@@ -69,7 +69,7 @@ async def shell_runtime(tmp_path: Path, request: pytest.FixtureRequest) -> Async
         "shell",
         paths,
         worker_target=None,
-        disable_sandbox_proxy=True,
+        runs_in_worker=False,
         tool_init_overrides={"base_dir": str(tmp_path)},
         tool_output_workspace_root=tmp_path,
     )
@@ -271,7 +271,7 @@ async def test_registered_plugin_exclusion_is_pinned_for_every_function(  # noqa
                 # Editing the authored list must not mutate the startup snapshot.
                 config.background_tool_jobs.exclude_toolkits.clear()
                 lifecycle = _make_lifecycle(tmp_path, current_config=config)
-                lifecycle.record_applied(config)
+                lifecycle._record_applied(config)
                 assert lifecycle.status.status == "restart_required"
                 step, _ = await _invoke(actor, "native_step", background_after=3)
                 assert not step.is_error

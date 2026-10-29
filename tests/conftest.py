@@ -53,41 +53,43 @@ from structlog.testing import ReturnLoggerFactory
 from structlog.typing import BindableLogger, Context, Processor, WrappedLogger
 
 import mindroom.api.sandbox_exec as sandbox_exec_module
+import mindroom.approval.continuation_runner as continuation_runner_module
 import mindroom.approval.manager as approval_manager_module
 import mindroom.bot  # noqa: F401
 import mindroom.custom_tools.todo as todo_tool_module
-import mindroom.handled_turns as handled_turns_module
 import mindroom.managed_avatars as managed_avatars_module
 import mindroom.matrix.client_room_admin as client_room_admin_module
 import mindroom.matrix.rooms as matrix_rooms_module
 import mindroom.memory._entrypoint_snapshots as memory_entrypoint_snapshots_module
-import mindroom.scheduling.tasks as scheduling_module
 import mindroom.tool_jobs.instances as tool_jobs_instances
 import mindroom.tool_system.sandbox_proxy as sandbox_proxy_module
 from mindroom import ai as mindroom_ai
 from mindroom.agent_cli.turn import LiveTurnTools
 from mindroom.agent_reply_membership import AgentReplyMembershipIndex
-from mindroom.ai import ResponseTurnContext
-from mindroom.approval.manager import ApprovalActionResult, ApprovalManager, initialize_approval_store
+from mindroom.approval.manager import (
+    ApprovalActionResult,
+    ApprovalManager,
+    ToolApprovalTransportError,
+    initialize_approval_store,
+)
 from mindroom.authorization import _ReplyAuthorizationDecision
-from mindroom.bot import AgentBot, TeamBot
+from mindroom.bot import AgentBot
 from mindroom.coalescing.batch import PendingEvent
 from mindroom.coalescing.gate import CoalescingDrainResult
 from mindroom.command_turn_executor import CommandTurnExecutor
+from mindroom.config.load_attempt import ConfigLoad, ConfigLoadResult
 from mindroom.config.main import Config, load_config
 from mindroom.constants import RuntimePaths, resolve_runtime_paths, safe_replace
 from mindroom.conversation_resolver import DispatchContextResult, MessageContext
 from mindroom.delivery_gateway import DeliveryGateway, EditTextRequest, FinalDeliveryRequest, SendTextRequest
 from mindroom.dispatch_handoff import (
     MediaDispatchEvent,
-    PendingDispatchMetadata,
     PreparedIngress,
     prepare_media_ingress,
 )
-from mindroom.dispatch_source import ScheduledHistoryBudget
+from mindroom.dispatch_source import MESSAGE_SOURCE_KIND, ScheduledHistoryBudget
 from mindroom.edit_regenerator import EditRegenerator
 from mindroom.embeddings.openai_embedder import OpenAIEmbedder
-from mindroom.entity_resolution import persisted_bot_user_ids
 from mindroom.event_journal import (
     AdmissionResult,
     ConversationPage,
@@ -95,6 +97,7 @@ from mindroom.event_journal import (
     DeliveryStage,
     EventClass,
     EventKind,
+    FinalAnswerEnqueue,
     InboundEvent,
     JournalEvent,
     MatrixDelivery,
@@ -104,15 +107,13 @@ from mindroom.event_journal import (
     PrincipalStore,
     ProjectedEvent,
     RelationView,
-    TerminalTurnWrite,
     VisibleMessage,
+    turn_rows,
 )
 from mindroom.event_journal import reads as journal_reads
-from mindroom.event_journal.matrix_delivery import TurnHandoff
 from mindroom.event_journal.outbox import matrix_delivery_payload
 from mindroom.execution_preparation import _build_unseen_context_messages
 from mindroom.final_delivery import FinalDeliveryOutcome
-from mindroom.handled_turns import TurnRecord, _reset_handled_turn_ledger_runtime
 from mindroom.history.prompt_tokens import build_static_token_estimator
 from mindroom.history.runtime import (
     finalize_history_preparation,
@@ -124,7 +125,6 @@ from mindroom.history.session_context import (
     load_scope_session,
     resolve_bound_team_scope,
 )
-from mindroom.history.turn_recorder import TurnRecorder
 from mindroom.history.types import (
     CompactionLifecycle,
     HistoryScope,
@@ -136,7 +136,6 @@ from mindroom.hooks import EnrichmentItem, MessageEnvelope
 from mindroom.ingress_validation import IngressValidator
 from mindroom.interactive import InteractiveMetadata
 from mindroom.interactive_models import InteractivePrompt, interactive_prompt_content
-from mindroom.legacy_delivery_payloads import _inline_final_result
 from mindroom.matrix.client import DeliveredMatrixEvent, ResolvedVisibleMessage
 from mindroom.matrix.client_delivery import build_edit_event_content
 from mindroom.matrix.client_room_admin import RoomJoinOutcome
@@ -149,10 +148,12 @@ from mindroom.matrix.thread_diagnostics import is_thread_history_degraded
 from mindroom.mcp import toolkit as mcp_toolkit_module
 from mindroom.message_target import MessageTarget
 from mindroom.model_defaults import OLLAMA_HOST_DEFAULT
+from mindroom.orchestration.config_lifecycle import load_startup_config
 from mindroom.personal_room_lifecycle import PersonalRoomLifecycle
 from mindroom.providers import registry as provider_registry
 from mindroom.providers.pipeline import media as media_pipeline
 from mindroom.reaction_dispatch import ReactionDispatcher
+from mindroom.response_lifecycle import QueuedHumanNoticeReservation
 from mindroom.response_payload_preparation import (
     DispatchPayloadInputs,
     ResponsePayloadPreparation,
@@ -162,23 +163,23 @@ from mindroom.response_runner import (
     PostLockRequestPreparationError,
     ResponseRequest,
     ResponseRunner,
-    _agent_run_metadata,
-    _PreparedResponseRuntime,
-    _ResponseGenerationOutcome,
 )
 from mindroom.response_sources import ResponseSources
-from mindroom.response_turn import CompletedAttempt
+from mindroom.response_turn import CompletedAttempt, ResponseTurnContext, TurnSinks
 from mindroom.session_storage.agent_storage import create_state_storage
 from mindroom.session_storage.store import _session_state, _write_session_state, ensure_session_row, persist_to
 from mindroom.thread_utils import decide_agent_response
-from mindroom.turn_controller import TurnController, _DispatchPreparation, _ReplayGuardContext
 from mindroom.turn_origin import TurnOrigin, classify_turn_origin
 from mindroom.turn_policy import PreparedDispatch, TurnPolicy
-from mindroom.turn_record import canonicalize_turn_record
-from mindroom.turn_store import TurnStore
+from mindroom.turn_store import _CLAIM_REGISTRIES, TurnClaim, TurnStore, _ClaimRegistry
+from mindroom.turns.dispatch import TurnDispatcher, _DispatchPreparation, _ReplayGuardContext
+from mindroom.turns.facts import IngressFacts
+from mindroom.turns.ingress import TurnIngress
+from mindroom.turns.interactive_selection import InteractiveSelections
 from mindroom.usage.storage import quote_identifier
 from mindroom.user_stop_reconciliation import UserStopReconciler
 from mindroom.visible_response_reconciliation import VisibleResponseReconciler
+from mindroom.voice.ingress import VoiceIngress
 from mindroom.voice.visible_voice_echo import VisibleVoiceEchoLifecycle, _reset_visible_voice_echo_barriers
 from mindroom.workers import runtime as workers_runtime_module
 from mindroom.workers.backends import static_runner as static_runner_module
@@ -188,16 +189,19 @@ from tests.identity_helpers import persist_entity_accounts
 from tests.test_helpers import make_test_ca_pem
 
 if TYPE_CHECKING:
+    from _typeshed import DataclassInstance
     from xdist.workermanage import WorkerController
 
     from mindroom.agent_cli.session import CliTurnOwner
+    from mindroom.approval.recovery import ApprovalRecovery
     from mindroom.dispatch_handoff import DispatchEvent
-    from mindroom.event_journal import EventJournalStore
+    from mindroom.event_journal import ApprovalDeliveryView, EventJournalStore
     from mindroom.event_journal.backend import Backend, Operation
     from mindroom.history.request_messages import TurnMessages
     from mindroom.llm.provider import ModelProvider
     from mindroom.llm.runs import AnyRunRecord
     from mindroom.matrix_rtc.call_manager import CallManager
+    from mindroom.orchestrator import _MultiAgentOrchestrator
     from mindroom.session_storage.store import ConversationStore
     from mindroom.session_storage.types import ConversationSession
     from mindroom.streaming import StreamingResponse
@@ -466,11 +470,13 @@ _configure_quiet_structlog()
 __all__ = [
     "TEST_ACCESS_TOKEN",
     "TEST_PASSWORD",
+    "FakeApprovalTransport",
     "FakeCredentialsManager",
     "FakeMediaResponse",
     "activate_interactive_prompt",
     "agent_response_should_respond",
     "aioresponse",
+    "approval_manager_for_test",
     "bind_mock_config_event_journal",
     "bind_runtime_paths",
     "build_private_template_dir",
@@ -485,6 +491,7 @@ __all__ = [
     "initialize_approval_store_for_test",
     "install_call_manager_mock",
     "install_edit_message_mock",
+    "install_edit_regeneration_mock",
     "install_generate_response_mock",
     "install_personal_room_shutdown_mock",
     "install_runtime_journal_support",
@@ -501,11 +508,10 @@ __all__ = [
     "prepare_history_for_run_for_test",
     "prepare_payload_via_seam",
     "prepared_dispatch_result",
-    "process_and_respond_for_test",
     "replace_delivery_gateway_deps",
     "replace_edit_regenerator_deps",
     "replace_response_runner_deps",
-    "replace_turn_controller_deps",
+    "replace_turn_deps",
     "replace_turn_policy_deps",
     "replace_turn_store_deps",
     "request_envelope",
@@ -524,7 +530,7 @@ _TEST_RUNTIME_PATHS_BY_CONFIG_ID: dict[int, RuntimePaths] = {}
 _VISIBLE_MESSAGE_IDS = count(1)
 _ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
 _SOFT_WRAP_RE = re.compile(r"(?<=\S)\n(?=\S)")
-RuntimeBot = AgentBot | TeamBot
+RuntimeBot = AgentBot
 TestFunction = Callable[..., object]
 
 
@@ -534,82 +540,22 @@ async def prepare_agent_and_prompt_for_test(
     prompt: str,
     runtime_paths: RuntimePaths,
     config: Config,
-    **options: Any,  # noqa: ANN401
+    scope_context: ScopeSessionContext | None = None,
+    current_event_id: str | None = None,
+    **turn_inputs: Any,  # noqa: ANN401
 ) -> Any:  # noqa: ANN401
-    """Prepare one agent turn through ``ai._prepare_agent_and_prompt`` with a plain top-level turn's options.
+    """Prepare one agent turn through ``ai._prepare_agent_and_prompt`` with a plain top-level turn's inputs.
 
-    ``options`` names the turn options a test sets; every other one is unset (None, empty, or off).
+    ``turn_inputs`` names the ``ResponseTurnContext`` fields a test sets beyond ``prompt``; every other one keeps
+    ``ctx``'s value.
     """
-    turn_options: dict[str, Any] = {
-        "scope_context": None,
-        "thread_history": None,
-        "knowledge": None,
-        "include_interactive_questions": True,
-        "tool_function_filter": None,
-        "execution_identity": None,
-        "compaction_lifecycle": None,
-        "delegation_depth": 0,
-        "refresh_scheduler": None,
-        "include_openai_compat_guidance": False,
-        "model_prompt": None,
-        "current_timestamp_ms": None,
-        "current_event_id": None,
-        "current_prompt_is_structured": False,
-        "pipeline_timing": None,
-        "eager_deferred_tools": False,
-        "supports_native_tool_approval": False,
-        "reusable_build": None,
-    }
     return await mindroom_ai._prepare_agent_and_prompt(
-        ctx,
-        prompt=prompt,
+        replace(ctx, prompt=prompt, **turn_inputs),
         runtime_paths=runtime_paths,
         config=config,
-        **(turn_options | options),
+        scope_context=scope_context,
+        current_event_id=current_event_id,
     )
-
-
-def agent_turn_recorder_for_test(
-    runner: ResponseRunner,
-    request: ResponseRequest,
-    runtime: _PreparedResponseRuntime,
-) -> TurnRecorder:
-    """Return the recorder the runner gives an agent turn of ``request`` under ``runtime``."""
-    return runner._build_turn_recorder(
-        user_message=runtime.model_prompt,
-        user_message_is_structured=request.current_prompt_is_structured,
-        reply_to_event_id=request.reply_to_event_id,
-        room_id=request.room_id,
-        thread_id=runtime.resolved_target.resolved_thread_id,
-        requester_id=request.user_id,
-        matrix_run_metadata=_agent_run_metadata(request),
-    )
-
-
-async def process_and_respond_for_test(
-    runner: ResponseRunner,
-    request: ResponseRequest,
-    *,
-    streaming: bool = False,
-    **options: Any,  # noqa: ANN401
-) -> _ResponseGenerationOutcome:
-    """Deliver ``request`` through the runner's streaming or non-streaming driver with a plain turn's options.
-
-    ``options`` names the driver options a test sets; otherwise the turn runs under a fresh run id in the bot's
-    history scope, ignores its delivery start, prepares its runtime from ``request``, and records into the recorder
-    the runner gives such a turn.
-    """
-    driver = runner._process_and_respond_streaming if streaming else runner._process_and_respond
-    runtime = options.pop("runtime", None) or await runner.prepare_response_runtime(request)
-    driver_options: dict[str, Any] = {
-        "run_id": str(uuid.uuid4()),
-        "on_delivery_started": lambda _event_id: None,
-        "runtime": runtime,
-        "history_scope": runner.deps.state_writer.history_scope(),
-    }
-    if "turn_recorder" not in options:
-        driver_options["turn_recorder"] = agent_turn_recorder_for_test(runner, request, runtime)
-    return await driver(request, **(driver_options | options))
 
 
 def build_unseen_context_messages_for_test(
@@ -638,19 +584,26 @@ def build_unseen_context_messages_for_test(
 def call_proxy_sync_for_test(**call: Any) -> object:  # noqa: ANN401
     """Send one tool call through ``sandbox_proxy._call_proxy_sync`` with the options a test names.
 
-    The others take a plain call's values: an entrypoint that leaves the call's agent alone, and no shared storage,
-    overrides, execution env, extra passthrough, or resolved worker target.
+    The others take a plain call's values: an entrypoint that leaves the call's agent alone, and no overrides,
+    execution env, extra passthrough, or resolved worker target.
     """
     plain: dict[str, Any] = {
         "function_entrypoint": lambda *_args, **_kwargs: None,
-        "shared_storage_root_path": None,
         "tool_config_overrides": None,
         "tool_init_overrides": None,
         "execution_env": None,
         "extra_env_passthrough": None,
         "worker_target": None,
+        "runtime_config": None,
     }
     return sandbox_proxy_module._call_proxy_sync(**(plain | call))
+
+
+@contextmanager
+def bound_worker_launch_config(config: Config) -> Iterator[None]:
+    """Bind ``config`` as the applied config dedicated workers launch from, as `mindroom run` does."""
+    with workers_runtime_module.bind_worker_launch_config_source(lambda: config):
+        yield
 
 
 def live_turn_tools_for_test(
@@ -660,37 +613,80 @@ def live_turn_tools_for_test(
     authorize: "Callable[[ToolKey, dict[str, object]], Awaitable[None]]",
     **options: Any,  # noqa: ANN401
 ) -> LiveTurnTools:
-    """Build one CLI turn's live tools with the options a test names.
+    """Build one CLI turn's live tools with the options a test names, which include its output-file policy.
 
-    The others take a top-level turn's values: no context documents, output-file policy, or knowledge refresh.
+    The others take a top-level turn's values: no context documents or knowledge refresh.
     """
     turn_options: dict[str, Any] = {
         "context": {},
-        "output_file_policy": None,
         "delegation_depth": 0,
         "refresh_scheduler": None,
     }
     return LiveTurnTools(owner, catalog=catalog, authorize=authorize, **(turn_options | options))
 
 
-def initialize_approval_store_for_test(runtime_paths: RuntimePaths, **collaborators: Any) -> ApprovalManager:  # noqa: ANN401
-    """Initialize the approval store with the collaborators a test names, and none of the others."""
-    unset = dict.fromkeys(
-        (
-            "prepare_event",
-            "send_delivery",
-            "resolve_delivery",
-            "resolve_action_delivery",
-            "cards",
-            "transport_sender",
-            "sending_device",
-            "continuation_ready",
-            "recovery",
-            "responder_principal",
-            "router_missing",
-        ),
+async def _no_approval_event(_room_id: str, _thread_id: str | None, _content: dict[str, Any]) -> dict[str, Any] | None:
+    return None
+
+
+async def _no_approval_delivery(_delivery: MatrixDelivery) -> str:
+    msg = "This test sends no approval delivery"
+    raise ToolApprovalTransportError(msg)
+
+
+async def _no_delivered_event(*_target: object) -> str | None:
+    return None
+
+
+async def _no_sources_to_wake(_entity_name: str, _room_id: str, _source_event_ids: tuple[str, ...]) -> None:
+    return None
+
+
+@dataclass
+class FakeApprovalTransport:
+    """The approval transport an approval manager uses, with the methods a test sets.
+
+    The others prepare and send nothing, find no earlier delivery, know no sender, device, or responder principal,
+    wake nothing, and find the router in every room.
+    """
+
+    prepare_approval_event: Callable[[str, str | None, dict[str, Any]], Awaitable[dict[str, Any] | None]] = (
+        _no_approval_event
     )
-    return initialize_approval_store(runtime_paths, **(unset | collaborators))
+    send_approval_delivery: Callable[[MatrixDelivery], Awaitable[str]] = _no_approval_delivery
+    resolve_approval_delivery: Callable[[MatrixDelivery], Awaitable[str | None]] = _no_delivered_event
+    resolve_approval_action_delivery: Callable[[str, str], Awaitable[str | None]] = _no_delivered_event
+    transport_sender_id: Callable[[], str | None] = lambda: None
+    transport_device_id: Callable[[], str | None] = lambda: None
+    wake_continuation_sources: Callable[[str, str, tuple[str, ...]], Awaitable[None]] = _no_sources_to_wake
+    responder_principal_id: Callable[[str], str | None] = lambda _entity_name: None
+    router_missing: Callable[[str], bool] = lambda _room_id: False
+
+
+def approval_manager_for_test(
+    runtime_paths: RuntimePaths,
+    *,
+    cards: "ApprovalDeliveryView | None" = None,
+    **transport: Any,  # noqa: ANN401
+) -> ApprovalManager:
+    """Build an approval manager over the transport methods a test names, as ``FakeApprovalTransport`` fields."""
+    return ApprovalManager(runtime_paths, transport=FakeApprovalTransport(**transport), cards=cards)
+
+
+def initialize_approval_store_for_test(
+    runtime_paths: RuntimePaths,
+    *,
+    cards: "ApprovalDeliveryView | None" = None,
+    recovery: "ApprovalRecovery | None" = None,
+    **transport: Any,  # noqa: ANN401
+) -> ApprovalManager:
+    """Initialize the approval store over the transport methods a test names, as ``FakeApprovalTransport`` fields."""
+    return initialize_approval_store(
+        runtime_paths,
+        transport=FakeApprovalTransport(**transport),
+        cards=cards,
+        recovery=recovery,
+    )
 
 
 async def handle_card_response_for_test(manager: ApprovalManager, **response: Any) -> ApprovalActionResult:  # noqa: ANN401
@@ -733,8 +729,9 @@ async def prepare_history_for_run_for_test(
         static_prompt_tokens = static_token_estimator.estimate(full_prompt)
     resolved_inputs = resolve_entity_preparation_inputs(
         config=config,
+        runtime_paths=runtime_paths,
         entity_name=agent_name,
-        history_settings=history_settings or config.resolve_entity(agent_name).history_settings,
+        history_settings=history_settings or config.resolve_scope(agent_name).history_settings,
         active_model_name=active_model_name,
         active_context_window=active_context_window,
         static_prompt_tokens=static_prompt_tokens,
@@ -765,7 +762,7 @@ async def prepare_history_for_run_for_test(
     if storage is not None and session_id is not None:
         persisted_session = session
         if persisted_session is None:
-            persisted_session = storage.load_session(session_id, resolved_scope.kind)
+            persisted_session = storage.load_session(session_id)
         scope_context = ScopeSessionContext(
             scope=resolved_scope,
             storage=storage,
@@ -801,7 +798,7 @@ def dispatch_context_result(context: MessageContext) -> DispatchContextResult:
 
 
 def prepared_dispatch_result(dispatch: PreparedDispatch) -> _DispatchPreparation:
-    """Wrap a prepared dispatch in the private turn-controller preparation result shape."""
+    """Wrap a prepared dispatch in the private turn-dispatch preparation result shape."""
     return _DispatchPreparation(
         dispatch=dispatch,
         replay_guard=_ReplayGuardContext(
@@ -893,26 +890,66 @@ def request_envelope(
     )
 
 
+def live_turn_claim(*source_event_ids: str) -> TurnClaim:
+    """Return a live claim on these sources, alone in its own registry, for gate and lane cleanup tests."""
+    return _ClaimRegistry().register(frozenset(source_event_ids), frozenset())
+
+
+def turn_claim_is_live(claim: TurnClaim) -> bool:
+    """Return whether a claim from ``live_turn_claim`` is still held."""
+    return any(claim._registry.owns(event_id) for event_id in claim.source_event_ids)
+
+
+def make_ingress_facts(
+    sender: str,
+    *,
+    source_kind: str = MESSAGE_SOURCE_KIND,
+    requester_user_id: str | None = None,
+    acting_requester_id: str | None = None,
+    original_sender: str | None = None,
+    original_sender_is_human: bool = False,
+    hook_source: str | None = None,
+    message_received_depth: int = 0,
+    discovery_event_id: str | None = None,
+    sender_entity_name: str | None = None,
+    requester_entity_name: str | None = None,
+) -> IngressFacts:
+    """Build the provenance ingress classifies for one event; the lane requester defaults to its sender."""
+    return IngressFacts(
+        physical_sender=sender,
+        source_kind=source_kind,
+        lane_requester_id=requester_user_id or sender,
+        original_sender=original_sender,
+        original_sender_is_human=original_sender_is_human,
+        acting_requester_id=acting_requester_id,
+        hook_source=hook_source,
+        message_received_depth=message_received_depth,
+        discovery_event_id=discovery_event_id,
+        sender_entity_name=sender_entity_name,
+        requester_entity_name=requester_entity_name,
+    )
+
+
 def make_pending_event(
     event: PreparedIngress | nio.RoomMessageFormatted | MediaDispatchEvent,
     room: nio.MatrixRoom,
     *,
     source_kind: str,
-    dispatch_policy_source_kind: str | None = None,
+    active_follow_up: bool = False,
     hook_source: str | None = None,
     message_received_depth: int = 0,
-    trust_internal_payload_metadata: bool = False,
+    payload_trusted: bool = False,
     requester_user_id: str | None = None,
     discovery_event_id: str | None = None,
     turn_dispatch_recovery: bool = False,
     enqueue_time: float | None = None,
-    dispatch_metadata: tuple[PendingDispatchMetadata, ...] = (),
+    notice: QueuedHumanNoticeReservation | None = None,
+    facts: IngressFacts | None = None,
 ) -> PendingEvent:
-    """Build one PendingEvent with per-source evidence stamped on its PreparedIngress.
+    """Build one PendingEvent with its admission facts beside its PreparedIngress.
 
-    Mirrors the pre-refactor PendingEvent constructor: raw nio text events are
-    normalized into PreparedIngress form and raw nio media events are wrapped
-    with their caption and retained protocol reference.
+    Raw nio text events are normalized into PreparedIngress form and raw nio
+    media events are wrapped with their caption and retained protocol reference.
     """
     if isinstance(event, PreparedIngress):
         prepared = event
@@ -931,18 +968,21 @@ def make_pending_event(
         raise TypeError(msg)
     prepared = replace(
         prepared,
+        active_follow_up=active_follow_up or prepared.active_follow_up,
+        payload_trusted=payload_trusted or prepared.payload_trusted,
+        turn_dispatch_recovery=turn_dispatch_recovery or prepared.turn_dispatch_recovery,
+    )
+    facts = facts or make_ingress_facts(
+        prepared.sender,
         source_kind=source_kind,
-        dispatch_policy_source_kind=dispatch_policy_source_kind,
+        requester_user_id=requester_user_id,
         hook_source=hook_source,
         message_received_depth=message_received_depth,
-        trust_internal_payload_metadata=trust_internal_payload_metadata,
-        requester_user_id=requester_user_id,
         discovery_event_id=discovery_event_id,
-        turn_dispatch_recovery=turn_dispatch_recovery,
     )
     if enqueue_time is None:
-        return PendingEvent(event=prepared, room=room, dispatch_metadata=dispatch_metadata)
-    return PendingEvent(event=prepared, room=room, enqueue_time=enqueue_time, dispatch_metadata=dispatch_metadata)
+        return PendingEvent(event=prepared, room=room, facts=facts, notice=notice)
+    return PendingEvent(event=prepared, room=room, facts=facts, enqueue_time=enqueue_time, notice=notice)
 
 
 def requires_linux(
@@ -976,9 +1016,9 @@ async def drain_coalescing(*bots: RuntimeBot) -> None:
             # runner drain settles.
             await asyncio.gather(
                 bot._coalescing_gate.drain_all(),
-                runner.drain_inbox_responses(),
+                runner.inbox.drain_inbox_responses(),
             )
-            if not runner._inbox_response_tasks and not bot._coalescing_gate._gates:
+            if not runner.inbox._inbox_response_tasks and not bot._coalescing_gate._gates:
                 break
 
 
@@ -1589,9 +1629,6 @@ class FakeOutbox:
 
     def __init__(self) -> None:
         self.rows: dict[tuple[str, str], MatrixDelivery] = {}
-        # What each acknowledgement carried alongside it, so a test can
-        # assert the terminal record and the acknowledgement are one write.
-        self.acknowledged_terminal_turns: list[tuple[str, TerminalTurnWrite | None]] = []
         self.acknowledged_projections: list[tuple[ProjectedEvent, ...]] = []
         self.attempted: set[tuple[str, str]] = set()
         # Turns whose membership has ended, as the journal would report it.
@@ -1630,7 +1667,6 @@ class FakeOutbox:
         result: Mapping[str, object] | None = None,
         event_type: str = "m.room.message",
         edits_event_id: str | None = None,
-        settle_source_event_ids: tuple[str, ...] = (),
         permanent_failure_reason: str | None = None,
     ) -> str | None:
         """Record intent, leaving an already-attempted row's payload alone.
@@ -1646,14 +1682,7 @@ class FakeOutbox:
         to go out under the frozen transaction rather than strand whatever it
         may already have made visible.
 
-        The handed-over sources are kept rather than dropped, because they are
-        a durable effect of this call in production and a double that swallowed
-        them would let a lost handoff pass unnoticed. There is no journal here
-        to settle them in; whether the settlement really shares this
-        transaction is pinned against the real backends.
         """
-        if settle_source_event_ids:
-            self.handed_over.append(settle_source_event_ids)
         membership_epoch = await self.membership_epoch(room_id)
         existing_owner = next(
             (
@@ -1679,7 +1708,7 @@ class FakeOutbox:
                 room_id=room_id,
                 thread_id=thread_id,
                 payload=matrix_delivery_payload(self.principal_id, delivery_id, stage, payload),
-                result=dict(result) if result is not None else _inline_final_result(payload),
+                result=dict(result) if result is not None else None,
                 event_type=event_type,
                 edits_event_id=edits_event_id,
                 permanent_failure_reason=permanent_failure_reason,
@@ -1697,7 +1726,7 @@ class FakeOutbox:
             thread_id=thread_id,
             transaction_id=transaction_id,
             payload=matrix_delivery_payload(self.principal_id, delivery_id, stage, payload),
-            result=dict(result) if result is not None else _inline_final_result(payload),
+            result=dict(result) if result is not None else None,
             edits_event_id=edits_event_id,
             acknowledged_event_id=None,
             created_at_ns=len(self.rows),
@@ -1799,6 +1828,43 @@ class FakeOutbox:
         self.rows[key] = replace(row, retired=True)
         return None
 
+    async def enqueue_final_answer(
+        self,
+        *,
+        delivery_id: str,
+        room_id: str,
+        thread_id: str | None,
+        payload: Mapping[str, object],
+        turn_key: str | None,
+        result: Mapping[str, object] | None = None,
+        event_type: str = "m.room.message",
+        edits_event_id: str | None = None,
+        permanent_failure_reason: str | None = None,
+    ) -> FinalAnswerEnqueue | None:
+        """Record a FINAL answer and hand over its delivery's own source.
+
+        There is no turn store here to bind, so only the delivery id is handed
+        over and kept, because the handoff is a durable effect of this call in
+        production and a double that swallowed it would let a lost handoff pass
+        unnoticed; what a bound turn settles is pinned against the real backends.
+        """
+        del turn_key
+        transaction_id = await self.enqueue_matrix_delivery(
+            delivery_id=delivery_id,
+            stage=DeliveryStage.FINAL,
+            room_id=room_id,
+            thread_id=thread_id,
+            payload=payload,
+            result=result,
+            event_type=event_type,
+            edits_event_id=edits_event_id,
+            permanent_failure_reason=permanent_failure_reason,
+        )
+        if transaction_id is None:
+            return None
+        self.handed_over.append((delivery_id,))
+        return FinalAnswerEnqueue(transaction_id=transaction_id, settled_event_ids=(delivery_id,))
+
     async def acknowledge_matrix_delivery(
         self,
         *,
@@ -1806,14 +1872,9 @@ class FakeOutbox:
         stage: DeliveryStage,
         event_id: str,
         delivered_projections: tuple[ProjectedEvent, ...],
-        terminal_turn: TerminalTurnWrite | None = None,
+        terminal_response_event_id: str | None = None,  # noqa: ARG002 - this fake keeps no turns
     ) -> DeliveryAcknowledgement:
-        """Record the Matrix event one claimed delivery produced, and the turn it completes.
-
-        The terminal record is kept rather than discarded so a test can assert
-        it travelled *with* the acknowledgement. Dropping it here would let the
-        two drift apart again without anything noticing.
-        """
+        """Record the Matrix event one claimed delivery produced."""
         key = (delivery_id, stage.value)
         already = self.rows[key].acknowledged_event_id
         if already is not None:
@@ -1826,9 +1887,8 @@ class FakeOutbox:
             acknowledged_event_id=event_id,
             permanent_failure_reason=None,
         )
-        self.acknowledged_terminal_turns.append((delivery_id, terminal_turn))
         self.acknowledged_projections.append(delivered_projections)
-        return DeliveryAcknowledgement(settled_event_id=event_id, terminal_turn=terminal_turn)
+        return DeliveryAcknowledgement(settled_event_id=event_id)
 
     async def unacknowledged_matrix_deliveries(
         self,
@@ -1938,7 +1998,6 @@ class DiesAfterAcknowledgement:
         result: Mapping[str, object] | None = None,
         event_type: str = "m.room.message",
         edits_event_id: str | None = None,
-        settle_source_event_ids: tuple[str, ...] = (),
         permanent_failure_reason: str | None = None,
     ) -> str | None:
         """Record delivery intent."""
@@ -1951,7 +2010,32 @@ class DiesAfterAcknowledgement:
             result=result,
             event_type=event_type,
             edits_event_id=edits_event_id,
-            settle_source_event_ids=settle_source_event_ids,
+            permanent_failure_reason=permanent_failure_reason,
+        )
+
+    async def enqueue_final_answer(
+        self,
+        *,
+        delivery_id: str,
+        room_id: str,
+        thread_id: str | None,
+        payload: Mapping[str, object],
+        turn_key: str | None,
+        result: Mapping[str, object] | None = None,
+        event_type: str = "m.room.message",
+        edits_event_id: str | None = None,
+        permanent_failure_reason: str | None = None,
+    ) -> FinalAnswerEnqueue | None:
+        """Record a FINAL answer and its handoff."""
+        return await self.inner.enqueue_final_answer(
+            delivery_id=delivery_id,
+            room_id=room_id,
+            thread_id=thread_id,
+            payload=payload,
+            turn_key=turn_key,
+            result=result,
+            event_type=event_type,
+            edits_event_id=edits_event_id,
             permanent_failure_reason=permanent_failure_reason,
         )
 
@@ -2028,7 +2112,7 @@ class DiesAfterAcknowledgement:
         stage: DeliveryStage,
         event_id: str,
         delivered_projections: tuple[ProjectedEvent, ...],
-        terminal_turn: TerminalTurnWrite | None = None,
+        terminal_response_event_id: str | None = None,
     ) -> DeliveryAcknowledgement:
         """Record the Matrix outcome, then die before anything else can run."""
         await self.inner.acknowledge_matrix_delivery(
@@ -2036,7 +2120,7 @@ class DiesAfterAcknowledgement:
             stage=stage,
             event_id=event_id,
             delivered_projections=delivered_projections,
-            terminal_turn=terminal_turn,
+            terminal_response_event_id=terminal_response_event_id,
         )
         msg = "crashed the instant the outcome was recorded"
         raise CrashError(msg)
@@ -2056,14 +2140,13 @@ class DiesAfterAcknowledgement:
         )
 
 
-# Drops the outbox-enqueue journal handoff, for tests that are not about it. Named
-# rather than a bare lambda so a reader can see that the handoff was
-# deliberately stubbed here, not forgotten. Tests that care what the handoff
-# settles use a real journal store instead.
-ignore_final_delivery_handoff = TurnHandoff(
-    sources_for_turn=lambda _turn_id: (),
-    released=lambda _event_ids: None,
-)
+def ignore_final_delivery_handoff(_event_ids: tuple[str, ...]) -> None:
+    """Drop the outbox-enqueue journal handoff, for tests that are not about it.
+
+    Named so a reader can see that the handoff was deliberately stubbed here,
+    not forgotten. Tests that care what the handoff settles use a real journal
+    store instead.
+    """
 
 
 async def ignore_delivered_projection(
@@ -2399,6 +2482,21 @@ def test_runtime_paths(tmp_root: Path) -> RuntimePaths:
 test_runtime_paths.__test__ = False
 
 
+def install_bots(orchestrator: "_MultiAgentOrchestrator", bots: Mapping[str, object]) -> None:
+    """Register test bots with a real orchestrator's entity fleet, which owns every managed bot."""
+    for entity_name, bot in bots.items():
+        orchestrator.fleet.add(entity_name, cast("AgentBot", bot))
+
+
+def swap_fleet_bot(orchestrator: "_MultiAgentOrchestrator", entity_name: str, bot: object | None) -> None:
+    """Swap or drop one fleet bot in place, as a finished replacement or removal leaves it, without its lifecycle."""
+    slots = orchestrator.fleet._slots
+    if bot is None:
+        del slots[entity_name]
+    else:
+        slots[entity_name].bot = cast("AgentBot", bot)
+
+
 def orchestrator_runtime_paths(
     storage_path: Path,
     *,
@@ -2424,6 +2522,34 @@ def orchestrator_runtime_paths(
 def load_config_yaml(config_path: Path) -> Config:
     """Load a config YAML file through the production runtime-aware loader."""
     return load_config(resolve_runtime_paths(config_path=Path(config_path).expanduser().resolve()))
+
+
+def published_config_load(config: Config) -> ConfigLoad:
+    """Return a successful load of ``config`` that no newer API commit superseded."""
+    return ConfigLoad(
+        result=ConfigLoadResult(success=True, uses_includes=config.uses_includes),
+        config=config,
+        source_fingerprint=config.source_fingerprint,
+        source_files=config.source_files,
+    )
+
+
+async def initialize_from_config_file(orchestrator: "_MultiAgentOrchestrator") -> Config:
+    """Load the orchestrator's config file the way `mindroom run` startup does, then initialize from that load."""
+    config = await load_startup_config(orchestrator.runtime_paths, api_enabled=orchestrator.api_enabled)
+    await orchestrator.initialize(config)
+    return config
+
+
+def failed_config_load(error: Exception) -> ConfigLoad:
+    """Return a load that failed with ``error`` and that no newer API commit superseded."""
+    return ConfigLoad(
+        result=ConfigLoadResult(success=False, error_status_code=422, error_detail=str(error)),
+        config=None,
+        source_fingerprint=None,
+        source_files=None,
+        error=error,
+    )
 
 
 def write_config_yaml(config: Config, config_path: Path) -> None:
@@ -2463,9 +2589,12 @@ def bind_runtime_paths(
 
     Unless the test config authors them, a reply waits no coalescing debounce and starts no automatic thread summary.
     A summary builds a model by name in the background, usually the reply's own ``default``, so it would take a turn
-    that the test scripted for the reply.
+    that the test scripted for the reply. A config that authors no models gets the ``default`` model its entities name.
     """
-    bound = Config.validate_with_runtime(config.authored_model_dump(), runtime_paths)
+    data = config.authored_model_dump()
+    if not data.get("models"):
+        data["models"] = {"default": {"provider": "openai", "id": "test-model"}}
+    bound = Config.validate_with_runtime(data, runtime_paths)
     _persist_bound_entity_accounts(bound, runtime_paths)
     authored_coalescing = config.defaults.coalescing
     if "debounce_ms" not in authored_coalescing.model_fields_set:
@@ -2519,14 +2648,10 @@ def completing(respond: Callable[..., Awaitable[str]]) -> Callable[..., Awaitabl
     A blocking caller reads a turn that reports no completed attempt as failed, so a plain stand-in is a failed turn.
     """
 
-    async def complete(
-        *args: object,
-        on_completed: Callable[[CompletedAttempt], None] | None = None,
-        **kwargs: object,
-    ) -> str:
-        text = await respond(*args, **kwargs)
-        if on_completed is not None:
-            on_completed(CompletedAttempt(replayable_text=text, has_visible_content=bool(text)))
+    async def complete(*args: object, sinks: TurnSinks | None = None, **kwargs: object) -> str:
+        text = await respond(*args, sinks=sinks, **kwargs)
+        if sinks is not None and sinks.on_completed is not None:
+            sinks.on_completed(CompletedAttempt(replayable_text=text, has_visible_content=bool(text)))
         return text
 
     return complete
@@ -2687,7 +2812,6 @@ def sync_bot_runtime_state(bot: RuntimeBot) -> None:
         client.user_id = bot.matrix_id.full_id
     runtime.client = bot.client
     runtime.config = bot.config
-    runtime.enable_streaming = bot.enable_streaming
     runtime.orchestrator = bot.orchestrator
 
 
@@ -2704,15 +2828,14 @@ def replace_turn_policy_deps(bot: RuntimeBot, **changes: object) -> TurnPolicy:
     store_changes = {name: value for name, value in changes.items() if name in store_field_names}
     if store_changes:
         replace_turn_store_deps(bot, **store_changes)
-    controller = unwrap_extracted_collaborator(bot._turn_controller)
-    controller_field_names = set(controller.deps.__dataclass_fields__)
-    controller_changes = {name: value for name, value in changes.items() if name in controller_field_names}
+    owner_field_names = _turn_owner_field_names(bot)
+    owner_changes = {name: value for name, value in changes.items() if name in owner_field_names}
     if policy_changes:
-        controller_changes["turn_policy"] = bot._turn_policy
+        owner_changes["turn_policy"] = bot._turn_policy
     if store_changes:
-        controller_changes["turn_store"] = bot._turn_store
-    if controller_changes:
-        replace_turn_controller_deps(bot, **controller_changes)
+        owner_changes["turn_store"] = bot._turn_store
+    if owner_changes:
+        replace_turn_deps(bot, **owner_changes)
     return rebuilt
 
 
@@ -2733,7 +2856,7 @@ def replace_delivery_gateway_deps(bot: RuntimeBot, **changes: object) -> Deliver
     rebuilt = DeliveryGateway(replace(gateway.deps, **changes))
     bot._delivery_gateway = rebuilt
     wrap_extracted_collaborators(bot, "_delivery_gateway")
-    replace_turn_controller_deps(bot, delivery_gateway=bot._delivery_gateway)
+    replace_turn_deps(bot, delivery_gateway=bot._delivery_gateway)
     replace_response_runner_deps(bot, delivery_gateway=bot._delivery_gateway)
     return rebuilt
 
@@ -2745,35 +2868,14 @@ def replace_response_runner_deps(bot: RuntimeBot, **changes: object) -> Response
     rebuilt = ResponseRunner(replace(coordinator.deps, **changes))
     bot._response_runner = rebuilt
     wrap_extracted_collaborators(bot, "_response_runner")
-    replace_turn_controller_deps(bot, response_runner=bot._response_runner)
+    replace_turn_deps(bot, response_runner=bot._response_runner)
     return rebuilt
 
 
 async def finish_edit_regenerations(bot: RuntimeBot) -> None:
     """Wait for the regenerations edits started off the room's lane, as a test checks their effects."""
     runner = unwrap_extracted_collaborator(bot._response_runner)
-    await asyncio.gather(*tuple(runner._inbox_response_tasks), return_exceptions=True)
-
-
-def journal_edit_regenerator_deps(bot: RuntimeBot, principal: PrincipalStore) -> dict[str, object]:
-    """Return the edit regenerator collaborators that read ``principal``, for a test that moved the bot's replies there."""
-
-    async def later_human_message(record: TurnRecord) -> bool:
-        target = record.conversation_target
-        assert target is not None
-        return await principal.later_message_exists(
-            room_id=target.room_id,
-            thread_id=target.resolved_thread_id,
-            source_event_ids=record.source_event_ids,
-            excluded_senders=persisted_bot_user_ids(bot.runtime_paths),
-            whole_room=bot._room_scope_is_single_conversation(target.room_id),
-        )
-
-    return {
-        "generate_response": bot._run_regenerated_response,
-        "reply_for_sources": principal.replies.for_sources,
-        "later_human_message": later_human_message,
-    }
+    await asyncio.gather(*tuple(runner.inbox._inbox_response_tasks), return_exceptions=True)
 
 
 def replace_edit_regenerator_deps(bot: RuntimeBot, **changes: object) -> EditRegenerator:
@@ -2799,8 +2901,18 @@ def replace_edit_regenerator_deps(bot: RuntimeBot, **changes: object) -> EditReg
     rebuilt = EditRegenerator(replace(regenerator.deps, **rebuilt_changes))
     bot._edit_regenerator = rebuilt
     wrap_extracted_collaborators(bot, "_edit_regenerator")
-    replace_turn_controller_deps(bot, edit_regenerator=bot._edit_regenerator)
+    replace_turn_deps(bot, edit_regenerator=bot._edit_regenerator)
     return rebuilt
+
+
+def install_edit_regeneration_mock(
+    bot: RuntimeBot,
+    generate_response: Callable[[ResponseRequest], Awaitable[object]],
+) -> EditRegenerator:
+    """Answer the bot's edit regenerations of an agent's turns through ``generate_response``, as its runner would."""
+    runner = _ExtractedCollaboratorProxy(unwrap_extracted_collaborator(bot._response_runner))
+    runner.generate_response = generate_response
+    return replace_edit_regenerator_deps(bot, response_runner=runner)
 
 
 def replace_reaction_dispatcher_deps(bot: RuntimeBot, **changes: object) -> ReactionDispatcher:
@@ -2816,20 +2928,67 @@ def replace_interactive_selection_handlers(
     handle: Callable[..., Awaitable[bool]] | None = None,
     start: Callable[..., Awaitable[None]] | None = None,
 ) -> None:
-    """Replace controller-owned interactive handlers for one test bot."""
-    controller = unwrap_extracted_collaborator(bot._turn_controller)
+    """Replace the interactive-selection handlers for one test bot."""
+    selections = bot._interactive_selections
     if handle is not None:
-        controller._handle_interactive_selection = handle  # type: ignore[method-assign]
+        selections._handle_interactive_selection = handle  # type: ignore[method-assign]
     if start is not None:
-        controller._start_interactive_selection = start  # type: ignore[method-assign]
+        selections._start_interactive_selection = start  # type: ignore[method-assign]
 
 
-def replace_turn_controller_deps(bot: RuntimeBot, **changes: object) -> TurnController:
-    """Rebuild the turn controller after swapping collaborators captured at construction."""
+def _changes_for(deps: "DataclassInstance", changes: Mapping[str, object]) -> dict[str, object]:
+    """Return the changes that name one owner's deps fields."""
+    return {name: value for name, value in changes.items() if name in deps.__dataclass_fields__}
+
+
+_VOICE_READINESS_CHANGES = {
+    "normalizer": "normalizer",
+    "turn_store": "turn_store",
+    "visible_voice_echo": "visible_echo",
+    "logger": "logger",
+}
+
+
+def _turn_owners(bot: RuntimeBot) -> tuple[TurnIngress, TurnDispatcher, InteractiveSelections, VoiceIngress]:
+    """Return the bot's turn owners: ingress, dispatch, interactive selections, and voice ingress."""
+    return bot._turn_ingress, bot._turn_dispatcher, bot._interactive_selections, bot._voice_ingress
+
+
+def _turn_owner_field_names(bot: RuntimeBot) -> set[str]:
+    """Return every deps field some turn owner has."""
+    return set().union(*(owner.deps.__dataclass_fields__ for owner in _turn_owners(bot)))
+
+
+def _held_turn_collaborator(bot: RuntimeBot, field_name: str) -> object:
+    """Return the collaborator the turn owners hold for one deps field."""
+    return next(
+        getattr(owner.deps, field_name) for owner in _turn_owners(bot) if field_name in owner.deps.__dataclass_fields__
+    )
+
+
+def update_turn_owner_deps(bot: RuntimeBot, **changes: object) -> None:
+    """Swap collaborators in place on every turn owner whose deps name them, voice readiness included.
+
+    In place, because the gate and the reaction dispatcher keep the owners they were built with.
+    """
+    owners = _turn_owners(bot)
+    known = set(_VOICE_READINESS_CHANGES) | _turn_owner_field_names(bot)
+    unknown = set(changes) - known
+    assert not unknown, f"not a turn owner collaborator: {sorted(unknown)}"
+    for owner in owners:
+        if owner_changes := _changes_for(owner.deps, changes):
+            owner.deps = replace(owner.deps, **owner_changes)
+    readiness_changes = {field: changes[name] for name, field in _VOICE_READINESS_CHANGES.items() if name in changes}
+    if readiness_changes:
+        voice = bot._voice_ingress
+        voice.deps = replace(voice.deps, readiness=replace(voice.deps.readiness, **readiness_changes))
+
+
+def replace_turn_deps(bot: RuntimeBot, **changes: object) -> None:
+    """Swap turn collaborators captured at construction, rebuilding the collaborators that capture them too."""
     sync_bot_runtime_state(bot)
-    controller = unwrap_extracted_collaborator(bot._turn_controller)
-    controller_field_names = set(controller.deps.__dataclass_fields__)
-    rebuilt_changes = {name: value for name, value in changes.items() if name in controller_field_names}
+    owner_field_names = _turn_owner_field_names(bot)
+    rebuilt_changes = {name: value for name, value in changes.items() if name in owner_field_names}
     default_collaborators = {
         "resolver": "_conversation_resolver",
         "normalizer": "_inbound_turn_normalizer",
@@ -2838,15 +2997,19 @@ def replace_turn_controller_deps(bot: RuntimeBot, **changes: object) -> TurnCont
         "ingress_hook_runner": "_ingress_hook_runner",
         "response_runner": "_response_runner",
         "delivery_gateway": "_delivery_gateway",
-        "tool_runtime": "_tool_runtime_support",
         "turn_store": "_turn_store",
         "edit_regenerator": "_edit_regenerator",
         "visible_responses": "_visible_responses",
     }
+    # The owners are updated in place, so a collaborator a test passed in stays until
+    # the test passes another; only a bot attribute swapped since the last call replaces it.
+    propagated = bot.__dict__.setdefault("_propagated_turn_collaborators", {})
     for field_name, attr_name in default_collaborators.items():
-        if field_name in rebuilt_changes:
-            continue
-        rebuilt_changes[field_name] = getattr(bot, attr_name)
+        held = _held_turn_collaborator(bot, field_name)
+        propagated.setdefault(attr_name, held)
+        if field_name not in rebuilt_changes:
+            current = getattr(bot, attr_name)
+            rebuilt_changes[field_name] = current if current is not propagated[attr_name] else held
     store_field_names = set(unwrap_extracted_collaborator(bot._turn_store).deps.__dataclass_fields__)
     store_changes = {name: value for name, value in changes.items() if name in store_field_names}
     if store_changes:
@@ -2855,11 +3018,17 @@ def replace_turn_controller_deps(bot: RuntimeBot, **changes: object) -> TurnCont
     if "edit_regenerator" not in rebuilt_changes:
         rebuilt_changes["edit_regenerator"] = bot._edit_regenerator
     if "ingress" not in rebuilt_changes:
+        validator_deps = bot._ingress_validator.deps
         rebuilt_changes["ingress"] = IngressValidator(
             replace(
-                bot._ingress_validator.deps,
+                validator_deps,
                 turn_store=rebuilt_changes["turn_store"],
                 turn_policy=rebuilt_changes["turn_policy"],
+                **{
+                    name: changes[name]
+                    for name in ("wait_for_admission_or_shutdown", "settle_ignored_sources")
+                    if name in changes
+                },
             ),
         )
     bot._ingress_validator = rebuilt_changes["ingress"]
@@ -2867,16 +3036,15 @@ def replace_turn_controller_deps(bot: RuntimeBot, **changes: object) -> TurnCont
     bot._visible_voice_echo = VisibleVoiceEchoLifecycle(
         replace(
             visible_voice_echo.deps,
-            runtime=rebuilt_changes.get("runtime", controller.deps.runtime),
-            logger=rebuilt_changes.get("logger", controller.deps.logger),
-            agent_name=rebuilt_changes.get("agent_name", controller.deps.agent_name),
+            runtime=rebuilt_changes.get("runtime", _held_turn_collaborator(bot, "runtime")),
+            logger=rebuilt_changes.get("logger", _held_turn_collaborator(bot, "logger")),
+            agent_name=rebuilt_changes.get("agent_name", _held_turn_collaborator(bot, "agent_name")),
             delivery_gateway=rebuilt_changes["delivery_gateway"],
             turn_store=rebuilt_changes["turn_store"],
             ingress=rebuilt_changes["ingress"],
         ),
     )
     wrap_extracted_collaborators(bot, "_visible_voice_echo")
-    rebuilt_changes["visible_voice_echo"] = bot._visible_voice_echo
     visible_responses = unwrap_extracted_collaborator(bot._visible_responses)
     visible_response_changes = {
         name: value
@@ -2887,8 +3055,8 @@ def replace_turn_controller_deps(bot: RuntimeBot, **changes: object) -> TurnCont
     bot._visible_responses = VisibleResponseReconciler(
         replace(
             visible_responses.deps,
-            runtime=rebuilt_changes.get("runtime", controller.deps.runtime),
-            logger=rebuilt_changes.get("logger", controller.deps.logger),
+            runtime=rebuilt_changes.get("runtime", _held_turn_collaborator(bot, "runtime")),
+            logger=rebuilt_changes.get("logger", _held_turn_collaborator(bot, "logger")),
             turn_store=rebuilt_changes["turn_store"],
             delivery_gateway=rebuilt_changes["delivery_gateway"],
             **visible_response_changes,
@@ -2916,10 +3084,10 @@ def replace_turn_controller_deps(bot: RuntimeBot, **changes: object) -> TurnCont
     bot._command_turn_executor = CommandTurnExecutor(
         replace(
             command_executor.deps,
-            runtime=rebuilt_changes.get("runtime", controller.deps.runtime),
-            logger=rebuilt_changes.get("logger", controller.deps.logger),
-            runtime_paths=rebuilt_changes.get("runtime_paths", controller.deps.runtime_paths),
-            agent_name=rebuilt_changes.get("agent_name", controller.deps.agent_name),
+            runtime=rebuilt_changes.get("runtime", _held_turn_collaborator(bot, "runtime")),
+            logger=rebuilt_changes.get("logger", _held_turn_collaborator(bot, "logger")),
+            runtime_paths=rebuilt_changes.get("runtime_paths", _held_turn_collaborator(bot, "runtime_paths")),
+            agent_name=rebuilt_changes.get("agent_name", _held_turn_collaborator(bot, "agent_name")),
             normalizer=rebuilt_changes["normalizer"],
             turn_policy=rebuilt_changes["turn_policy"],
             turn_store=rebuilt_changes["turn_store"],
@@ -2938,26 +3106,25 @@ def replace_turn_controller_deps(bot: RuntimeBot, **changes: object) -> TurnCont
         ),
     )
     wrap_extracted_collaborators(bot, "_user_stop_reconciler")
-    rebuilt = TurnController(replace(controller.deps, **rebuilt_changes))
-    bot._turn_controller = rebuilt
+    update_turn_owner_deps(bot, **rebuilt_changes, visible_voice_echo=bot._visible_voice_echo)
+    ingress = bot._turn_ingress
     reaction_dispatcher = bot._reaction_dispatcher
     replace_reaction_dispatcher_deps(
         bot,
-        runtime=rebuilt.deps.runtime,
-        logger=rebuilt.deps.logger,
-        runtime_paths=rebuilt.deps.runtime_paths,
-        agent_name=rebuilt.deps.agent_name,
-        turn_policy=rebuilt.deps.turn_policy,
+        runtime=ingress.deps.runtime,
+        logger=ingress.deps.logger,
+        runtime_paths=ingress.deps.runtime_paths,
+        agent_name=ingress.deps.agent_name,
         user_stop_reconciler=bot._user_stop_reconciler,
-        ingress=rebuilt.deps.ingress,
-        reserve_prompt_ingress_order=rebuilt.reserve_prompt_ingress_order,
-        enqueue_interactive_selection=rebuilt.enqueue_interactive_selection,
+        ingress=ingress.deps.ingress,
+        reserve_prompt_ingress_order=ingress.reserve_prompt_ingress_order,
+        enqueue_interactive_selection=bot._interactive_selections.enqueue_interactive_selection,
         config_confirmation=replace(
             reaction_dispatcher.deps.config_confirmation,
-            runtime=rebuilt.deps.runtime,
-            runtime_paths=rebuilt.deps.runtime_paths,
-            build_message_target=rebuilt.deps.resolver.build_message_target,
-            delivery_gateway=rebuilt.deps.delivery_gateway,
+            runtime=ingress.deps.runtime,
+            runtime_paths=ingress.deps.runtime_paths,
+            build_message_target=ingress.deps.resolver.build_message_target,
+            delivery_gateway=ingress.deps.delivery_gateway,
         ),
     )
     edit_changes = {
@@ -2967,18 +3134,25 @@ def replace_turn_controller_deps(bot: RuntimeBot, **changes: object) -> TurnCont
     }
     if edit_changes:
         replace_edit_regenerator_deps(bot, **edit_changes)
-    return rebuilt
+    propagated.update({attr_name: getattr(bot, attr_name) for attr_name in default_collaborators.values()})
 
 
 @contextmanager
 def patch_response_runner_module(**changes: object) -> Generator[None, None, None]:
-    """Patch module-level response coordinator seams on the real current owner."""
+    """Patch module-level response coordinator seams on the real current owners.
+
+    A seam the approval lifecycle also imports is patched there too, so a resumed approval sees the replacement.
+    """
     with ExitStack() as stack:
         for name, replacement in changes.items():
-            module_name = (
-                "mindroom.response_lifecycle" if name == "apply_post_response_effects" else "mindroom.response_runner"
-            )
-            stack.enter_context(patch(f"{module_name}.{name}", new=replacement))
+            if name == "apply_post_response_effects":
+                module_names = ["mindroom.response_lifecycle"]
+            else:
+                module_names = ["mindroom.response_runner"]
+                if name in vars(continuation_runner_module):
+                    module_names.append("mindroom.approval.continuation_runner")
+            for module_name in module_names:
+                stack.enter_context(patch(f"{module_name}.{name}", new=replacement))
         yield
 
 
@@ -2995,14 +3169,12 @@ def install_shutdown_drain_mocks(
     response_recovery_complete: bool,
 ) -> None:
     """Install exact shutdown drain outcomes through stable collaborator seams."""
-    wrap_extracted_collaborators(bot, "_coalescing_gate", "_response_runner")
+    wrap_extracted_collaborators(bot, "_coalescing_gate")
     bot._coalescing_gate.drain_all = AsyncMock(
         return_value=coalescing_drain_result,
     )
-    bot._response_runner.drain_inbox_responses = AsyncMock(return_value=responses_drained)
-    unwrap_extracted_collaborator(
-        bot._response_runner,
-    )._incomplete_inbox_responses_recoverable = response_recovery_complete
+    bot._response_runner.inbox.drain_inbox_responses = AsyncMock(return_value=responses_drained)
+    bot._response_runner.inbox._incomplete_inbox_responses_recoverable = response_recovery_complete
 
 
 def install_send_response_mock(bot: RuntimeBot, send_response: AsyncMock) -> None:
@@ -3053,7 +3225,7 @@ def install_send_response_mock(bot: RuntimeBot, send_response: AsyncMock) -> Non
         )
 
     bot._delivery_gateway.deliver_final = AsyncMock(side_effect=_deliver_final)
-    replace_turn_controller_deps(bot, delivery_gateway=bot._delivery_gateway)
+    replace_turn_deps(bot, delivery_gateway=bot._delivery_gateway)
     replace_response_runner_deps(bot, delivery_gateway=bot._delivery_gateway)
 
 
@@ -3061,9 +3233,7 @@ async def record_turn_answered(bot: RuntimeBot, request: ResponseRequest) -> Non
     """Settle a faked response's sources and record its turn answered, as a real reply's records do."""
     await bot._journal_dispatcher.store.settle_many(request.sources.pending_event_ids)
     turn_store = unwrap_extracted_collaborator(bot._turn_store)
-    record = turn_store.get_turn_record(request.sources.logical_source_event_ids[0])
-    if record is not None:
-        await turn_store.publish_completed_turn(canonicalize_turn_record(record, completed=True))
+    await turn_store.deps.turn_records.write(turn_rows.complete_turn_of, request.sources.logical_source_event_ids)
 
 
 def install_generate_response_mock(bot: RuntimeBot, generate_response: AsyncMock) -> None:
@@ -3104,7 +3274,7 @@ def install_generate_response_mock(bot: RuntimeBot, generate_response: AsyncMock
         return event_id
 
     bot._response_runner.generate_response = AsyncMock(side_effect=_generate)
-    replace_turn_controller_deps(bot, response_runner=bot._response_runner)
+    replace_turn_deps(bot, response_runner=bot._response_runner)
 
 
 def install_edit_message_mock(bot: RuntimeBot, edit_message: AsyncMock) -> None:
@@ -3122,7 +3292,7 @@ def install_edit_message_mock(bot: RuntimeBot, edit_message: AsyncMock) -> None:
         )
 
     bot._delivery_gateway.edit_text = AsyncMock(side_effect=_edit_text)
-    replace_turn_controller_deps(bot, delivery_gateway=bot._delivery_gateway)
+    replace_turn_deps(bot, delivery_gateway=bot._delivery_gateway)
     replace_response_runner_deps(bot, delivery_gateway=bot._delivery_gateway)
 
 
@@ -3231,13 +3401,6 @@ def _pin_matrix_homeserver(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("MINDROOM_NAMESPACE", raising=False)
     monkeypatch.delenv("MINDROOM_CONFIG_PATH", raising=False)
     monkeypatch.delenv("MINDROOM_STORAGE_PATH", raising=False)
-
-
-@pytest.fixture(autouse=True)
-def _reset_scheduled_task_runner_owner(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Keep a router registered as the scheduled-task runner owner, or a bot as a state writer, from leaking."""
-    monkeypatch.setattr(scheduling_module, "_runner_owner", None)
-    monkeypatch.setattr(scheduling_module, "_state_writers", {})
 
 
 @pytest.fixture(autouse=True)
@@ -3618,53 +3781,12 @@ def _reset_oversized_nonterminal_streaming_edit_rate_limit() -> Generator[None, 
     _oversized_nonterminal_streaming_edit_next_allowed_at.clear()
 
 
-_LEDGER_LOADING_TEST_MODULES = frozenset(
-    {
-        "test_handled_turns.py",
-        "test_turn_store.py",
-        "test_user_stop_convergence.py",
-    },
-)
-
-
 @pytest.fixture(autouse=True)
-def _reset_handled_turn_ledger_state(
-    monkeypatch: pytest.MonkeyPatch,
-    request: pytest.FixtureRequest,
-) -> Generator[None, None, None]:
-    """Give every test a cold handled-turn map, pre-warmed where startup is skipped.
-
-    The map is process-global and ``load`` fills it once per process. Left over
-    from a previous test it would satisfy that check, so a ledger opened onto a
-    fresh database would answer from the previous test's records and never read
-    its own.
-
-    Production warms the ledger during startup and every read refuses until it
-    has. Most tests build a bot and drive its callbacks directly without ever
-    reaching startup, and their database is empty, so starting the map loaded
-    is exactly the state warming it would produce.
-
-    A test whose database is *not* empty must opt out, with the
-    ``ledger_loads_from_disk`` marker or by living in one of the modules
-    below, and warm for real -- pre-warming would leave it answering from an
-    empty map while the rows it cares about sit unread.
-    """
-    _reset_handled_turn_ledger_runtime()
-    loads_from_disk = (
-        request.node.path.name in _LEDGER_LOADING_TEST_MODULES
-        or request.node.get_closest_marker("ledger_loads_from_disk") is not None
-    )
-    if not loads_from_disk:
-        shared_ledger_state = handled_turns_module._shared_ledger_state
-
-        def pre_warmed_ledger_state(*state_key: str) -> handled_turns_module._LedgerState:
-            state = shared_ledger_state(*state_key)
-            state.loaded = True
-            return state
-
-        monkeypatch.setattr(handled_turns_module, "_shared_ledger_state", pre_warmed_ledger_state)
+def _reset_turn_claims() -> Generator[None, None, None]:
+    """Give every test an empty claim registry: it is process-global, shared by every turn store of an agent."""
+    _CLAIM_REGISTRIES.clear()
     yield
-    _reset_handled_turn_ledger_runtime()
+    _CLAIM_REGISTRIES.clear()
 
 
 @pytest.fixture(autouse=True)
@@ -3798,7 +3920,13 @@ def unstored_team_scope_context(
 @pytest.fixture
 def store(tmp_path: Path) -> "ConversationStore":
     """Open the conversation database ``code`` under ``tmp_path`` as production opens one, with every table."""
-    return create_state_storage("code", tmp_path)
+    return create_state_storage("code", tmp_path, HistoryScope(kind="agent", scope_id="code"))
+
+
+@pytest.fixture
+def team_store(tmp_path: Path) -> "ConversationStore":
+    """Open team ``crew``'s conversation database, named ``code`` as ``store``'s is, so tests query the same tables."""
+    return create_state_storage("code", tmp_path / "team", HistoryScope(kind="team", scope_id="crew"))
 
 
 def seed_session_row(storage: "ConversationStore", session: "ConversationSession") -> None:
@@ -3825,11 +3953,11 @@ def seed_session_state(storage: "ConversationStore", session: "ConversationSessi
 def stored_session_state(storage: "ConversationStore", session_id: str) -> "dict[str, Any]":
     """Return the ``session_state`` the row of session ``session_id`` holds, as a load reads it, without its runs."""
     with storage.transaction(write=False) as connection:
-        (session_data,) = connection.execute(
-            f"SELECT session_data FROM {quote_identifier(storage.names.sessions)} WHERE session_id = ?",  # noqa: S608
+        (session_state,) = connection.execute(
+            f"SELECT session_state FROM {quote_identifier(storage.names.sessions)} WHERE session_id = ?",  # noqa: S608
             (session_id,),
         ).fetchone()
-    return _session_state(session_data)
+    return _session_state(session_state)
 
 
 def seed_session(storage: "ConversationStore", session: "ConversationSession") -> "ConversationSession":

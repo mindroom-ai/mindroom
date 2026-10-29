@@ -23,16 +23,15 @@ if TYPE_CHECKING:
     from mindroom.llm.events import RunEvent
 
 
-@pytest.mark.parametrize("member_agent_id", ["researcher-a", "Researcher_A"])
-def test_identify_approval_tools_keeps_team_member_owner(member_agent_id: str) -> None:
-    """Approval policy uses the raw config identity behind Agno's provider member ID."""
+def test_identify_approval_tools_keeps_team_member_owner() -> None:
+    """Approval policy uses the member's config name, the id its slot is keyed by."""
     tool = ToolExecution(
         tool_call_id="call-1",
         tool_name="dangerous",
         requires_confirmation=True,
     )
     requirement = RunRequirement(tool_execution=tool)
-    requirement.member_agent_id = member_agent_id
+    requirement.member_agent_id = "Researcher_A"
     requirement.member_display_name = "Researcher"
 
     identified = identify_approval_tools(
@@ -43,15 +42,8 @@ def test_identify_approval_tools_keeps_team_member_owner(member_agent_id: str) -
             requirements=(requirement,),
             response_presentation_state={
                 "kind": "team_stream",
-                "version": 2,
-                "members": [
-                    {
-                        "id": "researcher-a",
-                        "config_name": "Researcher_A",
-                        "display_name": "Researcher",
-                        "content": "",
-                    },
-                ],
+                "version": 3,
+                "members": [{"id": "Researcher_A", "display_name": "Researcher", "content": ""}],
                 "consensus": "",
             },
             toolkit_owners={("general", "dangerous"): "test_toolkit"},
@@ -80,20 +72,15 @@ def member_pause() -> PausedAttempt:
                 type="tool_call_started",
                 tool_name="dangerous",
                 tool_call_id="call-1",
-                scope_key="agent:test-agent",
+                member_id="test_agent",
             ),
         ),
         response_presentation_state={
             "kind": "team_stream",
-            "version": 2,
+            "version": 3,
             "members": [
-                {
-                    "id": "test-agent",
-                    "config_name": "test_agent",
-                    "display_name": "Test Agent",
-                    "content": "🔧 `dangerous` [1] ⏳",
-                },
-                {"id": "other", "config_name": "other", "display_name": "Other", "content": ""},
+                {"id": "test_agent", "display_name": "Test Agent", "content": "🔧 `dangerous` [1] ⏳"},
+                {"id": "other", "display_name": "Other", "content": ""},
             ],
             "consensus": "",
         },
@@ -101,15 +88,13 @@ def member_pause() -> PausedAttempt:
     )
 
 
-@pytest.mark.parametrize("member_agent_id", ["test_agent", "test-agent"])
-def test_ordered_team_pause_accepts_frozen_member_aliases(member_pause: PausedAttempt, member_agent_id: str) -> None:
-    """Raw config and frozen IDs must select the same visible tool anchor."""
-    member_pause.requirements[0].member_agent_id = member_agent_id
-
+def test_ordered_team_pause_accepts_its_member_s_config_name(member_pause: PausedAttempt) -> None:
+    """The member's config name selects the visible tool anchor in its slot."""
     require_ordered_pause_presentation(member_pause, show_tool_calls=True)
 
 
-@pytest.mark.parametrize("member_agent_id", ["unknown", "Test Agent", "TEST_AGENT", "other"])
+# "test-agent" is the url-safe id a version-2 snapshot keyed the member by; no member is named by it now.
+@pytest.mark.parametrize("member_agent_id", ["unknown", "Test Agent", "TEST_AGENT", "test-agent", "other"])
 def test_ordered_team_pause_rejects_wrong_member_owner(member_pause: PausedAttempt, member_agent_id: str) -> None:
     """Similar names, missing members, and another valid member cannot own this anchor."""
     member_pause.requirements[0].member_agent_id = member_agent_id
@@ -118,7 +103,7 @@ def test_ordered_team_pause_rejects_wrong_member_owner(member_pause: PausedAttem
         require_ordered_pause_presentation(member_pause, show_tool_calls=True)
 
 
-@pytest.mark.parametrize("member_agent_id", ["unknown", "Test Agent", "TEST_AGENT"])
+@pytest.mark.parametrize("member_agent_id", ["unknown", "Test Agent", "TEST_AGENT", "test-agent"])
 def test_identify_approval_tools_rejects_unknown_member_owner(
     member_pause: PausedAttempt,
     member_agent_id: str,
@@ -139,41 +124,23 @@ def test_identify_approval_tools_keeps_simple_member_owner(member_pause: PausedA
     assert identified[0][1] == "other"
 
 
-@pytest.mark.parametrize("member_agent_id", ["test_agent", "test-agent"])
-def test_team_pause_rejects_ambiguous_frozen_member_identity(
-    member_pause: PausedAttempt,
-    member_agent_id: str,
-) -> None:
-    """Conflicting aliases must never silently select another member's approval policy."""
-    member_pause.requirements[0].member_agent_id = member_agent_id
-    member_pause.response_presentation_state["members"] = [
-        {"id": "test-agent", "config_name": "test_agent"},
-        {"id": "different", "config_name": "test-agent"},
-    ]
-
-    with pytest.raises(RuntimeError):
-        identify_approval_tools(member_pause, default_agent_name="test-team")
-    with pytest.raises(RuntimeError):
-        require_ordered_pause_presentation(member_pause, show_tool_calls=True)
-
-
 @pytest.mark.parametrize(
-    ("card_id", "anchor_id", "scope_key", "presented"),
+    ("card_id", "anchor_id", "member_id", "presented"),
     [
         # A member's own delegation card is shown by the member's call it asks about.
-        ("test_agent:call-1", "call-1", "agent:test-agent", True),
+        ("test_agent:call-1", "call-1", "test_agent", True),
         # A marker of its own in the team's slot is not that call.
-        ("test_agent:call-1", "test_agent:call-1", "team", False),
+        ("test_agent:call-1", "test_agent:call-1", None, False),
         # Another member's slot does not show it.
-        ("other:call-1", "call-1", "agent:test-agent", False),
+        ("other:call-1", "call-1", "test_agent", False),
         # A child's projected call names its delegation, not a member, and keeps its marker in the team's slot.
-        ("delegation-1:call-1", "delegation-1:call-1", "team", True),
+        ("delegation-1:call-1", "delegation-1:call-1", None, True),
     ],
 )
 def test_a_team_delegation_card_is_presented_by_the_call_it_asks_about(
     card_id: str,
     anchor_id: str,
-    scope_key: str,
+    member_id: str | None,
     presented: bool,
 ) -> None:
     """The card the delegation driver raises carries no member identity of its own, only its id."""
@@ -189,15 +156,15 @@ def test_a_team_delegation_card_is_presented_by_the_call_it_asks_about(
                 type="tool_call_started",
                 tool_name="run_subagent",
                 tool_call_id=anchor_id,
-                scope_key=scope_key,
+                member_id=member_id,
             ),
         ),
         response_presentation_state={
             "kind": "team_stream",
-            "version": 2,
+            "version": 3,
             "members": [
-                {"id": "test-agent", "config_name": "test_agent", "display_name": "Test Agent", "content": ""},
-                {"id": "other", "config_name": "other", "display_name": "Other", "content": ""},
+                {"id": "test_agent", "display_name": "Test Agent", "content": ""},
+                {"id": "other", "display_name": "Other", "content": ""},
             ],
             "consensus": "",
         },
@@ -221,7 +188,7 @@ def test_two_members_pending_on_one_provider_call_id_are_each_presented_in_their
         type="tool_call_started",
         tool_name="run_subagent",
         tool_call_id="call-1",
-        scope_key="agent:test-agent",
+        member_id="test_agent",
     )
     paused = PausedAttempt(
         session_id="session-1",
@@ -235,15 +202,15 @@ def test_two_members_pending_on_one_provider_call_id_are_each_presented_in_their
                 type="tool_call_started",
                 tool_name="dangerous",
                 tool_call_id="call-1",
-                scope_key="agent:other",
+                member_id="other",
             ),
         ),
         response_presentation_state={
             "kind": "team_stream",
-            "version": 2,
+            "version": 3,
             "members": [
-                {"id": "test-agent", "config_name": "test_agent", "display_name": "Test Agent", "content": ""},
-                {"id": "other", "config_name": "other", "display_name": "Other", "content": ""},
+                {"id": "test_agent", "display_name": "Test Agent", "content": ""},
+                {"id": "other", "display_name": "Other", "content": ""},
             ],
             "consensus": "",
         },
@@ -260,6 +227,20 @@ def test_two_members_pending_on_one_provider_call_id_are_each_presented_in_their
     )
     with pytest.raises(RuntimeError, match="ordered presentation"):
         require_ordered_pause_presentation(doubled, show_tool_calls=True)
+
+
+def test_a_member_s_pending_call_is_presented_in_its_slot_when_the_leader_used_its_id_too(
+    member_pause: PausedAttempt,
+) -> None:
+    """The leader's provider numbers its calls apart from the members', so a leader's call may share a member call's id."""
+    leader_call = ToolTraceEntry(type="tool_call_started", tool_name="delegate_task_to_member", tool_call_id="call-1")
+    paused = replace(
+        member_pause,
+        response_text=f"{member_pause.response_text}\n\n🔧 `delegate_task_to_member` [2] ⏳",
+        tool_trace=(*member_pause.tool_trace, leader_call),
+    )
+
+    require_ordered_pause_presentation(paused, show_tool_calls=True)
 
 
 def test_ordered_team_pause_rejects_a_coordinator_tool_in_a_member_scope() -> None:
@@ -280,12 +261,12 @@ def test_ordered_team_pause_rejects_a_coordinator_tool_in_a_member_scope() -> No
                 type="tool_call_started",
                 tool_name="dangerous",
                 tool_call_id="call-1",
-                scope_key="agent:wrong-member",
+                member_id="wrong-member",
             ),
         ),
         response_presentation_state={
             "kind": "team_stream",
-            "version": 2,
+            "version": 3,
             "members": [],
             "consensus": "🔧 `dangerous` [1] ⏳",
         },
@@ -489,15 +470,15 @@ async def test_hidden_agent_continuation_separates_text_across_a_new_tool_bounda
 @pytest.mark.parametrize("owner", [None, "calculator"])
 async def test_pause_plan_requires_exact_live_toolkit_origin(tmp_path: Path, owner: str | None) -> None:
     """A new card cannot defer discovering its toolkit owner until approval time."""
-    coordinator = unwrap_extracted_collaborator(_bot(tmp_path)._response_runner)._approval_responses
+    runner = unwrap_extracted_collaborator(_bot(tmp_path)._response_runner)
     tool = ToolExecution(tool_call_id="call-1", tool_name="add", requires_confirmation=True)
     origins = {("general", "add"): owner, ("other", "add"): "calculator"}
     if owner is None:
         with pytest.raises(RuntimeError, match="toolkit origin"):
             await plan_approval_calls(
                 ((tool, "general"),),
-                config=coordinator.config(),
-                runtime_paths=coordinator.runtime_paths,
+                config=runner.deps.runtime.config,
+                runtime_paths=runner.deps.runtime_paths,
                 requester_id="@user:localhost",
                 toolkit_owners=origins,
                 room_id="!room:test",
@@ -506,8 +487,8 @@ async def test_pause_plan_requires_exact_live_toolkit_origin(tmp_path: Path, own
     else:
         plan = await plan_approval_calls(
             ((tool, "general"),),
-            config=coordinator.config(),
-            runtime_paths=coordinator.runtime_paths,
+            config=runner.deps.runtime.config,
+            runtime_paths=runner.deps.runtime_paths,
             requester_id="@user:localhost",
             toolkit_owners=origins,
             room_id="!room:test",

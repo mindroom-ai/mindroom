@@ -39,12 +39,12 @@ from mindroom.config.main import Config, ConfigRuntimeValidationError, load_conf
 from mindroom.constants import resolve_runtime_paths
 from mindroom.delivery_gateway import SendTextRequest
 from mindroom.event_journal.opening import record_opened_event_journal
-from mindroom.handled_turns import TurnRecord
 from mindroom.hooks import HookRegistry
 from mindroom.matrix.state import MatrixState
 from mindroom.message_target import MessageTarget
 from mindroom.tool_jobs.instances import pin_background_tool_jobs, release_background_tool_jobs
 from mindroom.tool_system.plugins import PluginReloadResult
+from mindroom.turn_record import TurnRecord
 from tests.authorization_helpers import (
     make_test_command_handler_context,
 )
@@ -2266,6 +2266,7 @@ async def test_apply_config_change_preserves_call_profile_authorship(tmp_path: P
                     "inherited": {"display_name": "Inherited"},
                     "cleared": {"display_name": "Cleared"},
                 },
+                "models": {"default": {"provider": "openai", "id": "gpt-6-astra"}},
                 "calls": {
                     "enabled": True,
                     "profiles": {
@@ -2423,6 +2424,7 @@ class TestConfigCommandHandling:
         with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as f:
             config_data = {
                 "agents": {"test_agent": {"display_name": "Test Agent", "role": "Testing"}},
+                "models": {"default": {"provider": "openai", "id": "gpt-6-astra"}},
             }
             yaml.dump(config_data, f)
             config_path = Path(f.name)

@@ -237,12 +237,13 @@ def test_launch_toolkits_include_egress_credentials_only_while_the_broker_is_on(
     assert ("egress_credentials" in names) is broker_on
 
 
-def test_launch_grants_exclude_skill_manage(tmp_path: Path) -> None:
-    """Like self_config, skill_manage stays with the agent's chat even when the agent lists it."""
+@pytest.mark.parametrize("restricted", ["agent_manager", "skill_manage"])
+def test_launch_grants_exclude_chat_only_tools(tmp_path: Path, restricted: str) -> None:
+    """Like self_config, these stay with the agent's chat even when the agent lists them."""
     context = _context_for_config(
         tmp_path,
         Config(
-            agents={"general": AgentConfig(display_name="General Agent", tools=["calculator", "skill_manage"])},
+            agents={"general": AgentConfig(display_name="General Agent", tools=["calculator", restricted])},
             defaults=DefaultsConfig(tools=[]),
             models={"default": ModelConfig(provider="anthropic", id="claude-sonnet-5-5")},
         ),
@@ -251,7 +252,7 @@ def test_launch_grants_exclude_skill_manage(tmp_path: Path) -> None:
     grants = resolve_script_launch_grants(context)
 
     assert ScriptToolGrant("calculator", "add") in grants
-    assert all(grant.toolkit_name != "skill_manage" for grant in grants)
+    assert all(grant.toolkit_name != restricted for grant in grants)
 
 
 def test_launch_grants_exclude_claude_agent(tmp_path: Path) -> None:
@@ -269,6 +270,25 @@ def test_launch_grants_exclude_claude_agent(tmp_path: Path) -> None:
 
     assert ScriptToolGrant("calculator", "add") in grants
     assert all(grant.toolkit_name != "claude_agent" for grant in grants)
+
+
+def test_launch_grants_exclude_slack(tmp_path: Path) -> None:
+    """A script's calls rebuild the tool context without the turn's hook source, so Slack writes stay in chat."""
+    context = _context_for_config(
+        tmp_path,
+        Config(
+            agents={"general": AgentConfig(display_name="General Agent", tools=["calculator", "slack"])},
+            defaults=DefaultsConfig(tools=[]),
+            models={"default": ModelConfig(provider="anthropic", id="claude-sonnet-5-5")},
+        ),
+    )
+
+    grants = resolve_script_launch_grants(context)
+
+    assert ScriptToolGrant("calculator", "add") in grants
+    assert all(grant.toolkit_name != "slack" for grant in grants)
+    assert "slack" not in resolve_script_launch_toolkit_names(context)
+    assert resolve_current_script_tool(context, ScriptToolGrant("slack", "slack_post")) is None
 
 
 def test_requested_toolkit_is_revoked_when_the_agent_is_removed(tmp_path: Path) -> None:

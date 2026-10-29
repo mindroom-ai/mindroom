@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, patch
 
 import pytest
@@ -32,6 +32,7 @@ from mindroom.tool_system.progress import tool_progress_reporter
 from mindroom.tool_system.runtime_context import tool_runtime_context
 from mindroom.tool_system.worker_routing import (
     ToolExecutionIdentity,
+    agent_workspace_root_path,
     get_tool_execution_identity,
     tool_execution_identity,
 )
@@ -46,7 +47,7 @@ if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
     from pathlib import Path
 
-    from mindroom.response_turn import ResponseTurnContext
+    from mindroom.response_turn import ResponseTurnContext, TurnSinks
 
 
 def _identity() -> ToolExecutionIdentity:
@@ -76,6 +77,7 @@ def _tools(tmp_path: Path) -> tuple[DelegateTools, object, object]:
             ["child"],
             runtime_paths,
             config,
+            agent_workspace_root_path(runtime_paths.storage_root, "leader"),
             execution_identity=identity,
         ),
         config,
@@ -117,7 +119,7 @@ async def test_direct_delegation_does_not_infer_success_from_unretained_text(tmp
     assert str(run["delegation_id"]) in result
     assert str(run["record_reference"]) in result
     # The caller reads the child's text, so no Matrix tool display markers belong in it.
-    assert child_response.call_args.kwargs["show_tool_calls"] is False
+    assert child_response.call_args.args[0].show_tool_calls is False
 
 
 @pytest.mark.asyncio
@@ -139,8 +141,9 @@ async def test_direct_delegation_records_real_tool_before_provider_error(tmp_pat
         msg = "provider failed after tool"
         raise ProviderError(msg, provider="Synthetic")
 
-    async def run_real_envelope(ctx: ResponseTurnContext, **kwargs: object) -> str:
-        callback = cast("Callable[[str, str], None]", kwargs["on_attempt_start"])
+    async def run_real_envelope(ctx: ResponseTurnContext, *_args: object, sinks: TurnSinks) -> str:
+        callback = sinks.on_attempt_start
+        assert callback is not None
         callback("real-child-run", ctx.active_model_name)
         model = ScriptedModel([calls(scripted_call("lookup", "actual-call", query="full query")), [Await(fail)]])
         spec = AgentSpec(id="child", name="child", model=model, system_messages=(), toolkits=(toolkit(lookup),))
@@ -197,8 +200,9 @@ async def test_real_parent_tool_call_records_direct_provenance_without_schema_fi
     # Minimal mode is hidden here because no allowed subagent can run it.
     assert set(function.parameters["properties"]) == {"agent_name", "task", "model"}
 
-    async def complete_child(ctx: ResponseTurnContext, **kwargs: object) -> str:
-        callback = cast("Callable[[str, str], None]", kwargs["on_attempt_start"])
+    async def complete_child(ctx: ResponseTurnContext, *_args: object, sinks: TurnSinks) -> str:
+        callback = sinks.on_attempt_start
+        assert callback is not None
         callback("direct-child-run", ctx.active_model_name)
         await observe_child_event(
             RunFinished(
@@ -279,7 +283,7 @@ async def _deny_in_the_callers_task(tools: DelegateTools) -> None:
         ),
         middleware=(_deny_call,),
     )
-    assert result == "denied before delegation"
+    assert result.value == "denied before delegation"
 
 
 @pytest.mark.asyncio
@@ -297,8 +301,9 @@ async def test_denied_tool_middleware_clears_direct_provenance(
         await deny(tools)
     assert not list(tmp_path.glob("agents/child/workspace/.mindroom/delegations/*/*/run.json"))
 
-    async def complete_child(ctx: ResponseTurnContext, **kwargs: object) -> str:
-        callback = cast("Callable[[str, str], None]", kwargs["on_attempt_start"])
+    async def complete_child(ctx: ResponseTurnContext, *_args: object, sinks: TurnSinks) -> str:
+        callback = sinks.on_attempt_start
+        assert callback is not None
         callback("later-child-run", ctx.active_model_name)
         await observe_child_event(
             RunFinished(
@@ -330,8 +335,9 @@ async def test_a_subagent_reports_what_it_says_and_calls_as_progress(tmp_path: P
     context = _delegate_runtime_context(config, runtime_paths, execution_identity=_identity())
     reports: list[str] = []
 
-    async def talking_child(ctx: ResponseTurnContext, **kwargs: object) -> str:
-        cast("Callable[[str, str], None]", kwargs["on_attempt_start"])("child-run", ctx.active_model_name)
+    async def talking_child(ctx: ResponseTurnContext, *_args: object, sinks: TurnSinks) -> str:
+        assert sinks.on_attempt_start is not None
+        sinks.on_attempt_start("child-run", ctx.active_model_name)
         await observe_child_event(TextDelta("Reading "))
         await observe_child_event(TextDelta("the logs."))
         await observe_child_event(
@@ -355,8 +361,9 @@ async def test_retried_child_does_not_inherit_previous_attempt_error(tmp_path: P
     tools, config, runtime_paths = _tools(tmp_path)
     context = _delegate_runtime_context(config, runtime_paths, execution_identity=_identity())
 
-    async def retry_child(ctx: ResponseTurnContext, **kwargs: object) -> str:
-        callback = cast("Callable[[str, str], None]", kwargs["on_attempt_start"])
+    async def retry_child(ctx: ResponseTurnContext, *_args: object, sinks: TurnSinks) -> str:
+        callback = sinks.on_attempt_start
+        assert callback is not None
         callback("first-run", ctx.active_model_name)
         await observe_child_event(
             RunFinished(
@@ -470,8 +477,9 @@ async def test_direct_delegation_preserves_completed_outcome_after_envelope_erro
     context = _delegate_runtime_context(config, runtime_paths, execution_identity=_identity())
     error = error_type("Envelope interrupted after child completion")
 
-    async def complete_then_interrupt(ctx: ResponseTurnContext, **kwargs: object) -> str:
-        callback = cast("Callable[[str, str], None]", kwargs["on_attempt_start"])
+    async def complete_then_interrupt(ctx: ResponseTurnContext, *_args: object, sinks: TurnSinks) -> str:
+        callback = sinks.on_attempt_start
+        assert callback is not None
         callback("completed-child-run", ctx.active_model_name)
         await observe_child_event(
             RunFinished(
@@ -515,7 +523,7 @@ async def test_native_delegation_leaves_record_ownership_to_driver(tmp_path: Pat
             "mindroom.ai.ai_response",
             new_callable=AsyncMock,
             return_value="native child answer",
-        ),
+        ) as response,
     ):
         child = prepare_child_turn(
             "leader",
@@ -541,6 +549,7 @@ async def test_native_delegation_leaves_record_ownership_to_driver(tmp_path: Pat
         )
 
     assert result == "native child answer"
+    response.assert_awaited_once()
     assert not list(tmp_path.glob("agents/child/workspace/.mindroom/delegations/*/*/run.json"))
 
 

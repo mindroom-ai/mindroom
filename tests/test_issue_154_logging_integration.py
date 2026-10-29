@@ -7,6 +7,7 @@ import logging
 import re
 import time
 import uuid
+from dataclasses import replace
 from json import JSONDecodeError
 from types import SimpleNamespace
 from typing import TYPE_CHECKING
@@ -21,7 +22,6 @@ from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import DebugConfig, ModelConfig
 from mindroom.constants import AI_RUN_METADATA_KEY, tracking_dir
-from mindroom.handled_turns import TurnRecord
 from mindroom.logging_config import get_logger, setup_logging
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.message_target import MessageTarget
@@ -29,12 +29,13 @@ from mindroom.response_payload_preparation import DispatchPayloadInputs
 from mindroom.tool_system.runtime_context import ToolDispatchContext
 from mindroom.tool_system.worker_routing import build_tool_execution_identity
 from mindroom.turn_policy import PreparedDispatch, ResponseAction
+from mindroom.turn_record import TurnRecord
 from tests.bot_helpers import make_test_agent_bot
 from tests.conftest import (
     bind_runtime_paths,
     install_model_providers,
     make_turn_context,
-    replace_turn_controller_deps,
+    replace_turn_deps,
     request_envelope,
     runtime_paths_for,
     test_runtime_paths,
@@ -204,22 +205,24 @@ async def test_cross_sink_correlation_invariant_for_matrix_turn_processing_log(
 
     async def generate_response(request: PreparedDispatch) -> str | None:
         response = await ai_response(
-            make_turn_context(
-                "general",
-                session_id=target.session_id or "session-1",
-                correlation_id=request.reply_to_event_id or "corr-test",
-                reply_to_event_id=request.reply_to_event_id,
-                room_id=request.room_id,
-                thread_id=request.thread_id,
-                requester_id=request.user_id,
-                matrix_run_metadata=request.matrix_run_metadata,
+            replace(
+                make_turn_context(
+                    "general",
+                    session_id=target.session_id or "session-1",
+                    correlation_id=request.reply_to_event_id or "corr-test",
+                    reply_to_event_id=request.reply_to_event_id,
+                    room_id=request.room_id,
+                    thread_id=request.thread_id,
+                    requester_id=request.user_id,
+                    matrix_run_metadata=request.matrix_run_metadata,
+                ),
+                prompt=request.prompt,
+                model_prompt="model prompt",
+                execution_identity=dispatch_context.execution_identity,
+                show_tool_calls=False,
             ),
-            prompt=request.prompt,
-            model_prompt="model prompt",
-            runtime_paths=runtime_paths,
-            config=config,
-            execution_identity=dispatch_context.execution_identity,
-            show_tool_calls=False,
+            runtime_paths,
+            config,
         )
         assert response == "Done"
         return "$response:localhost"
@@ -228,7 +231,7 @@ async def test_cross_sink_correlation_invariant_for_matrix_turn_processing_log(
         generate_response=AsyncMock(side_effect=generate_response),
         generate_team_response_helper=AsyncMock(),
     )
-    controller = replace_turn_controller_deps(
+    replace_turn_deps(
         bot,
         logger=get_logger("tests.issue_154.turn"),
         response_runner=response_runner,
@@ -263,13 +266,12 @@ async def test_cross_sink_correlation_invariant_for_matrix_turn_processing_log(
         ),
     )
 
-    await controller._execute_response_action(
+    await bot._turn_dispatcher._execute_response_action(
         room,
         event,
         dispatch,
         ResponseAction(kind="individual"),
         DispatchPayloadInputs((), (), ()),
-        processing_log="Processing",
         dispatch_started_at=time.monotonic(),
         handled_turn=TurnRecord.create(
             [event.event_id],
@@ -343,20 +345,22 @@ async def test_streaming_tool_call_shares_correlation_id_across_streaming_sinks(
     chunks = [
         chunk
         async for chunk in stream_agent_response(
-            make_turn_context(
-                "general",
-                session_id="!room:localhost:$thread:localhost",
-                correlation_id="$event:localhost",
-                reply_to_event_id="$event:localhost",
-                room_id="!room:localhost",
-                thread_id="$thread:localhost",
-                requester_id="@user:localhost",
+            replace(
+                make_turn_context(
+                    "general",
+                    session_id="!room:localhost:$thread:localhost",
+                    correlation_id="$event:localhost",
+                    reply_to_event_id="$event:localhost",
+                    room_id="!room:localhost",
+                    thread_id="$thread:localhost",
+                    requester_id="@user:localhost",
+                ),
+                prompt="hello",
+                model_prompt="model prompt",
+                execution_identity=execution_identity,
             ),
-            prompt="hello",
-            model_prompt="model prompt",
-            runtime_paths=runtime_paths,
-            config=config,
-            execution_identity=execution_identity,
+            runtime_paths,
+            config,
         )
     ]
 
@@ -398,18 +402,20 @@ async def test_non_matrix_request_mints_uuid_correlation_id_across_sinks(
 
     expected_correlation_id = uuid.uuid4().hex
     response = await ai_response(
-        make_turn_context(
-            "general",
-            session_id="openai-session",
-            correlation_id=expected_correlation_id,
-            requester_id="@api-user:localhost",
+        replace(
+            make_turn_context(
+                "general",
+                session_id="openai-session",
+                correlation_id=expected_correlation_id,
+                requester_id="@api-user:localhost",
+            ),
+            prompt="hello",
+            model_prompt="model prompt",
+            execution_identity=execution_identity,
+            show_tool_calls=False,
         ),
-        prompt="hello",
-        model_prompt="model prompt",
-        runtime_paths=runtime_paths,
-        config=config,
-        execution_identity=execution_identity,
-        show_tool_calls=False,
+        runtime_paths,
+        config,
     )
 
     assert response == "Done"

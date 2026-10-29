@@ -14,19 +14,18 @@ from mindroom import reply_lifecycle as rl
 from mindroom.conversation_resolver import MessageContext
 from mindroom.dispatch_callback_outcome import TurnDispatchOutcome
 from mindroom.event_journal import DeliveryStage, EventClass, EventKind
-from mindroom.event_journal.matrix_delivery import TurnHandoff
-from mindroom.handled_turns import TurnRecord, _reset_handled_turn_ledger_runtime
 from mindroom.matrix.thread_history_result import ThreadHistoryResult
 from mindroom.message_target import MessageTarget
 from mindroom.response_payload_preparation import DispatchPayloadInputs
 from mindroom.response_runner import ResponseRunner
 from mindroom.turn_policy import PreparedDispatch, ResponseAction
-from mindroom.turn_record import RevisionSnapshotChangedError
+from mindroom.turn_record import RevisionSnapshotChangedError, TurnRecord
 from mindroom.visible_response_reconciliation import VisibleResponseReconciler
 from tests.conftest import (
     make_visible_message,
     patch_response_runner_module,
     unwrap_extracted_collaborator,
+    update_turn_owner_deps,
 )
 from tests.journal_helpers import admit_dispatch_event
 from tests.matrix_room_events import (
@@ -40,15 +39,14 @@ from tests.test_response_redaction_recovery import _message, _redaction
 from tests.test_turn_store import _store
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import AsyncIterator, Callable
     from pathlib import Path
 
     from mindroom.bot import AgentBot
     from mindroom.delivery_gateway import DeliveryGateway
     from mindroom.event_journal import EventJournalStore, PrincipalStore
-    from mindroom.turn_store import TurnStore
 
-pytestmark = [pytest.mark.asyncio, pytest.mark.ledger_loads_from_disk]
+pytestmark = pytest.mark.asyncio
 SOURCE = "$deleted"
 INITIAL = "$initial"
 
@@ -57,42 +55,39 @@ def _runner_on(
     bot: AgentBot,
     gateway: DeliveryGateway,
     principal: PrincipalStore,
-    turn_store: TurnStore,
 ) -> ResponseRunner:
-    """Return the bot's response runner, with its replies, deliveries, and turn ledger on the test's stores.
+    """Return the bot's response runner, with its replies and deliveries on the test's stores.
 
     The runner's gateway runs its replies' effects, as the bot wires them.
     """
     deps = unwrap_extracted_collaborator(bot._response_runner).deps
     assert deps.replies is not None
-    replies = replace(deps.replies, store=principal, complete_turn=turn_store.publish_completed_turn)
+    replies = replace(deps.replies, store=principal)
     return ResponseRunner(
         replace(
             deps,
             delivery_gateway=replace(gateway, deps=replace(gateway.deps, reply_effects=replies.run_effects)),
-            approval_store=principal,
+            approval_store=principal.approvals,
             replies=replies,
         ),
     )
 
 
 @pytest.mark.parametrize("scenario", ["retry", "setup_failure", "source_deleted", "deleted_after_model"])
-async def test_preparation_outcomes_reach_controller_and_journal_owners(  # noqa: C901, PLR0915
+async def test_preparation_outcomes_reach_dispatch_and_journal_owners(  # noqa: C901, PLR0915
     journal_store: EventJournalStore,
     journal_database: Callable[[], EventJournalStore],
     tmp_path: Path,
     scenario: str,
 ) -> None:
     """Stale live context retries full preparation; deletion suppresses; real setup failure completes visibly."""
-    principal = journal_store.principal("agent@alice")
+    principal = journal_store.principal("general@alice")
     store = await _store(journal_store, agent_name="general")
     bot = _bot(tmp_path)
     gateway = _gateway(
         tmp_path,
         principal,
-        terminal_turn_for=store.terminal_turn_record,
-        terminal_turn_committed=store.publish_completed_turn,
-        turn_handoff=TurnHandoff(lambda _turn: (SOURCE,), lambda ids: dispatcher.release_delivered_turn_sources(ids)),
+        turn_handoff=lambda ids: dispatcher.release_delivered_turn_sources(ids),
     )
     gateway = replace(
         gateway,
@@ -102,8 +97,8 @@ async def test_preparation_outcomes_reach_controller_and_journal_owners(  # noqa
             response_hooks=_DeliveryTestHooks._hooks(),
         ),
     )
-    runner = _runner_on(bot, gateway, principal, store)
-    controller = unwrap_extracted_collaborator(bot._turn_controller)
+    runner = _runner_on(bot, gateway, principal)
+    turn_dispatcher = bot._turn_dispatcher
     gateway.deps.response_hooks.emit_cancelled_response = AsyncMock()
 
     async def settle_ignored(sources: tuple[str, ...]) -> None:
@@ -112,14 +107,14 @@ async def test_preparation_outcomes_reach_controller_and_journal_owners(  # noqa
 
     visible_responses = VisibleResponseReconciler(
         replace(
-            controller.deps.visible_responses.deps,
+            turn_dispatcher.deps.visible_responses.deps,
             turn_store=store,
             delivery_gateway=gateway,
             settle_ignored_sources=settle_ignored,
         ),
     )
-    controller.deps = replace(
-        controller.deps,
+    update_turn_owner_deps(
+        bot,
         response_runner=runner,
         delivery_gateway=gateway,
         turn_store=store,
@@ -197,16 +192,15 @@ async def test_preparation_outcomes_reach_controller_and_journal_owners(  # noqa
             correlation_id=SOURCE,
             envelope=_envelope(target, source_event_id=SOURCE),
         )
-        task = runner.track_inbox_response(
-            controller._execute_response_action(
+        task = runner.inbox.track_inbox_response(
+            turn_dispatcher._execute_response_action(
                 callback_room,
                 event,
                 dispatch,
                 ResponseAction(kind="individual"),
                 DispatchPayloadInputs((), (), ()),
-                processing_log="Processing",
                 dispatch_started_at=0.0,
-                handled_turn=store.get_turn_record(SOURCE),
+                handled_turn=await store.get_turn_record(SOURCE),
             ),
             name="inbox_response:preparation",
             recovery_proof_ready=lambda: True,
@@ -221,12 +215,16 @@ async def test_preparation_outcomes_reach_controller_and_journal_owners(  # noqa
     dispatcher = _dispatcher(principal, callback)
     model_requests = []
 
-    async def model(*args: object, **kwargs: object) -> str:
+    def model(*args: object, **kwargs: object) -> AsyncIterator[str]:
         model_requests.append((args, kwargs))
-        if scenario == "deleted_after_model":
-            captured.set()
-            await release.wait()
-        return "survivor answer"
+
+        async def answer() -> AsyncIterator[str]:
+            if scenario == "deleted_after_model":
+                captured.set()
+                await release.wait()
+            yield "survivor answer"
+
+        return answer()
 
     await admit_dispatch_event(
         dispatcher,
@@ -236,7 +234,7 @@ async def test_preparation_outcomes_reach_controller_and_journal_owners(  # noqa
         EventClass.ACTIONABLE,
     )
     with patch_response_runner_module(
-        ai_response=AsyncMock(side_effect=model),
+        stream_agent_response=model,
         should_use_streaming=AsyncMock(return_value=False),
         typing_indicator=_noop_typing,
         apply_post_response_effects=AsyncMock(),
@@ -256,7 +254,7 @@ async def test_preparation_outcomes_reach_controller_and_journal_owners(  # noqa
             assert (await principal.replies.for_sources((SOURCE,))).event_id == INITIAL
             assert (await gateway.recover_deliveries()).complete
             assert visible == {}
-            assert store.get_turn_record(SOURCE).response_event_id is None
+            assert (await store.get_turn_record(SOURCE)).response_event_id is None
         release.set()
         results = await asyncio.gather(tasks[-1], return_exceptions=True)
         if scenario != "retry":
@@ -278,7 +276,7 @@ async def test_preparation_outcomes_reach_controller_and_journal_owners(  # noqa
             assert len(model_requests) == 1
             assert "PRIVATE_CONTEXT_TO_DELETE" not in str(model_requests)
             assert visible == {INITIAL: "survivor answer"}
-            assert store.get_turn_record(SOURCE).completed
+            assert (await store.get_turn_record(SOURCE)).completed
             assert not await principal.is_pending(SOURCE)
             assert len([content for content in sends if "m.new_content" not in content]) == 1
         elif scenario == "deleted_after_model":
@@ -288,9 +286,8 @@ async def test_preparation_outcomes_reach_controller_and_journal_owners(  # noqa
             assert len(sends) == 1, "Deleted INITIAL received a late fallback edit"
             for reopened in (False, True):
                 if reopened:
-                    _reset_handled_turn_ledger_runtime()
                     journal_store = journal_database()
-                    principal = journal_store.principal("agent@alice")
+                    principal = journal_store.principal("general@alice")
                     store = await _store(journal_store, agent_name="general")
                 # The deletion ended the reply gone and its placeholder was removed; no answer row exists.
                 reply = await principal.replies.for_sources((SOURCE,))
@@ -302,10 +299,10 @@ async def test_preparation_outcomes_reach_controller_and_journal_owners(  # noqa
             assert results == [None]
             assert model_requests == []
             assert visible == {}
-            assert store.get_turn_record(SOURCE).response_event_id is None
-            assert not store.get_turn_record(SOURCE).completed
+            assert (await store.get_turn_record(SOURCE)).response_event_id is None
+            assert not (await store.get_turn_record(SOURCE)).completed
         else:
             assert results == [None]
             assert model_requests == []
             assert "history provider setup failed" in visible[INITIAL]
-            assert store.get_turn_record(SOURCE).completed
+            assert (await store.get_turn_record(SOURCE)).completed

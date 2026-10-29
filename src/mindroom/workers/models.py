@@ -7,7 +7,11 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Literal
 
 if TYPE_CHECKING:
+    from collections.abc import Mapping
     from uuid import UUID
+
+    from mindroom.agent_policy import ResolvedAgentPolicy
+    from mindroom.config.main import Config
 
 WorkerStatus = Literal["starting", "ready", "idle", "failed"]
 WorkerReadyPhase = Literal["cold_start", "waiting", "ready", "failed"]
@@ -15,12 +19,32 @@ ScriptResourceProfileName = Literal["small", "standard", "large"]
 
 
 @dataclass(frozen=True, slots=True)
+class WorkerLaunchConfig:
+    """What a dedicated worker launches with, derived once from the applied config.
+
+    Only ``digest`` takes part in comparison, so two launches compare cheaply.
+    The mappings are shared: a consumer that rewrites them copies them first.
+    """
+
+    config: Config = field(compare=False, repr=False)
+    config_data: Mapping[str, object] = field(compare=False, repr=False)
+    agent_policies: Mapping[str, ResolvedAgentPolicy] = field(compare=False, repr=False)
+    tool_validation_snapshot: Mapping[str, Mapping[str, object]] = field(compare=False, repr=False)
+    grantable_credentials: frozenset[str] = field(compare=False)
+    digest: str
+
+
+@dataclass(frozen=True, slots=True)
 class WorkerSpec:
-    """Stable worker request resolved from worker-routing semantics."""
+    """Stable worker request resolved from worker-routing semantics.
+
+    A dedicated backend provisions it from the applied launch it reads inside the worker's lock.
+    ``mirror_grantable_credentials`` mirrors the launch's grantable credentials into the worker; scripts mirror none.
+    """
 
     worker_key: str
     private_agent_names: frozenset[str] | None = None
-    mirrored_credential_services: frozenset[str] | None = None
+    mirror_grantable_credentials: bool = True
     state_scope_worker_key: str | None = None
     resource_profile: ScriptResourceProfileName | None = None
 

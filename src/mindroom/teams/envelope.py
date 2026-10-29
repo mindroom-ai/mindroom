@@ -1,10 +1,10 @@
 """Team turns: prepare a turn, run its leader, and render the reply through the turn driver.
 
-``team_response_stream`` is the team envelope the response runner drives through the shared turn driver; it consumes
-one ``run_team`` event stream into a ``TeamStreamPresentation``, the document its chunks show, in the configured member
-order, with each failed member run's reason once the team run ends, as a resumed reply shows it. ``team_response``
-collects that stream into the text a blocking reply delivers. ``run_prepared_team`` runs an OpenAI-compatible API team
-turn under the same leader hooks and storage.
+``team_response_stream`` is the team envelope the response runner drives through the turn driver; it consumes one
+``run_team`` event stream into a ``TeamStreamPresentation``, which a reply delivered whole collects. The reply shows
+its trace through its chunks, keeps the configured member order, and adds each failed member run's reason when the
+team run ends, as a resumed reply does. ``run_prepared_team`` runs an OpenAI-compatible API team turn under the same
+leader hooks and storage.
 """
 
 from __future__ import annotations
@@ -19,6 +19,7 @@ from uuid import uuid4
 from mindroom import ai_runtime
 from mindroom.agent_run_context import append_knowledge_availability_enrichment
 from mindroom.ai_run_metadata import build_prepared_history_metadata_content
+from mindroom.config.resolution import entity_timezone
 from mindroom.constants import MATRIX_SEEN_EVENT_IDS_METADATA_KEY, is_silent_schedule_no_report_response
 from mindroom.error_handling import get_user_friendly_error_message
 from mindroom.execution_preparation import (
@@ -47,7 +48,7 @@ from mindroom.response_turn import (
     HandledAttempt,
     PausedAttempt,
     ResponseTurnContext,
-    StreamingTurnAdapter,
+    TurnAdapter,
     TurnContinuationRunState,
     TurnSinks,
     build_llm_request_log_context,
@@ -67,13 +68,11 @@ from mindroom.teams.members import (
     build_team_spec,
     materialized_team_label,
     requested_team_agent_names,
-    resolve_team_member_model_names,
     resolve_team_members,
 )
 from mindroom.teams.presentation import (
     NO_TEAM_RESPONSE,
     TeamStreamPresentation,
-    finished_run_text,
     format_team_header,
 )
 from mindroom.teams.resume import TeamResume, continued_team_pause, drive_team_delegations
@@ -82,11 +81,12 @@ from mindroom.tool_jobs.notices import append_turn_start_job_note
 from mindroom.tool_jobs.settings import background_tool_jobs_enabled
 from mindroom.tool_system.context_bound_streams import closing_async_stream
 from mindroom.tool_system.events import StructuredStreamChunk
+from mindroom.turn_model import ModelScope, TurnModel, resolve_team_turn_models, resolve_turn_model
 
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator, AsyncIterator, Mapping, Sequence
 
-    from mindroom.config.main import Config, ResolvedRuntimeModel
+    from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
     from mindroom.history.request_messages import TurnMessages
     from mindroom.history.session_context import ScopeSessionContext
@@ -102,7 +102,6 @@ if TYPE_CHECKING:
     from mindroom.teams.runtime import TeamRunEvent
     from mindroom.teams.spec import TeamMode
     from mindroom.timing import DispatchPipelineTiming
-    from mindroom.tool_system.events import ToolTraceEntry
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 
 
@@ -156,7 +155,7 @@ async def prepare_materialized_team_execution(
     thread_history: Sequence[ResolvedVisibleMessage] | None,
     config: Config,
     runtime_paths: RuntimePaths,
-    runtime_model: ResolvedRuntimeModel,
+    runtime_model: TurnModel,
     response_sender_id: str | None,
     current_sender_id: str | None,
     configured_team_name: str | None,
@@ -343,6 +342,22 @@ def _run_metadata_seen_event_ids(run_metadata: dict[str, Any] | None) -> list[st
 # ---------------------------------------------------------------------------
 
 
+@dataclass(frozen=True)
+class TeamTurnSpec:
+    """Which team one turn runs: its members and mode, the runtime that builds them, and the models they run."""
+
+    agent_names: Sequence[str]
+    mode: TeamMode
+    orchestrator: OrchestratorRuntime
+    model_name: str | None = None
+    # The members' models chosen for the turn; None resolves them from the room and thread.
+    member_model_names: Mapping[str, str] | None = None
+    configured_team_name: str | None = None
+    # The Matrix account the team's reply is sent from, which its prompt names.
+    response_sender_id: str | None = None
+    reason_prefix: str = "Team request"
+
+
 @dataclass
 class _TeamTurnHolder:
     """Live per-turn team state shared between attempt closures and adapter callbacks.
@@ -360,34 +375,30 @@ class _TeamTurn:
     """The constants of one team turn, shared by its attempts.
 
     ``config`` is the config the turn started with, which every attempt builds its leader and members under, as an
-    agent turn runs on the config it was given; ``orchestrator`` supplies the runtime paths and the knowledge refresh
-    scheduler.
+    agent turn runs on the config it was given; ``spec.orchestrator`` supplies the runtime paths and the knowledge
+    refresh scheduler.
     """
 
     ctx: ResponseTurnContext
-    orchestrator: OrchestratorRuntime
+    spec: TeamTurnSpec
     config: Config
-    execution_identity: ToolExecutionIdentity | None
-    mode: TeamMode
     requested_agent_names: list[str]
-    thread_history: Sequence[ResolvedVisibleMessage] | None
-    model_name: str | None
-    media: MediaInputs
-    show_tool_calls: bool
-    user_id: str | None
-    response_sender_id: str | None
-    compaction_lifecycle: CompactionLifecycle | None
     run_metadata_collector: dict[str, Any] | None
-    configured_team_name: str | None
-    pipeline_timing: DispatchPipelineTiming | None
-    turn_recorder: TurnRecorder
     holder: _TeamTurnHolder
     # The zone of the entity whose bot runs the turn, which dates all of it.
     timezone: str
 
     @property
     def runtime_paths(self) -> RuntimePaths:
-        return self.orchestrator.runtime_paths
+        return self.spec.orchestrator.runtime_paths
+
+    @property
+    def configured_team_name(self) -> str | None:
+        return self.spec.configured_team_name
+
+    @property
+    def execution_identity(self) -> ToolExecutionIdentity | None:
+        return self.ctx.execution_identity
 
     @property
     def entity_name(self) -> str:
@@ -447,16 +458,20 @@ class _TeamTurn:
         members = self.members_for_attempt(continuation_state)
         config = self.config
         # Resolve the runtime model once here and hand it down so the team spec and the run metadata cannot disagree.
-        runtime_model = config.resolve_runtime_model(
-            entity_name=self.configured_team_name,
-            active_model_name=continuation_state.active_model_name or self.model_name,
-            room_id=self.ctx.room_id,
-            thread_id=self.ctx.thread_id,
-            runtime_paths=self.runtime_paths,
+        runtime_model = resolve_turn_model(
+            config,
+            self.runtime_paths,
+            ModelScope(
+                entity=self.configured_team_name,
+                room_id=self.ctx.room_id,
+                thread_id=self.ctx.thread_id,
+                explicit=continuation_state.active_model_name or self.spec.model_name,
+            ),
+            None,
         )
         built = build_team_spec(
             members=members,
-            mode=self.mode,
+            mode=self.spec.mode,
             config=config,
             runtime_paths=self.runtime_paths,
             scope_context=run.scope,
@@ -471,27 +486,25 @@ class _TeamTurn:
             scope_context=run.scope,
             built=built,
             message=continuation_state.active_prompt,
-            thread_history=self.thread_history,
+            thread_history=self.ctx.thread_history,
             config=config,
             runtime_paths=self.runtime_paths,
             runtime_model=runtime_model,
-            response_sender_id=self.response_sender_id,
-            current_sender_id=self.ctx.current_sender_id or self.user_id,
+            response_sender_id=self.spec.response_sender_id,
+            current_sender_id=self.ctx.current_sender_id or self.ctx.requester_id,
             current_timestamp_ms=continuation_state.active_current_timestamp_ms,
             current_event_id=continuation_state.active_current_event_id,
             current_prompt_is_structured=continuation_state.active_current_prompt_is_structured,
-            compaction_lifecycle=self.compaction_lifecycle,
+            compaction_lifecycle=self.ctx.compaction_lifecycle,
             configured_team_name=self.configured_team_name,
             thread_history_render_limits=_MATRIX_TEAM_THREAD_HISTORY_RENDER_LIMITS,
-            pipeline_timing=self.pipeline_timing,
+            pipeline_timing=self.ctx.pipeline_timing,
         )
-        run.unseen_event_ids = prepared.unseen_event_ids
         run.run_metadata = prepared.run_metadata
-        self.turn_recorder.set_run_metadata(prepared.run_metadata)
         presentation = TeamStreamPresentation.new(
             members.requested_agent_names,
             members.display_names,
-            show_tool_calls=self.show_tool_calls,
+            show_tool_calls=self.ctx.show_tool_calls,
         )
         attempt = TeamAttempt(
             run_id=continuation_state.active_run_id or str(uuid4()),
@@ -504,8 +517,12 @@ class _TeamTurn:
         )
         run.attempt = attempt
         self.holder.attempt_started = True
-        logger.info("executing_team_response", agent_count=len(members.requested_agent_names), mode=self.mode.value)
-        run_input = prepared.run_input(self.media)
+        logger.info(
+            "executing_team_response",
+            agent_count=len(members.requested_agent_names),
+            mode=self.spec.mode.value,
+        )
+        run_input = prepared.run_input(self.ctx.media or MediaInputs())
         logger.info(
             "team_prompt_preview",
             agents=members.display_names,
@@ -519,22 +536,21 @@ class _TeamTurn:
             runtime_paths=self.runtime_paths,
             storage=storage,
             configured_team_name=self.configured_team_name,
-            compaction_lifecycle=self.compaction_lifecycle,
-            turn_recorder=self.turn_recorder,
+            compaction_lifecycle=self.ctx.compaction_lifecycle,
+            turn_recorder=run.record,
         )
-        self.turn_recorder.set_run_id(attempt.run_id)
         request_context = self.request_log_context(
             prompt=continuation_state.active_prompt,
             run_input=run_input,
             metadata=prepared.run_metadata,
         )
         with bind_llm_request_log_context(**request_context):
-            if self.pipeline_timing is not None:
-                self.pipeline_timing.mark_model_request()
+            if self.ctx.pipeline_timing is not None:
+                self.ctx.pipeline_timing.mark_model_request()
             events = leader.start(
                 run_input,
                 run_id=attempt.run_id,
-                user_id=self.user_id,
+                user_id=self.ctx.requester_id,
                 metadata=prepared.run_metadata,
                 records=attempt.records,
             )
@@ -544,13 +560,13 @@ class _TeamTurn:
                 leader=leader,
                 records=attempt.records,
                 plan=prepared.prepared_history.replay_plan,
-                user_id=self.user_id,
+                user_id=self.ctx.requester_id,
             ),
             team_name=self.entity_name,
             config=config,
             runtime_paths=self.runtime_paths,
             execution_identity=self.execution_identity,
-            refresh_scheduler=self.orchestrator.knowledge_refresh_scheduler,
+            refresh_scheduler=self.spec.orchestrator.knowledge_refresh_scheduler,
         )
         return attempt, stream_with_llm_request_log_context(events, request_context=request_context)
 
@@ -567,16 +583,18 @@ class _TeamTurn:
                 async for event in events:
                     if not attempt.apply(event):
                         continue
-                    self.sync_live_turn_recorder(run, attempt)
                     chunk = attempt.chunk(finished=False)
                     if chunk is not None:
                         shown = chunk.content
                         yield chunk
         except Exception as error:
             logger.exception("team_response_failed", agents=attempt.members.display_names)
-            yield self.error_text(error)
             yield AttemptResolved(
-                HandledAttempt(metadata_content=self.run_metadata_content(attempt, RunStatus.error), error=error),
+                HandledAttempt(
+                    self.error_text(error),
+                    metadata_content=self.run_metadata_content(attempt, RunStatus.error),
+                    error=error,
+                ),
             )
             return
         finally:
@@ -596,12 +614,26 @@ class _TeamTurn:
                 )
             yield AttemptResolved(paused)
             return
+        if self.silent_no_report(record):
+            # A quiet scheduled check that found nothing replies with the bare token, which delivery then suppresses,
+            # instead of a team document around it.
+            # The document's trace stays, as the streamed reply keeps it.
+            shown = (record.handover_content or "").strip()
+            yield StructuredStreamChunk(content=shown, tool_trace=None)
         # The finished reply adds what no live chunk showed: a failed member run's reason, or the no-consensus note
         # when only members spoke.
-        if (chunk := attempt.chunk(finished=True)) is not None and chunk.content != shown:
+        elif (chunk := attempt.chunk(finished=True)) is not None and chunk.content != shown:
             shown = chunk.content
             yield chunk
         yield AttemptResolved(await self.resolve_completed(run, attempt, record, shown=shown is not None))
+
+    def silent_no_report(self, record: TeamRunRecord) -> bool:
+        """Whether a quiet scheduled turn's leader answered with the no-report token while no member found anything."""
+        return (
+            self.ctx.allow_no_report_response
+            and is_silent_schedule_no_report_response(record.handover_content or "")
+            and not any((member.handover_content or "").strip() for member in record.ended_member_runs)
+        )
 
     def run_metadata_content(self, attempt: TeamAttempt, status: RunStatus) -> dict[str, Any] | None:
         """Return the attempt's run metadata when the caller collects metadata and the run stored its record."""
@@ -621,22 +653,10 @@ class _TeamTurn:
         self.holder.attempt_started = False
         ai_runtime.register_scope_notice_storage(scope_context=scope_context, entity_name=self.entity_name)
 
-    def sync_live_turn_recorder(self, run: TurnRunState, attempt: TeamAttempt) -> None:
-        """Refresh the live turn state from the attempt, so an interruption records its text and its tool calls."""
-        snapshot = attempt.partial_snapshot()
-        run.turn_state.sync_partial(
-            self.turn_recorder,
-            run_metadata=run.run_metadata,
-            assistant_text=snapshot.assistant_text,
-            completed_tools=snapshot.completed_tools,
-            interrupted_tools=snapshot.interrupted_tools,
-        )
-
     def resolve_paused(self, attempt: TeamAttempt, record: TeamRunRecord) -> PausedAttempt:
         """Return the pause the lifecycle owner asks the requester about, in the document its events built.
 
-        The pause freezes that document, so it shows none of the paused notices its runs hold as their content
-        (``paused_content``, ``team_paused_content``); the approval card says what it waits for.
+        The pause freezes that document; the approval card says what it waits for.
         """
         paused = paused_attempt_from_response(record, toolkit_owners=attempt.team.tool_owners())
         if paused is None:
@@ -657,33 +677,28 @@ class _TeamTurn:
     ) -> CompletedAttempt:
         """Return the completed attempt: what its reply still has to show, what replays, and the turn's metadata.
 
-        ``shown`` says whether the attempt's chunks showed a document. One that showed nothing ends with the
-        no-response line; a quiet scheduled reply in which only the leader answered, with the bare no-report token,
-        which its delivery suppresses. An attempt that produced anything records the Matrix events the turn consumed
-        as seen on the stored session row; an empty one, whose run is discarded, leaves them unseen, so the next turn
-        still reads them.
+        ``shown`` says whether the attempt's chunks showed a document; one that showed nothing ends with the
+        no-response line. An attempt that produced anything, text or tool calls, records the Matrix events the turn
+        consumed as seen on the stored session row; an empty one, whose run is discarded, leaves them unseen, so the
+        next turn still reads them.
         """
         tool_executions = team_tool_executions(record)
-        # The text a reply records: its document without the header and tool markers. The no-response line is
-        # display chrome, not replayable assistant text.
+        header = format_team_header(attempt.members.display_names)
+        # The text records the document the attempt's events built and its failed runs' reasons, in the configured
+        # member order, without tool markers: the chunks show the trace. The "No team response generated." fallback is
+        # display chrome, not replayable assistant text. A quiet scheduled reply records the bare token.
         body_text = attempt.presentation.text_without_tool_markers(finished=True)
-        is_empty = record.status is RunStatus.completed and not tool_executions and not body_text
+        has_visible_output = bool(body_text)
+        is_empty = record.status is RunStatus.completed and not tool_executions and not has_visible_output
         if not is_empty and self.ctx.reply_to_event_id:
             await _persist_bound_seen_event_ids(
                 scope_context=run.scope,
                 event_ids=_run_metadata_seen_event_ids(run.run_metadata),
             )
-        rendered = format_team_header(attempt.members.display_names) + (body_text or NO_TEAM_RESPONSE)
-        replayable_text = rendered if body_text else ""
-        response_text = "" if shown else rendered
-        leader_text = finished_run_text(record)
-        if (
-            self.ctx.allow_no_report_response
-            and is_silent_schedule_no_report_response(leader_text)
-            and not any(finished_run_text(member).strip() for member in record.ended_member_runs)
-        ):
-            # A quiet scheduled reply delivers and records the bare token, not the team document.
-            response_text = replayable_text = leader_text.strip()
+        rendered = header + (body_text or NO_TEAM_RESPONSE)
+        replayable_text = rendered if has_visible_output else ""
+        if self.silent_no_report(record):
+            replayable_text = (record.handover_content or "").strip()
         logger.info(
             "team_response_preview",
             agents=attempt.members.display_names,
@@ -692,9 +707,9 @@ class _TeamTurn:
         if len(rendered) > _MAX_LOG_MESSAGE_LENGTH:
             logger.debug("team_response_full", agents=attempt.members.display_names, response=rendered)
         return CompletedAttempt(
-            response_text=response_text,
+            response_text="" if shown else rendered,
             replayable_text=replayable_text,
-            has_visible_content=bool(body_text),
+            has_visible_content=has_visible_output,
             is_empty=is_empty,
             session_id=record.session_id,
             run_id=record.run_id,
@@ -728,83 +743,60 @@ class _TeamTurn:
             team_name=self.configured_team_name,
         )
 
-    def initial_continuation(
-        self,
-        message: str,
-        *,
-        current_timestamp_ms: float | None,
-        current_prompt_is_structured: bool,
-    ) -> TurnContinuationRunState:
+    def initial_continuation(self) -> TurnContinuationRunState:
+        """Return the turn's first continuation state, which answers the team's message."""
         return TurnContinuationRunState.initial(
-            prompt=message,
+            prompt=self.ctx.prompt,
             model_prompt=None,
-            current_timestamp_ms=current_timestamp_ms,
-            current_prompt_is_structured=current_prompt_is_structured,
+            current_timestamp_ms=self.ctx.current_timestamp_ms,
+            current_prompt_is_structured=self.ctx.current_prompt_is_structured,
             current_event_id=self.ctx.reply_to_event_id,
             run_id=self.ctx.run_id,
             continuation_model_prompt_tail="",
         )
 
 
-def _team_turn(
-    ctx: ResponseTurnContext,
-    *,
-    orchestrator: OrchestratorRuntime,
-    execution_identity: ToolExecutionIdentity | None,
-    mode: TeamMode,
-    requested_agent_names: list[str],
-    thread_history: Sequence[ResolvedVisibleMessage] | None,
-    model_name: str | None,
-    media: MediaInputs | None,
-    show_tool_calls: bool,
-    user_id: str | None,
-    response_sender_id: str | None,
-    compaction_lifecycle: CompactionLifecycle | None,
-    run_metadata_collector: dict[str, Any] | None,
-    configured_team_name: str | None,
-    pipeline_timing: DispatchPipelineTiming | None,
-    turn_recorder: TurnRecorder,
-    reason_prefix: str,
-    member_model_names: Mapping[str, str] | None,
-) -> _TeamTurn | str:
+def _team_turn(spec: TeamTurnSpec, ctx: ResponseTurnContext, sinks: TurnSinks) -> _TeamTurn | str:
     """Resolve the team's members and return the turn's constants, or the text that explains why it cannot run.
 
     Resolving the members' knowledge and models reads the filesystem, so the caller runs this off the event loop
     (#1260); the members themselves build on their first delegation.
     """
+    orchestrator = spec.orchestrator
     assert orchestrator.config is not None
     if not ctx.session_id:
         msg = "team response turns require ResponseTurnContext.session_id"
         raise ValueError(msg)
     config = orchestrator.config
+    requested_agent_names = requested_team_agent_names(spec.agent_names)
     config.assert_team_agents_supported(
         requested_agent_names,
         allow_direct_private_agents=allow_direct_private_team_agents(
-            execution_identity,
-            configured_team_name=configured_team_name,
+            ctx.execution_identity,
+            configured_team_name=spec.configured_team_name,
         ),
     )
     active_member_model_names = (
-        dict(member_model_names)
-        if member_model_names is not None
-        else resolve_team_member_model_names(
-            requested_agent_names,
-            ctx.room_id,
+        dict(spec.member_model_names)
+        if spec.member_model_names is not None
+        else resolve_team_turn_models(
             config,
             orchestrator.runtime_paths,
-            thread_id=ctx.thread_id,
-        )
+            ModelScope(entity=spec.configured_team_name, room_id=ctx.room_id, thread_id=ctx.thread_id),
+            requested_agent_names,
+            None,
+        ).member_model_names
     )
     unavailable_bases: dict[str, KnowledgeAvailabilityDetail] = {}
     try:
         team_members = resolve_team_members(
             requested_agent_names,
             orchestrator,
-            execution_identity,
+            ctx.execution_identity,
             config=config,
             unavailable_bases=unavailable_bases,
-            reason_prefix=reason_prefix,
-            configured_team_name=configured_team_name,
+            reason_prefix=spec.reason_prefix,
+            configured_team_name=spec.configured_team_name,
             active_model_names=active_member_model_names,
         )
     except ValueError as exc:
@@ -819,173 +811,53 @@ def _team_turn(
                 unavailable_bases,
             ),
         ),
-        orchestrator=orchestrator,
+        spec=spec,
         config=config,
-        execution_identity=execution_identity,
-        mode=mode,
         requested_agent_names=requested_agent_names,
-        thread_history=thread_history,
-        model_name=model_name,
-        media=media or MediaInputs(),
-        show_tool_calls=show_tool_calls,
-        user_id=user_id,
-        response_sender_id=response_sender_id,
-        compaction_lifecycle=compaction_lifecycle,
-        run_metadata_collector=run_metadata_collector,
-        configured_team_name=configured_team_name,
-        pipeline_timing=pipeline_timing,
-        turn_recorder=turn_recorder,
+        run_metadata_collector=sinks.run_metadata_collector,
         holder=_TeamTurnHolder(members=team_members),
         # ``ctx`` still names the entity whose bot runs the turn; the turn's own context took the team's label above.
-        timezone=config.get_entity_timezone(ctx.entity_label),
+        timezone=entity_timezone(config, ctx.entity_label),
     )
 
 
 # ---------------------------------------------------------------------------
-# The streaming envelope and its blocking collector
+# The envelope
 # ---------------------------------------------------------------------------
-
-
-async def team_response(
-    agent_names: list[str],
-    mode: TeamMode,
-    message: str,
-    orchestrator: OrchestratorRuntime,
-    execution_identity: ToolExecutionIdentity | None,
-    ctx: ResponseTurnContext,
-    thread_history: Sequence[ResolvedVisibleMessage] | None = None,
-    model_name: str | None = None,
-    media: MediaInputs | None = None,
-    show_tool_calls: bool = True,
-    user_id: str | None = None,
-    current_timestamp_ms: float | None = None,
-    current_prompt_is_structured: bool = False,
-    response_sender_id: str | None = None,
-    compaction_lifecycle: CompactionLifecycle | None = None,
-    run_metadata_collector: dict[str, Any] | None = None,
-    configured_team_name: str | None = None,
-    pipeline_timing: DispatchPipelineTiming | None = None,
-    *,
-    turn_recorder: TurnRecorder,
-    reason_prefix: str = "Team request",
-    member_model_names: Mapping[str, str] | None = None,
-    tool_trace_collector: list[ToolTraceEntry] | None = None,
-) -> str:
-    """Run one team turn to its final text: ``team_response_stream``'s turn, collected as its reply shows it.
-
-    Each chunk replaces the reply's text, as a streamed team reply's edits do, so the text is the last chunk's.
-    ``tool_trace_collector`` receives the trace of the last document shown.
-    """
-    text = ""
-    tool_trace: list[ToolTraceEntry] = []
-    stream = team_response_stream(
-        agent_names,
-        mode,
-        message,
-        orchestrator,
-        execution_identity,
-        ctx,
-        thread_history=thread_history,
-        model_name=model_name,
-        media=media,
-        show_tool_calls=show_tool_calls,
-        user_id=user_id,
-        current_timestamp_ms=current_timestamp_ms,
-        current_prompt_is_structured=current_prompt_is_structured,
-        response_sender_id=response_sender_id,
-        compaction_lifecycle=compaction_lifecycle,
-        run_metadata_collector=run_metadata_collector,
-        configured_team_name=configured_team_name,
-        pipeline_timing=pipeline_timing,
-        turn_recorder=turn_recorder,
-        reason_prefix=reason_prefix,
-        member_model_names=member_model_names,
-    )
-    async with closing_async_stream(stream):
-        async for chunk in stream:
-            if isinstance(chunk, str):
-                text = chunk
-                continue
-            text = chunk.content
-            if chunk.tool_trace is not None:
-                tool_trace = list(chunk.tool_trace)
-    if tool_trace_collector is not None:
-        tool_trace_collector.extend(tool_trace)
-    return text
 
 
 async def team_response_stream(
-    agent_names: list[str],
-    mode: TeamMode,
-    message: str,
-    orchestrator: OrchestratorRuntime,
-    execution_identity: ToolExecutionIdentity | None,
+    spec: TeamTurnSpec,
     ctx: ResponseTurnContext,
-    thread_history: Sequence[ResolvedVisibleMessage] | None = None,
-    model_name: str | None = None,
-    media: MediaInputs | None = None,
-    show_tool_calls: bool = True,
-    user_id: str | None = None,
-    current_timestamp_ms: float | None = None,
-    current_prompt_is_structured: bool = False,
-    response_sender_id: str | None = None,
-    compaction_lifecycle: CompactionLifecycle | None = None,
-    run_metadata_collector: dict[str, Any] | None = None,
-    configured_team_name: str | None = None,
-    pipeline_timing: DispatchPipelineTiming | None = None,
     *,
-    turn_recorder: TurnRecorder,
-    reason_prefix: str = "Team request",
-    member_model_names: Mapping[str, str] | None = None,
+    sinks: TurnSinks,
 ) -> AsyncIterator[TeamStreamChunk]:
     """Stream one team turn as a live document: a header, one section per member, and the leader's consensus.
 
-    The document is rebuilt as events arrive, its members in the configured order. ``ctx`` carries the per-turn
-    Matrix identity; this entry refines its ``entity_label`` to the materialized team label and appends the
-    knowledge-availability enrichment before the turn runs.
+    The document is rebuilt as events arrive, its members in the configured order. ``ctx`` carries the turn's
+    inputs (``prompt`` is the team's message); this entry refines its ``entity_label`` to the materialized team label
+    and appends the knowledge-availability enrichment before the turn runs.
     """
-    turn = await asyncio.to_thread(
-        _team_turn,
-        ctx,
-        orchestrator=orchestrator,
-        execution_identity=execution_identity,
-        mode=mode,
-        requested_agent_names=requested_team_agent_names(agent_names),
-        thread_history=thread_history,
-        model_name=model_name,
-        media=media,
-        show_tool_calls=show_tool_calls,
-        user_id=user_id,
-        response_sender_id=response_sender_id,
-        compaction_lifecycle=compaction_lifecycle,
-        run_metadata_collector=run_metadata_collector,
-        configured_team_name=configured_team_name,
-        pipeline_timing=pipeline_timing,
-        turn_recorder=turn_recorder,
-        reason_prefix=reason_prefix,
-        member_model_names=member_model_names,
-    )
+    turn = await asyncio.to_thread(_team_turn, spec, ctx, sinks)
     if isinstance(turn, str):
+        # A turn whose members cannot run ran nothing to record; its message and this reply stay in the thread.
         yield turn
         return
 
-    adapter = StreamingTurnAdapter[TeamStreamChunk](
+    adapter = TurnAdapter[TeamStreamChunk](
         load_scope=turn.load_scope,
         run_attempt=turn.run_attempt,
         finalize_attempt=turn.finalize_attempt,
         make_text_chunk=lambda text: text,
+        user_message=ctx.prompt,
         unexpected_error_text=turn.error_text,
         discard_empty_run=turn.discard_empty_run,
     )
     response_stream = stream_response_turn(
         turn.ctx,
         adapter,
-        TurnSinks(turn_recorder=turn_recorder, run_metadata_collector=run_metadata_collector),
-        continuation=turn.initial_continuation(
-            message,
-            current_timestamp_ms=current_timestamp_ms,
-            current_prompt_is_structured=current_prompt_is_structured,
-        ),
+        sinks,
+        continuation=turn.initial_continuation(),
     )
     # Close the driver generator deterministically when this wrapper unwinds so
     # its cleanup does not wait for event-loop async-generator finalization.
@@ -997,8 +869,8 @@ async def team_response_stream(
 __all__ = [
     "PreparedTeamExecution",
     "TeamStreamChunk",
+    "TeamTurnSpec",
     "prepare_materialized_team_execution",
     "run_prepared_team",
-    "team_response",
     "team_response_stream",
 ]

@@ -26,6 +26,7 @@ def test_collision_projection_loads_plugins_once_for_all_agents(
     runtime_paths = orchestrator_runtime_paths(tmp_path, config_path=tmp_path / "config.yaml")
     config = Config.validate_with_runtime(
         {
+            "models": {"default": {"provider": "openai", "id": "test-model"}},
             "defaults": {"tools": []},
             "mcp_servers": {"demo": {"transport": "stdio", "command": "test-server"}},
             "agents": {
@@ -64,6 +65,7 @@ def test_collision_projection_builds_local_tools_only_for_agents_with_mcp_tools(
     runtime_paths = orchestrator_runtime_paths(tmp_path, config_path=tmp_path / "config.yaml")
     config = Config.validate_with_runtime(
         {
+            "models": {"default": {"provider": "openai", "id": "test-model"}},
             "defaults": {"tools": []},
             "mcp_servers": {"demo": {"transport": "stdio", "command": "test-server"}},
             "agents": {

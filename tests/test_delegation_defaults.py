@@ -15,6 +15,7 @@ from mindroom.delegation.state import DelegationState
 from mindroom.llm.runs import RunStatus
 from mindroom.response_turn import CompletedApprovalRun, PausedAttempt
 from mindroom.tool_system.runtime_context import tool_runtime_context
+from mindroom.tool_system.worker_routing import agent_workspace_root_path
 from tests.delegation_helpers import (
     ScriptedAgents,
     _delegate_runtime_context,
@@ -75,7 +76,14 @@ async def test_default_subagent_target_keeps_caller_scope_and_policy(
     agents.install(monkeypatch)
 
     if execution == "direct":
-        toolkit = DelegateTools("leader", allowed, paths, config, execution_identity=identity)
+        toolkit = DelegateTools(
+            "leader",
+            allowed,
+            paths,
+            config,
+            agent_workspace_root_path(paths.storage_root, "leader"),
+            execution_identity=identity,
+        )
         with tool_runtime_context(_delegate_runtime_context(config, paths, execution_identity=identity)):
             result = await toolkit.run_subagent(**arguments)
         assert ("Self report" in result) == expect_child

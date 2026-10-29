@@ -668,6 +668,7 @@ async def test_desktop_command_resolves_exact_agent_from_router_candidates(
     runtime_paths = _test_runtime_paths(tmp_path)
     config = Config.validate_with_runtime(
         {
+            "models": {"default": {"provider": "openai", "id": "test-model"}},
             "matrix_sync": {"mode": sync_mode},
             "defaults": {"tools": []},
             "agents": {

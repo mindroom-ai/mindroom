@@ -37,7 +37,6 @@ from mindroom.history.types import (
     HistoryScope,
     HistoryScopeState,
 )
-from mindroom.llm.errors import RateLimited
 from mindroom.llm.media import Image
 from mindroom.llm.messages import Message
 from mindroom.llm.provider import RequestOverrides
@@ -381,7 +380,7 @@ async def test_compaction_call_timeout_falls_back_in_runtime(
         )
         await wait_for_background_tasks(timeout=0.2)
 
-    persisted = storage.load_session("session-1", "agent")
+    persisted = storage.load_session("session-1")
     assert persisted is not None
     assert persisted.summary is None
     assert len(persisted.runs) == 4
@@ -711,23 +710,6 @@ def test_build_summary_input_honors_tool_call_history_limit() -> None:
     assert "first result" not in summary_input
     assert "call-2" in summary_input
     assert "second result" in summary_input
-
-
-@pytest.mark.parametrize(
-    ("error", "shrink"),
-    [
-        (RateLimited("Request too large for gpt-6-astra on tokens per min", provider="fake", status_code=429), True),
-        (RateLimited("slow down", provider="fake", status_code=429, provider_code="context_length_exceeded"), True),
-        (RateLimited("slow down", provider="fake", status_code=429, provider_code="rate_limit_exceeded"), False),
-    ],
-)
-def test_a_rate_limit_shrinks_the_summary_input_only_when_the_input_alone_is_too_large(
-    error: RateLimited,
-    *,
-    shrink: bool,
-) -> None:
-    """Waiting never lets a request above the per-minute token limit through, so its wording or code shrinks it."""
-    assert SummaryRetryPolicy().should_shrink(error) is shrink
 
 
 def test_owned_timeout_classification_does_not_depend_on_message_text() -> None:

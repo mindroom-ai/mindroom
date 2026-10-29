@@ -9,6 +9,7 @@ These built-in tools let an agent hand tasks to other agents, build and run reus
 - [`report_publishing`](#report_publishing) - Publish workflow reports or workspace static sites through revocable public links.
 - [`config_manager`](#config_manager) - Inspect and patch the full configuration, and create, update, or validate agents and teams.
 - [`self_config`](#self_config) - Let an agent read and update only its own configuration.
+- [`agent_manager`](#agent_manager) - Create agents for the people asking, and let owners change or delete the agents generated for them.
 - [`claude_agent`](#claude_agent) - Run persistent Claude Agent SDK coding sessions.
 
 Related tools documented elsewhere:
@@ -45,7 +46,6 @@ agents:
     display_name: Code
     role: Implement and debug code changes
     model: sonnet
-    memory_backend: file  # gives the agent a workspace for file paths
     tools: [coding, shell]
     delegate_to: [research]  # can delegate further
 
@@ -83,7 +83,7 @@ Delegated runs do not create a Matrix thread and cannot ask the user interactive
 When a child in a Matrix conversation calls a tool that needs approval, the approval card appears in the source room and thread, and the delegation continues after the decision.
 In Matrix conversations, a parent runs its subagents one at a time.
 Delegated runs through the OpenAI-compatible API have fewer tools available; see [OpenAI-Compatible API](https://docs.mindroom.chat/openai-api/).
-When the caller has a workspace, both calls accept the standard `mindroom_output_path` argument described in [Execution & Coding](https://docs.mindroom.chat/tools/execution-and-coding/#workspace-and-tool-output-files).
+Both calls accept the standard `mindroom_output_path` argument described in [Execution & Coding](https://docs.mindroom.chat/tools/execution-and-coding/#workspace-and-tool-output-files).
 
 Use `continue_subagent` with the returned ID to send a follow-up into the same child session after its previous turn returns.
 The ID works across parent turns and restarts, but only for the same caller, requester, and originating conversation.
@@ -143,7 +143,7 @@ run_subagent(
 #### Subagent Profiles
 
 Save a reusable persona as `subagents/<name>.md` in the agent's workspace and run it with `run_subagent(profile="<name>", task=...)`.
-The agent creates and edits profiles with its own file or shell tools, so profiles need an agent workspace, which exists with `memory_backend: file` or a `private:` configuration.
+The agent creates and edits profiles with its own file or shell tools.
 
 ```markdown
 ---
@@ -170,7 +170,6 @@ Authoring errors:
 - `Cannot delegate: unknown knowledge base '<id>'. Your knowledge bases: ...` - `knowledge` names something other than one of the caller's `semantic` knowledge bases, such as a `files`-mode base or the caller's file memory.
 - `Cannot delegate: subagent profile '<name>' was not found in subagents/.` - no such file in the caller's workspace.
 - `Cannot delegate: subagent profile '<name>' is invalid: <reason>.` - fix the file as the reason says.
-- `Cannot delegate: subagent profiles need an agent workspace.` - give the agent a workspace as described above.
 - `Subagent tool '<entry>' is no longer available to you; start a new subagent.` - the caller lost a tool the subagent uses.
 - `Cannot delegate: tool '<entry>' is not available to you.` - the caller's tool configuration excludes that function, or the tool is unavailable in this conversation, for example because it failed to load or the conversation is a voice call; fix the configuration or name a tool the caller can use here.
 
@@ -285,7 +284,7 @@ Changing a tool's authored settings, other than for MCP tools, cancels its still
 Include/exclude filters remain checked per function.
 Output redirection and automatic output saving apply to the completed child result, while released waits return the job handle directly.
 `job(action="list")` rediscovers handles after compaction, later turns, and a restart.
-For workspace-backed agents, `job` also accepts `mindroom_output_path`: `wait` saves the returned result.
+An agent's `job` tool also accepts `mindroom_output_path`: `wait` saves the returned result.
 Large supported results use the same configured automatic file-saving policy as other tools.
 Redirecting a stored result does not rerun the original tool or change its saved output.
 Removing a toolkit, changing its execution scope, the agent's `file_access`, or its provenance, or excluding a function revokes access.
@@ -357,7 +356,7 @@ The top-level fields are `id`, `name`, `description`, `kind`, `inputs`, `partici
 - **`inputs`**: An object schema with `required` and `properties`; each property supports `type`, `description`, and `enum`.
 - **`participants`**: Up to 8 entries with `kind` set to `subagent` (the default) or `room_agent`.
   - A `subagent` is an [authored subagent](#authored-subagents) of the caller: it declares `id`, an optional `description`, and either `profile`, naming a `subagents/<name>.md` profile in the caller's workspace, or an inline `system_prompt` with optional `tools`, `skills`, `model`, and `mode`.
-    Its `tools` must be the caller's own toolkits or `toolkit.function` entries, never `memory`, `delegate`, `self_config`, `skill_manage`, `compact_context`, `dynamic_workflow`, `dynamic_tools`, `invite_router`, or `thread_model`, and a participant that names no tools, inline or in its profile, gets none.
+    Its `tools` must be the caller's own toolkits or `toolkit.function` entries, never `memory`, `delegate`, `self_config`, `agent_manager`, `skill_manage`, `compact_context`, `dynamic_workflow`, `dynamic_tools`, `invite_router`, or `thread_model`, and a participant that names no tools, inline or in its profile, gets none.
     Its `skills` must be the caller's own skills, and a participant that names no skills gets none; it reads its skills whenever the caller could without approval, but reads a skill's scripts only when an operator `auto_approve` rule allows `get_skill_script`.
     It searches no knowledge bases, even when its profile lists `knowledge`.
     Its `model` is any alias or model ID in `models:` and defaults to the caller's current model; when `permissions.models` is set, it must also list it.
@@ -476,7 +475,6 @@ The tool never accepts arbitrary filesystem paths; it publishes only these sourc
 - **`dynamic_workflow_run`**: `source` takes `workflow_id`, `run_id`, and optional `scope` (default `agent`), and the run must be completed.
 - **`static_site`**: `source` takes a workspace-relative `path` and a required `title`.
   The path is a directory containing `index.html` plus optional CSS, JavaScript, images, fonts, or JSON, or a single HTML file served as `index.html`.
-  The agent needs a workspace, which exists when it uses `memory_backend: file` or a `private:` configuration.
   Publishing copies the site, so later workspace edits need a new `publish_report()` call.
   A site may contain at most 200 files, 200 directories nested at most 32 levels deep, and 10 MiB in total, and it may contain only regular files, not symlinks.
   Static sites are served at `/reports/public/<slug>/` with a trailing slash so relative asset URLs resolve.
@@ -610,6 +608,38 @@ update_own_config(
     context_files=["SOUL.md", "USER.md"],
 )
 ```
+
+## [`agent_manager`]
+
+`agent_manager` lets people get agents of their own and reshape them, without an administrator editing `config.yaml` for each change.
+MindRoom adds it automatically and it is never listed under `tools`.
+A generated agent is an agent made for one person from a [`personal_agents`](https://docs.mindroom.chat/personal-agents/) template, or one that another agent created.
+Which functions an agent gets depends on what it is:
+
+| Function | Offered to | What it does |
+| --- | --- | --- |
+| `create_agent(name, display_name, role, instructions=None, tools=None)` | Agents with `created_agents_per_owner` above 0 | Creates an agent for the person asking, with some of the creator's tools, and returns its Matrix ID |
+| `agent_settings()` | Every generated agent | Shows the agent's editable settings, its owners if it was created, and the toolkit names `tools` may use as `allowed_tools` |
+| `update_agent(changes)` | Every generated agent | Changes its `display_name`, `role`, `instructions`, or `tools`; for a created agent, its owner may also change `co_owners` |
+| `delete_agent()` | Created agents | Deletes the agent for its owner; its Matrix account stays, so the name stays taken |
+
+Only an agent's owners may read or change it, and only a created agent's owner may delete it or change its co-owners.
+`create_agent`, `update_agent`, and `delete_agent` always show an [approval card](https://docs.mindroom.chat/tool-approval/#approving-and-denying) to the person asking, even when `tool_approval.default` is `auto_approve`, and only that person's [`!auto_approve`](https://docs.mindroom.chat/tool-approval/#auto-approve-everything) window skips it.
+In a room without the router the call is denied, and the agent recovers with `invite_router` as described in [When the Router Is Missing](https://docs.mindroom.chat/tool-approval/#when-the-router-is-missing).
+Scripts and workflow participants cannot call it, and it cannot be deferred.
+
+```python
+create_agent(
+    name="research",
+    display_name="Research Helper",
+    role="Find and summarize sources for the owner.",
+    tools=["duckduckgo", "wikipedia"],
+)
+update_agent({"role": "Answer in two sentences.", "instructions": None})
+```
+
+`tools` are toolkit names such as `duckduckgo`, never function names, and each value in `update_agent` replaces the whole field, with `None` restoring the base agent's value.
+[Created Agents and Self-Updates](https://docs.mindroom.chat/personal-agents/#created-agents-and-self-updates) covers naming, the cap, owners and co-owners, and what happens when the creator changes.
 
 ## [`claude_agent`]
 

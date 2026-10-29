@@ -53,6 +53,7 @@ def _replayed_input(adapter: ResponsesAdapter, messages: list[Message]) -> list[
         responses_replay(messages, store=False, portable_replay=True, native_compaction=None),
         cache_system_prompt=adapter.settings.cache_system_prompt,
         explicit_breakpoint=adapter.wire.explicit_breakpoint,
+        provider=adapter.identity.provider_name,
     )
 
 
@@ -93,7 +94,7 @@ def test_image_history_after_summary_does_not_repeat_compaction_for_encoded_byte
         runs=[_completed_run("recent", messages=[message])],
         summary=ScopeSummary(text="Earlier work is complete.", updated_at=datetime.now(UTC)),
     )
-    config, _ = _make_config(
+    config, runtime_paths = _make_config(
         tmp_path,
         defaults_compaction=CompactionConfig(reserve_tokens=1000, replay_window_tokens=10_000),
         models={"default": ModelConfig(provider="openai", id="gpt-6-astra", context_window=20_000)},
@@ -101,8 +102,9 @@ def test_image_history_after_summary_does_not_repeat_compaction_for_encoded_byte
     adapter = responses_adapter(tmp_path, store=True)
     resolved = resolve_entity_preparation_inputs(
         config=config,
+        runtime_paths=runtime_paths,
         entity_name="test_agent",
-        history_settings=config.resolve_entity("test_agent").history_settings,
+        history_settings=config.resolve_scope("test_agent").history_settings,
         static_prompt_tokens=100,
         active_model_name=None,
         active_context_window=None,
@@ -417,6 +419,17 @@ def test_responses_image_file_id_retains_unknown_dimension_allowance(tmp_path: P
     assert 3000 <= tokens < 3100
 
 
+def test_responses_history_with_an_unreadable_attachment_is_sized_canonically(tmp_path: Path) -> None:
+    """An attachment file that is gone leaves the route no estimate; the request sends the media note in its place."""
+    gone = Image(filepath=str(tmp_path / "gone.png"), mime_type="image/png")
+
+    tokens = responses_adapter(tmp_path).estimate_portable_replay_tokens(
+        [Message(role="user", content="Describe.", images=[gone])],
+    )
+
+    assert tokens is None
+
+
 def _reasoned_answer(ciphertext: str, *, reasoning_tokens: int = 0, own_turn: bool = False) -> list[Message]:
     """Return a question and an answer whose stored output carries one encrypted reasoning item."""
     output = [
@@ -588,8 +601,9 @@ async def test_reply_preparation_sizes_and_fits_history_with_the_route_estimate(
     adapter = responses_adapter(tmp_path)
     inputs = resolve_entity_preparation_inputs(
         config=config,
+        runtime_paths=runtime_paths,
         entity_name="test_agent",
-        history_settings=config.resolve_entity("test_agent").history_settings,
+        history_settings=config.resolve_scope("test_agent").history_settings,
         static_prompt_tokens=0,
         active_model_name=None,
         active_context_window=None,

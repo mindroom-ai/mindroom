@@ -36,6 +36,7 @@ from tests.team_turn_helpers import (
     delegate,
     registered_probe,
 )
+from tests.turn_model_helpers import turn_model
 
 if TYPE_CHECKING:
     from collections.abc import Iterator, Sequence
@@ -93,12 +94,11 @@ def _completed_tool_names(team: TeamTurn) -> list[str | None]:
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(("stream", "show_tool_calls"), [(False, True), (True, True), (True, False)])
+@pytest.mark.parametrize("show_tool_calls", [True, False])
 async def test_a_member_s_next_turn_switch_runs_the_turn_again_building_only_the_members_it_delegates_to(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     *,
-    stream: bool,
     show_tool_calls: bool,
 ) -> None:
     """The second attempt has its own run id and continuation prompt; only its answer is the reply.
@@ -112,8 +112,8 @@ async def test_a_member_s_next_turn_switch_runs_the_turn_again_building_only_the
         general=[calls(_switch("next-turn"))],
     )
     with patch("mindroom.teams.members.create_agent", wraps=create_agent) as build:
-        text = await team.reply(stream=stream, message=PROMPT, show_tool_calls=show_tool_calls)
-    session = team.storage.load_session(SESSION_ID, "team")
+        text = await team.respond(message=PROMPT, show_tool_calls=show_tool_calls)
+    session = team.storage.load_session(SESSION_ID)
     assert session is not None
     run_ids = [run.run_id for run in session.runs if isinstance(run, TeamRunRecord)]
 
@@ -137,12 +137,9 @@ async def test_a_member_s_next_turn_switch_runs_the_turn_again_building_only_the
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("stream", [False, True])
 async def test_a_continuation_on_the_session_s_first_turn_replays_the_first_attempt_from_its_new_session(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
-    *,
-    stream: bool,
 ) -> None:
     """The first attempt gives the scope its first session; the continuation stores into it and replays that attempt."""
     team = _team(
@@ -151,8 +148,8 @@ async def test_a_continuation_on_the_session_s_first_turn_replays_the_first_atte
         default=[delegate("call-team", "general", "Switch"), answer("Switching."), answer("Finished the task.")],
         general=[calls(_switch("next-turn"))],
     )
-    assert team.storage.load_session(SESSION_ID, "team") is None
-    await team.reply(stream=stream, message=PROMPT)
+    assert team.storage.load_session(SESSION_ID) is None
+    await team.respond(message=PROMPT)
 
     first, *_, continued = team.models["default"].requests
     contents = [str(message.content) for message in continued.messages]
@@ -160,7 +157,7 @@ async def test_a_continuation_on_the_session_s_first_turn_replays_the_first_atte
     assert first_prompt in contents[:-1]
     assert "Switching." in contents
     assert CONTINUATION_MARK in contents[-1]
-    session = team.storage.load_session(SESSION_ID, "team")
+    session = team.storage.load_session(SESSION_ID)
     assert session is not None
     run_ids = [run.run_id for run in session.runs if isinstance(run, TeamRunRecord)]
     assert len(run_ids) == 2
@@ -237,13 +234,10 @@ async def test_a_config_reload_mid_turn_does_not_reach_the_rebuilt_members(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("stream", [False, True])
 async def test_an_after_call_switch_rebuilds_the_leader_and_members_on_the_new_model(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     probe: type[ProbeToolkit],
-    *,
-    stream: bool,
 ) -> None:
     """Keeping the first attempt's members would make a switch for the current reply wait until the next turn."""
     team = _team(
@@ -259,7 +253,7 @@ async def test_an_after_call_switch_rebuilds_the_leader_and_members_on_the_new_m
         ],
     )
 
-    text = await team.reply(stream=stream, message=PROMPT)
+    text = await team.respond(message=PROMPT)
 
     assert text.endswith("Finished with the new model.")
     # A member's tools run under the member's own model: its configured one first, the switched one after the rebuild.
@@ -320,7 +314,7 @@ async def test_the_last_successful_switch_wins_over_a_later_rejected_one(
     text = await team.respond(message=PROMPT)
 
     assert text.endswith("Finished with the successful model.")
-    session = team.storage.load_session(SESSION_ID, "team")
+    session = team.storage.load_session(SESSION_ID)
     assert session is not None
     [member] = [run for run in session.runs if isinstance(run, RunRecord)]
     assert member.tools is not None
@@ -383,12 +377,9 @@ async def test_a_stop_during_the_continuation_records_only_its_text_and_the_firs
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("stream", [False, True])
 async def test_each_attempt_logs_the_prompt_it_sent(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
-    *,
-    stream: bool,
 ) -> None:
     """The request log of a continuation attempt names the continuation prompt, not the original message."""
     logged: list[object] = []
@@ -407,7 +398,7 @@ async def test_each_attempt_logs_the_prompt_it_sent(
         general=[calls(_switch("next-turn"))],
     )
 
-    await team.reply(stream=stream, message=PROMPT)
+    await team.respond(message=PROMPT)
 
     assert logged[0] == PROMPT
     assert CONTINUATION_MARK in str(logged[1])
@@ -428,7 +419,7 @@ def test_members_built_without_a_resumable_driver_leave_out_their_approval_gated
             runtime_paths=team.runtime_paths,
             execution_identity=team.identity,
             refresh_scheduler=None,
-            active_model_names=None,
+            active_model_names={"general": turn_model(team.config, team.runtime_paths, "general").model_name},
             **kwargs,
         )
         return {name for _agent, name in tool_owners_by_agent(members.build("general", members.model_names["general"]))}

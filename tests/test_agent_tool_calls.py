@@ -363,7 +363,8 @@ async def test_a_waiting_cli_call_keeps_its_function_s_approval_type_and_silence
     assert isinstance(waiting, agent_tool_calls.AgentToolCallWaiting)
     stored = waiting.requirement.tool_execution.to_dict()
     expected = {**paused, "approval_type": "audit", "external_execution_silent": True, "tool_args": {"value": 3}}
-    assert {key: stored[key] for key in expected} == expected
+    # A field left unset is not stored, and reads as None.
+    assert {key: stored.get(key) for key in expected} == expected
 
 
 @pytest.mark.asyncio

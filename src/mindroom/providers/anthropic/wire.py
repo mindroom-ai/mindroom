@@ -1,8 +1,9 @@
 """Claude Messages API wire format: messages and tools in, request blocks out, responses parsed back.
 
-The formatter echoes a stored assistant turn's ``content_blocks`` verbatim, because the API signs thinking
-blocks and verifies the sequence on replay; everything else is rebuilt from the message fields. The parser
-is the single place a finished response becomes an assistant ``Message``.
+The parser is the single place a finished response becomes an assistant ``Message``: it stores the response's
+blocks once, in the shape a later request sends them (``claude_blocks``), and reads the message's text, reasoning,
+and tool calls from those blocks. The formatter echoes a stored turn's blocks verbatim, because the API signs
+thinking blocks and verifies the sequence on replay; a turn without them is rebuilt from its message fields.
 """
 
 from __future__ import annotations
@@ -11,34 +12,27 @@ import base64
 import json
 import mimetypes
 from copy import deepcopy
-from dataclasses import dataclass, replace
-from pathlib import Path
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
-from urllib.parse import urlparse
 
-import httpx2
-from anthropic.types import RedactedThinkingBlock, TextBlock, ThinkingBlock, ToolUseBlock, Usage
-from anthropic.types.beta import (
-    BetaMessage,
-    BetaRedactedThinkingBlock,
-    BetaTextBlock,
-    BetaThinkingBlock,
-    BetaToolUseBlock,
-    BetaUsage,
-)
+from anthropic.types.beta import BetaMessage, BetaUsage
 
-from mindroom.llm.media import canonical_mime_type, image_format
+from mindroom.llm.media import image_format
 from mindroom.llm.messages import Message, ToolResultView, system_texts, tool_result_view
-from mindroom.llm.tool_search import call_arguments
 from mindroom.llm.usage import MessageMetrics, TokenCounts
 from mindroom.logging_config import get_logger
 from mindroom.model_defaults import CLAUDE_NO_FORCED_TOOL_MODEL_PREFIXES, CLAUDE_PREFIX_CHECKED_THINKING_MODELS
-from mindroom.providers.claude_wire_blocks import as_dict
+from mindroom.providers.anthropic.repairs import replay_safe_blocks
+from mindroom.providers.anthropic.stored_turns import replayed_blocks
+from mindroom.providers.claude_wire_blocks import CLAUDE_BLOCKS_KEY, as_dict
+from mindroom.providers.media_files import read_media_file
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
 
     from anthropic.types import Message as AnthropicMessage
+    from anthropic.types import ToolUseBlock, Usage
+    from anthropic.types.beta import BetaToolUseBlock
 
     from mindroom.llm.media import File, Image
     from mindroom.llm.provider import StopReason, ToolSpec
@@ -172,6 +166,7 @@ def format_claude_messages(
     *,
     append_trailing_user_message: bool,
     earlier_thinking: bool,
+    provider: str,
 ) -> FormattedConversation:
     """Turn the conversation into Claude's alternating ``user``/``assistant`` turns.
 
@@ -180,16 +175,16 @@ def format_claude_messages(
     original response. Without ``earlier_thinking``, the turns before the current tool loop replay without their
     thinking (``_without_earlier_thinking``). A conversation that ends with an assistant turn gets a trailing
     ``continue`` user turn when the model rejects prefill. Documents ask for no citations, which no MindRoom reply
-    shows.
+    shows. An attachment file that cannot be read raises ``InvalidRequest`` naming ``provider``.
     """
     turns: list[dict[str, Any]] = []
     for message in messages:
         if message.role == "system":
             continue
         if message.role == "user":
-            content = _user_blocks(message)
+            content = _user_blocks(message, provider)
         elif message.role == "assistant":
-            content = _assistant_blocks(message)
+            content = replayed_blocks(message)
             if not content:
                 continue
         elif message.role == "tool":
@@ -206,11 +201,6 @@ def format_claude_messages(
     return FormattedConversation(messages=merged, system=system_texts(messages))
 
 
-def _block_type(block: Any) -> str | None:  # noqa: ANN401
-    """Return the type of a request block, whether it is a dict or one of the SDK's block models."""
-    return block.get("type") if isinstance(block, dict) else block.type
-
-
 def _merged_turns(turns: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Merge consecutive same-role turns; two assistant turns share one message only without the earlier thinking."""
     merged: list[dict[str, Any]] = []
@@ -218,7 +208,7 @@ def _merged_turns(turns: list[dict[str, Any]]) -> list[dict[str, Any]]:
         if merged and merged[-1]["role"] == turn["role"]:
             previous = merged[-1]["content"]
             if turn["role"] == "assistant":
-                previous = [block for block in previous if _block_type(block) not in _THINKING_BLOCK_TYPES]
+                previous = [block for block in previous if block.get("type") not in _THINKING_BLOCK_TYPES]
             merged[-1] = {"role": turn["role"], "content": [*previous, *turn["content"]]}
         else:
             merged.append(turn)
@@ -238,7 +228,7 @@ def _without_earlier_thinking(turns: list[dict[str, Any]]) -> list[dict[str, Any
         if index >= start or turn["role"] != "assistant":
             kept.append(turn)
             continue
-        content = [block for block in turn["content"] if _block_type(block) not in _THINKING_BLOCK_TYPES]
+        content = [block for block in turn["content"] if block.get("type") not in _THINKING_BLOCK_TYPES]
         if content:
             kept.append({**turn, "content": content})
     return kept
@@ -246,14 +236,14 @@ def _without_earlier_thinking(turns: list[dict[str, Any]]) -> list[dict[str, Any
 
 def _answers_tool_calls(turn: dict[str, Any]) -> bool:
     """Return whether a user turn carries tool results, which continue the tool loop instead of starting a turn."""
-    return any(_block_type(block) == "tool_result" for block in turn["content"])
+    return any(block.get("type") == "tool_result" for block in turn["content"])
 
 
-def _user_blocks(message: Message) -> list[Any]:
+def _user_blocks(message: Message, provider: str) -> list[Any]:
     content = message.content or ""
     blocks: list[Any] = [{"type": "text", "text": content}] if isinstance(content, str) else list(content)
-    media = [_image_block(image) for image in message.images or ()]
-    media += [_document_block(file) for file in message.files or ()]
+    media = [_image_block(image, provider) for image in message.images or ()]
+    media += [_document_block(file, provider) for file in message.files or ()]
     # Audio and video are not Claude inputs; the media fallback replaces them with a note before the request.
     return blocks + [block for block in media if block is not None]
 
@@ -271,91 +261,10 @@ def _image_media_type(image: Image, data: bytes | None) -> str | None:
     return None if detected is None else _IMAGE_MEDIA_TYPES.get(detected)
 
 
-def _url_document_stays_remote(file: File) -> bool:
-    """Return whether Claude reads this URL document itself: a PDF, or a document of unknown type."""
-    return file.url is not None and file.mime_type in {None, "application/pdf"}
-
-
-async def _fetched(url: str, http_client: httpx2.AsyncClient) -> tuple[bytes, str | None] | None:
-    """Return the bytes and media type behind ``url``, or None with a warning when it cannot be read."""
-    try:
-        response = await http_client.get(url)
-        response.raise_for_status()
-    except (httpx2.HTTPError, httpx2.InvalidURL) as error:
-        logger.warning("claude_url_media_dropped", url=url, error=str(error))
-        return None
-    return response.content, canonical_mime_type(response.headers.get("content-type"))
-
-
-async def _inlined_images(images: Sequence[Image] | None, http_client: httpx2.AsyncClient) -> list[Image]:
-    """Return the images with every URL-backed one fetched into ``content``, minus those that failed."""
-    inlined: list[Image] = []
-    for image in images or ():
-        if image.url is None:
-            inlined.append(image)
-            continue
-        fetched = await _fetched(image.url, http_client)
-        if fetched is None:
-            continue
-        data, media_type = fetched
-        url_format = Path(urlparse(image.url).path).suffix[1:].lower() or None
-        inlined.append(
-            replace(
-                image,
-                url=None,
-                content=data,
-                mime_type=image.mime_type or media_type,
-                format=image.format or url_format,
-            ),
-        )
-    return inlined
-
-
-async def _inlined_files(files: Sequence[File] | None, http_client: httpx2.AsyncClient) -> list[File]:
-    """Return the documents with every URL Claude would not read itself fetched into ``content``."""
-    inlined: list[File] = []
-    for file in files or ():
-        if file.url is None or _url_document_stays_remote(file):
-            inlined.append(file)
-            continue
-        fetched = await _fetched(file.url, http_client)
-        if fetched is not None:
-            inlined.append(replace(file, url=None, content=fetched[0]))
-    return inlined
-
-
-async def inline_url_media(messages: Sequence[Message], http_client: httpx2.AsyncClient) -> list[Message]:
-    """Fetch URL-backed images and URL documents Claude would not read itself, so they are sent inline.
-
-    A URL that cannot be read drops its media with a warning instead of failing the request, because the
-    message replays on every later request and an expired or private URL would fail them all.
-    """
-    return [
-        replace(
-            message,
-            images=await _inlined_images(message.images, http_client),
-            files=await _inlined_files(message.files, http_client),
-        )
-        if message.role == "user" and _has_remote_media(message)
-        else message
-        for message in messages
-    ]
-
-
-def _has_remote_media(message: Message) -> bool:
-    return any(image.url is not None for image in message.images or ()) or any(
-        file.url is not None and not _url_document_stays_remote(file) for file in message.files or ()
-    )
-
-
-def _image_block(image: Image) -> dict[str, Any] | None:
+def _image_block(image: Image, provider: str) -> dict[str, Any] | None:
     data = image.content
     if data is None and image.filepath is not None:
-        path = Path(image.filepath)
-        if not path.is_file():
-            logger.warning("claude_image_file_missing", filepath=image.filepath)
-            return None
-        data = path.read_bytes()
+        _, data = read_media_file(image.filepath, kind="image", provider=provider)
     media_type = _image_media_type(image, data)
     if data is None or media_type is None:
         logger.warning("claude_image_type_unknown", image_id=image.id)
@@ -366,99 +275,21 @@ def _image_block(image: Image) -> dict[str, Any] | None:
     }
 
 
-def _document_block(file: File) -> dict[str, Any] | None:
-    if file.url is not None:
-        # Only a document ``inline_url_media`` left remote reaches here.
-        source: dict[str, Any] = {"type": "url", "url": file.url}
+def _document_block(file: File, provider: str) -> dict[str, Any] | None:
+    if file.filepath is not None:
+        _, data = read_media_file(file.filepath, kind="file", provider=provider)
+        media_type = file.mime_type or mimetypes.guess_type(file.filepath)[0] or "application/pdf"
+    elif file.content is not None:
+        data = file.content.encode("utf-8") if isinstance(file.content, str) else file.content
+        media_type = file.mime_type or "application/pdf"
     else:
-        if file.filepath is not None:
-            path = Path(file.filepath)
-            if not path.is_file():
-                logger.warning("claude_document_file_missing", filepath=file.filepath)
-                return None
-            data = path.read_bytes()
-            media_type = file.mime_type or mimetypes.guess_type(file.filepath)[0] or "application/pdf"
-        elif file.content is not None:
-            data = file.content.encode("utf-8") if isinstance(file.content, str) else file.content
-            media_type = file.mime_type or "application/pdf"
-        else:
-            return None
-        if media_type in _TEXT_DOCUMENT_MEDIA_TYPES:
-            # The text document source accepts only text/plain; other text types are sent as plain text.
-            source = {"type": "text", "media_type": "text/plain", "data": data.decode("utf-8", errors="replace")}
-        else:
-            source = {"type": "base64", "media_type": media_type, "data": base64.b64encode(data).decode("utf-8")}
-    return {"type": "document", "source": source}
-
-
-def _serialized_content_blocks(blocks: Sequence[Any]) -> list[dict[str, Any]]:
-    """Serialize response blocks or stored block dicts in order; an unknown spelling of redacted thinking is fixed."""
-    serialized: list[dict[str, Any]] = []
-    for block in blocks:
-        block_dict = block if isinstance(block, dict) else block.model_dump(exclude_none=True)
-        if not block_dict.get("type"):
-            continue
-        if block_dict.get("type") == "redacted_reasoning_content":
-            block_dict = {**block_dict, "type": "redacted_thinking"}
-        serialized.append(block_dict)
-    return serialized
-
-
-def _stored_assistant_blocks(message: Message) -> list[dict[str, Any]] | None:
-    """Return the response blocks stored on an assistant turn, or None when it predates block storage.
-
-    A ``tool_use`` block is kept only while the message still carries the matching tool call: a response
-    cut off by ``max_tokens`` can hold a tool use that never ran, and the API rejects one without a result.
-    """
-    stored = (message.provider_data or {}).get("content_blocks")
-    if not isinstance(stored, list) or not stored:
         return None
-    tool_call_ids = {call.get("id") for call in message.tool_calls or []}
-    return [
-        dict(block)
-        for block in _serialized_content_blocks(stored)
-        if block.get("type") != "tool_use" or block.get("id") in tool_call_ids
-    ]
-
-
-def _assistant_blocks(message: Message) -> list[Any]:
-    """Return an assistant turn's blocks: the stored response blocks, or a rebuild from the message fields.
-
-    Rebuilt thinking, text, and tool-use blocks are the SDK's block models rather than dicts. The cache ladder
-    places breakpoints on dict blocks only, so a turn rebuilt from another provider's fields never takes a
-    breakpoint while an echoed stored turn can, which keeps breakpoint placement where the goldens pin it.
-    """
-    stored = _stored_assistant_blocks(message)
-    if stored is not None:
-        return stored
-    provider_data = message.provider_data or {}
-    blocks: list[Any] = []
-    signature = provider_data.get("signature")
-    if message.reasoning_content is not None and isinstance(signature, str) and signature:
-        blocks.append(ThinkingBlock(thinking=message.reasoning_content, signature=signature, type="thinking"))
-    # Reasoning without a signature (another provider's, or a partially stored response) cannot be replayed.
-    if message.redacted_reasoning_content is not None:
-        blocks.append(RedactedThinkingBlock(data=message.redacted_reasoning_content, type="redacted_thinking"))
-    # LEGACY_COMPAT: Claude turns stored with server-tool blocks but without the response's content blocks.
-    # Legacy format: an assistant message whose provider_data carries "server_tool_blocks" (each response block
-    # other than text, thinking, and tool_use, as the SDK's model_dump) and no "content_blocks"; selected
-    # whenever such a turn is rebuilt from its fields.
-    # Last legacy release: v2026.9.43 stored them through Agno 3.0.5; v2026.9.44 (Agno 3.0.9) also stores every
-    # response block in order under "content_blocks", which replays verbatim instead.
-    # Handling: the stored server-tool blocks replay after the thinking and before the text and tool uses, as
-    # Agno's formatter rebuilt them; a stored entry that is not a dict is skipped.
-    # Coverage: tests/providers/test_anthropic_family_replay.py::test_a_turn_stored_without_content_blocks_replays_its_server_tool_blocks
-    server_blocks = provider_data.get("server_tool_blocks")
-    if isinstance(server_blocks, list):
-        blocks.extend(block for block in server_blocks if isinstance(block, dict))
-    if isinstance(message.content, str) and message.content.strip():
-        blocks.append(TextBlock(text=message.content, type="text"))
-    for call in message.tool_calls or []:
-        function = call["function"]
-        blocks.append(
-            ToolUseBlock(id=call["id"], input=call_arguments(function), name=function["name"], type="tool_use"),
-        )
-    return blocks
+    if media_type in _TEXT_DOCUMENT_MEDIA_TYPES:
+        # The text document source accepts only text/plain; other text types are sent as plain text.
+        source = {"type": "text", "media_type": "text/plain", "data": data.decode("utf-8", errors="replace")}
+    else:
+        source = {"type": "base64", "media_type": media_type, "data": base64.b64encode(data).decode("utf-8")}
+    return {"type": "document", "source": source}
 
 
 def _tool_result_block(result: ToolResultView) -> dict[str, Any]:
@@ -577,8 +408,17 @@ def parse_claude_usage(usage: Usage | BetaUsage) -> MessageMetrics:
 
 
 def tool_call_from_block(block: ToolUseBlock | BetaToolUseBlock) -> dict[str, Any]:
+    """Return a streamed ``tool_use`` block as the tool call its finished message stores."""
+    return _tool_call(block.model_dump())
+
+
+def _tool_call(block: dict[str, Any]) -> dict[str, Any]:
     """Return a ``tool_use`` block as the stored tool-call dict; a cut-off block keeps the arguments that parsed."""
-    return {"id": block.id, "type": "function", "function": {"name": block.name, "arguments": json.dumps(block.input)}}
+    return {
+        "id": block["id"],
+        "type": "function",
+        "function": {"name": block["name"], "arguments": json.dumps(block["input"])},
+    }
 
 
 def assistant_message_from_response(
@@ -588,41 +428,19 @@ def assistant_message_from_response(
 ) -> Message:
     """Build the assistant message of one finished response.
 
-    Its reasoning joins the response's thinking blocks, and its redacted reasoning its redacted thinking blocks.
-    ``provider_data`` keeps ``content_blocks`` (the response blocks in order, as the API produced them),
-    ``server_tool_blocks`` (every other block, including types the SDK does not know), the thinking ``signature``,
-    the raw ``stop_reason``, and ``context_management`` when the model was configured with one. Every tool use
-    becomes a tool call, including the calls of a response the output limit cut off.
+    ``provider_data`` keeps the response's blocks under ``claude_blocks``, in order and in request shape
+    (``replay_safe_blocks``), the raw ``stop_reason``, and ``context_management`` when the model was configured with
+    one. The message's text joins the text blocks, its reasoning the thinking blocks, and its redacted reasoning the
+    redacted thinking blocks; every tool use becomes a tool call, including the calls of a response the output limit
+    cut off. A block of a type the SDK does not know keeps its own ``type``, so it is stored and replayed but read as
+    none of these.
     """
-    texts: list[str] = []
-    thinking: list[str] = []
-    signature: str | None = None
-    redacted: list[str] = []
-    server_tool_blocks: list[dict[str, Any]] = []
-    tool_calls: list[dict[str, Any]] = []
-    for block in response.content:
-        # The SDK builds a block of a type it does not know as a text block that keeps its own ``type``.
-        if block.type == "text" and isinstance(block, (TextBlock, BetaTextBlock)):
-            texts.append(block.text)
-        elif block.type == "thinking" and isinstance(block, (ThinkingBlock, BetaThinkingBlock)):
-            thinking.append(block.thinking)
-            signature = block.signature
-        elif block.type == "redacted_thinking" and isinstance(
-            block,
-            (RedactedThinkingBlock, BetaRedactedThinkingBlock),
-        ):
-            redacted.append(block.data)
-        elif block.type == "tool_use" and isinstance(block, (ToolUseBlock, BetaToolUseBlock)):
-            tool_calls.append(tool_call_from_block(block))
-        else:
-            server_tool_blocks.append(block.model_dump())
-    provider_data: dict[str, Any] = {}
-    if response.content:
-        provider_data["content_blocks"] = _serialized_content_blocks(response.content)
-    if thinking:
-        provider_data["signature"] = signature
-    if server_tool_blocks:
-        provider_data["server_tool_blocks"] = server_tool_blocks
+    blocks = replay_safe_blocks([block.model_dump(exclude_none=True) for block in response.content])
+    texts = [block["text"] for block in blocks if block["type"] == "text"]
+    thinking = [block["thinking"] for block in blocks if block["type"] == "thinking"]
+    redacted = [block["data"] for block in blocks if block["type"] == "redacted_thinking"]
+    tool_calls = [_tool_call(block) for block in blocks if block["type"] == "tool_use"]
+    provider_data: dict[str, Any] = {CLAUDE_BLOCKS_KEY: blocks}
     if record_context_management and isinstance(response, BetaMessage) and response.context_management is not None:
         provider_data["context_management"] = response.context_management.model_dump()
     provider_data["stop_reason"] = response.stop_reason
@@ -643,7 +461,6 @@ __all__ = [
     "checks_thinking_prefix",
     "format_claude_messages",
     "format_claude_tools",
-    "inline_url_media",
     "parse_claude_usage",
     "stop_reason_of",
     "supports_forced_tool_use",

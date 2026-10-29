@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import functools
 import stat
 import sys
 import threading
@@ -19,6 +20,7 @@ from fastapi.testclient import TestClient
 from mindroom.api import sandbox_runner as sandbox_runner_module
 from mindroom.api.sandbox_runner_scripts import router as sandbox_runner_scripts_router
 from mindroom.config.main import Config
+from mindroom.config.models import DefaultsConfig
 from mindroom.constants import RuntimePaths
 from mindroom.message_target import MessageTarget
 from mindroom.runtime_env_policy import SANDBOX_RUNTIME_ENV_BY_KEY
@@ -30,23 +32,30 @@ from mindroom.script_runs.manager import (
     ScriptRunManagerError,
 )
 from mindroom.script_runs.models import ScriptRunRecord, ScriptRunState, ScriptToolGrant
+from mindroom.script_runs.recovery import script_recovery_signature
 from mindroom.script_runs.store import ScriptRunStore
 from mindroom.script_runs.worker_client import (
     WorkerScriptCancel,
     WorkerScriptStatus,
 )
 from mindroom.shell.execution import ShellRunResult
+from mindroom.tool_system.runtime_context import ToolRuntimeContext
 from mindroom.tool_system.sandbox_proxy import runner_config_snapshot
 from mindroom.tool_system.worker_routing import agent_workspace_root_path, worker_root_path
 from mindroom.workers.backends.static_runner import StaticSandboxRunnerBackend
 from mindroom.workers.models import ScriptResourceProfileName, WorkerHandle, WorkerSpec
+from mindroom.workers.runtime import build_worker_launch_config
 from tests.authorization_helpers import make_test_tool_runtime_context
-from tests.conftest import SETTLE_TIMEOUT_SECONDS, make_conversation_reader_mock, make_relation_lookup
+from tests.conftest import (
+    SETTLE_TIMEOUT_SECONDS,
+    bound_worker_launch_config,
+    make_conversation_reader_mock,
+    make_relation_lookup,
+)
 
 if TYPE_CHECKING:
     import os
-
-    from mindroom.tool_system.runtime_context import ToolRuntimeContext
+    from collections.abc import Iterator
 
 
 def _runtime_paths(
@@ -76,6 +85,35 @@ def _runtime_paths(
     )
 
 
+def _config(*, private: bool = False, private_scope: str = "user_agent", worker_scope: str = "user_agent") -> Config:
+    watcher: dict[str, object] = {
+        "display_name": "Watcher",
+        "worker_scope": worker_scope,
+        "tools": ["script", "calculator"],
+    }
+    if private:
+        watcher.pop("worker_scope")
+        watcher["private"] = {"per": private_scope, "root": "private/watcher"}
+    return Config(
+        agents={
+            "watcher": watcher,
+            "analyzer": {
+                "display_name": "Analyzer",
+                "worker_scope": worker_scope,
+                "tools": ["script", "calculator"],
+            },
+        },
+        defaults={"tools": []},
+    )
+
+
+@pytest.fixture(autouse=True)
+def _applied_config() -> Iterator[None]:
+    """Bind the applied config script workers launch from, as `mindroom run` does."""
+    with bound_worker_launch_config(_config()):
+        yield
+
+
 def _context(
     tmp_path: Path,
     *,
@@ -94,25 +132,7 @@ def _context(
         backend=backend,
         isolated_script_gateway=isolated_script_gateway,
     )
-    watcher: dict[str, object] = {
-        "display_name": "Watcher",
-        "worker_scope": worker_scope,
-        "tools": ["script", "calculator"],
-    }
-    if private:
-        watcher.pop("worker_scope")
-        watcher["private"] = {"per": private_scope, "root": "private/watcher"}
-    config = Config(
-        agents={
-            "watcher": watcher,
-            "analyzer": {
-                "display_name": "Analyzer",
-                "worker_scope": worker_scope,
-                "tools": ["script", "calculator"],
-            },
-        },
-        defaults={"tools": []},
-    )
+    config = _config(private=private, private_scope=private_scope, worker_scope=worker_scope)
     return make_test_tool_runtime_context(
         agent_name=agent_name,
         target=MessageTarget.resolve(
@@ -367,6 +387,71 @@ async def test_launch_persists_recovery_contract_only_for_kubernetes(tmp_path: P
 
 
 @pytest.mark.asyncio
+async def test_recovery_contract_binds_the_authority_the_worker_launches_with(tmp_path: Path) -> None:
+    """A turn built from an older config cannot persist recovery authority its worker was not launched with."""
+    manager, backend, _client = _manager(tmp_path, backend="kubernetes", isolated_script_gateway=True)
+    backend.backend_name = "kubernetes"
+    context = _context(tmp_path, backend="kubernetes", isolated_script_gateway=True)
+    stale_defaults = DefaultsConfig(tools=[], worker_grantable_credentials=["openai"])
+    stale_turn = replace(context, config=context.config.model_copy(update={"defaults": stale_defaults}))
+    signature = functools.partial(
+        script_recovery_signature,
+        backend=backend,
+        agent_name="watcher",
+        gateway_url="http://script-gateway.test/api/script-gateway",
+        resource_profile=None,
+    )
+
+    run = await manager.run(stale_turn, source="print('ok')\n")
+
+    assert run.recovery_signature == signature(config=_config())
+    assert run.recovery_signature != signature(config=stale_turn.config)
+
+
+@pytest.mark.asyncio
+async def test_a_launch_admitted_after_a_reload_binds_the_reloaded_authority(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A launch admitted after a reload applied records recovery with the new config, derived off the event loop."""
+    manager, backend, _client = _manager(tmp_path, backend="kubernetes", isolated_script_gateway=True)
+    backend.backend_name = "kubernetes"
+    context = _context(tmp_path, backend="kubernetes", isolated_script_gateway=True)
+    reloaded = _config().model_copy(
+        update={"defaults": DefaultsConfig(tools=[], worker_grantable_credentials=["openai"])},
+    )
+    applied = {"config": _config()}
+    admit = manager_module.ScriptRunManager._admit_launch
+
+    async def admit_after_a_reload(self: manager_module.ScriptRunManager) -> None:
+        applied["config"] = reloaded
+        await admit(self)
+
+    derived_on: list[int] = []
+
+    def derive_launch(_paths: object) -> object:
+        # Deriving a launch can build the tool validation snapshot, which must not hold up the event loop.
+        derived_on.append(threading.get_ident())
+        return build_worker_launch_config(applied["config"], tool_validation_snapshot={})
+
+    monkeypatch.setattr(manager_module.ScriptRunManager, "_admit_launch", admit_after_a_reload)
+    monkeypatch.setattr(manager_module, "current_worker_launch_config", derive_launch)
+
+    run = await manager.run(context, source="print('ok')\n")
+
+    assert derived_on
+    assert threading.get_ident() not in derived_on
+
+    assert run.recovery_signature == script_recovery_signature(
+        backend=backend,
+        config=reloaded,
+        agent_name="watcher",
+        gateway_url="http://script-gateway.test/api/script-gateway",
+        resource_profile=None,
+    )
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("backend_name", ["kubernetes", "docker"])
 async def test_launch_sends_live_config_only_to_seeded_workers(tmp_path: Path, backend_name: str) -> None:
     """Kubernetes script workers mount no config, so the launch carries the allowlisted live config fields."""
@@ -409,7 +494,7 @@ async def test_launch_uses_derived_supervisor_handle_from_the_run_id(tmp_path: P
         WorkerSpec(
             run.worker_key,
             private_agent_names=frozenset(),
-            mirrored_credential_services=frozenset(),
+            mirror_grantable_credentials=False,
             state_scope_worker_key="v1:default:user_agent:~@alice:example.test:watcher",
         ),
     ]
@@ -704,7 +789,7 @@ async def test_kubernetes_worker_accepts_scripts_with_an_explicit_isolated_gatew
         WorkerSpec(
             run.worker_key or "",
             private_agent_names=frozenset(),
-            mirrored_credential_services=frozenset(),
+            mirror_grantable_credentials=False,
             state_scope_worker_key="v1:default:user_agent:~@alice:example.test:watcher",
         ),
     ]
@@ -743,7 +828,7 @@ async def test_kubernetes_worker_accepts_scripts_when_agent_vault_is_enabled(tmp
         WorkerSpec(
             run.worker_key or "",
             private_agent_names=frozenset(),
-            mirrored_credential_services=frozenset(),
+            mirror_grantable_credentials=False,
             state_scope_worker_key="v1:default:user_agent:~@alice:example.test:watcher",
         ),
     ]
@@ -1126,7 +1211,7 @@ async def test_script_process_target_preserves_private_agent_visibility(tmp_path
         WorkerSpec(
             run.worker_key,
             private_agent_names=frozenset({"watcher"}),
-            mirrored_credential_services=frozenset(),
+            mirror_grantable_credentials=False,
             state_scope_worker_key="v1:default:user_agent:~@alice:example.test:watcher",
         ),
     ]
@@ -2592,7 +2677,8 @@ async def test_local_snapshot_workspace_resolution_does_not_block_the_event_loop
         workspace.mkdir(parents=True)
         (workspace / path).write_text("print('ok')\n", encoding="utf-8")
 
-    def blocking_workspace(_context: ToolRuntimeContext) -> Path:
+    def blocking_workspace(_context: ToolRuntimeContext, *, create: bool = False) -> Path:
+        del create
         nonlocal workspace_resolutions
         workspace_resolutions += 1
         loop.call_soon_threadsafe(loop_processed_workspace_callback.set)
@@ -2619,7 +2705,7 @@ async def test_local_snapshot_workspace_resolution_does_not_block_the_event_loop
         assert handle is not None
         return ShellRunResult(message="Started background process", handle=handle)
 
-    monkeypatch.setattr(manager_module, "_agent_workspace", blocking_workspace)
+    monkeypatch.setattr(ToolRuntimeContext, "agent_workspace_root", blocking_workspace)
     monkeypatch.setattr(manager_module, "ensure_shell_supervisor", lambda: "/control/shell.sock")
     monkeypatch.setattr(manager_module, "run_command_via_supervisor", launch_local)
 

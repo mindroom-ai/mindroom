@@ -34,11 +34,7 @@ router = APIRouter(prefix="/api/workers", tags=["workers"])
 
 
 def _worker_manager_lease(request: Request) -> PrimaryWorkerManagerLease:
-    runtime_config, runtime_paths = config_lifecycle.read_committed_runtime_config(request)
-    lease = lease_configured_primary_worker_manager(
-        runtime_paths,
-        runtime_config=runtime_config,
-    )
+    lease = lease_configured_primary_worker_manager(config_lifecycle.api_runtime_paths(request))
     if lease is None:
         raise HTTPException(status_code=503, detail="Worker backend is not configured.")
     return lease

@@ -22,7 +22,6 @@ from mindroom.runtime_env_policy import (
     KUBERNETES_WORKER_BACKEND_CONFIG_ENV_BY_KEY,
     WORKER_COMPUTER_ENABLED_ENV,
     credentials_encryption_key_value,
-    is_worker_backend_config_env_name,
 )
 from mindroom.tool_system.worker_routing import resolved_worker_key_scope
 from mindroom.workers.backend import WorkerBackendError
@@ -285,11 +284,6 @@ def _read_seccomp_profile_env(env: Mapping[str, str]) -> _WorkerSeccompProfile |
         msg = f"{_SECCOMP_PROFILE_JSON_ENV} must contain a JSON object."
         raise WorkerBackendError(msg) from exc
     return _normalized_seccomp_profile(parsed)
-
-
-def is_kubernetes_worker_backend_config_env_name(name: str) -> bool:
-    """Return whether an env var configures the primary-side Kubernetes worker backend."""
-    return is_worker_backend_config_env_name(name) and name != _WORKER_BACKEND_ENV
 
 
 def _validate_required_string(item: dict[str, object], env_name: str, index: int, field_name: str) -> None:

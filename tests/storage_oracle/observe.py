@@ -68,17 +68,23 @@ def _session(session: ConversationSession | None) -> dict[str, object] | None:
 
 
 def _row(store: ConversationStore, session_id: str) -> dict[str, object] | None:
-    """Return the session row's requester, update time, and ``session_data`` (state and usage totals)."""
+    """Return the session row's requester, update time, and ``session_data`` (state and usage totals).
+
+    The state shows inside ``session_data``, where the layouts the recordings were made in kept it.
+    """
     with closing(sqlite3.connect(store.path)) as connection:
         row = connection.execute(
-            f"SELECT user_id, created_at, updated_at, session_data FROM {quote_identifier(store.names.sessions)} "  # noqa: S608
-            "WHERE session_id = ?",
+            "SELECT user_id, created_at, updated_at, session_data, session_state "  # noqa: S608
+            f"FROM {quote_identifier(store.names.sessions)} WHERE session_id = ?",
             (session_id,),
         ).fetchone()
     if row is None:
         return None
-    user_id, created_at, updated_at, session_data = row
-    return {"user_id": user_id, "created_at": created_at, "updated_at": updated_at, "session_data": _json(session_data)}
+    user_id, created_at, updated_at, session_data, session_state = row
+    data = _json(session_data)
+    if session_state is not None:
+        data = {**(data if isinstance(data, dict) else {}), "session_state": _json(session_state)}
+    return {"user_id": user_id, "created_at": created_at, "updated_at": updated_at, "session_data": data}
 
 
 def _ledger(store: ConversationStore, session_id: str) -> list[list[object]]:
@@ -145,7 +151,7 @@ def observe(
 
     ``run_ids`` are the runs whose folded tool calls are read; by default every run ``list_runs`` returns.
     """
-    session, load_error = _attempt(lambda: store.load_session(session_id, scope.kind))
+    session, load_error = _attempt(lambda: store.load_session(session_id))
     listed, list_error = _attempt(lambda: store.list_runs(session_id))
     folded_of = list(run_ids) if run_ids is not None else [run.run_id for run in listed or []]
     return {
@@ -158,7 +164,7 @@ def observe(
             lambda: sorted(read_scope_seen_event_ids(store, session, scope)) if session is not None else [],
         ),
         "redaction_candidates": _safely(
-            lambda: sorted(_read_scope_history_event_ids(store, session, scope)) if session is not None else [],
+            lambda: sorted(_read_scope_history_event_ids(store, session)) if session is not None else [],
         ),
         "folded_tool_call_ids": _safely(lambda: _folded_tool_call_ids(store, session_id, folded_of)),
         "list_runs": list_error

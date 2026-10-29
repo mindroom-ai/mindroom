@@ -127,6 +127,7 @@ _ALLOWED_THIRD_PARTY_ROOTS: dict[str, frozenset[str]] = {
     # provider, storage, or other feature-specific dependency.
     "mindroom.cli.doctor": _CLI_ROOTS | _REGISTRY_ROOTS,
     "mindroom.config.main": _CONFIG_LAYER_ROOTS,
+    "mindroom.slack.integration": _CONFIG_LAYER_ROOTS,
     "mindroom.providers.credentials": _CONFIG_LAYER_ROOTS,
     "mindroom.tool_system.declarations": frozenset({"dotenv"}),
     # The owned tool values import no Agno module; agno_toolkits builds them from Agno's tool objects.
@@ -194,6 +195,7 @@ import importlib, json, sys
 stdlib = set(sys.stdlib_module_names)
 baseline = {{name.split(".")[0] for name in sys.modules}}
 importlib.import_module({module!r})
+{build_config}
 banned_roots = {banned_roots!r}
 banned = sorted(
     name
@@ -230,6 +232,10 @@ def _run_slim_probe(module: str) -> tuple[list[str], frozenset[str]]:
             "-c",
             _SLIM_PROBE_TEMPLATE.format(
                 module=module,
+                # Building a config runs every integration's validation hook, so its footprint is measured after one.
+                build_config="importlib.import_module('mindroom.config.main').Config(agents={})"
+                if module == "mindroom.config.main"
+                else "",
                 banned_roots=_PROVIDER_SDK_ROOTS + _SLIM_ONLY_ROOTS,
             ),
         ],
@@ -390,63 +396,6 @@ print(json.dumps({"exports": module.__all__, "loaded": loaded}))
     assert json.loads(result.stdout) == {
         "exports": ["open_worker_state_root", "read_worker_identity", "remove_directory_tree_at"],
         "loaded": ["mindroom.workers.worker_retirement"],
-    }
-
-
-def test_background_approval_transactions_have_a_focused_module_boundary() -> None:
-    """Background rows depend on shared card state without owning its lifecycle."""
-    probe = """
-import importlib
-import json
-
-card_state = importlib.import_module("mindroom.event_journal.approval_card_state")
-background = importlib.import_module("mindroom.event_journal.background_approvals")
-dispatcher = importlib.import_module("mindroom.event_journal.approvals")
-print(json.dumps({
-    "background_exports": background.__all__,
-    "background_resolve_owner": background.resolve.__module__,
-    "card_state_exports": card_state.__all__,
-    "card_reserve_owner": card_state.reserve_delivery.__module__,
-    "dispatcher_owner": dispatcher.resolve_card.__module__,
-}))
-"""
-    result = subprocess.run(
-        [sys.executable, "-c", probe],
-        capture_output=True,
-        check=False,
-        text=True,
-        timeout=120,
-    )
-
-    assert result.returncode == 0, result.stderr
-    assert json.loads(result.stdout) == {
-        "background_exports": [
-            "BackgroundApprovalDecision",
-            "background_identity",
-            "decision",
-            "prune_calls",
-            "reserve_delivery",
-            "reserve_script_delivery",
-            "resolve",
-            "resolve_call",
-            "resolve_pending_calls",
-        ],
-        "background_resolve_owner": "mindroom.event_journal.background_approvals",
-        "card_state_exports": [
-            "DETACHED_GENERATION",
-            "TIMEOUT_REASON",
-            "ApprovalCardReservation",
-            "ApprovalDecisionMetadata",
-            "RecordedApprovalDecision",
-            "decode_object_payload",
-            "decode_resolution",
-            "enqueue_resolution",
-            "reserve_delivery",
-            "stored_resolution",
-            "terminal_content",
-        ],
-        "card_reserve_owner": "mindroom.event_journal.approval_card_state",
-        "dispatcher_owner": "mindroom.event_journal.approvals",
     }
 
 

@@ -49,11 +49,13 @@ from tests.conftest import (
     TEST_PASSWORD,
     bind_runtime_paths,
     delivered_matrix_event,
+    install_bots,
     install_call_manager_mock,
     install_runtime_journal_support,
     make_matrix_client_mock,
     orchestrator_runtime_paths,
     runtime_paths_for,
+    swap_fleet_bot,
     test_runtime_paths,
 )
 from tests.journal_membership_helpers import admit_room_membership
@@ -289,7 +291,7 @@ async def test_fleet_turn_recovery_releases_every_ready_bot_before_the_first_dra
     code_bot.release_pending_turn_journal_replay = release_code
     router_bot.recover_pending_turn_journal_events = recover_router
     code_bot.recover_pending_turn_journal_events = recover_code
-    orchestrator.agent_bots = {"router": router_bot, "code": code_bot}
+    install_bots(orchestrator, {"router": router_bot, "code": code_bot})
 
     recovery = asyncio.create_task(orchestrator._recover_ready_turn_journal_events())
     await router_recovery_started.wait()
@@ -326,7 +328,7 @@ async def test_bot_ready_releases_later_ready_bot_while_serial_recovery_is_block
     router_bot.recover_pending_turn_journal_events = AsyncMock(side_effect=recover_router)
     code_bot.recover_pending_turn_journal_events = AsyncMock()
     code_bot.release_pending_turn_journal_replay = code_released.set
-    orchestrator.agent_bots = {"router": router_bot, "code": code_bot}
+    install_bots(orchestrator, {"router": router_bot, "code": code_bot})
 
     orchestrator._schedule_ready_turn_dispatch_recovery()
     await router_recovery_started.wait()
@@ -364,11 +366,11 @@ async def test_fleet_turn_recovery_reloads_current_bot_before_each_serial_drain(
         await finish_router_recovery.wait()
 
     router_bot.recover_pending_turn_journal_events = AsyncMock(side_effect=recover_router)
-    orchestrator.agent_bots = {"router": router_bot, "code": retired_code_bot}
+    install_bots(orchestrator, {"router": router_bot, "code": retired_code_bot})
 
     recovery = asyncio.create_task(orchestrator._recover_ready_turn_journal_events())
     await router_recovery_started.wait()
-    orchestrator.agent_bots["code"] = replacement_code_bot
+    swap_fleet_bot(orchestrator, "code", replacement_code_bot)
     finish_router_recovery.set()
     await recovery
 
@@ -408,7 +410,6 @@ async def test_call_reconciliation_runs_once_per_sync_loop(tmp_path: Path) -> No
 
     with (
         patch("mindroom.bot.mark_matrix_sync_success", return_value=datetime.now(UTC)),
-        patch.object(bot, "_maybe_start_deferred_overdue_task_drain"),
     ):
         bot.mark_sync_loop_started()
         await _complete_frame(bot)
@@ -449,7 +450,6 @@ async def test_router_first_response_refreshes_room_backed_grants(tmp_path: Path
 
     with (
         patch("mindroom.bot.mark_matrix_sync_success", return_value=datetime.now(UTC)),
-        patch.object(bot, "_maybe_start_deferred_overdue_task_drain"),
     ):
         await _complete_frame(bot)
 
@@ -470,7 +470,6 @@ async def test_router_limited_sync_invalidates_then_rebuilds_room_backed_grants(
 
     with (
         patch("mindroom.bot.mark_matrix_sync_success", return_value=datetime.now(UTC)),
-        patch.object(bot, "_maybe_start_deferred_overdue_task_drain"),
     ):
         await _complete_frame(bot)
 
@@ -1378,7 +1377,7 @@ async def test_bot_ready_hook_can_send_messages(tmp_path: Path) -> None:
     bot.client = make_matrix_client_mock(user_id=bot.agent_user.user_id)
     orchestrator = _MultiAgentOrchestrator(runtime_paths=orchestrator_runtime_paths(tmp_path))
     orchestrator.config = bot.config
-    orchestrator.agent_bots = {"router": bot}
+    install_bots(orchestrator, {"router": bot})
     bot.orchestrator = orchestrator
 
     captured_content: dict[str, object] = {}
@@ -1419,7 +1418,7 @@ async def test_lifecycle_hooks_prefer_bot_room_state_helpers_before_router_fallb
     router_bot.client.room_get_state_event.return_value = MagicMock(content={"name": "Router Lobby"})
     router_bot.client.room_put_state.return_value = object()
     orchestrator = _MultiAgentOrchestrator(runtime_paths=orchestrator_runtime_paths(tmp_path))
-    orchestrator.agent_bots = {"router": router_bot, "code": bot}
+    install_bots(orchestrator, {"router": router_bot, "code": bot})
     bot.orchestrator = orchestrator
 
     results: list[tuple[dict[str, object] | None, bool]] = []
@@ -1467,7 +1466,7 @@ async def test_lifecycle_hooks_fallback_to_router_room_state_helpers_when_bot_ca
     router_bot.client.room_get_state_event.return_value = MagicMock(content={"name": "Router Lobby"})
     router_bot.client.room_put_state.return_value = object()
     orchestrator = _MultiAgentOrchestrator(runtime_paths=orchestrator_runtime_paths(tmp_path))
-    orchestrator.agent_bots = {"router": router_bot, "code": bot}
+    install_bots(orchestrator, {"router": router_bot, "code": bot})
     bot.orchestrator = orchestrator
 
     results: list[tuple[dict[str, object] | None, bool]] = []
@@ -1640,7 +1639,7 @@ async def test_non_router_hook_sender_prefers_current_bot_client(tmp_path: Path)
     router_bot.client = AsyncMock()
     router_bot.client.user_id = "@mindroom_router:localhost"
     orchestrator = _MultiAgentOrchestrator(runtime_paths=orchestrator_runtime_paths(tmp_path))
-    orchestrator.agent_bots = {"router": router_bot, "code": bot}
+    install_bots(orchestrator, {"router": router_bot, "code": bot})
     bot.orchestrator = orchestrator
 
     sent_clients: list[object] = []

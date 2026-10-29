@@ -31,12 +31,12 @@ def script_process_authority(config: Config, agent_name: str) -> dict[str, objec
     if agent_name not in config.agents:
         return None
     agent = config.agents[agent_name]
-    resolved = config.resolve_entity(agent_name)
-    if not any(tool.name == "script" for tool in resolved.tool_configs):
+    resolved = config.resolve_agent(agent_name)
+    if "script" not in resolved.tools.tool_names:
         return None
     knowledge_paths = sorted(config.get_knowledge_base_config(base_id).path for base_id in resolved.knowledge_base_ids)
     return {
-        "execution_scope": resolved.execution_scope,
+        "execution_scope": resolved.policy.effective_execution_scope,
         "private": None if agent.private is None else agent.private.model_dump(mode="json"),
         "knowledge_paths": knowledge_paths,
         "grantable_credentials": sorted(config.get_worker_grantable_credentials()),

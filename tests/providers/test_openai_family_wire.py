@@ -45,6 +45,7 @@ from mindroom.llm.provider import (
     complete,
 )
 from mindroom.native_compaction import native_compaction_route
+from mindroom.prompts import INLINE_MEDIA_FALLBACK_PROMPT
 from mindroom.providers.openai import build as openai_build
 from mindroom.providers.openai.build import ProviderRuntime, build_provider
 from mindroom.providers.openai.chat import ChatAdapter
@@ -52,6 +53,7 @@ from mindroom.providers.openai.errors import provider_error
 from mindroom.providers.openai.response_replay import RESPONSE_OUTPUT_KEY
 from mindroom.providers.openai.responses import ResponsesAdapter
 from mindroom.providers.pipeline import retry as retry_stage
+from mindroom.providers.pipeline.media import FALLBACK_MARKER
 from tests.providers.golden_support import PacedBytes, encoded_response, httpx2_transport, pipeline_provider
 from tests.providers.openai_family_support import (
     golden_provider,
@@ -71,7 +73,7 @@ _RESPONSE_USAGE = {"input_tokens": 42, "output_tokens": 12, "total_tokens": 54}
 _OPENAI_CHAT = {"provider": "openai", "api": "chat_completions", "id": "gpt-6-astra", "api_key": "test-key"}
 _OPENAI_RESPONSES = {"provider": "openai", "api": "responses", "id": "gpt-6-astra", "api_key": "test-key"}
 _CALL = {"id": "call_1", "type": "function", "function": {"name": "get_weather", "arguments": '{"city": "Paris"}'}}
-# A new id a Chat turn stores a call under: when its server sent none, or on the ``openai`` dialect one it rewrites.
+# A new id a Chat turn stores a call under: when its server sent none, or one outside the id rule Chat requests keep.
 _NEW_CHAT_ID = r"call_[0-9a-f]{32}"
 
 
@@ -221,6 +223,25 @@ async def test_chat_stream_tolerates_sparse_tool_call_indexes(tmp_path: Path) ->
 
 
 @pytest.mark.asyncio
+async def test_chat_stream_places_calls_streamed_without_an_index_by_their_position(tmp_path: Path) -> None:
+    """A server that sends no index keeps parallel calls apart by their place in the delta, and continues each there."""
+    calls = [
+        {"id": f"call_{city}", "type": "function", "function": {"name": "get_weather", "arguments": '{"city": '}}
+        for city in ("paris", "rome")
+    ]
+    more = {"tool_calls": [{"function": {"arguments": f'"{city}"}}'}} for city in ("Paris", "Rome")]}
+    reply = _chat_reply(_chunk({"tool_calls": calls}), _chunk(more, finish_reason="tool_calls"))
+    built = _Built(tmp_path, _OPENAI_CHAT, reply)
+
+    turn = await _turn(built, ModelRequest(messages=[_user()]))
+
+    assert [(call["id"], call["function"]["arguments"]) for call in turn.tool_calls] == [
+        ("call_paris", '{"city": "Paris"}'),
+        ("call_rome", '{"city": "Rome"}'),
+    ]
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(("finish_reason", "stop"), [("length", "output_limit"), ("content_filter", "content_filter")])
 async def test_chat_finish_reason_maps_to_stop_reason(tmp_path: Path, finish_reason: str, stop: str) -> None:
     built = _Built(tmp_path, _OPENAI_CHAT, _chat_reply(_chunk({"content": "cut"}, finish_reason=finish_reason)))
@@ -263,7 +284,8 @@ async def test_a_chat_stream_moves_a_leading_think_block_to_reasoning(tmp_path: 
         ("llama_cpp", "Rain.</think>Pack a coat.", ("Rain.</think>Pack a coat.", None)),
         ("llama_cpp", "Pack a coat. <think>Rain.</think>", ("Pack a coat. <think>Rain.</think>", None)),
         ("llama_cpp", "<think>Rain, cut off at </th", (None, "Rain, cut off at </th")),
-        ("groq", "<think>Rain.</think>Pack a coat.", ("<think>Rain.</think>Pack a coat.", None)),
+        ("groq", "<think>Rain.</think>Pack a coat.", ("Pack a coat.", "Rain.")),
+        ("cerebras", "<think>Rain.</think>Pack a coat.", ("Pack a coat.", "Rain.")),
     ],
     ids=[
         "leading-whitespace",
@@ -271,7 +293,8 @@ async def test_a_chat_stream_moves_a_leading_think_block_to_reasoning(tmp_path: 
         "no-opening-tag-kept",
         "later-tag-kept",
         "unclosed-reasoning",
-        "groq-keeps-the-tags",
+        "groq",
+        "cerebras",
     ],
 )
 async def test_a_chat_stream_splits_only_a_think_block_that_opens_the_reply(
@@ -280,10 +303,7 @@ async def test_a_chat_stream_splits_only_a_think_block_that_opens_the_reply(
     content: str,
     expected: tuple[str | None, str | None],
 ) -> None:
-    """Only a reply that opens with ``<think>`` streams reasoning, and a block the reply never closes is all reasoning.
-
-    Groq and Cerebras replies keep the tags as text.
-    """
+    """Only a reply that opens with ``<think>`` streams reasoning, and a block the reply never closes is all reasoning."""
     reply = _chat_reply(_chunk({"content": content}, finish_reason="stop"))
     built = _Built(tmp_path, {"provider": provider, "id": "qwen", "api_key": "k"}, reply)
 
@@ -310,6 +330,7 @@ async def test_text_a_chat_stream_holds_until_its_end_is_still_its_first_output(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("provider", ["llama_cpp", "groq", "cerebras"])
 @pytest.mark.parametrize(
     ("server_id", "stored"),
     [
@@ -322,15 +343,16 @@ async def test_text_a_chat_stream_holds_until_its_end_is_still_its_first_output(
 )
 async def test_a_chat_call_keeps_only_a_server_id_that_chat_requests_send_unchanged(
     tmp_path: Path,
+    provider: str,
     server_id: str | None,
     stored: str,
 ) -> None:
-    """On the ``openai`` dialect, a call without an id or with one outside the Chat rule gets a new id that fits it.
+    """A call without an id or with one outside the Chat rule gets a new id that fits it, on every Chat route.
 
-    That dialect's requests rewrite an id that is not ``call_`` and at most 40 characters, so the call is stored under
-    one they send unchanged.
+    Chat requests rewrite an id that is not ``call_`` and at most 40 characters, so the call is stored under one they
+    send unchanged.
     """
-    built = _Built(tmp_path, {"provider": "llama_cpp", "id": "qwen"}, _tool_call_reply(server_id))
+    built = _Built(tmp_path, {"provider": provider, "id": "qwen", "api_key": "k"}, _tool_call_reply(server_id))
 
     turn = await _turn(built, ModelRequest(messages=[_user()]))
 
@@ -338,31 +360,28 @@ async def test_a_chat_call_keeps_only_a_server_id_that_chat_requests_send_unchan
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(
-    ("route", "server_id", "stored"),
-    [
-        ("groq", "functions.get_weather:0", re.escape("functions.get_weather:0")),
-        ("cerebras", "functions.get_weather:0", re.escape("functions.get_weather:0")),
-        ("groq", None, _NEW_CHAT_ID),
-    ],
-    ids=["groq", "cerebras", "groq-omitted"],
-)
-async def test_a_groq_or_cerebras_call_keeps_the_id_its_server_sent(
-    tmp_path: Path,
-    route: str,
-    server_id: str | None,
-    stored: str,
-) -> None:
-    """Groq and Cerebras requests send stored ids unchanged, so a call keeps its server's id, even outside the Chat rule.
+@pytest.mark.parametrize("provider", ["groq", "cerebras"])
+async def test_groq_and_cerebras_streams_record_their_reasoning(tmp_path: Path, provider: str) -> None:
+    """The reasoning these routes stream in ``reasoning`` reaches the turn, as on every other Chat route."""
+    reply = _chat_reply(
+        _chunk({"reasoning": "Rain is likely"}),
+        _chunk({"reasoning": " this afternoon."}),
+        _chunk({"content": "Pack a coat."}, finish_reason="stop"),
+    )
+    built = _Built(tmp_path, {"provider": provider, "id": "gpt-oss-120b", "api_key": "k"}, reply)
 
-    Only a call its server sent without an id gets a new one.
-    """
-    built = _Built(tmp_path, _DECISION_ROUTES[route][0], _tool_call_reply(server_id))
+    events = [event async for event in built.provider.stream(ModelRequest(messages=[_user()]))]
 
-    turn = await _turn(built, ModelRequest(messages=[_user()]))
-
-    [call] = turn.tool_calls
-    assert re.fullmatch(stored, call["id"])
+    completed = events[-1]
+    assert isinstance(completed, TurnCompleted)
+    assert (completed.message.content, completed.message.reasoning_content) == (
+        "Pack a coat.",
+        "Rain is likely this afternoon.",
+    )
+    assert [event.text for event in events if isinstance(event, ReasoningDelta)] == [
+        "Rain is likely",
+        " this afternoon.",
+    ]
 
 
 class _Packing(BaseModel):
@@ -570,6 +589,49 @@ async def test_an_openrouter_stream_keeps_its_reasoning_details_and_routing_fiel
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("provider", ["openai", "groq", "cerebras"])
+async def test_a_chat_request_sends_no_participant_name_and_no_empty_call_list(tmp_path: Path, provider: str) -> None:
+    """A stored message's ``name`` is not sent, and an assistant message with no calls sends no ``tool_calls``."""
+    history = [
+        Message(role="user", content="Hi", name="alice"),
+        Message(role="assistant", content="Hello.", tool_calls=[]),
+        _user(),
+    ]
+    model_config = _OPENAI_CHAT if provider == "openai" else _DECISION_ROUTES[provider][0]
+    built = _Built(tmp_path, model_config, _chat_reply(_chunk({"content": "ok"}, finish_reason="stop")))
+
+    await _turn(built, ModelRequest(messages=history))
+
+    assert built.body()["messages"][:2] == [
+        {"role": "user", "content": "Hi"},
+        {"role": "assistant", "content": "Hello."},
+    ]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("provider", ["openai", "groq", "cerebras"])
+async def test_a_chat_request_sends_stored_calls_without_other_routes_fields(tmp_path: Path, provider: str) -> None:
+    """A call another route stored keeps only the Chat call fields, without Gemini's or Responses' replay state."""
+    gemini_call = {**_CALL, "id": "call_gemini", "thought_signature": "c2ln"}
+    responses_call = {**_CALL, "id": "fc_1", "call_id": "call_resp"}
+    history = [
+        _user(),
+        Message(role="assistant", tool_calls=[gemini_call, responses_call]),
+        Message(role="tool", tool_call_id="call_gemini", tool_name="get_weather", content="sunny"),
+        Message(role="tool", tool_call_id="fc_1", tool_name="get_weather", content="rainy"),
+        _user(),
+    ]
+    model_config = _OPENAI_CHAT if provider == "openai" else _DECISION_ROUTES[provider][0]
+    built = _Built(tmp_path, model_config, _chat_reply(_chunk({"content": "ok"}, finish_reason="stop")))
+
+    await _turn(built, ModelRequest(messages=history))
+
+    sent = built.body()["messages"][1]["tool_calls"]
+    assert [set(call) for call in sent] == [{"id", "type", "function"}] * 2
+    assert [call["function"] for call in sent] == [_CALL["function"]] * 2
+
+
+@pytest.mark.asyncio
 async def test_a_thread_switching_to_a_chat_route_rewrites_foreign_call_ids(tmp_path: Path) -> None:
     """Calls a Responses model made earlier in the thread, and their results, take ids Chat Completions accepts."""
     responses_call = {**_CALL, "id": "fc_68a1", "call_id": "call_68a1"}
@@ -635,20 +697,19 @@ async def test_a_chat_route_sends_audio_and_file_attachments_inline(tmp_path: Pa
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ("model_config", "reply", "text_part"),
+    ("model_config", "reply"),
     [
-        (_OPENAI_CHAT, _chat_reply(_chunk({"content": "ok"}, finish_reason="stop")), "text"),
-        (_OPENAI_RESPONSES, _responses_reply(*_text_events("ok"), _completed()), "input_text"),
+        (_OPENAI_CHAT, _chat_reply(_chunk({"content": "ok"}, finish_reason="stop"))),
+        (_OPENAI_RESPONSES, _responses_reply(*_text_events("ok"), _completed())),
     ],
     ids=["chat", "responses"],
 )
-async def test_attachments_deleted_since_their_turn_are_left_out(
+async def test_attachments_deleted_since_their_turn_are_sent_as_the_media_note(
     tmp_path: Path,
     model_config: dict[str, Any],
     reply: dict[str, Any],
-    text_part: str,
 ) -> None:
-    """History whose attachment files were cleaned up still replays: its text is sent and each missing file logged."""
+    """A turn whose attachment files were cleaned up still runs: its text is sent with the media fallback's note."""
     gone = tmp_path / "cleaned-up"
     photo, report = gone / "att_photo.png", gone / "att_report.pdf"
     earlier = Message(
@@ -664,8 +725,8 @@ async def test_attachments_deleted_since_their_turn_are_left_out(
 
     body = built.body()
     sent = body["messages"][0] if "messages" in body else body["input"][0]
-    assert sent["content"] == [{"type": text_part, "text": "Compare these."}]
-    assert [log["path"] for log in logs if log["event"] == "Model input file not found"] == [str(photo), str(report)]
+    assert sent["content"] == f"Compare these.\n\n{FALLBACK_MARKER}\n{INLINE_MEDIA_FALLBACK_PROMPT}"
+    assert [log["path"] for log in logs if log["event"] == "media_file_unreadable"] == [str(photo)]
 
 
 # --- Errors ---------------------------------------------------------------------------------------------------
@@ -1327,15 +1388,17 @@ _UNSTORED_OUTPUT = [
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("store", [True, False], ids=["stored", "unstored"])
 @pytest.mark.parametrize("listed", [True, False], ids=["listed-by-the-ended-response", "only-streamed"])
-async def test_an_unstored_response_keeps_its_output_for_replay_without_its_compaction_item(
+async def test_a_response_keeps_its_output_for_replay_without_its_compaction_item(
     tmp_path: Path,
     *,
     listed: bool,
+    store: bool,
 ) -> None:
-    """An unstored reply keeps its output for replay, from the ended response or, when that lists none, its stream.
+    """A reply keeps its output for replay, from the ended response or, when that lists none, its stream.
 
-    The compaction item stays out of that output.
+    It does on every route, whatever the route stores, and the compaction item stays out of that output.
     """
     done = [
         {"type": "response.output_item.done", "sequence_number": 2 + index, "output_index": index, "item": item}
@@ -1343,7 +1406,7 @@ async def test_an_unstored_response_keeps_its_output_for_replay_without_its_comp
     ]
     ended = _completed(_UNSTORED_OUTPUT if listed else None)
     reply = _responses_reply(*_text_events("Pack"), *done, ended)
-    built = _Built(tmp_path, {**_OPENAI_RESPONSES, "extra_kwargs": {"store": False}}, reply)
+    built = _Built(tmp_path, {**_OPENAI_RESPONSES, "extra_kwargs": {"store": store}}, reply)
 
     turn = await _turn(built, ModelRequest(messages=[_user()]))
 
@@ -1811,6 +1874,25 @@ _AZURE_CLIENT = {
     "default_headers": {"X-Origin": "configured"},
     "organization": "org-configured",
 }
+
+
+@pytest.mark.asyncio
+async def test_client_options_set_in_extra_kwargs_reach_the_client(tmp_path: Path) -> None:
+    """The endpoint, headers, and organization a Chat model sets directly in ``extra_kwargs`` reach the SDK client."""
+    built = _Built(
+        tmp_path,
+        {**_OPENAI_CHAT, "extra_kwargs": _CONFIGURED_CLIENT},
+        _chat_reply(_chunk({"content": "ok"}, finish_reason="stop")),
+    )
+
+    await _turn(built, ModelRequest(messages=[_user()]))
+
+    request = built.requests[0]
+    assert (str(request.url), request.headers["x-origin"], request.headers["openai-organization"]) == (
+        "http://configured.test/v1/chat/completions",
+        "configured",
+        "org-configured",
+    )
 
 
 @pytest.mark.asyncio

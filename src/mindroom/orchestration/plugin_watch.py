@@ -96,12 +96,13 @@ async def watch_plugins_task(orchestrator: _PluginWatcherRuntime) -> None:
     configured_roots = watch_state.sync_roots(orchestrator.config)
     watch_state_revision = watch_state.revision
 
-    while orchestrator.running:
+    # Runs until cancelled: a supervised loop that returned would be restarted.
+    while True:
         await asyncio.sleep(file_watcher._WATCH_SCAN_INTERVAL_SECONDS)
 
         try:
             config = orchestrator.config
-            if config is None:
+            if config is None or not orchestrator.running:
                 continue
 
             configured_roots = watch_state.sync_roots(config)

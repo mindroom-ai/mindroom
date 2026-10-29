@@ -21,7 +21,6 @@ from mindroom.credentials.manager import CredentialsManager
 from mindroom.egress_broker.secrets import save_secret
 from mindroom.egress_broker.service import serve_egress_broker
 from mindroom.egress_broker.tokens import TokenSigner
-from mindroom.tool_system.runtime_context import WorkerRuntimeContext, worker_runtime_context
 from mindroom.tool_system.worker_routing import (
     ResolvedWorkerTarget,
     ToolExecutionIdentity,
@@ -29,6 +28,7 @@ from mindroom.tool_system.worker_routing import (
     resolve_worker_target,
 )
 from mindroom.workers.backends.static_runner import StaticSandboxRunnerBackend
+from mindroom.workers.protocol import WORKER_PROTOCOL_VERSION, WorkerRoute
 from tests.conftest import call_proxy_sync_for_test
 
 if TYPE_CHECKING:
@@ -176,15 +176,20 @@ def payloads(monkeypatch: pytest.MonkeyPatch, current_static_runner: None) -> li
 def dedicated_routing(monkeypatch: pytest.MonkeyPatch) -> None:
     """Route calls to a dedicated worker whose key is the target's own or, for unscoped targets, a routed one."""
 
-    def routing_payload(*, worker_target: ResolvedWorkerTarget | None, **_kwargs: object) -> tuple[dict, None]:
+    def worker_route(*, worker_target: ResolvedWorkerTarget | None, **_kwargs: object) -> tuple[WorkerRoute, None]:
         assert worker_target is not None
-        return {"worker_key": worker_target.worker_key or _ROUTED_UNSCOPED_KEY}, None
+        route = WorkerRoute(
+            protocol=WORKER_PROTOCOL_VERSION,
+            worker_key=worker_target.worker_key or _ROUTED_UNSCOPED_KEY,
+        )
+        return route, None
 
-    monkeypatch.setattr(sandbox_proxy_module, "_build_worker_routing_payload", routing_payload)
+    monkeypatch.setattr(sandbox_proxy_module, "_worker_route", worker_route)
 
 
 def _call(
     runtime_paths: RuntimePaths,
+    config: Config,
     tool_name: str,
     worker_target: ResolvedWorkerTarget,
     credentials_manager: CredentialsManager,
@@ -199,6 +204,7 @@ def _call(
         credentials_manager=credentials_manager,
         execution_env=execution_env,
         worker_target=worker_target,
+        runtime_config=config,
     )
 
 
@@ -244,8 +250,7 @@ def test_calls_with_the_broker_off_import_no_broker_code(
     manager = CredentialsManager(runtime_paths.storage_root / "credentials")
     target = resolve_worker_target("user_agent", "code", _identity(), private_agent_names=frozenset())
 
-    with worker_runtime_context(WorkerRuntimeContext(runtime_paths=runtime_paths, config=config)):
-        _call(runtime_paths, tool_name, target, manager, {"KEEP": "me"})
+    _call(runtime_paths, config, tool_name, target, manager, {"KEEP": "me"})
 
     [payload] = payloads
     assert payload["execution_env"] == {"KEEP": "me"}
@@ -263,9 +268,8 @@ async def test_call_proxy_sync_merges_broker_env_for_shell_only(
     target = resolve_worker_target("user_agent", "code", _identity(), private_agent_names=frozenset())
     save_secret(manager, target, "github", "s3cret")
     async with serve_egress_broker(runtime_paths, config_provider=lambda: config, credentials_manager=manager):
-        with worker_runtime_context(WorkerRuntimeContext(runtime_paths=runtime_paths, config=config)):
-            _call(runtime_paths, "shell", target, manager, {"KEEP": "me"})
-            _call(runtime_paths, "file", target, manager)
+        _call(runtime_paths, config, "shell", target, manager, {"KEEP": "me"})
+        _call(runtime_paths, config, "file", target, manager)
     shell_payload, file_payload = payloads
     shell_env = shell_payload["execution_env"]
     assert shell_env["KEEP"] == "me"
@@ -287,8 +291,7 @@ async def test_unscoped_shell_call_signs_routed_worker_key(
     target = resolve_worker_target(None, "code", _identity())
     assert target.worker_key is None
     async with serve_egress_broker(runtime_paths, config_provider=lambda: config, credentials_manager=manager):
-        with worker_runtime_context(WorkerRuntimeContext(runtime_paths=runtime_paths, config=config)):
-            _call(runtime_paths, "shell", target, manager)
+        _call(runtime_paths, config, "shell", target, manager)
     [payload] = payloads
     assert _token_worker_key(runtime_paths, payload["execution_env"]) == _ROUTED_UNSCOPED_KEY
 
@@ -303,10 +306,9 @@ async def test_static_runner_shell_call_signs_unscoped_worker_key(
     manager = CredentialsManager(runtime_paths.storage_root / "credentials")
     target = resolve_worker_target(None, "code", _identity())
     async with serve_egress_broker(runtime_paths, config_provider=lambda: config, credentials_manager=manager):
-        with worker_runtime_context(WorkerRuntimeContext(runtime_paths=runtime_paths, config=config)):
-            _call(runtime_paths, "python", target, manager)
+        _call(runtime_paths, config, "python", target, manager)
     [payload] = payloads
-    assert "worker_key" not in payload
+    assert payload["worker_key"] is None
     assert "HTTPS_PROXY" in payload["execution_env"]
     assert _token_worker_key(runtime_paths, payload["execution_env"]) == resolve_unscoped_worker_key("code")
 
@@ -323,8 +325,7 @@ async def test_broker_git_config_appends_to_call_git_config(
     target = resolve_worker_target("user_agent", "code", _identity(), private_agent_names=frozenset())
     call_env = {"GIT_CONFIG_COUNT": "1", "GIT_CONFIG_KEY_0": "core.askPass", "GIT_CONFIG_VALUE_0": ""}
     async with serve_egress_broker(runtime_paths, config_provider=lambda: config, credentials_manager=manager):
-        with worker_runtime_context(WorkerRuntimeContext(runtime_paths=runtime_paths, config=config)):
-            _call(runtime_paths, "shell", target, manager, call_env)
+        _call(runtime_paths, config, "shell", target, manager, call_env)
     [payload] = payloads
     env = payload["execution_env"]
     assert env["GIT_CONFIG_COUNT"] == "3"
@@ -351,8 +352,7 @@ async def test_agent_without_the_egress_credentials_tool_gets_no_broker_env(
     target = resolve_worker_target("user_agent", "code", _identity(), private_agent_names=frozenset())
     save_secret(manager, target, "github", "s3cret")
     async with serve_egress_broker(runtime_paths, config_provider=lambda: config, credentials_manager=manager):
-        with worker_runtime_context(WorkerRuntimeContext(runtime_paths=runtime_paths, config=config)):
-            _call(runtime_paths, tool_name, target, manager, {"KEEP": "me"})
+        _call(runtime_paths, config, tool_name, target, manager, {"KEEP": "me"})
     [payload] = payloads
     assert payload["execution_env"] == {"KEEP": "me"}
 
@@ -371,7 +371,6 @@ async def test_call_without_a_configured_agent_gets_no_broker_env(
     target = resolve_worker_target("user_agent", "code", _identity(), private_agent_names=frozenset())
     save_secret(manager, target, "github", "s3cret")
     async with serve_egress_broker(runtime_paths, config_provider=lambda: config, credentials_manager=manager):
-        with worker_runtime_context(WorkerRuntimeContext(runtime_paths=runtime_paths, config=config)):
-            _call(runtime_paths, "shell", replace(target, routing_agent_name=agent_name), manager, {"KEEP": "me"})
+        _call(runtime_paths, config, "shell", replace(target, routing_agent_name=agent_name), manager, {"KEEP": "me"})
     [payload] = payloads
     assert payload["execution_env"] == {"KEEP": "me"}

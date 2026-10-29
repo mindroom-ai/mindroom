@@ -21,9 +21,13 @@ from mindroom.tool_system.worker_proxy_client import (
 )
 from mindroom.workers.in_flight import touch_workers_in_flight
 from mindroom.workers.models import WorkerHandle
+from mindroom.workers.protocol import WORKER_PROTOCOL_VERSION, ExecuteRequest
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterator
+
+
+_REQUEST = ExecuteRequest(protocol=WORKER_PROTOCOL_VERSION, tool_name="shell", function_name="run_shell_command")
 
 
 class _Manager:
@@ -114,10 +118,8 @@ def _execute(
             credential_policy={},
             lease_tool_credentials=False,
         ),
-        payload={"tool_name": "shell", "function_name": "run_shell_command"},
+        request=_REQUEST,
         credentials_manager=None,
-        tool_name="shell",
-        function_name="run_shell_command",
         worker_target=None,
         worker_handle=_HANDLE,
         worker_manager=manager or _Manager(),
@@ -245,10 +247,8 @@ def test_a_result_with_unicode_line_separators_arrives_whole() -> None:
             credential_policy={},
             lease_tool_credentials=False,
         ),
-        payload={"tool_name": "shell", "function_name": "run_shell_command"},
+        request=_REQUEST,
         credentials_manager=None,
-        tool_name="shell",
-        function_name="run_shell_command",
         worker_target=None,
         worker_handle=_HANDLE,
         worker_manager=manager,

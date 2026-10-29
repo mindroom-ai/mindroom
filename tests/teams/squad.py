@@ -12,14 +12,13 @@ import json
 import sqlite3
 from contextlib import closing
 from dataclasses import replace
-from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from mindroom.agent_loop.model_loop import EMPTY_REQUEST, NO_HOOKS
 from mindroom.agent_loop.spec import AgentSpec, RunContext, UnstoredSession
 from mindroom.config.main import Config
 from mindroom.custom_tools.calculator import CalculatorTools
-from mindroom.event_journal.approval_continuations import ApprovalCall, approval_arguments_digest
+from mindroom.event_journal.approval_calls import ApprovalCall, approval_arguments_digest
 from mindroom.llm.events import RunFinished
 from mindroom.llm.messages import Message
 from mindroom.llm.provider import ModelIdentity
@@ -30,6 +29,7 @@ from mindroom.teams.spec import MemberBuild, TeamMember, TeamMode, TeamSpec
 from mindroom.tool_system.agno_toolkits import adapt_toolkit
 from tests.fakes.scripted_model import ScriptedModel
 from tests.run_record_helpers import PROVIDER
+from tests.session_storage.goldens import STORAGE
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Callable, Mapping, Sequence
@@ -41,7 +41,6 @@ if TYPE_CHECKING:
     from mindroom.teams.runtime import TeamCallKey, TeamRunEvent
     from mindroom.tool_system.tool_function import AdaptedToolkit
 
-STORAGE = Path(__file__).resolve().parents[1] / "fixtures" / "agno_parity" / "storage"
 SQUAD = "!room:example.org:$squad"
 SQUAD_APPROVED = "!room:example.org:$squad-approved"
 PANEL = "!room:example.org:$panel"
@@ -145,7 +144,7 @@ def built_team(spec: TeamSpec) -> BuiltTeam:
     """Return ``spec`` as a built team under the default history settings in UTC, with no leader middleware or jobs."""
     return BuiltTeam(
         spec=spec,
-        history_settings=Config().resolve_entity(None).history_settings,
+        history_settings=Config().resolve_scope(None).history_settings,
         timezone="UTC",
         leader_middleware=(),
         leader_jobs=None,

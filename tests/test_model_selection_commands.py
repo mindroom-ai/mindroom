@@ -21,13 +21,13 @@ from mindroom.config.models import ModelConfig
 from mindroom.entity_resolution import entity_identity_registry
 from mindroom.message_target import MessageTarget
 from mindroom.model_selection import command_result_content_to_dict
-from mindroom.teams.members import TeamTurnModelSelection, resolve_team_turn_models
 from mindroom.thread_models import resolve_thread_model_override, set_thread_model_override
+from mindroom.turn_model import ModelScope, TeamTurnModelSelection, resolve_team_turn_models, resolve_turn_model
 from mindroom.turn_record import TurnRecord
 from tests.authorization_helpers import make_test_command_handler_context
 from tests.conftest import bind_runtime_paths, make_conversation_reader_mock, runtime_paths_for, test_runtime_paths
 from tests.test_model_selection_scope import ROOM, USER, joined_response, picker_client, picker_setup, root_event
-from tests.test_turn_controller_focused import _build_harness
+from tests.test_turns_focused import _build_harness, _in_room
 
 pytestmark = pytest.mark.usefixtures("enforce_turn_authorization")
 
@@ -162,7 +162,7 @@ async def test_other_runtime_target_never_owns_checkpoint(tmp_path: Path, wrong_
     """A second runtime device must not admit or acknowledge the selected device's command."""
     client, config, paths, _, router, _ = picker_setup(tmp_path)
     harness = _build_harness(config, tmp_path / "turns", agent_name="router")
-    executor = harness.controller.deps.command_executor
+    executor = harness.dispatcher.deps.command_executor
     executor.deps.runtime.client = client
     metadata = {
         "version": 1,
@@ -184,9 +184,10 @@ async def test_other_runtime_target_never_owns_checkpoint(tmp_path: Path, wrong_
         command,
         target=MessageTarget.resolve(ROOM, "$root", "$command"),
         handled_turn=TurnRecord.create(["$command"]),
+        acts_for_requester=False,
     )
     assert owned is False
-    assert harness.turn_store.get_turn_record("$command") is None
+    assert await harness.turn_store.get_turn_record("$command") is None
     assert not harness.gateway.sent
     assert _helper_override(paths, config) is None
 
@@ -196,7 +197,7 @@ async def test_replay_preserves_result_after_single_real_mutation(tmp_path: Path
     """A failed Matrix send must replay the frozen result even after current state changes."""
     client, config, paths, _, router, _ = picker_setup(tmp_path)
     harness = _build_harness(config, tmp_path / "turns", agent_name="router")
-    executor = harness.controller.deps.command_executor
+    executor = harness.dispatcher.deps.command_executor
     executor.deps.runtime.client = client
     metadata = {
         "version": 1,
@@ -224,8 +225,9 @@ async def test_replay_preserves_result_after_single_real_mutation(tmp_path: Path
             command,
             target=target,
             handled_turn=TurnRecord.create(["$command"]),
+            acts_for_requester=False,
         )
-    pending = harness.turn_store.get_turn_record("$command")
+    pending = await harness.turn_store.get_turn_record("$command")
     assert pending is not None
     assert _helper_override(paths, config) == "default"
     saved = json.dumps(command_result_content_to_dict(pending.command_result_extra_content), sort_keys=True)
@@ -240,7 +242,15 @@ async def test_replay_preserves_result_after_single_real_mutation(tmp_path: Path
         entity_names=("helper",),
         config=config,
     )
-    await executor.execute(client.rooms[ROOM], event, USER, command, target=target, handled_turn=pending)
+    await executor.execute(
+        client.rooms[ROOM],
+        event,
+        USER,
+        command,
+        target=target,
+        handled_turn=pending,
+        acts_for_requester=False,
+    )
     assert _helper_override(paths, config) == "later"
     assert json.dumps(harness.gateway.sent[0].extra_content, sort_keys=True) == saved
     assert harness.gateway.sent[0].response_text == sent[0].response_text
@@ -252,7 +262,7 @@ async def test_crash_before_result_returns_uncertainty_without_success(tmp_path:
     """An execution-start checkpoint cannot manufacture applied metadata after restart."""
     client, config, _, _, router, _ = picker_setup(tmp_path)
     harness = _build_harness(config, tmp_path / "turns", agent_name="router")
-    executor = harness.controller.deps.command_executor
+    executor = harness.dispatcher.deps.command_executor
     executor.deps.runtime.client = client
     event = root_event(
         event_id="$command",
@@ -270,7 +280,7 @@ async def test_crash_before_result_returns_uncertainty_without_success(tmp_path:
     )
     command = command_parser.parse(event.body)
     pending = await harness.turn_store.record_pending_turn(
-        TurnRecord.create(["$command"], completed=False, command_execution_started=True),
+        _in_room(TurnRecord.create(["$command"], completed=False, command_execution_started=True), ROOM),
     )
     assert pending is not None
     await executor.execute(
@@ -279,7 +289,8 @@ async def test_crash_before_result_returns_uncertainty_without_success(tmp_path:
         USER,
         command,
         target=MessageTarget.resolve(ROOM, "$root", "$command"),
-        handled_turn=pending,
+        handled_turn=pending.record,
+        acts_for_requester=False,
     )
     assert "uncertain" in harness.gateway.sent[0].response_text
     assert harness.gateway.sent[0].extra_content is None
@@ -299,7 +310,7 @@ async def test_same_thread_senders_cannot_overtake_waiting_model_command(
     config.agents["helper"].access.users.append(second_user)
     client.joined_members.return_value = joined_response(USER, second_user, router, agent)
     harness = _build_harness(config, tmp_path / "turns", agent_name="router")
-    executor = harness.controller.deps.command_executor
+    executor = harness.dispatcher.deps.command_executor
     executor.deps.runtime.client = client
     first_read = asyncio.Event()
     release_first = asyncio.Event()
@@ -336,6 +347,7 @@ async def test_same_thread_senders_cannot_overtake_waiting_model_command(
             command,
             target=MessageTarget.resolve(ROOM, "$root", event.event_id),
             handled_turn=TurnRecord.create([event.event_id]),
+            acts_for_requester=False,
         )
 
     first = asyncio.create_task(run(event_for("$first", USER, "default", structured=True)))
@@ -376,11 +388,11 @@ def restricted_config(tmp_path: Path) -> Config:
 def resolved_thread_models(config: Config, paths: RuntimePaths) -> dict[str, str]:
     """Return the model each agent of ``restricted_config`` runs with in the ``$root`` thread."""
     return {
-        name: config.resolve_runtime_model(
-            entity_name=name,
-            room_id=ROOM,
-            thread_id="$root",
-            runtime_paths=paths,
+        name: resolve_turn_model(
+            config,
+            paths,
+            ModelScope(entity=name, room_id=ROOM, thread_id="$root"),
+            None,
         ).model_name
         for name in ("helper", "restricted")
     }
@@ -437,12 +449,11 @@ def test_team_thread_override_governs_members_a_team_only_requester_reaches(tmp_
     _run_model_command(config, "expensive", USER)
 
     assert resolve_team_turn_models(
-        "squad",
-        ["code"],
-        ROOM,
         config,
         runtime_paths_for(config),
-        thread_id="$root",
+        ModelScope(entity="squad", room_id=ROOM, thread_id="$root"),
+        ["code"],
+        None,
     ) == TeamTurnModelSelection(team_model_name="expensive", member_model_names={"code": "expensive"})
 
 

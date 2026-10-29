@@ -70,7 +70,7 @@ class _Continuation:
     generation: int = 0
     claim_span_id: str | None = None
     state: str = "waiting"  # waiting, ready, failing
-    disposition: rl.FailureDisposition | None = None
+    failure_kind: rl.ApprovalFailureKind | None = None
 
 
 @dataclass
@@ -102,7 +102,7 @@ class _Model:
     removed: bool = False
     # Logical sources the user deleted: no settlement answers their turn.
     deleted: set[str] = field(default_factory=set)
-    # The turn ledger recorded the turn answered, which suppresses a later replay of its original source.
+    # The turn rows recorded the turn answered, which suppresses a later replay of its original source.
     turn_answered: bool = False
     # Pending sources a settlement answered.
     answered: set[str] = field(default_factory=set)
@@ -229,20 +229,20 @@ class ReplyLifecycleMachine(RuleBasedStateMachine):
                 self._settle(span_id)
             case CancelSpan(span_id=span_id):
                 self.model.cancel_requested.add(span_id)
-            case FenceApproval(approval_id=approval_id, disposition=disposition):
-                self._fence(approval_id, disposition)
+            case FenceApproval(approval_id=approval_id, kind=kind):
+                self._fence(approval_id, kind)
             case _:
                 msg = f"unmodelled effect {effect!r}"
                 raise AssertionError(msg)
 
-    def _fence(self, approval_id: str, disposition: rl.FailureDisposition) -> None:
+    def _fence(self, approval_id: str, kind: rl.ApprovalFailureKind) -> None:
         """Fence a continuation as the store does: a FINAL still delivered wins."""
         continuation = self.model.continuations.get(approval_id)
         if continuation is None or self.model.finals.get(continuation.delivery_id) in {"pending", "acknowledged"}:
             return
         if continuation.state in {"waiting", "ready"}:
             continuation.state = "failing"
-            continuation.disposition = disposition
+            continuation.failure_kind = kind
 
     def _claim(
         self,
@@ -675,7 +675,11 @@ class ReplyLifecycleMachine(RuleBasedStateMachine):
         ended = self.model.spans[span.span_id]
         if ended.outcome in _UNANSWERED_OUTCOMES and self.model.finals.get(continuation.delivery_id) is None:
             continuation.state = "failing"
-            continuation.disposition = "cancelled_by_user" if ended.outcome is SpanOutcome.CANCELLED else "failed"
+            continuation.failure_kind = (
+                rl.ApprovalFailureKind.USER_STOP
+                if ended.outcome is SpanOutcome.CANCELLED
+                else rl.ApprovalFailureKind.ERROR
+            )
 
     # --- approvals ----------------------------------------------------------
 
@@ -804,7 +808,7 @@ class ReplyLifecycleMachine(RuleBasedStateMachine):
             if continuation.state == "ready" and self.model.finals.get(continuation.delivery_id) == "refused":
                 # Matrix refused the answer for good: the runtime settles the run as a failure.
                 continuation.state = "failing"
-                continuation.disposition = "failed"
+                continuation.failure_kind = rl.ApprovalFailureKind.ERROR
             if continuation.state == "failing" and not self._may_finish(continuation):
                 self._write_failure_note(continuation)
             if self._may_finish(continuation):
@@ -833,7 +837,7 @@ class ReplyLifecycleMachine(RuleBasedStateMachine):
         if last.delivery_id in self.model.finals:
             # The gateway resends the note a FINAL already holds instead of writing another.
             return
-        cancelled = continuation.disposition == "cancelled_by_user" or reply.unapplied_stop
+        cancelled = continuation.failure_kind is rl.ApprovalFailureKind.USER_STOP or reply.unapplied_stop
         requested = ReplyState.CANCELLED if cancelled else ReplyState.FAILED
         self._apply(
             rl.approval_failure_note(
@@ -866,7 +870,7 @@ class ReplyLifecycleMachine(RuleBasedStateMachine):
                 self._last(),
                 approval_id=continuation.approval_id,
                 paused_span_id=continuation.paused_span_id,
-                disposition=continuation.disposition,
+                failure_kind=continuation.failure_kind,
                 answers_turn=answers_turn,
                 now_ns=self._now(),
             ),
@@ -921,12 +925,12 @@ class ReplyLifecycleMachine(RuleBasedStateMachine):
                 if final == "refused":
                     # Recovery settles a refused answer as a failure.
                     continuation.state = "failing"
-                    continuation.disposition = "failed"
+                    continuation.failure_kind = rl.ApprovalFailureKind.ERROR
                 if final in {"acknowledged", "refused"}:
                     self._finish_approval(continuation, owner_available=True)
             elif span is not None and span.outcome in _UNANSWERED_OUTCOMES - {SpanOutcome.RELEASED}:
                 continuation.state = "failing"
-                continuation.disposition = "failed"
+                continuation.failure_kind = rl.ApprovalFailureKind.ERROR
             else:
                 self._release_approval(continuation)
 
@@ -1104,7 +1108,7 @@ class ReplyLifecycleMachine(RuleBasedStateMachine):
         for continuation in tuple(self.model.continuations.values()):
             if continuation.state != "failing":
                 continuation.state = "failing"
-                continuation.disposition = "failed"
+                continuation.failure_kind = rl.ApprovalFailureKind.ERROR
             self._finish_approval(continuation, owner_available=False)
 
     @precondition(

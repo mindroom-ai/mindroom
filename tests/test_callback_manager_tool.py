@@ -6,6 +6,7 @@ import errno
 import json
 import os
 import re
+import shutil
 import stat
 import subprocess
 from dataclasses import replace
@@ -20,7 +21,13 @@ from mindroom.custom_tools.callback_manager import CallbackManagerTools
 from mindroom.external_triggers.store import ExternalTriggerStore
 from mindroom.message_target import MessageTarget
 from mindroom.runtime_state import reset_runtime_state, set_api_server_address
-from mindroom.tool_system.runtime_context import ToolRuntimeContext, tool_runtime_context
+from mindroom.tool_system.runtime_context import (
+    ToolRuntimeContext,
+    build_execution_identity_from_runtime_context,
+    tool_runtime_context,
+)
+from mindroom.tool_system.worker_routing import resolve_unscoped_worker_key, resolve_worker_key, visible_workspace_roots
+from mindroom.workers.backends._dedicated_worker_common import plan_scoped_workspace_mounts
 from tests.authorization_helpers import (
     make_test_tool_runtime_context,
 )
@@ -87,6 +94,7 @@ def test_mint_callback_writes_one_bound_script(tmp_path: Path) -> None:
 
     assert payload["status"] == "ok"
     script_path = Path(payload["script_path"])
+    assert script_path.is_relative_to(_workspace(tmp_path))
     assert payload["instruction"] == f'When finished, run: bash {script_path} "<short result summary>"'
     assert stat.S_IMODE(script_path.stat().st_mode) == 0o700
     assert script_path.parent.joinpath(".gitignore").read_text(encoding="utf-8") == "*\n"
@@ -110,6 +118,33 @@ def test_mint_callback_writes_one_bound_script(tmp_path: Path) -> None:
     assert f"CALLBACK_URL=http://127.0.0.1:8765/api/triggers/{callback_id}" in script_text
     assert "CALLBACK_TOKEN=mrt_" in script_text
     assert "mrt_" not in store.store_path.read_text(encoding="utf-8")
+
+
+def test_a_private_agent_writes_its_callback_script_into_the_requester_workspace(tmp_path: Path) -> None:
+    """A private agent's script lands in its requester's workspace, which that requester's worker mounts."""
+    context = _context(tmp_path)
+    data = context.config.model_dump(mode="json", exclude_unset=True)
+    data["agents"]["coder"]["private"] = {"per": "user"}
+    context = replace(context, config=Config.model_validate(data))
+
+    with tool_runtime_context(context):
+        payload = _payload(CallbackManagerTools().mint_callback("issue-042 implementer"))
+
+    assert payload["status"] == "ok"
+    # The requester's user-scope worker mounts exactly the workspace the script landed in.
+    identity = build_execution_identity_from_runtime_context(context)
+    worker_key = resolve_worker_key("user", identity, agent_name="coder")
+    assert worker_key is not None
+    mounted = visible_workspace_roots(
+        context.runtime_paths.storage_root,
+        worker_key,
+        context.config.get_agent_policies(),
+        private_agent_names=frozenset({"coder"}),
+    )
+    script_path = Path(payload["script_path"])
+    assert any(script_path.is_relative_to(root) for root in mounted)
+    assert not script_path.is_relative_to(_workspace(tmp_path))
+    assert script_path.is_file()
 
 
 def test_mint_callback_needs_no_hard_links(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -244,6 +279,93 @@ def test_generated_script_posts_summary_and_deletes_itself(tmp_path: Path) -> No
     }
     assert completed.stdout.strip() == "MindRoom notified."
     assert not script_path.exists()
+
+
+def _run_instruction(tmp_path: Path, instruction: str, env: dict[str, str]) -> str:
+    """Run the instruction's command as a background task would, with curl faked, and return its output."""
+    fake_bin = tmp_path / "fake-bin"
+    fake_bin.mkdir()
+    (fake_bin / "curl").write_text("#!/usr/bin/env bash\ncat > /dev/null\n", encoding="utf-8")
+    (fake_bin / "curl").chmod(0o700)
+    command = instruction.removeprefix("When finished, run: ").replace("<short result summary>", "done")
+    completed = subprocess.run(
+        ["bash", "-c", command],
+        check=True,
+        capture_output=True,
+        text=True,
+        env={**env, "PATH": f"{fake_bin}{os.pathsep}{os.environ['PATH']}"},
+    )
+    return completed.stdout.strip()
+
+
+@pytest.mark.parametrize(
+    ("execution_mode", "worker_backend", "shell_in_worker"),
+    [
+        ("off", "static_runner", False),
+        ("off", "docker", False),
+        ("all", "docker", True),
+    ],
+    ids=["local_shell", "local_shell_beside_dedicated_workers", "dedicated_worker_shell"],
+)
+def test_the_instruction_runs_without_the_agent_shell_environment(
+    tmp_path: Path,
+    execution_mode: str,
+    worker_backend: str,
+    shell_in_worker: bool,
+) -> None:
+    """The instruction names the script where the agent's shell finds it, so a task in a fresh tmux session runs it."""
+    worker_storage = tmp_path / "worker-storage"
+    process_env = {
+        "MINDROOM_SANDBOX_EXECUTION_MODE": execution_mode,
+        "MINDROOM_WORKER_BACKEND": worker_backend,
+        "MINDROOM_DOCKER_WORKER_IMAGE": "worker:test",
+        "MINDROOM_DOCKER_WORKER_STORAGE_MOUNT_PATH": str(worker_storage),
+    }
+    context = _context(tmp_path, process_env=process_env)
+    with tool_runtime_context(context):
+        payload = _payload(CallbackManagerTools().mint_callback("background callback"))
+    script_path = Path(payload["script_path"])
+    assert script_path.is_relative_to(worker_storage) == shell_in_worker
+    if shell_in_worker:
+        # The instruction names the script where the worker's mount planner puts the workspace.
+        [mount] = plan_scoped_workspace_mounts(
+            worker_key=resolve_unscoped_worker_key("coder"),
+            local_shared_storage_root=context.runtime_paths.storage_root,
+            worker_visible_shared_storage_root=worker_storage,
+            private_agent_names=frozenset(),
+            resolved_agent_policies=context.config.get_agent_policies(),
+        )
+        assert script_path.parent.parent.parent == mount.worker_visible_path
+        # The worker sees the workspace only below its own storage mount, never at the primary's path.
+        shutil.copytree(context.runtime_paths.storage_root, worker_storage)
+        shutil.rmtree(context.runtime_paths.storage_root)
+    # Like a fresh tmux session, the task inherits none of the agent shell's variables, which tests may run inside.
+    env = {name: value for name, value in os.environ.items() if name != "MINDROOM_AGENT_WORKSPACE"}
+
+    assert _run_instruction(tmp_path, payload["instruction"], env) == "MindRoom notified."
+    assert not script_path.exists()
+
+
+def test_a_local_shell_mints_beside_an_unconfigured_worker_backend(tmp_path: Path) -> None:
+    """Only a worker shell needs the worker backend's settings to name the script."""
+    process_env = {"MINDROOM_SANDBOX_EXECUTION_MODE": "off", "MINDROOM_WORKER_BACKEND": "docker"}
+    with tool_runtime_context(_context(tmp_path, process_env=process_env)):
+        payload = _payload(CallbackManagerTools().mint_callback("local callback"))
+
+    assert payload["status"] == "ok"
+    assert Path(payload["script_path"]).is_relative_to(_workspace(tmp_path))
+
+
+def test_a_worker_shell_with_an_unconfigured_backend_mints_nothing(tmp_path: Path) -> None:
+    """When the worker's path cannot be named, no record or token-bearing script is left behind."""
+    process_env = {"MINDROOM_SANDBOX_EXECUTION_MODE": "all", "MINDROOM_WORKER_BACKEND": "docker"}
+    with tool_runtime_context(_context(tmp_path, process_env=process_env)):
+        payload = _payload(CallbackManagerTools().mint_callback("worker callback"))
+
+    assert payload["status"] == "error"
+    assert "MINDROOM_DOCKER_WORKER_IMAGE" in payload["message"]
+    assert ExternalTriggerStore(_runtime_paths(tmp_path)).list_records() == []
+    assert not (_workspace(tmp_path) / ".mindroom" / "callbacks").exists()
 
 
 def test_script_failure_rolls_back_record(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

@@ -65,7 +65,6 @@ def _manager(root: Path, *, chunk_size: int = _CHUNK_SIZE, chunk_overlap: int = 
     config = bind_runtime_paths(
         Config(
             agents={"helper": AgentConfig(display_name="Helper", knowledge_bases=["docs"])},
-            models={},
             memory={},
             knowledge_bases={
                 "docs": KnowledgeBaseConfig(

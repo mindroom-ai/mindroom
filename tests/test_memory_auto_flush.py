@@ -7,6 +7,7 @@ import json
 import threading
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, cast
+from unittest.mock import patch
 
 import pytest
 from structlog.testing import capture_logs
@@ -20,7 +21,8 @@ from mindroom.llm.errors import ModelSafeguardRefusal, ProviderError
 from mindroom.llm.messages import Message
 from mindroom.llm.runs import RunRecord, RunStatus
 from mindroom.llm.usage import MessageMetrics
-from mindroom.memory import MemoryAutoFlushWorker, add_agent_memory, auto_flush
+from mindroom.memory import MemoryAutoFlushService, add_agent_memory, auto_flush
+from mindroom.memory.auto_flush import _MemoryAutoFlushWorker
 from mindroom.memory.functions import append_agent_daily_memory
 from mindroom.prompt_message_tags import render_msg_tag
 from mindroom.session_storage.agent_storage import create_session_storage
@@ -41,6 +43,7 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from mindroom.history.session_runs import RedactedEventIds
+    from mindroom.session_storage.store import ConversationStore
 
 T0 = 1_760_000_000
 ROOM = "!room:example.org"
@@ -185,8 +188,8 @@ def _worker(
     config: Config,
     clock: _Clock,
     redacted_event_ids: RedactedEventIds = _no_redactions,
-) -> MemoryAutoFlushWorker:
-    return MemoryAutoFlushWorker(
+) -> _MemoryAutoFlushWorker:
+    return _MemoryAutoFlushWorker(
         runtime_paths=runtime_paths_for(config),
         config_provider=lambda: config,
         redacted_event_ids=redacted_event_ids,
@@ -225,7 +228,7 @@ async def _started(
     config: Config,
     clock: _Clock | None = None,
     redacted_event_ids: RedactedEventIds = _no_redactions,
-) -> MemoryAutoFlushWorker:
+) -> _MemoryAutoFlushWorker:
     """Return a worker whose first pass ran at T0, which starts auto-flush, with its clock moved past every seeded turn."""
     clock = _Clock() if clock is None else clock
     worker = _worker(config, clock, redacted_event_ids)
@@ -838,9 +841,9 @@ async def test_budgets_cap_each_pass_and_each_agent_and_passes_take_turns(
     listed: list[str] = []
     real_updated_sessions = auto_flush.updated_sessions
 
-    def updated_sessions(storage: object, agent_name: str, *, since: int) -> list[tuple[str, int]]:
-        listed.append(agent_name)
-        return real_updated_sessions(storage, agent_name, since=since)
+    def updated_sessions(storage: ConversationStore, *, since: int) -> list[tuple[str, int]]:
+        listed.append(storage.names.storage_name)
+        return real_updated_sessions(storage, since=since)
 
     monkeypatch.setattr(auto_flush, "updated_sessions", updated_sessions)
     await worker._run_cycle(config)
@@ -1167,3 +1170,31 @@ def test_extractor_output_becomes_one_line_of_distinct_facts() -> None:
 
     assert auto_flush._sanitize_extractor_output(raw, "NO_REPLY") == "Atlas ships Friday. | Priya owns QA."
     assert auto_flush._sanitize_extractor_output("  no_reply \n", "NO_REPLY") is None
+
+
+@pytest.mark.asyncio
+async def test_service_runs_one_worker_while_auto_flush_is_enabled(tmp_path: Path) -> None:
+    """Enabling starts one worker that reads redactions through the service; disabling cancels its pass at once."""
+    config = _config(tmp_path)
+    service = MemoryAutoFlushService(
+        runtime_paths=runtime_paths_for(config),
+        config_provider=lambda: config,
+        redacted_event_ids=_no_redactions,
+    )
+    started = asyncio.Event()
+    workers: list[_MemoryAutoFlushWorker] = []
+
+    async def pass_that_never_ends(worker: _MemoryAutoFlushWorker) -> None:
+        workers.append(worker)
+        started.set()
+        await asyncio.Event().wait()
+
+    with patch.object(_MemoryAutoFlushWorker, "run", pass_that_never_ends):
+        await service.sync(config)
+        await asyncio.wait_for(started.wait(), timeout=5)
+        await service.sync(config)
+        await asyncio.wait_for(service.sync(_config(tmp_path, enabled=False)), timeout=5)
+
+    [worker] = workers
+    assert worker.redacted_event_ids is _no_redactions
+    assert not service._loop.running

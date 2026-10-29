@@ -1,11 +1,9 @@
-"""Exact redaction tombstones survive an interrupted response and its recovery."""
+"""A redaction admitted for an agent survives an interrupted response and its recovery."""
 
 from __future__ import annotations
 
 import asyncio
 import inspect
-import json
-import threading
 from dataclasses import replace
 from typing import TYPE_CHECKING
 from unittest.mock import MagicMock
@@ -13,37 +11,48 @@ from unittest.mock import MagicMock
 import nio
 import pytest
 
+from mindroom.bot import AgentBot
 from mindroom.dispatch_callback_outcome import TurnDispatchOutcome
-from mindroom.event_journal import DeliveryStage, EventClass, EventKind, journal
-from mindroom.handled_turns import TurnRecord, TurnRecordCodec, _reset_handled_turn_ledger_runtime
+from mindroom.event_journal import DeliveryStage, EventClass, EventKind
 from mindroom.history.types import HistoryScope
 from mindroom.llm.messages import Message
 from mindroom.llm.runs import RunRecord
-from mindroom.matrix.journal_ingress import replayable_redaction_target
 from mindroom.message_target import MessageTarget
+from mindroom.reply_scope import ReplyRuntime
 from mindroom.response_runner import ResponseRunner
-from mindroom.session_storage.agent_storage import create_state_storage
+from mindroom.session_storage.agent_storage import create_agent_state_storage
 from mindroom.session_storage.types import ConversationSession
-from mindroom.turn_store import TurnStore
+from mindroom.turn_record import TurnRecord
+from mindroom.turn_store import TurnClaim, TurnStore
 from tests.conftest import seed_session
 from tests.journal_helpers import admit_dispatch_event
 from tests.redaction_helpers import remove_redacted_history_like_next_response
 from tests.test_orderly_shutdown_recovery import _dispatcher
-from tests.test_response_delivery_gateway import _response_recovery_bot
-from tests.test_turn_store import _next_request, _seeded_storage, _store, _store_with_storage
+from tests.test_turn_store import _in_room, _next_request, _seeded_storage, _store, _store_with_storage
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
     from pathlib import Path
 
-    from mindroom.event_journal import EventJournalStore, JournalEvent
-    from mindroom.event_journal.backend import Transaction
+    from mindroom.event_journal import EventJournalStore
     from mindroom.session_storage.store import ConversationStore
 
 ROOM = "!redaction:localhost"
 SOURCE = "$deleted"
 REDACTION = "$redaction"
-pytestmark = pytest.mark.ledger_loads_from_disk
+
+
+def _redaction_callback_bot(journal_store: EventJournalStore) -> AgentBot:
+    """Return the minimal bot whose redaction callback these tests hand the journal dispatcher."""
+    bot = object.__new__(AgentBot)
+    # No reply runs here, so a deletion ends none and nothing owes debt.
+    bot._reply_runtime = ReplyRuntime(
+        store=journal_store.principal("agent@alice"),
+        entity_name="agent",
+        generation="gen-1",
+        retry_sources=lambda _room_id, _sources: None,
+        approval_ended=lambda _ended: None,
+    )
+    return bot
 
 
 def _message(event_id: str = SOURCE, body: str = "deleted prompt") -> nio.RoomMessageText:
@@ -76,13 +85,13 @@ def _redaction(target: str = SOURCE) -> nio.RedactionEvent:
 
 
 @pytest.mark.asyncio
-async def test_pending_redaction_owns_interrupted_initial_response(  # noqa: PLR0915
+async def test_a_redaction_admitted_during_an_interrupted_reply_releases_its_source(
     journal_store: EventJournalStore,
 ) -> None:
-    """Admission retires generation while the replayable callback still owns cleanup."""
+    """Admission deletes the source and retires its generation; its callback only ends what the deletion ended."""
     principal = journal_store.principal("agent@alice")
     store = await _store(journal_store)
-    bot = _response_recovery_bot(journal_store, store)
+    bot = _redaction_callback_bot(journal_store)
     dispatcher = _dispatcher(principal, MagicMock())
     dispatcher.callbacks = replace(dispatcher.callbacks, on_redaction=bot._on_redaction)
     room = nio.MatrixRoom(ROOM, "@bot:localhost")
@@ -112,20 +121,19 @@ async def test_pending_redaction_owns_interrupted_initial_response(  # noqa: PLR
         delivered_projections=(),
     )
     started = asyncio.Event()
+    claim = await store.claim(turn)
+    assert isinstance(claim, TurnClaim)
 
     async def generate() -> None:
-        assert store.try_claim_turn(turn)
         started.set()
-        try:
-            await asyncio.Event().wait()
-        finally:
-            store.release_pending_turn_claim(turn)
+        await asyncio.Event().wait()
 
     runner = ResponseRunner(deps=MagicMock())
-    response = runner.track_inbox_response(
+    response = runner.inbox.track_inbox_response(
         generate(),
         name="inbox_response:deleted",
-        recovery_proof_ready=lambda: bot._response_recovery_ready(turn),
+        recovery_proof_ready=lambda: store.response_recovery_ready(turn),
+        claim=claim,
         source_event_ids=turn.source_event_ids,
         room_id=ROOM,
     )
@@ -134,7 +142,7 @@ async def test_pending_redaction_owns_interrupted_initial_response(  # noqa: PLR
         await admit_dispatch_event(dispatcher, room, _redaction(), EventKind.REDACTION, EventClass.ACTIONABLE)
         assert not await principal.is_pending(SOURCE)
         assert await principal.is_pending(REDACTION)
-        proof = runner._inbox_response_tasks[response].recovery_proof_ready
+        proof = runner.inbox._inbox_response_tasks[response].recovery_proof_ready
         pending_proof = proof()
         assert inspect.isawaitable(pending_proof)
         assert not await pending_proof
@@ -145,16 +153,12 @@ async def test_pending_redaction_owns_interrupted_initial_response(  # noqa: PLR
         assert inspect.isawaitable(terminal_proof)
         assert await terminal_proof, "exact pending redaction cleanup must release the interrupted source"
         assert await principal.load_matrix_delivery(delivery_id=SOURCE, stage=DeliveryStage.FINAL) is None
-        incomplete = store.get_turn_record(SOURCE)
-        assert incomplete is not None
-        assert not incomplete.completed
-        assert incomplete.redacted_source_event_ids == ()
-        assert await dispatcher.drain_once() == 1
-        redacted = store.get_turn_record(SOURCE)
+        redacted = await store.get_turn_record(SOURCE)
         assert redacted is not None
         assert not redacted.completed
-        assert redacted.redacted_source_event_ids == (SOURCE,)
+        assert await store.deleted_sources(redacted) == {SOURCE}
         assert not redacted.source_event_prompts
+        assert await dispatcher.drain_once() == 1
         assert not await principal.is_pending(REDACTION)
     finally:
         response.cancel()
@@ -175,7 +179,7 @@ async def test_restart_survivor_cleans_pending_redaction_before_generation(  # n
     store = await _store(journal_store)
 
     def storage_factory(*_args: object, **_kwargs: object) -> ConversationStore:
-        return create_state_storage("agent", tmp_path)
+        return create_agent_state_storage("agent", tmp_path)
 
     store.deps.state_writer.create_storage.side_effect = storage_factory
     store.deps.state_writer.history_scope.return_value = scope
@@ -202,33 +206,34 @@ async def test_restart_survivor_cleans_pending_redaction_before_generation(  # n
         history_scope=scope,
         source_event_prompts={SOURCE: "deleted prompt", "$survivor": "keep prompt"},
     )
-    await store.record_pending_turn(turn)
+    pending = await store.record_pending_turn(turn)
+    assert pending is not None
+    stored = pending.record
+    assert stored.turn_key is not None
     await admit_dispatch_event(initial_dispatcher, room, _redaction(), EventKind.REDACTION, EventClass.ACTIONABLE)
-    assert await _response_recovery_bot(journal_store, store)._response_recovery_ready(turn)
-    _reset_handled_turn_ledger_runtime()
+    assert await store.response_recovery_ready(turn)
     reopened = TurnStore(store.deps)
     await reopened.warm()
-    bot = _response_recovery_bot(journal_store, reopened)
+    bot = _redaction_callback_bot(journal_store)
     requests: list[str] = []
     survivor_delivered = asyncio.Event()
 
     async def survivor(_room: nio.MatrixRoom, event: nio.RoomMessageFormatted) -> TurnDispatchOutcome:
         assert event.event_id == "$survivor"
-        assert not await reopened.prepare_pending_response_source(
+        preparation = await reopened.prepare_pending_response_source(
             target=target,
             source_event_ids=("$survivor",),
-            terminal_source_event_ids=(),
         )
+        assert preparation.invalid == ()
         recovered_storage = storage_factory()
         await remove_redacted_history_like_next_response(reopened, target, recovered_storage, scope=scope)
         requests.append(_next_request(recovered_storage, target.session_id, scope, event.body))
-        await principal.enqueue_matrix_delivery(
+        await principal.enqueue_final_answer(
             delivery_id="$survivor",
-            stage=DeliveryStage.FINAL,
             room_id=ROOM,
             thread_id="$thread",
             payload={"msgtype": "m.text", "body": "captured"},
-            settle_source_event_ids=("$survivor",),
+            turn_key=stored.turn_key,
         )
         survivor_delivered.set()
         return TurnDispatchOutcome.DEFERRED
@@ -250,36 +255,33 @@ async def test_restart_survivor_cleans_pending_redaction_before_generation(  # n
     assert not await principal.is_pending("$survivor")
     assert not await principal.is_pending(REDACTION)
     assert await principal.load_matrix_delivery(delivery_id="$survivor", stage=DeliveryStage.FINAL) is not None
-    redacted = reopened.get_turn_record(SOURCE)
+    redacted = await reopened.get_turn_record(SOURCE)
     assert redacted is not None
-    assert SOURCE in redacted.redacted_source_event_ids
+    assert SOURCE in await reopened.deleted_sources(redacted)
     assert redacted.source_event_prompts == {"$survivor": "keep prompt"}
-    assert not await reopened.prepare_pending_response_source(
+    preparation = await reopened.prepare_pending_response_source(
         target=target,
         source_event_ids=("$next",),
-        terminal_source_event_ids=(),
     )
+    assert preparation.invalid == ()
     storage = storage_factory()
-    persisted = storage.load_session(target.session_id, "agent")
+    persisted = storage.load_session(target.session_id)
     assert persisted is not None
     assert "deleted prompt" not in str([run.messages for run in persisted.runs or []])
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("late_registration", [False, True])
-@pytest.mark.parametrize(
-    "fault",
-    ["none", "unredacted_late", "missing_ledger", "corrupt_ledger", "wrong_room", "missing_context"],
-)
-async def test_completed_redaction_requires_current_tombstone_authority(
+@pytest.mark.parametrize("fault", ["none", "missing_source", "missing_redaction", "wrong_room", "missing_context"])
+async def test_a_redaction_proves_recovery_only_for_a_settled_source_in_its_own_room(
     journal_store: EventJournalStore,
     late_registration: bool,
     fault: str,
 ) -> None:
-    """The ledger tombstone in the source's room proves the redaction before and after late registration."""
+    """The agent's redaction of a source, in the room the turn names, is what hands a settled source off."""
     principal = journal_store.principal("agent@alice")
     store = await _store(journal_store)
-    bot = _response_recovery_bot(journal_store, store)
+    bot = _redaction_callback_bot(journal_store)
     dispatcher = _dispatcher(principal, MagicMock())
     dispatcher.callbacks = replace(dispatcher.callbacks, on_redaction=bot._on_redaction)
     room = nio.MatrixRoom(ROOM, "@bot:localhost")
@@ -298,104 +300,26 @@ async def test_completed_redaction_requires_current_tombstone_authority(
     assert await dispatcher.drain_once() == 1
     if late_registration:
         await store.record_pending_turn(turn)
-    current = store.get_turn_record(SOURCE)
+    current = await store.get_turn_record(SOURCE)
     assert current is not None
     assert not current.completed
-    assert current.redacted_source_event_ids == (SOURCE,)
+    assert await store.deleted_sources(current) == {SOURCE}
     assert not current.source_event_prompts
-    if fault == "missing_ledger":
-        await journal_store.backend.write(
-            lambda transaction: transaction.execute("DELETE FROM turn_records WHERE index_event_id = ?", (SOURCE,)),
-        )
-    elif fault != "none":
-        raw = TurnRecordCodec._to_ledger_record(turn if fault == "unredacted_late" else current)
-        if fault == "wrong_room":
-            raw = TurnRecordCodec._to_ledger_record(
-                replace(current, conversation_target=MessageTarget.resolve("!other:localhost", "$thread", SOURCE)),
-            )
-        elif fault == "missing_context":
-            raw = TurnRecordCodec._to_ledger_record(replace(current, conversation_target=None))
-        encoded = "{" if fault == "corrupt_ledger" else json.dumps(raw)
-        await journal_store.backend.write(
-            lambda transaction: transaction.execute(
-                "UPDATE turn_records SET record_json = ? WHERE index_event_id = ?",
-                (encoded, SOURCE),
-            ),
-        )
-    # History cleanup no longer depends on the record's conversation context, so losing it changes nothing.
-    assert await bot._response_recovery_ready(turn) is (fault in {"none", "missing_context"})
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize(
-    "case",
-    [
-        "missing_source",
-        "bare_tombstone",
-        "wrong_principal",
-        "wrong_room",
-        "wrong_kind",
-        "wrong_target",
-        "wrong_event_id",
-        "malformed",
-        "unreplayable",
-        "bad_security",
-        "context_only",
-    ],
-)
-async def test_redaction_proof_rejects_inexact_callback_debt(journal_store: EventJournalStore, case: str) -> None:
-    """Pending cleanup counts only when the exact retained callback can perform it."""
-    principal = journal_store.principal("agent@alice")
-    store = await _store(journal_store)
-    bot = _response_recovery_bot(journal_store, store)
-    dispatcher = _dispatcher(principal, MagicMock())
-    room = nio.MatrixRoom(ROOM, "@bot:localhost")
-    await admit_dispatch_event(dispatcher, room, _message(), EventKind.MESSAGE, EventClass.ACTIONABLE)
-    turn = TurnRecord.create([SOURCE], completed=False)
-    await store.record_pending_turn(turn)
-    await admit_dispatch_event(
-        dispatcher,
-        room,
-        _redaction(),
-        EventKind.REDACTION,
-        EventClass.CONTEXT_ONLY if case == "context_only" else EventClass.ACTIONABLE,
-    )
-    if case == "missing_source":
+    captured = turn
+    if fault == "missing_source":
         await journal_store.backend.write(
             lambda transaction: transaction.execute("DELETE FROM journal_events WHERE event_id = ?", (SOURCE,)),
         )
-    elif case == "bare_tombstone":
-        await principal.settle(REDACTION)
-    elif case in {"wrong_principal", "wrong_room", "wrong_kind"}:
-        column, value = {
-            "wrong_principal": ("principal_id", "agent@other"),
-            "wrong_room": ("room_id", "!other:localhost"),
-            "wrong_kind": ("kind", "message"),
-        }[case]
+    elif fault == "missing_redaction":
         await journal_store.backend.write(
-            lambda transaction: transaction.execute(
-                f"UPDATE journal_events SET {column} = ? WHERE event_id = ?",  # noqa: S608 - fixed column allowlist
-                (value, REDACTION),
-            ),
+            lambda transaction: transaction.execute("DELETE FROM event_redactions WHERE event_id = ?", (SOURCE,)),
         )
-    elif case != "context_only":
-        payload = dict(_redaction().source)
-        if case == "wrong_target":
-            payload["redacts"] = "$other"
-        elif case == "wrong_event_id":
-            payload["event_id"] = "$other"
-        elif case == "unreplayable":
-            payload.pop("sender")
-        elif case == "bad_security":
-            payload["io.mindroom.dispatch_recovery_security"] = "invalid"
-        source_json = "{" if case == "malformed" else json.dumps(payload)
-        await journal_store.backend.write(
-            lambda transaction: transaction.execute(
-                "UPDATE journal_events SET source_json = ? WHERE event_id = ?",
-                (source_json, REDACTION),
-            ),
-        )
-    assert not await bot._response_recovery_ready(turn)
+    elif fault == "wrong_room":
+        captured = replace(turn, conversation_target=MessageTarget.resolve("!other:localhost", "$thread", SOURCE))
+    elif fault == "missing_context":
+        captured = replace(turn, conversation_target=None)
+    # History cleanup does not depend on the record's conversation context, so losing it changes nothing.
+    assert await store.response_recovery_ready(captured) is (fault in {"none", "missing_context"})
 
 
 @pytest.mark.asyncio
@@ -407,85 +331,31 @@ async def test_mixed_response_needs_independent_ownership_for_every_source(
     """A pending survivor cannot excuse an unrelated settled sibling."""
     principal = journal_store.principal("agent@alice")
     store = await _store(journal_store)
-    bot = _response_recovery_bot(journal_store, store)
     dispatcher = _dispatcher(principal, MagicMock())
     room = nio.MatrixRoom(ROOM, "@bot:localhost")
     sources = (SOURCE, "$survivor", "$uncovered") if uncovered_sibling else (SOURCE, "$survivor")
     for source in sources:
         await admit_dispatch_event(dispatcher, room, _message(source), EventKind.MESSAGE, EventClass.ACTIONABLE)
-    turn = TurnRecord.create(sources, completed=False)
+    turn = _in_room(TurnRecord.create(sources, completed=False), ROOM)
     await store.record_pending_turn(turn)
     await admit_dispatch_event(dispatcher, room, _redaction(), EventKind.REDACTION, EventClass.ACTIONABLE)
     if uncovered_sibling:
         await principal.settle("$uncovered")
-    assert await bot._response_recovery_ready(turn) is not uncovered_sibling
+    assert await store.response_recovery_ready(turn) is not uncovered_sibling
     assert await principal.is_pending("$survivor")
     assert await principal.is_pending(REDACTION)
 
 
 @pytest.mark.asyncio
-async def test_redaction_callback_settlement_cannot_split_recovery_snapshot(
-    journal_store: EventJournalStore,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """One read sees pending cleanup or its committed marker across the callback transition."""
-    principal = journal_store.principal("agent@alice")
-    store = await _store(journal_store)
-    bot = _response_recovery_bot(journal_store, store)
-    dispatcher = _dispatcher(principal, MagicMock())
-    dispatcher.callbacks = replace(dispatcher.callbacks, on_redaction=bot._on_redaction)
-    room = nio.MatrixRoom(ROOM, "@bot:localhost")
-    await admit_dispatch_event(dispatcher, room, _message(), EventKind.MESSAGE, EventClass.ACTIONABLE)
-    turn = TurnRecord.create([SOURCE], completed=False)
-    await store.record_pending_turn(turn)
-    await admit_dispatch_event(dispatcher, room, _redaction(), EventKind.REDACTION, EventClass.ACTIONABLE)
-    records_read = threading.Event()
-    callback_settled = threading.Event()
-    original = journal.source_has_redaction_handoff
-
-    def interleave(
-        transaction: Transaction,
-        principal_id: str,
-        event_id: str,
-        captured: TurnRecord,
-        current: TurnRecord | None,
-        redaction_target: Callable[[JournalEvent], str | None],
-    ) -> bool:
-        records_read.set()
-        assert callback_settled.wait(5), "callback did not settle while recovery retained its snapshot"
-        return original(transaction, principal_id, event_id, captured, current, redaction_target)
-
-    monkeypatch.setattr(journal, "source_has_redaction_handoff", interleave)
-    reading = asyncio.create_task(
-        principal.response_recovery_state(
-            turn_record=turn,
-            agent_name="agent",
-            redaction_target=replayable_redaction_target,
-        ),
-    )
-    try:
-        assert await asyncio.to_thread(records_read.wait, 5)
-        assert await dispatcher.drain_once() == 1
-        assert not await principal.is_pending(REDACTION)
-    finally:
-        callback_settled.set()
-    snapshot = await reading
-    assert snapshot.redacted_sources == (True,)
-    assert snapshot.turn_records[0] is not None
-    assert snapshot.turn_records[0].redacted_source_event_ids == ()
-    assert await bot._response_recovery_ready(turn)
-
-
-@pytest.mark.asyncio
 @pytest.mark.parametrize("deleted_id", [SOURCE, "$alias", "$revision"])
-@pytest.mark.parametrize("scope", ["exact", "other_room", "other_principal"])
-async def test_cleanup_gate_reconciles_only_its_recorded_physical_tombstones(
+@pytest.mark.parametrize("scope", ["exact", "other_room", "other_login"])
+async def test_a_redaction_is_read_for_its_room_by_every_login_of_the_agent(
     journal_store: EventJournalStore,
     tmp_path: Path,
     deleted_id: str,
     scope: str,
 ) -> None:
-    """The batched lookup covers physical source aliases and revisions within exact scope."""
+    """The batched lookup covers a source, its alias, and its revision in their room, whichever login saw it."""
     principal = journal_store.principal("agent@alice")
     store = await _store_with_storage(journal_store, _seeded_storage(tmp_path))
     target = MessageTarget.resolve(ROOM, "$thread", SOURCE)
@@ -500,7 +370,7 @@ async def test_cleanup_gate_reconciles_only_its_recorded_physical_tombstones(
             conversation_target=target,
         ),
     )
-    callback_owner = journal_store.principal("agent@other") if scope == "other_principal" else principal
+    callback_owner = journal_store.principal("agent@other") if scope == "other_login" else principal
     room_id = "!other:localhost" if scope == "other_room" else ROOM
     await admit_dispatch_event(
         _dispatcher(callback_owner, MagicMock()),
@@ -510,12 +380,11 @@ async def test_cleanup_gate_reconciles_only_its_recorded_physical_tombstones(
         EventClass.CONTEXT_ONLY,
     )
     requested = (*tuple(f"$absent-{index}" for index in range(300)), deleted_id)
-    assert await principal.redacted_event_ids(ROOM, requested) == (
-        frozenset({deleted_id}) if scope == "exact" else frozenset()
-    )
-    assert not await store.prepare_pending_response_source(
+    expected = frozenset() if scope == "other_room" else frozenset({deleted_id})
+    assert await store.redacted_event_ids(ROOM, requested) == expected
+    preparation = await store.prepare_pending_response_source(
         target=target,
         source_event_ids=("$later",),
-        terminal_source_event_ids=(),
     )
-    assert store._is_revision_redacted(deleted_id) is (scope == "exact")
+    assert preparation.invalid == ()
+    assert await store.redacted_event_ids(ROOM, (deleted_id,)) == expected

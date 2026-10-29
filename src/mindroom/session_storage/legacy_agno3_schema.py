@@ -42,6 +42,18 @@ _SESSION_COLUMN_TYPES = {
     "created_at": "BIGINT NOT NULL",
     "updated_at": "BIGINT",
 }
+# The sessions columns the conversion reads or keeps, besides the Agno-era steps' own; it drops the others unread.
+READ_SESSION_COLUMNS = (
+    "session_id",
+    "session_type",
+    "agent_id",
+    "team_id",
+    "user_id",
+    "session_data",
+    "metadata",
+    "created_at",
+    "updated_at",
+)
 _RUNS_INDEXED_COLUMNS = (
     "session_id",
     "run_type",
@@ -183,6 +195,7 @@ def delete_run_subtrees_in_transaction(
 
 __all__ = [
     "AGNO_SCHEMA_VERSIONS_TABLE",
+    "READ_SESSION_COLUMNS",
     "AgnoTableNames",
     "agno_runs_sql",
     "agno_schema_sql",

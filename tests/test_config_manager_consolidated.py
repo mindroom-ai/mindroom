@@ -28,6 +28,7 @@ from mindroom.mcp.config import MCPServerConfig
 from mindroom.message_target import MessageTarget
 from mindroom.oauth.google_drive import google_drive_oauth_provider
 from mindroom.oauth.service import lookup_oauth_connect_token
+from mindroom.tool_system.agent_tools import resolve_agent_tools
 from mindroom.tool_system.metadata import _AUTHORED_OVERRIDE_INHERIT
 from mindroom.tool_system.runtime_context import ToolRuntimeContext, tool_runtime_context
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity, WorkerScope, resolve_worker_key
@@ -38,9 +39,13 @@ from tests.conftest import (
     load_config_yaml,
     make_conversation_reader_mock,
     make_relation_lookup,
+    test_runtime_paths,
     write_config_yaml,
 )
 from tests.identity_helpers import persist_entity_accounts
+from tests.test_generated_agents import BASE as GENERATED_BASE
+from tests.test_generated_agents import _created as created_entry
+from tests.test_generated_agents import _load as load_generated
 
 
 def _minimal_config_path(tmp_path: Path) -> Path:
@@ -159,6 +164,7 @@ def test_membership_config_mutations_require_platform_administrator(
     config = Config.model_validate(
         {
             "administrators": ["@admin:example.org"],
+            "models": {"default": {"provider": "openai", "id": "test-model"}},
             "agents": {
                 "talent": {
                     "display_name": "Talent",
@@ -198,6 +204,7 @@ def test_membership_platform_administrator_can_mutate_full_config(tmp_path: Path
     config = Config.model_validate(
         {
             "administrators": ["@admin:example.org"],
+            "models": {"default": {"provider": "openai", "id": "test-model"}},
             "agents": {
                 "talent": {
                     "display_name": "Talent",
@@ -233,6 +240,30 @@ def test_membership_platform_administrator_can_mutate_full_config(tmp_path: Path
     assert "Successfully created team" in team_result
 
 
+def test_manage_agent_refuses_to_change_a_created_agent(tmp_path: Path) -> None:
+    """A created agent lives in the roster, so saving the config would drop the change; its owners use update_agent."""
+    paths = test_runtime_paths(tmp_path)
+    data = GENERATED_BASE | {"administrators": ["@admin:example.org"]}
+    config = load_generated(tmp_path, data, created=[created_entry()])
+    paths.config_path.write_text(yaml.safe_dump(data), encoding="utf-8")
+    original = paths.config_path.read_text(encoding="utf-8")
+    config_manager = ConfigManagerTools(paths)
+
+    with tool_runtime_context(_caller_context(config_manager, config, requester_id="@admin:example.org")):
+        update_result = config_manager.manage_agent(operation="update", agent_name="creator_research", role="Changed")
+        remove_result = config_manager.manage_config(
+            operation="patch",
+            changes=[{"op": "remove", "path": "/agents/creator_research"}],
+        )
+
+    assert (
+        "agents.creator_research was created by another agent; its owners change it with update_agent" in update_result
+    )
+    assert "Successfully" not in update_result
+    assert remove_result.startswith("Error:")
+    assert paths.config_path.read_text(encoding="utf-8") == original
+
+
 def test_config_mutation_without_requester_context_fails_closed(tmp_path: Path) -> None:
     """Direct tool execution without a requester must never inherit administrative authority."""
     config_path = tmp_path / "config.yaml"
@@ -240,6 +271,7 @@ def test_config_mutation_without_requester_context_fails_closed(tmp_path: Path) 
         Config.model_validate(
             {
                 "administrators": ["@admin:example.org"],
+                "models": {"default": {"provider": "openai", "id": "test-model"}},
                 "agents": {"talent": {"display_name": "Talent", "role": "Original"}},
             },
         ),
@@ -721,8 +753,8 @@ class TestConsolidatedConfigManager:
         assert "not_a_field" in result
         assert config_path.read_bytes() == original
 
-    def test_manage_config_preserves_tool_overrides_and_runtime_overlay(self, tmp_path: Path) -> None:
-        """Unrelated patches must preserve authored overrides without persisting runtime overlays."""
+    def test_manage_config_preserves_tool_overrides_without_saving_approved_egress(self, tmp_path: Path) -> None:
+        """Unrelated patches must preserve authored overrides without saving the approved-egress switch's tool or rule."""
         config_path = tmp_path / "config.yaml"
         write_config_yaml(
             Config(
@@ -773,7 +805,7 @@ class TestConsolidatedConfigManager:
         """Initialization should preserve the explicitly provided config path."""
         with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as f:
             config_path = Path(f.name)
-            config = Config(agents={})
+            config = Config(agents={}, models={"default": {"provider": "openai", "id": "test-model"}})
             config.agents["test"] = AgentConfig(
                 display_name="Test Agent",
                 role="Test role",
@@ -794,7 +826,7 @@ class TestConsolidatedConfigManager:
         """Test get_info with agents info type."""
         with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as f:
             config_path = Path(f.name)
-            config = Config(agents={})
+            config = Config(agents={}, models={"default": {"provider": "openai", "id": "test-model"}})
             config.agents["test"] = AgentConfig(
                 display_name="Test Agent",
                 role="Test role",
@@ -921,6 +953,7 @@ class TestConsolidatedConfigManager:
                     "agent2": AgentConfig(display_name="Agent Two"),
                 },
                 teams={},
+                models={"default": {"provider": "openai", "id": "test-model"}},
             )
             config.teams["test_team"] = TeamConfig(
                 display_name="Test Team",
@@ -1036,7 +1069,7 @@ class TestConsolidatedConfigManager:
         """Test manage_agent with create operation."""
         with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as f:
             config_path = Path(f.name)
-            config = Config(agents={})
+            config = Config(agents={}, models={"default": {"provider": "openai", "id": "test-model"}})
             write_config_yaml(config, config_path)
 
         try:
@@ -1065,6 +1098,7 @@ class TestConsolidatedConfigManager:
         write_config_yaml(
             Config(
                 agents={"agent1": AgentConfig(display_name="Agent 1", role="Original")},
+                models={"default": {"provider": "openai", "id": "test-model"}},
             ),
             config_path,
         )
@@ -1460,7 +1494,7 @@ class TestConsolidatedConfigManager:
         """Agent create should accept preset entries in tools."""
         with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as f:
             config_path = Path(f.name)
-            config = Config(agents={})
+            config = Config(agents={}, models={"default": {"provider": "openai", "id": "test-model"}})
             write_config_yaml(config, config_path)
 
         try:
@@ -1476,7 +1510,7 @@ class TestConsolidatedConfigManager:
 
             config = load_config_yaml(config_path)
             assert config.agents["test_agent"].tool_names == ["openclaw_compat"]
-            effective = config.resolve_entity("test_agent").available_tools
+            effective = config.resolve_agent("test_agent").tools.tool_names
             assert effective[0] == "openclaw_compat"
             assert "shell" in effective
             assert "matrix_message" in effective
@@ -1601,7 +1635,7 @@ class TestConsolidatedConfigManager:
         """Test manage_agent with update operation."""
         with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as f:
             config_path = Path(f.name)
-            config = Config(agents={})
+            config = Config(agents={}, models={"default": {"provider": "openai", "id": "test-model"}})
             config.agents["test_agent"] = AgentConfig(
                 display_name="Old Name",
                 role="Old role",
@@ -1629,6 +1663,7 @@ class TestConsolidatedConfigManager:
         """Mixed string and mapping syntax should normalize and merge defaults with agent overrides."""
         config = Config.validate_with_runtime(
             {
+                "models": {"default": {"provider": "openai", "id": "test-model"}},
                 "defaults": {
                     "tools": [
                         "scheduler",
@@ -1651,7 +1686,7 @@ class TestConsolidatedConfigManager:
         assert config.defaults.tool_names == ["scheduler", "shell"]
         assert config.agents["code"].tool_names == ["file", "shell"]
 
-        resolved = config.resolve_entity("code").tool_configs
+        resolved = config.resolve_agent("code").tools.authored
         assert [entry.name for entry in resolved[:3]] == ["file", "shell", "scheduler"]
         resolved_shell = next(entry for entry in resolved if entry.name == "shell")
         assert resolved_shell.tool_config_overrides == {
@@ -1663,6 +1698,7 @@ class TestConsolidatedConfigManager:
         """A per-agent sentinel should remove an inherited required override and fall back to lower layers."""
         config = Config.validate_with_runtime(
             {
+                "models": {"default": {"provider": "openai", "id": "test-model"}},
                 "defaults": {
                     "tools": [
                         {"clickup": {"master_space_id": "space-default"}},
@@ -1680,7 +1716,7 @@ class TestConsolidatedConfigManager:
             _runtime_paths(),
         )
 
-        resolved = next(entry for entry in config.resolve_entity("code").tool_configs if entry.name == "clickup")
+        resolved = next(entry for entry in config.resolve_agent("code").tools.authored if entry.name == "clickup")
         assert resolved.tool_config_overrides == {}
 
     def test_tool_approval_null_section_uses_default_config(self) -> None:
@@ -1690,31 +1726,6 @@ class TestConsolidatedConfigManager:
         assert config.tool_approval.default == "auto_approve"
         assert config.tool_approval.timeout_days == 7.0
         assert config.tool_approval.rules == []
-
-    def test_runtime_approved_egress_flag_adds_tool_and_approval_rule(self) -> None:
-        """Runtime-managed approved egress should not require editing authored config."""
-        runtime_paths = resolve_runtime_paths(
-            config_path=Path("config.yaml"),
-            process_env={"MINDROOM_APPROVED_EGRESS_ENABLED": "true"},
-        )
-
-        config = Config.validate_with_runtime(
-            {
-                "defaults": {"tools": ["scheduler"]},
-                "tool_approval": {
-                    "rules": [
-                        {"match": "run_shell_command", "action": "require_approval"},
-                    ],
-                },
-            },
-            runtime_paths,
-        )
-
-        assert config.defaults.tool_names == ["scheduler", "approved_egress"]
-        assert [rule.model_dump(exclude_none=True) for rule in config.tool_approval.rules] == [
-            {"match": "request_network_access", "action": "require_approval"},
-            {"match": "run_shell_command", "action": "require_approval"},
-        ]
 
     @pytest.mark.parametrize(
         ("authored_defaults", "enabled", "expected_tools"),
@@ -1734,8 +1745,9 @@ class TestConsolidatedConfigManager:
         enabled: bool,
         expected_tools: list[str],
     ) -> None:
-        """The runtime overlay adds egress without changing default-tool inheritance."""
+        """The approved-egress switch adds its tool without changing default-tool inheritance."""
         data: dict[str, object] = {
+            "models": {"default": {"provider": "openai", "id": "test-model"}},
             "agents": {
                 "assistant": {"display_name": "Assistant"},
                 "standalone": {"display_name": "Standalone", "include_default_tools": False},
@@ -1750,55 +1762,8 @@ class TestConsolidatedConfigManager:
 
         config = Config.validate_with_runtime(data, runtime_paths)
 
-        assert config.resolve_entity("assistant").available_tools == expected_tools
-        assert config.resolve_entity("standalone").available_tools == []
-
-    def test_runtime_approved_egress_flag_keeps_authored_dump_unmodified(self) -> None:
-        """Runtime-managed approved egress should not become persisted authored config."""
-        runtime_paths = resolve_runtime_paths(
-            config_path=Path("config.yaml"),
-            process_env={"MINDROOM_APPROVED_EGRESS_ENABLED": "true"},
-        )
-
-        config = Config.validate_with_runtime(
-            {
-                "defaults": {"tools": ["scheduler"]},
-            },
-            runtime_paths,
-        )
-        empty_config = Config.validate_with_runtime({}, runtime_paths)
-
-        assert config.defaults.tool_names == ["scheduler", "approved_egress"]
-        assert config.authored_model_dump()["defaults"]["tools"] == ["scheduler"]
-        assert "tool_approval" not in config.authored_model_dump()
-        assert empty_config.defaults.tool_names == ["scheduler", "approved_egress"]
-        assert empty_config.authored_model_dump() == {}
-
-    def test_runtime_approved_egress_flag_forces_approval_ahead_of_script_rules(self) -> None:
-        """Runtime-managed approved egress must require Matrix approval even with authored scripts."""
-        runtime_paths = resolve_runtime_paths(
-            config_path=Path("config.yaml"),
-            process_env={"MINDROOM_APPROVED_EGRESS_ENABLED": "true"},
-        )
-
-        config = Config.validate_with_runtime(
-            {
-                "tool_approval": {
-                    "rules": [
-                        {"match": "*", "script": "approval.py"},
-                    ],
-                },
-            },
-            runtime_paths,
-        )
-
-        assert [rule.model_dump(exclude_none=True) for rule in config.tool_approval.rules] == [
-            {"match": "request_network_access", "action": "require_approval"},
-            {"match": "*", "script": "approval.py"},
-        ]
-        assert config.authored_model_dump()["tool_approval"]["rules"] == [
-            {"match": "*", "script": "approval.py"},
-        ]
+        assert list(config.resolve_agent("assistant").tools.tool_names) == expected_tools
+        assert config.resolve_agent("standalone").tools.tool_names == ()
 
     def test_tool_output_auto_save_threshold_is_configurable_in_defaults(self) -> None:
         """The automatic tool-output save threshold should be a validated config setting."""
@@ -1839,6 +1804,7 @@ class TestConsolidatedConfigManager:
         """Saving and reloading should preserve inline override entries for defaults and agents."""
         config_path = tmp_path / "config.yaml"
         config = Config(
+            models={"default": {"provider": "openai", "id": "test-model"}},
             defaults=DefaultsConfig(
                 tools=[
                     "scheduler",
@@ -1880,6 +1846,7 @@ class TestConsolidatedConfigManager:
         """Only explicit tool entries should carry overrides after preset expansion."""
         config = Config.validate_with_runtime(
             {
+                "models": {"default": {"provider": "openai", "id": "test-model"}},
                 "agents": {
                     "code": {
                         "display_name": "Code",
@@ -1894,7 +1861,9 @@ class TestConsolidatedConfigManager:
             _runtime_paths(),
         )
 
-        resolved = {entry.name: entry.tool_config_overrides for entry in config.resolve_entity("code").tool_configs}
+        resolved = {
+            entry.name: entry.tool_config_overrides for entry in resolve_agent_tools(config, "code").candidates()
+        }
         assert resolved["openclaw_compat"] == {}
         assert resolved["shell"] == {"enable_run_shell_command": False}
         assert resolved["coding"] == {}
@@ -1904,6 +1873,7 @@ class TestConsolidatedConfigManager:
         """String-only tool updates should keep overrides for retained tools."""
         config_path = tmp_path / "config.yaml"
         config = Config(
+            models={"default": {"provider": "openai", "id": "test-model"}},
             agents={
                 "code": AgentConfig(
                     display_name="Code",
@@ -1947,6 +1917,7 @@ class TestConsolidatedConfigManager:
         with pytest.raises(ValueError, match=r"Unknown tool 'does_not_exist'") as exc_info:
             Config.validate_with_runtime(
                 {
+                    "models": {"default": {"provider": "openai", "id": "test-model"}},
                     "agents": {
                         "code": {
                             "display_name": "Code",
@@ -1983,6 +1954,7 @@ class TestConsolidatedConfigManager:
             config_path = Path(f.name)
             config = Config(
                 agents={},
+                models={"default": {"provider": "openai", "id": "test-model"}},
                 knowledge_bases={
                     "docs": KnowledgeBaseConfig(path="./docs"),
                 },
@@ -2014,6 +1986,7 @@ class TestConsolidatedConfigManager:
             config_path = Path(f.name)
             config = Config(
                 agents={},
+                models={"default": {"provider": "openai", "id": "test-model"}},
                 knowledge_bases={
                     "docs": KnowledgeBaseConfig(path="./docs"),
                 },
@@ -2043,7 +2016,7 @@ class TestConsolidatedConfigManager:
         """Test manage_agent with validate operation."""
         with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as f:
             config_path = Path(f.name)
-            config = Config(agents={})
+            config = Config(agents={}, models={"default": {"provider": "openai", "id": "test-model"}})
             config.agents["test_agent"] = AgentConfig(
                 display_name="Test Agent",
                 role="Test role",
@@ -2075,7 +2048,10 @@ class TestConsolidatedConfigManager:
         """Regression: memory tool must be accepted in create/update/validate."""
         with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as f:
             config_path = Path(f.name)
-            write_config_yaml(Config(agents={}), config_path)
+            write_config_yaml(
+                Config(agents={}, models={"default": {"provider": "openai", "id": "test-model"}}),
+                config_path,
+            )
 
         try:
             cm = _config_manager(config_path)
@@ -2114,7 +2090,7 @@ class TestConsolidatedConfigManager:
         """Test manage_team tool."""
         with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as f:
             config_path = Path(f.name)
-            config = Config(agents={}, teams={})
+            config = Config(agents={}, teams={}, models={"default": {"provider": "openai", "id": "test-model"}})
             # Add agents that the team will reference
             config.agents["agent1"] = AgentConfig(
                 display_name="Agent 1",
@@ -2258,7 +2234,7 @@ class TestAgentWorkerScope:
                 "code": AgentConfig(display_name="Code", worker_scope="user_agent"),
             },
         )
-        assert config.resolve_entity("code").execution_scope == "user_agent"
+        assert config.resolve_agent("code").policy.effective_execution_scope == "user_agent"
 
     def test_worker_scope_falls_back_to_defaults(self) -> None:
         """Worker scope should inherit from defaults when agent config omits it."""
@@ -2268,7 +2244,7 @@ class TestAgentWorkerScope:
                 "code": AgentConfig(display_name="Code"),
             },
         )
-        assert config.resolve_entity("code").execution_scope == "user"
+        assert config.resolve_agent("code").policy.effective_execution_scope == "user"
 
 
 class TestWorkerGrantableCredentials:

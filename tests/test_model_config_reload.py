@@ -13,6 +13,7 @@ from mindroom.bot import AgentBot
 from mindroom.config.agent import AgentConfig, TeamConfig
 from mindroom.config.main import Config
 from mindroom.config.models import CompactionConfig, CompactionOverrideConfig, DefaultsConfig, ModelConfig
+from mindroom.config.resolution import entity_model_name
 from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.history.policy import resolve_history_execution_plan
 from mindroom.history.runtime import resolve_entity_preparation_inputs
@@ -23,7 +24,8 @@ from mindroom.providers.registry import build_model_provider
 from mindroom.teams.members import BuiltTeam, build_team_spec, resolve_exact_team_members
 from mindroom.teams.spec import TeamMode
 from mindroom.token_budget import compute_compaction_input_budget
-from tests.bot_helpers import make_test_agent_bot, make_test_team_bot
+from mindroom.turn_model import ModelScope, resolve_turn_model
+from tests.bot_helpers import make_test_agent_bot
 from tests.conftest import (
     TEST_PASSWORD,
     bind_runtime_paths,
@@ -33,12 +35,14 @@ from tests.conftest import (
 )
 from tests.identity_helpers import entity_ids
 from tests.providers.bare_adapter import bare_adapter
+from tests.turn_model_helpers import turn_model
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
     from pathlib import Path
 
     from mindroom.agent_loop.build import AgentBuild
+    from mindroom.constants import RuntimePaths
     from mindroom.history.types import ResolvedHistoryExecutionPlan
     from mindroom.llm.provider import ModelProvider
 
@@ -65,7 +69,8 @@ async def runtime(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> AsyncItera
         ),
         runtime_paths,
     )
-    orchestrator = _MultiAgentOrchestrator(runtime_paths=runtime_paths)
+    # Without the embedded API, reloads read the YAML through the plain loader.
+    orchestrator = _MultiAgentOrchestrator(runtime_paths=runtime_paths, api_enabled=False)
     orchestrator.config = config
     matrix_ids = entity_ids(config, runtime_paths)
     for name in ("general", "team", ROUTER_AGENT_NAME):
@@ -81,16 +86,11 @@ async def runtime(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> AsyncItera
             "config": config,
             "runtime_paths": runtime_paths,
         }
-        bot = make_test_team_bot(**kwargs) if name == "team" else make_test_agent_bot(**kwargs)
+        bot = make_test_agent_bot(**kwargs)
         bot.orchestrator = orchestrator
         bot.running = True
-        orchestrator.agent_bots[name] = bot
+        orchestrator.fleet.add(name, bot)
     monkeypatch.setattr(AgentBot, "_set_presence_with_model_info", AsyncMock())
-    monkeypatch.setattr(
-        orchestrator,
-        "_restart_changed_entities",
-        AsyncMock(side_effect=AssertionError("Model-only reload must preserve Matrix bots")),
-    )
     try:
         yield orchestrator
     finally:
@@ -120,7 +120,7 @@ def _materialize(runtime: _MultiAgentOrchestrator) -> tuple[AgentBuild, AgentBui
         runtime.runtime_paths,
         execution_identity=None,
         knowledge=None,
-        active_model_name=None,
+        model=turn_model(config, runtime.runtime_paths, "general"),
     )
     members = resolve_exact_team_members(
         ["general"],
@@ -128,7 +128,7 @@ def _materialize(runtime: _MultiAgentOrchestrator) -> tuple[AgentBuild, AgentBui
         runtime_paths=runtime.runtime_paths,
         execution_identity=None,
         refresh_scheduler=None,
-        active_model_names=None,
+        active_model_names={"general": turn_model(config, runtime.runtime_paths, "general").model_name},
     )
     team = build_team_spec(
         members=members,
@@ -137,7 +137,7 @@ def _materialize(runtime: _MultiAgentOrchestrator) -> tuple[AgentBuild, AgentBui
         runtime_paths=runtime.runtime_paths,
         scope_context=unstored_team_scope_context(config, ["general"], team_name="team"),
         execution_identity=None,
-        model_name=config.resolve_entity("team").model_name,
+        model_name=entity_model_name(config, "team"),
         configured_team_name="team",
         timezone="UTC",
     )
@@ -152,12 +152,12 @@ def _temperature(model: ModelProvider) -> float | None:
     return adapter.settings.temperature
 
 
-def _history_plan(config: Config, entity_name: str) -> ResolvedHistoryExecutionPlan:
+def _history_plan(config: Config, runtime_paths: RuntimePaths, entity_name: str) -> ResolvedHistoryExecutionPlan:
     """Resolve effective model and compaction budgets for one response scope."""
-    model = config.resolve_runtime_model(entity_name=entity_name)
+    model = resolve_turn_model(config, runtime_paths, ModelScope(entity=entity_name), None)
     return resolve_history_execution_plan(
         config=config,
-        history_settings=config.resolve_entity(entity_name).history_settings,
+        history_settings=config.resolve_scope(entity_name).history_settings,
         active_model_name=model.model_name,
         active_context_window=model.context_window,
         static_prompt_tokens=0,
@@ -180,6 +180,7 @@ async def test_model_reload_updates_next_response_without_restarting_bots(
         entity_name="general",
         history_settings=old_agent.history_settings,
         config=old,
+        runtime_paths=runtime.runtime_paths,
         static_prompt_tokens=0,
         active_model_name=None,
         active_context_window=None,
@@ -210,6 +211,7 @@ async def test_model_reload_updates_next_response_without_restarting_bots(
         entity_name="general",
         history_settings=agent.history_settings,
         config=runtime.config,
+        runtime_paths=runtime.runtime_paths,
         static_prompt_tokens=0,
         active_model_name=None,
         active_context_window=None,
@@ -240,7 +242,7 @@ async def test_compaction_model_reload_updates_effective_budgets(
     else:
         old.agents["general"].compaction = CompactionOverrideConfig.model_validate(compaction)
         old.teams["team"].compaction = CompactionOverrideConfig.model_validate(compaction)
-    before = {name: _history_plan(old, name) for name in ("general", "team")}
+    before = {name: _history_plan(old, runtime.runtime_paths, name) for name in ("general", "team")}
     model_name = compaction[model_field]
     new = old.model_copy(deep=True)
     new.models[model_name].context_window = 96000
@@ -252,7 +254,7 @@ async def test_compaction_model_reload_updates_effective_budgets(
         build_model_provider(runtime.config, runtime.runtime_paths, model_name).identity.id == "updated-summary-model"
     )
     for name in ("general", "team"):
-        after = _history_plan(runtime.config, name)
+        after = _history_plan(runtime.config, runtime.runtime_paths, name)
         assert after.replay_window_tokens == before[name].replay_window_tokens
         if model_field == "model":
             assert after.summary_input_budget_tokens == compute_compaction_input_budget(
@@ -283,7 +285,7 @@ async def test_context_window_reload_preserves_explicit_replay_cap(runtime: _Mul
     await _reload(runtime, new)
 
     assert runtime.config is not None
-    plan = _history_plan(runtime.config, "general")
+    plan = _history_plan(runtime.config, runtime.runtime_paths, "general")
     assert plan.replay_window_tokens == 3000
     assert plan.summary_input_budget_tokens == compute_compaction_input_budget(
         64000,
@@ -314,4 +316,4 @@ async def test_agent_and_team_edits_reach_the_next_response_without_restarting_b
     assert "Answer in one sentence." in agent.prompt.instructions
     assert "calculator" in {toolkit.name for toolkit in agent.spec.toolkits}
     assert runtime.agent_bots["team"].config.teams["team"].mode == "collaborate"
-    assert emit_config_reloaded.await_args.kwargs["changed_entities"] == {"general", "team"}
+    assert emit_config_reloaded.await_args.args[1] == {"general", "team"}

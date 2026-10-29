@@ -47,10 +47,16 @@ from mindroom.llm.runs import RunRecord
 from mindroom.llm.usage import HelperUsage, TokenCounts
 from mindroom.memory._mem0_usage import counted_mem0_usage, install_mem0_usage_capture, mem0_usage
 from mindroom.memory.auto_flush import _extract_memory_summary
-from mindroom.response_turn import CompletedApprovalRun, PausedAnswer, PausedAttempt, ResponsePausedForApproval
+from mindroom.response_turn import (
+    CompletedApprovalRun,
+    PausedAnswer,
+    PausedAttempt,
+    ResponsePausedForApproval,
+    TurnSinks,
+)
 from mindroom.session_storage.agent_storage import create_session_storage
 from mindroom.session_storage.types import session_state_snapshot
-from mindroom.teams.envelope import team_response
+from mindroom.teams.envelope import TeamTurnSpec
 from mindroom.teams.resume import continue_paused_team_run
 from mindroom.teams.spec import TeamMode
 from mindroom.tool_system.runtime_context import (
@@ -80,6 +86,8 @@ from tests.history_helpers import (
 )
 from tests.identity_helpers import persist_entity_accounts
 from tests.response_runner_helpers import _bot
+from tests.team_turn_helpers import collect_team_reply
+from tests.turn_model_helpers import turn_model
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -174,7 +182,14 @@ async def test_approval_resumed_helpers_keep_caller_usage_and_reset_context(  # 
     helper_results: list[object] = []
 
     async def add(self: CalculatorTools, a: float, b: float) -> str:
-        helper = create_agent("helper", config, paths, identity, knowledge=None, active_model_name=None)
+        helper = create_agent(
+            "helper",
+            config,
+            paths,
+            identity,
+            knowledge=None,
+            model=turn_model(config, paths, "helper"),
+        )
         helper_results.append(await _run_room_agent_turn(helper_context, helper, "Sample task."))
         if outcome == "cancel":
             raise asyncio.CancelledError
@@ -193,12 +208,16 @@ async def test_approval_resumed_helpers_keep_caller_usage_and_reset_context(  # 
         runtime_paths=paths,
         execution_identity=identity,
     )
-    turn = make_turn_context(
-        "reviewers" if caller == "team" else "general",
-        session_id="approval-session",
-        room_id=context.room_id,
-        thread_id=context.thread_id,
-        requester_id=context.requester_id,
+    turn = replace(
+        make_turn_context(
+            "reviewers" if caller == "team" else "general",
+            session_id="approval-session",
+            room_id=context.room_id,
+            thread_id=context.thread_id,
+            requester_id=context.requester_id,
+        ),
+        prompt="Add 2 and 3",
+        execution_identity=identity,
     )
     orchestrator = team_orchestrator(config, paths)
     orchestrator.agent_bots = {name: SimpleNamespace(running=True) for name in ("general", "second")}
@@ -206,26 +225,18 @@ async def test_approval_resumed_helpers_keep_caller_usage_and_reset_context(  # 
     async def pause() -> None:
         with tool_runtime_context(context):
             if caller == "team":
-                await team_response(
-                    agent_names=["general", "second"],
-                    mode=TeamMode.COORDINATE,
-                    message="Add 2 and 3",
-                    orchestrator=orchestrator,
-                    execution_identity=identity,
-                    ctx=turn,
-                    user_id=context.requester_id,
-                    configured_team_name="reviewers",
-                    turn_recorder=TurnRecorder(user_message="Add 2 and 3"),
+                await collect_team_reply(
+                    TeamTurnSpec(
+                        agent_names=["general", "second"],
+                        mode=TeamMode.COORDINATE,
+                        orchestrator=orchestrator,
+                        configured_team_name="reviewers",
+                    ),
+                    turn,
+                    sinks=TurnSinks(turn_recorder=TurnRecorder(user_message="Add 2 and 3")),
                 )
             else:
-                await ai_response(
-                    turn,
-                    prompt="Add 2 and 3",
-                    config=config,
-                    runtime_paths=paths,
-                    execution_identity=identity,
-                    supports_native_tool_approval=True,
-                )
+                await ai_response(replace(turn, supports_native_tool_approval=True), paths, config)
 
     with pytest.raises(ResponsePausedForApproval) as raised:
         await pause()
@@ -300,7 +311,7 @@ async def test_approval_resumed_helpers_keep_caller_usage_and_reset_context(  # 
                     tool_trace_collector=[],
                 )
         runner = unwrap_extracted_collaborator(_bot(tmp_path / "runner")._response_runner)
-        execution = replace(runner._approval_execution, config=lambda: config, runtime_paths=paths)
+        execution = replace(runner._approvals._approval_execution, config=lambda: config, runtime_paths=paths)
         return await execution.continue_run(
             approval_continuation(
                 approval_id="sample-approval",
@@ -532,7 +543,7 @@ async def test_workflow_first_turn_uses_actual_caller_store(
             _WorkflowRun("sample-workflow"),
         )
         assert result.content == "Sample output."
-        loaded = storage.load_session(context.session_id, "team" if caller.endswith("team") else "agent")
+        loaded = storage.load_session(context.session_id)
         assert loaded is not None, "First-turn helper usage needs its actual caller session row"
         assert not loaded.runs
         rows = _usage_rows(storage)
@@ -666,7 +677,7 @@ async def test_scope_reset_and_first_turn_write_preserve_concurrent_session(tmp_
             kind="dynamic_workflow",
             requester_id=None,
         )
-        loaded = context.storage.load_session("session", "agent")
+        loaded = context.storage.load_session("session")
         assert loaded is not None
         assert loaded.metadata == {"marker": "concurrent session"}
         raise asyncio.CancelledError

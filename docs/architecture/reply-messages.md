@@ -31,7 +31,7 @@ The [decisions](#decisions) and [accepted limitations](#accepted-limitations) be
 Every fact about an AI reply has one owner and one writer, so no two stores can disagree about a reply:
 
 - I-S1. Everything about an AI reply, including its event, state, presentation, Stop, each span's sources and their settlement, its tool calls, its redactions, and which bot instance claims its approval, is read from the reply records or from an in-memory cache of them that is never written separately; no other store writes it.
-  The turn ledger keeps user-message and turn facts, and a response event only for turns that are not AI replies, such as commands, rejections, and router notices; the journal keeps whether each event is pending or settled; agent history keeps the conversation the model sees.
+  The turn rows keep user-message and turn facts, and a response event only for turns that are not AI replies, such as commands, rejections, and router notices; the journal keeps whether each event is pending or settled; agent history keeps the conversation the model sees.
 - I-S2. A reply settles its journal sources in the same transaction that marks the turn they index answered when the reply answered them, so a crash cannot leave one without the other.
   Deleted sources, sources that became terminal without an answer, and those of a removed entity or of an approval whose owner is gone settle unanswered.
   Sources settled outside a reply, by an ingress decision that drops a waiting replay or by a room departure, leave their turn unanswered and end the reply that waited on them.
@@ -53,15 +53,15 @@ Every fact about an AI reply has one owner and one writer, so no two stores can 
 - Nothing blocks a repeated call; the model is told which calls finished and which were cut short and may have taken effect, to check before repeating them.
   In real-model runs a fast model rarely repeated a finished call (up to 1 of 24 runs) but repeated a cut-short call whenever its tools gave it no way to check.
   The owner accepted this, because blocking an identical call would also block a read-only call the model must run again when its shortened result is not enough.
-- Effects that run after a rule commits, such as cancelling a span or waking an approval, are best effort, because the records already say what must happen; only an approval's finish or release runs its effects to completion even when its caller is cancelled, so the conversation it held is always released.
+- Effects that run after a rule commits, such as cancelling a span or waking an approval, are best effort, because the records already say what must happen; only an approval's finish or release runs its effects to completion even when its caller is cancelled, so the claims that waited for it always retry.
 
 ### Approvals
 
 - An approval pauses and holds its reply and its conversation: later messages to that agent in that conversation wait with a ⏳ reaction, as behind a running reply, until the approval ends; no approval holds the room's event lane.
 - With background jobs on, a top-level agent's gated call that can become a managed job asks for its approval from that job instead of pausing its reply, so the approval holds neither the reply nor its conversation; after `approval_wait_timeout` the reply goes on and the job's outcome reaches the conversation like any other job's, and a restart interrupts the job, so that approval does not survive a restart as a paused reply's does.
 - The hold is not the conversation lock, because the resume, the failure settlement, an edit's regeneration, and approval recovery must still take that lock.
-- The hold is taken before the pause commits, so the approval's end can never come before it, and each bot start takes the holds of its principal's pending approvals before it replays the journal.
-- A message waiting behind a hold rechecks every 30 seconds that its approval still exists, so a hold whose end did not reach this bot still ends.
+- The hold starts at the pause's commit and ends at the commit that ends the approval, whichever path ends it, including a departure; the pause commits while its reply still holds the conversation's lock, so no message is answered between the pause and its hold, and no end precedes its hold.
+- Each bot start holds the conversations of its principal's pending approvals before it replays the journal.
 - Deleting the message a held reply answers cancels the approval, as a Stop would, and removes the reply.
 - A released approval hands its sources back to replay, unless a Stop is recorded: the reply then ends `cancelled` instead of replaying what the user stopped.
 
@@ -97,10 +97,11 @@ Delivery and recovery:
 
 - A reply write made while its create's outcome is unknown is sized as a plain message and wrapped as an edit only when claimed, so after a homeserver outage an answer near the event size limit can be refused and end with the delivery-failed note.
 - A reply still streaming when an upgrade from an earlier release stops the backend can keep its partial text, and its replay may answer in a new message, because upgrades are assumed to run with no reply in flight.
-- An upgrade from an earlier release cancels every approval of a paused reply that release left pending, because it cannot rule out that one is pending; approvals of scheduled calls are kept.
+- An upgrade from a release before v2026.10.228 cancels every approval of a paused reply that release left pending, because it cannot rebuild the reply such an approval paused; approvals of scheduled calls are kept, and pending approvals survive an upgrade from any later release.
   A cancelled approval's Matrix message keeps what it showed, which can still say that it waits for approval, and a click on its card does nothing.
+- When some messages of a coalesced turn are deleted, or answered by another turn, after its reply already exists, the whole turn ends unanswered rather than answering the rest: a reply's span pins its sources, and a reply that ended refuses any later claim by them, so answering the survivors would need moving them to a new reply.
+  Before any reply exists, as while the turn waits for its conversation or an approval, only those messages settle and the rest are answered as their own turn.
 - A message that already waited for the conversation's lock when the reply before it paused for an approval is answered while that approval waits; it is still answered once.
-- A 30-second recheck of the approvals holding a conversation that lands while a reply's pause is still committing can drop that approval's hold, so later messages are answered while it waits; this needs the recheck to land inside that commit.
 - A room departure and a removed entity end their replies without writing to Matrix, so those messages keep what they last showed: the bot has left the room, or the entity has no bot; a removed entity's reply still delivers the notes and redactions it owes if the entity comes back.
 - A note Matrix refused for good is not sent again (I15).
 - An interactive selection whose acknowledgement Matrix refuses for good stays unanswered without a note: the acknowledgement is smaller than the question MindRoom already delivered, so only a room-wide refusal such as lost send permission can refuse it, and that would refuse the note too.

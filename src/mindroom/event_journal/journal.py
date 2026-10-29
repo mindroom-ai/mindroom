@@ -26,8 +26,15 @@ from mindroom.event_journal.history_recovery import (
 )
 from mindroom.logging_config import get_logger
 
-from . import approval_continuations, approvals, membership_hooks, replies, reply_messages
-from .identity import decode_thread_id, encode_thread_id
+from . import (
+    approval_cards,
+    approval_continuations,
+    membership_hooks,
+    replies,
+    reply_messages,
+    turn_rows,
+)
+from .identity import agent_of_principal, decode_thread_id, encode_thread_id
 from .models import (
     TURN_BACKED_KINDS,
     AdmissionFacts,
@@ -48,7 +55,7 @@ from .models import (
     RoomMembershipPosition,
     SemanticConsumer,
 )
-from .projection import ProjectedEvent, is_tombstoned, project
+from .projection import ProjectedEvent, is_redacted, project, scrub_redacted_projection
 from .schema import PENDING_STATE, SETTLED_STATE
 
 if TYPE_CHECKING:
@@ -244,12 +251,13 @@ def _apply_semantic_ingestion_disposition(
     if semantic_result is AdmissionResult.DUPLICATE:
         retained = _require_matching_semantic_event(transaction, principal_id, event)
         if retained["kind"] == EventKind.OPAQUE_HISTORY and projected is not None:
-            _project_admitted_event(
+            project_with_redactions(
                 transaction,
                 principal_id,
                 projected,
                 receipt_order=int(retained["receipt_order"]),
                 membership_epoch=state.membership_epoch,
+                settle_redacted_arrival=True,
             )
     elif semantic_result is not AdmissionResult.ADMITTED:
         raise IngestionBatchIntegrityError
@@ -627,7 +635,6 @@ def _advance_membership_epoch(
         "conversation_hydration",
         "visible_messages",
         "unresolved_edits",
-        "redaction_tombstones",
         "room_history_recovery",
     ):
         transaction.execute(
@@ -652,15 +659,14 @@ def _advance_membership_epoch(
     # retain decision. That durable identity is the property this table exists
     # for.
     # A terminal acknowledgement may have committed just before a crash that
-    # prevented its approval-domain row from being retired. Preserve the click
-    # tombstone before either side of the cross-principal relationship is
-    # fenced or deleted below.
-    approvals.retire_completed_cards_for_departure(
+    # prevented its card from being retired. Retire it before either side of
+    # the cross-principal relationship is fenced or deleted below.
+    approval_cards.retire_completed_for_departure(
         transaction,
         principal_id,
         room_id=room_id,
     )
-    approvals.fail_continuations_for_departed_card_owner(
+    approval_cards.deny_for_departed_card_owner(
         transaction,
         principal_id,
         room_id=room_id,
@@ -675,14 +681,15 @@ def _advance_membership_epoch(
               SELECT 1 FROM approval_cards AS cards
               WHERE cards.principal_id = delivery.principal_id
                 AND cards.delivery_id = delivery.delivery_id
+                AND cards.kind = 'request'
           )
         """,
         (principal_id, room_id),
     )
     # Approval cards are authored by the router principal, while the paused
-    # run belongs to the responding entity principal. Preserve the router's
-    # terminal Matrix edit debt before this fence removes the continuation.
-    approvals.expire_cards_for_departed_continuations(
+    # run belongs to the responding entity principal. Decide its calls and keep
+    # the router's terminal Matrix edit debt before this fence removes it.
+    approval_cards.expire_for_departed_responder(
         transaction,
         principal_id,
         room_id=room_id,
@@ -690,15 +697,17 @@ def _advance_membership_epoch(
     )
     # A paused run owns exactly the source rows this fence is about to settle.
     # Delete the aggregate first so no durable continuation survives with no
-    # runnable source. Its call rows cascade.
-    transaction.execute(
+    # runnable source. Its calls go with it unless a live card still shows them,
+    # and the conversation it held is free from this commit.
+    for departed in transaction.fetchall(
         f"""
-        DELETE FROM approval_continuations
+        SELECT approval_id FROM approval_continuations
         WHERE principal_id = ?
           AND {approval_continuations.holds_source_in_room("approval_continuations")}
         """,  # noqa: S608 - a fixed SQL fragment, not input
         (principal_id, room_id),
-    )
+    ):
+        approval_continuations.delete(transaction, principal_id, approval_id=str(departed["approval_id"]))
     # Turn-backed work still pending from the membership that just ended can
     # never finish. Its answer would have to be enqueued, and enqueue refuses
     # any turn whose admitted epoch is not the room's current one -- correctly,
@@ -829,55 +838,127 @@ def admit(
     if row is None:
         return AdmissionResult.DUPLICATE
     if projected is not None:
-        _project_admitted_event(
+        project_with_redactions(
             transaction,
             principal_id,
             projected,
             receipt_order=int(row["receipt_order"]),
             membership_epoch=epoch,
+            settle_redacted_arrival=True,
         )
     return AdmissionResult.ADMITTED
 
 
-def _project_admitted_event(
+def project_with_redactions(
     transaction: Transaction,
     principal_id: str,
     projected: ProjectedEvent,
     *,
     receipt_order: int,
     membership_epoch: int,
+    settle_redacted_arrival: bool,
 ) -> None:
-    """Project readable content and retire any source its redaction tombstones."""
-    tombstoned_event_id = project(
+    """Project one event and apply the redaction authority it reports, in this transaction.
+
+    A redaction is recorded once for the principal's agent and applied to every
+    login of it. An event that arrives already redacted ends the replies that
+    lost their last source to it, and with ``settle_redacted_arrival`` its own
+    pending row retires, as admission does for the event it just admitted.
+    """
+    redacted_event_id = project(
         transaction,
         principal_id,
         projected,
         receipt_order=receipt_order,
         membership_epoch=membership_epoch,
     )
-    if tombstoned_event_id is not None:
-        _settle_tombstoned_turn_source(
+    if redacted_event_id is None:
+        return
+    if projected.redacts_event_id is not None:
+        redact_for_agent(
+            transaction,
+            agent_of_principal(principal_id),
+            room_id=projected.room_id,
+            event_id=redacted_event_id,
+            receipt_order=receipt_order,
+        )
+        return
+    if settle_redacted_arrival:
+        _settle_redacted_turn_source(
             transaction,
             principal_id,
             room_id=projected.room_id,
-            event_id=tombstoned_event_id,
+            event_id=redacted_event_id,
         )
+    replies.end_replies_of_deleted_source(
+        transaction,
+        principal_id,
+        room_id=projected.room_id,
+        event_id=redacted_event_id,
+    )
+
+
+def redact_for_agent(
+    transaction: Transaction,
+    agent_name: str,
+    *,
+    room_id: str,
+    event_id: str,
+    receipt_order: int,
+) -> None:
+    """Record one redaction for every Matrix login of an agent and apply its effects to each, in one transaction.
+
+    The deletion is agent-scoped, as turn truth is: the agent's turn rows lose
+    the event's plaintext, and every principal of the agent that has state in
+    the room loses it from its projection, retires a pending turn row of it,
+    and ends the replies that lost every source to it, exactly as the
+    principal that observed the redaction does. An earlier login the agent
+    returns to would otherwise still read the deleted text. Another agent's
+    rows are never touched, and reads stay principal-scoped: sharing the
+    deletion fact shares no content.
+    """
+    turn_rows.record_redaction(transaction, agent_name, room_id=room_id, event_id=event_id)
+    for principal_id in _principals_of_agent(transaction, agent_name, room_id=room_id):
+        scrub_redacted_projection(
+            transaction,
+            principal_id,
+            room_id=room_id,
+            event_id=event_id,
+            receipt_order=receipt_order,
+        )
+        _settle_redacted_turn_source(transaction, principal_id, room_id=room_id, event_id=event_id)
         replies.end_replies_of_deleted_source(
             transaction,
             principal_id,
-            room_id=projected.room_id,
-            event_id=tombstoned_event_id,
+            room_id=room_id,
+            event_id=event_id,
         )
 
 
-def _settle_tombstoned_turn_source(
+def _principals_of_agent(transaction: Transaction, agent_name: str, *, room_id: str) -> tuple[str, ...]:
+    """Return every Matrix login of one agent that has membership state in ``room_id``.
+
+    A principal is stored as ``agent@mxid`` and agent names hold no ``@``, so the
+    prefix names the agent exactly; it is compared here rather than with
+    ``LIKE``, which SQLite matches case-insensitively.
+    """
+    rows = transaction.fetchall(
+        "SELECT principal_id FROM room_membership WHERE room_id = ? ORDER BY principal_id/*bytes*/",
+        (room_id,),
+    )
+    return tuple(
+        principal_id for row in rows if agent_of_principal(principal_id := str(row["principal_id"])) == agent_name
+    )
+
+
+def _settle_redacted_turn_source(
     transaction: Transaction,
     principal_id: str,
     *,
     room_id: str,
     event_id: str,
 ) -> None:
-    """Retire tombstoned turn ingress unless a durable continuation owns it.
+    """Retire redacted turn ingress unless a durable continuation owns it.
 
     Approval continuations dispatch before event-kind ingress, so preserving
     one cannot replay its source through a message or media callback.
@@ -1112,7 +1193,7 @@ def pending_thread_events_after(
 
     Restricting it to ``TURN_BACKED_KINDS`` is the same argument one step
     further: pending means unfinished, not *will answer*. Thread membership is
-    derived from content for every kind alike -- ``inbound_event`` calls
+    derived from content for every kind alike -- ``_inbound_event`` calls
     ``thread_root`` regardless of kind -- so a reaction, an approval, or an
     ``m.room.encrypted`` event this bot could not decrypt can all sit pending
     in a thread under the requester's own sender. An interactive reaction can
@@ -1194,42 +1275,18 @@ def source_has_redaction_handoff(
     principal_id: str,
     event_id: str,
     captured: TurnRecord,
-    current: TurnRecord | None,
-    redaction_target: Callable[[JournalEvent], str | None],
 ) -> bool:
-    """Prove the source's redaction is durably tombstoned in the ledger or still owed by its callback.
+    """Prove the settled source was redacted in its own room, which is the turn's redaction authority.
 
-    Session history needs no handoff: each response removes history derived from tombstoned events.
+    Session history needs no handoff: each response removes history derived from redacted events.
     """
     source = transaction.fetchone(
         "SELECT room_id FROM journal_events WHERE principal_id = ? AND event_id = ? AND state = 'settled'",
         (principal_id, event_id),
     )
-    if source is None or not is_tombstoned(transaction, principal_id, source["room_id"], event_id):
+    if source is None or not is_redacted(transaction, principal_id, source["room_id"], event_id):
         return False
-    if captured.conversation_target is not None and captured.conversation_target.room_id != source["room_id"]:
-        return False
-    if current is not None and event_id in current.redacted_source_event_ids:
-        return current.conversation_target is None or current.conversation_target.room_id == source["room_id"]
-    return _has_pending_redaction(transaction, principal_id, source["room_id"], event_id, redaction_target)
-
-
-def _has_pending_redaction(
-    transaction: Transaction,
-    principal_id: str,
-    room_id: str,
-    event_id: str,
-    redaction_target: Callable[[JournalEvent], str | None],
-) -> bool:
-    """Read callback ownership and decode it within the source's recovery transaction."""
-    callbacks = transaction.fetchall(
-        f"""
-        SELECT {_JOURNAL_COLUMNS} FROM journal_events
-        WHERE principal_id = ? AND room_id = ? AND state = 'pending' AND kind = ?
-        """,  # noqa: S608 - fixed columns, bound values
-        (principal_id, room_id, EventKind.REDACTION.value),
-    )
-    return any(redaction_target(callback) == event_id for callback in _decode_rows(callbacks))
+    return captured.conversation_target is None or captured.conversation_target.room_id == source["room_id"]
 
 
 def sources_settled_by_departure(

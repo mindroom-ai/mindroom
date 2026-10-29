@@ -19,14 +19,12 @@ import nio
 import pytest
 
 from mindroom import reply_lifecycle as rl
-from mindroom.bot import AgentBot
 from mindroom.cancellation import current_task_is_process_shutdown, request_task_cancel
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import DefaultsConfig, _LargeMessageStrategy
 from mindroom.constants import (
     ACTING_REQUESTER_KEY,
-    DURABLE_FINAL_OUTCOME_KEY,
     SILENT_SCHEDULE_NO_REPLY_TOKEN,
 )
 from mindroom.delivery_gateway import (
@@ -43,15 +41,13 @@ from mindroom.delivery_gateway import (
 )
 from mindroom.dispatch_source import MESSAGE_SOURCE_KIND, SILENT_SCHEDULE_SOURCE_KIND
 from mindroom.entity_resolution import entity_identity_registry
-from mindroom.event_journal import DepartureSource, EventClass, EventKind, InboundEvent, TerminalTurnWrite
+from mindroom.event_journal import DepartureSource, EventClass, EventKind, InboundEvent
 from mindroom.event_journal.matrix_delivery import (
     MatrixDeliveryWorker,
     PermanentDeliveryError,
     RecoveryOutcome,
-    TurnHandoff,
 )
 from mindroom.event_journal.sqlite_backend import SqliteBackend
-from mindroom.handled_turns import TurnRecord, TurnRecordCodec, _reset_handled_turn_ledger_runtime
 from mindroom.history.types import CompactionLifecycleFailure
 from mindroom.hooks.context import ResponseDraft
 from mindroom.matrix.client_delivery import DeliveredMatrixEvent, MatrixDeliveryFailure, MatrixDeliveryFailureKind
@@ -62,11 +58,11 @@ from mindroom.matrix.large_messages import (
 )
 from mindroom.message_target import MessageTarget
 from mindroom.reply_presentation import NoteKind, Presentation, Segment, note_segment
-from mindroom.reply_scope import ReplyRuntime
 from mindroom.response_runner import ResponseRunner
 from mindroom.response_sources import ResponseSources
 from mindroom.runtime_shutdown import ORDERLY_SHUTDOWN
 from mindroom.tool_system.events import ToolTraceEntry
+from mindroom.turn_record import TurnRecord
 from tests.conftest import (
     SETTLE_TIMEOUT_SECONDS,
     FakeOutbox,
@@ -82,10 +78,10 @@ from tests.conftest import (
 from tests.journal_helpers import admit_room_event
 from tests.journal_membership_helpers import admit_room_membership
 from tests.reply_span_helpers import final_in_resume_span, final_in_span, reply_span
-from tests.test_turn_store import _store
+from tests.test_turn_store import _in_room, _redact, _store
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
+    from collections.abc import AsyncIterator, Callable, Mapping
     from pathlib import Path
 
     from mindroom.event_journal import (
@@ -95,7 +91,6 @@ if TYPE_CHECKING:
         PrincipalStore,
     )
     from mindroom.event_journal.backend import Transaction
-    from mindroom.turn_store import TurnStore
 
 
 async def _empty_stream() -> AsyncIterator[str]:
@@ -190,19 +185,12 @@ def alice(journal_store: EventJournalStore) -> PrincipalStore:
     return journal_store.principal("agent@alice")
 
 
-def _completed_turn(turn_id: str, event_id: str) -> TurnRecord:
-    """Return the terminal record a FINAL acknowledgement commits for one turn."""
-    return TurnRecord.create([turn_id], response_event_id=event_id)
-
-
 def _gateway(
     tmp_path: Path,
     outbox: MatrixDeliveryView | None = None,
     *,
     sending_device_id: str | None = "CURRENT-DEVICE",
-    terminal_turn_for: Callable[[str, str], TurnRecord | None] | None = None,
-    terminal_turn_committed: Callable[[TurnRecord], Awaitable[None]] | None = None,
-    turn_handoff: TurnHandoff = ignore_final_delivery_handoff,
+    turn_handoff: Callable[[tuple[str, ...]], None] = ignore_final_delivery_handoff,
     large_message_strategy: _LargeMessageStrategy = "sidecar",
 ) -> DeliveryGateway:
     """Return a delivery gateway whose only real collaborator is the outbox."""
@@ -225,7 +213,6 @@ def _gateway(
             runtime=SimpleNamespace(
                 client=client,
                 config=config,
-                enable_streaming=True,
                 orchestrator=None,
             ),
             runtime_paths=runtime_paths_for(config),
@@ -244,8 +231,6 @@ def _gateway(
             outbox=outbox if outbox is not None else make_outbox_mock(),
             turn_handoff=turn_handoff,
             sending_device_id=lambda: sending_device_id,
-            terminal_turn_for=terminal_turn_for,
-            terminal_turn_committed=terminal_turn_committed,
         ),
     )
 
@@ -264,27 +249,6 @@ async def _turn_row(principal: PrincipalStore, stage: DeliveryStage, turn_id: st
     row = await principal.load_matrix_delivery(delivery_id=turn_id, stage=stage)
     assert row is not None
     return row
-
-
-def _response_recovery_bot(journal_store: EventJournalStore, turn_store: TurnStore) -> AgentBot:
-    """Return the minimal real proof owner used by delivery integration tests."""
-    bot = object.__new__(AgentBot)
-    bot._journal_store = journal_store
-    bot._journal_principal_id = "agent@alice"
-    bot._turn_store = turn_store
-    bot._response_recovery_diagnostic_classes = set()
-    bot.logger = MagicMock()
-    # No reply runs here, so a deletion ends none and nothing owes debt.
-    bot._reply_runtime = ReplyRuntime(
-        store=journal_store.principal("agent@alice"),
-        entity_name="agent",
-        generation="gen-1",
-        retry_sources=lambda _room_id, _sources: None,
-        complete_turn=AsyncMock(),
-        hold_conversation=lambda _continuation: None,
-        approval_ended=lambda _ended: None,
-    )
-    return bot
 
 
 @pytest.mark.parametrize("kind", ["participation_decline", "mid_turn_defer", "approval_wait"])
@@ -724,7 +688,6 @@ class TestTurnDeliveryGoesThroughTheOutbox:
             ("Finding", SILENT_SCHEDULE_SOURCE_KIND),
             (f"Finding mentions {SILENT_SCHEDULE_NO_REPLY_TOKEN}", SILENT_SCHEDULE_SOURCE_KIND),
             (f"[{SILENT_SCHEDULE_NO_REPLY_TOKEN}]", SILENT_SCHEDULE_SOURCE_KIND),
-            ("", MESSAGE_SOURCE_KIND),
             (SILENT_SCHEDULE_NO_REPLY_TOKEN, MESSAGE_SOURCE_KIND),
         ],
     )
@@ -747,6 +710,25 @@ class TestTurnDeliveryGoesThroughTheOutbox:
         assert outcome.event_id == "$sent"
         assert outcome.suppressed is False
         send.assert_awaited_once()
+
+    async def test_an_ordinary_response_with_nothing_to_show_ends_without_an_answer(
+        self,
+        tmp_path: Path,
+        alice: PrincipalStore,
+    ) -> None:
+        """An ordinary empty response is not suppressed: it ends like a stream that showed only its placeholder."""
+        gateway = _gateway(tmp_path, alice)
+        gateway.deps.response_hooks._apply_before_response = self._hooks()._apply_before_response
+        send = AsyncMock(return_value=DeliveredMatrixEvent("$sent", {"body": ""}))
+
+        with patch("mindroom.delivery_gateway.send_message_outcome", send):
+            outcome = await final_in_span(gateway, alice, self._final_request("", source_kind=MESSAGE_SOURCE_KIND))
+
+        assert outcome.terminal_status == "error"
+        assert outcome.failure_reason == "stream_completed_without_visible_body"
+        assert outcome.event_id is None
+        assert outcome.suppressed is False
+        send.assert_not_awaited()
 
     @pytest.mark.parametrize("generated_text", ["", SILENT_SCHEDULE_NO_REPLY_TOKEN])
     async def test_silent_schedule_hook_finding_delivers_after_no_report_generation(
@@ -1290,7 +1272,6 @@ class TestTurnDeliveryGoesThroughTheOutbox:
         assert prompt["question_text"] == "Pick"
         assert prompt["options"] == {"1": "yes", "✅": "yes"}
         # The reply's records hold the body and its success; the result keeps only the question's registration facts.
-        assert DURABLE_FINAL_OUTCOME_KEY not in new_content
         assert delivery.result is not None
         assert set(delivery.result) == {"interactive"}
         assert delivery.result["interactive"]["question_text"] == "Pick"
@@ -1843,100 +1824,96 @@ class TestTheFrozenEditSpeaksOneAnswer:
 
 
 class TestTheTerminalRecordCommitsWithItsAcknowledgement:
-    """A delivered answer and the record that names it are one write.
+    """A delivered answer and the turn that names it are one write.
 
     The acknowledgement is the durable proof that a visible answer exists and
-    what its event ID is, which is exactly the fact the turn record is missing.
+    what its event ID is, which is exactly the fact the turn is missing.
     Written separately, a crash between them leaves a delivered answer whose
-    record does not know its response event -- and an edit of that message is
+    turn does not know its response event -- and an edit of that message is
     then dropped, because there is nothing recorded to edit. Nothing else
     repairs it: outbox recovery walks unacknowledged rows and steps over this
     one, and the journal has no pending source to re-enter through.
     """
 
     @staticmethod
-    def _final_request(text: str) -> FinalDeliveryRequest:
-        """Return one final delivery for the turn caused by `$cause`."""
-        return TestTurnDeliveryGoesThroughTheOutbox._final_request(text)
-
-    @staticmethod
-    async def _send_final(gateway: DeliveryGateway, text: str) -> str | None:
+    async def _send_final(gateway: DeliveryGateway, text: str, *, turn_key: str | None = None) -> str | None:
         """Send one answer that no reply owns, as a command's or a rejection's answer is sent."""
         return await gateway.send_text(
             SendTextRequest(
                 target=MessageTarget.resolve(_ROOM_ID, None, "$cause", room_mode=True),
                 response_text=text,
                 delivery_turn_id="$cause",
+                delivery_turn_key=turn_key,
             ),
         )
 
-    async def test_a_final_acknowledgement_carries_the_bound_record(
+    async def test_a_final_acknowledgement_completes_the_turn_it_was_bound_to(
         self,
         tmp_path: Path,
         journal_store: EventJournalStore,
         alice: PrincipalStore,
     ) -> None:
-        """The record travelling with the acknowledgement names the delivered event."""
-        pending = TurnRecord.create(["$cause"], completed=False, response_owner="agent")
-
-        def bind(turn_id: str, event_id: str) -> TurnRecord | None:
-            assert turn_id == "$cause"
-            return replace(pending, response_event_id=event_id, completed=True)
-
-        gateway = _gateway(tmp_path, alice, terminal_turn_for=bind)
+        """The acknowledgement names the delivered event on the turn the answer was enqueued for."""
+        turn_store = await _store(journal_store)
+        pending = await turn_store.record_pending_turn(
+            _in_room(TurnRecord.create(["$cause"], completed=False, response_owner="agent"), _ROOM_ID),
+        )
+        assert pending is not None
+        gateway = _gateway(tmp_path, alice)
         await admit_room_event(alice, _ROOM_ID, "$cause")
         delivered = DeliveredMatrixEvent("$sent", {"msgtype": "m.text", "body": "answer"})
 
         with patch("mindroom.delivery_gateway.send_message_outcome", AsyncMock(return_value=delivered)):
-            assert await self._send_final(gateway, "answer") == "$sent"
+            assert await self._send_final(gateway, "answer", turn_key=pending.record.turn_key) == "$sent"
 
-        ((index_event_ids, anchor_event_id, record_json),) = await journal_store.turn_records("agent").load_all()
-        assert index_event_ids == "$cause"
-        assert anchor_event_id == "$cause"
-        record = json.loads(record_json)
-        assert record["response_event_id"] == "$sent"
-        assert record["completed"] is True
+        record = await turn_store.get_turn_record("$cause")
+        assert record is not None
+        assert record.response_event_id == "$sent"
+        assert record.completed is True
 
-    async def test_a_replys_acknowledgement_binds_no_turn_record(
-        self,
-        tmp_path: Path,
-        alice: PrincipalStore,
-    ) -> None:
-        """A reply's records own its answer, so its acknowledgement commits no turn record beside it."""
-        bind = MagicMock(return_value=None)
-        gateway = _gateway(tmp_path, alice, terminal_turn_for=bind)
-        gateway.deps.response_hooks._apply_before_response = (
-            TestTurnDeliveryGoesThroughTheOutbox._hooks()._apply_before_response
-        )
-        delivered = DeliveredMatrixEvent("$sent", {"msgtype": "m.text", "body": "answer"})
-
-        with patch("mindroom.delivery_gateway.send_message_outcome", AsyncMock(return_value=delivered)):
-            outcome = await final_in_span(gateway, alice, self._final_request("answer"))
-
-        assert outcome.event_id == "$sent"
-        bind.assert_not_called()
-
-    async def test_nothing_is_carried_when_there_is_no_record_to_bind(
+    async def test_an_unbound_answer_is_acknowledged_without_completing_a_turn(
         self,
         tmp_path: Path,
         journal_store: EventJournalStore,
         alice: PrincipalStore,
     ) -> None:
-        """A turn with no record, or one that already names its answer, binds nothing.
+        """An answer enqueued for no stored turn still acknowledges, and completes nothing beside it.
 
         The acknowledgement still has to happen -- the answer is in the room
         either way -- so the delivery must not be held up by having nothing to
         write beside it.
         """
-        gateway = _gateway(tmp_path, alice, terminal_turn_for=lambda _turn_id, _event_id: None)
-        await admit_room_event(alice, _ROOM_ID, "$cause")
+        turn_store = await _store(journal_store)
+        pending = await turn_store.record_pending_turn(
+            _in_room(TurnRecord.create(["$cause"], completed=False, response_owner="agent"), _ROOM_ID),
+        )
+        assert pending is not None
+        gateway = _gateway(tmp_path, alice)
+        await alice.admit(
+            InboundEvent(
+                event_id="$cause",
+                room_id=_ROOM_ID,
+                thread_id=None,
+                kind=EventKind.MESSAGE,
+                event_class=EventClass.ACTIONABLE,
+                sender="@user:localhost",
+                origin_server_ts=1_000,
+                source={"event_id": "$cause", "content": {"msgtype": "m.text", "body": "question"}},
+            ),
+        )
+        assert await alice.is_pending("$cause")
         delivered = DeliveredMatrixEvent("$sent", {"msgtype": "m.text", "body": "answer"})
 
         with patch("mindroom.delivery_gateway.send_message_outcome", AsyncMock(return_value=delivered)):
             assert await self._send_final(gateway, "answer") == "$sent"
 
         assert (await _turn_row(alice, DeliveryStage.FINAL)).acknowledged_event_id == "$sent"
-        assert await journal_store.turn_records("agent").load_all() == ()
+        # The answer owed for its own source settles it, as an unbound answer always did.
+        assert not await alice.is_pending("$cause")
+        record = await turn_store.get_turn_record("$cause")
+        assert record is not None
+        assert record.completed is False
+        assert record.response_event_id is None
 
 
 class TestARacedAcknowledgementSpeaksForTheRow:
@@ -2069,75 +2046,6 @@ class TestARacedAcknowledgementSpeaksForTheRow:
         assert stored is not None
         assert stored.acknowledged_event_id == "$winner"
 
-    async def test_only_the_caller_that_bound_the_row_publishes_its_record(
-        self,
-        alice: PrincipalStore,
-    ) -> None:
-        """A shared event ID is what both callers get, and it says nothing about who won.
-
-        Both flushes here send the same frozen transaction ID from the same
-        device, so Matrix deduplicates and hands each of them the *same* event
-        -- exactly as a real homeserver does. Reading ownership off that
-        equality told the loser it had won, and it published a terminal record
-        the database had refused to take from it.
-        """
-        await self._enqueue(alice)
-        losing_send_started = asyncio.Event()
-        finish_losing_send = asyncio.Event()
-
-        async def losing_send(_claimed: MatrixDelivery) -> str:
-            losing_send_started.set()
-            await finish_losing_send.wait()
-            return "$deduplicated"
-
-        async def winning_send(_claimed: MatrixDelivery) -> str:
-            return "$deduplicated"
-
-        losing_publishes: list[TerminalTurnWrite] = []
-        winning_publishes: list[TerminalTurnWrite] = []
-
-        def terminal_turn_for(_delivery: MatrixDelivery, event_id: str) -> TerminalTurnWrite:
-            record = TurnRecord.create(["$source"], response_event_id=event_id)
-            assert record.anchor_event_id is not None
-            return TerminalTurnWrite(
-                agent_name="agent",
-                index_event_ids=record.indexed_event_ids,
-                anchor_event_id=record.anchor_event_id,
-                record_json=json.dumps(TurnRecordCodec._to_ledger_record(record)),
-            )
-
-        async def losing_publish(committed: TerminalTurnWrite) -> None:
-            losing_publishes.append(committed)
-
-        async def winning_publish(committed: TerminalTurnWrite) -> None:
-            winning_publishes.append(committed)
-
-        losing = MatrixDeliveryWorker(
-            store=alice,
-            send=losing_send,
-            observe_delivered=ignore_delivered_projection,
-            sending_device_id="DEVICE1",
-            terminal_turn_for=terminal_turn_for,
-            terminal_turn_committed=losing_publish,
-        )
-        winning = MatrixDeliveryWorker(
-            store=alice,
-            send=winning_send,
-            observe_delivered=ignore_delivered_projection,
-            sending_device_id="DEVICE1",
-            terminal_turn_for=terminal_turn_for,
-            terminal_turn_committed=winning_publish,
-        )
-
-        loser = asyncio.create_task(losing.flush(delivery_id="turn-1", stage=DeliveryStage.FINAL))
-        await losing_send_started.wait()
-        assert await winning.flush(delivery_id="turn-1", stage=DeliveryStage.FINAL) == "$deduplicated"
-        finish_losing_send.set()
-        assert await loser == "$deduplicated"
-
-        assert winning_publishes == [terminal_turn_for(None, "$deduplicated")]  # type: ignore[arg-type]
-        assert losing_publishes == [], "a caller that bound nothing published a record anyway"
-
 
 async def test_process_shutdown_recovery_bypasses_saturated_ordinary_journal_reads(
     journal_store: EventJournalStore,
@@ -2161,7 +2069,7 @@ async def test_process_shutdown_recovery_bypasses_saturated_ordinary_journal_rea
             },
         ),
     )
-    bot = _response_recovery_bot(journal_store, await _store(journal_store))
+    turn_store = await _store(journal_store)
 
     backend = journal_store.backend
     ordinary_capacity = (
@@ -2187,7 +2095,7 @@ async def test_process_shutdown_recovery_bypasses_saturated_ordinary_journal_rea
         assert await asyncio.to_thread(ordinary_started.wait, SETTLE_TIMEOUT_SECONDS), (
             "ordinary journal reads did not saturate"
         )
-        proof = asyncio.create_task(bot._response_recovery_ready(turn))
+        proof = asyncio.create_task(turn_store.response_recovery_ready(turn))
         ready = await asyncio.wait_for(asyncio.shield(proof), timeout=SETTLE_TIMEOUT_SECONDS)
     finally:
         release_ordinary.set()
@@ -2943,30 +2851,24 @@ class TestTurnDeliverySerialization:
         assert final not in completed_before_initial_acceptance
         assert accepted_stages == [DeliveryStage.INITIAL, DeliveryStage.FINAL]
 
-    async def test_cancelled_final_publishes_its_committed_terminal_before_propagating(
+    async def test_a_final_cancelled_on_the_wire_keeps_its_acknowledgement(
         self,
         tmp_path: Path,
         alice: PrincipalStore,
     ) -> None:
-        """An acknowledged FINAL cannot leave its terminal-record publication behind."""
+        """A FINAL Matrix accepted is acknowledged even when its task was cancelled mid-send."""
         await self._enqueue(alice, DeliveryStage.FINAL)
         send_started = asyncio.Event()
         accept_final = asyncio.Event()
-        published: list[TurnRecord] = []
 
         async def send(_delivery: MatrixDelivery) -> str:
             send_started.set()
             await accept_final.wait()
             return "$final"
 
-        async def publish(committed: TurnRecord) -> None:
-            published.append(committed)
-
         gateway = _gateway(
             tmp_path,
             alice,
-            terminal_turn_for=_completed_turn,
-            terminal_turn_committed=publish,
         )
         delivery = gateway._response_delivery(send, handoff=None)
         final = asyncio.create_task(delivery.flush(delivery_id="turn-1", stage=DeliveryStage.FINAL))
@@ -2980,7 +2882,6 @@ class TestTurnDeliverySerialization:
         stored = await alice.load_matrix_delivery(delivery_id="turn-1", stage=DeliveryStage.FINAL)
         assert stored is not None
         assert stored.acknowledged_event_id == "$final"
-        assert [record.response_event_id for record in published] == ["$final"]
 
     async def test_process_shutdown_accepts_exact_completed_final(
         self,
@@ -2991,9 +2892,12 @@ class TestTurnDeliverySerialization:
         """A cancelled task is safe when FINAL and its exact terminal turn committed."""
         source_event_id = "$source"
         response_event_id = "$answer"
-        turn = TurnRecord.create([source_event_id], completed=False)
         turn_store = await _store(journal_store, agent_name="agent")
-        await turn_store.record_pending_turn(turn)
+        pending = await turn_store.record_pending_turn(
+            _in_room(TurnRecord.create([source_event_id], completed=False), _ROOM_ID),
+        )
+        assert pending is not None
+        turn = pending.record
         await alice.admit(
             InboundEvent(
                 event_id=source_event_id,
@@ -3009,18 +2913,12 @@ class TestTurnDeliverySerialization:
                 },
             ),
         )
-        handoff = TurnHandoff(
-            sources_for_turn=lambda turn_id: turn.source_event_ids if turn_id == source_event_id else (),
-            released=lambda _source_event_ids: None,
-        )
+        handoff = ignore_final_delivery_handoff
         gateway = _gateway(
             tmp_path,
             alice,
-            terminal_turn_for=turn_store.terminal_turn_record,
-            terminal_turn_committed=turn_store.publish_completed_turn,
             turn_handoff=handoff,
         )
-        bot = _response_recovery_bot(journal_store, turn_store)
         send_started = asyncio.Event()
         finish_send = asyncio.Event()
 
@@ -3031,24 +2929,25 @@ class TestTurnDeliverySerialization:
 
         delivery = gateway._response_delivery(send, handoff=handoff)
         runner = ResponseRunner(deps=MagicMock())
-        response_task = runner.track_inbox_response(
+        response_task = runner.inbox.track_inbox_response(
             delivery.deliver(
                 delivery_id=source_event_id,
                 stage=DeliveryStage.FINAL,
                 room_id=_ROOM_ID,
                 thread_id=source_event_id,
                 payload={"msgtype": "m.text", "body": "answer"},
+                turn_key=turn.turn_key,
             ),
             name="test_process_shutdown_completed_final",
-            recovery_proof_ready=lambda: bot._response_recovery_ready(turn),
+            recovery_proof_ready=lambda: turn_store.response_recovery_ready(turn),
             room_id=_ROOM_ID,
         )
         await send_started.wait()
-        runner.begin_process_shutdown()
+        runner.inbox.begin_process_shutdown()
         finish_send.set()
 
         assert (
-            await runner.drain_inbox_responses(
+            await runner.inbox.drain_inbox_responses(
                 cancel_after_seconds=_SHUTDOWN_DRAIN_WINDOW_SECONDS,
                 shutdown_intent=ORDERLY_SHUTDOWN,
             )
@@ -3058,113 +2957,7 @@ class TestTurnDeliverySerialization:
         stored = await alice.load_matrix_delivery(delivery_id=source_event_id, stage=DeliveryStage.FINAL)
         assert stored is not None
         assert stored.acknowledged_event_id == response_event_id
-        completed_turn = turn_store.get_turn_record(source_event_id)
-        assert completed_turn is not None
-        assert completed_turn.completed
-        assert completed_turn.response_event_id == response_event_id
-
-    async def test_process_shutdown_finishes_terminal_publication_across_second_cancel(
-        self,
-        tmp_path: Path,
-        journal_store: EventJournalStore,
-        alice: PrincipalStore,
-    ) -> None:
-        """A repeated shutdown cancel cannot strand memory behind the atomic ack."""
-        source_event_id = "$source"
-        response_event_id = "$answer"
-        turn = TurnRecord.create([source_event_id], completed=False)
-        turn_store = await _store(journal_store, agent_name="agent")
-        await turn_store.record_pending_turn(turn)
-        await alice.admit(
-            InboundEvent(
-                event_id=source_event_id,
-                room_id=_ROOM_ID,
-                thread_id=source_event_id,
-                kind=EventKind.MESSAGE,
-                event_class=EventClass.ACTIONABLE,
-                sender="@user:localhost",
-                origin_server_ts=1_000,
-                source={
-                    "event_id": source_event_id,
-                    "content": {"msgtype": "m.text", "body": "question"},
-                },
-            ),
-        )
-        handoff = TurnHandoff(
-            sources_for_turn=lambda turn_id: turn.source_event_ids if turn_id == source_event_id else (),
-            released=lambda _source_event_ids: None,
-        )
-        publication_started = asyncio.Event()
-        allow_publication = asyncio.Event()
-
-        async def publish_completed_turn(committed: TurnRecord) -> None:
-            publication_started.set()
-            await allow_publication.wait()
-            await turn_store.publish_completed_turn(committed)
-
-        gateway = _gateway(
-            tmp_path,
-            alice,
-            terminal_turn_for=turn_store.terminal_turn_record,
-            terminal_turn_committed=publish_completed_turn,
-            turn_handoff=handoff,
-        )
-        bot = _response_recovery_bot(journal_store, turn_store)
-        send_started = asyncio.Event()
-        finish_send = asyncio.Event()
-
-        async def send(_delivery: MatrixDelivery) -> str:
-            send_started.set()
-            await finish_send.wait()
-            return response_event_id
-
-        delivery = gateway._response_delivery(send, handoff=handoff)
-        runner = ResponseRunner(deps=MagicMock())
-        response_task = runner.track_inbox_response(
-            delivery.deliver(
-                delivery_id=source_event_id,
-                stage=DeliveryStage.FINAL,
-                room_id=_ROOM_ID,
-                thread_id=source_event_id,
-                payload={"msgtype": "m.text", "body": "answer"},
-            ),
-            name="test_process_shutdown_repeated_cancel_after_final_ack",
-            recovery_proof_ready=lambda: bot._response_recovery_ready(turn),
-            room_id=_ROOM_ID,
-        )
-        await send_started.wait()
-        original_request_task_cancel = request_task_cancel
-        cancellation_count = 0
-
-        def cancel_and_release_publication(task: asyncio.Task[None], **kwargs: object) -> None:
-            nonlocal cancellation_count
-            cancellation_count += 1
-            original_request_task_cancel(task, **kwargs)  # type: ignore[arg-type]
-            if cancellation_count == 2:
-                allow_publication.set()
-
-        with patch(
-            "mindroom.response_runner.request_task_cancel",
-            side_effect=cancel_and_release_publication,
-        ):
-            runner.begin_process_shutdown()
-            finish_send.set()
-            await publication_started.wait()
-            assert (
-                await runner.drain_inbox_responses(
-                    # Exercise repeated cancellation without imposing a database deadline.
-                    cancel_after_seconds=_SHUTDOWN_DRAIN_WINDOW_SECONDS,
-                    shutdown_intent=ORDERLY_SHUTDOWN,
-                )
-                is True
-            )
-
-        assert cancellation_count >= 2
-        assert response_task.cancelled()
-        stored = await alice.load_matrix_delivery(delivery_id=source_event_id, stage=DeliveryStage.FINAL)
-        assert stored is not None
-        assert stored.acknowledged_event_id == response_event_id
-        completed_turn = turn_store.get_turn_record(source_event_id)
+        completed_turn = await turn_store.get_turn_record(source_event_id)
         assert completed_turn is not None
         assert completed_turn.completed
         assert completed_turn.response_event_id == response_event_id
@@ -3179,14 +2972,20 @@ class TestTurnDeliverySerialization:
         source_event_id = "$source"
         placeholder_event_id = "$placeholder"
         final_edit_event_id = "$final-edit"
-        turn = TurnRecord.create(
-            [source_event_id],
-            completed=False,
-            response_event_id=placeholder_event_id,
-            response_owner="agent",
-        )
         turn_store = await _store(journal_store, agent_name="agent")
-        await turn_store.record_pending_turn(turn)
+        pending = await turn_store.record_pending_turn(
+            _in_room(
+                TurnRecord.create(
+                    [source_event_id],
+                    completed=False,
+                    response_event_id=placeholder_event_id,
+                    response_owner="agent",
+                ),
+                _ROOM_ID,
+            ),
+        )
+        assert pending is not None
+        turn = pending.record
         await alice.admit(
             InboundEvent(
                 event_id=source_event_id,
@@ -3202,18 +3001,12 @@ class TestTurnDeliverySerialization:
                 },
             ),
         )
-        handoff = TurnHandoff(
-            sources_for_turn=lambda turn_id: turn.source_event_ids if turn_id == source_event_id else (),
-            released=lambda _source_event_ids: None,
-        )
+        handoff = ignore_final_delivery_handoff
         gateway = _gateway(
             tmp_path,
             alice,
-            terminal_turn_for=turn_store.terminal_turn_record,
-            terminal_turn_committed=turn_store.publish_completed_turn,
             turn_handoff=handoff,
         )
-        bot = _response_recovery_bot(journal_store, turn_store)
         send_started = asyncio.Event()
         finish_send = asyncio.Event()
 
@@ -3224,7 +3017,7 @@ class TestTurnDeliverySerialization:
 
         delivery = gateway._response_delivery(send, handoff=handoff)
         runner = ResponseRunner(deps=MagicMock())
-        response_task = runner.track_inbox_response(
+        response_task = runner.inbox.track_inbox_response(
             delivery.deliver(
                 delivery_id=source_event_id,
                 stage=DeliveryStage.FINAL,
@@ -3232,17 +3025,18 @@ class TestTurnDeliverySerialization:
                 thread_id=source_event_id,
                 payload={"msgtype": "m.text", "body": "answer"},
                 edits_event_id=placeholder_event_id,
+                turn_key=turn.turn_key,
             ),
             name="test_process_shutdown_completed_final_edit",
-            recovery_proof_ready=lambda: bot._response_recovery_ready(turn),
+            recovery_proof_ready=lambda: turn_store.response_recovery_ready(turn),
             room_id=_ROOM_ID,
         )
         await send_started.wait()
-        runner.begin_process_shutdown()
+        runner.inbox.begin_process_shutdown()
         finish_send.set()
 
         assert (
-            await runner.drain_inbox_responses(
+            await runner.inbox.drain_inbox_responses(
                 cancel_after_seconds=_SHUTDOWN_DRAIN_WINDOW_SECONDS,
                 shutdown_intent=ORDERLY_SHUTDOWN,
             )
@@ -3253,11 +3047,11 @@ class TestTurnDeliverySerialization:
         assert stored is not None
         assert stored.acknowledged_event_id == final_edit_event_id
         assert stored.edits_event_id == placeholder_event_id
-        completed_turn = turn_store.get_turn_record(source_event_id)
+        completed_turn = await turn_store.get_turn_record(source_event_id)
         assert completed_turn is not None
         assert completed_turn.completed
         assert completed_turn.response_event_id == placeholder_event_id
-        assert turn_store.is_handled(source_event_id)
+        assert await turn_store.is_handled(_ROOM_ID, source_event_id)
 
     async def test_cancelled_final_finishes_after_its_enqueue_commits(
         self,
@@ -3279,7 +3073,6 @@ class TestTurnDeliverySerialization:
             payload: Mapping[str, object],
             result: Mapping[str, object] | None = None,
             edits_event_id: str | None = None,
-            settle_source_event_ids: tuple[str, ...] = (),
             permanent_failure_reason: str | None = None,
         ) -> str | None:
             transaction_id = await original_enqueue(
@@ -3291,7 +3084,6 @@ class TestTurnDeliverySerialization:
                 payload=payload,
                 result=result,
                 edits_event_id=edits_event_id,
-                settle_source_event_ids=settle_source_event_ids,
                 permanent_failure_reason=permanent_failure_reason,
             )
             enqueue_committed.set()
@@ -3351,7 +3143,6 @@ class TestTurnDeliverySerialization:
             payload: Mapping[str, object],
             result: Mapping[str, object] | None = None,
             edits_event_id: str | None = None,
-            settle_source_event_ids: tuple[str, ...] = (),
             permanent_failure_reason: str | None = None,
         ) -> str | None:
             transaction_id = await original_enqueue(
@@ -3363,7 +3154,6 @@ class TestTurnDeliverySerialization:
                 payload=payload,
                 result=result,
                 edits_event_id=edits_event_id,
-                settle_source_event_ids=settle_source_event_ids,
                 permanent_failure_reason=permanent_failure_reason,
             )
             enqueue_committed.set()
@@ -3677,136 +3467,55 @@ class TestTurnDeliverySerialization:
         assert await delivery.recover() == RecoveryOutcome(recovered=1, failed=0)
         assert sent == [DeliveryStage.FINAL]
 
-    async def test_terminal_callback_can_reenter_the_same_turn(
-        self,
-        tmp_path: Path,
-        alice: PrincipalStore,
-    ) -> None:
-        """Publishing a committed FINAL runs after releasing its visible-delivery lock."""
-        await self._enqueue(alice, DeliveryStage.FINAL)
-        reentered: list[str | None] = []
-        reentrant_delivery: MatrixDeliveryWorker | None = None
 
-        async def publish_committed(_committed: TurnRecord) -> None:
-            assert reentrant_delivery is not None
-            reentered.append(await reentrant_delivery.flush(delivery_id="turn-1", stage=DeliveryStage.FINAL))
+async def test_a_recovered_answer_keeps_its_event_through_a_concurrent_redaction(
+    tmp_path: Path,
+    journal_store: EventJournalStore,
+    alice: PrincipalStore,
+) -> None:
+    """A redaction landing while a recovered answer is on the wire takes nothing from the turn it completes.
 
-        async def send(_delivery: MatrixDelivery) -> str:
-            return "$answer"
-
-        gateway = _gateway(
-            tmp_path,
-            alice,
-            terminal_turn_for=_completed_turn,
-            terminal_turn_committed=publish_committed,
-        )
-        outer_delivery = gateway._response_delivery(send, handoff=None)
-        reentrant_delivery = gateway._response_delivery(send, handoff=None)
-
-        try:
-            delivered = await asyncio.wait_for(
-                outer_delivery.flush(delivery_id="turn-1", stage=DeliveryStage.FINAL),
-                timeout=SETTLE_TIMEOUT_SECONDS,
-            )
-        except TimeoutError:
-            pytest.fail("terminal callback deadlocked on the turn's visible-delivery lock")
-
-        assert delivered == "$answer"
-        assert reentered == ["$answer"]
-
-
-class TestTheAcknowledgedRecordOutlivesAConcurrentMutation:
-    """The record an acknowledgement commits has to be written, not just published.
-
-    Every other terminal write goes through the ledger's own lock, which
-    publishes to memory and enqueues the row while holding it. That pairing is
-    the whole reason concurrent mutation is safe: writes reach the database in
-    the order they reached memory, so whichever lands last derived from memory
-    that already held the other's fact.
-
-    The acknowledgement commits its record in the outbox's transaction instead,
-    outside that lock. Telling memory afterwards and stopping there puts the
-    acknowledgement outside the pairing: a mutation that derived its record
-    before being told, and reaches the database after the transaction, writes
-    over the row and takes the answer's event ID with it.
-
-    A live turn survives that because it re-asserts the record durably right
-    after delivery. Recovery does not: it acknowledges and returns, nothing
-    reads the outbox's event back into a record, and the turn no longer names
-    the message an edit would have to edit -- for good, across restarts.
+    The redaction arrives on a lane task of its own, it is not turn-backed so
+    nothing defers it behind a live turn, and the recovery pass runs after
+    every sync response. A restart reads both facts from the database alone.
     """
+    turn_store = await _store(journal_store, agent_name="agent")
+    pending = await turn_store.record_pending_turn(_in_room(TurnRecord.create(["$source"], completed=False), _ROOM_ID))
+    assert pending is not None
+    assert pending.record.turn_key is not None
+    await admit_room_event(alice, _ROOM_ID, "$source")
+    gateway = _gateway(tmp_path, alice)
+    enqueued = await alice.enqueue_final_answer(
+        delivery_id="$source",
+        room_id=_ROOM_ID,
+        thread_id=None,
+        payload={"msgtype": "m.text", "body": "the answer"},
+        turn_key=pending.record.turn_key,
+    )
+    assert enqueued is not None
+    send_started = asyncio.Event()
+    finish_send = asyncio.Event()
 
-    @staticmethod
-    async def _restarted_record(journal_store: EventJournalStore, source_event_id: str) -> TurnRecord | None:
-        """Return the record as a restart reads it, from the database alone.
+    async def send(*_args: object, **_kwargs: object) -> DeliveredMatrixEvent:
+        send_started.set()
+        await finish_send.wait()
+        return DeliveredMatrixEvent("$answer", {"body": "the answer"})
 
-        The live map is dropped first on purpose. Asking the ledger that just
-        wrote would answer from memory, which is the half of the state that
-        was never in doubt.
-        """
-        _reset_handled_turn_ledger_runtime()
-        restarted = await _store(journal_store, agent_name="agent")
-        return restarted.get_turn_record(source_event_id)
+    with patch("mindroom.delivery_gateway.send_message_outcome", AsyncMock(side_effect=send)):
+        recovery = asyncio.create_task(gateway.recover_deliveries())
+        await send_started.wait()
+        redaction = asyncio.create_task(_redact(journal_store, "$source", _ROOM_ID))
+        finish_send.set()
+        outcome = await recovery
+        await redaction
 
-    @pytest.mark.ledger_loads_from_disk
-    async def test_a_recovered_answer_keeps_its_event_through_a_concurrent_redaction(
-        self,
-        tmp_path: Path,
-        journal_store: EventJournalStore,
-        alice: PrincipalStore,
-    ) -> None:
-        """Both facts are durable, whichever of the two writers reaches the row last.
-
-        The redaction is the one that actually happens: it arrives on a lane
-        task of its own, it is not turn-backed so nothing defers it behind a
-        live turn, and the recovery pass runs after every sync response.
-
-        Asserting on the database rather than on the ledger is the point. Both
-        orderings leave memory holding everything and only the stored row
-        short, so a test that read the ledger would pass against the loss it
-        was written to catch.
-        """
-        turn_store = await _store(journal_store, agent_name="agent")
-        await turn_store.record_pending_turn(TurnRecord.create(["$source"], completed=False))
-        await admit_room_event(alice, _ROOM_ID, "$source")
-        gateway = _gateway(
-            tmp_path,
-            alice,
-            terminal_turn_for=turn_store.terminal_turn_record,
-            terminal_turn_committed=turn_store.publish_completed_turn,
-        )
-        transaction_id = await alice.enqueue_matrix_delivery(
-            delivery_id="$source",
-            stage=DeliveryStage.FINAL,
-            room_id=_ROOM_ID,
-            thread_id=None,
-            payload={"msgtype": "m.text", "body": "the answer"},
-        )
-        assert transaction_id is not None
-        send_started = asyncio.Event()
-        finish_send = asyncio.Event()
-
-        async def send(*_args: object, **_kwargs: object) -> DeliveredMatrixEvent:
-            send_started.set()
-            await finish_send.wait()
-            return DeliveredMatrixEvent("$answer", {"body": "the answer"})
-
-        with patch("mindroom.delivery_gateway.send_message_outcome", AsyncMock(side_effect=send)):
-            recovery = asyncio.create_task(gateway.recover_deliveries())
-            await send_started.wait()
-            # Started while the answer is on the wire, so it derives its record
-            # from a memory the acknowledgement has not published into yet.
-            redaction = asyncio.create_task(turn_store.mark_source_redacted("$source", room_id=_ROOM_ID))
-            finish_send.set()
-            outcome = await recovery
-            await redaction
-
-        assert outcome.recovered == 1
-        stored = await self._restarted_record(journal_store, "$source")
-        assert stored is not None
-        assert stored.redacted_source_event_ids == ("$source",), "the redaction never reached the database"
-        assert stored.response_event_id == "$answer", "the delivered answer lost the event it is stored under"
-        assert stored.completed, "a delivered turn came back unfinished"
+    assert outcome.recovered == 1
+    restarted = await _store(journal_store, agent_name="agent")
+    stored = await restarted.get_turn_record("$source")
+    assert stored is not None
+    assert await restarted.deleted_sources(stored) == frozenset({"$source"}), "the redaction never reached the database"
+    assert stored.response_event_id == "$answer", "the delivered answer lost the event it is stored under"
+    assert stored.completed, "a delivered turn came back unfinished"
 
 
 async def test_a_published_body_is_remembered_until_a_later_one_is_written_ahead() -> None:

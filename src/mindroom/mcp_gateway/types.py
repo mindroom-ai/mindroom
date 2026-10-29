@@ -34,6 +34,7 @@ class GatewayErrorCode(StrEnum):
     APPROVAL_REQUIRED = "approval_required"
     TOOL_UNAVAILABLE = "tool_unavailable"
     TOOL_DECLINED = "tool_declined"
+    TOOL_FAILED = "tool_failed"
     INVALID_ARGUMENTS = "invalid_arguments"
     RESULT_TOO_LARGE = "result_too_large"
     SCHEMA_TOO_LARGE = "schema_too_large"

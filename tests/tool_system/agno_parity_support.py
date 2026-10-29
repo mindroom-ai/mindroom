@@ -30,6 +30,7 @@ from mindroom.agents import build_agent_toolkit
 from mindroom.config.main import Config
 from mindroom.constants import RuntimePaths, resolve_runtime_paths
 from mindroom.credentials.manager import get_runtime_credentials_manager
+from mindroom.tool_system.agent_tools import resolve_agent_tools
 from mindroom.tool_system.agno_toolkits import adapt_toolkit
 from mindroom.tool_system.catalog import TOOL_METADATA, ensure_tool_registry_loaded
 from mindroom.tool_system.dependencies import check_deps_installed, optional_dependency_environment
@@ -41,6 +42,7 @@ from mindroom.tool_system.invocation import (
     execute_tool_call,
     parse_tool_arguments,
 )
+from mindroom.tool_system.sandbox_proxy import tool_placement
 from mindroom.vendor_telemetry import vendor_telemetry_env_values
 from tests.agno_parity import tool_argument_probes as probes
 
@@ -60,7 +62,8 @@ ARGUMENTS_PATH = FIXTURE_DIR / "arguments.json"
 UNBUILDABLE = frozenset({"apify", "composio"})
 AGENT_NAME = "golden"
 # Tools are built for one agent of a config shaped like `mindroom config init` output: file memory gives the agent a
-# workspace, so output-file wrapping applies; delegation and the knowledge graph enable the tools that need them.
+# workspace, so output-file wrapping applies; delegation, the knowledge graph and agent creation enable the tools that
+# need them, and an empty worker tool list builds every tool in this process.
 CONFIG = {
     "models": {"default": {"provider": "openai", "id": "golden-model"}},
     "memory": {"backend": "file"},
@@ -70,8 +73,10 @@ CONFIG = {
             "display_name": "Golden",
             "role": "Captures tool schemas.",
             "delegate_to": ["helper"],
+            "created_agents_per_owner": 1,
             "knowledge_graph": True,
             "knowledge_graph_edits": True,
+            "worker_tools": [],
         },
         "helper": {"display_name": "Helper", "role": "Helps with delegated work."},
     },
@@ -110,8 +115,6 @@ DUMMY_CREDENTIALS: dict[str, dict[str, object]] = {
     "oxylabs": {"username": _KEY, "password": _KEY},
     "scrapegraph": {"api_key": _KEY},
     "searxng": {"host": _URL},
-    # Its search_messages function exists only with a user token.
-    "slack": {"token": _KEY, "user_token": _KEY},
     "spotify": {"access_token": _KEY},
     "sql": {"db_url": "sqlite://"},
     "tavily": {"api_key": _KEY},
@@ -256,11 +259,9 @@ def build_toolkit(
     ):
         toolkit = build_agent_toolkit(
             tool_name,
-            agent_name=AGENT_NAME,
-            config=config,
+            agent_tools=resolve_agent_tools(config, AGENT_NAME),
+            placement=tool_placement(runtime_paths),
             runtime_paths=runtime_paths,
-            worker_tools=[],
-            runtime_overrides=None,
             tool_config_overrides=tool_config_overrides,
             execution_identity=None,
             deferred_toolkits=deferred_toolkits,

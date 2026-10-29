@@ -3,27 +3,38 @@
 from __future__ import annotations
 
 import asyncio
+import time
 from dataclasses import replace
 from typing import TYPE_CHECKING, Literal
 
 import pytest
 
-from mindroom.approval.manager import ApprovalManager
 from mindroom.approval.tool_approval import BackgroundScriptToolOrigin
 from mindroom.config.agent import AgentConfig
 from mindroom.event_journal import (
+    JOB_ENDED_REASON,
     ApprovalCardReservation,
+    ApprovalCardView,
     BackgroundApprovalDecision,
+    CallKey,
     DeliveryStage,
     DepartureSource,
     EventJournalStore,
     MatrixDelivery,
-    StoredApprovalCard,
+    tool_job_run_id,
 )
+from mindroom.event_journal.approval_store import ApprovalStore
 from mindroom.script_runs.broker import ScriptToolBroker, ScriptToolCallRequest
 from mindroom.script_runs.models import ScriptCallState, ScriptToolGrant
-from tests.conftest import handle_card_response_for_test, test_runtime_paths
+from tests.approval_card_helpers import card_is_terminal, wait_for_pending_card
+from tests.conftest import (
+    approval_manager_for_test,
+    bound_worker_launch_config,
+    handle_card_response_for_test,
+    test_runtime_paths,
+)
 from tests.journal_membership_helpers import admit_room_membership
+from tests.test_script_run_manager import _config as _manager_config
 from tests.test_script_run_manager import _context as _manager_context
 from tests.test_script_run_manager import _manager
 from tests.test_script_tool_broker import _call_through_gateway, _RuntimeResolver
@@ -31,10 +42,10 @@ from tests.test_script_tool_broker import _call_through_gateway, _RuntimeResolve
 if TYPE_CHECKING:
     from pathlib import Path
 
-    from mindroom.event_journal.store import PrincipalStore
+    from mindroom.approval.manager import ApprovalManager
 
-# A background approval waiter rereads its durable decision once a second, so a
-# settlement can take a whole poll interval to reach it.
+# A background approval waiter wakes as its decision commits; this bound only
+# keeps a lost wake from hanging the test until the call's 30-second deadline.
 _SETTLED_DECISION_WAIT_SECONDS = 5.0
 
 
@@ -47,7 +58,8 @@ async def test_launch_preapproval_does_not_expand_from_live_script_config(
     """A live allowlist added after launch cannot bypass Matrix approval."""
     manager, _backend, worker_client = _manager(tmp_path)
     launch_context = _manager_context(tmp_path)
-    launched = await manager.run(launch_context, source="print('ok')\n")
+    with bound_worker_launch_config(_manager_config()):
+        launched = await manager.run(launch_context, source="print('ok')\n")
     durable_run = manager.store.get_run(launched.run_id)
     assert durable_run.preapprove_launch_grants is False
 
@@ -136,29 +148,23 @@ async def _approval_manager(
             raise RuntimeError(message)
         return f"$terminal:{delivery.delivery_id}" if unique_event_ids else "$terminal"
 
-    manager = ApprovalManager(
+    manager = approval_manager_for_test(
         test_runtime_paths(tmp_path),
-        prepare_event=prepare_event,
-        send_delivery=send,
+        prepare_approval_event=prepare_event,
+        send_approval_delivery=send,
         cards=cards,
-        transport_sender=lambda: "@mindroom_router:localhost",
-        sending_device=lambda: "DEVICE",
+        transport_sender_id=lambda: "@mindroom_router:localhost",
+        transport_device_id=lambda: "DEVICE",
     )
     return manager, journal, initial_sent
 
 
-async def _wait_for_pending_card(journal: EventJournalStore) -> StoredApprovalCard:
-    cards = journal.principal("router@shared")
-    for _attempt in range(1000):
-        stored = await cards.pending_approval_card(
-            room_id="!room:localhost",
-            card_event_id="$approval",
-        )
-        if stored is not None:
-            return stored
-        await asyncio.sleep(0.001)
-    message = "Approval delivery was not durably acknowledged."
-    raise AssertionError(message)
+async def _wait_for_pending_card(journal: EventJournalStore) -> ApprovalCardView:
+    return await wait_for_pending_card(
+        journal.principal("router@shared").approvals,
+        room_id="!room:localhost",
+        card_event_id="$approval",
+    )
 
 
 @pytest.mark.asyncio
@@ -171,6 +177,7 @@ async def test_background_approval_fails_closed_when_room_departure_is_fenced(tm
     try:
         decision = await asyncio.wait_for(
             manager.request_background_approval(
+                owner_kind="script",
                 origin=_origin(),
                 room_id="!room:localhost",
                 thread_id="$thread",
@@ -187,7 +194,7 @@ async def test_background_approval_fails_closed_when_room_departure_is_fenced(tm
         assert decision.status == "denied"
         assert decision.reason == "Approval card could not be published in this room."
         assert initial_sent.is_set() is False
-        assert await cards.background_approval_decision(run_id="run-1", call_id="call-1") is None
+        assert await cards.approvals.detached_decision(CallKey.detached("run-1", "call-1")) is None
     finally:
         await manager.shutdown()
         await journal.close()
@@ -208,23 +215,19 @@ async def test_background_script_approval_uses_exact_matrix_actor_and_first_deci
     cards = journal.principal("router@shared")
     read_started = asyncio.Event()
     decision_committed = asyncio.Event()
-    original_read = type(cards).background_approval_decision
+    original_read = ApprovalStore.detached_decision
     decision_task: asyncio.Task[BackgroundApprovalDecision] | None = None
 
-    async def read_after_commit(
-        principal: PrincipalStore,
-        *,
-        run_id: str,
-        call_id: str,
-    ) -> BackgroundApprovalDecision | None:
-        if asyncio.current_task() is decision_task and principal is manager.cards:
+    async def read_after_commit(approvals: ApprovalStore, call: CallKey) -> BackgroundApprovalDecision | None:
+        if asyncio.current_task() is decision_task and approvals == cards.approvals:
             read_started.set()
             await decision_committed.wait()
-        return await original_read(principal, run_id=run_id, call_id=call_id)
+        return await original_read(approvals, call)
 
-    monkeypatch.setattr(type(cards), "background_approval_decision", read_after_commit)
+    monkeypatch.setattr(ApprovalStore, "detached_decision", read_after_commit)
     decision_task = asyncio.create_task(
         manager.request_background_approval(
+            owner_kind="script",
             origin=_origin(),
             room_id="!room:localhost",
             thread_id="$thread",
@@ -240,7 +243,7 @@ async def test_background_script_approval_uses_exact_matrix_actor_and_first_deci
         await initial_sent.wait()
         stored = await _wait_for_pending_card(journal)
         await read_started.wait()
-        assert stored.target_kind == "background_script"
+        assert stored.owner_kind == "script"
         wrong_actor = await handle_card_response_for_test(
             manager,
             room_id="!room:localhost",
@@ -251,7 +254,7 @@ async def test_background_script_approval_uses_exact_matrix_actor_and_first_deci
         )
         assert wrong_actor.consumed is False
         assert decision_task.done() is False
-        assert await cards.background_approval_decision(run_id="run-1", call_id="call-1") is None
+        assert await cards.approvals.detached_decision(CallKey.detached("run-1", "call-1")) is None
 
         result = await handle_card_response_for_test(
             manager,
@@ -263,7 +266,7 @@ async def test_background_script_approval_uses_exact_matrix_actor_and_first_deci
             authorize_responder=lambda _entity_name: True,
         )
         assert result.consumed is True
-        committed = await cards.background_approval_decision(run_id="run-1", call_id="call-1")
+        committed = await cards.approvals.detached_decision(CallKey.detached("run-1", "call-1"))
         assert committed is not None
         assert committed.status == status
         assert committed.reason == "operator decision"
@@ -271,7 +274,8 @@ async def test_background_script_approval_uses_exact_matrix_actor_and_first_deci
         decision = await decision_task
         assert decision.status == status
         assert decision.reason == "operator decision"
-        assert await journal.principal("router@shared").is_terminal_approval_card(
+        assert await card_is_terminal(
+            journal.principal("router@shared").approvals,
             room_id="!room:localhost",
             card_event_id="$approval",
         )
@@ -285,9 +289,8 @@ async def test_background_script_approval_uses_exact_matrix_actor_and_first_deci
             authorize_responder=lambda _entity_name: True,
         )
         assert repeated.consumed is True
-        persisted = await journal.principal("router@shared").background_approval_decision(
-            run_id="run-1",
-            call_id="call-1",
+        persisted = await journal.principal("router@shared").approvals.detached_decision(
+            CallKey.detached("run-1", "call-1"),
         )
         assert persisted is not None
         assert persisted.status == status
@@ -306,6 +309,7 @@ async def test_background_script_approval_expires_and_retires_without_a_response
     manager, journal, _initial_sent = await _approval_manager(tmp_path)
     try:
         decision = await manager.request_background_approval(
+            owner_kind="script",
             origin=_origin(),
             room_id="!room:localhost",
             thread_id="$thread",
@@ -319,7 +323,8 @@ async def test_background_script_approval_expires_and_retires_without_a_response
 
         assert decision.status == "expired"
         assert decision.reason == "Tool approval request timed out."
-        assert await journal.principal("router@shared").is_terminal_approval_card(
+        assert await card_is_terminal(
+            journal.principal("router@shared").approvals,
             room_id="!room:localhost",
             card_event_id="$approval",
         )
@@ -333,6 +338,7 @@ async def test_background_script_terminal_edit_is_recovered_after_restart(tmp_pa
     """Restart recovery retries a failed terminal edit and retires the card."""
     first, first_journal, _initial_sent = await _approval_manager(tmp_path, fail_final=True)
     decision = await first.request_background_approval(
+        owner_kind="script",
         origin=_origin(),
         room_id="!room:localhost",
         thread_id="$thread",
@@ -352,7 +358,8 @@ async def test_background_script_terminal_edit_is_recovered_after_restart(tmp_pa
         sweep = await recovered.recover_cards_on_startup()
 
         assert sweep.complete is True
-        assert await recovered_journal.principal("router@shared").is_terminal_approval_card(
+        assert await card_is_terminal(
+            recovered_journal.principal("router@shared").approvals,
             room_id="!room:localhost",
             card_event_id="$approval",
         )
@@ -367,6 +374,7 @@ async def test_cancelled_background_call_is_denied_retired_and_pruned_with_run(t
     manager, journal, initial_sent = await _approval_manager(tmp_path)
     decision_task = asyncio.create_task(
         manager.request_background_approval(
+            owner_kind="script",
             origin=_origin(),
             room_id="!room:localhost",
             thread_id="$thread",
@@ -390,18 +398,248 @@ async def test_cancelled_background_call_is_denied_retired_and_pruned_with_run(t
         assert settled is True
         assert decision.status == "denied"
         assert decision.reason == "Background script ownership was cancelled."
-        assert await journal.principal("router@shared").is_terminal_approval_card(
+        assert await card_is_terminal(
+            journal.principal("router@shared").approvals,
             room_id="!room:localhost",
             card_event_id="$approval",
         )
         assert await manager.prune_background_approvals("run-1") is True
         assert (
-            await journal.principal("router@shared").background_approval_decision(
-                run_id="run-1",
-                call_id="call-1",
-            )
+            await journal.principal("router@shared").approvals.detached_decision(CallKey.detached("run-1", "call-1"))
             is None
         )
+    finally:
+        if not decision_task.done():
+            decision_task.cancel()
+            await asyncio.gather(decision_task, return_exceptions=True)
+        await manager.shutdown()
+        await journal.close()
+
+
+@pytest.mark.asyncio
+async def test_a_waiting_call_wakes_as_its_decision_commits(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A waiter that already read no decision ends when one commits, long before its deadline."""
+    manager, journal, _initial_sent = await _approval_manager(tmp_path)
+    waiting = asyncio.Event()
+    original_read = ApprovalStore.detached_decision
+
+    async def note_undecided(approvals: ApprovalStore, call: CallKey) -> BackgroundApprovalDecision | None:
+        decision = await original_read(approvals, call)
+        if decision is None:
+            waiting.set()
+        return decision
+
+    monkeypatch.setattr(ApprovalStore, "detached_decision", note_undecided)
+    decision_task = asyncio.create_task(
+        manager.request_background_approval(
+            owner_kind="script",
+            origin=_origin(),
+            room_id="!room:localhost",
+            thread_id="$thread",
+            agent_name="watcher",
+            requester_id="@alice:localhost",
+            approver_user_id="@alice:localhost",
+            tool_name="add",
+            arguments={"a": 1, "b": 2},
+            timeout_seconds=30.0,
+        ),
+    )
+    try:
+        await asyncio.wait_for(waiting.wait(), timeout=_SETTLED_DECISION_WAIT_SECONDS)
+        assert await manager.settle_background_approval(_origin(), reason="Cancelled.") is True
+        decision = await asyncio.wait_for(decision_task, timeout=_SETTLED_DECISION_WAIT_SECONDS)
+        assert decision == BackgroundApprovalDecision(status="denied", reason="Cancelled.")
+    finally:
+        if not decision_task.done():
+            decision_task.cancel()
+            await asyncio.gather(decision_task, return_exceptions=True)
+        await manager.shutdown()
+        await journal.close()
+
+
+def _recording_sends(manager: ApprovalManager) -> tuple[list[tuple[str, DeliveryStage]], asyncio.Event]:
+    """Record every approval delivery the manager sends, and set the returned event at the first terminal edit."""
+    sent: list[tuple[str, DeliveryStage]] = []
+    final_sent = asyncio.Event()
+    send = manager.transport.send_approval_delivery
+
+    async def record(delivery: MatrixDelivery) -> str:
+        sent.append((delivery.delivery_id, delivery.stage))
+        if delivery.stage is DeliveryStage.FINAL:
+            final_sent.set()
+        return await send(delivery)
+
+    manager.transport.send_approval_delivery = record
+    return sent, final_sent
+
+
+@pytest.mark.asyncio
+async def test_an_ended_jobs_card_shows_its_denial_as_the_end_commits(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """The save of a job's end denies its card in the journal, and the card's terminal edit is sent at once."""
+    manager, journal, _initial_sent = await _approval_manager(tmp_path)
+    sent, final_sent = _recording_sends(manager)
+    origin = _origin(run_id=tool_job_run_id("job-1"))
+    waiting = asyncio.Event()
+    original_read = ApprovalStore.detached_decision
+
+    async def note_undecided(approvals: ApprovalStore, call: CallKey) -> BackgroundApprovalDecision | None:
+        decision = await original_read(approvals, call)
+        if decision is None:
+            waiting.set()
+        return decision
+
+    monkeypatch.setattr(ApprovalStore, "detached_decision", note_undecided)
+    decision_task = asyncio.create_task(
+        manager.request_background_approval(
+            owner_kind="job",
+            origin=origin,
+            room_id="!room:localhost",
+            thread_id="$thread",
+            agent_name="watcher",
+            requester_id="@alice:localhost",
+            approver_user_id="@alice:localhost",
+            tool_name="add",
+            arguments={"a": 1, "b": 2},
+            timeout_seconds=30.0,
+        ),
+    )
+    jobs = journal.tool_jobs("runtime-1")
+    try:
+        await asyncio.wait_for(waiting.wait(), timeout=_SETTLED_DECISION_WAIT_SECONDS)
+        await jobs.take_ownership()
+        await jobs.accept("job-1", "{}")
+        # No manager decides this call: the job's own save does.
+        await jobs.save("job-1", "{}", ends_approvals=True)
+
+        await asyncio.wait_for(final_sent.wait(), timeout=_SETTLED_DECISION_WAIT_SECONDS)
+        decision = await asyncio.wait_for(decision_task, timeout=_SETTLED_DECISION_WAIT_SECONDS)
+        assert decision == BackgroundApprovalDecision(status="denied", reason=JOB_ENDED_REASON)
+        assert sent == [
+            (f"script-approval:{origin.run_id}:call-1", DeliveryStage.INITIAL),
+            (f"script-approval:{origin.run_id}:call-1", DeliveryStage.FINAL),
+        ]
+    finally:
+        if not decision_task.done():
+            decision_task.cancel()
+            await asyncio.gather(decision_task, return_exceptions=True)
+        await manager.shutdown()
+        await journal.close()
+
+
+@pytest.mark.asyncio
+async def test_a_decision_the_manager_writes_sends_its_cards_terminal_edit_once(tmp_path: Path) -> None:
+    """The manager's own flush and the one its decided-card signal starts are one send, whichever runs first."""
+    manager, journal, initial_sent = await _approval_manager(tmp_path)
+    sent, _final_sent = _recording_sends(manager)
+    decision_task = asyncio.create_task(
+        manager.request_background_approval(
+            owner_kind="script",
+            origin=_origin(),
+            room_id="!room:localhost",
+            thread_id="$thread",
+            agent_name="watcher",
+            requester_id="@alice:localhost",
+            approver_user_id="@alice:localhost",
+            tool_name="add",
+            arguments={"a": 1, "b": 2},
+            timeout_seconds=30.0,
+        ),
+    )
+    try:
+        await asyncio.wait_for(initial_sent.wait(), timeout=_SETTLED_DECISION_WAIT_SECONDS)
+        await _wait_for_pending_card(journal)
+        result = await handle_card_response_for_test(
+            manager,
+            room_id="!room:localhost",
+            sender_id="@alice:localhost",
+            card_event_id="$approval",
+            status="approved",
+            authorize_responder=lambda _entity_name: True,
+        )
+        assert result.consumed is True
+        decision = await asyncio.wait_for(decision_task, timeout=_SETTLED_DECISION_WAIT_SECONDS)
+        assert decision.status == "approved"
+        # The decided-card send the commit started has finished too.
+        await asyncio.gather(*manager._decided_flushes)
+
+        assert sent == [
+            ("script-approval:run-1:call-1", DeliveryStage.INITIAL),
+            ("script-approval:run-1:call-1", DeliveryStage.FINAL),
+        ]
+    finally:
+        if not decision_task.done():
+            decision_task.cancel()
+            await asyncio.gather(decision_task, return_exceptions=True)
+        await manager.shutdown()
+        await journal.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("ending", ["call", "run", "timeout"])
+async def test_a_detached_ending_delivers_only_the_cards_it_decided(tmp_path: Path, ending: str) -> None:
+    """A call's denial, its run's settlement, or its timeout sends its own card's edit; other owed edits wait for the sweep."""
+    manager, journal, initial_sent = await _approval_manager(tmp_path, unique_event_ids=True)
+    sent: list[tuple[str, DeliveryStage]] = []
+    send = manager.transport.send_approval_delivery
+
+    async def record(delivery: MatrixDelivery) -> str:
+        sent.append((delivery.delivery_id, delivery.stage))
+        return await send(delivery)
+
+    manager.transport.send_approval_delivery = record
+    approvals = journal.principal("router@shared").approvals
+    # Another run's card whose decision is committed and whose edit is still owed.
+    other = CallKey.detached("run-2", "other")
+    assert await approvals.reserve_detached_card(
+        call=other,
+        owner_kind="script",
+        tool_name="add",
+        toolkit_name="calculator",
+        invoking_agent="watcher",
+        room_id="!room:localhost",
+        thread_id="$thread",
+        expires_at_ns=time.time_ns() + 60_000_000_000,
+        card=ApprovalCardReservation(
+            delivery_id="script-approval:run-2:other",
+            tool_call_id="other",
+            event_type="io.mindroom.tool_approval",
+            approver_user_id="@alice:localhost",
+            approvable=True,
+            payload={"tool_name": "add", "status": "pending"},
+        ),
+    )
+    assert (await approvals.resolve_approval_call(other, requested_status="denied", reason="decided")).recorded
+    decision_task = asyncio.create_task(
+        manager.request_background_approval(
+            owner_kind="script",
+            origin=_origin(),
+            room_id="!room:localhost",
+            thread_id="$thread",
+            agent_name="watcher",
+            requester_id="@alice:localhost",
+            approver_user_id="@alice:localhost",
+            tool_name="add",
+            arguments={"a": 1, "b": 2},
+            timeout_seconds=0.2 if ending == "timeout" else 30.0,
+        ),
+    )
+    try:
+        await asyncio.wait_for(initial_sent.wait(), timeout=1.0)
+        if ending == "call":
+            assert await manager.settle_background_approval(_origin(), reason="Cancelled.") is True
+        elif ending == "run":
+            assert await manager.settle_pending_background_approvals("run-1", reason="Cancelled.") == 1
+        decision = await asyncio.wait_for(decision_task, timeout=_SETTLED_DECISION_WAIT_SECONDS)
+
+        assert decision.status == ("expired" if ending == "timeout" else "denied")
+        assert ("script-approval:run-1:call-1", DeliveryStage.FINAL) in sent
+        assert [delivery for delivery in sent if delivery[0] == "script-approval:run-2:other"] == []
     finally:
         if not decision_task.done():
             decision_task.cancel()
@@ -427,16 +665,21 @@ async def test_run_settlement_denies_only_pending_calls_without_revisiting_histo
     try:
         for index in range(historical_count):
             call_id = f"history-{index}"
-            assert await run_cards.reserve_background_approval_card(
+            assert await run_cards.approvals.reserve_detached_card(
+                call=CallKey.detached("run-1", call_id),
+                owner_kind="script",
+                tool_name="shell",
+                toolkit_name="shell",
+                invoking_agent="agent",
                 room_id="!room:localhost",
                 thread_id="$thread",
-                run_id="run-1",
-                call_id=call_id,
                 expires_at_ns=0,
                 card=ApprovalCardReservation(
                     delivery_id=f"script-approval:run-1:{call_id}",
                     tool_call_id=call_id,
                     event_type="m.room.message",
+                    approver_user_id="@user:example.org",
+                    approvable=True,
                     payload={
                         "approval_target": "background_script",
                         "background_run_id": "run-1",
@@ -446,9 +689,8 @@ async def test_run_settlement_denies_only_pending_calls_without_revisiting_histo
                     },
                 ),
             )
-            recorded = await run_cards.resolve_background_approval_call(
-                run_id="run-1",
-                call_id=call_id,
+            recorded = await run_cards.approvals.resolve_approval_call(
+                CallKey.detached("run-1", call_id),
                 requested_status="expired",
                 reason="historical timeout",
             )
@@ -456,6 +698,7 @@ async def test_run_settlement_denies_only_pending_calls_without_revisiting_histo
 
         pending_run_task = asyncio.create_task(
             manager.request_background_approval(
+                owner_kind="script",
                 origin=pending_run_origin,
                 room_id="!room:localhost",
                 thread_id="$thread",
@@ -469,6 +712,7 @@ async def test_run_settlement_denies_only_pending_calls_without_revisiting_histo
         )
         other_run_task = asyncio.create_task(
             manager.request_background_approval(
+                owner_kind="script",
                 origin=other_run_origin,
                 room_id="!room:localhost",
                 thread_id="$thread",
@@ -492,10 +736,7 @@ async def test_run_settlement_denies_only_pending_calls_without_revisiting_histo
         assert decision.status == "denied"
         assert other_run_task.done() is False
         for index in range(historical_count):
-            historical = await run_cards.background_approval_decision(
-                run_id="run-1",
-                call_id=f"history-{index}",
-            )
+            historical = await run_cards.approvals.detached_decision(CallKey.detached("run-1", f"history-{index}"))
             assert historical is not None
             assert historical.status == "expired"
         assert await manager.settle_pending_background_approvals("run-1", reason="repeated") == 0

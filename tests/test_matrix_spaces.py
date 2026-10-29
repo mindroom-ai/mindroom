@@ -24,6 +24,7 @@ from tests.conftest import (
     bind_runtime_paths,
     load_config_yaml,
     orchestrator_runtime_paths,
+    published_config_load,
     runtime_paths_for,
 )
 
@@ -691,14 +692,20 @@ async def test_orchestrator_ensure_root_space_uses_effective_room_invite_users(t
     )
     router_bot = MagicMock()
     router_bot.client = AsyncMock()
-    orchestrator.agent_bots[ROUTER_AGENT_NAME] = router_bot
+    orchestrator.fleet.add(ROUTER_AGENT_NAME, router_bot)
 
     with (
-        patch("mindroom.orchestrator.ensure_root_space", new=AsyncMock(return_value="!space:localhost")) as mock_space,
-        patch("mindroom.orchestrator.get_room_members", new=AsyncMock(return_value={"@mindroom_router:localhost"})),
-        patch("mindroom.orchestrator.invite_to_room", new=AsyncMock(return_value=True)) as mock_invite,
+        patch(
+            "mindroom.orchestration.rooms.ensure_root_space",
+            new=AsyncMock(return_value="!space:localhost"),
+        ) as mock_space,
+        patch(
+            "mindroom.orchestration.rooms.get_room_members",
+            new=AsyncMock(return_value={"@mindroom_router:localhost"}),
+        ),
+        patch("mindroom.orchestration.rooms.invite_to_room", new=AsyncMock(return_value=True)) as mock_invite,
     ):
-        await orchestrator._ensure_root_space({"lobby": "!lobby:localhost"})
+        await orchestrator._rooms.link_root_space({"lobby": "!lobby:localhost"})
 
     mock_space.assert_awaited_once_with(
         router_bot.client,
@@ -722,14 +729,20 @@ async def test_orchestrator_ensure_root_space_invites_authorized_user_without_in
     )
     router_bot = MagicMock()
     router_bot.client = AsyncMock()
-    orchestrator.agent_bots[ROUTER_AGENT_NAME] = router_bot
+    orchestrator.fleet.add(ROUTER_AGENT_NAME, router_bot)
 
     with (
-        patch("mindroom.orchestrator.ensure_root_space", new=AsyncMock(return_value="!space:localhost")) as mock_space,
-        patch("mindroom.orchestrator.get_room_members", new=AsyncMock(return_value={"@mindroom_router:localhost"})),
-        patch("mindroom.orchestrator.invite_to_room", new=AsyncMock(return_value=True)) as mock_invite,
+        patch(
+            "mindroom.orchestration.rooms.ensure_root_space",
+            new=AsyncMock(return_value="!space:localhost"),
+        ) as mock_space,
+        patch(
+            "mindroom.orchestration.rooms.get_room_members",
+            new=AsyncMock(return_value={"@mindroom_router:localhost"}),
+        ),
+        patch("mindroom.orchestration.rooms.invite_to_room", new=AsyncMock(return_value=True)) as mock_invite,
     ):
-        await orchestrator._ensure_root_space({"lobby": "!lobby:localhost"})
+        await orchestrator._rooms.link_root_space({"lobby": "!lobby:localhost"})
 
     mock_space.assert_awaited_once_with(
         router_bot.client,
@@ -758,15 +771,15 @@ async def test_orchestrator_ensure_root_space_skips_existing_members(tmp_path) -
     )
     router_bot = MagicMock()
     router_bot.client = AsyncMock()
-    orchestrator.agent_bots[ROUTER_AGENT_NAME] = router_bot
+    orchestrator.fleet.add(ROUTER_AGENT_NAME, router_bot)
     internal_user_id = mindroom_user_id(orchestrator.config, orchestrator.runtime_paths)
 
     with (
-        patch("mindroom.orchestrator.ensure_root_space", new=AsyncMock(return_value="!space:localhost")),
-        patch("mindroom.orchestrator.get_room_members", new=AsyncMock(return_value={internal_user_id})),
-        patch("mindroom.orchestrator.invite_to_room", new=AsyncMock(return_value=True)) as mock_invite,
+        patch("mindroom.orchestration.rooms.ensure_root_space", new=AsyncMock(return_value="!space:localhost")),
+        patch("mindroom.orchestration.rooms.get_room_members", new=AsyncMock(return_value={internal_user_id})),
+        patch("mindroom.orchestration.rooms.invite_to_room", new=AsyncMock(return_value=True)) as mock_invite,
     ):
-        await orchestrator._ensure_root_space({"lobby": "!lobby:localhost"})
+        await orchestrator._rooms.link_root_space({"lobby": "!lobby:localhost"})
 
     mock_invite.assert_awaited_once_with(router_bot.client, "!space:localhost", "@owner:example.com")
 
@@ -792,18 +805,18 @@ async def test_setup_rooms_and_memberships_reconciles_root_space_once(tmp_path) 
 
     with (
         patch.object(
-            orchestrator,
-            "_ensure_rooms_exist",
+            orchestrator._rooms,
+            "ensure_rooms_exist",
             new=AsyncMock(side_effect=[{"lobby": "!room1:localhost"}, {"lobby": "!room1:localhost"}]),
         ),
-        patch.object(orchestrator, "_ensure_root_space", new=AsyncMock()) as mock_root_space,
-        patch.object(orchestrator, "_ensure_room_invitations", new=AsyncMock()),
-        patch("mindroom.orchestrator.get_rooms_for_entity", return_value=["lobby"]),
-        patch("mindroom.orchestrator.resolve_room_aliases", return_value=["!room1:localhost"]),
-        patch("mindroom.orchestrator.load_rooms", return_value={"lobby": MagicMock(room_id="!room1:localhost")}),
-        patch("mindroom.orchestrator.ensure_user_in_rooms", new=AsyncMock()),
+        patch.object(orchestrator._rooms, "link_root_space", new=AsyncMock()) as mock_root_space,
+        patch.object(orchestrator._rooms, "_ensure_room_invitations", new=AsyncMock()),
+        patch("mindroom.orchestration.rooms.get_rooms_for_entity", return_value=["lobby"]),
+        patch("mindroom.orchestration.rooms.resolve_room_aliases", return_value=["!room1:localhost"]),
+        patch("mindroom.orchestration.rooms.load_rooms", return_value={"lobby": MagicMock(room_id="!room1:localhost")}),
+        patch("mindroom.orchestration.rooms.ensure_user_in_rooms", new=AsyncMock()),
     ):
-        await orchestrator._setup_rooms_and_memberships([router_bot, general_bot])
+        await orchestrator._rooms.setup([router_bot, general_bot])
 
     assert mock_root_space.await_args_list == [
         call({"lobby": "!room1:localhost"}),
@@ -827,33 +840,30 @@ async def test_update_config_matrix_space_change_reconciles_without_room_members
 
     general_bot = MagicMock()
     general_bot.config = initial_config
-    general_bot.enable_streaming = True
     general_bot._set_presence_with_model_info = AsyncMock()
-    orchestrator.agent_bots["general"] = general_bot
+    orchestrator.fleet.add("general", general_bot)
 
     router_bot = MagicMock()
     router_bot.config = initial_config
-    router_bot.enable_streaming = True
     router_bot.running = True
     router_bot._set_presence_with_model_info = AsyncMock()
     router_bot.recover_pending_turn_journal_events = AsyncMock()
-    orchestrator.agent_bots[ROUTER_AGENT_NAME] = router_bot
+    orchestrator.fleet.add(ROUTER_AGENT_NAME, router_bot)
 
     with (
-        patch("mindroom.orchestration.config_lifecycle.load_config", return_value=updated_config),
-        patch("mindroom.orchestration.config_updates._identify_entities_to_restart", return_value=set()),
-        patch.object(orchestrator, "_setup_rooms_and_memberships", new=AsyncMock()) as mock_setup,
+        patch.object(orchestrator.config_reload, "load_config", return_value=published_config_load(updated_config)),
+        patch.object(orchestrator._rooms, "setup", new=AsyncMock()) as mock_setup,
         patch.object(
-            orchestrator,
-            "_ensure_rooms_exist",
+            orchestrator._rooms,
+            "ensure_rooms_exist",
             new=AsyncMock(return_value={"lobby": "!room1:localhost"}),
         ) as mock_rooms,
-        patch.object(orchestrator, "_ensure_root_space", new=AsyncMock()) as mock_root_space,
+        patch.object(orchestrator._rooms, "link_root_space", new=AsyncMock()) as mock_root_space,
         patch.object(orchestrator, "_sync_runtime_support_services", new=AsyncMock()),
     ):
         updated = await orchestrator.config_reload._update_config()
 
-    assert updated is True
+    assert updated is False
     assert general_bot.config == updated_config
     assert router_bot.config == updated_config
     mock_setup.assert_not_awaited()

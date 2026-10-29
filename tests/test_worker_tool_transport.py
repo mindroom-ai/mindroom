@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import asyncio
 import base64
-import inspect
 import json
 from types import SimpleNamespace
 from typing import TYPE_CHECKING
@@ -27,7 +26,6 @@ from mindroom.message_target import MessageTarget
 from mindroom.tool_jobs.execution import agent_tool_middleware
 from mindroom.tool_system import sandbox_proxy
 from mindroom.tool_system.agno_toolkits import ToolCallActor
-from mindroom.tool_system.declarations import tool_schema_source
 from mindroom.tool_system.invocation import ToolCallContext, execute_tool_call
 from mindroom.tool_system.runtime_context import (
     build_execution_identity_from_runtime_context,
@@ -36,6 +34,7 @@ from mindroom.tool_system.runtime_context import (
 )
 from mindroom.tool_system.worker_routing import descriptive_worker_id_for_key, resolve_worker_key
 from tests.agent_tool_helpers import offered_function, run_offered, source_toolkit
+from tests.api.sandbox_runner_support import execute_call
 from tests.authorization_helpers import make_test_tool_runtime_context
 from tests.conftest import (
     call_proxy_sync_for_test,
@@ -46,6 +45,7 @@ from tests.conftest import (
 )
 from tests.identity_helpers import persist_entity_accounts
 from tests.test_agent_worker_routing import _create_routing_agent
+from tests.turn_model_helpers import turn_model
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -79,8 +79,17 @@ def worker_requests(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> list[dic
         assert request.url.path.endswith("/execute")
         payload = json.loads(request.content)
         requests.append(payload)
-        prepared = sandbox_runner.PreparedSandboxRunnerExecuteRequest.model_validate(payload)
-        response = asyncio.run(sandbox_runner._execute_prepared_request_inprocess(prepared, runtime_paths, config))
+        fields = {name: value for name, value in payload.items() if name != "protocol"}
+        # The primary sends its live config; the runner reads the agents it routes from it, as the endpoint does.
+        snapshot = fields.get("config_snapshot")
+        call_config = (
+            config
+            if snapshot is None
+            else sandbox_runner._primary_validated_config(snapshot, runtime_paths, log_skipped_plugins=False)
+        )
+        response = asyncio.run(
+            sandbox_runner._execute_request_inprocess(execute_call(runtime_paths, call_config, **fields)),
+        )
         return httpx.Response(200, json=response.model_dump(mode="json"))
 
     monkeypatch.setattr(
@@ -283,7 +292,7 @@ def test_invalid_arguments_rejected_before_worker_side_effects(
     def provision_forbidden(*_args: object, **_kwargs: object) -> object:
         pytest.fail("Invalid arguments reached worker provisioning")
 
-    monkeypatch.setattr(sandbox_proxy, "_primary_worker_manager_context", provision_forbidden)
+    monkeypatch.setattr(sandbox_proxy, "_lease_worker_manager", provision_forbidden)
     value: object = {
         "value": Opaque(),
         "nested": {"payload": [Opaque()]},
@@ -406,7 +415,7 @@ def _context_agent(
         persist_runtime_state=False,
         supports_native_tool_approval=True,
         knowledge=None,
-        active_model_name=None,
+        model=turn_model(config, runtime_paths, "routing"),
     )
     return agent, context
 
@@ -588,9 +597,7 @@ async def test_browser_host_override_keeps_worker_transport_schema_and_hooks(
         require_approval=True,
     )
     function = offered_function(agent, "browser_control")
-    toolkit = source_toolkit(function)
-    assert isinstance(toolkit, BrowserTools)
-    assert inspect.unwrap(tool_schema_source(function.entrypoint)) == toolkit.browser
+    assert isinstance(source_toolkit(function), BrowserTools)
     schema = json.loads(json.dumps(function.parameters))
     assert function.requires_confirmation is True
     assert function.approval_type == "mindroom_policy"

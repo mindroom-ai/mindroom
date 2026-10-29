@@ -24,6 +24,7 @@ from mindroom.delivery_gateway import EditTextRequest, SendTextRequest
 from mindroom.dispatch_handoff import PreparedIngress, payload_metadata_from_source
 from mindroom.dispatch_recovery_context import turn_dispatch_recovery_active
 from mindroom.dispatch_source import TRUSTED_INTERNAL_RELAY_SOURCE_KIND
+from mindroom.event_journal import turn_rows
 from mindroom.matrix.room_history_reads import find_response_event_ids_via_room_messages
 from mindroom.matrix.room_membership import cached_member_ids
 from mindroom.response_admission import admitted_response_decision
@@ -243,7 +244,7 @@ class VisibleVoiceEchoLifecycle:
         always settled, including when the claiming task is cancelled.
         """
         if self.deps.agent_name == ROUTER_AGENT_NAME:
-            published = self.deps.turn_store.visible_echo_for_source(source_event_id) is not None
+            published = await self.deps.turn_store.visible_echo(source_event_id) is not None
             return published or not self._publication_required(room.room_id, requester_user_id)
         key = self._barrier_key(room.room_id, source_event_id)
         barrier = _echo_barriers.get(key)
@@ -254,9 +255,8 @@ class VisibleVoiceEchoLifecycle:
             return True
         if barrier is None or barrier.published_event_id is None:
             # A router that published before restart will not replay its source.
-            # Its receipt belongs to the router ledger, not the responder's.
-            router_record = await self.deps.router_turn_records.load(source_event_id)
-            if router_record is not None and router_record.visible_echo_event_id is not None:
+            # Its receipt belongs to the router's turns, not the responder's.
+            if await self.deps.router_turn_records.read(turn_rows.visible_echo, source_event_id) is not None:
                 return True
             # Publication or a replacement claim may have arrived during the read.
             barrier = _echo_barriers.get(key)
@@ -431,13 +431,17 @@ class VisibleVoiceEchoLifecycle:
         ):
             if not self._sender_is_authorized(request):
                 return None
-            existing_event_id = self.deps.turn_store.visible_echo_for_source(request.source_event_id)
-            if existing_event_id is not None:
-                _publish_echo_barrier(barrier, existing_event_id)
-                return existing_event_id
+            existing = await self.deps.turn_store.visible_echo(request.source_event_id)
+            if existing is not None:
+                _publish_echo_barrier(barrier, existing.event_id)
+                return existing.event_id
             existing_event_id = await self._recover_visible_echo_event_id(request)
             if existing_event_id is not None:
-                await self.deps.turn_store.record_visible_echo(request.source_event_id, existing_event_id)
+                await self.deps.turn_store.record_visible_echo(
+                    request.target.room_id,
+                    request.source_event_id,
+                    existing_event_id,
+                )
                 _publish_echo_barrier(barrier, existing_event_id)
                 return existing_event_id
             event_id = await self.deps.delivery_gateway.send_text(
@@ -452,7 +456,11 @@ class VisibleVoiceEchoLifecycle:
                 ),
             )
             if event_id is not None:
-                await self.deps.turn_store.record_visible_echo(request.source_event_id, event_id)
+                await self.deps.turn_store.record_visible_echo(
+                    request.target.room_id,
+                    request.source_event_id,
+                    event_id,
+                )
                 _publish_echo_barrier(barrier, event_id)
             return event_id
 
@@ -480,13 +488,11 @@ class VisibleVoiceEchoLifecycle:
         ):
             if not self._sender_is_authorized(request):
                 return None
-            finalized = self.deps.turn_store.finalized_visible_echo(request.source_event_id)
-            if finalized is not None and (not finalized.is_fallback or is_fallback):
-                return finalized.event_id
+            tracked = await self.deps.turn_store.visible_echo(request.source_event_id)
+            if tracked is not None and tracked.is_fallback is not None and (not tracked.is_fallback or is_fallback):
+                return tracked.event_id
 
-            event_id = placeholder_event_id or self.deps.turn_store.visible_echo_for_source(
-                request.source_event_id,
-            )
+            event_id = placeholder_event_id or (None if tracked is None else tracked.event_id)
             extra_content = self._extra_content(
                 requester_user_id=request.requester_user_id,
                 normalized_source=normalized_event.source,
@@ -494,7 +500,11 @@ class VisibleVoiceEchoLifecycle:
             if event_id is None:
                 event_id = await self._recover_visible_echo_event_id(request)
                 if event_id is not None:
-                    await self.deps.turn_store.record_visible_echo(request.source_event_id, event_id)
+                    await self.deps.turn_store.record_visible_echo(
+                        request.target.room_id,
+                        request.source_event_id,
+                        event_id,
+                    )
             if event_id is None:
                 event_id = await self.deps.delivery_gateway.send_text(
                     SendTextRequest(
@@ -506,7 +516,11 @@ class VisibleVoiceEchoLifecycle:
                 )
                 if event_id is None:
                     return None
-                await self.deps.turn_store.record_visible_echo(request.source_event_id, event_id)
+                await self.deps.turn_store.record_visible_echo(
+                    request.target.room_id,
+                    request.source_event_id,
+                    event_id,
+                )
             else:
                 # Publication survived a prior attempt, even if this edit fails.
                 _publish_echo_barrier(handle.barrier, event_id)

@@ -32,6 +32,7 @@ from tests.agent_loop.helpers import collect, context, spec, toolkit
 from tests.agent_tool_helpers import tool_policy
 from tests.fakes.scripted_model import ScriptedModel, calls, tool_call
 from tests.providers.test_provider_pipeline import _drain, _ScriptedProvider, _transient, _turn
+from tests.session_storage.agno_layout import recorded_owner
 from tests.test_decrypt_failure import _megolm_event, _mock_client, _mock_room
 from tests.test_decrypt_failure import _runtime_paths as _decrypt_runtime_paths
 from tests.test_oauth_service import _context, _credentials, _FakeOAuthProvider, _save
@@ -154,7 +155,7 @@ def test_conversation_converted_keeps_its_name_and_fields(tmp_path: Path) -> Non
         connection.execute("CREATE TABLE other (x)")
 
     with capture_logs() as logs:
-        prepare_conversation_database(database, names)
+        prepare_conversation_database(database, names, recorded_owner(database))
 
     _assert_logged(logs, "conversation_converted")
 

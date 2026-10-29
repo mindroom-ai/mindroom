@@ -40,7 +40,7 @@ from mindroom.session_storage.lanes import run_session_storage_operation
 from mindroom.session_storage.store import ConversationStore, persist_to
 from mindroom.tool_system.progress import tool_progress_reporter
 from mindroom.tool_system.runtime_context import tool_runtime_context
-from mindroom.tool_system.worker_routing import ToolExecutionIdentity
+from mindroom.tool_system.worker_routing import ToolExecutionIdentity, agent_workspace_root_path
 from mindroom.usage.storage import quote_identifier
 from tests.access_schema_support import with_responder_access
 from tests.approval_continuation_helpers import approval_continuation, repeats_each_request
@@ -233,7 +233,7 @@ async def test_child_approval_survives_parent_reconstruction(  # noqa: PLR0915
             if outcome == "cancel_completed":
                 # A crash after the child committed completion but before its parent and audit record saw it.
                 storage = create_session_storage("code", config, paths, child_identity)
-                session = storage.load_session(child.session_id, "agent")
+                session = storage.load_session(child.session_id)
                 assert session is not None
                 completed = deepcopy(storage.get_run(child.run_id))
                 assert isinstance(completed, RunRecord)
@@ -385,6 +385,80 @@ async def test_a_child_resumed_after_its_approval_reports_its_activity_as_progre
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("before_the_pause", "after_the_call", "handed_over"),
+    [
+        pytest.param(None, "", "Agent completed the task but returned no content.", id="no-text"),
+        pytest.param("The findings: three risks.", "", "The findings: three risks.", id="own-text"),
+        pytest.param(
+            "The findings: three risks.",
+            "The report is written.",
+            "The findings: three risks.\n\nThe report is written.",
+            id="own-text-then-more",
+        ),
+    ],
+)
+async def test_a_child_resumed_after_its_approval_hands_its_parent_everything_it_wrote(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    before_the_pause: str | None,
+    after_the_call: str,
+    handed_over: str,
+) -> None:
+    """A resumed child that ran its approved call hands over the text it wrote before and after the pause.
+
+    The texts join a blank line apart; a child that wrote nothing hands over the completion note, never a paused
+    notice.
+    """
+    paths = _runtime_paths(tmp_path)
+    config = _config(paths)
+    identity = _leader_identity()
+    leader = ScriptedModel(
+        [
+            calls(tool_call("run_subagent", "delegate-0", agent_name="code", task="Write report")),
+            answer("parent result"),
+        ],
+    )
+    code = ScriptedModel(
+        [calls(tool_call("write_report", "same-call"), content=before_the_pause), answer(after_the_call)],
+    )
+    ScriptedAgents({"leader": leader, "code": code}).install(monkeypatch)
+
+    with registered_report_tool() as report:
+        paused = await respond(
+            "leader",
+            "delegate",
+            config=config,
+            runtime_paths=paths,
+            identity=identity,
+            run_id="parent-run",
+        )
+        assert isinstance(paused, PausedAttempt)
+        state = DelegationState.from_metadata(_parent_record(config, paths, identity, "parent-run").metadata)
+        call_id = str(state.pending_tools[0]["tool_call_id"])
+        result = await resume(
+            approval_executor(config, paths),
+            paused,
+            _saved_approval_calls(state),
+            agent_name="leader",
+            identity=identity,
+            config=config,
+            runtime_paths=paths,
+            decisions={call_id: True},
+            denial_reasons={call_id: None},
+            approval_id="card-0",
+        )
+
+    assert isinstance(result, CompletedApprovalRun)
+    assert report.written == ["written"]
+    resumed = _parent_record(config, paths, identity, "parent-run")
+    result_message = next(message.content for message in resumed.messages if message.tool_call_id == "delegate-0")
+    assert isinstance(result_message, str)
+    # The child's result comes first, then the delegation's record line.
+    assert result_message.partition("\n\nDelegation ")[0] == handed_over
+
+
+@pytest.mark.asyncio
 async def test_a_reply_whose_continuation_fails_records_every_delegation_it_answered(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -487,8 +561,7 @@ async def test_an_approval_resume_that_pauses_on_a_call_nothing_answers_fails(
     stored = create_session_storage("code", config, paths, identity).get_run("run")
     assert stored is not None
     assert stored.status is RunStatus.paused
-    # The resume fails naming the waiting call before the reply's continuation runs, not with the run's stale
-    # pause notice ("I have tools to execute, but I need confirmation.").
+    # The resume fails naming the waiting call before the reply's continuation runs.
     assert str(raised.value) == "agent run 'run' paused on ['hand_off'] without an approval to ask for"
 
 
@@ -1024,7 +1097,7 @@ async def test_copied_delegation_call_never_starts_twice_from_one_approval(
     stored = storage.get_run("parent-run")
     assert isinstance(stored, RunRecord)
     state = DelegationState.from_metadata(stored.metadata)
-    session = storage.load_session("parent", "agent")
+    session = storage.load_session("parent")
     assert session is not None
     planted = deepcopy(stored)
     assert planted.requirements is not None
@@ -1281,7 +1354,14 @@ def test_adapted_delegate_functions_carry_the_external_execution_flags(tmp_path:
     """The adapted delegate functions carry the external-execution flags the approval capability sets."""
     paths = _runtime_paths(tmp_path)
     config = _config(paths, child_tools=())
-    toolkit = DelegateTools("leader", ["code"], paths, config, execution_identity=_leader_identity())
+    toolkit = DelegateTools(
+        "leader",
+        ["code"],
+        paths,
+        config,
+        agent_workspace_root_path(paths.storage_root, "leader"),
+        execution_identity=_leader_identity(),
+    )
 
     flags = {
         function.name: (function.external_execution, function.external_execution_silent)

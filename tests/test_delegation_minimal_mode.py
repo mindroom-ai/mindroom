@@ -24,6 +24,7 @@ from mindroom.delegation.state import DelegationChild
 from mindroom.response_turn import ResponseTurnContext
 from mindroom.runtime_state import clear_api_server_address, set_api_server_address
 from mindroom.tool_system.runtime_context import tool_runtime_context
+from mindroom.tool_system.worker_routing import agent_workspace_root_path
 from tests.delegation_helpers import ScriptedAgents, _delegate_runtime_context
 from tests.fakes.scripted_model import ScriptedModel, answer, calls, tool_call
 from tests.identity_helpers import entity_ids
@@ -65,6 +66,11 @@ def _config(*, helper_tools: list[str], approval: ToolApprovalConfig | None = No
 
 def _paths(tmp_path: Path, env: dict[str, str]) -> RuntimePaths:
     return resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path, process_env=env)
+
+
+def _workspace(tmp_path: Path, agent_name: str) -> Path:
+    """Return the workspace of a shared agent stored under ``tmp_path``."""
+    return agent_workspace_root_path(tmp_path, agent_name)
 
 
 def _live_context(config: Config, paths: RuntimePaths) -> ToolRuntimeContext:
@@ -116,12 +122,14 @@ async def _delegate(
     call_id = f"{tool_name}-call-{len(leader.requests)}"
     leader.turns.extend([calls(tool_call(tool_name, call_id, **arguments)), answer("Parent done")])
     result = await ai.ai_response(
-        _leader_turn(_identity()),
-        prompt="Delegate",
-        runtime_paths=paths,
-        config=config,
-        execution_identity=_identity(),
-        supports_native_tool_approval=True,
+        replace(
+            _leader_turn(_identity()),
+            prompt="Delegate",
+            execution_identity=_identity(),
+            supports_native_tool_approval=True,
+        ),
+        paths,
+        config,
     )
     assert "Parent done" in result
     return next(
@@ -136,7 +144,7 @@ def test_authoring_guidance_mentions_minimal_only_when_offered(tmp_path: Path) -
     config = _config(helper_tools=["shell"])
 
     def guidance() -> str:
-        toolkit = DelegateTools("helper", ["helper"], _paths(tmp_path, {}), config)
+        toolkit = DelegateTools("helper", ["helper"], _paths(tmp_path, {}), config, _workspace(tmp_path, "helper"))
         return toolkit.async_functions["run_subagent"].description or ""
 
     # A local shell calls back through the running API, which this test starts only below.
@@ -160,18 +168,26 @@ def test_minimal_option_is_advertised_only_for_capable_subagents(tmp_path: Path)
         return has_option
 
     # A local shell calls back through the running API, which this test starts only below.
-    unready = DelegateTools("leader", ["helper", "plain"], _paths(tmp_path, {}), config)
+    unready = DelegateTools("leader", ["helper", "plain"], _paths(tmp_path, {}), config, _workspace(tmp_path, "leader"))
     assert not offered(unready)
     set_api_server_address("0.0.0.0", 8765)  # noqa: S104 - the default bind address
     try:
-        ready = DelegateTools("leader", ["helper", "plain"], _paths(tmp_path, _CLI_DEPLOYMENT_ENV), config)
+        ready = DelegateTools(
+            "leader",
+            ["helper", "plain"],
+            _paths(tmp_path, _CLI_DEPLOYMENT_ENV),
+            config,
+            _workspace(tmp_path, "leader"),
+        )
         description = ready.async_functions["run_subagent"].description or ""
         assert "Subagents that support minimal mode: helper." in description
         assert "not important in its system prompt" in description
         # Hiding the option must not change the schema other callers receive.
         assert offered(ready)
         # A local shell needs only the running API.
-        assert offered(DelegateTools("leader", ["helper"], _paths(tmp_path, {}), config))
+        assert offered(
+            DelegateTools("leader", ["helper"], _paths(tmp_path, {}), config, _workspace(tmp_path, "leader")),
+        )
 
         openai_caller = replace(_identity(), channel="openai_compat")
         detached = DelegateTools(
@@ -179,6 +195,7 @@ def test_minimal_option_is_advertised_only_for_capable_subagents(tmp_path: Path)
             ["helper"],
             _paths(tmp_path, _CLI_DEPLOYMENT_ENV),
             config,
+            _workspace(tmp_path, "leader"),
             execution_identity=openai_caller,
         )
         assert not offered(detached)
@@ -189,7 +206,13 @@ def test_minimal_option_is_advertised_only_for_capable_subagents(tmp_path: Path)
                 rules=[ApprovalRuleConfig(match="run_shell_command", action="require_approval")],
             ),
         )
-        gated_tools = DelegateTools("leader", ["helper"], _paths(tmp_path, _CLI_DEPLOYMENT_ENV), gated)
+        gated_tools = DelegateTools(
+            "leader",
+            ["helper"],
+            _paths(tmp_path, _CLI_DEPLOYMENT_ENV),
+            gated,
+            _workspace(tmp_path, "leader"),
+        )
         assert not offered(gated_tools)
     finally:
         clear_api_server_address()
@@ -219,7 +242,14 @@ async def test_ineligible_minimal_child_fails_with_a_standard_subagent_hint(
     config = _config(helper_tools=["shell"], approval=approval)
     paths = _paths(tmp_path, _CLI_DEPLOYMENT_ENV)
     entity_ids(config, paths)
-    toolkit = DelegateTools("leader", ["helper", "plain"], paths, config, execution_identity=_identity())
+    toolkit = DelegateTools(
+        "leader",
+        ["helper", "plain"],
+        paths,
+        config,
+        _workspace(tmp_path, "leader"),
+        execution_identity=_identity(),
+    )
     leader = ScriptedModel([])
     ScriptedAgents({"leader": leader, "helper": ScriptedModel([]), "plain": ScriptedModel([])}).install(monkeypatch)
 
@@ -278,7 +308,14 @@ async def test_minimal_subagent_requests_only_bash_and_follow_ups_keep_its_mode(
     leader = ScriptedModel([])
     install_scripted_shell(monkeypatch, run_shell_command)
     ScriptedAgents({"leader": leader, "helper": child}).install(monkeypatch)
-    toolkit = DelegateTools("leader", ["helper", "plain"], paths, config, execution_identity=identity)
+    toolkit = DelegateTools(
+        "leader",
+        ["helper", "plain"],
+        paths,
+        config,
+        _workspace(tmp_path, "leader"),
+        execution_identity=identity,
+    )
 
     with tool_runtime_context(live):
         result = await _delegate(
@@ -384,13 +421,7 @@ async def test_minimal_parent_runs_a_minimal_child_through_its_cli(
     monkeypatch.setattr(ai._TurnRunContinuation, "events", continue_turn_run)
 
     with tool_runtime_context(live):
-        result = await ai.ai_response(
-            turn,
-            prompt="Delegate",
-            runtime_paths=paths,
-            config=config,
-            execution_identity=identity,
-        )
+        result = await ai.ai_response(replace(turn, prompt="Delegate", execution_identity=identity), paths, config)
 
     assert "Leader done" in result, result
     assert len(child_listings) == 1
@@ -412,7 +443,14 @@ async def test_child_snapshot_without_mode_continues_in_standard_mode(
     entity_ids(config, paths)
     child = ScriptedModel([answer("Answer 0"), answer("Answer 1")])
     ScriptedAgents({"helper": child}).install(monkeypatch)
-    toolkit = DelegateTools("leader", ["helper"], paths, config, execution_identity=_identity())
+    toolkit = DelegateTools(
+        "leader",
+        ["helper"],
+        paths,
+        config,
+        _workspace(tmp_path, "leader"),
+        execution_identity=_identity(),
+    )
 
     with tool_runtime_context(_live_context(config, paths)):
         assert "Answer 0" in await toolkit.run_subagent(task="Report", agent_name="helper")

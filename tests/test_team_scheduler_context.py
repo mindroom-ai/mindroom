@@ -43,6 +43,8 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from mindroom.bot import AgentBot
+    from mindroom.response_turn import ResponseTurnContext, TurnSinks
+    from mindroom.teams.envelope import TeamTurnSpec
 
 
 @asynccontextmanager
@@ -104,6 +106,16 @@ def _make_bot(tmp_path: Path) -> AgentBot:
 _MEMBER_NAMES = ["general", "research"]
 
 
+def _assert_scheduled_team_turn(turns: list[tuple[bool, ResponseTurnContext]]) -> None:
+    """Assert the team entry ran once inside the tool context, in the thread's session, for the requester."""
+    [(has_tool_context, ctx)] = turns
+    assert has_tool_context
+    assert ctx.session_id == "!team:localhost:$thread_root"
+    assert ctx.requester_id == "@user:localhost"
+    assert isinstance(ctx.run_id, str)
+    assert ctx.run_id
+
+
 @pytest.mark.asyncio
 async def test_team_non_streaming_has_scheduler_context(tmp_path: Path) -> None:
     """Team non-streaming flow should expose scheduler context to tool calls."""
@@ -113,13 +125,16 @@ async def test_team_non_streaming_has_scheduler_context(tmp_path: Path) -> None:
         response_function = kwargs["response_function"]
         await response_function(None)
 
-    async def fake_team_response(*_args: object, **_kwargs: object) -> str:
-        assert get_tool_runtime_context() is not None
-        assert _kwargs["ctx"].session_id == "!team:localhost:$thread_root"
-        assert _kwargs["user_id"] == "@user:localhost"
-        assert isinstance(_kwargs["ctx"].run_id, str)
-        assert _kwargs["ctx"].run_id
-        return "team non-streaming response"
+    turns: list[tuple[bool, ResponseTurnContext]] = []
+
+    async def fake_team_response_stream(
+        _spec: TeamTurnSpec,
+        ctx: ResponseTurnContext,
+        *,
+        sinks: TurnSinks,  # noqa: ARG001
+    ) -> AsyncIterator[str]:
+        turns.append((get_tool_runtime_context() is not None, ctx))
+        yield "team non-streaming response"
 
     with (
         patch.object(
@@ -130,7 +145,7 @@ async def test_team_non_streaming_has_scheduler_context(tmp_path: Path) -> None:
         patch("mindroom.response_runner.typing_indicator", new=_noop_typing_indicator),
         patch_response_runner_module(
             should_use_streaming=AsyncMock(return_value=False),
-            team_response=fake_team_response,
+            team_response_stream=fake_team_response_stream,
         ),
     ):
         await bot._response_runner.generate_team_response_helper(
@@ -149,6 +164,8 @@ async def test_team_non_streaming_has_scheduler_context(tmp_path: Path) -> None:
             team_mode="coordinate",
         )
 
+    _assert_scheduled_team_turn(turns)
+
 
 @pytest.mark.asyncio
 async def test_team_non_streaming_cancellation_edits_placeholder(tmp_path: Path) -> None:
@@ -156,14 +173,15 @@ async def test_team_non_streaming_cancellation_edits_placeholder(tmp_path: Path)
     bot = _make_bot(tmp_path)
     unique_room_send_responses(bot.client)
 
-    async def fake_team_response(*_args: object, **_kwargs: object) -> str:
+    async def fake_team_response_stream(*_args: object, **_kwargs: object) -> AsyncIterator[str]:
         raise asyncio.CancelledError
+        yield
 
     with (
         patch("mindroom.response_runner.typing_indicator", new=_noop_typing_indicator),
         patch_response_runner_module(
             should_use_streaming=AsyncMock(return_value=False),
-            team_response=fake_team_response,
+            team_response_stream=fake_team_response_stream,
         ),
     ):
         await bot._response_runner.generate_team_response_helper(
@@ -195,14 +213,15 @@ async def test_team_non_streaming_sync_restart_edits_placeholder_with_restart_no
     bot = _make_bot(tmp_path)
     unique_room_send_responses(bot.client)
 
-    async def fake_team_response(*_args: object, **_kwargs: object) -> str:
+    async def fake_team_response_stream(*_args: object, **_kwargs: object) -> AsyncIterator[str]:
         raise asyncio.CancelledError(SYNC_RESTART_CANCEL_MSG)
+        yield
 
     with (
         patch("mindroom.response_runner.typing_indicator", new=_noop_typing_indicator),
         patch_response_runner_module(
             should_use_streaming=AsyncMock(return_value=False),
-            team_response=fake_team_response,
+            team_response_stream=fake_team_response_stream,
         ),
     ):
         await bot._response_runner.generate_team_response_helper(
@@ -242,17 +261,19 @@ async def test_team_streaming_has_scheduler_context(tmp_path: Path) -> None:
         chunks = [str(chunk) async for chunk in response_stream]
         return StreamTransportOutcome(
             last_physical_stream_event_id="$stream_event",
-            terminal_status="completed",
             rendered_body="".join(chunks),
             visible_body_state="visible_body",
         )
 
-    async def fake_team_response_stream(*_args: object, **_kwargs: object) -> AsyncIterator[str]:
-        assert get_tool_runtime_context() is not None
-        assert _kwargs["ctx"].session_id == "!team:localhost:$thread_root"
-        assert _kwargs["user_id"] == "@user:localhost"
-        assert isinstance(_kwargs["ctx"].run_id, str)
-        assert _kwargs["ctx"].run_id
+    turns: list[tuple[bool, ResponseTurnContext]] = []
+
+    async def fake_team_response_stream(
+        _spec: TeamTurnSpec,
+        ctx: ResponseTurnContext,
+        *,
+        sinks: TurnSinks,  # noqa: ARG001
+    ) -> AsyncIterator[str]:
+        turns.append((get_tool_runtime_context() is not None, ctx))
         yield "stream chunk"
 
     with (
@@ -287,6 +308,8 @@ async def test_team_streaming_has_scheduler_context(tmp_path: Path) -> None:
             team_mode="collaborate",
         )
 
+    _assert_scheduled_team_turn(turns)
+
 
 @pytest.mark.asyncio
 async def test_team_late_cancellation_after_its_answer_is_visible_lets_post_effects_finish(tmp_path: Path) -> None:
@@ -305,6 +328,9 @@ async def test_team_late_cancellation_after_its_answer_is_visible_lets_post_effe
         started.set()
         await release.wait()
 
+    async def fake_team_response_stream(*_args: object, **_kwargs: object) -> AsyncIterator[str]:
+        yield "team non-streaming response"
+
     with (
         patch.object(
             ResponseRunner,
@@ -314,7 +340,7 @@ async def test_team_late_cancellation_after_its_answer_is_visible_lets_post_effe
         patch("mindroom.response_runner.typing_indicator", new=_noop_typing_indicator),
         patch_response_runner_module(
             should_use_streaming=AsyncMock(return_value=False),
-            team_response=AsyncMock(return_value="team non-streaming response"),
+            team_response_stream=fake_team_response_stream,
             apply_post_response_effects=AsyncMock(side_effect=fake_post_effects),
         ),
     ):

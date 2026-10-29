@@ -79,7 +79,7 @@ async def test_a_text_fallback_on_a_native_route_stops_asking_the_provider_to_co
         is_team=False,
         model_name="default",
         model=model,
-        history_settings=config.resolve_entity("test_agent").history_settings,
+        history_settings=config.resolve_scope("test_agent").history_settings,
         storage=None,
         replay_plan=None,
         prompt_id=None,
@@ -144,7 +144,7 @@ async def test_a_later_loop_of_the_run_sizes_and_falls_back_by_its_own_request_s
         is_team=False,
         model_name="default",
         model=model,
-        history_settings=config.resolve_entity("test_agent").history_settings,
+        history_settings=config.resolve_scope("test_agent").history_settings,
         storage=None,
         replay_plan=None,
         prompt_id=None,
@@ -175,6 +175,7 @@ def _responses_body(request: ModelRequest) -> dict[str, object]:
         request=request,
         settings=ResponsesSettings(),
         wire=_RESPONSES_WIRE,
+        provider="OpenAI Responses",
     )
     return {**kwargs, **kwargs.get("extra_body", {})}
 
@@ -199,7 +200,7 @@ def _run_local_hook(config: Config, runtime_paths: RuntimePaths, model: ModelPro
         is_team=False,
         model_name="default",
         model=model,
-        history_settings=config.resolve_entity("test_agent").history_settings,
+        history_settings=config.resolve_scope("test_agent").history_settings,
         storage=None,
         replay_plan=None,
         prompt_id=None,

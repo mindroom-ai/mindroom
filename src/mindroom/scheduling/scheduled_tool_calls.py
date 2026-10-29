@@ -16,20 +16,14 @@ from contextvars import ContextVar
 from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING
 
-from mindroom.approval.tool_approval import (
-    POLICY_CONFIRMATION_APPROVAL_TYPE,
-    claim_scheduled_call,
-    record_scheduled_call_outcome,
-    resolve_tool_approval_approver,
-    scheduled_call,
-)
-from mindroom.failure_text import failure_text
+from mindroom.approval import manager as approval_manager
+from mindroom.approval.tool_approval import POLICY_CONFIRMATION_APPROVAL_TYPE, resolve_tool_approval_approver
 from mindroom.json_utils import has_only_finite_numbers, object_with_unique_keys
 from mindroom.tool_approval_grants import ANY_ARGUMENTS, canonical_arguments
 from mindroom.tool_system.invocation import run_tool_call
 from mindroom.tool_system.tool_access import validate_tool_arguments
 from mindroom.tool_system.tool_function import ToolOutcome
-from mindroom.tool_system.tool_hooks import run_as_completion_owner
+from mindroom.tool_system.tool_hooks import owned_sync_tool_completion
 
 if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
@@ -51,6 +45,7 @@ _SCHEDULER_TOOLKIT = "scheduler"
 # The scheduler's functions that read the run's live functions: one stores a call to one, one runs it.
 _LIVE_FUNCTION_READERS = frozenset({"schedule_tool_call", "run_scheduled_call"})
 
+_RUNTIME_NOT_READY = "the approval runtime is not ready"
 _REFUSALS: dict[ScheduledCallRefusal, str] = {
     "missing": "this task has no stored call",
     "elsewhere": "the call belongs to another agent, conversation, or requester",
@@ -188,16 +183,19 @@ async def run_scheduled_call(  # noqa: PLR0911 - one refusal per broken conditio
     live = _LIVE_TOOLS.get()
     if live is None or context.agent_name not in context.config.agents:
         return _refused(task_id, "scheduled calls run only in their agent's own conversation turn")
-    call = await scheduled_call(task_id)
+    manager = approval_manager.get_approval_store()
+    if manager is None:
+        return _refused(task_id, _RUNTIME_NOT_READY)
+    call = await manager.scheduled_call(task_id)
     if call is None:
         return _refused(task_id, _REFUSALS["missing"])
     prepared = _prepare_run(context, call, live, arguments_json)
     if isinstance(prepared, str):
         return _refused(task_id, prepared)
     function, arguments_text, approver_id = prepared
-    claimed = await claim_scheduled_call(call, arguments_json=arguments_text, approver_user_id=approver_id)
+    claimed = await manager.claim_scheduled_call(call, arguments_json=arguments_text, approver_user_id=approver_id)
     if claimed is None:
-        return _refused(task_id, "the approval runtime is not ready")
+        return _refused(task_id, _RUNTIME_NOT_READY)
     if isinstance(claimed, str):
         if claimed in _ASK_INSTEAD and time.time_ns() >= call.execute_at_ns:
             # Once its time has come, the call can still go ahead the ordinary way, with an approval card now.
@@ -211,16 +209,19 @@ async def run_scheduled_call(  # noqa: PLR0911 - one refusal per broken conditio
             return _refused(task_id, f"{_REFUSALS[claimed]}; it runs when its task fires")
         return _refused(task_id, _REFUSALS[claimed])
     # The approval is spent; a call interrupted from here leaves its outcome unknown and is never retried.
-    try:
-        result = await _execute(live, function, json.loads(arguments_text), call_id=f"scheduled-{task_id}")
-    except Exception as error:
-        await record_scheduled_call_outcome(task_id, "failed")
-        return ToolOutcome(content=f"❌ Scheduled call `{task_id}` failed: {failure_text(error)}", is_error=True)
-    # The policy answers a call a plugin hook declined with a failed outcome: the call never ran, and this runner's own
-    # call fails with the decline.
-    declined = isinstance(result, ToolOutcome) and result.is_error
-    await record_scheduled_call_outcome(task_id, "failed" if declined else "completed")
-    return result
+    # The run's tool-call policy owns a synchronous body until it finishes.
+    async with owned_sync_tool_completion():
+        result = await run_tool_call(
+            function,
+            json.loads(arguments_text),
+            replace(live.context, call_id=f"scheduled-{task_id}"),
+            middleware=live.middleware,
+        )
+    await manager.record_scheduled_call_outcome(task_id, "completed" if result.succeeded else "failed")
+    if result.error is not None:
+        return ToolOutcome(content=f"❌ Scheduled call `{task_id}` failed: {result.failure_text}", is_error=True)
+    # A call the policy refused, or one its tool answered as failed, fails this runner's own call with that outcome.
+    return result.value
 
 
 def _prepare_run(  # noqa: PLR0911 - one refusal per broken condition
@@ -271,13 +272,6 @@ def _invalid_arguments(function: ToolFunction, arguments: dict[str, object]) -> 
     if unknown and schema.get("additionalProperties") is not True:
         return "the arguments do not match the tool's current parameters"
     return None
-
-
-async def _execute(live: _LiveTools, function: ToolFunction, arguments: dict[str, object], *, call_id: str) -> object:
-    """Run one live function under the run's tool-call policy, owning a synchronous body until it finishes."""
-    return await run_as_completion_owner(
-        lambda: run_tool_call(function, arguments, replace(live.context, call_id=call_id), middleware=live.middleware),
-    )
 
 
 def _refused(task_id: str, reason: str, *, advice: str = "") -> ToolOutcome:

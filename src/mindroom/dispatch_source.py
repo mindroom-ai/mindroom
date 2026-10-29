@@ -75,13 +75,6 @@ _SELF_AUTHORED_INGRESS_SOURCE_KINDS: frozenset[str] = frozenset(
         EXTERNAL_TRIGGER_SOURCE_KIND,
     },
 )
-_INTERNAL_RELAY_DETECTION_SOURCE_KINDS: frozenset[str] = frozenset(
-    {
-        "",
-        MESSAGE_SOURCE_KIND,
-        TRUSTED_INTERNAL_RELAY_SOURCE_KIND,
-    },
-)
 _PER_FIRE_THREAD_ROOT_SOURCE_KINDS: frozenset[str] = frozenset(
     {
         SCHEDULED_SOURCE_KIND,
@@ -117,11 +110,6 @@ class _HasSourceKind(Protocol):
 
 
 @runtime_checkable
-class _HasSourceKindOverride(Protocol):
-    source_kind_override: str | None
-
-
-@runtime_checkable
 class _HasSender(Protocol):
     sender: str
 
@@ -144,11 +132,6 @@ def source_kind_allows_trusted_original_sender(source_kind: str | None) -> bool:
 def source_kind_allows_self_authored_ingress(source_kind: str | None) -> bool:
     """Return whether one self-authored Matrix event may enter dispatch."""
     return source_kind in _SELF_AUTHORED_INGRESS_SOURCE_KINDS
-
-
-def source_kind_allows_internal_relay_detection(source_kind: str | None) -> bool:
-    """Return whether content metadata may promote this event to a trusted internal relay."""
-    return source_kind in _INTERNAL_RELAY_DETECTION_SOURCE_KINDS
 
 
 def _source_kind_from_value(value: object) -> str | None:
@@ -233,8 +216,6 @@ def is_voice_event(
     source_kind = (
         event_or_envelope.source_kind
         if isinstance(event_or_envelope, _HasSourceKind)
-        else event_or_envelope.source_kind_override
-        if isinstance(event_or_envelope, _HasSourceKindOverride)
         else _trusted_source_kind_from_event_content(
             event_or_envelope,
             sender_is_trusted=sender_is_trusted,

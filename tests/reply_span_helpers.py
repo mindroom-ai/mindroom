@@ -6,7 +6,6 @@ import time
 from contextlib import asynccontextmanager
 from dataclasses import replace
 from typing import TYPE_CHECKING
-from unittest.mock import AsyncMock
 from uuid import uuid4
 
 from mindroom import reply_lifecycle as rl
@@ -18,29 +17,25 @@ from mindroom.response_sources import ResponseSources
 from tests.approval_continuation_helpers import approval_continuation, claim_continuation, continuation_claim
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Awaitable, Callable
+    from collections.abc import AsyncIterator
     from contextlib import AbstractAsyncContextManager
 
     from mindroom.delivery_gateway import DeliveryGateway, FinalDeliveryRequest
     from mindroom.event_journal import PrincipalStore
     from mindroom.final_delivery import FinalDeliveryOutcome
     from mindroom.response_runner import ResponseRequest, ResponseRunner
-    from mindroom.turn_record import TurnRecord
 
 
 def _runtime(
     principal: PrincipalStore,
     *,
     entity_name: str = "agent",
-    complete_turn: Callable[[TurnRecord], Awaitable[object]] | None = None,
 ) -> ReplyRuntime:
     return ReplyRuntime(
         store=principal,
         entity_name=entity_name,
         generation="gen-test",
         retry_sources=lambda _room_id, _sources: None,
-        complete_turn=complete_turn or AsyncMock(),
-        hold_conversation=lambda _continuation: None,
         approval_ended=lambda _ended: None,
     )
 
@@ -175,16 +170,13 @@ async def final_in_span(
     request: FinalDeliveryRequest,
     *,
     regenerates: bool = False,
-    complete_turn: Callable[[TurnRecord], Awaitable[object]] | None = None,
 ) -> FinalDeliveryOutcome:
     """Deliver one final answer from inside the reply span its request names, as a locked response turn does.
 
     A regeneration regenerates the answer the request names; any other
     request with an existing event shows that event as its placeholder.
-    ``complete_turn`` sees each turn the reply records answered, as the bot's
-    gateway runs its reply runtime's effects.
     """
-    runtime = _runtime(principal, complete_turn=complete_turn)
+    runtime = _runtime(principal)
     gateway = replace(gateway, deps=replace(gateway.deps, reply_effects=runtime.run_effects))
     sources = request.identity.sources
     regenerated = request.existing_event_id if regenerates else None
@@ -338,7 +330,7 @@ async def pause_shown_reply(
         show_tool_calls=continuation.show_tool_calls,
     )
     stage = rl.WriteStage.EDIT if text else None
-    enqueued = await principal.pause_for_approval(
+    enqueued = await principal.approvals.pause_for_approval(
         continuation,
         ReplyRowRequest(
             reply_id=span.reply_id,
@@ -367,7 +359,7 @@ async def pause_shown_reply(
             event_id=f"{continuation.response_event_id}:paused",
             delivered_projections=(),
         )
-    return await principal.approval_continuation(continuation.approval_id)
+    return await principal.approvals.approval_continuation(continuation.approval_id)
 
 
 async def paused_for_approval(
@@ -379,7 +371,7 @@ async def paused_for_approval(
     """Pause a reply for ``continuation`` the way a response does, and return the continuation the pause created.
 
     ``None`` means the pause could not take the sources, as
-    ``PrincipalStore.pause_for_approval`` reports it. A claimed continuation
+    ``ApprovalStore.pause_for_approval`` reports it. A claimed continuation
     is paused ready and then claimed by its ``runtime_generation``'s resume.
     ``text`` is the partial answer the paused reply keeps.
     """

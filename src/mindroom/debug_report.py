@@ -16,7 +16,7 @@ from pathlib import Path
 from typing import Any, LiteralString, cast
 
 _AI_RUN_KEY = "io.mindroom.ai_run"
-_JOURNAL_SOURCES = ("turn_records", "journal_events", "delivery_outbox")
+_JOURNAL_SOURCES = ("turns", "event_redactions", "journal_events", "delivery_outbox")
 _MAX_JSONL_RECORDS = 1000
 _MAX_RUNS = 100
 # The JSON text columns of a run row and of its message and tool rows.
@@ -181,7 +181,7 @@ def _journal_results(status: str, location: str, error: str | None = None) -> di
 
 
 def _read_journal(query: _Query, ids: _DebugReportIds, location: str) -> dict[str, _SourceResult]:
-    """Read turn records, admitted events, and outbound deliveries for the identifiers."""
+    """Read turns, redactions, admitted events, and outbound deliveries for the identifiers."""
     results = _journal_results("ok", location)
     thread_known = bool(ids.room_id and ids.thread_id)
 
@@ -203,15 +203,44 @@ def _read_journal(query: _Query, ids: _DebugReportIds, location: str) -> dict[st
         results["journal_events"].items = [_decode_json_columns(row) for row in rows]
         admitted_event_ids = {row["event_id"] for row in rows}
 
-    # A thread names events the report did not list, so their turn records follow the admitted events.
+    # A thread names events the report did not list, so their turns follow the admitted events.
     marks, event_ids = _in_list(ids.event_ids | admitted_event_ids)
     if event_ids:
-        rows = query(
-            f"SELECT * FROM turn_records WHERE index_event_id IN ({marks}) OR anchor_event_id IN ({marks}) "  # noqa: S608 - placeholders only
-            "ORDER BY agent_name, index_event_id",
+        turns = query(
+            "SELECT * FROM turns AS turn WHERE EXISTS ("  # noqa: S608 - placeholders only
+            "SELECT 1 FROM turn_sources AS source WHERE source.agent_name = turn.agent_name "
+            f"AND source.turn_key = turn.turn_key AND source.event_id IN ({marks})"
+            ") OR EXISTS ("
+            "SELECT 1 FROM turn_aliases AS alias WHERE alias.agent_name = turn.agent_name "
+            f"AND alias.turn_key = turn.turn_key AND alias.event_id IN ({marks})"
+            ") ORDER BY turn.agent_name, turn.anchor_event_id",
             [*event_ids, *event_ids],
         )
-        results["turn_records"].items = [_decode_json_columns(row) for row in rows]
+        items = [_decode_json_columns(turn) for turn in turns]
+        for item in items:
+            turn = [item["agent_name"], item["turn_key"]]
+            item["sources"] = [
+                _decode_json_columns(source)
+                for source in query(
+                    "SELECT * FROM turn_sources WHERE agent_name = ? AND turn_key = ? ORDER BY ordinal",
+                    turn,
+                )
+            ]
+            item["aliases"] = query(
+                "SELECT * FROM turn_aliases WHERE agent_name = ? AND turn_key = ? ORDER BY event_id",
+                turn,
+            )
+            item["revisions"] = query(
+                "SELECT * FROM turn_revisions WHERE agent_name = ? AND turn_key = ? "
+                "ORDER BY source_event_id, timestamp_ms, revision_id",
+                turn,
+            )
+        results["turns"].items = items
+        results["event_redactions"].items = query(
+            f"SELECT * FROM event_redactions WHERE event_id IN ({marks}) "  # noqa: S608 - placeholders only
+            "ORDER BY agent_name, room_id, event_id",
+            event_ids,
+        )
 
     if thread_known:
         rows = query(

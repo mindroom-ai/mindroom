@@ -51,6 +51,7 @@ from mindroom.matrix.journal_ingress import (
 )
 from mindroom.pending_event_worker import _BATCH_SIZE, _MAX_RETRY_DELAY_SECONDS, PendingEventWorker
 from mindroom.response_lifecycle import ResponseLifecycleCoordinator, response_lifecycle_reservation_context
+from tests.approval_card_helpers import resolve_card_event
 from tests.approval_continuation_helpers import claim_continuation
 from tests.conftest import request_envelope
 from tests.journal_helpers import admit_dispatch_event
@@ -2590,7 +2591,9 @@ class TestRoomRetryBackoff:
             assert attempts == ["$source-1", "$middle"]
             assert store.tail_read_after == middle.receipt_order
             worker.release(("$source-1",))
-            recorded = await alice.resolve_continuation_approval_card(
+            recorded = await resolve_card_event(
+                alice.approvals,
+                room_id=ROOM,
                 card_event_id="$approval",
                 requested_status="approved",
                 reason=None,

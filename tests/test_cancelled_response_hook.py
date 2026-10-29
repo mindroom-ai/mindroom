@@ -4,15 +4,17 @@ from __future__ import annotations
 
 import asyncio
 from contextlib import suppress
-from typing import TYPE_CHECKING
+from dataclasses import replace
+from typing import TYPE_CHECKING, Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import nio
 import pytest
+from structlog.testing import capture_logs
 
-from mindroom.bot import TeamBot
+from mindroom.background_tasks import wait_for_background_tasks
 from mindroom.cancellation import current_task_is_process_shutdown, request_task_cancel
-from mindroom.config.agent import AgentConfig
+from mindroom.config.agent import AgentConfig, TeamConfig
 from mindroom.config.main import Config
 from mindroom.config.plugin import PluginEntryConfig
 from mindroom.delivery_gateway import (
@@ -23,9 +25,8 @@ from mindroom.delivery_gateway import (
     ResponseHookService,
     ResponseIdentity,
 )
-from mindroom.dispatch_source import MESSAGE_SOURCE_KIND
+from mindroom.dispatch_source import EDIT_SOURCE_KIND, MESSAGE_SOURCE_KIND
 from mindroom.final_delivery import FinalDeliveryOutcome, StreamTransportOutcome
-from mindroom.handled_turns import TurnRecord
 from mindroom.history.types import HistoryScope
 from mindroom.hooks import (
     EVENT_MESSAGE_AFTER_RESPONSE,
@@ -50,14 +51,16 @@ from mindroom.post_response_effects import PostResponseEffectsDeps, ResponseOutc
 from mindroom.response_lifecycle import ResponseLifecycle, ResponseLifecycleDeps
 from mindroom.response_runner import ResponseRequest
 from mindroom.response_sources import ResponseSources
+from mindroom.turn_record import TurnRecord
 from tests.access_schema_support import with_current_room_member_access
-from tests.bot_helpers import make_test_team_bot
+from tests.bot_helpers import make_test_agent_bot
 from tests.conftest import (
     TEST_PASSWORD,
     bind_runtime_paths,
     finish_edit_regenerations,
     ignore_final_delivery_handoff,
     install_runtime_journal_support,
+    make_ingress_facts,
     make_matrix_client_mock,
     message_origin,
     replace_edit_regenerator_deps,
@@ -69,15 +72,16 @@ from tests.conftest import (
 from tests.reply_span_helpers import reply_span, seed_finished_reply
 
 if TYPE_CHECKING:
+    from collections.abc import Callable, Coroutine
     from contextlib import AbstractAsyncContextManager
     from pathlib import Path
 
-    from mindroom.bot import TeamBot
+    from mindroom.bot import AgentBot
     from mindroom.event_journal import EventJournalStore, PrincipalStore
     from mindroom.reply_scope import SpanHandle
 
 
-def _config(tmp_path: Path) -> Config:
+def _config(tmp_path: Path, *, teams: dict[str, TeamConfig] | None = None) -> Config:
     runtime_paths = test_runtime_paths(tmp_path)
     return bind_runtime_paths(
         with_current_room_member_access(
@@ -85,6 +89,7 @@ def _config(tmp_path: Path) -> Config:
                 agents={
                     "code": AgentConfig(display_name="Code", rooms=["!room:localhost"]),
                 },
+                teams=teams or {},
             ),
         ),
         runtime_paths,
@@ -171,8 +176,13 @@ def _response_lifecycle(
     )
 
 
-def _team_bot(tmp_path: Path) -> TeamBot:
-    config = _config(tmp_path)
+def _team_bot(tmp_path: Path) -> AgentBot:
+    config = _config(
+        tmp_path,
+        teams={
+            "team_bot": TeamConfig(display_name="Team Bot", role="Team", agents=["code"], rooms=["!room:localhost"]),
+        },
+    )
     runtime_paths = runtime_paths_for(config)
     team_user = AgentMatrixUser(
         agent_name="team_bot",
@@ -180,7 +190,7 @@ def _team_bot(tmp_path: Path) -> TeamBot:
         display_name="Team Bot",
         password=TEST_PASSWORD,
     )
-    bot = make_test_team_bot(
+    bot = make_test_agent_bot(
         team_user,
         tmp_path,
         config=config,
@@ -406,9 +416,149 @@ async def test_response_hook_service_skips_when_no_hooks(tmp_path: Path) -> None
     )
 
 
+def _after_response_service(
+    tmp_path: Path,
+    reply_mirror: Callable[[MessageEnvelope, str], Coroutine[Any, Any, None] | None],
+    plugins: list[object] | None = None,
+) -> ResponseHookService:
+    """Return a response hook service with a reply mirror and, unless given plugins, no hooks."""
+    config = _config(tmp_path)
+    hook_context = HookContextSupport(
+        runtime=type("RT", (), {"client": None, "orchestrator": None, "config": config, "runtime_started_at": 0.0})(),
+        runtime_paths=runtime_paths_for(config),
+        agent_name="code",
+        hook_registry_state=HookRegistryState(HookRegistry.from_plugins(plugins or [])),
+        hook_send_message=AsyncMock(),
+    )
+    return ResponseHookService(hook_context=hook_context, reply_mirror=reply_mirror)
+
+
+async def _emit_after_response(service: ResponseHookService, *, response_kind: str) -> None:
+    """Emit one final reply, then wait for what the service started in the background."""
+    envelope = _envelope()
+    await service.emit_after_response(
+        identity=ResponseIdentity(
+            response_kind=response_kind,
+            response_envelope=envelope,
+            correlation_id="corr-mirror",
+            sources=ResponseSources((envelope.source_event_id,), (envelope.source_event_id,)),
+        ),
+        response_text="final reply",
+        response_event_id="$reply",
+        delivery_kind="sent",
+    )
+    assert await wait_for_background_tasks(5.0, owner=service.hook_context.runtime)
+
+
+@pytest.mark.asyncio
+async def test_after_response_mirrors_agent_replies_without_any_hooks(tmp_path: Path) -> None:
+    """The reply mirror gets each agent's final reply even when no after-response hook is registered."""
+    mirrored: list[tuple[MessageEnvelope, str]] = []
+
+    async def mirror(envelope: MessageEnvelope, text: str) -> None:
+        mirrored.append((envelope, text))
+
+    await _emit_after_response(_after_response_service(tmp_path, mirror), response_kind="ai")
+
+    assert mirrored == [(_envelope(), "final reply")]
+
+
+@pytest.mark.asyncio
+async def test_after_response_does_not_wait_for_the_reply_mirror(tmp_path: Path) -> None:
+    """A slow mirror runs in the background, so the response lock is not held while it works."""
+    release = asyncio.Event()
+    finished: list[str] = []
+
+    async def slow_mirror(_envelope: MessageEnvelope, text: str) -> None:
+        await release.wait()
+        finished.append(text)
+
+    service = _after_response_service(tmp_path, slow_mirror)
+    identity = ResponseIdentity(
+        response_kind="ai",
+        response_envelope=_envelope(),
+        correlation_id="corr-slow",
+        sources=ResponseSources(("$event",), ("$event",)),
+    )
+
+    await asyncio.wait_for(
+        service.emit_after_response(
+            identity=identity,
+            response_text="final reply",
+            response_event_id="$reply",
+            delivery_kind="sent",
+        ),
+        timeout=1,
+    )
+    assert finished == []
+    release.set()
+    assert await wait_for_background_tasks(5.0, owner=service.hook_context.runtime)
+    assert finished == ["final reply"]
+
+
+@pytest.mark.asyncio
+async def test_after_response_starts_no_task_for_a_reply_the_mirror_declines(tmp_path: Path) -> None:
+    """A mirror that returns no coroutine, because the reply goes nowhere else, costs no background task."""
+    seen: list[str] = []
+
+    def declining_mirror(_envelope: MessageEnvelope, text: str) -> None:
+        seen.append(text)
+
+    service = _after_response_service(tmp_path, declining_mirror)
+
+    with capture_logs() as logs, patch("mindroom.delivery_gateway.create_background_task") as create_task:
+        await _emit_after_response(service, response_kind="ai")
+
+    assert seen == ["final reply"]
+    create_task.assert_not_called()
+    assert [entry for entry in logs if entry["log_level"] == "error"] == []
+
+
+@pytest.mark.asyncio
+async def test_after_response_does_not_mirror_team_replies(tmp_path: Path) -> None:
+    """Only an agent's own final reply is mirrored."""
+    mirrored: list[str] = []
+
+    async def mirror(_envelope: MessageEnvelope, text: str) -> None:
+        mirrored.append(text)
+
+    await _emit_after_response(_after_response_service(tmp_path, mirror), response_kind="team")
+
+    assert mirrored == []
+
+
+@pytest.mark.parametrize("failure", ["before_the_task_starts", "in_the_task"])
+@pytest.mark.asyncio
+async def test_after_response_survives_a_failing_reply_mirror(tmp_path: Path, failure: str) -> None:
+    """A mirror that fails is logged and never reaches delivery; after-response hooks still run."""
+    seen: list[str] = []
+    message = "mirror broke"
+
+    async def failing_mirror(_envelope: MessageEnvelope, _text: str) -> None:
+        raise RuntimeError(message)
+
+    def failing_start(_envelope: MessageEnvelope, _text: str) -> Coroutine[Any, Any, None]:
+        raise RuntimeError(message)
+
+    @hook(EVENT_MESSAGE_AFTER_RESPONSE)
+    async def on_after(ctx: AfterResponseContext) -> None:
+        seen.append(ctx.result.response_text)
+
+    reply_mirror = failing_start if failure == "before_the_task_starts" else failing_mirror
+    service = _after_response_service(tmp_path, reply_mirror, [_plugin("mirror-order", [on_after])])
+
+    with capture_logs() as logs:
+        await _emit_after_response(service, response_kind="ai")
+
+    assert seen == ["final reply"]
+    assert [entry["event"] for entry in logs if entry["log_level"] == "error"] == [
+        "Reply mirror failed" if failure == "before_the_task_starts" else "Background task failed",
+    ]
+
+
 @pytest.mark.asyncio
 async def test_team_bot_empty_prompt_emits_cancelled_hook_once(tmp_path: Path) -> None:
-    """TeamBot empty prompts must finalize through lifecycle so message:cancelled fires exactly once."""
+    """A team's empty prompts must finalize through lifecycle so message:cancelled fires exactly once."""
     bot = _team_bot(tmp_path)
 
     with (
@@ -450,15 +600,20 @@ async def test_team_edit_regeneration_empty_prompt_emits_cancelled_hook_once(tmp
     bot = _team_bot(tmp_path)
     replace_edit_regenerator_deps(bot)
     turn_store = bot._edit_regenerator.deps.turn_store
-    turn_record = TurnRecord(
-        anchor_event_id="$original",
-        source_event_ids=("$original",),
-        response_event_id="$response",
-        response_owner="team_bot",
-        requester_id="@user:localhost",
-        history_scope=HistoryScope(kind="team", scope_id="team_bot"),
-        conversation_target=MessageTarget.resolve("!room:localhost", None, "$original"),
+    await turn_store.record_responded_turn(
+        TurnRecord(
+            anchor_event_id="$original",
+            source_event_ids=("$original",),
+            response_event_id="$response",
+            response_owner="team_bot",
+            requester_id="@user:localhost",
+            history_scope=HistoryScope(kind="team", scope_id="team_bot"),
+            conversation_target=MessageTarget.resolve("!room:localhost", None, "$original"),
+        ),
     )
+    turn_record = await turn_store.get_turn_record("$original")
+    assert turn_record is not None
+    assert turn_record.turn_key is not None
     await seed_finished_reply(
         bot.journal_principal(),
         "$response",
@@ -503,17 +658,17 @@ async def test_team_edit_regeneration_empty_prompt_emits_cancelled_hook_once(tmp
         ),
         patch.object(
             bot._conversation_resolver,
-            "build_message_envelope",
+            "build_envelope",
             return_value=_envelope(body="   "),
         ),
         patch.object(
             turn_store,
-            "load_turn",
+            "get_turn_record_after_writes",
             return_value=turn_record,
         ),
         patch.object(turn_store, "build_run_metadata", return_value={}),
         patch.object(turn_store, "register_edit_revision", return_value=turn_record),
-        patch.object(turn_store, "record_turn"),
+        patch.object(turn_store, "record_edit"),
         patch.object(turn_store, "remove_stale_runs_for_edit"),
         patch.object(turn_store, "prepare_edit_snapshot", return_value=False),
         patch.object(bot._ingress_hook_runner, "emit_message_received_hooks", new=AsyncMock(return_value=False)),
@@ -522,11 +677,12 @@ async def test_team_edit_regeneration_empty_prompt_emits_cancelled_hook_once(tmp
             room,
             edit_event,
             event_info,
-            requester_user_id="@user:localhost",
+            make_ingress_facts(edit_event.sender, source_kind=EDIT_SOURCE_KIND, requester_user_id="@user:localhost"),
         )
         await finish_edit_regenerations(bot)
 
     mock_emit.assert_awaited_once()
+    assert mock_emit.await_args.kwargs["identity"].response_kind == "team"
 
 
 @pytest.mark.asyncio
@@ -887,7 +1043,6 @@ async def test_final_only_provider_runs_before_response_then_after_response_once
                 target=MessageTarget.resolve("!room:localhost", None, "$event"),
                 stream_transport_outcome=StreamTransportOutcome(
                     last_physical_stream_event_id="$thinking",
-                    terminal_status="completed",
                     rendered_body="Thinking...",
                     visible_body_state="placeholder_only",
                     canonical_final_body_candidate="final body",
@@ -1088,3 +1243,61 @@ async def test_suppressed_placeholder_cleanup_exception_returns_typed_outcome_af
     assert len(cancelled_seen) == 1
     assert cancelled_seen[0].visible_response_event_id is None
     assert cancelled_seen[0].failure_reason == outcome.failure_reason
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("run_succeeded", "applied"), [(True, 1), (False, 0)], ids=["owed-answer", "approval-pause"])
+async def test_a_suspended_reply_applies_its_run_effects_only_once_its_run_finished(
+    tmp_path: Path,
+    run_succeeded: bool,
+    applied: int,
+) -> None:
+    """An answer recorded but not yet in the room finished its run, so memory and skill review take it now.
+
+    A run paused for approval has not finished and applies nothing; neither fires a delivery hook before the reply is
+    in the room.
+    """
+    _, response_hooks = _response_hook_service(tmp_path, HookRegistry.from_plugins([]))
+    lifecycle = _response_lifecycle(response_hooks, response_envelope=_envelope(), correlation_id="corr-owed")
+    post_effects = AsyncMock()
+    after_response = AsyncMock()
+    cancelled = AsyncMock()
+
+    with (
+        patch("mindroom.response_lifecycle.apply_post_response_effects", new=post_effects),
+        patch.object(response_hooks, "emit_after_response", new=after_response),
+        patch.object(response_hooks, "emit_cancelled_response", new=cancelled),
+    ):
+        outcome = await lifecycle.finalize(
+            FinalDeliveryOutcome(terminal_status="suspended", event_id=None, failure_reason="delivery_failed"),
+            build_post_response_outcome=lambda _outcome: ResponseOutcome(run_succeeded=run_succeeded),
+            post_response_deps=PostResponseEffectsDeps(logger=get_logger("tests.post_response")),
+        )
+
+    assert outcome.terminal_status == "suspended"
+    assert post_effects.await_count == applied
+    after_response.assert_not_awaited()
+    cancelled.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_an_owed_answer_hands_a_shutdown_during_its_effects_back_to_the_process(tmp_path: Path) -> None:
+    """Process shutdown owns cancellation, so a shutdown that lands during an owed answer's effects still stops it."""
+    _, response_hooks = _response_hook_service(tmp_path, HookRegistry.from_plugins([]))
+    lifecycle = _response_lifecycle(response_hooks, response_envelope=_envelope(), correlation_id="corr-owed-shutdown")
+    stopping: list[bool] = []
+    lifecycle.deps = replace(lifecycle.deps, process_shutdown_requested=lambda: bool(stopping))
+
+    async def shut_down(*_args: object) -> None:
+        stopping.append(True)
+        raise asyncio.CancelledError
+
+    with (
+        patch("mindroom.response_lifecycle.apply_post_response_effects", new=AsyncMock(side_effect=shut_down)),
+        pytest.raises(asyncio.CancelledError),
+    ):
+        await lifecycle.finalize(
+            FinalDeliveryOutcome(terminal_status="suspended", event_id=None),
+            build_post_response_outcome=lambda _outcome: ResponseOutcome(),
+            post_response_deps=PostResponseEffectsDeps(logger=get_logger("tests.post_response")),
+        )

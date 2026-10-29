@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from contextlib import suppress
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Literal
 
 import aiohttp
@@ -48,23 +48,6 @@ class ComputerRuntime:
     authorize: Callable[[str, str, str], Awaitable[ComputerTarget]]
     config_generation: int
     config: Config = field(repr=False)
-
-
-def rebind_computer_runtime(app: FastAPI, preload: config_lifecycle.ApiSnapshot, *, loaded: bool) -> None:
-    """Keep a prebound authorizer across initial API configuration publication."""
-    state = config_lifecycle.app_state(app)
-    runtime = state.computer_runtime
-    if runtime is None or preload.runtime_config is not None or preload.config_load_result is not None:
-        return
-    if loaded:
-        state.computer_runtime = replace(
-            runtime,
-            config_generation=config_lifecycle.require_api_state(app).snapshot.generation,
-        )
-    else:
-        state.computer_runtime = None
-        if state.computer_sessions is not None:
-            state.computer_sessions.close_all()
 
 
 class _ComputerRoute(APIRoute):
@@ -136,9 +119,9 @@ def _session(request: Request, session_id: str) -> ComputerSession:
     return _store(request.app).authenticate(session_id, authorization[7:])
 
 
-def _resolve_worker(config: Config, paths: RuntimePaths, target: ComputerTarget, *, start: bool) -> WorkerHandle:
+def _resolve_worker(paths: RuntimePaths, target: ComputerTarget, *, start: bool) -> WorkerHandle:
     try:
-        lease = lease_configured_primary_worker_manager(paths, runtime_config=config)
+        lease = lease_configured_primary_worker_manager(paths)
         if lease is None:
             raise ComputerError(503, "A dedicated computer worker backend is required.")
         with lease as manager:
@@ -188,8 +171,8 @@ async def _checked_status(connection: Request | WebSocket, session: ComputerSess
     try:
         store.get(session.session_id)
         await _authorize(connection, session.target)
-        config, paths = config_lifecycle.read_app_committed_runtime_config(connection.app)
-        handle = await asyncio.to_thread(_resolve_worker, config, paths, session.target, start=False)
+        paths = config_lifecycle.require_api_state(connection.app).snapshot.runtime_paths
+        handle = await asyncio.to_thread(_resolve_worker, paths, session.target, start=False)
         if session.handle is None or not _same_worker(session.handle, handle):
             raise ComputerError(409, "Computer worker changed; create a new session.")  # noqa: TRY301 - revoke below
         status = await computer_request(handle, "status", session.session_id)
@@ -215,7 +198,7 @@ def _public_status(session: ComputerSession, status: ComputerStatus) -> dict[str
 async def create_session(payload: _CreateSession, request: Request) -> dict[str, str | float]:
     """Exchange configured-homeserver OpenID for a requester-bound computer viewer."""
     runtime = _runtime(request)
-    config, paths = config_lifecycle.read_app_committed_runtime_config(request.app)
+    paths = config_lifecycle.require_api_state(request.app).snapshot.runtime_paths
     try:
         requester_id = await verify_matrix_openid(payload.openid_token, paths, request_origin=str(request.base_url))
     except MatrixOpenIDError as error:
@@ -226,7 +209,7 @@ async def create_session(payload: _CreateSession, request: Request) -> dict[str,
     store = _store(request.app)
     session = store.create(target)
     try:
-        session.handle = await asyncio.to_thread(_resolve_worker, config, paths, target, start=True)
+        session.handle = await asyncio.to_thread(_resolve_worker, paths, target, start=True)
         status = await computer_request(session.handle, "start", session.session_id)
         session.generation = status["generation"]
         await _authorize(request, target)

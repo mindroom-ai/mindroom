@@ -26,6 +26,7 @@ from tests.conftest import bind_runtime_paths, install_model_providers, make_tur
 from tests.delegation_helpers import approval_calls_for, approval_executor, resume
 from tests.fakes.scripted_model import ScriptedModel, ScriptStep, answer, calls, tool_call
 from tests.test_plugins import _preserved_plugin_loader_state
+from tests.turn_model_helpers import turn_model
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -434,7 +435,7 @@ async def _exercise_saved_approval(  # noqa: C901, PLR0912, PLR0915
         history_storage=storage,
         supports_native_tool_approval=True,
         knowledge=None,
-        active_model_name=None,
+        model=turn_model(config, paths, "general"),
     )
     offered = initial.spec.functions
     original_names = set(offered)
@@ -449,19 +450,21 @@ async def _exercise_saved_approval(  # noqa: C901, PLR0912, PLR0915
     initial_discoveries = list(transport.discoveries)
     with pytest.raises(ResponsePausedForApproval) as raised:
         await ai_response(
-            make_turn_context(
-                "general",
-                session_id=identity.session_id,
-                room_id=identity.room_id,
-                thread_id=identity.thread_id,
-                requester_id=identity.requester_id,
-                matrix_run_metadata={"approval_probe": "saved"},
+            replace(
+                make_turn_context(
+                    "general",
+                    session_id=identity.session_id,
+                    room_id=identity.room_id,
+                    thread_id=identity.thread_id,
+                    requester_id=identity.requester_id,
+                    matrix_run_metadata={"approval_probe": "saved"},
+                ),
+                prompt="Look up the synthetic record",
+                execution_identity=identity,
+                supports_native_tool_approval=True,
             ),
-            prompt="Look up the synthetic record",
-            config=config,
-            runtime_paths=paths,
-            execution_identity=identity,
-            supports_native_tool_approval=True,
+            paths,
+            config,
         )
     paused = raised.value.paused
     assert paused.toolkit_owners[("general", function_name)] == tool_name

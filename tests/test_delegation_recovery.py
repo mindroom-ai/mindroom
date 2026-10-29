@@ -163,7 +163,7 @@ async def test_restart_cleanup_uses_latest_attempt_of_the_same_delegation(  # no
         assert result is not None
         assert result.status == (RunStatus.paused if followup else RunStatus.cancelled)
         if not followup:
-            assert result.content == "Stopped after restart"
+            assert (result.content, result.error) == (None, "Stopped after restart")
             assert not any(tool.is_paused for tool in result.tools or ())
     handle = json.loads((paths.storage_root / "subagent_sessions" / f"{child.subagent_id}.json").read_text())["child"]
     assert handle["delegation_id"] == child.delegation_id

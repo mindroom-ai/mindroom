@@ -189,7 +189,7 @@ class InboundTurnNormalizer:
                         },
                     },
                     server_timestamp=request.event.server_timestamp,
-                    source_kind_override=VOICE_SOURCE_KIND,
+                    payload_trusted=True,
                 ),
             )
 
@@ -222,7 +222,7 @@ class InboundTurnNormalizer:
                     server_timestamp=request.event.server_timestamp
                     if isinstance(request.event.server_timestamp, int)
                     else None,
-                    source_kind_override=VOICE_SOURCE_KIND,
+                    payload_trusted=True,
                 ),
             )
 

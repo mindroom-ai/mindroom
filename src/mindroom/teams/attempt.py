@@ -1,7 +1,7 @@
 """One attempt of a team run, a turn's or a resumed run's: the reply document its events build and what it produced.
 
-An attempt records its document's text without tool markers, however it ends, and pauses showing that document; the
-records the run hands over give its run metadata.
+An attempt records its document's text without tool markers, however it ends, and shows that document when it pauses;
+the records the run hands over give its run metadata.
 """
 
 from __future__ import annotations
@@ -46,17 +46,13 @@ def _unshown_handover(run: AnyRunRecord, *, streamed: bool) -> str | None:
     """Return what ``run`` hands over beyond its pause (``new_handover_content``) that its events have not shown.
 
     A run's deltas show its content as it is written, so a run that streamed text has shown what it hands over,
-    unless it failed: a failed run hands over why it failed, which no delta shows, even when its content is that
-    reason because its model said nothing it kept. What a resumed run carried over from its pause the document the
-    resume continues already accounts for. A paused run shows nothing more: beyond the text it streamed, its content
-    is a paused notice, which a team reply never shows, as a pause of a live turn does not.
+    unless it failed: a failed run hands over why it failed, which no delta shows. What a resumed run wrote before its
+    pause the document the resume continues already shows. A paused run shows nothing more: the document it pauses
+    in holds its text, even a stored run the delegation driver hands back unresumed, which carries nothing.
     """
-    if run.status is RunStatus.paused:
+    if run.status is RunStatus.paused or (streamed and run.status is not RunStatus.error):
         return None
-    handover = run.new_handover_content
-    if run.status is RunStatus.error:
-        return handover
-    return None if streamed and handover == run.content else handover
+    return run.new_handover_content
 
 
 @dataclass
@@ -97,8 +93,9 @@ class TeamAttempt:
     def interrupted_text(self) -> str:
         """Return the text the turn records when this attempt is stopped or fails: its document without tool markers.
 
-        The text ends with the no-consensus note only once the team run completed, so it matches the message a stopped
-        reply shows.
+        A stopped leader that wrote nothing contributes nothing; a failed one contributes the reason its run recorded,
+        credentials redacted. The text ends with the no-consensus note only once the team run completed, so it matches
+        the message a stopped reply shows.
         """
         record = self.records.record
         return self.presentation.text_without_tool_markers(

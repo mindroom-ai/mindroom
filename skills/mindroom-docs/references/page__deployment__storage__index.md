@@ -32,6 +32,7 @@ Set `MINDROOM_SESSION_STORAGE_PATH` to move agent and team session databases to 
 Back up the whole storage directory, and keep `tracking/` on persistent storage.
 When `MINDROOM_SESSION_STORAGE_PATH` is set in a container, mount that path on persistent storage and back it up too.
 The [conversation storage v2 upgrade notes](https://docs.mindroom.chat/deployment/upgrades/#upgrading-to-conversation-storage-v2) cover the `<name>.db.pre-storage-v2` backups it leaves beside each conversation database and what a database restored from a backup taken before that upgrade needs when it converts again.
+The [one-owner upgrade notes](https://docs.mindroom.chat/deployment/upgrades/#upgrading-to-one-owner-per-conversation-database) cover the `<name>.db.pre-storage-v4` backups that upgrade leaves.
 
 `tracking/` keeps a small record of every handled event so restarts and resyncs never answer the same message twice.
 These records are never pruned automatically, so size and monitor the volume for growth over the install's lifetime.
@@ -80,7 +81,8 @@ A refused database is left untouched.
 | `Another MindRoom runtime is already using this event journal` | Another storage root's runtime is bound to the same journal database. | Run one runtime per journal; two would both answer every message. |
 
 A PostgreSQL journal is claimed with a session advisory lock, so its connection must be direct or session-pooled; a transaction-pooling proxy cannot hold it.
-If that session is lost, MindRoom shuts down rather than keep running unclaimed; a process supervisor such as Kubernetes or systemd restarts it.
+If that session or any other connection to the journal is lost, such as when the database restarts or closes an idle connection, MindRoom shuts down rather than keep running unclaimed or unable to use the journal; a process supervisor such as Kubernetes or systemd restarts it.
+Leave `idle_session_timeout`, and a session pooler's client idle timeout such as PgBouncer's `client_idle_timeout`, off for MindRoom's database role, because each idle journal connection they close makes MindRoom restart.
 After a runtime's host is lost without closing that session, a replacement is refused with `Another MindRoom runtime is already using this event journal` for about a minute on a direct connection, or for the pooler's client timeout behind a session pooler, until the old session is dropped; a supervisor's retries get through after that.
 
 Do not adopt just because startup refused: a connection URL that drifted to a fresh database is the common cause, and adopting would abandon the real journal's history instead of finding it.

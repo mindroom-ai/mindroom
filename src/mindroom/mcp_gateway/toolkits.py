@@ -15,7 +15,9 @@ from mindroom.logging_config import get_logger
 from mindroom.mcp.toolkit import MindRoomMCPToolkit
 from mindroom.mcp_gateway.execution import retain_execution_task, run_gateway_sync
 from mindroom.mcp_gateway.types import GatewayError, GatewayErrorCode
+from mindroom.tool_system.agent_tools import resolve_agent_tools
 from mindroom.tool_system.catalog import TOOL_METADATA
+from mindroom.tool_system.sandbox_proxy import tool_placement
 from mindroom.tool_system.tool_hooks import SyncToolCompletionTracker, track_sync_tool_completion
 from mindroom.tool_system.toolkit_connections import shielded_lifecycle
 
@@ -90,7 +92,7 @@ async def _close_after(pending: asyncio.Future[Any], toolkit: Toolkit | None = N
 
 
 def _build_native(context: AgentToolContext, entry: EffectiveToolConfig) -> Toolkit:
-    from mindroom.agents import build_agent_toolkit, resolve_runtime_worker_tools  # noqa: PLC0415
+    from mindroom.agents import build_agent_toolkit  # noqa: PLC0415
     from mindroom.runtime_resolution import resolve_agent_runtime  # noqa: PLC0415
 
     # Plugin metadata can change after selection while this build is scheduled.
@@ -104,20 +106,14 @@ def _build_native(context: AgentToolContext, entry: EffectiveToolConfig) -> Tool
         execution_identity=context.execution_identity,
         create=True,
     )
-    worker_tools = resolve_runtime_worker_tools(
-        context.agent_name,
-        context.config,
-        context.runtime_paths,
-        [entry.name],
-        tool_registry_preloaded=True,
-    )
+    agent_tools = resolve_agent_tools(context.config, context.agent_name)
+    placement = tool_placement(context.runtime_paths)
     toolkit = build_agent_toolkit(
         entry.name,
-        agent_name=context.agent_name,
-        config=context.config,
+        agent_tools=agent_tools,
+        placement=placement,
         runtime_paths=context.runtime_paths,
-        worker_tools=worker_tools,
-        runtime_overrides=context.config.resolve_entity(context.agent_name).tool_runtime_overrides(entry.name),
+        workspace_in_worker=agent_tools.workspace_in_worker([entry.name], placement),
         agent_runtime=runtime,
         tool_config_overrides=entry.tool_config_overrides,
         execution_identity=context.execution_identity,

@@ -9,7 +9,12 @@ from fastapi.responses import JSONResponse
 
 from mindroom.api import config_lifecycle
 from mindroom.api.auth import require_operator_key
-from mindroom.response_activity import ActiveResponseInfo, DetailedResponseActivity, ResponseActivity, ResponseIdentity
+from mindroom.response_activity import (
+    ActiveResponseIdentity,
+    ActiveResponseInfo,
+    DetailedResponseActivity,
+    ResponseActivity,
+)
 from mindroom.runtime_state import get_runtime_state
 
 if TYPE_CHECKING:
@@ -18,10 +23,10 @@ if TYPE_CHECKING:
 router = APIRouter(prefix="/api/responses", tags=["responses"])
 
 
-async def track_openai_request(request: Request) -> AsyncIterator[ResponseIdentity]:
+async def track_openai_request(request: Request) -> AsyncIterator[ActiveResponseIdentity]:
     """Observe one HTTP request through its normal response-body lifecycle."""
     responses = config_lifecycle.app_state(request.app).openai_responses
-    identity = ResponseIdentity()
+    identity = ActiveResponseIdentity()
     responses.add(identity)
     try:
         yield identity

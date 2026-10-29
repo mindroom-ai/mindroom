@@ -19,7 +19,7 @@ from mindroom.custom_tools.usage_stats import UsageStatsTools
 from mindroom.llm.runs import RunRecord
 from mindroom.llm.usage import RunMetrics, TokenCounts
 from mindroom.message_target import MessageTarget
-from mindroom.session_storage.agent_storage import create_state_storage
+from mindroom.session_storage.agent_storage import create_agent_state_storage
 from mindroom.session_storage.types import ConversationSession
 from mindroom.tool_system.metadata import TOOL_METADATA, get_tool_by_name
 from mindroom.tool_system.runtime_context import ToolRuntimeContext
@@ -102,7 +102,7 @@ async def test_usage_tool_optionally_returns_daily_tokens_from_storage(
     """Both tool entry points expose daily tokens only when explicitly requested."""
     context = _context(tmp_path, administrators=["@alice:example.test"])
     monkeypatch.setattr("mindroom.custom_tools.usage_stats.get_tool_runtime_context", lambda: context)
-    storage = create_state_storage("usage", context.runtime_paths.storage_root / "agents" / "usage")
+    storage = create_agent_state_storage("usage", context.runtime_paths.storage_root / "agents" / "usage")
     persist_session(
         storage,
         ConversationSession(
@@ -215,14 +215,14 @@ def test_admin_scope_requires_an_agent_override(tmp_path: Path) -> None:
         "usage_stats",
         runtime_paths,
         credential_overrides={"admin_scope": True},
-        disable_sandbox_proxy=True,
+        runs_in_worker=False,
         worker_target=None,
     )
     admin_toolkit = get_tool_by_name(
         "usage_stats",
         runtime_paths,
         tool_config_overrides={"admin_scope": True},
-        disable_sandbox_proxy=True,
+        runs_in_worker=False,
         worker_target=None,
     )
 
@@ -256,9 +256,7 @@ def test_admin_scope_is_valid_on_an_agent_tool_entry(tmp_path: Path) -> None:
 
     bound = bind_runtime_paths(config, test_runtime_paths(tmp_path))
 
-    usage_entry = next(
-        entry for entry in bound.resolve_entity("usage").authored_tool_configs if entry.name == "usage_stats"
-    )
+    usage_entry = next(entry for entry in bound.resolve_agent("usage").tools.authored if entry.name == "usage_stats")
     assert usage_entry.tool_config_overrides == {"admin_scope": True}
 
 

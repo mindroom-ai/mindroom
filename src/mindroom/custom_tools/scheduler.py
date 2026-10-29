@@ -262,7 +262,7 @@ class SchedulerTools(Toolkit):
             room_id=context.room_id,
             task_id=task_id,
             runtime_paths=context.runtime_paths,
-            matrix_admin=context.matrix_admin,
+            task_runtime=context.orchestrator.scheduled_tasks if context.orchestrator is not None else None,
         )
         _raise_for_scheduler_error(response_text)
         return response_text

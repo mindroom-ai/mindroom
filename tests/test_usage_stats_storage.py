@@ -14,9 +14,14 @@ import pytest
 from mindroom.config.agent import AgentConfig, AgentPrivateConfig, TeamConfig
 from mindroom.config.main import Config
 from mindroom.constants import RuntimePaths, resolve_runtime_paths
+from mindroom.history.types import HistoryScope
 from mindroom.llm.runs import RunRecord, RunStatus, TeamRunRecord
-from mindroom.llm.usage import ModelMetrics, RunMetrics, TokenCounts
-from mindroom.session_storage.agent_storage import create_state_storage, prepare_conversation_database
+from mindroom.llm.usage import HelperUsage, ModelMetrics, RunMetrics, TokenCounts
+from mindroom.session_storage.agent_storage import (
+    create_agent_state_storage,
+    create_state_storage,
+    prepare_conversation_database,
+)
 from mindroom.session_storage.schema import TableNames
 from mindroom.session_storage.types import ConversationSession
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity, resolve_worker_key, worker_dir_name
@@ -29,7 +34,9 @@ from mindroom.usage.stats_storage import (
     discover_self_usage_sources,
     iter_usage_storage_rows,
 )
+from mindroom.usage.storage import SYSTEM_USAGE_ENTITY, SYSTEM_USAGE_STORAGE_NAME
 from tests.conftest import create_agno_2_sessions_db, persist_runs, persist_session
+from tests.session_storage.agno_layout import recorded_owner
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
@@ -55,7 +62,7 @@ _INSERTED_COLUMNS = "session_id, session_type, agent_id, team_id, user_id, sessi
 def _source(path: Path) -> UsageStorageSource:
     # Existing-history fixtures pass through the same conversion as startup; a read of a missing file creates none.
     if path.is_file():
-        prepare_conversation_database(path, TableNames.of_database(path))
+        prepare_conversation_database(path, TableNames.of_database(path), recorded_owner(path))
     return UsageStorageSource(
         path=path,
         path_label=path.name,
@@ -226,7 +233,7 @@ def test_reader_extracts_only_top_level_usage_fields(tmp_path: Path) -> None:
 
 def test_reader_extracts_runs_written_by_the_conversation_store(tmp_path: Path) -> None:
     """The adapter reads the exact JSON representation the conversation store writes."""
-    storage = create_state_storage("code", tmp_path)
+    storage = create_agent_state_storage("code", tmp_path)
     persist_session(
         storage,
         ConversationSession(
@@ -352,7 +359,7 @@ def test_reader_since_keeps_a_store_readable_beside_a_malformed_snapshot(tmp_pat
 
 def test_reader_preserves_run_table_creation_date_after_updates(tmp_path: Path) -> None:
     """Saving a run again, even with a later creation time, keeps the run's original creation date in the ledger."""
-    storage = create_state_storage("code", tmp_path)
+    storage = create_agent_state_storage("code", tmp_path)
     session = ConversationSession(kind="agent", session_id="session-1", owner_id="code")
     run = RunRecord(
         run_id="run-1",
@@ -378,14 +385,14 @@ def test_reader_preserves_run_table_creation_date_after_updates(tmp_path: Path) 
 
 @pytest.mark.parametrize("legacy_encoding", [False, True])
 def test_reader_extracts_team_session_metrics_with_member_runs(tmp_path: Path, legacy_encoding: bool) -> None:
-    """Admin totals use the team session's member-inclusive aggregate, which member run rows add to."""
+    """Admin totals use the team session's member-inclusive aggregate, and the team's source lists each member run."""
     session = ConversationSession(
         kind="team",
         session_id="session-1",
         owner_id="engineering",
         created_at=1_723_837_600,
     )
-    storage = create_state_storage("engineering", tmp_path)
+    storage = create_state_storage("engineering", tmp_path, HistoryScope(kind="team", scope_id="engineering"))
     # The member saves before its team run, as a team turn saves them.
     persist_runs(
         storage,
@@ -429,7 +436,7 @@ def test_reader_extracts_team_session_metrics_with_member_runs(tmp_path: Path, l
         ),
     )
 
-    source = _source(tmp_path / "sessions" / "engineering.db")
+    source = replace(_source(tmp_path / "sessions" / "engineering.db"), scope="team", source_agent_id=None)
     if legacy_encoding:
         with sqlite3.connect(source.path) as connection:
             (session_data,) = connection.execute("SELECT session_data FROM engineering_sessions").fetchone()
@@ -444,7 +451,7 @@ def test_reader_extracts_team_session_metrics_with_member_runs(tmp_path: Path, l
         ("provider-b", "model-b", {"input_tokens": 14, "output_tokens": 6, "total_tokens": 20}),
         ("provider-a", "model-a", {"input_tokens": 7, "output_tokens": 3, "total_tokens": 10}),
     ]
-    assert [run.run_id for run in row.runs] == ["team-run"]
+    assert [(run.run_id, run.parent_run_id) for run in row.runs] == [("member-run", "team-run"), ("team-run", None)]
     assert row.runs_available is True
     assert row.session_metrics_available is True
 
@@ -583,6 +590,36 @@ def test_reader_does_not_change_database_bytes(tmp_path: Path) -> None:
 
     assert len(result) == 1
     assert database.read_bytes() == before
+
+
+def test_a_system_source_another_owner_owns_reads_as_malformed(tmp_path: Path) -> None:
+    """The system scope reads only rows of the database the system usage ledger owns, whatever the rows say."""
+    storage = create_state_storage(
+        SYSTEM_USAGE_STORAGE_NAME,
+        tmp_path / SYSTEM_USAGE_STORAGE_NAME,
+        HistoryScope(kind="agent", scope_id="code"),
+    )
+    storage.save_independent_usage(
+        session_id="routing",
+        usage_id="routing:1",
+        kind="routing",
+        requester_id=None,
+        usage=HelperUsage(run_id="1", model=None, provider=None, metrics=RunMetrics()),
+        initial_session=ConversationSession(session_id="routing", kind="agent", owner_id=SYSTEM_USAGE_ENTITY),
+    )
+    source = UsageStorageSource(
+        path=storage.path,
+        path_label=storage.path.name,
+        scope="system",
+        source_agent_id=None,
+        allowed_agent_ids=frozenset(),
+        requester_isolated=False,
+    )
+
+    [result] = iter_usage_storage_rows(source)
+
+    assert isinstance(result, UsageStorageDiagnostic)
+    assert (result.status, result.detail) == ("partial", "malformed retained session")
 
 
 def test_malformed_runs_return_content_free_diagnostic(tmp_path: Path) -> None:

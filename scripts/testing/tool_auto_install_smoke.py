@@ -169,7 +169,7 @@ def _runtime_check_tool(tool_name: str, runtime_paths: RuntimePaths) -> RuntimeT
     status = "ok"
     error: str | None = None
     try:
-        toolkit = get_tool_by_name(tool_name, runtime_paths, disable_sandbox_proxy=True, worker_target=None)
+        toolkit = get_tool_by_name(tool_name, runtime_paths, runs_in_worker=False, worker_target=None)
         _ = getattr(toolkit, "name", tool_name)
     except Exception as exc:
         status = "failed"

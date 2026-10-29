@@ -35,15 +35,22 @@ from mindroom.event_journal import (
     EventJournalStore,
     EventKind,
 )
-from mindroom.event_journal.matrix_delivery import MatrixDeliveryWorker, TurnHandoff
+from mindroom.event_journal.matrix_delivery import MatrixDeliveryWorker
 from mindroom.event_journal.store import _DEFAULT_UNACKNOWLEDGED_LIMIT as _UNACKNOWLEDGED_BATCH
 from mindroom.matrix.journal_ingress import _inbound_event, _projected_event
 from mindroom.pending_event_worker import PendingEventWorker
-from tests.conftest import CrashError, DiesAfterAcknowledgement, DiesAfterNextWriteCommit, ignore_delivered_projection
+from tests.conftest import (
+    CrashError,
+    DiesAfterAcknowledgement,
+    DiesAfterNextWriteCommit,
+    ignore_delivered_projection,
+    ignore_final_delivery_handoff,
+)
 from tests.journal_membership_helpers import admit_room_membership
 
 if TYPE_CHECKING:
     from mindroom.event_journal import JournalEvent, MatrixDelivery, MatrixDeliveryView, PrincipalStore
+    from mindroom.event_journal.approval_signals import ApprovalSignals
 
 pytestmark = pytest.mark.asyncio
 
@@ -126,16 +133,13 @@ class FakeHomeserver:
         return len(self.room_events)
 
 
-# A turn here answers exactly one source, and hands over exactly that one.
-_SETTLE_THE_SOURCE = TurnHandoff(sources_for_turn=lambda turn_id: (turn_id,), released=lambda _event_ids: None)
-
-
 @dataclass
 class TurnRuntime:
     """Everything that would be rebuilt by a restart."""
 
     store: PrincipalStore
     crashing_backend: DiesAfterNextWriteCommit
+    approval_signals: ApprovalSignals
     homeserver: FakeHomeserver
     model_runs: int = 0
     crash_after_model: bool = False
@@ -167,7 +171,10 @@ class TurnRuntime:
         that ran two of them.
         """
         self.crashing_backend.armed = self.crash_after_enqueue
-        principal = EventJournalStore(backend=cast("Any", self.crashing_backend)).principal(PRINCIPAL)
+        principal = EventJournalStore(
+            backend=cast("Any", self.crashing_backend),
+            approval_signals=self.approval_signals,
+        ).principal(PRINCIPAL)
         if not self.crash_after_acknowledgement:
             return principal
         return cast("MatrixDeliveryView", DiesAfterAcknowledgement(principal))
@@ -191,7 +198,9 @@ class TurnRuntime:
             observe_delivered=ignore_delivered_projection,
             sending_device_id=self.homeserver.device_id,
             resolve_delivered=self.homeserver.find_delivered,
-            handoff=_SETTLE_THE_SOURCE,
+            # A turn here answers exactly one source, and hands over exactly that one: with no stored turn, its
+            # FINAL settles only the delivery's own source.
+            handoff=ignore_final_delivery_handoff,
         ).deliver(
             delivery_id=event.event_id,
             stage=DeliveryStage.FINAL,
@@ -214,6 +223,7 @@ def runtime(journal_store: EventJournalStore) -> TurnRuntime:
     return TurnRuntime(
         store=journal_store.principal(PRINCIPAL),
         crashing_backend=DiesAfterNextWriteCommit(inner=journal_store.backend),
+        approval_signals=journal_store.approval_signals,
         homeserver=FakeHomeserver(),
     )
 
@@ -707,13 +717,12 @@ class TestTheHandoffIsOneTransaction:
             ),
             pytest.raises(CrashError),
         ):
-            await runtime.store.enqueue_matrix_delivery(
+            await runtime.store.enqueue_final_answer(
                 delivery_id=SOURCE,
-                stage=DeliveryStage.FINAL,
                 room_id=ROOM,
                 thread_id=None,
                 payload={"msgtype": "m.text", "body": "the answer"},
-                settle_source_event_ids=(SOURCE,),
+                turn_key=None,
             )
 
         assert await runtime.store.load_matrix_delivery(delivery_id=SOURCE, stage=DeliveryStage.FINAL) is None
@@ -737,16 +746,15 @@ class TestTheHandoffIsOneTransaction:
         await admit_room_membership(runtime.store, ROOM, "leave", source=DepartureSource.LOCAL)
         assert await runtime.store.pending() == (), "the fence left unanswerable work offered"
 
-        transaction_id = await runtime.store.enqueue_matrix_delivery(
+        enqueued = await runtime.store.enqueue_final_answer(
             delivery_id=SOURCE,
-            stage=DeliveryStage.FINAL,
             room_id=ROOM,
             thread_id=None,
             payload={"msgtype": "m.text", "body": "the answer"},
-            settle_source_event_ids=(SOURCE,),
+            turn_key=None,
         )
 
-        assert transaction_id is None
+        assert enqueued is None
         assert await runtime.store.load_matrix_delivery(delivery_id=SOURCE, stage=DeliveryStage.FINAL) is None
         settled = await runtime.store.load_event(SOURCE)
         assert settled is not None, "the journal row is still the proof this event had its turn"

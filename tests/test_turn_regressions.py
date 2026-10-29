@@ -1,0 +1,579 @@
+"""Targeted turn ingress, dispatch, and selection regressions."""
+
+from __future__ import annotations
+
+import asyncio
+from contextlib import suppress
+from typing import TYPE_CHECKING
+from unittest.mock import AsyncMock, MagicMock, patch
+
+import nio
+import pytest
+
+from mindroom import interactive
+from mindroom.coalescing.batch import CoalescingKey, PendingEvent, RequesterCoalescingOwner
+from mindroom.coalescing.gate import CoalescingGate, IngressAdmissionClosedError, LaneSlot, ReadyPendingEvent
+from mindroom.coalescing.ingress_lanes import ReceiptLaneKey
+from mindroom.coalescing.ingress_ticket import IngressTicket
+from mindroom.config.agent import AgentConfig
+from mindroom.config.main import Config
+from mindroom.constants import MATRIX_SOURCE_EVENT_IDS_METADATA_KEY, MATRIX_TURN_DISCOVERY_EVENT_IDS_METADATA_KEY
+from mindroom.dispatch_handoff import PreparedIngress
+from mindroom.dispatch_source import INTERACTIVE_SELECTION_SOURCE_KIND, MESSAGE_SOURCE_KIND
+from mindroom.matrix.thread_history_result import thread_history_result
+from mindroom.matrix.users import AgentMatrixUser
+from mindroom.streaming import send_streaming_response
+from mindroom.turns.dispatch import TurnDispatcher
+from tests.bot_helpers import make_test_agent_bot
+from tests.conftest import (
+    bind_runtime_paths,
+    delivered_matrix_side_effect,
+    install_generate_response_mock,
+    live_turn_claim,
+    make_ingress_facts,
+    make_pending_event,
+    replace_turn_deps,
+    runtime_paths_for,
+    test_runtime_paths,
+    turn_claim_is_live,
+    wrap_extracted_collaborators,
+)
+from tests.streaming_helpers import FakeReplyRecords
+
+if TYPE_CHECKING:
+    from collections.abc import AsyncIterator, Callable
+    from pathlib import Path
+
+    from mindroom.bot import AgentBot
+    from mindroom.hooks import MessageEnvelope
+
+
+async def _wait_for(condition: Callable[[], bool], *, deadline_seconds: float = 0.5) -> None:
+    """Poll until a test condition becomes true."""
+    ready = asyncio.Event()
+    loop = asyncio.get_running_loop()
+
+    def _mark_ready() -> None:
+        if condition():
+            ready.set()
+            return
+        loop.call_later(0.001, _mark_ready)
+
+    _mark_ready()
+    try:
+        async with asyncio.timeout(deadline_seconds):
+            await ready.wait()
+    except TimeoutError as exc:
+        msg = "Timed out waiting for async test condition"
+        raise AssertionError(msg) from exc
+
+
+def _text_event(event_id: str, body: str, origin_server_ts: int) -> nio.RoomMessageText:
+    """Build one plain Matrix text event."""
+    return nio.RoomMessageText.from_dict(
+        {
+            "content": {"body": body, "msgtype": "m.text"},
+            "event_id": event_id,
+            "sender": "@user:localhost",
+            "origin_server_ts": origin_server_ts,
+            "room_id": "!room:localhost",
+            "type": "m.room.message",
+        },
+    )
+
+
+def _pending(event: nio.RoomMessageText) -> PendingEvent:
+    """Wrap one Matrix event as pending user ingress."""
+    return make_pending_event(
+        event,
+        nio.MatrixRoom("!room:localhost", "@mindroom:localhost"),
+        source_kind=MESSAGE_SOURCE_KIND,
+    )
+
+
+@pytest.mark.asyncio
+async def test_rejected_readiness_admission_releases_its_claim_once_readiness_ends() -> None:
+    """A readiness task the gate refuses is cancelled, its late result closed, and its claim released only after it ends."""
+    result_claim = live_turn_claim("$late:localhost")
+    pending_event = _pending(_text_event("$late:localhost", "late", 1000))
+    pending_event.claim = result_claim
+    finish = asyncio.Event()
+
+    async def ready() -> ReadyPendingEvent:
+        # Readiness that finishes despite cancellation, like a checkpoint write.
+        with suppress(asyncio.CancelledError):
+            await asyncio.Event().wait()
+        await finish.wait()
+        return ReadyPendingEvent(pending_event=pending_event)
+
+    class RejectingGate:
+        def submit_lane_slot(self, *_args: object, **_kwargs: object) -> None:
+            msg = "closed"
+            raise IngressAdmissionClosedError(msg)
+
+        def release_lane_slot(self, slot: LaneSlot) -> None:
+            slot.released = True
+            slot.settled.set()
+
+    slot = LaneSlot(room_id="!room:localhost", sender_id="@user:localhost", receipt_time=1.0)
+    ticket_claim = live_turn_claim("$voice:localhost")
+    ticket = IngressTicket(gate=RejectingGate(), slot=slot, turn_store=MagicMock(), claim=ticket_claim)
+    ready_task = asyncio.create_task(ready())
+    await asyncio.sleep(0)
+
+    with pytest.raises(IngressAdmissionClosedError):
+        ticket.admit_ready(
+            CoalescingKey("!room:localhost", "$thread:localhost", RequesterCoalescingOwner("@user:localhost")),
+            ready_task,
+            source_event_id="$voice:localhost",
+        )
+    ticket.close()
+
+    assert slot.released is True
+    await asyncio.sleep(0)
+    assert turn_claim_is_live(ticket_claim), "a source whose readiness still runs stays claimed"
+    finish.set()
+    await ready_task
+    await asyncio.sleep(0)
+    assert not turn_claim_is_live(ticket_claim)
+    assert not turn_claim_is_live(result_claim)
+
+
+@pytest.mark.asyncio
+async def test_rejected_readiness_admission_cancelled_before_its_first_step_releases_its_claim() -> None:
+    """A readiness task cancelled before it ever ran still ends, which releases the claim it was to hold."""
+
+    async def ready() -> ReadyPendingEvent | None:
+        return None
+
+    gate = CoalescingGate(
+        dispatch_turn=AsyncMock(),
+        debounce_seconds=lambda: 0.0,
+        is_shutting_down=lambda: False,
+    )
+    slot = gate.enter_lane(ReceiptLaneKey(room_id="!room:localhost", sender_id="@user:localhost"))
+    gate.release_lane_slot(slot)
+    claim = live_turn_claim("$voice:localhost")
+    ticket = IngressTicket(gate=gate, slot=slot, turn_store=MagicMock(), claim=claim)
+    ready_task = asyncio.create_task(ready())
+
+    with pytest.raises(IngressAdmissionClosedError):
+        ticket.admit_ready(
+            CoalescingKey("!room:localhost", "$thread:localhost", RequesterCoalescingOwner("@user:localhost")),
+            ready_task,
+            source_event_id="$voice:localhost",
+        )
+
+    await asyncio.gather(ready_task, return_exceptions=True)
+    await asyncio.sleep(0)
+    assert ready_task.cancelled()
+    assert not turn_claim_is_live(claim)
+    await asyncio.wait_for(slot.settled.wait(), timeout=1.0)
+
+
+@pytest.mark.asyncio
+async def test_handle_interactive_selection_threaded_streaming_keeps_reply_target(
+    tmp_path: Path,
+) -> None:
+    """Threaded interactive selections should stream edits without thread-fallback assertions."""
+    config = bind_runtime_paths(
+        Config(agents={"general": AgentConfig(display_name="General")}),
+        test_runtime_paths(tmp_path),
+    )
+    config.memory.backend = "file"
+
+    agent_user = AgentMatrixUser(
+        agent_name="general",
+        user_id="@mindroom_general:localhost",
+        display_name="GeneralAgent",
+        password="test_password",  # noqa: S106
+    )
+    bot = make_test_agent_bot(
+        agent_user=agent_user,
+        storage_path=tmp_path,
+        config=config,
+        runtime_paths=runtime_paths_for(config),
+        rooms=["!test:localhost"],
+    )
+    bot.client = AsyncMock()
+
+    room = MagicMock()
+    room.room_id = "!test:localhost"
+    selection = interactive.InteractiveSelection(
+        question_event_id="$question:localhost",
+        question_text="Which option should I use?",
+        selection_key="1",
+        selected_label="Option 1",
+        selected_value="Option 1",
+        thread_id="$thread-root:localhost",
+    )
+
+    bot._conversation_resolver.fetch_thread_history = AsyncMock(
+        return_value=thread_history_result([], is_full_history=True),
+    )
+    wrap_extracted_collaborators(bot, "_delivery_gateway")
+    bot._delivery_gateway.send_text = AsyncMock(return_value="$ack:localhost")
+    replace_turn_deps(
+        bot,
+        resolver=bot._conversation_resolver,
+        delivery_gateway=bot._delivery_gateway,
+    )
+
+    captured_envelope: MessageEnvelope | None = None
+    captured_metadata: dict[str, object] | None = None
+
+    async def generate_response(
+        prompt: str,
+        thread_history: list[object],
+        existing_event_id: str | None = None,
+        user_id: str | None = None,  # noqa: ARG001
+        media: object | None = None,  # noqa: ARG001
+        attachment_ids: list[str] | None = None,  # noqa: ARG001
+        model_prompt: str | None = None,  # noqa: ARG001
+        transient_enrichment_items: tuple[object, ...] = (),  # noqa: ARG001
+        system_enrichment_items: tuple[object, ...] = (),  # noqa: ARG001
+        response_envelope: MessageEnvelope | None = None,
+        correlation_id: str | None = None,  # noqa: ARG001
+        matrix_run_metadata: dict[str, object] | None = None,
+    ) -> str | None:
+        nonlocal captured_envelope, captured_metadata
+        assert response_envelope is not None
+        captured_envelope = response_envelope
+        captured_metadata = matrix_run_metadata
+        assert prompt == interactive.build_selection_prompt(selection)
+        assert response_envelope.target.room_id == room.room_id
+        assert response_envelope.target.reply_to_event_id == selection.question_event_id
+        assert response_envelope.target.resolved_thread_id == selection.thread_id
+        assert thread_history == []
+        assert existing_event_id == "$ack:localhost"
+
+        async def response_stream() -> AsyncIterator[str]:
+            yield "Processed selection"
+
+        mock_edit = AsyncMock(side_effect=delivered_matrix_side_effect("$edit:localhost"))
+        with patch("mindroom.streaming.edit_message_result", new=mock_edit):
+            outcome = await send_streaming_response(
+                client=bot.client,
+                target=response_envelope.target,
+                config=config,
+                runtime_paths=runtime_paths_for(config),
+                response_stream=response_stream(),
+                existing_event_id=existing_event_id,
+                adopt_existing_placeholder=True,
+                **FakeReplyRecords(edit=mock_edit).hooks(),
+            )
+
+        mock_edit.assert_awaited()
+        assert outcome.rendered_body == "Processed selection"
+        return outcome.last_physical_stream_event_id
+
+    generate_response_mock = AsyncMock(side_effect=generate_response)
+    install_generate_response_mock(bot, generate_response_mock)
+
+    await bot._interactive_selections._handle_interactive_selection(
+        room,
+        selection=selection,
+        facts=make_ingress_facts("@user:localhost", source_kind=INTERACTIVE_SELECTION_SOURCE_KIND),
+        source_event_id="$selection:localhost",
+        response_target=bot._interactive_selections._interactive_selection_target(room.room_id, selection),
+    )
+
+    bot._delivery_gateway.send_text.assert_awaited_once()
+    ack_request = bot._delivery_gateway.send_text.await_args.args[0]
+    assert ack_request.target.resolved_thread_id == selection.thread_id
+    assert ack_request.target.reply_to_event_id == selection.question_event_id
+    generate_response_mock.assert_awaited_once()
+    assert captured_envelope is not None
+    assert captured_envelope.source_event_id == "$selection:localhost"
+    assert captured_envelope.target.resolved_thread_id == selection.thread_id
+    assert captured_metadata is not None
+    assert captured_metadata[MATRIX_SOURCE_EVENT_IDS_METADATA_KEY] == ["$selection:localhost"]
+    assert captured_metadata[MATRIX_TURN_DISCOVERY_EVENT_IDS_METADATA_KEY] == [selection.question_event_id]
+    request = bot._response_runner.generate_response.await_args.args[0]
+    assert request.history_boundary_event_id == "$selection:localhost"
+    await _assert_interactive_turn_aliases(bot, selection, "$selection:localhost")
+
+
+async def _assert_interactive_turn_aliases(
+    bot: AgentBot,
+    selection: interactive.InteractiveSelection,
+    selection_event_id: str,
+) -> None:
+    """Assert that question and selection IDs resolve to one canonical turn."""
+    question_record = await bot._turn_store.get_turn_record(selection.question_event_id)
+    selection_record = await bot._turn_store.get_turn_record(selection_event_id)
+    assert question_record is not None
+    assert question_record == selection_record
+    assert question_record.source_event_ids == (selection_event_id,)
+    assert question_record.discovery_event_ids == (selection.question_event_id,)
+
+
+@pytest.mark.asyncio
+async def test_handle_interactive_selection_does_not_mark_handled_when_runner_returns_none(
+    tmp_path: Path,
+) -> None:
+    """A retryable terminal outcome must not mark the source turn handled."""
+    config = bind_runtime_paths(
+        Config(agents={"general": AgentConfig(display_name="General")}),
+        test_runtime_paths(tmp_path),
+    )
+    config.memory.backend = "file"
+
+    agent_user = AgentMatrixUser(
+        agent_name="general",
+        user_id="@mindroom_general:localhost",
+        display_name="GeneralAgent",
+        password="test_password",  # noqa: S106
+    )
+    bot = make_test_agent_bot(
+        agent_user=agent_user,
+        storage_path=tmp_path,
+        config=config,
+        runtime_paths=runtime_paths_for(config),
+        rooms=["!test:localhost"],
+    )
+    bot.client = AsyncMock()
+
+    room = MagicMock()
+    room.room_id = "!test:localhost"
+    selection = interactive.InteractiveSelection(
+        question_event_id="$question:localhost",
+        question_text="Which option should I use?",
+        selection_key="1",
+        selected_label="Option 1",
+        selected_value="Option 1",
+        thread_id="$thread-root:localhost",
+    )
+
+    bot._conversation_resolver.fetch_thread_history = AsyncMock(
+        return_value=thread_history_result([], is_full_history=True),
+    )
+    wrap_extracted_collaborators(bot, "_delivery_gateway")
+    bot._delivery_gateway.send_text = AsyncMock(return_value="$ack:localhost")
+    replace_turn_deps(
+        bot,
+        resolver=bot._conversation_resolver,
+        delivery_gateway=bot._delivery_gateway,
+    )
+    bot._turn_ingress.deps.turn_store.record_turn = AsyncMock()
+    generate_response_mock = AsyncMock(return_value=None)
+    install_generate_response_mock(bot, generate_response_mock)
+
+    with pytest.raises(RuntimeError, match="no durable terminal outcome"):
+        await bot._interactive_selections._handle_interactive_selection(
+            room,
+            selection=selection,
+            facts=make_ingress_facts("@user:localhost", source_kind=INTERACTIVE_SELECTION_SOURCE_KIND),
+            source_event_id="$selection:localhost",
+            response_target=bot._interactive_selections._interactive_selection_target(room.room_id, selection),
+        )
+
+    generate_response_mock.assert_awaited_once()
+    bot._turn_ingress.deps.turn_store.record_turn.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_on_message_claims_interactive_text_by_durable_source_event(
+    tmp_path: Path,
+) -> None:
+    """Plain numeric replies should claim against their admitted source event."""
+    config = bind_runtime_paths(
+        Config(agents={"general": AgentConfig(display_name="General")}),
+        test_runtime_paths(tmp_path),
+    )
+    config.memory.backend = "file"
+
+    agent_user = AgentMatrixUser(
+        agent_name="general",
+        user_id="@mindroom_general:localhost",
+        display_name="GeneralAgent",
+        password="test_password",  # noqa: S106
+    )
+    bot = make_test_agent_bot(
+        agent_user=agent_user,
+        storage_path=tmp_path,
+        config=config,
+        runtime_paths=runtime_paths_for(config),
+        rooms=["!test:localhost"],
+    )
+    bot.client = AsyncMock()
+
+    room = nio.MatrixRoom(room_id="!test:localhost", own_user_id="@mindroom_general:localhost")
+    message_event = nio.RoomMessageText.from_dict(
+        {
+            "content": {
+                "body": "1",
+                "msgtype": "m.text",
+                "m.relates_to": {"m.in_reply_to": {"event_id": "$plain-reply:localhost"}},
+            },
+            "event_id": "$selection:localhost",
+            "sender": "@user:localhost",
+            "origin_server_ts": 1000000,
+            "type": "m.room.message",
+            "room_id": "!test:localhost",
+        },
+    )
+    message_event.source = {
+        "content": {
+            "body": "1",
+            "msgtype": "m.text",
+            "m.relates_to": {"m.in_reply_to": {"event_id": "$plain-reply:localhost"}},
+        },
+        "event_id": "$selection:localhost",
+        "sender": "@user:localhost",
+        "origin_server_ts": 1000000,
+        "type": "m.room.message",
+        "room_id": "!test:localhost",
+    }
+
+    interactive_questions = MagicMock()
+    interactive_questions.claim_interactive_text = AsyncMock(return_value=None)
+    wrap_extracted_collaborators(bot, "_delivery_gateway", "_turn_policy")
+    replace_turn_deps(
+        bot,
+        resolver=bot._conversation_resolver,
+        delivery_gateway=bot._delivery_gateway,
+        turn_policy=bot._turn_policy,
+        interactive_questions=interactive_questions,
+    )
+
+    with (
+        patch("mindroom.turn_policy.TurnPolicy.can_reply_to_sender_in_room", return_value=True),
+        patch.object(bot._turn_policy, "can_reply_to_sender_in_room", return_value=True),
+        patch.object(
+            bot._conversation_resolver,
+            "coalescing_thread_id",
+            new_callable=AsyncMock,
+            return_value="$thread-root:localhost",
+        ),
+        patch.object(TurnDispatcher, "dispatch_turn", new_callable=AsyncMock) as mock_dispatch_text,
+    ):
+        await bot._on_message(room, message_event)
+        await _wait_for(lambda: mock_dispatch_text.await_count == 1)
+
+    interactive_questions.claim_interactive_text.assert_awaited_once_with(
+        source_event_id="$selection:localhost",
+    )
+    mock_dispatch_text.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_sidecar_preview_claims_interactive_text_by_durable_source_event(
+    tmp_path: Path,
+) -> None:
+    """Sidecar previews should claim against their admitted source event."""
+    config = bind_runtime_paths(
+        Config(agents={"general": AgentConfig(display_name="General")}),
+        test_runtime_paths(tmp_path),
+    )
+    config.memory.backend = "file"
+
+    agent_user = AgentMatrixUser(
+        agent_name="general",
+        user_id="@mindroom_general:localhost",
+        display_name="GeneralAgent",
+        password="test_password",  # noqa: S106
+    )
+    bot = make_test_agent_bot(
+        agent_user=agent_user,
+        storage_path=tmp_path,
+        config=config,
+        runtime_paths=runtime_paths_for(config),
+        rooms=["!test:localhost"],
+    )
+    bot.client = AsyncMock()
+
+    room = nio.MatrixRoom(room_id="!test:localhost", own_user_id="@mindroom_general:localhost")
+    sidecar_event = nio.RoomMessageFile.from_dict(
+        {
+            "content": {
+                "body": "1 [Message continues in attached file]",
+                "msgtype": "m.file",
+                "info": {"mimetype": "application/json"},
+                "io.mindroom.long_text": {
+                    "version": 2,
+                    "encoding": "matrix_event_content_json",
+                },
+                "url": "mxc://server/sidecar-selection",
+            },
+            "event_id": "$sidecar-selection:localhost",
+            "sender": "@user:localhost",
+            "origin_server_ts": 1000000,
+            "type": "m.room.message",
+            "room_id": "!test:localhost",
+        },
+    )
+    sidecar_event.source = {
+        "content": {
+            "body": "1 [Message continues in attached file]",
+            "msgtype": "m.file",
+            "info": {"mimetype": "application/json"},
+            "io.mindroom.long_text": {
+                "version": 2,
+                "encoding": "matrix_event_content_json",
+            },
+            "url": "mxc://server/sidecar-selection",
+        },
+        "event_id": "$sidecar-selection:localhost",
+        "sender": "@user:localhost",
+        "origin_server_ts": 1000000,
+        "type": "m.room.message",
+        "room_id": "!test:localhost",
+    }
+    prepared_event = PreparedIngress(
+        sender="@user:localhost",
+        event_id="$sidecar-selection:localhost",
+        body="1",
+        source={
+            "content": {
+                "body": "1",
+                "msgtype": "m.text",
+            },
+            "event_id": "$sidecar-selection:localhost",
+            "sender": "@user:localhost",
+            "origin_server_ts": 1000000,
+            "type": "m.room.message",
+            "room_id": "!test:localhost",
+        },
+        server_timestamp=1000000,
+    )
+
+    interactive_questions = MagicMock()
+    interactive_questions.claim_interactive_text = AsyncMock(return_value=None)
+    wrap_extracted_collaborators(bot, "_turn_policy", "_inbound_turn_normalizer")
+    replace_turn_deps(
+        bot,
+        resolver=bot._conversation_resolver,
+        turn_policy=bot._turn_policy,
+        normalizer=bot._inbound_turn_normalizer,
+        interactive_questions=interactive_questions,
+    )
+
+    with (
+        patch("mindroom.turn_policy.TurnPolicy.can_reply_to_sender_in_room", return_value=True),
+        patch.object(bot._turn_policy, "can_reply_to_sender_in_room", return_value=True),
+        patch.object(
+            bot._conversation_resolver,
+            "coalescing_thread_id",
+            new_callable=AsyncMock,
+            return_value="$thread-root:localhost",
+        ),
+        patch.object(
+            bot._inbound_turn_normalizer,
+            "prepare_file_sidecar_text_event",
+            new_callable=AsyncMock,
+            return_value=prepared_event,
+        ),
+        patch.object(
+            bot._turn_ingress,
+            "_enqueue_prepared_ingress",
+            new_callable=AsyncMock,
+        ) as mock_enqueue,
+    ):
+        await bot._turn_ingress.handle_media_event(room, sidecar_event)
+
+    interactive_questions.claim_interactive_text.assert_awaited_once_with(
+        source_event_id=prepared_event.event_id,
+    )
+    mock_enqueue.assert_awaited_once()
+    assert mock_enqueue.await_args.args[1] is prepared_event

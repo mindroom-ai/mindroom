@@ -140,7 +140,7 @@ async def _started(
 ) -> tuple[BudgetMonitor, _Scans, list[Config]]:
     scans = _Scans(monkeypatch, spend)
     monitor, current = _monitor(tmp_path, config or _config())
-    monitor.sync()
+    await monitor.sync(current[0])
     await _until(lambda: monitor.status().snapshot is not None)
     return monitor, scans, current
 
@@ -252,7 +252,7 @@ async def test_previous_month_snapshot_counts_as_zero_after_rollover(
     clock = _Clock()
     scans = _Scans(monkeypatch, {ALICE: 12.0})
     monitor, _current = _monitor(tmp_path, _config(), clock)
-    monitor.sync()
+    await monitor.sync(_config())
     await _until(lambda: monitor.status().snapshot is not None)
     scans.release.clear()
 
@@ -269,7 +269,7 @@ async def test_refreshes_are_debounced_with_one_trailing_scan(tmp_path: Path, mo
     scans = _Scans(monkeypatch, {})
     scans.release.clear()
     monitor, _current = _monitor(tmp_path, _config())
-    monitor.sync()
+    await monitor.sync(_config())
     await _until(lambda: scans.calls == 1)
 
     for _ in range(5):
@@ -300,7 +300,7 @@ async def test_disabled_budgets_never_scan_or_swap(tmp_path: Path, monkeypatch: 
     monitor, scans, current = await _started(tmp_path, monkeypatch, {ALICE: 12.0})
     current[0] = current[0].model_copy(update={"budgets": None})
 
-    monitor.sync()
+    await monitor.sync(current[0])
     await _quiet()
 
     assert scans.calls == 1
@@ -412,7 +412,7 @@ async def test_rescans_wait_for_the_minimum_interval(tmp_path: Path, monkeypatch
         clock=_Clock(),
         min_scan_interval_seconds=0.3,
     )
-    monitor.sync()
+    await monitor.sync(_config())
     await _until(lambda: scans.calls == 1)
     monitor.response_finished()
     await _until(lambda: scans.calls == 2)
@@ -442,7 +442,7 @@ async def test_slow_scans_are_spaced_by_their_duration(tmp_path: Path, monkeypat
         min_scan_interval_seconds=0,
         scan_spacing_factor=5,
     )
-    monitor.sync()
+    await monitor.sync(_config())
     await _until(lambda: scans.calls == 1)
     monitor.response_finished()
     await _until(lambda: scans.calls == 2)
@@ -464,7 +464,7 @@ async def test_idle_tick_rescans_usage_no_reply_reported(tmp_path: Path, monkeyp
         min_scan_interval_seconds=0,
         tick_seconds=0.05,
     )
-    monitor.sync()
+    await monitor.sync(_config())
     await _until(lambda: scans.calls >= 2)
 
     clock.now = datetime(2026, 11, 1, 0, 5, tzinfo=UTC)
@@ -528,7 +528,7 @@ async def test_an_incomplete_price_table_is_rebuilt_on_the_next_scan(
 
     monkeypatch.setattr(pricing_module, "_price_table", table)
     monitor, _current = _monitor(tmp_path, _config())
-    monitor.sync()
+    await monitor.sync(_config())
     await _until(lambda: scans.calls == 1)
     for expected_scans in (2, 3):
         monitor.response_finished()

@@ -22,6 +22,7 @@ from typing import TYPE_CHECKING
 
 import pytest
 
+from mindroom.event_journal.approval_signals import ApprovalSignals
 from mindroom.event_journal.sqlite_backend import SqliteBackend
 from mindroom.event_journal.write_queue import WriteOutcome, _deliver, _outcomes
 
@@ -90,7 +91,7 @@ def _stop_test_loops(
 @pytest.mark.asyncio
 async def test_a_write_from_a_second_event_loop_comes_back(tmp_path: Path) -> None:
     """A caller on another loop must resume once its write has committed."""
-    backend = SqliteBackend.open(tmp_path / "journal.db")
+    backend = SqliteBackend.open(tmp_path / "journal.db", publish=ApprovalSignals().publish)
     # The first write is what pins the writer task to this loop, which is the
     # arrangement the bridge then writes into from a loop of its own.
     await backend.write(lambda transaction: transaction.execute("CREATE TABLE claim (value INTEGER)"))
@@ -151,7 +152,7 @@ async def test_a_cross_loop_write_racing_close_is_refused_not_stranded(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A write admitted across loops must end, even if close() beats it to the queue."""
-    backend = SqliteBackend.open(tmp_path / "journal.db")
+    backend = SqliteBackend.open(tmp_path / "journal.db", publish=ApprovalSignals().publish)
     await backend.write(lambda transaction: transaction.execute("CREATE TABLE claim (value INTEGER)"))
 
     outcome: list[BaseException | None] = []
@@ -201,7 +202,7 @@ async def test_close_wakes_a_cross_loop_write_already_waiting_in_the_queue(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Closing must wake a foreign caller whose write was queued behind another write."""
-    backend = SqliteBackend.open(tmp_path / "journal.db")
+    backend = SqliteBackend.open(tmp_path / "journal.db", publish=ApprovalSignals().publish)
     await backend.write(lambda transaction: transaction.execute("CREATE TABLE claim (value INTEGER)"))
 
     blocking_write_started = threading.Event()
@@ -269,7 +270,7 @@ async def test_close_before_foreign_writer_task_lookup_does_not_recreate_the_wri
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A foreign write past its first check must not recreate the writer after close clears it."""
-    backend = SqliteBackend.open(tmp_path / "journal.db")
+    backend = SqliteBackend.open(tmp_path / "journal.db", publish=ApprovalSignals().publish)
     await backend.write(lambda transaction: transaction.execute("CREATE TABLE claim (value INTEGER)"))
     writer_loop = asyncio.get_running_loop()
     ensure_writer_task = backend._writes._ensure_writer_task
@@ -328,7 +329,7 @@ def test_close_wakes_a_handoff_scheduled_after_the_writer_loop_stops(  # noqa: P
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Shutdown must own a foreign handoff before its callback is scheduled."""
-    backend = SqliteBackend.open(tmp_path / "journal.db")
+    backend = SqliteBackend.open(tmp_path / "journal.db", publish=ApprovalSignals().publish)
     writer_loop = asyncio.new_event_loop()
     writer_ready = threading.Event()
     shutdown_finished = threading.Event()
@@ -394,7 +395,7 @@ def test_close_wakes_a_handoff_scheduled_after_the_writer_loop_stops(  # noqa: P
 @pytest.mark.asyncio
 async def test_a_closed_recorded_writer_loop_refuses_a_cross_loop_write(tmp_path: Path) -> None:
     """A stale closed writer loop must produce the store's closure error, not leak a loop error."""
-    backend = SqliteBackend.open(tmp_path / "journal.db")
+    backend = SqliteBackend.open(tmp_path / "journal.db", publish=ApprovalSignals().publish)
     await backend.write(lambda transaction: transaction.execute("CREATE TABLE claim (value INTEGER)"))
     writer_loop = backend._writes._writer_loop
     closed_loop = asyncio.new_event_loop()
@@ -419,7 +420,7 @@ async def test_a_closed_recorded_writer_loop_refuses_a_cross_loop_write(tmp_path
 @pytest.mark.asyncio
 async def test_cancelling_a_cross_loop_write_waits_for_its_statement_to_finish(tmp_path: Path) -> None:
     """Cancellation must wake only after the cross-loop statement releases the writer."""
-    backend = SqliteBackend.open(tmp_path / "journal.db")
+    backend = SqliteBackend.open(tmp_path / "journal.db", publish=ApprovalSignals().publish)
     await backend.write(lambda transaction: transaction.execute("CREATE TABLE claim (value INTEGER)"))
     statement_started = threading.Event()
     release_statement = threading.Event()

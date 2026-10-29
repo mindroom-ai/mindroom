@@ -18,6 +18,8 @@ import httpx
 from mindroom.failure_text import failure_text
 from mindroom.llm.errors import (
     MISSING_API_KEY,
+    QUOTA_EXHAUSTED,
+    TOKENS_PER_MINUTE,
     TRANSPORT_TIMEOUT,
     AuthenticationFailed,
     ContextWindowExceeded,
@@ -33,7 +35,6 @@ if TYPE_CHECKING:
 __all__ = [
     "CliLoginError",
     "classify_provider_error",
-    "is_context_window_error",
     "missing_api_key_error",
     "provider_failure",
     "retry_after_seconds",
@@ -51,6 +52,18 @@ _INVALID_REQUEST_STATUSES = frozenset({400, 404, 413, 422})
 _HTTP_CLIENT_ERROR_RANGE = range(400, 500)
 # The names providers give a throttled request: Anthropic's error type and the Responses code.
 _RATE_LIMIT_NAMES = frozenset({"rate_limit_error", "rate_limit_exceeded"})
+# The codes OpenAI sends with the 429 of an account that only a change to its billing or limits lets through: prepaid
+# credit used up, a reached organization or project spend limit, and a reached OpenAI-assigned usage limit, besides
+# ``insufficient_quota``, the older code of an account without credit and still the error type of the others.
+_QUOTA_EXHAUSTED_NAMES = frozenset(
+    {
+        "insufficient_quota",
+        "credit_balance_exhausted",
+        "organization_spend_limit_exceeded",
+        "project_spend_limit_exceeded",
+        "organization_usage_limit_exceeded",
+    },
+)
 # The name Anthropic gives rejected credentials, with or without its 401 status.
 _AUTHENTICATION_ERROR_TYPE = "authentication_error"
 # Anthropic reports an overloaded model with this error type, with or without a 529 status.
@@ -78,6 +91,11 @@ _CREDENTIAL_WORDING = re.compile(
     r"(?<![a-z0-9])(?:(?:un)?auth(?:enticat[a-z]*|ori[sz][a-z]*)?|api[ _]?keys?)(?![a-z0-9])",
 )
 
+# How OpenAI words the 429 of a request larger than the account's tokens-per-minute limit, which it sends with the
+# ``rate_limit_exceeded`` code: "Request too large for gpt-4o in organization org-... on tokens per min (TPM): Limit
+# 30000, Requested 50000." Waiting never lets such a request through; only a smaller one passes.
+_REQUEST_TOO_LARGE = "request too large"
+
 # Wording providers use when a request does not fit the model's context window, such as the payload-size wording of
 # OpenAI-compatible servers and Anthropic, older Claude models' "input length and `max_tokens` exceed context limit",
 # and llama.cpp's "the request exceeds the available context size". A bare ``max_tokens`` is too broad to count.
@@ -92,7 +110,7 @@ _CONTEXT_WINDOW_MARKERS = (
     "too many tokens",
     "payload too large",
     "content_too_large",
-    "request too large",
+    _REQUEST_TOO_LARGE,
     "input too long",
     "prompt is too long",
     "prompt too long",
@@ -112,12 +130,9 @@ class CliLoginError(ValueError):
         self.status_code = status_code
 
 
-def is_context_window_error(message: str, *, code: str | None = None) -> bool:
-    """Return whether an error's code or wording says the request does not fit the context window."""
-    if code == "context_length_exceeded":
-        return True
-    lowered = message.casefold()
-    return any(marker in lowered for marker in _CONTEXT_WINDOW_MARKERS)
+def _is_context_window_error(lowered: str, *, code: str | None) -> bool:
+    """Return whether an error's code or lowercased wording says the request does not fit the context window."""
+    return code == "context_length_exceeded" or any(marker in lowered for marker in _CONTEXT_WINDOW_MARKERS)
 
 
 def classify_provider_error(  # noqa: PLR0911 - one return per rule
@@ -136,7 +151,9 @@ def classify_provider_error(  # noqa: PLR0911 - one return per rule
     name the failure as the provider does, such as ``rate_limit_error`` or ``server_error``; the error keeps ``code``
     as its ``provider_code``. ``retry_after_seconds`` is the response's ``Retry-After`` hint.
 
-    1. A 429 status or a rate-limit name is ``RateLimited``.
+    1. A 429 status or a rate-limit name is ``RateLimited``, unless its wording says the request alone is larger than
+       the account's tokens-per-minute limit, which makes it ``ContextWindowExceeded`` marked ``TOKENS_PER_MINUTE``:
+       only a smaller request passes.
     2. A transient status, 408, 409, or any 5xx, is ``ProviderUnavailable``.
     3. A 401 status or Anthropic's ``authentication_error`` is ``AuthenticationFailed``.
     4. Wording or a code that names the context window, on a client error or an event without a status, is
@@ -146,28 +163,35 @@ def classify_provider_error(  # noqa: PLR0911 - one return per rule
        ``AuthenticationFailed``.
     7. An invalid-request status is ``InvalidRequest``.
     8. Anything else, such as a 403 or an unknown status, is a final ``ProviderError``.
+
+    A name that says the account has no credit left or reached its monthly spend or usage limit outranks every rule:
+    whatever its status, it is a final ``ProviderError`` marked ``QUOTA_EXHAUSTED``, since no wait lets it through.
     """
     status = status_code if status_code is not None else (int(code) if code is not None and code.isdecimal() else None)
     names = {code, error_type}
     lowered = message.casefold()
     client_side = status is None or status in _HTTP_CLIENT_ERROR_RANGE
 
-    def typed(kind: type[ProviderError]) -> ProviderError:
+    def typed(kind: type[ProviderError], *, marker: str | None = None) -> ProviderError:
         return kind(
             message,
             provider=provider,
             status_code=status_code,
+            code=marker,
             provider_code=code,
             retry_after_seconds=retry_after_seconds,
         )
 
+    if names & _QUOTA_EXHAUSTED_NAMES:
+        return typed(ProviderError, marker=QUOTA_EXHAUSTED)
     if status == _RATE_LIMIT_STATUS or names & _RATE_LIMIT_NAMES:
-        return typed(RateLimited)
+        too_large = _REQUEST_TOO_LARGE in lowered
+        return typed(ContextWindowExceeded, marker=TOKENS_PER_MINUTE) if too_large else typed(RateLimited)
     if status in _TRANSIENT_CLIENT_STATUSES or status in _SERVER_ERROR_RANGE:
         return typed(ProviderUnavailable)
     if status == _UNAUTHORIZED_STATUS or _AUTHENTICATION_ERROR_TYPE in names:
         return typed(AuthenticationFailed)
-    if client_side and is_context_window_error(message, code=code):
+    if client_side and _is_context_window_error(lowered, code=code):
         return typed(ContextWindowExceeded)
     if names & _TRANSIENT_NAMES or _OVERLOADED_ERROR_TYPE in lowered:
         return typed(ProviderUnavailable)

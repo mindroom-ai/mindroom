@@ -1,9 +1,9 @@
 """Backend-neutral worker lifecycle state transitions.
 
-The dedicated (docker, local) and shared (static) worker backends persist the
-same lifecycle fields and apply the same status-transition rules. This module is
-the single source of truth for those rules; each backend converts its own
-metadata to and from :class:`WorkerLifecycleState` at the edge.
+The dedicated (docker, kubernetes, local) and shared (static) worker backends persist
+the same lifecycle fields and apply the same status-transition rules. This module is
+the single source of truth for those rules; each backend converts its own metadata
+(Kubernetes: Deployment annotations) to and from :class:`WorkerLifecycleState` at the edge.
 """
 
 from __future__ import annotations
@@ -78,12 +78,17 @@ def prepare_worker_ensure_lifecycle(
     *,
     now: float,
     should_restart: bool,
+    reapplying: bool = False,
 ) -> WorkerLifecycleState:
-    """Return lifecycle fields for one ensure attempt before backend-specific startup IO."""
+    """Return lifecycle fields for one ensure attempt before backend-specific startup IO.
+
+    A worker reads as starting while it restarts, and while ``reapplying`` its definition without a restart, as
+    Kubernetes does for every ensure that misses its ready cache before it waits for the Deployment's rollout.
+    """
     return replace(
         state,
         last_used_at=now,
-        status="starting" if should_restart else state.status,
+        status="starting" if should_restart or reapplying else state.status,
         last_started_at=now if should_restart else state.last_started_at,
         startup_count=state.startup_count + int(should_restart),
         failure_reason=None,

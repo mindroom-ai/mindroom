@@ -28,9 +28,9 @@ from mindroom.llm.errors import ModelSafeguardRefusal
 from mindroom.llm.messages import Message
 from mindroom.llm.usage import MessageMetrics
 from mindroom.providers.openai.responses import ResponsesAdapter
-from mindroom.session_storage.agent_storage import create_state_storage
+from mindroom.session_storage.agent_storage import create_agent_state_storage
 from mindroom.token_budget import estimate_compaction_input_tokens
-from tests.conftest import install_model_providers, seed_session
+from tests.conftest import install_model_providers, runtime_paths_for, seed_session
 from tests.fakes.summary_model import summary_model
 from tests.history_helpers import (
     RecordingCompactionLifecycle,
@@ -54,8 +54,9 @@ def _agent_inputs(config: Config) -> HistoryPreparationInputs:
     """Resolve the configured test agent's history inputs for a 100-token static prompt."""
     return resolve_entity_preparation_inputs(
         entity_name="test_agent",
-        history_settings=config.resolve_entity("test_agent").history_settings,
+        history_settings=config.resolve_scope("test_agent").history_settings,
         config=config,
+        runtime_paths=runtime_paths_for(config),
         static_prompt_tokens=100,
         active_model_name=None,
         active_context_window=None,
@@ -73,7 +74,7 @@ async def test_history_sizing_allows_loop_progress(
     config, paths = _make_config(tmp_path)
     model = responses_adapter(tmp_path, store=True)
     session = _session("session", runs=[_completed_run("run", messages=[Message(role="user", content="Hello")])])
-    storage = create_state_storage("test_agent", tmp_path)
+    storage = create_agent_state_storage("test_agent", tmp_path)
     # The session then holds its runs as the store does.
     seed_session(storage, session)
     original = deepcopy(session)
@@ -177,7 +178,7 @@ async def test_history_storage_work_allows_loop_progress(
     """A pending loop callback can run while compaction reads its basis or appends its summary row."""
     model = responses_adapter(tmp_path, store=True)
     session = _session("session", runs=[_completed_run("run", messages=[Message(role="user", content="Hello")])])
-    storage = create_state_storage("test_agent", tmp_path)
+    storage = create_agent_state_storage("test_agent", tmp_path)
     seed_session(storage, session)
     scope = HistoryScope(kind="agent", scope_id="test_agent")
     loop = asyncio.get_running_loop()
@@ -239,7 +240,7 @@ async def test_forced_compaction_reuses_canonical_history_count(
     session = _session("session", runs=[_completed_run("run", messages=[Message(role="user", content="Hello")])])
     scope = HistoryScope(kind="agent", scope_id="test_agent")
     session.metadata = _with_scope_state(session.metadata, scope, HistoryScopeState(force_compact_before_next_run=True))
-    storage = create_state_storage("test_agent", tmp_path)
+    storage = create_agent_state_storage("test_agent", tmp_path)
     seed_session(storage, session)
     resolved = _agent_inputs(config)
     counted_history: list[list[str]] = []
@@ -287,13 +288,14 @@ async def test_cancelling_history_sizing_preserves_durable_state(  # noqa: PLR09
     config, paths = _make_config(tmp_path)
     model = responses_adapter(tmp_path, store=True)
     session = _session("session", runs=[_completed_run("run", messages=[Message(role="user", content="Hello")])])
-    storage = create_state_storage("test_agent", tmp_path)
+    storage = create_agent_state_storage("test_agent", tmp_path)
     seed_session(storage, session)
     original = deepcopy(session)
     resolved = resolve_entity_preparation_inputs(
         config=config,
+        runtime_paths=paths,
         entity_name="test_agent",
-        history_settings=config.resolve_entity("test_agent").history_settings,
+        history_settings=config.resolve_scope("test_agent").history_settings,
         static_prompt_tokens=100,
         active_model_name=None,
         active_context_window=None,
@@ -358,7 +360,7 @@ async def test_cancelling_history_sizing_preserves_durable_state(  # noqa: PLR09
         with pytest.raises(asyncio.CancelledError, match="original cancellation"):
             await task
         if after_persist:
-            persisted = storage.load_session("session", "agent")
+            persisted = storage.load_session("session")
             assert persisted is not None
             assert persisted.summary is not None
             assert persisted.summary.text == "Greeting received."
@@ -386,7 +388,7 @@ async def test_cancelled_finalization_finishes_before_the_session_is_reused(
     config, paths = _make_config(tmp_path)
     model = responses_adapter(tmp_path, store=False)
     session = _session("session", runs=[_completed_run("run", messages=[Message(role="user", content="Hello")])])
-    storage = create_state_storage("test_agent", tmp_path)
+    storage = create_agent_state_storage("test_agent", tmp_path)
     seed_session(storage, session)
     scope = HistoryScope(kind="agent", scope_id="test_agent")
     prepared = await prepare_scope_history(
@@ -510,7 +512,7 @@ async def test_cancelling_preparation_sizing_preserves_input(
     config, paths = _make_config(tmp_path)
     model = responses_adapter(tmp_path, store=True)
     session = _session("session", runs=[_completed_run("run", messages=[Message(role="user", content="Hello")])])
-    storage = create_state_storage("test_agent", tmp_path)
+    storage = create_agent_state_storage("test_agent", tmp_path)
     seed_session(storage, session)
     original = deepcopy(session)
     scope = HistoryScope(kind="agent", scope_id="test_agent")

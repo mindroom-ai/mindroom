@@ -1570,6 +1570,7 @@ space_room_id: null
         mindroom_username = agent_username_localpart(colliding_entity_name, runtime_paths=runtime_paths)
         config = Config.validate_with_runtime(
             {
+                "models": {"default": {"provider": "openai", "id": "test-model"}},
                 "agents": agents,
                 "teams": teams,
                 "mindroom_user": {
@@ -1612,11 +1613,10 @@ space_room_id: null
         orchestrator = _MultiAgentOrchestrator(runtime_paths)
 
         with (
-            patch("mindroom.orchestrator.load_config", return_value=config),
             patch("mindroom.orchestrator.create_agent_user", new=recording_create_agent_user),
             pytest.raises(PermanentMatrixStartupError, match="localpart collision"),
         ):
-            await orchestrator.initialize()
+            await orchestrator.initialize(config)
 
         assert created_accounts == []
         assert MatrixState.load(runtime_paths=runtime_paths).accounts == {}
@@ -1890,6 +1890,8 @@ class TestAgentLogin:
             user_id=credentials.user_id,
             device_id=credentials.device_id,
             access_token=credentials.access_token,
+            get_displayname=AsyncMock(return_value=nio.ProfileGetDisplayNameResponse("CalculatorAgent")),
+            set_displayname=AsyncMock(),
         )
         opened = MagicMock(client=owned_client, session=AsyncMock())
         consumer_store = object()
@@ -1953,3 +1955,48 @@ class TestAgentLogin:
         )
         persist.assert_called_once()
         cross_signing.assert_awaited_once_with(owned_client, agent_user)
+        owned_client.set_displayname.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_restored_owned_session_updates_a_changed_display_name(self, tmp_path: Path) -> None:
+        """A display name changed in the config reaches the Matrix profile, though the session is restored."""
+        agent_user = AgentMatrixUser(
+            agent_name="calculator",
+            user_id="@mindroom_calculator:localhost",
+            display_name="Calculator Two",
+            password=TEST_PASSWORD,
+            device_id="AGENTDEVICE",
+            access_token="access-token",  # noqa: S106
+        )
+        credentials = _owned_session.MatrixCredentials(agent_user.user_id, "AGENTDEVICE", "access-token")
+        owned_client = MagicMock(
+            user_id=credentials.user_id,
+            device_id=credentials.device_id,
+            get_displayname=AsyncMock(return_value=nio.ProfileGetDisplayNameResponse("Calculator One")),
+            set_displayname=AsyncMock(),
+        )
+        opened = MagicMock(client=owned_client, session=AsyncMock())
+
+        with (
+            patch(
+                "mindroom.matrix.users.appservice.resolve_managed_account_auth",
+                return_value=ManagedAccountAuth(mode="password"),
+            ),
+            patch("mindroom.matrix.users.olm_store_exists", return_value=True),
+            patch("mindroom.matrix.users.restore_credentials", new=AsyncMock(return_value=credentials)),
+            patch("mindroom.matrix.users.login_password_credentials", new=AsyncMock()) as password_login,
+            patch("mindroom.matrix.users.open_owned_matrix_session", new=AsyncMock(return_value=opened)),
+            patch("mindroom.matrix.users.ensure_agent_cross_signing", new=AsyncMock()),
+        ):
+            result = await matrix_users.login_agent_owned_session(
+                "http://localhost:8008",
+                agent_user,
+                _runtime_paths(tmp_path),
+                consumer_store=object(),
+                new_consumer_generation=UUID("33333333-3333-4333-8333-333333333333"),
+                config=DurableSyncConfig(sync_timeout_ms=30_000),
+            )
+
+        assert result is opened
+        password_login.assert_not_awaited()
+        owned_client.set_displayname.assert_awaited_once_with("Calculator Two")

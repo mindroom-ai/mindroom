@@ -27,6 +27,7 @@ from mindroom.tool_system.worker_routing import (
     worker_dir_name,
 )
 from mindroom.workers.models import WorkerHandle
+from mindroom.workers.protocol import WORKER_PROTOCOL_VERSION
 from tests.access_schema_support import with_current_room_member_access
 from tests.api.test_view_file import HEADERS, TOKEN, _png_bytes
 from tests.conftest import bind_runtime_paths
@@ -96,11 +97,12 @@ def test_view_file_uses_validated_agent_workspace(
         "/api/sandbox-runner/view-file",
         headers=HEADERS,
         json={
+            "protocol": WORKER_PROTOCOL_VERSION,
             "worker_key": target.worker_key,
             "routing_agent_name": "writer",
             "private_agent_names": ["writer"],
             "execution_identity": asdict(target.execution_identity),
-            "tool_init_overrides": {"base_dir": workspace.relative_to(shared_root).as_posix()},
+            "base_dir": workspace.relative_to(shared_root).as_posix(),
             "path": path,
         },
     )
@@ -140,15 +142,17 @@ def test_view_file_rejects_unauthorized_workspace_override(
         "/api/sandbox-runner/view-file",
         headers=HEADERS,
         json={
+            "protocol": WORKER_PROTOCOL_VERSION,
             "worker_key": target.worker_key,
             "private_agent_names": ["writer"],
-            "tool_init_overrides": {"base_dir": str(forbidden)},
+            "base_dir": str(forbidden),
             "path": "sample.png",
         },
     )
 
-    assert response.status_code == 400
-    assert "visible workspace" in response.json()["detail"]
+    assert response.status_code == 200
+    assert response.json()["failure_kind"] == "tool"
+    assert "visible workspace" in response.json()["error"]
 
 
 def test_view_file_without_override_keeps_worker_default(
@@ -164,7 +168,7 @@ def test_view_file_without_override_keeps_worker_default(
     response = client.post(
         "/api/sandbox-runner/view-file",
         headers=HEADERS,
-        json={"private_agent_names": ["writer"], "path": "default.png"},
+        json={"protocol": WORKER_PROTOCOL_VERSION, "private_agent_names": ["writer"], "path": "default.png"},
     )
 
     assert response.status_code == 200
@@ -225,6 +229,7 @@ async def test_view_file_transports_workspace_between_storage_mounts(
     tools = AttachmentTools(
         runtime_paths=context.runtime_paths,
         worker_target=target,
+        workspace_in_worker=True,
         tool_output_workspace_root=primary_workspace,
     )
     (workspace / "linked.png").symlink_to("sample.png")
@@ -260,19 +265,19 @@ async def test_view_file_transports_workspace_between_storage_mounts(
 
 
 @pytest.mark.parametrize(
-    ("snapshot_root", "base_dir_root", "status_code"),
+    ("snapshot_root", "base_dir_root", "authorized"),
     [
-        ("notes", "notes", 200),
-        ("notes", "workspace", 400),
-        (None, "notes", 400),
-        (None, "workspace", 200),
+        ("notes", "notes", True),
+        ("notes", "workspace", False),
+        (None, "notes", False),
+        (None, "workspace", True),
     ],
 )
 def test_view_file_authorizes_workspaces_from_the_primary_config_snapshot(
     routed_workspace: tuple[TestClient, ResolvedWorkerTarget, Path, Path],
     snapshot_root: str | None,
     base_dir_root: str,
-    status_code: int,
+    authorized: bool,
 ) -> None:
     """The runner derives visible workspaces from the live config the primary sends, else its seed config."""
     client, target, shared_root, workspace = routed_workspace
@@ -289,14 +294,16 @@ def test_view_file_authorizes_workspaces_from_the_primary_config_snapshot(
         "/api/sandbox-runner/view-file",
         headers=HEADERS,
         json={
+            "protocol": WORKER_PROTOCOL_VERSION,
             "worker_key": target.worker_key,
             "routing_agent_name": "writer",
             "private_agent_names": ["writer"],
             "execution_identity": asdict(target.execution_identity),
-            "tool_init_overrides": {"base_dir": (workspace.parent / base_dir_root).relative_to(shared_root).as_posix()},
+            "base_dir": (workspace.parent / base_dir_root).relative_to(shared_root).as_posix(),
             "path": "sample.png",
             **snapshot,
         },
     )
 
-    assert response.status_code == status_code, response.text
+    assert response.status_code == 200, response.text
+    assert response.json()["ok"] is authorized, response.text

@@ -1,9 +1,9 @@
 """Dict codecs of ``mindroom.llm`` read the dicts Agno 3.0.9 wrote, keeping every value the owned records model.
 
-These are legacy inputs and never change: ``tests/fixtures/agno_parity/codecs.json`` holds what real Agno objects
-produced, and the stored-run fixtures under ``tests/fixtures/agno_parity/runs`` hold what MindRoom stored through Agno.
-Each one read and written back is the dict it was, minus the keys the owned records deliberately drop, which
-``tests.llm.agno_dict_helpers`` lists once per type. The schema MindRoom itself writes is
+These are legacy inputs and never change: ``tests/fixtures/legacy_agno3/codecs.json`` holds what real Agno objects
+produced, and the stored-run fixtures under ``tests/fixtures/legacy_agno3/runs`` hold what MindRoom stored through Agno.
+Each one read and written back is the dict it was, minus the keys the owned records deliberately drop and those held
+at their defaults, which ``tests.llm.agno_dict_helpers`` lists once per type. The schema MindRoom itself writes is
 ``tests/llm/test_stored_dicts.py``'s.
 """
 # ruff: noqa: D103
@@ -12,10 +12,10 @@ from __future__ import annotations
 
 import copy
 import json
-from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 import pytest
+from structlog.testing import capture_logs
 
 from mindroom.history.message_content import render_message_content
 from mindroom.llm import usage as llm_usage
@@ -27,18 +27,21 @@ from tests.llm.agno_dict_helpers import (
     DROPPED_METRICS_KEYS,
     DROPPED_RUN_KEYS,
     DROPPED_TOOL_EXECUTION_KEYS,
+    expected_message_dict,
     expected_requirement_dict,
     expected_run_dict,
+    expected_tool_dict,
     stored_run_record,
     without,
 )
+from tests.session_storage.goldens import LEGACY_AGNO3
 
 if TYPE_CHECKING:
     from collections.abc import Callable
 
-FIXTURES = Path(__file__).resolve().parents[1] / "fixtures" / "agno_parity"
-# What Agno 3.0.9 objects wrote, keyed by the case that built them; see the fixtures README.
-AGNO: dict[str, Any] = json.loads((FIXTURES / "codecs.json").read_text(encoding="utf-8"))
+# What Agno 3.0.9 objects wrote, keyed by the case that built them; see "Codec goldens" in
+# ``tests/fixtures/agno_parity/README.md``.
+AGNO: dict[str, Any] = json.loads((LEGACY_AGNO3 / "codecs.json").read_text(encoding="utf-8"))
 
 PNG_BYTES = b"\x89PNG\r\n\x1a\n" + bytes(range(32))
 PDF_BYTES = b"%PDF-1.7\n%\xe2\xe3\xcf\xd3\n"
@@ -137,9 +140,9 @@ def test_model_metrics_round_trip_agno_dict() -> None:
 
 @pytest.mark.parametrize("message_id", list(AGNO["messages"]))
 def test_message_round_trips_agno_dict(message_id: str) -> None:
-    expected = agno("messages")[message_id]
+    stored = agno("messages")[message_id]
 
-    assert Message.from_dict(expected).to_dict() == expected
+    assert Message.from_dict(stored).to_dict() == expected_message_dict(stored)
 
 
 def test_a_message_agno_stored_with_a_compressed_copy_keeps_it() -> None:
@@ -176,6 +179,52 @@ def test_message_from_dict_reads_non_persisted_flags_from_model_dump_payloads() 
     message = Message.from_dict(agno("message_model_dump_with_non_persisted_flags"))
 
     assert message.add_to_agent_memory is False
+
+
+@pytest.mark.parametrize("malformed", [7, "", ["call-1"]], ids=["number", "empty", "list"])
+def test_a_message_stored_with_a_malformed_call_id_loads_without_it(malformed: object) -> None:
+    """A call id that is not non-empty text is dropped once, when the row decodes, with a log line; the load goes on.
+
+    Every wire then reads a call id as text or None, and well-formed ids and calls stay as stored.
+    """
+    calls = [
+        {"id": malformed, "type": "function", "function": {"name": "invalid", "arguments": "{}"}},
+        {"id": "call-2", "type": "function", "function": {"name": "valid", "arguments": "{}"}},
+        {"type": "function", "function": {"name": "unnamed", "arguments": "{}"}},
+    ]
+    stored = [
+        {"id": "m.call", "role": "assistant", "tool_calls": calls, "created_at": 1},
+        {"id": "m.bad", "role": "tool", "tool_call_id": malformed, "tool_name": "invalid", "created_at": 1},
+        {"id": "m.good", "role": "tool", "tool_call_id": "call-2", "tool_name": "valid", "created_at": 1},
+    ]
+
+    with capture_logs() as logs:
+        assistant, bad, good = (Message.from_dict(data) for data in stored)
+
+    assert assistant.tool_calls == [{**calls[0], "id": None}, calls[1], calls[2]]
+    assert (bad.tool_call_id, good.tool_call_id) == (None, "call-2")
+    assert [(log["event"], log["log_level"], log["message_id"]) for log in logs] == [
+        ("stored_tool_call_id_dropped", "debug", "m.call"),
+        ("stored_tool_call_id_dropped", "debug", "m.bad"),
+    ]
+
+
+def test_a_message_whose_result_and_call_ids_are_both_malformed_logs_one_line() -> None:
+    """Each decode of a row logs its dropped ids once, at debug level, since the row is read again on every load."""
+    stored = {
+        "id": "m.odd",
+        "role": "assistant",
+        "tool_call_id": "",
+        "tool_calls": [{"id": 7, "type": "function", "function": {"name": "f", "arguments": "{}"}}],
+        "created_at": 1,
+    }
+
+    with capture_logs() as logs:
+        Message.from_dict(stored)
+
+    assert [(log["event"], log["log_level"], log["message_id"]) for log in logs] == [
+        ("stored_tool_call_id_dropped", "debug", "m.odd"),
+    ]
 
 
 # --- tool executions and requirements --------------------------------------------------------------------------
@@ -371,18 +420,18 @@ def test_message_reads_files_agno_accepted_without_a_source(stored: dict[str, An
 
 # --- stored fixtures -------------------------------------------------------------------------------------------
 
-FIXTURE_RUNS = FIXTURES / "runs"
+FIXTURE_RUNS = LEGACY_AGNO3 / "runs"
 
 # Fixture file -> (reader, expected dict for one stored case); every file under ``runs/`` has an entry.
 FIXTURE_CODECS: dict[str, tuple[Callable[[dict[str, Any]], Any], Callable[[dict[str, Any]], dict[str, Any]]]] = {
     "run_output": (stored_run_record, expected_run_dict),
     "team_run_output": (stored_run_record, expected_run_dict),
-    "message": (Message.from_dict, dict),
+    "message": (Message.from_dict, expected_message_dict),
     "image": (Image.from_dict, dict),
     "audio": (Audio.from_dict, dict),
     "video": (Video.from_dict, dict),
     "file": (File.from_dict, dict),
-    "tool_execution": (ToolExecution.from_dict, lambda stored: without(stored, DROPPED_TOOL_EXECUTION_KEYS)),
+    "tool_execution": (ToolExecution.from_dict, expected_tool_dict),
     "run_requirement": (RunRequirement.from_dict, expected_requirement_dict),
     "message_metrics": (MessageMetrics.from_dict, dict),
     "run_metrics": (RunMetrics.from_dict, dict),

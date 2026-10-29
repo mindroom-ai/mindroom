@@ -22,7 +22,9 @@ from mindroom.constants import (
     resolve_runtime_paths,
 )
 from mindroom.delivery_gateway import DeliveryGateway, DeliveryGatewayDeps, ResponseHookService
-from mindroom.event_journal import EventJournalStore, PrincipalStore
+from mindroom.event_journal import EventJournalStore
+from mindroom.event_journal.approval_store import ApprovalStore
+from mindroom.event_journal.identity import journal_principal_id
 from mindroom.final_delivery import StreamTransportOutcome
 from mindroom.history.session_context import resolve_bound_team_scope
 from mindroom.history.types import HistoryScope
@@ -263,7 +265,6 @@ def _build_response_runner(
     message_target: MessageTarget | None = None,
     orchestrator: object | None = None,
     knowledge_access_support: SimpleNamespace | None = None,
-    enable_streaming: bool = True,
 ) -> ResponseRunner:
     """Build a real response runner for one bot-shaped test double."""
 
@@ -271,7 +272,6 @@ def _build_response_runner(
         return storage if storage is not None else MagicMock()
 
     bot.matrix_id = MagicMock(full_id="@mindroom_general:localhost", domain="localhost")
-    bot.enable_streaming = enable_streaming
     bot.orchestrator = orchestrator
     bot._conversation_resolver = MagicMock()
     bot._conversation_resolver.build_message_target = MagicMock(
@@ -320,7 +320,6 @@ def _build_response_runner(
         client=bot.client,
         config=config,
         agent_reply_memberships=agent_reply_memberships,
-        enable_streaming=bot.enable_streaming,
         orchestrator=bot.orchestrator,
         response_admission_gate=bot.admission_gate,
         runtime_started_at=0.0,
@@ -337,7 +336,7 @@ def _build_response_runner(
     response_hook_service.emit_after_response = AsyncMock(wraps=response_hook_service.emit_after_response)
     # One principal's records, as a bot's gateway and reply runtime share them.
     principal = EventJournalStore.open_sqlite(storage_path / "reply_records.db").principal(
-        f"{bot.agent_name}@{bot.matrix_id.full_id}",
+        journal_principal_id(bot.agent_name, bot.matrix_id.full_id),
     )
     delivery_gateway = DeliveryGateway(
         DeliveryGatewayDeps(
@@ -358,7 +357,6 @@ def _build_response_runner(
         AsyncMock(
             return_value=StreamTransportOutcome(
                 last_physical_stream_event_id="$msg_id",
-                terminal_status="completed",
                 rendered_body="Hello!",
                 visible_body_state="visible_body",
             ),
@@ -400,7 +398,7 @@ def _build_response_runner(
         agent_name=bot.agent_name,
     )
     bot._knowledge_access_support = knowledge_access_support or _knowledge_access_support()
-    approval_store = MagicMock(spec=PrincipalStore)
+    approval_store = MagicMock(spec=ApprovalStore)
     approval_store.approval_continuation_for_source = AsyncMock(return_value=None)
 
     return ResponseRunner(
@@ -432,8 +430,6 @@ def _build_response_runner(
                 entity_name=bot.agent_name,
                 generation="test-runtime",
                 retry_sources=lambda _room_id, _event_ids: None,
-                complete_turn=AsyncMock(),
-                hold_conversation=lambda _continuation: None,
                 approval_ended=lambda _ended: None,
             ),
         ),

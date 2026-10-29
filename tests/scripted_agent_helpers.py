@@ -37,13 +37,13 @@ def stored_runs(
 ) -> list[AnyRunRecord]:
     """Return the runs the agent's replies stored in the session, none when the session does not exist."""
     storage = create_session_storage(agent_name, config, runtime_paths, execution_identity=None)
-    session = storage.load_session(session_id, "agent")
+    session = storage.load_session(session_id)
     return [] if session is None else session.runs
 
 
 def streamed_text(chunks: Iterable[AIStreamChunk]) -> list[str]:
-    """Return the text deltas a reply streamed, in order."""
-    return [chunk.text for chunk in chunks if isinstance(chunk, TextDelta)]
+    """Return the text a reply streamed, in order: its deltas, and a failed run's reply, which is a bare string."""
+    return [chunk if isinstance(chunk, str) else chunk.text for chunk in chunks if isinstance(chunk, str | TextDelta)]
 
 
 @contextmanager

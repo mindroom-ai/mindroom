@@ -266,17 +266,11 @@ def test_a_message_stores_each_field_it_holds_under_its_key_and_reads_back_as_it
     assert Message.from_dict(stored) == owned
 
 
-def test_a_message_with_only_a_role_stores_its_id_flags_role_and_creation_time() -> None:
-    assert Message.from_dict({"role": "user"}).to_dict().keys() == {
-        "id",
-        "from_history",
-        "stop_after_tool_call",
-        "role",
-        "created_at",
-    }
+def test_a_message_with_only_a_role_stores_its_id_role_and_creation_time() -> None:
+    assert Message.from_dict({"role": "user"}).to_dict().keys() == {"id", "role", "created_at"}
 
 
-def test_message_to_dict_drops_empty_values_but_keeps_false_and_zero() -> None:
+def test_message_to_dict_drops_empty_values_and_default_flags_but_keeps_false_and_zero() -> None:
     message = Message(
         role="tool",
         content="",
@@ -291,12 +285,32 @@ def test_message_to_dict_drops_empty_values_but_keeps_false_and_zero() -> None:
     assert message.to_dict() == {
         "id": "m",
         "content": "",
-        "from_history": False,
-        "stop_after_tool_call": False,
         "role": "tool",
         "tool_call_error": False,
         "created_at": 0,
     }
+
+
+def test_a_message_stores_its_flags_only_when_they_differ_from_their_defaults() -> None:
+    """A stop-after-call result and a history copy store their flag as True; ``from_dict`` reads an absent one as False."""
+    stopped = Message(role="tool", content="done", stop_after_tool_call=True, id="t", created_at=1)
+    copy = Message(role="assistant", content="earlier", from_history=True, id="a", created_at=1)
+
+    assert stopped.to_dict() == {
+        "id": "t",
+        "content": "done",
+        "stop_after_tool_call": True,
+        "role": "tool",
+        "created_at": 1,
+    }
+    assert copy.to_dict() == {
+        "id": "a",
+        "content": "earlier",
+        "from_history": True,
+        "role": "assistant",
+        "created_at": 1,
+    }
+    assert [Message.from_dict(message.to_dict()) for message in (stopped, copy)] == [stopped, copy]
 
 
 def test_only_context_no_history_keeps_stores_its_flag_and_reads_back_as_it() -> None:
@@ -312,25 +326,157 @@ def test_only_context_no_history_keeps_stores_its_flag_and_reads_back_as_it() ->
 # --- tool executions and requirements --------------------------------------------------------------------------
 
 
-def test_a_tool_execution_stores_every_field_under_its_stored_key() -> None:
+def test_a_tool_execution_stores_its_id_name_and_the_fields_it_sets() -> None:
     owned = ToolExecution(tool_call_id="c", tool_name="t", tool_args={})
+
+    assert owned.to_dict() == {"tool_call_id": "c", "tool_name": "t", "tool_args": {}}
+    assert ToolExecution.from_dict(owned.to_dict()) == owned
+
+
+def test_a_tool_execution_stores_every_set_field_under_its_stored_key_false_included() -> None:
+    """A denied call keeps ``confirmed: false`` and a failed or answered one its ``tool_call_error``, unlike unset ones."""
+    owned = ToolExecution(
+        tool_call_id="c",
+        tool_name="t",
+        tool_args={"x": 1},
+        is_error=False,
+        result="",
+        child_run_id="child",
+        stop_after_call=True,
+        requires_confirmation=False,
+        confirmed=False,
+        confirmation_note="No.",
+        external_execution_required=False,
+        external_execution_silent=False,
+        approval_type="mindroom_policy",
+    )
 
     assert owned.to_dict() == {
         "tool_call_id": "c",
         "tool_name": "t",
-        "tool_args": {},
-        "tool_call_error": None,
-        "result": None,
-        "child_run_id": None,
-        "stop_after_tool_call": False,
-        "requires_confirmation": None,
-        "confirmed": None,
-        "confirmation_note": None,
-        "external_execution_required": None,
-        "external_execution_silent": None,
-        "approval_type": None,
+        "tool_args": {"x": 1},
+        "tool_call_error": False,
+        "result": "",
+        "child_run_id": "child",
+        "stop_after_tool_call": True,
+        "requires_confirmation": False,
+        "confirmed": False,
+        "confirmation_note": "No.",
+        "external_execution_required": False,
+        "external_execution_silent": False,
+        "approval_type": "mindroom_policy",
     }
     assert ToolExecution.from_dict(owned.to_dict()) == owned
+
+
+def test_a_run_v2026_10_664_stored_with_every_default_reads_as_the_run_stored_now() -> None:
+    """Rows that spell out the defaults, as v2026.10.664 and every earlier release wrote them, read unchanged.
+
+    The rows written now leave those keys out, and the same reader, which v2026.10.664 shipped, reads them as that run.
+    """
+    earlier = {
+        "run_id": "r",
+        "agent_id": "code",
+        "created_at": 1,
+        "status": "PAUSED",
+        "messages": [
+            {
+                "id": "u",
+                "content": "Hi",
+                "from_history": False,
+                "stop_after_tool_call": False,
+                "role": "user",
+                "created_at": 1,
+            },
+            {
+                "id": "t",
+                "content": "done",
+                "from_history": False,
+                "stop_after_tool_call": True,
+                "role": "tool",
+                "tool_call_id": "c1",
+                "tool_name": "stop",
+                "created_at": 1,
+            },
+        ],
+        "tools": [
+            {
+                "tool_call_id": "c1",
+                "tool_name": "stop",
+                "tool_args": {},
+                "tool_call_error": False,
+                "result": "done",
+                "child_run_id": None,
+                "stop_after_tool_call": True,
+                "requires_confirmation": None,
+                "confirmed": None,
+                "confirmation_note": None,
+                "external_execution_required": None,
+                "external_execution_silent": None,
+                "approval_type": None,
+            },
+        ],
+        "requirements": [
+            {
+                "id": "q",
+                "tool_execution": {
+                    "tool_call_id": "c2",
+                    "tool_name": "add",
+                    "tool_args": {"a": 1},
+                    "tool_call_error": None,
+                    "result": None,
+                    "child_run_id": None,
+                    "stop_after_tool_call": False,
+                    "requires_confirmation": True,
+                    "confirmed": None,
+                    "confirmation_note": None,
+                    "external_execution_required": None,
+                    "external_execution_silent": None,
+                    "approval_type": "mindroom_policy",
+                },
+            },
+        ],
+    }
+    now = {
+        **earlier,
+        "messages": [
+            {"id": "u", "content": "Hi", "role": "user", "created_at": 1},
+            {
+                "id": "t",
+                "content": "done",
+                "stop_after_tool_call": True,
+                "role": "tool",
+                "tool_call_id": "c1",
+                "tool_name": "stop",
+                "created_at": 1,
+            },
+        ],
+        "tools": [
+            {
+                "tool_call_id": "c1",
+                "tool_name": "stop",
+                "tool_args": {},
+                "tool_call_error": False,
+                "result": "done",
+                "stop_after_tool_call": True,
+            },
+        ],
+        "requirements": [
+            {
+                "id": "q",
+                "tool_execution": {
+                    "tool_call_id": "c2",
+                    "tool_name": "add",
+                    "tool_args": {"a": 1},
+                    "requires_confirmation": True,
+                    "approval_type": "mindroom_policy",
+                },
+            },
+        ],
+    }
+
+    assert RunRecord.from_dict(earlier).to_dict() == now
+    assert RunRecord.from_dict(now) == RunRecord.from_dict(earlier)
 
 
 def test_new_tool_executions_and_requirements_store_no_timing() -> None:

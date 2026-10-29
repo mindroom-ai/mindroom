@@ -475,23 +475,27 @@ class ResponseRecoveryState:
 
 
 @dataclass(frozen=True, slots=True)
+class FinalAnswerEnqueue:
+    """A recorded non-AI FINAL answer and the journal sources its enqueue handed to the outbox."""
+
+    transaction_id: str
+    settled_event_ids: tuple[str, ...]
+
+
+@dataclass(frozen=True, slots=True)
 class DeliveryAcknowledgement:
     """What one delivery's row names afterwards, and what binding it committed.
 
     Two processes can send the same frozen transaction ID from the same
     device; Matrix deduplicates and hands both callers the *same* event ID,
-    while only one conditional update binds the row. The settled event
-    therefore cannot tell a loser it lost: only the caller that bound the row
-    gets the terminal turn record its transaction committed, and so only it
-    publishes one.
+    while only one conditional update binds the row, and only that binding
+    completes the turn the delivery answers.
     """
 
     # The event the row names now: this call's if it bound the row, the
     # winner's if it did not, and ``None`` when there is no row left to name
     # one. Membership fences retain rows as retired identity tombstones.
     settled_event_id: str | None
-    # The terminal turn record this call's binding of a FINAL row committed.
-    terminal_turn: TerminalTurnWrite | None = None
     # Work a reply row's acknowledgement left for after the commit, such as
     # cancelling a span a Stop that waited for this event now reaches.
     reply_effects: tuple[PostCommitEffect, ...] = ()
@@ -505,26 +509,3 @@ class PermanentDeliveryFailure:
     acknowledged_event_id: str | None = None
     # Work refused reply rows left for after the commit.
     reply_effects: tuple[PostCommitEffect, ...] = ()
-
-
-@dataclass(frozen=True, slots=True)
-class TerminalTurnWrite:
-    """One agent's terminal turn record, committed with a delivery acknowledgement.
-
-    The acknowledgement is the proof that a visible answer exists and what its
-    event ID is, and that is exactly the fact the turn record needs. Keeping
-    them in separate commits leaves a window where a delivered answer has a
-    record that does not know its response event -- and an edit of that message
-    arriving afterwards is dropped, because there is nothing recorded to edit.
-    A startup pass used to rejoin the two; carrying the record into the
-    acknowledgement transaction removes the window instead of repairing it.
-
-    Agent-scoped while the acknowledgement is principal-scoped, which is fine
-    and is the reason these rows live in the journal's database at all: one
-    transaction needs one database, not one scope key.
-    """
-
-    agent_name: str
-    index_event_ids: tuple[str, ...]
-    anchor_event_id: str
-    record_json: str

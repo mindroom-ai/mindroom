@@ -13,10 +13,10 @@ import pytest
 from mindroom.config.main import Config
 from mindroom.constants import ORIGINAL_SENDER_KEY, SOURCE_KIND_KEY
 from mindroom.dispatch_source import TRUSTED_INTERNAL_RELAY_SOURCE_KIND
-from mindroom.handled_turns import TurnRecord
 from mindroom.matrix.message_builder import build_reaction_content
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.message_target import MessageTarget
+from mindroom.turn_record import TurnRecord
 from tests.access_schema_support import with_current_room_member_access
 from tests.bot_helpers import dispatch_reaction_durably, make_test_agent_bot
 from tests.conftest import (
@@ -93,7 +93,7 @@ async def _generating(bot: AgentBot, message_id: str, target: MessageTarget) -> 
 
 async def _assert_not_stopped(bot: AgentBot, message_id: str) -> None:
     """Neither the turn nor the reply showing ``message_id`` recorded a Stop."""
-    pending = bot._turn_store.get_turn_record(f"{message_id}-source")
+    pending = await bot._turn_store.get_turn_record(f"{message_id}-source")
     assert pending is not None
     assert not pending.completed
     reply = await bot.journal_principal().replies.for_event(message_id)

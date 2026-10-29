@@ -23,7 +23,6 @@ from mindroom.approval.tool_approval import (
     shutdown_approval_runtime,
 )
 from mindroom.coalescing.batch import PendingEvent, PreparedTurn, requester_coalescing_key
-from mindroom.coalescing.gate import ReadyPendingEvent
 from mindroom.config.access import ResponderAccessConfig
 from mindroom.config.approval import ApprovalRuleConfig, ToolApprovalConfig
 from mindroom.config.main import Config
@@ -31,7 +30,7 @@ from mindroom.config.models import ToolConfigEntry
 from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.dispatch_callback_outcome import TurnDispatchOutcome
 from mindroom.dispatch_handoff import PreparedIngress
-from mindroom.dispatch_source import MESSAGE_SOURCE_KIND
+from mindroom.dispatch_source import INTERACTIVE_SELECTION_SOURCE_KIND
 from mindroom.event_journal import (
     AdmissionResult,
     DeliveryStage,
@@ -43,13 +42,13 @@ from mindroom.event_journal import (
     ProjectedEvent,
     SemanticConsumer,
 )
-from mindroom.handled_turns import TurnRecord
 from mindroom.hooks import (
     EVENT_REACTION_RECEIVED,
     HookRegistry,
     ReactionReceivedContext,
     hook,
 )
+from mindroom.ingress_validation import IngressValidator
 from mindroom.matrix.thread_history_result import thread_history_result
 from mindroom.message_target import MessageTarget
 from mindroom.response_runner import ResponseRequest, ResponseRunner
@@ -58,6 +57,8 @@ from mindroom.response_turn import PausedAttempt
 from mindroom.room_thread_modes import set_room_thread_mode_override
 from mindroom.runtime_shutdown import SYNC_RESTART_SHUTDOWN, RuntimeShutdownIntent
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity
+from mindroom.turn_record import TurnRecord
+from mindroom.turns.interactive_selection import InteractiveSelectionDispatch
 from tests.approval_continuation_helpers import approval_continuation
 from tests.bot_helpers import (
     AgentBotTestBase,
@@ -73,11 +74,12 @@ from tests.conftest import (
     handle_card_response_for_test,
     initialize_approval_store_for_test,
     install_relation_lookup,
+    make_ingress_facts,
     make_matrix_client_mock,
     record_turn_answered,
     replace_interactive_selection_handlers,
     replace_reaction_dispatcher_deps,
-    replace_turn_controller_deps,
+    replace_turn_deps,
     request_envelope,
     runtime_paths_for,
     unwrap_extracted_collaborator,
@@ -238,6 +240,32 @@ def _claimed_test_selection(
     return selection, target
 
 
+async def _start_selection_response(
+    bot: AgentBot,
+    response: Callable[[], Awaitable[object]],
+    *,
+    target: MessageTarget,
+) -> None:
+    """Start one claimed selection whose response runs ``response`` instead of executing the selection."""
+    selections = bot._interactive_selections
+
+    async def handle(*_args: object, **_kwargs: object) -> object:
+        return await response()
+
+    selections._handle_interactive_selection = handle  # type: ignore[method-assign]
+    selection, _target = _claimed_test_selection(bot, room_id=target.room_id)
+    await selections._start_interactive_selection(
+        nio.MatrixRoom(target.room_id, bot.matrix_id.full_id),
+        InteractiveSelectionDispatch(selection=selection, response_target=target),
+        facts=make_ingress_facts(
+            "@user:localhost",
+            source_kind=INTERACTIVE_SELECTION_SOURCE_KIND,
+            requester_user_id="@user:localhost",
+        ),
+        source_event_id="$reaction",
+    )
+
+
 def _mock_interactive_claim(
     bot: AgentBot,
     selection: interactive.InteractiveSelection | None,
@@ -266,11 +294,11 @@ def _install_text_dispatch_mock(
     monkeypatch: pytest.MonkeyPatch,
     bot: AgentBot,
 ) -> AsyncMock:
-    """Replace the unwrapped text-dispatch collaborator through an auto-restored seam."""
+    """Replace text handling past the approval reply, through an auto-restored seam."""
     handle_text_event = AsyncMock(return_value=TurnDispatchOutcome.DEFERRED)
     monkeypatch.setattr(
-        unwrap_extracted_collaborator(bot._turn_controller),
-        "handle_text_event",
+        bot._turn_ingress,
+        "_handle_message_inner",
         handle_text_event,
     )
     return handle_text_event
@@ -462,9 +490,22 @@ class TestAgentBot(AgentBotTestBase):
             await gate.wait_until_open()
             return True
 
+        ingress = bot._reaction_dispatcher.deps.ingress
+        settled_inside_fence: list[tuple[tuple[str, ...], int]] = []
+
+        async def settle(event_ids: tuple[str, ...]) -> None:
+            settled_inside_fence.append((event_ids, gate.in_flight_response_count))
+            await ingress.deps.settle_ignored_sources(event_ids)
+
         replace_reaction_dispatcher_deps(
             bot,
-            wait_for_admission_or_shutdown=wait_for_replacement,
+            ingress=IngressValidator(
+                replace(
+                    ingress.deps,
+                    wait_for_admission_or_shutdown=wait_for_replacement,
+                    settle_ignored_sources=settle,
+                ),
+            ),
         )
         with _mock_interactive_claim(bot, None):
             reaction_task = asyncio.create_task(_dispatch_reaction(bot, room, event))
@@ -478,6 +519,7 @@ class TestAgentBot(AgentBotTestBase):
                 await reaction_task
 
         assert seen == []
+        assert settled_inside_fence == [((event.event_id,), 1)]
 
     @pytest.mark.asyncio
     @pytest.mark.usefixtures("enforce_turn_authorization")
@@ -545,9 +587,10 @@ class TestAgentBot(AgentBotTestBase):
             await gate.wait_until_open()
             return True
 
+        ingress = bot._reaction_dispatcher.deps.ingress
         replace_reaction_dispatcher_deps(
             bot,
-            wait_for_admission_or_shutdown=wait_for_replacement,
+            ingress=IngressValidator(replace(ingress.deps, wait_for_admission_or_shutdown=wait_for_replacement)),
         )
 
         with _mock_interactive_claim(bot, None):
@@ -596,7 +639,7 @@ class TestAgentBot(AgentBotTestBase):
         with _mock_interactive_claim(bot, selection):
             await _dispatch_reaction(bot, room, event)
 
-        await bot._response_runner.drain_inbox_responses()
+        await bot._response_runner.inbox.drain_inbox_responses()
         assert seen == []
         assert event.event_id not in bot._journal_dispatcher._deferred_reaction_ids
         assert event.event_id not in bot._journal_dispatcher._worker._deferred
@@ -775,13 +818,13 @@ class TestAgentBot(AgentBotTestBase):
         assert admission is AdmissionResult.ADMITTED
 
         execute = AsyncMock(side_effect=(OSError("pending write failed"), None))
-        with patch.object(bot._turn_controller, "_execute_interactive_selection", new=execute):
+        with patch.object(bot._interactive_selections, "_execute_admitted_interactive_selection", new=execute):
             await _dispatch_reaction(bot, room, event)
-            await bot._response_runner.drain_inbox_responses()
+            await bot._response_runner.inbox.drain_inbox_responses()
             assert event.event_id in await bot._journal_dispatcher.unsettled_event_ids()
 
             await bot._journal_dispatcher.drain_once()
-            await bot._response_runner.drain_inbox_responses()
+            await bot._response_runner.inbox.drain_inbox_responses()
             bot._journal_dispatcher.start()
             try:
                 async with asyncio.timeout(5):
@@ -829,12 +872,12 @@ class TestAgentBot(AgentBotTestBase):
         assert admission is AdmissionResult.ADMITTED
 
         with patch.object(
-            bot._turn_controller,
-            "_execute_interactive_selection",
+            bot._interactive_selections,
+            "_execute_admitted_interactive_selection",
             new=AsyncMock(side_effect=OSError("pending write failed")),
         ):
             await _dispatch_reaction(bot, room, event)
-            await bot._response_runner.drain_inbox_responses()
+            await bot._response_runner.inbox.drain_inbox_responses()
 
         await admit_room_membership(bot.journal_principal(), room.room_id, "leave", source=DepartureSource.LOCAL)
 
@@ -907,29 +950,28 @@ class TestAgentBot(AgentBotTestBase):
         )
         startup_observed = asyncio.Event()
         release_startup = asyncio.Event()
-        reservation_owner = MagicMock()
-        reservation_owner.release = AsyncMock()
-        release_count_during_startup = -1
+        ticket = MagicMock()
+        close_count_during_startup = -1
 
         async def blocked_enqueue(*_args: object, **_kwargs: object) -> None:
-            nonlocal release_count_during_startup
-            release_count_during_startup = reservation_owner.release.await_count
+            nonlocal close_count_during_startup
+            close_count_during_startup = ticket.close.call_count
             startup_observed.set()
             await release_startup.wait()
 
         replace_reaction_dispatcher_deps(
             bot,
-            reserve_prompt_ingress_order=MagicMock(return_value=reservation_owner),
+            reserve_prompt_ingress_order=MagicMock(return_value=ticket),
             enqueue_interactive_selection=blocked_enqueue,
         )
         with _mock_interactive_claim(bot, selection):
             dispatch = asyncio.create_task(_dispatch_reaction(bot, room, event))
             await startup_observed.wait()
-            assert release_count_during_startup == 0
+            assert close_count_during_startup == 0
             release_startup.set()
             await dispatch
 
-        reservation_owner.release.assert_awaited_once()
+        ticket.close.assert_called_once_with()
 
     @pytest.mark.asyncio
     async def test_interactive_reaction_waits_for_earlier_same_thread_ingress(
@@ -965,28 +1007,21 @@ class TestAgentBot(AgentBotTestBase):
                 return
             await original_dispatch(turn)
 
-        async def start_selection(
-            _response_factory: Callable[[], Awaitable[None]],
-            **_kwargs: object,
-        ) -> None:
+        async def start_selection(*_args: object, **_kwargs: object) -> None:
             execution_order.append("reaction")
 
         monkeypatch.setattr(bot._coalescing_gate, "_dispatch_turn", dispatch_turn)
         replace_interactive_selection_handlers(bot, start=start_selection)
-        earlier_owner = bot._turn_controller.reserve_prompt_ingress_order(room, "@user:localhost")
+        earlier_owner = bot._turn_ingress.reserve_prompt_ingress_order(room, "@user:localhost")
         earlier_event = PreparedIngress(
             sender="@user:localhost",
             event_id="$earlier",
             body="Earlier message",
             source={"content": {"msgtype": "m.text", "body": "Earlier message"}},
-            requester_user_id="@user:localhost",
-            source_kind=MESSAGE_SOURCE_KIND,
         )
-        await earlier_owner.admit(
+        earlier_owner.admit(
             requester_coalescing_key(room.room_id, "$thread-a", "@user:localhost"),
-            source_event_id=earlier_event.event_id,
-            source_kind=MESSAGE_SOURCE_KIND,
-            ready_result=ReadyPendingEvent(pending_event=PendingEvent(event=earlier_event, room=room)),
+            PendingEvent(event=earlier_event, room=room, facts=make_ingress_facts("@user:localhost")),
         )
 
         try:
@@ -1037,7 +1072,7 @@ class TestAgentBot(AgentBotTestBase):
 
         replace_interactive_selection_handlers(bot, handle=blocked_selection)
         monkeypatch.setattr(
-            unwrap_extracted_collaborator(bot._turn_controller),
+            bot._turn_ingress,
             "handle_text_event",
             handle_other_thread,
         )
@@ -1066,7 +1101,7 @@ class TestAgentBot(AgentBotTestBase):
                 assert reaction.event_id in await bot._journal_dispatcher.unsettled_event_ids()
         finally:
             release_selection.set()
-            await bot._response_runner.drain_inbox_responses()
+            await bot._response_runner.inbox.drain_inbox_responses()
             await bot._journal_dispatcher.stop()
 
     @pytest.mark.asyncio
@@ -1131,12 +1166,12 @@ class TestAgentBot(AgentBotTestBase):
                 release_older.set()
                 assert await older == "$older-response"
                 await preparation_started.wait()
-                await bot._response_runner.drain_inbox_responses()
+                await bot._response_runner.inbox.drain_inbox_responses()
         finally:
             release_older.set()
             if older is not None:
                 await asyncio.gather(older, return_exceptions=True)
-            await bot._response_runner.drain_inbox_responses()
+            await bot._response_runner.inbox.drain_inbox_responses()
 
     @pytest.mark.asyncio
     async def test_cancelled_interactive_preparation_releases_same_thread_reservation(
@@ -1158,18 +1193,11 @@ class TestAgentBot(AgentBotTestBase):
             thread_id="$thread-a",
             reply_to_event_id="$question",
         )
-        await bot._turn_controller._start_interactive_selection(
-            prepare_forever,
-            response_target=target,
-            source_event_id="$reaction",
-            transport_sender_id="@user:localhost",
-            requester_user_id="@user:localhost",
-            selected_value="Selected",
-        )
+        await _start_selection_response(bot, prepare_forever, target=target)
         await asyncio.wait_for(preparation_started.wait(), timeout=1.0)
         assert bot._response_runner.has_active_response_for_target(target)
 
-        assert await bot._response_runner.drain_inbox_responses(cancel_after_seconds=0.01) is False
+        assert await bot._response_runner.inbox.drain_inbox_responses(cancel_after_seconds=0.01) is False
         assert not bot._response_runner.has_active_response_for_target(target)
 
     @pytest.mark.asyncio
@@ -1184,7 +1212,7 @@ class TestAgentBot(AgentBotTestBase):
         settlement_error = OSError("simulated journal settlement failure")
         settle_dispatch_sources = AsyncMock(side_effect=settlement_error)
         retry_dispatch_sources = MagicMock()
-        controller = replace_turn_controller_deps(
+        replace_turn_deps(
             bot,
             settle_dispatch_sources=settle_dispatch_sources,
             retry_dispatch_sources=retry_dispatch_sources,
@@ -1199,15 +1227,8 @@ class TestAgentBot(AgentBotTestBase):
             thread_id="$thread-a",
             reply_to_event_id="$question",
         )
-        await controller._start_interactive_selection(
-            response,
-            response_target=target,
-            source_event_id="$reaction",
-            transport_sender_id="@user:localhost",
-            requester_user_id="@user:localhost",
-            selected_value="Selected",
-        )
-        await bot._response_runner.drain_inbox_responses()
+        await _start_selection_response(bot, response, target=target)
+        await bot._response_runner.inbox.drain_inbox_responses()
 
         assert response_completed.is_set()
         settle_dispatch_sources.assert_awaited_once_with(("$reaction",))
@@ -1224,7 +1245,7 @@ class TestAgentBot(AgentBotTestBase):
         config = self._config_for_storage(tmp_path)
         bot = make_test_agent_bot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
         settle_dispatch_sources = AsyncMock()
-        controller = replace_turn_controller_deps(
+        replace_turn_deps(
             bot,
             settle_dispatch_sources=settle_dispatch_sources,
         )
@@ -1237,15 +1258,8 @@ class TestAgentBot(AgentBotTestBase):
             thread_id="$thread-a",
             reply_to_event_id="$question",
         )
-        await controller._start_interactive_selection(
-            hand_off_response,
-            response_target=target,
-            source_event_id="$reaction",
-            transport_sender_id="@user:localhost",
-            requester_user_id="@user:localhost",
-            selected_value="Selected",
-        )
-        await bot._response_runner.drain_inbox_responses()
+        await _start_selection_response(bot, hand_off_response, target=target)
+        await bot._response_runner.inbox.drain_inbox_responses()
 
         settle_dispatch_sources.assert_not_awaited()
 
@@ -1259,7 +1273,7 @@ class TestAgentBot(AgentBotTestBase):
         config = self._config_for_storage(tmp_path)
         bot = make_test_agent_bot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
         source_is_terminal = AsyncMock(return_value=True)
-        controller = replace_turn_controller_deps(
+        replace_turn_deps(
             bot,
             dispatch_source_is_terminal=source_is_terminal,
         )
@@ -1268,17 +1282,20 @@ class TestAgentBot(AgentBotTestBase):
 
         with (
             patch.object(
-                controller,
-                "_execute_interactive_selection",
+                bot._interactive_selections,
+                "_execute_admitted_interactive_selection",
                 new=AsyncMock(side_effect=asyncio.CancelledError("restart")),
             ),
             pytest.raises(asyncio.CancelledError, match="restart"),
         ):
-            await controller._handle_interactive_selection(
+            await bot._interactive_selections._handle_interactive_selection(
                 room,
                 selection=selection,
-                transport_sender_id="@user:localhost",
-                requester_user_id="@user:localhost",
+                facts=make_ingress_facts(
+                    "@user:localhost",
+                    source_kind=INTERACTIVE_SELECTION_SOURCE_KIND,
+                    requester_user_id="@user:localhost",
+                ),
                 source_event_id="$reaction",
                 response_target=target,
             )
@@ -1307,17 +1324,24 @@ class TestAgentBot(AgentBotTestBase):
             await release_terminal_probe.wait()
             return True
 
-        controller = replace_turn_controller_deps(bot, dispatch_source_is_terminal=source_is_terminal)
+        replace_turn_deps(bot, dispatch_source_is_terminal=source_is_terminal)
         selection, target = _claimed_test_selection(bot)
         room = nio.MatrixRoom(target.room_id, bot.matrix_id.full_id)
 
-        with patch.object(controller, "_execute_interactive_selection", new=execute_selection):
+        with patch.object(
+            bot._interactive_selections,
+            "_execute_admitted_interactive_selection",
+            new=execute_selection,
+        ):
             response = asyncio.create_task(
-                controller._handle_interactive_selection(
+                bot._interactive_selections._handle_interactive_selection(
                     room,
                     selection=selection,
-                    transport_sender_id="@user:localhost",
-                    requester_user_id="@user:localhost",
+                    facts=make_ingress_facts(
+                        "@user:localhost",
+                        source_kind=INTERACTIVE_SELECTION_SOURCE_KIND,
+                        requester_user_id="@user:localhost",
+                    ),
                     source_event_id="$reaction",
                     response_target=target,
                 ),
@@ -1359,14 +1383,14 @@ class TestAgentBot(AgentBotTestBase):
             ordinary_response_started.set()
             await asyncio.Event().wait()
 
-        response_task = bot._response_runner.track_inbox_response(
+        response_task = bot._response_runner.inbox.track_inbox_response(
             response_owner(),
             name="test_interactive_claim_owner",
             recovery_proof_ready=lambda: False,
             source_event_ids=("$reaction",),
             room_id="!room:example.org",
         )
-        ordinary_response_task = bot._response_runner.track_inbox_response(
+        ordinary_response_task = bot._response_runner.inbox.track_inbox_response(
             ordinary_response(),
             name="test_ordinary_response",
             recovery_proof_ready=lambda: False,
@@ -1449,7 +1473,7 @@ class TestAgentBot(AgentBotTestBase):
             await release_resume.wait()
             return False
 
-        with patch.object(bot._response_runner, "_resume_approval_source", new=resume):
+        with patch.object(bot._response_runner._approvals, "_resume_approval_source", new=resume):
             handoff = asyncio.create_task(
                 bot._journal_dispatcher.callbacks.on_approval_continuation("$source"),
             )
@@ -1459,8 +1483,8 @@ class TestAgentBot(AgentBotTestBase):
 
                 assert handoff.done()
                 assert await handoff is False
-                assert bot._response_runner.has_live_inbox_response("$source")
-                assert bot._response_runner.has_live_inbox_response("$coalesced")
+                assert bot._response_runner.inbox.has_live_inbox_response("$source")
+                assert bot._response_runner.inbox.has_live_inbox_response("$coalesced")
                 deferred = await store.load_event("$source")
                 assert deferred is not None
                 bot._journal_dispatcher._worker._defer(deferred)
@@ -1470,7 +1494,7 @@ class TestAgentBot(AgentBotTestBase):
             finally:
                 release_resume.set()
                 await asyncio.gather(handoff, return_exceptions=True)
-                await bot._response_runner.wait_for_source_owned_inbox_responses()
+                await bot._response_runner.inbox.wait_for_source_owned_inbox_responses()
                 assert "$source" not in bot._journal_dispatcher._worker._deferred
 
     @pytest.mark.parametrize("requires_human", [False, True], ids=["automatic", "human"])
@@ -1534,12 +1558,12 @@ class TestAgentBot(AgentBotTestBase):
 
             initialize_approval_store_for_test(
                 runtime_paths,
-                prepare_event=prepare_event,
-                send_delivery=send_delivery,
-                resolve_delivery=AsyncMock(return_value=None),
+                prepare_approval_event=prepare_event,
+                send_approval_delivery=send_delivery,
+                resolve_approval_delivery=AsyncMock(return_value=None),
                 cards=first._journal_store.principal(router_principal_id),
-                transport_sender=lambda: "@mindroom_router:localhost",
-                sending_device=lambda: "DEVICE",
+                transport_sender_id=lambda: "@mindroom_router:localhost",
+                transport_device_id=lambda: "DEVICE",
             )
         source = InboundEvent(
             event_id="$source",
@@ -1579,7 +1603,7 @@ class TestAgentBot(AgentBotTestBase):
             async with first_runner.deps.replies.span_scope():
                 claimed_request = await first_runner._claim_reply_span(request, history_scope=history_scope)
                 assert claimed_request is not None
-                suspended = await first_runner._suspend_for_approval(
+                suspended = await first_runner._approvals.suspend_for_approval(
                     paused,
                     request=claimed_request,
                     target=target,
@@ -1591,7 +1615,7 @@ class TestAgentBot(AgentBotTestBase):
 
         assert suspended.terminal_status == "suspended"
         assert report_tool.written == []
-        persisted = await first.approval_store.approval_continuation_for_source("$source")
+        persisted = await first.approval_store.approvals.approval_continuation_for_source("$source")
         if requires_human:
             await shutdown_approval_runtime()
         assert persisted is not None
@@ -1604,21 +1628,23 @@ class TestAgentBot(AgentBotTestBase):
         async def drain_restarted_runtime() -> None:
             restarted._journal_dispatcher.release_turn_replay()
             await restarted._journal_dispatcher.drain_once()
-            await restarted._response_runner.wait_for_source_owned_inbox_responses()
+            await restarted._response_runner.inbox.wait_for_source_owned_inbox_responses()
             await restarted._journal_dispatcher.drain_once()
 
         if requires_human:
             manager = initialize_approval_store_for_test(
                 runtime_paths,
-                prepare_event=prepare_event,
-                send_delivery=send_delivery,
-                resolve_delivery=AsyncMock(return_value=None),
+                prepare_approval_event=prepare_event,
+                send_approval_delivery=send_delivery,
+                resolve_approval_delivery=AsyncMock(return_value=None),
                 cards=restarted._journal_store.principal(router_principal_id),
-                transport_sender=lambda: "@mindroom_router:localhost",
-                sending_device=lambda: "DEVICE",
-                continuation_ready=lambda _entity_name, room_id, source_ids: restarted.retry_approval_sources(
-                    room_id,
-                    source_ids,
+                transport_sender_id=lambda: "@mindroom_router:localhost",
+                transport_device_id=lambda: "DEVICE",
+                wake_continuation_sources=AsyncMock(
+                    side_effect=lambda _entity_name, room_id, source_ids: restarted.retry_approval_sources(
+                        room_id,
+                        source_ids,
+                    ),
                 ),
             )
             restarted._journal_dispatcher.release_turn_replay()
@@ -1638,7 +1664,7 @@ class TestAgentBot(AgentBotTestBase):
         else:
             await drain_restarted_runtime()
 
-        remaining = await restarted.approval_store.approval_continuation_for_source("$source")
+        remaining = await restarted.approval_store.approvals.approval_continuation_for_source("$source")
         assert report_tool.written == ["written"], remaining
         assert model.turns == []
         assert remaining is None
@@ -1664,7 +1690,7 @@ class TestAgentBot(AgentBotTestBase):
         async def stop_dispatcher(*, shutdown_intent: RuntimeShutdownIntent) -> None:
             assert shutdown_intent == SYNC_RESTART_SHUTDOWN
             response_tasks.append(
-                bot._response_runner.track_inbox_response(
+                bot._response_runner.inbox.track_inbox_response(
                     response_owner(),
                     name="test_late_interactive_claim_owner",
                     recovery_proof_ready=lambda: False,
@@ -1708,9 +1734,9 @@ class TestAgentBot(AgentBotTestBase):
         """Outer response ownership returns its journal source before preparation starts."""
         config = self._config_for_storage(tmp_path)
         bot = make_test_agent_bot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
-        selection, target = _claimed_test_selection(bot)
+        _selection, target = _claimed_test_selection(bot)
         retry_dispatch_sources = MagicMock()
-        controller = replace_turn_controller_deps(
+        replace_turn_deps(
             bot,
             retry_dispatch_sources=retry_dispatch_sources,
         )
@@ -1737,20 +1763,13 @@ class TestAgentBot(AgentBotTestBase):
 
         try:
             with acquire_patch:
-                await controller._start_interactive_selection(
-                    response,
-                    response_target=target,
-                    source_event_id="$reaction",
-                    transport_sender_id="@user:localhost",
-                    requester_user_id="@user:localhost",
-                    selected_value=selection.selected_value,
-                )
+                await _start_selection_response(bot, response, target=target)
                 if failure_stage == "queued_cancel":
                     # This checks ownership recovery, not millisecond shutdown latency.
                     # Allow queued acquisition cancellation and shielded reservation cleanup to finish.
-                    assert await bot._response_runner.drain_inbox_responses(cancel_after_seconds=1.0) is False
+                    assert await bot._response_runner.inbox.drain_inbox_responses(cancel_after_seconds=1.0) is False
                 else:
-                    await bot._response_runner.drain_inbox_responses()
+                    await bot._response_runner.inbox.drain_inbox_responses()
 
             assert not response_entered.is_set()
             retry_dispatch_sources.assert_called_with(target.room_id, ("$reaction",))
@@ -1761,7 +1780,7 @@ class TestAgentBot(AgentBotTestBase):
         finally:
             if lock_owned_by_test:
                 lifecycle_lock.release()
-            await bot._response_runner.drain_inbox_responses()
+            await bot._response_runner.inbox.drain_inbox_responses()
 
     @pytest.mark.asyncio
     async def test_interactive_reaction_reserves_same_thread_lifecycle_before_preparation(
@@ -1855,13 +1874,13 @@ class TestAgentBot(AgentBotTestBase):
                 release_interactive.set()
                 await asyncio.wait_for(newer_entered.wait(), timeout=1.0)
                 assert await newer_task == "$newer-response"
-                await bot._response_runner.drain_inbox_responses()
+                await bot._response_runner.inbox.drain_inbox_responses()
         finally:
             release_preparation.set()
             release_interactive.set()
             if newer_task is not None:
                 await asyncio.gather(newer_task, return_exceptions=True)
-            await bot._response_runner.drain_inbox_responses()
+            await bot._response_runner.inbox.drain_inbox_responses()
 
     @pytest.mark.asyncio
     async def test_interactive_reaction_keeps_room_mode_target_across_handoff(
@@ -1914,12 +1933,12 @@ class TestAgentBot(AgentBotTestBase):
                 patch.object(ResponseRunner, "_generate_response_locked", new=generate_locked),
             ):
                 await _dispatch_reaction(bot, room, reaction)
-                await bot._response_runner.drain_inbox_responses()
+                await bot._response_runner.inbox.drain_inbox_responses()
 
             assert [target.resolved_thread_id for target in resolved_targets] == [None]
             assert reaction.event_id not in await bot._journal_dispatcher.unsettled_event_ids()
         finally:
-            await bot._response_runner.drain_inbox_responses()
+            await bot._response_runner.inbox.drain_inbox_responses()
 
     @pytest.mark.asyncio
     async def test_interactive_reaction_executes_as_canonical_human_requester(
@@ -1970,7 +1989,7 @@ class TestAgentBot(AgentBotTestBase):
                 patch.object(ResponseRunner, "_generate_response_locked", new=generate_locked),
             ):
                 await _dispatch_reaction(bot, room, reaction)
-                await bot._response_runner.drain_inbox_responses()
+                await bot._response_runner.inbox.drain_inbox_responses()
 
             assert len(captured_requests) == 1
             request = captured_requests[0]
@@ -1978,7 +1997,7 @@ class TestAgentBot(AgentBotTestBase):
             assert request.response_envelope.origin.transport_sender_id == bridge_id
             assert request.response_envelope.origin.requester_id == owner_id
         finally:
-            await bot._response_runner.drain_inbox_responses()
+            await bot._response_runner.inbox.drain_inbox_responses()
 
     @pytest.mark.asyncio
     async def test_checkmark_interactive_reaction_reserves_before_tool_approval_lookup(
@@ -2022,11 +2041,11 @@ class TestAgentBot(AgentBotTestBase):
             try:
                 reaction_slots = bot._coalescing_gate.lanes.unsettled_slots()
                 assert reaction_slots
-                later_owner = bot._turn_controller.reserve_prompt_ingress_order(room, "@user:localhost")
+                later_owner = bot._turn_ingress.reserve_prompt_ingress_order(room, "@user:localhost")
                 try:
                     assert reaction_slots[0].receipt_time < later_owner.slot.receipt_time
                 finally:
-                    await later_owner.release()
+                    later_owner.close()
             finally:
                 release_approval.set()
                 await reaction_task
@@ -2124,7 +2143,7 @@ class TestAgentBot(AgentBotTestBase):
             initialize_approval_store_for_test(
                 runtime_paths,
                 cards=cards,
-                resolve_action_delivery=transport.resolve_approval_action_delivery,
+                resolve_approval_action_delivery=transport.resolve_approval_action_delivery,
             )
             on_approval = bot._journal_dispatcher.callbacks.on_approval
 
@@ -2208,7 +2227,7 @@ class TestAgentBot(AgentBotTestBase):
             raise RuntimeError(message)
 
         journal = bot._journal_dispatcher.store
-        with patch("mindroom.bot.maybe_handle_tool_approval_reply", side_effect=consume_then_crash):
+        with patch("mindroom.turns.ingress.maybe_handle_tool_approval_reply", side_effect=consume_then_crash):
             await admit_dispatch_event(
                 bot._journal_dispatcher,
                 room,
@@ -2253,7 +2272,7 @@ class TestAgentBot(AgentBotTestBase):
         handle_text_event.assert_not_awaited()
         assert await restarted._journal_dispatcher.store.pending() == ()
         # The card answered it: no message older than it is skipped as superseded by it.
-        assert restarted._turn_store.is_handled(event.event_id)
+        assert await restarted._turn_store.is_handled(room.room_id, event.event_id)
 
     @pytest.mark.asyncio
     @pytest.mark.usefixtures("enforce_turn_authorization")
@@ -2334,7 +2353,6 @@ class TestAgentBot(AgentBotTestBase):
         assert unexpected_hooks == []
         assert await restarted._journal_dispatcher.store.pending() == ()
 
-    @pytest.mark.ledger_loads_from_disk
     @pytest.mark.asyncio
     async def test_interrupted_stop_reaction_replay_cannot_become_hook_input(
         self,
@@ -2508,7 +2526,7 @@ class TestAgentBot(AgentBotTestBase):
         unexpected_hooks = _install_reaction_recorder(restarted)
         replace_interactive_selection_handlers(restarted, handle=AsyncMock(return_value=False))
         await restarted._journal_dispatcher.drain_once()
-        await restarted._response_runner.drain_inbox_responses()
+        await restarted._response_runner.inbox.drain_inbox_responses()
 
         assert unexpected_hooks == []
         assert await restarted._journal_dispatcher.store.pending() == ()
@@ -2617,9 +2635,22 @@ class TestAgentBot(AgentBotTestBase):
             replays.append(ctx.event_id)
 
         restarted.hook_registry = HookRegistry.from_plugins([_hook_plugin("hooked", [record_replay])])
+        gate = restarted._runtime_view.response_admission_gate
+        ingress = restarted._reaction_dispatcher.deps.ingress
+        settled_inside_fence: list[tuple[tuple[str, ...], int]] = []
+
+        async def settle(event_ids: tuple[str, ...]) -> None:
+            settled_inside_fence.append((event_ids, gate.in_flight_response_count))
+            await ingress.deps.settle_ignored_sources(event_ids)
+
+        replace_reaction_dispatcher_deps(
+            restarted,
+            ingress=IngressValidator(replace(ingress.deps, settle_ignored_sources=settle)),
+        )
         await restarted._journal_dispatcher.drain_once()
 
         assert replays == []
+        assert settled_inside_fence == [((event.event_id,), 1)]
         assert await restarted._journal_dispatcher.store.pending() == ()
 
     @pytest.mark.asyncio

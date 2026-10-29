@@ -38,10 +38,9 @@ from mindroom.delegation.lifecycle import prepare_child_turn, start_child_turn
 from mindroom.delegation.recovery import read_child_run
 from mindroom.delegation.sessions import load_retained_subagent_turn, subagent_recovery_lock
 from mindroom.delegation.state import DelegationState
-from mindroom.event_journal import BackgroundApprovalDecision
+from mindroom.event_journal import JOB_ENDED_REASON, BackgroundApprovalDecision, EventJournalStore, tool_job_run_id
 from mindroom.llm.messages import Message
 from mindroom.llm.runs import RunRecord, RunStatus
-from mindroom.tool_jobs.approvals import _approval_run_id
 from mindroom.tool_jobs.control import (
     JobControl,
     job_control_context,
@@ -60,9 +59,10 @@ from mindroom.tool_system.agno_toolkits import Toolkit
 from mindroom.tool_system.call_record import recording_tool_calls
 from mindroom.tool_system.runtime_context import tool_runtime_context
 from mindroom.tool_system.tool_function import ToolOutcome
-from mindroom.tool_system.worker_routing import ToolExecutionIdentity
+from mindroom.tool_system.worker_routing import ToolExecutionIdentity, agent_workspace_root_path
 from tests.access_schema_support import with_responder_access
 from tests.agent_loop.helpers import collect, spec, toolkit
+from tests.conftest import FakeApprovalTransport
 from tests.delegation_helpers import ScriptedAgents, _delegate_runtime_context, _runtime_paths
 from tests.fakes.scripted_model import ScriptedModel, answer, calls, tool_call
 from tests.scripted_agent_helpers import registered_toolkit
@@ -72,8 +72,10 @@ from tests.tool_job_helpers import (
     SpanRecorder,
     cancel_settled,
     intercept_job_saves,
+    job_card_decision,
     job_child,
     lookup,
+    reserve_job_card,
     saved_jobs,
     start_delegation_job,
     tool_job_runtime,
@@ -286,15 +288,16 @@ async def test_parent_cancellation_during_job_admission_keeps_accepted_child(
 
 @dataclass
 class _JobApprovalCards:
-    """Stand in for the approval store: record each card a job posts and answer it when the test decides."""
+    """Stand in for the approval store: record each card a job posts and answer it when the test decides.
+
+    Given the job journal, each card's call is reserved there, as the router reserves it, so the job's end denies it.
+    """
 
     decision: asyncio.Future[BackgroundApprovalDecision]
+    journal: EventJournalStore | None = None
     posted: asyncio.Event = field(default_factory=asyncio.Event)
     requested: list[tuple[str, str, str]] = field(default_factory=list)
-    settled: list[str] = field(default_factory=list)
-    cards: object = field(default_factory=object)
-    send_delivery: object = field(default_factory=object)
-    router_missing: None = None
+    transport: FakeApprovalTransport = field(default_factory=FakeApprovalTransport)
 
     async def request_background_approval(
         self,
@@ -303,14 +306,11 @@ class _JobApprovalCards:
         tool_name: str,
         **_kwargs: object,
     ) -> BackgroundApprovalDecision:
+        if self.journal is not None:
+            await reserve_job_card(self.journal, origin.run_id, origin.call_id, tool_name=tool_name)
         self.requested.append((origin.run_id, origin.call_id, tool_name))
         self.posted.set()
         return await asyncio.shield(self.decision)
-
-    async def settle_pending_background_approvals(self, run_id: str, *, reason: str) -> int:
-        assert reason
-        self.settled.append(run_id)
-        return 0
 
 
 @pytest.mark.asyncio
@@ -335,7 +335,7 @@ async def test_native_background_result_runs_child_once(  # noqa: C901, PLR0915
     runtime = await tool_job_runtime(tmp_path)
     pin_background_tool_jobs(config, paths)
     register_background_runtime(paths, runtime)
-    cards = _JobApprovalCards(asyncio.get_running_loop().create_future())
+    cards = _JobApprovalCards(asyncio.get_running_loop().create_future(), runtime.journal)
     monkeypatch.setattr(approval_manager, "get_approval_store", lambda: cards)
     code = ScriptedModel(
         [*([calls(tool_call("write_report", "write-once"))] if approval else []), answer("Exact child result")],
@@ -364,7 +364,7 @@ async def test_native_background_result_runs_child_once(  # noqa: C901, PLR0915
         await asyncio.wait_for(cards.posted.wait(), JOB_TEST_TIMEOUT)
         job_id = children[0].delegation_id
         await wait_for_status(runtime, job_id, "awaiting_approval")
-        assert cards.requested == [(_approval_run_id(job_id), "write-once", "write_report")]
+        assert cards.requested == [(tool_job_run_id(job_id), "write-once", "write_report")]
         assert reports.effects == []
         if exclude_after_acceptance:
             config.background_tool_jobs.exclude_toolkits.append("delegate")
@@ -374,7 +374,11 @@ async def test_native_background_result_runs_child_once(  # noqa: C901, PLR0915
             cancelled = await read_child_run(children[0], config, paths)
             assert cancelled is not None
             assert cancelled.status is RunStatus.cancelled
-            assert cards.settled == [_approval_run_id(job_id)]
+            assert await job_card_decision(
+                runtime.journal,
+                tool_job_run_id(job_id),
+                "write-once",
+            ) == BackgroundApprovalDecision("denied", JOB_ENDED_REASON)
             return
         status = "denied" if approval == "denied" else "approved"
         cards.decision.set_result(BackgroundApprovalDecision(status, "Not now" if status == "denied" else None))
@@ -534,7 +538,7 @@ async def test_a_parent_waits_for_its_childs_approval_no_longer_than_a_gated_cal
             assert result.status is RunStatus.completed
             handle = json.loads(_tool_message(result, "first"))
             assert handle["status"] == "awaiting_approval"
-            assert cards.requested == [(_approval_run_id(handle["job_id"]), "w", "write_report")]
+            assert cards.requested == [(tool_job_run_id(handle["job_id"]), "w", "write_report")]
             assert reports.effects == []
         finally:
             await runtime.shutdown()
@@ -1478,7 +1482,15 @@ async def test_only_a_top_level_delegate_offers_background_waits(tmp_path: Path,
     pin_background_tool_jobs(config, paths)
     register_background_runtime(paths, runtime)
     try:
-        delegate = DelegateTools("leader", ["code"], paths, config, execution_identity=owner, delegation_depth=depth)
+        delegate = DelegateTools(
+            "leader",
+            ["code"],
+            paths,
+            config,
+            agent_workspace_root_path(paths.storage_root, "leader"),
+            execution_identity=owner,
+            delegation_depth=depth,
+        )
         description = delegate.async_functions["run_subagent"].description or ""
         offered = "background_after" in description
         instructed = config.get_prompt("DELEGATE_BACKGROUND_JOB_INSTRUCTIONS") in (delegate.instructions or "")

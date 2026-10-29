@@ -30,9 +30,8 @@ from dataclasses import replace
 from typing import TYPE_CHECKING, cast
 
 from mindroom.interactive_models import INTERACTIVE_PROMPT_KEY
-from mindroom.legacy_delivery_payloads import decode_delivery_result
 
-from .identity import decode_thread_id, delivery_transaction_id, encode_thread_id
+from .identity import decode_thread_id, delivery_transaction_id, encode_thread_id, matrix_user_of_principal
 from .membership_state import claim_membership_epoch
 from .models import DURABLE_DELIVERY_ID_KEY, DeliveryStage, MatrixDelivery, ReplyRowFacts, UnreadableMatrixDelivery
 
@@ -471,6 +470,16 @@ def acknowledge(
         (event_id, principal_id, delivery_id, stage.value),
     )
     if bound is not None and stage is DeliveryStage.INITIAL:
+        # The event now shows the approval card this delivery carries, if any.
+        transaction.execute(
+            """
+            INSERT INTO approval_card_events (principal_id, card_event_id, delivery_id)
+            SELECT principal_id, ?, delivery_id FROM approval_cards
+            WHERE principal_id = ? AND delivery_id = ?
+            ON CONFLICT (principal_id, card_event_id) DO NOTHING
+            """,
+            (event_id, principal_id, delivery_id),
+        )
         # A reply row takes its edit target from its reply when it is claimed.
         transaction.execute(
             """
@@ -678,7 +687,7 @@ def event_belongs_to_membership(
     """Return whether a delivery event belongs to this room membership."""
     delivery: Row | None = None
     delivery_identity = _delivery_identity(content)
-    sender_owns_principal = principal_id.endswith(f"@{sender}")
+    sender_owns_principal = matrix_user_of_principal(principal_id) == sender
     if delivery_identity is not None and sender_owns_principal:
         marked_principal, delivery_id, stage = delivery_identity
         if marked_principal == principal_id:
@@ -842,11 +851,11 @@ def _delivery(row: Row) -> MatrixDelivery:
     if not isinstance(payload, dict):
         msg = f"Outbox payload for delivery {row['delivery_id']!r} is not an object"
         raise TypeError(msg)
-    result = decode_delivery_result(
-        payload,
-        cast("str | None", row["result_json"]),
-        delivery_id=str(row["delivery_id"]),
-    )
+    raw_result = cast("str | None", row["result_json"])
+    result = None if raw_result is None else json.loads(raw_result)
+    if result is not None and not isinstance(result, dict):
+        msg = f"Outbox result for delivery {row['delivery_id']!r} is not an object"
+        raise TypeError(msg)
     return MatrixDelivery(
         delivery_id=row["delivery_id"],
         stage=DeliveryStage(row["stage"]),

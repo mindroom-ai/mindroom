@@ -38,7 +38,6 @@ class Coordination:
     owner: Mock
     local: Mock
     lookup: Mock
-    requester: Mock
 
 
 @pytest.fixture
@@ -77,9 +76,8 @@ def coordination(tmp_path: Path) -> Coordination:
     owner = Mock(spec=PersonalRoomService)
     local = Mock(spec=PersonalRoomService)
     lookup = Mock(return_value=PersonalRoomTarget(owner, first_sync_complete=True))
-    requester = Mock(side_effect=lambda event: event.sender)
-    lifecycle = PersonalRoomLifecycle("router", runtime, paths, local, lookup, requester)
-    return Coordination(lifecycle, owner, local, lookup, requester)
+    lifecycle = PersonalRoomLifecycle("router", runtime, paths, local, lookup)
+    return Coordination(lifecycle, owner, local, lookup)
 
 
 @dataclass
@@ -120,7 +118,6 @@ def template_coordination(tmp_path: Path) -> TemplateCoordination:
         paths,
         Mock(spec=PersonalRoomService),
         lookup,
-        Mock(side_effect=lambda event: event.sender),
         provision,
     )
     return TemplateCoordination(lifecycle, target, lookup, provision)
@@ -201,9 +198,13 @@ async def test_commands_require_exact_self_request_in_onboarding_room(coordinati
     """Only a trusted self-command can reach the selected owner's service."""
     lifecycle = coordination.lifecycle
     room = nio.MatrixRoom("!lobby:localhost", "@mindroom_router:localhost")
-    assert not await lifecycle.handle_command(room, command("!personal @bob:localhost"))
-    assert not await lifecycle.handle_command(nio.MatrixRoom("!other:localhost", room.own_user_id), command())
-    assert await lifecycle.handle_command(room, command("  !personal  "))
+    assert not await lifecycle.handle_command(room, command("!personal @bob:localhost"), "@alice:localhost")
+    assert not await lifecycle.handle_command(
+        nio.MatrixRoom("!other:localhost", room.own_user_id),
+        command(),
+        "@alice:localhost",
+    )
+    assert await lifecycle.handle_command(room, command("  !personal  "), "@alice:localhost")
     coordination.lookup.assert_called_with("helper")
     coordination.owner.ensure.assert_awaited_once_with(
         "@alice:localhost",
@@ -212,9 +213,8 @@ async def test_commands_require_exact_self_request_in_onboarding_room(coordinati
         reinvite_departed_owner=False,
     )
     coordination.owner.ensure.reset_mock()
-    coordination.requester.side_effect = None
-    coordination.requester.return_value = "@bob:localhost"
-    assert await lifecycle.handle_command(room, command())
+    # The event's trusted requester is someone else, as when an entity relays alice's words for bob.
+    assert await lifecycle.handle_command(room, command(), "@bob:localhost")
     coordination.owner.ensure.assert_not_awaited()
 
 
@@ -247,7 +247,11 @@ async def test_non_router_never_routes_onboarding(coordination: Coordination) ->
     lifecycle.agent_name = "helper"
     lifecycle.runtime.config.personal_rooms.backfill = True
     assert not lifecycle.observes_onboarding_joins
-    assert not await lifecycle.handle_command(nio.MatrixRoom("!lobby:localhost", "@helper:localhost"), command())
+    assert not await lifecycle.handle_command(
+        nio.MatrixRoom("!lobby:localhost", "@helper:localhost"),
+        command(),
+        "@alice:localhost",
+    )
     await lifecycle._onboard("@alice:localhost", "!lobby:localhost")
     await lifecycle._reconcile()
     coordination.lookup.assert_not_called()
@@ -469,7 +473,7 @@ async def test_live_triggers_ignore_reconciliation_backoff(coordination: Coordin
     lifecycle.runtime.config.personal_rooms.backfill = True
     coordination.owner.ensure.side_effect = [RuntimeError("membership mismatch"), None, None, None]
     await lifecycle._reconcile()
-    assert await lifecycle.handle_command(LOBBY, command())
+    assert await lifecycle.handle_command(LOBBY, command(), "@alice:localhost")
     await lifecycle.member_event(LOBBY, lobby_rejoin())
     join = RoomMemberJoin(LOBBY.room_id, "$join", "@alice:localhost", "@alice:localhost", None, None, "join", None)
     await lifecycle.baseline_join(join)
@@ -503,7 +507,7 @@ async def test_failed_live_trigger_without_recorded_intent_is_retried(coordinati
     """A command that fails before its owner records any intent is still retried by the next pass."""
     lifecycle = coordination.lifecycle
     coordination.owner.ensure.side_effect = [RuntimeError("Personal-room onboarding membership unavailable"), None]
-    assert await lifecycle.handle_command(LOBBY, command())
+    assert await lifecycle.handle_command(LOBBY, command(), "@alice:localhost")
 
     await lifecycle._reconcile()
 
@@ -527,7 +531,7 @@ async def test_live_trigger_failing_during_a_pass_keeps_reconciliation_pending(c
     async def ensure(user_id: str, *_args: object, **_kwargs: object) -> None:
         attempts.append(user_id)
         if len(attempts) == 1:
-            assert await lifecycle.handle_command(LOBBY, command())
+            assert await lifecycle.handle_command(LOBBY, command(), "@alice:localhost")
         elif len(attempts) == 2:
             msg = "Personal-room invite failed"
             raise RuntimeError(msg)
@@ -559,7 +563,7 @@ async def test_successful_live_trigger_retires_only_the_retry_it_covers(
     if second_trigger == "rejoin":
         await lifecycle.member_event(LOBBY, lobby_rejoin())
     else:
-        assert await lifecycle.handle_command(LOBBY, command())
+        assert await lifecycle.handle_command(LOBBY, command(), "@alice:localhost")
 
     await lifecycle._reconcile()
 
@@ -603,7 +607,7 @@ async def test_live_trigger_preserves_cancellation(coordination: Coordination) -
     """Shutdown cancellation still stops an onboarding-room trigger instead of settling it."""
     coordination.owner.ensure.side_effect = asyncio.CancelledError
     with pytest.raises(asyncio.CancelledError):
-        await coordination.lifecycle.handle_command(LOBBY, command())
+        await coordination.lifecycle.handle_command(LOBBY, command(), "@alice:localhost")
 
 
 @pytest.mark.asyncio

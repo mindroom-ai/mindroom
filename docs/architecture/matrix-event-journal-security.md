@@ -12,7 +12,8 @@ Room membership is not the boundary either, because two bots joined to the same 
 
 Approval coordination is the one place that deliberately crosses principals, because the router owns approval cards while the responding entity owns the paused continuation.
 It does so only by validating persisted card-to-continuation relationships inside the runtime, and it is not a way for ordinary conversation readers to select another principal.
-Turn records are scoped to the agent name alone, so a re-login under a new Matrix ID does not answer every outstanding message again, and they still hold conversation-derived text.
+Turn rows and redactions are scoped to the agent name alone, so a re-login under a new Matrix ID neither answers every outstanding message again nor forgets a deletion, and turn rows still hold conversation-derived text.
+A redaction one login observes is applied to the projection, pending journal rows, and replies of every login of that agent, and never to another agent's rows; the logins share the deletion fact, not content.
 
 ## Where durable plaintext lives
 
@@ -22,29 +23,32 @@ Turn records are scoped to the agent name alone, so a re-login under a new Matri
 - `visible_messages.content_json` holds the current visible body of each logical message and keeps no edit history.
   Redacting a message deletes its row and its held edits, and redacting the revision on screen clears the body in the same transaction, after which no read returns that message until a refetch installs the server's replacement.
   The truncated preview carried by a message too large for one Matrix event is never stored as its body.
-  A departure deletes the departing principal's projection for that room, including its held edits and redaction tombstones, while other bots in the room keep theirs.
+  A departure deletes the departing principal's projection for that room, including its held edits, while other bots in the room keep theirs; the agent's record of each redaction stays, so a bot that rejoins keeps hiding content redacted before it left.
 - `unresolved_edits.content_json` holds an edit whose target has not arrived yet, and it is deleted the moment the target lands or is redacted.
   Redacting the held edit itself clears its payload but keeps its identity and ordering until the target arrives.
 - `interactive_questions.question_json` holds question text and options for every revision, including superseded revisions needed for source replay and consumption proof.
   Redacting a revision deletes its row, and deleting the logical message deletes all of its revisions.
-- `turn_records.record_json` holds turn identity, outcome, and regeneration content.
-  Its prepared voice-source checkpoint (prepared body, Matrix content, batching scope, and echo thread) lets a retry skip transcription, is never copied into agent run metadata, and is removed on turn completion or source redaction, including redaction through a source's discovery alias.
-  Records holding a conversation's redaction tombstone are kept indefinitely, because history cleanup derives from them; other records follow age and count retention once no unsettled source or unfinished turn fact protects them.
+- `turns` holds turn identity, outcome, response context, and a command's checkpointed result text, and `turn_sources` holds each source's regeneration prompt and attribution.
+  `turn_sources.prepared_voice_json` holds a voice source's checkpoint (prepared body, Matrix content, batching scope, and echo thread), which lets a retry skip transcription, is never copied into agent run metadata, and is removed on turn completion, on redaction of the source or of the message it answers for, and at the next retention pass once none of the turn's sources is unsettled and the turn has no recorded response context.
+  A redaction clears, in the transaction that admits it, the prompt and checkpoint of the source it deletes and of a source whose selected edit it is, and every later write is checked against it, so text written after a deletion is never stored.
+  Turns follow age and count retention once no unsettled source or unfinished turn fact protects them.
+- `event_redactions` holds only the ids of each redacted event and its room, per agent, and is kept indefinitely, because history cleanup and replay derive from it; `legacy_summary_revisions` holds only ids an upgrade copied from older turn records.
 - `matrix_delivery_outbox.payload_json` holds each response or tool-approval event frozen before it is sent, `result_json` holds local completion facts, which can include final response text and interactive metadata, and `reply_row_json` can hold the reply text that delivery writes.
   Rows an earlier release wrote can also hold source prompts inside a serialized prepared edit turn record.
-- `approval_continuations.context_json` can hold the original `request_body`, `memory_prompt`, and `memory_thread_history[*].body` needed to resume an approved call, and `approval_continuation_calls.reason` can hold the text of a human's denial reply; both are deleted with the continuation after terminal delivery or cleanup.
+- `approval_continuations.context_json` can hold the original `request_body`, `memory_prompt`, and `memory_thread_history[*].body` needed to resume an approved call, and `failure_detail` can hold the unredacted text of the error that failed a paused reply, which is redacted only where it is shown; both are deleted with the continuation after terminal delivery or cleanup.
+- `approval_calls.reason` can hold the text of a human's denial reply to any approval card, and `tool_name`, `invoking_agent`, `approver_user_id`, and `resolved_by` name the call and the people involved.
+  A paused reply's call is deleted with its continuation, or when the last card that shows it retires if that is later; a scheduled call's goes with its binding, and a script or job run's when retention prunes the run, never before its cards retire.
 - `reply_messages.presentation_json` and `possibly_shown_json` hold what each AI reply shows and what its latest progress edit may have shown: visible text, tool trace, and team presentation state.
   `reply_messages.owed_write_json` can hold reply text a Matrix write still owes, and `reply_spans.rollback_json` holds the presentation a claimed span restores if it rolls back.
   `reply_tool_calls.entry_json` records every tool call before it runs, with its redacted argument preview and, once it returns, its redacted result preview, whether or not the reply shows tool calls.
   These traces also carry internal tool-call and member-scope identities that Matrix message metadata omits, and a finished reply, its spans, and its tool calls are deleted with handled-turn retention.
 - Approval terminal edits are frozen outbox stages stripped of full-argument transport fields and pending duration choices, keeping the compact argument preview and grant acknowledgement.
-  `approval_cards`, `approval_action_tombstones`, `approval_grant_cards`, and `approval_grant_locks` hold identities, scopes, and references rather than conversation text.
+  `approval_cards`, `approval_card_events`, `approval_card_scopes`, and `approval_grant_locks` hold identities, scopes, and references rather than conversation text; a retired card and its events stay so a later click on them is recognized as terminal.
 - `approval_grants.resolution_json` holds the terminal card body and redacted argument preview needed to publish a later revocation edit.
   Grant maintenance clears it when an unrevoked grant expires, when either owning principal leaves the room, or when the revocation edit is acknowledged, and acknowledged revocation outbox rows are removed once it is cleared.
   A revocation accepted before expiry keeps its material until acknowledged, and compact grant identity remains so a duplicate action cannot recreate a window.
 - `scheduled_call_approvals.arguments_json` holds each scheduled call's unredacted arguments beside its task, room, thread, requester, and approver, while Matrix task state and the trigger carry only the task ID.
   Grant maintenance deletes the row 30 days after its send time or withdrawal, once its card has retired and any receipt is settled.
-- `background_approval_calls.reason` can hold the text of a human's denial reply to a scheduled-call or script approval card, and it is deleted with its scheduled-call binding or when retention prunes its script run, never before the shared card retires.
 - `tool_jobs.job_json` keeps each background job's snapshot: its owner and conversation, the tool name, the call's unredacted arguments, a result summary of at most 500 characters, and for a background subagent the child's saved state.
   `tool_jobs.result_payload_json` keeps the job's full result, including returned media bytes, up to 64 MiB of encoded JSON.
   An ended job, read or not, is deleted 30 days after its last change, or one day after it when the call that started the job returned its result inline, once its turn has finished and no approval in its session is pending; redacting the message that started it or the bot leaving the room does not delete it sooner.

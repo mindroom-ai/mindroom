@@ -18,14 +18,11 @@ import pytest
 from pydantic import ValidationError
 
 from mindroom import interactive
-from mindroom.cancellation import SYNC_RESTART_CANCEL_MSG, USER_STOP_CANCEL_MSG, CancelSource
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig, RouterConfig, StreamingConfig
 from mindroom.constants import (
-    STREAM_STATUS_CANCELLED,
     STREAM_STATUS_COMPLETED,
-    STREAM_STATUS_ERROR,
     STREAM_STATUS_KEY,
     STREAM_STATUS_STREAMING,
     STREAM_VISIBLE_BODY_KEY,
@@ -85,7 +82,6 @@ from tests.conftest import (
     make_matrix_client_mock,
     message_origin,
     patch_response_runner_module,
-    process_and_respond_for_test,
     push_stream_chunk,
     replace_response_runner_deps,
     request_envelope,
@@ -94,13 +90,14 @@ from tests.conftest import (
     unwrap_extracted_collaborator,
 )
 from tests.identity_helpers import persist_entity_accounts
-from tests.reply_span_helpers import response_span
 from tests.response_attempt_helpers import install_direct_response_admission
+from tests.streaming_helpers import FakeReplyRecords, reply_hooks
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Awaitable, Callable
 
     from mindroom.bot import AgentBot
+    from mindroom.response_turn import ResponseTurnContext
 
 IN_PROGRESS_MARKER = " ⋯"
 _INTERRUPTION_SUMMARY = "(turn stopped before completion)"
@@ -109,6 +106,15 @@ _INTERRUPTION_SUMMARY = "(turn stopped before completion)"
 async def _aiter(*events: object) -> AsyncIterator[object]:
     for event in events:
         yield event
+
+
+def _answer_stream(text: str) -> Callable[..., AsyncIterator[str]]:
+    """Return a turn stream that answers ``text`` each time a turn runs."""
+
+    def stream(*_args: object, **_kwargs: object) -> AsyncIterator[str]:
+        return _aiter(text)
+
+    return stream
 
 
 def _render_cleaned_interrupted_replay(body: str) -> str:
@@ -165,7 +171,6 @@ def _make_bot_with_shared_knowledge(
         agent,
         tmp_path,
         rooms=["!test:localhost"],
-        enable_streaming=True,
         config=config,
         runtime_paths=runtime_paths_for(config),
     )
@@ -229,6 +234,7 @@ async def test_dropped_optional_delivery_still_sends_latest_visible_text(tmp_pat
         update_char_threshold=1,
         min_update_char_threshold=1,
         min_char_update_interval=0.0,
+        **reply_hooks(),
     )
     streaming.last_update = float("-inf")
     streaming.accumulated_text = "stale body"
@@ -260,11 +266,7 @@ async def test_a_progress_edit_its_records_defer_is_skipped_not_failed(tmp_path:
     mock_response.event_id = "$edit"
     mock_client.room_send.return_value = mock_response
     config = bind_runtime_paths(Config(), test_runtime_paths(tmp_path))
-    permissions = [ProgressPermission.DEFER, ProgressPermission.SEND]
-
-    async def write_ahead(_progress: object) -> ProgressPermission:
-        return permissions.pop(0)
-
+    records = FakeReplyRecords(progress_permissions=[ProgressPermission.DEFER, ProgressPermission.SEND])
     streaming = StreamingResponse(
         target=MessageTarget.resolve("!test:localhost", None, "$original_123"),
         config=config,
@@ -275,7 +277,7 @@ async def test_a_progress_edit_its_records_defer_is_skipped_not_failed(tmp_path:
         update_char_threshold=1,
         min_update_char_threshold=1,
         min_char_update_interval=0.0,
-        progress_write_ahead=write_ahead,
+        **records.hooks(),
     )
     streaming.event_id = "$reply"
     streaming.accumulated_text = "progress"
@@ -336,14 +338,12 @@ class TestStreamingBehavior:
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize("streaming", [True, False], ids=["streamed", "not_streamed"])
-    @patch("mindroom.response_runner.ai_response")
     @patch("mindroom.response_runner.stream_agent_response")
     @patch("mindroom.response_runner.should_use_streaming")
     async def test_streaming_agent_mentions_another_agent(  # noqa: PLR0915
         self,
         mock_should_use_streaming: AsyncMock,
-        mock_stream_agent_response: AsyncMock,
-        mock_ai_response: AsyncMock,
+        mock_stream_agent_response: MagicMock,
         mock_helper_agent: AgentMatrixUser,
         mock_calculator_agent: AgentMatrixUser,
         tmp_path: Path,
@@ -365,12 +365,12 @@ class TestStreamingBehavior:
 
         # Set up helper bot (the one that will stream)
         config = self.config
+        config.defaults.enable_streaming = streaming
 
         helper_bot = make_test_agent_bot(
             mock_helper_agent,
             tmp_path,
             rooms=["!test:localhost"],
-            enable_streaming=streaming,
             config=config,
             runtime_paths=runtime_paths_for(config),
         )
@@ -383,14 +383,14 @@ class TestStreamingBehavior:
         mock_orchestrator.current_config = config
         helper_bot.orchestrator = mock_orchestrator
 
-        # Set up calculator bot (the one that will be mentioned)
-        config = self.config
+        # Set up calculator bot (the one that will be mentioned) with its own non-streaming config
+        config = bind_runtime_paths(self.config, runtime_paths_for(self.config))
+        config.defaults.enable_streaming = False
 
         calc_bot = make_test_agent_bot(
             mock_calculator_agent,
             tmp_path,
             rooms=["!test:localhost"],
-            enable_streaming=False,
             config=config,
             runtime_paths=runtime_paths_for(config),
         )
@@ -410,15 +410,16 @@ class TestStreamingBehavior:
         helper_bot.client.room_send.return_value = mock_send_response
         calc_bot.client.room_send.return_value = mock_send_response
 
-        # Mock AI responses: the helper's reply when it does not stream, then the calculator's
-        mock_ai_response.return_value = "Let me help with that calculation. @mindroom_calculator:localhost what's 2+2?"
+        # Each bot's turn answers through its stream: the helper mentions the calculator, which answers "4".
+        answered: list[str] = []
 
-        # Create a generator that yields the streaming response
-        async def streaming_generator() -> AsyncIterator[str]:
-            yield "Let me help with that calculation. "
-            yield "@mindroom_calculator:localhost what's 2+2?"
+        def answer(ctx: ResponseTurnContext, *_args: object, **_kwargs: object) -> AsyncIterator[object]:
+            answered.append(ctx.entity_label)
+            if ctx.entity_label == "helper":
+                return _aiter("Let me help with that calculation. ", "@mindroom_calculator:localhost what's 2+2?")
+            return _aiter("4")
 
-        mock_stream_agent_response.return_value = streaming_generator()
+        mock_stream_agent_response.side_effect = answer
 
         # Set up room
         mock_room = MagicMock()
@@ -450,8 +451,7 @@ class TestStreamingBehavior:
         )
         assert len(streaming_edit_contents) == int(streaming)
         assert final_edit_content[STREAM_STATUS_KEY] == STREAM_STATUS_COMPLETED
-        mock_ai_response.reset_mock()
-        mock_ai_response.return_value = "4"
+        assert answered == ["helper"]
 
         def helper_event(event_id: str, content: dict[str, object]) -> nio.RoomMessageText:
             return nio.RoomMessageText.from_dict(
@@ -476,7 +476,7 @@ class TestStreamingBehavior:
             await drain_coalescing(calc_bot)
 
         assert calc_bot.client.room_send.call_count == 0
-        assert mock_ai_response.call_count == 0
+        assert answered == ["helper"]
 
         # The final edit wakes the calculator once, however often it is delivered.
         final_edit = helper_event("$helper_final_edit", final_edit_content)
@@ -485,13 +485,13 @@ class TestStreamingBehavior:
             await drain_coalescing(calc_bot)
 
         assert calc_bot.client.room_send.call_count == 2  # thinking + final
-        assert mock_ai_response.call_count == 1
+        assert answered == ["helper", "calculator"]
 
     @pytest.mark.asyncio
-    @patch("mindroom.response_runner.ai_response")
+    @patch("mindroom.response_runner.stream_agent_response")
     async def test_agent_responds_only_to_final_message(
         self,
-        mock_ai_response: AsyncMock,
+        mock_stream_agent_response: MagicMock,
         mock_helper_agent: AgentMatrixUser,  # noqa: ARG002
         mock_calculator_agent: AgentMatrixUser,
         tmp_path: Path,
@@ -499,12 +499,12 @@ class TestStreamingBehavior:
         """Test that agents respond to the final complete message, not edits."""
         # Set up calculator bot
         config = self.config
+        config.defaults.enable_streaming = False
 
         calc_bot = make_test_agent_bot(
             mock_calculator_agent,
             tmp_path,
             rooms=["!test:localhost"],
-            enable_streaming=False,
             config=config,
             runtime_paths=runtime_paths_for(config),
         )
@@ -522,8 +522,8 @@ class TestStreamingBehavior:
         mock_send_response.__class__ = nio.RoomSendResponse
         calc_bot.client.room_send.return_value = mock_send_response
 
-        # Mock AI response
-        mock_ai_response.return_value = "4"
+        # Mock the turn's answer
+        mock_stream_agent_response.side_effect = _answer_stream("4")
 
         # Set up room
         mock_room = MagicMock()
@@ -545,11 +545,11 @@ class TestStreamingBehavior:
         await calc_bot._on_message(mock_room, initial_event)
         await drain_coalescing(calc_bot)
         assert calc_bot.client.room_send.call_count == 2  # thinking + final
-        assert mock_ai_response.call_count == 1
+        assert mock_stream_agent_response.call_count == 1
 
         # Reset mocks
         calc_bot.client.room_send.reset_mock()
-        mock_ai_response.reset_mock()
+        mock_stream_agent_response.reset_mock()
 
         # Helper edits to add more context (simulating streaming)
         edit_event = MagicMock()
@@ -571,7 +571,7 @@ class TestStreamingBehavior:
         await calc_bot._on_message(mock_room, edit_event)
         await drain_coalescing(calc_bot)
         assert calc_bot.client.room_send.call_count == 0
-        assert mock_ai_response.call_count == 0
+        assert mock_stream_agent_response.call_count == 0
 
     @pytest.mark.asyncio
     async def test_streaming_response_flow(
@@ -593,6 +593,7 @@ class TestStreamingBehavior:
             target=MessageTarget.resolve("!test:localhost", None, "$original_123"),
             config=config,
             runtime_paths=runtime_paths_for(config),
+            **reply_hooks(),
         )
 
         # Simulate streaming chunks
@@ -637,14 +638,6 @@ class TestStreamingBehavior:
     async def test_oversized_nonterminal_sidecar_edits_are_rate_limited(self) -> None:
         """Oversized in-progress edits should not burst sidecar uploads while final still sends."""
         mock_client = _make_matrix_client_mock()
-        streaming = StreamingResponse(
-            target=MessageTarget.resolve("!test:localhost", "$thread_123", "$original_123"),
-            config=self.config,
-            runtime_paths=runtime_paths_for(self.config),
-        )
-        streaming.event_id = "$stream_123"
-        streaming.accumulated_text = "x" * 40000
-
         now = {"value": 100.0}
         delivered_edits: list[dict[str, object]] = []
 
@@ -660,9 +653,19 @@ class TestStreamingBehavior:
             )
             return DeliveredMatrixEvent(event_id="$edit", content_sent=dict(new_content))
 
+        mock_edit = AsyncMock(side_effect=delivered_edit)
+        streaming = StreamingResponse(
+            target=MessageTarget.resolve("!test:localhost", "$thread_123", "$original_123"),
+            config=self.config,
+            runtime_paths=runtime_paths_for(self.config),
+            **FakeReplyRecords(edit=mock_edit).hooks(),
+        )
+        streaming.event_id = "$stream_123"
+        streaming.accumulated_text = "x" * 40000
+
         with (
             patch("mindroom.matrix.large_messages.monotonic", side_effect=lambda: now["value"]),
-            patch("mindroom.streaming.edit_message_result", new=AsyncMock(side_effect=delivered_edit)) as mock_edit,
+            patch("mindroom.streaming.edit_message_result", new=mock_edit),
         ):
             assert await streaming._send_or_edit_message(mock_client)
             assert mock_edit.await_count == 1
@@ -684,11 +687,7 @@ class TestStreamingBehavior:
             assert mock_edit.await_count == 2
 
             streaming.accumulated_text += " final"
-            assert await streaming._send_or_edit_message(
-                mock_client,
-                is_final=True,
-                stream_status=STREAM_STATUS_COMPLETED,
-            )
+            await streaming.finalize(mock_client)
             assert mock_edit.await_count == 3
 
     @pytest.mark.asyncio
@@ -699,6 +698,7 @@ class TestStreamingBehavior:
             target=MessageTarget.resolve("!test:localhost", "$thread_123", "$original_123"),
             config=self.config,
             runtime_paths=runtime_paths_for(self.config),
+            **reply_hooks(),
         )
         streaming.event_id = "$stream_123"
         streaming.accumulated_text = "x" * 40000
@@ -727,6 +727,7 @@ class TestStreamingBehavior:
             update_interval=5.0,
             min_update_interval=0.5,
             interval_ramp_seconds=15.0,
+            **reply_hooks(),
         )
         streaming.stream_started_at = 100.0
 
@@ -749,6 +750,7 @@ class TestStreamingBehavior:
             update_char_threshold=180,
             min_update_char_threshold=30,
             interval_ramp_seconds=15.0,
+            **reply_hooks(),
         )
         streaming.stream_started_at = 100.0
 
@@ -768,6 +770,7 @@ class TestStreamingBehavior:
             target=MessageTarget.resolve("!test:localhost", None, "$original_123"),
             config=self.config,
             runtime_paths=runtime_paths_for(self.config),
+            **reply_hooks(),
         )
 
         streaming._update("abc")
@@ -782,6 +785,7 @@ class TestStreamingBehavior:
             target=MessageTarget.resolve("!test:localhost", None, "$original_123"),
             config=self.config,
             runtime_paths=runtime_paths_for(self.config),
+            **reply_hooks(),
         )
         assert streaming.stream_started_at is None
         # Before stream starts, ramp is inactive so steady-state interval is returned
@@ -860,6 +864,7 @@ class TestStreamingBehavior:
             update_interval=5.0,
             min_update_interval=0.5,
             interval_ramp_seconds=15.0,
+            **reply_hooks(),
         )
         streaming.accumulated_text = "hello"
 
@@ -885,6 +890,7 @@ class TestStreamingBehavior:
             update_char_threshold=5,
             min_update_char_threshold=5,
             min_char_update_interval=0.0,
+            **reply_hooks(),
         )
         streaming.last_update = time.time()
 
@@ -913,6 +919,7 @@ class TestStreamingBehavior:
                 interval_ramp_seconds=0.0,
                 max_idle=0.25,
                 show_tool_calls=show_tool_calls,
+                **reply_hooks(),
             )
             streaming.last_update = 100.0
             streaming.stream_started_at = 100.0
@@ -968,6 +975,7 @@ class TestStreamingBehavior:
             min_char_update_interval=0.0,
             max_idle=0.25,
             show_tool_calls=True,
+            **reply_hooks(),
         )
         streaming.last_update = 100.0
         streaming.stream_started_at = 100.0
@@ -1023,6 +1031,7 @@ class TestStreamingBehavior:
             interval_ramp_seconds=0.0,
             max_idle=0.25,
             show_tool_calls=True,
+            **reply_hooks(),
         )
         streaming.last_update = 100.0
         streaming.stream_started_at = 100.0
@@ -1086,6 +1095,7 @@ class TestStreamingBehavior:
             min_char_update_interval=10.0,
             max_idle=0.25,
             show_tool_calls=True,
+            **reply_hooks(),
         )
         streaming.last_update = 100.0
         streaming.stream_started_at = 100.0
@@ -1157,6 +1167,7 @@ class TestStreamingBehavior:
             progress_update_interval=10.0,
             max_idle=0.25,
             show_tool_calls=True,
+            **reply_hooks(),
         )
         streaming.last_update = 100.0
         streaming.stream_started_at = 100.0
@@ -1227,6 +1238,7 @@ class TestStreamingBehavior:
             progress_update_interval=10.0,
             max_idle=0.25,
             show_tool_calls=True,
+            **reply_hooks(),
         )
         streaming.last_update = 100.0
         streaming.stream_started_at = 100.0
@@ -1285,6 +1297,7 @@ class TestStreamingBehavior:
             progress_update_interval=10.0,
             max_idle=0.25,
             show_tool_calls=True,
+            **reply_hooks(),
         )
         streaming.last_update = float("-inf")
 
@@ -1363,6 +1376,7 @@ class TestStreamingBehavior:
             min_char_update_interval=0.0,
             max_idle=10.0,
             show_tool_calls=show_tool_calls,
+            **reply_hooks(),
         )
         streaming.last_update = 100.0
         streaming.stream_started_at = 100.0
@@ -1415,6 +1429,7 @@ class TestStreamingBehavior:
             progress_update_interval=10.0,
             max_idle=10.0,
             show_tool_calls=True,
+            **reply_hooks(),
         )
         streaming.event_id = "$existing_event"
         streaming.last_update = 100.0
@@ -1473,6 +1488,7 @@ class TestStreamingBehavior:
             min_char_update_interval=0.0,
             max_idle=0.25,
             show_tool_calls=True,
+            **reply_hooks(),
         )
         streaming.last_update = 100.0
         streaming.stream_started_at = 100.0
@@ -1515,6 +1531,7 @@ class TestStreamingBehavior:
             min_update_char_threshold=10_000,
             min_char_update_interval=0.0,
             max_idle=0.25,
+            **reply_hooks(),
         )
         streaming.event_id = "$existing_event"
         streaming.stream_started_at = 100.0
@@ -1553,6 +1570,7 @@ class TestStreamingBehavior:
             min_update_char_threshold=10_000,
             min_char_update_interval=10.0,
             max_idle=0.25,
+            **reply_hooks(),
         )
         streaming.last_update = float("-inf")
 
@@ -1588,6 +1606,7 @@ class TestStreamingBehavior:
             interval_ramp_seconds=0.0,
             update_char_threshold=100,
             min_char_update_interval=0.35,
+            **reply_hooks(),
         )
         streaming.last_update = float("-inf")
         delta_seconds = 0.025
@@ -1632,6 +1651,7 @@ class TestStreamingBehavior:
             min_char_update_interval=0.35,
             max_idle=10.0,
             visible_progress_callback=lambda _body, _trace: first_send_landed.set(),
+            **reply_hooks(),
         )
         streaming.last_update = float("-inf")
 
@@ -1697,6 +1717,7 @@ class TestStreamingBehavior:
             max_idle=10.0,
             show_tool_calls=True,
             visible_progress_callback=lambda _body, _trace: first_send_landed.set(),
+            **reply_hooks(),
         )
         streaming.last_update = float("-inf")
         tool = ToolExecution(
@@ -1768,6 +1789,7 @@ class TestStreamingBehavior:
             min_char_update_interval=0.35,
             max_idle=0.25,
             visible_progress_callback=lambda _body, _trace: first_send_landed.set(),
+            **reply_hooks(),
         )
         streaming.last_update = float("-inf")
 
@@ -1826,6 +1848,7 @@ class TestStreamingBehavior:
             target=MessageTarget.resolve("!test:localhost", None, "$original_123"),
             config=self.config,
             runtime_paths=runtime_paths_for(self.config),
+            **reply_hooks(),
         )
         streaming.accumulated_text = "hello"
         streaming.chars_since_last_update = len(streaming.accumulated_text)
@@ -1855,6 +1878,7 @@ class TestStreamingBehavior:
             min_update_char_threshold=10_000,
             min_char_update_interval=0.0,
             max_idle=0.25,
+            **reply_hooks(),
         )
         streaming.event_id = "$existing_event"
         streaming.stream_started_at = 100.0
@@ -1889,6 +1913,7 @@ class TestStreamingBehavior:
             min_update_char_threshold=10_000,
             min_char_update_interval=0.0,
             max_idle=0.25,
+            **reply_hooks(),
         )
         streaming.event_id = "$existing_event"
         streaming.stream_started_at = 100.0
@@ -1917,6 +1942,7 @@ class TestStreamingBehavior:
             min_update_char_threshold=10_000,
             min_char_update_interval=0.0,
             max_idle=0.25,
+            **reply_hooks(),
         )
         streaming.event_id = "$existing_event"
         streaming.stream_started_at = 100.0
@@ -1940,7 +1966,10 @@ class TestStreamingBehavior:
         """A failed phase-boundary flush should preserve buffered chars so the marker can still surface."""
         mock_client = _make_matrix_client_mock()
         sent_bodies: list[str] = []
-        send_results = iter((False, True))
+        send_results = iter((False,))
+
+        async def deliver(_client: object, _room_id: str, content: dict[str, object]) -> DeliveredMatrixEvent:
+            return DeliveredMatrixEvent(event_id="$final", content_sent=dict(content))
 
         streaming = StreamingResponse(
             target=MessageTarget.resolve("!test:localhost", None, "$original_123"),
@@ -1954,6 +1983,7 @@ class TestStreamingBehavior:
             min_char_update_interval=0.0,
             max_idle=10.0,
             show_tool_calls=True,
+            **FakeReplyRecords(send=deliver).hooks(),
         )
         streaming.last_update = 100.0
         streaming.stream_started_at = 100.0
@@ -1977,13 +2007,15 @@ class TestStreamingBehavior:
 
         with patch("mindroom.streaming.time.time", side_effect=[100.0, 100.0, 100.1, 100.1, 100.1]):
             await _consume_streaming_chunks_for_test(mock_client, response_stream(), streaming)
-        await streaming.finalize(mock_client)
+        outcome = await streaming.finalize(mock_client)
 
-        assert streaming._send_or_edit_message.await_count == 2
+        assert streaming._send_or_edit_message.await_count == 1
         assert sent_bodies[0].startswith("x" * 40)
         assert "search_web" in sent_bodies[0]
-        assert sent_bodies[1].startswith("x" * 40)
-        assert "search_web" in sent_bodies[1]
+        # The terminal update the failed flush left owed still shows the marker.
+        assert outcome.rendered_body is not None
+        assert outcome.rendered_body.startswith("x" * 40)
+        assert "search_web" in outcome.rendered_body
 
     @pytest.mark.asyncio
     async def test_idle_does_not_fire_below_min_char_interval(self) -> None:
@@ -2000,6 +2032,7 @@ class TestStreamingBehavior:
             min_update_char_threshold=10_000,
             min_char_update_interval=0.35,
             max_idle=0.25,
+            **reply_hooks(),
         )
         streaming.event_id = "$existing_event"
         streaming.stream_started_at = 100.0
@@ -2029,6 +2062,7 @@ class TestStreamingBehavior:
             runtime_paths=runtime_paths_for(self.config),
             update_interval=5.0,
             progress_update_interval=0.2,
+            **reply_hooks(),
         )
         streaming.event_id = "$existing_event"
         streaming.accumulated_text = "working"
@@ -2054,6 +2088,7 @@ class TestStreamingBehavior:
             runtime_paths=runtime_paths_for(self.config),
             update_interval=5.0,
             progress_update_interval=0.2,
+            **reply_hooks(),
         )
         streaming.event_id = "$existing_event"
         streaming.stream_started_at = 100.0
@@ -2093,6 +2128,7 @@ class TestStreamingBehavior:
             runtime_paths=runtime_paths_for(self.config),
             update_interval=5.0,
             progress_update_interval=0.2,
+            **reply_hooks(),
         )
         # No event_id set — simulates tool-first cold start
         streaming.stream_started_at = 100.0
@@ -2123,6 +2159,7 @@ class TestStreamingBehavior:
             update_interval=5.0,
             progress_update_interval=0.2,
             show_tool_calls=False,
+            **reply_hooks(),
         )
         streaming.accumulated_text = "\n\n"
         streaming.stream_started_at = 100.0
@@ -2143,6 +2180,12 @@ class TestStreamingBehavior:
         mock_response.__class__ = nio.RoomSendResponse
         mock_response.event_id = "$placeholder_msg"
         mock_client.room_send.return_value = mock_response
+        mock_edit = AsyncMock(
+            return_value=DeliveredMatrixEvent(
+                event_id="$placeholder_msg",
+                content_sent={"body": _PROGRESS_PLACEHOLDER},
+            ),
+        )
 
         streaming = StreamingResponse(
             target=MessageTarget.resolve("!test:localhost", None, "$original_123"),
@@ -2150,6 +2193,7 @@ class TestStreamingBehavior:
             runtime_paths=runtime_paths_for(self.config),
             update_interval=5.0,
             progress_update_interval=0.2,
+            **FakeReplyRecords(edit=mock_edit).hooks(),
         )
         # Simulate cold-start: progress hint created the initial placeholder
         streaming.stream_started_at = 100.0
@@ -2166,15 +2210,7 @@ class TestStreamingBehavior:
         assert IN_PROGRESS_MARKER not in initial_content["body"]
 
         # Now finalize with no text ever emitted
-        with patch(
-            "mindroom.streaming.edit_message_result",
-            new=AsyncMock(
-                return_value=DeliveredMatrixEvent(
-                    event_id="$placeholder_msg",
-                    content_sent={"body": _PROGRESS_PLACEHOLDER},
-                ),
-            ),
-        ) as mock_edit:
+        with patch("mindroom.streaming.edit_message_result", new=mock_edit):
             await streaming.finalize(mock_client)
 
         assert mock_edit.await_count == 1
@@ -2186,27 +2222,28 @@ class TestStreamingBehavior:
     async def test_finalize_does_not_overwrite_existing_message_without_placeholder(self) -> None:
         """Finalize should not force a placeholder onto arbitrary existing messages."""
         mock_client = _make_matrix_client_mock()
+        mock_edit = AsyncMock(
+            return_value=DeliveredMatrixEvent(
+                event_id="$existing_msg",
+                content_sent={"body": _PROGRESS_PLACEHOLDER},
+            ),
+        )
+        records = FakeReplyRecords(edit=mock_edit)
 
         streaming = StreamingResponse(
             target=MessageTarget.resolve("!test:localhost", None, "$original_123"),
             config=self.config,
             runtime_paths=runtime_paths_for(self.config),
+            **records.hooks(),
         )
         # Existing event from edit/ack flows, but no placeholder progress was sent.
         streaming.event_id = "$existing_msg"
 
-        with patch(
-            "mindroom.streaming.edit_message_result",
-            new=AsyncMock(
-                return_value=DeliveredMatrixEvent(
-                    event_id="$existing_msg",
-                    content_sent={"body": _PROGRESS_PLACEHOLDER},
-                ),
-            ),
-        ) as mock_edit:
+        with patch("mindroom.streaming.edit_message_result", new=mock_edit):
             await streaming.finalize(mock_client)
 
         assert mock_edit.await_count == 0
+        assert records.writes == []
 
     @pytest.mark.asyncio
     async def test_send_streaming_response_finalizes_adopted_placeholder_without_chunks(self) -> None:
@@ -2238,6 +2275,7 @@ class TestStreamingBehavior:
                 response_stream=empty_stream(),
                 existing_event_id="$thinking_123",
                 adopt_existing_placeholder=True,
+                **FakeReplyRecords(edit=record_edit).hooks(),
             )
 
         event_id = outcome.last_physical_stream_event_id
@@ -2257,7 +2295,7 @@ class TestStreamingBehavior:
         mock_helper_agent: AgentMatrixUser,
         tmp_path: Path,
     ) -> None:
-        """Streaming without a preexisting placeholder should keep the original thread root."""
+        """A streamed reply to a plain reply in a started thread keeps the original thread root on its first event."""
 
         @asynccontextmanager
         async def noop_typing(*_args: object, **_kwargs: object) -> AsyncIterator[None]:
@@ -2272,7 +2310,6 @@ class TestStreamingBehavior:
             mock_helper_agent,
             tmp_path,
             rooms=["!test:localhost"],
-            enable_streaming=True,
             config=config,
             runtime_paths=runtime_paths_for(config),
         )
@@ -2327,13 +2364,13 @@ class TestStreamingBehavior:
             patch("mindroom.delivery_gateway.send_message_outcome", new=record_send),
             patch_response_runner_module(
                 stream_agent_response=MagicMock(return_value=response_stream()),
+                should_use_streaming=AsyncMock(return_value=True),
                 typing_indicator=noop_typing,
             ),
         ):
-            async with response_span(runner, request):
-                generation = await process_and_respond_for_test(runner, request, streaming=True)
+            event_id = await runner.generate_response(request)
 
-        assert generation.delivery.event_id == "$stream_1"
+        assert event_id == "$stream_1"
         assert sent_contents
         first_content = sent_contents[0]
         assert first_content["m.relates_to"]["rel_type"] == "m.thread"
@@ -2358,18 +2395,18 @@ class TestStreamingBehavior:
             sent_messages.append((room_id, content))
             return DeliveredMatrixEvent(event_id="$stream_1", content_sent=dict(content))
 
-        with patch("mindroom.streaming.send_message_result", new=record_send):
-            streaming = StreamingResponse(
-                target=target,
-                config=self.config,
-                runtime_paths=runtime_paths_for(self.config),
-            )
+        streaming = StreamingResponse(
+            target=target,
+            config=self.config,
+            runtime_paths=runtime_paths_for(self.config),
+            **FakeReplyRecords(send=record_send).hooks(),
+        )
 
-            assert streaming.room_id == "!canonical:localhost"
-            assert streaming.thread_id == "$thread:localhost"
-            assert streaming.reply_to_event_id == "$reply:localhost"
+        assert streaming.room_id == "!canonical:localhost"
+        assert streaming.thread_id == "$thread:localhost"
+        assert streaming.reply_to_event_id == "$reply:localhost"
 
-            await push_stream_chunk(streaming, "Hello world", AsyncMock())
+        await push_stream_chunk(streaming, "Hello world", AsyncMock())
 
         assert sent_messages
         room_id, content = sent_messages[0]
@@ -2412,7 +2449,6 @@ class TestStreamingBehavior:
             body = "".join(chunks)
             return StreamTransportOutcome(
                 last_physical_stream_event_id="$response",
-                terminal_status="completed",
                 rendered_body=body,
                 visible_body_state="visible_body",
             )
@@ -2468,11 +2504,11 @@ class TestStreamingBehavior:
             base_id="fresh_turn_docs",
         )
 
-        async def fake_ai_response(*args: object, **_kwargs: object) -> str:
+        async def fake_stream_agent_response(*args: object, **_kwargs: object) -> AsyncIterator[str]:
             transient_enrichment_items = args[0].transient_enrichment_items
             assert len(transient_enrichment_items) == 1
             assert "Knowledge base `fresh_turn_docs` is initializing" in transient_enrichment_items[0].text
-            return "handled"
+            yield "handled"
 
         with (
             patch(
@@ -2496,12 +2532,12 @@ class TestStreamingBehavior:
                 new=AsyncMock(),
             ) as reindex_all,
             patch_response_runner_module(
-                ai_response=AsyncMock(side_effect=fake_ai_response),
+                should_use_streaming=AsyncMock(return_value=False),
+                stream_agent_response=fake_stream_agent_response,
                 typing_indicator=_noop_typing_indicator,
             ),
         ):
-            generation = await process_and_respond_for_test(
-                bot._response_runner,
+            event_id = await bot._response_runner.generate_response(
                 ResponseRequest(
                     sources=ResponseSources(
                         pending_event_ids=("$event",),
@@ -2519,7 +2555,7 @@ class TestStreamingBehavior:
                 ),
             )
 
-        assert generation.delivery.event_id == "$response"
+        assert event_id == "$response"
         assert sync_git_source.await_count == 0
         assert reindex_all.await_count == 0
 
@@ -2543,6 +2579,7 @@ class TestStreamingBehavior:
             target=MessageTarget.resolve("!test:localhost", None, "$original_123"),
             config=config,
             runtime_paths=runtime_paths_for(config),
+            **reply_hooks(),
         )
 
         # Stream some content
@@ -2565,87 +2602,11 @@ class TestStreamingBehavior:
         assert "Hello world" in final_content["body"]
 
     @pytest.mark.asyncio
-    async def test_cancelled_stream_preserves_partial_text_with_suffix(self) -> None:
-        """Cancellation should keep streamed text and append a stop marker."""
-        mock_client = _make_matrix_client_mock()
-        edited_texts: list[str] = []
-
-        async def record_edit(
-            _client: object,
-            _room_id: str,
-            _event_id: str,
-            _new_content: dict[str, object],
-            new_text: str,
-        ) -> DeliveredMatrixEvent:
-            edited_texts.append(new_text)
-            return DeliveredMatrixEvent(event_id="$edit", content_sent={})
-
-        async def cancelling_stream() -> AsyncIterator[str]:
-            yield "Partial answer"
-            raise asyncio.CancelledError(USER_STOP_CANCEL_MSG)
-
-        with (
-            patch("mindroom.streaming.edit_message_result", new=AsyncMock(side_effect=record_edit)),
-            pytest.raises(StreamingDeliveryError) as exc_info,
-        ):
-            await send_streaming_response(
-                client=mock_client,
-                target=MessageTarget.resolve("!test:localhost", None, "$original_123", room_mode=True),
-                config=self.config,
-                runtime_paths=runtime_paths_for(self.config),
-                response_stream=cancelling_stream(),
-                existing_event_id="$thinking_123",
-            )
-
-        assert len(edited_texts) == 2
-        assert IN_PROGRESS_MARKER not in edited_texts[0]
-        assert edited_texts[-1] == f"Partial answer\n\n{CANCELLED_RESPONSE_NOTE}"
-        assert exc_info.value.transport_outcome.terminal_status == "cancelled"
-        assert exc_info.value.transport_outcome.failure_reason == "cancelled_by_user"
-
-    @pytest.mark.asyncio
-    async def test_interrupted_stream_preserves_partial_text_with_suffix(self) -> None:
-        """Generic interruptions should not render as user-cancelled."""
-        mock_client = _make_matrix_client_mock()
-        edited_texts: list[str] = []
-
-        async def record_edit(
-            _client: object,
-            _room_id: str,
-            _event_id: str,
-            _new_content: dict[str, object],
-            new_text: str,
-        ) -> DeliveredMatrixEvent:
-            edited_texts.append(new_text)
-            return DeliveredMatrixEvent(event_id="$edit", content_sent={})
-
-        async def interrupted_stream() -> AsyncIterator[str]:
-            yield "Partial answer"
-            raise asyncio.CancelledError
-
-        with (
-            patch("mindroom.streaming.edit_message_result", new=AsyncMock(side_effect=record_edit)),
-            pytest.raises(StreamingDeliveryError),
-        ):
-            await send_streaming_response(
-                client=mock_client,
-                target=MessageTarget.resolve("!test:localhost", None, "$original_123", room_mode=True),
-                config=self.config,
-                runtime_paths=runtime_paths_for(self.config),
-                response_stream=interrupted_stream(),
-                existing_event_id="$thinking_123",
-            )
-
-        assert len(edited_texts) == 2
-        assert edited_texts[-1] == f"Partial answer\n\n{_INTERRUPTED_RESPONSE_NOTE}"
-
-    @pytest.mark.asyncio
     async def test_process_shutdown_does_not_start_terminal_stream_edit(self) -> None:
         """Orderly teardown must not start fresh Matrix cleanup under a closing client."""
         mock_client = _make_matrix_client_mock()
         first_edit_finished = asyncio.Event()
         edited_texts: list[str] = []
-        transport_outcomes: list[StreamTransportOutcome] = []
 
         async def record_edit(
             _client: object,
@@ -2663,20 +2624,18 @@ class TestStreamingBehavior:
             await asyncio.Event().wait()
 
         async def run_stream() -> None:
-            try:
-                await send_streaming_response(
-                    client=mock_client,
-                    target=MessageTarget.resolve("!test:localhost", None, "$original_123", room_mode=True),
-                    config=self.config,
-                    runtime_paths=runtime_paths_for(self.config),
-                    response_stream=blocked_stream(),
-                    existing_event_id="$thinking_123",
-                )
-            except StreamingDeliveryError as error:
-                transport_outcomes.append(error.transport_outcome)
+            await send_streaming_response(
+                client=mock_client,
+                target=MessageTarget.resolve("!test:localhost", None, "$original_123", room_mode=True),
+                config=self.config,
+                runtime_paths=runtime_paths_for(self.config),
+                response_stream=blocked_stream(),
+                existing_event_id="$thinking_123",
+                **FakeReplyRecords(edit=record_edit).hooks(),
+            )
 
         runner = ResponseRunner(deps=MagicMock())
-        response_task = runner.track_inbox_response(
+        response_task = runner.inbox.track_inbox_response(
             run_stream(),
             name="test_process_shutdown_stream",
             recovery_proof_ready=lambda: False,
@@ -2684,16 +2643,14 @@ class TestStreamingBehavior:
         )
         with patch("mindroom.streaming.edit_message_result", new=AsyncMock(side_effect=record_edit)):
             await asyncio.wait_for(first_edit_finished.wait(), timeout=1.0)
-            completed = await runner.drain_inbox_responses(
+            completed = await runner.inbox.drain_inbox_responses(
                 cancel_after_seconds=0.25,
                 shutdown_intent=ORDERLY_SHUTDOWN,
             )
 
         assert completed is False
-        assert response_task.done()
+        assert response_task.cancelled()
         assert len(edited_texts) == 1
-        assert transport_outcomes[0].terminal_status == "cancelled"
-        assert transport_outcomes[0].failure_reason == "interrupted"
 
     @pytest.mark.asyncio
     async def test_cancelled_stream_reports_existing_event_id_to_callback(self) -> None:
@@ -2710,7 +2667,7 @@ class TestStreamingBehavior:
                 "mindroom.streaming.edit_message_result",
                 new=AsyncMock(return_value=DeliveredMatrixEvent(event_id="$edit", content_sent={})),
             ),
-            pytest.raises(StreamingDeliveryError),
+            pytest.raises(asyncio.CancelledError),
         ):
             await send_streaming_response(
                 client=mock_client,
@@ -2720,6 +2677,7 @@ class TestStreamingBehavior:
                 response_stream=cancelling_stream(),
                 existing_event_id="$thinking_123",
                 visible_event_id_callback=visible_event_ids.append,
+                **reply_hooks(),
             )
 
         assert visible_event_ids == ["$thinking_123"]
@@ -2734,16 +2692,11 @@ class TestStreamingBehavior:
             yield "Partial answer"
             raise asyncio.CancelledError
 
+        send = AsyncMock(return_value=DeliveredMatrixEvent(event_id="$stream-123", content_sent={}))
+        edit = AsyncMock(return_value=DeliveredMatrixEvent(event_id="$edit", content_sent={}))
         with (
-            patch(
-                "mindroom.streaming.send_message_result",
-                new=AsyncMock(return_value=DeliveredMatrixEvent(event_id="$stream-123", content_sent={})),
-            ),
-            patch(
-                "mindroom.streaming.edit_message_result",
-                new=AsyncMock(return_value=DeliveredMatrixEvent(event_id="$edit", content_sent={})),
-            ),
-            pytest.raises(StreamingDeliveryError),
+            patch("mindroom.streaming.edit_message_result", new=edit),
+            pytest.raises(asyncio.CancelledError),
         ):
             await send_streaming_response(
                 client=mock_client,
@@ -2752,107 +2705,14 @@ class TestStreamingBehavior:
                 runtime_paths=runtime_paths_for(self.config),
                 response_stream=cancelling_stream(),
                 visible_event_id_callback=visible_event_ids.append,
+                **FakeReplyRecords(send=send, edit=edit).hooks(),
             )
 
         assert visible_event_ids == ["$stream-123"]
 
     @pytest.mark.asyncio
-    async def test_sync_restart_stream_preserves_partial_text_with_restart_suffix(self) -> None:
-        """Sync-restart cancellation should keep streamed text and append the restart marker."""
-        mock_client = _make_matrix_client_mock()
-        edited_messages: list[tuple[dict[str, object], str]] = []
-
-        async def record_edit(
-            _client: object,
-            _room_id: str,
-            _event_id: str,
-            new_content: dict[str, object],
-            new_text: str,
-        ) -> DeliveredMatrixEvent:
-            edited_messages.append((new_content, new_text))
-            return DeliveredMatrixEvent(event_id="$edit", content_sent=dict(new_content))
-
-        async def cancelling_stream() -> AsyncIterator[str]:
-            yield "Partial answer"
-            raise asyncio.CancelledError(SYNC_RESTART_CANCEL_MSG)
-
-        with (
-            patch("mindroom.streaming.edit_message_result", new=AsyncMock(side_effect=record_edit)),
-            pytest.raises(StreamingDeliveryError) as exc_info,
-        ):
-            await send_streaming_response(
-                client=mock_client,
-                target=MessageTarget.resolve("!test:localhost", None, "$original_123", room_mode=True),
-                config=self.config,
-                runtime_paths=runtime_paths_for(self.config),
-                response_stream=cancelling_stream(),
-                existing_event_id="$thinking_123",
-            )
-
-        assert len(edited_messages) == 2
-        final_content, final_text = edited_messages[-1]
-        assert final_text == build_restart_interrupted_body("Partial answer")
-        assert final_content[STREAM_STATUS_KEY] == STREAM_STATUS_ERROR
-        assert exc_info.value.transport_outcome.terminal_status == "cancelled"
-        assert exc_info.value.transport_outcome.failure_reason == "sync_restart_cancelled"
-
-    @pytest.mark.asyncio
-    async def test_cancel_sources_reuse_compatible_terminal_stream_statuses(self) -> None:
-        """Generic interruptions must not introduce a new wire-level stream status."""
-        mock_client = _make_matrix_client_mock()
-        observed_statuses: dict[str, str] = {}
-
-        cases = (
-            ("user_stop", USER_STOP_CANCEL_MSG, STREAM_STATUS_CANCELLED),
-            ("interrupted", None, STREAM_STATUS_ERROR),
-            ("sync_restart", SYNC_RESTART_CANCEL_MSG, STREAM_STATUS_ERROR),
-        )
-
-        for label, cancel_message, expected_status in cases:
-            edited_messages: list[dict[str, object]] = []
-
-            async def record_edit(
-                _client: object,
-                _room_id: str,
-                _event_id: str,
-                new_content: dict[str, object],
-                _new_text: str,
-                *,
-                _edited_messages: list[dict[str, object]] = edited_messages,
-            ) -> DeliveredMatrixEvent:
-                _edited_messages.append(new_content)
-                return DeliveredMatrixEvent(event_id="$edit", content_sent=new_content)
-
-            async def cancelling_stream(
-                *,
-                _cancel_message: str | None = cancel_message,
-            ) -> AsyncIterator[str]:
-                yield "Partial answer"
-                if _cancel_message is None:
-                    raise asyncio.CancelledError
-                raise asyncio.CancelledError(_cancel_message)
-
-            with (
-                patch("mindroom.streaming.edit_message_result", new=AsyncMock(side_effect=record_edit)),
-                pytest.raises(StreamingDeliveryError),
-            ):
-                await send_streaming_response(
-                    client=mock_client,
-                    target=MessageTarget.resolve("!test:localhost", None, "$original_123", room_mode=True),
-                    config=self.config,
-                    runtime_paths=runtime_paths_for(self.config),
-                    response_stream=cancelling_stream(),
-                    existing_event_id="$thinking_123",
-                )
-
-            observed_statuses[label] = str(edited_messages[-1][STREAM_STATUS_KEY])
-            assert observed_statuses[label] == expected_status
-
-        assert set(observed_statuses.values()) == {STREAM_STATUS_CANCELLED, STREAM_STATUS_ERROR}
-
-    @pytest.mark.asyncio
-    async def test_stream_error_preserves_partial_text_and_appends_error_hint(self) -> None:
-        """Stream failures should remove pending state and append an error hint."""
+    async def test_stream_error_leaves_the_partial_text_to_its_span_exit(self) -> None:
+        """A stream failure raises with its error and writes no note: the reply's span exit ends the reply."""
         mock_client = _make_matrix_client_mock()
         edited_texts: list[str] = []
 
@@ -2882,22 +2742,16 @@ class TestStreamingBehavior:
                 runtime_paths=runtime_paths_for(self.config),
                 response_stream=failing_stream(),
                 existing_event_id="$thinking_123",
+                **FakeReplyRecords(edit=record_edit).hooks(),
             )
 
         assert isinstance(exc_info.value.error, RuntimeError)
         assert str(exc_info.value.error) == "model backend disconnected"
-        assert exc_info.value.event_id == "$thinking_123"
-        assert len(edited_texts) == 2
-        assert IN_PROGRESS_MARKER not in edited_texts[0]
-        final_text = edited_texts[-1]
-        assert exc_info.value.accumulated_text == final_text
-        assert final_text.startswith("Partial answer\n\n**[Response interrupted by an error:")
-        assert "model backend disconnected" in final_text
-        assert IN_PROGRESS_MARKER not in final_text
+        assert edited_texts == ["Partial answer"]
 
     @pytest.mark.asyncio
-    async def test_stream_error_replaces_placeholder_when_no_text_arrives(self) -> None:
-        """Stream failures before first chunk should replace a thinking placeholder with an error hint."""
+    async def test_stream_error_before_any_text_leaves_the_placeholder(self) -> None:
+        """A stream failure before its first chunk writes nothing over the placeholder: its span exit notes it."""
         mock_client = _make_matrix_client_mock()
         edited_texts: list[str] = []
 
@@ -2928,17 +2782,12 @@ class TestStreamingBehavior:
                 runtime_paths=runtime_paths_for(self.config),
                 response_stream=failing_stream(),
                 existing_event_id="$thinking_123",
+                **FakeReplyRecords(edit=record_edit).hooks(),
             )
 
         assert isinstance(exc_info.value.error, RuntimeError)
         assert str(exc_info.value.error) == "provider stream failed"
-        assert exc_info.value.event_id == "$thinking_123"
-        assert len(edited_texts) == 1
-        final_text = edited_texts[0]
-        assert exc_info.value.accumulated_text == final_text
-        assert final_text.startswith("**[Response interrupted by an error:")
-        assert "provider stream failed" in final_text
-        assert IN_PROGRESS_MARKER not in final_text
+        assert edited_texts == []
 
     @pytest.mark.asyncio
     async def test_worker_progress_delivery_failure_raises_streaming_delivery_error(self) -> None:
@@ -2987,68 +2836,11 @@ class TestStreamingBehavior:
                 response_stream=stream(),
                 existing_event_id="$thinking_123",
                 adopt_existing_placeholder=True,
+                **FakeReplyRecords(edit=record_edit).hooks(),
             )
 
         assert isinstance(exc_info.value.error, RuntimeError)
         assert str(exc_info.value.error) == "edit blew up"
-        assert exc_info.value.event_id == "$thinking_123"
-
-    @pytest.mark.asyncio
-    async def test_worker_progress_delivery_failure_still_writes_terminal_status(self) -> None:
-        """A failed warmup edit should still be followed by a terminal error-status edit."""
-        mock_client = _make_matrix_client_mock()
-        terminal_statuses: list[str] = []
-        edited_texts: list[str] = []
-
-        async def record_edit(
-            _client: object,
-            _room_id: str,
-            _event_id: str,
-            new_content: dict[str, object],
-            new_text: str,
-        ) -> DeliveredMatrixEvent:
-            terminal_statuses.append(str(new_content[STREAM_STATUS_KEY]))
-            edited_texts.append(new_text)
-            if "Preparing isolated worker" in new_text:
-                msg = "edit blew up"
-                raise RuntimeError(msg)
-            return DeliveredMatrixEvent(event_id="$edit", content_sent=dict(new_content))
-
-        async def stream() -> AsyncIterator[str]:
-            pump = get_worker_progress_pump()
-            assert pump is not None
-            pump.queue.put_nowait(
-                WorkerProgressEvent(
-                    tool_name="shell",
-                    function_name="run",
-                    progress=WorkerReadyProgress(
-                        phase="cold_start",
-                        worker_key="worker-a",
-                        backend_name="kubernetes",
-                        elapsed_seconds=2.0,
-                    ),
-                ),
-            )
-            await asyncio.sleep(0)
-            yield "hello"
-
-        with (
-            patch("mindroom.streaming.edit_message_result", new=AsyncMock(side_effect=record_edit)),
-            pytest.raises(StreamingDeliveryError, match="edit blew up"),
-        ):
-            await send_streaming_response(
-                client=mock_client,
-                target=MessageTarget.resolve("!test:localhost", None, "$original_123", room_mode=True),
-                config=self.config,
-                runtime_paths=runtime_paths_for(self.config),
-                response_stream=stream(),
-                existing_event_id="$thinking_123",
-                adopt_existing_placeholder=True,
-            )
-
-        assert terminal_statuses[-1] == STREAM_STATUS_ERROR
-        assert edited_texts[-1].startswith("**[Response interrupted by an error:")
-        assert "hello" not in edited_texts[-1]
 
     @pytest.mark.asyncio
     async def test_worker_progress_delivery_failure_stops_chunk_consumption_immediately(self) -> None:
@@ -3102,6 +2894,7 @@ class TestStreamingBehavior:
                 response_stream=stream(),
                 existing_event_id="$thinking_123",
                 adopt_existing_placeholder=True,
+                **FakeReplyRecords(edit=record_edit).hooks(),
             )
 
         assert later_chunk_reached is False
@@ -3134,12 +2927,9 @@ class TestStreamingBehavior:
         async def stream() -> AsyncIterator[str]:
             yield "hello"
 
+        edit = AsyncMock(return_value=DeliveredMatrixEvent(event_id="$edit123", content_sent={}))
         with (
-            patch("mindroom.streaming.send_message_result", new=AsyncMock(side_effect=record_send)),
-            patch(
-                "mindroom.streaming.edit_message_result",
-                new=AsyncMock(return_value=DeliveredMatrixEvent(event_id="$edit123", content_sent={})),
-            ),
+            patch("mindroom.streaming.edit_message_result", new=edit),
             patch("mindroom.streaming._drain_worker_progress_events", new=lingering_drain),
         ):
             outcome = await send_streaming_response(
@@ -3148,15 +2938,16 @@ class TestStreamingBehavior:
                 config=self.config,
                 runtime_paths=runtime_paths_for(self.config),
                 response_stream=stream(),
+                **FakeReplyRecords(send=record_send, edit=edit).hooks(),
             )
 
         assert outcome.last_physical_stream_event_id == "$event123"
-        assert outcome.terminal_status == "completed"
+        assert outcome.failure_reason is None
         assert outcome.rendered_body == "hello"
 
     @pytest.mark.asyncio
-    async def test_worker_progress_delivery_failure_does_not_leak_undelivered_buffered_text(self) -> None:
-        """Terminal error text should not include chunks that were buffered but never delivered."""
+    async def test_worker_progress_delivery_failure_writes_no_undelivered_buffered_text(self) -> None:
+        """A failed warmup edit ends the stream's writes: chunks buffered behind it never reach Matrix."""
         mock_client = _make_matrix_client_mock()
         warmup_edit_started = asyncio.Event()
         edited_texts: list[str] = []
@@ -3218,16 +3009,16 @@ class TestStreamingBehavior:
                 existing_event_id="$thinking_123",
                 adopt_existing_placeholder=True,
                 streaming_cls=ImmediateStreamingResponse,
+                **FakeReplyRecords(edit=record_edit).hooks(),
             )
 
-        assert exc_info.value.accumulated_text == edited_texts[-1]
-        assert exc_info.value.accumulated_text.startswith("**[Response interrupted by an error:")
-        assert "hello" not in exc_info.value.accumulated_text
-        assert "world" not in exc_info.value.accumulated_text
+        assert str(exc_info.value.error) == "edit blew up"
+        assert "Preparing isolated worker" in edited_texts[-1]
+        assert all("hello" not in text and "world" not in text for text in edited_texts)
 
     @pytest.mark.asyncio
-    async def test_late_delivery_failure_after_stream_completion_restores_last_delivered_state(self) -> None:
-        """A delivery failure surfaced only during shutdown should still roll back undelivered buffered text."""
+    async def test_late_delivery_failure_after_stream_completion_fails_without_finalizing(self) -> None:
+        """A delivery failure surfaced only during shutdown fails the stream without sending its terminal update."""
         mock_client = _make_matrix_client_mock()
         stream_finished = asyncio.Event()
 
@@ -3241,6 +3032,8 @@ class TestStreamingBehavior:
                 self.update_char_threshold = 1
                 self.min_update_char_threshold = 1
 
+        edited_statuses: list[object] = []
+
         async def record_edit(
             _client: object,
             _room_id: str,
@@ -3249,6 +3042,7 @@ class TestStreamingBehavior:
             _new_text: str,
         ) -> DeliveredMatrixEvent:
             await stream_finished.wait()
+            edited_statuses.append(_new_content.get(STREAM_STATUS_KEY))
             if _new_content.get("io.mindroom.stream_status") == "streaming":
                 msg = "late edit blew up"
                 raise RuntimeError(msg)
@@ -3271,10 +3065,11 @@ class TestStreamingBehavior:
                 existing_event_id="$thinking_123",
                 adopt_existing_placeholder=True,
                 streaming_cls=ImmediateStreamingResponse,
+                **FakeReplyRecords(edit=record_edit).hooks(),
             )
 
-        assert exc_info.value.accumulated_text.startswith("**[Response interrupted by an error:")
-        assert "hello" not in exc_info.value.accumulated_text
+        assert str(exc_info.value.error) == "late edit blew up"
+        assert edited_statuses == [STREAM_STATUS_STREAMING]
 
     @pytest.mark.asyncio
     async def test_streaming_edit_returning_none_raises_delivery_error(self) -> None:
@@ -3320,10 +3115,13 @@ class TestStreamingBehavior:
                 existing_event_id="$thinking_123",
                 adopt_existing_placeholder=True,
                 streaming_cls=ImmediateStreamingResponse,
+                **FakeReplyRecords(edit=record_edit).hooks(),
             )
 
-        assert terminal_texts[-1].startswith("**[Response interrupted by an error:")
-        assert "hello" not in exc_info.value.accumulated_text
+        # The failed edit is the stream's last write: its span exit, not the stream, notes the failure.
+        assert terminal_texts == ["hello"]
+        assert str(exc_info.value.error) == "Failed to edit streaming message"
+        assert exc_info.value.failure_reason == "Failed to edit streaming message"
 
     @pytest.mark.asyncio
     async def test_send_or_edit_message_commits_frozen_preawait_snapshot(self) -> None:
@@ -3343,6 +3141,7 @@ class TestStreamingBehavior:
             latest_thread_event_id=None,
             show_tool_calls=True,
             extra_content=None,
+            **reply_hooks(),
         )
         streaming.event_id = "$thinking_123"
         streaming._warmup_state.apply_event(
@@ -3446,6 +3245,7 @@ class TestStreamingBehavior:
             min_update_char_threshold=10_000,
             min_char_update_interval=0.0,
             max_idle=0.25,
+            **reply_hooks(),
         )
         streaming.event_id = "$existing_event"
         streaming.stream_started_at = 100.0
@@ -3480,6 +3280,7 @@ class TestStreamingBehavior:
             target=MessageTarget.resolve("!test:localhost", None, "$original_123"),
             config=self.config,
             runtime_paths=runtime_paths_for(self.config),
+            **reply_hooks(),
         )
         streaming.accumulated_text = "latest body"
         streaming.chars_since_last_update = len(streaming.accumulated_text)
@@ -3504,22 +3305,14 @@ class TestStreamingBehavior:
     async def test_send_streaming_response_skips_terminal_finalize_when_delivery_shutdown_times_out(self) -> None:
         """Terminal finalization must not run when the delivery owner refuses to stop."""
         mock_client = _make_matrix_client_mock()
-        finalize_calls: list[Exception | None] = []
+        finalize_calls: list[str | None] = []
 
         class TrackingStreamingResponse(StreamingResponse):
-            async def finalize(
-                self,
-                client: nio.AsyncClient,
-                *,
-                cancelled: bool = False,
-                cancel_source: CancelSource | None = None,
-                error: Exception | None = None,
-            ) -> StreamTransportOutcome:
-                del client, cancelled, cancel_source
-                finalize_calls.append(error)
+            async def finalize(self, client: nio.AsyncClient) -> StreamTransportOutcome:
+                del client
+                finalize_calls.append(self.event_id)
                 return StreamTransportOutcome(
                     last_physical_stream_event_id=self.event_id,
-                    terminal_status="completed",
                     rendered_body=None,
                     visible_body_state="none",
                 )
@@ -3550,10 +3343,7 @@ class TestStreamingBehavior:
         with (
             patch("mindroom.streaming._consume_stream_with_progress_supervision", new=fail_stream_supervision),
             patch("mindroom.streaming._shutdown_stream_delivery", new=timeout_shutdown),
-            pytest.raises(
-                StreamingDeliveryError,
-                match="Timed out shutting down stream delivery controller",
-            ) as exc_info,
+            pytest.raises(StreamingDeliveryError, match="stream blew up") as exc_info,
         ):
             await send_streaming_response(
                 client=mock_client,
@@ -3562,9 +3352,11 @@ class TestStreamingBehavior:
                 runtime_paths=runtime_paths_for(self.config),
                 response_stream=_aiter(),
                 streaming_cls=TrackingStreamingResponse,
+                **reply_hooks(),
             )
 
-        assert isinstance(exc_info.value.error, TimeoutError)
+        # The stream's own failure is what it reports; the timed-out shutdown is only logged.
+        assert isinstance(exc_info.value.error, RuntimeError)
         assert finalize_calls == []
 
     @pytest.mark.asyncio
@@ -3621,6 +3413,7 @@ class TestStreamingBehavior:
                 config=self.config,
                 runtime_paths=runtime_paths_for(self.config),
                 response_stream=paused_stream(),
+                **reply_hooks(),
             )
 
         assert isinstance(exc_info.value.error, TimeoutError)
@@ -3650,11 +3443,10 @@ class TestStreamingBehavior:
             async def _send_or_edit_message(
                 self,
                 client: nio.AsyncClient,
-                is_final: bool = False,
                 **kwargs: object,
             ) -> bool:
                 recorded_force_flags.append(bool(kwargs.get("force_nonterminal_delivery")))
-                return await super()._send_or_edit_message(client, is_final, **kwargs)
+                return await super()._send_or_edit_message(client, **kwargs)
 
         async def pause_after_buffering_tool(
             _response_stream: AsyncIterator[object],
@@ -3688,6 +3480,7 @@ class TestStreamingBehavior:
                 existing_event_id="$stream",
                 adopt_existing_placeholder=True,
                 streaming_cls=RecordingStreamingResponse,
+                **FakeReplyRecords(edit=edit).hooks(),
             )
 
         with (
@@ -3759,6 +3552,7 @@ class TestStreamingBehavior:
                 existing_event_id="$stream",
                 adopt_existing_placeholder=True,
                 show_tool_calls=True,
+                **FakeReplyRecords(edit=edit).hooks(),
             )
 
         assert raised_pause.value is pause
@@ -3833,6 +3627,7 @@ class TestStreamingBehavior:
                 existing_event_id="$thinking_123",
                 adopt_existing_placeholder=True,
                 streaming_cls=ImmediateStreamingResponse,
+                **FakeReplyRecords(edit=record_edit).hooks(),
             )
 
         assert max_in_flight == 1
@@ -3879,10 +3674,7 @@ class TestStreamingBehavior:
             await asyncio.wait_for(notice_shown.wait(), timeout=SETTLE_TIMEOUT_SECONDS)
             yield "done"
 
-        with (
-            patch("mindroom.streaming.send_message_result", new=AsyncMock(side_effect=record_send)),
-            patch("mindroom.streaming.edit_message_result", new=AsyncMock(side_effect=record_edit)),
-        ):
+        with patch("mindroom.streaming.edit_message_result", new=AsyncMock(side_effect=record_edit)):
             await send_streaming_response(
                 client=_make_matrix_client_mock(),
                 target=MessageTarget.resolve("!test:localhost", None, "$original_123"),
@@ -3890,6 +3682,7 @@ class TestStreamingBehavior:
                 runtime_paths=runtime_paths_for(self.config),
                 response_stream=stream(),
                 show_tool_calls=False,
+                **FakeReplyRecords(send=record_send, edit=record_edit).hooks(),
             )
 
         assert notice_shown.is_set()
@@ -3907,6 +3700,7 @@ class TestStreamingBehavior:
             target=MessageTarget.resolve("!test:localhost", None, "$original_123"),
             config=self.config,
             runtime_paths=runtime_paths_for(self.config),
+            **reply_hooks(),
         )
         streaming._warmup_state.apply_event(
             WorkerProgressEvent(
@@ -4000,6 +3794,7 @@ class TestStreamingBehavior:
             config=self.config,
             runtime_paths=runtime_paths_for(self.config),
             response_stream=stream(),
+            **reply_hooks(),
         )
 
         assert outcome.last_physical_stream_event_id == "$warmup_stream_123"
@@ -4020,6 +3815,7 @@ class TestStreamingBehavior:
             config=self.config,
             runtime_paths=runtime_paths_for(self.config),
             show_tool_calls=False,
+            **reply_hooks(),
         )
         for tool_name, function_name in (("shell", "run"), ("python", "execute")):
             streaming._warmup_state.apply_event(
@@ -4055,6 +3851,7 @@ class TestStreamingBehavior:
             target=MessageTarget.resolve("!test:localhost", None, "$original_123"),
             config=self.config,
             runtime_paths=runtime_paths_for(self.config),
+            **reply_hooks(),
         )
         streaming.accumulated_text = "```python\nprint('hello')"
         streaming._warmup_state.apply_event(
@@ -4093,6 +3890,7 @@ class TestStreamingBehavior:
             target=MessageTarget.resolve("!test:localhost", None, "$original_123"),
             config=self.config,
             runtime_paths=runtime_paths_for(self.config),
+            **reply_hooks(),
         )
         streaming.accumulated_text = "Ping @helper now"
         streaming._warmup_state.apply_event(
@@ -4116,15 +3914,18 @@ class TestStreamingBehavior:
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize(
-        ("terminal_kind", "expected_final_text"),
-        [("cancel", _INTERRUPTED_RESPONSE_NOTE), ("complete", _PROGRESS_PLACEHOLDER)],
+        ("terminal_kind", "expected_texts_after_warmup"),
+        [("cancel", []), ("complete", [_PROGRESS_PLACEHOLDER])],
     )
     async def test_send_streaming_response_terminal_update_ignores_late_progress(
         self,
         terminal_kind: str,
-        expected_final_text: str,
+        expected_texts_after_warmup: list[str],
     ) -> None:
-        """Late worker progress after terminal shutdown must not re-add the warmup suffix."""
+        """Late worker progress after terminal shutdown must not re-add the warmup suffix.
+
+        A completed stream's terminal update drops the suffix; a cancelled stream writes nothing after it.
+        """
         mock_client = _make_matrix_client_mock()
         captured_texts: list[str] = []
         late_event_done = threading.Event()
@@ -4193,7 +3994,7 @@ class TestStreamingBehavior:
 
         with patch("mindroom.streaming.edit_message_result", new=AsyncMock(side_effect=record_edit)):
             if terminal_kind == "cancel":
-                with pytest.raises(StreamingDeliveryError):
+                with pytest.raises(asyncio.CancelledError):
                     await send_streaming_response(
                         client=mock_client,
                         target=MessageTarget.resolve("!test:localhost", None, "$original_123", room_mode=True),
@@ -4202,6 +4003,7 @@ class TestStreamingBehavior:
                         response_stream=stream(),
                         existing_event_id="$thinking_123",
                         adopt_existing_placeholder=True,
+                        **FakeReplyRecords(edit=record_edit).hooks(),
                     )
             else:
                 await send_streaming_response(
@@ -4212,6 +4014,7 @@ class TestStreamingBehavior:
                     response_stream=stream(),
                     existing_event_id="$thinking_123",
                     adopt_existing_placeholder=True,
+                    **FakeReplyRecords(edit=record_edit).hooks(),
                 )
 
         assert late_event_thread is not None
@@ -4219,14 +4022,12 @@ class TestStreamingBehavior:
         assert late_event_done.is_set()
         await asyncio.sleep(0.05)
 
-        assert len(captured_texts) == 2
         assert "Preparing isolated worker" in captured_texts[0]
-        assert "Preparing isolated worker" not in captured_texts[1]
-        assert captured_texts[1] == expected_final_text
+        assert captured_texts[1:] == expected_texts_after_warmup
 
     @pytest.mark.asyncio
     async def test_send_streaming_response_error_update_ignores_late_progress(self) -> None:
-        """Late worker progress after an error must not re-add the warmup suffix."""
+        """Late worker progress after an error writes nothing: the failure's span exit ends the reply."""
         mock_client = _make_matrix_client_mock()
         captured_texts: list[str] = []
         late_event_done = threading.Event()
@@ -4304,6 +4105,7 @@ class TestStreamingBehavior:
                 response_stream=failing_stream(),
                 existing_event_id="$thinking_123",
                 adopt_existing_placeholder=True,
+                **FakeReplyRecords(edit=record_edit).hooks(),
             )
 
         assert late_event_thread is not None
@@ -4311,10 +4113,8 @@ class TestStreamingBehavior:
         assert late_event_done.is_set()
         await asyncio.sleep(0.05)
 
-        assert len(captured_texts) == 2
+        assert len(captured_texts) == 1
         assert "Preparing isolated worker" in captured_texts[0]
-        assert "Preparing isolated worker" not in captured_texts[1]
-        assert captured_texts[1].startswith("**[Response interrupted by an error:")
 
     @pytest.mark.asyncio
     async def test_worker_warmup_coalesces_parallel_calls_on_same_worker_key(self) -> None:
@@ -4329,6 +4129,7 @@ class TestStreamingBehavior:
             target=MessageTarget.resolve("!test:localhost", None, "$original_123"),
             config=self.config,
             runtime_paths=runtime_paths_for(self.config),
+            **reply_hooks(),
         )
         for tool_name, function_name in (("shell", "run"), ("python", "execute")):
             streaming._warmup_state.apply_event(
@@ -4367,6 +4168,7 @@ class TestStreamingBehavior:
             target=MessageTarget.resolve("!test:localhost", None, "$original_123"),
             config=self.config,
             runtime_paths=runtime_paths_for(self.config),
+            **reply_hooks(),
         )
         for worker_key, tool_name in (("worker-a", "shell"), ("worker-b", "python")):
             streaming._warmup_state.apply_event(
@@ -4400,6 +4202,7 @@ class TestStreamingBehavior:
             target=MessageTarget.resolve("!test:localhost", None, "$original_123"),
             config=self.config,
             runtime_paths=runtime_paths_for(self.config),
+            **reply_hooks(),
         )
         streaming._warmup_state.apply_event(
             WorkerProgressEvent(
@@ -4446,6 +4249,7 @@ class TestStreamingBehavior:
             target=MessageTarget.resolve("!test:localhost", None, "$original_123"),
             config=self.config,
             runtime_paths=runtime_paths_for(self.config),
+            **reply_hooks(),
         )
         streaming._warmup_state.apply_event(
             WorkerProgressEvent(
@@ -4484,6 +4288,7 @@ class TestStreamingBehavior:
             config=self.config,
             runtime_paths=runtime_paths_for(self.config),
             show_tool_calls=True,
+            **reply_hooks(),
         )
         streaming._warmup_state.apply_event(
             WorkerProgressEvent(
@@ -4531,6 +4336,7 @@ class TestStreamingBehavior:
             runtime_paths=runtime_paths_for(self.config),
             show_tool_calls=False,
             progress_update_interval=0.0,
+            **reply_hooks(),
         )
         streaming.last_update = 100.0
         streaming.stream_started_at = 100.0
@@ -4597,6 +4403,7 @@ class TestStreamingBehavior:
             progress_update_interval=10.0,
             min_char_update_interval=0.35,
             max_idle=0.25,
+            **reply_hooks(),
         )
         streaming.last_update = 100.0
         streaming.stream_started_at = 100.0
@@ -4700,6 +4507,7 @@ class TestStreamingConfig:
             runtime_paths=runtime_paths,
             response_stream=empty_stream(),
             streaming_cls=CapturingStreamingResponse,
+            **reply_hooks(),
         )
 
         event_id = outcome.last_physical_stream_event_id
@@ -4750,21 +4558,7 @@ class TestStreamingConfig:
 
 
 class TestTerminalEditDurability:
-    """Only the edit that carries a streamed answer claims the turn's delivery."""
-
-    @staticmethod
-    def _streaming(tmp_path: Path, terminal_edit: object) -> StreamingResponse:
-        """Return one stream already showing a message, with a durable sender."""
-        config = bind_runtime_paths(Config(), test_runtime_paths(tmp_path))
-        streaming = StreamingResponse(
-            target=MessageTarget.resolve("!test:localhost", None, "$root"),
-            config=config,
-            runtime_paths=runtime_paths_for(config),
-            terminal_edit=terminal_edit,  # type: ignore[arg-type]
-        )
-        streaming.event_id = "$visible"
-        streaming.accumulated_text = "the answer"
-        return streaming
+    """The edit that carries a streamed answer goes through the reply's records."""
 
     @pytest.mark.asyncio
     async def test_a_completed_stream_edits_through_the_durable_sender(self, tmp_path: Path) -> None:
@@ -4773,41 +4567,26 @@ class TestTerminalEditDurability:
         Nothing else delivers it, so if this edit is not recorded the answer
         has no durable existence and a crash loses it silently.
         """
-        delivered = SimpleNamespace(event_id="$visible", content_sent={"body": "the answer"})
-        terminal = AsyncMock(return_value=delivered)
-        streaming = self._streaming(tmp_path, terminal)
+        delivered = DeliveredMatrixEvent(event_id="$visible", content_sent={"body": "the answer"})
+        records = FakeReplyRecords(edit=AsyncMock(return_value=delivered))
+        config = bind_runtime_paths(Config(), test_runtime_paths(tmp_path))
+        streaming = StreamingResponse(
+            target=MessageTarget.resolve("!test:localhost", None, "$root"),
+            config=config,
+            runtime_paths=runtime_paths_for(config),
+            **records.hooks(),
+        )
+        streaming.event_id = "$visible"
+        streaming.accumulated_text = "the answer"
 
         with patch("mindroom.streaming.edit_message_result", AsyncMock(return_value=delivered)) as direct:
-            await streaming._send_or_edit_message(
-                AsyncMock(),
-                is_final=True,
-                stream_status=STREAM_STATUS_COMPLETED,
-            )
+            await streaming.finalize(AsyncMock())
 
-        terminal.assert_awaited(), "a completed stream's terminal edit bypassed the durable sender"
+        [terminal] = records.writes
+        assert (terminal.kind, terminal.event_id) == ("terminal", "$visible"), (
+            "a completed stream's terminal edit bypassed the durable sender"
+        )
         direct.assert_not_awaited()
-
-    @pytest.mark.asyncio
-    async def test_a_cancelled_stream_edits_directly(self, tmp_path: Path) -> None:
-        """A cancelled stream ends with a notice, not an answer.
-
-        Recording it as the turn's final delivery would settle the turn with
-        "stopped", and the caller that delivers the real terminal state would
-        find its own delivery already acknowledged.
-        """
-        delivered = SimpleNamespace(event_id="$visible", content_sent={"body": "stopped"})
-        terminal = AsyncMock(return_value=delivered)
-        streaming = self._streaming(tmp_path, terminal)
-
-        with patch("mindroom.streaming.edit_message_result", AsyncMock(return_value=delivered)) as direct:
-            await streaming._send_or_edit_message(
-                AsyncMock(),
-                is_final=True,
-                stream_status=STREAM_STATUS_CANCELLED,
-            )
-
-        terminal.assert_not_awaited()
-        direct.assert_awaited()
 
 
 class TestStreamTransportStopsWithItsMembership:
@@ -4820,7 +4599,12 @@ class TestStreamTransportStopsWithItsMembership:
     """
 
     @staticmethod
-    def _streaming(tmp_path: Path, *, membership_is_current: bool) -> StreamingResponse:
+    def _streaming(
+        tmp_path: Path,
+        *,
+        membership_is_current: bool,
+        records: FakeReplyRecords | None = None,
+    ) -> StreamingResponse:
         """Return one stream already showing a message, under a live or ended membership."""
         config = bind_runtime_paths(Config(), test_runtime_paths(tmp_path))
         streaming = StreamingResponse(
@@ -4828,6 +4612,7 @@ class TestStreamTransportStopsWithItsMembership:
             config=config,
             runtime_paths=runtime_paths_for(config),
             transport_is_current=AsyncMock(return_value=membership_is_current),
+            **(records if records is not None else FakeReplyRecords()).hooks(),
         )
         streaming.accumulated_text = "half an answer"
         return streaming
@@ -4852,29 +4637,14 @@ class TestStreamTransportStopsWithItsMembership:
     @pytest.mark.asyncio
     async def test_a_placeholder_send_stops_once_the_membership_ended(self, tmp_path: Path) -> None:
         """A stream that has not sent anything yet must not start now either."""
-        streaming = self._streaming(tmp_path, membership_is_current=False)
+        records = FakeReplyRecords(send=AsyncMock())
+        streaming = self._streaming(tmp_path, membership_is_current=False, records=records)
 
-        with patch("mindroom.streaming.send_message_result", AsyncMock()) as direct:
-            handled = await streaming._send_or_edit_message(AsyncMock())
+        handled = await streaming._send_or_edit_message(AsyncMock())
 
         assert handled
         assert streaming.event_id is None
-        direct.assert_not_awaited()
-
-    @pytest.mark.asyncio
-    async def test_a_cancellation_notice_stops_once_the_membership_ended(self, tmp_path: Path) -> None:
-        """A cancelled stream's notice is transport too, and has nowhere to go."""
-        streaming = self._streaming(tmp_path, membership_is_current=False)
-        streaming.event_id = "$visible"
-
-        with patch("mindroom.streaming.edit_message_result", AsyncMock()) as direct:
-            await streaming._send_or_edit_message(
-                AsyncMock(),
-                is_final=True,
-                stream_status=STREAM_STATUS_CANCELLED,
-            )
-
-        direct.assert_not_awaited()
+        assert records.writes == []
 
     @pytest.mark.asyncio
     async def test_a_progressive_edit_under_a_live_membership_still_goes_out(self, tmp_path: Path) -> None:
@@ -4898,21 +4668,16 @@ class TestStreamTransportStopsWithItsMembership:
         blocking an attempted row's retry here would leave that answer visible
         and permanently unacknowledged.
         """
-        delivered = SimpleNamespace(event_id="$visible", content_sent={"body": "the answer"})
-        terminal = AsyncMock(return_value=delivered)
-        streaming = self._streaming(tmp_path, membership_is_current=False)
+        delivered = DeliveredMatrixEvent(event_id="$visible", content_sent={"body": "the answer"})
+        records = FakeReplyRecords(edit=AsyncMock(return_value=delivered))
+        streaming = self._streaming(tmp_path, membership_is_current=False, records=records)
         streaming.event_id = "$visible"
-        streaming.terminal_edit = terminal
         streaming.accumulated_text = "the answer"
 
         with patch("mindroom.streaming.edit_message_result", AsyncMock()) as direct:
-            await streaming._send_or_edit_message(
-                AsyncMock(),
-                is_final=True,
-                stream_status=STREAM_STATUS_COMPLETED,
-            )
+            await streaming.finalize(AsyncMock())
 
-        terminal.assert_awaited()
+        assert [write.kind for write in records.writes] == ["terminal"]
         direct.assert_not_awaited()
 
 
@@ -4938,13 +4703,13 @@ async def test_the_final_transform_shapes_the_terminal_payload_not_a_later_edit(
         config=config,
         runtime_paths=runtime_paths_for(config),
         final_text_transform=transform,
+        **reply_hooks(),
     )
     streaming.accumulated_text = "raw answer"
 
     prepared = await streaming._prepare_delivery_async(
         is_final=True,
         allow_empty_progress=False,
-        stream_status=STREAM_STATUS_COMPLETED,
     )
 
     assert transformed == ["raw answer"]
@@ -4969,13 +4734,13 @@ async def test_a_progressive_payload_is_never_transformed(tmp_path: Path) -> Non
         config=config,
         runtime_paths=runtime_paths_for(config),
         final_text_transform=transform,
+        **reply_hooks(),
     )
     streaming.accumulated_text = "partial"
 
     prepared = await streaming._prepare_delivery_async(
         is_final=False,
         allow_empty_progress=True,
-        stream_status=STREAM_STATUS_STREAMING,
     )
 
     assert calls == []
@@ -5004,13 +4769,13 @@ async def test_a_failing_final_transform_still_delivers_the_streamed_answer(tmp_
         config=config,
         runtime_paths=runtime_paths_for(config),
         final_text_transform=failing_transform,
+        **reply_hooks(),
     )
     streaming.accumulated_text = "the streamed answer"
 
     prepared = await streaming._prepare_delivery_async(
         is_final=True,
         allow_empty_progress=False,
-        stream_status=STREAM_STATUS_COMPLETED,
     )
 
     assert prepared is not None

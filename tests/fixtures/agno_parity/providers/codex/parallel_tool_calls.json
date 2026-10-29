@@ -80,6 +80,24 @@
         },
         "mindroom_native_compaction": null,
         "mindroom_portable_replay": false,
+        "mindroom_response_output": [
+          {
+            "arguments": "{\"city\": \"Paris\", \"unit\": \"celsius\"}",
+            "call_id": "call_parity_weather",
+            "id": "fc_parity_weather",
+            "name": "get_weather",
+            "status": "completed",
+            "type": "function_call"
+          },
+          {
+            "arguments": "{\"query\": \"Paris packing list\"}",
+            "call_id": "call_parity_notes",
+            "id": "fc_parity_notes",
+            "name": "search_notes",
+            "status": "completed",
+            "type": "function_call"
+          }
+        ],
         "mindroom_response_stored": false,
         "response_id": "resp_parity"
       },

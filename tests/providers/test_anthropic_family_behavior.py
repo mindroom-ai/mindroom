@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import base64
 import json
 from dataclasses import replace
 from typing import TYPE_CHECKING, Any, Literal
@@ -30,7 +29,7 @@ from mindroom.llm.errors import (
     ProviderUnavailable,
     RateLimited,
 )
-from mindroom.llm.media import Audio, File, Image
+from mindroom.llm.media import Audio, File
 from mindroom.llm.messages import Message
 from mindroom.llm.provider import (
     ModelRequest,
@@ -65,10 +64,6 @@ from tests.providers.golden_support import Wire, claude_stream_events, pipeline_
 if TYPE_CHECKING:
     from pathlib import Path
 
-_PNG = base64.b64decode(
-    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==",
-)
-_GIF = b"GIF89a\x01\x00\x01\x00\x80\x00\x00\x00\x00\x00\xff\xff\xff!\xf9\x04\x01\x00\x00\x00\x00,\x00\x00\x00\x00\x01\x00\x01\x00\x00\x02\x02D\x01\x00;"
 # Sonnet 5.5, the model these tests default to, asks the Anthropic and Vertex routes to drop stale replayed thinking.
 _THINKING_BINDING_BETA = "thinking-binding-controls-2026-08-01"
 _DROP_STALE = {"prefix_mismatch_behavior": "drop_block"}
@@ -194,24 +189,29 @@ async def test_stream_reports_start_usage_deltas_tool_calls_and_the_finished_mes
     assert message.content == "Looking it up."
     assert message.reasoning_content == "Check first."
     assert message.tool_calls == [events[3].call]
-    provider_data = message.provider_data or {}
-    assert provider_data["signature"] == "sig"
-    assert provider_data["stop_reason"] == "tool_use"
-    assert provider_data["mindroom_model"] == {"id": "claude-sonnet-5-5", "provider": "Anthropic"}
-    assert provider_data["mindroom_native_compaction"] is None
-    assert [block["type"] for block in provider_data["content_blocks"]] == ["thinking", "text", "tool_use"]
+    assert message.provider_data == {
+        "claude_blocks": [
+            {"type": "thinking", "thinking": "Check first.", "signature": "sig"},
+            {"type": "text", "text": "Looking it up."},
+            {"type": "tool_use", "id": "toolu_1", "name": "get_weather", "input": {"city": "Paris"}},
+        ],
+        "stop_reason": "tool_use",
+        "mindroom_model": {"id": "claude-sonnet-5-5", "provider": "Anthropic"},
+        "mindroom_native_compaction": None,
+    }
     assert wire.body()["thinking"] == {"type": "adaptive", "block_binding": _DROP_STALE}
 
 
 @pytest.mark.asyncio
 async def test_a_reply_stores_every_thinking_block_joined(tmp_path: Path) -> None:
-    """A reply's reasoning joins its thinking blocks, and its redacted reasoning its redacted thinking blocks."""
+    """A reply's text joins its text blocks, its reasoning its thinking blocks, and its redacted reasoning the rest."""
     blocks = [
         {"type": "thinking", "thinking": "First. ", "signature": "sig-1"},
         {"type": "redacted_thinking", "data": "redacted-1"},
+        {"type": "text", "text": "Half "},
         {"type": "thinking", "thinking": "Second.", "signature": "sig-2"},
         {"type": "redacted_thinking", "data": "redacted-2"},
-        {"type": "text", "text": "Done."},
+        {"type": "text", "text": "done."},
     ]
     provider = route_provider(
         "anthropic",
@@ -223,7 +223,8 @@ async def test_a_reply_stores_every_thinking_block_joined(tmp_path: Path) -> Non
     message = (await claude_turn(provider, ModelRequest(messages=_user()))).message
 
     assert (message.reasoning_content, message.redacted_reasoning_content) == ("First. Second.", "redacted-1redacted-2")
-    assert (message.provider_data or {})["signature"] == "sig-2"
+    assert message.content == "Half done."
+    assert (message.provider_data or {})["claude_blocks"] == blocks
 
 
 @pytest.mark.asyncio
@@ -343,11 +344,7 @@ async def test_block_types_the_sdk_does_not_know_are_kept_for_replay(tmp_path: P
     completed = events[-1]
     assert isinstance(completed, TurnCompleted)
     assert completed.message.content == "Hi."
-    provider_data = completed.message.provider_data or {}
-    assert provider_data["content_blocks"] == [unknown, text]
-    assert [(block["type"], block["payload"]) for block in provider_data["server_tool_blocks"]] == [
-        ("future_block", "p"),
-    ]
+    assert (completed.message.provider_data or {})["claude_blocks"] == [unknown, text]
 
 
 @pytest.mark.asyncio
@@ -358,6 +355,8 @@ async def test_refusal_completes_with_the_refusal_stop_reason(tmp_path: Path) ->
     completed = await claude_turn(provider, ModelRequest(messages=_user()))
     assert completed.stop_reason == "refusal"
     assert completed.message.content is None
+    # Every Claude turn stores its blocks, so a reply without any still reads as one with nothing to replay.
+    assert (completed.message.provider_data or {})["claude_blocks"] == []
     assert completed.message.metrics.tokens.input_tokens == 40
 
 
@@ -559,11 +558,11 @@ async def test_history_ending_with_an_assistant_turn_gets_a_trailing_user_turn(t
     wire = Wire(sse_reply([{"type": "text", "text": "More."}]))
     provider = route_provider("anthropic", tmp_path, wire)
     stored = {
-        "content_blocks": [{"type": "thinking", "thinking": "t", "signature": "s"}, {"type": "text", "text": "A"}],
+        "claude_blocks": [{"type": "thinking", "thinking": "t", "signature": "s"}, {"type": "text", "text": "A"}],
     }
     messages = [
         *_user(),
-        Message(role="assistant", content="A", provider_data=stored),
+        Message(role="assistant", content="A", reasoning_content="t", provider_data=stored),
         Message(role="assistant", content="B"),
     ]
     await claude_turn(provider, ModelRequest(messages=messages))
@@ -878,13 +877,13 @@ def _two_turns_with_a_tool_loop() -> list[Message]:
         Message(
             role="assistant",
             content="First answer.",
-            provider_data={"content_blocks": [dict(_EARLIER_THINKING), {"type": "text", "text": "First answer."}]},
+            provider_data={"claude_blocks": [dict(_EARLIER_THINKING), {"type": "text", "text": "First answer."}]},
         ),
         Message(role="user", content="Second?"),
         Message(
             role="assistant",
             tool_calls=[call],
-            provider_data={"content_blocks": [dict(_LOOP_THINKING), dict(_LOOP_REDACTED), dict(_LOOP_CALL)]},
+            provider_data={"claude_blocks": [dict(_LOOP_THINKING), dict(_LOOP_REDACTED), dict(_LOOP_CALL)]},
         ),
         Message(role="tool", content="Seen.", tool_call_id="toolu_1"),
     ]
@@ -987,7 +986,7 @@ async def test_a_request_without_the_binding_replays_thinking_only_inside_the_cu
 async def test_an_earlier_turn_of_only_thinking_is_left_out_whole(tmp_path: Path) -> None:
     """The API rejects an empty assistant turn, so one that had only thinking goes, and the user turns around it merge."""
     wire = Wire(sse_reply([{"type": "text", "text": "Done."}]))
-    thought = Message(role="assistant", provider_data={"content_blocks": [dict(_EARLIER_THINKING)]})
+    thought = Message(role="assistant", provider_data={"claude_blocks": [dict(_EARLIER_THINKING)]})
     messages = [*_user("First?"), thought, Message(role="user", content="Second?")]
     await claude_turn(route_provider("bedrock_claude", tmp_path, wire), ModelRequest(messages=messages))
     (turn,) = wire.body()["messages"]
@@ -1367,7 +1366,7 @@ async def test_native_compaction_sends_the_edit_and_replays_the_recorded_checkpo
         "checkpoint_prefix": True,
     }
     # The canonical history is untouched: the stored message still starts with its compaction block.
-    assert (first.message.provider_data or {})["content_blocks"][0]["type"] == "compaction"
+    assert (first.message.provider_data or {})["claude_blocks"][0]["type"] == "compaction"
     assert messages[0].content == "Be brief."
 
 
@@ -1423,27 +1422,26 @@ async def test_an_authored_context_edit_records_what_the_response_applied(tmp_pa
 
 @pytest.mark.asyncio
 async def test_replay_drops_unsigned_thinking_from_a_cut_off_response(tmp_path: Path) -> None:
-    """A stream that stopped mid-block leaves an unsigned thinking block, which the API rejects on replay."""
+    """A stream that stopped mid-block stores an unsigned thinking block, which the API rejects on replay."""
     signed = {"type": "thinking", "thinking": "", "signature": "complete"}
     unsigned = {"type": "thinking", "thinking": "", "signature": ""}
     tool_use = {"type": "tool_use", "id": "toolu_save", "name": "save_file", "input": {"file_name": "notes.md"}}
     unfinished = {"type": "tool_use", "id": "toolu_shell", "name": "run_shell_command", "input": {}}
     stored = [signed, tool_use, unsigned, unfinished]
-    wire = Wire(sse_reply([{"type": "text", "text": "Saved."}]))
+    wire = Wire(
+        sse_reply([dict(block) for block in stored], stop_reason="max_tokens"),
+        sse_reply([{"type": "text", "text": "Saved."}]),
+    )
     provider = route_provider("anthropic", tmp_path, wire, extra_kwargs={"thinking": {"type": "adaptive"}})
-    messages = [
-        Message(role="user", content="Save the notes."),
-        Message(
-            role="assistant",
-            content="",
-            provider_data={"content_blocks": [dict(block) for block in stored], "signature": "complete"},
-            tool_calls=[{"id": "toolu_save", "type": "function", "function": {"name": "save_file", "arguments": "{}"}}],
-        ),
-        Message(role="tool", tool_call_id="toolu_save", content="saved"),
-    ]
+    question = Message(role="user", content="Save the notes.")
+    cut_off = (await claude_turn(provider, ModelRequest(messages=[question]))).message
+    assert (cut_off.provider_data or {})["claude_blocks"] == stored
+    # Only the save call ran; the cut-off shell call left no result.
+    cut_off.tool_calls = [call for call in cut_off.tool_calls or [] if call["id"] == "toolu_save"]
+    messages = [question, cut_off, Message(role="tool", tool_call_id="toolu_save", content="saved")]
     await claude_turn(provider, ModelRequest(messages=messages))
     assert wire.body()["messages"][1]["content"] == [signed, tool_use]
-    assert (messages[1].provider_data or {})["content_blocks"] == stored
+    assert (messages[1].provider_data or {})["claude_blocks"] == stored
 
 
 @pytest.mark.asyncio
@@ -1778,98 +1776,6 @@ async def test_vertex_token_refresh_failures_map_to_the_shared_provider_errors(
     assert raised.value.__cause__ is failure
     assert wire.requests == []
     assert get_user_friendly_error_message(raised.value).startswith(final_message)
-
-
-@pytest.mark.asyncio
-async def test_url_media_is_fetched_inline_except_pdf_documents(tmp_path: Path) -> None:
-    """URL images and non-PDF URL documents are fetched and sent inline; Claude reads a PDF from its URL itself."""
-
-    def respond(request: httpx.Request) -> httpx.Response:
-        if request.url.host != "media.example":
-            return sse_reply([{"type": "text", "text": "Seen."}])
-        if request.url.path == "/photo":
-            return httpx.Response(200, content=_PNG, headers={"content-type": "image/png"})
-        if request.url.path == "/pic.png":
-            return httpx.Response(200, content=_PNG, headers={"content-type": "application/octet-stream"})
-        return httpx.Response(200, content=b"# Notes\n", headers={"content-type": "text/markdown; charset=utf-8"})
-
-    wire = Wire(respond)
-    provider = route_provider("anthropic", tmp_path, wire)
-    message = Message(
-        role="user",
-        content="Look.",
-        images=[Image(url="https://media.example/photo"), Image(url="https://media.example/pic.png")],
-        files=[
-            File(url="https://media.example/notes", mime_type="text/markdown"),
-            File(url="https://media.example/report.pdf", mime_type="application/pdf"),
-        ],
-    )
-    await claude_turn(provider, ModelRequest(messages=[message]))
-    blocks = wire.body()["messages"][0]["content"]
-    assert [block["type"] for block in blocks] == ["text", "image", "image", "document", "document"]
-    png = {"type": "base64", "media_type": "image/png", "data": base64.b64encode(_PNG).decode()}
-    assert blocks[1]["source"] == png
-    assert blocks[2]["source"] == png
-    assert blocks[3]["source"] == {"type": "text", "media_type": "text/plain", "data": "# Notes\n"}
-    assert blocks[4]["source"] == {"type": "url", "url": "https://media.example/report.pdf"}
-    assert [str(request.url) for request in wire.requests[:-1]] == [
-        "https://media.example/photo",
-        "https://media.example/pic.png",
-        "https://media.example/notes",
-    ]
-    assert message.images is not None
-    assert all(image.url is not None for image in message.images), "the request's inlined copies leave the input alone"
-
-
-@pytest.mark.asyncio
-async def test_unreadable_url_media_is_dropped_and_the_request_still_runs(tmp_path: Path) -> None:
-    """An expired or unreachable URL drops its media with a warning; the rest of the message is still sent."""
-
-    def respond(request: httpx2.Request) -> httpx.Response:
-        if request.url.host != "media.example":
-            return sse_reply([{"type": "text", "text": "Ok."}])
-        if request.url.path == "/gone":
-            return httpx.Response(404)
-        msg = "connection refused"
-        raise httpx2.ConnectError(msg, request=request)
-
-    wire = Wire(respond)
-    provider = route_provider("anthropic", tmp_path, wire)
-    message = Message(
-        role="user",
-        content="Look.",
-        images=[Image(url="https://media.example/gone")],
-        files=[File(url="https://media.example/down", mime_type="text/plain")],
-    )
-    completed = await claude_turn(provider, ModelRequest(messages=[message]))
-    assert completed.message.content == "Ok."
-    blocks = wire.body()["messages"][0]["content"]
-    assert [(block["type"], block["text"]) for block in blocks] == [("text", "Look.")]
-
-
-@pytest.mark.asyncio
-async def test_url_images_are_inlined_in_every_user_turn_beside_inline_images(tmp_path: Path) -> None:
-    """Each user turn's URL images are fetched where they sat, and images already carried inline stay as they are."""
-
-    def respond(request: httpx.Request) -> httpx.Response:
-        if request.url.host != "media.example":
-            return sse_reply([{"type": "text", "text": "Seen."}])
-        return httpx.Response(200, content=_PNG, headers={"content-type": "image/png"})
-
-    wire = Wire(respond)
-    inline = Image(content=_GIF, mime_type="image/gif")
-    messages = [
-        Message(role="user", content="First.", images=[inline, Image(url="https://media.example/one")]),
-        Message(role="assistant", content="Seen."),
-        Message(role="user", content="Second.", images=[Image(url="https://media.example/two")]),
-    ]
-    await claude_turn(route_provider("anthropic", tmp_path, wire), ModelRequest(messages=messages))
-    first, _, second = wire.body()["messages"]
-    gif = {"type": "base64", "media_type": "image/gif", "data": base64.b64encode(_GIF).decode()}
-    png = {"type": "base64", "media_type": "image/png", "data": base64.b64encode(_PNG).decode()}
-    assert [block.get("source") for block in first["content"]] == [None, gif, png]
-    assert [block.get("source") for block in second["content"]] == [None, png]
-    assert [request.url.path for request in wire.requests[:-1]] == ["/one", "/two"]
 
 
 def _markers(payload: object) -> list[dict[str, Any]]:

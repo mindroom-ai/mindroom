@@ -1,16 +1,17 @@
-"""The team reply document: member slots, consensus, tool markers, the durable snapshot, member ids, finished runs.
+"""The team reply document: member slots, consensus, tool markers, the durable snapshot, finished runs.
 
-The finished runs are the records a team run hands over, in the order a blocking reply lists them.
+The finished runs are the records a team run hands over.
 """
 # ruff: noqa: D103
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
 import pytest
 
 from mindroom.approval.response import require_ordered_pause_presentation
 from mindroom.llm.events import ReportedCall, TextDelta, ToolCompleted, ToolStarted
-from mindroom.llm.messages import Message
 from mindroom.llm.runs import RunRecord, RunRequirement, RunStatus, TeamRunRecord, ToolExecution
 from mindroom.redaction import redact_sensitive_text
 from mindroom.response_turn import PausedAttempt
@@ -18,34 +19,20 @@ from mindroom.teams.attempt import TeamAttempt
 from mindroom.teams.presentation import (
     TeamStreamPresentation,
     apply_team_event,
-    finished_run_text,
     format_team_header,
     render_team_member_slots,
     strip_team_display,
-    url_safe_member_id,
 )
+from mindroom.teams.resume import continued_team_pause
 from mindroom.teams.runtime import MemberEvent
 from tests.teams.squad import resolved_members, scripted, team_spec
+
+if TYPE_CHECKING:
+    from mindroom.tool_system.events import ToolTraceEntry
 
 
 def _presentation(*, show_tool_calls: bool = False) -> TeamStreamPresentation:
     return TeamStreamPresentation.new(["ledger_agent", "scout"], ["Ledger", "Scout"], show_tool_calls=show_tool_calls)
-
-
-@pytest.mark.parametrize(
-    ("config_name", "member_id"),
-    [
-        ("ledger_agent", "ledger-agent"),
-        ("CamelCase", "camel-case"),
-        ("Two Words", "two-words"),
-        ("dots.kept", "dots.kept"),
-        ("trailing__under", "trailing-under"),
-        ("mixed-Case_name 2", "mixed-case-name-2"),
-    ],
-)
-def test_member_ids_keep_the_keys_of_stored_reply_snapshots(config_name: str, member_id: str) -> None:
-    """Stored reply snapshots key members by these ids, so a configured name keeps the id main gave it."""
-    assert url_safe_member_id(config_name) == member_id
 
 
 def test_member_and_leader_events_land_in_their_slots() -> None:
@@ -55,7 +42,7 @@ def test_member_and_leader_events_land_in_their_slots() -> None:
     apply_team_event(presentation, MemberEvent("scout", "Scout", "run-2", TextDelta("Two more.")))
     apply_team_event(presentation, TextDelta("Five in all."))
 
-    assert presentation.per_member == {"ledger-agent": "Three vendors.", "scout": "Two more."}
+    assert presentation.per_member == {"ledger_agent": "Three vendors.", "scout": "Two more."}
     assert presentation.consensus == "Five in all."
     assert presentation.render_body(finished=True) == (
         "🤝 **Team Response** (Ledger, Scout):\n\n"
@@ -139,39 +126,15 @@ def test_members_without_a_consensus_get_the_no_consensus_note_once_finished_and
     assert format_team_header(["Ledger", "Scout"]) == "🤝 **Team Response** (Ledger, Scout):\n\n"
 
 
-def test_a_finished_run_without_content_reads_as_the_text_its_model_wrote() -> None:
-    """A run whose content is empty shows the text its own model requests wrote.
-
-    An earlier reply in the thread reaches the run's input as an assistant message no model answered, so it is not
-    the run's text.
-    """
-    answered = {"mindroom_model": {"id": "scout-model", "provider": "Synthetic"}}
-    scout = RunRecord(
-        run_id="scout-run",
-        agent_id="scout",
-        agent_display_name="Scout",
-        messages=[
-            Message(role="assistant", content="\n\nAn earlier reply."),
-            Message(role="user", content="Find vendors."),
-            Message(role="assistant", content="Three vendors.", provider_data=answered),
-            Message(role="assistant", tool_calls=[{"id": "call-1"}], provider_data=answered),
-            Message(role="tool", content="two more", tool_call_id="call-1"),
-            Message(role="assistant", content="Two more.", provider_data=answered),
-        ],
-    )
-
-    assert finished_run_text(scout) == "Three vendors.\n\nTwo more."
-
-
 _RAW_FAILURE = "checker provider down: api_key=example-secret"
 
 
-@pytest.mark.parametrize("source", ["live", "loaded"])
+@pytest.mark.parametrize("source", ["current", "stored-before-errors"])
 def test_a_failed_member_shows_its_redacted_reason_in_the_team_document(source: str) -> None:
-    """A member whose run failed shows why, credentials redacted, whether its record is live or loaded from storage.
+    """A member whose run failed shows why, credentials redacted, whether its record carries an error or predates it.
 
-    The live record carries the reason the loop recorded, though its model wrote text first; a loaded one holds only
-    its stored content, the raw error, since the model wrote nothing.
+    A current record carries the reason the loop recorded, though its model wrote text first; one stored before
+    failed runs stored their error holds only its content, the raw error, since the model wrote nothing.
     """
     reason = redact_sensitive_text(_RAW_FAILURE)
     checker = RunRecord(
@@ -179,8 +142,8 @@ def test_a_failed_member_shows_its_redacted_reason_in_the_team_document(source: 
         agent_id="checker",
         agent_display_name="Checker",
         status=RunStatus.error,
-        content="I will check." if source == "live" else _RAW_FAILURE,
-        error=reason if source == "live" else None,
+        content="I will check." if source == "current" else _RAW_FAILURE,
+        error=reason if source == "current" else None,
     )
 
     presentation = TeamStreamPresentation.new(["checker"], ["Checker"], show_tool_calls=False)
@@ -210,7 +173,7 @@ def test_hidden_tool_calls_separate_the_text_that_follows_them_and_survive_the_s
     apply_team_event(presentation, MemberEvent("scout", "Scout", "run-2", TextDelta("Looking.")))
     apply_team_event(presentation, MemberEvent("scout", "Scout", "run-2", ToolStarted(tool.call)))
     state = presentation.to_state()
-    assert state["separate_next_scopes"] == ["agent:scout"]
+    assert state["separate_next_slots"] == ["scout"]
 
     restored = TeamStreamPresentation.restore(
         config_names=["ledger_agent", "scout"],
@@ -224,6 +187,52 @@ def test_hidden_tool_calls_separate_the_text_that_follows_them_and_survive_the_s
     assert restored.per_member["scout"] == "Looking.\n\nFour seats."
     assert [entry.type for entry in restored.tool_trace] == ["tool_call_completed"]
     assert restored.tool_tracker.pending_tools == []
+
+
+def _hidden_pause_state() -> tuple[dict[str, object], list[ToolTraceEntry]]:
+    """Return the snapshot and trace of a hidden pause: scout's call and the leader's wait after their text."""
+    presentation = _presentation(show_tool_calls=False)
+    apply_team_event(presentation, MemberEvent("scout", "Scout", "run-2", TextDelta("Looking.")))
+    apply_team_event(
+        presentation,
+        MemberEvent("scout", "Scout", "run-2", ToolStarted(ReportedCall("call-1", "lookup", {}))),
+    )
+    apply_team_event(presentation, TextDelta("Summing up."))
+    apply_team_event(presentation, ToolStarted(ReportedCall("call-2", "lookup", {})))
+    state = presentation.to_state()
+    assert state["separate_next_slots"] == ["scout", None]
+    return state, presentation.tool_trace
+
+
+@pytest.mark.parametrize(
+    ("separators", "trace_member", "show_tool_calls"),
+    [
+        ({"scout": True}, "scout", False),
+        ([["scout"]], "scout", False),
+        (["stranger"], "scout", False),
+        (["scout", "scout"], "scout", False),
+        (["ledger_agent"], "scout", False),
+        (["scout", None], "scout", True),
+        (["scout", None], "stranger", False),
+    ],
+)
+def test_a_snapshot_that_names_a_slot_it_cannot_hold_is_refused(
+    separators: object,
+    trace_member: str,
+    *,
+    show_tool_calls: bool,
+) -> None:
+    """Separators name a slot with text at most once, only with tool calls hidden; every call is in a slot."""
+    state, trace = _hidden_pause_state()
+    trace[0].member_id = trace_member
+
+    with pytest.raises(RuntimeError, match=r"snapshot is invalid|not in a frozen presentation slot"):
+        TeamStreamPresentation.restore(
+            config_names=["ledger_agent", "scout"],
+            show_tool_calls=show_tool_calls,
+            state={**state, "separate_next_slots": separators},
+            tool_trace=trace,
+        )
 
 
 def test_an_empty_delta_keeps_the_paragraph_break_a_hidden_call_left_for_the_next_text() -> None:
@@ -255,22 +264,51 @@ def test_a_snapshot_for_other_members_is_refused() -> None:
         )
 
 
+@pytest.mark.parametrize("version", [1, 4])
+def test_a_snapshot_of_another_version_is_refused(version: int) -> None:
+    with pytest.raises(RuntimeError, match="snapshot is invalid"):
+        TeamStreamPresentation.restore(
+            config_names=["ledger_agent", "scout"],
+            show_tool_calls=False,
+            state={**_presentation().to_state(), "version": version},
+            tool_trace=(),
+        )
+
+
+@pytest.mark.parametrize(
+    "member",
+    [
+        "ledger_agent",
+        {"id": "ledger_agent", "display_name": "Ledger"},
+        {"id": "ledger_agent", "display_name": None, "content": ""},
+    ],
+)
+def test_a_snapshot_with_a_malformed_member_slot_is_refused(member: object) -> None:
+    with pytest.raises(RuntimeError, match="snapshot is invalid"):
+        TeamStreamPresentation.restore(
+            config_names=["ledger_agent"],
+            show_tool_calls=False,
+            state={"kind": "team_stream", "version": 3, "members": [member], "consensus": ""},
+            tool_trace=(),
+        )
+
+
 def test_members_with_the_same_display_name_keep_their_own_slots() -> None:
-    """Slots are keyed by member id, so equal display names share neither text nor tools."""
+    """Slots are keyed by config name, so equal display names share neither text nor tools."""
     presentation = TeamStreamPresentation.new(["member_a", "member_b"], ["Same", "Same"], show_tool_calls=True)
 
-    presentation.append_member("member-a", "First answer.")
-    presentation.append_member("member-b", "Second answer.")
-    presentation.start_member_tool(
-        "member-b",
+    presentation.append_member("member_a", "First answer.")
+    presentation.append_member("member_b", "Second answer.")
+    presentation.start_tool(
         ToolExecution(tool_call_id="call-1", tool_name="inspect", tool_args={}).call,
+        member_id="member_b",
     )
 
     assert presentation.per_member == {
-        "member-a": "First answer.",
-        "member-b": "Second answer.\n\n🔧 `inspect` [1] ⏳\n\n",
+        "member_a": "First answer.",
+        "member_b": "Second answer.\n\n🔧 `inspect` [1] ⏳\n\n",
     }
-    assert presentation.tool_trace[0].scope_key == "agent:member-b"
+    assert presentation.tool_trace[0].member_id == "member_b"
     assert presentation.render_body(finished=True).count("**Same**:") == 2
 
 
@@ -279,8 +317,8 @@ def test_a_pause_renumbers_interleaved_member_calls_in_document_order() -> None:
     presentation = TeamStreamPresentation.new(["first", "second"], ["First", "Second"], show_tool_calls=True)
     first = ToolExecution(tool_call_id="call-first", tool_name="inspect_first", requires_confirmation=True)
     second = ToolExecution(tool_call_id="call-second", tool_name="inspect_second", requires_confirmation=True)
-    presentation.start_member_tool("second", second.call)
-    presentation.start_member_tool("first", first.call)
+    presentation.start_tool(second.call, member_id="second")
+    presentation.start_tool(first.call, member_id="first")
     paused = PausedAttempt(
         session_id="session-1",
         run_id="run-1",
@@ -300,21 +338,36 @@ def test_a_pause_renumbers_interleaved_member_calls_in_document_order() -> None:
     assert [entry.tool_call_id for entry in presentation.tool_trace] == ["call-first", "call-second"]
     assert "🔧 `inspect_first` [1] ⏳" in presentation.per_member["first"]
     assert "🔧 `inspect_second` [2] ⏳" in presentation.per_member["second"]
-    presentation.complete_member_tool(
-        "second",
+    presentation.complete_tool(
         ToolExecution(tool_call_id="call-second", tool_name="inspect_second", result="done").call,
+        member_id="second",
     )
     assert [entry.type for entry in presentation.tool_trace] == ["tool_call_started", "tool_call_completed"]
     assert "🔧 `inspect_second` [2]\n\n" in presentation.per_member["second"]
+
+
+def test_a_pause_on_a_call_of_a_member_the_document_has_no_slot_for_is_refused() -> None:
+    presentation = TeamStreamPresentation.new(["first"], ["First"], show_tool_calls=True)
+    tool = ToolExecution(tool_call_id="call-1", tool_name="inspect", requires_confirmation=True)
+    paused = PausedAttempt(
+        session_id="session-1",
+        run_id="run-1",
+        tools=(tool,),
+        requirements=(RunRequirement(tool, member_agent_id="stranger", member_display_name="Stranger"),),
+        toolkit_owners={},
+    )
+
+    with pytest.raises(RuntimeError, match="no frozen member slot for 'Stranger'"):
+        continued_team_pause(presentation, paused)
 
 
 def test_a_hidden_snapshot_keeps_the_call_identity_without_markers() -> None:
     """With tool calls hidden, the restored document completes its pending call by id and still shows no marker."""
     presentation = TeamStreamPresentation.new(["general"], ["GeneralAgent"], show_tool_calls=False)
     presentation.append_member("general", "Before.")
-    presentation.start_member_tool(
-        "general",
+    presentation.start_tool(
         ToolExecution(tool_call_id="call-1", tool_name="inspect", tool_args={"query": "value"}).call,
+        member_id="general",
     )
 
     restored = TeamStreamPresentation.restore(
@@ -323,9 +376,9 @@ def test_a_hidden_snapshot_keeps_the_call_identity_without_markers() -> None:
         state=presentation.to_state(),
         tool_trace=presentation.tool_trace,
     )
-    restored.complete_member_tool(
-        "general",
+    restored.complete_tool(
         ToolExecution(tool_call_id="call-1", tool_name="inspect", result="done").call,
+        member_id="general",
     )
     restored.append_member("general", " After.")
 
@@ -336,22 +389,22 @@ def test_a_hidden_snapshot_keeps_the_call_identity_without_markers() -> None:
 def test_two_members_may_reuse_one_call_id() -> None:
     """Members' providers number calls independently; a call id is scoped to its member's slot."""
     presentation = TeamStreamPresentation.new(["first", "second"], ["First", "Second"], show_tool_calls=True)
-    presentation.start_member_tool(
-        "first",
+    presentation.start_tool(
         ToolExecution(tool_call_id="call-1", tool_name="inspect", tool_args={"item": "first"}).call,
+        member_id="first",
     )
-    presentation.start_member_tool(
-        "second",
+    presentation.start_tool(
         ToolExecution(tool_call_id="call-1", tool_name="inspect", tool_args={"item": "second"}).call,
+        member_id="second",
     )
-    presentation.complete_member_tool(
-        "first",
+    presentation.complete_tool(
         ToolExecution(tool_call_id="call-1", tool_name="inspect", result="first done").call,
+        member_id="first",
     )
 
-    assert [(entry.scope_key, entry.type) for entry in presentation.tool_trace] == [
-        ("agent:first", "tool_call_completed"),
-        ("agent:second", "tool_call_started"),
+    assert [(entry.member_id, entry.type) for entry in presentation.tool_trace] == [
+        ("first", "tool_call_completed"),
+        ("second", "tool_call_started"),
     ]
     assert "🔧 `inspect` [1]" in presentation.per_member["first"]
     assert "🔧 `inspect` [2] ⏳" in presentation.per_member["second"]
@@ -384,10 +437,13 @@ def test_a_chained_pause_keeps_the_hidden_separators_of_every_slot() -> None:
     """A pause in one member's slot keeps the pending separator another member's finished call left."""
     prior = TeamStreamPresentation.new(["first", "second"], ["First", "Second"], show_tool_calls=False)
     prior.append_member("first", "Before tool.")
-    prior.start_member_tool("first", ToolExecution(tool_call_id="call-1", tool_name="inspect", tool_args={}).call)
-    prior.complete_member_tool("first", ToolExecution(tool_call_id="call-1", tool_name="inspect", result="done").call)
+    prior.start_tool(ToolExecution(tool_call_id="call-1", tool_name="inspect", tool_args={}).call, member_id="first")
+    prior.complete_tool(
+        ToolExecution(tool_call_id="call-1", tool_name="inspect", result="done").call,
+        member_id="first",
+    )
     prior.append_member("second", "Waiting.")
-    prior.start_member_tool("second", ToolExecution(tool_call_id="call-2", tool_name="approve", tool_args={}).call)
+    prior.start_tool(ToolExecution(tool_call_id="call-2", tool_name="approve", tool_args={}).call, member_id="second")
 
     restored = TeamStreamPresentation.restore(
         config_names=["first", "second"],
@@ -404,7 +460,7 @@ def test_a_restored_visible_marker_keeps_one_paragraph_break_before_the_consensu
     """Completing a restored leader marker and continuing the consensus adds no second blank paragraph."""
     prior = TeamStreamPresentation.new([], [], show_tool_calls=True)
     prior.append_consensus("Before approval.")
-    prior.start_tool("team", ToolExecution(tool_call_id="call-1", tool_name="inspect", tool_args={}).call)
+    prior.start_tool(ToolExecution(tool_call_id="call-1", tool_name="inspect", tool_args={}).call)
     presentation = TeamStreamPresentation.restore(
         config_names=[],
         show_tool_calls=True,

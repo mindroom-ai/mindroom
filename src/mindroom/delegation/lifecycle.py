@@ -10,7 +10,6 @@ from uuid import uuid4
 
 from mindroom.authorization import is_sender_allowed_for_responder
 from mindroom.background_tasks import run_coroutine_until_complete
-from mindroom.budgets.monitor import budget_model
 from mindroom.delegation.audit import (
     child_audit_context,
     child_response_usage,
@@ -30,6 +29,7 @@ from mindroom.requester_identity import is_access_checked_requester_id
 from mindroom.tool_system.progress import cap_progress, report_tool_progress
 from mindroom.tool_system.runtime_context import get_detached_requester_context, get_tool_runtime_context
 from mindroom.tool_system.worker_routing import serialize_tool_execution_identity
+from mindroom.turn_model import ModelScope, TurnBudget, resolve_turn_model
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Mapping, Sequence
@@ -171,14 +171,13 @@ async def settle_child_response(
 ) -> None:
     """Derive operational state from one exact run, then publish its audit view.
 
-    A finished run's result is what it hands over (``handover_content``), so a failed run's is why it failed.
+    A finished run's result is what it hands over (``handover_content``), so a failed run's is why it failed, a run
+    recovery cancelled hands over why, and a resumed run's is what it wrote before its pause and since, else the
+    completion note.
     """
     if response.run_id != child.run_id or response.session_id != child.session_id:
         msg = "Delegation child response does not match its retained run"
         raise ValueError(msg)
-    # TODO(simplify): A resumed child that wrote nothing hands over its carried pause notice ("I have tools to
-    # execute, but I need confirmation.") after its call ran. Hand over only what the resume added
-    # (``new_handover_content``) or the completion note below. The delegating parent's model would notice.
     content = response.handover_content
     if response.status == RunStatus.completed:
         child.status = "completed"
@@ -188,7 +187,7 @@ async def settle_child_response(
         child.result = content or "Delegation cancelled."
     elif response.status == RunStatus.error:
         child.status = "failed"
-        child.result = str(content or response.status)
+        child.result = content or "Delegation failed."
     else:
         child.status = "paused" if response.status == RunStatus.paused else "running"
         child.result = None
@@ -462,17 +461,19 @@ def prepare_child_turn(
         # Last legacy release: v2026.10.244; replacement: the next release also persists requested_model_name.
         # Handling: An absent requested model reads as the recorded model, so follow-ups keep the model they ran on before.
         # Coverage: tests/test_budget_enforcement.py::test_delegated_follow_up_of_a_child_saved_without_a_requested_model.
-        requested_model_name = previous.requested_model_name or previous.model_name
-    else:
-        requested_model_name = config.resolve_runtime_model(
-            entity_name=agent_name,
-            active_model_name=model,
+        model = previous.requested_model_name or previous.model_name
+    # Each turn checks the budget against the requested model, so a follow-up recovers once spend is under the cap.
+    turn_model = resolve_turn_model(
+        config,
+        runtime_paths,
+        ModelScope(
+            entity=agent_name,
             room_id=identity.room_id,
             thread_id=identity.resolved_thread_id,
-            runtime_paths=runtime_paths,
-        ).model_name
-    # Each turn checks the budget against the requested model, so a follow-up recovers once spend is under the cap.
-    model_name = budget_model(config, runtime_paths, budget_monitor, owner.requester_id, requested_model_name)
+            explicit=model,
+        ),
+        TurnBudget(monitor=budget_monitor, requester_id=owner.requester_id),
+    )
     return DelegationChild(
         delegation_id=delegation_id,
         parent_tool_call_id=parent_tool_call_id,
@@ -481,8 +482,8 @@ def prepare_child_turn(
         task=task,
         session_id=session_id,
         run_id=uuid4().hex,
-        model_name=model_name,
-        requested_model_name=requested_model_name,
+        model_name=turn_model.model_name,
+        requested_model_name=turn_model.requested_model_name,
         depth=depth + 1,
         execution_identity=serialize_tool_execution_identity(identity),
         subagent_id=previous.subagent_id if previous is not None else delegation_id,

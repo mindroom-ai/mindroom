@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import time
 from copy import deepcopy
 from dataclasses import asdict, dataclass, field, replace
 from functools import partial
@@ -26,7 +27,15 @@ from mindroom.config.models import BackgroundToolJobsConfig
 from mindroom.delegation.background import delegation_child, start_delegation
 from mindroom.delegation.execution import _drive_delegations
 from mindroom.delegation.state import DelegationChild
-from mindroom.event_journal import ApprovalCall, EventJournalStore, ToolJobStore, approval_arguments_digest
+from mindroom.event_journal import (
+    ApprovalCall,
+    ApprovalCardReservation,
+    BackgroundApprovalDecision,
+    CallKey,
+    EventJournalStore,
+    ToolJobStore,
+    approval_arguments_digest,
+)
 from mindroom.event_journal.offloading import ThreadOffload
 from mindroom.event_journal.opening import event_journal_sqlite_path
 from mindroom.history.request_messages import build_resume_request
@@ -59,6 +68,7 @@ from tests.conftest import bind_runtime_paths, test_runtime_paths
 from tests.delegation_helpers import ScriptedAgents, _delegate_runtime_context
 from tests.fakes.scripted_model import ScriptedModel
 from tests.identity_helpers import entity_ids
+from tests.turn_model_helpers import turn_model
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Mapping, Sequence
@@ -130,6 +140,11 @@ class ProcessRuntime(ToolJobRuntime):
         )
         self._journal = journal
 
+    @property
+    def journal(self) -> EventJournalStore:
+        """Return this process's journal connection, which job cards reserve their calls through as the router does."""
+        return self._journal
+
     async def shutdown(self) -> None:
         """Shut down in order, then close this process's journal connection."""
         try:
@@ -140,6 +155,38 @@ class ProcessRuntime(ToolJobRuntime):
     async def close_journal(self) -> None:
         """Close this process's journal connection, as its exit does with or without an orderly shutdown."""
         await self._journal.close()
+
+
+# The router principal a test's job cards are reserved under.
+_JOB_CARD_PRINCIPAL = "router@jobs"
+
+
+async def reserve_job_card(journal: EventJournalStore, run_id: str, call_id: str, *, tool_name: str) -> None:
+    """Reserve one job card's call in the journal, as the approval manager does, so the save of the job's end decides it."""
+    delivery_id = f"script-approval:{run_id}:{call_id}"
+    assert await journal.principal(_JOB_CARD_PRINCIPAL).approvals.reserve_detached_card(
+        call=CallKey.detached(run_id, call_id),
+        owner_kind="job",
+        tool_name=tool_name,
+        toolkit_name="shell",
+        invoking_agent="code",
+        room_id="!room:example.org",
+        thread_id=None,
+        expires_at_ns=time.time_ns() + 3_600_000_000_000,
+        card=ApprovalCardReservation(
+            delivery_id=delivery_id,
+            tool_call_id=call_id,
+            event_type="io.mindroom.tool_approval",
+            approver_user_id="@alice:example.org",
+            approvable=True,
+            payload={"approval_id": delivery_id, "tool_name": tool_name, "status": "pending"},
+        ),
+    )
+
+
+async def job_card_decision(journal: EventJournalStore, run_id: str, call_id: str) -> BackgroundApprovalDecision | None:
+    """Return the journal's decision of one job card's call, or None while the card stays answerable."""
+    return await journal.principal(_JOB_CARD_PRINCIPAL).approvals.detached_decision(CallKey.detached(run_id, call_id))
 
 
 async def tool_job_runtime(
@@ -205,9 +252,16 @@ def intercept_job_saves(
         await original_accept(store, job_id, job_json)
         await hook(after, job_json, None)
 
-    async def save(store: ToolJobStore, job_id: str, job_json: str, result_payload_json: str | None = None) -> None:
+    async def save(
+        store: ToolJobStore,
+        job_id: str,
+        job_json: str,
+        result_payload_json: str | None = None,
+        *,
+        ends_approvals: bool,
+    ) -> None:
         await hook(before, job_json, result_payload_json)
-        await original_save(store, job_id, job_json, result_payload_json)
+        await original_save(store, job_id, job_json, result_payload_json, ends_approvals=ends_approvals)
         await hook(after, job_json, result_payload_json)
 
     monkeypatch.setattr(ToolJobStore, "accept", accept)
@@ -223,6 +277,15 @@ async def saved_jobs(storage_root: Path) -> dict[str, BackgroundJob]:
         await journal.close()
 
 
+async def saved_job_card_decision(storage_root: Path, run_id: str, call_id: str) -> BackgroundApprovalDecision | None:
+    """Read one job card's decision from the journal of one storage root, as the next process would."""
+    journal = tool_job_journal(storage_root)
+    try:
+        return await job_card_decision(journal, run_id, call_id)
+    finally:
+        await journal.close()
+
+
 async def write_saved_job(storage_root: Path, job_id: str, job_json: str) -> None:
     """Save one snapshot as is, as an earlier process might have left it; the writer takes the jobs over."""
     journal = tool_job_journal(storage_root)
@@ -230,7 +293,7 @@ async def write_saved_job(storage_root: Path, job_id: str, job_json: str) -> Non
         store = journal.tool_jobs(uuid4().hex)
         await store.take_ownership()
         if job_id in {saved.job_id for saved in await journal.tool_jobs("reader").load_all()}:
-            await store.save(job_id, job_json)
+            await store.save(job_id, job_json, ends_approvals=False)
         else:
             await store.accept(job_id, job_json)
     finally:
@@ -763,7 +826,7 @@ class DelegatingLeader:
             supports_native_tool_approval=True,
             include_interactive_questions=False,
             knowledge=None,
-            active_model_name=None,
+            model=turn_model(self.config, self.paths, "leader"),
         )
         hooks = agent_loop_hooks(
             build,

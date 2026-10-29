@@ -6,6 +6,7 @@ import asyncio
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
+from mindroom.llm.errors import InvalidRequest
 from mindroom.llm.provider import NativeCompactionReplay
 from mindroom.native_compaction import native_compaction_route
 from mindroom.providers.assistant_turn import TurnTimer, finished_turn
@@ -100,14 +101,22 @@ class ResponsesAdapter:
         """Return whether replayed images are priced by their visual patches."""
         return responses_replay_uses_visual_tokens(self.identity.id)
 
-    def estimate_portable_replay_tokens(self, messages: list[Message]) -> int:
-        """Count the input an explicitly replayed request sends for ``messages``, for history budgets."""
-        return estimate_responses_replay_tokens(
-            messages,
-            model_id=self.identity.id,
-            cache_system_prompt=self.settings.cache_system_prompt,
-            explicit_breakpoint=self.wire.explicit_breakpoint,
-        )
+    def estimate_portable_replay_tokens(self, messages: list[Message]) -> int | None:
+        """Count the input an explicitly replayed request sends for ``messages``, for history budgets.
+
+        Messages with an attachment file that cannot be read are sized canonically: the request replaces that media
+        with the media fallback's note.
+        """
+        try:
+            return estimate_responses_replay_tokens(
+                messages,
+                model_id=self.identity.id,
+                cache_system_prompt=self.settings.cache_system_prompt,
+                explicit_breakpoint=self.wire.explicit_breakpoint,
+                provider=self.identity.provider_name,
+            )
+        except InvalidRequest:
+            return None
 
     def _request_kwargs(self, request: ModelRequest) -> dict[str, Any]:
         return responses_request_kwargs(
@@ -115,6 +124,7 @@ class ResponsesAdapter:
             request=request,
             settings=request_settings(self.settings, request.overrides, self.capabilities),
             wire=self.wire,
+            provider=self.identity.provider_name,
         )
 
     async def _streamed(

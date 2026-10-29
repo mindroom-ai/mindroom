@@ -8,7 +8,6 @@ from mindroom.external_triggers.auth import (
     verify_trigger_request,
 )
 from mindroom.external_triggers.models import ExternalTriggerAcceptedResponse, ExternalTriggerPayload
-from mindroom.external_triggers.replay_store import ExternalTriggerEventClaim, ExternalTriggerReplayStore
 from mindroom.external_triggers.store import (
     ExternalTriggerRecord,
     ExternalTriggerStore,
@@ -18,10 +17,8 @@ from mindroom.external_triggers.store import (
 
 __all__ = (
     "ExternalTriggerAcceptedResponse",
-    "ExternalTriggerEventClaim",
     "ExternalTriggerPayload",
     "ExternalTriggerRecord",
-    "ExternalTriggerReplayStore",
     "ExternalTriggerStore",
     "ExternalTriggerTarget",
     "TriggerAuthError",

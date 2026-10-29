@@ -9,7 +9,7 @@ the storage v2 conversion still reads; keys the records do not model are ignored
 from __future__ import annotations
 
 import json
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import asdict, dataclass, field, fields
 from enum import StrEnum
 from time import time
@@ -17,9 +17,9 @@ from typing import Any
 from uuid import NAMESPACE_URL, uuid4, uuid5
 
 from mindroom.llm.events import ReportedCall
+from mindroom.llm.legacy_run_content import legacy_failure_text, stored_content
 from mindroom.llm.messages import Message
 from mindroom.llm.usage import RunMetrics
-from mindroom.redaction import redact_sensitive_text
 
 
 def _new_id() -> str:
@@ -101,10 +101,12 @@ class ToolExecution:
         return ReportedCall(self.tool_call_id, self.tool_name, self.tool_args, self.result, self.is_error)
 
     def to_dict(self) -> dict[str, Any]:
-        """Return the stored dict: every field, None included, under its stored key."""
-        # TODO(simplify): every field is stored, None defaults included. Store only the fields that hold a value,
-        # with the storage redesign (#3107, #3095). Stored data would change: new rows would omit unset fields.
-        return {_STORED_TOOL_KEYS.get(name, name): value for name, value in asdict(self).items()}
+        """Return the stored dict: each field not at its default under its stored key, as ``from_dict`` reads it."""
+        return {
+            _STORED_TOOL_KEYS.get(name, name): value
+            for name, value in asdict(self).items()
+            if value != _TOOL_DEFAULTS[name]
+        }
 
     @classmethod
     def from_dict(cls, data: Mapping[str, Any]) -> ToolExecution:
@@ -143,6 +145,8 @@ class ToolExecution:
 
 # Each tool-execution field by its stored key.
 _TOOL_FIELDS = {_STORED_TOOL_KEYS.get(item.name, item.name): item.name for item in fields(ToolExecution)}
+# Each tool-execution field's default, ``MISSING`` for the call's id and name, which every stored dict holds.
+_TOOL_DEFAULTS = {item.name: item.default for item in fields(ToolExecution)}
 
 _DENIED_WITHOUT_REASON = "Not approved by requester"
 
@@ -280,7 +284,12 @@ class _RunRecordCommon:
     parent_run_id: str | None = None
     user_id: str | None = None
     status: RunStatus = RunStatus.running
+    # What the run's model wrote, before a pause and after each resume, its requests' texts a blank line apart
+    # (``joined_texts``). A pause is in ``requirements`` and a failure in ``error``, never here.
     content: str | None = None
+    # Why the run failed or was stopped, credentials redacted, set by whatever ended it so: the loop for an ``ERROR``
+    # run, and delegation recovery for a child run it fails or cancels. A run its own cancellation stopped has none.
+    error: str | None = None
     model: str | None = None
     model_provider: str | None = None
     messages: list[Message] = field(default_factory=list)
@@ -292,39 +301,34 @@ class _RunRecordCommon:
     metrics: RunMetrics | None = None
     metadata: dict[str, Any] | None = None
     created_at: int = field(default_factory=_now)
-    # Why an ``ERROR`` run failed, credentials redacted, set by the loop that ended it. It is never stored, so a
-    # loaded record has none; the stored ``content`` holds the error's text only when the model said nothing.
-    error: str | None = field(default=None, compare=False, repr=False)
-    # The content a resumed run carried over from its pause, set by the resume (``resumed_record``): a resumed agent
-    # or team member keeps its paused content until it writes text of its own, while a resumed team leader starts its
-    # text afresh (``continue_team``) and this records what it had at the pause. It is never stored, so a loaded
-    # record has none.
+    # The content a resumed run carried from its pause, set by the resume (``resumed_record``); the loop joins what the
+    # model writes since to it. Never stored, so a loaded record has none.
     carried_content: str | None = field(default=None, compare=False, repr=False)
 
     @property
     def handover_content(self) -> str | None:
-        """Return what the run shows whoever reads it after it ends: why it failed, else its content.
+        """Return what the run shows whoever reads it after it ends: why it failed or was stopped, else its content.
 
-        The run that started it, a team's document of its members, and a delegation's settlement all read this. A
-        failed run that ended in this process shows its ``error``; a failed record loaded from storage has none, so
-        its stored content, the unredacted error when its model said nothing, is shown with credentials redacted.
+        The run that started it, a team's document of its members, and a delegation's settlement all read this.
         """
-        if self.status is not RunStatus.error:
-            return self.content
         if self.error is not None:
             return self.error
-        return None if self.content is None else redact_sensitive_text(self.content)
+        return legacy_failure_text(self.content) if self.status is RunStatus.error else self.content
 
     @property
     def new_handover_content(self) -> str | None:
-        """Return what the run hands over (``handover_content``) beyond what it carried over from its pause.
+        """Return what the run hands over (``handover_content``) beyond the text it carried from its pause.
 
-        A reply that a resume continues already accounts for what each resumed run carried over: the text it wrote
-        before the pause, or a paused notice that no longer holds once the run continues. A run that was not resumed
-        hands over all of it, and a failed run why it failed.
+        The reply a resume continues already shows that text, so it adds only this: what the model wrote since the
+        resume, or why the run failed or was stopped. A run that was not resumed hands over all of it.
         """
         handover = self.handover_content
-        return None if handover == self.carried_content else handover
+        carried = (self.carried_content or "").strip()
+        if self.error is not None or not carried or handover is None:
+            return handover
+        if handover == self.carried_content:
+            return None
+        return handover.removeprefix(carried + _TEXT_SEPARATOR)
 
     def _scalars_dict(self, identity: Mapping[str, str | None]) -> dict[str, Any]:
         """Return the scalar keys in stored order: the run, its agent or team, then the rest."""
@@ -335,6 +339,7 @@ class _RunRecordCommon:
             "parent_run_id": self.parent_run_id,
             "user_id": self.user_id,
             "content": self.content,
+            "error": self.error,
             "model": self.model,
             "model_provider": self.model_provider,
         }
@@ -363,20 +368,37 @@ class _RunRecordCommon:
         return {} if self.requirements is None else {"requirements": [item.to_dict() for item in self.requirements]}
 
 
+_TEXT_SEPARATOR = "\n\n"
+
+
+def joined_texts(parts: Sequence[str]) -> str:
+    """Return a run's texts as its content: one text as it is, several stripped and a blank line apart.
+
+    A resumed run's content joins its carried text and the texts of its requests since, so the text before and after
+    a tool call or an approval reads as two paragraphs.
+    """
+    texts = [part for part in parts if part.strip()]
+    if len(texts) <= 1:
+        return texts[0] if texts else "".join(parts)
+    return _TEXT_SEPARATOR.join(text.strip() for text in texts)
+
+
 def _common_from_dict(data: Mapping[str, Any]) -> dict[str, Any]:
     tools = data.get("tools")
     requirements = data.get("requirements")
     metrics = data.get("metrics")
+    messages = [Message.from_dict(message) for message in data.get("messages") or []]
     values: dict[str, Any] = {
         "run_id": data["run_id"],
         "session_id": data.get("session_id"),
         "parent_run_id": data.get("parent_run_id"),
         "user_id": data.get("user_id"),
         "status": _stored_status(data.get("status", RunStatus.running.value)),
-        "content": data.get("content"),
+        "content": stored_content(data.get("content"), messages),
+        "error": data.get("error"),
         "model": data.get("model"),
         "model_provider": data.get("model_provider"),
-        "messages": [Message.from_dict(message) for message in data.get("messages") or []],
+        "messages": messages,
         "tools": None if tools is None else [ToolExecution.from_dict(tool) for tool in tools],
         "uncounted_tool_calls": data.get("uncounted_tool_calls", 0),
         "requirements": None if requirements is None else [RunRequirement.from_dict(item) for item in requirements],
@@ -466,4 +488,5 @@ __all__ = [
     "TeamRunRecord",
     "ToolExecution",
     "denial_note_for",
+    "joined_texts",
 ]

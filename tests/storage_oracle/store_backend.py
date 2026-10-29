@@ -138,16 +138,16 @@ def edit_cut(store: ConversationStore, scope: HistoryScope, event_id: str) -> bo
     return remove_runs_answering(store, SESSION_ID, scope, event_id)
 
 
-def redaction_cut(store: ConversationStore, scope: HistoryScope, redacted: set[str]) -> list[str]:
+def redaction_cut(store: ConversationStore, redacted: set[str]) -> list[str]:
     """Run a reply's redaction cleanup over the conversation, which sees every event in ``redacted`` as redacted."""
-    session = store.load_session(SESSION_ID, scope.kind)
+    session = store.load_session(SESSION_ID)
     if session is None:
         return []
 
     async def redacted_history_events(event_ids: tuple[str, ...]) -> dict[str, str | None]:
         return {event_id: None for event_id in event_ids if event_id in redacted}
 
-    return asyncio.run(remove_history_of_redacted_events(store, session, scope, redacted_history_events))
+    return asyncio.run(remove_history_of_redacted_events(store, session, redacted_history_events))
 
 
 def _rewritten(changed: Sequence[AnyRunRecord]) -> object:
@@ -212,11 +212,11 @@ class StoreBackend(Driver):
 
     @override
     def open_store(self) -> None:
-        self.store = create_state_storage(self.owner, self.root)
+        self.store = create_state_storage(self.owner, self.root, self.scope)
 
     @override
     def load(self) -> ConversationSession | None:
-        return self.store.load_session(SESSION_ID, self.kind)
+        return self.store.load_session(SESSION_ID)
 
     def _written(self, record: AnyRunRecord, status: str | None = None) -> None:
         self.saved[record.run_id] = ([message.to_dict() for message in record.messages], status or record.status.value)
@@ -272,7 +272,7 @@ class StoreBackend(Driver):
             changed.extend(edit(runs))
             return changed
 
-        self.store.rewrite_run_messages(SESSION_ID, self.kind, recorded)
+        self.store.rewrite_run_messages(SESSION_ID, recorded)
         for run in changed:
             # Only the loaded runs store, each under its stored status.
             if run.run_id in statuses:
@@ -282,7 +282,7 @@ class StoreBackend(Driver):
     @override
     def finalize_notice(self, response_turn_id: str) -> object:
         # As ``_finalize_queued_notice_in_new_session_storage`` does.
-        if self.store.load_session(SESSION_ID, self.kind) is None:
+        if self.store.load_session(SESSION_ID) is None:
             return "no-session"
         return _rewritten(self._rewrite(partial(_finalize_queued_notice_in_runs, response_turn_id=response_turn_id)))
 
@@ -427,7 +427,7 @@ class StoreBackend(Driver):
 
     @override
     def redaction_cleanup(self, redacted: set[str]) -> object:
-        return redaction_cut(self.store, self.scope, redacted)
+        return redaction_cut(self.store, redacted)
 
     @override
     def set_force(self, session: ConversationSession, *, forced: bool) -> None:

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING
 
 from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.entity_resolution import entity_identity_registry
@@ -13,7 +13,7 @@ if TYPE_CHECKING:
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
     from mindroom.matrix.identity import MatrixID
-    from mindroom.runtime_protocols import OrchestratorRuntime, SupportsRunningState
+    from mindroom.runtime_protocols import OrchestratorRuntime
 
 
 def materializable_agent_names_for_orchestrator(
@@ -33,14 +33,10 @@ def live_responder_entity_names(
     """Return running agent/team responder bot names when runtime state is known."""
     if orchestrator is None:
         return None
-    orchestrator_agent_bots = orchestrator.agent_bots
-    if not isinstance(orchestrator_agent_bots, dict):
-        return None
-    running_bots = cast("dict[str, SupportsRunningState]", orchestrator_agent_bots)
     configured_responder_names = set(config.agents) | set(config.teams)
     return {
         name
-        for name, bot in running_bots.items()
+        for name, bot in orchestrator.agent_bots.items()
         if name != ROUTER_AGENT_NAME and name in configured_responder_names and bot.running
     }
 

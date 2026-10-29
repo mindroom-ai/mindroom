@@ -17,9 +17,10 @@ from mindroom.config.models import BackgroundToolJobsConfig
 from mindroom.custom_tools.job import JobTools
 from mindroom.delegation.background import delegation_outcome
 from mindroom.event_journal import ToolJobStore
+from mindroom.history.types import HistoryScope
 from mindroom.llm.media import Image
 from mindroom.llm.runs import RunRecord, RunStatus, TeamRunRecord, ToolExecution
-from mindroom.session_storage.agent_storage import create_session_storage
+from mindroom.session_storage.agent_storage import create_session_storage, create_state_storage
 from mindroom.session_storage.types import ConversationSession
 from mindroom.tool_jobs import consumption as consumption_module
 from mindroom.tool_jobs.consumption import ConsumptionOwner, consumption_context, set_consumption_storage
@@ -48,6 +49,7 @@ from tests.tool_job_helpers import (
     toolkit_job_tools,
     wait_for_status,
 )
+from tests.turn_model_helpers import turn_model
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -110,7 +112,7 @@ async def test_enabling_jobs_reserves_the_function_name_job(tmp_path: Path, *, f
                     persist_runtime_state=False,
                     tool_function_filter=lambda function: function.name != "job",
                     knowledge=None,
-                    active_model_name=None,
+                    model=turn_model(config, paths, "leader"),
                 )
                 assert build.spec.functions["job"].toolkit == "job"
             else:
@@ -122,7 +124,7 @@ async def test_enabling_jobs_reserves_the_function_name_job(tmp_path: Path, *, f
                         execution_identity=owner,
                         persist_runtime_state=False,
                         knowledge=None,
-                        active_model_name=None,
+                        model=turn_model(config, paths, "leader"),
                     )
     finally:
         await runtime.shutdown()
@@ -193,7 +195,7 @@ async def test_managed_agent_has_one_job_schema(tmp_path: Path, delegate: bool) 
             execution_identity=owner,
             persist_runtime_state=False,
             knowledge=None,
-            active_model_name=None,
+            model=turn_model(config, paths, "leader"),
         )
         names = [function.name for toolkit in build.spec.toolkits for function in toolkit.functions]
         assert names.count("job") == 1
@@ -262,7 +264,10 @@ async def test_job_list_rediscovers_restart_outcomes_with_current_scope(tmp_path
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("saved_kind", ["team", "agent"])
-async def test_a_team_leaders_wait_is_read_once_its_team_run_saves_the_call(tmp_path: Path, saved_kind: str) -> None:
+async def test_a_team_leaders_wait_is_read_once_its_team_run_saves_the_call(
+    tmp_path: Path,
+    saved_kind: Literal["team", "agent"],
+) -> None:
     """A team leader's job wait counts as read only when the team's own run saved the call, never an agent's."""
     paths = _runtime_paths(tmp_path)
     config = Config(agents={"leader": AgentConfig(display_name="Leader")})
@@ -271,7 +276,7 @@ async def test_a_team_leaders_wait_is_read_once_its_team_run_saves_the_call(tmp_
     runtime = await tool_job_runtime(tmp_path)
     pin_background_tool_jobs(context.config, paths)
     register_background_runtime(paths, runtime)
-    store = create_session_storage("leader", config, paths, owner)
+    store = create_state_storage("squad", tmp_path / "squad", HistoryScope(kind=saved_kind, scope_id="squad"))
 
     async def operation() -> BackgroundOutcome:
         return BackgroundOutcome("completed", "saved member answer")

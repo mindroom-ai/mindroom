@@ -105,12 +105,16 @@ async def test_local_minimal_bash_runs_the_real_cli_against_the_running_api(
 
     with tool_runtime_context(runtime):
         result = await ai.ai_response(
-            replace(_turn_context(), agent_mode="minimal", run_id=None),
-            prompt="List your tools",
-            runtime_paths=runtime.runtime_paths,
-            config=runtime.config,
-            execution_identity=build_execution_identity_from_runtime_context(runtime),
-            supports_native_tool_approval=True,
+            replace(
+                _turn_context(),
+                agent_mode="minimal",
+                run_id=None,
+                prompt="List your tools",
+                execution_identity=build_execution_identity_from_runtime_context(runtime),
+                supports_native_tool_approval=True,
+            ),
+            runtime.runtime_paths,
+            runtime.config,
         )
 
     assert "done" in result
@@ -267,7 +271,7 @@ async def test_local_launcher_directory_with_a_comma_stays_on_path(tmp_path: Pat
     """A comma in the storage path does not split the launcher directory into separate PATH entries."""
     runtime = _runtime_context(tmp_path / "Smith, John")
     shell_env = agent_cli_shell_env(runtime.config, runtime.runtime_paths, "helper", "grant")
-    shell = get_tool_by_name("shell", runtime.runtime_paths, disable_sandbox_proxy=True, worker_target=None)
+    shell = get_tool_by_name("shell", runtime.runtime_paths, runs_in_worker=False, worker_target=None)
     run = shell.async_functions["run_shell_command"].entrypoint
     assert run is not None
 

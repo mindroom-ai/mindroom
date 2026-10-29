@@ -22,6 +22,7 @@ from mindroom.llm.messages import Message
 from mindroom.llm.runs import RunRecord, RunRequirement, RunStatus, TeamRunRecord, ToolExecution
 from mindroom.llm.usage import HelperUsage, MessageMetrics, RequestUsage, RunMetrics, TokenCounts
 from mindroom.session_storage import store as store_module
+from mindroom.session_storage.schema import LOG_VERSION
 from mindroom.session_storage.store import (
     ConversationStore,
     ensure_session_row,
@@ -49,7 +50,7 @@ def _session(session_id: str = "s1", *, kind: SessionKind = "agent", owner: str 
 
 
 def _team() -> ConversationSession:
-    return _session(kind="team", owner="eng")
+    return _session(kind="team", owner="crew")
 
 
 def _usage(input_tokens: int, *, model: str = "code-model") -> RunMetrics:
@@ -101,7 +102,7 @@ def _member(run_id: str, team_run_id: str, status: RunStatus = RunStatus.complet
 def _team_run(run_id: str, status: RunStatus = RunStatus.completed, **fields: Any) -> TeamRunRecord:  # noqa: ANN401
     return TeamRunRecord(
         run_id=run_id,
-        team_id="eng",
+        team_id="crew",
         session_id="s1",
         status=status,
         created_at=1_700_000_000,
@@ -206,17 +207,17 @@ def _has_usage(store: ConversationStore, run_id: str) -> bool:
 
 def _totals(store: ConversationStore, session_id: str = "s1") -> dict[str, Any]:
     [(session_data,)] = _query(store, "SELECT session_data FROM code_sessions WHERE session_id = ?", session_id)
-    return json.loads(session_data).get("session_metrics", {})
+    return json.loads(session_data or "{}").get("session_metrics", {})
 
 
-def _loaded(store: ConversationStore, kind: SessionKind = "agent") -> ConversationSession:
-    session = store.load_session("s1", kind)
+def _loaded(store: ConversationStore) -> ConversationSession:
+    session = store.load_session("s1")
     assert session is not None
     return session
 
 
-def _loaded_ids(store: ConversationStore, kind: SessionKind = "agent") -> list[str]:
-    return [run.run_id for run in _loaded(store, kind).runs]
+def _loaded_ids(store: ConversationStore) -> list[str]:
+    return [run.run_id for run in _loaded(store).runs]
 
 
 def _as_stored(runs: list[AnyRunRecord]) -> list[dict[str, Any]]:
@@ -256,13 +257,13 @@ def _fold(
 # --- seq ----------------------------------------------------------------------------------------------------------
 
 
-def test_a_first_write_takes_the_next_seq_whatever_its_status(store: ConversationStore) -> None:
+def test_a_first_write_takes_the_next_seq_whatever_its_status(team_store: ConversationStore) -> None:
     """A new run gets the next number in its insert, paused, finished, cancelled, or a member alike."""
-    _save(store, _run("p0", RunStatus.paused), _run("r1"), _run("c2", RunStatus.cancelled))
-    _save(store, _member("m3", "t4"), _team_run("t4"), session=_team())
+    _save(team_store, _run("p0", RunStatus.paused), _run("r1"), _run("c2", RunStatus.cancelled), session=_team())
+    _save(team_store, _member("m3", "t4"), _team_run("t4"), session=_team())
 
-    assert _seqs(store) == {"p0": 1, "r1": 2, "c2": 3, "m3": 4, "t4": 5}
-    assert _query(store, "SELECT version, next_seq FROM code_sessions_log_meta") == [(2, 6)]
+    assert _seqs(team_store) == {"p0": 1, "r1": 2, "c2": 3, "m3": 4, "t4": 5}
+    assert _query(team_store, "SELECT version, next_seq FROM code_sessions_log_meta") == [(LOG_VERSION, 6)]
 
 
 def test_a_deleted_runs_number_is_never_handed_out_again(store: ConversationStore) -> None:
@@ -350,20 +351,20 @@ def test_a_non_visible_run_saved_visible_moves_to_the_end(store: ConversationSto
     assert session.summary.text == "summary"
 
 
-def test_a_member_saved_visible_keeps_its_seq(store: ConversationStore) -> None:
+def test_a_member_saved_visible_keeps_its_seq(team_store: ConversationStore) -> None:
     """Only a top-level run moves when it finishes; a member's number only orders it among the session's rows."""
     team = _team()
     _save(
-        store,
+        team_store,
         _member("m0", "t0", RunStatus.paused),
         _team_run("t0", RunStatus.paused),
         _team_run("t1"),
         session=team,
     )
 
-    assert _save(store, _member("m0", "t0", RunStatus.completed), session=team) == ["written"]
+    assert _save(team_store, _member("m0", "t0", RunStatus.completed), session=team) == ["written"]
 
-    assert _seqs(store)["m0"] == 1
+    assert _seqs(team_store)["m0"] == 1
 
 
 # --- rules 1, 2, and 4 ----------------------------------------------------------------------------------------------
@@ -415,14 +416,14 @@ def test_a_final_save_writes_nothing_and_records_no_usage(store: ConversationSto
     assert session.runs[0] is kept
 
 
-def test_a_member_of_a_visible_team_run_is_final(store: ConversationStore) -> None:
+def test_a_member_of_a_visible_team_run_is_final(team_store: ConversationStore) -> None:
     """Members persist when they end, before their team run's terminal save; after it, they are final."""
     team = _team()
-    _save(store, _member("m0", "t0", content="original"), _team_run("t0"), session=team)
-    _save(store, _member("p0", "tp", RunStatus.paused), _team_run("tp", RunStatus.paused), session=team)
+    _save(team_store, _member("m0", "t0", content="original"), _team_run("t0"), session=team)
+    _save(team_store, _member("p0", "tp", RunStatus.paused), _team_run("tp", RunStatus.paused), session=team)
 
     outcomes = _save(
-        store,
+        team_store,
         _member("m0", "t0", content="stale"),
         _member("m-new", "t0"),
         _member("p0", "tp", content="checked"),
@@ -430,46 +431,46 @@ def test_a_member_of_a_visible_team_run_is_final(store: ConversationStore) -> No
     )
 
     assert outcomes == ["final", "final", "written"]
-    row = _row(store, "m0")
+    row = _row(team_store, "m0")
     assert row is not None
     assert json.loads(row[2])["content"] == "original"
-    assert _row(store, "m-new") is None
+    assert _row(team_store, "m-new") is None
 
 
 def test_a_paused_team_run_behind_the_summary_keeps_writable_members_and_moves_on_completion(
-    store: ConversationStore,
+    team_store: ConversationStore,
 ) -> None:
     """Only a visible run is final; a paused team approval's members still save, and the team run then moves."""
     team = _team()
     _save(
-        store,
+        team_store,
         _member("m0", "t0", content="before"),
         _team_run("t0", RunStatus.paused),
         _team_run("t1"),
         session=team,
     )
-    _summary(store, 3, scope_key="team:eng")
+    _summary(team_store, 3, scope_key="team:crew")
 
-    outcomes = _save(store, _member("m0", "t0", content="after"), _team_run("t0"), session=team)
+    outcomes = _save(team_store, _member("m0", "t0", content="after"), _team_run("t0"), session=team)
 
     assert outcomes == ["written", "written"]
-    row = _row(store, "m0")
+    row = _row(team_store, "m0")
     assert row is not None
     assert json.loads(row[2])["content"] == "after"
-    assert _seqs(store)["t0"] == 4
-    assert _loaded_ids(store, "team") == ["m0", "t0"]
+    assert _seqs(team_store)["t0"] == 4
+    assert _loaded_ids(team_store) == ["m0", "t0"]
 
 
-def test_a_member_of_a_member_raises_and_writes_nothing(store: ConversationStore) -> None:
+def test_a_member_of_a_member_raises_and_writes_nothing(team_store: ConversationStore) -> None:
     """Team members are agents, so a run's root is itself or its parent."""
     team = _team()
-    _save(store, _member("m0", "t0", RunStatus.paused), session=team)
+    _save(team_store, _member("m0", "t0", RunStatus.paused), session=team)
 
     with pytest.raises(ValueError, match="names member run 'm0'"):
-        store.save_run(team, _run("deep", parent="m0", agent_id="helper"), record_usage=True)
+        team_store.save_run(team, _run("deep", parent="m0", agent_id="helper"), record_usage=True)
 
-    assert _row(store, "deep") is None
-    assert not _has_usage(store, "deep")
+    assert _row(team_store, "deep") is None
+    assert not _has_usage(team_store, "deep")
 
 
 # --- rule 5: the replay view ------------------------------------------------------------------------------------
@@ -697,19 +698,19 @@ def test_a_metadata_patch_joins_nothing_behind_the_latest_barrier(store: Convers
     ]
 
 
-def test_a_metadata_patch_of_a_run_that_is_not_visible_joins_nothing(store: ConversationStore) -> None:
+def test_a_metadata_patch_of_a_run_that_is_not_visible_joins_nothing(team_store: ConversationStore) -> None:
     """Only a visible top-level run is covered; a paused run and a member are not, even by their own scope's row."""
     team = _team()
-    _save(store, _member("m1", "t2"), _team_run("t2", RunStatus.paused), _team_run("t3"), session=team)
-    row_id = _summary(store, 3, scope_key="team:eng")
-    member_scope = _summary(store, 3, scope_key="agent:helper")
+    _save(team_store, _member("m1", "t2"), _team_run("t2", RunStatus.paused), _team_run("t3"), session=team)
+    row_id = _summary(team_store, 3, scope_key="team:crew")
+    member_scope = _summary(team_store, 3, scope_key="agent:helper")
 
-    store.patch_run_metadata("s1", "m1", {"matrix_response_event_id": "$member"})
-    store.patch_run_metadata("s1", "t2", {"matrix_response_event_id": "$paused"})
-    store.patch_run_metadata("s1", "t3", {"matrix_response_event_id": "$covered"})
+    team_store.patch_run_metadata("s1", "m1", {"matrix_response_event_id": "$member"})
+    team_store.patch_run_metadata("s1", "t2", {"matrix_response_event_id": "$paused"})
+    team_store.patch_run_metadata("s1", "t3", {"matrix_response_event_id": "$covered"})
 
-    assert _summary_sets(store, row_id) == (["$covered"], ["$covered"])
-    assert _summary_sets(store, member_scope) == ([], [])
+    assert _summary_sets(team_store, row_id) == (["$covered"], ["$covered"])
+    assert _summary_sets(team_store, member_scope) == ([], [])
 
 
 def test_a_metadata_patch_replaces_the_sessions_copy_in_a_new_list(store: ConversationStore) -> None:
@@ -747,7 +748,7 @@ def test_a_message_rewrite_edits_only_the_runs_a_load_returns_and_stores_only_th
         run.status, run.metadata, run.content = RunStatus.error, {"k": "lost"}, "lost"
         return [*runs, _run("covered", messages=[Message(role="user", content="no", id="covered-user")])]
 
-    store.rewrite_run_messages("s1", "agent", edit, session=session)
+    store.rewrite_run_messages("s1", edit, session=session)
 
     assert handed == ["r1"]
     stored = store.get_run("r1")
@@ -768,7 +769,7 @@ def test_a_message_rewrite_never_unfolds_a_message(store: ConversationStore) -> 
         runs[0].messages = [*copy.deepcopy(messages)]
         return runs
 
-    store.rewrite_run_messages("s1", "agent", edit)
+    store.rewrite_run_messages("s1", edit)
 
     assert [(row[0], row[2]) for row in _message_rows(store, "r1")] == [("m0", summary_id), ("m1", None)]
 
@@ -781,7 +782,7 @@ def test_a_message_rewrite_keeps_a_paused_runs_system_message(store: Conversatio
         runs[0].status = RunStatus.completed
         return runs
 
-    store.rewrite_run_messages("s1", "agent", edit)
+    store.rewrite_run_messages("s1", edit)
 
     assert [row[0] for row in _message_rows(store, "r1")] == ["r1-system", "r1-user"]
 
@@ -795,7 +796,7 @@ def test_a_message_rewrite_holds_the_write_lock_while_it_edits(store: Conversati
         _write_now(store, "UPDATE code_sessions_log_runs SET status = 'ERROR'", errors)
         return runs
 
-    store.rewrite_run_messages("s1", "agent", edit)
+    store.rewrite_run_messages("s1", edit)
 
     assert errors == ["database is locked"]
 
@@ -812,7 +813,7 @@ def test_a_message_rewrite_that_stores_no_run_leaves_the_session_the_load_its_ed
         handed.extend(runs)
         return [_run("unknown")]
 
-    store.rewrite_run_messages("s1", "agent", edit, session=session)
+    store.rewrite_run_messages("s1", edit, session=session)
 
     assert [id(run) for run in session.runs] == [id(run) for run in handed]
     assert _as_stored(session.runs) == _as_stored(_loaded(store).runs)
@@ -822,23 +823,25 @@ def test_a_message_rewrite_that_stores_no_run_leaves_the_session_the_load_its_ed
 # --- deletes ----------------------------------------------------------------------------------------------------
 
 
-def test_deleting_runs_takes_their_members_and_messages_and_fences_nothing(store: ConversationStore) -> None:
+def test_deleting_runs_takes_their_members_and_messages_and_fences_nothing(team_store: ConversationStore) -> None:
     """A discard deletes the team run's member rows too; it records no removed run and keeps the summaries."""
     team = _team()
-    _save(store, _member("m0", "t0"), _member("m1", "t0"), _team_run("t0"), _team_run("t1"), session=team)
-    seed_session_row(store, _session("s2", kind="team", owner="eng"))
-    store.save_run(_session("s2", kind="team", owner="eng"), _member("elsewhere", "t0"), record_usage=False)
-    _summary(store, 4, scope_key="team:eng")
-    session = _loaded(store, "team")
+    _save(team_store, _member("m0", "t0"), _member("m1", "t0"), _team_run("t0"), _team_run("t1"), session=team)
+    seed_session_row(team_store, _session("s2", kind="team", owner="crew"))
+    team_store.save_run(_session("s2", kind="team", owner="crew"), _member("elsewhere", "t0"), record_usage=False)
+    _summary(team_store, 4, scope_key="team:crew")
+    session = _loaded(team_store)
     session.runs = [*session.runs, _member("m0", "t0"), _member("m1", "t0"), _team_run("t0")]
 
-    deleted = store.delete_runs(["t0", "missing"], session_id="s1", session=session)
+    deleted = team_store.delete_runs(["t0", "missing"], session_id="s1", session=session)
 
     assert deleted == {"t0", "m0", "m1"}
-    assert _query(store, "SELECT run_id FROM code_sessions_log_runs WHERE parent_run_id = 't0'") == [("elsewhere",)]
-    assert _query(store, "SELECT DISTINCT run_id FROM code_sessions_log_messages") == [("elsewhere",)]
-    assert _query(store, "SELECT * FROM code_sessions_log_removed") == []
-    assert _query(store, "SELECT COUNT(*) FROM code_sessions_log_summaries") == [(1,)]
+    assert _query(team_store, "SELECT run_id FROM code_sessions_log_runs WHERE parent_run_id = 't0'") == [
+        ("elsewhere",),
+    ]
+    assert _query(team_store, "SELECT DISTINCT run_id FROM code_sessions_log_messages") == [("elsewhere",)]
+    assert _query(team_store, "SELECT * FROM code_sessions_log_removed") == []
+    assert _query(team_store, "SELECT COUNT(*) FROM code_sessions_log_summaries") == [(1,)]
     assert [run.run_id for run in session.runs] == []
 
 
@@ -856,11 +859,13 @@ def test_runs_without_removes_the_runs_and_their_members() -> None:
 # --- reads ------------------------------------------------------------------------------------------------------
 
 
-def test_load_returns_uncovered_and_non_visible_runs_with_their_members_in_seq_order(store: ConversationStore) -> None:
+def test_load_returns_uncovered_and_non_visible_runs_with_their_members_in_seq_order(
+    team_store: ConversationStore,
+) -> None:
     """Every non-visible run loads wherever it sits, members follow loaded runs only, and orphans never load."""
     team = _team()
     _save(
-        store,
+        team_store,
         _member("m-paused", "t-paused", RunStatus.paused),
         _team_run("t-paused", RunStatus.paused),
         _member("m-covered", "t-covered"),
@@ -870,9 +875,9 @@ def test_load_returns_uncovered_and_non_visible_runs_with_their_members_in_seq_o
         _team_run("t-new"),
         session=team,
     )
-    _summary(store, 6, scope_key="team:eng")
+    _summary(team_store, 6, scope_key="team:crew")
 
-    assert _loaded_ids(store, "team") == ["m-paused", "t-paused", "t-cancelled", "t-new"]
+    assert _loaded_ids(team_store) == ["m-paused", "t-paused", "t-cancelled", "t-new"]
 
 
 def test_cancelled_and_errored_runs_behind_the_summary_still_load(store: ConversationStore) -> None:
@@ -902,46 +907,48 @@ def test_load_covers_runs_by_their_own_scopes_latest_summary_and_replays_the_own
     assert [run.run_id for run in session.runs] == ["r3", "unowned"]
 
 
-def test_load_returns_none_for_a_missing_session_or_one_of_another_kind(store: ConversationStore) -> None:
-    """An agent load never returns a team session."""
-    _save(store, _team_run("t1"), session=_team())
+def test_a_load_names_the_databases_owner_and_returns_none_for_a_missing_session(team_store: ConversationStore) -> None:
+    """A loaded session's kind and owner are the database's; a session it does not hold loads as None."""
+    _save(team_store, _team_run("t1"), session=_team())
 
-    assert store.load_session("s1", "agent") is None
-    assert store.load_session("missing", "team") is None
-    assert _loaded_ids(store, "team") == ["t1"]
+    assert team_store.load_session("missing") is None
+    loaded = _loaded(team_store)
+    assert (loaded.kind, loaded.owner_id, [run.run_id for run in loaded.runs]) == ("team", "crew", ["t1"])
 
 
 def test_a_new_database_reads_as_empty(store: ConversationStore) -> None:
     """A database opened before anything was written to it reads as empty instead of failing."""
-    assert store.load_session("s1", "agent") is None
+    assert store.load_session("s1") is None
     assert store.read_session_metadata("s1") is None
     assert store.list_runs("s1") == []
     assert store.get_run("r1") is None
-    assert store.list_updated_sessions("code", since=0) == []
+    assert store.list_updated_sessions(since=0) == []
 
 
-def test_get_run_returns_a_paused_team_run_with_the_members_its_requirements_name(store: ConversationStore) -> None:
+def test_get_run_returns_a_paused_team_run_with_the_members_its_requirements_name(
+    team_store: ConversationStore,
+) -> None:
     """The members come in first-mention order, each a copy of its own; a run another team run owns is no member."""
     team = _team()
     replying = Message(role="assistant", content="ok", id="m1-reply", provider_data={"k": ["v"]}, created_at=1)
     m1 = _member("m1", "t0", RunStatus.paused)
     m1.messages.append(replying)
-    _save(store, m1, _member("m2", "t0", RunStatus.paused), session=team)
-    _save(store, _member("other", "t9", RunStatus.paused), _team_run("t9", RunStatus.paused), session=team)
+    _save(team_store, m1, _member("m2", "t0", RunStatus.paused), session=team)
+    _save(team_store, _member("other", "t9", RunStatus.paused), _team_run("t9", RunStatus.paused), session=team)
     requirements = [
         _member_requirement("m2", "c1"),
         _member_requirement("m1", "c2"),
         _member_requirement("m2", "c3"),
         _member_requirement("other", "c4"),
     ]
-    _save(store, _team_run("t0", RunStatus.paused, requirements=requirements), session=team)
+    _save(team_store, _team_run("t0", RunStatus.paused, requirements=requirements), session=team)
 
-    paused = store.get_run("t0")
+    paused = team_store.get_run("t0")
 
     assert isinstance(paused, TeamRunRecord)
     assert [member.run_id for member in paused.member_responses] == ["m2", "m1"]
     assert [message.id for message in paused.member_responses[0].messages] == ["m2-system", "m2-user"]
-    loaded = {run.run_id: run for run in _loaded(store, "team").runs}
+    loaded = {run.run_id: run for run in _loaded(team_store).runs}
     loaded_team = loaded["t0"]
     assert isinstance(loaded_team, TeamRunRecord)
     assert loaded_team.member_responses[1] is not loaded["m1"]
@@ -949,31 +956,37 @@ def test_get_run_returns_a_paused_team_run_with_the_members_its_requirements_nam
     assert loaded_team.member_responses[1].to_dict() == loaded["m1"].to_dict()
 
 
-def test_a_team_run_that_is_not_paused_reads_without_members(store: ConversationStore) -> None:
+def test_a_team_run_that_is_not_paused_reads_without_members(team_store: ConversationStore) -> None:
     """Only a paused team run's resume reads its members from the team run."""
     team = _team()
-    _save(store, _member("m1", "t0"), session=team)
-    _save(store, _team_run("t0", requirements=[_member_requirement("m1", "c1")]), session=team)
+    _save(team_store, _member("m1", "t0"), session=team)
+    _save(team_store, _team_run("t0", requirements=[_member_requirement("m1", "c1")]), session=team)
 
-    finished = store.get_run("t0")
+    finished = team_store.get_run("t0")
 
     assert isinstance(finished, TeamRunRecord)
     assert finished.member_responses == []
-    assert store.get_run("missing") is None
+    assert team_store.get_run("missing") is None
 
 
-def test_list_runs_returns_every_run_with_members_in_seq_order_in_its_replay_view(store: ConversationStore) -> None:
+def test_list_runs_returns_every_run_with_members_in_seq_order_in_its_replay_view(
+    team_store: ConversationStore,
+) -> None:
     """Covered runs and members are listed too, and a crash-left copy hides what its fold took."""
     team = _team()
-    _save(store, _team_run("t0"), _member("m1", "t2"), _team_run("t2", RunStatus.cancelled), session=team)
-    _summary(store, 1, scope_key="team:eng")
-    _fold(store, _team_run("t2", RunStatus.running), [Message(role="user", content="m", id="folded", created_at=1)])
+    _save(team_store, _team_run("t0"), _member("m1", "t2"), _team_run("t2", RunStatus.cancelled), session=team)
+    _summary(team_store, 1, scope_key="team:crew")
+    _fold(
+        team_store,
+        _team_run("t2", RunStatus.running),
+        [Message(role="user", content="m", id="folded", created_at=1)],
+    )
 
-    listed = store.list_runs("s1")
+    listed = team_store.list_runs("s1")
 
     assert [run.run_id for run in listed] == ["t0", "m1", "t2"]
     assert listed[2].messages == []
-    stored = store.get_run("t2")
+    stored = team_store.get_run("t2")
     assert stored is not None
     assert stored.messages == []
 
@@ -1092,45 +1105,45 @@ async def test_the_session_places_a_saved_run_where_the_log_does(
 
 
 @pytest.mark.asyncio
-async def test_a_removed_save_takes_the_run_and_its_members_out_of_the_session(store: ConversationStore) -> None:
+async def test_a_removed_save_takes_the_run_and_its_members_out_of_the_session(team_store: ConversationStore) -> None:
     """A run a cut removed while it waited leaves the session with its member runs, as it left the log."""
     team = _team()
     _save(
-        store,
+        team_store,
         _member("m0", "t0", RunStatus.paused),
         _team_run("t0", RunStatus.paused),
         _team_run("t1"),
         session=team,
     )
-    session = _loaded(store, "team")
-    store.delete_runs(["t0"], session_id="s1")
-    _remove(store, "t0")
+    session = _loaded(team_store)
+    team_store.delete_runs(["t0"], session_id="s1")
+    _remove(team_store, "t0")
 
-    await persist_to(store, session)(_team_run("t0", RunStatus.cancelled))
+    await persist_to(team_store, session)(_team_run("t0", RunStatus.cancelled))
 
     assert [run.run_id for run in session.runs] == ["t1"]
-    assert _as_stored(session.runs) == _as_stored(_loaded(store, "team").runs)
+    assert _as_stored(session.runs) == _as_stored(_loaded(team_store).runs)
 
 
 @pytest.mark.asyncio
-async def test_a_resumed_team_run_keeps_its_member_runs_in_the_session(store: ConversationStore) -> None:
+async def test_a_resumed_team_run_keeps_its_member_runs_in_the_session(team_store: ConversationStore) -> None:
     """A member keeps its place and its copy when its team run's save moves the team run after a later turn."""
     team = _team()
     _save(
-        store,
+        team_store,
         _member("m0", "t0", RunStatus.paused),
         _team_run("t0", RunStatus.paused),
         _team_run("t1"),
         session=team,
     )
-    session = _loaded(store, "team")
-    persist = persist_to(store, session)
+    session = _loaded(team_store)
+    persist = persist_to(team_store, session)
 
     await persist(_member("m0", "t0", content="checked"))
     await persist(_team_run("t0", content="answered"))
 
     assert [run.run_id for run in session.runs] == ["m0", "t1", "t0"]
-    assert _as_stored(session.runs) == _as_stored(_loaded(store, "team").runs)
+    assert _as_stored(session.runs) == _as_stored(_loaded(team_store).runs)
 
 
 @pytest.mark.asyncio
@@ -1243,15 +1256,17 @@ def test_a_fold_of_a_run_without_a_row_stores_it_cancelled_with_its_live_scalars
     assert _loaded_ids(store) == ["r0"]
 
 
-def test_a_fold_flags_the_member_runs_it_names_that_have_rows(store: ConversationStore) -> None:
+def test_a_fold_flags_the_member_runs_it_names_that_have_rows(team_store: ConversationStore) -> None:
     """Members that ended before the fold go with it; another member, and one an earlier fold took, keep theirs."""
     team = _team()
-    _save(store, _member("m0", "t0"), _member("m1", "t0"), _member("m2", "t0"), session=team)
-    first = _fold(store, _team_run("t0", RunStatus.running), [], member_run_ids=("m2",))
+    _save(team_store, _member("m0", "t0"), _member("m1", "t0"), _member("m2", "t0"), session=team)
+    first = _fold(team_store, _team_run("t0", RunStatus.running), [], member_run_ids=("m2",))
 
-    second = _fold(store, _team_run("t0", RunStatus.running), [], member_run_ids=("m0", "m2", "unstored"))
+    second = _fold(team_store, _team_run("t0", RunStatus.running), [], member_run_ids=("m0", "m2", "unstored"))
 
-    assert dict(_query(store, "SELECT run_id, folded_by FROM code_sessions_log_runs WHERE parent_run_id = 't0'")) == {
+    assert dict(
+        _query(team_store, "SELECT run_id, folded_by FROM code_sessions_log_runs WHERE parent_run_id = 't0'"),
+    ) == {
         "m0": second,
         "m1": None,
         "m2": first,
@@ -1327,7 +1342,7 @@ async def test_persist_to_saves_the_record_with_its_usage_and_the_session_state_
     # Another writer's state stays while this session's tools left theirs alone.
     _execute(
         store,
-        """UPDATE code_sessions SET session_data = json_set(session_data, '$.session_state', json('{"other": 1}'))""",
+        """UPDATE code_sessions SET session_state = json('{"other": 1}')""",
     )
     await persist(_run("r3"))
     assert _loaded(store).session_state == {"other": 1}
@@ -1368,8 +1383,8 @@ async def test_persist_to_stores_a_record_and_its_state_together_or_neither(stor
     persist = persist_to(store, session)
     _execute(
         store,
-        "CREATE TRIGGER refuse_state BEFORE UPDATE OF session_data ON code_sessions "
-        "WHEN json_extract(NEW.session_data, '$.session_state.cwd') = '/repo/sub' "
+        "CREATE TRIGGER refuse_state BEFORE UPDATE OF session_state ON code_sessions "
+        "WHEN json_extract(NEW.session_state, '$.cwd') = '/repo/sub' "
         "BEGIN SELECT RAISE(ABORT, 'state refused'); END",
     )
     session.session_state["cwd"] = "/repo/sub"
@@ -1400,7 +1415,7 @@ async def test_persist_to_compares_the_state_with_what_the_session_loaded_or_las
     persist = persist_to(store, session)
     _execute(
         store,
-        """UPDATE code_sessions SET session_data = json_set(session_data, '$.session_state', json('{"cwd": "/other"}'))""",
+        """UPDATE code_sessions SET session_state = json('{"cwd": "/other"}')""",
     )
 
     await persist(_run("r2"))
@@ -1426,10 +1441,26 @@ async def test_the_save_that_creates_the_session_row_records_the_state_it_stored
     assert session.stored_session_state is not session.session_state
     _execute(
         store,
-        """UPDATE code_sessions SET session_data = json_set(session_data, '$.session_state', json('{"cwd": "/other"}'))""",
+        """UPDATE code_sessions SET session_state = json('{"cwd": "/other"}')""",
     )
     await persist_to(store, session)(_run("r2"))
     assert _loaded(store).session_state == {"cwd": "/other"}
+
+
+@pytest.mark.asyncio
+async def test_the_state_and_the_usage_totals_are_stored_apart(store: ConversationStore) -> None:
+    """A row keeps its state in its own column and its totals alone in ``session_data``, so neither write reads the other."""
+    session = _session()
+    session.session_state["cwd"] = "/repo"
+    store.save_run(session, _run("r1"), record_usage=False)
+    assert _query(store, "SELECT session_state, session_data FROM code_sessions") == [('{"cwd": "/repo"}', None)]
+
+    session.session_state["cwd"] = "/repo/sub"
+    await persist_to(store, session)(_run("r2", metrics=_usage(10)))
+
+    [(state, totals)] = _query(store, "SELECT session_state, session_data FROM code_sessions")
+    assert json.loads(state) == {"cwd": "/repo/sub"}
+    assert set(json.loads(totals)) == {"session_metrics"}
 
 
 @pytest.mark.asyncio
@@ -1694,17 +1725,17 @@ def test_a_run_saved_again_counts_once_in_the_session_totals(store: Conversation
     assert _usage_row(store, "r1")["metrics"]["input_tokens"] == 25
 
 
-def test_team_member_runs_count_in_their_team_sessions_totals(store: ConversationStore) -> None:
+def test_team_member_runs_count_in_their_team_sessions_totals(team_store: ConversationStore) -> None:
     """Each member row and the team row add their own usage once."""
     _persist(
-        store,
+        team_store,
         _team(),
         _member("m1", "t1", metrics=_usage(7, model="helper-model")),
         _team_run("t1", metrics=_usage(30)),
     )
 
-    assert _totals(store)["input_tokens"] == 37
-    assert _usage_row(store, "m1")["parent_run_id"] == "t1"
+    assert _totals(team_store)["input_tokens"] == 37
+    assert _usage_row(team_store, "m1")["parent_run_id"] == "t1"
 
 
 def test_a_usage_write_failure_rolls_back_the_run(store: ConversationStore) -> None:
@@ -1729,7 +1760,7 @@ def test_usage_saves_move_the_sessions_update_time_and_rewrites_do_not(store: Co
 
     _save(store, _run("r1"), _run("r2"))
     store.patch_run_metadata("s1", "r1", {"matrix_response_event_id": "$reply"})
-    store.rewrite_run_messages("s1", "agent", lambda runs: runs)
+    store.rewrite_run_messages("s1", lambda runs: runs)
     store.delete_runs(["r2"], session_id="s1")
     assert _query(store, "SELECT updated_at FROM code_sessions") == [(5,)]
 
@@ -1788,12 +1819,10 @@ def test_independent_usage_needs_its_conversation_row(store: ConversationStore) 
         )
 
 
-def test_list_updated_sessions_returns_an_agents_sessions_updated_after_the_cursor(store: ConversationStore) -> None:
-    """An agent's sessions are listed oldest update first, strictly after the cursor; team sessions are not."""
-    for session_id, owner, updated_at in (("a", "code", 10), ("b", "code", 30), ("c", "code", 20), ("d", "other", 40)):
-        seed_session_row(store, _session(session_id, owner=owner))
+def test_list_updated_sessions_returns_the_sessions_updated_after_the_cursor(store: ConversationStore) -> None:
+    """The database's sessions are listed oldest update first, strictly after the cursor."""
+    for session_id, updated_at in (("a", 10), ("b", 30), ("c", 20)):
+        seed_session_row(store, _session(session_id))
         _execute(store, "UPDATE code_sessions SET updated_at = ? WHERE session_id = ?", updated_at, session_id)
-    seed_session_row(store, _session("t", kind="team", owner="code"))
-    _execute(store, "UPDATE code_sessions SET agent_id = 'code', updated_at = 50 WHERE session_id = 't'")
 
-    assert store.list_updated_sessions("code", since=10) == [("c", 20), ("b", 30)]
+    assert store.list_updated_sessions(since=10) == [("c", 20), ("b", 30)]

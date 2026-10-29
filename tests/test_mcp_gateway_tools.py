@@ -40,7 +40,6 @@ from mindroom.tool_system.invocation import DETACHED_SESSION_ID
 from mindroom.tool_system.registry_state import BUILTIN_TOOL_METADATA, BUILTIN_TOOL_REGISTRY, TOOL_REGISTRY
 from mindroom.tool_system.runtime_context import (
     get_tool_runtime_context,
-    get_worker_runtime_context,
     tool_runtime_context,
 )
 from mindroom.tool_system.worker_routing import get_tool_execution_identity, tool_execution_identity
@@ -53,6 +52,7 @@ if TYPE_CHECKING:
 
     from mindroom.api.connection_agents import AgentToolContext
     from mindroom.mcp_gateway.types import InvocationResult
+    from mindroom.tool_system.agent_tools import AgentTools
 
 
 @pytest.fixture
@@ -720,20 +720,17 @@ async def test_mcp_lazy_configure_never_contacts_backends(
 
 
 @pytest.mark.asyncio
-async def test_worker_context_covers_construction_body_and_cleanup(
+async def test_gateway_call_context_covers_construction_body_and_cleanup(
     context: AgentToolContext,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Detached worker configuration follows the complete selected toolkit lifecycle."""
+    """The gateway's own identity, and no ambient turn, follow the complete selected toolkit lifecycle."""
     phases = []
+    built_from: list[Config] = []
 
     def check(phase: str) -> None:
         assert get_tool_runtime_context() is None
         assert get_tool_execution_identity() == context.execution_identity
-        worker_context = get_worker_runtime_context()
-        assert worker_context is not None
-        assert worker_context.config is context.config
-        assert worker_context.runtime_paths == context.runtime_paths
         phases.append(phase)
 
     class ScopedToolkit(Toolkit):
@@ -752,7 +749,11 @@ async def test_worker_context_covers_construction_body_and_cleanup(
         def close(self) -> None:
             check("close")
 
-    monkeypatch.setattr(agents, "build_agent_toolkit", lambda *_args, **_kwargs: ScopedToolkit())
+    def build_toolkit(*_args: object, agent_tools: AgentTools, **_kwargs: object) -> ScopedToolkit:
+        built_from.append(agent_tools.config)
+        return ScopedToolkit()
+
+    monkeypatch.setattr(agents, "build_agent_toolkit", build_toolkit)
     ambient = _tool_runtime_context(context.runtime_paths.storage_root, agent_name="other")
     other_identity = replace(context.execution_identity, requester_id="@bob:example.org")
     with tool_runtime_context(ambient), tool_execution_identity(other_identity):
@@ -761,7 +762,8 @@ async def test_worker_context_covers_construction_body_and_cleanup(
         assert get_tool_execution_identity() == other_identity
     assert result == {"result": "account"}
     assert phases == ["build", "connect", "body", "close"]
-    assert get_worker_runtime_context() is None
+    # Worker-routed calls take their config from the toolkit build, so the gateway's config reaches the worker.
+    assert built_from == [context.config]
 
 
 @pytest.mark.asyncio

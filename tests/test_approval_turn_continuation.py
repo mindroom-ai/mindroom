@@ -36,7 +36,8 @@ from mindroom.response_turn import (
     PausedAnswer,
     PausedAttempt,
     ResponsePausedForApproval,
-    ResumedAttempt,
+    TurnResume,
+    TurnSinks,
 )
 from mindroom.tool_system.events import (
     CollectedStreamPresentation,
@@ -52,7 +53,7 @@ from tests.response_runner_helpers import _bot
 from tests.scripted_agent_helpers import stop_turn, stored_runs
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Callable
+    from collections.abc import AsyncIterator
     from pathlib import Path
 
     from mindroom.constants import RuntimePaths
@@ -117,23 +118,21 @@ async def _paused_turn(
     show_tool_calls: bool = True,
 ) -> PausedAttempt:
     """Run one reply of ``general`` as the response runner does and return the pause it suspended on, as it shows."""
-    ctx = make_turn_context(
-        "general",
-        session_id=identity.session_id,
-        room_id=identity.room_id,
-        thread_id=identity.thread_id,
-        requester_id=identity.requester_id,
+    ctx = replace(
+        make_turn_context(
+            "general",
+            session_id=identity.session_id,
+            room_id=identity.room_id,
+            thread_id=identity.thread_id,
+            requester_id=identity.requester_id,
+        ),
+        prompt=prompt,
+        execution_identity=identity,
+        show_tool_calls=show_tool_calls,
+        supports_native_tool_approval=True,
     )
     with pytest.raises(ResponsePausedForApproval) as raised:
-        await ai_response(
-            ctx,
-            prompt=prompt,
-            config=config,
-            runtime_paths=paths,
-            execution_identity=identity,
-            show_tool_calls=show_tool_calls,
-            supports_native_tool_approval=True,
-        )
+        await ai_response(ctx, paths, config)
     return _paused_with_committed_presentation(raised.value, show_tool_calls=show_tool_calls)
 
 
@@ -163,12 +162,14 @@ async def test_deferred_call_through_call_tool_pauses_under_its_real_name(
     install_model_providers(monkeypatch, {"default": model})
     with pytest.raises(ResponsePausedForApproval) as raised:
         await ai_response(
-            make_turn_context("general", session_id="deferred-approval"),
-            prompt="Add two and three.",
-            config=config,
-            runtime_paths=paths,
-            show_tool_calls=show_tool_calls,
-            supports_native_tool_approval=True,
+            replace(
+                make_turn_context("general", session_id="deferred-approval"),
+                prompt="Add two and three.",
+                show_tool_calls=show_tool_calls,
+                supports_native_tool_approval=True,
+            ),
+            paths,
+            config,
         )
     paused = _paused_with_committed_presentation(raised.value, show_tool_calls=show_tool_calls)
     assert not model.turns
@@ -318,7 +319,7 @@ async def test_approved_run_continues_after_a_same_turn_continuation(  # noqa: C
         continuation_count=2 if outcome == "immediate_pause" else 0,
     )
     runner = unwrap_extracted_collaborator(_bot(tmp_path / "runner")._response_runner)
-    execution = replace(runner._approval_execution, config=lambda: config, runtime_paths=paths)
+    execution = replace(runner._approvals._approval_execution, config=lambda: config, runtime_paths=paths)
     context = execution.tool_runtime.build_context(
         MessageTarget(
             identity.room_id,
@@ -337,14 +338,19 @@ async def test_approved_run_continues_after_a_same_turn_continuation(  # noqa: C
     )
     trace: list[ToolTraceEntry] = []
     run_ids: list[str] = []
-    monkeypatch.setattr(
-        "mindroom.approval.execution.stream_agent_response",
-        lambda *args, **kwargs: stream_agent_response(
-            *args,
-            **kwargs,
-            on_attempt_start=lambda run_id, _model_name: run_ids.append(run_id),
-        ),
-    )
+
+    def stream_noting_attempts(
+        ctx: ResponseTurnContext,
+        runtime_paths: RuntimePaths,
+        config: Config,
+        *,
+        sinks: TurnSinks,
+        **kwargs: Any,  # noqa: ANN401
+    ) -> AsyncIterator[object]:
+        attempt_sinks = replace(sinks, on_attempt_start=lambda run_id, _model_name: run_ids.append(run_id))
+        return stream_agent_response(ctx, runtime_paths, config, sinks=attempt_sinks, **kwargs)
+
+    monkeypatch.setattr("mindroom.approval.execution.stream_agent_response", stream_noting_attempts)
     paused_answer = PausedAnswer()
     resume_starts: list[int] = []
 
@@ -508,7 +514,7 @@ async def test_approval_settlement_preserves_tool_boundary(
         _continuation_turn_context(continuation, model_name="default", metadata=None),
         presentation,
         prompt=continuation.request_body,
-        resumed_attempt=ResumedAttempt(CompletedAttempt(response_text=collected.terminal_content)),
+        resume=TurnResume(CompletedAttempt(response_text=collected.terminal_content)),
         config=config,
         runtime_paths=paths,
         knowledge=None,
@@ -545,24 +551,20 @@ async def test_approval_settlement_uses_typed_status(
         state="claimed",
     )
 
-    async def stream(
-        _ctx: ResponseTurnContext,
-        *,
-        on_completed: Callable[[CompletedAttempt], None],
-        run_metadata_collector: dict[str, Any],
-        **_kwargs: object,
-    ) -> AsyncIterator[TextDelta]:
+    async def stream(*_args: object, sinks: TurnSinks, **_kwargs: object) -> AsyncIterator[TextDelta]:
+        assert sinks.run_metadata_collector is not None
+        assert sinks.on_completed is not None
         if wire_status is not None:
-            run_metadata_collector[AI_RUN_METADATA_KEY] = {"status": wire_status}
+            sinks.run_metadata_collector[AI_RUN_METADATA_KEY] = {"status": wire_status}
         yield TextDelta("Terminal response")
-        on_completed(CompletedAttempt(status=status))
+        sinks.on_completed(CompletedAttempt(status=status))
 
     monkeypatch.setattr("mindroom.approval.execution.stream_agent_response", stream)
     settlement = _stream_continuation_turn(
         _continuation_turn_context(continuation, model_name="default", metadata=None),
         CollectedStreamPresentation(show_tool_calls=False),
         prompt=continuation.request_body,
-        resumed_attempt=ResumedAttempt(CompletedAttempt()),
+        resume=TurnResume(CompletedAttempt()),
         config=config,
         runtime_paths=paths,
         knowledge=None,
@@ -689,7 +691,7 @@ async def test_approved_run_streams_progress_from_its_saved_presentation(
         show_tool_calls=True,
     )
     runner = unwrap_extracted_collaborator(_bot(tmp_path / "runner")._response_runner)
-    execution = replace(runner._approval_execution, config=lambda: config, runtime_paths=paths)
+    execution = replace(runner._approvals._approval_execution, config=lambda: config, runtime_paths=paths)
     published: list[StructuredStreamChunk] = []
 
     async def progress(chunk: StructuredStreamChunk) -> None:
@@ -783,7 +785,7 @@ async def test_an_approved_run_that_answers_without_text_shows_its_earlier_text_
         show_tool_calls=False,
     )
     runner = unwrap_extracted_collaborator(_bot(tmp_path / "runner")._response_runner)
-    execution = replace(runner._approval_execution, config=lambda: config, runtime_paths=paths)
+    execution = replace(runner._approvals._approval_execution, config=lambda: config, runtime_paths=paths)
 
     result = await execution.continue_run(
         continuation,
@@ -816,10 +818,10 @@ async def test_a_run_that_paused_without_text_shows_no_paused_notice_in_its_paus
     pause: str,
     reply: str,
 ) -> None:
-    """A blocking reply shows its pause and its approved reply without the paused notice its run's record holds.
+    """A blocking reply shows its pause and its approved reply without a paused notice.
 
-    The run paused without text of its own, so its record holds the paused notice as its content, which neither
-    reply shows: the approval card says what the pause waits for.
+    The run paused without text of its own, so its record holds no content: the approval card says what the pause
+    waits for.
     """
     paths = resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path / "storage")
     config = bind_runtime_paths(
@@ -846,7 +848,7 @@ async def test_a_run_that_paused_without_text_shows_no_paused_notice_in_its_paus
     )
     assert paused.response_text.strip() == pause
     [stored] = stored_runs(config, paths, identity.session_id)
-    assert stored.content == "I have tools to execute, but I need confirmation."
+    assert stored.content is None
     continuation = approval_continuation(
         approval_id="approval-notice-free",
         run_id=paused.run_id,
@@ -869,7 +871,7 @@ async def test_a_run_that_paused_without_text_shows_no_paused_notice_in_its_paus
         show_tool_calls=show_tool_calls,
     )
     runner = unwrap_extracted_collaborator(_bot(tmp_path / "runner")._response_runner)
-    execution = replace(runner._approval_execution, config=lambda: config, runtime_paths=paths)
+    execution = replace(runner._approvals._approval_execution, config=lambda: config, runtime_paths=paths)
 
     result = await execution.continue_run(
         continuation,
@@ -930,7 +932,7 @@ async def test_an_approved_run_hands_its_session_to_queued_notice_finalization(
         request_body="Add them.",
     )
     runner = unwrap_extracted_collaborator(_bot(tmp_path / "runner")._response_runner)
-    execution = replace(runner._approval_execution, config=lambda: config, runtime_paths=paths)
+    execution = replace(runner._approvals._approval_execution, config=lambda: config, runtime_paths=paths)
 
     with queued_message_signal_context(None) as notices:
         result = await execution.continue_run(
@@ -968,7 +970,7 @@ async def test_fresh_attempt_pause_publishes_its_progress_before_returning_the_p
     )
     gated = ToolExecution(tool_call_id="call-2", tool_name="publish_report", tool_args={})
 
-    async def stream(_ctx: ResponseTurnContext, **_kwargs: object) -> AsyncIterator[object]:
+    async def stream(*_args: object, **_kwargs: object) -> AsyncIterator[object]:
         yield TextDelta(" Next, publishing.")
         yield ToolStarted(gated.call)
         raise ResponsePausedForApproval(
@@ -985,7 +987,7 @@ async def test_fresh_attempt_pause_publishes_its_progress_before_returning_the_p
         _continuation_turn_context(continuation, model_name="default", metadata=None),
         CollectedStreamPresentation(show_tool_calls=True, response_text="Checked."),
         prompt=continuation.request_body,
-        resumed_attempt=ResumedAttempt(CompletedAttempt()),
+        resume=TurnResume(CompletedAttempt()),
         config=config,
         runtime_paths=paths,
         knowledge=None,
@@ -1069,7 +1071,7 @@ async def test_a_call_that_failed_before_an_approval_replays_as_failed_when_the_
         show_tool_calls=True,
     )
     runner = unwrap_extracted_collaborator(_bot(tmp_path / "runner")._response_runner)
-    execution = replace(runner._approval_execution, config=lambda: config, runtime_paths=paths)
+    execution = replace(runner._approvals._approval_execution, config=lambda: config, runtime_paths=paths)
 
     with pytest.raises(asyncio.CancelledError):
         await execution.continue_run(

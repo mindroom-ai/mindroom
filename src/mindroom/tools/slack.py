@@ -1,189 +1,103 @@
-"""Slack tool configuration."""
+"""Slack tool registration."""
 
 from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from mindroom.tool_system.declarations import ConfigField, SetupType, ToolCategory, ToolFileAccess, ToolStatus
+from mindroom.tool_system.declarations import (
+    ConfigField,
+    SetupType,
+    ToolCategory,
+    ToolFileAccess,
+    ToolManagedInitArg,
+    ToolStatus,
+)
 from mindroom.tool_system.registration import register_tool_with_metadata
 
 if TYPE_CHECKING:
-    from agno.tools.slack import SlackTools
+    from mindroom.custom_tools.slack import SlackTools
 
 
 @register_tool_with_metadata(
     name="slack",
-    file_access=ToolFileAccess.UNCONFINED,
-    requires_primary_runtime=True,
     display_name="Slack",
-    description="Send messages and manage channels",
+    description=(
+        "Search, read, download, post, react, edit, delete, and upload in Slack as the connected user "
+        "or in a project's channels"
+    ),
     category=ToolCategory.COMMUNICATION,
+    # Uploads read the path they are given under the agent's file_access; downloads always land in the workspace.
+    file_access=ToolFileAccess.AGENT,
     status=ToolStatus.REQUIRES_CONFIG,
-    setup_type=SetupType.API_KEY,
+    setup_type=SetupType.OAUTH,
+    requires_primary_runtime=True,
+    consumes_workspace_paths=True,
+    auth_provider="slack",
     icon="SiSlack",
     icon_color="text-purple-600",
     config_fields=[
         ConfigField(
-            name="token",
-            label="Token",
-            type="password",
-            required=False,
-            default=None,
-        ),
-        ConfigField(
-            name="user_token",
-            label="User Token",
-            type="password",
-            required=False,
-            default=None,
-            description="User token (xoxp-) used for search_messages, which bot tokens cannot call",
-        ),
-        ConfigField(
-            name="markdown",
-            label="Markdown",
+            name="write",
+            label="Allow Write Operations",
             type="boolean",
             required=False,
             default=True,
+            description="Allow posting, editing, and deleting messages, adding reactions, and uploading files.",
+        ),
+    ],
+    agent_override_fields=[
+        ConfigField(
+            name="channels",
+            label="Project Channels",
+            type="string[]",
+            required=False,
+            default=None,
+            placeholder="C0123ABCD",
+            description=(
+                "Slack channel IDs this agent reads and posts in with the MindRoom Slack app; "
+                "without channels, every requester uses their own Slack account."
+            ),
         ),
         ConfigField(
-            name="output_directory",
-            label="Output Directory",
+            name="room",
+            label="Answering Room",
             type="text",
             required=False,
             default=None,
-        ),
-        ConfigField(
-            name="save_downloads",
-            label="Save Downloads",
-            type="boolean",
-            required=False,
-            default=False,
-        ),
-        ConfigField(
-            name="enable_send_message",
-            label="Enable Send Message",
-            type="boolean",
-            required=False,
-            default=True,
-        ),
-        ConfigField(
-            name="enable_send_message_thread",
-            label="Enable Send Message Thread",
-            type="boolean",
-            required=False,
-            default=True,
-        ),
-        ConfigField(
-            name="enable_list_channels",
-            label="Enable List Channels",
-            type="boolean",
-            required=False,
-            default=True,
-        ),
-        ConfigField(
-            name="enable_get_channel_history",
-            label="Enable Get Channel History",
-            type="boolean",
-            required=False,
-            default=True,
-        ),
-        ConfigField(
-            name="enable_upload_file",
-            label="Enable Upload File",
-            type="boolean",
-            required=False,
-            default=True,
-        ),
-        ConfigField(
-            name="enable_download_file",
-            label="Enable Download File",
-            type="boolean",
-            required=False,
-            default=True,
-        ),
-        ConfigField(
-            name="enable_search_messages",
-            label="Enable Search Messages",
-            type="boolean",
-            required=False,
-            default=False,
-        ),
-        ConfigField(
-            name="enable_search_workspace",
-            label="Enable Search Workspace",
-            type="boolean",
-            required=False,
-            default=False,
-        ),
-        ConfigField(
-            name="enable_get_thread",
-            label="Enable Get Thread",
-            type="boolean",
-            required=False,
-            default=False,
-        ),
-        ConfigField(
-            name="enable_list_users",
-            label="Enable List Users",
-            type="boolean",
-            required=False,
-            default=False,
-        ),
-        ConfigField(
-            name="enable_get_user_info",
-            label="Enable Get User Info",
-            type="boolean",
-            required=False,
-            default=False,
-        ),
-        ConfigField(
-            name="enable_get_channel_info",
-            label="Enable Get Channel Info",
-            type="boolean",
-            required=False,
-            default=False,
-        ),
-        ConfigField(
-            name="all",
-            label="All",
-            type="boolean",
-            required=False,
-            default=False,
-        ),
-        ConfigField(
-            name="max_file_size",
-            label="Max File Size",
-            type="number",
-            required=False,
-            default=1073741824,
-        ),
-        ConfigField(
-            name="thread_message_limit",
-            label="Thread Message Limit",
-            type="number",
-            required=False,
-            default=20,
+            description="One of the agent's rooms where mentions of the MindRoom app in its channels start threads.",
         ),
     ],
-    dependencies=["slack-sdk"],
-    docs_url="https://docs.mindroom.chat/tools/messaging-and-social/#slack",
+    managed_init_args=(
+        ToolManagedInitArg.RUNTIME_PATHS,
+        ToolManagedInitArg.CREDENTIALS_MANAGER,
+        ToolManagedInitArg.WORKER_TARGET,
+        ToolManagedInitArg.RUNTIME_CONFIG,
+        ToolManagedInitArg.TOOL_OUTPUT_WORKSPACE_ROOT,
+        ToolManagedInitArg.CURRENT_ROOM_ID,
+        ToolManagedInitArg.FILE_ACCESS,
+    ),
+    dependencies=[],
+    docs_url="https://docs.mindroom.chat/tools/slack/",
+    helper_text=(
+        "Each user connects their own Slack account through the MindRoom Slack app. "
+        "Store the app's client ID and secret in the slack_oauth_client credential service, "
+        "and its bot token, signing secret and, for watches, app-level token in slack_app."
+    ),
     function_names=(
-        "download_file",
-        "get_channel_history",
-        "get_channel_info",
-        "get_thread",
-        "get_user_info",
-        "list_channels",
-        "list_users",
-        "search_messages",
-        "search_workspace",
-        "send_message",
-        "send_message_thread",
-        "upload_file",
+        "slack_search",
+        "slack_recent",
+        "slack_read",
+        "slack_download",
+        "slack_post",
+        "slack_react",
+        "slack_edit",
+        "slack_delete",
+        "slack_upload",
+        "slack_watch",
     ),
 )
 def slack_tools() -> type[SlackTools]:
-    """Return Slack tools for messaging and channel management."""
-    from agno.tools.slack import SlackTools
+    """Return Slack tools that act as the requester or as the MindRoom Slack app in a project's channels."""
+    from mindroom.custom_tools.slack import SlackTools
 
     return SlackTools

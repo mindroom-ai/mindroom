@@ -1,0 +1,488 @@
+{
+  "created": [
+    {
+      "apiVersion": "apps/v1",
+      "kind": "Deployment",
+      "metadata": {
+        "name": "mindroom-worker-f360bf3b80bdca4d709b81a5",
+        "namespace": "chat",
+        "labels": {
+          "mindroom.ai/component": "worker",
+          "app.kubernetes.io/managed-by": "mindroom",
+          "app.kubernetes.io/name": "mindroom-worker",
+          "mindroom.ai/tenant": "test",
+          "mindroom.ai/worker-id": "mindroom-worker-f360bf3b80bdca4d709b81a5"
+        },
+        "annotations": {
+          "mindroom.ai/worker-key": "v1:tenant-123:shared:code",
+          "mindroom.ai/state-subpath": "workers/v1_tenant-123_shared_code-f360bf3b80bdca4d",
+          "mindroom.ai/created-at": "10.0",
+          "mindroom.ai/last-used-at": "10.0",
+          "mindroom.ai/startup-count": "1",
+          "mindroom.ai/failure-count": "0",
+          "mindroom.ai/worker-status": "starting",
+          "mindroom.ai/last-started-at": "10.0",
+          "mindroom.ai/template-hash": "4165d3f1d1730463e53db71bea6a59d76a4a0501d729f51702cee6743c4e4f48",
+          "mindroom.ai/workspace-template-hash": "4165d3f1d1730463e53db71bea6a59d76a4a0501d729f51702cee6743c4e4f48",
+          "mindroom.ai/private-agent-names": "[\"mind\"]"
+        }
+      },
+      "spec": {
+        "replicas": 1,
+        "selector": {
+          "matchLabels": {
+            "mindroom.ai/component": "worker",
+            "app.kubernetes.io/managed-by": "mindroom",
+            "app.kubernetes.io/name": "mindroom-worker",
+            "mindroom.ai/tenant": "test",
+            "mindroom.ai/worker-id": "mindroom-worker-f360bf3b80bdca4d709b81a5"
+          }
+        },
+        "template": {
+          "metadata": {
+            "labels": {
+              "mindroom.ai/component": "worker",
+              "app.kubernetes.io/managed-by": "mindroom",
+              "app.kubernetes.io/name": "mindroom-worker",
+              "mindroom.ai/tenant": "test",
+              "mindroom.ai/worker-id": "mindroom-worker-f360bf3b80bdca4d709b81a5"
+            },
+            "annotations": {
+              "mindroom.ai/worker-key": "v1:tenant-123:shared:code",
+              "mindroom.ai/startup-manifest-hash": "f338aca2a2ad8a15d158d435f54e02aa8b4fa5685fd75e32d9d7e66d7a484f18",
+              "mindroom.ai/runner-token-hash": "7e5991dff51c578d6d67c9f9dc325f4da868aa587dc978498849629d3a279e4d"
+            }
+          },
+          "spec": {
+            "serviceAccountName": "mindroom-worker",
+            "automountServiceAccountToken": false,
+            "enableServiceLinks": false,
+            "securityContext": {
+              "runAsUser": 1000,
+              "runAsGroup": 1000,
+              "fsGroup": 1000,
+              "runAsNonRoot": true,
+              "fsGroupChangePolicy": "OnRootMismatch",
+              "seccompProfile": {
+                "type": "RuntimeDefault"
+              }
+            },
+            "containers": [
+              {
+                "name": "sandbox-runner",
+                "image": "ghcr.io/mindroom-ai/mindroom:latest",
+                "imagePullPolicy": "IfNotPresent",
+                "command": [
+                  "tini",
+                  "--",
+                  "/app/run-sandbox-runner.sh"
+                ],
+                "ports": [
+                  {
+                    "containerPort": 8766,
+                    "name": "api"
+                  }
+                ],
+                "env": [
+                  {
+                    "name": "MINDROOM_SANDBOX_RUNNER_MODE",
+                    "value": "true"
+                  },
+                  {
+                    "name": "MINDROOM_SANDBOX_RUNNER_EXECUTION_MODE",
+                    "value": "forkserver"
+                  },
+                  {
+                    "name": "MINDROOM_SANDBOX_RUNNER_PORT",
+                    "value": "8766"
+                  },
+                  {
+                    "name": "MINDROOM_SANDBOX_STARTUP_MANIFEST_PATH",
+                    "value": "/app/worker/workers/v1_tenant-123_shared_code-f360bf3b80bdca4d/.runtime/startup_manifest.json"
+                  },
+                  {
+                    "name": "MINDROOM_CONFIG_PATH",
+                    "value": "/srv/mindroom-golden/config.yaml"
+                  },
+                  {
+                    "name": "MINDROOM_STORAGE_PATH",
+                    "value": "/app/worker/workers/v1_tenant-123_shared_code-f360bf3b80bdca4d"
+                  },
+                  {
+                    "name": "MINDROOM_SHARED_CREDENTIALS_PATH",
+                    "value": "/app/worker/workers/v1_tenant-123_shared_code-f360bf3b80bdca4d/.shared_credentials"
+                  },
+                  {
+                    "name": "MINDROOM_SANDBOX_DEDICATED_WORKER_KEY",
+                    "value": "v1:tenant-123:shared:code"
+                  },
+                  {
+                    "name": "MINDROOM_SANDBOX_DEDICATED_WORKER_ROOT",
+                    "value": "/app/worker/workers/v1_tenant-123_shared_code-f360bf3b80bdca4d"
+                  },
+                  {
+                    "name": "HOME",
+                    "value": "/app/worker/workers/v1_tenant-123_shared_code-f360bf3b80bdca4d"
+                  },
+                  {
+                    "name": "MINDROOM_SANDBOX_PROXY_TOKEN",
+                    "valueFrom": {
+                      "secretKeyRef": {
+                        "name": "mindroom-worker-f360bf3b80bdca4d709b81a5",
+                        "key": "MINDROOM_SANDBOX_PROXY_TOKEN"
+                      }
+                    }
+                  },
+                  {
+                    "name": "MINDROOM_WORKER_EGRESS_PROXY_URL",
+                    "value": "http://agent-vault:14322"
+                  },
+                  {
+                    "name": "MINDROOM_WORKER_EGRESS_PROXY_TOKEN_FILE",
+                    "value": "/agent-vault/token"
+                  },
+                  {
+                    "name": "MINDROOM_WORKER_EGRESS_PROXY_VAULT",
+                    "value": "agent-vault-tenant-123-shared-code-f360bf3b80"
+                  },
+                  {
+                    "name": "MINDROOM_WORKER_EGRESS_PROXY_CA_FILE",
+                    "value": "/etc/agent-vault/ca.pem"
+                  },
+                  {
+                    "name": "EXTRA_ENV",
+                    "value": "present"
+                  },
+                  {
+                    "name": "MINDROOM_SANDBOX_RUNNER_SUBPROCESS_TIMEOUT_SECONDS",
+                    "value": "45"
+                  },
+                  {
+                    "name": "OPENAI_BASE_URL",
+                    "value": "https://extra-llm.example.test/v1"
+                  },
+                  {
+                    "name": "ANONYMIZED_TELEMETRY",
+                    "value": "false"
+                  },
+                  {
+                    "name": "CHROMA_OTEL_COLLECTION_ENDPOINT",
+                    "value": ""
+                  },
+                  {
+                    "name": "CHROMA_OTEL_GRANULARITY",
+                    "value": "none"
+                  },
+                  {
+                    "name": "COMPOSIO_DISABLE_SENTRY",
+                    "value": "true"
+                  },
+                  {
+                    "name": "COMPOSIO_DISABLE_VERSION_CHECK",
+                    "value": "true"
+                  },
+                  {
+                    "name": "DISABLE_TELEMETRY",
+                    "value": "1"
+                  },
+                  {
+                    "name": "DO_NOT_TRACK",
+                    "value": "1"
+                  },
+                  {
+                    "name": "GRAPHITI_TELEMETRY_ENABLED",
+                    "value": "false"
+                  },
+                  {
+                    "name": "HF_HUB_DISABLE_TELEMETRY",
+                    "value": "1"
+                  },
+                  {
+                    "name": "LITELLM_LOCAL_ANTHROPIC_BETA_HEADERS",
+                    "value": "true"
+                  },
+                  {
+                    "name": "LITELLM_LOCAL_MODEL_COST_MAP",
+                    "value": "true"
+                  },
+                  {
+                    "name": "MEM0_TELEMETRY",
+                    "value": "false"
+                  },
+                  {
+                    "name": "MEM0_TELEMETRY_SAMPLE_RATE",
+                    "value": "0"
+                  },
+                  {
+                    "name": "NEXT_TELEMETRY_DISABLED",
+                    "value": "1"
+                  },
+                  {
+                    "name": "OTEL_SDK_DISABLED",
+                    "value": "true"
+                  },
+                  {
+                    "name": "TURBO_TELEMETRY_DISABLED",
+                    "value": "1"
+                  },
+                  {
+                    "name": "WANDB_MODE",
+                    "value": "disabled"
+                  }
+                ],
+                "volumeMounts": [
+                  {
+                    "name": "worker-storage",
+                    "mountPath": "/app/worker/agents/code/workspace",
+                    "subPath": "agents/code/workspace"
+                  },
+                  {
+                    "name": "worker-storage",
+                    "mountPath": "/app/worker/workers/v1_tenant-123_shared_code-f360bf3b80bdca4d",
+                    "subPath": "workers/v1_tenant-123_shared_code-f360bf3b80bdca4d"
+                  },
+                  {
+                    "name": "worker-storage",
+                    "mountPath": "/app/worker/workers/v1_tenant-123_shared_code-f360bf3b80bdca4d/.shared_credentials",
+                    "subPath": "workers/v1_tenant-123_shared_code-f360bf3b80bdca4d/.shared_credentials",
+                    "readOnly": true
+                  },
+                  {
+                    "name": "worker-storage",
+                    "mountPath": "/app/worker/workers/v1_tenant-123_shared_code-f360bf3b80bdca4d/.runtime",
+                    "subPath": "workers/v1_tenant-123_shared_code-f360bf3b80bdca4d/.runtime",
+                    "readOnly": true
+                  },
+                  {
+                    "name": "worker-tmp",
+                    "mountPath": "/tmp"
+                  },
+                  {
+                    "name": "agent-vault-token",
+                    "mountPath": "/agent-vault",
+                    "readOnly": true
+                  },
+                  {
+                    "name": "agent-vault-ca",
+                    "mountPath": "/etc/agent-vault",
+                    "readOnly": true
+                  },
+                  {
+                    "name": "worker-storage",
+                    "mountPath": "/app/worker/agents/code/knowledge",
+                    "subPath": "agents/code/knowledge",
+                    "readOnly": true
+                  }
+                ],
+                "readinessProbe": {
+                  "httpGet": {
+                    "path": "/healthz",
+                    "port": "api"
+                  },
+                  "periodSeconds": 5,
+                  "failureThreshold": 6
+                },
+                "startupProbe": {
+                  "httpGet": {
+                    "path": "/healthz",
+                    "port": "api"
+                  },
+                  "periodSeconds": 5,
+                  "failureThreshold": 60
+                },
+                "livenessProbe": {
+                  "httpGet": {
+                    "path": "/healthz",
+                    "port": "api"
+                  },
+                  "periodSeconds": 10,
+                  "failureThreshold": 6
+                },
+                "resources": {
+                  "requests": {
+                    "memory": "256Mi",
+                    "cpu": "100m"
+                  },
+                  "limits": {
+                    "memory": "1Gi",
+                    "cpu": "500m"
+                  }
+                },
+                "securityContext": {
+                  "allowPrivilegeEscalation": false,
+                  "readOnlyRootFilesystem": true,
+                  "capabilities": {
+                    "drop": [
+                      "ALL"
+                    ]
+                  }
+                }
+              }
+            ],
+            "volumes": [
+              {
+                "name": "worker-storage",
+                "persistentVolumeClaim": {
+                  "claimName": "mindroom-storage"
+                }
+              },
+              {
+                "name": "worker-tmp",
+                "emptyDir": {
+                  "sizeLimit": "1Gi"
+                }
+              },
+              {
+                "name": "agent-vault-token",
+                "emptyDir": {}
+              },
+              {
+                "name": "agent-vault-bootstrap",
+                "secret": {
+                  "secretName": "agent-vault-bootstrap"
+                }
+              },
+              {
+                "name": "agent-vault-ca",
+                "configMap": {
+                  "name": "agent-vault-ca",
+                  "items": [
+                    {
+                      "key": "ca.pem",
+                      "path": "ca.pem"
+                    }
+                  ]
+                }
+              }
+            ],
+            "initContainers": [
+              {
+                "name": "agent-vault-mint-token",
+                "image": "example.test/agent-vault:1",
+                "imagePullPolicy": "IfNotPresent",
+                "command": [
+                  "sh",
+                  "-ec",
+                  "set -eu\nexport HOME=/tmp/agent-vault-mint-home\nmkdir -p \"$HOME\"\ndeadline=$(($(date +%s) + 180))\nuntil wget -q -O /dev/null \"$AGENT_VAULT_API_URL/health\"; do\n  if [ \"$(date +%s)\" -ge \"$deadline\" ]; then\n    echo \"Agent Vault did not become ready at $AGENT_VAULT_API_URL\" >&2\n    exit 1\n  fi\n  sleep 2\ndone\nagent-vault auth login \\\n  --address \"$AGENT_VAULT_API_URL\" \\\n  --email \"$AGENT_VAULT_OWNER_EMAIL\" \\\n  --password-stdin < \"/agent-vault-bootstrap/AGENT_VAULT_OWNER_PASSWORD\" > /dev/null\nagent-vault vault create \"$AGENT_VAULT_VAULT\" > /dev/null 2>&1 || true\nagent-vault owner vault join \"$AGENT_VAULT_VAULT\" > /dev/null 2>&1 || true\nif ! agent-vault agent create \"$AGENT_VAULT_VAULT\" \\\n  --vault \"$AGENT_VAULT_VAULT:proxy\" \\\n  --token-only > \"/agent-vault/token\"; then\n  agent-vault agent rotate \"$AGENT_VAULT_VAULT\" --token-only > \"/agent-vault/token\"\nfi\nif ! agent-vault vault agent add \"$AGENT_VAULT_VAULT\" \\\n  --vault \"$AGENT_VAULT_VAULT\" \\\n  --role proxy > /dev/null; then\n  agent-vault vault agent set-role \"$AGENT_VAULT_VAULT\" \\\n    --vault \"$AGENT_VAULT_VAULT\" \\\n    --role proxy > /dev/null\nfi\ntest -s \"/agent-vault/token\"\n"
+                ],
+                "env": [
+                  {
+                    "name": "AGENT_VAULT_API_URL",
+                    "value": "http://agent-vault:14321"
+                  },
+                  {
+                    "name": "AGENT_VAULT_OWNER_EMAIL",
+                    "value": "vault-owner@example.test"
+                  },
+                  {
+                    "name": "AGENT_VAULT_VAULT",
+                    "value": "agent-vault-tenant-123-shared-code-f360bf3b80"
+                  }
+                ],
+                "volumeMounts": [
+                  {
+                    "name": "agent-vault-token",
+                    "mountPath": "/agent-vault"
+                  },
+                  {
+                    "name": "agent-vault-bootstrap",
+                    "mountPath": "/agent-vault-bootstrap",
+                    "readOnly": true
+                  }
+                ],
+                "resources": {
+                  "requests": {
+                    "memory": "256Mi",
+                    "cpu": "100m"
+                  },
+                  "limits": {
+                    "memory": "1Gi",
+                    "cpu": "500m"
+                  }
+                },
+                "securityContext": {
+                  "allowPrivilegeEscalation": false,
+                  "capabilities": {
+                    "drop": [
+                      "ALL"
+                    ]
+                  }
+                }
+              }
+            ]
+          }
+        }
+      }
+    }
+  ],
+  "patched": [
+    [
+      "mindroom-worker-f360bf3b80bdca4d709b81a5",
+      {
+        "metadata": {
+          "annotations": {
+            "mindroom.ai/worker-key": "v1:tenant-123:shared:code",
+            "mindroom.ai/state-subpath": "workers/v1_tenant-123_shared_code-f360bf3b80bdca4d",
+            "mindroom.ai/created-at": "10.0",
+            "mindroom.ai/last-used-at": "10.0",
+            "mindroom.ai/startup-count": "1",
+            "mindroom.ai/failure-count": "0",
+            "mindroom.ai/worker-status": "ready",
+            "mindroom.ai/last-started-at": "10.0",
+            "mindroom.ai/template-hash": "4165d3f1d1730463e53db71bea6a59d76a4a0501d729f51702cee6743c4e4f48",
+            "mindroom.ai/workspace-template-hash": "4165d3f1d1730463e53db71bea6a59d76a4a0501d729f51702cee6743c4e4f48",
+            "mindroom.ai/private-agent-names": "[\"mind\"]"
+          }
+        }
+      }
+    ]
+  ],
+  "manifest": {
+    "runtime_paths": {
+      "config_path": "/srv/mindroom-golden/config.yaml",
+      "env_file_values": {},
+      "process_env": {
+        "ANONYMIZED_TELEMETRY": "false",
+        "BROWSER_EXECUTABLE_PATH": "/usr/bin/chromium",
+        "CHROMA_OTEL_COLLECTION_ENDPOINT": "",
+        "CHROMA_OTEL_GRANULARITY": "none",
+        "COMPOSIO_DISABLE_SENTRY": "true",
+        "COMPOSIO_DISABLE_VERSION_CHECK": "true",
+        "CUSTOMER_ID": "customer-1",
+        "DISABLE_TELEMETRY": "1",
+        "DO_NOT_TRACK": "1",
+        "GRAPHITI_TELEMETRY_ENABLED": "false",
+        "HF_HUB_DISABLE_TELEMETRY": "1",
+        "LITELLM_LOCAL_ANTHROPIC_BETA_HEADERS": "true",
+        "LITELLM_LOCAL_MODEL_COST_MAP": "true",
+        "MATRIX_HOMESERVER": "https://matrix.example.test",
+        "MEM0_TELEMETRY": "false",
+        "MEM0_TELEMETRY_SAMPLE_RATE": "0",
+        "MINDROOM_CONFIG_PATH": "/srv/mindroom-golden/config.yaml",
+        "MINDROOM_KUBERNETES_WORKER_STORAGE_SUBPATH_PREFIX": "workers",
+        "MINDROOM_LOG_LEVEL": "INFO",
+        "MINDROOM_SANDBOX_DEDICATED_WORKER_KEY": "v1:tenant-123:shared:code",
+        "MINDROOM_SANDBOX_DEDICATED_WORKER_ROOT": "/app/worker/workers/v1_tenant-123_shared_code-f360bf3b80bdca4d",
+        "MINDROOM_SANDBOX_RUNNER_EXECUTION_MODE": "forkserver",
+        "MINDROOM_SANDBOX_RUNNER_MODE": "true",
+        "MINDROOM_SANDBOX_RUNNER_PORT": "8766",
+        "MINDROOM_SANDBOX_RUNNER_SUBPROCESS_TIMEOUT_SECONDS": "45",
+        "MINDROOM_SHARED_CREDENTIALS_PATH": "/app/worker/workers/v1_tenant-123_shared_code-f360bf3b80bdca4d/.shared_credentials",
+        "MINDROOM_STORAGE_PATH": "/app/worker/workers/v1_tenant-123_shared_code-f360bf3b80bdca4d",
+        "NEXT_TELEMETRY_DISABLED": "1",
+        "OTEL_SDK_DISABLED": "true",
+        "TURBO_TELEMETRY_DISABLED": "1",
+        "WANDB_MODE": "disabled"
+      },
+      "storage_root": "/app/worker/workers/v1_tenant-123_shared_code-f360bf3b80bdca4d"
+    },
+    "tool_validation_snapshot": {
+      "calculator": {
+        "agent_override_fields": [],
+        "authored_override_validator": "default",
+        "config_fields": [],
+        "runtime_loadable": true
+      }
+    }
+  }
+}

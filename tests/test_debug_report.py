@@ -39,8 +39,8 @@ from mindroom.llm.messages import Message
 from mindroom.llm.runs import RunRecord, RunStatus, ToolExecution
 from mindroom.providers.pipeline import request_log as request_log_stage
 from mindroom.session_ids import create_session_id
-from mindroom.session_storage.agent_storage import create_state_storage, prepare_conversation_database
-from mindroom.session_storage.legacy_agno3_backup import BACKUP_SUFFIX
+from mindroom.session_storage.agent_storage import create_agent_state_storage, prepare_conversation_database
+from mindroom.session_storage.legacy_agno3_conversion import BACKUP_SUFFIX
 from mindroom.session_storage.store import ConversationStore
 from mindroom.session_storage.types import ConversationSession
 from mindroom.tool_system import tool_calls
@@ -52,6 +52,7 @@ from mindroom.tool_system.worker_routing import (
 from mindroom.usage.storage import SYSTEM_USAGE_STORAGE_NAME
 from tests.conftest import postgres_journal_schema_url, seed_session, test_runtime_paths
 from tests.history_helpers import store_fold
+from tests.session_storage.agno_layout import recorded_owner
 from tests.session_storage.goldens import golden_stores
 
 if TYPE_CHECKING:
@@ -103,7 +104,18 @@ def test_collect_ids_merges_flags_and_derives_unthreaded_session() -> None:
     assert collect_ids(None).is_empty()
 
 
-_TURN_INSERT = "INSERT INTO turn_records (agent_name, index_event_id, anchor_event_id, record_json) VALUES (?, ?, ?, ?)"
+_TURN_INSERT = (
+    "INSERT INTO turns (agent_name, turn_key, anchor_event_id, room_id, completed, history_scope_json, "
+    "command_execution_started, updated_at) VALUES (?, ?, ?, ?, TRUE, ?, FALSE, 1)"
+)
+_SOURCE_INSERT = "INSERT INTO turn_sources (agent_name, event_id, turn_key, ordinal) VALUES (?, ?, ?, 0)"
+_ALIAS_INSERT = "INSERT INTO turn_aliases (agent_name, turn_key, event_id) VALUES (?, ?, ?)"
+_REVISION_INSERT = (
+    "INSERT INTO turn_revisions (agent_name, turn_key, revision_id, source_event_id, timestamp_ms, response_event_id) "
+    "VALUES (?, ?, ?, ?, ?, ?)"
+)
+_REDACTION_INSERT = "INSERT INTO event_redactions (agent_name, room_id, event_id) VALUES (?, ?, ?)"
+_SCOPE = {"kind": "agent", "scope_id": "general"}
 _JOURNAL_INSERT = (
     "INSERT INTO journal_events (principal_id, event_id, room_id, thread_id, kind, sender, "
     "origin_server_ts, source_json, membership_epoch, state) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
@@ -138,7 +150,15 @@ def test_runtime_names_and_paths_copied_by_the_reader_match_the_runtime(tmp_path
     assert document["sources"]["tool_calls"]["paths"] == [str(tool_call_log)]
     assert document["sources"]["llm_requests"]["paths"] == [str(request_log)]
     # No journal exists yet, so the missing source names where the reader looked.
-    assert document["sources"]["turn_records"]["paths"] == [str(event_journal_sqlite_path(runtime_paths.storage_root))]
+    assert document["sources"]["turns"]["paths"] == [str(event_journal_sqlite_path(runtime_paths.storage_root))]
+
+
+def _seed_turn(db: sqlite3.Connection, source: str, *, aliases: Sequence[str] = ()) -> None:
+    """Store one answered turn of one source, keyed by that source, as the runtime's rows hold it."""
+    db.execute(_TURN_INSERT, ("general", f"turn{source}", source, ROOM, json.dumps(_SCOPE)))
+    db.execute(_SOURCE_INSERT, ("general", source, f"turn{source}"))
+    for alias in aliases:
+        db.execute(_ALIAS_INSERT, ("general", f"turn{source}", alias))
 
 
 def _seed_journal(path: Path) -> None:
@@ -146,8 +166,10 @@ def _seed_journal(path: Path) -> None:
     with closing(sqlite3.connect(path)) as db:
         for statement in schema_statements(SQLITE_DIALECT):
             db.execute(statement)
-        db.execute(_TURN_INSERT, ("general", "$user", "$user", json.dumps({"correlation_id": "$user"})))
-        db.execute(_TURN_INSERT, ("general", "$unrelated", "$unrelated", "{}"))
+        _seed_turn(db, "$user", aliases=("$relayed",))
+        _seed_turn(db, "$unrelated")
+        db.execute(_REVISION_INSERT, ("general", "turn$user", "$edit", "$user", 5, "$answer"))
+        db.executemany(_REDACTION_INSERT, [("general", ROOM, "$late"), ("general", ROOM, "$unrelated")])
         alice, bob = "@alice:example.com", "@bob:example.com"
         db.executemany(
             _JOURNAL_INSERT,
@@ -169,17 +191,23 @@ def _seed_journal(path: Path) -> None:
 
 
 def test_read_journal_matches_events_and_thread_and_decodes_json(tmp_path: Path) -> None:
-    """Turn records match by event id, journal rows by event id or thread, and JSON columns come back decoded."""
+    """Turns match by source event id, journal rows by event id or thread, and JSON columns come back decoded."""
     path = tmp_path / "event_journal.db"
     _seed_journal(path)
     ids = collect_ids(None, event_ids=["$user"], room_id=ROOM, thread_id="$root")
     with _sqlite_query(path) as query:
         results = _read_journal(query, ids, str(path))
 
-    turns = results["turn_records"]
+    turns = results["turns"]
     assert turns.status == "ok"
-    assert [item["index_event_id"] for item in turns.items] == ["$user"]
-    assert turns.items[0]["record_json"] == {"correlation_id": "$user"}
+    assert [item["anchor_event_id"] for item in turns.items] == ["$user"]
+    assert turns.items[0]["history_scope_json"] == _SCOPE
+    assert [source["event_id"] for source in turns.items[0]["sources"]] == ["$user"]
+    assert [alias["event_id"] for alias in turns.items[0]["aliases"]] == ["$relayed"]
+    (revision,) = turns.items[0]["revisions"]
+    assert (revision["revision_id"], revision["timestamp_ms"], revision["response_event_id"]) == ("$edit", 5, "$answer")
+    # A redaction is reported for an event the thread admitted, even when no turn answered it.
+    assert [item["event_id"] for item in results["event_redactions"].items] == ["$late"]
 
     events = results["journal_events"].items
     assert [item["event_id"] for item in events] == ["$user", "$late"]
@@ -191,31 +219,31 @@ def test_read_journal_matches_events_and_thread_and_decodes_json(tmp_path: Path)
     assert outbox.items[0]["result_json"] == {"ok": True}
 
 
-def test_read_journal_matches_a_turn_record_by_its_anchor_alone(tmp_path: Path) -> None:
-    """A turn record whose index event differs from the reported event still matches through its anchor."""
+def test_read_journal_matches_a_turn_by_the_message_it_answers_for(tmp_path: Path) -> None:
+    """A turn whose source differs from the reported event still matches through the message it answers for."""
     path = tmp_path / "event_journal.db"
     _seed_journal(path)
     with closing(sqlite3.connect(path)) as db:
-        db.execute(_TURN_INSERT, ("general", "$index", "$anchor", "{}"))
+        _seed_turn(db, "$relay", aliases=("$original",))
         db.commit()
     with _sqlite_query(path) as query:
-        results = _read_journal(query, collect_ids(None, event_ids=["$anchor"]), str(path))
-    assert [item["index_event_id"] for item in results["turn_records"].items] == ["$index"]
+        results = _read_journal(query, collect_ids(None, event_ids=["$original"]), str(path))
+    assert [item["anchor_event_id"] for item in results["turns"].items] == ["$relay"]
 
 
-def test_read_journal_returns_the_turn_records_of_every_event_in_the_thread(tmp_path: Path) -> None:
-    """Naming only the room and thread still returns the turn record of a later event the thread admitted."""
+def test_read_journal_returns_the_turns_of_every_event_in_the_thread(tmp_path: Path) -> None:
+    """Naming only the room and thread still returns the turn of a later event the thread admitted."""
     path = tmp_path / "event_journal.db"
     _seed_journal(path)
     with closing(sqlite3.connect(path)) as db:
-        db.execute(_TURN_INSERT, ("general", "$late", "$late", "{}"))
+        _seed_turn(db, "$late")
         db.commit()
     ids = collect_ids(None, room_id=ROOM, thread_id="$root")
     assert ids.event_ids == frozenset({"$root"})
     with _sqlite_query(path) as query:
         results = _read_journal(query, ids, str(path))
     assert [item["event_id"] for item in results["journal_events"].items] == ["$user", "$late"]
-    assert sorted(item["index_event_id"] for item in results["turn_records"].items) == ["$late", "$user"]
+    assert sorted(item["anchor_event_id"] for item in results["turns"].items) == ["$late", "$user"]
 
 
 def test_read_journal_without_thread_matches_event_ids_only(tmp_path: Path) -> None:
@@ -233,7 +261,7 @@ def test_sqlite_query_is_read_only(tmp_path: Path) -> None:
     path = tmp_path / "event_journal.db"
     _seed_journal(path)
     with _sqlite_query(path) as query, pytest.raises(sqlite3.OperationalError):
-        query("DELETE FROM turn_records", [])
+        query("DELETE FROM turns", [])
 
 
 def test_sqlite_query_accepts_a_relative_path(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -241,7 +269,7 @@ def test_sqlite_query_accepts_a_relative_path(tmp_path: Path, monkeypatch: pytes
     _seed_journal(tmp_path / "event_journal.db")
     monkeypatch.chdir(tmp_path)
     with _sqlite_query(Path("event_journal.db")) as query:
-        assert len(query("SELECT * FROM turn_records", [])) == 2
+        assert len(query("SELECT * FROM turns", [])) == 2
 
 
 def test_postgres_query_reads_the_journal_and_cannot_write(postgres_journal_url: str) -> None:
@@ -252,33 +280,32 @@ def test_postgres_query_reads_the_journal_and_cannot_write(postgres_journal_url:
     with psycopg.connect(database_url, autocommit=True) as db:
         for statement in schema_statements(POSTGRES_DIALECT):
             db.execute(statement)
-        db.execute(
-            "INSERT INTO turn_records (agent_name, index_event_id, anchor_event_id, record_json) VALUES (%s, %s, %s, %s)",
-            ("general", "$user", "$user", json.dumps({"correlation_id": "$user"})),
-        )
+        db.execute(_TURN_INSERT.replace("?", "%s"), ("general", "turn$user", "$user", ROOM, json.dumps(_SCOPE)))
+        db.execute(_SOURCE_INSERT.replace("?", "%s"), ("general", "$user", "turn$user"))
 
     ids = collect_ids(None, event_ids=["$user"], room_id=ROOM, thread_id="$root")
     with _postgres_query(database_url) as query:
         results = _read_journal(query, ids, "postgres")
         with pytest.raises(psycopg.errors.ReadOnlySqlTransaction):
-            query("DELETE FROM turn_records", [])
+            query("DELETE FROM turns", [])
 
-    assert results["turn_records"].items == [
-        {
-            "agent_name": "general",
-            "index_event_id": "$user",
-            "anchor_event_id": "$user",
-            "record_json": {"correlation_id": "$user"},
-        },
-    ]
+    (turn,) = results["turns"].items
+    assert (turn["agent_name"], turn["turn_key"], turn["anchor_event_id"], turn["room_id"]) == (
+        "general",
+        "turn$user",
+        "$user",
+        ROOM,
+    )
+    assert turn["history_scope_json"] == _SCOPE
+    assert [source["event_id"] for source in turn["sources"]] == ["$user"]
     assert results["journal_events"].items == []
     with psycopg.connect(database_url, autocommit=True) as db:
-        assert db.execute("SELECT count(*) FROM turn_records").fetchone() == (1,)
+        assert db.execute("SELECT count(*) FROM turns").fetchone() == (1,)
 
 
 def _seed_runs(state_root: Path, session_id: str, runs: Sequence[tuple[str, int]]) -> None:
     """Persist one session holding `(run_id, created_at)` runs in the conversation database under `state_root`."""
-    storage = create_state_storage(state_root.name, state_root)
+    storage = create_agent_state_storage(state_root.name, state_root)
     seed_session(
         storage,
         ConversationSession(
@@ -329,7 +356,7 @@ def test_read_runs_matches_session_and_decodes_its_rows(tmp_path: Path) -> None:
 def test_read_runs_names_the_fold_that_took_a_message(tmp_path: Path) -> None:
     """A message a mid-turn fold took follows the run's stored messages and names that fold's summary row."""
     _seed_general_runs(tmp_path)
-    storage = create_state_storage("general", tmp_path / "agents" / "general")
+    storage = create_agent_state_storage("general", tmp_path / "agents" / "general")
     scope = HistoryScope(kind="agent", scope_id="general")
     fold_id = store_fold(storage, f"{ROOM}:$root", scope, "run-1", tool_call_ids=["call-1"])
 
@@ -344,7 +371,7 @@ def test_read_runs_names_the_fold_that_took_a_message(tmp_path: Path) -> None:
 
 def test_read_runs_lists_a_folds_messages_in_its_order_when_some_were_stored(tmp_path: Path) -> None:
     """A fold that takes messages the run already stored, beside ones it did not, lists them in the fold's order."""
-    storage = create_state_storage("general", tmp_path / "agents" / "general")
+    storage = create_agent_state_storage("general", tmp_path / "agents" / "general")
     session = ConversationSession(kind="agent", session_id=f"{ROOM}:$root", owner_id="general")
     stored = [Message(role="user", content=f"m{index}", id=f"m{index}") for index in range(1, 6)]
     run = RunRecord(
@@ -398,7 +425,7 @@ def test_read_runs_reads_converted_goldens_and_names_unconverted_databases(tmp_p
     assert unconverted.error.count("not converted to the current storage layout") == len(databases)
 
     for store, database in zip(goldens, databases, strict=True):
-        prepare_conversation_database(database, store.names)
+        prepare_conversation_database(database, store.names, recorded_owner(database))
         assert database.with_name(f"{database.name}{BACKUP_SUFFIX}").is_file()
     converted = _read_runs(tmp_path, ids)
 
@@ -647,7 +674,7 @@ def test_read_runs_keeps_healthy_databases_when_one_fails(tmp_path: Path) -> Non
 
 
 def test_build_debug_report_marks_every_journal_source_when_the_journal_cannot_be_read(tmp_path: Path) -> None:
-    """A journal missing its tables (an older install) marks all three journal sources as errors."""
+    """A journal missing its tables (an older install) marks every journal source as an error."""
     journal = tmp_path / "tracking" / "event_journal.db"
     journal.parent.mkdir(parents=True)
     with closing(sqlite3.connect(journal)) as db:
@@ -657,21 +684,21 @@ def test_build_debug_report_marks_every_journal_source_when_the_journal_cannot_b
     document = build_debug_report(_sources(tmp_path), collect_ids(_report()), generated_at="now")
 
     sources = document["sources"]
-    for name in ("turn_records", "journal_events", "delivery_outbox"):
+    for name in ("turns", "event_redactions", "journal_events", "delivery_outbox"):
         assert sources[name]["status"] == "error"
         assert "no such table" in sources[name]["error"]
     assert sources["tool_calls"]["status"] == "ok"
 
 
 def test_build_debug_report_marks_journal_sources_with_the_given_journal_error(tmp_path: Path) -> None:
-    """A journal that could not be located is an error on all three sources, and the SQLite file is not read."""
+    """A journal that could not be located is an error on every journal source, and the SQLite file is not read."""
     _seed_journal(tmp_path / "tracking" / "event_journal.db")
     _seed_files(tmp_path)
     sources = dataclasses.replace(_sources(tmp_path), journal_error="no database URL")
 
     document = build_debug_report(sources, collect_ids(None, event_ids=["$user"]), generated_at="now")
 
-    for name in ("turn_records", "journal_events", "delivery_outbox"):
+    for name in ("turns", "event_redactions", "journal_events", "delivery_outbox"):
         assert document["sources"][name]["status"] == "error"
         assert document["sources"][name]["error"] == "no database URL"
         assert document["sources"][name]["paths"] == ["event journal"]
@@ -680,7 +707,7 @@ def test_build_debug_report_marks_journal_sources_with_the_given_journal_error(t
 
 
 def test_build_debug_report_marks_journal_sources_when_postgres_is_unreachable(tmp_path: Path) -> None:
-    """A PostgreSQL journal that refuses the connection marks all three journal sources as errors."""
+    """A PostgreSQL journal that refuses the connection marks every journal source as an error."""
     pytest.importorskip("psycopg")
     _seed_files(tmp_path)
 
@@ -692,7 +719,7 @@ def test_build_debug_report_marks_journal_sources_when_postgres_is_unreachable(t
     )
 
     sources = document["sources"]
-    for name in ("turn_records", "journal_events", "delivery_outbox"):
+    for name in ("turns", "event_redactions", "journal_events", "delivery_outbox"):
         assert sources[name]["status"] == "error"
         assert sources[name]["error"]
         assert sources[name]["paths"] == ["postgres"]
@@ -714,7 +741,7 @@ def test_build_debug_report_marks_journal_sources_when_psycopg_is_missing(
     )
 
     sources = document["sources"]
-    for name in ("turn_records", "journal_events", "delivery_outbox"):
+    for name in ("turns", "event_redactions", "journal_events", "delivery_outbox"):
         assert sources[name]["status"] == "error"
         assert "psycopg" in sources[name]["error"]
         assert "mindroom[postgres]" in sources[name]["error"]
@@ -736,7 +763,7 @@ def test_build_debug_report_survives_an_unreadable_tracking_directory(tmp_path: 
         tracking.chmod(0o700)
 
     sources = document["sources"]
-    for name in ("turn_records", "journal_events", "delivery_outbox", "tool_calls"):
+    for name in ("turns", "event_redactions", "journal_events", "delivery_outbox", "tool_calls"):
         assert sources[name]["status"] == "error"
         assert "PermissionError" in sources[name]["error"]
     assert sources["llm_requests"]["status"] == "ok"
@@ -772,7 +799,8 @@ def test_cli_writes_backend_report_for_a_chat_bug_report(tmp_path: Path) -> None
     document = json.loads(output.read_text(encoding="utf-8"))
     assert document["identifiers"]["roomId"] == ROOM
     assert set(document["sources"]) == {
-        "turn_records",
+        "turns",
+        "event_redactions",
         "journal_events",
         "delivery_outbox",
         "runs",
@@ -801,9 +829,9 @@ def test_cli_shows_the_error_of_a_source_that_could_not_be_read(tmp_path: Path) 
     assert result.exit_code == 0, result.output
     document = json.loads(output.read_text(encoding="utf-8"))
     assert document["sources"]["runs"]["status"] == "error"
-    assert [item["index_event_id"] for item in document["sources"]["turn_records"]["items"]] == ["$user"]
+    assert [item["anchor_event_id"] for item in document["sources"]["turns"]["items"]] == ["$user"]
     assert f"runs: error, 0 items ({document['sources']['runs']['error']})" in result.output.splitlines()
-    assert "turn_records: ok, 1 items" in result.output
+    assert "turns: ok, 1 items" in result.output
 
 
 def test_cli_shows_the_error_of_a_source_that_is_ok_with_a_partial_failure(tmp_path: Path) -> None:
@@ -848,13 +876,13 @@ def test_cli_reports_journal_errors_when_the_postgres_url_is_not_configured(
 
     assert result.exit_code == 0, result.output
     sources = json.loads(output.read_text(encoding="utf-8"))["sources"]
-    for name in ("turn_records", "journal_events", "delivery_outbox"):
+    for name in ("turns", "event_redactions", "journal_events", "delivery_outbox"):
         assert sources[name]["status"] == "error"
         assert sources[name]["items"] == []
         assert "MINDROOM_EVENT_CACHE_DATABASE_URL" in sources[name]["error"]
     assert sources["tool_calls"]["status"] == "ok"
     assert "Warning:" not in result.output
-    assert "turn_records: error, 0 items (PostgreSQL event journal requires" in result.output
+    assert "turns: error, 0 items (PostgreSQL event journal requires" in result.output
 
 
 def _write_request_log(directory: Path, request_log_id: str) -> None:
@@ -913,8 +941,8 @@ def test_cli_reads_the_config_without_migrating_it(tmp_path: Path) -> None:
     assert result.exit_code == 0, result.output
     assert config.read_bytes() == original
     assert [path.name for path in config_dir.iterdir()] == ["config.yaml"]
-    turn_records = json.loads(output.read_text(encoding="utf-8"))["sources"]["turn_records"]
-    assert [item["index_event_id"] for item in turn_records["items"]] == ["$user"]
+    turns = json.loads(output.read_text(encoding="utf-8"))["sources"]["turns"]
+    assert [item["anchor_event_id"] for item in turns["items"]] == ["$user"]
 
 
 def test_cli_reads_settings_from_a_config_the_runtime_would_reject(tmp_path: Path) -> None:
@@ -956,7 +984,7 @@ def test_cli_reports_journal_errors_when_the_event_journal_section_is_invalid(tm
 
     assert result.exit_code == 0, result.output
     sources = json.loads(output.read_text(encoding="utf-8"))["sources"]
-    for name in ("turn_records", "journal_events", "delivery_outbox"):
+    for name in ("turns", "event_redactions", "journal_events", "delivery_outbox"):
         assert sources[name]["status"] == "error"
         assert "EventJournalConfig" in sources[name]["error"]
         assert sources[name]["items"] == []
@@ -988,8 +1016,8 @@ def test_cli_notes_default_locations_when_the_default_config_is_missing(
     assert f"Note: no config at {missing}; using default storage locations." in result.output
     document = json.loads(output.read_text(encoding="utf-8"))
     assert document["type"] == "io.mindroom.debug_report"
-    assert document["sources"]["turn_records"]["status"] == "ok"
-    assert [item["index_event_id"] for item in document["sources"]["turn_records"]["items"]] == ["$user"]
+    assert document["sources"]["turns"]["status"] == "ok"
+    assert [item["anchor_event_id"] for item in document["sources"]["turns"]["items"]] == ["$user"]
 
 
 @pytest.mark.parametrize(
@@ -1015,7 +1043,7 @@ def test_cli_reports_journal_errors_when_the_config_exists_but_cannot_be_read(tm
 
     assert result.exit_code == 0, result.output
     sources = json.loads(output.read_text(encoding="utf-8"))["sources"]
-    for name in ("turn_records", "journal_events", "delivery_outbox"):
+    for name in ("turns", "event_redactions", "journal_events", "delivery_outbox"):
         assert sources[name]["status"] == "error"
         assert sources[name]["items"] == []
         assert sources[name]["error"].startswith("config could not be read: ")
@@ -1024,7 +1052,7 @@ def test_cli_reports_journal_errors_when_the_config_exists_but_cannot_be_read(tm
     assert sources["llm_requests"]["status"] == "ok"
     assert [item["request_log_id"] for item in sources["llm_requests"]["items"]] == ["r1"]
     assert sources["tool_calls"]["status"] == "ok"
-    assert "turn_records: error, 0 items (config could not be read: " in result.output
+    assert "turns: error, 0 items (config could not be read: " in result.output
 
 
 def test_cli_prints_the_document_to_stdout_without_an_output_file(tmp_path: Path) -> None:
@@ -1071,8 +1099,9 @@ def test_build_debug_report_keeps_values_the_json_decoder_refuses(tmp_path: Path
     journal = tmp_path / "tracking" / "event_journal.db"
     _seed_journal(journal)
     with closing(sqlite3.connect(journal)) as db:
-        db.execute(_TURN_INSERT, ("general", "$huge", "$huge", huge))
-        db.execute(_TURN_INSERT, ("general", "$deep", "$deep", deep))
+        for source, scope in (("$huge", huge), ("$deep", deep)):
+            db.execute(_TURN_INSERT, ("general", f"turn{source}", source, ROOM, scope))
+            db.execute(_SOURCE_INSERT, ("general", source, f"turn{source}"))
         db.commit()
     _seed_files(tmp_path)
     with (tmp_path / "tracking" / "tool_calls.jsonl").open("a", encoding="utf-8") as handle:
@@ -1086,8 +1115,8 @@ def test_build_debug_report_keeps_values_the_json_decoder_refuses(tmp_path: Path
     )
 
     sources = document["sources"]
-    turns = {item["index_event_id"]: item["record_json"] for item in sources["turn_records"]["items"]}
-    assert turns == {"$deep": deep, "$huge": huge, "$user": {"correlation_id": "$user"}}
+    turns = {item["anchor_event_id"]: item["history_scope_json"] for item in sources["turns"]["items"]}
+    assert turns == {"$deep": deep, "$huge": huge, "$user": _SCOPE}
     assert sources["tool_calls"]["status"] == "ok"
     assert [item["tool_name"] for item in sources["tool_calls"]["items"]] == ["old", "shell"]
 

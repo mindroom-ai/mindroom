@@ -82,7 +82,7 @@
     "message": {
       "content": "Walking shoes.",
       "provider_data": {
-        "content_blocks": [
+        "claude_blocks": [
           {
             "text": "Walking shoes.",
             "type": "text"

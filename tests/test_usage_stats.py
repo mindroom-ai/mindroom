@@ -20,7 +20,7 @@ from mindroom.constants import RuntimePaths, resolve_runtime_paths
 from mindroom.llm.runs import RunRecord
 from mindroom.llm.usage import ModelMetrics, RunMetrics, TokenCounts
 from mindroom.requester_identity import resolve_human_requester_alias
-from mindroom.session_storage.agent_storage import create_state_storage, prepare_conversation_database
+from mindroom.session_storage.agent_storage import create_agent_state_storage, prepare_conversation_database
 from mindroom.session_storage.schema import TableNames
 from mindroom.session_storage.types import ConversationSession
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity
@@ -33,6 +33,7 @@ from mindroom.usage.stats_storage import (
     UsageStorageSource,
 )
 from tests.conftest import create_agno_2_sessions_db, persist_runs, persist_session, seed_session_metrics
+from tests.session_storage.agno_layout import recorded_owner
 
 if TYPE_CHECKING:
     from collections.abc import Iterator, Mapping
@@ -731,7 +732,7 @@ def test_daily_usage_returns_empty_breakdown_without_retained_runs(
 def test_daily_and_combined_models_use_the_per_model_metrics_details(tmp_path: Path, admin: bool) -> None:
     paths = _paths(tmp_path)
     config = Config(agents={"code": AgentConfig(display_name="Code")})
-    storage = create_state_storage("code", paths.storage_root / "agents" / "code")
+    storage = create_agent_state_storage("code", paths.storage_root / "agents" / "code")
     first_day = int(datetime(2026, 9, 14, tzinfo=UTC).timestamp())
     metrics = RunMetrics(
         tokens=TokenCounts(
@@ -896,7 +897,7 @@ def test_daily_models_read_real_agno_2_history(tmp_path: Path, double_encoded: b
         with sqlite3.connect(database) as connection:
             runs = connection.execute("SELECT runs FROM code_sessions").fetchone()[0]
             connection.execute("UPDATE code_sessions SET runs = ?", (json.loads(runs),))
-    prepare_conversation_database(database, TableNames.of_database(database))
+    prepare_conversation_database(database, TableNames.of_database(database), recorded_owner(database))
 
     report = collect_self_usage(
         agent_name="code",
@@ -941,7 +942,7 @@ def test_migration_keeps_valid_usage_beside_a_malformed_counter(tmp_path: Path) 
                 ),
             ),
         )
-    prepare_conversation_database(database, TableNames.of_database(database))
+    prepare_conversation_database(database, TableNames.of_database(database), recorded_owner(database))
 
     report = collect_self_usage(
         agent_name="code",
@@ -971,7 +972,7 @@ def test_migration_keeps_valid_usage_beside_a_malformed_counter(tmp_path: Path) 
 def test_unusable_model_details_preserve_daily_totals(tmp_path: Path, details: object) -> None:
     paths = _paths(tmp_path)
     config = Config(agents={"code": AgentConfig(display_name="Code")})
-    storage = create_state_storage("code", paths.storage_root / "agents" / "code")
+    storage = create_agent_state_storage("code", paths.storage_root / "agents" / "code")
     persist_runs(
         storage,
         ConversationSession(kind="agent", session_id="session-1", owner_id="code"),

@@ -45,10 +45,12 @@
     "message": {
       "content": "Add a warm layer.",
       "provider_data": {
+        "id": "chatcmpl-parity",
         "mindroom_model": {
           "id": "gpt-oss-120b",
           "provider": "Cerebras"
-        }
+        },
+        "system_fingerprint": "fp_parity"
       },
       "role": "assistant"
     },

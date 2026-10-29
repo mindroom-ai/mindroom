@@ -60,6 +60,7 @@ from mindroom.model_usage import message_context_tokens
 from mindroom.redaction import redact_sensitive_text
 from mindroom.session_storage.lanes import run_session_storage_operation
 from mindroom.timing import timed
+from mindroom.turn_model import ModelScope, resolve_turn_model
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Sequence
@@ -668,11 +669,7 @@ def finalize_history_preparation(
         active_context_window=resolved_inputs.active_context_window,
         static_prompt_tokens=static_prompt_tokens,
     )
-    history_budget = (
-        execution_plan.hard_replay_budget_tokens
-        if execution_plan.automatic_compaction
-        else execution_plan.replay_budget_tokens
-    )
+    history_budget = execution_plan.hard_replay_budget_tokens
     if execution_plan.automatic_compaction and execution_plan.unavailable_reason is not None:
         logger.warning(
             "Compaction unavailable for this run",
@@ -770,6 +767,7 @@ async def prepare_bound_scope_history(
     """
     resolved_inputs = resolve_entity_preparation_inputs(
         config=config,
+        runtime_paths=runtime_paths,
         entity_name=team_name,
         history_settings=history_settings,
         static_prompt_tokens=static_prompt_tokens,
@@ -792,6 +790,7 @@ async def prepare_bound_scope_history(
 def resolve_entity_preparation_inputs(
     *,
     config: Config,
+    runtime_paths: RuntimePaths,
     entity_name: str | None,
     history_settings: ResolvedHistorySettings,
     static_prompt_tokens: int,
@@ -803,10 +802,15 @@ def resolve_entity_preparation_inputs(
     ``history_settings`` are the ones the entity's build resolved, whose replay policy and compaction config the
     scope follows.
     """
-    runtime_model = config.resolve_runtime_model(
-        entity_name=entity_name,
-        active_model_name=active_model_name,
-        active_context_window=active_context_window,
+    runtime_model = resolve_turn_model(
+        config,
+        runtime_paths,
+        ModelScope(
+            entity=entity_name,
+            explicit=active_model_name,
+            explicit_context_window=active_context_window,
+        ),
+        None,
     )
     return HistoryPreparationInputs(
         history_settings=history_settings,

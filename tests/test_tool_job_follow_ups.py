@@ -13,11 +13,21 @@ from mindroom import reply_lifecycle as rl
 from mindroom.approval.response import continuation_target
 from mindroom.config.agent import TeamConfig
 from mindroom.dispatch_source import SILENT_SCHEDULE_SOURCE_KIND
+from mindroom.history.session_context import ScopeSessionContext
+from mindroom.history.types import HistoryScope
 from mindroom.reply_presentation import Presentation, encode_presentation
 from mindroom.reply_scope import SpanHandle, SpanSlot, _current_slot
 from mindroom.response_lifecycle import ResponseLifecycleCoordinator, _QueuedMessageState
 from mindroom.response_sources import ResponseSources
-from mindroom.response_turn import CompletedAttempt, TurnSinks
+from mindroom.response_turn import (
+    AttemptResolved,
+    CompletedAttempt,
+    TurnAdapter,
+    TurnContinuationRunState,
+    TurnSinks,
+    stream_response_turn,
+)
+from mindroom.session_storage.store import ConversationStore
 from mindroom.tool_jobs.conversation import ConversationKey
 from mindroom.tool_jobs.follow_ups import (
     _FOLLOW_UP_LIMIT,
@@ -33,15 +43,13 @@ from tests.approval_continuation_helpers import approval_continuation
 from tests.bot_helpers import unique_room_send_responses
 from tests.conftest import (
     install_generate_response_mock,
+    make_turn_context,
     message_origin,
     patch_response_runner_module,
     unwrap_extracted_collaborator,
 )
 from tests.identity_helpers import persist_entity_accounts
 from tests.response_runner_helpers import _bot, _envelope, _noop_typing, _target
-from tests.test_response_turn import _AdapterLog, _collected_turn, _resolving_adapter
-from tests.test_response_turn import _continuation as _turn_continuation
-from tests.test_response_turn import _ctx as _turn_ctx
 from tests.tool_job_helpers import (
     completed_delegation_job,
     job_context,
@@ -53,17 +61,57 @@ from tests.tool_job_helpers import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator
+    from collections.abc import AsyncIterator, Callable
     from pathlib import Path
 
     from mindroom.bot import AgentBot
     from mindroom.event_journal import JournalEvent, PrincipalStore
     from mindroom.response_runner import ResponseRunner
-    from mindroom.response_turn import TurnContinuationRunState, TurnRunState
+    from mindroom.response_turn import ResponseTurnContext, TurnRunState
     from mindroom.tool_jobs.runtime import ToolJobRuntime
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 
 pytestmark = pytest.mark.asyncio
+
+
+def _mock_scope() -> ScopeSessionContext:
+    return ScopeSessionContext(
+        scope=HistoryScope(kind="agent", scope_id="general"),
+        storage=MagicMock(spec=ConversationStore),
+        session=None,
+        session_id="session-1",
+        storage_factory=lambda: MagicMock(spec=ConversationStore),
+    )
+
+
+async def _drive_jobs_turn(
+    attempt: Callable[[TurnRunState, TurnContinuationRunState], AsyncIterator[AttemptResolved]],
+    *,
+    prompt: str = "hello",
+    load_scope: Callable[[], ScopeSessionContext] = _mock_scope,
+    **ctx_overrides: object,
+) -> str:
+    """Run one background-jobs turn of ``attempt`` through the turn driver and return its text."""
+    adapter = TurnAdapter[str](
+        load_scope=load_scope,
+        run_attempt=attempt,
+        discard_empty_run=lambda _scope, _discard: None,
+        make_text_chunk=str,
+        user_message=prompt,
+    )
+    continuation = TurnContinuationRunState.initial(
+        prompt=prompt,
+        model_prompt=None,
+        current_timestamp_ms=None,
+        current_prompt_is_structured=False,
+        current_event_id=None,
+        run_id="run-1",
+        continuation_model_prompt_tail="",
+    )
+    ctx = replace(make_turn_context(**ctx_overrides), background_tool_jobs=True)
+    return "".join(
+        [chunk async for chunk in stream_response_turn(ctx, adapter, TurnSinks(), continuation=continuation)],
+    )
 
 
 def _key(owner: ToolExecutionIdentity) -> ConversationKey:
@@ -409,15 +457,15 @@ async def test_a_job_ending_with_no_reply_running_posts_one_follow_up(tmp_path: 
 async def test_a_follow_up_runs_a_model_turn_that_posts_its_reply(tmp_path: Path) -> None:
     """The follow-up's turn reaches the model with its prompt and posts what the model answers."""
     bot = _bot(tmp_path)
-    await bot._reply_runtime.start()
+    await bot._take_over_replies()
     unique_room_send_responses(bot.client)
     runner = unwrap_extracted_collaborator(bot._response_runner)
     key = _runner_key(bot)
     runtime = await _runner_runtime(bot, tmp_path)
     prompts: list[str] = []
 
-    async def stream(*_args: object, **kwargs: object) -> AsyncIterator[str]:
-        prompts.append(str(kwargs["prompt"]))
+    async def stream(ctx: ResponseTurnContext, *_args: object, **_kwargs: object) -> AsyncIterator[str]:
+        prompts.append(ctx.prompt)
         yield "The job finished."
 
     try:
@@ -485,7 +533,7 @@ async def test_a_follow_up_waits_for_the_running_reply_and_skips_what_it_collect
 async def test_a_follow_up_gives_way_to_a_message_already_waiting(tmp_path: Path) -> None:
     """A follow-up posts nothing while a message waits for its conversation, whose reply reports the jobs instead."""
     bot = _bot(tmp_path)
-    await bot._reply_runtime.start()
+    await bot._take_over_replies()
     unique_room_send_responses(bot.client)
     runner = unwrap_extracted_collaborator(bot._response_runner)
     key = _runner_key(bot)
@@ -493,8 +541,8 @@ async def test_a_follow_up_gives_way_to_a_message_already_waiting(tmp_path: Path
     runtime = await _runner_runtime(bot, tmp_path)
     prompts: list[str] = []
 
-    async def stream(*_args: object, **kwargs: object) -> AsyncIterator[str]:
-        prompts.append(str(kwargs["prompt"]))
+    async def stream(ctx: ResponseTurnContext, *_args: object, **_kwargs: object) -> AsyncIterator[str]:
+        prompts.append(ctx.prompt)
         yield "The job finished."
 
     try:
@@ -673,17 +721,17 @@ async def test_a_reply_never_waits(tmp_path: Path) -> None:
         handle.leaves_work = None
         token = _current_slot.set(SpanSlot(handle=handle))
 
-        async def attempt(_run: TurnRunState, _continuation: TurnContinuationRunState) -> CompletedAttempt:
-            return CompletedAttempt(response_text="answer", replayable_text="answer", has_visible_content=True)
+        async def attempt(
+            _run: TurnRunState,
+            _continuation: TurnContinuationRunState,
+        ) -> AsyncIterator[AttemptResolved]:
+            yield AttemptResolved(
+                CompletedAttempt(response_text="answer", replayable_text="answer", has_visible_content=True),
+            )
 
         try:
             with tool_runtime_context(context):
-                text = await _collected_turn(
-                    _turn_ctx(background_tool_jobs=True),
-                    _resolving_adapter(_AdapterLog(), attempt),
-                    TurnSinks(),
-                    continuation=_turn_continuation(),
-                )
+                text = await _drive_jobs_turn(attempt)
         finally:
             _current_slot.reset(token)
         assert text == "answer"
@@ -703,20 +751,17 @@ async def test_a_ready_result_at_the_boundary_does_not_continue_the_turn(tmp_pat
     coordinator = job_coordinator(tmp_path, runtime, bot)
     attempts = 0
 
-    async def attempt(_run: TurnRunState, _continuation: TurnContinuationRunState) -> CompletedAttempt:
+    async def attempt(_run: TurnRunState, _continuation: TurnContinuationRunState) -> AsyncIterator[AttemptResolved]:
         nonlocal attempts
         attempts += 1
-        return CompletedAttempt(response_text="answer", replayable_text="answer", has_visible_content=True)
+        yield AttemptResolved(
+            CompletedAttempt(response_text="answer", replayable_text="answer", has_visible_content=True),
+        )
 
     try:
         await _ended(runtime, "ready", BackgroundOutcome("completed", "done"), owner=owner)
         with tool_runtime_context(context):
-            text = await _collected_turn(
-                _turn_ctx(background_tool_jobs=True),
-                _resolving_adapter(_AdapterLog(), attempt),
-                TurnSinks(),
-                continuation=_turn_continuation(),
-            )
+            text = await _drive_jobs_turn(attempt)
         assert (text, attempts) == ("answer", 1)
         await coordinator._admit_follow_ups(runtime)
         bot.admit_job_follow_up.assert_awaited_once()

@@ -33,6 +33,7 @@ from mindroom.api import tools as tools_api
 from mindroom.api import workers as workers_api
 from mindroom.api.credentials_target import RequestCredentialsTarget
 from mindroom.commands.config_commands import apply_config_change
+from mindroom.config.load_attempt import ConfigLoad
 from mindroom.config.main import Config, dashboard_config_schema, iter_config_validation_messages
 from mindroom.credentials.manager import get_runtime_credentials_manager, save_scoped_credentials
 from mindroom.custom_tools.homeassistant import HomeAssistantTools
@@ -59,6 +60,7 @@ from tests.api.conftest import (
     trusted_upstream_jwt_key,
     use_trusted_upstream_runtime,
 )
+from tests.conftest import failed_config_load
 from tests.oauth_test_utils import publish_oauth_credentials
 from tests.test_personal_agents_config import _entry as personal_agent_entry
 
@@ -742,37 +744,29 @@ def test_load_config_into_app_discards_stale_results_after_runtime_swap(tmp_path
     )
     started = threading.Event()
     allow_finish = threading.Event()
-    original_load_result = config_lifecycle._load_config_result
+    original_load_attempt = config_lifecycle.load_config_attempt
 
-    def _fake_load_result(
-        runtime_paths: constants.RuntimePaths,
-    ) -> tuple[
-        config_lifecycle.ConfigLoadResult,
-        dict[str, Any] | None,
-        Config | None,
-        str | None,
-        frozenset[Path] | None,
-    ]:
+    def _fake_load_attempt(runtime_paths: constants.RuntimePaths) -> ConfigLoad:
         if runtime_paths == first_runtime:
             started.set()
             allow_finish.wait()
-            return (
-                config_lifecycle.ConfigLoadResult(
+            return ConfigLoad(
+                result=config_lifecycle.ConfigLoadResult(
                     success=False,
                     error_status_code=422,
                     error_detail="invalid old config",
                 ),
-                None,
-                None,
-                "stale-old-source",
-                frozenset({first_runtime.config_path}),
+                config=None,
+                source_fingerprint="stale-old-source",
+                source_files=frozenset({first_runtime.config_path}),
+                error=ValueError("invalid old config"),
             )
-        return original_load_result(runtime_paths)
+        return original_load_attempt(runtime_paths)
 
     main.initialize_api_app(fresh_app, first_runtime)
 
     with (
-        patch.object(config_lifecycle, "_load_config_result", side_effect=_fake_load_result),
+        patch.object(config_lifecycle, "load_config_attempt", side_effect=_fake_load_attempt),
         ThreadPoolExecutor(max_workers=1) as executor,
     ):
         stale_result = executor.submit(config_lifecycle.load_config_into_app, first_runtime, fresh_app)
@@ -780,11 +774,11 @@ def test_load_config_into_app_discards_stale_results_after_runtime_swap(tmp_path
             assert started.wait(timeout=1)
 
             main.initialize_api_app(fresh_app, second_runtime)
-            assert config_lifecycle.load_config_into_app(second_runtime, fresh_app) is True
+            assert config_lifecycle.load_config_into_app(second_runtime, fresh_app).loaded
         finally:
             allow_finish.set()
 
-        assert stale_result.result(timeout=1) is False
+        assert stale_result.result(timeout=1).superseded
 
     context = main._app_context(fresh_app)
     assert context.runtime_paths == second_runtime
@@ -825,14 +819,14 @@ def test_load_config_into_app_ignores_runtime_mismatches_after_api_runtime_swap(
     )
 
     main.initialize_api_app(fresh_app, first_runtime)
-    assert config_lifecycle.load_config_into_app(first_runtime, fresh_app) is True
+    assert config_lifecycle.load_config_into_app(first_runtime, fresh_app).loaded
     assert set(main._app_context(fresh_app).config_data["agents"]) == {"first"}
 
     main.initialize_api_app(fresh_app, second_runtime)
-    assert config_lifecycle.load_config_into_app(second_runtime, fresh_app) is True
+    assert config_lifecycle.load_config_into_app(second_runtime, fresh_app).loaded
     assert set(main._app_context(fresh_app).config_data["agents"]) == {"second"}
 
-    assert config_lifecycle.load_config_into_app(first_runtime, fresh_app) is False
+    assert not config_lifecycle.load_config_into_app(first_runtime, fresh_app).loaded
     assert set(main._app_context(fresh_app).config_data["agents"]) == {"second"}
     assert main._app_context(fresh_app).config_load_result == config_lifecycle.ConfigLoadResult(success=True)
 
@@ -927,9 +921,10 @@ def _record_loaded_path(
     runtime_paths: constants.RuntimePaths,
     loaded_paths: list[Path],
     load_event: asyncio.Event,
-) -> None:
+) -> ConfigLoad:
     loaded_paths.append(runtime_paths.config_path)
     load_event.set()
+    return failed_config_load(OSError("this test only records the load"))
 
 
 @pytest.mark.asyncio
@@ -943,18 +938,12 @@ async def test_worker_cleanup_loop_uses_current_runtime_after_runtime_swap(
     second_runtime = constants.resolve_primary_runtime_paths(config_path=tmp_path / "second.yaml", process_env={})
     cleanup_paths: list[Path] = []
 
-    class _FakeRuntimeConfig:
-        def get_worker_grantable_credentials(self) -> frozenset[str]:
-            return constants.DEFAULT_WORKER_GRANTABLE_CREDENTIALS
-
     def _fake_cleanup(
         runtime_paths: constants.RuntimePaths,
         *,
-        runtime_config: object | None = None,
         touch_live_workers: Callable[[WorkerBackend], None] | None = None,
         computer_worker_keys: frozenset[str] = frozenset(),
     ) -> int:
-        del runtime_config
         assert touch_live_workers is None
         assert computer_worker_keys == frozenset()
         cleanup_paths.append(runtime_paths.config_path)
@@ -967,20 +956,10 @@ async def test_worker_cleanup_loop_uses_current_runtime_after_runtime_swap(
     async def _fake_to_thread(func: Callable[..., int], *args: object, **kwargs: object) -> int:
         return func(*args, **kwargs)
 
-    def _read_current_runtime_config(
-        api_app: FastAPI,
-    ) -> tuple[_FakeRuntimeConfig, constants.RuntimePaths]:
-        return _FakeRuntimeConfig(), main._app_runtime_paths(api_app)
-
     main.initialize_api_app(main.app, first_runtime)
     monkeypatch.setattr(main, "_worker_cleanup_interval_seconds", lambda _runtime_paths: 0.01)
     monkeypatch.setattr(main, "_cleanup_workers_once", _fake_cleanup)
     monkeypatch.setattr(main.asyncio, "to_thread", _fake_to_thread)
-    monkeypatch.setattr(
-        main.config_lifecycle,
-        "read_app_committed_runtime_config",
-        _read_current_runtime_config,
-    )
 
     await main._worker_cleanup_loop(stop_event, main.app, idle_poll_interval_seconds=0.01)
 
@@ -1321,9 +1300,7 @@ def test_worker_cleanup_once_cleans_workers(monkeypatch: pytest.MonkeyPatch) -> 
         lambda *_args, **_kwargs: nullcontext(worker_manager),
     )
 
-    runtime_paths = main._app_runtime_paths(main.app)
-    runtime_config = Config.validate_with_runtime({}, runtime_paths)
-    assert main._cleanup_workers_once(runtime_paths, runtime_config=runtime_config) == 1
+    assert main._cleanup_workers_once(main._app_runtime_paths(main.app)) == 1
 
 
 def test_worker_cleanup_once_reconciles_drifted_worker_templates(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1347,9 +1324,7 @@ def test_worker_cleanup_once_reconciles_drifted_worker_templates(monkeypatch: py
         "lease_configured_primary_worker_manager",
         lambda *_args, **_kwargs: nullcontext(worker_manager),
     )
-    runtime_paths = main._app_runtime_paths(main.app)
-    runtime_config = Config.validate_with_runtime({}, runtime_paths)
-    main._cleanup_workers_once(runtime_paths, runtime_config=runtime_config)
+    main._cleanup_workers_once(main._app_runtime_paths(main.app))
 
     assert maintained_managers == [worker_manager]
 
@@ -1496,7 +1471,7 @@ def test_get_personal_agents_lists_active_pending_and_removed_template_entries(
     config_data = yaml.safe_load(temp_config_file.read_text())
     config_data["personal_agents"] = {"mind": {"agent": {"display_name": "{user_display_name}'s Mind"}}}
     temp_config_file.write_text(yaml.dump(config_data))
-    assert config_lifecycle.load_config_into_app(runtime_paths, main.app)
+    assert config_lifecycle.load_config_into_app(runtime_paths, main.app).loaded
     _append_personal_agent_roster_entry(
         runtime_paths,
         personal_agent_entry("@dave:localhost", agent_name="mind_dave", user_display_name="Dave"),
@@ -1546,6 +1521,21 @@ def test_get_personal_agents_lists_active_pending_and_removed_template_entries(
             "template_exists": True,
         },
     ]
+
+
+def test_the_dashboard_list_shows_an_edited_personal_name(test_client: TestClient, temp_config_file: Path) -> None:
+    """An owner's display name edit replaces the template's name in the listing."""
+    runtime_paths = main._app_runtime_paths(main.app)
+    _append_personal_agent_roster_entry(runtime_paths, personal_agent_entry(edits={"display_name": "Scout"}))
+    config_data = yaml.safe_load(temp_config_file.read_text())
+    config_data["personal_agents"] = {"mind": {"agent": {"display_name": "{user_display_name}'s Mind"}}}
+    temp_config_file.write_text(yaml.dump(config_data))
+    assert config_lifecycle.load_config_into_app(runtime_paths, main.app).loaded
+
+    response = test_client.get("/api/config/personal-agents")
+
+    assert response.status_code == 200
+    assert [agent["display_name"] for agent in response.json()] == ["Scout"]
 
 
 def test_create_agent(test_client: TestClient, sample_agent_data: dict[str, Any], temp_config_file: Path) -> None:
@@ -3498,7 +3488,10 @@ def test_save_config(test_client: TestClient, temp_config_file: Path) -> None:
                 "config": {"model": "nomic-embed-text", "host": "http://localhost:11434"},
             },
         },
-        "models": {"default": {"provider": "openai", "id": "test-model-2"}},
+        "models": {
+            "default": {"provider": "openai", "id": "test-model-2"},
+            "ollama": {"provider": "ollama", "id": "test-model"},
+        },
         "agents": {
             "new_agent": {
                 "display_name": "New Agent",
@@ -3762,7 +3755,7 @@ def test_save_config_can_recover_from_invalid_reload(
     """Full config replacement should recover from an invalid on-disk config."""
     runtime_paths = main._app_runtime_paths(test_client.app)
     temp_config_file.write_text("agents:\n  broken: [\n", encoding="utf-8")
-    assert config_lifecycle.load_config_into_app(runtime_paths, main.app) is False
+    assert not config_lifecycle.load_config_into_app(runtime_paths, main.app).loaded
 
     valid_config = {
         "models": {"default": {"provider": "openai", "id": "gpt-6-astra"}},
@@ -3796,7 +3789,7 @@ def test_get_raw_config_source_returns_current_invalid_file(
     invalid_source = "agents:\n  broken: [\n"
     temp_config_file.write_text(invalid_source, encoding="utf-8")
 
-    assert config_lifecycle.load_config_into_app(runtime_paths, main.app) is False
+    assert not config_lifecycle.load_config_into_app(runtime_paths, main.app).loaded
 
     response = test_client.get("/api/config/raw")
 
@@ -3820,7 +3813,7 @@ def test_get_raw_config_source_returns_replacement_text_for_non_utf8_invalid_fil
     runtime_paths = main._app_runtime_paths(test_client.app)
     temp_config_file.write_bytes(b"agents:\n  broken: \xff\n")
 
-    assert config_lifecycle.load_config_into_app(runtime_paths, main.app) is False
+    assert not config_lifecycle.load_config_into_app(runtime_paths, main.app).loaded
 
     response = test_client.get("/api/config/raw")
 
@@ -3836,7 +3829,7 @@ def test_save_raw_config_source_can_recover_from_invalid_reload(
     runtime_paths = main._app_runtime_paths(test_client.app)
     temp_config_file.write_text("agents:\n  broken: [\n", encoding="utf-8")
 
-    assert config_lifecycle.load_config_into_app(runtime_paths, main.app) is False
+    assert not config_lifecycle.load_config_into_app(runtime_paths, main.app).loaded
 
     valid_source = yaml.safe_dump(
         {
@@ -3928,7 +3921,7 @@ def test_config_reload_after_api_save_keeps_returned_generation(test_client: Tes
     assert first_save_response.status_code == 200
     first_save_generation = int(first_save_response.headers[config_lifecycle.CONFIG_GENERATION_HEADER])
 
-    assert config_lifecycle.load_config_into_app(main._app_runtime_paths(test_client.app), main.app) is True
+    assert config_lifecycle.load_config_into_app(main._app_runtime_paths(test_client.app), main.app).loaded
 
     reloaded_config_response = test_client.post("/api/config/load")
     assert reloaded_config_response.status_code == 200
@@ -3956,7 +3949,7 @@ def test_external_raw_config_reload_advances_generation_for_same_authored_config
     externally_edited_source = f"# external operator note\n{initial_source}"
     temp_config_file.write_text(externally_edited_source, encoding="utf-8")
 
-    assert config_lifecycle.load_config_into_app(main._app_runtime_paths(test_client.app), main.app) is True
+    assert config_lifecycle.load_config_into_app(main._app_runtime_paths(test_client.app), main.app).loaded
 
     reloaded_raw_response = test_client.get("/api/config/raw")
     assert reloaded_raw_response.status_code == 200
@@ -3995,14 +3988,14 @@ def test_config_reload_uses_source_fingerprint_from_validated_source(
         return source
 
     with patch.object(Path, "read_bytes", autospec=True, side_effect=_read_then_mutate):
-        assert config_lifecycle.load_config_into_app(main._app_runtime_paths(test_client.app), main.app) is True
+        assert config_lifecycle.load_config_into_app(main._app_runtime_paths(test_client.app), main.app).loaded
 
     reloaded_response = test_client.post("/api/config/load")
     assert reloaded_response.status_code == 200
     assert reloaded_response.json()["agents"] == initial_agents
     assert int(reloaded_response.headers[config_lifecycle.CONFIG_GENERATION_HEADER]) == initial_generation
 
-    assert config_lifecycle.load_config_into_app(main._app_runtime_paths(test_client.app), main.app) is True
+    assert config_lifecycle.load_config_into_app(main._app_runtime_paths(test_client.app), main.app).loaded
     interleaved_response = test_client.post("/api/config/load")
     assert interleaved_response.status_code == 200
     assert list(interleaved_response.json()["agents"]) == ["interleaved"]
@@ -4061,7 +4054,7 @@ def test_api_config_load_accepts_missing_plugin_path_in_degraded_mode(temp_confi
     )
     runtime_paths = constants.resolve_primary_runtime_paths(config_path=temp_config_file, process_env={})
     main.initialize_api_app(main.app, runtime_paths)
-    assert config_lifecycle.load_config_into_app(runtime_paths, main.app) is True
+    assert config_lifecycle.load_config_into_app(runtime_paths, main.app).loaded
     client = TestClient(main.app, base_url="http://localhost")
 
     response = client.post("/api/config/load")
@@ -4099,7 +4092,7 @@ def test_api_config_load_does_not_serve_stale_cache_after_invalid_reload(temp_co
 
     temp_config_file.write_text("agents:\n  broken: [\n", encoding="utf-8")
 
-    assert config_lifecycle.load_config_into_app(runtime_paths, main.app) is False
+    assert not config_lifecycle.load_config_into_app(runtime_paths, main.app).loaded
 
     response = client.post("/api/config/load")
 
@@ -4127,7 +4120,7 @@ def test_api_cached_read_endpoints_refuse_stale_config_after_invalid_reload(
     runtime_paths = main._app_runtime_paths(api_key_client.app)
     temp_config_file.write_text("agents:\n  broken: [\n", encoding="utf-8")
 
-    assert config_lifecycle.load_config_into_app(runtime_paths, main.app) is False
+    assert not config_lifecycle.load_config_into_app(runtime_paths, main.app).loaded
 
     response = api_key_client.get(path, headers={"Authorization": "Bearer test-key"})
 
@@ -4144,7 +4137,7 @@ def test_api_cached_write_endpoints_refuse_stale_config_after_invalid_reload(
     invalid_source = "agents:\n  broken: [\n"
     temp_config_file.write_text(invalid_source, encoding="utf-8")
 
-    assert config_lifecycle.load_config_into_app(runtime_paths, main.app) is False
+    assert not config_lifecycle.load_config_into_app(runtime_paths, main.app).loaded
 
     response = api_key_client.put(
         "/api/config/models/default",
@@ -4166,7 +4159,7 @@ def test_api_key_raw_endpoints_recover_from_invalid_reload(
     invalid_source = "agents:\n  broken: [\n"
     temp_config_file.write_text(invalid_source, encoding="utf-8")
 
-    assert config_lifecycle.load_config_into_app(runtime_paths, main.app) is False
+    assert not config_lifecycle.load_config_into_app(runtime_paths, main.app).loaded
 
     raw_response = api_key_client.get(
         "/api/config/raw",
@@ -4787,6 +4780,35 @@ def test_agent_policies_endpoint_uses_backend_policy(test_client: TestClient) ->
     }
 
 
+def test_agent_policies_endpoint_reports_draft_root_scope_and_team_eligibility(test_client: TestClient) -> None:
+    """Drafts keep their private root and scope fall-through, and each agent says why it cannot join a team."""
+    response = test_client.post(
+        "/api/config/agent-policies",
+        json={
+            "defaults": {"worker_scope": "user"},
+            "agents": {
+                "fanout": {"display_name": "Fanout", "delegate_to": ["mind", "notes", "ghost"]},
+                "caller": {"display_name": "Caller", "delegate_to": ["ghost"]},
+                "mind": {"display_name": "Mind", "private": {"per": "user_agent", "root": " workspace/mind "}},
+                "notes": {"display_name": "Notes", "private": {"knowledge": {"path": "kb"}}},
+            },
+        },
+    )
+
+    assert response.status_code == 200
+    policies = response.json()["agent_policies"]
+    assert {name: policy["team_eligibility_reason"] for name, policy in policies.items()} == {
+        "fanout": "Delegates to private agents 'mind', 'notes', so it cannot participate in teams.",
+        "caller": None,
+        "mind": "Private agents cannot be configured as team members.",
+        "notes": "Private agents cannot be configured as team members.",
+    }
+    assert policies["mind"]["private_root"] == "workspace/mind"
+    assert policies["notes"]["scope_source"] == "defaults.worker_scope"
+    assert policies["notes"]["effective_execution_scope"] == "user"
+    assert policies["notes"]["private_knowledge_base_id"] == "__agent_private__:notes"
+
+
 def test_create_team(test_client: TestClient, temp_config_file: Path) -> None:
     """Test creating a new team."""
     test_client.post("/api/config/load")
@@ -4872,6 +4894,12 @@ def test_update_team(test_client: TestClient, temp_config_file: Path) -> None:
         "mode": "coordinate",
     }
     test_client.post("/api/config/teams", json=team_data)
+
+    model_response = test_client.put(
+        "/api/config/models/gpt-6-astra",
+        json={"provider": "openai", "id": "gpt-6-astra"},
+    )
+    assert model_response.status_code == 200
 
     # Update the team
     updated_data = {
@@ -4975,6 +5003,12 @@ def test_get_room_models(test_client: TestClient) -> None:
 def test_update_room_models(test_client: TestClient, temp_config_file: Path) -> None:
     """Test updating room-specific model overrides."""
     test_client.post("/api/config/load")
+
+    for model_name, model in {
+        "gpt-6-astra": {"provider": "openai", "id": "gpt-6-astra"},
+        "claude-sonnet-5": {"provider": "anthropic", "id": "claude-sonnet-5-5"},
+    }.items():
+        assert test_client.put(f"/api/config/models/{model_name}", json=model).status_code == 200
 
     room_models = {"lobby": "gpt-6-astra", "tech-room": "claude-sonnet-5", "general": "default"}
 

@@ -37,7 +37,7 @@ from mindroom.history.storage import (
 from mindroom.history.types import HistoryScope
 from mindroom.llm.messages import Message
 from mindroom.llm.runs import RunRecord, RunStatus
-from mindroom.session_storage.agent_storage import create_state_storage
+from mindroom.session_storage.agent_storage import create_agent_state_storage
 from mindroom.session_storage.legacy_agno3_schema import AgnoTableNames, agno_runs_sql
 from mindroom.session_storage.types import ConversationSession, session_state_snapshot
 from tests.conftest import seed_session, seed_session_state
@@ -140,7 +140,7 @@ class _Runner:
             self._check()
 
     def _open(self) -> ConversationStore:
-        return create_state_storage("code", self._root)
+        return create_agent_state_storage("code", self._root)
 
     def _seed_legacy(self) -> None:
         """Write the session as the destructive compactor left it after folding the legacy runs, which the open converts.
@@ -170,7 +170,7 @@ class _Runner:
             )
 
     def _load(self) -> ConversationSession:
-        session = self._storage.load_session(_SESSION, "agent")
+        session = self._storage.load_session(_SESSION)
         assert session is not None
         return session
 
@@ -398,7 +398,7 @@ class _Runner:
             floor = None
         fold_rows = self._fold_rows()
         barrier = self._latest_barrier()
-        _remove_redacted_event_from_history(self._storage, session=self._load(), scope=_SCOPE, event_id=event_id)
+        _remove_redacted_event_from_history(self._storage, session=self._load(), event_id=event_id)
         # A run goes whole, so a cut that removed one of its fold rows starts right after that row.
         remaining = self._fold_rows()
         for row_id, (through, owner) in fold_rows.items():

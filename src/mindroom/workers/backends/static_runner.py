@@ -25,7 +25,7 @@ from mindroom.workers.backends._lifecycle import (
     touch_worker_lifecycle,
     write_lifecycle_state,
 )
-from mindroom.workers.compatibility import worker_health_compatibility_error
+from mindroom.workers.compatibility import ready_worker_protocol_mismatch
 from mindroom.workers.models import ProgressSink, WorkerHandle, WorkerSpec, WorkerStatus
 
 _DEFAULT_IDLE_TIMEOUT_SECONDS = 1800.0
@@ -147,13 +147,14 @@ class StaticSandboxRunnerBackend:
         except httpx.HTTPError as exc:
             msg = f"Sandbox runner at '{runner_root}' did not answer its health check: {exc}"
             raise WorkerBackendError(msg) from exc
-        compatibility_error = worker_health_compatibility_error(
+        # The shared runner is not this primary's to replace, so a mismatch fails the call.
+        mismatch = ready_worker_protocol_mismatch(
             response,
             worker=f"Sandbox runner at '{runner_root}'",
             older_worker_hint=_OLDER_RUNNER_HINT,
         )
-        if compatibility_error is not None:
-            raise WorkerBackendError(compatibility_error)
+        if mismatch is not None:
+            raise WorkerBackendError(mismatch.error)
         with self._lock:
             # A failure recorded while the probe was in flight leaves the next call to probe again.
             self._compatible_since_failures = failures_before_probe

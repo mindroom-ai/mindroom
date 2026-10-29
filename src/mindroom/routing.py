@@ -16,6 +16,7 @@ from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage, repl
 from mindroom.providers import registry as provider_registry
 from mindroom.routing_judgment import ResponderSelection, judge_responder
 from mindroom.tool_system.events import body_without_tool_markers
+from mindroom.turn_model import ModelScope, resolve_turn_model
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -72,11 +73,11 @@ async def suggest_responder(
             )
             prompt = f"{config.get_prompt('ROUTER_THREAD_CONTEXT_HEADER')}\n{recent}\n{prompt}"
 
-        router_model_name = config.resolve_runtime_model(
-            entity_name=ROUTER_AGENT_NAME,
-            room_id=room_id,
-            thread_id=thread_id,
-            runtime_paths=runtime_paths,
+        router_model_name = resolve_turn_model(
+            config,
+            runtime_paths,
+            ModelScope(entity=ROUTER_AGENT_NAME, room_id=room_id, thread_id=thread_id),
+            None,
         ).model_name
 
         provider = provider_registry.build_model_provider(config, runtime_paths, router_model_name)

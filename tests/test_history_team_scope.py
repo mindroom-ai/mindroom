@@ -63,6 +63,7 @@ from tests.team_turn_helpers import (
     squad_turn,
 )
 from tests.teams.squad import start_team
+from tests.turn_model_helpers import turn_model
 
 if TYPE_CHECKING:
     from mindroom.llm.provider import ModelRequest
@@ -110,7 +111,7 @@ def _build_pair(
         runtime_paths=runtime_paths,
         execution_identity=None,
         refresh_scheduler=None,
-        active_model_names=None,
+        active_model_names={name: turn_model(config, runtime_paths, name).model_name for name in ("zeta", "alpha")},
     )
     return build_team_spec(
         members=members,
@@ -241,7 +242,7 @@ async def test_the_team_turn_sizes_its_static_tokens_from_the_leader_prompt_and_
         thread_history=None,
         config=config,
         runtime_paths=runtime_paths,
-        runtime_model=config.resolve_runtime_model(entity_name="pair", active_model_name="default"),
+        runtime_model=turn_model(config, runtime_paths, "pair", "default"),
         response_sender_id=None,
         current_sender_id=None,
         configured_team_name="pair",
@@ -320,7 +321,7 @@ _PAST_2_ONLY = ["past-2 team question", "past-2 team answer"]
 def _store_two_past_runs_under_a_one_run_limit(team: TeamTurn) -> None:
     """Author ``num_history_runs = 1`` on the squad and store two runs, where the defaults would replay both."""
     team.config.teams["squad"].num_history_runs = 1
-    assert team.config.resolve_entity(None).history_settings.policy.mode == "all"
+    assert team.config.resolve_scope(None).history_settings.policy.mode == "all"
     past = [_completed_team_run("past-1", team_id="squad"), _completed_team_run("past-2", team_id="squad")]
     seed_session(team.storage, _team_session(SESSION_ID, team_id="squad", runs=past))
 
@@ -508,7 +509,7 @@ async def test_prepare_bound_scope_history_uses_opened_private_ad_hoc_scope(tmp_
             model=estimate_only_model(),
             runtime_paths=runtime_paths,
             config=config,
-            history_settings=config.resolve_entity(None).history_settings,
+            history_settings=config.resolve_scope(None).history_settings,
             scope_context=scope_context,
             static_prompt_tokens=5,
             non_prompt_tokens=2,

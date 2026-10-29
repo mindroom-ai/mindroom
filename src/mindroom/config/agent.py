@@ -413,6 +413,11 @@ class AgentConfig(BaseModel):
         default=None,
         description="Allow this agent to modify its own configuration via a tool",
     )
+    created_agents_per_owner: int = Field(
+        default=0,
+        ge=0,
+        description="How many agents each person may create through this agent with create_agent; 0 turns create_agent off",
+    )
     automations: AutomationList | None = Field(
         default=None,
         description="Automations for this agent, built-in such as prompt_curation or from a plugin; omitted inherits defaults.automations",
@@ -431,24 +436,6 @@ class AgentConfig(BaseModel):
     def tool_names(self) -> list[str]:
         """Return authored tool names without inline override details."""
         return [entry.name for entry in self.tools]
-
-    def get_tool_overrides(self, tool_name: str) -> dict[str, object] | None:
-        """Return normalized per-agent runtime overrides for one configured tool."""
-        # why-lazy: config.agent is imported by config.main; the tool catalog loads hook/runtime helpers.
-        from mindroom.tool_system.catalog import TOOL_METADATA, normalize_authored_tool_overrides  # noqa: PLC0415
-
-        for entry in self.tools:
-            if entry.name == tool_name and entry.overrides:
-                metadata = TOOL_METADATA.get(tool_name)
-                allowed_fields = {field.name for field in metadata.agent_override_fields or []} if metadata else set()
-                if not allowed_fields:
-                    return None
-                overrides = {name: value for name, value in entry.overrides.items() if name in allowed_fields}
-                if not overrides:
-                    return None
-                normalized = normalize_authored_tool_overrides(tool_name, overrides)
-                return normalized or None
-        return None
 
     def authored_model_dump(self) -> dict[str, object]:
         """Serialize the authored agent config."""
@@ -541,7 +528,7 @@ class TeamConfig(BaseModel):
             "invites from matching inviter Matrix IDs or glob patterns"
         ),
     )
-    model: str | None = Field(
+    model: str = Field(
         default="default",
         description="Configured model alias used for this team's replies",
         json_schema_extra=dashboard_hint(reference="model"),

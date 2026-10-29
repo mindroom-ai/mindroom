@@ -30,6 +30,7 @@ from mindroom.tool_system.tool_hooks import build_tool_hook_middleware
 from tests.chat_ui_contract_fixture import make_chat_ui_context
 from tests.conftest import bind_runtime_paths, install_model_providers
 from tests.fakes.scripted_model import ScriptedModel
+from tests.turn_model_helpers import turn_model
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -362,7 +363,7 @@ def test_agent_factory_attaches_the_announcement_to_the_worker_browser(
         runtime_paths,
         execution_identity=None,
         knowledge=None,
-        active_model_name=None,
+        model=turn_model(config, runtime_paths, "researcher"),
     )
 
     assert [middleware.__name__ for middleware in build.tool_policy] == ["bind_live_functions", "middleware"]
@@ -396,7 +397,7 @@ async def test_a_deferred_browser_a_minimal_turn_builds_later_announces_the_comp
         execution_identity=None,
         agent_mode="minimal",
         knowledge=None,
-        active_model_name=None,
+        model=turn_model(config, runtime_paths, "researcher"),
     )
     [deferred] = build.surface.deferred
     assert deferred.name == "browser"

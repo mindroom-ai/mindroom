@@ -24,7 +24,7 @@ from mindroom.mcp_gateway import toolkits as gateway_toolkits
 from mindroom.mcp_gateway import tools as gateway
 from mindroom.tool_system import sandbox_proxy
 from mindroom.tool_system.authoring import toolkit_functions
-from mindroom.tool_system.runtime_context import get_tool_runtime_context, get_worker_runtime_context
+from mindroom.tool_system.runtime_context import get_tool_runtime_context
 from mindroom.tool_system.worker_routing import get_tool_execution_identity
 from tests.test_mcp_gateway_server import _HEADERS, _authenticate, _call, _cancel, _client
 from tests.test_mcp_gateway_tools import context  # noqa: F401
@@ -73,9 +73,6 @@ async def test_native_capacity_survives_response_until_cleanup_finishes(
         on_gateway_pool[stage] = threading.current_thread().name.startswith("mindroom-mcp-gateway-tool")
         assert get_tool_runtime_context() is None
         assert get_tool_execution_identity() == context.execution_identity
-        worker = get_worker_runtime_context()
-        assert worker is not None
-        assert worker.config is context.config
         if phase == stage:
             started.set()
             assert release.wait(5)
@@ -272,7 +269,7 @@ async def test_cancelled_worker_proxy_call_keeps_capacity_until_proxy_thread_exi
 
     def build(*_args: object, **_kwargs: object) -> Toolkit:
         toolkit = Toolkit(name="calculator", tools=[work])
-        # Like maybe_wrap_toolkit_for_sandbox_proxy, every worker-routed function gets the async proxy.
+        # Like wrap_toolkit_for_sandbox_proxy, every worker-routed function gets the async proxy.
         toolkit.async_functions = {
             name: sandbox_proxy._wrap_async_proxy(
                 function,

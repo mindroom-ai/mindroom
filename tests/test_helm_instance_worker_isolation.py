@@ -32,7 +32,7 @@ from mindroom.matrix.personal_room_store import (
 )
 from mindroom.private_storage.private_instance_identity_store import ensure_private_instance_identity
 from mindroom.session_storage import agent_storage
-from mindroom.session_storage.agent_storage import create_state_storage
+from mindroom.session_storage.agent_storage import create_agent_state_storage
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -1272,7 +1272,7 @@ def test_static_runner_storage_mounts_hold_no_record_or_lock_the_primary_trusts(
 
 
 def _open_sessions(state_root: Path) -> ConversationStore:
-    return create_state_storage("helper", state_root)
+    return create_agent_state_storage("helper", state_root)
 
 
 def test_instance_chart_static_runner_generates_primary_api_key_without_other_auth() -> None:

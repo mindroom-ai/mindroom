@@ -53,7 +53,6 @@ BOT_RUNTIME_VIEW_ALLOWED_IMPORTERS = {
     "mindroom.bot",
     "mindroom.response_runner",
     "mindroom.tool_system.runtime_context",
-    "mindroom.turn_controller",
 }
 
 

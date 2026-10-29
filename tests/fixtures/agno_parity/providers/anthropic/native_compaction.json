@@ -64,7 +64,7 @@
     "message": {
       "content": "Add a warm layer.",
       "provider_data": {
-        "content_blocks": [
+        "claude_blocks": [
           {
             "content": "<summary>Alice is packing for a rainy Paris trip and asked about the evening.</summary>",
             "encrypted_content": "parity-compaction",
@@ -95,15 +95,6 @@
           "route": "7ba1c97e7ce53244967bde7ad22d5a3554eda610705403aacc591a1aadf8a673",
           "threshold": 60000
         },
-        "server_tool_blocks": [
-          {
-            "content": "<summary>Alice is packing for a rainy Paris trip and asked about the evening.</summary>",
-            "encrypted_content": "parity-compaction",
-            "signature": null,
-            "tool_changes": null,
-            "type": "compaction"
-          }
-        ],
         "stop_reason": "end_turn"
       },
       "role": "assistant"

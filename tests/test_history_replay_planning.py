@@ -43,6 +43,7 @@ from mindroom.llm.media import Image
 from mindroom.llm.messages import Message
 from mindroom.session_storage.agent_storage import create_session_storage
 from mindroom.token_budget import estimate_text_tokens
+from mindroom.turn_model import ModelScope, resolve_turn_model
 from tests.conftest import bind_runtime_paths, install_model_providers, prepare_history_for_run_for_test, seed_session
 from tests.fakes.summary_model import summary_model
 from tests.history_helpers import (
@@ -58,7 +59,7 @@ from tests.history_helpers import (
 
 def _agent_settings(config: Config) -> ResolvedHistorySettings:
     """Return the test agent's resolved history settings, which hold its compaction config."""
-    return config.resolve_entity("test_agent").history_settings
+    return config.resolve_scope("test_agent").history_settings
 
 
 def _viewed_image_message(index: int) -> Message:
@@ -237,7 +238,7 @@ async def test_prepare_history_for_run_authored_compaction_still_plans_safe_repl
         session=session,
     )
 
-    persisted = storage.load_session("session-1", "agent")
+    persisted = storage.load_session("session-1")
     assert persisted is not None
     assert persisted.summary is None
     assert [run.run_id for run in persisted.runs] == ["run-1", "run-2"]
@@ -296,7 +297,7 @@ async def test_prepare_history_for_run_without_authored_compaction_and_no_window
             session=session,
         )
 
-    persisted = storage.load_session("session-1", "agent")
+    persisted = storage.load_session("session-1")
     assert persisted is not None
     assert persisted.summary is None
     assert [run.run_id for run in persisted.runs] == ["run-1", "run-2"]
@@ -334,7 +335,7 @@ async def test_prepare_history_for_run_with_disabled_compaction_and_no_window_sk
             session=session,
         )
 
-    persisted = storage.load_session("session-1", "agent")
+    persisted = storage.load_session("session-1")
     assert persisted is not None
     assert persisted.summary is None
     assert [run.run_id for run in persisted.runs] == ["run-1", "run-2"]
@@ -460,7 +461,10 @@ def test_only_an_authored_enabled_compaction_config_compacts_automatically(
 ) -> None:
     """The settings own whether compaction runs on its own, and the plan carries their answer.
 
-    ``defaults.compaction: null`` leaves the built-in config, which is enabled but authored by nobody.
+    ``defaults.compaction: null`` leaves the built-in config, which is enabled but authored by nobody, so like
+    ``enabled: false`` it has no trigger and keeps ``reserve_tokens`` free for the reply. On this 48k window with a
+    2k static prompt, fitting replay to the 80% trigger instead would replay 36,400 tokens and leave 9,600 for the
+    reply, below the 16,384 reserve.
     """
     config = Config.validate_with_runtime(
         {
@@ -481,6 +485,8 @@ def test_only_an_authored_enabled_compaction_config_compacts_automatically(
 
     assert _agent_settings(config).automatic_compaction is automatic
     assert execution_plan.automatic_compaction is automatic
+    assert execution_plan.hard_replay_budget_tokens == execution_plan.replay_budget_tokens == 48_000 - 16_384 - 2_000
+    assert execution_plan.trigger_threshold_tokens == (38_400 if automatic else None)
 
 
 def test_validate_compaction_model_references_does_not_emit_availability_warnings(tmp_path: Path) -> None:
@@ -935,7 +941,7 @@ def test_resolve_history_execution_plan_uses_compaction_model_window_only_for_su
     assert decision.reason == "history_exceeds_hard_budget"
 
 
-def test_resolve_runtime_model_uses_room_override_for_team(
+def test_resolve_turn_model_uses_room_override_for_team(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -962,17 +968,18 @@ def test_resolve_runtime_model_uses_room_override_for_team(
     )
     monkeypatch.setattr("mindroom.matrix.state.get_room_alias_from_id", lambda *_args: "lobby")
 
-    runtime_model = config.resolve_runtime_model(
-        entity_name="team_123",
-        room_id="!room:localhost",
-        runtime_paths=runtime_paths,
+    runtime_model = resolve_turn_model(
+        config,
+        runtime_paths,
+        ModelScope(entity="team_123", room_id="!room:localhost"),
+        None,
     )
 
     assert runtime_model.model_name == "large"
     assert runtime_model.context_window == 32_000
 
 
-def test_resolve_runtime_model_uses_room_override_for_agent(
+def test_resolve_turn_model_uses_room_override_for_agent(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -991,10 +998,11 @@ def test_resolve_runtime_model_uses_room_override_for_agent(
     )
     monkeypatch.setattr("mindroom.matrix.state.get_room_alias_from_id", lambda *_args: "lobby")
 
-    runtime_model = config.resolve_runtime_model(
-        entity_name="test_agent",
-        room_id="!room:localhost",
-        runtime_paths=runtime_paths,
+    runtime_model = resolve_turn_model(
+        config,
+        runtime_paths,
+        ModelScope(entity="test_agent", room_id="!room:localhost"),
+        None,
     )
 
     assert runtime_model.model_name == "large"
@@ -1126,6 +1134,8 @@ def test_resolve_history_execution_plan_caps_replay_without_capping_summary_inpu
     assert execution_plan.replay_window_tokens == expected_replay_window
     assert execution_plan.summary_input_budget_tokens == expected_summary_input_budget
     assert execution_plan.trigger_threshold_tokens == int(expected_replay_window * 0.8)
+    # The trigger falls below the hard budget here, so replay fits the trigger minus the static prompt.
+    assert execution_plan.replay_budget_tokens == int(expected_replay_window * 0.8) - 10_000
     hard_replay_budget = execution_plan.hard_replay_budget_tokens
     assert hard_replay_budget is not None
     assert hard_replay_budget == expected_replay_window - 16_384 - 10_000
@@ -1290,7 +1300,7 @@ async def test_prepare_history_for_run_forced_compaction_without_budget_clears_f
         session=session,
     )
 
-    persisted = storage.load_session("session-1", "agent")
+    persisted = storage.load_session("session-1")
     assert persisted is not None
     assert persisted.summary is None
     assert [run.run_id for run in persisted.runs] == ["run-1", "run-2"]
@@ -1446,7 +1456,7 @@ async def test_prepare_history_for_run_preserves_compaction_when_summary_exceeds
             available_history_budget=1,
         )
 
-    persisted = storage.load_session("session-1", "agent")
+    persisted = storage.load_session("session-1")
     assert persisted is not None
     assert persisted.summary is not None
     assert persisted.summary.text == "merged summary"

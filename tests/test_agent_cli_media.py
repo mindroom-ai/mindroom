@@ -19,17 +19,18 @@ from mindroom.agent_cli.bash import minimal_bash_toolkit
 from mindroom.agent_cli.events import stream_cli_events
 from mindroom.agent_cli.json_io import MAX_ENVELOPE_BYTES, canonical_json
 from mindroom.agent_cli.lifetime import response_cli_lifetime
-from mindroom.agent_cli.projection import project_cli_result
-from mindroom.agent_cli.protocol import ContextReadOperation, ToolCallOperation, ToolCallReceipt, ToolDescribeOperation
+from mindroom.agent_cli.protocol import ContextReadOperation, ToolCallOperation, ToolDescribeOperation
 from mindroom.agent_cli.session import CliTurnOwner
 from mindroom.agent_cli.shell_contract import AgentCliShellEnv
 from mindroom.agent_loop.model_loop import EMPTY_REQUEST, LoopHooks
 from mindroom.agent_loop.run import run_agent
 from mindroom.agent_loop.spec import AgentSpec
-from mindroom.ai import _process_stream_events, _StreamingAttemptState, collect_streamed_response_content
+from mindroom.ai import _process_stream_events, _StreamingAttemptState
 from mindroom.attachments.media import resolve_scoped_attachments
+from mindroom.history.types import HistoryScope
 from mindroom.llm.events import ToolCompleted, ToolStarted
 from mindroom.llm.messages import Message
+from mindroom.response_turn import collect_streamed_response_content
 from mindroom.session_storage.agent_storage import create_state_storage
 from mindroom.tool_system.agno_toolkits import adapt_toolkit
 from mindroom.tool_system.events import CollectedStreamPresentation, deserialize_tool_trace, serialize_tool_trace
@@ -79,7 +80,7 @@ async def _run(tmp_path, result, *, policy=None):  # noqa: C901
         middleware=(hook,),
     )
     catalog.runtime_context = replace(catalog.runtime_context, storage_path=tmp_path / "storage")
-    catalog.store = create_state_storage("helper", tmp_path)
+    catalog.store = create_state_storage("helper", tmp_path, HistoryScope(kind="agent", scope_id="helper"))
     receipts = []
 
     async def authorize(key, arguments):
@@ -294,6 +295,7 @@ async def test_single_oversized_schema_is_retrievable_through_scoped_context(tmp
         CliTurnOwner(build_execution_identity_from_runtime_context(catalog.runtime_context), "turn", "run"),
         catalog=catalog,
         authorize=authorize,
+        output_file_policy=ToolOutputFilePolicy(tmp_path / "workspace"),
     )
     try:
         async with owner._window("outer"):
@@ -360,6 +362,7 @@ async def test_admission_uses_current_window_context_after_rebuild(tmp_path) -> 
         CliTurnOwner(build_execution_identity_from_runtime_context(catalog.runtime_context), "turn", "run"),
         catalog=catalog,
         authorize=authorize,
+        output_file_policy=ToolOutputFilePolicy(tmp_path / "workspace"),
     )
 
     async def submit(window: str):
@@ -391,32 +394,3 @@ async def test_admission_uses_current_window_context_after_rebuild(tmp_path) -> 
         assert tag.get() == "unbound"
     finally:
         await owner.close()
-
-
-@pytest.mark.parametrize(
-    "result",
-    [
-        # Quotes double when JSON-escaped, so this alone would overflow the 64 KiB receipt envelope.
-        '"' * 40_000,
-        # Halving stops just under the budget, so the notice must count toward it too.
-        "x" * 32_700,
-    ],
-    ids=["escaped", "notice-at-budget"],
-)
-def test_large_result_without_workspace_is_shortened_to_fit_its_receipt(result: str) -> None:
-    """With nowhere to save the full output, an oversized result still reaches the caller, shortened."""
-    projected = project_cli_result(result, None, "run_shell_command")
-
-    assert isinstance(projected, str)
-    assert projected.startswith(result[:1000])
-    assert projected.endswith("Call the tool directly for all of it.]")
-    assert len(json.dumps(projected, ensure_ascii=False).encode()) <= 16 * 1024
-    receipt = ToolCallReceipt(
-        call_id=uuid4(),
-        toolkit="shell",
-        function="run_shell_command",
-        status="completed",
-        outcome=projected,
-    )
-    assert len(canonical_json(receipt.model_dump(mode="json")).encode()) <= MAX_ENVELOPE_BYTES
-    assert project_cli_result("small", None, "run_shell_command") == "small"

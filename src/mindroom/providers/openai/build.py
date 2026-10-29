@@ -34,7 +34,7 @@ from mindroom.providers.model_http_client import MODEL_HTTP_CLIENT
 from mindroom.providers.names import provider_route
 from mindroom.providers.openai.adapter_common import SDKClients
 from mindroom.providers.openai.chat import ChatAdapter
-from mindroom.providers.openai.chat_wire import ChatDialect, ChatWire, deepseek_request_thinks
+from mindroom.providers.openai.chat_wire import ChatWire, deepseek_request_thinks
 from mindroom.providers.openai.codex_auth import (
     CODEX_BASE_URL,
     CodexAuthError,
@@ -96,7 +96,6 @@ class _ChatRoute:
     provider_name: str
     api_key_env: str | None
     base_url: str | None = None
-    dialect: ChatDialect = "openai"
     accepted: frozenset[str] = CHAT_FIELDS
     structured_output: StructuredOutput = "native"
     omitted_media: frozenset[MediaKind] = frozenset({"video"})
@@ -152,7 +151,6 @@ _CHAT_ROUTES: dict[str, _ChatRoute] = {
         provider="Groq",
         provider_name="Groq",
         api_key_env=PROVIDER_ENV_KEYS["groq"],
-        dialect="groq",
         accepted=GROQ_FIELDS,
         structured_output="forced_tool",
         omitted_media=frozenset({"audio", "file", "video"}),
@@ -162,7 +160,6 @@ _CHAT_ROUTES: dict[str, _ChatRoute] = {
         provider="Cerebras",
         provider_name="Cerebras",
         api_key_env=PROVIDER_ENV_KEYS["cerebras"],
-        dialect="cerebras",
         accepted=CEREBRAS_FIELDS,
         structured_output="json_schema",
         omitted_media=frozenset({"audio", "image", "file", "video"}),
@@ -216,15 +213,10 @@ def _authored_base_url(client_params: Mapping[str, Any] | None, base_url: str | 
     return (client_params or {}).get("base_url") or base_url
 
 
-def _client_options(
-    settings: ChatSettings | ResponsesSettings,
-    *,
-    base_url: str,
-    organization: bool = True,
-) -> dict[str, Any]:
+def _client_options(settings: ChatSettings | ResponsesSettings, *, base_url: str) -> dict[str, Any]:
     """Return the SDK client options a route configures; ``client_params`` is merged over them per client."""
     return {
-        "organization": settings.organization if organization else None,
+        "organization": settings.organization,
         "base_url": base_url,
         "timeout": settings.timeout,
         "default_headers": settings.default_headers,
@@ -329,7 +321,7 @@ def _chat_client_factory(
     """Return the SDK client factory of one Chat route; ``alternative_auth`` says it authenticates without a key."""
     route = _CHAT_ROUTES[route_key]
     http_client = runtime.http_client
-    options = _client_options(settings, base_url=base_url, organization=route.dialect == "openai")
+    options = _client_options(settings, base_url=base_url)
     if route_key == "kimi":
 
         def kimi_client() -> AsyncOpenAI:
@@ -445,12 +437,13 @@ def _build_chat(route_key: str, model_config: ModelConfig, runtime: ProviderRunt
     capabilities = Capabilities(
         structured_output=structured_output,
         omitted_media=route.omitted_media,
+        url_media=frozenset({"image"}),
         provider_default_sampling=_provider_default_sampling(model_id),
     )
     return ChatAdapter(
         identity=identity,
         capabilities=capabilities,
-        wire=ChatWire(route=route_key, dialect=route.dialect),
+        wire=ChatWire(route=route_key),
         settings=settings,
         clients=SDKClients(
             _chat_client_factory(
@@ -524,6 +517,7 @@ def _build_responses(
     capabilities = Capabilities(
         structured_output="native",
         omitted_media=frozenset({"audio", "video"}),
+        url_media=frozenset({"file", "image"}),
         native_tool_search=openai_native_tool_search_supported(route_key, model_id, base_url=base_url),
         native_compaction=_native_compaction_supported(model_id, endpoint, store, settings),
         provider_default_sampling=_provider_default_sampling(model_id),

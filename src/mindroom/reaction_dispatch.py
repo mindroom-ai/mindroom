@@ -12,7 +12,6 @@ from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.dispatch_callback_outcome import TurnDispatchOutcome
 from mindroom.entity_resolution import entity_identity_registry
 from mindroom.event_journal import SemanticConsumer
-from mindroom.response_admission import admitted_response_decision
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
@@ -21,13 +20,13 @@ if TYPE_CHECKING:
     import structlog
 
     from mindroom.agent_reply_membership import AgentReplyMembershipIndex
-    from mindroom.coalescing.prompt_ingress_reservation import PromptIngressReservationOwner
+    from mindroom.coalescing.ingress_ticket import IngressTicket
     from mindroom.commands.config_confirmation import ConfigConfirmationContext
     from mindroom.constants import RuntimePaths
     from mindroom.ingress_validation import IngressValidator
     from mindroom.journal_dispatch import JournalDispatcher
     from mindroom.runtime_protocols import SupportsClientConfigOrchestrator
-    from mindroom.turn_policy import TurnPolicy
+    from mindroom.turns.facts import IngressFacts
     from mindroom.user_stop_reconciliation import UserStopReconciler
 
 
@@ -41,13 +40,11 @@ class ReactionDispatcherDeps:
     agent_name: str
     journal_dispatcher: JournalDispatcher
     agent_reply_memberships: AgentReplyMembershipIndex
-    turn_policy: TurnPolicy
     user_stop_reconciler: UserStopReconciler
     ingress: IngressValidator
-    reserve_prompt_ingress_order: Callable[..., PromptIngressReservationOwner]
+    reserve_prompt_ingress_order: Callable[..., IngressTicket]
     enqueue_interactive_selection: Callable[..., Awaitable[None]]
     emit_reaction_received_hooks: Callable[..., Awaitable[None]]
-    wait_for_admission_or_shutdown: Callable[[], Awaitable[bool]]
     config_confirmation: ConfigConfirmationContext
 
 
@@ -143,8 +140,8 @@ class ReactionDispatcher:
         room: nio.MatrixRoom,
         event: nio.ReactionEvent,
         consumer: SemanticConsumer | None,
-        reservation_owner: PromptIngressReservationOwner,
-        requester_user_id: str,
+        ticket: IngressTicket,
+        facts: IngressFacts,
     ) -> TurnDispatchOutcome | None:
         """Route an interactive choice only through its source-owned selection."""
         interactive_claimed = consumer is SemanticConsumer.INTERACTIVE_REACTION
@@ -160,11 +157,10 @@ class ReactionDispatcher:
             return TurnDispatchOutcome.INTENTIONALLY_IGNORED if interactive_claimed else None
 
         await self.deps.enqueue_interactive_selection(
-            reservation_owner,
+            ticket,
             room,
             selection=selection,
-            requester_user_id=requester_user_id,
-            user_id=event.sender,
+            facts=facts,
             source_event_id=event.event_id,
         )
         return TurnDispatchOutcome.DEFERRED
@@ -174,23 +170,21 @@ class ReactionDispatcher:
         room: nio.MatrixRoom,
         event: nio.ReactionEvent,
         consumer: SemanticConsumer | None,
-        reservation_owner: PromptIngressReservationOwner,
-        requester_user_id: str,
+        ticket: IngressTicket,
+        facts: IngressFacts,
     ) -> TurnDispatchOutcome | None:
         """Route one authorized reaction among the non-config consumers."""
+        requester_user_id = facts.lane_requester_id
         if await self._maybe_handle_approval_reaction(room, event, consumer):
             return TurnDispatchOutcome.INTENTIONALLY_IGNORED
         if consumer is None:
-            async with admitted_response_decision(
-                self.deps.runtime.response_admission_gate,
-                self.deps.wait_for_admission_or_shutdown,
-            ):
-                if not self.deps.turn_policy.can_reply_to_sender_in_room(
-                    requester_user_id,
-                    room.room_id,
-                ):
+            async with self.deps.ingress.admitted_reply_decision(
+                requester_user_id,
+                room.room_id,
+                unanswered=(event.event_id,),
+            ) as allowed:
+                if not allowed:
                     self.deps.logger.debug("Ignoring reaction due to reply permissions", sender=event.sender)
-                    await self.deps.journal_dispatcher.settle_running_event_intentionally_ignored()
                     return TurnDispatchOutcome.INTENTIONALLY_IGNORED
                 if await self._maybe_handle_stop_reaction(room, event, consumer, requester_user_id):
                     return TurnDispatchOutcome.INTENTIONALLY_IGNORED
@@ -198,8 +192,8 @@ class ReactionDispatcher:
                     room,
                     event,
                     consumer,
-                    reservation_owner,
-                    requester_user_id,
+                    ticket,
+                    facts,
                 )
                 if outcome is not None:
                     return outcome
@@ -218,8 +212,8 @@ class ReactionDispatcher:
             room,
             event,
             consumer,
-            reservation_owner,
-            requester_user_id,
+            ticket,
+            facts,
         )
 
     async def _route_reaction(
@@ -254,27 +248,22 @@ class ReactionDispatcher:
             )
             return TurnDispatchOutcome.INTENTIONALLY_IGNORED
 
-        requester_user_id = self.deps.ingress.requester_user_id(
-            sender=event.sender,
-            source=event.source,
-        )
-        reservation_owner = self.deps.reserve_prompt_ingress_order(
+        facts = self.deps.ingress.classify(event)
+        requester_user_id = facts.lane_requester_id
+        ticket = self.deps.reserve_prompt_ingress_order(
             room,
             requester_user_id,
             receipt_time=time.monotonic(),
         )
         try:
             if pending_change is not None:
-                async with admitted_response_decision(
-                    self.deps.runtime.response_admission_gate,
-                    self.deps.wait_for_admission_or_shutdown,
-                ):
-                    if not self.deps.turn_policy.can_reply_to_sender_in_room(
-                        requester_user_id,
-                        room.room_id,
-                    ):
+                async with self.deps.ingress.admitted_reply_decision(
+                    requester_user_id,
+                    room.room_id,
+                    unanswered=(event.event_id,),
+                ) as allowed:
+                    if not allowed:
                         self.deps.logger.debug("Ignoring reaction due to current authorization", sender=event.sender)
-                        await self.deps.journal_dispatcher.settle_running_event_intentionally_ignored()
                         return TurnDispatchOutcome.INTENTIONALLY_IGNORED
                     if semantic_consumer is None:
                         await self.deps.journal_dispatcher.claim_semantic_consumer(
@@ -292,13 +281,13 @@ class ReactionDispatcher:
                     room,
                     event,
                     semantic_consumer,
-                    reservation_owner,
-                    requester_user_id,
+                    ticket,
+                    facts,
                 )
             ) is not None:
                 return outcome
         finally:
-            await reservation_owner.release()
+            ticket.close()
         self.deps.logger.warning(
             "reaction_consumer_did_not_match_event",
             event_id=event.event_id,
@@ -313,16 +302,16 @@ class ReactionDispatcher:
         requester_user_id: str,
     ) -> None:
         """Emit generic hooks only while their current reply authority is admitted."""
-        async with admitted_response_decision(
-            self.deps.runtime.response_admission_gate,
-            self.deps.wait_for_admission_or_shutdown,
-        ):
-            if not self.deps.turn_policy.can_reply_to_sender_in_room(requester_user_id, room.room_id):
+        async with self.deps.ingress.admitted_reply_decision(
+            requester_user_id,
+            room.room_id,
+            unanswered=(event.event_id,),
+        ) as allowed:
+            if not allowed:
                 self.deps.logger.debug(
                     "Ignoring reaction hook due to current authorization",
                     sender=event.sender,
                 )
-                await self.deps.journal_dispatcher.settle_running_event_intentionally_ignored()
                 return
             await self.deps.emit_reaction_received_hooks(
                 room_id=room.room_id,
@@ -334,10 +323,7 @@ class ReactionDispatcher:
         """Route one reaction to its sole durable semantic consumer."""
         semantic_consumer = self.deps.journal_dispatcher.semantic_consumer()
         if semantic_consumer is SemanticConsumer.REACTION_HOOKS:
-            requester_user_id = self.deps.ingress.requester_user_id(
-                sender=event.sender,
-                source=event.source,
-            )
+            requester_user_id = self.deps.ingress.classify(event).lane_requester_id
             await self._emit_authorized_reaction_hooks(room, event, requester_user_id)
             return TurnDispatchOutcome.INTENTIONALLY_IGNORED
         return await self._route_reaction(room, event, semantic_consumer)

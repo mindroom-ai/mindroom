@@ -20,6 +20,7 @@ if TYPE_CHECKING:
     from structlog.stdlib import BoundLogger
 
     from mindroom.delivery_gateway import ResponseHookService, ResponseIdentity
+    from mindroom.event_journal.approval_signals import ApprovalSignals, PausedReply
     from mindroom.final_delivery import FinalDeliveryOutcome
     from mindroom.hooks import MessageEnvelope
     from mindroom.message_target import MessageTarget
@@ -62,7 +63,7 @@ class ResponseLifecycleReservation:
             self._acquire_task = asyncio.create_task(self._acquire())
         await self._ready.wait()
 
-    def consume(
+    def _consume(
         self,
         coordinator: ResponseLifecycleCoordinator,
         target: MessageTarget,
@@ -232,19 +233,12 @@ class QueuedHumanNoticeReservation:
     _source_event_id: str
     _active: bool = True
 
-    def _release_waiting_human_message(self) -> None:
+    def release(self) -> None:
+        """Stop counting this message as waiting for the running response; idempotent."""
         if not self._active:
             return
         self._state.consume_waiting_human_message(self._source_event_id)
         self._active = False
-
-    def consume(self) -> None:
-        """Mark the reservation as owned by the response lifecycle."""
-        self._release_waiting_human_message()
-
-    def cancel(self) -> None:
-        """Release a reservation that will not reach response lifecycle ownership."""
-        self._release_waiting_human_message()
 
 
 @dataclass
@@ -253,32 +247,42 @@ class ResponseLifecycleCoordinator:
 
     _response_lifecycle_locks: dict[ResponseLifecycleKey, asyncio.Lock] = field(default_factory=dict)
     _thread_queued_signals: dict[ResponseLifecycleKey, _QueuedMessageState] = field(default_factory=dict)
-    # A pending approval counts as an active response turn of its conversation, by approval.
+    # A pending approval counts as an active response turn of its conversation, by approval,
+    # for each paused reply the journal's approval signals report.
     _approval_holds: dict[str, ResponseLifecycleKey] = field(default_factory=dict)
+    _stop_following_approvals: Callable[[], None] | None = None
 
-    def hold_for_approval(self, approval_id: str, target: MessageTarget) -> None:
-        """Keep a conversation busy while an approval of its reply is pending; holding it again changes nothing.
+    def follow_approval_holds(self, signals: ApprovalSignals, principal_id: str) -> None:
+        """Hold the conversation of each paused reply of ``principal_id``, from the ones paused now, until it ends.
 
         Later messages wait as they wait behind a running response. The hold
         does not take the lifecycle lock, so the approval's own resume and
         settlement still run.
         """
-        if approval_id in self._approval_holds:
-            return
-        self._approval_holds[approval_id] = target.lifecycle_key
-        self._get_or_create_queued_signal(target).begin_response_turn()
+        self.stop_following_approval_holds()
+        self._stop_following_approvals = signals.follow_paused_replies(
+            principal_id,
+            paused=self._hold_for_approval,
+            ended=self._release_approval_hold,
+        )
 
-    def release_approval_hold(self, approval_id: str) -> None:
-        """End the hold of an approval that ended, letting its conversation's waiting messages run."""
+    def stop_following_approval_holds(self) -> None:
+        """Stop learning of paused replies, as a stopping bot does before its replacement follows them."""
+        stop, self._stop_following_approvals = self._stop_following_approvals, None
+        if stop is not None:
+            stop()
+
+    def _hold_for_approval(self, paused: PausedReply) -> None:
+        if paused.approval_id in self._approval_holds:
+            return
+        lifecycle_key = ResponseLifecycleKey(room_id=paused.room_id, thread_id=paused.thread_id)
+        self._approval_holds[paused.approval_id] = lifecycle_key
+        self._queued_signal_for_key(lifecycle_key).begin_response_turn()
+
+    def _release_approval_hold(self, approval_id: str) -> None:
         lifecycle_key = self._approval_holds.pop(approval_id, None)
         if lifecycle_key is not None:
             self._thread_queued_signals[lifecycle_key].finish_response_turn()
-
-    def release_approval_holds_in_room(self, room_id: str) -> None:
-        """End the holds of a room this bot left, whose approvals the departure ended."""
-        for approval_id, lifecycle_key in tuple(self._approval_holds.items()):
-            if lifecycle_key.room_id == room_id:
-                self.release_approval_hold(approval_id)
 
     def approval_holds(self, room_id: str, thread_id: str | None) -> tuple[str, ...]:
         """Return the approvals that hold one conversation."""
@@ -383,7 +387,9 @@ class ResponseLifecycleCoordinator:
 
     def _get_or_create_queued_signal(self, target: MessageTarget) -> _QueuedMessageState:
         """Return the queued-message signal for one canonical conversation thread."""
-        lifecycle_key = target.lifecycle_key
+        return self._queued_signal_for_key(target.lifecycle_key)
+
+    def _queued_signal_for_key(self, lifecycle_key: ResponseLifecycleKey) -> _QueuedMessageState:
         signal = self._thread_queued_signals.get(lifecycle_key)
         if signal is not None:
             return signal
@@ -478,7 +484,7 @@ class ResponseLifecycleCoordinator:
         reservation: ResponseLifecycleReservation | None,
     ) -> tuple[asyncio.Lock, _QueuedMessageState, str | None]:
         if reservation is not None:
-            return reservation.consume(self, target), reservation._queued_signal, None
+            return reservation._consume(self, target), reservation._queued_signal, None
         lifecycle_lock = self._response_lifecycle_lock(target)
         queued_signal = self._get_or_create_queued_signal(target)
         notice = self._begin_response_turn_notice(
@@ -666,8 +672,11 @@ class ResponseLifecycle:
     ) -> FinalDeliveryOutcome:
         """Run outer lifecycle finalization and return the canonical terminal outcome."""
         if final_delivery_outcome.terminal_status == "suspended":
-            if self.pipeline_timing is not None:
-                self.pipeline_timing.emit_summary(self.deps.logger, outcome="suspended")
+            await self._finalize_suspended(
+                final_delivery_outcome,
+                post_response_outcome=build_post_response_outcome(final_delivery_outcome),
+                post_response_deps=post_response_deps,
+            )
             return final_delivery_outcome
         self._raise_if_process_shutdown()
         response_event_id = final_delivery_outcome.final_visible_event_id
@@ -714,6 +723,33 @@ class ResponseLifecycle:
         if self.pipeline_timing is not None:
             self.pipeline_timing.emit_summary(self.deps.logger, outcome=_response_outcome_label(final_delivery_outcome))
         return final_delivery_outcome
+
+    async def _finalize_suspended(
+        self,
+        final_delivery_outcome: FinalDeliveryOutcome,
+        *,
+        post_response_outcome: ResponseOutcome,
+        post_response_deps: PostResponseEffectsDeps | Callable[[], PostResponseEffectsDeps],
+    ) -> None:
+        """Finalize a reply whose run waits for approval, or whose answer is recorded but not yet acknowledged.
+
+        A run paused for approval has not finished, so nothing applies. An owed answer's run finished, so its run's
+        effects apply unless the process is stopping; effects and hooks that need a delivered completed answer skip.
+        The outbox owns the answer by then, so an effect that fails or is cancelled must not settle it again.
+        """
+        if post_response_outcome.run_succeeded and not self.deps.process_shutdown_requested():
+            if callable(post_response_deps):
+                post_response_deps = cast("Callable[[], PostResponseEffectsDeps]", post_response_deps)()
+            try:
+                await apply_post_response_effects(final_delivery_outcome, post_response_outcome, post_response_deps)
+            except asyncio.CancelledError:
+                if self.deps.process_shutdown_requested():
+                    raise
+                self.deps.logger.warning("Post-response effects cancelled for an answer the outbox owes")
+            except Exception:
+                self.deps.logger.exception("Post-response effects failed for an answer the outbox owes")
+        if self.pipeline_timing is not None:
+            self.pipeline_timing.emit_summary(self.deps.logger, outcome="suspended")
 
     async def _apply_effects_safely(
         self,

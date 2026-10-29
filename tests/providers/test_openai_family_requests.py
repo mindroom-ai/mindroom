@@ -33,11 +33,12 @@ from mindroom.llm.provider import ModelRequest, RequestOverrides, TurnCompleted
 from mindroom.llm.runs import RunRecord
 from mindroom.media_inputs import MediaInputs
 from mindroom.model_defaults import OPENAI_BASE_URL_DEFAULT
-from mindroom.providers.openai.build import build_provider
+from mindroom.providers.openai.build import accepted_extra_kwargs, build_provider
 from mindroom.providers.openai.chat import ChatAdapter
 from mindroom.providers.openai.chat_wire import ChatStream, chat_request_kwargs
 from mindroom.providers.openai.codex_auth import CODEX_BASE_URL
 from mindroom.providers.openai.media import chat_file_part, responses_file_part
+from mindroom.providers.openai.response_replay import RESPONSE_OUTPUT_KEY
 from mindroom.providers.openai.responses import ResponsesAdapter
 from mindroom.providers.openai.responses_wire import (
     ResponsesStream,
@@ -49,7 +50,7 @@ from mindroom.providers.openai.responses_wire import (
 from mindroom.providers.openai.schema import strict_response_schema
 from mindroom.providers.openai.settings import ChatSettings
 from mindroom.providers.openai.tool_search import openai_native_tool_search_supported
-from mindroom.session_storage.agent_storage import create_state_storage
+from mindroom.session_storage.agent_storage import create_agent_state_storage
 from mindroom.session_storage.types import ConversationSession
 from tests.agent_loop.helpers import collect, context, gated
 from tests.providers.golden_support import responses_events, streamed_reply
@@ -73,6 +74,8 @@ _ANSWER = {
     "content": [{"type": "output_text", "text": "Ready", "annotations": []}],
 }
 _REASONING = {"type": "reasoning", "id": "rs_first", "summary": [], "encrypted_content": "opaque-reasoning"}
+# Reasoning as a stored response returns it when its request asks for no encrypted content.
+_STORED_REASONING = {"type": "reasoning", "id": "rs_first", "summary": []}
 _CALL = {
     "type": "function_call",
     "id": "fc_lookup",
@@ -172,6 +175,7 @@ def _input(messages: list[Message], *, store: bool | None = False, portable: boo
         ),
         cache_system_prompt=kwargs.get("cache_system_prompt", False),
         explicit_breakpoint=kwargs.get("explicit_breakpoint", False),
+        provider="OpenAI Responses",
     )
 
 
@@ -314,6 +318,72 @@ def test_stored_output_missing_one_of_the_turn_s_calls_is_not_reused(tmp_path: P
     ]
 
 
+@pytest.mark.parametrize(
+    ("store", "portable"),
+    [(True, False), (True, True), (False, False)],
+    ids=["stored", "portable", "unstored"],
+)
+@pytest.mark.parametrize("status", ["completed", "incomplete"])
+def test_every_response_records_its_ordered_output(*, store: bool, portable: bool, status: str) -> None:
+    """Every response that ends records its output in order, hosted searches included, whatever its route stores.
+
+    A cut-off response records it without its reasoning, which may lack the item that must follow it.
+    """
+    output = [_REASONING, _SEARCH_CALL, _SEARCH_OUTPUT, _ANSWER, _CALL]
+
+    parts = _streamed(_response(output, status=status), store=store, portable_replay=portable)
+
+    assert parts.provider_data[RESPONSE_OUTPUT_KEY] == (output if status == "completed" else output[1:])
+    assert "tool_search_items" not in parts.provider_data
+
+
+@pytest.mark.parametrize(
+    ("output", "as_recorded"),
+    [
+        ([_REASONING, _ANSWER], True),
+        ([_STORED_REASONING, _ANSWER], False),
+        ([_REASONING, {**_STORED_REASONING, "id": "rs_second"}, _ANSWER], False),
+        ([_ANSWER], False),
+    ],
+    ids=["encrypted-reasoning", "stored-reasoning", "partly-encrypted-reasoning", "no-reasoning"],
+)
+@pytest.mark.parametrize("store", [True, False])
+def test_a_reply_replays_as_recorded_only_with_its_encrypted_reasoning(
+    output: list[dict[str, Any]],
+    *,
+    as_recorded: bool,
+    store: bool,
+) -> None:
+    """Recorded output goes as recorded only while all its reasoning can go with it; otherwise the turn is rebuilt.
+
+    A rebuild sends the same text without reasoning, which output without encrypted reasoning cannot resend.
+    """
+    reply = Message(
+        role="assistant",
+        content="Ready",
+        provider_data={"response_id": "resp_1", RESPONSE_OUTPUT_KEY: output},
+    )
+
+    replay = _input([reply, Message(role="user", content="Thanks.")], store=store)
+
+    assert replay[:-1] == (output if as_recorded else [{"role": "assistant", "content": "Ready"}])
+
+
+def test_a_cut_off_reply_replays_rebuilt_after_the_searches_it_ran() -> None:
+    """A response the output limit cut off replays its text and calls without reasoning, after its searches."""
+    parts = _streamed(_response([_REASONING, _SEARCH_CALL, _SEARCH_OUTPUT, _CALL], status="incomplete"), store=False)
+    reply = Message(role="assistant", tool_calls=parts.tool_calls, provider_data=parts.provider_data)
+
+    replay = _input([reply, Message(role="tool", tool_call_id="fc_lookup", content="Not run")])
+
+    assert replay == [
+        _without_item_id(_SEARCH_CALL),
+        _without_item_id(_SEARCH_OUTPUT),
+        {"type": "function_call", "call_id": "call_lookup", "name": "lookup", "arguments": "{}", "status": "completed"},
+        {"type": "function_call_output", "call_id": "call_lookup", "output": "Not run"},
+    ]
+
+
 @pytest.mark.parametrize("reasoning", [None, _REASONING, {"type": "reasoning", "id": "rs_last", "summary": []}])
 @pytest.mark.parametrize("retained", ["none", "second", "both"])
 @pytest.mark.parametrize("portable", [False, True])
@@ -425,22 +495,18 @@ def _without_item_id(item: dict[str, Any]) -> dict[str, Any]:
 
 
 def test_search_items_replay_ahead_of_the_discovered_function_call() -> None:
-    """Captured search items go back immediately ahead of the message's replayed function calls.
+    """Recorded search items go back immediately ahead of the message's replayed function calls.
 
-    The message recorded no reasoning, so the items and the call go without their item IDs.
+    The output recorded no reasoning, so the items and the call go without their item IDs.
     """
+    function = {"name": "get_weather", "arguments": "{}"}
+    call = {"id": "fc_1", "call_id": "call_1", "type": "function", "function": function}
+    recorded_call = {"type": "function_call", "id": "fc_1", "call_id": "call_1", **function}
     assistant = Message(
         role="assistant",
         content="",
-        tool_calls=[
-            {
-                "id": "fc_1",
-                "call_id": "call_1",
-                "type": "function",
-                "function": {"name": "get_weather", "arguments": "{}"},
-            },
-        ],
-        provider_data={"tool_search_items": [dict(_SEARCH_CALL), dict(_SEARCH_OUTPUT)]},
+        tool_calls=[call],
+        provider_data={RESPONSE_OUTPUT_KEY: [dict(_SEARCH_CALL), dict(_SEARCH_OUTPUT), recorded_call]},
     )
     messages = [
         Message(role="user", content="weather?"),
@@ -459,7 +525,12 @@ def test_search_items_replay_ahead_of_the_discovered_function_call() -> None:
 
 def test_search_items_replay_with_their_own_turn_not_an_identical_earlier_one() -> None:
     """An earlier assistant turn with the same text cannot claim a later turn's search items."""
-    later = Message(role="assistant", content="same text", provider_data={"tool_search_items": [dict(_SEARCH_CALL)]})
+    answer = {**_ANSWER, "content": [{"type": "output_text", "text": "same text", "annotations": []}]}
+    later = Message(
+        role="assistant",
+        content="same text",
+        provider_data={RESPONSE_OUTPUT_KEY: [dict(_SEARCH_CALL), answer]},
+    )
     messages = [
         Message(role="user", content="q1"),
         Message(role="assistant", content="same text"),
@@ -484,15 +555,145 @@ def test_a_reply_without_text_or_calls_replays_as_an_empty_answer() -> None:
     ]
 
 
-def test_claude_server_tool_blocks_are_not_replayed_to_responses() -> None:
-    """Anthropic-native server tool blocks stay out when a thread switches to a Responses model."""
+def test_claude_blocks_are_not_replayed_to_responses() -> None:
+    """A Claude turn's stored blocks, server-tool blocks included, stay out when a thread switches to Responses."""
     assistant = Message(
         role="assistant",
         content="Claude searched here.",
-        provider_data={"server_tool_blocks": [{"type": "server_tool_use", "id": "srv_1"}]},
+        provider_data={
+            "claude_blocks": [
+                {"type": "server_tool_use", "id": "srv_1", "name": "web_search", "input": {"query": "here"}},
+                {"type": "text", "text": "Claude searched here."},
+            ],
+        },
     )
 
     assert _input([assistant]) == [{"role": "assistant", "content": "Claude searched here."}]
+
+
+# --- Replies an older release stored --------------------------------------------------------------------------
+
+# A tool turn after a hosted tool search as v2026.10.651 stored it (``Message.to_dict``), keyed by how its response
+# ended: on a stored route, on an unstored route without and with reasoning, and cut off by the output limit.
+_V2026_10_651_SEARCH_ITEMS = [
+    {
+        "id": "tsc_1",
+        "arguments": {"queries": ["weather"]},
+        "execution": "server",
+        "status": "completed",
+        "type": "tool_search_call",
+    },
+    {
+        "id": "tso_1",
+        "execution": "server",
+        "status": "completed",
+        "tools": [{"name": "get_weather", "parameters": {"type": "object"}, "type": "function"}],
+        "type": "tool_search_output",
+    },
+]
+_V2026_10_651_PROVIDER_DATA: dict[str, dict[str, Any]] = {
+    "stored": {
+        "tool_search_items": _V2026_10_651_SEARCH_ITEMS,
+        "response_id": "resp_1",
+        "mindroom_response_stored": True,
+        "mindroom_conversation_sha256": "d31229fc7f47dc5edce3e26cc3c5f1863d6a9936eeac56eb8d04fcbf185d9152",
+        "mindroom_portable_replay": False,
+        "mindroom_native_compaction": None,
+    },
+    "unstored-without-reasoning": {
+        "tool_search_items": _V2026_10_651_SEARCH_ITEMS,
+        "response_id": "resp_1",
+        "mindroom_response_stored": False,
+        "mindroom_portable_replay": False,
+        "mindroom_native_compaction": None,
+    },
+    "unstored-with-reasoning": {
+        "tool_search_items": _V2026_10_651_SEARCH_ITEMS,
+        "response_id": "resp_1",
+        "mindroom_response_stored": False,
+        "mindroom_portable_replay": False,
+        "mindroom_native_compaction": None,
+        "mindroom_response_output": [
+            {
+                "id": "rs_1",
+                "summary": [{"text": "Need the tool.", "type": "summary_text"}],
+                "type": "reasoning",
+                "encrypted_content": "opaque-reasoning",
+            },
+            *_V2026_10_651_SEARCH_ITEMS,
+            {
+                "id": "msg_1",
+                "content": [{"annotations": [], "text": "Checking the forecast.", "type": "output_text"}],
+                "role": "assistant",
+                "status": "completed",
+                "type": "message",
+            },
+            {
+                "arguments": '{"city": "Paris"}',
+                "call_id": "call_1",
+                "name": "get_weather",
+                "type": "function_call",
+                "id": "fc_1",
+                "status": "completed",
+            },
+        ],
+    },
+    "cut-off": {
+        "tool_search_items": _V2026_10_651_SEARCH_ITEMS,
+        "response_id": "resp_1",
+        "mindroom_response_stored": False,
+    },
+}
+
+
+@pytest.mark.parametrize("store", [True, False])
+@pytest.mark.parametrize("row", list(_V2026_10_651_PROVIDER_DATA))
+def test_a_reply_v2026_10_651_stored_replays_as_that_release_sent_it(row: str, *, store: bool) -> None:
+    """Each tool turn v2026.10.651 stored replays as that release sent it, its search items included.
+
+    The expected inputs are the ones v2026.10.651 built for this history.
+    """
+    reply = Message.from_dict(
+        {
+            "role": "assistant",
+            "content": "Checking the forecast.",
+            "tool_calls": [
+                {
+                    "id": "fc_1",
+                    "call_id": "call_1",
+                    "type": "function",
+                    "function": {"name": "get_weather", "arguments": '{"city": "Paris"}'},
+                },
+            ],
+            "provider_data": json.loads(json.dumps(_V2026_10_651_PROVIDER_DATA[row])),
+        },
+    )
+    history = [
+        Message(role="system", content="Changed prompt."),
+        Message(role="user", content="Weather in Paris?"),
+        reply,
+        Message(role="tool", tool_call_id="fc_1", content="light rain"),
+        Message(role="user", content="And tomorrow?"),
+    ]
+    call = {"call_id": "call_1", "name": "get_weather", "arguments": '{"city": "Paris"}', "status": "completed"}
+    recorded = _V2026_10_651_PROVIDER_DATA[row].get("mindroom_response_output")
+    turn = (
+        [*recorded[:-1], {"type": "function_call", "id": "fc_1", **call}]
+        if recorded is not None
+        else [
+            *(_without_item_id(item) for item in _V2026_10_651_SEARCH_ITEMS),
+            {"role": "assistant", "content": "Checking the forecast."},
+            {"type": "function_call", **call},
+        ]
+    )
+
+    assert _input(history, store=store) == [
+        {"role": "developer", "content": "Changed prompt."},
+        {"role": "user", "content": "Weather in Paris?"},
+        *turn,
+        {"type": "function_call_output", "call_id": "call_1", "output": "light rain"},
+        {"role": "user", "content": "And tomorrow?"},
+    ]
 
 
 # --- Storage, continuation, and recorded policy ---------------------------------------------------------------
@@ -505,6 +706,7 @@ def _request(adapter: ResponsesAdapter, messages: list[Message], **request: Any)
         request=ModelRequest(messages=messages, **request),
         settings=adapter.settings,
         wire=adapter.wire,
+        provider=adapter.identity.provider_name,
     )
     return {**kwargs.pop("extra_body", {}), **kwargs}
 
@@ -682,7 +884,7 @@ async def test_an_approval_resume_on_a_stored_chain_continues_it_with_the_result
 
     The resumed request sends only what follows the stored reply: the result, then the receipt.
     """
-    adapter, sent = _stored_reply_route(tmp_path, [{"type": "reasoning", "id": "rs_first", "summary": []}, _CALL])
+    adapter, sent = _stored_reply_route(tmp_path, [_STORED_REASONING, _CALL])
     prompt = _dated_prompt("Monday")
     question = Message(role="user", content="Look it up.")
     call = await _reply(adapter, [*prompt, question])
@@ -767,7 +969,7 @@ async def test_an_approval_resume_on_a_stored_chain_names_each_receipt_call_as_i
 
 def _stored(tmp_path: Path, run: RunRecord) -> RunRecord:
     """Save ``run`` to a conversation store and return it as the store loads it."""
-    store = create_state_storage("code", tmp_path / "state")
+    store = create_agent_state_storage("code", tmp_path / "state")
     store.save_run(ConversationSession(session_id="session-1", kind="agent", owner_id="code"), run, record_usage=False)
     stored = store.get_run(run.run_id)
     assert isinstance(stored, RunRecord)
@@ -945,11 +1147,11 @@ async def test_a_follow_up_to_a_photo_continues_the_chain_only_while_history_rep
 async def test_a_replay_after_the_prompt_changes_sends_hosted_search_items_without_their_item_ids(
     tmp_path: Path,
 ) -> None:
-    """A stored reply records no reasoning, so its replayed search items and call drop the IDs that reasoning owns.
+    """A stored reply's reasoning has no encrypted content, so its replayed search items and call drop the IDs it owns.
 
     The provider rejects a search item's ID sent without the reasoning item that preceded it, stored or not.
     """
-    output = [_REASONING, _SEARCH_CALL, _SEARCH_OUTPUT, {**_REASONING, "id": "rs_second"}, _CALL]
+    output = [_STORED_REASONING, _SEARCH_CALL, _SEARCH_OUTPUT, {**_STORED_REASONING, "id": "rs_second"}, _CALL]
     adapter, sent = _stored_reply_route(tmp_path, output)
     question = Message(role="user", content="Look it up.")
     call = await _reply(adapter, [*_dated_prompt("Monday"), question])
@@ -1225,8 +1427,8 @@ def test_an_attachment_s_type_comes_from_its_original_filename(
 )
 def test_chat_and_responses_type_a_file_by_one_rule(file: File, expected_mime: str) -> None:
     """Both wires name a file by its original filename and type it by the same rule; a compressed name has no type."""
-    chat = chat_file_part(file)
-    responses = responses_file_part(file)
+    chat = chat_file_part(file, provider="OpenAI Chat")
+    responses = responses_file_part(file, provider="OpenAI Responses")
 
     assert chat is not None
     assert responses is not None
@@ -1290,7 +1492,7 @@ def test_the_strict_schema_keeps_closed_objects_and_open_maps() -> None:
 
 def _chat_usage(adapter: ChatAdapter, usage: dict[str, Any]) -> MessageMetrics | None:
     """Return the usage a Chat stream reports in its usage chunk, where Groq streams it in its own extension."""
-    report = {"x_groq": {"usage": usage}} if adapter.wire.dialect == "groq" else {"usage": usage}
+    report = {"x_groq": {"usage": usage}} if adapter.wire.route == "groq" else {"usage": usage}
     chunk = {"id": "chatcmpl_test", "object": "chat.completion.chunk", "created": 1, "model": "m", "choices": []}
     stream = ChatStream(adapter.wire)
     stream.add(ChatCompletionChunk.model_validate({**chunk, **report}))
@@ -1377,6 +1579,21 @@ def test_groq_and_cerebras_usage_keeps_cached_input_and_reasoning(tmp_path: Path
     assert (usage.tokens.cache_read_tokens, usage.tokens.reasoning_tokens) == (4608, 120)
 
 
+@pytest.mark.parametrize("provider", ["openai", "groq", "cerebras"])
+def test_a_chat_reply_keeps_the_token_total_its_route_reports(tmp_path: Path, provider: str) -> None:
+    """The stored total is the one the route reports, not input plus output."""
+    adapter = build_provider(
+        ModelConfig(provider=provider, id="m", api="chat_completions" if provider == "openai" else None, api_key="k"),
+        provider_runtime(resolve_runtime_paths(config_path=tmp_path / "config.yaml", process_env={})),
+    )
+    assert isinstance(adapter, ChatAdapter)
+
+    usage = _chat_usage(adapter, {"prompt_tokens": 40, "completion_tokens": 10, "total_tokens": 57})
+
+    assert usage is not None
+    assert (usage.tokens.input_tokens, usage.tokens.output_tokens, usage.tokens.total_tokens) == (40, 10, 57)
+
+
 # A value for every Chat request setting that travels in the request body.
 _CHAT_BODY_VALUES: dict[str, Any] = {
     "store": True,
@@ -1403,32 +1620,20 @@ _CHAT_BODY_VALUES: dict[str, Any] = {
 _CHAT_NON_BODY_FIELDS = frozenset({"extra_headers", "extra_query", "extra_body", "response_format"})
 
 
-@pytest.mark.parametrize(
-    ("provider", "request_fields"),
-    [
-        ("openai", tuple(ChatSettings().openai_request_fields())),
-        ("groq", tuple(ChatSettings().groq_request_fields())),
-        ("cerebras", tuple(ChatSettings().cerebras_request_fields())),
-    ],
-)
-def test_every_request_setting_a_chat_dialect_accepts_reaches_its_body(
-    provider: str,
-    request_fields: tuple[str, ...],
-    tmp_path: Path,
-) -> None:
-    """A request setting the dialect's routes accept is sent in the body, so no accepted setting is dropped."""
-    body_fields = [name for name in request_fields if name not in _CHAT_NON_BODY_FIELDS]
-    authored = {name: _CHAT_BODY_VALUES[name] for name in body_fields}
-    adapter = build_provider(
-        ModelConfig(
-            provider=provider,
-            id="m",
-            api="chat_completions" if provider == "openai" else None,
-            api_key="test-key",
-            extra_kwargs=authored,
-        ),
-        provider_runtime(resolve_runtime_paths(config_path=tmp_path / "config.yaml", process_env={})),
+@pytest.mark.parametrize("provider", ["openai", "groq", "cerebras"])
+def test_every_request_setting_a_chat_route_accepts_reaches_its_body(provider: str, tmp_path: Path) -> None:
+    """A request setting a route accepts is sent in the body, so no accepted setting is dropped."""
+    runtime_paths = resolve_runtime_paths(config_path=tmp_path / "config.yaml", process_env={})
+    config = ModelConfig(
+        provider=provider,
+        id="m",
+        api="chat_completions" if provider == "openai" else None,
+        api_key="test-key",
     )
+    accepted = accepted_extra_kwargs(config, runtime_paths)
+    authored = {name: value for name, value in _CHAT_BODY_VALUES.items() if name in accepted}
+    assert set(_CHAT_BODY_VALUES) == set(ChatSettings().request_fields()) - _CHAT_NON_BODY_FIELDS
+    adapter = build_provider(config.model_copy(update={"extra_kwargs": authored}), provider_runtime(runtime_paths))
     assert isinstance(adapter, ChatAdapter)
 
     kwargs = chat_request_kwargs(
@@ -1440,15 +1645,16 @@ def test_every_request_setting_a_chat_dialect_accepts_reaches_its_body(
         structured_output=adapter.capabilities.structured_output,
         settings=adapter.settings,
         wire=adapter.wire,
+        provider=adapter.identity.provider_name,
     )
 
     body = {**kwargs.pop("extra_body", {}), **kwargs}
-    assert {name: body.get(name) for name in body_fields} == authored
+    assert {name: body.get(name) for name in authored} == authored
 
 
 @pytest.mark.parametrize("provider", ["openai", "groq", "cerebras"])
 def test_a_chat_request_without_tools_sends_no_tool_list(provider: str, tmp_path: Path) -> None:
-    """Every Chat dialect leaves ``tools`` out of a request that offers none, rather than sending an empty list."""
+    """Every Chat route leaves ``tools`` out of a request that offers none, rather than sending an empty list."""
     adapter = build_provider(
         ModelConfig(provider=provider, id="m", api="chat_completions" if provider == "openai" else None, api_key="k"),
         provider_runtime(resolve_runtime_paths(config_path=tmp_path / "config.yaml", process_env={})),
@@ -1464,6 +1670,7 @@ def test_a_chat_request_without_tools_sends_no_tool_list(provider: str, tmp_path
         structured_output=adapter.capabilities.structured_output,
         settings=adapter.settings,
         wire=adapter.wire,
+        provider=adapter.identity.provider_name,
     )
 
     assert "tools" not in {**kwargs.get("extra_body", {}), **kwargs}

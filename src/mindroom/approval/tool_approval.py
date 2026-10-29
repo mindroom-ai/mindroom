@@ -12,12 +12,14 @@ from typing import TYPE_CHECKING, Any, Literal
 from uuid import uuid4
 
 from mindroom.approval import manager as approval_manager
+from mindroom.approval.auto_approve_windows import auto_approve_expires_at
 from mindroom.approval.manager import (
-    DEFAULT_ROUTER_MANAGED_ROOM_REASON,
     ApprovalActionResult,
     ToolApprovalTransportError,
 )
+from mindroom.config.approval import ApprovalRuleConfig
 from mindroom.constants import RuntimePaths, resolve_config_relative_path
+from mindroom.event_journal import DEFAULT_ROUTER_MANAGED_ROOM_REASON
 from mindroom.logging_config import get_logger
 from mindroom.requester_identity import is_human_requester_id, resolve_human_requester_alias
 from mindroom.tool_approval_grants import grant_operation
@@ -28,21 +30,13 @@ if TYPE_CHECKING:
     from pathlib import Path
     from types import ModuleType
 
-    from mindroom.config.approval import ApprovalRuleConfig
     from mindroom.config.main import Config
-    from mindroom.event_journal import (
-        ScheduledApprovalArmState,
-        ScheduledCall,
-        ScheduledCallBinding,
-        ScheduledCallClaim,
-        ScheduledCallOutcome,
-        ScheduledCallRefusal,
-    )
     from mindroom.tool_system.tool_function import ToolFunction
 
 __all__ = [
     "DEFAULT_ROUTER_MANAGED_ROOM_REASON",
     "JOB_APPROVAL_TYPE",
+    "NO_APPROVER_REASON",
     "POLICY_CONFIRMATION_APPROVAL_TYPE",
     "ApprovalActionResult",
     "BackgroundScriptToolOrigin",
@@ -51,25 +45,21 @@ __all__ = [
     "ToolApprovalScriptError",
     "ToolApprovalTransportError",
     "approval_gated",
-    "arm_scheduled_call_approval",
-    "claim_scheduled_call",
     "evaluate_tool_approval",
     "handle_matrix_approval_action",
+    "human_gate",
     "is_process_active_approval_card",
-    "record_scheduled_call_outcome",
-    "request_scheduled_call_approval",
     "resolve_tool_approval_approver",
-    "scheduled_call",
     "scheduled_call_offers_any_arguments",
     "shutdown_approval_runtime",
     "tool_may_require_approval",
-    "withdraw_scheduled_call_approval",
 ]
 
 # The loop copies this field onto the paused ToolExecution, preserving whether MindRoom added the confirmation boundary.
 POLICY_CONFIRMATION_APPROVAL_TYPE = "mindroom_policy"
 # A policy-gated call whose approval is the first phase of the background job it runs as, instead of a paused run.
 JOB_APPROVAL_TYPE = "mindroom_job"
+NO_APPROVER_REASON = "No approval recipient is configured; the tool was denied safely."
 # The terminal card edit carries the reason twice, and nio encrypts it as ASCII-escaped JSON that base64 grows by 4/3.
 # Escaping turns one emoji into 12 bytes, so the reply is bounded by escaped size to keep the edit below the event limit.
 _MAX_RESOLUTION_REASON_JSON_BYTES = 2000
@@ -95,7 +85,7 @@ class BackgroundScriptToolOrigin:
 
 @dataclass(frozen=True, slots=True)
 class ToolApprovalDecision:
-    """One terminal automation approval decision."""
+    """A gated call's final approval decision."""
 
     approved: bool
     reason: str | None = None
@@ -156,8 +146,19 @@ def _load_script_module(
     return module, resolved_path
 
 
+# The approved-egress switch's tool asks before each network grant unless an authored rule already requires approval.
+_APPROVED_EGRESS_RULE = ApprovalRuleConfig(match="request_network_access", action="require_approval")
+
+
 def _matching_tool_approval_rule(config: Config, tool_name: str) -> ApprovalRuleConfig | None:
-    return next((rule for rule in config.tool_approval.rules if fnmatchcase(tool_name, rule.match)), None)
+    rule = next((rule for rule in config.tool_approval.rules if fnmatchcase(tool_name, rule.match)), None)
+    if (
+        config.approved_egress_enabled
+        and fnmatchcase(tool_name, _APPROVED_EGRESS_RULE.match)
+        and (rule is None or rule.action != "require_approval")
+    ):
+        return _APPROVED_EGRESS_RULE
+    return rule
 
 
 def approval_gated(function: ToolFunction) -> bool:
@@ -185,6 +186,31 @@ def resolve_tool_approval_approver(
     if not is_human_requester_id(canonical_requester_id, config, runtime_paths):
         return None
     return canonical_requester_id
+
+
+def human_gate(
+    runtime_paths: RuntimePaths,
+    *,
+    approver_id: str | None,
+    room_id: str | None,
+    thread_id: str | None,
+) -> ToolApprovalDecision | None:
+    """Decide a gated call that no person needs to or can answer, or return None to ask its approver.
+
+    The approver's auto-approve window in the conversation approves it. A call no one may approve, or one in a room
+    without the router, is denied with a reason; the router's tells the agent how to invite it.
+    """
+    if (
+        auto_approve_expires_at(runtime_paths, room_id=room_id, thread_id=thread_id, requester_id=approver_id)
+        is not None
+    ):
+        return ToolApprovalDecision(approved=True)
+    if approver_id is None:
+        return ToolApprovalDecision(approved=False, reason=NO_APPROVER_REASON)
+    manager = approval_manager.get_approval_store()
+    if room_id is not None and manager is not None and manager.transport.router_missing(room_id):
+        return ToolApprovalDecision(approved=False, reason=DEFAULT_ROUTER_MANAGED_ROOM_REASON)
+    return None
 
 
 async def evaluate_tool_approval(
@@ -313,73 +339,6 @@ def scheduled_call_offers_any_arguments(
         return False
     operation = grant_operation(config, tool_name, arguments)
     return operation is not None and operation.mcp_server_id is None
-
-
-async def request_scheduled_call_approval(
-    binding: ScheduledCallBinding,
-    *,
-    approver_user_id: str,
-    scheduled_for_text: str,
-    any_arguments_offered: bool,
-) -> bool:
-    """Publish the card that pre-approves the call a scheduled task stores."""
-    manager = approval_manager.get_approval_store()
-    return manager is not None and await manager.request_scheduled_call_approval(
-        binding,
-        approver_user_id=approver_user_id,
-        scheduled_for_text=scheduled_for_text,
-        any_arguments_offered=any_arguments_offered,
-    )
-
-
-async def scheduled_call(task_id: str) -> ScheduledCall | None:
-    """Read the call one scheduled task stored; none without a store."""
-    manager = approval_manager.get_approval_store()
-    return None if manager is None else await manager.scheduled_call(task_id)
-
-
-async def claim_scheduled_call(
-    call: ScheduledCall,
-    *,
-    arguments_json: str,
-    approver_user_id: str,
-) -> ScheduledCallClaim | ScheduledCallRefusal | None:
-    """Spend a scheduled approval for the arguments about to run; none without a store."""
-    manager = approval_manager.get_approval_store()
-    if manager is None:
-        return None
-    return await manager.claim_scheduled_call(call, arguments_json=arguments_json, approver_user_id=approver_user_id)
-
-
-async def record_scheduled_call_outcome(task_id: str, outcome: ScheduledCallOutcome) -> None:
-    """Record how one claimed scheduled call ended."""
-    manager = approval_manager.get_approval_store()
-    if manager is not None:
-        await manager.record_scheduled_call_outcome(task_id, outcome)
-
-
-async def arm_scheduled_call_approval(
-    task_id: str,
-    workflow_digest: str,
-    *,
-    any_arguments_allowed: bool,
-) -> ScheduledApprovalArmState:
-    """Arm a scheduled call's approval as its unchanged task fires; unknown without a store."""
-    manager = approval_manager.get_approval_store()
-    if manager is None:
-        return "none"
-    return await manager.arm_scheduled_call_approval(
-        task_id,
-        workflow_digest,
-        any_arguments_allowed=any_arguments_allowed,
-    )
-
-
-async def withdraw_scheduled_call_approval(task_id: str, *, reason: str) -> None:
-    """Withdraw a cancelled task's approval and deny its card if it is still pending."""
-    manager = approval_manager.get_approval_store()
-    if manager is not None:
-        await manager.withdraw_scheduled_call_approval(task_id, reason=reason)
 
 
 def is_process_active_approval_card(card_event_id: str) -> bool:

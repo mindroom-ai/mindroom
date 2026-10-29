@@ -19,9 +19,11 @@ from agno.run import RunContext
 from agno.tools import Toolkit
 from agno.tools.function import Function, ToolResult
 
+from mindroom.failure_text import failure_text
 from mindroom.llm.media import Audio, File, Image, Video
 from mindroom.tool_system.agno_toolkits import ToolCallActor, adapt_function, adapt_toolkit
 from mindroom.tool_system.invocation import (
+    CallResult,
     ToolArgumentError,
     ToolCall,
     ToolCallContext,
@@ -33,7 +35,12 @@ from mindroom.tool_system.invocation import (
     run_tool_call,
 )
 from mindroom.tool_system.tool_function import ToolOutcome, ToolValue
-from mindroom.tool_system.tool_hooks import SyncToolCompletionTracker, track_sync_tool_completion
+from mindroom.tool_system.tool_hooks import (
+    SyncToolCompletionTracker,
+    owned_sync_tool_completion,
+    track_sync_tool_completion,
+)
+from tests.conftest import SETTLE_TIMEOUT_SECONDS
 from tests.tool_system import agno_parity_support as support
 
 if TYPE_CHECKING:
@@ -264,7 +271,7 @@ async def test_a_vendor_tool_result_reaches_middleware_and_runners_as_its_tool_v
 
     [function] = _functions(tool).values()
 
-    returned = await run_tool_call(function, {}, _context(), middleware=[observe])
+    returned = (await run_tool_call(function, {}, _context(), middleware=[observe])).value
 
     expected = ToolValue(content="made", images=(Image(id="out", url="https://example.invalid/out.png"),))
     assert returned == expected
@@ -402,7 +409,7 @@ async def test_a_returned_iterator_is_drained_like_a_generator() -> None:
 
     [function] = _functions(letters).values()
 
-    assert await run_tool_call(function, {}, _context(), middleware=()) == "ab"
+    assert (await run_tool_call(function, {}, _context(), middleware=())).value == "ab"
 
 
 def _letters(closed: list[str]) -> Iterator[str]:
@@ -538,7 +545,7 @@ async def test_none_and_plain_results_are_read_as_text() -> None:
 
 @pytest.mark.asyncio
 async def test_runners_outside_the_loop_get_the_tools_own_value_and_its_exception() -> None:
-    """``run_tool_call`` returns what the tool returned, drained if it streamed, and lets its exception through."""
+    """``run_tool_call`` keeps what the tool returned, drained if it streamed, and the exception a failed call raised."""
 
     def numbers() -> dict[str, int]:
         return {"a": 1}
@@ -560,12 +567,142 @@ async def test_runners_outside_the_loop_get_the_tools_own_value_and_its_exceptio
 
     functions = _functions(numbers, streams, fails)
 
-    assert await run_tool_call(functions["numbers"], {}, _context(), middleware=(record,)) == {"a": 1}
-    assert await run_tool_call(functions["streams"], {}, _context(), middleware=()) == "ab"
-    with pytest.raises(ValueError, match="boom"):
-        await run_tool_call(functions["fails"], {}, _context(), middleware=())
+    assert await run_tool_call(functions["numbers"], {}, _context(), middleware=(record,)) == CallResult("ok", {"a": 1})
+    assert await run_tool_call(functions["streams"], {}, _context(), middleware=()) == CallResult("ok", "ab")
+    failed = await run_tool_call(functions["fails"], {}, _context(), middleware=())
+    assert failed.status == "failed"
+    assert isinstance(failed.error, ValueError)
+    assert failed.value is None
+    assert failed.failure_text == failure_text(failed.error)
     assert seen == ["numbers"]
     assert current_tool_call() is None
+
+
+_OAUTH_PAYLOAD: dict[str, object] = {
+    "error": "Connect Google to continue.",
+    "oauth_connection_required": True,
+    "provider": "google",
+}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("refusal", "status"),
+    [
+        (ToolOutcome(content="[TOOL CALL DECLINED] paused", is_error=True, refused_by="plugin_hook"), "declined"),
+        (ToolOutcome(content="Not tonight.", is_error=True, refused_by="approval"), "denied"),
+    ],
+    ids=["plugin-decline", "approval-denial"],
+)
+async def test_a_call_the_policy_refuses_is_declined_or_denied_with_the_refusals_text(
+    refusal: ToolOutcome,
+    status: str,
+) -> None:
+    """A plugin hook's decline is ``declined`` and an approval denial ``denied``; neither runs the body or has an error."""
+    ran: list[str] = []
+
+    def tool() -> str:
+        ran.append("body")
+        return "ran"
+
+    async def refuse(call: ToolCall, call_next: ToolNext) -> object:
+        del call, call_next
+        return refusal
+
+    [function] = _functions(tool).values()
+
+    result = await run_tool_call(function, {}, _context(), middleware=(refuse,))
+
+    assert result == CallResult(status, refusal)
+    assert result.failure_text == refusal.content
+    assert result.succeeded is False
+    assert ran == []
+
+
+@pytest.mark.parametrize(
+    ("status", "succeeded"),
+    [("ok", True), ("connection_required", True), ("failed", False), ("declined", False), ("denied", False)],
+)
+def test_only_answered_calls_succeed(status: str, succeeded: bool) -> None:
+    """Origins outside the model loop record a call as done only when it answered, an OAuth prompt included."""
+    assert CallResult(status).succeeded is succeeded
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("answer", "status"),
+    [
+        (ToolOutcome(content="The account is locked.", is_error=True), "failed"),
+        (ToolOutcome(content="fine"), "ok"),
+        (_OAUTH_PAYLOAD, "connection_required"),
+        (json.dumps(_OAUTH_PAYLOAD), "connection_required"),
+        (ToolResult(content=json.dumps(_OAUTH_PAYLOAD)), "connection_required"),
+        ({**_OAUTH_PAYLOAD, "oauth_connection_required": "yes"}, "ok"),
+        ("not json", "ok"),
+    ],
+    ids=[
+        "failed-outcome",
+        "outcome",
+        "oauth-payload",
+        "oauth-json",
+        "oauth-json-tool-result",
+        "flag-not-true",
+        "text",
+    ],
+)
+async def test_a_call_that_ran_is_read_from_what_its_tool_answered(answer: object, status: str) -> None:
+    """A tool's own failed outcome is ``failed`` with no error, and an OAuth prompt in any form needs a connection.
+
+    The value is the tool's answer, with a vendor ``ToolResult`` read as its ``ToolValue``.
+    """
+
+    def tool() -> object:
+        return answer
+
+    [function] = _functions(tool).values()
+
+    result = await run_tool_call(function, {}, _context(), middleware=())
+
+    expected = ToolValue(content=answer.content) if isinstance(answer, ToolResult) else answer
+    assert result == CallResult(status, expected)
+    assert result.error is None
+    if status == "failed":
+        assert result.failure_text == "The account is locked."
+
+
+@pytest.mark.asyncio
+async def test_an_owned_sync_body_is_waited_for_after_cancellation_without_raising_its_failure() -> None:
+    """A cancelled call's owner waits for the synchronous body it started, and the body's exception stays its own."""
+    started = threading.Event()
+    release = threading.Event()
+    finished: list[str] = []
+
+    def blocking() -> str:
+        started.set()
+        assert release.wait(SETTLE_TIMEOUT_SECONDS)
+        finished.append("body")
+        msg = "slack is down"
+        raise RuntimeError(msg)
+
+    [function] = _functions(blocking).values()
+
+    async def owned_call() -> None:
+        async with owned_sync_tool_completion():
+            await run_tool_call(function, {}, _context(), middleware=())
+
+    running = asyncio.create_task(owned_call())
+    finished_when_done: list[list[str]] = []
+    running.add_done_callback(lambda _: finished_when_done.append(list(finished)))
+    assert await asyncio.to_thread(started.wait, SETTLE_TIMEOUT_SECONDS)
+
+    running.cancel()
+    # Long enough for an unowned call's cancellation to finish; an owned one stays pending until its body does.
+    await asyncio.wait({running}, timeout=0.2)
+    release.set()
+    with pytest.raises(asyncio.CancelledError):
+        await running
+
+    assert finished_when_done == [["body"]]
 
 
 def test_clients_get_a_tool_values_text_with_references_to_its_media() -> None:
