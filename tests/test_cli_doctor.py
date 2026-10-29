@@ -346,6 +346,25 @@ def test_doctor_checks_each_accepted_provider_spelling_as_the_route_the_runtime_
     assert vertex_models == ["claude-sonnet-5-5"]
 
 
+def test_doctor_checks_the_env_files_ollama_server_for_a_model_without_a_host(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An Ollama model that sets no host, as config init writes them, is checked at the `.env` OLLAMA_HOST."""
+    runtime_paths = _runtime_with_env(tmp_path, {"OLLAMA_HOST": "http://gpu.example:11434"})
+    probed = _ollama_servers(monkeypatch)
+    model = ModelConfig(
+        provider="ollama",
+        id="gemma4",
+        context_window=32768,
+        extra_kwargs={"options": {"num_ctx": 32768}},
+    )
+    config = Config(models={"default": model}, router=RouterConfig(model="default"))
+
+    assert _check_providers(config, runtime_paths) == (1, 0, 0)
+    assert _servers_and_keys(probed) == [("http://gpu.example:11434/api/tags", None)]
+
+
 def test_doctor_checks_each_ollama_server_through_the_client_its_models_send_with(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

@@ -61,6 +61,7 @@ from mindroom.model_defaults import (
 from mindroom.providers import credentials as provider_credentials
 from mindroom.providers.credentials import missing_model_api_key_provider
 from mindroom.providers.model_http_client import MODEL_HTTP_CLIENT
+from mindroom.providers.ollama.adapter import build_provider as build_ollama_provider
 from mindroom.services.config import InstallResult, ServiceManager, ServiceStatus
 from mindroom.startup_errors import PermanentStartupError
 from mindroom.thread_export import ThreadExportStats
@@ -899,20 +900,19 @@ class TestConfigInit:
 
         config = yaml.safe_load(target.read_text())
         assert "mindroom_user" not in config
-        # Ollama runs each model at the context size the request asks for, so history fits what Ollama loads.
+        # Ollama runs each model at the context size the request asks for, so history fits what Ollama loads, and the
+        # models set no host, so the `.env` OLLAMA_HOST names their server as it does memory's.
         assert config["models"] == {
             "default": {
                 "provider": "ollama",
                 "id": OLLAMA_GEMMA,
                 "context_window": 32_768,
-                "host": "http://localhost:11434",
                 "extra_kwargs": {"options": {"num_ctx": 32_768}},
             },
             LOCAL_QWEN_PRESET_NAME: {
                 "provider": "ollama",
                 "id": OLLAMA_QWEN,
                 "context_window": 32_768,
-                "host": "http://localhost:11434",
                 "extra_kwargs": {"options": {"num_ctx": 32_768}},
             },
         }
@@ -933,6 +933,27 @@ class TestConfigInit:
         assert f"ollama pull {OLLAMA_GEMMA}" in output
         assert f"ollama pull {OLLAMA_QWEN}" in output
         assert "Ollama" in output
+
+    def test_init_ollama_models_reach_the_server_the_env_file_names(self, tmp_path: Path) -> None:
+        """Pointing the generated `.env` OLLAMA_HOST at another server moves every generated Ollama model to it."""
+        target = tmp_path / "config.yaml"
+        result = runner.invoke(app, ["config", "init", "--path", str(target), "--provider", "ollama"])
+        assert result.exit_code == 0
+        env_path = tmp_path / ".env"
+        env_text = env_path.read_text()
+        assert "OLLAMA_HOST=http://localhost:11434\n" in env_text
+        env_path.write_text(
+            env_text.replace("OLLAMA_HOST=http://localhost:11434\n", "OLLAMA_HOST=http://gpu.example:11434\n"),
+        )
+        runtime_paths = constants_module.resolve_primary_runtime_paths(config_path=target, process_env={})
+        sync_env_to_credentials(runtime_paths)
+
+        config = config_cli.load_config_quiet(runtime_paths)
+
+        endpoints = {
+            name: build_ollama_provider(model, runtime_paths).identity.endpoint for name, model in config.models.items()
+        }
+        assert endpoints == {"default": "http://gpu.example:11434", LOCAL_QWEN_PRESET_NAME: "http://gpu.example:11434"}
 
     @pytest.mark.parametrize("provider_name", ["llama.cpp", "llama-cpp", "llama_cpp"])
     def test_init_mindroom_chat_llama_cpp_writes_hosted_openai_compatible_defaults(

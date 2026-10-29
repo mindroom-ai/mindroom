@@ -1126,8 +1126,6 @@ def _model_settings_block(model_preset: ModelPreset) -> str:
         lines.append(f"display_name: {model_preset.display_name}")
     if model_preset.context_window is not None:
         lines.append(f"context_window: {model_preset.context_window}")
-    if model_preset.provider == "ollama":
-        lines.append(f"host: {_OLLAMA_HOST}")
     extra_kwargs: list[str] = []
     if model_preset.provider == "llama_cpp":
         extra_kwargs.extend([f"api_key: {LOCAL_OPENAI_API_KEY_DEFAULT}", f"base_url: {_LLAMA_CPP_BASE_URL}"])
