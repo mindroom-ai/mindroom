@@ -489,7 +489,7 @@ class TurnDispatcher:
         response_action = plan.response_action
         assert response_action is not None
         # Orderly shutdown has closed task ownership, so no response is planned after it.
-        if self.deps.response_runner.process_shutdown_started:
+        if self.deps.response_runner.inbox.process_shutdown_started:
             raise ResponseAdmissionRefusedError
         response_history_scope = (
             self.deps.turn_store.response_history_scope(
@@ -520,7 +520,7 @@ class TurnDispatcher:
         # The inbox handoff is complete once the runner takes the conversation's
         # response lock; the response itself keeps running on a runner-owned task.
         response_started = asyncio.Event()
-        response_task = self.deps.response_runner.track_inbox_response(
+        response_task = self.deps.response_runner.inbox.track_inbox_response(
             self._execute_response_action(
                 room,
                 prepared.turn.event,

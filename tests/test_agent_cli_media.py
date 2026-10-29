@@ -25,10 +25,11 @@ from mindroom.agent_cli.shell_contract import AgentCliShellEnv
 from mindroom.agent_loop.model_loop import EMPTY_REQUEST, LoopHooks
 from mindroom.agent_loop.run import run_agent
 from mindroom.agent_loop.spec import AgentSpec
-from mindroom.ai import _process_stream_events, _StreamingAttemptState, collect_streamed_response_content
+from mindroom.ai import _process_stream_events, _StreamingAttemptState
 from mindroom.attachments.media import resolve_scoped_attachments
 from mindroom.llm.events import ToolCompleted, ToolStarted
 from mindroom.llm.messages import Message
+from mindroom.response_turn import collect_streamed_response_content
 from mindroom.session_storage.agent_storage import create_state_storage
 from mindroom.tool_system.agno_toolkits import adapt_toolkit
 from mindroom.tool_system.events import CollectedStreamPresentation, deserialize_tool_trace, serialize_tool_trace

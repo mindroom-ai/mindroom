@@ -27,6 +27,7 @@ from tests.conftest import (
     test_runtime_paths,
 )
 from tests.response_attempt_helpers import install_direct_response_admission
+from tests.response_runner_helpers import streamed_answer
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -121,7 +122,10 @@ async def test_agent_regenerates_on_multiple_edits(tmp_path: Path) -> None:
     original_event.source = original_event.__dict__["source"]
 
     # Process original message with mocked AI response
-    with patch("mindroom.response_runner.ai_response", AsyncMock(return_value="Original: 4")):
+    with patch(
+        "mindroom.response_runner.stream_agent_response",
+        new=streamed_answer(AsyncMock(return_value="Original: 4")),
+    ):
         await bot._on_message(room, original_event)
         await drain_coalescing(bot)
 

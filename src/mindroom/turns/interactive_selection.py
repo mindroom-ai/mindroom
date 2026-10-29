@@ -153,7 +153,7 @@ class InteractiveSelections:
 
         owned_response = run_owned_response()
         try:
-            self.deps.response_runner.track_inbox_response(
+            self.deps.response_runner.inbox.track_inbox_response(
                 owned_response,
                 name=f"interactive_selection_response:{source_event_id}",
                 room_id=response_target.room_id,

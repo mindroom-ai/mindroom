@@ -5,7 +5,7 @@ from __future__ import annotations
 import tempfile
 from itertools import count
 from pathlib import Path
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock
 
 import nio
 import pytest
@@ -59,6 +59,7 @@ from tests.conftest import (
 )
 from tests.history_helpers import stored_turn
 from tests.identity_helpers import entity_ids
+from tests.streaming_helpers import FakeReplyRecords
 
 _VISIBLE_MESSAGE_IDS = count(1)
 
@@ -866,129 +867,19 @@ class TestStreamingFinalizeStatuses:
         runtime_paths = runtime_paths_for(config)
         client = AsyncMock()
 
-        with (
-            patch("mindroom.streaming.send_message_result", new_callable=AsyncMock) as mock_send_message,
-            patch("mindroom.streaming.edit_message_result", new_callable=AsyncMock) as mock_edit_message,
-        ):
-            mock_send_message.return_value = delivered_matrix_event("$event1")
-            mock_edit_message.return_value = delivered_matrix_event("$edit1")
+        mock_send_message = AsyncMock(return_value=delivered_matrix_event("$event1"))
+        mock_edit_message = AsyncMock(return_value=delivered_matrix_event("$edit1"))
+        streaming = StreamingResponse(
+            target=MessageTarget.resolve("!room:localhost", None, None),
+            config=config,
+            runtime_paths=runtime_paths,
+            **FakeReplyRecords(send=mock_send_message, edit=mock_edit_message).hooks(),
+        )
 
-            streaming = StreamingResponse(
-                target=MessageTarget.resolve("!room:localhost", None, None),
-                config=config,
-                runtime_paths=runtime_paths,
-            )
-
-            await push_stream_chunk(streaming, "Partial answer", client)
-            await streaming.finalize(client)
+        await push_stream_chunk(streaming, "Partial answer", client)
+        await streaming.finalize(client)
 
         initial_content = mock_send_message.await_args.args[2]
         final_content = mock_edit_message.await_args.args[3]
         assert initial_content[STREAM_STATUS_KEY] == STREAM_STATUS_PENDING
         assert final_content[STREAM_STATUS_KEY] == STREAM_STATUS_COMPLETED
-
-    @pytest.mark.asyncio
-    async def test_cancelled_finalize_sets_cancelled_status(self) -> None:
-        """Persist cancelled status on the final cancellation edit."""
-        config = _make_config()
-        runtime_paths = runtime_paths_for(config)
-        client = AsyncMock()
-
-        with (
-            patch("mindroom.streaming.send_message_result", new_callable=AsyncMock) as mock_send_message,
-            patch("mindroom.streaming.edit_message_result", new_callable=AsyncMock) as mock_edit_message,
-        ):
-            mock_send_message.return_value = delivered_matrix_event("$event1")
-            mock_edit_message.return_value = delivered_matrix_event("$edit1")
-
-            streaming = StreamingResponse(
-                target=MessageTarget.resolve("!room:localhost", None, None),
-                config=config,
-                runtime_paths=runtime_paths,
-            )
-
-            await push_stream_chunk(streaming, "Partial answer", client)
-            await streaming.finalize(client, cancelled=True)
-
-        final_content = mock_edit_message.await_args.args[3]
-        assert final_content[STREAM_STATUS_KEY] == STREAM_STATUS_CANCELLED
-
-    @pytest.mark.asyncio
-    async def test_error_finalize_sets_error_status(self) -> None:
-        """Persist error status on the final error edit."""
-        config = _make_config()
-        runtime_paths = runtime_paths_for(config)
-        client = AsyncMock()
-
-        with (
-            patch("mindroom.streaming.send_message_result", new_callable=AsyncMock) as mock_send_message,
-            patch("mindroom.streaming.edit_message_result", new_callable=AsyncMock) as mock_edit_message,
-        ):
-            mock_send_message.return_value = delivered_matrix_event("$event1")
-            mock_edit_message.return_value = delivered_matrix_event("$edit1")
-
-            streaming = StreamingResponse(
-                target=MessageTarget.resolve("!room:localhost", None, None),
-                config=config,
-                runtime_paths=runtime_paths,
-            )
-
-            await push_stream_chunk(streaming, "Partial answer", client)
-            await streaming.finalize(client, error=RuntimeError("boom"))
-
-        final_content = mock_edit_message.await_args.args[3]
-        assert final_content[STREAM_STATUS_KEY] == STREAM_STATUS_ERROR
-
-    @pytest.mark.asyncio
-    async def test_finalize_retries_terminal_edit_once(self) -> None:
-        """Retry the terminal edit once before giving up on persisting the status."""
-        config = _make_config()
-        runtime_paths = runtime_paths_for(config)
-        client = AsyncMock()
-
-        with (
-            patch("mindroom.streaming.send_message_result", new_callable=AsyncMock) as mock_send_message,
-            patch("mindroom.streaming.edit_message_result", new_callable=AsyncMock) as mock_edit_message,
-        ):
-            mock_send_message.return_value = delivered_matrix_event("$event1")
-            mock_edit_message.side_effect = [None, delivered_matrix_event("$edit2")]
-
-            streaming = StreamingResponse(
-                target=MessageTarget.resolve("!room:localhost", None, None),
-                config=config,
-                runtime_paths=runtime_paths,
-            )
-
-            await push_stream_chunk(streaming, "Partial answer", client)
-            await streaming.finalize(client, cancelled=True)
-
-        assert mock_edit_message.await_count == 2
-        for call in mock_edit_message.await_args_list:
-            assert call.args[3][STREAM_STATUS_KEY] == STREAM_STATUS_CANCELLED
-
-    @pytest.mark.asyncio
-    async def test_finalize_retries_terminal_edit_after_exception(self) -> None:
-        """Retry terminal edits when the first edit attempt raises."""
-        config = _make_config()
-        runtime_paths = runtime_paths_for(config)
-        client = AsyncMock()
-
-        with (
-            patch("mindroom.streaming.send_message_result", new_callable=AsyncMock) as mock_send_message,
-            patch("mindroom.streaming.edit_message_result", new_callable=AsyncMock) as mock_edit_message,
-        ):
-            mock_send_message.return_value = delivered_matrix_event("$event1")
-            mock_edit_message.side_effect = [RuntimeError("transport boom"), delivered_matrix_event("$edit2")]
-
-            streaming = StreamingResponse(
-                target=MessageTarget.resolve("!room:localhost", None, None),
-                config=config,
-                runtime_paths=runtime_paths,
-            )
-
-            await push_stream_chunk(streaming, "Partial answer", client)
-            await streaming.finalize(client, cancelled=True)
-
-        assert mock_edit_message.await_count == 2
-        for call in mock_edit_message.await_args_list:
-            assert call.args[3][STREAM_STATUS_KEY] == STREAM_STATUS_CANCELLED

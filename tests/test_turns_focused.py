@@ -222,6 +222,11 @@ class _RecordingResponseRunner:
     # Whether a pending approval holds every conversation.
     held_for_approval: bool = False
 
+    @property
+    def inbox(self) -> _RecordingResponseRunner:
+        """Stand in for the runner's inbox ownership too, which ``track_inbox_response`` records."""
+        return self
+
     def active_thread_ids_for_room(self, room_id: str) -> frozenset[str | None]:  # noqa: ARG002
         return frozenset()
 

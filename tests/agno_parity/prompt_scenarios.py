@@ -54,6 +54,7 @@ from mindroom.message_target import MessageTarget
 from mindroom.participation import ParticipationGate
 from mindroom.providers import registry
 from mindroom.providers.assistant_turn import stamp_model
+from mindroom.response_turn import TurnSinks
 from mindroom.routing import suggest_responder
 from mindroom.routing_judgment import ResponderSelection
 from mindroom.runtime_state import clear_api_server_address, set_api_server_address
@@ -63,7 +64,7 @@ from mindroom.session_storage.types import ConversationSession
 from mindroom.skill_learning.capture import SkillReviewCapture
 from mindroom.skill_learning.reviewer import review_conversation
 from mindroom.skill_learning.tools import ReviewProgress
-from mindroom.teams.envelope import team_response_stream
+from mindroom.teams.envelope import TeamTurnSpec, team_response_stream
 from mindroom.teams.formation import select_ad_hoc_team_mode
 from mindroom.teams.spec import TeamMode
 from mindroom.thread_summary import _generate_summary, _resolve_thread_summary_model_name, _ThreadEnrichment
@@ -454,17 +455,19 @@ async def _agent_turn(
     with reply_runtime(turn) as runtime:
         execution_identity = build_execution_identity_from_runtime_context(runtime)
         async for _chunk in ai.stream_agent_response(
-            ctx,
-            prompt=turn.prompt,
-            runtime_paths=turn.runtime_paths,
-            config=turn.config,
-            thread_history=_thread_history(),
-            current_timestamp_ms=_CURRENT_TIMESTAMP_MS,
-            knowledge=turn.knowledge,
-            media=turn.media,
-            execution_identity=execution_identity,
-            turn_recorder=recorder,
-            supports_native_tool_approval=True,
+            replace(
+                ctx,
+                prompt=turn.prompt,
+                thread_history=_thread_history(),
+                current_timestamp_ms=_CURRENT_TIMESTAMP_MS,
+                knowledge=turn.knowledge,
+                media=turn.media,
+                execution_identity=execution_identity,
+                supports_native_tool_approval=True,
+            ),
+            turn.runtime_paths,
+            turn.config,
+            sinks=TurnSinks(turn_recorder=recorder),
         ):
             pass
     _assert_answered(recorder)
@@ -674,31 +677,31 @@ async def _run_team(root: Path, mode: TeamMode) -> ScenarioOutput:
     )
     prompt = "Plan the launch and draft the announcement."
     runtime = _tool_runtime(config, runtime_paths, "launch")
-    ctx = make_turn_context(
-        "launch",
-        session_id=_SESSION_ID,
-        room_id=_ROOM_ID,
-        thread_id=_THREAD_ID,
-        requester_id=_REQUESTER_ID,
-        reply_to_event_id=_CURRENT_EVENT_ID,
-        correlation_id=_CORRELATION_ID,
+    ctx = replace(
+        make_turn_context(
+            "launch",
+            session_id=_SESSION_ID,
+            room_id=_ROOM_ID,
+            thread_id=_THREAD_ID,
+            requester_id=_REQUESTER_ID,
+            reply_to_event_id=_CURRENT_EVENT_ID,
+            correlation_id=_CORRELATION_ID,
+        ),
+        prompt=prompt,
+        current_timestamp_ms=_CURRENT_TIMESTAMP_MS,
+        thread_history=_thread_history(),
+        execution_identity=build_execution_identity_from_runtime_context(runtime),
+    )
+    spec = TeamTurnSpec(
+        agent_names=["planner", "writer"],
+        mode=mode,
+        orchestrator=orchestrator,
+        configured_team_name="launch",
+        response_sender_id=member_ids["launch"].full_id,
     )
     recorder = TurnRecorder(user_message=prompt)
     with _api_server(), tool_runtime_context(runtime):
-        async for _chunk in team_response_stream(
-            agent_names=["planner", "writer"],
-            message=prompt,
-            orchestrator=orchestrator,
-            execution_identity=build_execution_identity_from_runtime_context(runtime),
-            ctx=ctx,
-            mode=mode,
-            thread_history=_thread_history(),
-            user_id=_REQUESTER_ID,
-            current_timestamp_ms=_CURRENT_TIMESTAMP_MS,
-            response_sender_id=member_ids["launch"].full_id,
-            configured_team_name="launch",
-            turn_recorder=recorder,
-        ):
+        async for _chunk in team_response_stream(spec, ctx, sinks=TurnSinks(turn_recorder=recorder)):
             pass
     delegations = [tool.tool_name for tool in recorder.completed_tools]
     expected = ["delegate_task_to_members"] if mode is TeamMode.COLLABORATE else ["delegate_task_to_member"] * 2

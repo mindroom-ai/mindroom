@@ -129,7 +129,7 @@ async def test_a_redaction_admitted_during_an_interrupted_reply_releases_its_sou
         await asyncio.Event().wait()
 
     runner = ResponseRunner(deps=MagicMock())
-    response = runner.track_inbox_response(
+    response = runner.inbox.track_inbox_response(
         generate(),
         name="inbox_response:deleted",
         recovery_proof_ready=lambda: store.response_recovery_ready(turn),
@@ -142,7 +142,7 @@ async def test_a_redaction_admitted_during_an_interrupted_reply_releases_its_sou
         await admit_dispatch_event(dispatcher, room, _redaction(), EventKind.REDACTION, EventClass.ACTIONABLE)
         assert not await principal.is_pending(SOURCE)
         assert await principal.is_pending(REDACTION)
-        proof = runner._inbox_response_tasks[response].recovery_proof_ready
+        proof = runner.inbox._inbox_response_tasks[response].recovery_proof_ready
         pending_proof = proof()
         assert inspect.isawaitable(pending_proof)
         assert not await pending_proof

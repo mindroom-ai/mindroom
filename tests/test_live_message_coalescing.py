@@ -121,6 +121,7 @@ from tests.conftest import (
 )
 from tests.journal_helpers import admit_dispatch_event
 from tests.response_attempt_helpers import install_direct_response_admission
+from tests.response_runner_helpers import streamed_answer
 from tests.threading_helpers import seed_hydrated_conversation, seed_unhydrated_room_event
 from tests.turn_dispatch_helpers import dispatch_test_turn, nothing_else_queued, prepared_turn_recorder
 
@@ -129,7 +130,7 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from mindroom.bot import AgentBot
-    from mindroom.tool_system.worker_routing import ToolExecutionIdentity
+    from mindroom.response_turn import ResponseTurnContext
 
 
 def _coalescing_gate_is_idle(gate: CoalescingGate) -> bool:
@@ -1689,23 +1690,17 @@ async def test_active_follow_ups_from_two_senders_run_tools_as_their_own_sender(
     runs: list[tuple[str | None, str | None, str, list[str]]] = []
     pending_after_late_follow_up: list[str] = []
 
-    async def fake_ai_response(
-        _ctx: object,
-        prompt: str,
-        *_args: object,
-        execution_identity: ToolExecutionIdentity | None = None,
-        **_kwargs: object,
-    ) -> str:
+    async def fake_ai_response(ctx: ResponseTurnContext, *_args: object, **_kwargs: object) -> str:
         tool_context = get_tool_runtime_context()
         runs.append(
             (
                 tool_context.requester_id if tool_context is not None else None,
-                execution_identity.requester_id if execution_identity is not None else None,
-                prompt,
+                ctx.execution_identity.requester_id if ctx.execution_identity is not None else None,
+                ctx.prompt,
                 [message.event_id for message in queued_signal.pending_message_snapshot()],
             ),
         )
-        if prompt == "add me to administrators":
+        if ctx.prompt == "add me to administrators":
             await bot._turn_ingress.handle_text_event(room, late_event)
             pending_after_late_follow_up.extend(
                 message.event_id for message in queued_signal.pending_message_snapshot()
@@ -1716,7 +1711,10 @@ async def test_active_follow_ups_from_two_senders_run_tools_as_their_own_sender(
     queued_signal.begin_response_turn()
     try:
         with (
-            patch("mindroom.response_runner.ai_response", new=AsyncMock(side_effect=fake_ai_response)),
+            patch(
+                "mindroom.response_runner.stream_agent_response",
+                new=streamed_answer(AsyncMock(side_effect=fake_ai_response)),
+            ),
             patch("mindroom.response_runner.should_use_streaming", new=AsyncMock(return_value=False)),
             patch.object(
                 unwrap_extracted_collaborator(bot._conversation_resolver),
@@ -1733,7 +1731,7 @@ async def test_active_follow_ups_from_two_senders_run_tools_as_their_own_sender(
             lifecycle_lock.release()
             await _wait_for(lambda: len(runs) == 2)
             await bot._coalescing_gate.drain_all()
-            await response_runner.drain_inbox_responses()
+            await response_runner.inbox.drain_inbox_responses()
     finally:
         queued_signal.finish_response_turn()
         if lifecycle_lock.locked():
@@ -1799,16 +1797,19 @@ async def test_follow_up_run_is_superseded_only_when_no_other_requester_waits(
     queued_signal = lifecycle._get_or_create_queued_signal(target)
     runs: list[tuple[str | None, str]] = []
 
-    async def fake_ai_response(_ctx: object, prompt: str, *_args: object, **_kwargs: object) -> str:
+    async def fake_ai_response(ctx: ResponseTurnContext, *_args: object, **_kwargs: object) -> str:
         tool_context = get_tool_runtime_context()
-        runs.append((tool_context.requester_id if tool_context is not None else None, prompt))
+        runs.append((tool_context.requester_id if tool_context is not None else None, ctx.prompt))
         return "ok"
 
     await lifecycle_lock.acquire()
     queued_signal.begin_response_turn()
     try:
         with (
-            patch("mindroom.response_runner.ai_response", new=AsyncMock(side_effect=fake_ai_response)),
+            patch(
+                "mindroom.response_runner.stream_agent_response",
+                new=streamed_answer(AsyncMock(side_effect=fake_ai_response)),
+            ),
             patch("mindroom.response_runner.should_use_streaming", new=AsyncMock(return_value=False)),
             patch.object(
                 unwrap_extracted_collaborator(bot._conversation_resolver),
@@ -1836,7 +1837,7 @@ async def test_follow_up_run_is_superseded_only_when_no_other_requester_waits(
             lifecycle_lock.release()
             await _wait_for(lambda: not bot._coalescing_gate.queued_pending_events(follow_up_key))
             await bot._coalescing_gate.drain_all()
-            await response_runner.drain_inbox_responses()
+            await response_runner.inbox.drain_inbox_responses()
     finally:
         queued_signal.finish_response_turn()
         if lifecycle_lock.locked():
@@ -1880,16 +1881,19 @@ async def test_follow_up_run_waits_for_an_agent_reply_written_for_the_same_reque
     queued_signal = lifecycle._get_or_create_queued_signal(target)
     runs: list[tuple[str | None, str]] = []
 
-    async def fake_ai_response(_ctx: object, prompt: str, *_args: object, **_kwargs: object) -> str:
+    async def fake_ai_response(ctx: ResponseTurnContext, *_args: object, **_kwargs: object) -> str:
         tool_context = get_tool_runtime_context()
-        runs.append((tool_context.requester_id if tool_context is not None else None, prompt))
+        runs.append((tool_context.requester_id if tool_context is not None else None, ctx.prompt))
         return "ok"
 
     await lifecycle_lock.acquire()
     queued_signal.begin_response_turn()
     try:
         with (
-            patch("mindroom.response_runner.ai_response", new=AsyncMock(side_effect=fake_ai_response)),
+            patch(
+                "mindroom.response_runner.stream_agent_response",
+                new=streamed_answer(AsyncMock(side_effect=fake_ai_response)),
+            ),
             patch("mindroom.response_runner.should_use_streaming", new=AsyncMock(return_value=False)),
             patch.object(
                 unwrap_extracted_collaborator(bot._conversation_resolver),
@@ -1917,7 +1921,7 @@ async def test_follow_up_run_waits_for_an_agent_reply_written_for_the_same_reque
             lifecycle_lock.release()
             await _wait_for(lambda: not bot._coalescing_gate.queued_pending_events(follow_up_key))
             await bot._coalescing_gate.drain_all()
-            await response_runner.drain_inbox_responses()
+            await response_runner.inbox.drain_inbox_responses()
     finally:
         queued_signal.finish_response_turn()
         if lifecycle_lock.locked():

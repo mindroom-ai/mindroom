@@ -639,7 +639,7 @@ class TestAgentBot(AgentBotTestBase):
         with _mock_interactive_claim(bot, selection):
             await _dispatch_reaction(bot, room, event)
 
-        await bot._response_runner.drain_inbox_responses()
+        await bot._response_runner.inbox.drain_inbox_responses()
         assert seen == []
         assert event.event_id not in bot._journal_dispatcher._deferred_reaction_ids
         assert event.event_id not in bot._journal_dispatcher._worker._deferred
@@ -820,11 +820,11 @@ class TestAgentBot(AgentBotTestBase):
         execute = AsyncMock(side_effect=(OSError("pending write failed"), None))
         with patch.object(bot._interactive_selections, "_execute_admitted_interactive_selection", new=execute):
             await _dispatch_reaction(bot, room, event)
-            await bot._response_runner.drain_inbox_responses()
+            await bot._response_runner.inbox.drain_inbox_responses()
             assert event.event_id in await bot._journal_dispatcher.unsettled_event_ids()
 
             await bot._journal_dispatcher.drain_once()
-            await bot._response_runner.drain_inbox_responses()
+            await bot._response_runner.inbox.drain_inbox_responses()
             bot._journal_dispatcher.start()
             try:
                 async with asyncio.timeout(5):
@@ -877,7 +877,7 @@ class TestAgentBot(AgentBotTestBase):
             new=AsyncMock(side_effect=OSError("pending write failed")),
         ):
             await _dispatch_reaction(bot, room, event)
-            await bot._response_runner.drain_inbox_responses()
+            await bot._response_runner.inbox.drain_inbox_responses()
 
         await admit_room_membership(bot.journal_principal(), room.room_id, "leave", source=DepartureSource.LOCAL)
 
@@ -1101,7 +1101,7 @@ class TestAgentBot(AgentBotTestBase):
                 assert reaction.event_id in await bot._journal_dispatcher.unsettled_event_ids()
         finally:
             release_selection.set()
-            await bot._response_runner.drain_inbox_responses()
+            await bot._response_runner.inbox.drain_inbox_responses()
             await bot._journal_dispatcher.stop()
 
     @pytest.mark.asyncio
@@ -1166,12 +1166,12 @@ class TestAgentBot(AgentBotTestBase):
                 release_older.set()
                 assert await older == "$older-response"
                 await preparation_started.wait()
-                await bot._response_runner.drain_inbox_responses()
+                await bot._response_runner.inbox.drain_inbox_responses()
         finally:
             release_older.set()
             if older is not None:
                 await asyncio.gather(older, return_exceptions=True)
-            await bot._response_runner.drain_inbox_responses()
+            await bot._response_runner.inbox.drain_inbox_responses()
 
     @pytest.mark.asyncio
     async def test_cancelled_interactive_preparation_releases_same_thread_reservation(
@@ -1197,7 +1197,7 @@ class TestAgentBot(AgentBotTestBase):
         await asyncio.wait_for(preparation_started.wait(), timeout=1.0)
         assert bot._response_runner.has_active_response_for_target(target)
 
-        assert await bot._response_runner.drain_inbox_responses(cancel_after_seconds=0.01) is False
+        assert await bot._response_runner.inbox.drain_inbox_responses(cancel_after_seconds=0.01) is False
         assert not bot._response_runner.has_active_response_for_target(target)
 
     @pytest.mark.asyncio
@@ -1228,7 +1228,7 @@ class TestAgentBot(AgentBotTestBase):
             reply_to_event_id="$question",
         )
         await _start_selection_response(bot, response, target=target)
-        await bot._response_runner.drain_inbox_responses()
+        await bot._response_runner.inbox.drain_inbox_responses()
 
         assert response_completed.is_set()
         settle_dispatch_sources.assert_awaited_once_with(("$reaction",))
@@ -1259,7 +1259,7 @@ class TestAgentBot(AgentBotTestBase):
             reply_to_event_id="$question",
         )
         await _start_selection_response(bot, hand_off_response, target=target)
-        await bot._response_runner.drain_inbox_responses()
+        await bot._response_runner.inbox.drain_inbox_responses()
 
         settle_dispatch_sources.assert_not_awaited()
 
@@ -1383,14 +1383,14 @@ class TestAgentBot(AgentBotTestBase):
             ordinary_response_started.set()
             await asyncio.Event().wait()
 
-        response_task = bot._response_runner.track_inbox_response(
+        response_task = bot._response_runner.inbox.track_inbox_response(
             response_owner(),
             name="test_interactive_claim_owner",
             recovery_proof_ready=lambda: False,
             source_event_ids=("$reaction",),
             room_id="!room:example.org",
         )
-        ordinary_response_task = bot._response_runner.track_inbox_response(
+        ordinary_response_task = bot._response_runner.inbox.track_inbox_response(
             ordinary_response(),
             name="test_ordinary_response",
             recovery_proof_ready=lambda: False,
@@ -1483,8 +1483,8 @@ class TestAgentBot(AgentBotTestBase):
 
                 assert handoff.done()
                 assert await handoff is False
-                assert bot._response_runner.has_live_inbox_response("$source")
-                assert bot._response_runner.has_live_inbox_response("$coalesced")
+                assert bot._response_runner.inbox.has_live_inbox_response("$source")
+                assert bot._response_runner.inbox.has_live_inbox_response("$coalesced")
                 deferred = await store.load_event("$source")
                 assert deferred is not None
                 bot._journal_dispatcher._worker._defer(deferred)
@@ -1494,7 +1494,7 @@ class TestAgentBot(AgentBotTestBase):
             finally:
                 release_resume.set()
                 await asyncio.gather(handoff, return_exceptions=True)
-                await bot._response_runner.wait_for_source_owned_inbox_responses()
+                await bot._response_runner.inbox.wait_for_source_owned_inbox_responses()
                 assert "$source" not in bot._journal_dispatcher._worker._deferred
 
     @pytest.mark.parametrize("requires_human", [False, True], ids=["automatic", "human"])
@@ -1628,7 +1628,7 @@ class TestAgentBot(AgentBotTestBase):
         async def drain_restarted_runtime() -> None:
             restarted._journal_dispatcher.release_turn_replay()
             await restarted._journal_dispatcher.drain_once()
-            await restarted._response_runner.wait_for_source_owned_inbox_responses()
+            await restarted._response_runner.inbox.wait_for_source_owned_inbox_responses()
             await restarted._journal_dispatcher.drain_once()
 
         if requires_human:
@@ -1690,7 +1690,7 @@ class TestAgentBot(AgentBotTestBase):
         async def stop_dispatcher(*, shutdown_intent: RuntimeShutdownIntent) -> None:
             assert shutdown_intent == SYNC_RESTART_SHUTDOWN
             response_tasks.append(
-                bot._response_runner.track_inbox_response(
+                bot._response_runner.inbox.track_inbox_response(
                     response_owner(),
                     name="test_late_interactive_claim_owner",
                     recovery_proof_ready=lambda: False,
@@ -1767,9 +1767,9 @@ class TestAgentBot(AgentBotTestBase):
                 if failure_stage == "queued_cancel":
                     # This checks ownership recovery, not millisecond shutdown latency.
                     # Allow queued acquisition cancellation and shielded reservation cleanup to finish.
-                    assert await bot._response_runner.drain_inbox_responses(cancel_after_seconds=1.0) is False
+                    assert await bot._response_runner.inbox.drain_inbox_responses(cancel_after_seconds=1.0) is False
                 else:
-                    await bot._response_runner.drain_inbox_responses()
+                    await bot._response_runner.inbox.drain_inbox_responses()
 
             assert not response_entered.is_set()
             retry_dispatch_sources.assert_called_with(target.room_id, ("$reaction",))
@@ -1780,7 +1780,7 @@ class TestAgentBot(AgentBotTestBase):
         finally:
             if lock_owned_by_test:
                 lifecycle_lock.release()
-            await bot._response_runner.drain_inbox_responses()
+            await bot._response_runner.inbox.drain_inbox_responses()
 
     @pytest.mark.asyncio
     async def test_interactive_reaction_reserves_same_thread_lifecycle_before_preparation(
@@ -1874,13 +1874,13 @@ class TestAgentBot(AgentBotTestBase):
                 release_interactive.set()
                 await asyncio.wait_for(newer_entered.wait(), timeout=1.0)
                 assert await newer_task == "$newer-response"
-                await bot._response_runner.drain_inbox_responses()
+                await bot._response_runner.inbox.drain_inbox_responses()
         finally:
             release_preparation.set()
             release_interactive.set()
             if newer_task is not None:
                 await asyncio.gather(newer_task, return_exceptions=True)
-            await bot._response_runner.drain_inbox_responses()
+            await bot._response_runner.inbox.drain_inbox_responses()
 
     @pytest.mark.asyncio
     async def test_interactive_reaction_keeps_room_mode_target_across_handoff(
@@ -1933,12 +1933,12 @@ class TestAgentBot(AgentBotTestBase):
                 patch.object(ResponseRunner, "_generate_response_locked", new=generate_locked),
             ):
                 await _dispatch_reaction(bot, room, reaction)
-                await bot._response_runner.drain_inbox_responses()
+                await bot._response_runner.inbox.drain_inbox_responses()
 
             assert [target.resolved_thread_id for target in resolved_targets] == [None]
             assert reaction.event_id not in await bot._journal_dispatcher.unsettled_event_ids()
         finally:
-            await bot._response_runner.drain_inbox_responses()
+            await bot._response_runner.inbox.drain_inbox_responses()
 
     @pytest.mark.asyncio
     async def test_interactive_reaction_executes_as_canonical_human_requester(
@@ -1989,7 +1989,7 @@ class TestAgentBot(AgentBotTestBase):
                 patch.object(ResponseRunner, "_generate_response_locked", new=generate_locked),
             ):
                 await _dispatch_reaction(bot, room, reaction)
-                await bot._response_runner.drain_inbox_responses()
+                await bot._response_runner.inbox.drain_inbox_responses()
 
             assert len(captured_requests) == 1
             request = captured_requests[0]
@@ -1997,7 +1997,7 @@ class TestAgentBot(AgentBotTestBase):
             assert request.response_envelope.origin.transport_sender_id == bridge_id
             assert request.response_envelope.origin.requester_id == owner_id
         finally:
-            await bot._response_runner.drain_inbox_responses()
+            await bot._response_runner.inbox.drain_inbox_responses()
 
     @pytest.mark.asyncio
     async def test_checkmark_interactive_reaction_reserves_before_tool_approval_lookup(
@@ -2526,7 +2526,7 @@ class TestAgentBot(AgentBotTestBase):
         unexpected_hooks = _install_reaction_recorder(restarted)
         replace_interactive_selection_handlers(restarted, handle=AsyncMock(return_value=False))
         await restarted._journal_dispatcher.drain_once()
-        await restarted._response_runner.drain_inbox_responses()
+        await restarted._response_runner.inbox.drain_inbox_responses()
 
         assert unexpected_hooks == []
         assert await restarted._journal_dispatcher.store.pending() == ()

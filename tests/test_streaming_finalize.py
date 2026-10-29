@@ -52,6 +52,7 @@ from tests.conftest import (
     test_runtime_paths,
 )
 from tests.reply_span_helpers import reply_span
+from tests.streaming_helpers import FakeReplyRecords
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
@@ -100,11 +101,12 @@ async def _empty_stream() -> AsyncIterator[str]:
         yield ""
 
 
-def _streaming_response(config: Config) -> StreamingResponse:
+def _streaming_response(config: Config, records: FakeReplyRecords | None = None) -> StreamingResponse:
     return StreamingResponse(
         target=MessageTarget.resolve("!room:localhost", None, "$reply"),
         config=config,
         runtime_paths=runtime_paths_for(config),
+        **(records if records is not None else FakeReplyRecords()).hooks(),
     )
 
 
@@ -177,26 +179,20 @@ def _delivery_gateway(tmp_path: Path, outbox: MatrixDeliveryView | None = None) 
 async def test_transport_retry_terminal_send_with_no_event_id_retries_until_send_lands(tmp_path: Path) -> None:
     """Terminal sends should retry even when finalize is sending the first visible event."""
     config = _config(tmp_path)
-    streaming = _streaming_response(config)
-    streaming.accumulated_text = "hello"
-    sleep_mock = AsyncMock()
     delivered = DeliveredMatrixEvent(
         event_id="$terminal-send",
         content_sent={"body": "hello"},
     )
+    mock_send = AsyncMock(side_effect=[None, None, delivered])
+    streaming = _streaming_response(config, FakeReplyRecords(send=mock_send))
+    streaming.accumulated_text = "hello"
+    sleep_mock = AsyncMock()
 
-    with (
-        patch(
-            "mindroom.streaming.send_message_result",
-            new=AsyncMock(side_effect=[None, None, delivered]),
-        ) as mock_send,
-        patch("mindroom.streaming.asyncio.sleep", new=sleep_mock),
-    ):
+    with patch("mindroom.streaming.asyncio.sleep", new=sleep_mock):
         outcome = await streaming.finalize(_client())
 
     assert mock_send.await_count == 2
     sleep_mock.assert_not_awaited()
-    assert outcome.terminal_status == "completed"
     assert outcome.failure_reason == "terminal_update_failed"
     assert outcome.last_physical_stream_event_id is None
 
@@ -210,85 +206,57 @@ async def test_a_completed_first_event_answer_goes_through_the_durable_sender(tm
     Leaving that path on the plain sender makes exactly those answers
     unrecoverable -- the ones whose turn already had a delivery problem.
     """
-    streaming = _streaming_response(_config(tmp_path))
+    delivered = DeliveredMatrixEvent(event_id="$answer", content_sent={"body": "complete answer"})
+    records = FakeReplyRecords(send=AsyncMock(return_value=delivered))
+    streaming = _streaming_response(_config(tmp_path), records)
     streaming.event_id = None
     streaming.accumulated_text = "complete answer"
-    delivered = DeliveredMatrixEvent(event_id="$answer", content_sent={"body": "complete answer"})
-    terminal_send = AsyncMock(return_value=delivered)
-    streaming.terminal_send = terminal_send
-    plain_send = AsyncMock(return_value=delivered)
 
-    with patch("mindroom.streaming.send_message_result", new=plain_send):
-        outcome = await streaming.finalize(_client())
+    outcome = await streaming.finalize(_client())
 
-    assert outcome.terminal_status == "completed"
-    terminal_send.assert_awaited_once()
-    plain_send.assert_not_awaited()
-    assert terminal_send.await_args.args[3] == "complete answer"
-
-
-@pytest.mark.asyncio
-async def test_a_cancelled_first_event_note_stays_on_the_plain_sender(tmp_path: Path) -> None:
-    """A cancellation note is transport, not an answer, first event or not."""
-    streaming = _streaming_response(_config(tmp_path))
-    streaming.event_id = None
-    streaming.accumulated_text = "partial answer"
-    delivered = DeliveredMatrixEvent(event_id="$note", content_sent={"body": "partial answer"})
-    terminal_send = AsyncMock(return_value=delivered)
-    streaming.terminal_send = terminal_send
-    plain_send = AsyncMock(return_value=delivered)
-
-    with patch("mindroom.streaming.send_message_result", new=plain_send):
-        await streaming.finalize(_client(), cancelled=True, cancel_source="user_stop")
-
-    terminal_send.assert_not_awaited()
-    plain_send.assert_awaited_once()
+    assert outcome.failure_reason is None
+    [answer] = records.writes
+    assert (answer.kind, answer.event_id) == ("terminal", None)
+    assert answer.display_text == "complete answer"
 
 
 @pytest.mark.asyncio
 async def test_completed_terminal_ordinary_exception_keeps_immediate_retry(tmp_path: Path) -> None:
     """Ordinary terminal failures keep the existing two immediate attempts."""
-    streaming = _streaming_response(_config(tmp_path))
+    edit = AsyncMock(side_effect=RuntimeError("ordinary failure"))
+    streaming = _streaming_response(_config(tmp_path), FakeReplyRecords(edit=edit))
     streaming.event_id = "$placeholder"
     streaming.accumulated_text = "complete answer"
-    edit = AsyncMock(side_effect=RuntimeError("ordinary failure"))
     sleep_mock = AsyncMock()
 
-    with (
-        patch("mindroom.streaming.edit_message_result", new=edit),
-        patch("mindroom.streaming.asyncio.sleep", new=sleep_mock),
-    ):
+    with patch("mindroom.streaming.asyncio.sleep", new=sleep_mock):
         outcome = await streaming.finalize(_client())
 
     assert edit.await_count == 2
     sleep_mock.assert_not_awaited()
-    assert outcome.terminal_status == "completed"
     assert outcome.failure_reason == "terminal_update_exception:RuntimeError"
 
 
 @pytest.mark.asyncio
 async def test_transport_cancelled_terminal_update_does_not_sleep_behind_retry_backoff(tmp_path: Path) -> None:
-    """Cancelled terminal updates should finish immediately without retry backoff."""
+    """A stop landing on the terminal update ends it at once, without retry backoff, for its span exit to note."""
     config = _config(tmp_path)
-    streaming = _streaming_response(config)
+    edit = AsyncMock(side_effect=asyncio.CancelledError("user-stop"))
+    streaming = _streaming_response(config, FakeReplyRecords(edit=edit))
     streaming.event_id = "$placeholder"
-    streaming.accumulated_text = "partial answer"
+    streaming.accumulated_text = "complete answer"
     sleep_mock = AsyncMock()
     warning = MagicMock()
 
     with (
-        patch(
-            "mindroom.streaming.edit_message_result",
-            new=AsyncMock(side_effect=asyncio.CancelledError("user-stop")),
-        ),
         patch("mindroom.streaming.asyncio.sleep", new=sleep_mock),
         patch("mindroom.streaming.logger.warning", new=warning),
+        pytest.raises(asyncio.CancelledError, match="user-stop"),
     ):
-        outcome = await streaming.finalize(_client(), cancelled=True)
+        await streaming.finalize(_client())
 
+    edit.assert_awaited_once()
     sleep_mock.assert_not_awaited()
-    assert outcome.terminal_status == "cancelled"
-    assert outcome.failure_reason == "cancelled_by_user"
     warning.assert_called_once()
     assert warning.call_args.kwargs["exc_info"] is True
 
@@ -298,140 +266,33 @@ async def test_process_shutdown_stream_cancellations_do_not_format_tracebacks(
     tmp_path: Path,
 ) -> None:
     """A saturated orderly stop must not synchronously render one traceback per stream."""
-    streams = [_streaming_response(_config(tmp_path)) for _ in range(16)]
+    stream_count = 16
     started = asyncio.Event()
     entered = 0
 
     async def blocked_edit(*_args: object, **_kwargs: object) -> None:
         nonlocal entered
         entered += 1
-        if entered == len(streams):
+        if entered == stream_count:
             started.set()
         await asyncio.Future()
 
+    streams = [_streaming_response(_config(tmp_path), FakeReplyRecords(edit=blocked_edit)) for _ in range(stream_count)]
     for index, stream in enumerate(streams):
         stream.event_id = f"$placeholder-{index}"
         stream.accumulated_text = "partial answer"
 
     warning = MagicMock()
-    with (
-        patch("mindroom.streaming.edit_message_result", new=blocked_edit),
-        patch("mindroom.streaming.logger.warning", new=warning),
-    ):
+    with patch("mindroom.streaming.logger.warning", new=warning):
         tasks = [asyncio.create_task(stream.finalize(_client())) for stream in streams]
         await started.wait()
         for task in tasks:
             request_task_cancel(task, process_shutdown=True)
-        outcomes = await asyncio.gather(*tasks)
+        outcomes = await asyncio.gather(*tasks, return_exceptions=True)
 
-    assert all(outcome.terminal_status == "cancelled" for outcome in outcomes)
+    assert all(isinstance(outcome, asyncio.CancelledError) for outcome in outcomes)
     assert warning.call_count == len(streams)
     assert all(call.kwargs["exc_info"] is False for call in warning.call_args_list)
-
-
-@pytest.mark.asyncio
-async def test_transport_restart_interrupted_terminal_update_does_not_sleep_behind_retry_backoff(
-    tmp_path: Path,
-) -> None:
-    """Restart-interrupted terminal updates should not sit in edit retry backoff."""
-    config = _config(tmp_path)
-    streaming = _streaming_response(config)
-    streaming.event_id = "$placeholder"
-    streaming.accumulated_text = "partial answer"
-    sleep_mock = AsyncMock()
-
-    with (
-        patch("mindroom.streaming.edit_message_result", new=AsyncMock(return_value=None)) as mock_edit,
-        patch("mindroom.streaming.asyncio.sleep", new=sleep_mock),
-    ):
-        outcome = await streaming.finalize(_client(), cancel_source="sync_restart")
-
-    assert mock_edit.await_count == 1
-    sleep_mock.assert_not_awaited()
-    assert outcome.terminal_status == "cancelled"
-    assert outcome.failure_reason == "sync_restart_cancelled"
-    assert outcome.terminal_update_committed is False
-
-
-@pytest.mark.asyncio
-async def test_user_stopped_terminal_update_gets_a_second_attempt(tmp_path: Path) -> None:
-    """Only a restart interruption gives up after one terminal attempt; a user stop retries once."""
-    streaming = _streaming_response(_config(tmp_path))
-    streaming.event_id = "$placeholder"
-    streaming.accumulated_text = "partial answer"
-
-    with patch("mindroom.streaming.edit_message_result", new=AsyncMock(return_value=None)) as mock_edit:
-        outcome = await streaming.finalize(_client(), cancelled=True, cancel_source="user_stop")
-
-    assert mock_edit.await_count == 2
-    assert outcome.terminal_status == "cancelled"
-    assert outcome.terminal_update_committed is False
-
-
-@pytest.mark.asyncio
-async def test_transport_restart_interrupted_terminal_update_reports_committed(tmp_path: Path) -> None:
-    """A landed restart interruption must carry explicit terminal-update proof."""
-    streaming = _streaming_response(_config(tmp_path))
-    streaming.event_id = "$placeholder"
-    streaming.accumulated_text = "partial answer"
-
-    with patch(
-        "mindroom.streaming.edit_message_result",
-        new=AsyncMock(
-            return_value=DeliveredMatrixEvent(
-                event_id="$terminal-edit",
-                content_sent={"body": "partial answer\n\n**[Response interrupted by service restart]**"},
-            ),
-        ),
-    ):
-        outcome = await streaming.finalize(_client(), cancel_source="sync_restart")
-
-    assert outcome.terminal_status == "cancelled"
-    assert outcome.terminal_update_committed is True
-    assert outcome.rendered_body is not None
-    assert outcome.rendered_body.endswith("**[Response interrupted by service restart]**")
-
-
-@pytest.mark.asyncio
-async def test_transport_placeholder_only_cancelled_terminal_update_keeps_committed_placeholder_body(
-    tmp_path: Path,
-) -> None:
-    """Cancelled terminal edits must preserve the last committed placeholder body, not the unlanded cancel note."""
-    config = _config(tmp_path)
-    streaming = _streaming_response(config)
-    streaming.event_id = "$placeholder"
-    streaming.placeholder_progress_sent = True
-
-    with patch(
-        "mindroom.streaming.edit_message_result",
-        new=AsyncMock(side_effect=asyncio.CancelledError("user-stop")),
-    ):
-        outcome = await streaming.finalize(_client(), cancelled=True)
-
-    assert outcome.failure_reason == "cancelled_by_user"
-    assert outcome.rendered_body == "Thinking..."
-    assert outcome.visible_body_state == "placeholder_only"
-
-
-@pytest.mark.asyncio
-async def test_transport_existing_visible_cancel_without_new_body_preserves_prior_event(
-    tmp_path: Path,
-) -> None:
-    """Cancelling a regeneration before new text lands must not overwrite the old visible reply."""
-    config = _config(tmp_path)
-    streaming = _streaming_response(config)
-    streaming.event_id = "$existing"
-    streaming.preserve_existing_visible_on_empty_terminal = True
-
-    with patch("mindroom.streaming.edit_message_result", new=AsyncMock()) as mock_edit:
-        outcome = await streaming.finalize(_client(), cancel_source="user_stop")
-
-    mock_edit.assert_not_awaited()
-    assert outcome.last_physical_stream_event_id == "$existing"
-    assert outcome.terminal_status == "cancelled"
-    assert outcome.rendered_body is None
-    assert outcome.visible_body_state == "none"
-    assert outcome.failure_reason == "cancelled_by_user"
 
 
 @pytest.mark.asyncio
@@ -440,27 +301,23 @@ async def test_transport_failed_terminal_update_drops_committed_interactive_meta
 ) -> None:
     """Late terminal failures must not carry interactive metadata into a failed terminal outcome."""
     config = _config(tmp_path)
-    streaming = _streaming_response(config)
-    streaming.accumulated_text = """```interactive
-{"question":"Choose","options":[{"emoji":"✅","label":"Yes","value":"yes"}]}
-```"""
-
-    with patch(
-        "mindroom.streaming.send_message_result",
-        new=AsyncMock(
+    records = FakeReplyRecords(
+        send=AsyncMock(
             return_value=DeliveredMatrixEvent(
                 event_id="$interactive",
                 content_sent={"body": "Choose"},
             ),
         ),
-    ):
-        assert await streaming._send_or_edit_message(_client(), is_final=False)
+        edit=AsyncMock(return_value=None),
+    )
+    streaming = _streaming_response(config, records)
+    streaming.accumulated_text = """```interactive
+{"question":"Choose","options":[{"emoji":"✅","label":"Yes","value":"yes"}]}
+```"""
 
-    with patch(
-        "mindroom.streaming.edit_message_result",
-        new=AsyncMock(return_value=None),
-    ):
-        transport_outcome = await streaming.finalize(_client(), cancel_source="sync_restart")
+    assert await streaming._send_or_edit_message(_client())
+
+    transport_outcome = await streaming.finalize(_client())
 
     response_hooks = SimpleNamespace(
         _apply_before_response=AsyncMock(),
@@ -498,7 +355,7 @@ async def test_transport_failed_terminal_update_drops_committed_interactive_meta
         ),
     )
 
-    assert transport_outcome.failure_reason == "sync_restart_cancelled"
+    assert transport_outcome.failure_reason == "terminal_update_failed"
     assert transport_outcome.rendered_body is not None
     assert outcome.option_map is None
     assert outcome.options_list is None
@@ -535,7 +392,6 @@ async def test_transport_failed_terminal_update_ignores_hidden_canonical_interac
             target=MessageTarget.resolve("!room:localhost", None, "$reply"),
             stream_transport_outcome=StreamTransportOutcome(
                 last_physical_stream_event_id="$visible",
-                terminal_status="completed",
                 rendered_body="visible plain text",
                 visible_body_state="visible_body",
                 canonical_final_body_candidate="yes\n\n- ✅ approve",
@@ -579,10 +435,11 @@ async def test_transport_empty_adopted_placeholder_finishes_as_error_note(tmp_pa
             response_stream=_empty_stream(),
             existing_event_id="$thinking",
             adopt_existing_placeholder=True,
+            **FakeReplyRecords(edit=record_edit).hooks(),
         )
 
     assert outcome.last_physical_stream_event_id == "$thinking"
-    assert outcome.terminal_status == "completed"
+    assert outcome.failure_reason is None
     assert outcome.rendered_body == "Thinking..."
     assert outcome.visible_body_state == "placeholder_only"
 
@@ -717,9 +574,10 @@ async def test_transport_final_event_only_body_uses_canonical_final_candidate(tm
             response_stream=final_only_stream(),
             existing_event_id="$thinking",
             adopt_existing_placeholder=True,
+            **FakeReplyRecords(edit=record_edit).hooks(),
         )
 
-    assert outcome.terminal_status == "completed"
+    assert outcome.failure_reason is None
     assert outcome.rendered_body == "Thinking..."
     assert outcome.visible_body_state == "placeholder_only"
     assert outcome.canonical_final_body_candidate == "hello from final event"
@@ -758,6 +616,7 @@ async def test_run_completed_content_does_not_rewrite_visible_stream_text(tmp_pa
             response_stream=tool_then_final_content(),
             existing_event_id="$placeholder",
             adopt_existing_placeholder=True,
+            **FakeReplyRecords(edit=record_edit).hooks(),
         )
 
     assert outcome.last_physical_stream_event_id == "$placeholder"
@@ -809,6 +668,7 @@ async def test_streamed_interactive_final_reply_registers_reactions_on_root_even
             adopt_existing_placeholder=True,
             interactive_creator_agent="code",
             interactive_source_event_id="$source",
+            **FakeReplyRecords(edit=record_stream_edit).hooks(),
         )
 
     assert stream_outcome.last_physical_stream_event_id == "$displayed-root"
@@ -932,7 +792,8 @@ async def test_streamed_interactive_metadata_survives_unparseable_canonical_fina
     async def interactive_stream() -> AsyncIterator[str]:
         yield raw_interactive
 
-    with patch("mindroom.streaming.edit_message_result", new=AsyncMock(return_value=DeliveredMatrixEvent("$edit", {}))):
+    edit = AsyncMock(return_value=DeliveredMatrixEvent("$edit", {}))
+    with patch("mindroom.streaming.edit_message_result", new=edit):
         stream_outcome = await send_streaming_response(
             client=client,
             target=target,
@@ -941,6 +802,7 @@ async def test_streamed_interactive_metadata_survives_unparseable_canonical_fina
             response_stream=interactive_stream(),
             existing_event_id="$displayed-root",
             adopt_existing_placeholder=True,
+            **FakeReplyRecords(edit=edit).hooks(),
         )
 
     assert stream_outcome.rendered_body == formatted_interactive.formatted_text
@@ -999,62 +861,6 @@ async def test_streamed_interactive_metadata_survives_unparseable_canonical_fina
         "📂": "inspect",
         "2": "inspect",
     }
-
-
-@pytest.mark.asyncio
-async def test_finalize_streamed_response_restart_interruption_preserves_cancellation_state(tmp_path: Path) -> None:
-    """Structured streamed restart interruptions should arrive with cancelled terminal status."""
-    config = _config(tmp_path)
-    envelope = _envelope()
-    response_hooks = SimpleNamespace(
-        _apply_before_response=AsyncMock(),
-        _apply_final_response_transform=AsyncMock(),
-        emit_after_response=AsyncMock(),
-        emit_cancelled_response=AsyncMock(),
-    )
-    gateway = DeliveryGateway(
-        DeliveryGatewayDeps(
-            runtime=SimpleNamespace(client=_client(), orchestrator=None, config=config, runtime_started_at=0.0),
-            runtime_paths=runtime_paths_for(config),
-            agent_name="code",
-            logger=get_logger("tests.delivery"),
-            redact_message_event=AsyncMock(return_value=True),
-            resolver=Mock(),
-            response_hooks=response_hooks,
-            outbox=make_outbox_mock(),
-            turn_handoff=ignore_final_delivery_handoff,
-        ),
-    )
-
-    outcome = await gateway.finalize_streamed_response(
-        FinalizeStreamedResponseRequest(
-            target=MessageTarget.resolve("!room:localhost", None, "$reply"),
-            stream_transport_outcome=StreamTransportOutcome(
-                last_physical_stream_event_id="$streaming",
-                terminal_status="cancelled",
-                rendered_body="partial answer\n\n**[Response interrupted by service restart]**",
-                visible_body_state="visible_body",
-                terminal_update_committed=True,
-                failure_reason="sync_restart_cancelled",
-            ),
-            initial_delivery_kind="edited",
-            identity=ResponseIdentity(
-                response_kind="ai",
-                response_envelope=envelope,
-                correlation_id="corr-stream-restart-cancelled",
-                sources=ResponseSources((envelope.source_event_id,), (envelope.source_event_id,)),
-            ),
-            tool_trace=None,
-            extra_content=None,
-        ),
-    )
-
-    assert outcome.terminal_status == "cancelled"
-    assert outcome.final_visible_event_id == "$streaming"
-    assert outcome.mark_handled is True
-    assert outcome.delivery_kind == "edited"
-    response_hooks.emit_after_response.assert_not_awaited()
-    response_hooks.emit_cancelled_response.assert_not_awaited()
 
 
 @pytest.mark.asyncio

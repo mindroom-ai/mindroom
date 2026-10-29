@@ -3,8 +3,8 @@
 ``build_team_turn`` installs a ``ScriptedModel`` for each configured model name, so the members and the leader build
 scripted providers and a turn runs the real member builds, ``build_team_spec``, ``run_team``, the presentation, and the
 conversation store. ``TeamTurn`` holds one team's config, its scripted models, its tool runtime, and its orchestrator,
-and drives ``team_response``, ``team_response_stream``, and ``continue_paused_team_run`` as the response runner calls
-them. ``squad_turn`` builds the ``squad`` team of a writer and a checker that the team runtime, compaction, and history
+and drives ``team_response_stream`` (streamed, or collected by ``collect_team_reply``) and ``continue_paused_team_run``
+as the response runner calls them. ``squad_turn`` builds the ``squad`` team of a writer and a checker that the team runtime, compaction, and history
 suites share; ``ProbeToolkit`` is its members' tool.
 """
 
@@ -12,9 +12,10 @@ from __future__ import annotations
 
 import asyncio
 from contextlib import contextmanager
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field, fields, replace
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, ClassVar
+from unittest.mock import MagicMock
 
 from agno.tools import Toolkit
 
@@ -26,10 +27,12 @@ from mindroom.history.turn_recorder import TurnRecorder
 from mindroom.history.types import HistoryScope
 from mindroom.llm.runs import RunRecord, TeamRunRecord
 from mindroom.message_target import MessageTarget
-from mindroom.teams.envelope import team_response, team_response_stream
+from mindroom.response_turn import TurnSinks, collect_streamed_response_content
+from mindroom.streaming import ReplacementStreamingResponse
+from mindroom.teams.envelope import TeamTurnSpec, team_response_stream
 from mindroom.teams.resume import continue_paused_team_run
 from mindroom.teams.spec import TeamMode
-from mindroom.tool_system.events import StructuredStreamChunk
+from mindroom.tool_system.events import CollectedStreamPresentation, StructuredStreamChunk
 from mindroom.tool_system.invocation import current_tool_call
 from mindroom.tool_system.runtime_context import (
     build_execution_identity_from_runtime_context,
@@ -51,7 +54,7 @@ from tests.fakes.scripted_model import ScriptedModel, ScriptStep, calls, tool_ca
 from tests.scripted_agent_helpers import registered_toolkit
 
 if TYPE_CHECKING:
-    from collections.abc import Iterator, Mapping, Sequence
+    from collections.abc import AsyncIterator, Iterator, Mapping, Sequence
     from pathlib import Path
 
     import pytest
@@ -60,6 +63,7 @@ if TYPE_CHECKING:
     from mindroom.response_turn import CompletedApprovalRun, PausedAttempt, ResponseTurnContext
     from mindroom.session_storage.store import ConversationStore
     from mindroom.teams.envelope import TeamStreamChunk
+    from mindroom.tool_system.events import ToolTraceEntry
     from mindroom.tool_system.runtime_context import ToolRuntimeContext
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 
@@ -70,6 +74,8 @@ EVENT_ID = "$current:localhost"
 SESSION_ID = f"{ROOM_ID}:{THREAD_ID}"
 PROBE_TOOL = "team_turn_probe"
 TEAM_SCOPE = HistoryScope(kind="team", scope_id="squad")
+_SPEC_OPTIONS = frozenset(spec_field.name for spec_field in fields(TeamTurnSpec))
+_SINK_OPTIONS = frozenset(sink_field.name for sink_field in fields(TurnSinks))
 
 
 class ProbeToolkit(Toolkit):
@@ -156,6 +162,51 @@ def rendered(chunk: TeamStreamChunk) -> str:
     return chunk.content if isinstance(chunk, StructuredStreamChunk) else chunk
 
 
+def scripted_team_stream(*chunks: str, completes: bool = False) -> MagicMock:
+    """Return a ``team_response_stream`` stand-in that yields ``chunks``, whose calls name each turn's spec and context.
+
+    A completing stream records its turn completed, as the turn driver it stands in for does before its last chunk.
+    """
+
+    async def stream(_spec: TeamTurnSpec, _ctx: ResponseTurnContext, *, sinks: TurnSinks) -> AsyncIterator[str]:
+        if completes:
+            assert sinks.turn_recorder is not None
+            sinks.turn_recorder.record_completed(
+                run_id=None,
+                run_metadata=None,
+                assistant_text="".join(chunks),
+                completed_tools=(),
+            )
+        for chunk in chunks:
+            yield chunk
+
+    return MagicMock(side_effect=stream)
+
+
+async def collect_team_reply(
+    spec: TeamTurnSpec,
+    ctx: ResponseTurnContext,
+    *,
+    sinks: TurnSinks,
+    tool_trace: list[ToolTraceEntry] | None = None,
+) -> str:
+    """Collect one team turn's stream into the text it delivers whole, as the response runner collects it.
+
+    ``tool_trace`` receives the collected tool trace, as the runner's does.
+    """
+    body, collected_trace = await collect_streamed_response_content(
+        team_response_stream(spec, ctx, sinks=sinks),
+        presentation=CollectedStreamPresentation(
+            show_tool_calls=ctx.show_tool_calls,
+            track_hidden_tools=True,
+            replaces_text=ReplacementStreamingResponse.replaces_text,
+        ),
+    )
+    if tool_trace is not None:
+        tool_trace.extend(collected_trace)
+    return body
+
+
 @dataclass
 class TeamTurn:
     """One team's config, scripted models by model name, tool runtime, orchestrator, and its last turn's recorder.
@@ -220,6 +271,38 @@ class TeamTurn:
         ]
         return record, members
 
+    def turn_inputs(
+        self,
+        message: str,
+        ctx: ResponseTurnContext | None,
+        options: dict[str, Any],
+    ) -> tuple[TeamTurnSpec, ResponseTurnContext, TurnSinks]:
+        """Split one reply's options into its team, its turn inputs, and its sinks, as the runner builds them.
+
+        ``user_id`` names the requester; every option that names neither the team nor a sink is a turn input.
+        """
+        self.recorder = TurnRecorder(user_message=message)
+        spec = TeamTurnSpec(
+            **{
+                "agent_names": list(self.member_names),
+                "mode": self.mode,
+                "orchestrator": self.orchestrator,
+                "configured_team_name": self.team_name,
+            }
+            | {name: options.pop(name) for name in _SPEC_OPTIONS & options.keys()},
+        )
+        sinks = TurnSinks(
+            turn_recorder=self.recorder,
+            **{name: options.pop(name) for name in _SINK_OPTIONS & options.keys()},
+        )
+        if "user_id" in options:
+            options["requester_id"] = options.pop("user_id")
+        turn_ctx = replace(
+            ctx or self.ctx(),
+            **{"prompt": message, "execution_identity": self.identity} | options,
+        )
+        return spec, turn_ctx, sinks
+
     async def stream(
         self,
         *,
@@ -232,21 +315,10 @@ class TeamTurn:
 
         ``chunks`` collects them as they arrive, so a reply that pauses, which raises, keeps the chunks it sent first.
         """
-        kwargs.setdefault("mode", self.mode)
-        kwargs.setdefault("user_id", REQUESTER_ID)
-        kwargs.setdefault("agent_names", list(self.member_names))
-        self.recorder = TurnRecorder(user_message=message)
+        spec, turn_ctx, sinks = self.turn_inputs(message, ctx, kwargs)
         collected = [] if chunks is None else chunks
         with tool_runtime_context(self.runtime):
-            async for chunk in team_response_stream(
-                message=message,
-                orchestrator=self.orchestrator,
-                execution_identity=self.identity,
-                ctx=ctx or self.ctx(),
-                configured_team_name=self.team_name,
-                turn_recorder=self.recorder,
-                **kwargs,
-            ):
+            async for chunk in team_response_stream(spec, turn_ctx, sinks=sinks):
                 collected.append(chunk)
         return collected
 
@@ -255,23 +327,16 @@ class TeamTurn:
         *,
         message: str = "Hello",
         ctx: ResponseTurnContext | None = None,
+        tool_trace: list[ToolTraceEntry] | None = None,
         **kwargs: Any,  # noqa: ANN401
     ) -> str:
-        """Run one blocking team reply and return its text."""
-        kwargs.setdefault("mode", self.mode)
-        kwargs.setdefault("user_id", REQUESTER_ID)
-        kwargs.setdefault("agent_names", list(self.member_names))
-        self.recorder = TurnRecorder(user_message=message)
+        """Run one team reply collected into its text, as a reply delivered without streaming is.
+
+        ``tool_trace`` receives the reply's collected tool trace.
+        """
+        spec, turn_ctx, sinks = self.turn_inputs(message, ctx, kwargs)
         with tool_runtime_context(self.runtime):
-            return await team_response(
-                message=message,
-                orchestrator=self.orchestrator,
-                execution_identity=self.identity,
-                ctx=ctx or self.ctx(),
-                configured_team_name=self.team_name,
-                turn_recorder=self.recorder,
-                **kwargs,
-            )
+            return await collect_team_reply(spec, turn_ctx, sinks=sinks, tool_trace=tool_trace)
 
     async def reply(self, *, stream: bool, **kwargs: Any) -> str:  # noqa: ANN401
         """Run one reply on either path and return the text it ended with: the last streamed chunk, or the reply."""
@@ -466,9 +531,11 @@ __all__ = [
     "TeamTurn",
     "authored_team_config",
     "build_team_turn",
+    "collect_team_reply",
     "delegate",
     "member_approval",
     "registered_probe",
     "rendered",
+    "scripted_team_stream",
     "squad_turn",
 ]

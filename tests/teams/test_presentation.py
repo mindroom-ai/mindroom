@@ -1,6 +1,6 @@
 """The team reply document: member slots, consensus, tool markers, the durable snapshot, member ids, finished runs.
 
-The finished runs are the records a team run hands over, in the order a blocking reply lists them.
+The finished runs are the records a team run hands over.
 """
 # ruff: noqa: D103
 

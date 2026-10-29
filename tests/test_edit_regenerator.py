@@ -98,6 +98,11 @@ class _Runner:
     async def deliver_team_rejection(self, request: ResponseRequest, **kwargs: object) -> str | None:
         return await self._claimed(self.rejection_entry, request, **kwargs)
 
+    @property
+    def inbox(self) -> _Runner:
+        """The inbox the regeneration runs on, which this stand-in plays itself."""
+        return self
+
     def track_inbox_response(self, response: Coroutine[Any, Any, None], **_ownership: object) -> asyncio.Task[None]:
         task = asyncio.create_task(response)
         self.regenerations.append(task)
@@ -1303,6 +1308,7 @@ async def test_a_rejected_team_regeneration_shows_why_in_the_reply_it_regenerate
     assert request.existing_event_id == RESPONSE_EVENT_ID
     assert harness.runner.rejection_entry.await_args.kwargs == {
         "member_names": [MEMBER_NAME],
+        "team_mode": "coordinate",
         "rejection_message": "Team 'assistant' cannot answer: member is unavailable.",
     }
     # The claimed reply answers the edited text from then on.

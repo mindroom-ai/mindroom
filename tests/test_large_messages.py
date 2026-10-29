@@ -12,7 +12,6 @@ from mindroom.constants import (
     AI_RUN_METADATA_KEY,
     ATTACHMENT_IDS_KEY,
     CONFIG_CONFIRMATION_REACTION_KEY,
-    DURABLE_FINAL_OUTCOME_KEY,
     HOOK_MESSAGE_RECEIVED_DEPTH_KEY,
     ORIGINAL_SENDER_KEY,
     PER_FIRE_THREAD_ROOT_EVENT_ID_KEY,
@@ -824,59 +823,6 @@ async def test_prepare_text_edit_with_file_sidecar_keeps_parseable_fallback() ->
 
     assert prepared["m.new_content"]["msgtype"] == "m.file"
     assert isinstance(parsed, nio.Event)
-
-
-@pytest.mark.asyncio
-async def test_prepare_terminal_edit_keeps_local_recovery_data_off_the_wire() -> None:
-    """Local recovery facts belong in the outbox, not its event or sidecar."""
-    client = _UploadClient(nio.UploadResponse("mxc://server/final-edit"))
-    text = "final answer " + ("x" * 20_000)
-    semantic_outcome = {"body": text, "interactive": None}
-    edit_content = {
-        "body": f"* {text}",
-        "m.new_content": {
-            "body": text,
-            "msgtype": "m.text",
-            DURABLE_FINAL_OUTCOME_KEY: semantic_outcome,
-        },
-        "m.relates_to": {"rel_type": "m.replace", "event_id": "$target"},
-        "msgtype": "m.text",
-        DURABLE_FINAL_OUTCOME_KEY: semantic_outcome,
-    }
-
-    result = await prepare_large_message(client, "!room:server", edit_content)
-
-    assert calculate_event_size(result) <= _MATRIX_EVENT_HARD_LIMIT
-    assert DURABLE_FINAL_OUTCOME_KEY not in result
-    assert DURABLE_FINAL_OUTCOME_KEY not in result["m.new_content"]
-    assert client.uploaded_data is not None
-    uploaded = json.loads(client.uploaded_data.decode("utf-8"))
-    assert DURABLE_FINAL_OUTCOME_KEY not in uploaded
-    assert DURABLE_FINAL_OUTCOME_KEY not in uploaded["m.new_content"]
-
-
-@pytest.mark.asyncio
-async def test_prepare_terminal_edit_preserves_bounded_result_compatibility_marker() -> None:
-    """A version marker remains visible to older readers without carrying the result."""
-    client = _UploadClient(nio.UploadResponse("mxc://server/final-edit-compatibility"))
-    text = "final answer " + ("x" * 20_000)
-    marker = {"version": 2}
-    edit_content = {
-        "body": f"* {text}",
-        "m.new_content": {
-            "body": text,
-            "msgtype": "m.text",
-            DURABLE_FINAL_OUTCOME_KEY: marker,
-        },
-        "m.relates_to": {"rel_type": "m.replace", "event_id": "$target"},
-        "msgtype": "m.text",
-        DURABLE_FINAL_OUTCOME_KEY: marker,
-    }
-
-    result = await prepare_large_message(client, "!room:server", edit_content)
-
-    assert result["m.new_content"][DURABLE_FINAL_OUTCOME_KEY] == {"version": 2}
-    assert calculate_event_size(result) <= _MATRIX_EVENT_HARD_LIMIT
 
 
 @pytest.mark.asyncio

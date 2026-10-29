@@ -751,12 +751,14 @@ async def test_a_fresh_turn_the_receipt_names_keeps_it_after_its_input_across_it
         chunks = [
             chunk
             async for chunk in stream_agent_response(
-                ctx,
-                prompt="Check the report",
-                runtime_paths=paths,
-                config=config,
-                execution_identity=identity,
-                supports_native_tool_approval=True,
+                replace(
+                    ctx,
+                    prompt="Check the report",
+                    execution_identity=identity,
+                    supports_native_tool_approval=True,
+                ),
+                paths,
+                config,
             )
         ]
 

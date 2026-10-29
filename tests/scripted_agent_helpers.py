@@ -42,8 +42,8 @@ def stored_runs(
 
 
 def streamed_text(chunks: Iterable[AIStreamChunk]) -> list[str]:
-    """Return the text deltas a reply streamed, in order."""
-    return [chunk.text for chunk in chunks if isinstance(chunk, TextDelta)]
+    """Return the text a reply streamed, in order: its deltas, and a failed run's reply, which is a bare string."""
+    return [chunk if isinstance(chunk, str) else chunk.text for chunk in chunks if isinstance(chunk, str | TextDelta)]
 
 
 @contextmanager

@@ -19,7 +19,7 @@ from mindroom.matrix.client_delivery import (
 from mindroom.message_target import MessageTarget
 from mindroom.reply_lifecycle import ReplyState, SpanOutcome
 from mindroom.reply_presentation import decode_presentation, render_body
-from mindroom.response_runner import DeliveryProgress, ResponseRunner, _ResponseGenerationOutcome
+from mindroom.response_runner import DeliveryProgress, ResponseRunner
 from mindroom.response_sources import ResponseSources
 from tests.ai_user_id_helpers import (
     _build_response_runner,
@@ -41,11 +41,38 @@ from tests.reply_span_helpers import seed_finished_reply
 from tests.response_runner_helpers import _bot, _noop_typing, _plain_request, _target
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable
+    from collections.abc import AsyncIterator, Awaitable, Callable
     from pathlib import Path
 
-    from mindroom.history.turn_recorder import TurnRecorder
     from mindroom.response_runner import ResponseRequest
+    from mindroom.response_turn import TurnSinks
+
+
+def _turn_stream(
+    *chunks: str,
+    error: Exception | None = None,
+    run_id: str | None = None,
+) -> Callable[..., AsyncIterator[str]]:
+    """Return a turn stream that yields ``chunks``, recording a completed turn under ``run_id`` when given, or raises."""
+
+    def stream(*_args: object, sinks: TurnSinks, **_kwargs: object) -> AsyncIterator[str]:
+        async def chunks_then_end() -> AsyncIterator[str]:
+            for chunk in chunks:
+                yield chunk
+            if error is not None:
+                raise error
+            if run_id is not None:
+                assert sinks.turn_recorder is not None
+                sinks.turn_recorder.record_completed(
+                    run_id=run_id,
+                    run_metadata=None,
+                    assistant_text="".join(chunks),
+                    completed_tools=(),
+                )
+
+        return chunks_then_end()
+
+    return stream
 
 
 class _FakeHomeserver:
@@ -131,14 +158,10 @@ async def test_one_turn_never_shows_two_placeholders(
     coordinator = unwrap_extracted_collaborator(bot._response_runner)
     homeserver = _FakeHomeserver(accepts_first=server_kept_the_placeholder)
 
-    async def die_before_answering(_request: object, **_kwargs: object) -> _ResponseGenerationOutcome:
-        msg = "process died before the answer"
-        raise RuntimeError(msg)
-
     with (
         patch("mindroom.delivery_gateway.send_message_outcome", new=homeserver.send),
-        patch.object(coordinator, "_process_and_respond", new=AsyncMock(side_effect=die_before_answering)),
         patch_response_runner_module(
+            stream_agent_response=_turn_stream(error=RuntimeError("process died before the answer")),
             should_use_streaming=AsyncMock(return_value=False),
             typing_indicator=_noop_typing,
             apply_post_response_effects=AsyncMock(),
@@ -180,9 +203,8 @@ def test_delivery_progress_transitions() -> None:
 async def test_agent_post_delivery_failure_settles_error_outcome(tmp_path: Path) -> None:
     """A failure after delivery started settles a terminal error instead of asserting.
 
-    The reply ends failed with its error note below what it recorded, rather
-    than the streamer's finalize, whose placeholder-only cleanup could redact
-    an adopted thinking message that already carries the full streamed reply.
+    The reply ends failed with its error note below what it recorded: a delivery that already started may have
+    written the answer, so its event is noted, never finalized as if the answer landed.
     """
     bot = _bot(tmp_path)
     unique_room_send_responses(bot.client)
@@ -194,17 +216,11 @@ async def test_agent_post_delivery_failure_settles_error_outcome(tmp_path: Path)
         effect_outcomes.append(final_outcome)
         effect_response_outcomes.append(response_outcome)
 
-    async def failing_process(_request: object, **kwargs: object) -> _ResponseGenerationOutcome:
-        on_delivery_started = cast("Callable[[str | None], None]", kwargs["on_delivery_started"])
-        cast("TurnRecorder", kwargs["turn_recorder"]).set_run_id("run-attempt-1")
-        on_delivery_started("$stream-event")
-        msg = "delivery pipe burst"
-        raise RuntimeError(msg)
-
     with (
         patch.object(DeliveryGateway, "finalize_streamed_response", new=AsyncMock()) as mock_finalize,
-        patch.object(coordinator, "_process_and_respond", new=AsyncMock(side_effect=failing_process)),
+        patch.object(DeliveryGateway, "deliver_final", new=AsyncMock(side_effect=RuntimeError("delivery pipe burst"))),
         patch_response_runner_module(
+            stream_agent_response=_turn_stream("The answer", run_id="run-attempt-1"),
             should_use_streaming=AsyncMock(return_value=False),
             typing_indicator=_noop_typing,
             apply_post_response_effects=AsyncMock(side_effect=fake_post_effects),
@@ -223,7 +239,7 @@ async def test_agent_post_delivery_failure_settles_error_outcome(tmp_path: Path)
     assert len(effect_outcomes) == 1
     assert effect_outcomes[0].terminal_status == "error"
     assert effect_outcomes[0].failure_reason == "delivery pipe burst"
-    # The caller-owned collector keeps the real attempt id on raising paths.
+    # The turn's record keeps the real attempt id on raising paths.
     assert effect_response_outcomes[0].response_run_id == "run-attempt-1"
 
 
@@ -242,10 +258,6 @@ async def test_agent_regeneration_pre_delivery_failure_leaves_prior_answer_intac
 
     async def fake_post_effects(final_outcome: object, *_args: object) -> None:
         effect_outcomes.append(final_outcome)
-
-    async def failing_process(_request: object, **_kwargs: object) -> _ResponseGenerationOutcome:
-        msg = "regen prep exploded"
-        raise RuntimeError(msg)
 
     request = _plain_request(_target())
     regen_request: ResponseRequest = request.__class__(
@@ -266,8 +278,8 @@ async def test_agent_regeneration_pre_delivery_failure_leaves_prior_answer_intac
     )
     with (
         patch.object(DeliveryGateway, "send_text", new=AsyncMock(return_value="$thinking")),
-        patch.object(coordinator, "_process_and_respond", new=AsyncMock(side_effect=failing_process)),
         patch_response_runner_module(
+            stream_agent_response=_turn_stream(error=RuntimeError("regen prep exploded")),
             should_use_streaming=AsyncMock(return_value=False),
             typing_indicator=_noop_typing,
             apply_post_response_effects=AsyncMock(side_effect=fake_post_effects),
@@ -324,7 +336,7 @@ async def test_team_post_delivery_failure_settles_error_outcome_without_finalize
             "mindroom.response_lifecycle.apply_post_response_effects",
             new=AsyncMock(side_effect=fake_post_effects),
         ),
-        patch("mindroom.response_runner.team_response", new=AsyncMock(return_value="Team answer")),
+        patch("mindroom.response_runner.team_response_stream", new=_turn_stream("Team answer")),
         patch("mindroom.response_runner.typing_indicator", _noop_typing),
     ):
         coordinator = _build_response_runner(
@@ -393,8 +405,8 @@ async def test_team_pre_delivery_failure_ends_the_reply_failed_and_reraises(tmp_
         patch("mindroom.response_runner.should_use_streaming", new=AsyncMock(return_value=False)),
         patch("mindroom.response_lifecycle.apply_post_response_effects", new=AsyncMock(return_value=None)),
         patch(
-            "mindroom.response_runner.team_response",
-            new=AsyncMock(side_effect=RuntimeError("team prep exploded")),
+            "mindroom.response_runner.team_response_stream",
+            new=_turn_stream(error=RuntimeError("team prep exploded")),
         ),
         patch("mindroom.response_runner.typing_indicator", _noop_typing),
     ):

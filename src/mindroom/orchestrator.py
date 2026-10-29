@@ -94,7 +94,7 @@ from mindroom.mcp.toolkit import bind_mcp_server_manager
 from mindroom.memory import MemoryAutoFlushWorker, auto_flush_enabled
 from mindroom.private_storage.legacy_private_storage import migrate_private_storage
 from mindroom.providers.model_http_client import aclose_model_http_client
-from mindroom.response_activity import ResponseIdentity
+from mindroom.response_activity import ActiveResponseIdentity
 from mindroom.response_admission import ResponseAdmissionGate
 from mindroom.runtime_shutdown import (
     ENTITY_REMOVED_SHUTDOWN,
@@ -581,10 +581,10 @@ class _MultiAgentOrchestrator:
         """Return the process-local background-script lifecycle collaborator."""
         return self._script_runtime
 
-    def active_call_identities(self) -> list[ResponseIdentity]:
+    def active_call_identities(self) -> list[ActiveResponseIdentity]:
         """Return one identity per voice call that any bot has joined or is joining."""
         return [
-            ResponseIdentity(responder=entity_name, requester_id=requester_id)
+            ActiveResponseIdentity(responder=entity_name, requester_id=requester_id)
             for entity_name, bot in self.agent_bots.items()
             for requester_id in bot.active_call_requesters
         ]
@@ -2759,7 +2759,7 @@ async def _run_api_server(  # noqa: PLR0915 - the primary API and its worker-fac
     thread_export_runner: WorkspaceThreadExportRunner | None = None,
     leave_matrix_room: Callable[[str, str], Awaitable[bool]] | None = None,
     response_admission_gate: ResponseAdmissionGate | None = None,
-    active_calls: Callable[[], list[ResponseIdentity]] | None = None,
+    active_calls: Callable[[], list[ActiveResponseIdentity]] | None = None,
     config_reload_status: Callable[[], ConfigReloadStatus] | None = None,
     agent_reply_memberships: AgentReplyMembershipIndex | None = None,
     agent_cli_registry: TurnToolRegistry | None = None,

@@ -47,7 +47,6 @@ from mindroom.mcp.toolkit import bind_mcp_server_manager
 from mindroom.memory import search_agent_memories
 from mindroom.response_turn import apply_exact_approval_decisions
 from mindroom.session_storage.agent_storage import create_session_storage
-from mindroom.tool_system.events import CollectedStreamPresentation
 from mindroom.tool_system.runtime_context import (
     build_execution_identity_from_runtime_context,
     get_tool_runtime_context,
@@ -126,8 +125,7 @@ class ProtocolShell:
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("function", ["sync", "asynchronous", "generator", "async_generator"])
-@pytest.mark.parametrize("streamed", [False, True])
-async def test_response_direct_cli_parity(tmp_path, monkeypatch, function, streamed) -> None:
+async def test_response_direct_cli_parity(tmp_path, monkeypatch, function) -> None:
     """Removing canonical context, hooks, generators, or hidden dispatch breaks parity."""
     runtime = _runtime_context(tmp_path)
     runtime.config.administrators = [runtime.requester_id]
@@ -195,24 +193,17 @@ async def test_response_direct_cli_parity(tmp_path, monkeypatch, function, strea
             ],
             "done",
         ]
-        ctx = replace(_turn_context(), agent_mode=mode, run_id=None)
+        ctx = replace(
+            _turn_context(),
+            agent_mode=mode,
+            run_id=None,
+            prompt="same parity task",
+            execution_identity=identity,
+            supports_native_tool_approval=True,
+            show_tool_calls=True,
+        )
         with tool_runtime_context(runtime):
-            kwargs = {
-                "prompt": "same parity task",
-                "runtime_paths": runtime.runtime_paths,
-                "config": runtime.config,
-                "execution_identity": identity,
-                "supports_native_tool_approval": True,
-                "show_tool_calls": True,
-            }
-            result = (
-                await ai.collect_streamed_response_content(
-                    ai.stream_agent_response(ctx, **kwargs),
-                    presentation=CollectedStreamPresentation(show_tool_calls=True),
-                )
-                if streamed
-                else await ai.ai_response(ctx, **kwargs)
-            )
+            result = await ai.ai_response(ctx, runtime.runtime_paths, runtime.config)
         results.append(result)
     assert effects[0][:4] == effects[1][:4]
     assert effects[1][4] == identity
@@ -288,12 +279,16 @@ async def test_same_child_responder_direct_and_cli_provenance(tmp_path, monkeypa
             ]
             with tool_runtime_context(runtime):
                 await ai.ai_response(
-                    replace(_turn_context(), agent_mode=mode, run_id=None),
-                    prompt="delegate task",
-                    runtime_paths=runtime.runtime_paths,
-                    config=runtime.config,
-                    execution_identity=build_execution_identity_from_runtime_context(runtime),
-                    supports_native_tool_approval=True,
+                    replace(
+                        _turn_context(),
+                        agent_mode=mode,
+                        run_id=None,
+                        prompt="delegate task",
+                        execution_identity=build_execution_identity_from_runtime_context(runtime),
+                        supports_native_tool_approval=True,
+                    ),
+                    runtime.runtime_paths,
+                    runtime.config,
                 )
         assert len(children) == 2
         first, second = children
@@ -345,14 +340,18 @@ def response_harness(tmp_path, monkeypatch) -> SimpleNamespace:
         provider.steps = steps
         with tool_runtime_context(runtime):
             return await ai.ai_response(
-                replace(_turn_context(), agent_mode=mode, run_id=None),
-                prompt=prompt,
-                runtime_paths=runtime.runtime_paths,
-                config=runtime.config,
-                knowledge=knowledge,
-                execution_identity=build_execution_identity_from_runtime_context(runtime),
-                supports_native_tool_approval=True,
-                show_tool_calls=True,
+                replace(
+                    _turn_context(),
+                    agent_mode=mode,
+                    run_id=None,
+                    prompt=prompt,
+                    knowledge=knowledge,
+                    execution_identity=build_execution_identity_from_runtime_context(runtime),
+                    supports_native_tool_approval=True,
+                    show_tool_calls=True,
+                ),
+                runtime.runtime_paths,
+                runtime.config,
             )
 
     h.respond = respond
@@ -754,16 +753,12 @@ async def test_concurrent_factory_owners_scoped_credentials_and_grants(tmp_path,
             requester_id=runtime.requester_id,
             agent_mode=mode,
             run_id=None,
+            prompt="concurrent scoped integration",
+            execution_identity=build_execution_identity_from_runtime_context(runtime),
+            supports_native_tool_approval=True,
         )
         with tool_runtime_context(runtime):
-            return await ai.ai_response(
-                turn,
-                prompt="concurrent scoped integration",
-                runtime_paths=runtime.runtime_paths,
-                config=config,
-                execution_identity=build_execution_identity_from_runtime_context(runtime),
-                supports_native_tool_approval=True,
-            )
+            return await ai.ai_response(turn, runtime.runtime_paths, config)
 
     minimal_steps = {session: provider.steps for session, provider in providers.items()}
     for session, runtime in runtimes.items():

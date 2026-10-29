@@ -395,7 +395,7 @@ class EditRegenerator:
                 raise
             await settle_unless_owned()
 
-        self.deps.response_runner.track_inbox_response(
+        self.deps.response_runner.inbox.track_inbox_response(
             regenerate(),
             name=f"edit_regeneration:{request.correlation_id}",
             room_id=request.response_envelope.target.room_id,
@@ -424,6 +424,7 @@ class EditRegenerator:
             await runner.deliver_team_rejection(
                 request,
                 member_names=[member.name for member in action.form_team.member_statuses],
+                team_mode=self.deps.runtime.config.teams[self.deps.agent_name].mode,
                 rejection_message=action.rejection_message,
             )
             return

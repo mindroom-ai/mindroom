@@ -500,14 +500,11 @@ def _contents(request: ModelRequest) -> list[str]:
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("stream", [False, True])
 @pytest.mark.usefixtures("squad_probe")
 async def test_long_single_team_turn_compacts_mid_turn_and_continues(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     summary_calls: SummaryCalls,
-    *,
-    stream: bool,
 ) -> None:
     """The leader's delegation loop outgrows the window; the fold replaces the replayed history and the turn so far."""
     team = squad_turn(
@@ -519,11 +516,7 @@ async def test_long_single_team_turn_compacts_mid_turn_and_continues(
     )
     _seed_team_history(team)
 
-    if stream:
-        chunks = await team.stream()
-        text = chunks[-1].content
-    else:
-        text = await team.respond()
+    text = await team.respond()
 
     assert text.endswith("All parts done")
     assert summary_calls.inputs

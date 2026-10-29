@@ -188,6 +188,10 @@ class CollectedStreamPresentation:
     tool_trace: list[ToolTraceEntry] = field(default_factory=list)
     track_hidden_tools: bool = False
     canonical_final_body_candidate: str | None = None
+    # The structured state of a team document the stream showed whole, which a resume restores.
+    document_state: dict[str, object] | None = None
+    # Whether a text chunk replaces the collected text, as in a team's stream of whole documents, instead of continuing it.
+    replaces_text: bool = False
     tool_tracker: StreamingToolTracker = field(default_factory=StreamingToolTracker, init=False)
     separate_next_text: bool = field(default=False, init=False, repr=False)
 
@@ -195,6 +199,13 @@ class CollectedStreamPresentation:
         """Restore pending tool identity from the durable trace."""
         self.tool_tracker.restore_pending(self.tool_trace)
         self.separate_next_text = bool(self.response_text and self.tool_tracker.pending_tools)
+
+    def show_text(self, content: str) -> None:
+        """Apply one text chunk: it replaces the collected text in a stream of whole documents, else continues it."""
+        if self.replaces_text:
+            self.response_text = content
+            return
+        self.append_text(content)
 
     def append_text(self, content: object | None) -> None:
         """Append one provider content delta when it is non-empty."""
@@ -236,6 +247,13 @@ class CollectedStreamPresentation:
                 tool_index=pending_tool.visible_tool_index,
             )
         self.tool_tracker.update_visible_trace_entry(self.tool_trace, pending_tool, completed_trace)
+
+    def show_document(self, chunk: StructuredStreamChunk) -> None:
+        """Replace the collected presentation with a document the stream sent whole; one without a trace keeps it."""
+        self.response_text = chunk.content
+        if chunk.tool_trace is not None:
+            self.tool_trace = list(chunk.tool_trace)
+        self.document_state = chunk.presentation_state
 
     def final_text(self) -> str:
         """Return collected deltas, falling back to the provider's canonical final body."""
