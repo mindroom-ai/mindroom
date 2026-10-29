@@ -329,10 +329,33 @@ def test_the_instruction_runs_without_the_agent_shell_environment(
         shutil.rmtree(storage_root)
     script_path = Path(payload["script_path"])
     assert script_path.is_relative_to(worker_storage) == shell_in_worker
+    # Like a fresh tmux session, the task inherits none of the agent shell's variables, which tests may run inside.
     env = {name: value for name, value in os.environ.items() if name != "MINDROOM_AGENT_WORKSPACE"}
 
     assert _run_instruction(tmp_path, payload["instruction"], env) == "MindRoom notified."
     assert not script_path.exists()
+
+
+def test_a_local_shell_mints_beside_an_unconfigured_worker_backend(tmp_path: Path) -> None:
+    """Only a worker shell needs the worker backend's settings to name the script."""
+    process_env = {"MINDROOM_SANDBOX_EXECUTION_MODE": "off", "MINDROOM_WORKER_BACKEND": "docker"}
+    with tool_runtime_context(_context(tmp_path, process_env=process_env)):
+        payload = _payload(CallbackManagerTools().mint_callback("local callback"))
+
+    assert payload["status"] == "ok"
+    assert Path(payload["script_path"]).is_relative_to(_workspace(tmp_path))
+
+
+def test_a_worker_shell_with_an_unconfigured_backend_mints_nothing(tmp_path: Path) -> None:
+    """When the worker's path cannot be named, no record or token-bearing script is left behind."""
+    process_env = {"MINDROOM_SANDBOX_EXECUTION_MODE": "all", "MINDROOM_WORKER_BACKEND": "docker"}
+    with tool_runtime_context(_context(tmp_path, process_env=process_env)):
+        payload = _payload(CallbackManagerTools().mint_callback("worker callback"))
+
+    assert payload["status"] == "error"
+    assert "MINDROOM_DOCKER_WORKER_IMAGE" in payload["message"]
+    assert ExternalTriggerStore(_runtime_paths(tmp_path)).list_records() == []
+    assert not (_workspace(tmp_path) / ".mindroom" / "callbacks").exists()
 
 
 def test_script_failure_rolls_back_record(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
