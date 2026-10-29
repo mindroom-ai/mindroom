@@ -216,7 +216,8 @@ def _prompt_item(message: Message, provider: str) -> dict[str, Any]:
         ]
     if message.files:
         content = item.get("content")
-        parts: list[Any] = content if isinstance(content, list) else [{"type": "input_text", "text": content or ""}]
+        # A copy, so the stored message's own content list never takes the file parts.
+        parts: list[Any] = [*content] if isinstance(content, list) else [{"type": "input_text", "text": content or ""}]
         parts.extend(
             part for file in message.files if (part := responses_file_part(file, provider=provider)) is not None
         )
