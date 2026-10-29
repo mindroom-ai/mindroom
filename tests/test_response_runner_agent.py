@@ -1863,25 +1863,15 @@ class TestAgentBot(AgentBotTestBase):
             ),
         ]
 
+        answer = AsyncMock(return_value="ok")
         with (
-            patch.object(
-                ResponseRunner,
-                "_deliver_turn",
-                new=delivered_turn(
-                    FinalDeliveryOutcome(
-                        terminal_status="completed",
-                        event_id="$response",
-                        is_visible_response=True,
-                        final_visible_body="ok",
-                    ),
-                ),
-            ) as mock_process,
             patch.object(
                 ResponseRunner,
                 "_run_cancellable_response",
                 new=AsyncMock(side_effect=run_cancellable_response),
             ),
             patch("mindroom.response_runner.should_use_streaming", new_callable=AsyncMock, return_value=False),
+            patch("mindroom.response_runner.stream_agent_response", new=streamed_answer(answer)),
             patch("mindroom.response_runner.create_background_task", side_effect=schedule_background_task),
             patch(
                 "mindroom.response_runner.store_conversation_memory",
@@ -1917,12 +1907,12 @@ class TestAgentBot(AgentBotTestBase):
         if scheduled_tasks:
             await asyncio.gather(*scheduled_tasks)
 
-        request = mock_process.await_args.args[0].delivery_request
-        assert request.prompt == "What time is it?"
-        assert request.model_prompt == "What time is it?"
-        assert request.current_timestamp_ms == int(current_turn_time.timestamp() * 1000)
-        assert request.thread_history[0].body == "[2026-03-10 08:10 PDT] Earlier user question"
-        assert request.thread_history[1].body == "Existing agent reply"
+        turn = answer.call_args.args[0]
+        assert turn.prompt == "What time is it?"
+        assert turn.model_prompt == "What time is it?"
+        assert turn.current_timestamp_ms == int(current_turn_time.timestamp() * 1000)
+        assert turn.thread_history[0].body == "[2026-03-10 08:10 PDT] Earlier user question"
+        assert turn.thread_history[1].body == "Existing agent reply"
 
     @pytest.mark.asyncio
     async def test_generate_response_keeps_memory_inputs_unprefixed(
@@ -1986,19 +1976,8 @@ class TestAgentBot(AgentBotTestBase):
             ),
         ]
 
+        answer = AsyncMock(return_value="ok")
         with (
-            patch.object(
-                ResponseRunner,
-                "_deliver_turn",
-                new=delivered_turn(
-                    FinalDeliveryOutcome(
-                        terminal_status="completed",
-                        event_id="$response",
-                        is_visible_response=True,
-                        final_visible_body="ok",
-                    ),
-                ),
-            ) as mock_process,
             patch.object(
                 ResponseRunner,
                 "_run_cancellable_response",
@@ -2006,6 +1985,7 @@ class TestAgentBot(AgentBotTestBase):
             ),
             patch_response_runner_module(
                 should_use_streaming=AsyncMock(return_value=False),
+                stream_agent_response=streamed_answer(answer),
                 create_background_task=schedule_background_task,
                 store_conversation_memory=fake_store_conversation_memory,
             ),
@@ -2039,13 +2019,13 @@ class TestAgentBot(AgentBotTestBase):
         if scheduled_tasks:
             await asyncio.gather(*scheduled_tasks)
 
-        request = mock_process.await_args.args[0].delivery_request
-        assert request.prompt == "What time is it?"
-        assert request.model_prompt == "What time is it?"
-        assert request.current_timestamp_ms == int(current_turn_time.timestamp() * 1000)
-        assert request.thread_history[0].body == "[2026-03-10 08:10 PDT] Bob question"
-        assert request.thread_history[1].body == "[2026-03-10 08:12 PDT] Alice earlier"
-        assert request.thread_history[2].body == "Existing agent reply"
+        turn = answer.call_args.args[0]
+        assert turn.prompt == "What time is it?"
+        assert turn.model_prompt == "What time is it?"
+        assert turn.current_timestamp_ms == int(current_turn_time.timestamp() * 1000)
+        assert turn.thread_history[0].body == "[2026-03-10 08:10 PDT] Bob question"
+        assert turn.thread_history[1].body == "[2026-03-10 08:12 PDT] Alice earlier"
+        assert turn.thread_history[2].body == "Existing agent reply"
 
         assert len(stored_calls) == 1
         store_args, _ = stored_calls[0]
@@ -2393,6 +2373,7 @@ class TestAgentBot(AgentBotTestBase):
         config = self._config_for_storage(tmp_path)
         bot = make_test_agent_bot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
         bot.client = _make_matrix_client_mock()
+        unique_room_send_responses(bot.client, prefix="$response")
 
         async def cached_history_refresh(
             _room_id: str,
@@ -2400,19 +2381,8 @@ class TestAgentBot(AgentBotTestBase):
         ) -> ThreadHistoryResult:
             return ThreadHistoryResult(fresh_history, is_full_history=True)
 
+        answer = AsyncMock(return_value="ok")
         with (
-            patch.object(
-                ResponseRunner,
-                "_deliver_turn",
-                new=delivered_turn(
-                    FinalDeliveryOutcome(
-                        terminal_status="completed",
-                        event_id="$response",
-                        is_visible_response=True,
-                        final_visible_body="ok",
-                    ),
-                ),
-            ) as mock_process,
             patch.object(
                 ResponseRunner,
                 "_run_cancellable_response",
@@ -2425,6 +2395,7 @@ class TestAgentBot(AgentBotTestBase):
             ) as mock_fetch_thread_history,
             patch_response_runner_module(
                 should_use_streaming=AsyncMock(return_value=False),
+                stream_agent_response=streamed_answer(answer),
                 prepare_memory_and_model_context=passthrough_prepare_context,
                 apply_post_response_effects=AsyncMock(),
             ),
@@ -2450,14 +2421,14 @@ class TestAgentBot(AgentBotTestBase):
                     ),
                 )
 
-        assert _handled_response_event_id(resolution) == "$response"
+        assert _handled_response_event_id(resolution) == "$response1"
         mock_fetch_thread_history.assert_awaited_once_with(
             "!test:localhost",
             "$thread",
         )
-        request = mock_process.await_args.args[0].delivery_request
-        assert list(request.thread_history) == fresh_history
-        assert request.thread_history[0].stream_status == STREAM_STATUS_COMPLETED
+        turn = answer.call_args.args[0]
+        assert list(turn.thread_history) == fresh_history
+        assert turn.thread_history[0].stream_status == STREAM_STATUS_COMPLETED
 
     @pytest.mark.asyncio
     async def test_generate_response_timestamps_history_in_the_agents_timezone(
@@ -2480,19 +2451,8 @@ class TestAgentBot(AgentBotTestBase):
         # 2026-03-20 15:00 UTC.
         history = [_visible_message(sender="@alice:localhost", body="older text", timestamp=1_774_018_800_000)]
 
+        answer = AsyncMock(return_value="ok")
         with (
-            patch.object(
-                ResponseRunner,
-                "_deliver_turn",
-                new=delivered_turn(
-                    FinalDeliveryOutcome(
-                        terminal_status="completed",
-                        event_id="$response",
-                        is_visible_response=True,
-                        final_visible_body="ok",
-                    ),
-                ),
-            ) as mock_process,
             patch.object(
                 ResponseRunner,
                 "_run_cancellable_response",
@@ -2505,6 +2465,7 @@ class TestAgentBot(AgentBotTestBase):
             ),
             patch_response_runner_module(
                 should_use_streaming=AsyncMock(return_value=False),
+                stream_agent_response=streamed_answer(answer),
                 apply_post_response_effects=AsyncMock(),
             ),
         ):
@@ -2529,7 +2490,7 @@ class TestAgentBot(AgentBotTestBase):
                     ),
                 )
 
-        [older] = mock_process.await_args.args[0].delivery_request.thread_history
+        [older] = answer.call_args.args[0].thread_history
         assert older.body == "[2026-03-20 08:00 PDT] older text"
 
     @pytest.mark.asyncio

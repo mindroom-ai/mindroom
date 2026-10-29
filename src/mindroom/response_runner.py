@@ -669,9 +669,8 @@ class _LockedTurn:
     """One admitted agent or team turn, prepared: everything its generation and settlement read.
 
     ``request`` is the turn's request as admitted, which its lifecycle, effects, and approval pause read;
-    ``delivery_request`` is the request locked to the target the reply streams into, of which delivery reads only the
-    envelope, sources, and timing. An agent's also carries the model-facing prompt and history its stream answers; a
-    team's keeps the admitted ones, since its stream reads them from its own turn context.
+    ``delivery_request`` is the same request locked to the target the reply streams into; the stream reads the
+    model-facing history and prompt from its own turn context.
     """
 
     request: ResponseRequest
@@ -3152,7 +3151,7 @@ class ResponseRunner:
 
         return _LockedTurn(
             request=request,
-            delivery_request=turn_request,
+            delivery_request=self._request_with_locked_target(request, runtime.resolved_target),
             response_target=resolved_target,
             response_kind="ai",
             history_scope=history_scope,
