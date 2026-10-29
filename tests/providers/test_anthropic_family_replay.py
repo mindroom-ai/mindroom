@@ -130,6 +130,8 @@ async def test_claude_reads_every_text_type_and_notes_an_untyped_file_unread(tmp
             File(content=b"key: value", mime_type="application/yaml", filename="settings.yaml"),
             File(filepath=str(tmp_path / "att_missing"), filename="blob"),
             File(content=b"caf\xe9,ok", filename="latin.csv"),
+            File(content=b"a: 1", filename="config.yaml"),
+            File(content=b"From: a@example.org", filename="mail.eml"),
         ],
     )
 
@@ -140,6 +142,8 @@ async def test_claude_reads_every_text_type_and_notes_an_untyped_file_unread(tmp
         {"type": "document", "source": {"type": "text", "media_type": "text/plain", "data": "key: value"}},
         {"type": "text", "text": unreadable_type_note("blob", "application/octet-stream")},
         {"type": "document", "source": {"type": "text", "media_type": "text/plain", "data": "caf\ufffd,ok"}},
+        {"type": "document", "source": {"type": "text", "media_type": "text/plain", "data": "a: 1"}},
+        {"type": "document", "source": {"type": "text", "media_type": "text/plain", "data": "From: a@example.org"}},
     ]
 
 

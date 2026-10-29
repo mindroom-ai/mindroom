@@ -1441,7 +1441,21 @@ def _sent_type(part: dict[str, Any] | None) -> str:
             "text/plain",
         ),
         (File(content=b"{}", filename="data.json"), "text", "application/json"),
-        (File(content=b"From: a@example.org\n\nHi", filename="mail.eml"), "note message/rfc822", "message/rfc822"),
+        (File(content=b"From: a@example.org\n\nHi", filename="mail.eml"), "text", "message/rfc822"),
+        (File(content=b"a: 1", filename="config.yaml"), "text", "application/yaml"),
+        (File(content=b"x = 1", filename="app.toml"), "text", "application/toml"),
+        (File(content=b"started", filename="server.log"), "text", "text/plain"),
+        (File(content=b"let x = 1", filename="app.ts"), "text", "text/x-typescript"),
+        (
+            File(content=b"let x = 1", filename="app.js", mime_type="application/javascript"),
+            "text",
+            "application/javascript",
+        ),
+        (
+            File(content=b"echo hi", filename="run", mime_type="application/x-shellscript"),
+            "text",
+            "note application/x-shellscript",
+        ),
         (
             File(content=b"a,b", filename="report.csv.gz"),
             "note application/octet-stream",

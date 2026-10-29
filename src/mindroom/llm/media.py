@@ -340,12 +340,44 @@ class File:
 MEDIA_MIME_FAMILIES: dict[type[Image | Audio | Video], str] = {Image: "image/", Audio: "audio/", Video: "video/"}
 
 
-# Python's MIME database lacks or misnames these document formats; host /etc/mime.types must not decide.
+# Python's MIME database lacks or misnames these document, text, and code formats, most of them extensions OpenAI's
+# file inputs guide lists; host /etc/mime.types must not decide.
 _NAMED_FILE_TYPES = {
     ".docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
     ".pptx": "application/vnd.openxmlformats-officedocument.presentationml.presentation",
     ".xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    ".xla": "application/vnd.ms-excel",
+    ".xlc": "application/vnd.ms-excel",
+    ".xlm": "application/vnd.ms-excel",
+    ".xlt": "application/vnd.ms-excel",
+    ".xlw": "application/vnd.ms-excel",
+    ".odt": "application/vnd.oasis.opendocument.text",
+    ".iif": "text/x-iif",
     ".sh": "text/x-sh",
+    ".yaml": "application/yaml",
+    ".yml": "application/yaml",
+    ".toml": "application/toml",
+    ".ini": "text/x-ini",
+    ".sql": "application/x-sql",
+    ".ts": "text/x-typescript",
+    ".go": "text/x-go",
+    ".rs": "text/x-rust",
+    ".cc": "text/x-c++",
+    ".cpp": "text/x-c++",
+    ".cxx": "text/x-c++",
+    ".hh": "text/x-c++",
+    ".asm": "text/x-asm",
+    ".s": "text/x-asm",
+    ".ics": "text/calendar",
+    ".ifb": "text/calendar",
+    ".mime": "message/rfc822",
+    ".conf": "text/plain",
+    ".def": "text/plain",
+    ".dic": "text/plain",
+    ".in": "text/plain",
+    ".list": "text/plain",
+    ".log": "text/plain",
+    ".text": "text/plain",
 }
 
 
