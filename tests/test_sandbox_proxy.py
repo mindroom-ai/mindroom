@@ -1142,23 +1142,30 @@ async def test_a_toolkit_function_runs_its_request_on_the_threads_of_the_call_th
 
 
 @pytest.mark.asyncio
-async def test_a_synchronous_tool_may_run_a_toolkit_function_on_its_own_event_loop(
+async def test_a_synchronous_tool_cannot_run_a_toolkit_function_on_its_own_event_loop(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A synchronous tool that runs a nested call with ``asyncio.run`` inside a job's call gets its result."""
-    toolkit, restore = _routed_ping_toolkit(monkeypatch, "test_routed_ping_sync_tool")
+    """A nested call a synchronous tool runs with ``asyncio.run`` fails before its request starts; the owner settles."""
+    requests: list[str] = []
+
+    def respond(_url: str, _payload: dict[str, Any]) -> object:
+        requests.append(threading.current_thread().name)
+        return {"ok": True, "result": "sandbox-result"}
+
+    toolkit, restore = _routed_ping_toolkit(monkeypatch, "test_routed_ping_sync_tool", respond)
     try:
         ping = toolkit_functions(toolkit)["ping"]
 
         def sync_tool() -> str:
             return asyncio.run(ping())
 
-        async with owned_sync_tool_completion(JOB_CALL_EXECUTOR):
-            result = await run_sync_tool_entrypoint(sync_tool)
+        with pytest.raises(RuntimeError, match="make the tool async to call other tools"):
+            async with owned_sync_tool_completion(JOB_CALL_EXECUTOR):
+                await run_sync_tool_entrypoint(sync_tool)
     finally:
         restore()
 
-    assert result == "sandbox-result"
+    assert requests == []
 
 
 @pytest.mark.asyncio

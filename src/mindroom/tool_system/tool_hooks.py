@@ -119,9 +119,11 @@ class SyncToolCompletionTracker:
     ``executor`` runs the entrypoint; ``None`` uses the event loop's default executor.
     An owner that supplies an executor also runs and retains the blocking call an async
     entrypoint offloads, such as a worker proxy request, so its capacity covers that thread.
+    The owner makes it on its own event loop, the only one its leaves may start from.
     """
 
     executor: Executor | None = None
+    _loop: asyncio.AbstractEventLoop = field(default_factory=asyncio.get_running_loop, init=False, repr=False)
     _leaves: list[tuple[_StartClaim, asyncio.Task[_ToolHookResult]]] = field(
         default_factory=list,
         init=False,
@@ -342,14 +344,19 @@ def _resolve_tool_context(
 async def run_sync_tool_entrypoint(call: Callable[[], _ToolHookResult]) -> _ToolHookResult:
     """Run one synchronous tool call off the event loop, retained by any completion owner."""
     tracker = _SYNC_TOOL_COMPLETION_TRACKER.get()
+    if tracker is not None and tracker._loop is not asyncio.get_running_loop():
+        # A synchronous body that runs its own event loop, as with asyncio.run, would start work its owner cannot hold.
+        msg = (
+            "A synchronous tool cannot run a nested tool call on its own event loop; "
+            "make the tool async to call other tools."
+        )
+        raise RuntimeError(msg)
     claim = _StartClaim()
 
     def invoke() -> _ToolHookResult:
         if not claim.claim_start():
             raise asyncio.CancelledError
-        # The body's thread owns what it starts, such as a nested call through asyncio.run; the owner waits for it.
-        with track_sync_tool_completion(None):
-            return call()
+        return call()
 
     async def offload() -> _ToolHookResult:
         executor = tracker.executor if tracker is not None else None
