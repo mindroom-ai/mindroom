@@ -161,6 +161,8 @@ def test_a_personal_agent_template_cannot_answer() -> None:
 
     with pytest.raises(ValidationError, match=r"personal_agents\.mind\.agent\.tools\.slack\.room"):
         Config.model_validate(data)
+    data["personal_agents"]["mind"]["agent"] = _agent(rooms=["lobby"], channels=["C0123ABCD"], room=None)
+    assert Config.model_validate(data).personal_agents["mind"].agent.rooms == ["lobby"]
 
 
 def test_answering_needs_the_user_mapping() -> None:

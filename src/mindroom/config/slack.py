@@ -138,9 +138,12 @@ def validate_slack_agents(config: Config) -> None:
     for name, agent in config.agents.items():
         _check_agent(config, name, agent)
     for key, template in config.personal_agents.items():
-        if "room" in _slack_overrides(template.agent):
+        if _slack_overrides(template.agent).get("room") is not None:
             # Every owner's agent would answer the same channels, which fails only once a second owner onboards.
-            msg = f"personal_agents.{key}.agent.tools.slack.room: a template cannot answer Slack mentions"
+            msg = (
+                f"personal_agents.{key}.agent.tools.slack.room: a template cannot answer Slack mentions; "
+                "set room in one user's override or on a regular agent"
+            )
             raise ValueError(msg)
     answered_by: dict[str, str] = {}
     for answering in slack_answering_agents(config):
