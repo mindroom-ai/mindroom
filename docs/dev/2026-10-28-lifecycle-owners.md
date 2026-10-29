@@ -6,7 +6,7 @@ It records reasons, rejected alternatives, and accepted limitations; the code sh
 ## Decisions
 
 - The config update plan is the only place that decides what a reload restarts, starts, removes, and re-authorizes.
-  Its restart, start, and remove sets are disjoint by construction, because a removed entity that was also treated as a restart was stopped by the restart path and then skipped by the removal path, so it never left its rooms and its approval recovery ran after its sender stopped.
+  Its restart, start, and remove sets are disjoint by construction, because an entity in both the restart and remove sets would be stopped by the restart path and then skipped by the removal path, never leaving its rooms, with its approval recovery running after its sender stopped.
 - A reload stops every entity it changes before it publishes the new config.
   Removal runs first, while the current router still delivers unavailable-approval notices and before a replacement router's orphan cleanup could remove the departing accounts from their rooms; restarted entities stop next.
   Plugins are staged before anything stops, so a plugin reload that fails to stage fails the config reload with every bot still running.
@@ -15,10 +15,10 @@ It records reasons, rejected alternatives, and accepted limitations; the code sh
 - Three authorization predicates stay separate because they gate different things: any reply-authorization input (publication waits for replies), a continuing agent's responder access (background scripts are re-authorized; a broader trigger would end scripts whose bot is merely restarting, because an unavailable bot cannot confirm authority), and room-membership grant inputs (grants are revoked until the router refreshes, which blocks replies, so it must not fire on extra inputs).
 - One entity fleet holds each entity's bot, sync task, start retry, and disabled flag in one slot, with one stop sequence per reason.
   A restart tolerates only a reply that outlived the drain, because the replacement replays it; removal and process shutdown keep a bot that still owns cleanup registered until its deferred stop finishes.
-- A bot start is one attempt and the fleet owns every retry, because a retry inside the fleet's own retry loop multiplied attempts and delayed the degraded report.
+- A bot start is one attempt and the fleet owns every retry, because a retry inside the fleet's own retry loop multiplies attempts and delays the degraded report.
 - An edit made while MindRoom starts is applied once startup publishes its config: a reload request made before the runtime runs is kept, and startup reloads once if the config files changed since it loaded them.
 - Each scheduled task has one owner bot, decided once when the task is saved and stored in its state: the router when the room's full state lets it send the task's trigger and write schedule state, else the bot that saved the task.
-  Recomputing the owner at each restore from the latest writer disagreed with creation twice over: a synced room view lazy-loads members, so it can lack a joined router that the full state shows, and an edit by another agent made that agent the latest writer while the runner stayed with the creator.
+  Recomputing the owner at each restore from the latest writer would disagree with creation twice over: a synced room view lazy-loads members, so it can lack a joined router that the full state shows, and an edit by another agent makes that agent the latest writer while the runner stays with the creator.
   Edits, status writes, and cancellations keep the stored owner whichever bot writes them, so a restarting owner keeps its tasks and its recurring checkpoint key, and every bot that restores the room reads the same owner.
   Runners outlive their owner's restarts instead of being cancelled and restored, because a restore races the replacement's own restore on join and a cancelled send has no safe replay; a stopping owner admits no new operation and its operations in flight drain, bounded, before its client closes.
 - A removed entity's scheduled tasks fail; they are never handed to another bot.
@@ -31,7 +31,7 @@ It records reasons, rejected alternatives, and accepted limitations; the code sh
 
 - Stopping only MCP-dependent entities before the MCP sync and the rest after publication: it kept two stop phases and a reconciliation parameter between them; stopping every changed entity first meets the same need.
   Cost: an entity restarted in the same reload as an MCP server change is also down during the MCP sync, while admission is closed anyway.
-- Keeping the dashboard's own config watcher and loader beside the runtime's: every edit was loaded twice, running plugin modules twice, and two loads raced to publish the dashboard's config.
+- Keeping the dashboard's own config watcher and loader beside the runtime's: every edit would load twice, running plugin modules twice, with two loads racing to publish the dashboard's config.
   Cost of the single loader: the windows under Accepted limitations, in which the dashboard lags behind a file edit while the runtime applies another one.
 - Refusing a dashboard save whose config files changed on disk since the dashboard loaded them: the dashboard deliberately lets a save replace a broken config file before any reload has read it, and that check would refuse the recovery.
 - A listener protocol for entity lifecycle events: there is exactly one listener, the orchestrator, so the fleet takes plain hooks.
