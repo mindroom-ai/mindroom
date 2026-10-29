@@ -59,7 +59,6 @@ depends_on = [
     "mindroom.embeddings.ollama_embedder",
     "mindroom.embeddings.openai_embedder",
     "mindroom.embeddings.sentence_transformers_embedder",
-    "mindroom.model_defaults",
 ]
 
 [[modules]]
@@ -8446,7 +8445,6 @@ path = "mindroom.providers.ollama.adapter"
 depends_on = [
     "mindroom.credentials.sync",
     "mindroom.llm",
-    "mindroom.model_defaults",
     "mindroom.providers.assistant_turn",
     "mindroom.providers.extra_kwargs",
     "mindroom.providers.media_files",

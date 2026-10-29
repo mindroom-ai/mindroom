@@ -300,11 +300,13 @@ def test_databases_agno_3_created_are_left_untouched(tmp_path: Path) -> None:
 def test_owners_migrating_at_once_move_the_blob_runs_once(tmp_path: Path) -> None:
     """Owners racing to convert one Agno 2 database write each run row once."""
     db_file = _agno_2_database(tmp_path)
+    # Read the owner before the race: a conversion that commits first drops the columns it is read from.
+    owner = recorded_owner(db_file)
     start = threading.Barrier(4)
 
     def migrate(_index: int) -> None:
         start.wait()
-        prepare_conversation_database(db_file, _NAMES, recorded_owner(db_file))
+        prepare_conversation_database(db_file, _NAMES, owner)
 
     with ThreadPoolExecutor(max_workers=4) as pool:
         list(pool.map(migrate, range(4)))

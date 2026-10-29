@@ -242,6 +242,8 @@ OPENROUTER_BASE_URL_DEFAULT = "https://openrouter.ai/api/v1"
 OLLAMA_GEMMA = "gemma4"
 OLLAMA_QWEN = "qwen3.8:27b"
 OLLAMA_HOST_DEFAULT = "http://localhost:11434"
+# The context size config init's Ollama models ask Ollama to load, and so the size MindRoom fits history into.
+_OLLAMA_CONTEXT_WINDOW = 32_768
 
 LLAMA_CPP_GEMMA = "unsloth/gemma-4-26B-A4B-it-GGUF:UD-Q4_K_M"
 LLAMA_CPP_QWEN = "unsloth/Qwen3.8-27B-GGUF:UD-Q4_K_XL"
@@ -278,7 +280,7 @@ CONFIG_INIT_MODEL_PRESETS: Mapping[str, ModelPreset] = MappingProxyType(
         "codex": ModelPreset("codex", _CODEX_GPT, _CODEX_CONTEXT_WINDOW, reasoning_effort="medium", display_name="Sol"),
         "kimi": ModelPreset("kimi", _KIMI, 1_048_576),
         "llama_cpp": ModelPreset("llama_cpp", LLAMA_CPP_GEMMA, 128_000),
-        "ollama": ModelPreset("ollama", OLLAMA_GEMMA, 128_000),
+        "ollama": ModelPreset("ollama", OLLAMA_GEMMA, _OLLAMA_CONTEXT_WINDOW),
         "openai": ModelPreset("openai", _OPENAI_GPT, 1_050_000),
         "openrouter": ModelPreset("openrouter", _OPENROUTER_CLAUDE_SONNET, 1_000_000),
         "vertexai_claude": ModelPreset("vertexai_claude", _ANTHROPIC_SONNET, 1_000_000),
@@ -350,7 +352,7 @@ CONFIG_INIT_ADDITIONAL_MODELS: Mapping[str, tuple[tuple[str, ModelPreset], ...]]
             ),
         ),
         "llama_cpp": ((LOCAL_QWEN_PRESET_NAME, ModelPreset("llama_cpp", LLAMA_CPP_QWEN, LOCAL_QWEN_CONTEXT_WINDOW)),),
-        "ollama": ((LOCAL_QWEN_PRESET_NAME, ModelPreset("ollama", OLLAMA_QWEN, LOCAL_QWEN_CONTEXT_WINDOW)),),
+        "ollama": ((LOCAL_QWEN_PRESET_NAME, ModelPreset("ollama", OLLAMA_QWEN, _OLLAMA_CONTEXT_WINDOW)),),
     },
 )
 

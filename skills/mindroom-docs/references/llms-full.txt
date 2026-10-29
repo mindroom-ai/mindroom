@@ -3279,7 +3279,7 @@ Mem0 supports the `openai` (default), `ollama`, `huggingface`, and `sentence_tra
 |---|---|---|
 | `provider` | `openai` | Embedding provider |
 | `config.model` | `text-embedding-3-small` | Embedding model name |
-| `config.host` | `null` | Base URL for OpenAI-compatible endpoints, or the Ollama host; for `ollama`, a configured `OLLAMA_HOST` takes precedence, and the fallback is `http://localhost:11434` |
+| `config.host` | `null` | Base URL for OpenAI-compatible endpoints, or the Ollama host; for `ollama`, a configured `OLLAMA_HOST` takes precedence over `host`, and without either the host is `http://localhost:11434` |
 | `config.dimensions` | `null` | Embedding dimension override (>= 1) for OpenAI-compatible providers |
 | `config.api_key` | `null` | Explicit API key for the `openai` provider |
 | `config.credentials_service` | `null` | Credential service that supplies the `openai` provider's key |
@@ -3360,7 +3360,7 @@ When the embedder rejects its credential, semantic memory search reports the cau
 `memory.llm` sets the model Mem0 uses to extract memories.
 Supported providers are `ollama`, `openai`, `openrouter`, and `anthropic`.
 When `memory.llm` is omitted, MindRoom uses `gemma4` on the Ollama server set by `OLLAMA_HOST` (default `http://localhost:11434`).
-With `provider: ollama`, `config.host` points extraction at a different Ollama server, but a configured `OLLAMA_HOST` takes precedence; other providers ignore `host`.
+With `provider: ollama`, `config.host` names the Ollama server only when no `OLLAMA_HOST` is configured, unlike a model's `host`; without either, extraction uses `http://localhost:11434`, and other providers ignore `host`.
 With `provider: openai`, use `gpt-6-luna`; other GPT-5 and GPT-6 models that support Chat Completions also work.
 For GPT-5 and GPT-6 models, with `provider: openai` or as `openai/<model>` with `provider: openrouter`, Mem0 sends no `temperature`, `top_p`, or `max_tokens` from `config` unless `config.is_reasoning_model` is `false`; set `config.reasoning_effort`, for example `low`, to choose their reasoning effort.
 
@@ -22392,7 +22392,7 @@ Some presets need a local login or server before MindRoom can answer:
 
 - `codex`: run `codex login` first; see [Codex Models](https://docs.mindroom.chat/configuration/models/#codex-models-with-chatgpt-login) for the generated models.
 - `kimi`: run `kimi` and `/login` first; see [Kimi Models](https://docs.mindroom.chat/configuration/models/#kimi-models-with-kimi-code-login).
-- `ollama`: generates `gemma4` as `default` and `qwen3.8:27b` as `qwen3_8_27b`, with `OLLAMA_HOST=http://localhost:11434`; pull both models first with `ollama pull gemma4` and `ollama pull qwen3.8:27b`.
+- `ollama`: generates `gemma4` as `default` and `qwen3.8:27b` as `qwen3_8_27b`, each loaded with a 32,768-token context (see [Ollama Context Size](https://docs.mindroom.chat/configuration/models/#ollama-context-size) to change it), with `OLLAMA_HOST=http://localhost:11434`; pull both models first with `ollama pull gemma4` and `ollama pull qwen3.8:27b`.
 - `llama.cpp`: generates Unsloth GGUF models for a llama.cpp server at `http://localhost:8080/v1`; start it with one of the configured model refs:
 
 ```bash
