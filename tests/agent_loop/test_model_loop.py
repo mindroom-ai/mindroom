@@ -433,19 +433,13 @@ async def test_a_confirmation_pause_announces_the_call_records_a_requirement_and
     assert record.requirements is not None
     plain, paused = record.tools
     assert (plain.result, plain.is_error, plain.is_paused) == ("fine", False, False)
-    assert paused.to_dict() == {
-        **paused.to_dict(),
-        "tool_call_id": "c2",
-        "tool_name": "add",
-        "tool_args": {"a": 6, "b": 7},
-        "result": None,
-        "tool_call_error": None,
-        "requires_confirmation": True,
-        "confirmed": None,
-        "approval_type": "mindroom_policy",
-        "external_execution_required": None,
-        "external_execution_silent": None,
-    }
+    assert paused == ToolExecution(
+        tool_call_id="c2",
+        tool_name="add",
+        tool_args={"a": 6, "b": 7},
+        requires_confirmation=True,
+        approval_type="mindroom_policy",
+    )
     [requirement] = record.requirements
     assert requirement.tool_execution is paused
     assert requirement.needs_confirmation

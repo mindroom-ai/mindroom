@@ -31,6 +31,7 @@ from tests.llm.agno_dict_helpers import (
     expected_message_dict,
     expected_requirement_dict,
     expected_run_dict,
+    expected_tool_dict,
     stored_run_record,
     without,
 )
@@ -430,7 +431,7 @@ FIXTURE_CODECS: dict[str, tuple[Callable[[dict[str, Any]], Any], Callable[[dict[
     "audio": (Audio.from_dict, dict),
     "video": (Video.from_dict, dict),
     "file": (File.from_dict, dict),
-    "tool_execution": (ToolExecution.from_dict, lambda stored: without(stored, DROPPED_TOOL_EXECUTION_KEYS)),
+    "tool_execution": (ToolExecution.from_dict, expected_tool_dict),
     "run_requirement": (RunRequirement.from_dict, expected_requirement_dict),
     "message_metrics": (MessageMetrics.from_dict, dict),
     "run_metrics": (RunMetrics.from_dict, dict),

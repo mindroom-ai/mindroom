@@ -23,7 +23,7 @@ from mindroom.history.types import HistoryScope
 from mindroom.session_storage.agent_storage import create_state_storage
 from mindroom.session_storage.schema import TableNames
 from mindroom.usage.storage import quote_identifier
-from tests.llm.agno_dict_helpers import MESSAGE_DEFAULTS
+from tests.llm.agno_dict_helpers import MESSAGE_DEFAULTS, TOOL_EXECUTION_DEFAULTS
 from tests.storage_oracle.determinism import deterministic
 from tests.storage_oracle.observe import observe
 
@@ -69,7 +69,7 @@ def decode(text: str) -> dict[str, Any]:
 
 
 def with_defaults(observed: object) -> Any:  # noqa: ANN401 - a JSON value
-    """Return ``observed`` with each message showing the keys its stored dict leaves at their defaults.
+    """Return ``observed`` with each message and tool execution showing the keys its stored dict leaves at their defaults.
 
     The recordings show those keys, since the writers of their time stored every one. A reader reads an absent key as
     its default, so showing them again changes nothing a reader sees, and a key holding any other value still differs.
@@ -81,6 +81,8 @@ def with_defaults(observed: object) -> Any:  # noqa: ANN401 - a JSON value
     shown = {key: with_defaults(value) for key, value in observed.items()}
     if "role" in shown and "id" in shown:
         return {**MESSAGE_DEFAULTS, **shown}
+    if "tool_call_id" in shown and "tool_name" in shown:
+        return {**TOOL_EXECUTION_DEFAULTS, **shown}
     return shown
 
 
