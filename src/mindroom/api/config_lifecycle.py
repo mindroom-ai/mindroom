@@ -56,7 +56,7 @@ if TYPE_CHECKING:
     from mindroom.external_triggers.store import TriggerDeliverySnapshot
     from mindroom.knowledge.refresh_scheduler import KnowledgeRefreshScheduler
     from mindroom.knowledge.watch import KnowledgeSourceWatcher
-    from mindroom.response_activity import ActiveScriptRunInfo, ResponseIdentity
+    from mindroom.response_activity import ActiveResponseIdentity, ActiveScriptRunInfo
     from mindroom.response_admission import ResponseAdmissionGate
     from mindroom.thread_export.workspace_sync import WorkspaceThreadExportRunner
     from mindroom.worker_computer.sessions import ComputerSessionStore
@@ -144,8 +144,8 @@ class _MindroomAppState:
     agent_reply_memberships: AgentReplyMembershipIndex = field(default_factory=AgentReplyMembershipIndex)
     response_admission_gate: ResponseAdmissionGate | None = None
     budget_monitor: BudgetMonitor | None = None
-    openai_responses: set[ResponseIdentity] = field(default_factory=set)
-    active_calls: Callable[[], list[ResponseIdentity]] | None = None
+    openai_responses: set[ActiveResponseIdentity] = field(default_factory=set)
+    active_calls: Callable[[], list[ActiveResponseIdentity]] | None = None
     active_script_runs: Callable[[], Awaitable[list[ActiveScriptRunInfo]]] | None = None
     config_reload_status: Callable[[], ConfigReloadStatus] | None = None
     script_worker_keepalive: Callable[[WorkerBackend], None] | None = None

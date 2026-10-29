@@ -27,8 +27,9 @@ from mindroom.reply_presentation import (
     with_trailing_note,
 )
 from mindroom.streaming import (
+    CANCELLED_RESPONSE_NOTE,
+    INTERRUPTED_RESPONSE_NOTE,
     RESTART_INTERRUPTED_RESPONSE_NOTE,
-    build_cancelled_response_update,
     build_restart_interrupted_body,
     format_stream_error_note,
 )
@@ -91,11 +92,13 @@ def test_codec_rejects_unknown_versions_and_malformed_segments() -> None:
 )
 def test_cancel_and_interruption_bodies_match_main(visible: str) -> None:
     """A trailing cancel or interruption note renders exactly main's terminal text."""
-    for kind, cancel_source in ((NoteKind.CANCELLED, "user_stop"), (NoteKind.INTERRUPTED, "interrupted")):
+    for kind, note in (
+        (NoteKind.CANCELLED, CANCELLED_RESPONSE_NOTE),
+        (NoteKind.INTERRUPTED, INTERRUPTED_RESPONSE_NOTE),
+    ):
         presentation = Presentation(segments=(_answer(visible),) if visible else ())
         body, _trace_entries = render_body(with_trailing_note(presentation, note_segment(kind)))
-        expected, _status = build_cancelled_response_update(visible, cancel_source=cancel_source)
-        assert body == expected
+        assert body == (f"{visible}\n\n{note}" if visible else note)
 
 
 def test_error_note_matches_main() -> None:

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from contextlib import suppress
+from dataclasses import replace
 from typing import TYPE_CHECKING, Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -12,9 +13,8 @@ import pytest
 from structlog.testing import capture_logs
 
 from mindroom.background_tasks import wait_for_background_tasks
-from mindroom.bot import TeamBot
 from mindroom.cancellation import current_task_is_process_shutdown, request_task_cancel
-from mindroom.config.agent import AgentConfig
+from mindroom.config.agent import AgentConfig, TeamConfig
 from mindroom.config.main import Config
 from mindroom.config.plugin import PluginEntryConfig
 from mindroom.delivery_gateway import (
@@ -25,9 +25,8 @@ from mindroom.delivery_gateway import (
     ResponseHookService,
     ResponseIdentity,
 )
-from mindroom.dispatch_source import MESSAGE_SOURCE_KIND
+from mindroom.dispatch_source import EDIT_SOURCE_KIND, MESSAGE_SOURCE_KIND
 from mindroom.final_delivery import FinalDeliveryOutcome, StreamTransportOutcome
-from mindroom.handled_turns import TurnRecord
 from mindroom.history.types import HistoryScope
 from mindroom.hooks import (
     EVENT_MESSAGE_AFTER_RESPONSE,
@@ -52,14 +51,16 @@ from mindroom.post_response_effects import PostResponseEffectsDeps, ResponseOutc
 from mindroom.response_lifecycle import ResponseLifecycle, ResponseLifecycleDeps
 from mindroom.response_runner import ResponseRequest
 from mindroom.response_sources import ResponseSources
+from mindroom.turn_record import TurnRecord
 from tests.access_schema_support import with_current_room_member_access
-from tests.bot_helpers import make_test_team_bot
+from tests.bot_helpers import make_test_agent_bot
 from tests.conftest import (
     TEST_PASSWORD,
     bind_runtime_paths,
     finish_edit_regenerations,
     ignore_final_delivery_handoff,
     install_runtime_journal_support,
+    make_ingress_facts,
     make_matrix_client_mock,
     message_origin,
     replace_edit_regenerator_deps,
@@ -75,12 +76,12 @@ if TYPE_CHECKING:
     from contextlib import AbstractAsyncContextManager
     from pathlib import Path
 
-    from mindroom.bot import TeamBot
+    from mindroom.bot import AgentBot
     from mindroom.event_journal import EventJournalStore, PrincipalStore
     from mindroom.reply_scope import SpanHandle
 
 
-def _config(tmp_path: Path) -> Config:
+def _config(tmp_path: Path, *, teams: dict[str, TeamConfig] | None = None) -> Config:
     runtime_paths = test_runtime_paths(tmp_path)
     return bind_runtime_paths(
         with_current_room_member_access(
@@ -88,6 +89,7 @@ def _config(tmp_path: Path) -> Config:
                 agents={
                     "code": AgentConfig(display_name="Code", rooms=["!room:localhost"]),
                 },
+                teams=teams or {},
             ),
         ),
         runtime_paths,
@@ -174,8 +176,13 @@ def _response_lifecycle(
     )
 
 
-def _team_bot(tmp_path: Path) -> TeamBot:
-    config = _config(tmp_path)
+def _team_bot(tmp_path: Path) -> AgentBot:
+    config = _config(
+        tmp_path,
+        teams={
+            "team_bot": TeamConfig(display_name="Team Bot", role="Team", agents=["code"], rooms=["!room:localhost"]),
+        },
+    )
     runtime_paths = runtime_paths_for(config)
     team_user = AgentMatrixUser(
         agent_name="team_bot",
@@ -183,7 +190,7 @@ def _team_bot(tmp_path: Path) -> TeamBot:
         display_name="Team Bot",
         password=TEST_PASSWORD,
     )
-    bot = make_test_team_bot(
+    bot = make_test_agent_bot(
         team_user,
         tmp_path,
         config=config,
@@ -551,7 +558,7 @@ async def test_after_response_survives_a_failing_reply_mirror(tmp_path: Path, fa
 
 @pytest.mark.asyncio
 async def test_team_bot_empty_prompt_emits_cancelled_hook_once(tmp_path: Path) -> None:
-    """TeamBot empty prompts must finalize through lifecycle so message:cancelled fires exactly once."""
+    """A team's empty prompts must finalize through lifecycle so message:cancelled fires exactly once."""
     bot = _team_bot(tmp_path)
 
     with (
@@ -593,15 +600,20 @@ async def test_team_edit_regeneration_empty_prompt_emits_cancelled_hook_once(tmp
     bot = _team_bot(tmp_path)
     replace_edit_regenerator_deps(bot)
     turn_store = bot._edit_regenerator.deps.turn_store
-    turn_record = TurnRecord(
-        anchor_event_id="$original",
-        source_event_ids=("$original",),
-        response_event_id="$response",
-        response_owner="team_bot",
-        requester_id="@user:localhost",
-        history_scope=HistoryScope(kind="team", scope_id="team_bot"),
-        conversation_target=MessageTarget.resolve("!room:localhost", None, "$original"),
+    await turn_store.record_responded_turn(
+        TurnRecord(
+            anchor_event_id="$original",
+            source_event_ids=("$original",),
+            response_event_id="$response",
+            response_owner="team_bot",
+            requester_id="@user:localhost",
+            history_scope=HistoryScope(kind="team", scope_id="team_bot"),
+            conversation_target=MessageTarget.resolve("!room:localhost", None, "$original"),
+        ),
     )
+    turn_record = await turn_store.get_turn_record("$original")
+    assert turn_record is not None
+    assert turn_record.turn_key is not None
     await seed_finished_reply(
         bot.journal_principal(),
         "$response",
@@ -646,17 +658,17 @@ async def test_team_edit_regeneration_empty_prompt_emits_cancelled_hook_once(tmp
         ),
         patch.object(
             bot._conversation_resolver,
-            "build_message_envelope",
+            "build_envelope",
             return_value=_envelope(body="   "),
         ),
         patch.object(
             turn_store,
-            "load_turn",
+            "get_turn_record_after_writes",
             return_value=turn_record,
         ),
         patch.object(turn_store, "build_run_metadata", return_value={}),
         patch.object(turn_store, "register_edit_revision", return_value=turn_record),
-        patch.object(turn_store, "record_turn"),
+        patch.object(turn_store, "record_edit"),
         patch.object(turn_store, "remove_stale_runs_for_edit"),
         patch.object(turn_store, "prepare_edit_snapshot", return_value=False),
         patch.object(bot._ingress_hook_runner, "emit_message_received_hooks", new=AsyncMock(return_value=False)),
@@ -665,11 +677,12 @@ async def test_team_edit_regeneration_empty_prompt_emits_cancelled_hook_once(tmp
             room,
             edit_event,
             event_info,
-            requester_user_id="@user:localhost",
+            make_ingress_facts(edit_event.sender, source_kind=EDIT_SOURCE_KIND, requester_user_id="@user:localhost"),
         )
         await finish_edit_regenerations(bot)
 
     mock_emit.assert_awaited_once()
+    assert mock_emit.await_args.kwargs["identity"].response_kind == "team"
 
 
 @pytest.mark.asyncio
@@ -1030,7 +1043,6 @@ async def test_final_only_provider_runs_before_response_then_after_response_once
                 target=MessageTarget.resolve("!room:localhost", None, "$event"),
                 stream_transport_outcome=StreamTransportOutcome(
                     last_physical_stream_event_id="$thinking",
-                    terminal_status="completed",
                     rendered_body="Thinking...",
                     visible_body_state="placeholder_only",
                     canonical_final_body_candidate="final body",
@@ -1231,3 +1243,61 @@ async def test_suppressed_placeholder_cleanup_exception_returns_typed_outcome_af
     assert len(cancelled_seen) == 1
     assert cancelled_seen[0].visible_response_event_id is None
     assert cancelled_seen[0].failure_reason == outcome.failure_reason
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("run_succeeded", "applied"), [(True, 1), (False, 0)], ids=["owed-answer", "approval-pause"])
+async def test_a_suspended_reply_applies_its_run_effects_only_once_its_run_finished(
+    tmp_path: Path,
+    run_succeeded: bool,
+    applied: int,
+) -> None:
+    """An answer recorded but not yet in the room finished its run, so memory and skill review take it now.
+
+    A run paused for approval has not finished and applies nothing; neither fires a delivery hook before the reply is
+    in the room.
+    """
+    _, response_hooks = _response_hook_service(tmp_path, HookRegistry.from_plugins([]))
+    lifecycle = _response_lifecycle(response_hooks, response_envelope=_envelope(), correlation_id="corr-owed")
+    post_effects = AsyncMock()
+    after_response = AsyncMock()
+    cancelled = AsyncMock()
+
+    with (
+        patch("mindroom.response_lifecycle.apply_post_response_effects", new=post_effects),
+        patch.object(response_hooks, "emit_after_response", new=after_response),
+        patch.object(response_hooks, "emit_cancelled_response", new=cancelled),
+    ):
+        outcome = await lifecycle.finalize(
+            FinalDeliveryOutcome(terminal_status="suspended", event_id=None, failure_reason="delivery_failed"),
+            build_post_response_outcome=lambda _outcome: ResponseOutcome(run_succeeded=run_succeeded),
+            post_response_deps=PostResponseEffectsDeps(logger=get_logger("tests.post_response")),
+        )
+
+    assert outcome.terminal_status == "suspended"
+    assert post_effects.await_count == applied
+    after_response.assert_not_awaited()
+    cancelled.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_an_owed_answer_hands_a_shutdown_during_its_effects_back_to_the_process(tmp_path: Path) -> None:
+    """Process shutdown owns cancellation, so a shutdown that lands during an owed answer's effects still stops it."""
+    _, response_hooks = _response_hook_service(tmp_path, HookRegistry.from_plugins([]))
+    lifecycle = _response_lifecycle(response_hooks, response_envelope=_envelope(), correlation_id="corr-owed-shutdown")
+    stopping: list[bool] = []
+    lifecycle.deps = replace(lifecycle.deps, process_shutdown_requested=lambda: bool(stopping))
+
+    async def shut_down(*_args: object) -> None:
+        stopping.append(True)
+        raise asyncio.CancelledError
+
+    with (
+        patch("mindroom.response_lifecycle.apply_post_response_effects", new=AsyncMock(side_effect=shut_down)),
+        pytest.raises(asyncio.CancelledError),
+    ):
+        await lifecycle.finalize(
+            FinalDeliveryOutcome(terminal_status="suspended", event_id=None),
+            build_post_response_outcome=lambda _outcome: ResponseOutcome(),
+            post_response_deps=PostResponseEffectsDeps(logger=get_logger("tests.post_response")),
+        )

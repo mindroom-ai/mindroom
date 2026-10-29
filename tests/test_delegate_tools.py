@@ -46,6 +46,8 @@ if TYPE_CHECKING:
     from collections.abc import Iterator
     from pathlib import Path
 
+    from mindroom.response_turn import ResponseTurnContext
+
 
 def _make_config(agents: dict[str, AgentConfig]) -> Config:
     """Create a minimal Config with the given agents."""
@@ -303,20 +305,19 @@ class TestDelegateTools:
             result = await tools.run_subagent(agent_name="code", task="Write a hello world program")
 
             assert mock_ai_response.await_count == 1
-            call_kwargs = mock_ai_response.await_args.kwargs
             call_ctx = mock_ai_response.await_args.args[0]
             assert call_ctx.entity_label == "code"
-            assert call_kwargs["prompt"] == "Write a hello world program"
-            assert call_kwargs["runtime_paths"] == tools._runtime_paths
-            assert call_kwargs["config"] == tools._config
-            assert call_kwargs["knowledge"] is None
+            assert call_ctx.prompt == "Write a hello world program"
+            assert mock_ai_response.await_args.args[1] == tools._runtime_paths
+            assert mock_ai_response.await_args.args[2] == tools._config
+            assert call_ctx.knowledge is None
             assert call_ctx.requester_id == "@alice:example.org"
-            assert call_kwargs["include_interactive_questions"] is False
-            identity = call_kwargs["execution_identity"]
+            assert call_ctx.include_interactive_questions is False
+            identity = call_ctx.execution_identity
             assert identity.agent_name == "code"
             assert identity.session_id == call_ctx.session_id
             assert identity.requester_id == call_ctx.requester_id
-            assert call_kwargs["delegation_depth"] == 1
+            assert call_ctx.delegation_depth == 1
             assert call_ctx.session_id.startswith("delegate:leader:code:")
             _assert_direct_result_with_receipt(result, "Here is the generated code: print('hello')")
 
@@ -443,7 +444,7 @@ class TestDelegateTools:
             ) as mock_ai_response,
         ):
             await tools.run_subagent(agent_name="code", task="task")
-            assert mock_ai_response.await_args.kwargs["delegation_depth"] == 2
+            assert mock_ai_response.await_args.args[0].delegation_depth == 2
 
     @pytest.mark.asyncio
     async def test_delegate_threads_explicit_config_path(
@@ -474,7 +475,7 @@ class TestDelegateTools:
             ) as mock_ai_response,
         ):
             await tools.run_subagent(agent_name="code", task="update yourself")
-            assert mock_ai_response.await_args.kwargs["runtime_paths"] == runtime_paths
+            assert mock_ai_response.await_args.args[1] == runtime_paths
 
 
 class TestDelegateKnowledge:
@@ -531,15 +532,14 @@ class TestDelegateKnowledge:
             assert args == ("researcher", config, runtime_paths)
             identity = kwargs["execution_identity"]
             assert identity.agent_name == "researcher"
-            assert identity == mock_ai_response.await_args.kwargs["execution_identity"]
-            ai_kwargs = mock_ai_response.await_args.kwargs
+            assert identity == mock_ai_response.await_args.args[0].execution_identity
             ai_ctx = mock_ai_response.await_args.args[0]
             assert ai_ctx.entity_label == "researcher"
-            assert ai_kwargs["config"] == config
-            assert ai_kwargs["runtime_paths"] == runtime_paths
-            assert ai_kwargs["knowledge"] is mock_knowledge
-            assert ai_kwargs["include_interactive_questions"] is False
-            assert ai_kwargs["delegation_depth"] == 1
+            assert mock_ai_response.await_args.args[2] == config
+            assert mock_ai_response.await_args.args[1] == runtime_paths
+            assert ai_ctx.knowledge is mock_knowledge
+            assert ai_ctx.include_interactive_questions is False
+            assert ai_ctx.delegation_depth == 1
             _assert_direct_result_with_receipt(result, "Found relevant docs")
 
     @pytest.mark.asyncio
@@ -658,7 +658,7 @@ class TestDelegateKnowledge:
         ):
             await tools.run_subagent(agent_name="worker", task="do work")
             assert mock_ai_response.await_args.args[0].entity_label == "worker"
-            assert mock_ai_response.await_args.kwargs["knowledge"] is None
+            assert mock_ai_response.await_args.args[0].knowledge is None
 
     @pytest.mark.asyncio
     async def test_delegation_uses_stored_execution_identity_for_private_target(self, tmp_path: Path) -> None:
@@ -712,13 +712,11 @@ class TestDelegateKnowledge:
             ) as mock_ai_response,
         ):
             await tools.run_subagent(agent_name="worker", task="do work")
-
-        call_kwargs = mock_ai_response.await_args.kwargs
         call_ctx = mock_ai_response.await_args.args[0]
         assert call_ctx.entity_label == "worker"
-        assert call_kwargs["config"] == config
-        assert call_kwargs["runtime_paths"] == runtime_paths
-        delegated_identity = call_kwargs["execution_identity"]
+        assert mock_ai_response.await_args.args[2] == config
+        assert mock_ai_response.await_args.args[1] == runtime_paths
+        delegated_identity = call_ctx.execution_identity
         assert delegated_identity is not execution_identity
         assert delegated_identity is not None
         assert delegated_identity.agent_name == "worker"
@@ -729,7 +727,7 @@ class TestDelegateKnowledge:
         assert delegated_identity.session_id.startswith("delegate:leader:worker:")
         assert call_ctx.room_id == "!room:example.org"
         assert call_ctx.requester_id == "@alice:example.org"
-        assert call_kwargs["delegation_depth"] == 1
+        assert call_ctx.delegation_depth == 1
 
     @pytest.mark.asyncio
     async def test_delegation_rebinds_runtime_context_for_child_agent(self, tmp_path: Path) -> None:
@@ -787,7 +785,7 @@ class TestDelegateKnowledge:
             tool_function_filter=tool_function_filter,
         )
 
-        async def fake_ai_response(ctx: object, **kwargs: object) -> str:
+        async def fake_ai_response(ctx: ResponseTurnContext, *_args: object, **_kwargs: object) -> str:
             context = get_tool_runtime_context()
             assert context is not None
             assert context.agent_name == "worker"
@@ -798,7 +796,7 @@ class TestDelegateKnowledge:
             assert ctx.correlation_id == "corr-parent"
             assert context.active_model_name == "default"
             assert context.tool_function_filter is tool_function_filter
-            assert kwargs["tool_function_filter"] is tool_function_filter
+            assert ctx.tool_function_filter is tool_function_filter
             return "done"
 
         with (
@@ -896,7 +894,7 @@ class TestDelegateKnowledge:
             active_model_name="default",
         )
 
-        async def fake_ai_response(ctx: object, **_kwargs: object) -> str:
+        async def fake_ai_response(ctx: ResponseTurnContext, *_args: object, **_kwargs: object) -> str:
             context = get_tool_runtime_context()
             assert context is not None
             assert context.agent_name == "worker"

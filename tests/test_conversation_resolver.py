@@ -19,8 +19,9 @@ import pytest
 
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
-from mindroom.constants import ATTACHMENT_IDS_KEY, HOOK_SOURCE_KEY, SKIP_MENTIONS_KEY
-from mindroom.conversation_resolver import ConversationResolver, ConversationResolverDeps, MessageContext
+from mindroom.constants import ATTACHMENT_IDS_KEY, SKIP_MENTIONS_KEY
+from mindroom.conversation_resolver import ConversationResolver, ConversationResolverDeps
+from mindroom.dispatch_source import TRUSTED_INTERNAL_RELAY_SOURCE_KIND
 from mindroom.entity_resolution import entity_identity_registry
 from mindroom.event_journal import (
     ConversationCursor,
@@ -39,8 +40,10 @@ from mindroom.matrix.journal_ingress import _inbound_event, _projected_event
 from mindroom.matrix.relation_lookup import RelationLookup
 from mindroom.matrix.thread_membership import RelatedEventUnavailableError, ThreadMembershipLookupError
 from mindroom.message_target import MessageTarget
+from mindroom.turn_origin import TurnTrust
 from tests.conftest import (
     bind_runtime_paths,
+    make_ingress_facts,
     make_matrix_client_mock,
     make_relation_lookup,
     runtime_paths_for,
@@ -317,6 +320,21 @@ async def test_reply_to_missing_parent_keeps_unproven_candidate(config: Config) 
     assert result.thread_context.stable_target.resolved_thread_id is None
 
 
+@pytest.mark.parametrize(("thread_mode", "one_conversation"), [("thread", False), ("room", True)])
+def test_room_is_one_conversation_only_in_room_thread_mode(
+    tmp_path: Path,
+    thread_mode: str,
+    one_conversation: bool,
+) -> None:
+    """Room thread mode makes the whole room, threads included, one conversation."""
+    config = bind_runtime_paths(
+        Config(agents={"general": AgentConfig(display_name="General", thread_mode=thread_mode)}),
+        test_runtime_paths(tmp_path),
+    )
+
+    assert _resolver(config).room_is_one_conversation(_ROOM_ID) is one_conversation
+
+
 @pytest.mark.asyncio
 async def test_room_thread_mode_skips_thread_resolution(tmp_path: Path) -> None:
     """Agents in room thread mode treat every message as room-level."""
@@ -542,8 +560,8 @@ async def test_skip_mentions_metadata_suppresses_mention_extraction(config: Conf
 
 
 @pytest.mark.asyncio
-async def test_build_ingress_envelope_carries_event_identity(config: Config) -> None:
-    """The lightweight ingress envelope mirrors the inbound event without thread extraction."""
+async def test_build_envelope_carries_event_identity(config: Config) -> None:
+    """The envelope mirrors the inbound event and its classified provenance without thread extraction."""
     resolver = _resolver(config)
     event = _event({"body": "hello"})
     target = resolver.build_message_target(
@@ -552,11 +570,7 @@ async def test_build_ingress_envelope_carries_event_identity(config: Config) -> 
         reply_to_event_id=_EVENT_ID,
     )
 
-    envelope = resolver.build_ingress_envelope(
-        event=event,
-        requester_user_id=_SENDER,
-        target=target,
-    )
+    envelope = resolver.build_envelope(event=event, facts=make_ingress_facts(_SENDER), target=target)
 
     assert envelope.source_event_id == _EVENT_ID
     assert envelope.room_id == _ROOM_ID
@@ -570,48 +584,42 @@ async def test_build_ingress_envelope_carries_event_identity(config: Config) -> 
 
 
 @pytest.mark.parametrize(("body", "expected_body"), [(None, "hello"), ("", "hello"), ("override", "override")])
-def test_full_and_lightweight_envelopes_share_fields(config: Config, body: str | None, expected_body: str) -> None:
-    """Both adapters preserve mentions, body fallback, attachments, and relay metadata."""
+def test_envelope_carries_mentions_body_fallback_attachments_and_relay_provenance(
+    config: Config,
+    body: str | None,
+    expected_body: str,
+) -> None:
+    """The envelope keeps mentions, the body fallback, attachments, and the relay provenance its facts carry."""
     resolver = _resolver(config)
     event = _event({"body": "hello", ATTACHMENT_IDS_KEY: [" a ", "a", "b"]})
     target = MessageTarget.resolve(_ROOM_ID, _THREAD_ROOT, _EVENT_ID)
-    mentions = [MatrixID.parse(_BOT_USER_ID)]
-    context = MessageContext(
-        am_i_mentioned=True,
-        is_thread=True,
-        thread_id=_THREAD_ROOT,
-        thread_history=(),
-        mentioned_agents=mentions,
-        has_non_agent_mentions=False,
-    )
-    full = resolver.build_message_envelope(
-        event=event,
-        requester_user_id=_SENDER,
-        context=context,
-        target=target,
-        body=body,
+    facts = make_ingress_facts(
+        _BOT_USER_ID,
+        source_kind=TRUSTED_INTERNAL_RELAY_SOURCE_KIND,
+        requester_user_id=_HUMAN_USER_ID,
+        original_sender=_HUMAN_USER_ID,
+        original_sender_is_human=True,
         hook_source="test-hook",
         message_received_depth=2,
-        original_sender=_HUMAN_USER_ID,
-        trusted_user_relay=True,
+        sender_entity_name="general",
     )
-    lightweight = resolver.build_ingress_envelope(
+
+    envelope = resolver.build_envelope(
         event=event,
-        requester_user_id=_SENDER,
+        facts=facts,
         target=target,
+        mentioned_agents=[MatrixID.parse(_BOT_USER_ID)],
         body=body,
-        mentioned_agents=mentions,
-        hook_source="test-hook",
-        message_received_depth=2,
-        original_sender=_HUMAN_USER_ID,
-        trusted_user_relay=True,
     )
-    assert full == lightweight
-    assert full.body == expected_body
-    assert full.attachment_ids == ("a", "b")
-    assert full.mentioned_agents == ("general",)
-    assert full.hook_source == "test-hook"
-    assert full.message_received_depth == 2
+
+    assert envelope.body == expected_body
+    assert envelope.attachment_ids == ("a", "b")
+    assert envelope.mentioned_agents == ("general",)
+    assert envelope.hook_source == "test-hook"
+    assert envelope.message_received_depth == 2
+    assert envelope.origin == facts.origin
+    assert envelope.origin.trust is TurnTrust.TRUSTED_USER_RELAY
+    assert envelope.dispatch_policy_source_kind is None
 
 
 def _parse(source: dict[str, Any]) -> nio.Event:
@@ -963,19 +971,3 @@ async def test_coalescing_keeps_a_server_failure_retryable(
             await resolver.coalescing_thread_id(_room(), _reply_event())
 
     assert not isinstance(raised.value, RelatedEventUnavailableError)
-
-
-def test_only_a_managed_sender_can_mark_a_turn_as_an_automation_turn(config: Config) -> None:
-    """A person's message carrying an automation hook source is an ordinary turn, so auto-flush still keeps it."""
-    resolver = _resolver(config)
-    event = _event({"body": "hello", HOOK_SOURCE_KEY: "automation/dreaming"})
-
-    envelope = resolver.build_ingress_envelope(
-        event=event,
-        requester_user_id=_SENDER,
-        target=MessageTarget.resolve(_ROOM_ID, None, _EVENT_ID),
-        body="hello",
-        mentioned_agents=[],
-    )
-
-    assert envelope.hook_source is None

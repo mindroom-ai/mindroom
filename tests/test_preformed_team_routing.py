@@ -2,7 +2,7 @@
 
 These tests ensure that mentioning a predefined team:
 - Does NOT trigger router routing
-- Does cause the TeamBot to respond using its configured team members
+- Does cause the team's bot to respond using its configured team members
 """
 
 from __future__ import annotations
@@ -29,7 +29,7 @@ from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 from mindroom.turn_origin import TurnIntent
 from tests.access_schema_support import with_current_room_member_access
 from tests.approval_continuation_helpers import approval_continuation
-from tests.bot_helpers import make_test_agent_bot, make_test_team_bot
+from tests.bot_helpers import make_test_agent_bot
 from tests.conftest import (
     bind_runtime_paths,
     drain_coalescing,
@@ -46,12 +46,13 @@ from tests.identity_helpers import entity_ids
 from tests.response_attempt_helpers import install_direct_response_admission
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncGenerator, Callable
+    from collections.abc import AsyncGenerator, AsyncIterator, Callable
     from contextvars import Context
     from pathlib import Path
 
     from mindroom.final_delivery import FinalDeliveryOutcome
-    from mindroom.history.turn_recorder import TurnRecorder
+    from mindroom.response_turn import ResponseTurnContext, TurnSinks
+    from mindroom.teams.envelope import TeamTurnSpec
 
 
 def _bind_runtime_paths(config: Config, tmp_path: Path) -> Config:
@@ -160,7 +161,7 @@ async def test_router_does_not_route_when_preformed_team_is_mentioned(config_wit
 
 @pytest.mark.asyncio
 async def test_preformed_team_bot_responds_when_mentioned(config_with_team: Config, tmp_path: Path) -> None:
-    """TeamBot should respond with team response when the team is mentioned."""
+    """The team's bot should respond with team response when the team is mentioned."""
     config_with_team = _bind_runtime_paths(config_with_team, tmp_path)
     runtime_paths = runtime_paths_for(config_with_team)
     ids = entity_ids(config_with_team, runtime_paths)
@@ -170,7 +171,7 @@ async def test_preformed_team_bot_responds_when_mentioned(config_with_team: Conf
         display_name="Team One",
         password="p",  # noqa: S106
     )
-    bot = make_test_team_bot(
+    bot = make_test_agent_bot(
         agent_user=team_user,
         storage_path=tmp_path,
         config=config_with_team,
@@ -182,10 +183,10 @@ async def test_preformed_team_bot_responds_when_mentioned(config_with_team: Conf
     bot.client = _make_matrix_client_mock()
     install_runtime_journal_support(bot)
 
-    async def fake_team_response(*_args: Any, **_kwargs: Any) -> str:  # noqa: ANN401
-        return "🤝 Team Response (a1, a2):\n\n**a1**: ok\n\n**a2**: ok"
+    async def fake_team_response_stream(*_args: Any, **_kwargs: Any) -> AsyncIterator[str]:  # noqa: ANN401
+        yield "🤝 Team Response (a1, a2):\n\n**a1**: ok\n\n**a2**: ok"
 
-    # Minimal orchestrator stub is fine because we patch team_response
+    # Minimal orchestrator stub is fine because we patch team_response_stream
     bot.orchestrator = MagicMock()
 
     team_user_id = ids["t1"].full_id
@@ -197,7 +198,7 @@ async def test_preformed_team_bot_responds_when_mentioned(config_with_team: Conf
         nio.RoomSendResponse.from_dict({"event_id": "$edit"}, room.room_id),
     ]
     with patch_response_runner_module(
-        team_response=fake_team_response,
+        team_response_stream=fake_team_response_stream,
         should_use_streaming=AsyncMock(return_value=False),
         typing_indicator=_noop_typing_indicator,
     ):
@@ -235,8 +236,7 @@ async def _team_memory_saves(
         display_name=entity_name,
         password="p",  # noqa: S106
     )
-    make_bot = make_test_team_bot if entity_name in config.teams else make_test_agent_bot
-    bot = make_bot(
+    bot = make_test_agent_bot(
         agent_user=user,
         storage_path=tmp_path,
         config=config,
@@ -266,10 +266,22 @@ async def _team_memory_saves(
         scheduled_tasks.append(task)
         return task
 
-    async def team_response(*_args: Any, turn_recorder: TurnRecorder, **_kwargs: Any) -> str:  # noqa: ANN401
+    async def team_response_stream(
+        _spec: TeamTurnSpec,
+        _ctx: ResponseTurnContext,
+        *,
+        sinks: TurnSinks,
+    ) -> AsyncIterator[str]:
+        # The turn driver this stream stands in for records how the turn ended.
+        assert sinks.turn_recorder is not None
         if completes:
-            turn_recorder.mark_completed()
-        return "team response"
+            sinks.turn_recorder.record_completed(
+                run_id=None,
+                run_metadata=None,
+                assistant_text="team response",
+                completed_tools=(),
+            )
+        yield "team response"
 
     request = ResponseRequest(
         sources=ResponseSources(pending_event_ids=("$evt1",), logical_source_event_ids=("$evt1",)),
@@ -288,7 +300,7 @@ async def _team_memory_saves(
     with patch_response_runner_module(
         should_use_streaming=AsyncMock(return_value=False),
         typing_indicator=_noop_typing_indicator,
-        team_response=team_response,
+        team_response_stream=team_response_stream,
         store_conversation_memory=fake_store_conversation_memory,
         create_background_task=schedule_background_task,
     ):
@@ -297,7 +309,7 @@ async def _team_memory_saves(
             nio.RoomSendResponse.from_dict({"event_id": "$edit"}, "!room:localhost"),
         ]
         if edited:
-            await bot._run_regenerated_response(request)
+            await bot._edit_regenerator._run_regeneration(request)
         else:
             await bot._response_runner.generate_team_response_helper(
                 request,
@@ -348,7 +360,7 @@ async def test_team_reply_resumed_after_approval_saves_the_conversation(
     config = _bind_runtime_paths(config_with_team, tmp_path)
     runtime_paths = runtime_paths_for(config)
     ids = entity_ids(config, runtime_paths)
-    bot = make_test_team_bot(
+    bot = make_test_agent_bot(
         agent_user=AgentMatrixUser(agent_name="t1", user_id=ids["t1"].full_id, display_name="t1", password="p"),  # noqa: S106
         storage_path=tmp_path,
         config=config,
@@ -398,7 +410,7 @@ async def test_preformed_team_rejection_edits_existing_message(config_with_team:
         display_name="Team One",
         password="p",  # noqa: S106
     )
-    bot = make_test_team_bot(
+    bot = make_test_agent_bot(
         agent_user=team_user,
         storage_path=tmp_path,
         config=config_with_team,
@@ -421,7 +433,7 @@ async def test_preformed_team_rejection_edits_existing_message(config_with_team:
             ),
         ),
     ) as mock_edit:
-        resolution = await bot._run_regenerated_response(
+        await bot._edit_regenerator._run_regeneration(
             ResponseRequest(
                 sources=ResponseSources(
                     pending_event_ids=("$evt1",),
@@ -441,7 +453,6 @@ async def test_preformed_team_rejection_edits_existing_message(config_with_team:
             ),
         )
 
-    assert resolution == "$existing_response"
     # The outbox sends the finished replace event, so the edit target and its
     # text are read out of the envelope rather than off the call.
     envelope = mock_edit.await_args.args[2]
@@ -457,7 +468,7 @@ async def test_preformed_team_plain_reply_does_not_continue_existing_thread_root
     config_with_team: Config,
     tmp_path: Path,
 ) -> None:
-    """TeamBot should answer the prompt event instead of following a stale plain-reply target."""
+    """The team's bot should answer the prompt event instead of following a stale plain-reply target."""
     config_with_team = _bind_runtime_paths(config_with_team, tmp_path)
     runtime_paths = runtime_paths_for(config_with_team)
     ids = entity_ids(config_with_team, runtime_paths)
@@ -467,7 +478,7 @@ async def test_preformed_team_plain_reply_does_not_continue_existing_thread_root
         display_name="Team One",
         password="p",  # noqa: S106
     )
-    bot = make_test_team_bot(
+    bot = make_test_agent_bot(
         agent_user=team_user,
         storage_path=tmp_path,
         config=config_with_team,
@@ -497,12 +508,12 @@ async def test_preformed_team_plain_reply_does_not_continue_existing_thread_root
         },
     )
 
-    async def fake_team_response(*_args: Any, **_kwargs: Any) -> str:  # noqa: ANN401
-        return "🤝 Team Response (a1, a2):\n\n**a1**: ok\n\n**a2**: ok"
+    async def fake_team_response_stream(*_args: Any, **_kwargs: Any) -> AsyncIterator[str]:  # noqa: ANN401
+        yield "🤝 Team Response (a1, a2):\n\n**a1**: ok\n\n**a2**: ok"
 
     with (
         patch_response_runner_module(
-            team_response=fake_team_response,
+            team_response_stream=fake_team_response_stream,
             should_use_streaming=AsyncMock(return_value=False),
             typing_indicator=_noop_typing_indicator,
         ),
@@ -524,7 +535,7 @@ async def test_preformed_team_plain_reply_does_not_continue_existing_thread_root
 
 @pytest.mark.asyncio
 async def test_team_does_not_respond_to_different_domain_mention(config_with_team: Config, tmp_path: Path) -> None:
-    """TeamBot should NOT respond to mentions of the same username on a different domain.
+    """The team's bot should NOT respond to mentions of the same username on a different domain.
 
     This is a security test - @mindroom_t1:evil.org should not trigger @mindroom_t1:localhost.
     """
@@ -537,7 +548,7 @@ async def test_team_does_not_respond_to_different_domain_mention(config_with_tea
         display_name="Team One",
         password="p",  # noqa: S106
     )
-    bot = make_test_team_bot(
+    bot = make_test_agent_bot(
         agent_user=team_user,
         storage_path=tmp_path,
         config=config_with_team,
@@ -549,8 +560,8 @@ async def test_team_does_not_respond_to_different_domain_mention(config_with_tea
     install_runtime_journal_support(bot)
     bot.orchestrator = MagicMock()
 
-    async def fake_team_response(*_args: Any, **_kwargs: Any) -> str:  # noqa: ANN401
-        return "🤝 Team Response (a1, a2): ok"
+    async def fake_team_response_stream(*_args: Any, **_kwargs: Any) -> AsyncIterator[str]:  # noqa: ANN401
+        yield "🤝 Team Response (a1, a2): ok"
 
     # Craft a mention using a DIFFERENT domain than the bot's MatrixID
     # This simulates someone trying to impersonate the team
@@ -563,7 +574,7 @@ async def test_team_does_not_respond_to_different_domain_mention(config_with_tea
     event = _mock_event_with_team_mention(mentioned_id, body=f"{mentioned_id} ping")
 
     with patch_response_runner_module(
-        team_response=fake_team_response,
+        team_response_stream=fake_team_response_stream,
         should_use_streaming=AsyncMock(return_value=False),
         typing_indicator=_noop_typing_indicator,
     ):
@@ -634,7 +645,7 @@ async def test_job_follow_up_hands_no_prompt_to_memory(
     config.agents["a1"].memory_backend = "mem0"
     runtime_paths = runtime_paths_for(config)
     ids = entity_ids(config, runtime_paths)
-    bot = make_test_team_bot(
+    bot = make_test_agent_bot(
         agent_user=AgentMatrixUser(agent_name="t1", user_id=ids["t1"].full_id, display_name="t1", password="p"),  # noqa: S106
         storage_path=tmp_path,
         config=config,

@@ -24,7 +24,7 @@ from mindroom.matrix.thread_history_result import ThreadHistoryResult
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.message_target import MessageTarget
 from mindroom.response_payload_preparation import DispatchPayloadInputs, ResponsePayloadPreparation
-from mindroom.response_runner import ResponseRequest, _ResponseGenerationOutcome
+from mindroom.response_runner import ResponseRequest
 from mindroom.response_sources import ResponseSources
 from mindroom.turn_policy import PreparedDispatch
 from tests.access_schema_support import with_current_room_member_access
@@ -324,17 +324,13 @@ async def test_generate_response_invokes_preparer_exactly_once_under_lock(tmp_pa
         await response_function(None)
         return "$response"
 
-    async def fake_process_and_respond(_request: ResponseRequest, **_kwargs: object) -> _ResponseGenerationOutcome:
-        return _ResponseGenerationOutcome(
-            delivery=FinalDeliveryOutcome(
-                terminal_status="completed",
-                event_id="$response",
-                is_visible_response=True,
-                final_visible_body="ok",
-                delivery_kind="sent",
-            ),
-            run_succeeded=True,
-        )
+    delivered = FinalDeliveryOutcome(
+        terminal_status="completed",
+        event_id="$response",
+        is_visible_response=True,
+        final_visible_body="ok",
+        delivery_kind="sent",
+    )
 
     with (
         patch.object(bot._request_payload_preparer, "prepare", new=AsyncMock(side_effect=spy_prepare)),
@@ -348,7 +344,7 @@ async def test_generate_response_invokes_preparer_exactly_once_under_lock(tmp_pa
             "_run_cancellable_response",
             new=AsyncMock(side_effect=fake_run_cancellable_response),
         ),
-        patch.object(coordinator, "_process_and_respond", new=AsyncMock(side_effect=fake_process_and_respond)),
+        patch.object(coordinator, "_deliver_turn", new=AsyncMock(return_value=delivered)),
         patch("mindroom.response_runner.should_use_streaming", AsyncMock(return_value=False)),
     ):
         result = await coordinator.generate_response(

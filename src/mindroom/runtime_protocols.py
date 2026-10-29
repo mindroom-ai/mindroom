@@ -12,7 +12,7 @@ if TYPE_CHECKING:
     from mindroom.agent_cli.session import TurnToolRegistry
     from mindroom.agent_reply_membership import AgentReplyMembershipIndex
     from mindroom.automations.runner import AutomationRunner
-    from mindroom.bot import AgentBot, TeamBot
+    from mindroom.bot import AgentBot
     from mindroom.budgets.monitor import BudgetMonitor
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
@@ -108,7 +108,7 @@ class OrchestratorRuntime(SupportsRunningState, Protocol):
         """Resolve the current running bot's already-owned Matrix device pin."""
         ...
 
-    def handle_bot_ready(self, bot: AgentBot | TeamBot) -> Awaitable[None]:
+    def handle_bot_ready(self, bot: AgentBot) -> Awaitable[None]:
         """Handle a managed bot completing its first sync."""
         ...
 

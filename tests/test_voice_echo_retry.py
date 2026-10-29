@@ -17,9 +17,9 @@ from mindroom.constants import ROUTER_AGENT_NAME, SOURCE_KIND_KEY
 from mindroom.conversation_resolver import ConversationResolver
 from mindroom.dispatch_handoff import PreparedIngress
 from mindroom.dispatch_source import VOICE_SOURCE_KIND
-from mindroom.event_journal import EventClass, EventKind, TurnRecordStore
-from mindroom.handled_turns import TurnRecord, _reset_handled_turn_ledger_runtime
+from mindroom.event_journal import EventClass, EventKind, TurnRecordStore, turn_rows
 from mindroom.inbound_turn_normalizer import InboundTurnNormalizer, _VoiceNormalizationResult
+from mindroom.turn_record import SourceVisibleEcho
 from mindroom.voice.visible_voice_echo import (
     VisibleVoiceEchoLifecycle,
     VisibleVoiceEchoRequest,
@@ -27,13 +27,14 @@ from mindroom.voice.visible_voice_echo import (
 )
 from tests.conftest import bind_runtime_paths, test_runtime_paths
 from tests.journal_helpers import admit_dispatch_event
-from tests.test_turn_controller_focused import (
+from tests.test_turns_focused import (
     _ROOM_ID,
     _SENDER,
     _THREAD_ROOT,
     _build_harness,
     _entity_user_id,
     _obligation_runner,
+    _replace_harness_deps,
     _room_with_members,
     _settle_dispatcher,
 )
@@ -43,7 +44,7 @@ if TYPE_CHECKING:
 
     from mindroom.hooks import MessageEnvelope
     from mindroom.journal_dispatch import JournalDispatcher
-    from tests.test_turn_controller_focused import _Harness
+    from tests.test_turns_focused import _Harness
 
 
 @pytest.fixture(autouse=True)
@@ -57,37 +58,37 @@ def _wire_dispatcher(harness: _Harness, room: nio.MatrixRoom, tmp_path: Path) ->
     dispatcher = _obligation_runner(
         harness,
         tracking_path=tmp_path / "dispatch",
-        principal_id=harness.controller.deps.matrix_id.full_id,
-        entity_name=harness.controller.deps.agent_name,
+        matrix_user_id=harness.ingress.deps.matrix_id.full_id,
+        entity_name=harness.ingress.deps.agent_name,
         room=room,
     )
 
-    async def settle_ignored(source_event_id: str) -> None:
-        harness.ignored_dispatch_sources.append((source_event_id,))
-        await dispatcher.settle_intentionally_ignored_turn_sources((source_event_id,))
+    async def settle_ignored(source_event_ids: tuple[str, ...]) -> None:
+        harness.ignored_dispatch_sources.append(source_event_ids)
+        await dispatcher.settle_intentionally_ignored_turn_sources(source_event_ids)
 
     def retry(room_id: str, source_event_id: str) -> None:
         harness.retried_dispatch_sources.append((source_event_id,))
         dispatcher.retry_turn_source(room_id, source_event_id)
 
     gate = CoalescingGate(
-        dispatch_turn=harness.controller.handle_prepared_turn,
+        dispatch_turn=harness.dispatcher.handle_prepared_turn,
         debounce_seconds=lambda: 0.0,
         is_shutting_down=lambda: False,
         on_undelivered_source=retry,
-        on_intentionally_ignored_source=settle_ignored,
+        on_intentionally_ignored_sources=settle_ignored,
     )
     harness.gate = gate
-    harness.controller.deps = replace(
-        harness.controller.deps,
+    _replace_harness_deps(
+        harness,
         coalescing_gate=gate,
         retry_dispatch_sources=dispatcher.retry_turn_sources,
         settle_dispatch_sources=dispatcher.settle_intentionally_ignored_turn_sources,
         dispatch_source_is_terminal=dispatcher.source_is_terminal,
         visible_responses=replace(
-            harness.controller.deps.visible_responses,
+            harness.dispatcher.deps.visible_responses,
             deps=replace(
-                harness.controller.deps.visible_responses.deps,
+                harness.dispatcher.deps.visible_responses.deps,
                 settle_ignored_sources=dispatcher.settle_intentionally_ignored_turn_sources,
             ),
         ),
@@ -140,13 +141,12 @@ def _voice_event(config: Config) -> tuple[nio.RoomMessageAudio, PreparedIngress]
             },
         },
         server_timestamp=event.server_timestamp,
-        source_kind_override=VOICE_SOURCE_KIND,
+        payload_trusted=True,
     )
     return event, normalized
 
 
 @pytest.mark.asyncio
-@pytest.mark.ledger_loads_from_disk
 @pytest.mark.parametrize("restart_after_echo", [False, True])
 @pytest.mark.parametrize("readiness_fallback", [False, True])
 async def test_delayed_voice_echo_keeps_source_pending_until_one_reply(  # noqa: PLR0915
@@ -189,19 +189,19 @@ async def test_delayed_voice_echo_keeps_source_pending_until_one_reply(  # noqa:
         assert harness.retried_dispatch_sources == [(event.event_id,)]
         normalize.assert_awaited_once()
         normalize.side_effect = RuntimeError("Provider unavailable after deferral")
-        snapshot = harness.turn_store.prepared_voice_for_source(event.event_id)
+        snapshot = await harness.turn_store.prepared_voice_for_source(event.event_id)
         assert snapshot is not None
         assert snapshot.body == "Please review the new PR"
         assert snapshot.to_content() == normalized.source["content"]
         assert snapshot.thread_id == _THREAD_ROOT
 
-        target = router.controller.deps.resolver.build_message_target(
+        target = router.ingress.deps.resolver.build_message_target(
             room_id=room.room_id,
             thread_id=_THREAD_ROOT,
             reply_to_event_id=event.event_id,
             event_source=event.source,
         )
-        echo = router.controller.deps.visible_voice_echo
+        echo = router.voice.deps.readiness.visible_echo
         handle = echo.start(
             VisibleVoiceEchoRequest(
                 source_event_id=event.event_id,
@@ -217,10 +217,9 @@ async def test_delayed_voice_echo_keeps_source_pending_until_one_reply(  # noqa:
         if restart_after_echo:
             await dispatcher.stop()
             _reset_visible_voice_echo_barriers()
-            _reset_handled_turn_ledger_runtime()
             harness = _build_harness(config, tmp_path)
             await harness.turn_store.warm()
-            assert harness.turn_store.prepared_voice_for_source(event.event_id) == snapshot
+            assert await harness.turn_store.prepared_voice_for_source(event.event_id) == snapshot
             dispatcher = _wire_dispatcher(harness, room, tmp_path)
 
         # The journal's retry timer owns recovery: no new Matrix event is admitted.
@@ -230,11 +229,11 @@ async def test_delayed_voice_echo_keeps_source_pending_until_one_reply(  # noqa:
         await harness.gate.drain_all()
         await harness.runner.settle_inbox_responses()
         assert [request.prompt for request in harness.runner.requests] == ["Please review the new PR"]
-        assert harness.turn_store.is_handled(event.event_id)
-        assert harness.turn_store.prepared_voice_for_source(event.event_id) is None
+        assert await harness.turn_store.is_handled(_ROOM_ID, event.event_id)
+        assert await harness.turn_store.prepared_voice_for_source(event.event_id) is None
         normalize.assert_awaited_once()
 
-        await harness.controller.handle_media_event(room, event)
+        await harness.ingress.handle_media_event(room, event)
         await harness.gate.drain_all()
         assert len(harness.runner.requests) == 1
     finally:
@@ -255,18 +254,26 @@ async def test_echo_journal_read_failure_reuses_prepared_transcription(
     harness = _build_harness(config, tmp_path)
     room = _room_with_members(config, "general", ROUTER_AGENT_NAME)
     event, normalized = _voice_event(config)
-    router_record = replace(TurnRecord.create([event.event_id], completed=False), visible_echo_event_id="$echo")
+    router_echo = SourceVisibleEcho("$echo")
     normalize = AsyncMock(return_value=_VoiceNormalizationResult(event=normalized))
     monkeypatch.setattr(
         InboundTurnNormalizer,
         "prepare_voice_event",
         normalize,
     )
-    monkeypatch.setattr(
-        TurnRecordStore,
-        "load",
-        AsyncMock(side_effect=[RuntimeError("Temporary journal read failure"), router_record]),
-    )
+    router_reads: list[object] = [RuntimeError("Temporary journal read failure"), router_echo]
+    real_read = TurnRecordStore.read
+
+    async def read(records: TurnRecordStore, operation: object, *args: object, **kwargs: object) -> object:
+        # The responder's read of the router's echo fails once, then finds it.
+        if records.agent_name == ROUTER_AGENT_NAME and operation is turn_rows.visible_echo and router_reads:
+            outcome = router_reads.pop(0)
+            if isinstance(outcome, Exception):
+                raise outcome
+            return outcome
+        return await real_read(records, operation, *args, **kwargs)
+
+    monkeypatch.setattr(TurnRecordStore, "read", read)
     monkeypatch.setattr(VisibleVoiceEchoLifecycle, "_router_echo_expected", lambda *_: True)
     dispatcher = _wire_dispatcher(harness, room, tmp_path)
     await admit_dispatch_event(dispatcher, room, event, EventKind.MEDIA, EventClass.ACTIONABLE)
@@ -287,8 +294,8 @@ async def test_echo_journal_read_failure_reuses_prepared_transcription(
         await harness.gate.drain_all()
         await harness.runner.settle_inbox_responses()
         assert [request.prompt for request in harness.runner.requests] == ["Please review the new PR"]
-        assert harness.turn_store.is_handled(event.event_id)
-        assert harness.turn_store.prepared_voice_for_source(event.event_id) is None
+        assert await harness.turn_store.is_handled(_ROOM_ID, event.event_id)
+        assert await harness.turn_store.prepared_voice_for_source(event.event_id) is None
         normalize.assert_awaited_once()
     finally:
         await dispatcher.stop()
@@ -312,7 +319,7 @@ async def test_prepared_voice_write_failure_preserves_pending_source_without_raw
     fallback = AsyncMock(side_effect=AssertionError("Checkpoint failure must not re-normalize"))
     monkeypatch.setattr(InboundTurnNormalizer, "prepare_voice_event", normalize)
     monkeypatch.setattr(InboundTurnNormalizer, "prepare_raw_voice_fallback_event", fallback)
-    monkeypatch.setattr(TurnRecordStore, "upsert", AsyncMock(side_effect=RuntimeError("Journal unavailable")))
+    monkeypatch.setattr(TurnRecordStore, "write", AsyncMock(side_effect=RuntimeError("Journal unavailable")))
     dispatcher = _wire_dispatcher(harness, room, tmp_path)
     await admit_dispatch_event(dispatcher, room, event, EventKind.MEDIA, EventClass.ACTIONABLE)
     try:
@@ -324,7 +331,7 @@ async def test_prepared_voice_write_failure_preserves_pending_source_without_raw
         assert harness.retried_dispatch_sources == [(event.event_id,)]
         assert not harness.turn_store.has_live_turn_claim(event.event_id)
         assert not harness.gate.has_pending_source_event(event.event_id)
-        assert harness.turn_store.prepared_voice_for_source(event.event_id) is None
+        assert await harness.turn_store.prepared_voice_for_source(event.event_id) is None
         normalize.assert_awaited_once()
         fallback.assert_not_awaited()
     finally:
@@ -363,14 +370,13 @@ async def test_router_becoming_ready_during_transcription_still_requires_publica
         assert await dispatcher.store.is_pending(event.event_id)
         assert harness.runner.requests == []
         assert harness.retried_dispatch_sources == [(event.event_id,)]
-        assert harness.turn_store.prepared_voice_for_source(event.event_id).body == "Please review the new PR"
+        assert (await harness.turn_store.prepared_voice_for_source(event.event_id)).body == "Please review the new PR"
     finally:
         await dispatcher.stop()
         await harness.gate.drain_all()
 
 
 @pytest.mark.asyncio
-@pytest.mark.ledger_loads_from_disk
 @pytest.mark.parametrize("restart", [False, True])
 @pytest.mark.parametrize("send_raises", [False, True])
 @pytest.mark.parametrize("root_audio", [False, True])
@@ -411,11 +417,11 @@ async def test_router_initial_echo_failure_retains_owner_and_reuses_checkpoint( 
         await dispatcher.drain_once()
         await router.gate.drain_all()
         assert await dispatcher.store.is_pending(event.event_id)
-        assert not router.turn_store.is_handled(event.event_id)
+        assert not await router.turn_store.is_handled(_ROOM_ID, event.event_id)
         assert router.ignored_dispatch_sources == []
         assert router.retried_dispatch_sources == [(event.event_id,)]
         assert not router.turn_store.has_live_turn_claim(event.event_id)
-        snapshot = router.turn_store.prepared_voice_for_source(event.event_id)
+        snapshot = await router.turn_store.prepared_voice_for_source(event.event_id)
         assert snapshot is not None
         assert snapshot.body == "Please review the new PR"
         assert snapshot.thread_id == (event.event_id if root_audio else _THREAD_ROOT)
@@ -425,10 +431,9 @@ async def test_router_initial_echo_failure_retains_owner_and_reuses_checkpoint( 
         if restart:
             await dispatcher.stop()
             _reset_visible_voice_echo_barriers()
-            _reset_handled_turn_ledger_runtime()
             router = _build_harness(config, tmp_path, agent_name=ROUTER_AGENT_NAME)
             await router.turn_store.warm()
-            assert router.turn_store.prepared_voice_for_source(event.event_id) == snapshot
+            assert await router.turn_store.prepared_voice_for_source(event.event_id) == snapshot
             dispatcher = _wire_dispatcher(router, room, tmp_path)
         else:
             monkeypatch.setattr(router.gateway, "send_text", send)
@@ -438,9 +443,9 @@ async def test_router_initial_echo_failure_retains_owner_and_reuses_checkpoint( 
         await _settle_dispatcher(router, dispatcher)
         await router.gate.drain_all()
         assert len(router.gateway.sent) == 1
-        assert router.turn_store.visible_echo_for_source(event.event_id) == "$sent-1:localhost"
+        assert (await router.turn_store.visible_echo(event.event_id)).event_id == "$sent-1:localhost"
         normalize.assert_awaited_once()
-        await router.controller.handle_media_event(room, event)
+        await router.ingress.handle_media_event(room, event)
         await router.gate.drain_all()
         assert len(router.gateway.sent) == 1
     finally:
@@ -463,7 +468,7 @@ async def test_voice_metadata_failure_retries_without_retranscription(
     event, normalized = _voice_event(config)
     normalize = AsyncMock(return_value=_VoiceNormalizationResult(event=normalized))
     monkeypatch.setattr(InboundTurnNormalizer, "prepare_voice_event", normalize)
-    build_envelope = ConversationResolver.build_ingress_envelope
+    build_envelope = ConversationResolver.build_envelope
     fail_metadata = True
 
     def build_or_fail(self: ConversationResolver, **kwargs: Any) -> MessageEnvelope:  # noqa: ANN401
@@ -472,7 +477,7 @@ async def test_voice_metadata_failure_retries_without_retranscription(
             raise RuntimeError(msg)
         return build_envelope(self, **kwargs)
 
-    monkeypatch.setattr(ConversationResolver, "build_ingress_envelope", build_or_fail)
+    monkeypatch.setattr(ConversationResolver, "build_envelope", build_or_fail)
     dispatcher = _wire_dispatcher(harness, room, tmp_path)
     await admit_dispatch_event(dispatcher, room, event, EventKind.MEDIA, EventClass.ACTIONABLE)
     try:
@@ -482,7 +487,7 @@ async def test_voice_metadata_failure_retries_without_retranscription(
         assert harness.runner.requests == []
         assert harness.retried_dispatch_sources == [(event.event_id,)]
         assert not harness.turn_store.has_live_turn_claim(event.event_id)
-        assert harness.turn_store.prepared_voice_for_source(event.event_id).body == "Please review the new PR"
+        assert (await harness.turn_store.prepared_voice_for_source(event.event_id)).body == "Please review the new PR"
         fail_metadata = False
         config.agents["general"].thread_mode = "room"
         normalize.side_effect = AssertionError("Metadata retry must reuse the checkpoint")
@@ -492,7 +497,7 @@ async def test_voice_metadata_failure_retries_without_retranscription(
         await harness.gate.drain_all()
         await harness.runner.settle_inbox_responses()
         assert [request.prompt for request in harness.runner.requests] == ["Please review the new PR"]
-        assert harness.turn_store.is_handled(event.event_id)
+        assert await harness.turn_store.is_handled(_ROOM_ID, event.event_id)
         normalize.assert_awaited_once()
     finally:
         await dispatcher.stop()

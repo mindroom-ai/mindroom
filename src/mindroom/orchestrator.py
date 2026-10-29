@@ -94,7 +94,7 @@ from mindroom.mcp.toolkit import bind_mcp_server_manager
 from mindroom.memory import MemoryAutoFlushWorker, auto_flush_enabled
 from mindroom.private_storage.legacy_private_storage import migrate_private_storage
 from mindroom.providers.model_http_client import aclose_model_http_client
-from mindroom.response_activity import ResponseIdentity
+from mindroom.response_activity import ActiveResponseIdentity
 from mindroom.response_admission import ResponseAdmissionGate
 from mindroom.runtime_shutdown import (
     ENTITY_REMOVED_SHUTDOWN,
@@ -135,7 +135,7 @@ from mindroom.workers.runtime import (
 )
 
 from . import file_watcher
-from .bot import AgentBot, TeamBot, create_bot_for_entity
+from .bot import AgentBot, create_bot_for_entity
 from .config.main import Config, load_config
 from .credentials.sync import sync_env_to_credentials
 from .event_journal.opening import OpenEventJournal, bind_event_journal, open_event_journal
@@ -410,7 +410,7 @@ class _MultiAgentOrchestrator:
     api_enabled: bool = True
     storage_path: Path = field(init=False)
     config_path: Path = field(init=False)
-    agent_bots: dict[str, AgentBot | TeamBot] = field(default_factory=dict, init=False)
+    agent_bots: dict[str, AgentBot] = field(default_factory=dict, init=False)
     # The one journal every bot in this process borrows a store from, opened on
     # first use and closed after the last bot stops.
     _open_journal: OpenEventJournal | None = field(default=None, init=False, repr=False)
@@ -581,10 +581,10 @@ class _MultiAgentOrchestrator:
         """Return the process-local background-script lifecycle collaborator."""
         return self._script_runtime
 
-    def active_call_identities(self) -> list[ResponseIdentity]:
+    def active_call_identities(self) -> list[ActiveResponseIdentity]:
         """Return one identity per voice call that any bot has joined or is joining."""
         return [
-            ResponseIdentity(responder=entity_name, requester_id=requester_id)
+            ActiveResponseIdentity(responder=entity_name, requester_id=requester_id)
             for entity_name, bot in self.agent_bots.items()
             for requester_id in bot.active_call_requesters
         ]
@@ -729,7 +729,7 @@ class _MultiAgentOrchestrator:
         finally:
             self._response_admission_gate.release()
 
-    def _bind_response_admission_gate(self, bot: AgentBot | TeamBot) -> None:
+    def _bind_response_admission_gate(self, bot: AgentBot) -> None:
         """Share the orchestrator-owned response admission gate with one managed bot."""
         bot.admission_gate = self._response_admission_gate
 
@@ -745,20 +745,20 @@ class _MultiAgentOrchestrator:
         router_bot = self.agent_bots.get(ROUTER_AGENT_NAME)
         return None if router_bot is None else router_bot.approval_store
 
-    def _bind_started_runtime_support_services(self, bots: list[AgentBot | TeamBot]) -> None:
+    def _bind_started_runtime_support_services(self, bots: list[AgentBot]) -> None:
         """Bind current runtime support objects needed by live callbacks."""
         for bot in bots:
             self._bind_response_admission_gate(bot)
         self._configure_approval_store_transport()
         self._thread_export_runner.queue_full_pass()
 
-    async def _start_runtime_support(self, bots: list[AgentBot | TeamBot]) -> None:
+    async def _start_runtime_support(self, bots: list[AgentBot]) -> None:
         """Bind live-callback support, then start the job and script runtimes that deliver through those bots."""
         self._bind_started_runtime_support_services(bots)
         await self._tool_job_runtime.sync()
         await self._script_runtime.start()
 
-    async def _setup_startup_rooms_and_memberships(self, bots: list[AgentBot | TeamBot]) -> None:
+    async def _setup_startup_rooms_and_memberships(self, bots: list[AgentBot]) -> None:
         """Run startup room setup, then publish trigger delivery runtime."""
         await run_with_retry(
             "Setting up Matrix rooms and memberships",
@@ -847,10 +847,10 @@ class _MultiAgentOrchestrator:
         for entity_name in tuple(self._bot_start_tasks):
             await self._cancel_bot_start_task(entity_name)
 
-    def _running_startup_maintenance_bots(self) -> list[AgentBot | TeamBot]:
+    def _running_startup_maintenance_bots(self) -> list[AgentBot]:
         """Return currently running bots in startup-maintenance order."""
         router_bot = self.agent_bots.get(ROUTER_AGENT_NAME)
-        bots: list[AgentBot | TeamBot] = []
+        bots: list[AgentBot] = []
         if router_bot is not None and router_bot.running:
             bots.append(router_bot)
         bots.extend(
@@ -858,7 +858,7 @@ class _MultiAgentOrchestrator:
         )
         return bots
 
-    def _start_sync_task(self, entity_name: str, bot: AgentBot | TeamBot) -> None:
+    def _start_sync_task(self, entity_name: str, bot: AgentBot) -> None:
         """Ensure one sync task exists for a running bot."""
         existing_task = self._sync_tasks.get(entity_name)
         if existing_task is not None and not existing_task.done():
@@ -868,15 +868,15 @@ class _MultiAgentOrchestrator:
             name=f"sync_{entity_name}",
         )
 
-    def _bots_to_setup_after_background_start(self, entity_name: str) -> list[AgentBot | TeamBot]:
+    def _bots_to_setup_after_background_start(self, entity_name: str) -> list[AgentBot]:
         """Return the bots whose room memberships should be reconciled after a background start."""
         if entity_name == ROUTER_AGENT_NAME:
             return self._running_bots_for_entities(self.agent_bots)
         return self._running_bots_for_entities((entity_name,))
 
-    def _running_bots_for_entities(self, entity_names: Iterable[str]) -> list[AgentBot | TeamBot]:
+    def _running_bots_for_entities(self, entity_names: Iterable[str]) -> list[AgentBot]:
         """Return running bots for the given entity names."""
-        running_bots: list[AgentBot | TeamBot] = []
+        running_bots: list[AgentBot] = []
         for entity_name in entity_names:
             bot = self.agent_bots.get(entity_name)
             if bot is not None and bot.running:
@@ -887,7 +887,7 @@ class _MultiAgentOrchestrator:
         self,
         entity_name: str,
         config: Config,
-    ) -> AgentBot | TeamBot | None:
+    ) -> AgentBot | None:
         """Return the current bot when its fleet dependencies are ready."""
         bot = self.agent_bots.get(entity_name)
         required_entities = (
@@ -928,7 +928,7 @@ class _MultiAgentOrchestrator:
             if config is None:
                 return
             first_error: Exception | None = None
-            ready_bots: list[tuple[str, AgentBot | TeamBot]] = []
+            ready_bots: list[tuple[str, AgentBot]] = []
             for entity_name in configured_entity_names(config):
                 bot = self._ready_bot_for_turn_journal_recovery(entity_name, config)
                 if bot is None:
@@ -983,7 +983,7 @@ class _MultiAgentOrchestrator:
             if self._dispatch_recovery_task is current_task:
                 self._dispatch_recovery_task = None
 
-    async def _try_start_bot_once(self, entity_name: str, bot: AgentBot | TeamBot) -> bool | None:
+    async def _try_start_bot_once(self, entity_name: str, bot: AgentBot) -> bool | None:
         """Run one bot start attempt and classify the result."""
         try:
             started = bool(await bot.try_start())
@@ -1238,24 +1238,21 @@ class _MultiAgentOrchestrator:
         entity_name: str,
         config: Config,
         agent_user: AgentMatrixUser,
-    ) -> AgentBot | TeamBot:
+    ) -> AgentBot:
         """Create and register one runtime-managed bot."""
-        bot = cast(
-            "AgentBot | TeamBot",
-            create_bot_for_entity(
-                entity_name,
-                agent_user,
-                config,
-                self.runtime_paths,
-                self.storage_path,
-                config_path=self.config_path,
-                journal_store=self._shared_journal_store(),
-                agent_reply_memberships=self.agent_reply_memberships,
-                agent_reply_membership_sync=(
-                    self.agent_reply_membership_sync if entity_name == ROUTER_AGENT_NAME else None
-                ),
-                room_activity_observer=self._thread_export_runner.mark_room_activity,
+        bot = create_bot_for_entity(
+            entity_name,
+            agent_user,
+            config,
+            self.runtime_paths,
+            self.storage_path,
+            config_path=self.config_path,
+            journal_store=self._shared_journal_store(),
+            agent_reply_memberships=self.agent_reply_memberships,
+            agent_reply_membership_sync=(
+                self.agent_reply_membership_sync if entity_name == ROUTER_AGENT_NAME else None
             ),
+            room_activity_observer=self._thread_export_runner.mark_room_activity,
         )
         bot.orchestrator = self
         bot.hook_registry = self.hook_registry
@@ -1394,7 +1391,7 @@ class _MultiAgentOrchestrator:
         start_sync_tasks: bool,
     ) -> EntityStartResults:
         """Try to start each named entity once and classify the results."""
-        entity_bots: list[tuple[str, AgentBot | TeamBot]] = []
+        entity_bots: list[tuple[str, AgentBot]] = []
         for entity_name in entity_names:
             bot = self.agent_bots.get(entity_name)
             if bot is not None:
@@ -1586,13 +1583,13 @@ class _MultiAgentOrchestrator:
             return
         logger.info("All agent bots started successfully")
 
-    def _resolve_bot_room_aliases(self, bots: list[AgentBot | TeamBot], config: Config) -> None:
+    def _resolve_bot_room_aliases(self, bots: list[AgentBot], config: Config) -> None:
         """Resolve currently known room aliases into each bot's configured room IDs."""
         for bot in bots:
             room_aliases = get_rooms_for_entity(bot.agent_name, config)
             bot.rooms = resolve_room_aliases(room_aliases, runtime_paths=self.runtime_paths)
 
-    async def handle_bot_ready(self, bot: AgentBot | TeamBot) -> None:
+    async def handle_bot_ready(self, bot: AgentBot) -> None:
         """Handle bot-ready notifications through the public runtime protocol."""
         if bot.agent_name == ROUTER_AGENT_NAME:
             self._router_reply_memberships_live_sync_ready.set()
@@ -2236,7 +2233,7 @@ class _MultiAgentOrchestrator:
                     running_bots=self._running_startup_maintenance_bots,
                 )
 
-    def _router_bot(self) -> AgentBot | TeamBot | None:
+    def _router_bot(self) -> AgentBot | None:
         """Return the router bot when it exists and has an active client."""
         router_bot = self.agent_bots.get(ROUTER_AGENT_NAME)
         if router_bot is None:
@@ -2247,7 +2244,7 @@ class _MultiAgentOrchestrator:
             return None
         return router_bot
 
-    async def _setup_rooms_and_memberships(self, bots: list[AgentBot | TeamBot]) -> None:
+    async def _setup_rooms_and_memberships(self, bots: list[AgentBot]) -> None:
         """Setup rooms and ensure all bots have correct memberships.
 
         This shared flow is used during both initial startup and config updates.
@@ -2762,7 +2759,7 @@ async def _run_api_server(  # noqa: PLR0915 - the primary API and its worker-fac
     thread_export_runner: WorkspaceThreadExportRunner | None = None,
     leave_matrix_room: Callable[[str, str], Awaitable[bool]] | None = None,
     response_admission_gate: ResponseAdmissionGate | None = None,
-    active_calls: Callable[[], list[ResponseIdentity]] | None = None,
+    active_calls: Callable[[], list[ActiveResponseIdentity]] | None = None,
     config_reload_status: Callable[[], ConfigReloadStatus] | None = None,
     agent_reply_memberships: AgentReplyMembershipIndex | None = None,
     agent_cli_registry: TurnToolRegistry | None = None,

@@ -10,18 +10,21 @@ The path from a Matrix message to a delivered response; [Bot Runtime](bot-runtim
 ```text
 Matrix sync callback
   -> matrix/durable_ingestion.py                           (validate owned Nio work, commit its sequence and effects, then acknowledge)
-  -> bot.py (AgentBot/TeamBot runtime shell)
+  -> bot.py (AgentBot runtime shell, for agents, teams, and the router)
   -> journal_dispatch.py + pending_event_worker.py         (fan admitted events out to callbacks; unsettled work is woken again)
-  -> turn_controller.py (owns one turn: precheck -> normalize -> resolve -> coalesce -> decide -> execute -> record)
-       -> ingress_validation.py                                  (trust, dedup, echo drop; commands exit before batching)
+  -> turns/ingress.py (owns one event to gate admission: onboarding command -> approval reply -> precheck -> claim -> normalize -> resolve -> admit)
+       -> ingress_validation.py                                  (classify provenance once, dedup, echo drop; commands exit before batching)
        -> inbound_turn_normalizer.py + conversation_resolver.py  (canonical turn input, conversation identity)
+       -> voice/ingress.py + turns/interactive_selection.py      (voice readiness and selection answers, admitted in receipt order)
+       -> coalescing/ingress_ticket.py                           (one item's lane slot, turn claim, and queued notice until admission)
        -> coalescing/ingress_lanes.py                            (per-(room, sender) receipt-order FIFO; STT readiness waits here)
        -> coalescing/gate.py                                     (ordinary text dispatches immediately; adaptive text and media debounce)
-       -> text_ingress_dispatch.py + turn_policy.py              (ignore / route / respond decision, command execution)
+  -> turns/dispatch.py (owns one turn from gate exit: prepare -> decide -> execute -> record)
+       -> turn_policy.py + command_turn_executor.py              (ignore / route / respond decision, command execution)
        -> response_runner.py -> ai.py / teams/envelope.py        (lifecycle lock, entity envelopes)
             -> response_turn.py                                  (shared streaming turn driver; blocking replies collect it)
        -> streaming.py + delivery_gateway.py                     (progressive edits, Matrix send)
-       -> turn_store.py / handled_turns.py                       (durable dedup so restarts don't double-reply)
+       -> turn_store.py / event_journal/turn_rows.py             (durable dedup so restarts don't double-reply)
 ```
 
 ## Modules
@@ -43,15 +46,22 @@ Matrix sync callback
 | `runtime_state.py` | Shared runtime readiness state for health/ready endpoints |
 | `event_loop_stall.py` | Native-thread event-loop stall detector that logs the blocking stack |
 | `runtime_resolution.py` | Authoritative runtime resolution for one agent materialization |
-| `bot.py` | AgentBot and TeamBot runtime shells for Matrix lifecycle, sync callbacks, and room behavior |
-| `turn_controller.py` | TurnController - owns one inbound turn from ingress to recorded outcome |
-| `ingress_validation.py` | Ingress boundary validation: trust, effective requester, handled-id dedup, router-echo drop, command detection |
+| `bot.py` | AgentBot runtime shell of every agent, team, and the router: Matrix lifecycle, sync callbacks, and room behavior |
+| `turns/ingress.py` | TurnIngress - owns one inbound text or media event from its Matrix callback to gate admission, including onboarding commands, approval replies, edits, and commands that bypass the gate |
+| `turns/dispatch.py` | TurnDispatcher - owns one turn from the coalescing gate's exit to its recorded outcome: prepare, decide, execute, record |
+| `turns/interactive_selection.py` | Admits an answer to an interactive question behind earlier ingress and runs its response after the gate |
+| `turns/queued_notice.py` | The queued notice and approval-wait reaction that text, media, and voice ingress share |
+| `voice/ingress.py` | VoiceIngress - fixes a voice message's conversation, then readies it behind its sender's lane |
+| `voice/readiness.py` | Voice preparation and checkpointing, gated on the router's visible echo |
+| `router_relay.py` | Router relay delivery: target readiness, handoff metadata, and visible delivery |
+| `ingress_validation.py` | Ingress boundary validation: classify each event's provenance once against the entity registry, handled-id dedup, reply access at the first gate and again under the admission fence |
+| `turns/facts.py` | One inbound event's classified provenance (`IngressFacts`), the turn origin derived from it, and the one command rule |
 | `inbound_turn_normalizer.py` | Raw input shaping (text, voice, sidecars, media) into canonical turn inputs |
-| `conversation_resolver.py` | Conversation identity, thread history, and ingress envelope assembly |
+| `conversation_resolver.py` | Conversation identity, thread history, and envelope assembly from classified provenance |
+| `coalescing/ingress_ticket.py` | `IngressTicket`: one ingress item's lane slot, turn claim, and queued notice until gate admission moves them, released by one idempotent `close` |
 | `coalescing/ingress_lanes.py` | Per-(room, sender) receipt-order FIFO delivering resolving ingress (voice/STT readiness) to conversations |
 | `coalescing/gate.py` | Live message coalescing gate; ordinary text dispatches immediately, adaptive text waits for its quiet window, and media waits for attachments and a trailing caption |
 | `coalescing/batch.py` | Coalesced dispatch batch construction |
-| `text_ingress_dispatch.py` | Text ingress dispatch path used by TurnController |
 | `turn_policy.py` | Pure turn policy: decide ignore, route, or respond for inbound turns |
 | `participation.py` | Framework-independent participation state: one immutable decision, concurrent checks, and approval-preserving settlement |
 | `participation_hook.py` | The reply's participation check as a pre-request loop hook: a decision request on the reply's exact messages, or the configured judgment backend, ending the run when it stays silent |
@@ -67,13 +77,13 @@ Matrix sync callback
 | `config/skill_learning.py` | Opt-in agent settings for skill reviews: interval, review model, notices, and archival |
 | `dispatch_replay_guard.py` | Replay-guard checks for dispatch sequencing |
 | `event_journal/` | Durable ownership of admitted Matrix events, conversation projection, and delivery outbox |
-| `event_journal/upgrades.py` | The ordered schema upgrades both backends run inside their schema transaction, against one schema inspector |
+| `event_journal/upgrades.py` | The ordered schema upgrades both backends run inside their schema transaction, against one schema inspector, then the current schema and the conversions that fill it |
 | `event_journal/write_queue.py` | The one writer task each backend's writes queue for, from any event loop; the writes queued at once commit in one transaction |
 | `response_sources.py` | Immutable response-attempt source identity shared by runtime and persistence boundaries |
 | `reply_lifecycle.py` | Pure rules for durable reply records: every event that changes a reply, its spans, rows, and effects (see [Reply Messages](reply-messages.md)) |
 | `reply_presentation.py` | Reply presentation model, its JSON codec, and rendering into a body, trace, and terminal wire status |
 | `reply_scope.py` | `ReplyRuntime` and `SpanHandle`: reply claims, span exits, write-ahead, owed writes, and runtime ownership |
-| `edit_regenerator.py` | Decides which message edits regenerate a reply and hands each to a regeneration off the room's event lane |
+| `edit_regenerator.py` | Decides which message edits regenerate a reply and runs each off the room's event lane, as the entity answers now |
 | `event_journal/replies.py` | `ReplyStore`: reply rules applied inside journal transactions, with their in-transaction effects |
 | `event_journal/approval_store.py` | `ApprovalStore`: one principal's approval calls, cards, grants, scheduled calls, and paused-run continuations |
 | `event_journal/approval_calls.py` | One row per gated call, whatever owns it, and `resolve_call`, the only writer of a call's decision and its card's terminal edit |
@@ -82,6 +92,8 @@ Matrix sync callback
 | `event_journal/approval_signals.py` | `ApprovalSignals`: what committed approval writes tell the process, each principal's paused replies that bots' holds follow and each decided call that wakes its waiter and sends its card's terminal edit |
 | `event_journal/legacy_approval_records.py` | One-time conversion of an earlier release's per-kind approval tables to one row per call and card |
 | `event_journal/legacy_response_attempts.py` | One-time cancellation of the approvals an earlier release left pending, and removal of the tables that kept their reply identity |
+| `event_journal/turn_rows.py` | Turn state as rows, agent-scoped: lookups, narrow writes, the one reshape that forms a new source tuple, the agent's redaction record and the eligibility guard every write checks, delivery binding, and retention |
+| `event_journal/legacy_turn_rows.py` | One-time conversion of `turn_records` blobs, journal redaction tombstones, and the pre-journal JSON ledger into turn rows |
 | `event_journal/legacy_approval_failures.py` | One-time conversion of the free-text failure reasons failing approval continuations stored into their failure kind and detail |
 | `event_journal/scheduled_approvals.py` | Stored scheduled tool calls and their one-shot approvals: binding, fire-time arming, withdrawal, claim with its receipt, and outcome |
 | `journal_dispatch.py` | Fan admitted journal events out to typed Matrix callbacks and settle the ones that finish |
@@ -90,10 +102,11 @@ Matrix sync callback
 | `reaction_dispatch.py` | Durable semantic routing for Matrix reactions |
 | `user_stop_reconciliation.py` | Records a Stop reaction on the reply it stops |
 | `visible_response_reconciliation.py` | Visible Matrix response recovery, adoption, and replay reconciliation |
-| `turn_store.py` | Unified durable turn access (wraps the handled-turn ledger) |
-| `handled_turns.py` | Disk-backed handled-turn ledger preventing duplicate responses |
-| `response_runner.py` | Response lifecycle execution (locking, streaming vs non-streaming, cancellation, detached inbox responses, shutdown drains) |
-| `response_turn.py` | The shared streaming response-turn driver behind the agent and team envelopes, which blocking replies collect (attempt loop, model-switch continuation, empty-run retry, interrupt recording), and the run metadata and request-log context a turn binds around its model requests and stream pulls |
+| `turn_store.py` | One agent's turn state for the runtime: awaited reads and writes over `event_journal/turn_rows.py`, the in-process claim registry, and locked source and edit-snapshot preparation |
+| `response_runner.py` | Response lifecycle execution: the one locked turn agents and teams share, streamed or collected delivery, how a reply's span ends, and cancellation; it delegates a reply's approval lifecycle to `approval/continuation_runner.py` |
+| `reply_turn/inbox.py` | `InboxResponses`: owns detached inbox response tasks, and the turn claim each holds, until they finish, and proves their journal recovery when a shutdown drain cancels them |
+| `reply_turn/enrichment.py` | Request enrichment for one reply turn: Matrix targeting context, silent-schedule guidance, timestamped model context, and the account of an interrupted attempt |
+| `response_turn.py` | The streaming response-turn driver behind agent and team turns and the collector blocking callers read it with (attempt loop, model-switch continuation, empty-run retry, the turn record and its interrupted row), `ResponseTurnContext` with a turn's inputs, and the run metadata and request-log context a turn binds around its model requests and stream pulls |
 | `loop_hooks.py` | The hooks every run or resume installs on the agent loop, composed once in the order the turn applies them; `agent_loop_hooks` and `leader_loop_hooks` name what an agent's and a team leader's run differ by, and `HookTurn` holds what every run takes from its turn |
 | `run_storage.py` | Where an agent or team run stores (`RunStorage`, taken from a scope context or bound to a turn), the terminal record it hands over and the error when it hands none, and the persist callback that keeps and stores it |
 | `response_attempt.py` | Runs one visible response attempt as its reply span's cancellable task |
@@ -191,7 +204,7 @@ Matrix sync callback
 | `teams/delegate_tools.py` | `delegate_task_to_member` and `delegate_task_to_members`, the member result texts, the pause a paused member propagates to the team run, and the answer its resumed run gives the waiting call |
 | `teams/runtime.py` | `run_team` and `continue_team` over the agent loop: members as child runs, member decisions routed by member and call, team usage |
 | `teams/presentation.py` | The team reply document: header, member slots, consensus, tool trace, the durable `team_stream` snapshot an approval resume restores, the live document a resumed run publishes, and the document's text without tool markers that a reply records |
-| `teams/envelope.py` | `team_response_stream`: prepare a team turn, run its leader through the turn driver, and render the reply, which `team_response` collects for a blocking reply; `run_prepared_team` runs an OpenAI-compatible API team turn under the same leader hooks and storage |
+| `teams/envelope.py` | `team_response_stream`: prepare a team turn, run its leader through the turn driver, and render the reply; `run_prepared_team` runs an OpenAI-compatible API team turn under the same leader hooks and storage |
 | `teams/leader.py` | `LeaderRun`: how a team's leader runs in one turn or resume, its storage, hooks, request settings, and model, which a live turn and a saved approval's resume both build to start or continue the leader's run |
 | `teams/attempt.py` | One attempt of a team run, a turn's or a resume's: the reply document its events build, the records the run hands over, the text an interrupted turn records (its document without tool markers), and its run metadata |
 | `teams/resume.py` | Resuming a paused team run: `TeamResume` routes decisions to the calls the team waits for, `drive_team_delegations` runs a member's delegations and continues with their results, `continue_paused_team_run` rebuilds the team from a saved approval, and the document a team pause shows |
@@ -251,7 +264,7 @@ Matrix sync callback
 | `tools/` | 100+ tool integrations |
 | `tools/lumalabs.py` | Configurable SDK model binding for both inherited Luma video-generation methods |
 | `tool_system/dependencies.py` | Auto-install per-tool optional dependencies at runtime |
-| `ai.py` | AI response generation, streaming, and Matrix run metadata |
+| `ai.py` | The agent turn: `stream_agent_response` runs an agent through the turn driver, `ai_response` collects that stream, and delegated children run through it too |
 | `providers/credentials.py` | Which key a configured model authenticates with: the dashboard key and the missing-key checks the CLI and dashboard report |
 | `providers/key_checks.py` | The request that proves a provider API key valid, which `mindroom doctor` and the dashboard's provider setup send |
 | `providers/names.py` | `provider_route`, the route a configured provider value selects with aliases such as `gemini` resolved, which model dispatch, pricing, and the wire adapters compare, and `PROVIDER_ROUTES`, the routes the provider registry builds, which config validation accepts as a model's `provider`, in a module that imports nothing |
@@ -304,6 +317,7 @@ Matrix sync callback
 | `history/summary_rows.py` | The conversation log's summary rows: compare-and-append of compaction chunks and mid-turn folds, the event ids each row covers, the tool calls folds took, and edit and redaction cuts |
 | `history/legacy_compaction_state.py` | The conversion's step that turns earlier compaction state, the compaction archive, and unpositioned run rows into summary rows and positioned runs before they convert |
 | `history/mid_turn_compaction.py` | Compaction between the model requests of one reply: request sizing, folding, and the scoped or run-local summary |
+| `history/turn_recorder.py` | `TurnRecorder`: what one turn did, which the turn driver writes, and the interrupted-replay snapshot the driver stores when the turn stops |
 | `history/legacy_summary_system_prompt.py` | Approval resume of runs paused with the summary inside their saved system message |
 | `history/legacy_stored_tool_calls.py` | Tool-call shapes earlier releases stored, which the conversion to storage v2 stores in the current shape in every message a converted run replays |
 | `history/summary_message.py` | The compaction summary as a user message: its text, its scope or run-local marker, and the marker that replays the scope's summary after a mid-turn compacted prompt |
@@ -377,7 +391,7 @@ Matrix sync callback
 | `shell/output_capture.py` | Bounded shell output spools, completion validation, and atomic output-file publication |
 | `shell/execution.py` | Shell command execution core: spawning, output buffering, stopping at a timeout, and the handle registry of Desktop shell and script runs |
 | `shell/supervisor.py` | Worker-local shell supervisor process that runs shell commands and script handles for sandbox request subprocesses, stopping a command whose relay dies |
-| `streaming.py` | Streaming state machine: placeholder, progressive edits, tool traces, cancellation |
+| `streaming.py` | Streaming state machine: placeholder, progressive edits, tool traces, and the terminal write of a stream that finished; a stopped or failed stream raises for its span exit to end |
 | `prompts.py` | Built-in prompt defaults and prompt override registry |
 | `attachments/storage.py` | Attachment persistence, registration, and context-scoped resolution |
 | `attachments/ids.py` | Leaf attachment-ID helpers kept free of matrix-client imports |

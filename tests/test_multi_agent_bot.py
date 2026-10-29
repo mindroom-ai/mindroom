@@ -28,7 +28,6 @@ from mindroom.event_journal import (
     IngestionRecordDisposition,
     RoomMembershipPosition,
 )
-from mindroom.handled_turns import TurnRecord
 from mindroom.knowledge.utils import _KnowledgeResolution
 from mindroom.matrix.client import PermanentMatrixStartupError
 from mindroom.matrix.state import MatrixState
@@ -41,15 +40,17 @@ from mindroom.orchestrator import (
     _MultiAgentOrchestrator,
 )
 from mindroom.startup_errors import PermanentStartupError
+from mindroom.turn_record import TurnRecord
 from tests.access_schema_support import with_current_room_member_access
 from tests.bot_helpers import (
     AgentBotTestBase,
     _make_matrix_client_mock,
     _runtime_bound_config,
-    _set_turn_store_tracker,
     _turn_store,
     _visible_message,
     _wrap_extracted_collaborators,
+    assert_no_turn_answered,
+    assert_turn_answered,
     make_mock_agent_user,
     make_test_agent_bot,
     unique_room_send_responses,
@@ -334,7 +335,7 @@ class TestAgentBot(AgentBotTestBase):
         assert bot._tool_runtime_support.matrix_id.full_id == actual_user_id
         assert bot._response_runner.deps.matrix_full_id == actual_user_id
         assert bot._turn_policy.deps.matrix_id.full_id == actual_user_id
-        assert bot._turn_controller.deps.matrix_id.full_id == actual_user_id
+        assert bot._turn_ingress.deps.matrix_id.full_id == actual_user_id
         mock_client.add_event_callback.assert_called_once_with(
             bot._on_invite_before_sync_certification,
             nio.InviteEvent,
@@ -1075,7 +1076,6 @@ class TestAgentBot(AgentBotTestBase):
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize("enable_streaming", [True, False])
-    @patch("mindroom.response_runner.ai_response")
     @patch("mindroom.response_runner.stream_agent_response")
     @patch("mindroom.conversation_resolver.ConversationResolver.fetch_thread_history")
     @patch("mindroom.response_runner.should_use_streaming")
@@ -1083,21 +1083,19 @@ class TestAgentBot(AgentBotTestBase):
         self,
         mock_should_use_streaming: AsyncMock,
         mock_fetch_history: AsyncMock,
-        mock_stream_agent_response: AsyncMock,
-        mock_ai_response: AsyncMock,
+        mock_stream_agent_response: MagicMock,
         enable_streaming: bool,
         mock_agent_user: AgentMatrixUser,  # noqa: ARG002
         tmp_path: Path,
     ) -> None:
-        """Test agent bot responding to mentions with both streaming and non-streaming modes."""
+        """Test agent bot responding to mentions; both delivery modes run the one agent turn stream."""
 
         # Mock streaming response - return an async generator
-        async def mock_streaming_response() -> AsyncGenerator[str, None]:
+        async def mock_streaming_response(*_args: object, **_kwargs: object) -> AsyncGenerator[str, None]:
             yield "Test"
             yield " response"
 
-        mock_stream_agent_response.return_value = mock_streaming_response()
-        mock_ai_response.return_value = "Test response"
+        mock_stream_agent_response.side_effect = mock_streaming_response
         mock_fetch_history.return_value = thread_history_result([], is_full_history=True)
         # Mock the presence check to return same value as enable_streaming
         mock_should_use_streaming.return_value = enable_streaming
@@ -1170,59 +1168,30 @@ class TestAgentBot(AgentBotTestBase):
         await bot._on_message(mock_room, mock_event)
         await drain_coalescing(bot)
 
-        # Should call AI and send response based on streaming mode
-        if enable_streaming:
-            mock_stream_agent_response.assert_called_once()
-            stream_args = mock_stream_agent_response.call_args.args
-            stream_kwargs = mock_stream_agent_response.call_args.kwargs
-            stream_ctx = stream_args[0]
-            assert stream_ctx.entity_label == "calculator"
-            assert stream_kwargs["prompt"] == f"{mention_id}: What's 2+2?"
-            assert stream_kwargs["model_prompt"] == f"{mention_id}: What's 2+2?"
-            assert stream_kwargs["current_timestamp_ms"] == 1_774_019_700_000.0
-            assert stream_ctx.session_id == "!test:localhost:$thread_root_id"
-            assert stream_kwargs["runtime_paths"].storage_root == runtime_paths_for(config).storage_root
-            assert stream_kwargs["config"] == config
-            assert stream_kwargs["thread_history"] == []
-            assert stream_ctx.room_id == "!test:localhost"
-            assert stream_kwargs["knowledge"] is None
-            assert stream_ctx.requester_id == "@user:localhost"
-            assert isinstance(stream_ctx.run_id, str)
-            assert stream_ctx.run_id
-            assert stream_kwargs["media"] == MediaInputs()
-            assert stream_ctx.reply_to_event_id == "event123"
-            assert stream_kwargs["show_tool_calls"] is True
-            assert stream_kwargs["run_metadata_collector"] == {}
-            mock_ai_response.assert_not_called()
-            # With streaming and stop button: initial message + reaction + edits
-            # Note: The exact count may vary based on implementation
-            assert bot.client.room_send.call_count >= 2
-        else:
-            mock_ai_response.assert_called_once()
-            ai_args = mock_ai_response.call_args.args
-            ai_kwargs = mock_ai_response.call_args.kwargs
-            ai_ctx = ai_args[0]
-            assert ai_ctx.entity_label == "calculator"
-            assert ai_kwargs["prompt"] == f"{mention_id}: What's 2+2?"
-            assert ai_kwargs["model_prompt"] == f"{mention_id}: What's 2+2?"
-            assert ai_kwargs["current_timestamp_ms"] == 1_774_019_700_000.0
-            assert ai_ctx.session_id == "!test:localhost:$thread_root_id"
-            assert ai_kwargs["runtime_paths"].storage_root == runtime_paths_for(config).storage_root
-            assert ai_kwargs["config"] == config
-            assert ai_kwargs["thread_history"] == []
-            assert ai_ctx.room_id == "!test:localhost"
-            assert ai_kwargs["knowledge"] is None
-            assert ai_ctx.requester_id == "@user:localhost"
-            assert isinstance(ai_ctx.run_id, str)
-            assert ai_ctx.run_id
-            assert ai_kwargs["media"] == MediaInputs()
-            assert ai_ctx.reply_to_event_id == "event123"
-            assert ai_kwargs["show_tool_calls"] is True
-            assert ai_kwargs["tool_trace_collector"] == []
-            assert ai_kwargs["run_metadata_collector"] == {}
-            mock_stream_agent_response.assert_not_called()
-            # With stop button support: initial + reaction + final
-            assert bot.client.room_send.call_count >= 2
+        # Both delivery modes run the agent's turn stream once; a whole delivery collects it.
+        mock_stream_agent_response.assert_called_once()
+        stream_args = mock_stream_agent_response.call_args.args
+        stream_kwargs = mock_stream_agent_response.call_args.kwargs
+        stream_ctx = stream_args[0]
+        assert stream_ctx.entity_label == "calculator"
+        assert stream_ctx.prompt == f"{mention_id}: What's 2+2?"
+        assert stream_ctx.model_prompt == f"{mention_id}: What's 2+2?"
+        assert stream_ctx.current_timestamp_ms == 1_774_019_700_000.0
+        assert stream_ctx.session_id == "!test:localhost:$thread_root_id"
+        assert stream_args[1].storage_root == runtime_paths_for(config).storage_root
+        assert stream_args[2] == config
+        assert stream_ctx.thread_history == []
+        assert stream_ctx.room_id == "!test:localhost"
+        assert stream_ctx.knowledge is None
+        assert stream_ctx.requester_id == "@user:localhost"
+        assert isinstance(stream_ctx.run_id, str)
+        assert stream_ctx.run_id
+        assert stream_ctx.media == MediaInputs()
+        assert stream_ctx.reply_to_event_id == "event123"
+        assert stream_ctx.show_tool_calls is True
+        assert stream_kwargs["sinks"].run_metadata_collector == {}
+        # The placeholder, then the answer; a stream also sends its progress edits and Stop button.
+        assert bot.client.room_send.call_count >= 2
 
     @pytest.mark.asyncio
     async def test_agent_bot_on_message_not_mentioned(self, mock_agent_user: AgentMatrixUser, tmp_path: Path) -> None:
@@ -1233,7 +1202,9 @@ class TestAgentBot(AgentBotTestBase):
         bot.client = AsyncMock()
 
         mock_room = MagicMock()
+        mock_room.room_id = "!test:localhost"
         mock_event = MagicMock()
+        mock_event.event_id = "$hello"
         mock_event.sender = "@user:localhost"
         mock_event.body = "Hello everyone!"
         mock_event.source = {"content": {"body": "Hello everyone!"}}
@@ -1461,8 +1432,6 @@ class TestAgentBot(AgentBotTestBase):
         bot = make_test_agent_bot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
         _wrap_extracted_collaborators(bot)
         bot.client = AsyncMock()
-        tracker = _set_turn_store_tracker(bot, MagicMock())
-        tracker.has_responded.return_value = False
 
         room = MagicMock(spec=nio.MatrixRoom)
         room.room_id = "!test:localhost"
@@ -1476,11 +1445,9 @@ class TestAgentBot(AgentBotTestBase):
             await self._invoke_handler(bot, handler_name, room, event)
 
         if marks_responded:
-            tracker.record_handled_turn.assert_called_once_with(
-                TurnRecord.create([event.event_id]),
-            )
+            await assert_turn_answered(bot, TurnRecord.create([event.event_id]))
         else:
-            tracker.record_handled_turn.assert_not_called()
+            await assert_no_turn_answered(bot)
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize(
@@ -1511,8 +1478,6 @@ class TestAgentBot(AgentBotTestBase):
         bot = make_test_agent_bot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
         _wrap_extracted_collaborators(bot)
         bot.client = AsyncMock()
-        tracker = _set_turn_store_tracker(bot, MagicMock())
-        tracker.has_responded.return_value = False
 
         room = MagicMock(spec=nio.MatrixRoom)
         room.room_id = "!test:localhost"
@@ -1539,7 +1504,7 @@ class TestAgentBot(AgentBotTestBase):
             patch("mindroom.turn_policy.TurnPolicy.can_reply_to_sender_in_room", return_value=True),
             patch.object(bot._turn_policy, "can_reply_to_sender_in_room", return_value=False),
             patch.object(
-                bot._turn_controller.deps.turn_policy,
+                bot._turn_ingress.deps.turn_policy,
                 "can_reply_to_sender_in_room",
                 return_value=False,
             ),
@@ -1547,24 +1512,20 @@ class TestAgentBot(AgentBotTestBase):
             await self._invoke_handler(bot, handler_name, room, event)
 
         if marks_responded:
-            tracker.record_handled_turn.assert_called_once_with(
-                TurnRecord.create([event.event_id]),
-            )
+            await assert_turn_answered(bot, TurnRecord.create([event.event_id]))
         else:
-            tracker.record_handled_turn.assert_not_called()
+            await assert_no_turn_answered(bot)
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize("enable_streaming", [True, False])
     @patch("mindroom.config.main.load_config")
     @patch("mindroom.teams.members.resolve_agent_knowledge_access")
-    @patch("mindroom.response_runner.ai_response")
     @patch("mindroom.response_runner.stream_agent_response")
     @patch("mindroom.response_runner.should_use_streaming")
     async def test_agent_bot_thread_response(  # noqa: PLR0915
         self,
         mock_should_use_streaming: AsyncMock,
-        mock_stream_agent_response: AsyncMock,
-        mock_ai_response: AsyncMock,
+        mock_stream_agent_response: MagicMock,
         mock_resolve_agent_knowledge_access: MagicMock,
         mock_load_config: MagicMock,
         enable_streaming: bool,
@@ -1643,12 +1604,11 @@ class TestAgentBot(AgentBotTestBase):
         )
 
         # Mock streaming response - return an async generator
-        async def mock_streaming_response() -> AsyncGenerator[str, None]:
+        async def mock_streaming_response(*_args: object, **_kwargs: object) -> AsyncGenerator[str, None]:
             yield "Thread"
             yield " response"
 
-        mock_stream_agent_response.return_value = mock_streaming_response()
-        mock_ai_response.return_value = "Thread response"
+        mock_stream_agent_response.side_effect = mock_streaming_response
 
         # Mock the presence check to return same value as enable_streaming
         mock_should_use_streaming.return_value = enable_streaming
@@ -1671,20 +1631,12 @@ class TestAgentBot(AgentBotTestBase):
         await drain_coalescing(bot)
 
         # Should respond as only agent in thread
-        if enable_streaming:
-            mock_stream_agent_response.assert_called_once()
-            mock_ai_response.assert_not_called()
-            # With streaming and stop button support
-            assert bot.client.room_send.call_count >= 2
-        else:
-            mock_ai_response.assert_called_once()
-            mock_stream_agent_response.assert_not_called()
-            # With stop button support: initial + reaction + final
-            assert bot.client.room_send.call_count >= 2
+        # Both delivery modes run the agent's turn stream once; a whole delivery collects it.
+        mock_stream_agent_response.assert_called_once()
+        assert bot.client.room_send.call_count >= 2
 
         # Reset mocks
         mock_stream_agent_response.reset_mock()
-        mock_ai_response.reset_mock()
         bot.client.room_send.reset_mock()
 
         # Test 2: Thread with multiple agents - should NOT respond without mention
@@ -1729,7 +1681,6 @@ class TestAgentBot(AgentBotTestBase):
 
         # Should form team and send a structured streaming team response
         mock_stream_agent_response.assert_not_called()
-        mock_ai_response.assert_not_called()
         # The team mode was chosen once, then the team formed once.
         assert [request.output_schema is not None for request in team_model.requests] == [True, False]
         # Structured streaming sends an initial message and one or more edits
@@ -1737,7 +1688,6 @@ class TestAgentBot(AgentBotTestBase):
 
         # Reset mocks
         mock_stream_agent_response.reset_mock()
-        mock_ai_response.reset_mock()
         bot.client.room_send.reset_mock()
 
         # Test 3: Thread with multiple agents WITH mention - should respond
@@ -1758,27 +1708,19 @@ class TestAgentBot(AgentBotTestBase):
         }
 
         # Set up fresh async generator for the second call
-        async def mock_streaming_response2() -> AsyncGenerator[str, None]:
+        async def mock_streaming_response2(*_args: object, **_kwargs: object) -> AsyncGenerator[str, None]:
             yield "Mentioned"
             yield " response"
 
-        mock_stream_agent_response.return_value = mock_streaming_response2()
-        mock_ai_response.return_value = "Mentioned response"
+        mock_stream_agent_response.side_effect = mock_streaming_response2
 
         await bot._on_message(mock_room, mock_event_with_mention)
         await drain_coalescing(bot)
 
         # Should respond when explicitly mentioned
-        if enable_streaming:
-            mock_stream_agent_response.assert_called_once()
-            mock_ai_response.assert_not_called()
-            # With streaming and stop button support
-            assert bot.client.room_send.call_count >= 2
-        else:
-            mock_ai_response.assert_called_once()
-            mock_stream_agent_response.assert_not_called()
-            # With stop button support: initial + reaction + final
-            assert bot.client.room_send.call_count >= 2
+        # Both delivery modes run the agent's turn stream once; a whole delivery collects it.
+        mock_stream_agent_response.assert_called_once()
+        assert bot.client.room_send.call_count >= 2
 
     @pytest.mark.asyncio
     async def test_agent_bot_skips_already_responded_messages(
@@ -1793,7 +1735,7 @@ class TestAgentBot(AgentBotTestBase):
         bot.client = AsyncMock()
 
         # Mark an event as already responded
-        await _turn_store(bot).record_turn(TurnRecord.create(["event123"]))
+        await _turn_store(bot).record_turn(TurnRecord.create(["event123"]), room_id="!test:localhost")
 
         # Create mock room and event
         mock_room = MagicMock()

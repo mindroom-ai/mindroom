@@ -7152,7 +7152,6 @@ A template or override that would produce an invalid agent fails validation as s
 ## Generated Agents
 
 Generated agents are ordinary agents in the running config, and workers receive them too.
-Docker workers take them from the config the runtime last accepted, and every other setting from `config.yaml`, so a rejected `config.yaml` edit can give a worker a mix of the two until you fix the file.
 They never appear in the saved config file, and the dashboard and `config_manager` edit only what you authored.
 
 - Editing the template changes every user's agent at the next reload.
@@ -13209,7 +13208,7 @@ With `room`, the agent answers Slack:
 
 Who can wake the agent:
 
-- The author's Slack email must be in `slack.email_domain`, and its localpart maps to a Matrix account through `slack.matrix_user_id_template`.
+- The author's Slack email must be confirmed and in `slack.email_domain`, and its localpart maps to a Matrix account through `slack.matrix_user_id_template`.
 - Guests, bots and other apps, deactivated accounts, and people from other workspaces never wake an agent.
 - The mapped account must also pass the agent's [`access`](https://docs.mindroom.chat/authorization/#responder-access) check in `room`.
 - Anyone else sees a message in Slack that only they can see, `MindRoom can't answer you here.`, at most once a day per thread, and nothing reaches Matrix.
@@ -17528,6 +17527,7 @@ Custom events default to 1000 ms.
   Streamed replies usually show text before they finish, so this hook does not see them; set `defaults.enable_streaming: false` when every reply must pass through it, as with the disclaimer and redaction examples above.
   Once a streamed reply is visible it cannot be suppressed; use `message:final_response_transform` for one text-only replacement after a streamed reply succeeds.
   `message:final_response_transform` cannot suppress, redact, or delete the reply, or change its metadata.
+  A reply resumed after a tool approval runs `message:before_response` on its final text, not `message:final_response_transform`; when the reply streams, its resumed text can show before that hook runs.
 - **`message:cancelled`**: `ctx.info.failure_reason` tells cancellation, interruption, suppression, and delivery failure apart.
 - **`agent:started` with `required=True`**: use a short, separate required hook for initialization the bot must not run without, and keep optional work such as backfill or welcome messages in ordinary hooks.
   A failure or timeout stops the remaining startup hooks and fails that bot's startup like any other startup error.
@@ -17833,8 +17833,9 @@ ResponseResult(
 - In `schedule:fired`, omitting `thread_id` posts to `ctx.thread_id`, while an explicit `thread_id=None` posts at room level.
 - A plain send triggers agents only when it would as a normal message, for example when it mentions an agent.
 - `trigger_dispatch=True` sends the message as `source_kind` `"hook_dispatch"`, which agents may answer without a mention, subject to normal permissions and routing.
+- Hook-sent text never runs as a chat command, even when it starts with `!`; agents receive it as conversation.
 - A hook-sent message passes through `message:received` once, skipping the plugin that sent it if the send came from `message:received`.
-  Messages sent by hooks in response to hook-sent messages are still posted, but they skip `message:received` and do not trigger commands or agent replies, which prevents feedback loops.
+  Messages sent by hooks in response to hook-sent messages are still posted, but they skip `message:received` and do not trigger agent replies, which prevents feedback loops.
 
 ### Room state and recent messages
 
@@ -18190,6 +18191,8 @@ Callbacks follow `external_trigger_policy` and count toward `max_triggers_per_ow
 When finished, run: bash /path/to/callback_1234.sh "<short result summary>"
 ```
 
+The script lives in the agent's workspace, and the path is where the agent's shell finds it in MindRoom, in a dedicated worker, or in a `static_runner` sandbox that mounts the agent workspaces, as the Kubernetes sidecar does.
+The [Docker Compose `static_runner` sandbox](https://docs.mindroom.chat/deployment/sandbox-proxy/#sandbox-proxy-isolation_1) cannot see agent workspaces, so a background task started from a shell there cannot run the script.
 The script needs only Bash and curl.
 It posts the summary to the room and thread where the callback was minted, which wakes the agent.
 After a successful delivery the callback is used up and the script deletes itself; if delivery fails, the script remains so it can be run again.
@@ -23401,7 +23404,7 @@ Collect everything the backend stored about one conversation into a single JSON 
 The input is the JSON file a MindRoom Chat **Report a bug** message carries, or plain identifiers.
 See [Bug Reports](https://docs.mindroom.chat/bug-reports/) for how users send those reports and how administrators receive them.
 
-The report includes the event journal's turn records, admitted events, and outbound deliveries, the conversation's stored runs of agents, teams, private instances, and system usage, `tracking/tool_calls.jsonl` and its rotations, the LLM request logs, and the `mindroom_*.log` files.
+The report includes the event journal's turn records, message deletions, admitted events, and outbound deliveries, the conversation's stored runs of agents, teams, private instances, and system usage, `tracking/tool_calls.jsonl` and its rotations, the LLM request logs, and the `mindroom_*.log` files.
 Each source lists the files it read under `paths` and has a `status` of `ok`, `missing` (nothing to read there), or `error` with the message under `error`; a source that cannot be read, such as a locked or corrupt database, does not stop the others.
 Successful tool calls and LLM requests are only logged when `debug.log_llm_requests` is enabled.
 Nothing is redacted, and the newest matches are kept: up to 100 runs, 1,000 records per JSONL source, and 2,000 log lines of 4,000 characters each, with `dropped` and `truncated` counting what was left out or shortened.

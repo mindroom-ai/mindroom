@@ -11,18 +11,18 @@ import pytest
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig, RouterConfig
-from mindroom.handled_turns import TurnRecord
 from mindroom.matrix.thread_history_result import thread_history_result
 from mindroom.matrix.users import AgentMatrixUser
+from mindroom.turn_record import TurnRecord
 from tests.access_schema_support import with_current_room_member_access
 from tests.bot_helpers import make_test_agent_bot
 from tests.conftest import (
     TEST_PASSWORD,
     bind_runtime_paths,
     drain_coalescing,
+    install_edit_regeneration_mock,
     install_runtime_journal_support,
     make_matrix_client_mock,
-    replace_edit_regenerator_deps,
     runtime_paths_for,
     test_runtime_paths,
 )
@@ -30,7 +30,7 @@ from tests.identity_helpers import persist_entity_accounts
 from tests.response_attempt_helpers import install_direct_response_admission
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncGenerator
+    from collections.abc import AsyncGenerator, AsyncIterator, Callable
     from pathlib import Path
 
     from mindroom.bot import AgentBot
@@ -39,6 +39,18 @@ if TYPE_CHECKING:
 async def _empty_event_iterator() -> AsyncGenerator[object, None]:
     if False:
         yield None
+
+
+def _answer_stream(text: str) -> Callable[..., AsyncIterator[str]]:
+    """Return a turn stream that answers ``text`` each time a turn runs."""
+
+    def stream(*_args: object, **_kwargs: object) -> AsyncIterator[str]:
+        async def chunks() -> AsyncIterator[str]:
+            yield text
+
+        return chunks()
+
+    return stream
 
 
 def _make_matrix_client_mock() -> AsyncMock:
@@ -80,7 +92,7 @@ def setup_test_bot(
     install_direct_response_admission(bot)
     bot.client = _make_matrix_client_mock()
     install_runtime_journal_support(bot)
-    bot._turn_controller.deps.resolver.dispatch_thread_snapshot = AsyncMock(
+    bot._turn_ingress.deps.resolver.dispatch_thread_snapshot = AsyncMock(
         return_value=thread_history_result([], is_full_history=False),
     )
     bot._conversation_resolver.fetch_thread_history = AsyncMock(
@@ -125,12 +137,10 @@ class TestStreamingEdits:
         )
 
     @pytest.mark.asyncio
-    @patch("mindroom.response_runner.ai_response")
     @patch("mindroom.response_runner.stream_agent_response")
     async def test_agent_regenerates_on_user_edits(
         self,
-        mock_stream_agent_response: AsyncMock,  # noqa: ARG002
-        mock_ai_response: AsyncMock,
+        mock_stream_agent_response: MagicMock,
         mock_agent_user: AgentMatrixUser,
         tmp_path: Path,
     ) -> None:
@@ -143,8 +153,8 @@ class TestStreamingEdits:
         mock_send_response.__class__ = nio.RoomSendResponse
         bot.client.room_send.return_value = mock_send_response
 
-        # Mock AI response
-        mock_ai_response.return_value = "I can help with that!"
+        # Mock the turn's answer
+        mock_stream_agent_response.side_effect = _answer_stream("I can help with that!")
 
         # Set up room
         mock_room = MagicMock()
@@ -166,14 +176,15 @@ class TestStreamingEdits:
         await bot._on_message(mock_room, initial_event)
         await drain_coalescing(bot)
         assert bot.client.room_send.call_count == 2  # thinking + final
-        assert mock_ai_response.call_count == 1
+        assert mock_stream_agent_response.call_count == 1
         await bot._turn_store.record_turn(
             TurnRecord.create(["$initial123"], response_event_id="$response123"),
+            room_id="!test:localhost",
         )
 
         # Reset mocks
         bot.client.room_send.reset_mock()
-        mock_ai_response.reset_mock()
+        mock_stream_agent_response.reset_mock()
 
         # Edit event 1 - simulating streaming update
         edit_event1 = MagicMock()
@@ -198,7 +209,7 @@ class TestStreamingEdits:
 
         # Process edit - bot SHOULD regenerate its response.
         mock_generate_response = AsyncMock(return_value=_delivery_resolution("$response123"))
-        replace_edit_regenerator_deps(bot, generate_response=mock_generate_response)
+        install_edit_regeneration_mock(bot, mock_generate_response)
         await bot._on_message(mock_room, edit_event1)
         await drain_coalescing(bot)
         assert mock_generate_response.await_count == 1
@@ -226,20 +237,20 @@ class TestStreamingEdits:
 
         # Reset mocks again
         bot.client.room_send.reset_mock()
-        mock_ai_response.reset_mock()
+        mock_stream_agent_response.reset_mock()
 
         # Process second edit - bot should regenerate again.
         mock_generate_response = AsyncMock(return_value=_delivery_resolution("$response123"))
-        replace_edit_regenerator_deps(bot, generate_response=mock_generate_response)
+        install_edit_regeneration_mock(bot, mock_generate_response)
         await bot._on_message(mock_room, edit_event2)
         await drain_coalescing(bot)
         assert mock_generate_response.await_count == 1
 
     @pytest.mark.asyncio
-    @patch("mindroom.response_runner.ai_response")
+    @patch("mindroom.response_runner.stream_agent_response")
     async def test_agent_responds_to_new_messages_after_edits(
         self,
-        mock_ai_response: AsyncMock,
+        mock_stream_agent_response: MagicMock,
         mock_agent_user: AgentMatrixUser,
         tmp_path: Path,
     ) -> None:
@@ -252,15 +263,15 @@ class TestStreamingEdits:
         mock_send_response.__class__ = nio.RoomSendResponse
         bot.client.room_send.return_value = mock_send_response
 
-        # Mock AI response
-        mock_ai_response.return_value = "Here's the answer!"
+        # Mock the turn's answer
+        mock_stream_agent_response.side_effect = _answer_stream("Here's the answer!")
 
         # Set up room
         mock_room = MagicMock()
         mock_room.room_id = "!test:localhost"
 
         # Mark that we already responded to some original message
-        await bot._turn_store.record_turn(TurnRecord.create(["$original123"]))
+        await bot._turn_store.record_turn(TurnRecord.create(["$original123"]), room_id="!test:localhost")
 
         # New message (NOT an edit) mentioning the agent
         new_event = MagicMock()
@@ -278,13 +289,13 @@ class TestStreamingEdits:
         await bot._on_message(mock_room, new_event)
         await drain_coalescing(bot)
         assert bot.client.room_send.call_count == 2  # thinking + final
-        assert mock_ai_response.call_count == 1
+        assert mock_stream_agent_response.call_count == 1
 
     @pytest.mark.asyncio
-    @patch("mindroom.response_runner.ai_response")
+    @patch("mindroom.response_runner.stream_agent_response")
     async def test_agent_ignores_all_edits_from_agents(
         self,
-        mock_ai_response: AsyncMock,
+        mock_stream_agent_response: MagicMock,
         mock_agent_user: AgentMatrixUser,
         tmp_path: Path,
     ) -> None:
@@ -297,8 +308,8 @@ class TestStreamingEdits:
         mock_send_response.__class__ = nio.RoomSendResponse
         bot.client.room_send.return_value = mock_send_response
 
-        # Mock AI response
-        mock_ai_response.return_value = "I can help with that!"
+        # Mock the turn's answer
+        mock_stream_agent_response.side_effect = _answer_stream("I can help with that!")
 
         # Set up room
         mock_room = MagicMock()
@@ -319,7 +330,7 @@ class TestStreamingEdits:
         await bot._on_message(mock_room, initial_event)
         await drain_coalescing(bot)
         assert bot.client.room_send.call_count == 0
-        assert mock_ai_response.call_count == 0
+        assert mock_stream_agent_response.call_count == 0
 
         # Edit from agent that NOW mentions calculator (with in-progress marker)
         edit_event = MagicMock()
@@ -345,13 +356,13 @@ class TestStreamingEdits:
         await bot._on_message(mock_room, edit_event)
         await drain_coalescing(bot)
         assert bot.client.room_send.call_count == 0
-        assert mock_ai_response.call_count == 0
+        assert mock_stream_agent_response.call_count == 0
 
     @pytest.mark.asyncio
-    @patch("mindroom.response_runner.ai_response")
+    @patch("mindroom.response_runner.stream_agent_response")
     async def test_agent_responds_to_user_edits_with_new_mentions(
         self,
-        mock_ai_response: AsyncMock,
+        mock_stream_agent_response: MagicMock,
         mock_agent_user: AgentMatrixUser,
         tmp_path: Path,
     ) -> None:
@@ -368,8 +379,8 @@ class TestStreamingEdits:
         mock_send_response.__class__ = nio.RoomSendResponse
         bot.client.room_send.return_value = mock_send_response
 
-        # Mock AI response
-        mock_ai_response.return_value = "I can help with that!"
+        # Mock the turn's answer
+        mock_stream_agent_response.side_effect = _answer_stream("I can help with that!")
 
         # Set up room
         mock_room = MagicMock()
@@ -390,7 +401,7 @@ class TestStreamingEdits:
         await bot._on_message(mock_room, initial_event)
         await drain_coalescing(bot)
         assert bot.client.room_send.call_count == 0
-        assert mock_ai_response.call_count == 0
+        assert mock_stream_agent_response.call_count == 0
 
         # Edit from user that NOW mentions calculator
         edit_event = MagicMock()
@@ -416,4 +427,4 @@ class TestStreamingEdits:
         await bot._on_message(mock_room, edit_event)
         await drain_coalescing(bot)
         assert bot.client.room_send.call_count == 0
-        assert mock_ai_response.call_count == 0
+        assert mock_stream_agent_response.call_count == 0

@@ -213,6 +213,7 @@ Custom events default to 1000 ms.
   Streamed replies usually show text before they finish, so this hook does not see them; set `defaults.enable_streaming: false` when every reply must pass through it, as with the disclaimer and redaction examples above.
   Once a streamed reply is visible it cannot be suppressed; use `message:final_response_transform` for one text-only replacement after a streamed reply succeeds.
   `message:final_response_transform` cannot suppress, redact, or delete the reply, or change its metadata.
+  A reply resumed after a tool approval runs `message:before_response` on its final text, not `message:final_response_transform`; when the reply streams, its resumed text can show before that hook runs.
 - **`message:cancelled`**: `ctx.info.failure_reason` tells cancellation, interruption, suppression, and delivery failure apart.
 - **`agent:started` with `required=True`**: use a short, separate required hook for initialization the bot must not run without, and keep optional work such as backfill or welcome messages in ordinary hooks.
   A failure or timeout stops the remaining startup hooks and fails that bot's startup like any other startup error.
@@ -518,8 +519,9 @@ ResponseResult(
 - In `schedule:fired`, omitting `thread_id` posts to `ctx.thread_id`, while an explicit `thread_id=None` posts at room level.
 - A plain send triggers agents only when it would as a normal message, for example when it mentions an agent.
 - `trigger_dispatch=True` sends the message as `source_kind` `"hook_dispatch"`, which agents may answer without a mention, subject to normal permissions and routing.
+- Hook-sent text never runs as a chat command, even when it starts with `!`; agents receive it as conversation.
 - A hook-sent message passes through `message:received` once, skipping the plugin that sent it if the send came from `message:received`.
-  Messages sent by hooks in response to hook-sent messages are still posted, but they skip `message:received` and do not trigger commands or agent replies, which prevents feedback loops.
+  Messages sent by hooks in response to hook-sent messages are still posted, but they skip `message:received` and do not trigger agent replies, which prevents feedback loops.
 
 ### Room state and recent messages
 

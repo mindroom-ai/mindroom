@@ -381,9 +381,7 @@ def _patch_orchestrator_plugin_update_test_runtime(monkeypatch: pytest.MonkeyPat
         _noop_start_sync_task,
     )
     monkeypatch.setattr("mindroom.bot.AgentBot.try_start", _noop_try_start)
-    monkeypatch.setattr("mindroom.bot.TeamBot.try_start", _noop_try_start)
     monkeypatch.setattr("mindroom.bot.AgentBot.stop", _noop_stop)
-    monkeypatch.setattr("mindroom.bot.TeamBot.stop", _noop_stop)
 
 
 @pytest.mark.asyncio
@@ -3351,8 +3349,6 @@ async def test_orchestrator_handles_config_reload(  # noqa: PLR0915
 
     monkeypatch.setattr("mindroom.bot.AgentBot.start", mock_start)
     monkeypatch.setattr("mindroom.bot.AgentBot.sync_forever", AsyncMock())
-    monkeypatch.setattr("mindroom.bot.TeamBot.start", mock_start)
-    monkeypatch.setattr("mindroom.bot.TeamBot.sync_forever", AsyncMock())
     monkeypatch.setattr("mindroom.orchestrator._MultiAgentOrchestrator._ensure_user_account", AsyncMock())
     monkeypatch.setattr("mindroom.orchestrator._MultiAgentOrchestrator._setup_rooms_and_memberships", AsyncMock())
 
@@ -3381,9 +3377,8 @@ async def test_orchestrator_handles_config_reload(  # noqa: PLR0915
             self.client = AsyncMock()
             self.client.user_id = self.agent_user.user_id
 
-    # Patch AgentBot.start and TeamBot.start to use our mock
+    # Patch AgentBot.start to use our mock
     monkeypatch.setattr("mindroom.bot.AgentBot.start", mock_start_with_thread_manager)
-    monkeypatch.setattr("mindroom.bot.TeamBot.start", mock_start_with_thread_manager)
 
     # Mock bot operations for update
     for bot in orchestrator.agent_bots.values():
@@ -3808,7 +3803,7 @@ async def test_replaced_runtime_refuses_deferred_response_without_matrix_io(
     # Stand where a config apply stands: admission closed, plan in progress.
     assert admission_gate.close_if_idle()
     assert bot.admission_gate is admission_gate
-    task = bot._response_runner.track_inbox_response(
+    task = bot._response_runner.inbox.track_inbox_response(
         bot._response_runner.generate_response(
             ResponseRequest(
                 sources=ResponseSources(

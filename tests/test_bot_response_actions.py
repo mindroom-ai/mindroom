@@ -32,7 +32,7 @@ from mindroom.matrix.users import AgentMatrixUser
 from mindroom.message_target import MessageTarget
 from mindroom.teams.formation import TeamIntent, TeamMemberStatus, TeamOutcome, TeamResolution, TeamResolutionMember
 from mindroom.thread_utils import AgentResponseDecision
-from mindroom.turn_policy import PreparedDispatch, _DispatchPlan
+from mindroom.turn_policy import DispatchPlan, PreparedDispatch
 from tests.access_schema_support import with_current_room_member_access
 from tests.bot_helpers import (
     AgentBotTestBase,
@@ -42,10 +42,10 @@ from tests.bot_helpers import (
     _runtime_bound_config,
     make_mock_agent_user,
     make_test_agent_bot,
-    make_test_team_bot,
 )
 from tests.conftest import (
     TEST_PASSWORD,
+    make_ingress_facts,
     make_matrix_client_mock,
     message_origin,
     runtime_paths_for,
@@ -601,7 +601,7 @@ class TestAgentBot(AgentBotTestBase):
             display_name="Ops Team",
             password=TEST_PASSWORD,
         )
-        bot = make_test_team_bot(
+        bot = make_test_agent_bot(
             team_user,
             tmp_path,
             config=config,
@@ -1436,7 +1436,7 @@ class TestAgentBot(AgentBotTestBase):
         event = self._make_handler_event("message", sender="@user:localhost", event_id="$event")
         event.body = "continue"
         event.source = {"content": {"body": "continue"}}
-        bot._turn_controller.deps.resolver.dispatch_thread_snapshot = AsyncMock(
+        bot._turn_ingress.deps.resolver.dispatch_thread_snapshot = AsyncMock(
             return_value=ThreadHistoryResult(
                 [
                     ResolvedVisibleMessage(
@@ -1453,10 +1453,10 @@ class TestAgentBot(AgentBotTestBase):
             ),
         )
 
-        should_skip = await bot._turn_controller._should_skip_router_before_shared_ingress_work(
+        should_skip = await bot._turn_ingress._should_skip_router_before_shared_ingress_work(
             room,
             event,
-            requester_user_id="@user:localhost",
+            facts=make_ingress_facts(event.sender, requester_user_id="@user:localhost"),
             thread_id="$thread",
         )
 
@@ -1830,7 +1830,7 @@ class TestAgentBot(AgentBotTestBase):
 
         plan = await bot._turn_policy._plan_router_dispatch(room, event, dispatch)
 
-        assert plan == _DispatchPlan(kind="ignore", ignore_reason="router")
+        assert plan == DispatchPlan(kind="ignore", ignore_reason="router")
 
     @pytest.mark.asyncio
     async def test_router_skips_unmentioned_thread_when_policy_history_partial(
@@ -1900,4 +1900,4 @@ class TestAgentBot(AgentBotTestBase):
 
         plan = await bot._turn_policy._plan_router_dispatch(room, event, dispatch)
 
-        assert plan == _DispatchPlan(kind="ignore", ignore_reason="router")
+        assert plan == DispatchPlan(kind="ignore", ignore_reason="router")

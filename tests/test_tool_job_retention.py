@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Literal
@@ -17,8 +16,8 @@ from mindroom.event_journal import (
     EventClass,
     EventKind,
     InboundEvent,
+    turn_rows,
 )
-from mindroom.handled_turns import TurnRecordCodec
 from mindroom.orchestration.tool_job_runtime import ToolJobRuntimeCoordinator
 from mindroom.response_sources import ResponseSources
 from mindroom.tool_jobs.runtime import BackgroundOutcome, JobAccessError
@@ -104,13 +103,18 @@ async def test_retention_preserves_pending_turns_and_conversation_approvals(
     )
     if source != "pending":
         await principal.settle("$original")
-    await bot._journal_store.turn_records("general").upsert(
-        index_event_ids=record.indexed_event_ids,
-        anchor_event_id="$original",
-        record_json=json.dumps(TurnRecordCodec._to_ledger_record(record)),
-    )
+    records = bot._journal_store.turn_records("general")
+    if record.completed:
+        await records.write(turn_rows.record_turn, record, room_id="!room:localhost")
+    else:
+        await records.write(turn_rows.record_pending_turn, record, room_id="!room:localhost")
     if source_pruned:
-        await bot._journal_store.turn_records("general").forget(index_event_ids=record.indexed_event_ids)
+        await records.write(
+            lambda transaction, agent_name: transaction.execute(
+                "DELETE FROM turns WHERE agent_name = ?",
+                (agent_name,),
+            ),
+        )
     if approval:
         principal = bot.journal_principal()
         await principal.admit(

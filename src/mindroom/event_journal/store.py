@@ -25,7 +25,6 @@ from . import (
     approval_signals,
     interactive_questions,
     journal,
-    legacy_turn_records,
     membership_hooks,
     outbox,
     reads,
@@ -33,15 +32,17 @@ from . import (
     reply_messages,
     reply_spans,
     tool_jobs,
-    turn_records,
+    turn_rows,
 )
 from .approval_signals import ApprovalSignals
+from .identity import agent_of_principal
 from .membership_state import claim_active_membership_epoch
 from .models import (
     AdmissionResult,
     DeliveryAcknowledgement,
     DeliveryProjectionPendingError,
     DeliveryStage,
+    FinalAnswerEnqueue,
     IngestionConsumer,
     IngestionConsumerBindingError,
     PermanentDeliveryFailure,
@@ -53,7 +54,6 @@ from .projection import (
     drop_refetched_message,
     install_refetched_revision,
     project,
-    tombstoned_event_ids,
 )
 from .replies import (
     AppliedTransition,
@@ -66,7 +66,7 @@ from .replies import (
 from .tool_jobs import SavedToolJob  # noqa: TC001 - part of this module's runtime return types
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Mapping, Sequence
+    from collections.abc import Callable, Mapping
     from pathlib import Path
 
     from mindroom.interactive_models import InteractivePrompt
@@ -90,7 +90,6 @@ if TYPE_CHECKING:
         RefreshRequest,
         RoomMembershipPosition,
         SemanticConsumer,
-        TerminalTurnWrite,
         UnreadableMatrixDelivery,
     )
     from .projection import ProjectedEvent
@@ -229,22 +228,13 @@ class PrincipalStore:
             lambda transaction: journal.is_pending(transaction, self._principal_id, event_id),
         )
 
-    async def response_recovery_state(
-        self,
-        *,
-        turn_record: TurnRecord,
-        agent_name: str,
-        redaction_target: Callable[[JournalEvent], str | None],
-    ) -> ResponseRecoveryState:
+    async def response_recovery_state(self, turn_record: TurnRecord) -> ResponseRecoveryState:
         """Read one response's durable handoff through the reserved recovery lane."""
+        agent_name = agent_of_principal(self._principal_id)
 
         def load(transaction: Transaction) -> ResponseRecoveryState:
             source_event_ids = turn_record.source_event_ids
             turn_id = turn_record.anchor_event_id
-            records = {
-                event_id: turn_records.load_record(transaction, agent_name, event_id)
-                for event_id in turn_record.indexed_event_ids
-            }
             pending = tuple(
                 journal.is_pending(transaction, self._principal_id, event_id) for event_id in source_event_ids
             )
@@ -262,17 +252,13 @@ class PrincipalStore:
                 pending_sources=pending,
                 redacted_sources=tuple(
                     not is_pending
-                    and journal.source_has_redaction_handoff(
-                        transaction,
-                        self._principal_id,
-                        event_id,
-                        turn_record,
-                        records.get(event_id),
-                        redaction_target,
-                    )
+                    and journal.source_has_redaction_handoff(transaction, self._principal_id, event_id, turn_record)
                     for event_id, is_pending in zip(source_event_ids, pending, strict=True)
                 ),
-                turn_records=tuple(records.values()),
+                turn_records=tuple(
+                    turn_rows.get_turn_record(transaction, agent_name, event_id)
+                    for event_id in turn_record.indexed_event_ids
+                ),
                 final_delivery=delivery,
                 sources_settled_by_departure=(
                     not any(pending)
@@ -458,13 +444,14 @@ class PrincipalStore:
             ),
         )
 
-    async def redacted_event_ids(self, room_id: str, event_ids: tuple[str, ...]) -> frozenset[str]:
-        """Read recorded context tombstones in one transaction and one offload."""
+    async def deleted_event_ids(self, room_id: str, event_ids: tuple[str, ...]) -> frozenset[str]:
+        """Return which of these events are deleted: redacted, or answering for a relayed message that was."""
         return await self._backend.read(
-            lambda transaction: frozenset(
-                event_id
-                for batch in batched(event_ids, 256)
-                for event_id in tombstoned_event_ids(transaction, self._principal_id, room_id, batch)
+            lambda transaction: turn_rows.deleted_events(
+                transaction,
+                agent_of_principal(self._principal_id),
+                room_id,
+                event_ids,
             ),
         )
 
@@ -743,7 +730,6 @@ class PrincipalStore:
         result: Mapping[str, object] | None = None,
         event_type: str = "m.room.message",
         edits_event_id: str | None = None,
-        settle_source_event_ids: tuple[str, ...] = (),
         permanent_failure_reason: str | None = None,
     ) -> str | None:
         """Record delivery intent, or refuse it as an answer to a membership that ended.
@@ -752,14 +738,6 @@ class PrincipalStore:
         caused it, and that event's journal row records which membership
         admitted it, so this needs no epoch from its caller and cannot be
         given a stale one.
-
-        ``settle_source_event_ids`` are the journal sources this delivery
-        discharges, and they are settled in the same transaction that records
-        it. That is the whole handoff: ownership of the turn moves from the
-        journal to the outbox at one commit, so there is no instant at which a
-        crash leaves both of them owning it. Two transactions would leave one,
-        and a process that died there would send the frozen answer *and*
-        replay the turn -- a second model run for a question already answered.
         """
         return await self._backend.write(
             lambda transaction: _enqueue_matrix_delivery(
@@ -773,8 +751,45 @@ class PrincipalStore:
                 payload=payload,
                 result=result,
                 edits_event_id=edits_event_id,
-                settle_source_event_ids=settle_source_event_ids,
                 permanent_failure_reason=permanent_failure_reason,
+            ),
+        )
+
+    async def enqueue_final_answer(
+        self,
+        *,
+        delivery_id: str,
+        room_id: str,
+        thread_id: str | None,
+        payload: Mapping[str, object],
+        turn_key: str | None,
+        result: Mapping[str, object] | None = None,
+        event_type: str = "m.room.message",
+        edits_event_id: str | None = None,
+        permanent_failure_reason: str | None = None,
+    ) -> FinalAnswerEnqueue | None:
+        """Record a non-AI FINAL answer and hand its turn from the journal to the outbox, in one transaction.
+
+        The turn the producer recorded under ``turn_key`` is bound to this
+        delivery, and its sources and aliases settle with the row, so there is
+        no instant at which a crash leaves both the journal and the outbox
+        owning it: one would send the frozen answer *and* replay the turn. A
+        turn that is not the one the producer recorded binds nothing, and only
+        the delivery's own source settles. Nothing means refused.
+        """
+        return await self._backend.write(
+            lambda transaction: _enqueue_final_answer(
+                transaction,
+                self._principal_id,
+                delivery_id=delivery_id,
+                event_type=event_type,
+                room_id=room_id,
+                thread_id=thread_id,
+                payload=payload,
+                result=result,
+                edits_event_id=edits_event_id,
+                permanent_failure_reason=permanent_failure_reason,
+                turn_key=turn_key,
             ),
         )
 
@@ -944,7 +959,7 @@ class PrincipalStore:
         stage: DeliveryStage,
         event_id: str,
         delivered_projections: tuple[ProjectedEvent, ...],
-        terminal_turn: TerminalTurnWrite | None = None,
+        terminal_response_event_id: str | None = None,
     ) -> DeliveryAcknowledgement:
         """Record the Matrix event one claimed delivery produced, if nothing else has.
 
@@ -960,8 +975,9 @@ class PrincipalStore:
         while it bound nothing at all -- and only the conditional update below
         knows the difference.
 
-        ``terminal_turn`` is the turn record this acknowledgement completes,
-        written in the same transaction. The acknowledgement is the durable
+        ``terminal_response_event_id``, when given, completes the turn this
+        delivery was bound to with that response event, written in the same
+        transaction. The acknowledgement is the durable
         proof that a visible answer exists and what its event ID is, and that
         is precisely the fact the record is missing until it is told. Two
         commits leave a window in which the answer is delivered and the record
@@ -1000,11 +1016,13 @@ class PrincipalStore:
             # either. The row already names another event, and a terminal
             # record pointing somewhere else is the disagreement this whole
             # transaction exists to prevent.
-            committed_terminal = (
-                turn_records.commit_terminal(transaction, terminal_turn)
-                if bound and may_project and terminal_turn is not None
-                else None
-            )
+            if bound and may_project and terminal_response_event_id is not None:
+                turn_rows.complete_bound_delivery(
+                    transaction,
+                    agent_of_principal(self._principal_id),
+                    delivery_id=delivery_id,
+                    response_event_id=terminal_response_event_id,
+                )
             if bound and may_project:
                 for delivered_projection in delivered_projections:
                     project(
@@ -1035,7 +1053,6 @@ class PrincipalStore:
                 )
                 return DeliveryAcknowledgement(
                     settled_event_id=event_id,
-                    terminal_turn=committed_terminal,
                     reply_effects=() if reply_applied is None else reply_applied.post_commit,
                 )
             # Lost the row. Whatever is on it now is the answer this delivery
@@ -1144,7 +1161,6 @@ def _enqueue_matrix_delivery(
     payload: Mapping[str, object],
     result: Mapping[str, object] | None,
     edits_event_id: str | None,
-    settle_source_event_ids: tuple[str, ...],
     permanent_failure_reason: str | None,
     edit_target_pending: bool = False,
     reply_id: str | None = None,
@@ -1170,10 +1186,6 @@ def _enqueue_matrix_delivery(
     changed-device recovery first reconciles exact room history and then
     follows the delivery type's explicit replay-or-retain policy.
 
-    Settling the sources here rather than after the commit is what makes the
-    handoff one event. A refusal settles nothing, because nothing durable
-    would owe the answer afterwards; anything else settles every source the
-    delivery accounts for, atomically with the row that now answers them.
     """
     admitted_owner = journal.admitted_membership_owner(transaction, principal_id, delivery_id)
     attempted = outbox.is_attempted(
@@ -1212,7 +1224,7 @@ def _enqueue_matrix_delivery(
         ):
             return None
         membership_epoch = admitted_epoch
-    transaction_id = outbox.enqueue(
+    return outbox.enqueue(
         transaction,
         principal_id,
         delivery_id=delivery_id,
@@ -1231,10 +1243,56 @@ def _enqueue_matrix_delivery(
         reply_sequence=reply_sequence,
         reply_row=reply_row,
     )
+
+
+def _enqueue_final_answer(
+    transaction,  # noqa: ANN001 - the backend's Transaction, kept structural
+    principal_id: str,
+    *,
+    delivery_id: str,
+    event_type: str,
+    room_id: str,
+    thread_id: str | None,
+    payload: Mapping[str, object],
+    result: Mapping[str, object] | None,
+    edits_event_id: str | None,
+    permanent_failure_reason: str | None,
+    turn_key: str | None,
+) -> FinalAnswerEnqueue | None:
+    """Record a FINAL answer and settle what its bound turn answers; a refusal settles nothing.
+
+    Nothing durable would owe the answer after a refusal, so the turn stays the
+    journal's.
+    """
+    transaction_id = _enqueue_matrix_delivery(
+        transaction,
+        principal_id,
+        delivery_id=delivery_id,
+        stage=DeliveryStage.FINAL,
+        event_type=event_type,
+        room_id=room_id,
+        thread_id=thread_id,
+        payload=payload,
+        result=result,
+        edits_event_id=edits_event_id,
+        permanent_failure_reason=permanent_failure_reason,
+    )
     if transaction_id is None:
         return None
-    journal.settle_many(transaction, principal_id, settle_source_event_ids)
-    return transaction_id
+    bound = (
+        None
+        if turn_key is None
+        else turn_rows.bind_final_delivery(
+            transaction,
+            agent_of_principal(principal_id),
+            delivery_id=delivery_id,
+            room_id=room_id,
+            turn_key=turn_key,
+        )
+    )
+    settled = tuple(dict.fromkeys(bound or (delivery_id,)))
+    journal.settle_many(transaction, principal_id, settled)
+    return FinalAnswerEnqueue(transaction_id=transaction_id, settled_event_ids=settled)
 
 
 class ReplyRowRefusedError(Exception):
@@ -1366,7 +1424,6 @@ def enqueue_reply_row(
             payload=prepared.payload,
             result=prepared.result,
             edits_event_id=edits_event_id,
-            settle_source_event_ids=(),
             permanent_failure_reason=prepared.permanent_failure_reason,
             edit_target_pending=edit_target_pending,
             **row_fields,
@@ -1492,15 +1549,14 @@ def _install_room_history_recovery_chunk(
     if not journal.claim_room_history_recovery(transaction, principal_id, recovery):
         return False
     for event in events:
-        tombstoned = project(
+        journal.project_with_redactions(
             transaction,
             principal_id,
             event,
             receipt_order=0,
             membership_epoch=expected_membership_epoch,
+            settle_redacted_arrival=False,
         )
-        if tombstoned is not None:
-            replies.end_replies_of_deleted_source(transaction, principal_id, room_id=event.room_id, event_id=tombstoned)
     return True
 
 
@@ -1545,15 +1601,14 @@ def _install_hydration_chunk(
     ):
         return False
     for event in events:
-        tombstoned = project(
+        journal.project_with_redactions(
             transaction,
             principal_id,
             event,
             receipt_order=0,
             membership_epoch=expected_membership_epoch,
+            settle_redacted_arrival=False,
         )
-        if tombstoned is not None:
-            replies.end_replies_of_deleted_source(transaction, principal_id, room_id=event.room_id, event_id=tombstoned)
     return True
 
 
@@ -1647,8 +1702,8 @@ class EventJournalStore:
         """
         return await self.backend.read(journal.read_generation)
 
-    def turn_records(self, agent_name: str) -> TurnRecordStore:
-        """Return the agent-scoped turn-record view.
+    def turn_records(self, agent_name: str) -> turn_rows.TurnRecordStore:
+        """Return the agent-scoped turn-row view.
 
         Not a ``PrincipalStore`` method, because turn records are not scoped to
         a Matrix identity. They record that a message was answered, which stays
@@ -1658,7 +1713,7 @@ class EventJournalStore:
         if not agent_name:
             msg = "Turn records require an agent name"
             raise ValueError(msg)
-        return TurnRecordStore(_backend=self.backend, _agent_name=agent_name)
+        return turn_rows.TurnRecordStore(backend=self.backend, agent_name=agent_name)
 
     def tool_jobs(self, runtime_generation: str) -> ToolJobStore:
         """Return the background tool jobs as one runtime generation saves them.
@@ -1672,104 +1727,6 @@ class EventJournalStore:
     async def close(self) -> None:
         """Release every connection the backend owns."""
         await self.backend.close()
-
-
-@dataclass(frozen=True, slots=True)
-class TurnRecordStore:
-    """One agent's durable turn records, in the journal's own database.
-
-    Deliberately separate from ``PrincipalStore``. The point of moving these
-    rows here is that the acknowledgement binding a delivery's Matrix event and
-    the terminal record naming that event commit together, and that needs one
-    database -- not one scope key.
-
-    Not one transaction spanning the whole answer, which is the easy thing to
-    read into this and is wrong. Sources settle when the ``FINAL`` row is
-    enqueued; the record lands when that row is acknowledged, a send later. One
-    database buys an unbroken chain of ownership across those two writes, not a
-    single write -- and a crash between them is a state the outbox is designed
-    to own, not one a reconciler has to repair.
-
-    Keeping the two views apart keeps a reader from assuming a turn record
-    belongs to the principal it happened to be fetched beside.
-    """
-
-    _backend: Backend
-    _agent_name: str
-
-    @property
-    def state_key(self) -> str:
-        """Identify the physical database these records live in.
-
-        Callers that cache records in memory need to know when two views are
-        the same store and when they are different ones. Two stores over
-        different databases must not share a cache, or the second answers from
-        rows it does not have.
-
-        The backend object is the identity. One backend owns one database and
-        every view of that database is handed the same instance, so this is
-        stable where it must be and distinct where it must be, without a
-        connection string that would put a password in a cache key.
-        """
-        return f"{id(self._backend):x}"
-
-    async def upsert(
-        self,
-        *,
-        index_event_ids: Sequence[str],
-        anchor_event_id: str,
-        record_json: str,
-    ) -> str | None:
-        """Store a record and return its committed state, or reject a changed owner."""
-        return await self._backend.write(
-            lambda transaction: turn_records.write_record(
-                transaction,
-                self._agent_name,
-                index_event_ids=index_event_ids,
-                anchor_event_id=anchor_event_id,
-                record_json=record_json,
-            ),
-        )
-
-    async def adopt_missing(
-        self,
-        *,
-        index_event_ids: Sequence[str],
-        anchor_event_id: str,
-        record_json: str,
-    ) -> int:
-        """Fill only the indexes with no record yet, for migration. Returns how many."""
-        return await self._backend.write(
-            lambda transaction: legacy_turn_records.adopt_missing(
-                transaction,
-                self._agent_name,
-                index_event_ids=index_event_ids,
-                anchor_event_id=anchor_event_id,
-                record_json=record_json,
-            ),
-        )
-
-    async def load_all(self) -> tuple[tuple[str, str, str], ...]:
-        """Return every record this agent holds, for a warm-up."""
-        return await self._backend.read(
-            lambda transaction: turn_records.load_all(transaction, self._agent_name),
-        )
-
-    async def load(self, event_id: str) -> TurnRecord | None:
-        """Read one exact record without depending on a runtime ledger cache."""
-        return await self._backend.read(
-            lambda transaction: turn_records.load_record(transaction, self._agent_name, event_id),
-        )
-
-    async def forget(self, *, index_event_ids: Sequence[str]) -> None:
-        """Drop records indexed by these events, as compaction does."""
-        await self._backend.write(
-            lambda transaction: turn_records.forget(
-                transaction,
-                self._agent_name,
-                index_event_ids=index_event_ids,
-            ),
-        )
 
 
 @dataclass(frozen=True, slots=True)

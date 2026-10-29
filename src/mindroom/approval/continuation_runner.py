@@ -132,6 +132,7 @@ if TYPE_CHECKING:
     from mindroom.llm.runs import RunRequirement
     from mindroom.message_target import MessageTarget
     from mindroom.post_response_effects import PostResponseEffectsDeps
+    from mindroom.reply_turn.inbox import InboxResponses
     from mindroom.response_lifecycle import ResponseLifecycle, ResponseLifecycleCoordinator
     from mindroom.response_runner import PreparedResponseRuntime, ResponseRunnerDeps
     from mindroom.streaming import ProgressPublisher
@@ -215,6 +216,8 @@ class _ResponseHost(Protocol):
     """What the approval lifecycle uses of the response runner that hosts it."""
 
     deps: ResponseRunnerDeps
+    # The runner's inbox, which owns the resume a released approval source starts.
+    inbox: InboxResponses
 
     def client(self) -> nio.AsyncClient: ...
 
@@ -281,16 +284,6 @@ class _ResponseHost(Protocol):
         locked_operation: Callable[[MessageTarget, object], Awaitable[str | None]],
         signal_queued_message: bool,
     ) -> str | None: ...
-
-    def track_inbox_response(
-        self,
-        response: Coroutine[Any, Any, None],
-        *,
-        name: str,
-        room_id: str,
-        recovery_proof_ready: Callable[[], bool | Awaitable[bool]],
-        source_event_ids: tuple[str, ...],
-    ) -> asyncio.Task[None]: ...
 
 
 @dataclass
@@ -1521,7 +1514,7 @@ class ApprovalContinuationRunner:
 
         resume = self._resume_approval_source(source_event_id)
         try:
-            self.host.track_inbox_response(
+            self.host.inbox.track_inbox_response(
                 resume,
                 name=f"approval_resume:{continuation.approval_id}:{continuation.generation}",
                 recovery_proof_ready=lambda: True,

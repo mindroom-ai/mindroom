@@ -194,7 +194,6 @@ def test_stream_transport_outcome_accepts_placeholder_only_visible_state() -> No
     """Placeholder-only visibility must remain distinct from visible body."""
     outcome = StreamTransportOutcome(
         last_physical_stream_event_id="$thinking",
-        terminal_status="completed",
         rendered_body="Thinking...",
         visible_body_state="placeholder_only",
         failure_reason="terminal_update_failed",
@@ -278,7 +277,6 @@ def test_stream_and_final_event_id_precedence_are_equivalent(
     """
     stream_outcome = StreamTransportOutcome(
         last_physical_stream_event_id="$stream",
-        terminal_status="completed",
         rendered_body="body",
         visible_body_state=visible_body_state,  # type: ignore[arg-type]
     )
@@ -290,30 +288,3 @@ def test_stream_and_final_event_id_precedence_are_equivalent(
     )
     assert stream_outcome.visible_event_id == expected_event_id
     assert final_outcome.final_visible_event_id == expected_event_id
-
-
-def test_stream_transport_resolved_cancel_source_matches_final_delivery() -> None:
-    """Transport and final delivery resolve identical cancellation provenance."""
-    transport = StreamTransportOutcome(
-        last_physical_stream_event_id="$stream",
-        terminal_status="cancelled",
-        rendered_body=None,
-        visible_body_state="none",
-        failure_reason="sync_restart_cancelled",
-    )
-    final = FinalDeliveryOutcome(
-        terminal_status="cancelled",
-        event_id="$stream",
-        is_visible_response=True,
-        cancel_source="sync_restart",
-        failure_reason="sync_restart_cancelled",
-    )
-    assert transport.resolved_cancel_source == final.resolved_cancel_source == "sync_restart"
-    cancelled_only = StreamTransportOutcome(
-        last_physical_stream_event_id=None,
-        terminal_status="error",
-        rendered_body=None,
-        visible_body_state="none",
-        failure_reason="stream_finalize_failed",
-    )
-    assert cancelled_only.resolved_cancel_source is None

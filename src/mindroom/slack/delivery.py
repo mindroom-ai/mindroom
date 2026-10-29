@@ -43,7 +43,7 @@ if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Iterable, Mapping
 
     from mindroom.agent_reply_membership import AgentReplyMembershipIndex
-    from mindroom.bot import AgentBot, TeamBot
+    from mindroom.bot import AgentBot
     from mindroom.config.main import Config
     from mindroom.config.slack import SlackAnsweringAgent
     from mindroom.constants import RuntimePaths
@@ -67,7 +67,7 @@ class SlackRuntime:
     `bots` is the orchestrator's own mapping, so it always holds the bots running now.
     """
 
-    bots: Mapping[str, AgentBot | TeamBot]
+    bots: Mapping[str, AgentBot]
     agent_reply_memberships: AgentReplyMembershipIndex
     http_client: Callable[[], httpx.AsyncClient] = slack_http_client
     # When each (Slack author, thread key) last got a notice; they get at most one a day, remembered in memory only.

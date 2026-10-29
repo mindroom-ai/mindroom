@@ -17,7 +17,7 @@ import nio
 import pytest
 
 from mindroom.background_tasks import wait_for_background_tasks
-from mindroom.bot import AgentBot, TeamBot
+from mindroom.bot import AgentBot
 from mindroom.coalescing.batch import CoalescingKey, RequesterCoalescingOwner
 from mindroom.coalescing.gate import CoalescingGate, ReadyPendingEvent
 from mindroom.config.access import ResponderAccessConfig
@@ -36,16 +36,17 @@ from mindroom.matrix.users import AgentMatrixUser
 from mindroom.message_target import MessageTarget
 from mindroom.orchestration.runtime import EntityStartResults
 from mindroom.orchestrator import _MultiAgentOrchestrator
+from mindroom.response_admission import admitted_response_decision
+from mindroom.router_relay import execute_router_relay
 from mindroom.routing import ResponderSelection, suggest_responder_for_message
 from mindroom.teams.formation import TeamOutcome, TeamResolution
-from mindroom.text_ingress_dispatch import _run_admitted_router_relay
 from mindroom.thread_utils import AgentResponseDecision
 from mindroom.turn_policy import PreparedDispatch, TurnPolicy, _ResponderAvailability
 from tests.access_schema_support import with_current_room_member_access
 from tests.authorization_helpers import (
     make_test_turn_policy_deps,
 )
-from tests.bot_helpers import make_test_agent_bot, make_test_team_bot
+from tests.bot_helpers import make_test_agent_bot
 from tests.conftest import (
     TEST_PASSWORD,
     bind_runtime_paths,
@@ -63,6 +64,7 @@ from tests.fakes.scripted_model import ScriptedModel, answer
 from tests.identity_helpers import actual_entity_usernames, entity_ids, entity_name_for_id, persist_entity_accounts
 from tests.journal_helpers import admit_dispatch_event
 from tests.response_attempt_helpers import install_direct_response_admission
+from tests.response_runner_helpers import streamed_answer
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable
@@ -273,12 +275,23 @@ def _router_readiness_event(event_id: str) -> nio.RoomMessageText:
 
 
 def _router_relay(router_bot: AgentBot, room: nio.MatrixRoom, event_id: str) -> Awaitable[None]:
-    return router_bot._turn_controller._execute_router_relay(
+    return execute_router_relay(
+        router_bot._turn_dispatcher.deps,
         room,
         _router_readiness_event(event_id),
         [],
         requester_user_id="@user:localhost",
     )
+
+
+async def _admitted_router_relay(router_bot: AgentBot, room: nio.MatrixRoom, event_id: str) -> None:
+    """Relay as route dispatch does, holding response admission through the router's selection and delivery."""
+    deps = router_bot._turn_dispatcher.deps
+    async with admitted_response_decision(
+        deps.runtime.response_admission_gate,
+        deps.response_runner.wait_for_admission_or_shutdown,
+    ):
+        await _router_relay(router_bot, room, event_id)
 
 
 @pytest.mark.asyncio
@@ -618,10 +631,7 @@ class TestRoutingRegression:
         release_send = asyncio.Event()
 
         def admitted_relay(event_id: str) -> Awaitable[None]:
-            return _run_admitted_router_relay(
-                router_bot._turn_controller,
-                lambda: _router_relay(router_bot, room, event_id),
-            )
+            return _admitted_router_relay(router_bot, room, event_id)
 
         async def blocking_room_send(**_: object) -> nio.RoomSendResponse:
             send_started.set()
@@ -707,12 +717,7 @@ class TestRoutingRegression:
             return nio.RoomSendResponse.from_dict({"event_id": "$router-response"}, room_id=room.room_id)
 
         router_bot.client.room_send.side_effect = blocking_room_send
-        relay_task = asyncio.create_task(
-            _run_admitted_router_relay(
-                router_bot._turn_controller,
-                lambda: _router_relay(router_bot, room, "$mcp-restart"),
-            ),
-        )
+        relay_task = asyncio.create_task(_admitted_router_relay(router_bot, room, "$mcp-restart"))
         await send_started.wait()
         assert router_bot.admission_gate.in_flight_response_count == 1
 
@@ -749,12 +754,12 @@ class TestRoutingRegression:
 
     @pytest.mark.asyncio
     @patch("mindroom.response_attempt.is_user_online")
-    @patch("mindroom.response_runner.ai_response")
+    @patch("mindroom.response_runner.stream_agent_response")
     @patch("mindroom.router_relay.suggest_responder_for_message")
     async def test_router_does_not_respond_when_agent_mentioned(
         self,
         mock_suggest_responder: AsyncMock,
-        mock_ai_response: AsyncMock,
+        mock_stream_agent_response: MagicMock,
         mock_is_user_online: AsyncMock,
         mock_research_agent: AgentMatrixUser,
         mock_news_agent: AgentMatrixUser,
@@ -777,6 +782,8 @@ class TestRoutingRegression:
         news_bot = setup_test_bot(mock_news_agent, tmp_path, test_room_id)
 
         # Mock AI responses
+        mock_ai_response = AsyncMock()
+        mock_stream_agent_response.side_effect = streamed_answer(mock_ai_response)
         mock_ai_response.return_value = "I can help with that research!"
         mock_suggest_responder.return_value = "news"  # Router would pick news
 
@@ -822,12 +829,12 @@ class TestRoutingRegression:
         assert mock_suggest_responder.call_count == 0
 
     @pytest.mark.asyncio
-    @patch("mindroom.response_runner.ai_response")
+    @patch("mindroom.response_runner.stream_agent_response")
     @patch("mindroom.router_relay.suggest_responder_for_message")
     async def test_router_activates_when_no_agent_mentioned(
         self,
         mock_suggest_responder: AsyncMock,
-        mock_ai_response: AsyncMock,
+        mock_stream_agent_response: MagicMock,
         mock_research_agent: AgentMatrixUser,
         mock_news_agent: AgentMatrixUser,
         tmp_path: Path,
@@ -877,6 +884,8 @@ class TestRoutingRegression:
         news_bot = setup_test_bot(mock_news_agent, tmp_path, test_room_id, config=test_config)
 
         # Mock AI responses
+        mock_ai_response = AsyncMock()
+        mock_stream_agent_response.side_effect = streamed_answer(mock_ai_response)
         mock_ai_response.return_value = "I can help with that!"
         mock_suggest_responder.return_value = "research"  # Router picks research
 
@@ -997,7 +1006,8 @@ class TestRoutingRegression:
             },
         }
 
-        await router_bot._turn_controller._execute_router_relay(
+        await execute_router_relay(
+            router_bot._turn_dispatcher.deps,
             mock_room,
             message_event,
             [],
@@ -1081,7 +1091,8 @@ class TestRoutingRegression:
         message_event.server_timestamp = 1000
         message_event.source = {"content": {"body": "Please route this"}}
 
-        await router_bot._turn_controller._execute_router_relay(
+        await execute_router_relay(
+            router_bot._turn_dispatcher.deps,
             mock_room,
             message_event,
             [],
@@ -1164,7 +1175,8 @@ class TestRoutingRegression:
             },
         }
 
-        await router_bot._turn_controller._execute_router_relay(
+        await execute_router_relay(
+            router_bot._turn_dispatcher.deps,
             mock_room,
             message_event,
             [],
@@ -1224,10 +1236,10 @@ class TestRoutingRegression:
             content_with_metadata: dict[str, object] = {ORIGINAL_SENDER_KEY: original_sender, **content}
             if source_kind is not None:
                 content_with_metadata[SOURCE_KIND_KEY] = source_kind
-            return router_bot._ingress_validator.requester_user_id(
-                sender=router_sender,
-                source={"content": content_with_metadata},
-            )
+            return router_bot._ingress_validator.classify_source(
+                router_sender,
+                {"content": content_with_metadata},
+            ).lane_requester_id
 
         untrusted_contents: list[dict[str, object]] = [
             {"body": "@alice Sorry, I could not route this request."},
@@ -1301,7 +1313,7 @@ class TestRoutingRegression:
             "alpha": MagicMock(spec=AgentBot, running=True, first_sync_complete=True),
             "beta": MagicMock(spec=AgentBot, running=False, first_sync_complete=False),
             "writer": MagicMock(spec=AgentBot, running=True, first_sync_complete=True),
-            "ops": MagicMock(spec=TeamBot, running=True, first_sync_complete=True),
+            "ops": MagicMock(spec=AgentBot, running=True, first_sync_complete=True),
             "router": MagicMock(spec=AgentBot, running=True, first_sync_complete=True),
         }
         router_bot.orchestrator = orchestrator
@@ -1329,7 +1341,8 @@ class TestRoutingRegression:
         message_event.server_timestamp = 1000
         message_event.source = {"content": {"body": "Who can help?"}}
 
-        await router_bot._turn_controller._execute_router_relay(
+        await execute_router_relay(
+            router_bot._turn_dispatcher.deps,
             mock_room,
             message_event,
             [],
@@ -1442,7 +1455,7 @@ class TestRoutingRegression:
         self,
         tmp_path: Path,
     ) -> None:
-        """A live TeamBot must surface configured-team rejection even if members are unavailable."""
+        """A live team bot must surface configured-team rejection even if members are unavailable."""
         test_room_id = "!team-reject:localhost"
         test_config = _runtime_bound_config(
             with_current_room_member_access(
@@ -1473,7 +1486,7 @@ class TestRoutingRegression:
             display_name="Ops Team",
             user_id=ids["ops"].full_id,
         )
-        bot = make_test_team_bot(
+        bot = make_test_agent_bot(
             team_user,
             tmp_path,
             config=test_config,
@@ -1786,12 +1799,12 @@ class TestRoutingRegression:
 
     @pytest.mark.asyncio
     @patch("mindroom.teams.members.resolve_agent_knowledge_access")
-    @patch("mindroom.response_runner.ai_response")
+    @patch("mindroom.response_runner.stream_agent_response")
     @patch("mindroom.config.main.load_config")
     async def test_multiple_mentions_each_responds_once(
         self,
         mock_from_yaml: MagicMock,
-        mock_ai_response: AsyncMock,
+        mock_stream_agent_response: MagicMock,
         mock_resolve_agent_knowledge_access: MagicMock,
         mock_research_agent: AgentMatrixUser,
         mock_news_agent: AgentMatrixUser,
@@ -1855,6 +1868,8 @@ class TestRoutingRegression:
         news_bot.orchestrator = mock_orchestrator
 
         # Mock AI responses; the team's leader is scripted above.
+        mock_ai_response = AsyncMock()
+        mock_stream_agent_response.side_effect = streamed_answer(mock_ai_response)
         mock_ai_response.side_effect = ["Research response!", "News response!"]
 
         # Mock successful room_send
@@ -1901,10 +1916,10 @@ class TestRoutingRegression:
 
     @pytest.mark.asyncio
     @patch("mindroom.response_attempt.is_user_online")
-    @patch("mindroom.response_runner.ai_response")
+    @patch("mindroom.response_runner.stream_agent_response")
     async def test_router_message_has_completion_marker(
         self,
-        mock_ai_response: AsyncMock,
+        mock_stream_agent_response: MagicMock,
         mock_is_user_online: AsyncMock,
         mock_research_agent: AgentMatrixUser,
         mock_news_agent: AgentMatrixUser,  # noqa: ARG002
@@ -1935,6 +1950,8 @@ class TestRoutingRegression:
         research_bot = setup_test_bot(mock_research_agent, tmp_path, test_room_id)
 
         # Mock AI response
+        mock_ai_response = AsyncMock()
+        mock_stream_agent_response.side_effect = streamed_answer(mock_ai_response)
         mock_ai_response.return_value = "I can help with that research question!"
 
         # Mock successful room_send

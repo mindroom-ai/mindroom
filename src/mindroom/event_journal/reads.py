@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from .identity import decode_thread_id, encode_thread_id
+from .identity import agent_of_principal, decode_thread_id, encode_thread_id
 from .membership_state import claim_membership_epoch
 from .models import (
     ConversationCursor,
@@ -330,16 +330,16 @@ def latest_visible_event_id(
     A withheld body is not enough to tell those apart. A message whose text
     lives in a sidecar is stored exactly the same way -- no body, refresh owed
     -- and its revision is a perfectly good event that was never redacted. Only
-    the tombstone distinguishes them, so only the tombstone is consulted.
+    the recorded redaction distinguishes them, so only it is consulted.
     """
     row = transaction.fetchone(
         """
         SELECT CASE
                    WHEN EXISTS (
-                       SELECT 1 FROM redaction_tombstones AS tombstone
-                       WHERE tombstone.principal_id = visible.principal_id
-                         AND tombstone.room_id = visible.room_id
-                         AND tombstone.redacted_event_id = visible.revision_event_id
+                       SELECT 1 FROM event_redactions AS redaction
+                       WHERE redaction.agent_name = ?
+                         AND redaction.room_id = visible.room_id
+                         AND redaction.event_id = visible.revision_event_id
                    )
                    THEN visible.logical_event_id
                    ELSE visible.revision_event_id
@@ -349,7 +349,7 @@ def latest_visible_event_id(
         ORDER BY visible.created_ts DESC, visible.logical_event_id DESC
         LIMIT 1
         """,
-        (principal_id, room_id, encode_thread_id(thread_id)),
+        (agent_of_principal(principal_id), principal_id, room_id, encode_thread_id(thread_id)),
     )
     return None if row is None else str(row["reply_target"])
 

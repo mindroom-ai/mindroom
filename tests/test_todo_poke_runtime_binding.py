@@ -28,7 +28,6 @@ from mindroom.custom_tools.todo_poke import (
 )
 from mindroom.custom_tools.todo_state import state_root as todo_state_root
 from mindroom.entity_resolution import MissingManagedEntityAccountError, mindroom_user_id
-from mindroom.handled_turns import TurnRecord
 from mindroom.hooks.sender import send_hook_message
 from mindroom.ingress_validation import IngressValidator, IngressValidatorDeps
 from mindroom.logging_config import get_logger
@@ -36,6 +35,7 @@ from mindroom.matrix.client_delivery import DeliveredMatrixEvent
 from mindroom.orchestration.todo_poke_runtime import TodoPokeRuntimeCoordinator
 from mindroom.orchestrator import _MultiAgentOrchestrator
 from mindroom.turn_policy import TurnPolicy
+from mindroom.turn_record import TurnRecord
 from tests.authorization_helpers import make_test_turn_policy_deps
 from tests.conftest import bind_runtime_paths, make_conversation_reader_mock, runtime_paths_for, test_runtime_paths
 from tests.identity_helpers import entity_ids
@@ -44,7 +44,7 @@ if TYPE_CHECKING:
     from pathlib import Path
     from typing import Any
 
-    from mindroom.bot import AgentBot, TeamBot
+    from mindroom.bot import AgentBot
     from mindroom.constants import RuntimePaths
 
 
@@ -87,7 +87,7 @@ def _restricted_config(tmp_path: Path) -> Config:
 def _coordinator(
     runtime_paths: RuntimePaths,
     config: Config | None,
-    bots: dict[str, AgentBot | TeamBot],
+    bots: dict[str, AgentBot],
 ) -> TodoPokeRuntimeCoordinator:
     return TodoPokeRuntimeCoordinator(
         runtime_paths=runtime_paths,
@@ -371,7 +371,7 @@ async def test_poke_applies_assignee_access_policy_to_human_requester(tmp_path: 
         orchestrator=None,
     )
     turn_store = MagicMock()
-    turn_store.is_handled.return_value = False
+    turn_store.is_handled = AsyncMock(return_value=False)
     turn_store.record_turn = AsyncMock()
     validator = IngressValidator(
         IngressValidatorDeps(
@@ -389,6 +389,8 @@ async def test_poke_applies_assignee_access_policy_to_human_requester(tmp_path: 
                     agent_reply_memberships=runtime.agent_reply_memberships,
                 ),
             ),
+            wait_for_admission_or_shutdown=AsyncMock(return_value=True),
+            settle_ignored_sources=AsyncMock(),
         ),
     )
     room = nio.MatrixRoom("!room:localhost", secret_id)
@@ -409,11 +411,18 @@ async def test_poke_applies_assignee_access_policy_to_human_requester(tmp_path: 
         "@mallory:localhost",
         mindroom_user_id(config, runtime_paths),
     ]
-    assert await validator.precheck_event(room, authorized_event) == "@alice:localhost"
+    authorized_facts = validator.classify(authorized_event)
+    assert authorized_facts.lane_requester_id == "@alice:localhost"
+    assert await validator.precheck_event(room, authorized_event, authorized_facts)
     # A human who may not address the assignee gets no turn from the poke.
-    assert await validator.precheck_event(room, unauthorized_event) is None
-    assert await validator.precheck_event(room, internal_event) == secret_id
-    turn_store.record_turn.assert_awaited_once_with(TurnRecord.create([unauthorized_event.event_id]))
+    assert not await validator.precheck_event(room, unauthorized_event, validator.classify(unauthorized_event))
+    internal_facts = validator.classify(internal_event)
+    assert internal_facts.lane_requester_id == secret_id
+    assert await validator.precheck_event(room, internal_event, internal_facts)
+    turn_store.record_turn.assert_awaited_once_with(
+        TurnRecord.create([unauthorized_event.event_id]),
+        room_id=room.room_id,
+    )
 
 
 @pytest.mark.asyncio

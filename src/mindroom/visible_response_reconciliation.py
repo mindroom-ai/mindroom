@@ -10,6 +10,7 @@ from mindroom.delivery_gateway import SendTextRequest
 from mindroom.matrix.room_history_reads import find_response_event_ids_via_room_messages
 from mindroom.model_selection import command_result_content_to_dict
 from mindroom.turn_record import canonicalize_turn_record
+from mindroom.turn_store import SourcePreparation
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Collection, Mapping
@@ -18,11 +19,11 @@ if TYPE_CHECKING:
     import structlog
 
     from mindroom.delivery_gateway import DeliveryGateway
-    from mindroom.handled_turns import TurnRecord
     from mindroom.message_target import MessageTarget
     from mindroom.reply_scope import ReplyRuntime
     from mindroom.runtime_protocols import SupportsClientConfig
-    from mindroom.turn_store import TurnStore
+    from mindroom.turn_record import TurnRecord
+    from mindroom.turn_store import PendingTurn, TurnStore
 
 
 @dataclass(frozen=True)
@@ -59,11 +60,12 @@ class VisibleResponseReconciler:
         excluded_event_ids: Collection[str] = (),
     ) -> str | None:
         """Return the durable visible response owned by a replayed turn."""
-        incomplete_records = tuple(
+        incomplete_records = [
             record
             for source_event_id in handled_turn.source_event_ids
-            if (record := self.deps.turn_store.get_turn_record(source_event_id)) is not None and not record.completed
-        )
+            if (record := await self.deps.turn_store.get_turn_record(source_event_id)) is not None
+            and not record.completed
+        ]
         response_event_ids = {
             record.response_event_id for record in incomplete_records if record.response_event_id is not None
         }
@@ -124,11 +126,11 @@ class VisibleResponseReconciler:
                 raise RuntimeError(msg)
             recovered_response_event_id = next(iter(response_event_ids), None)
         if recovered_response_event_id is not None:
-            await self.record_pending_visible_response(handled_turn, recovered_response_event_id)
+            await self.deps.turn_store.record_placeholder(handled_turn, recovered_response_event_id)
         return recovered_response_event_id
 
     async def settle_source_events_ignored(self, handled_turn: TurnRecord) -> None:
-        """Compact exact callback obligations without growing the handled-turn ledger."""
+        """Settle exact callback obligations without recording a turn."""
         await self.deps.settle_ignored_sources(handled_turn.source_event_ids)
 
     async def settle_superseded_turn(self, handled_turn: TurnRecord) -> bool:
@@ -140,11 +142,29 @@ class VisibleResponseReconciler:
         await self.settle_source_events_ignored(handled_turn)
         return True
 
-    async def record_pending_visible_response(self, handled_turn: TurnRecord, response_event_id: str) -> None:
-        """Durably bind one visible response to its incomplete turn before generation."""
-        await self.deps.turn_store.record_pending_turn(
-            canonicalize_turn_record(handled_turn, response_event_id=response_event_id, completed=False),
+    async def settle_deleted_sources(self, pending_turn: PendingTurn, *, room_id: str) -> bool:
+        """Settle what a deletion ended before a pending turn answers; return whether the caller must stop.
+
+        Only the deleted sources settle while others survive, and the survivors
+        answer as their own turn once the caller's claim releases.
+        """
+        deleted = pending_turn.deleted_sources
+        if not deleted:
+            return False
+        source_event_ids = pending_turn.record.source_event_ids
+        await self.answer_surviving_sources(
+            room_id,
+            SourcePreparation(
+                invalid=tuple(event_id for event_id in source_event_ids if event_id in deleted),
+                surviving=tuple(event_id for event_id in source_event_ids if event_id not in deleted),
+            ),
         )
+        return True
+
+    async def answer_surviving_sources(self, room_id: str, preparation: SourcePreparation) -> None:
+        """Settle a turn's invalid sources; the survivors answer as their own turn once the caller's claim releases."""
+        await self.deps.settle_ignored_sources(preparation.invalid)
+        self.deps.turn_store.retry_when_claim_releases(room_id, preparation.surviving)
 
     async def deliver_recoverable_text(
         self,
@@ -157,32 +177,11 @@ class VisibleResponseReconciler:
     ) -> str | None:
         """Send and durably bind one non-model reply unless recovery already found it.
 
-        Every reply here has a turn behind it, so every one goes through the
-        same claim-before-send row a model answer uses. Two things follow from
-        that, and both are the point.
-
-        The journal sources this turn answers settle inside the enqueue, so the
-        answer becoming durably owed and the turn stopping being the journal's
-        work are one commit. On the direct path the terminal record would land
-        in the handled-turn ledger first and the journal would settle
-        afterwards, leaving a window where a pending row describes finished
-        work -- the window the degraded replay guard has to consult two records
-        to survive.
-
-        And a crashed send is recovered by resending the frozen row rather than
-        by scanning the room for what might already be there. The scan still
-        runs ahead of the send here, because a row from a previous membership
-        is gone and its answer is not, but it stops being the only thing
-        standing between a crash and a lost reply.
-
-        Only callers that send exactly once per turn may use this. The outbox
-        freezes a row at its first attempt, so a second send for the same turn
-        would be refused and its text would never reach the room.
-
-        A send that genuinely is not a turn -- a voice echo, a reconciliation
-        notice -- has no identity a restart can resolve and does not belong
-        here at all; it builds its own ``SendTextRequest`` and the gateway
-        gives it the direct path.
+        The reply goes through the same outbox row a model answer uses, so a
+        crashed send is resent. Call it once per turn: the outbox freezes a row
+        at its first attempt and refuses a second send for the same turn. A
+        send that is not a turn, such as a voice echo, builds its own
+        ``SendTextRequest`` instead.
         """
         if recovered_response_event_id is not None:
             return recovered_response_event_id
@@ -193,10 +192,13 @@ class VisibleResponseReconciler:
                 extra_content=command_result_content_to_dict(handled_turn.command_result_extra_content),
                 skip_mentions=skip_mentions,
                 delivery_turn_id=handled_turn.anchor_event_id,
+                delivery_turn_key=handled_turn.turn_key,
             ),
         )
         if response_event_id is not None:
-            await self.record_pending_visible_response(handled_turn, response_event_id)
+            # A FINAL the outbox bound to this turn already completed it. One it could not bind, because the turn
+            # moved room meanwhile, is found here by a replay that runs before the caller records the turn.
+            await self.deps.turn_store.record_placeholder(handled_turn, response_event_id)
         return response_event_id
 
     async def deliver_selection_acknowledgement(
@@ -249,9 +251,6 @@ class VisibleResponseReconciler:
         excluded_event_ids: Collection[str] = (),
     ) -> tuple[TurnRecord | None, str | None]:
         """Persist one non-model delivery intent and recover any visible event."""
-        reconcile_visible_response = self.deps.turn_store.has_pending_response_intent(
-            handled_turn.source_event_ids,
-        )
         tracked_turn = self.deps.turn_store.attach_response_context(
             canonicalize_turn_record(
                 handled_turn,
@@ -261,18 +260,15 @@ class VisibleResponseReconciler:
             conversation_target=target,
         )
         pending_turn = await self.deps.turn_store.record_pending_turn(tracked_turn)
-        if pending_turn is None or pending_turn.completed:
-            return None, None
-        if pending_turn.redacted_source_event_ids:
-            await self.settle_source_events_ignored(pending_turn)
+        if pending_turn is None or await self.settle_deleted_sources(pending_turn, room_id=target.room_id):
             return None, None
         recovered_response_event_id = (
             await self.recovered_response_event_id(
-                pending_turn,
+                pending_turn.record,
                 room_id=target.room_id,
                 excluded_event_ids=excluded_event_ids,
             )
-            if reconcile_visible_response
+            if pending_turn.resumes_response
             else None
         )
-        return pending_turn, recovered_response_event_id
+        return pending_turn.record, recovered_response_event_id

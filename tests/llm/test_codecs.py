@@ -1,7 +1,7 @@
 """Dict codecs of ``mindroom.llm`` read the dicts Agno 3.0.9 wrote, keeping every value the owned records model.
 
-These are legacy inputs and never change: ``tests/fixtures/agno_parity/codecs.json`` holds what real Agno objects
-produced, and the stored-run fixtures under ``tests/fixtures/agno_parity/runs`` hold what MindRoom stored through Agno.
+These are legacy inputs and never change: ``tests/fixtures/legacy_agno3/codecs.json`` holds what real Agno objects
+produced, and the stored-run fixtures under ``tests/fixtures/legacy_agno3/runs`` hold what MindRoom stored through Agno.
 Each one read and written back is the dict it was, minus the keys the owned records deliberately drop, which
 ``tests.llm.agno_dict_helpers`` lists once per type. The schema MindRoom itself writes is
 ``tests/llm/test_stored_dicts.py``'s.
@@ -12,7 +12,6 @@ from __future__ import annotations
 
 import copy
 import json
-from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 import pytest
@@ -33,13 +32,14 @@ from tests.llm.agno_dict_helpers import (
     stored_run_record,
     without,
 )
+from tests.session_storage.goldens import LEGACY_AGNO3
 
 if TYPE_CHECKING:
     from collections.abc import Callable
 
-FIXTURES = Path(__file__).resolve().parents[1] / "fixtures" / "agno_parity"
-# What Agno 3.0.9 objects wrote, keyed by the case that built them; see the fixtures README.
-AGNO: dict[str, Any] = json.loads((FIXTURES / "codecs.json").read_text(encoding="utf-8"))
+# What Agno 3.0.9 objects wrote, keyed by the case that built them; see "Codec goldens" in
+# ``tests/fixtures/agno_parity/README.md``.
+AGNO: dict[str, Any] = json.loads((LEGACY_AGNO3 / "codecs.json").read_text(encoding="utf-8"))
 
 PNG_BYTES = b"\x89PNG\r\n\x1a\n" + bytes(range(32))
 PDF_BYTES = b"%PDF-1.7\n%\xe2\xe3\xcf\xd3\n"
@@ -418,7 +418,7 @@ def test_message_reads_files_agno_accepted_without_a_source(stored: dict[str, An
 
 # --- stored fixtures -------------------------------------------------------------------------------------------
 
-FIXTURE_RUNS = FIXTURES / "runs"
+FIXTURE_RUNS = LEGACY_AGNO3 / "runs"
 
 # Fixture file -> (reader, expected dict for one stored case); every file under ``runs/`` has an entry.
 FIXTURE_CODECS: dict[str, tuple[Callable[[dict[str, Any]], Any], Callable[[dict[str, Any]], dict[str, Any]]]] = {

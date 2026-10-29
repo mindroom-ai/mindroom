@@ -450,19 +450,21 @@ async def _exercise_saved_approval(  # noqa: C901, PLR0912, PLR0915
     initial_discoveries = list(transport.discoveries)
     with pytest.raises(ResponsePausedForApproval) as raised:
         await ai_response(
-            make_turn_context(
-                "general",
-                session_id=identity.session_id,
-                room_id=identity.room_id,
-                thread_id=identity.thread_id,
-                requester_id=identity.requester_id,
-                matrix_run_metadata={"approval_probe": "saved"},
+            replace(
+                make_turn_context(
+                    "general",
+                    session_id=identity.session_id,
+                    room_id=identity.room_id,
+                    thread_id=identity.thread_id,
+                    requester_id=identity.requester_id,
+                    matrix_run_metadata={"approval_probe": "saved"},
+                ),
+                prompt="Look up the synthetic record",
+                execution_identity=identity,
+                supports_native_tool_approval=True,
             ),
-            prompt="Look up the synthetic record",
-            config=config,
-            runtime_paths=paths,
-            execution_identity=identity,
-            supports_native_tool_approval=True,
+            paths,
+            config,
         )
     paused = raised.value.paused
     assert paused.toolkit_owners[("general", function_name)] == tool_name

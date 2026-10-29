@@ -8,6 +8,7 @@ from __future__ import annotations
 import asyncio
 import threading
 from contextlib import contextmanager
+from dataclasses import replace
 from typing import TYPE_CHECKING
 from unittest.mock import MagicMock
 
@@ -167,11 +168,13 @@ async def _reply(config: Config) -> list[str]:
     chunks = [
         chunk
         async for chunk in stream_agent_response(
-            make_turn_context("worker", session_id="session", run_id="run", requester_id="@user:localhost"),
-            prompt="Fetch mindroom.",
-            runtime_paths=runtime_paths_for(config),
-            config=config,
-            show_tool_calls=False,
+            replace(
+                make_turn_context("worker", session_id="session", run_id="run", requester_id="@user:localhost"),
+                prompt="Fetch mindroom.",
+                show_tool_calls=False,
+            ),
+            runtime_paths_for(config),
+            config,
         )
     ]
     return streamed_text(chunks)

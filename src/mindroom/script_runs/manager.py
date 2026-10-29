@@ -26,7 +26,6 @@ from mindroom.path_confinement import (
     resolve_path_within_root,
     write_file_within_root,
 )
-from mindroom.runtime_resolution import resolve_agent_runtime
 from mindroom.script_runs.models import (
     ScriptRunRecord,
     ScriptRunState,
@@ -865,7 +864,7 @@ class ScriptRunManager:
         source: bytes,
         token: str,
     ) -> ScriptRunRecord:
-        workspace = await asyncio.to_thread(_agent_workspace, context)
+        workspace = await asyncio.to_thread(context.agent_workspace_root, create=True)
         await self._record_snapshot_locator(run, workspace)
         source_path, token_path = await asyncio.to_thread(
             _write_snapshot,
@@ -1201,19 +1200,9 @@ class ScriptRunManager:
         await asyncio.to_thread(_require_script_worker_backend(backend).retire_worker, worker_key)
 
 
-def _agent_workspace(context: ToolRuntimeContext) -> Path:
-    return resolve_agent_runtime(
-        context.agent_name,
-        context.config,
-        context.runtime_paths,
-        execution_identity=build_execution_identity_from_runtime_context(context),
-        create=True,
-    ).workspace.root
-
-
 def _resolve_and_read_workspace_source(context: ToolRuntimeContext, relative_path: str) -> bytes:
     """Resolve and read one script source while keeping workspace I/O off the request loop."""
-    return _read_workspace_source(_agent_workspace(context), relative_path)
+    return _read_workspace_source(context.agent_workspace_root(create=True), relative_path)
 
 
 def _require_supported_private_script_worker_scope(context: ToolRuntimeContext) -> None:

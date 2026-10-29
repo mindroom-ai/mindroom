@@ -24,7 +24,7 @@ from mindroom.agent_cli.lifetime import cli_control_calls, response_cli_lifetime
 from mindroom.agent_cli.protocol import ContextReadOperation, ToolCallOperation, ToolDescribeOperation
 from mindroom.agent_cli.session import CliBashWindowRequiredError, CliTurnOwner, TurnToolRegistry
 from mindroom.agent_cli.shell_contract import AgentCliShellEnv
-from mindroom.ai import collect_streamed_response_content, run_delegated_child_response
+from mindroom.ai import run_delegated_child_response
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import DefaultsConfig, ModelConfig
@@ -39,7 +39,12 @@ from mindroom.mcp.registry import sync_mcp_tool_registry
 from mindroom.mcp.toolkit import bind_mcp_server_manager
 from mindroom.memory import search_agent_memories
 from mindroom.prompts import INTERACTIVE_QUESTION_PROMPT
-from mindroom.response_turn import PausedAnswer, PausedAttempt, apply_exact_approval_decisions
+from mindroom.response_turn import (
+    PausedAnswer,
+    PausedAttempt,
+    apply_exact_approval_decisions,
+    collect_streamed_response_content,
+)
 from mindroom.run_storage import RunStorage
 from mindroom.session_storage.agent_storage import create_agent_state_storage, create_session_storage
 from mindroom.tool_system.agent_tool_calls import AgentToolCallWaiting, DeferredAgentToolkit, execute_agent_tool_call

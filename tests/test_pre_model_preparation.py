@@ -266,7 +266,7 @@ async def test_blocked_agent_build_exposes_fixed_response_shutdown_phase() -> No
             pipeline_timing=None,
         )
 
-    response_task = runner.track_inbox_response(
+    response_task = runner.inbox.track_inbox_response(
         blocked_response(),
         name="test_blocked_agent_build_shutdown_phase",
         recovery_proof_ready=lambda: True,
@@ -274,15 +274,15 @@ async def test_blocked_agent_build_exposes_fixed_response_shutdown_phase() -> No
     )
     try:
         assert await asyncio.to_thread(agent_started.wait, 1.0)
-        runner.begin_process_shutdown()
+        runner.inbox.begin_process_shutdown()
         await asyncio.sleep(0)
 
         assert not response_task.done()
-        assert runner.pending_response_phase_counts == {"agent_preparation": 1}
+        assert runner.inbox.pending_response_phase_counts == {"agent_preparation": 1}
     finally:
         agent_release.set()
 
-    assert await runner.drain_inbox_responses(
+    assert await runner.inbox.drain_inbox_responses(
         cancel_after_seconds=0.1,
         shutdown_intent=ORDERLY_SHUTDOWN,
     )

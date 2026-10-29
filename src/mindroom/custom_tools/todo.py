@@ -36,8 +36,7 @@ from mindroom.path_confinement import (
     read_regular_file_within_root,
     resolve_path_within_root,
 )
-from mindroom.runtime_resolution import resolve_agent_runtime
-from mindroom.tool_system.runtime_context import build_execution_identity_from_runtime_context, get_tool_runtime_context
+from mindroom.tool_system.runtime_context import get_tool_runtime_context
 from mindroom.tool_system.skills import workspace_entry_names
 
 if TYPE_CHECKING:
@@ -293,13 +292,7 @@ def _current_agent_workspace_root() -> Path | None:
     ctx = get_tool_runtime_context()
     if ctx is None or ctx.agent_name not in ctx.config.agents:
         return None
-    return resolve_agent_runtime(
-        ctx.agent_name,
-        ctx.config,
-        ctx.runtime_paths,
-        execution_identity=build_execution_identity_from_runtime_context(ctx),
-        create=True,
-    ).workspace.root
+    return ctx.agent_workspace_root(create=True)
 
 
 def _visible_template_roots() -> tuple[_TemplateRoot, ...]:

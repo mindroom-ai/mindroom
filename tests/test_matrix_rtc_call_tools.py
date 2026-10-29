@@ -80,8 +80,9 @@ if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
     from pathlib import Path
 
+    from mindroom.constants import RuntimePaths
     from mindroom.message_target import MessageTarget
-    from mindroom.response_turn import ResponseTurnContext
+    from mindroom.response_turn import ResponseTurnContext, TurnSinks
     from mindroom.tool_system.invocation import ToolCall, ToolMiddleware, ToolNext
     from mindroom.tool_system.tool_function import AdaptedToolkit, ToolFunction
 
@@ -594,8 +595,9 @@ async def test_call_responder_prepares_full_requester_prompt_before_first_turn(
         runtime_paths,
     )
 
-    async def respond(_turn: ResponseTurnContext, **kwargs: object) -> str:
-        return system_text(prompt_for_turn(cast("AgentBuild", kwargs["reusable_build"])))
+    async def respond(turn: ResponseTurnContext, *_args: object, **_kwargs: object) -> str:
+        assert turn.reusable_build is not None
+        return system_text(prompt_for_turn(turn.reusable_build))
 
     monkeypatch.setattr("mindroom.ai.ai_response", respond)
     for requester, name, other in (("@alice:example.org", "Alice", "Bob"), ("@bob:example.org", "Bob", "Alice")):
@@ -800,7 +802,7 @@ async def test_call_responder_uses_normal_agent_turn_and_refuses_unsafe_function
     knowledge = _ready_knowledge()
     refresh_scheduler = object()
     execution_identity = SimpleNamespace()
-    calls: list[tuple[ResponseTurnContext, dict[str, object]]] = []
+    calls: list[tuple[ResponseTurnContext, Config]] = []
     persisted_interruptions: list[dict[str, object]] = []
     completed_tools = [
         ToolTraceEntry(type="tool_call_completed", tool_name="weather"),
@@ -854,11 +856,20 @@ async def test_call_responder_uses_normal_agent_turn_and_refuses_unsafe_function
             turn_contexts.append(tool_context)
             return await operation()
 
-    async def fake_ai_response(turn: ResponseTurnContext, **kwargs: object) -> str:
-        calls.append((turn, kwargs))
-        recorder = kwargs["turn_recorder"]
-        recorder.set_run_id("call-run-1")  # type: ignore[union-attr]
-        recorder.record_completed(  # type: ignore[union-attr]
+    async def fake_ai_response(
+        turn: ResponseTurnContext,
+        _paths: RuntimePaths,
+        config: Config,
+        *,
+        sinks: TurnSinks,
+    ) -> str:
+        calls.append((turn, config))
+        recorder = sinks.turn_recorder
+        assert recorder is not None
+        # The turn driver starts the turn's record with its user message.
+        recorder.start(user_message=turn.prompt, user_message_is_structured=False, run_metadata={})
+        recorder.record_completed(
+            run_id="call-run-1",
             run_metadata={"model": "same-chat-model"},
             assistant_text="It is sunny.",
             completed_tools=completed_tools,
@@ -932,7 +943,7 @@ async def test_call_responder_uses_normal_agent_turn_and_refuses_unsafe_function
     assert len(calls) == 1
     authorization_allowed = True
     create_agent_mock.assert_called_once()
-    turn, kwargs = calls[0]
+    turn, turn_config = calls[0]
     assert turn.entity_label == AGENT
     assert turn.requester_id == REQUESTER
     assert turn.session_id == "!room:example.org:call:one"
@@ -941,15 +952,16 @@ async def test_call_responder_uses_normal_agent_turn_and_refuses_unsafe_function
     assert turn.active_model_name == "call_fast"
     assert contexts[0].active_model_name == "call_fast"
     assert turn.system_enrichment_items[0].text == "Speak briefly."
-    assert kwargs["config"] is config
-    assert kwargs["knowledge"] is knowledge
-    assert kwargs["execution_identity"] is execution_identity
-    assert kwargs["refresh_scheduler"] is refresh_scheduler
-    assert "include_interactive_questions" not in kwargs
-    assert "tool_function_filter" not in kwargs
-    assert kwargs["show_tool_calls"] is False
-    assert kwargs["eager_deferred_tools"] is True
-    used_build = cast("AgentBuild", kwargs["reusable_build"])
+    assert turn_config is config
+    assert turn.knowledge is knowledge
+    assert turn.execution_identity is execution_identity
+    assert turn.refresh_scheduler is refresh_scheduler
+    assert turn.include_interactive_questions is True
+    assert turn.tool_function_filter is None
+    assert turn.show_tool_calls is False
+    assert turn.eager_deferred_tools is True
+    used_build = turn.reusable_build
+    assert used_build is not None
     assert used_build.prompt == cached_build.prompt
     assert create_agent_mock.call_args.kwargs["history_storage"] is history_storage
     # The cached delegate keeps chat's tools and prompt, so calls reuse chat's prompt cache.
@@ -1000,14 +1012,17 @@ async def test_call_responder_uses_normal_agent_turn_and_refuses_unsafe_function
         else []
     )
 
-    async def cancel_before_playout(_turn: ResponseTurnContext, **cancel_kwargs: object) -> str:
-        recorder = cancel_kwargs["turn_recorder"]
-        recorder.set_run_id("call-run-2")  # type: ignore[union-attr]
-        recorder.record_interrupted(  # type: ignore[union-attr]
+    async def cancel_before_playout(turn: ResponseTurnContext, *_args: object, sinks: TurnSinks) -> str:
+        recorder = sinks.turn_recorder
+        assert recorder is not None
+        recorder.start(user_message=turn.prompt, user_message_is_structured=False, run_metadata={})
+        recorder.record_interrupted(
+            run_id="call-run-2",
             run_metadata={"model": "same-chat-model"},
             assistant_text="generated but never spoken",
             completed_tools=(ToolTraceEntry(type="tool_call_completed", tool_name="calendar"),),
             interrupted_tools=(),
+            original_status=RunStatus.cancelled,
         )
         raise asyncio.CancelledError
 
@@ -1020,9 +1035,12 @@ async def test_call_responder_uses_normal_agent_turn_and_refuses_unsafe_function
     assert persisted_interruptions[-1]["original_status"] is RunStatus.cancelled
     assert recorded_tool_uses[-1] == ["calendar"]
 
-    async def return_error_without_run_id(_turn: ResponseTurnContext, **error_kwargs: object) -> str:
-        recorder = error_kwargs["turn_recorder"]
-        recorder.record_interrupted(  # type: ignore[union-attr]
+    async def return_error_without_run_id(turn: ResponseTurnContext, *_args: object, sinks: TurnSinks) -> str:
+        recorder = sinks.turn_recorder
+        assert recorder is not None
+        recorder.start(user_message=turn.prompt, user_message_is_structured=False, run_metadata={})
+        recorder.record_interrupted(
+            run_id=None,
             run_metadata={"model": "same-chat-model"},
             assistant_text="provider failed",
             completed_tools=(),
@@ -1380,7 +1398,7 @@ async def test_cascaded_responder_uses_the_fallback_for_an_over_budget_caller(
     async def resolve_knowledge(*_args: object, **_kwargs: object) -> SimpleNamespace:
         return SimpleNamespace(knowledge=None, unavailable={})
 
-    async def fake_ai_response(turn: ResponseTurnContext, **_kwargs: object) -> str:
+    async def fake_ai_response(turn: ResponseTurnContext, *_args: object, **_kwargs: object) -> str:
         ai_calls.append(turn)
         return "answer"
 
@@ -1452,7 +1470,7 @@ async def test_cascaded_responder_switches_to_the_fallback_when_the_caller_cross
 
     ai_models: list[str | None] = []
 
-    async def fake_ai_response(turn: ResponseTurnContext, **_kwargs: object) -> str:
+    async def fake_ai_response(turn: ResponseTurnContext, *_args: object, **_kwargs: object) -> str:
         ai_models.append(turn.active_model_name)
         return "answer"
 
@@ -1768,7 +1786,7 @@ async def test_cascaded_responder_refreshes_knowledge_and_availability_each_turn
     execution_identity = _identity(runtime_paths)
     ready_knowledge = _ready_knowledge()
     resolver_calls: list[dict[str, object]] = []
-    ai_calls: list[tuple[ResponseTurnContext, dict[str, object]]] = []
+    ai_calls: list[ResponseTurnContext] = []
     resolutions = iter(
         (
             SimpleNamespace(
@@ -1809,8 +1827,8 @@ async def test_cascaded_responder_refreshes_knowledge_and_availability_each_turn
         resolver_calls.append(kwargs)
         return next(resolutions)
 
-    async def fake_ai_response(turn: ResponseTurnContext, **kwargs: object) -> str:
-        ai_calls.append((turn, kwargs))
+    async def fake_ai_response(turn: ResponseTurnContext, *_args: object, **_kwargs: object) -> str:
+        ai_calls.append(turn)
         return f"answer-{len(ai_calls)}"
 
     first_build = _build(role="first base")
@@ -1845,15 +1863,18 @@ async def test_cascaded_responder_refreshes_knowledge_and_availability_each_turn
 
     assert [call["refresh_scheduler"] for call in resolver_calls] == [first_scheduler, second_scheduler]
     assert all(call["execution_identity"] is execution_identity for call in resolver_calls)
-    assert ai_calls[0][1]["knowledge"] is None
-    assert ai_calls[1][1]["knowledge"] is ready_knowledge
-    assert cast("AgentBuild", ai_calls[0][1]["reusable_build"]).prompt == first_build.prompt
-    assert cast("AgentBuild", ai_calls[1][1]["reusable_build"]).prompt == second_build.prompt
+    assert ai_calls[0].knowledge is None
+    assert ai_calls[1].knowledge is ready_knowledge
+    first_used, second_used = ai_calls[0].reusable_build, ai_calls[1].reusable_build
+    assert first_used is not None
+    assert first_used.prompt == first_build.prompt
+    assert second_used is not None
+    assert second_used.prompt == second_build.prompt
     assert create_agent_mock.call_count == 2
-    assert [item.key for item in ai_calls[0][0].system_enrichment_items] == ["voice_call"]
-    assert [item.key for item in ai_calls[0][0].transient_enrichment_items] == ["knowledge_availability"]
-    assert [item.key for item in ai_calls[1][0].system_enrichment_items] == ["voice_call"]
-    assert ai_calls[1][0].transient_enrichment_items == ()
+    assert [item.key for item in ai_calls[0].system_enrichment_items] == ["voice_call"]
+    assert [item.key for item in ai_calls[0].transient_enrichment_items] == ["knowledge_availability"]
+    assert [item.key for item in ai_calls[1].system_enrichment_items] == ["voice_call"]
+    assert ai_calls[1].transient_enrichment_items == ()
     assert tooling.close is not None
     await tooling.close()
 
@@ -1877,7 +1898,7 @@ async def test_call_responder_adds_origin_brief_enrichment(
     runtime_paths = test_runtime_paths(tmp_path)
     turns: list[ResponseTurnContext] = []
 
-    async def fake_ai_response(turn: ResponseTurnContext, **_kwargs: object) -> str:
+    async def fake_ai_response(turn: ResponseTurnContext, *_args: object, **_kwargs: object) -> str:
         turns.append(turn)
         return "answer"
 
@@ -1946,11 +1967,13 @@ async def test_cascaded_responder_waits_for_interrupted_playout_settlement(
             assert tool_context.tool_function_filter is not None
             return await operation()
 
-    async def fake_ai_response(_turn: ResponseTurnContext, **kwargs: object) -> str:
-        prompt = cast("str", kwargs["prompt"])
+    async def fake_ai_response(turn: ResponseTurnContext, *_args: object, sinks: TurnSinks) -> str:
+        prompt = turn.prompt
         ai_prompts.append(prompt)
-        recorder = kwargs["turn_recorder"]
-        recorder.record_completed(  # type: ignore[union-attr]
+        recorder = sinks.turn_recorder
+        assert recorder is not None
+        recorder.record_completed(
+            run_id=None,
             run_metadata={},
             assistant_text=f"answer to {prompt}",
             completed_tools=(),
@@ -2191,16 +2214,22 @@ def test_matrix_message_available_during_call_needs_the_tool_without_approval() 
 
 def test_an_interrupted_voice_reply_drops_the_tools_its_fold_summarized() -> None:
     """A voice reply that compacted mid-turn is saved without the calls the summary holds."""
-    recorder = TurnRecorder(user_message="question")
-    recorder.set_run_metadata({"source": "voice"})
-    recorder.completed_tools = [
-        ToolTraceEntry(type="tool_call_completed", tool_name="search", tool_call_id="folded"),
-        ToolTraceEntry(type="tool_call_completed", tool_name="search", tool_call_id="after"),
-    ]
+    recorder = TurnRecorder()
+    recorder.start(user_message="question", user_message_is_structured=False, run_metadata={"source": "voice"})
     recorder.record_folded_tool_calls({"folded"})
-    recorder.mark_interrupted()
+    recorder.record_interrupted(
+        run_id=None,
+        run_metadata=None,
+        assistant_text="",
+        completed_tools=[
+            ToolTraceEntry(type="tool_call_completed", tool_name="search", tool_call_id="folded"),
+            ToolTraceEntry(type="tool_call_completed", tool_name="search", tool_call_id="after"),
+        ],
+        interrupted_tools=(),
+        original_status=RunStatus.cancelled,
+    )
 
-    state = _call_agent_run_state(recorder, session_id="session", fallback_run_id="run")
+    state = _call_agent_run_state(recorder, {}, session_id="session", fallback_run_id="run")
 
     assert state.run_metadata["source"] == "voice"
     assert [tool.tool_call_id for tool in state.completed_tools] == ["after"]

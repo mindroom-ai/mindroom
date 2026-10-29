@@ -56,7 +56,7 @@ if TYPE_CHECKING:
 
     import structlog
 
-    from mindroom.bot import AgentBot, TeamBot
+    from mindroom.bot import AgentBot
     from mindroom.constants import RuntimePaths
 
 logger = get_logger(__name__)
@@ -258,7 +258,7 @@ class _MatrixSyncStalledError(RuntimeError):
     """Raised when the watchdog detects a stalled Matrix sync loop."""
 
 
-def _matrix_sync_receive_loop_active(bot: AgentBot | TeamBot) -> bool:
+def _matrix_sync_receive_loop_active(bot: AgentBot) -> bool:
     """Return whether the supervisor still owns an active receive loop."""
     return bot.running and not bot._matrix_ingestion_quiesce_requested
 
@@ -267,14 +267,14 @@ def _matrix_sync_receive_loop_active(bot: AgentBot | TeamBot) -> bool:
 class _SyncIteration:
     """Own the lifecycle of one sync task and its watchdog."""
 
-    bot: AgentBot | TeamBot
+    bot: AgentBot
     sync_task: asyncio.Task[Any] | None
     watchdog_task: asyncio.Task[Any] | None
     watchdog_cancelled_sync: asyncio.Event = field(default_factory=asyncio.Event)
 
     @staticmethod
     async def _watch(
-        bot: AgentBot | TeamBot,
+        bot: AgentBot,
         sync_task: asyncio.Task[Any],
         watchdog_cancelled_sync: asyncio.Event,
     ) -> None:
@@ -369,7 +369,7 @@ class _SyncIteration:
             await sync_task
 
     @classmethod
-    def start(cls, bot: AgentBot | TeamBot) -> _SyncIteration:
+    def start(cls, bot: AgentBot) -> _SyncIteration:
         """Create the sync task and its watchdog for one loop iteration."""
         bot.mark_sync_loop_started()
         # Reset the monotonic watchdog clock so a fresh iteration gets the full
@@ -445,7 +445,7 @@ class _SyncIterationOutcome:
     shutdown_intent: RuntimeShutdownIntent = GENERIC_SHUTDOWN
 
 
-async def _run_sync_iteration(bot: AgentBot | TeamBot, *, attempt: int) -> _SyncIterationOutcome:
+async def _run_sync_iteration(bot: AgentBot, *, attempt: int) -> _SyncIterationOutcome:
     """Run one receive-loop iteration and settle only the tasks that iteration owns.
 
     Live responses outlive a transport restart: the response runtime is torn down
@@ -654,7 +654,7 @@ async def wait_for_matrix_homeserver(
 class EntityStartResults:
     """Result of one pass trying to start a batch of entities."""
 
-    started_bots: list[AgentBot | TeamBot] = field(default_factory=list)
+    started_bots: list[AgentBot] = field(default_factory=list)
     retryable_entities: list[str] = field(default_factory=list)
     permanently_failed_entities: list[str] = field(default_factory=list)
 
@@ -695,7 +695,7 @@ def _split_restart_response_timeouts(
 
 async def stop_entities(
     entities_to_stop: set[str],
-    agent_bots: dict[str, AgentBot | TeamBot],
+    agent_bots: dict[str, AgentBot],
     sync_tasks: dict[str, asyncio.Task],
     *,
     restart_entities: set[str] | None = None,
@@ -767,7 +767,7 @@ async def stop_entities(
         agent_bots.pop(entity_name, None)
 
 
-async def sync_forever_with_restart(bot: AgentBot | TeamBot, max_retries: int = -1) -> None:
+async def sync_forever_with_restart(bot: AgentBot, max_retries: int = -1) -> None:
     """Run sync_forever with automatic restart on failure."""
     retry_count = 0
     while _matrix_sync_receive_loop_active(bot) and (max_retries < 0 or retry_count < max_retries):

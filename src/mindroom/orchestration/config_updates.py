@@ -15,7 +15,7 @@ if TYPE_CHECKING:
 
     from pydantic import BaseModel
 
-    from mindroom.bot import AgentBot, TeamBot
+    from mindroom.bot import AgentBot
     from mindroom.config.calls import LiveCallProfile
     from mindroom.config.main import Config
 
@@ -187,7 +187,7 @@ def _restart_fields(
     old_entry: BaseModel,
     new_entry: BaseModel,
     live_fields: frozenset[str],
-    bot: AgentBot | TeamBot | None,
+    bot: AgentBot | None,
 ) -> set[str]:
     """Return the changed entry fields that restart an entity's bot.
 
@@ -213,7 +213,7 @@ def _agent_startup_tools(config: Config, agent_name: str) -> tuple[bool, frozens
 def _identify_entities_to_restart(
     config: Config | None,
     new_config: Config,
-    agent_bots: Mapping[str, AgentBot | TeamBot],
+    agent_bots: Mapping[str, AgentBot],
     changed_mcp_servers: set[str],
 ) -> set[str]:
     """Identify entities that need restarting due to config changes."""
@@ -231,7 +231,7 @@ def _identify_entities_to_restart(
 def _call_agents_to_restart(
     config: Config | None,
     new_config: Config,
-    agent_bots: Mapping[str, AgentBot | TeamBot],
+    agent_bots: Mapping[str, AgentBot],
 ) -> set[str]:
     """Return call agents whose call setup changed or whose call in progress would keep stale config."""
     if config is None:
@@ -296,7 +296,7 @@ def _call_manager_signature(config: Config, agent_name: str) -> object | None:
 def _get_changed_agents(
     config: Config | None,
     new_config: Config,
-    agent_bots: Mapping[str, AgentBot | TeamBot],
+    agent_bots: Mapping[str, AgentBot],
 ) -> set[str]:
     """Return agents to restart: added, removed, or changed in what their bot reads only at startup."""
     if not config:
@@ -331,7 +331,7 @@ def _get_changed_agents(
 def _get_changed_teams(
     config: Config | None,
     new_config: Config,
-    agent_bots: Mapping[str, AgentBot | TeamBot],
+    agent_bots: Mapping[str, AgentBot],
 ) -> set[str]:
     """Return teams to restart: added, removed, or changed in what their bot reads only at startup."""
     if not config:
@@ -464,7 +464,7 @@ def build_config_update_plan(
     new_config: Config,
     configured_entities: set[str],
     existing_entities: set[str],
-    agent_bots: Mapping[str, AgentBot | TeamBot],
+    agent_bots: Mapping[str, AgentBot],
 ) -> ConfigUpdatePlan:
     """Compute the effect of reloading config for the current runtime state."""
     changed_mcp_servers = _changed_mcp_servers(current_config, new_config)

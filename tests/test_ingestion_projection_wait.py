@@ -14,6 +14,7 @@ from nio import TimelineEventProvenance
 from nio.durable import RecordKind, SyncBatch, SyncRecord
 
 from mindroom.event_journal import DeliveryStage
+from mindroom.event_journal.identity import journal_principal_id
 from mindroom.event_journal.matrix_delivery import MatrixDeliveryWorker
 from mindroom.matrix.durable_ingestion import run_ingestion_pump
 from tests.test_bot_ready_hook import _agent_bot
@@ -41,7 +42,7 @@ SENDER = "@alice:example.org"
 
 
 async def _projection_case(store: EventJournalStore) -> tuple[PrincipalStore, dict[str, object], SyncBatch]:
-    principal_id = f"agent@{ACCOUNT_ID}"
+    principal_id = journal_principal_id("agent", ACCOUNT_ID)
     principal = store.principal(principal_id)
     await principal.load_or_create_ingestion_consumer(new_generation=CONSUMER_GENERATION)
     await principal.bind_ingestion_stream(generation=CONSUMER_GENERATION, stream_id=STREAM_ID)
@@ -99,7 +100,7 @@ async def test_pump_waits_for_projection_without_committing_or_spinning(  # noqa
 ) -> None:
     store = journal_database()
     principal, edit, batch = await _projection_case(store)
-    principal_id = f"agent@{ACCOUNT_ID}"
+    principal_id = journal_principal_id("agent", ACCOUNT_ID)
     session = _AdapterSession(batch)
     blocked = asyncio.Event()
     projected = asyncio.Event()

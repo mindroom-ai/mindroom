@@ -695,31 +695,38 @@ def test_interrupted_replay_preserves_independent_usage(tmp_path: Path, *, is_te
 
 
 def test_turn_recorder_tracks_text_tools_and_metadata() -> None:
-    """TurnRecorder should accumulate trusted interrupted-turn runtime facts."""
-    recorder = TurnRecorder(
+    """TurnRecorder should keep the trusted facts a started turn records when it is interrupted."""
+    recorder = TurnRecorder()
+    recorder.start(
         user_message="Please continue",
+        user_message_is_structured=False,
         run_metadata={"matrix_event_id": "e1", "matrix_seen_event_ids": ["e1"]},
     )
 
-    recorder.assistant_text = "Text emitted before interruption"
-    recorder.completed_tools = [
-        ToolTraceEntry(
-            type="tool_call_completed",
-            tool_name="run_shell_command",
-            args_preview="cmd=pwd",
-            result_preview="/app",
-        ),
-    ]
-    recorder.interrupted_tools = [
-        ToolTraceEntry(
-            type="tool_call_started",
-            tool_name="save_file",
-            args_preview="file_name=main.py",
-        ),
-    ]
-    recorder.mark_interrupted()
+    recorder.record_interrupted(
+        run_id="run-1",
+        run_metadata=None,
+        assistant_text="Text emitted before interruption",
+        completed_tools=[
+            ToolTraceEntry(
+                type="tool_call_completed",
+                tool_name="run_shell_command",
+                args_preview="cmd=pwd",
+                result_preview="/app",
+            ),
+        ],
+        interrupted_tools=[
+            ToolTraceEntry(
+                type="tool_call_started",
+                tool_name="save_file",
+                args_preview="file_name=main.py",
+            ),
+        ],
+        original_status=RunStatus.cancelled,
+    )
 
     snapshot = recorder.interrupted_snapshot()
+    assert recorder.run_id == "run-1"
 
     assert snapshot.user_message == "Please continue"
     assert snapshot.partial_text == "Text emitted before interruption"
@@ -744,6 +751,7 @@ def test_turn_recorder_record_helpers_capture_completed_and_interrupted_turns() 
     recorder = TurnRecorder(user_message="Please continue")
 
     recorder.record_completed(
+        run_id="run-1",
         run_metadata={"matrix_event_id": "e1", "matrix_seen_event_ids": ["e1"]},
         assistant_text="Text emitted before interruption",
         completed_tools=[completed_tool],
@@ -754,14 +762,19 @@ def test_turn_recorder_record_helpers_capture_completed_and_interrupted_turns() 
     assert recorder.interrupted_tools == []
 
     recorder.record_interrupted(
+        run_id=None,
         run_metadata={"matrix_event_id": "e2", "matrix_seen_event_ids": ["e2"]},
         assistant_text="Still working",
         completed_tools=[completed_tool],
         interrupted_tools=[interrupted_tool],
+        original_status=RunStatus.error,
     )
 
     snapshot = recorder.interrupted_snapshot()
     assert recorder.outcome == "interrupted"
+    # A record that names no run keeps the run id recorded before.
+    assert recorder.run_id == "run-1"
+    assert snapshot.original_status is RunStatus.error
     assert snapshot.run_metadata == {"matrix_event_id": "e2", "matrix_seen_event_ids": ["e2"]}
     assert snapshot.partial_text == "Still working"
     assert [tool.tool_name for tool in snapshot.completed_tools] == ["run_shell_command"]
@@ -769,17 +782,19 @@ def test_turn_recorder_record_helpers_capture_completed_and_interrupted_turns() 
 
 
 def test_turn_recorder_keeps_seed_metadata_when_runtime_metadata_is_missing() -> None:
-    """Early interruptions should retain Matrix identity seeded by the runner."""
+    """Early interruptions should retain the Matrix identity the turn was seeded with."""
     recorder = TurnRecorder(
         user_message="Please continue",
         run_metadata={"matrix_event_id": "$question", "requester_id": "@alice:localhost"},
     )
 
     recorder.record_interrupted(
+        run_id=None,
         run_metadata=None,
         assistant_text="Partial answer",
         completed_tools=[],
         interrupted_tools=[],
+        original_status=RunStatus.cancelled,
     )
 
     assert recorder.interrupted_snapshot().run_metadata == {

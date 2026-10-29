@@ -30,7 +30,7 @@ if TYPE_CHECKING:
     import nio
 
     from mindroom.agent_reply_membership import AgentReplyMembershipIndex
-    from mindroom.bot import AgentBot, TeamBot
+    from mindroom.bot import AgentBot
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
 
@@ -156,7 +156,7 @@ def runtime_for(
     slack: FakeSlack,
 ) -> SlackRuntime:
     """Return a Slack runtime over fake bots whose Slack calls reach `slack`."""
-    return SlackRuntime(cast("Mapping[str, AgentBot | TeamBot]", bots), memberships, http_client=slack.client)
+    return SlackRuntime(cast("Mapping[str, AgentBot]", bots), memberships, http_client=slack.client)
 
 
 def config_data(

@@ -11,7 +11,9 @@ from uuid import uuid4
 import pytest
 from nio.durable.store import DurableStore
 
+from mindroom.turn_record import TurnRecord
 from scripts.testing import fuzz_live_matrix as live_fuzz
+from tests.test_live_matrix_fuzz import _write_ledger
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -76,17 +78,16 @@ def test_recovery_snapshot_reads_current_store_without_event_payloads(tmp_path: 
 def test_failure_bundle_preserves_incomplete_and_malformed_turn_rows(tmp_path: Path) -> None:
     """Failure evidence must keep rows that the terminal polling oracle cannot accept."""
     ledger = tmp_path / "event_journal.db"
+    _write_ledger(
+        ledger,
+        {
+            "$pending": TurnRecord.create(source_event_ids=("$pending",), completed=False),
+            "$corrupt": TurnRecord.create(source_event_ids=("$corrupt",)),
+        },
+        redacted=("$gone",),
+    )
     with closing(sqlite3.connect(ledger)) as database:
-        database.execute(
-            "CREATE TABLE turn_records(agent_name TEXT, index_event_id TEXT, anchor_event_id TEXT, record_json TEXT)",
-        )
-        database.executemany(
-            "INSERT INTO turn_records VALUES('general',?,?,?)",
-            [
-                ("$pending", "$pending", '{"completed":false}'),
-                ("$corrupt", "$corrupt", "not JSON"),
-            ],
-        )
+        database.execute("UPDATE turns SET history_scope_json = 'not JSON' WHERE anchor_event_id = '$corrupt'")
         database.commit()
     directory = tmp_path / "bundle"
     directory.mkdir()
@@ -102,14 +103,15 @@ def test_failure_bundle_preserves_incomplete_and_malformed_turn_rows(tmp_path: P
         diagnostics={},
         tuwunel_log="",
     )
-    snapshot = json.loads((directory / "handled_turns.json").read_text())
+    snapshot = json.loads((directory / "turn_rows.json").read_text())
     assert json.loads((directory / "full_request_observations.json").read_text()) == {
         "1": ["MRK[src=root:0;rev=orig]"],
     }
-    assert snapshot["rows"] == [
-        {"index_event_id": "$corrupt", "anchor_event_id": "$corrupt", "record_json": "not JSON"},
-        {"index_event_id": "$pending", "anchor_event_id": "$pending", "record_json": '{"completed":false}'},
-    ]
+    turns = {row["anchor_event_id"]: row for row in snapshot["tables"]["turns"]}
+    assert turns["$pending"]["completed"] == 0
+    assert turns["$corrupt"]["history_scope_json"] == "not JSON"
+    assert [row["event_id"] for row in snapshot["tables"]["turn_sources"]] == ["$pending", "$corrupt"]
+    assert [row["event_id"] for row in snapshot["tables"]["event_redactions"]] == ["$gone"]
 
 
 @pytest.mark.parametrize("second_room", [None, "cold", "other_agent", "joined"])

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from contextlib import nullcontext
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 from weakref import WeakValueDictionary
@@ -29,7 +30,6 @@ if TYPE_CHECKING:
     from mindroom.commands.parsing import Command
     from mindroom.desktop.identity import DesktopControllerIdentity
     from mindroom.dispatch_handoff import PreparedIngress
-    from mindroom.handled_turns import TurnRecord
     from mindroom.hooks import HookMatrixAdmin
     from mindroom.inbound_turn_normalizer import InboundTurnNormalizer
     from mindroom.matrix.conversation_reads import ConversationReader
@@ -37,6 +37,7 @@ if TYPE_CHECKING:
     from mindroom.model_selection import CommandResultContent
     from mindroom.runtime_protocols import SupportsClientConfigOrchestrator
     from mindroom.turn_policy import TurnPolicy
+    from mindroom.turn_record import TurnRecord
     from mindroom.turn_store import TurnStore
     from mindroom.visible_response_reconciliation import VisibleResponseReconciler
 
@@ -88,26 +89,33 @@ class CommandTurnExecutor:
         *,
         target: MessageTarget,
         handled_turn: TurnRecord,
+        acts_for_requester: bool,
     ) -> None:
-        """Run one explicit command under its durable turn journal."""
+        """Run one explicit command under its durable turn journal.
+
+        ``acts_for_requester`` says an entity wrote the command for ``requester_user_id``.
+        """
         if command.type is CommandType.MODEL and model_selection_targets_other_runtime(
             event.source.get("content", {}),
             self._client().user_id,
             self._client().device_id,
         ):
             return
+        lock: asyncio.Lock | nullcontext[None] = nullcontext()
         if command.type is CommandType.MODEL:
-            key = room.room_id, target.resolved_thread_id
-            lock = self._model_command_locks.get(key)
-            if lock is None:
-                lock = asyncio.Lock()
-                self._model_command_locks[key] = lock
             # Keep a strong local reference while waiting. Text and structured
             # model commands share the same order across requester ingress lanes.
-            async with lock:
-                await self._execute(room, event, requester_user_id, command, target=target, handled_turn=handled_turn)
-        else:
-            await self._execute(room, event, requester_user_id, command, target=target, handled_turn=handled_turn)
+            lock = self._model_command_locks.setdefault((room.room_id, target.resolved_thread_id), asyncio.Lock())
+        async with lock:
+            await self._execute(
+                room,
+                event,
+                requester_user_id,
+                command,
+                target=target,
+                handled_turn=handled_turn,
+                acts_for_requester=acts_for_requester,
+            )
 
     async def _execute(
         self,
@@ -118,6 +126,7 @@ class CommandTurnExecutor:
         *,
         target: MessageTarget,
         handled_turn: TurnRecord,
+        acts_for_requester: bool,
     ) -> None:
         """Execute after target ownership and any model command ordering barrier."""
         event = await self.deps.normalizer.resolve_text_event(
@@ -204,7 +213,7 @@ class CommandTurnExecutor:
             event=event,
             command=command,
             requester_user_id=requester_user_id,
-            acts_for_requester=event.acts_for_requester,
+            acts_for_requester=acts_for_requester,
         )
 
     def _matrix_admin(self) -> HookMatrixAdmin | None:
@@ -236,6 +245,7 @@ class CommandTurnExecutor:
             return False
         await self.deps.turn_store.record_responded_turn(
             canonicalize_turn_record(command_turn, response_event_id=response_event_id),
+            room_id=room_id,
         )
         return True
 
@@ -243,23 +253,15 @@ class CommandTurnExecutor:
         self,
         command_turn: TurnRecord,
         *,
-        command_execution_started: bool | None = None,
         command_result_text: str | None = None,
         command_result_extra_content: CommandResultContent | None = None,
     ) -> TurnRecord:
-        persisted_turn = await self.deps.turn_store.record_pending_turn(
-            canonicalize_turn_record(
-                command_turn,
-                command_execution_started=(
-                    command_turn.command_execution_started
-                    if command_execution_started is None
-                    else command_execution_started
-                ),
-                command_result_text=command_result_text,
-                command_result_extra_content=command_result_extra_content,
-            ),
+        persisted_turn = await self.deps.turn_store.record_command_checkpoint(
+            command_turn,
+            result_text=command_result_text,
+            result_extra_content=command_result_extra_content,
         )
-        if persisted_turn is None or persisted_turn.completed:
+        if persisted_turn is None:
             msg = "Failed to persist pending command checkpoint"
             raise RuntimeError(msg)
         return persisted_turn
@@ -310,10 +312,7 @@ class CommandTurnExecutor:
             )
             return None
         if command_type in COMMAND_TYPES_WITH_SIDE_EFFECTS:
-            return await self._persist_checkpoint(
-                command_turn,
-                command_execution_started=True,
-            )
+            return await self._persist_checkpoint(command_turn)
         return command_turn
 
     async def execute_if_owned(
@@ -325,6 +324,7 @@ class CommandTurnExecutor:
         *,
         target: MessageTarget,
         handled_turn: TurnRecord,
+        acts_for_requester: bool,
     ) -> bool:
         """Execute only on the bot that owns this command response."""
         if command.type is CommandType.MODEL and model_selection_targets_other_runtime(
@@ -348,5 +348,6 @@ class CommandTurnExecutor:
             command=command,
             target=target,
             handled_turn=handled_turn,
+            acts_for_requester=acts_for_requester,
         )
         return True

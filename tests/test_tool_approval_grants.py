@@ -34,6 +34,7 @@ from mindroom.event_journal import (
     approval_calls,
     approval_grants,
 )
+from mindroom.event_journal.identity import journal_principal_id
 from mindroom.llm.runs import ToolExecution
 from mindroom.matrix.large_messages import content_fits_normal_event
 from mindroom.mcp.config import MCPServerConfig
@@ -1344,7 +1345,7 @@ async def _card(
     command: object = None,
     expires_at_ns: int = 9_000_000_000_000_000_000,
 ) -> str:
-    responder = journal.principal("agent@" + agent)
+    responder = journal.principal(journal_principal_id("agent", agent))
     await responder.admit(
         InboundEvent(
             event_id="$source-" + name,
@@ -1419,7 +1420,7 @@ def _manager(journal: EventJournalStore, tmp_path: Path) -> ApprovalManager:
         prepare_approval_event=prepare,
         send_approval_delivery=send,
         transport_sender_id=lambda: "@router:test",
-        responder_principal_id=lambda entity_name: "agent@" + entity_name,
+        responder_principal_id=lambda entity_name: journal_principal_id("agent", entity_name),
     )
 
 
@@ -1462,7 +1463,9 @@ async def test_grant_batches_pending_calls_and_survives_restart_with_fixed_expir
             assert continuation is not None
             assert continuation.calls[0].decision.value == "approved"
         for name, agent in (("other-agent", "helper"), ("other-operation", "code"), ("other-requester", "code")):
-            continuation = await journal.principal("agent@" + agent).approvals.approval_continuation(name)
+            continuation = await journal.principal(
+                journal_principal_id("agent", agent),
+            ).approvals.approval_continuation(name)
             assert continuation is not None
             assert continuation.calls[0].decision is None
         grant = await manager.cards.approvals.approval_grant_for_card(room_id="!room:test", card_event_id=first)

@@ -36,6 +36,7 @@ if TYPE_CHECKING:
         DeliveryAcknowledgement,
         DeliveryStage,
         EventKind,
+        FinalAnswerEnqueue,
         HydrationCoverage,
         InboundEvent,
         IngestionBatchAdmission,
@@ -45,7 +46,6 @@ if TYPE_CHECKING:
         PermanentDeliveryFailure,
         RefreshRequest,
         SemanticConsumer,
-        TerminalTurnWrite,
         UnreadableMatrixDelivery,
     )
     from .projection import ProjectedEvent
@@ -334,10 +334,25 @@ class MatrixDeliveryView(Protocol):
         result: Mapping[str, object] | None = None,
         event_type: str = "m.room.message",
         edits_event_id: str | None = None,
-        settle_source_event_ids: tuple[str, ...] = (),
         permanent_failure_reason: str | None = None,
     ) -> str | None:
-        """Record delivery intent and settle what it answers, or refuse both."""
+        """Record delivery intent, or refuse it."""
+        ...
+
+    async def enqueue_final_answer(
+        self,
+        *,
+        delivery_id: str,
+        room_id: str,
+        thread_id: str | None,
+        payload: Mapping[str, object],
+        turn_key: str | None,
+        result: Mapping[str, object] | None = None,
+        event_type: str = "m.room.message",
+        edits_event_id: str | None = None,
+        permanent_failure_reason: str | None = None,
+    ) -> FinalAnswerEnqueue | None:
+        """Record a non-AI FINAL answer and settle the turn it binds, or refuse both."""
         ...
 
     async def turn_membership_is_current(self, *, turn_id: str, room_id: str) -> bool:
@@ -396,7 +411,7 @@ class MatrixDeliveryView(Protocol):
         stage: DeliveryStage,
         event_id: str,
         delivered_projections: tuple[ProjectedEvent, ...],
-        terminal_turn: TerminalTurnWrite | None = None,
+        terminal_response_event_id: str | None = None,
     ) -> DeliveryAcknowledgement:
         """Atomically record and project the delivery, plus the turn it completes."""
         ...
