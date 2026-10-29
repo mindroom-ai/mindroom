@@ -2626,14 +2626,17 @@ def runtime_paths_for(config: Config) -> RuntimePaths:
     return runtime_paths
 
 
+def cached_plugin_entry(module_path: Path) -> plugin_imports._ModuleCacheEntry:
+    """Return the one plugin module cache entry for a file, whatever other plugins earlier tests left cached."""
+    (entry,) = (
+        cached for cached in plugin_imports._MODULE_IMPORT_CACHE.values() if cached.module.__file__ == str(module_path)
+    )
+    return entry
+
+
 def cached_plugin_module(module_path: Path) -> ModuleType:
     """Return the one cached plugin module imported from a file."""
-    (module,) = (
-        cached.module
-        for cached in plugin_imports._MODULE_IMPORT_CACHE.values()
-        if cached.module.__file__ == str(module_path)
-    )
-    return module
+    return cached_plugin_entry(module_path).module
 
 
 def create_mock_room(

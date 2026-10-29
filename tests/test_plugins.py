@@ -30,7 +30,7 @@ from mindroom.tool_system.agent_tools import resolve_agent_tools
 from mindroom.tool_system.metadata import TOOL_METADATA, TOOL_REGISTRY, get_tool_by_name
 from mindroom.tool_system.plugins import get_configured_plugin_roots, load_plugins, reload_plugins
 from mindroom.tool_system.skills import get_plugin_skill_roots, set_plugin_skill_roots
-from tests.conftest import bind_runtime_paths, cached_plugin_module, runtime_paths_for
+from tests.conftest import bind_runtime_paths, cached_plugin_entry, cached_plugin_module, runtime_paths_for
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
@@ -3485,7 +3485,7 @@ async def test_loads_between_reloads_keep_only_the_replaced_modules_a_reload_may
                 _set_hooks_version(hooks_path, version)
                 load_plugins(config, runtime_paths)
 
-            (cached,) = plugin_module._MODULE_IMPORT_CACHE.values()
+            cached = cached_plugin_entry(hooks_path)
             assert cached.module.VERSION == 5
             assert cached.replaced_modules == (first_module, busy_module)
         finally:
