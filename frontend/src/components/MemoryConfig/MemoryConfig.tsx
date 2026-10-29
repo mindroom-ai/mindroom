@@ -33,12 +33,6 @@ const DEFAULT_MODELS: Record<string, string> = {
   sentence_transformers: "sentence-transformers/all-MiniLM-L6-v2",
 };
 
-const DEFAULT_HOSTS: Record<string, string> = {
-  openai: "",
-  ollama: "http://localhost:11434",
-  sentence_transformers: "",
-};
-
 const MODEL_PLACEHOLDERS: Record<string, string> = {
   openai: "e.g. text-embedding-3-small",
   ollama: "e.g. nomic-embed-text",
@@ -110,7 +104,7 @@ const DEFAULT_MEMORY_SETTINGS: MemorySettings = {
 function normalizeMemorySettings(
   memory: MindRoomConfig["memory"] | undefined,
 ): MemorySettings {
-  const merged: MemorySettings = {
+  return {
     ...DEFAULT_MEMORY_SETTINGS,
     ...(memory || {}),
     embedder: {
@@ -147,11 +141,6 @@ function normalizeMemorySettings(
       },
     },
   };
-
-  if (!merged.embedder.config.host) {
-    merged.embedder.config.host = DEFAULT_HOSTS[merged.embedder.provider] || "";
-  }
-  return merged;
 }
 
 function parseInteger(value: string, fallback: number): number {
@@ -190,9 +179,10 @@ function shouldShowHostField(provider: string): boolean {
 function defaultEmbedderConfig(
   provider: string,
 ): MemorySettings["embedder"]["config"] {
+  // An empty host lets the runtime pick the server, such as OLLAMA_HOST for Ollama.
   return {
     model: DEFAULT_MODELS[provider] || "",
-    host: DEFAULT_HOSTS[provider] || "",
+    host: "",
   };
 }
 
@@ -532,10 +522,9 @@ export function MemoryConfig() {
               }
               helperText={
                 localConfig.embedder.provider === "ollama"
-                  ? "The URL where your Ollama server is running"
+                  ? "Empty uses OLLAMA_HOST, else http://localhost:11434. A configured OLLAMA_HOST also takes precedence over this URL."
                   : "Leave empty for official OpenAI API, or set for OpenAI-compatible servers"
               }
-              required={localConfig.embedder.provider === "ollama"}
               htmlFor="host"
             >
               <Input
