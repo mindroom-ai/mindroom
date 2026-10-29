@@ -9,6 +9,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import nio
 import pytest
+from structlog.testing import capture_logs
 
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
@@ -366,7 +367,7 @@ async def test_removed_agent_fails_every_pending_task_it_owns_and_says_so_where_
     assert notice.await_count == 2
     assert all(call.args[0] is removed_bot.client for call in notice.await_args_list)
     assert notice.await_args.args[2].resolved_thread_id == "$thread"
-    assert "cancelled because its agent was removed" in notice.await_args.args[3]
+    assert "❌ Schedule failed because its agent was removed: " in notice.await_args.args[3]
     await runtime.stop()
 
 
@@ -422,6 +423,26 @@ async def test_removal_stops_waiting_for_a_stalled_homeserver_and_leaves_the_tas
 
     assert runtime._runners == {}
     notice.assert_not_awaited()
+    await runtime.stop()
+
+
+@pytest.mark.asyncio
+async def test_removal_names_a_room_whose_state_it_cannot_read(tmp_path: Path) -> None:
+    """A room the removed agent cannot read keeps its tasks pending, and the log says which room."""
+    config, runtime_paths, ids = _config_and_ids(tmp_path)
+    removed_bot = scheduling_bot(_client(ids["general"]), agent_name="general")
+    removed_bot.client.rooms = {ROOM_ID: MagicMock()}
+    removed_bot.client.room_get_state = AsyncMock(return_value=nio.RoomGetStateError("unavailable", "M_UNKNOWN"))
+    runtime = _runtime(runtime_paths, config, _Bots(general=removed_bot))
+
+    with (
+        capture_logs() as logs,
+        patch("mindroom.scheduling.executor.send_scheduled_failure_notice", new=AsyncMock()) as notice,
+    ):
+        await runtime.fail_removed({"general"})
+
+    notice.assert_not_awaited()
+    assert [log["room_id"] for log in logs if log["event"] == "scheduled_task_room_state_unread"] == [ROOM_ID]
     await runtime.stop()
 
 
@@ -482,7 +503,7 @@ async def test_restore_fails_a_task_whose_owner_was_removed_while_mindroom_was_d
         client.room_put_state.assert_awaited_once()
         assert client.room_put_state.await_args.kwargs["content"]["status"] == "failed"
         notice.assert_awaited_once()
-        assert "cancelled because its agent was removed" in notice.await_args.args[3]
+        assert "❌ Schedule failed because its agent was removed: " in notice.await_args.args[3]
     else:
         client.room_put_state.assert_not_awaited()
         notice.assert_not_awaited()

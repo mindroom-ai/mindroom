@@ -69,6 +69,7 @@ _TASK_STATE_POLL_INTERVAL_SECONDS = 30
 _MISSED_TASK_MAX_AGE_SECONDS = 86400
 # Reason shown on a scheduled tool call's approval card when its trigger never went out.
 _SCHEDULE_UNSENT_REASON = "Scheduled task did not run."
+_OWNER_REMOVED_REASON = "Schedule failed because its agent was removed."
 
 
 @dataclass
@@ -145,6 +146,7 @@ class ScheduledTaskRuntime:
         """Return a room's full-state view and each pending task with its owner's Matrix ID and entity name."""
         response = await client.room_get_state(room_id)
         if not isinstance(response, nio.RoomGetStateResponse):
+            logger.warning("scheduled_task_room_state_unread", room_id=room_id, error=str(response))
             return None
         registry = entity_identity_registry(self._config(), self.runtime_paths)
         router_id = registry.current_id(ROUTER_AGENT_NAME).full_id
@@ -286,7 +288,7 @@ class ScheduledTaskRuntime:
             if task is None:
                 return
             if task.workflow.pre_approved_call:
-                await withdraw_scheduled_call(task_id, reason=SCHEDULE_CANCELLED_REASON)
+                await withdraw_scheduled_call(task_id, reason=_OWNER_REMOVED_REASON)
             await _save_task_status(
                 client,
                 task,
@@ -299,7 +301,7 @@ class ScheduledTaskRuntime:
             client,
             task.workflow,
             MessageTarget.for_scheduled_task(task.workflow),
-            f"❌ Schedule cancelled because its agent was removed: {task.workflow.description}\nTask ID: `{task_id}`",
+            f"❌ Schedule failed because its agent was removed: {task.workflow.description}\nTask ID: `{task_id}`",
             bot._conversation_reader,
         )
 
