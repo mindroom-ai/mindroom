@@ -33,14 +33,16 @@ if TYPE_CHECKING:
 _POOL_SIZE = 4
 # The journal lock's session. A runtime that vanishes without closing it (a
 # lost node, a partition) holds the lock until the server notices: within about
-# a minute with these, instead of the default two hours. A holder cut off from
-# the server fails its probe within a minute too, and shuts down.
+# a minute with these, instead of the default two hours.
 _HOLD_SERVER_KEEPALIVES: tuple[LiteralString, ...] = (
     "SET tcp_keepalives_idle = 30",
     "SET tcp_keepalives_interval = 10",
     "SET tcp_keepalives_count = 3",
 )
-_HOLD_CLIENT_KEEPALIVES: dict[str, Any] = {
+# Every connection's client side. A connection cut off without a reset fails
+# within a minute instead of blocking until TCP gives up, and the keepalive
+# traffic keeps a middlebox from expiring an idle connection.
+_CLIENT_KEEPALIVES: dict[str, Any] = {
     "keepalives": 1,
     "keepalives_idle": 30,
     "keepalives_interval": 10,
@@ -170,7 +172,7 @@ class PostgresBackend:
         # The row factory is chosen per cursor rather than per connection: it
         # is the only place both psycopg and the type checker agree on the
         # resulting row type.
-        return psycopg.connect(self.database_url, autocommit=False)
+        return psycopg.connect(self.database_url, autocommit=False, **_CLIENT_KEEPALIVES)
 
     def _create_schema(self) -> None:
         with self._writer.cursor(row_factory=dict_row) as cursor:
@@ -293,7 +295,7 @@ class PostgresBackend:
         key = int.from_bytes(hashlib.sha256(identity.encode()).digest()[:8], "big", signed=True)
 
         def take() -> psycopg.Connection[tuple[Any, ...]] | None:
-            session = psycopg.connect(self.database_url, autocommit=True, **_HOLD_CLIENT_KEEPALIVES)
+            session = psycopg.connect(self.database_url, autocommit=True, **_CLIENT_KEEPALIVES)
             try:
                 for statement in _HOLD_SERVER_KEEPALIVES:
                     session.execute(statement)
@@ -309,10 +311,18 @@ class PostgresBackend:
         self._hold = await asyncio.to_thread(take)
         return self._hold is not None
 
-    async def still_held(self) -> bool:
-        """Return whether the session holding the journal's lock is still alive."""
+    async def still_usable(self) -> bool:
+        """Return whether the session holding the journal's lock is alive and no other connection of the journal is lost.
+
+        The writer and the readers never reconnect, so a runtime that lost one stops as it does when it loses the
+        lock's session, and its supervisor restarts it. The writer cannot reconnect in place because a commit cut off
+        with its connection has an unknown outcome, which the restart's recovery reads back from the journal; the
+        readers could, but a lost connection is rare enough that the one restart path serves both.
+        """
         session = self._hold
-        if session is None:
+        if session is None or any(
+            connection.broken for connection in (self._writer, self._recovery_reader, *self._pool)
+        ):
             return False
 
         def probe() -> bool:
