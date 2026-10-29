@@ -1640,10 +1640,56 @@ async def test_prepare_history_for_run_uses_context_window_guard_without_authore
     assert [run.run_id for run in persisted.runs] == ["run-1", "run-2", "run-3"]
     assert prepared.compaction_reply_outcome == "none"
     assert prepared.replay_plan is not None
+    # Replay keeps the reserve, half of the 600-token window, free, so one of the 200-token runs fits.
     assert prepared.replay_plan.mode == "limited"
     assert prepared.replay_plan.add_history_to_context is True
-    assert prepared.replay_plan.num_history_runs == 2
+    assert prepared.replay_plan.num_history_runs == 1
     assert prepared.replay_plan.num_history_messages is None
+
+
+@pytest.mark.asyncio
+async def test_prepare_history_for_run_replays_history_between_trigger_and_hard_budget_on_a_native_route(
+    tmp_path: Path,
+) -> None:
+    """Native compaction owns history above the trigger, so replay is fitted only to the hard budget."""
+    config, runtime_paths = _make_config(
+        tmp_path,
+        context_window=20_000,
+        compaction=CompactionOverrideConfig(threshold_tokens=400),
+    )
+    storage = create_session_storage("test_agent", config, runtime_paths, execution_identity=None)
+    session = _session(
+        "session-1",
+        runs=[
+            _completed_run(
+                f"run-{index}",
+                messages=[
+                    Message(role="user", content="u" * 400),
+                    Message(role="assistant", content="a" * 400),
+                ],
+            )
+            for index in range(1, 4)
+        ],
+    )
+    seed_session(storage, session)
+
+    prepared = await prepare_history_for_run_for_test(
+        agent_name="test_agent",
+        full_prompt="Current prompt",
+        session_id="session-1",
+        runtime_paths=runtime_paths,
+        config=config,
+        execution_identity=None,
+        model=_native_model(),
+        storage=storage,
+        session=session,
+    )
+
+    # The three 200-token runs exceed the 400-token trigger but fit the hard budget, about half the 20,000-token window.
+    assert prepared.compaction_decision.reason == "within_hard_budget"
+    assert prepared.replay_plan is not None
+    assert prepared.replay_plan.estimated_tokens == 600
+    assert prepared.replay_plan.num_history_runs is None
 
 
 @pytest.mark.asyncio
