@@ -251,7 +251,7 @@ _SIGNATURES = {
     "get_tool_by_name": (
         "(tool_name, runtime_paths, *, disable_sandbox_proxy, credential_overrides, credentials_manager, "
         "runtime_config, tool_config_overrides, tool_init_overrides, worker_tools_override, runtime_overrides, "
-        "shared_storage_root_path, allowed_shared_services, tool_output_workspace_root, agent_state_root, "
+        "allowed_shared_services, tool_output_workspace_root, agent_state_root, "
         "tool_output_auto_save_threshold_bytes, worker_target)"
     ),
     "get_tool_runtime_context": "()",

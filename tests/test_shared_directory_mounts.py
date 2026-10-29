@@ -8,14 +8,11 @@ from typing import TYPE_CHECKING
 import pytest
 from structlog.testing import capture_logs
 
+from mindroom.config.main import Config
 from mindroom.runtime_resolution import shared_knowledge_path
 from mindroom.shared_directories.store import add_shared_directory_member, create_shared_directory
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity, resolve_unscoped_worker_key, resolve_worker_key
-from mindroom.workers.backends._dedicated_worker_common import (
-    SharedDirectoryMount,
-    plan_shared_directory_mounts,
-    resolved_agent_policies_from_config_data,
-)
+from mindroom.workers.backends._dedicated_worker_common import SharedDirectoryMount, plan_shared_directory_mounts
 from tests.conftest import test_runtime_paths
 
 if TYPE_CHECKING:
@@ -67,7 +64,7 @@ def _plan(
         worker_key=worker_key,
         runtime_paths=runtime_paths,
         worker_visible_shared_storage_root=_WORKER_ROOT,
-        resolved_agent_policies=resolved_agent_policies_from_config_data(config_data),
+        resolved_agent_policies=Config.model_validate(config_data).get_agent_policies(),
     )
 
 
@@ -127,7 +124,7 @@ def test_planner_ignores_private_and_unknown_agents(tmp_path: Path) -> None:
     private_member = {
         "agents": {
             "alice": {"display_name": "alice"},
-            "carol": {"display_name": "carol", "private": {"per": "user"}, "worker_scope": "user_agent"},
+            "carol": {"display_name": "carol", "private": {"per": "user_agent"}},
         },
     }
 

@@ -6,7 +6,7 @@ import asyncio
 import signal
 import time
 from collections.abc import Awaitable, Callable
-from contextlib import AbstractAsyncContextManager, nullcontext, suppress
+from contextlib import AbstractAsyncContextManager, ExitStack, nullcontext, suppress
 from contextvars import Context
 from dataclasses import dataclass, field
 from functools import partial
@@ -109,9 +109,9 @@ from mindroom.tool_system.plugins import (
     reload_plugins,
 )
 from mindroom.tool_system.skills import clear_skill_cache, get_skill_snapshot
-from mindroom.workers.backends.docker_projection import publish_generated_agents
 from mindroom.workers.backends.legacy_state_root_mounts import retire_state_root_worker_mounts
 from mindroom.workers.runtime import (
+    bind_worker_launch_config_source,
     clear_worker_validation_snapshot_cache,
     lease_configured_primary_worker_manager,
     reset_primary_worker_manager,
@@ -423,7 +423,6 @@ class _MultiAgentOrchestrator:
             bot_provider=lambda agent_name: self.agent_bots.get(agent_name),
             worker_lease_provider=lambda required_backend_locator: lease_configured_primary_worker_manager(
                 self.runtime_paths,
-                runtime_config=self.config,
                 required_backend_locator=required_backend_locator,
             ),
             api_enabled=self.api_enabled,
@@ -438,6 +437,7 @@ class _MultiAgentOrchestrator:
             response_admission_gate=self._response_admission_gate,
             before_runtime_replacement=self._thread_export_runner.prepare_runtime_replacement,
             rebind_published_config_consumers=lambda: self._bind_trigger_runtimes(),
+            finish_reload=self._script_runtime.finish_reload,
             config_update_lock=self._config_update_lock,
         )
         self._approval_transport = ApprovalMatrixTransport(
@@ -945,11 +945,6 @@ class _MultiAgentOrchestrator:
         except (DuplicateManagedEntityIdentityError, MissingManagedEntityAccountError) as exc:
             raise PermanentStartupError(str(exc)) from exc
 
-    def _commit_config(self, config: Config) -> None:
-        """Run on `config` from now on, and give Docker worker configs the generated agents it built."""
-        self.config = config
-        publish_generated_agents(self.runtime_paths, config.generated_agent_data())
-
     def _preflight_account_provisioning(
         self,
         config: Config,
@@ -1137,12 +1132,12 @@ class _MultiAgentOrchestrator:
                 )
                 return result
             finally:
-                await self._script_runtime.complete_worker_replacement()
+                await self._script_runtime.finish_reload()
 
     def _publish_config(self, plan: ConfigUpdatePlan, commit_plugins: Callable[[], HookRegistry] | None) -> None:
         """Make the new config, its plugins, and its hook registry live in one step."""
         new_config = plan.new_config
-        self._commit_config(new_config)
+        self.config = new_config
         if plan.reply_membership_policy_changed:
             self.invalidate_agent_reply_memberships(reason="config_reload")
         if commit_plugins is None:
@@ -1182,7 +1177,7 @@ class _MultiAgentOrchestrator:
         self._preflight_account_provisioning(config, entity_names=entity_names, include_internal_user=True)
         await self._prepare_user_account(config, update_runtime_state=True)
         entity_users = await self._prepare_entity_accounts(config, entity_names)
-        self._commit_config(config)
+        self.config = config
         warn_about_config_risks(config, self.runtime_paths)
         self.agent_reply_memberships.invalidate(config, reason="initial_config")
         await self._bind_event_journal()
@@ -1657,7 +1652,7 @@ class _MultiAgentOrchestrator:
                 self._publish_config(plan, commit_plugins)
                 # Now that the removal is published, recovery can judge the removed owners as gone.
                 await self._approval_recovery.reconcile_unavailable_entities(unsettled_removals)
-                await self._script_runtime.complete_worker_replacement()
+                await self._script_runtime.reopen_script_calls()
                 catalog_changed = await self._sync_mcp_manager(new_config)
                 logger.info(
                     "updating_config_authorization",
@@ -1712,7 +1707,7 @@ class _MultiAgentOrchestrator:
                 logger.info("configuration_update_complete", affected_bot_count=len(changed_entities))
                 return True
         finally:
-            await self._script_runtime.complete_worker_replacement()
+            await self._script_runtime.reopen_script_calls()
 
     def _router_bot(self) -> AgentBot | TeamBot | None:
         """Return the router bot when it exists and has an active client."""
@@ -2370,6 +2365,8 @@ async def _run_runtime(  # noqa: PLR0915
     shutdown_wait_task: asyncio.Task[bool] | None = None
     api_task: asyncio.Task[None] | None = None
     stall_detector: EventLoopStallDetector | None = None
+    # Holds the binding of the applied config as the one source dedicated workers launch from.
+    worker_launch_binding = ExitStack()
 
     try:
         # Drop any stale worker manager before startup work builds the active runtime.
@@ -2398,6 +2395,13 @@ async def _run_runtime(  # noqa: PLR0915
         orchestrator = _MultiAgentOrchestrator(runtime_paths=runtime_paths, api_enabled=api)
         # Before the config watcher starts, so it covers every included file while startup waits.
         orchestrator.config_reload.record_load_sources(startup_config.source_files, loaded=True)
+        config_reload = orchestrator.config_reload
+        # Bound before the API and the bots start, and kept until the worker manager has shut down; a reload that
+        # is still applying, or failed partway, never reaches a worker launch. Until startup records its config as
+        # applied, workers launch from the config it loaded, which no older config precedes.
+        worker_launch_binding.enter_context(
+            bind_worker_launch_config_source(lambda: config_reload.fully_applied_config or startup_config),
+        )
         set_runtime_starting()
         auxiliary_tasks.extend(
             _start_auxiliary_tasks(orchestrator, runtime_paths, shutdown_requested, journal_lost),
@@ -2472,10 +2476,13 @@ async def _run_runtime(  # noqa: PLR0915
             ),
             name="runtime_shutdown",
         )
-        await _wait_for_runtime_shutdown_cleanup(
-            cleanup_task,
-            shutdown_was_requested=shutdown_was_requested,
-        )
+        try:
+            await _wait_for_runtime_shutdown_cleanup(
+                cleanup_task,
+                shutdown_was_requested=shutdown_was_requested,
+            )
+        finally:
+            worker_launch_binding.close()
     if journal_lost.is_set():
         # Exiting with a failure lets a supervisor that restarts only on failure bring the runtime back.
         msg = "MindRoom stopped because it lost its event journal's lock session or one of its database connections"

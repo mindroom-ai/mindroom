@@ -829,7 +829,7 @@ async def test_manual_plugin_reload_interrupts_scripts_before_plugin_publication
     async def interrupt_for_plugin_reload(_runtime: object) -> None:
         order.append("scripts")
 
-    async def complete_worker_replacement(_runtime: object) -> None:
+    async def finish_reload(_runtime: object) -> None:
         order.append("complete")
 
     def reload_current_plugins(_config: Config, _runtime_paths: object) -> PluginReloadResult:
@@ -844,8 +844,8 @@ async def test_manual_plugin_reload_interrupts_scripts_before_plugin_publication
         ),
         patch.object(
             type(orchestrator.script_runtime),
-            "complete_worker_replacement",
-            new=complete_worker_replacement,
+            "finish_reload",
+            new=finish_reload,
         ),
         patch("mindroom.orchestrator.reload_plugins", side_effect=reload_current_plugins),
     ):

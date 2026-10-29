@@ -59,6 +59,7 @@ def _lifecycle(tmp_path: Path) -> ConfigReloadLifecycle:
         response_admission_gate=ResponseAdmissionGate(),
         before_runtime_replacement=AsyncMock(),
         rebind_published_config_consumers=MagicMock(),
+        finish_reload=AsyncMock(),
     )
 
 

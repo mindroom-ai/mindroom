@@ -33,6 +33,7 @@ from mindroom.shell.supervisor import (
     run_command_via_supervisor,
 )
 from mindroom.tool_system.metadata import get_tool_by_name
+from tests.api.sandbox_runner_support import execute_call
 from tests.process_helpers import assert_linux_pid_not_running
 
 if TYPE_CHECKING:
@@ -1299,13 +1300,7 @@ def test_subprocess_mode_shell_stops_a_command_past_its_timeout(tmp_path: Path) 
 
     def execute(function_name: str, kwargs: dict[str, object]) -> str:
         response = sandbox_runner_module._execute_request_subprocess_sync(
-            sandbox_runner_module.SandboxRunnerExecuteRequest(
-                tool_name="shell",
-                function_name=function_name,
-                kwargs=kwargs,
-            ),
-            runtime_paths,
-            config,
+            execute_call(runtime_paths, config, tool_name="shell", function_name=function_name, kwargs=kwargs),
         )
         assert response.ok, response.error
         assert isinstance(response.result, str)

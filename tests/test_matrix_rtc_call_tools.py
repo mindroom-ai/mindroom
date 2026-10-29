@@ -364,8 +364,8 @@ async def test_call_agent_keeps_chat_tool_surface_and_refuses_text_chat_function
             middleware=agent_tool_middleware(call_build),
         )
 
-    assert refused == _TEXT_CHAT_REQUIRED_MESSAGE
-    assert '"result": 2' in str(subtracted)
+    assert refused.value == _TEXT_CHAT_REQUIRED_MESSAGE
+    assert '"result": 2' in str(subtracted.value)
     assert started == ["subtract"]
 
 
@@ -960,13 +960,14 @@ async def test_call_responder_uses_normal_agent_turn_and_refuses_unsafe_function
     cached = _functions(cached_build)
     assert list(used) == ["safe", "confirm", "policy_approval", "run_workflow"]
     assert used["safe"] is cached["safe"]
-    assert await run_tool_call(used["safe"], {}, _CALL_CONTEXT, middleware=agent_tool_middleware(used_build)) == "safe"
+    safe = await run_tool_call(used["safe"], {}, _CALL_CONTEXT, middleware=agent_tool_middleware(used_build))
+    assert safe.value == "safe"
     for name in ("confirm", "policy_approval", "run_workflow"):
         refused = used[name]
         assert refused.requires_confirmation is False
         assert refused.parameters == cached[name].parameters
         result = await run_tool_call(refused, {}, _CALL_CONTEXT, middleware=agent_tool_middleware(used_build))
-        assert result == _TEXT_CHAT_REQUIRED_MESSAGE
+        assert result.value == _TEXT_CHAT_REQUIRED_MESSAGE
     create_scope_session_storage_mock.assert_called_once_with(
         scope=HistoryScope(kind="agent", scope_id=AGENT),
         config=config,

@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import threading
-from contextlib import asynccontextmanager, suppress
+from contextlib import asynccontextmanager, nullcontext, suppress
 from dataclasses import asdict, dataclass
 from functools import partial
 from typing import TYPE_CHECKING, Annotated, Any, Literal
@@ -80,7 +80,11 @@ from mindroom.runtime_state import get_runtime_state
 from mindroom.session_storage.legacy_agno3_conversion import migrate_conversation_storage
 from mindroom.workers.backend import maintain_workers
 from mindroom.workers.in_flight import touch_workers_in_flight
-from mindroom.workers.runtime import lease_configured_primary_worker_manager, shutdown_primary_worker_manager
+from mindroom.workers.runtime import (
+    bind_worker_launch_config_source,
+    lease_configured_primary_worker_manager,
+    shutdown_primary_worker_manager,
+)
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Awaitable, Callable
@@ -251,15 +255,11 @@ def _worker_cleanup_interval_seconds(runtime_paths: constants.RuntimePaths) -> f
 def _cleanup_workers_once(
     runtime_paths: constants.RuntimePaths,
     *,
-    runtime_config: Config | None = None,
     touch_live_workers: Callable[[WorkerBackend], None] | None = None,
     computer_worker_keys: frozenset[str] = frozenset(),
 ) -> int:
     """Run one idle-worker cleanup pass when a backend is configured."""
-    worker_lease = lease_configured_primary_worker_manager(
-        runtime_paths,
-        runtime_config=runtime_config,
-    )
+    worker_lease = lease_configured_primary_worker_manager(runtime_paths)
     if worker_lease is None:
         return 0
     with worker_lease as worker_manager:
@@ -305,15 +305,9 @@ async def _worker_cleanup_loop(
             break
         except TimeoutError:
             try:
-                try:
-                    runtime_config, runtime_paths = config_lifecycle.read_app_committed_runtime_config(api_app)
-                except HTTPException:
-                    runtime_config = None
-                    runtime_paths = _app_runtime_paths(api_app)
                 await asyncio.to_thread(
                     _cleanup_workers_once,
-                    runtime_paths,
-                    runtime_config=runtime_config,
+                    _app_runtime_paths(api_app),
                     touch_live_workers=config_lifecycle.app_state(api_app).script_worker_keepalive,
                     computer_worker_keys=active_computer_worker_keys(api_app),
                 )
@@ -534,63 +528,69 @@ async def _lifespan(_app: FastAPI) -> AsyncIterator[None]:
     # Bound, the runtime has already migrated storage, synced credentials, and published its config load,
     # and it publishes every later load, so this app neither loads nor watches config itself.
     standalone = knowledge_refresh_scheduler is None
-    if standalone:
-        await migrate_private_storage(runtime_paths)
-        await migrate_state_root_records(runtime_paths)
-        await migrate_conversation_storage(runtime_paths)
-        await migrate_tool_credential_defaults(runtime_paths)
-        await asyncio.to_thread(
-            constants.ensure_writable_config_path,
-            create_minimal=True,
-            runtime_paths=runtime_paths,
-        )
-        await asyncio.to_thread(config_lifecycle.load_config_into_app, runtime_paths, _app)
-        logger.info(
-            "Initialized API runtime config",
-            config_path=str(runtime_paths.config_path),
-            config_exists=runtime_paths.config_path.exists(),
-        )
-
-        # Sync API keys from environment to CredentialsManager
-        logger.info("Syncing API credentials from runtime env")
-        await run_blocking_until_complete(sync_env_to_credentials, runtime_paths)
-
-        api_owned_knowledge_refresh_scheduler = KnowledgeRefreshScheduler.from_runtime(runtime_paths)
-        knowledge_refresh_scheduler = api_owned_knowledge_refresh_scheduler
-        standalone_knowledge_source_watcher = KnowledgeSourceWatcher(knowledge_refresh_scheduler, runtime_paths)
-        app_state.knowledge_source_watcher = standalone_knowledge_source_watcher
-    app_state.knowledge_refresh_scheduler = knowledge_refresh_scheduler
-    await _sync_standalone_knowledge_watchers(_app)
-    logger.info(
-        "Published knowledge index refresh is scheduled by Git polling, filesystem watch, on access, or explicit API actions",
+    # An API running on its own owns the applied config dedicated workers launch from, until its worker manager has
+    # shut down; an edit that fails to load keeps the last config that loaded.
+    worker_launch_binding = (
+        bind_worker_launch_config_source(lambda: _app_context(_app).runtime_config) if standalone else nullcontext()
     )
+    with worker_launch_binding:
+        if standalone:
+            await migrate_private_storage(runtime_paths)
+            await migrate_state_root_records(runtime_paths)
+            await migrate_conversation_storage(runtime_paths)
+            await migrate_tool_credential_defaults(runtime_paths)
+            await asyncio.to_thread(
+                constants.ensure_writable_config_path,
+                create_minimal=True,
+                runtime_paths=runtime_paths,
+            )
+            await asyncio.to_thread(config_lifecycle.load_config_into_app, runtime_paths, _app)
+            logger.info(
+                "Initialized API runtime config",
+                config_path=str(runtime_paths.config_path),
+                config_exists=runtime_paths.config_path.exists(),
+            )
 
-    stop_event = asyncio.Event()
-    background_tasks = [asyncio.create_task(_worker_cleanup_loop(stop_event, _app))]
-    if standalone:
-        background_tasks.append(asyncio.create_task(_watch_config(stop_event, _app)))
+            # Sync API keys from environment to CredentialsManager
+            logger.info("Syncing API credentials from runtime env")
+            await run_blocking_until_complete(sync_env_to_credentials, runtime_paths)
 
-    async with gateway_lifespan(_app):
-        yield
+            api_owned_knowledge_refresh_scheduler = KnowledgeRefreshScheduler.from_runtime(runtime_paths)
+            knowledge_refresh_scheduler = api_owned_knowledge_refresh_scheduler
+            standalone_knowledge_source_watcher = KnowledgeSourceWatcher(knowledge_refresh_scheduler, runtime_paths)
+            app_state.knowledge_source_watcher = standalone_knowledge_source_watcher
+        app_state.knowledge_refresh_scheduler = knowledge_refresh_scheduler
+        await _sync_standalone_knowledge_watchers(_app)
+        logger.info(
+            "Published knowledge index refresh is scheduled by Git polling, filesystem watch, on access, or explicit API actions",
+        )
 
-    if app_state.computer_sessions is not None:
-        app_state.computer_sessions.close_all()
-    app_state.computer_runtime = None
-    stop_event.set()
-    for task in background_tasks:
-        task.cancel()
-    for task in background_tasks:
-        with suppress(asyncio.CancelledError):
-            await task
-    if standalone_knowledge_source_watcher is not None:
-        await standalone_knowledge_source_watcher.stop()
-    if api_owned_knowledge_refresh_scheduler is not None:
-        await api_owned_knowledge_refresh_scheduler.shutdown()
-    close_usage_export_runner(_app)
-    if standalone:
-        # `mindroom run` stops the worker manager itself once its bots have stopped.
-        # An API running on its own must stop it here, or its Docker worker containers outlive the process.
-        await run_blocking_until_complete(shutdown_primary_worker_manager)
+        stop_event = asyncio.Event()
+        background_tasks = [asyncio.create_task(_worker_cleanup_loop(stop_event, _app))]
+        if standalone:
+            background_tasks.append(asyncio.create_task(_watch_config(stop_event, _app)))
+
+        async with gateway_lifespan(_app):
+            yield
+
+        if app_state.computer_sessions is not None:
+            app_state.computer_sessions.close_all()
+        app_state.computer_runtime = None
+        stop_event.set()
+        for task in background_tasks:
+            task.cancel()
+        for task in background_tasks:
+            with suppress(asyncio.CancelledError):
+                await task
+        if standalone_knowledge_source_watcher is not None:
+            await standalone_knowledge_source_watcher.stop()
+        if api_owned_knowledge_refresh_scheduler is not None:
+            await api_owned_knowledge_refresh_scheduler.shutdown()
+        close_usage_export_runner(_app)
+        if standalone:
+            # `mindroom run` stops the worker manager itself once its bots have stopped.
+            # An API running on its own must stop it here, or its Docker worker containers outlive the process.
+            await run_blocking_until_complete(shutdown_primary_worker_manager)
 
 
 def bind_orchestrator_knowledge_refresh_scheduler(
