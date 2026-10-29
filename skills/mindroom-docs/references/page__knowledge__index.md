@@ -89,7 +89,7 @@ knowledge_bases:
 | `git` | object | `null` | Sync the folder from a Git repository; see [Git-Backed Knowledge Bases](#git-backed-knowledge-bases) |
 
 Set `skip_hidden: false` if the folder intentionally contains dot-prefixed files that should be indexed.
-Use a smaller `chunk_size` when your embedding server has lower token or batch limits; a chunk too long for the embedding model fails the file that holds it, and with it the refresh, for example with `embedder request failed (HTTP 400)` from OpenAI, or `(HTTP 500)` from a llama.cpp server whose physical batch size is smaller than the chunk.
+Use a smaller `chunk_size` when your embedding server has lower token or batch limits; a chunk too long for the embedding model fails the file that holds it without a retry, and with it the refresh, for example with `embedder request failed (HTTP 400)` from OpenAI, or `(HTTP 500)` from a llama.cpp server whose physical batch size is smaller than the chunk.
 
 ### Keeping Indexes Fresh
 

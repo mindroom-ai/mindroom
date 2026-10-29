@@ -48,6 +48,14 @@ _REQUEST_TOO_LARGE = (
         (400, "too long", "context_length_exceeded", ContextWindowExceeded, False),
         (None, "prompt is too long", None, ContextWindowExceeded, False),
         (500, "context window service unavailable", None, ProviderUnavailable, True),
+        # llama.cpp sends an input larger than its physical batch, such as an embedding, with a 500.
+        (
+            500,
+            "input (9000 tokens) is too large to process. increase the physical batch size (current batch size: 512)",
+            None,
+            ContextWindowExceeded,
+            False,
+        ),
         (503, "The model is overloaded", None, ProviderUnavailable, True),
         (409, "conflict", None, ProviderUnavailable, True),
         (400, "Invalid JSON payload received.", None, InvalidRequest, False),

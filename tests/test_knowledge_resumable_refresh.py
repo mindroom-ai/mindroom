@@ -28,7 +28,7 @@ import httpx2
 import pytest
 from agno.knowledge.document.base import Document
 from agno.knowledge.reader.markdown_reader import MarkdownReader
-from openai import APIStatusError, RateLimitError
+from openai import APIStatusError, InternalServerError, RateLimitError
 from structlog.testing import capture_logs
 
 import mindroom.embeddings.batching as embedding_batching_module
@@ -1182,6 +1182,36 @@ async def test_a_chunk_too_long_for_the_embedding_model_fails_only_its_own_file(
     result = await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)
 
     assert result.index_published is False
+    checkpoint = load_candidate_checkpoint(_storage_path(config, runtime_paths))
+    assert checkpoint is not None
+    assert (sorted(checkpoint.completed), sorted(checkpoint.failed)) == (["doc0000.md", "doc0002.md"], ["doc0001.md"])
+
+
+def _physical_batch_too_small_error() -> Exception:
+    """Return what the OpenAI embedder raises for llama.cpp's 500 for an input larger than its physical batch."""
+    message = "input (9000 tokens) is too large to process. increase the physical batch size (current batch size: 512)"
+    body = {"code": 500, "message": message, "type": "server_error"}
+    response = httpx.Response(500, request=httpx.Request("POST", "http://embeddings.local/v1/embeddings"))
+    return openai_embedder_error(InternalServerError(message, response=response, body=body))
+
+
+@pytest.mark.asyncio
+async def test_a_chunk_larger_than_a_llama_cpp_physical_batch_fails_only_its_own_file_at_once(
+    tmp_path: Path,
+    embedder: _RecordingEmbedder,
+) -> None:
+    """Only a smaller input fits, so the batch goes one chunk per request at once and the chunk's file is not retried."""
+    docs_path = tmp_path / "docs"
+    _write_corpus(docs_path, 3)
+    config = _config(tmp_path, docs_path)
+    runtime_paths = runtime_paths_for(config)
+    embedder.batch_error = _physical_batch_too_small_error()
+    embedder.failures["content 1"] = [_physical_batch_too_small_error() for _ in range(10)]
+
+    result = await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)
+
+    assert result.index_published is False
+    assert (len(embedder.batch_requests), embedder.single_requests.count("content 1")) == (1, 2)
     checkpoint = load_candidate_checkpoint(_storage_path(config, runtime_paths))
     assert checkpoint is not None
     assert (sorted(checkpoint.completed), sorted(checkpoint.failed)) == (["doc0000.md", "doc0002.md"], ["doc0001.md"])

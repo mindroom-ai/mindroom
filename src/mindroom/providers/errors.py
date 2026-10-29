@@ -120,6 +120,10 @@ _CONTEXT_WINDOW_MARKERS = (
     "exceeds the model",
     "available context size",
 )
+# How a llama.cpp server words the 500 of an input it must take in one physical batch, such as an embedding, that is
+# larger than that batch: "input (9000 tokens) is too large to process. increase the physical batch size (current batch
+# size: 512)". Only a smaller input passes, though the status is a server error's.
+_PHYSICAL_BATCH_TOO_SMALL = "too large to process. increase the physical batch size"
 
 
 class CliLoginError(ValueError):
@@ -157,7 +161,9 @@ def classify_provider_error(  # noqa: PLR0911 - one return per rule
     1. A 429 status or a rate-limit name is ``RateLimited``, unless its wording says the request alone is larger than
        the account's tokens-per-minute limit, which makes it ``ContextWindowExceeded`` marked ``TOKENS_PER_MINUTE``:
        only a smaller request passes.
-    2. A transient status, 408, 409, or any 5xx, is ``ProviderUnavailable``.
+    2. A transient status, 408, 409, or any 5xx, is ``ProviderUnavailable``, unless its wording is llama.cpp's for an
+       input larger than the server's physical batch, which makes it ``ContextWindowExceeded``: only a smaller input
+       passes.
     3. A 401 status or Anthropic's ``authentication_error`` is ``AuthenticationFailed``.
     4. Wording or a code that names the context window, on a client error or an event without a status, is
        ``ContextWindowExceeded``: a retry cannot make the request fit. A 5xx that mentions it stays transient.
@@ -191,7 +197,8 @@ def classify_provider_error(  # noqa: PLR0911 - one return per rule
         too_large = _REQUEST_TOO_LARGE in lowered
         return typed(ContextWindowExceeded, marker=TOKENS_PER_MINUTE) if too_large else typed(RateLimited)
     if status in _TRANSIENT_CLIENT_STATUSES or status in _SERVER_ERROR_RANGE:
-        return typed(ProviderUnavailable)
+        too_large = _PHYSICAL_BATCH_TOO_SMALL in lowered
+        return typed(ContextWindowExceeded) if too_large else typed(ProviderUnavailable)
     if status == _UNAUTHORIZED_STATUS or _AUTHENTICATION_ERROR_TYPE in names:
         return typed(AuthenticationFailed)
     if client_side and _is_context_window_error(lowered, code=code):
