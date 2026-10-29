@@ -56,6 +56,9 @@ import mindroom.api.sandbox_exec as sandbox_exec_module
 import mindroom.approval.continuation_runner as continuation_runner_module
 import mindroom.approval.manager as approval_manager_module
 import mindroom.bot  # noqa: F401
+import mindroom.cli.config as cli_config_module
+import mindroom.cli.desktop as cli_desktop_module
+import mindroom.cli.service as cli_service_module
 import mindroom.custom_tools.todo as todo_tool_module
 import mindroom.managed_avatars as managed_avatars_module
 import mindroom.matrix.client_room_admin as client_room_admin_module
@@ -2369,6 +2372,27 @@ def install_call_manager_mock(bot: RuntimeBot, call_manager: object | None) -> N
 def normalize_console_output(text: str) -> str:
     """Collapse wrapped console output for stable substring assertions."""
     return " ".join(_SOFT_WRAP_RE.sub("", _ANSI_RE.sub("", text)).split())
+
+
+@pytest.fixture
+def wide_cli_consoles(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Render the CLI's consoles at a width no output line with a temporary path reaches.
+
+    `normalize_console_output` rejoins a line wrapped at a space without that space, so a temporary path in the middle
+    of a line breaks the assertion at some path lengths. The CLI builds its consoles at import, which fixes a `COLUMNS`
+    exported when pytest starts, and with `FORCE_COLOR` set the root conftest's dumb terminal makes Rich use 80 columns.
+    Rich takes a pinned width and height before either.
+    """
+    for console in (
+        cli_config_module.console,
+        cli_config_module._err_console,
+        cli_desktop_module._console,
+        cli_desktop_module._error_console,
+        cli_service_module._console,
+        cli_service_module._err_console,
+    ):
+        monkeypatch.setattr(console, "_width", 1000)
+        monkeypatch.setattr(console, "_height", 25)
 
 
 class _ExtractedCollaboratorProxy[CollaboratorT]:
