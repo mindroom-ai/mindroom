@@ -301,11 +301,8 @@ class _FailingStatusWorkerClient:
 
 
 @dataclass
-class _BlockingLaunchWorkerClient(_TerminatingWorkerClient):
-    """Hold one admitted launch open until the replacement boundary observes it."""
-
-    launch_entered: asyncio.Event = field(default_factory=asyncio.Event)
-    release_launch: asyncio.Event = field(default_factory=asyncio.Event)
+class _LaunchingWorkerClient(_TerminatingWorkerClient):
+    """Accept every launch at once, so a test blocks a launch where its own fake does."""
 
     async def launch(
         self,
@@ -321,8 +318,6 @@ class _BlockingLaunchWorkerClient(_TerminatingWorkerClient):
     ) -> None:
         del run_id, source_digest, gateway_url, state_scope_worker_key, private_agent_names, config_snapshot
         assert max_runtime_seconds > 0
-        self.launch_entered.set()
-        await self.release_launch.wait()
 
 
 @dataclass
@@ -2323,8 +2318,7 @@ async def test_script_tool_removal_drains_a_launch_admitted_before_durable_creat
         defaults={"tools": []},
     )
     backend = _LaunchingBackend(runtime_paths)
-    client = _BlockingLaunchWorkerClient()
-    client.release_launch.set()
+    client = _LaunchingWorkerClient()
     settlement_resolver = _ApprovalSettlementResolver()
     broker = ScriptToolBroker(store=store, runtime_resolver=settlement_resolver)
     manager = ScriptRunManager(
