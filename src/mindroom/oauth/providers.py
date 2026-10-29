@@ -256,6 +256,19 @@ class OAuthConnectionRequired(OAuthProviderError):  # noqa: N818
         self.reset_required = reset_required
 
 
+def is_oauth_connection_required_result(result: object) -> bool:
+    """Return whether a tool answered with an OAuth connection prompt: the payload, or its JSON as a tool returns it."""
+    if isinstance(result, str):
+        # Most tool text is not a prompt; parse only text that could be one.
+        if "oauth_connection_required" not in result:
+            return False
+        try:
+            result = json.loads(result)
+        except ValueError:
+            return False
+    return isinstance(result, Mapping) and cast("Mapping[str, object]", result).get("oauth_connection_required") is True
+
+
 def oauth_connection_required_payload(exc: OAuthConnectionRequired) -> dict[str, object]:
     """Return the structured tool payload for one OAuth connection prompt."""
     payload: dict[str, object] = {

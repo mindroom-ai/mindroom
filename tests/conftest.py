@@ -647,19 +647,26 @@ def build_unseen_context_messages_for_test(
 def call_proxy_sync_for_test(**call: Any) -> object:  # noqa: ANN401
     """Send one tool call through ``sandbox_proxy._call_proxy_sync`` with the options a test names.
 
-    The others take a plain call's values: an entrypoint that leaves the call's agent alone, and no shared storage,
-    overrides, execution env, extra passthrough, or resolved worker target.
+    The others take a plain call's values: an entrypoint that leaves the call's agent alone, and no overrides,
+    execution env, extra passthrough, or resolved worker target.
     """
     plain: dict[str, Any] = {
         "function_entrypoint": lambda *_args, **_kwargs: None,
-        "shared_storage_root_path": None,
         "tool_config_overrides": None,
         "tool_init_overrides": None,
         "execution_env": None,
         "extra_env_passthrough": None,
         "worker_target": None,
+        "runtime_config": None,
     }
     return sandbox_proxy_module._call_proxy_sync(**(plain | call))
+
+
+@contextmanager
+def bound_worker_launch_config(config: Config) -> Iterator[None]:
+    """Bind ``config`` as the applied config dedicated workers launch from, as `mindroom run` does."""
+    with workers_runtime_module.bind_worker_launch_config_source(lambda: config):
+        yield
 
 
 def live_turn_tools_for_test(
