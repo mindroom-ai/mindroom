@@ -44,7 +44,7 @@ BACKUP_SUFFIX = ".pre-storage-v4"
 # LEGACY_COMPAT: Conversation databases below layout version 4, whose meta row names no owner.
 # Legacy format: A database in the current layout whose `*_log_meta` row records version 2 or 3 and has no
 # `owner_kind` and `owner_id` columns; its session rows name their owner instead.
-# Last legacy release: v2026.10.667; replacement: the next release, layout version 4, whose meta row records the
+# Last legacy release: v2026.10.676; replacement: the next release, layout version 4, whose meta row records the
 # agent, team scope, or system usage ledger that owns the database.
 # Handling: Every store open and the startup sweep, which know the owner, convert such a database once in one write
 # transaction, after its backup to `<name>.db.pre-storage-v4`: at version 2 an agent's rows first take its name, then
@@ -110,7 +110,7 @@ def stored_counts(connection: sqlite3.Connection, names: TableNames) -> tuple[in
 # LEGACY_COMPAT: Session rows that name their kind and owner and keep their state inside `session_data`.
 # Legacy format: The sessions table's `session_type`, `agent_id`, and `team_id` columns and its `session_type` index,
 # and `session_state` as a key of each row's `session_data` object, beside the session's usage totals.
-# Last legacy release: v2026.10.667; replacement: the next release, whose sessions table holds `session_state` in a
+# Last legacy release: v2026.10.676; replacement: the next release, whose sessions table holds `session_state` in a
 # column of its own and leaves the owner to the meta row.
 # Handling: In the caller's write transaction, each row's state moves to the `session_state` column, and the rest of a
 # readable `session_data` object stays, or NULL when nothing is left; a row whose `session_data` is not an object keeps

@@ -44,7 +44,7 @@ def leave_write_ahead_log(connection: sqlite3.Connection, path: Path) -> None:
 # Legacy format: A conversation database without `<s>_log_meta`, in the Agno 3 run-row layout or the Agno 2 layout the
 # conversion's Agno-era steps still read, and one whose meta row records a layout version below 4.
 # Last legacy release: the Agno layout, v2026.10.608, replaced by the next release's storage v2 `<s>_log_*` tables;
-# layout version 3, v2026.10.667, replaced by the next release's layout version 4.
+# layout version 3, v2026.10.676, replaced by the next release's layout version 4.
 # Handling: Before a conversion writes anything, copy the file byte for byte beside it, to `<name>.db.pre-storage-v2`
 # before storage v2 and to `<name>.db.pre-storage-v4` before layout version 4, so a downgrade can restore it; a retry
 # replaces an earlier attempt's backup, and MindRoom never deletes the backup of a converted database.
