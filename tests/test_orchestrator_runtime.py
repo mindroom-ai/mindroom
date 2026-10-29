@@ -116,6 +116,7 @@ from tests.conftest import (
     make_matrix_client_mock,
     published_config_load,
     runtime_paths_for,
+    swap_fleet_bot,
 )
 
 
@@ -4395,6 +4396,84 @@ class TestMultiAgentOrchestrator:
             owner=orchestrator._dispatch_recovery_task_owner,
         )
         assert recovery_task.done()
+
+    @pytest.mark.asyncio
+    async def test_a_bot_ready_during_a_blocked_recovery_pass_releases_its_replay_at_once(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """A newly ready bot's replay is not held behind another bot's drain; its own drain follows that pass."""
+        config = _runtime_bound_config(
+            Config(agents={"general": AgentConfig(display_name="General", role="General assistant")}),
+            tmp_path,
+        )
+        orchestrator = _MultiAgentOrchestrator(runtime_paths=runtime_paths_for(config))
+        orchestrator.config = config
+        orchestrator._runtime_ready_event.set()
+        router_draining = asyncio.Event()
+        release_router = asyncio.Event()
+
+        async def drain_router() -> None:
+            router_draining.set()
+            await release_router.wait()
+
+        router_bot = MagicMock()
+        router_bot.running = True
+        router_bot.first_sync_complete = True
+        router_bot.recover_pending_turn_journal_events = AsyncMock(side_effect=drain_router)
+        general_bot = MagicMock()
+        general_bot.running = True
+        general_bot.first_sync_complete = False
+        general_bot.recover_pending_turn_journal_events = AsyncMock()
+        install_bots(orchestrator, {ROUTER_AGENT_NAME: router_bot, "general": general_bot})
+
+        orchestrator._schedule_ready_turn_dispatch_recovery()
+        await router_draining.wait()
+        general_bot.release_pending_turn_journal_replay.assert_not_called()
+
+        general_bot.first_sync_complete = True
+        await orchestrator.handle_bot_ready(general_bot)
+
+        general_bot.release_pending_turn_journal_replay.assert_called()
+        general_bot.recover_pending_turn_journal_events.assert_not_awaited()
+        release_router.set()
+        assert await wait_for_background_tasks(timeout=1, owner=orchestrator._dispatch_recovery_task_owner)
+        general_bot.recover_pending_turn_journal_events.assert_awaited()
+
+    @pytest.mark.asyncio
+    async def test_a_recovery_pass_drains_the_generation_that_replaced_a_bot_during_an_earlier_drain(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """A drain resolves its entity's current generation after the previous drain's awaits."""
+        config = _runtime_bound_config(
+            Config(agents={"general": AgentConfig(display_name="General", role="General assistant")}),
+            tmp_path,
+        )
+        orchestrator = _MultiAgentOrchestrator(runtime_paths=runtime_paths_for(config))
+        orchestrator.config = config
+        replacement = MagicMock()
+        replacement.running = True
+        replacement.first_sync_complete = True
+        replacement.recover_pending_turn_journal_events = AsyncMock()
+
+        async def drain_router_while_general_is_replaced() -> None:
+            swap_fleet_bot(orchestrator, "general", replacement)
+
+        router_bot = MagicMock()
+        router_bot.running = True
+        router_bot.first_sync_complete = True
+        router_bot.recover_pending_turn_journal_events = AsyncMock(side_effect=drain_router_while_general_is_replaced)
+        retired = MagicMock()
+        retired.running = True
+        retired.first_sync_complete = True
+        retired.recover_pending_turn_journal_events = AsyncMock()
+        install_bots(orchestrator, {ROUTER_AGENT_NAME: router_bot, "general": retired})
+
+        await orchestrator._recover_ready_turn_journal_events()
+
+        retired.recover_pending_turn_journal_events.assert_not_awaited()
+        replacement.recover_pending_turn_journal_events.assert_awaited_once_with()
 
     @pytest.mark.asyncio
     async def test_full_startup_does_not_recover_team_before_member_first_sync(
