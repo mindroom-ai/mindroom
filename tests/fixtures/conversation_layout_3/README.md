@@ -13,4 +13,5 @@ Each `<name>.json` beside its dump is what every reader showed of that database 
 
 ## Recording again
 
-Check out v2026.10.667 with this branch's first commit applied, which adds the recorder and the readers, and run `.venv/bin/python -m tests.session_storage.layout_3_recorder` from the repository root; recording again there writes identical files.
+The recorder lives in commit `70eb34a75836023fbbfd8364d8a4bfb6d4f26dff`, which is v2026.10.667 (`1672953bf94f3e7cab752d57b80a46217ab900a1`) plus the recorder and the readers, and stays reachable from pull request #3339 (`git fetch origin pull/3339/head`).
+Check that commit out in a separate worktree and run `.venv/bin/python -m tests.session_storage.layout_3_recorder` from its root; recording again there writes identical files.
