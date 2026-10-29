@@ -359,6 +359,7 @@ _NAMED_FILE_TYPES = {
     ".toml": "application/toml",
     ".ini": "text/x-ini",
     ".sql": "application/x-sql",
+    ".proto": "text/x-protobuf",
     ".ts": "text/x-typescript",
     ".go": "text/x-go",
     ".rs": "text/x-rust",

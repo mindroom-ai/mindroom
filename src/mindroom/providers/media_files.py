@@ -37,7 +37,8 @@ logger = get_logger(__name__)
 _OCTET_STREAM = "application/octet-stream"
 # Text types outside ``text/``: those OpenAI's file inputs guide lists as text, code, spreadsheets, and rich documents
 # (https://developers.openai.com/api/docs/guides/pdf-files), and common declared types for XML, JavaScript, Python, and
-# shell scripts.
+# shell scripts. The guide's ``application/x-protobuf`` is left out, since it usually names a binary payload; a
+# ``.proto`` source file is typed as text by its name.
 _TEXT_MIME_TYPES = frozenset(
     {
         "application/csv",
@@ -60,7 +61,6 @@ _TEXT_MIME_TYPES = frozenset(
         "application/x-patch",
         "application/x-php",
         "application/x-powershell",
-        "application/x-protobuf",
         "application/x-python",
         "application/x-rust",
         "application/x-scala",

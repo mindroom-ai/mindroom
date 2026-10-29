@@ -1461,6 +1461,12 @@ def _sent_type(part: dict[str, Any] | None) -> str:
         (File(content=b"x = 1", filename="app.toml"), "text", "application/toml"),
         (File(content=b"started", filename="server.log"), "text", "text/plain"),
         (File(content=b"let x = 1", filename="app.ts"), "text", "text/x-typescript"),
+        (File(content=b'syntax = "proto3";', filename="api.proto"), "text", "text/x-protobuf"),
+        (
+            File(content=b"\x08\x96\x01", filename="payload.bin", mime_type="application/x-protobuf"),
+            "note application/x-protobuf",
+            "application/x-protobuf",
+        ),
         (
             File(content=b"let x = 1", filename="app.js", mime_type="application/javascript"),
             "text",
