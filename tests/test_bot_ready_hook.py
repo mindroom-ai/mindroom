@@ -1162,11 +1162,13 @@ async def test_room_membership_cleanup_registers_without_call_runtime(tmp_path: 
     client.add_to_device_callback.assert_not_called()
 
 
-def test_call_admission_reads_each_call_agents_invited_room_record(tmp_path: Path) -> None:
-    """Call admission reads every calls-enabled agent's invited rooms from its own record."""
+def test_call_admission_reads_each_running_call_agents_invited_room_record(tmp_path: Path) -> None:
+    """Call admission reads the invited-room record of each calls-enabled agent the runtime runs."""
     bot = _agent_bot(tmp_path)
+    other = _agent_bot(tmp_path, agent_name="other")
     bot.config.agents["code"].accept_invites = True
     bot.config.agents["other"] = AgentConfig(display_name="Other", accept_invites=True)
+    bot.config.agents["absent"] = AgentConfig(display_name="Absent", accept_invites=True)
     bot.config.calls = CallsConfig(
         enabled=True,
         profiles={
@@ -1177,8 +1179,10 @@ def test_call_admission_reads_each_call_agents_invited_room_record(tmp_path: Pat
                 voice="marin",
             ),
         },
-        agents={"code": "voice", "other": "voice"},
+        agents={"code": "voice", "other": "voice", "absent": "voice"},
     )
+    bot.orchestrator = MagicMock(agent_bots={"code": bot, "other": other})
+    remember_invited_room(invited_rooms_path(bot.runtime_paths, "absent"), "!code-call:localhost")
     remember_invited_room(invited_rooms_path(bot.runtime_paths, "code"), "!code-call:localhost")
     remember_invited_room(invited_rooms_path(bot.runtime_paths, "other"), "!other-call:localhost")
 

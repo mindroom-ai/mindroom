@@ -7,6 +7,7 @@ memberships. This test module verifies that behavior.
 from __future__ import annotations
 
 import asyncio
+import json
 import threading
 from dataclasses import replace
 from pathlib import Path  # noqa: TC003
@@ -38,6 +39,7 @@ from mindroom.matrix.invited_rooms_store import (
     load_invited_rooms,
     load_pending_room_invites,
     pending_room_invites_path,
+    read_invited_rooms,
     remember_invited_room,
     should_accept_invites,
 )
@@ -1394,6 +1396,7 @@ async def test_router_cleanup_loads_invited_rooms_off_event_loop(
         runtime_paths=runtime_paths_for(config),
     )
     bot.client = AsyncMock()
+    remember_invited_room(_invited_rooms_path(config, ROUTER_AGENT_NAME), "!kept:localhost")
     event_loop_thread_id = threading.get_ident()
     load_thread_ids: list[int] = []
 
@@ -3140,3 +3143,27 @@ def test_ledgers_planted_in_a_worker_mounted_state_root_are_ignored(tmp_path: Pa
 
     assert bot._room_lifecycle.invited_room_ids() == set()
     assert bot._room_lifecycle._pending_room_invites == {}
+
+
+def test_invited_room_reads_see_every_write_to_the_record(tmp_path: Path) -> None:
+    """A read reflects the record as it is now, whether the store or anything else wrote it."""
+    config = bind_runtime_paths(
+        Config(router=RouterConfig(model="default", accept_invites=True)),
+        test_runtime_paths(tmp_path),
+    )
+    runtime_paths = runtime_paths_for(config)
+    path = _invited_rooms_path(config, ROUTER_AGENT_NAME)
+    assert read_invited_rooms(runtime_paths, config, ROUTER_AGENT_NAME) == frozenset()
+
+    remember_invited_room(path, "!first:localhost")
+    assert read_invited_rooms(runtime_paths, config, ROUTER_AGENT_NAME) == {"!first:localhost"}
+
+    path.write_text('["!first:localhost", "!edited:localhost"]\n', encoding="utf-8")
+    assert read_invited_rooms(runtime_paths, config, ROUTER_AGENT_NAME) == {"!first:localhost", "!edited:localhost"}
+
+    path.unlink()
+    assert read_invited_rooms(runtime_paths, config, ROUTER_AGENT_NAME) == frozenset()
+
+    path.write_text("not json", encoding="utf-8")
+    with pytest.raises(json.JSONDecodeError):
+        read_invited_rooms(runtime_paths, config, ROUTER_AGENT_NAME)

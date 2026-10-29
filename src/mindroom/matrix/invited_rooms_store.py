@@ -26,6 +26,9 @@ logger = get_logger(__name__)
 # These files are the only record of their state. Rewrites run in worker threads and in plugin code, so one lock keeps
 # two read-modify-writes from replacing each other's fresh read.
 _RECORDS_LOCK = threading.Lock()
+# Invited rooms are read on the event loop for every approval and call-room check, so a read costs one stat while the
+# file is unchanged; keyed by the file's (mtime, size), so a write from anywhere is seen at the next read.
+_INVITED_ROOMS_BY_PATH: dict[Path, tuple[tuple[int, int], frozenset[str]]] = {}
 
 
 def invited_rooms_path(runtime_paths: RuntimePaths, agent_name: str) -> Path:
@@ -77,7 +80,19 @@ def read_invited_rooms(runtime_paths: RuntimePaths, config: Config, agent_name: 
     """Return the rooms one entity keeps across restarts because it accepted their invites."""
     if not should_persist_invited_rooms(config, agent_name):
         return frozenset()
-    return frozenset(load_invited_rooms(invited_rooms_path(runtime_paths, agent_name)))
+    path = invited_rooms_path(runtime_paths, agent_name)
+    try:
+        stat = path.stat()
+    except FileNotFoundError:
+        _INVITED_ROOMS_BY_PATH.pop(path, None)
+        return frozenset()
+    version = (stat.st_mtime_ns, stat.st_size)
+    cached = _INVITED_ROOMS_BY_PATH.get(path)
+    if cached is not None and cached[0] == version:
+        return cached[1]
+    room_ids = frozenset(load_invited_rooms(path))
+    _INVITED_ROOMS_BY_PATH[path] = (version, room_ids)
+    return room_ids
 
 
 def load_pending_room_invites(path: Path) -> dict[str, str]:

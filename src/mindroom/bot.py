@@ -1704,10 +1704,14 @@ class AgentBot:
         )
 
     def _invited_call_rooms_by_agent(self) -> dict[str, frozenset[str]]:
-        """Return the accepted-invite rooms of each configured call agent."""
+        """Return the accepted-invite rooms of each configured call agent the runtime runs."""
         config = self.config
+        orchestrator = self.orchestrator
+        fleet = orchestrator.agent_bots if orchestrator is not None else {self.agent_name: self}
         return {
-            agent_name: read_invited_rooms(self.runtime_paths, config, agent_name) for agent_name in config.calls.agents
+            agent_name: read_invited_rooms(self.runtime_paths, config, agent_name)
+            for agent_name in config.calls.agents
+            if agent_name in fleet
         }
 
     def _desktop_controller_identity(self, entity_name: str) -> DesktopControllerIdentity:
