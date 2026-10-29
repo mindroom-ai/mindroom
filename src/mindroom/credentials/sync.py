@@ -588,9 +588,10 @@ def get_embedder_api_key(
 def get_ollama_host(runtime_paths: RuntimePaths, *, configured_host: str | None, saved_first: bool) -> str:
     """Return the Ollama server a client reaches: ``configured_host`` or the saved ``OLLAMA_HOST``, else the default.
 
-    ``configured_host`` wins unless ``saved_first``. A model's own host wins. The memory LLM and the Ollama embedder
-    put the saved host first, because the dashboard's Memory page saved ``OLLAMA_HOST_DEFAULT`` as the embedder host
-    of configs whose Ollama server only ``OLLAMA_HOST`` names, such as a Docker install's host.
+    ``configured_host`` wins unless ``saved_first``. The memory LLM and the Ollama embedder keep the saved-first order
+    they had, so existing configs keep reaching the same server. The known case is the ``OLLAMA_HOST_DEFAULT`` host
+    the dashboard's Memory page saved for every Ollama embedder, also where only ``OLLAMA_HOST`` names the real
+    server, such as a Docker install's host.
     """
     if configured_host and not saved_first:
         return configured_host
