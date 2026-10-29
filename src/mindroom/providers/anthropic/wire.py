@@ -24,7 +24,7 @@ from mindroom.model_defaults import CLAUDE_NO_FORCED_TOOL_MODEL_PREFIXES, CLAUDE
 from mindroom.providers.anthropic.repairs import replay_safe_blocks
 from mindroom.providers.anthropic.stored_turns import replayed_blocks
 from mindroom.providers.claude_wire_blocks import CLAUDE_BLOCKS_KEY, as_dict
-from mindroom.providers.media_files import file_mime_type, is_text_mime_type, read_media_file, unreadable_file_note
+from mindroom.providers.media_files import file_mime_type, is_text_mime_type, read_media_bytes, unreadable_file_note
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -248,8 +248,11 @@ def _image_media_type(image: Image, data: bytes | None) -> str | None:
 
 def _image_block(image: Image, provider: str) -> dict[str, Any] | None:
     data = image.content
-    if data is None and image.filepath is not None:
-        _, data = read_media_file(image.filepath, kind="image", provider=provider)
+    if image.filepath is not None and data is None:
+        data = read_media_bytes(image.filepath, kind="image", provider=provider)
+        if data is None:
+            # The file is empty, which its reader already logged.
+            return None
     media_type = _image_media_type(image, data)
     if data is None or media_type is None:
         logger.warning("claude_image_type_unknown", image_id=image.id)
@@ -263,7 +266,7 @@ def _image_block(image: Image, provider: str) -> dict[str, Any] | None:
 def _document_block(file: File, provider: str) -> dict[str, Any] | None:
     """Return a PDF or text file as a document, a file of another type as a text block noting it, or None.
 
-    None is for a file without bytes; a file noted is never read.
+    None is for a file without bytes or an empty local file; a file noted is never read.
     """
     if file.filepath is None and file.content is None:
         return None
@@ -272,9 +275,11 @@ def _document_block(file: File, provider: str) -> dict[str, Any] | None:
     if not text and media_type != _PDF:
         return {"type": "text", "text": unreadable_file_note(file, media_type)}
     if file.filepath is not None:
-        _, data = read_media_file(file.filepath, kind="file", provider=provider)
+        data = read_media_bytes(file.filepath, kind="file", provider=provider)
     else:
-        data = file.content.encode("utf-8") if isinstance(file.content, str) else file.content or b""
+        data = file.content.encode("utf-8") if isinstance(file.content, str) else file.content
+    if data is None:
+        return None
     if text:
         # The text document source accepts only text/plain; every text type is sent as plain text.
         source = {"type": "text", "media_type": "text/plain", "data": data.decode("utf-8", errors="replace")}

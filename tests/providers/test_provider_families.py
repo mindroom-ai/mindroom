@@ -15,6 +15,7 @@ from typing import TYPE_CHECKING, Any
 
 import httpx
 import pytest
+from structlog.testing import capture_logs
 
 from mindroom.config.models import ModelConfig
 from mindroom.history.request_messages import TurnMessages, build_request, scope_history_messages
@@ -509,6 +510,46 @@ async def test_every_family_sends_nothing_for_a_file_without_bytes(family: str, 
     assert not [marker for marker in _MEDIA_PART_MARKERS if marker in sent]
     assert "Attachment omitted" not in sent
     assert (FALLBACK_MARKER in sent) is ("file" in adapter.capabilities.omitted_media)
+
+
+def _empty_media(kind: str, root: Path) -> dict[str, Any]:
+    path = root / f"empty-{kind}"
+    path.write_bytes(b"")
+    media = {
+        "image": Image(filepath=str(path), mime_type="image/png"),
+        "file": File(filepath=str(path), mime_type="application/pdf", filename="empty.pdf"),
+        "audio": Audio(filepath=str(path), format="wav"),
+    }
+    return {{"image": "images", "file": "files", "audio": "audio"}[kind]: [media[kind]]}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("kind", ["image", "file", "audio"])
+@pytest.mark.parametrize("family", sorted(FAMILIES))
+async def test_every_family_leaves_out_an_empty_attachment_file_with_one_warning(
+    family: str,
+    kind: str,
+    tmp_path: Path,
+) -> None:
+    """An empty attachment file adds no part on any route, and a route that reads it logs one warning.
+
+    A route that omits the kind replaces it up front with the media fallback's note and never reads it.
+    """
+    spec = FAMILIES[family]
+    wire = Wire(spec.reply())
+    adapter = spec.adapter(tmp_path, wire)
+    message = Message(role="user", content="Look", **_empty_media(kind, tmp_path))
+
+    with capture_logs() as logs:
+        turn = await complete(pipeline_provider(adapter), ModelRequest(messages=[message]))
+
+    assert (turn.content, len(wire.requests)) == ("ok", 1)
+    sent = json.dumps(wire.body())
+    assert not [marker for marker in _MEDIA_PART_MARKERS if marker in sent]
+    omitted = kind in adapter.capabilities.omitted_media
+    assert (FALLBACK_MARKER in sent) is omitted
+    warnings = [log["event"] for log in logs if log["log_level"] == "warning"]
+    assert warnings == ([] if omitted else ["media_file_empty"])
 
 
 @pytest.mark.asyncio

@@ -239,13 +239,13 @@ async def _local_part(
 ) -> dict[str, Any] | None:
     """Inline a local file up to the inline limit, or reference its Files API upload where the route has one.
 
-    ``mime_type`` gets the file's bytes, or only its header when the file is uploaded.
+    ``mime_type`` gets the file's bytes, or only its header when the file is uploaded. An empty file adds no part.
     """
     file_path = Path(path)
     read = partial(read_media_file, file_path, kind=kind, provider=route.provider, limit=_INLINE_MEDIA_LIMIT_BYTES)
-    size, data = await asyncio.to_thread(read)
-    if not size:
+    if (local := await asyncio.to_thread(read)) is None:
         return None
+    size, data = local
     if size <= _INLINE_MEDIA_LIMIT_BYTES:
         return _inline(data, mime_type(data))
     if route.upload is None:
