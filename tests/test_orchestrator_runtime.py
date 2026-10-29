@@ -86,7 +86,7 @@ from mindroom.orchestrator import (
     _SignalAwareUvicornServer,
     _wait_for_runtime_completion,
     _wait_for_runtime_shutdown_cleanup,
-    _watch_event_journal_hold,
+    _watch_event_journal,
     main,
 )
 from mindroom.runtime_state import (
@@ -96,7 +96,7 @@ from mindroom.runtime_state import (
     set_api_server_address,
     set_runtime_ready,
 )
-from mindroom.startup_errors import EventJournalHoldLostError, PermanentStartupError
+from mindroom.startup_errors import EventJournalLostError, PermanentStartupError
 from mindroom.tool_jobs.runtime import ToolJobRuntime, get_background_runtime
 from mindroom.tool_system.metadata import TOOL_METADATA
 from mindroom.tool_system.skills import get_plugin_skill_roots, set_plugin_skill_roots
@@ -563,16 +563,16 @@ async def test_binding_the_journal_loads_its_paused_replies_before_any_bot_follo
 async def test_a_runtime_that_loses_its_journal_stops() -> None:
     """Once the journal's claim lapses, another runtime could take it over, so this one shuts down."""
     orchestrator = MagicMock()
-    orchestrator.event_journal_still_held = AsyncMock(side_effect=[True, False])
+    orchestrator.event_journal_still_usable = AsyncMock(side_effect=[True, False])
     shutdown_requested = asyncio.Event()
-    hold_lost = asyncio.Event()
+    journal_lost = asyncio.Event()
 
-    with patch("mindroom.orchestrator._EVENT_JOURNAL_HOLD_CHECK_SECONDS", 0):
-        await asyncio.wait_for(_watch_event_journal_hold(orchestrator, shutdown_requested, hold_lost), timeout=5)
+    with patch("mindroom.orchestrator._EVENT_JOURNAL_CHECK_SECONDS", 0):
+        await asyncio.wait_for(_watch_event_journal(orchestrator, shutdown_requested, journal_lost), timeout=5)
 
     assert shutdown_requested.is_set()
-    assert hold_lost.is_set()
-    assert orchestrator.event_journal_still_held.await_count == 2
+    assert journal_lost.is_set()
+    assert orchestrator.event_journal_still_usable.await_count == 2
 
 
 @pytest.mark.asyncio
@@ -687,7 +687,7 @@ class TestAgentBot(AgentBotTestBase):
         mock_orchestrator.start = AsyncMock(side_effect=lambda: asyncio.Event().wait())
         mock_orchestrator.stop = AsyncMock()
         mock_orchestrator.running = False
-        mock_orchestrator.event_journal_still_held = AsyncMock(return_value=False)
+        mock_orchestrator.event_journal_still_usable = AsyncMock(return_value=False)
 
         async def _blocked_auxiliary_task(*_args: object, **_kwargs: object) -> None:
             await asyncio.Event().wait()
@@ -698,8 +698,8 @@ class TestAgentBot(AgentBotTestBase):
             patch("mindroom.orchestrator.reset_primary_worker_manager"),
             patch("mindroom.orchestrator._MultiAgentOrchestrator", return_value=mock_orchestrator),
             patch("mindroom.orchestrator._run_auxiliary_task_forever", new=_blocked_auxiliary_task),
-            patch("mindroom.orchestrator._EVENT_JOURNAL_HOLD_CHECK_SECONDS", 0),
-            pytest.raises(EventJournalHoldLostError),
+            patch("mindroom.orchestrator._EVENT_JOURNAL_CHECK_SECONDS", 0),
+            pytest.raises(EventJournalLostError),
         ):
             await asyncio.wait_for(
                 main(log_level="INFO", runtime_paths=self._runtime_paths(tmp_path), api=False),
