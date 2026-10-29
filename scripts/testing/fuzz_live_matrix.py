@@ -4865,6 +4865,13 @@ class _CanonicalResponseView:
     completed: bool
     origin_server_ts: int | None = None
 
+    @property
+    def interrupted(self) -> bool:
+        """Return whether this is MindRoom's final write of a reply it ended with an interruption note."""
+        return self.stream_status == "error" and self.body.endswith(
+            (INTERRUPTED_RESPONSE_NOTE, RESTART_INTERRUPTED_RESPONSE_NOTE),
+        )
+
 
 def _response_payload_completed(payload: object) -> bool:
     """Recognize successful streaming or blocking delivery without discarding key presence."""
@@ -5785,8 +5792,8 @@ def _body_call_id(body: str) -> int | None:
     if not body.startswith(_CALL_ID_PREFIX):
         return None
     # A cut-short attempt can end at its ID, right before the interrupted note's line break.
-    digits = body[len(_CALL_ID_PREFIX) :].split(maxsplit=1)
-    return int(digits[0]) if digits and digits[0].isdigit() else None
+    parts = body[len(_CALL_ID_PREFIX) :].split(maxsplit=1)
+    return int(parts[0]) if parts and parts[0].isdigit() else None
 
 
 @dataclass(frozen=True, slots=True)
@@ -6029,9 +6036,8 @@ class FinalStateAuditor:
             old_record is None
             or old_response not in self._visible_record_reply_ids(old_record, replies)
             or old_view is None
-            or old_view.stream_status != "error"
             # A superseded replay ends its reply with the interrupted note; a restart left the restart note.
-            or not old_view.body.endswith((INTERRUPTED_RESPONSE_NOTE, RESTART_INTERRUPTED_RESPONSE_NOTE))
+            or not old_view.interrupted
         ):
             return None
         anchor = self._completed_supersession_anchor(newer, snapshot.records, events, replies)
@@ -6143,9 +6149,9 @@ class FinalStateAuditor:
 
         The restarted MindRoom replays the edit and declines it once another
         message followed the edited one, and the reply keeps what the cut-short
-        regeneration showed, ended by the interrupted note. The later message
-        must have reached Matrix before that note, which MindRoom wrote after
-        its decision.
+        regeneration showed, ended by an interruption note in its final write.
+        The later message must have reached Matrix before that note, which
+        MindRoom wrote after its decision.
         """
         declined = _declined_edits(snapshot, self.source_revision_markers)
         dropped: set[str] = set()
@@ -6158,7 +6164,7 @@ class FinalStateAuditor:
                 view = _canonical_response_view(events, reply_event_id, self.agent_id)
                 call_id = _body_call_id(view.body)
                 if (
-                    view.body.endswith((INTERRUPTED_RESPONSE_NOTE, RESTART_INTERRUPTED_RESPONSE_NOTE))
+                    view.interrupted
                     and call_id is not None
                     and view.origin_server_ts is not None
                     and not markers.isdisjoint(self.observed_markers_for(call_id))

@@ -6956,14 +6956,15 @@ async def test_supersession_anchor_accepts_the_revision_mindroom_answered() -> N
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ("later_ts", "seen", "noted", "dropped"),
+    ("later_ts", "seen", "noted", "status", "dropped"),
     [
-        (30, "declined", True, True),
-        (50, "declined", True, False),
-        (None, "declined", True, False),
-        (30, "original", True, False),
-        (30, "answered", True, False),
-        (30, "declined", False, False),
+        (30, "declined", True, "error", True),
+        (50, "declined", True, "error", False),
+        (None, "declined", True, "error", False),
+        (30, "original", True, "error", False),
+        (30, "answered", True, "error", False),
+        (30, "declined", False, "streaming", False),
+        (30, "declined", True, "streaming", False),
     ],
     ids=[
         "later_message_before_the_note",
@@ -6972,6 +6973,7 @@ async def test_supersession_anchor_accepts_the_revision_mindroom_answered() -> N
         "call_saw_the_original",
         "call_saw_an_answered_edit",
         "no_interrupted_note",
+        "note_in_a_write_that_is_not_final",
     ],
 )
 async def test_regeneration_a_restart_cut_short_ends_interrupted_once_a_later_message_drops_it(
@@ -6979,6 +6981,7 @@ async def test_regeneration_a_restart_cut_short_ends_interrupted_once_a_later_me
     later_ts: int | None,
     seen: str,
     noted: bool,
+    status: str,
     dropped: bool,
 ) -> None:
     """After a restart MindRoom declines an edit another message followed, and the cut-short reply ends interrupted."""
@@ -7057,6 +7060,7 @@ async def test_regeneration_a_restart_cut_short_ends_interrupted_once_a_later_me
         "$reply": _agent_reply_event("$root", "$reply", "Thinking..."),
         "$note": _agent_edit_event("$reply", "$note", body, ts=40),
     }
+    events["$note"]["content"]["m.new_content"]["io.mindroom.stream_status"] = status
     if later_ts is not None:
         events["$later"] = {
             "event_id": "$later",
