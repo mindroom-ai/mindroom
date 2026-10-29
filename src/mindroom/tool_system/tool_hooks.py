@@ -347,7 +347,9 @@ async def run_sync_tool_entrypoint(call: Callable[[], _ToolHookResult]) -> _Tool
     def invoke() -> _ToolHookResult:
         if not claim.claim_start():
             raise asyncio.CancelledError
-        return call()
+        # The body's thread owns what it starts, such as a nested call through asyncio.run; the owner waits for it.
+        with track_sync_tool_completion(None):
+            return call()
 
     async def offload() -> _ToolHookResult:
         executor = tracker.executor if tracker is not None else None

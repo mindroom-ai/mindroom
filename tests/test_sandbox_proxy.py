@@ -88,6 +88,7 @@ from mindroom.tool_system.tool_hooks import (
     SyncToolCompletionTracker,
     build_tool_hook_middleware,
     owned_sync_tool_completion,
+    run_sync_tool_entrypoint,
     track_sync_tool_completion,
 )
 from mindroom.tool_system.worker_proxy_client import (
@@ -1138,6 +1139,26 @@ async def test_a_toolkit_function_runs_its_request_on_the_threads_of_the_call_th
 
     assert result == "sandbox-result"
     assert threads == ["mindroom-job-call"]
+
+
+@pytest.mark.asyncio
+async def test_a_synchronous_tool_may_run_a_toolkit_function_on_its_own_event_loop(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A synchronous tool that runs a nested call with ``asyncio.run`` inside a job's call gets its result."""
+    toolkit, restore = _routed_ping_toolkit(monkeypatch, "test_routed_ping_sync_tool")
+    try:
+        ping = toolkit_functions(toolkit)["ping"]
+
+        def sync_tool() -> str:
+            return asyncio.run(ping())
+
+        async with owned_sync_tool_completion(JOB_CALL_EXECUTOR):
+            result = await run_sync_tool_entrypoint(sync_tool)
+    finally:
+        restore()
+
+    assert result == "sandbox-result"
 
 
 @pytest.mark.asyncio

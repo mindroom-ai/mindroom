@@ -208,7 +208,7 @@ def toolkit_functions(toolkit: Toolkit | _AgnoToolkit) -> dict[str, Callable[...
 
     For an Agno toolkit, such as one ``get_tool_by_name`` returns, a function's async variant wins where it has one,
     as an agent runs it. A call through one inside a tool call shares that call's ownership of the synchronous work it
-    starts, so a tool may call them any number of times, at once too.
+    starts, so a tool may call them any number of times, at once too; a synchronous tool runs one with ``asyncio.run``.
     """
     if isinstance(toolkit, Toolkit):
         return dict(toolkit.functions)
