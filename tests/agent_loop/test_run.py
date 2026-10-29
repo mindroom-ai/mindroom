@@ -477,7 +477,8 @@ async def test_a_stop_while_the_paused_record_is_being_saved_leaves_a_cancelled_
     cancelled = saved[-1]
     # Cancellation wins over the pause: the requirement leaves and the tool entry stops waiting.
     assert cancelled["requirements"] == []
-    assert (cancelled["tools"][0]["requires_confirmation"], cancelled["tools"][0]["confirmed"]) == (False, None)
+    tool = ToolExecution.from_dict(cancelled["tools"][0])
+    assert (tool.requires_confirmation, tool.confirmed) == (False, None)
     assert "content" not in cancelled
 
 
