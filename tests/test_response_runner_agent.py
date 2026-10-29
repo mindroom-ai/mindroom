@@ -283,7 +283,7 @@ class TestAgentBot(AgentBotTestBase):
             assert "failures" in instruction.text.lower()
 
     @pytest.mark.asyncio
-    async def test_process_and_respond_includes_matrix_metadata_when_tool_enabled(
+    async def test_agent_reply_includes_matrix_metadata_when_tool_enabled(
         self,
         mock_agent_user: AgentMatrixUser,
         tmp_path: Path,
@@ -400,7 +400,7 @@ class TestAgentBot(AgentBotTestBase):
         assert (mock_ai.await_args.args[0].compaction_lifecycle is None) is allows_no_report_response
 
     @pytest.mark.asyncio
-    async def test_process_and_respond_includes_matrix_metadata_when_openclaw_compat_enabled(
+    async def test_agent_reply_includes_matrix_metadata_when_openclaw_compat_enabled(
         self,
         mock_agent_user: AgentMatrixUser,
         tmp_path: Path,
@@ -456,7 +456,7 @@ class TestAgentBot(AgentBotTestBase):
         assert "!test:localhost" in _matrix_target_item(mock_ai).text
 
     @pytest.mark.asyncio
-    async def test_process_and_respond_streaming_includes_matrix_metadata_when_tool_enabled(
+    async def test_streamed_agent_reply_includes_matrix_metadata_when_tool_enabled(
         self,
         mock_agent_user: AgentMatrixUser,
         tmp_path: Path,
@@ -526,7 +526,7 @@ class TestAgentBot(AgentBotTestBase):
         )
 
     @pytest.mark.asyncio
-    async def test_process_and_respond_uses_safe_thread_root_for_prompt_metadata(
+    async def test_agent_reply_uses_safe_thread_root_for_prompt_metadata(
         self,
         mock_agent_user: AgentMatrixUser,
         tmp_path: Path,
@@ -588,7 +588,7 @@ class TestAgentBot(AgentBotTestBase):
         assert "$reply_plain:localhost" not in target_text
 
     @pytest.mark.asyncio
-    async def test_process_and_respond_keeps_thread_root_metadata_when_reply_anchor_is_root(
+    async def test_agent_reply_keeps_thread_root_metadata_when_reply_anchor_is_root(
         self,
         mock_agent_user: AgentMatrixUser,
         tmp_path: Path,
@@ -649,7 +649,7 @@ class TestAgentBot(AgentBotTestBase):
         assert "$thread_root:localhost" in target_text
 
     @pytest.mark.asyncio
-    async def test_process_and_respond_streaming_resolves_knowledge_once(
+    async def test_streamed_agent_reply_resolves_knowledge_once(
         self,
         mock_agent_user: AgentMatrixUser,
         tmp_path: Path,
@@ -757,7 +757,7 @@ class TestAgentBot(AgentBotTestBase):
         persist_interrupted.assert_not_called()
 
     @pytest.mark.asyncio
-    async def test_process_and_respond_includes_attachment_ids_in_response_metadata(
+    async def test_agent_reply_includes_attachment_ids_in_response_metadata(
         self,
         mock_agent_user: AgentMatrixUser,
         tmp_path: Path,
@@ -805,7 +805,7 @@ class TestAgentBot(AgentBotTestBase):
         assert sent_extra_content["io.mindroom.ai_run"]["version"] == 1
 
     @pytest.mark.asyncio
-    async def test_process_and_respond_streaming_includes_attachment_ids_in_response_metadata(
+    async def test_streamed_agent_reply_includes_attachment_ids_in_response_metadata(
         self,
         mock_agent_user: AgentMatrixUser,
         tmp_path: Path,
@@ -1048,7 +1048,7 @@ class TestAgentBot(AgentBotTestBase):
         assert extra["io.mindroom.ai_run"]["version"] == 1
 
     @pytest.mark.asyncio
-    async def test_process_and_respond_streaming_preserves_terminal_event_id_on_error(
+    async def test_streamed_agent_reply_preserves_terminal_event_id_on_error(
         self,
         mock_agent_user: AgentMatrixUser,
         tmp_path: Path,
@@ -1157,7 +1157,7 @@ class TestAgentBot(AgentBotTestBase):
         assert "Response interrupted by an error" in delivery.response_text
 
     @pytest.mark.asyncio
-    async def test_process_and_respond_applies_before_and_after_hooks_non_streaming(
+    async def test_agent_reply_applies_before_and_after_hooks_non_streaming(
         self,
         mock_agent_user: AgentMatrixUser,
         tmp_path: Path,
@@ -1216,7 +1216,7 @@ class TestAgentBot(AgentBotTestBase):
         assert after_results == [("$response1", "Handled [hooked]", "edited", "ai")]
 
     @pytest.mark.asyncio
-    async def test_process_and_respond_passes_active_response_event_ids(
+    async def test_agent_reply_passes_active_response_event_ids(
         self,
         mock_agent_user: AgentMatrixUser,
         tmp_path: Path,
@@ -1264,7 +1264,7 @@ class TestAgentBot(AgentBotTestBase):
         live_event_ids.assert_awaited_with("!test:localhost")
 
     @pytest.mark.asyncio
-    async def test_process_and_respond_streaming_ignores_post_visible_before_response_mutation(
+    async def test_streamed_agent_reply_ignores_post_visible_before_response_mutation(
         self,
         mock_agent_user: AgentMatrixUser,
         tmp_path: Path,
@@ -1337,7 +1337,7 @@ class TestAgentBot(AgentBotTestBase):
         assert after_results == [("$response", "chunk", "sent", "ai")]
 
     @pytest.mark.asyncio
-    async def test_process_and_respond_streaming_passes_active_response_event_ids(
+    async def test_streamed_agent_reply_passes_active_response_event_ids(
         self,
         mock_agent_user: AgentMatrixUser,
         tmp_path: Path,

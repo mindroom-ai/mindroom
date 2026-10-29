@@ -209,7 +209,7 @@ Custom events default to 1000 ms.
   Streamed replies usually show text before they finish, so this hook does not see them; set `defaults.enable_streaming: false` when every reply must pass through it, as with the disclaimer and redaction examples above.
   Once a streamed reply is visible it cannot be suppressed; use `message:final_response_transform` for one text-only replacement after a streamed reply succeeds.
   `message:final_response_transform` cannot suppress, redact, or delete the reply, or change its metadata.
-  A reply resumed after a tool approval is delivered whole once the approved run finishes, so it runs `message:before_response`, not `message:final_response_transform`.
+  A reply resumed after a tool approval runs `message:before_response` on its final text, not `message:final_response_transform`; when the reply streams, its resumed text can show before that hook runs.
 - **`message:cancelled`**: `ctx.info.failure_reason` tells cancellation, interruption, suppression, and delivery failure apart.
 - **`agent:started` with `required=True`**: use a short, separate required hook for initialization the bot must not run without, and keep optional work such as backfill or welcome messages in ordinary hooks.
   A failure or timeout stops the remaining startup hooks and fails that bot's startup like any other startup error.
