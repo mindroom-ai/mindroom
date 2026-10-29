@@ -1187,6 +1187,11 @@ path = "mindroom.session_storage.lanes"
 depends_on = ["mindroom.background_tasks"]
 
 [[modules]]
+path = "mindroom.session_storage.summaries"
+depends_on = ["mindroom.session_storage.schema", "mindroom.session_storage.store"]
+visibility = ["mindroom.history.summary_rows"]
+
+[[modules]]
 path = "mindroom.agent_run_context"
 depends_on = [
     "mindroom.knowledge.utils",
@@ -2997,6 +3002,7 @@ path = "mindroom.history.summary_rows"
 depends_on = [
     "mindroom.session_storage.schema",
     "mindroom.session_storage.store",
+    "mindroom.session_storage.summaries",
     "mindroom.session_storage.types",
 ]
 visibility = [
