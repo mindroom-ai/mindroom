@@ -320,7 +320,6 @@ def _build_response_runner(
         client=bot.client,
         config=config,
         agent_reply_memberships=agent_reply_memberships,
-        enable_streaming=config.defaults.enable_streaming,
         orchestrator=bot.orchestrator,
         response_admission_gate=bot.admission_gate,
         runtime_started_at=0.0,

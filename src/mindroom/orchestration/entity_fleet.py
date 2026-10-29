@@ -161,11 +161,11 @@ class EntityFleet:
         return results
 
     async def start(self, entity_names: Iterable[str]) -> EntityStartResults:
-        """Start entities once, run sync for the started ones, retry the rest, and publish the outcome."""
-        names = set(entity_names)
-        if not names:
-            return EntityStartResults()
-        results = await self.try_start(names)
+        """Start entities once, run sync for the started ones, retry the rest, and publish the outcome.
+
+        An empty start still publishes, so a reload that only removes entities reconsiders parked turns.
+        """
+        results = await self.try_start(entity_names)
         self.start_sync(results.started_bots)
         self.schedule_retries(results.retryable_entities)
         await self._hooks.entities_started(results)

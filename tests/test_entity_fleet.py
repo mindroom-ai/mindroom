@@ -298,6 +298,17 @@ async def test_background_retry_waits_before_its_first_attempt_and_stops_on_canc
 
 
 @pytest.mark.asyncio
+async def test_a_start_of_no_entities_still_publishes_its_outcome(fake_sync: list[str]) -> None:
+    """A reload that only removes entities publishes an empty start, which reconsiders parked turns."""
+    del fake_sync
+    harness = _Harness()
+
+    results = await harness.fleet.start(set())
+
+    assert harness.started == [results]
+
+
+@pytest.mark.asyncio
 async def test_cancelling_retries_survives_an_entity_added_while_one_retry_stops(fake_sync: list[str]) -> None:
     """Process shutdown cancels every retry even when another task changes the fleet during a cancellation."""
     del fake_sync
