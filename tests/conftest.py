@@ -65,6 +65,8 @@ import mindroom.managed_avatars as managed_avatars_module
 import mindroom.matrix.client_room_admin as client_room_admin_module
 import mindroom.matrix.rooms as matrix_rooms_module
 import mindroom.memory._entrypoint_snapshots as memory_entrypoint_snapshots_module
+import mindroom.reply_turn.request as reply_request_module
+import mindroom.response_runner as response_runner_module
 import mindroom.tool_jobs.instances as tool_jobs_instances
 import mindroom.tool_system.sandbox_proxy as sandbox_proxy_module
 from mindroom import ai as mindroom_ai
@@ -157,6 +159,7 @@ from mindroom.personal_room_lifecycle import PersonalRoomLifecycle
 from mindroom.providers import registry as provider_registry
 from mindroom.providers.pipeline import media as media_pipeline
 from mindroom.reaction_dispatch import ReactionDispatcher
+from mindroom.reply_turn.request import ResponseRequest
 from mindroom.response_admission import ResponseAdmissionGate
 from mindroom.response_lifecycle import QueuedHumanNoticeReservation
 from mindroom.response_payload_preparation import (
@@ -164,11 +167,7 @@ from mindroom.response_payload_preparation import (
     ResponsePayloadPreparation,
     ResponsePayloadPreparer,
 )
-from mindroom.response_runner import (
-    PostLockRequestPreparationError,
-    ResponseRequest,
-    ResponseRunner,
-)
+from mindroom.response_runner import PostLockRequestPreparationError, ResponseRunner
 from mindroom.response_sources import ResponseSources
 from mindroom.response_turn import CompletedAttempt, ResponseTurnContext, TurnSinks
 from mindroom.session_storage.agent_storage import create_state_storage
@@ -3205,16 +3204,18 @@ def replace_turn_deps(bot: RuntimeBot, **changes: object) -> None:
 def patch_response_runner_module(**changes: object) -> Generator[None, None, None]:
     """Patch module-level response coordinator seams on the real current owners.
 
-    A seam the approval lifecycle also imports is patched there too, so a resumed approval sees the replacement.
+    A seam is patched in every reply module that imports it, so a resumed approval sees the replacement too.
     """
     with ExitStack() as stack:
         for name, replacement in changes.items():
             if name == "apply_post_response_effects":
                 module_names = ["mindroom.response_lifecycle"]
             else:
-                module_names = ["mindroom.response_runner"]
-                if name in vars(continuation_runner_module):
-                    module_names.append("mindroom.approval.continuation_runner")
+                module_names = [
+                    module.__name__
+                    for module in (response_runner_module, reply_request_module, continuation_runner_module)
+                    if name in vars(module)
+                ]
             for module_name in module_names:
                 stack.enter_context(patch(f"{module_name}.{name}", new=replacement))
         yield

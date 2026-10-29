@@ -39,7 +39,8 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from mindroom.constants import RuntimePaths
-    from mindroom.response_runner import ResponseRequest, ResponseRunner
+    from mindroom.reply_turn.request import ResponseRequest
+    from mindroom.response_runner import ResponseRunner
     from mindroom.turn_policy import TurnPolicy
 
 AGENT_NAME = "assistant"

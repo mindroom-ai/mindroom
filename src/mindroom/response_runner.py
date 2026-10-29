@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import time
-from contextlib import asynccontextmanager, suppress
+from contextlib import asynccontextmanager
 from dataclasses import dataclass, field, replace
 from functools import partial
 from typing import TYPE_CHECKING, Any, Literal, TypeVar
@@ -22,7 +22,6 @@ from mindroom.background_tasks import create_background_task, run_coroutine_unti
 from mindroom.config.resolution import cheap_model as agent_cheap_model
 from mindroom.config.resolution import entity_timezone, memory_backend, show_tool_calls
 from mindroom.constants import (
-    ATTACHMENT_IDS_KEY,
     HOOK_SOURCE_RUN_METADATA_KEY,
     ROUTER_AGENT_NAME,
     STREAM_STATUS_KEY,
@@ -30,7 +29,7 @@ from mindroom.constants import (
     TURN_INTENT_RUN_METADATA_KEY,
 )
 from mindroom.conversation_state_writer import ReplySession, session_started_on_creation
-from mindroom.dispatch_source import SILENT_SCHEDULE_SOURCE_KIND, is_automation_source_kind
+from mindroom.dispatch_source import is_automation_source_kind
 from mindroom.entity_resolution import current_internal_sender_ids
 from mindroom.error_handling import get_user_friendly_error_message
 from mindroom.final_delivery import FinalDeliveryOutcome
@@ -39,7 +38,6 @@ from mindroom.history.turn_recorder import TurnRecorder
 from mindroom.judgment.cold_cache import idle_seconds_before_turn, select_cold_cache_model
 from mindroom.judgment.conversation import conversation_context_before_sources
 from mindroom.matrix.presence import should_use_streaming
-from mindroom.matrix.typing import typing_indicator
 from mindroom.memory import store_conversation_memory
 from mindroom.mid_turn_judgment import create_mid_turn_gate
 from mindroom.orchestration.runtime import (
@@ -76,6 +74,15 @@ from mindroom.reply_turn.enrichment import (
     with_silent_schedule_delivery,
 )
 from mindroom.reply_turn.inbox import InboxResponses
+from mindroom.reply_turn.request import (
+    PreparedResponseRuntime,
+    ResponseRequest,
+    correlation_id_for_request,
+    is_silent_schedule_response,
+    merge_response_extra_content,
+    reply_authorization_entity_names,
+    response_typing_indicator,
+)
 from mindroom.response_attempt import ResponseAttemptDeps, ResponseAttemptRequest, ResponseAttemptRunner, SpanAttempt
 from mindroom.response_sources import ResponseSources
 from mindroom.response_turn import (
@@ -99,7 +106,7 @@ from mindroom.teams.members import requested_team_agent_names
 from mindroom.teams.spec import TeamMode
 from mindroom.thread_models import set_thread_model_override
 from mindroom.thread_summary import thread_summary_message_count_hint
-from mindroom.timing import DispatchPipelineTiming, timed
+from mindroom.timing import timed
 from mindroom.tool_jobs.follow_ups import follow_up_envelope, follow_up_jobs, follow_up_key
 from mindroom.tool_jobs.runtime import get_background_runtime
 from mindroom.tool_system.agent_tools import room_turn_offers
@@ -154,11 +161,9 @@ if TYPE_CHECKING:
     from mindroom.approval.continuation_runner import ApprovalContinuationRunner
     from mindroom.bot_runtime_view import BotRuntimeView
     from mindroom.config.main import Config
-    from mindroom.config.participation import ParticipationConfig
     from mindroom.constants import RuntimePaths
     from mindroom.conversation_resolver import ConversationResolver
     from mindroom.conversation_state_writer import ConversationStateWriter
-    from mindroom.dispatch_source import ScheduledHistoryBudget
     from mindroom.event_journal import JournalEvent
     from mindroom.event_journal.approval_signals import ApprovalSignals
     from mindroom.event_journal.approval_store import ApprovalStore
@@ -173,30 +178,18 @@ if TYPE_CHECKING:
     from mindroom.mid_turn import MidTurnGate
     from mindroom.post_response_effects import PostResponseEffectsDeps
     from mindroom.reply_scope import ReplyRuntime
-    from mindroom.response_payload_preparation import ResponsePayloadPreparation, ResponsePayloadPreparer
+    from mindroom.response_payload_preparation import ResponsePayloadPreparer
     from mindroom.streaming import StreamInputChunk
     from mindroom.tool_jobs.conversation import ConversationKey
     from mindroom.tool_system.events import ToolTraceEntry
     from mindroom.tool_system.runtime_context import ToolRuntimeSupport
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
     from mindroom.turn_origin import TurnOrigin
-    from mindroom.turn_store import SourcePreparation
 
     from .response_admission import ResponseAdmissionGate
 
 _ToolContextResult = TypeVar("_ToolContextResult")
 _ToolStreamChunk = TypeVar("_ToolStreamChunk")
-
-
-def merge_response_extra_content(
-    extra_content: dict[str, Any] | None,
-    attachment_ids: Sequence[str] | None,
-) -> dict[str, Any] | None:
-    """Merge optional attachment IDs into response metadata."""
-    merged_extra_content = extra_content if extra_content is not None else {}
-    if attachment_ids:
-        merged_extra_content[ATTACHMENT_IDS_KEY] = list(attachment_ids)
-    return merged_extra_content if extra_content is not None or attachment_ids else None
 
 
 def _paused_with_committed_presentation(
@@ -291,97 +284,6 @@ def _turn_run_metadata(request: ResponseRequest) -> dict[str, Any]:
     return recorded
 
 
-def reply_authorization_entity_names(
-    config: Config,
-    owner_entity_name: str,
-    team_member_names: Sequence[str],
-) -> tuple[str, ...]:
-    """Return the policy entities governing one agent or team execution."""
-    if owner_entity_name in config.teams:
-        return (owner_entity_name,)
-    return tuple(dict.fromkeys((owner_entity_name, *team_member_names)))
-
-
-@dataclass(frozen=True)
-class ResponseRequest:
-    """Typed carrier for one response lifecycle request."""
-
-    thread_history: Sequence[ResolvedVisibleMessage]
-    prompt: str
-    response_envelope: MessageEnvelope
-    sources: ResponseSources
-    participation: ParticipationConfig | None = None
-    member_display_names: Mapping[str, str] = field(default_factory=dict)
-    model_prompt: str | None = None
-    # The event this response was dispatched to write over: the answer an edit
-    # regenerates or an approval resumes, or a selection's acknowledgement.
-    # Once claimed, the span's reply names the event instead.
-    existing_event_id: str | None = None
-    # Set when an edit regenerates the reply at ``existing_event_id``.
-    edit_regeneration: bool = False
-    # The span an interactive selection's acknowledgement created, which this answer adopts.
-    interactive_span_id: str | None = None
-    # Set for a follow-up: the conversation whose ended background jobs it reports in a new reply.
-    follow_up_key: ConversationKey | None = None
-    user_id: str | None = None
-    media: MediaInputs | None = None
-    attachment_ids: tuple[str, ...] | None = None
-    correlation_id: str | None = None
-    matrix_run_metadata: Mapping[str, Any] | None = None
-    participating_agent_names: tuple[str, ...] = ()
-    transient_enrichment_items: tuple[EnrichmentItem, ...] = ()
-    system_enrichment_items: tuple[EnrichmentItem, ...] = ()
-    requires_model_history_refresh: bool = False
-    scheduled_history_budget: ScheduledHistoryBudget | None = None
-    history_boundary_event_id: str | None = None
-    scheduled_model: str | None = None
-    payload_preparation: ResponsePayloadPreparation | None = None
-    current_timestamp_ms: float | None = None
-    current_prompt_is_structured: bool = False
-    on_lifecycle_lock_acquired: Callable[[], None] | None = None
-    # Which sources became terminal while the request waited for its lock: deleted, or answered elsewhere.
-    prepare_source_turn: Callable[[Sequence[ResolvedVisibleMessage]], Coroutine[Any, Any, SourcePreparation]] | None = (
-        None
-    )
-    # Runs once the turn claimed its reply, before the response is prepared: an edit prunes the history it
-    # replaces only then, so a Stop that refuses the claim leaves that history whole.
-    on_reply_claimed: Callable[[], Awaitable[None]] | None = None
-    # Settles the turn's sources when they became terminal before any reply existed to settle them.
-    on_source_turn_suppressed: Callable[[], Awaitable[None]] | None = None
-    # When only some sources became terminal before any reply existed: settles those and hands the
-    # rest back to the journal, to answer as their own turn once this request lets them go.
-    on_sources_invalidated: Callable[[SourcePreparation], Awaitable[None]] | None = None
-    pipeline_timing: DispatchPipelineTiming | None = None
-    # Records and settles a turn that ended before any reply span existed to settle it.
-    on_no_response_handled: Callable[[], Awaitable[None]] | None = None
-    # Set only after another durable owner can finish the source.
-    source_handoff: asyncio.Event | None = None
-
-    def __post_init__(self) -> None:
-        """Require the envelope to name the source driving this response."""
-        if not isinstance(self.sources, ResponseSources):
-            message = "ResponseRequest requires ResponseSources"
-            raise TypeError(message)
-        if self.sources.pending_event_ids[0] != self.response_envelope.source_event_id:
-            message = "ResponseRequest first pending event must equal the envelope source event"
-            raise ValueError(message)
-
-    @property
-    def room_id(self) -> str:
-        """Return the canonical response room."""
-        return self.response_envelope.target.room_id
-
-    @property
-    def reply_to_event_id(self) -> str | None:
-        """Return the canonical event this response answers."""
-        return self.response_envelope.target.reply_to_event_id
-
-    @property
-    def thread_id(self) -> str | None:
-        """Return the canonical resolved response thread root."""
-        return self.response_envelope.target.resolved_thread_id
-
-
 def _request_has_media(request: ResponseRequest) -> bool:
     """Count deferred attachment registration as media too."""
     preparation = request.payload_preparation
@@ -472,77 +374,6 @@ def _skip_unapproved_response(participation: ParticipationGate | None) -> FinalD
     if participation is None or not participation.decline("run_failed_before_decision"):
         return None
     return _skipped_participation_outcome()
-
-
-def _is_silent_schedule_response(request: ResponseRequest) -> bool:
-    """Return whether one response must avoid provisional Matrix activity."""
-    return request.response_envelope.source_kind == SILENT_SCHEDULE_SOURCE_KIND
-
-
-def correlation_id_for_request(request: ResponseRequest) -> str:
-    """Resolve the correlation id for one request."""
-    return request.correlation_id or request.reply_to_event_id or request.response_envelope.source_event_id
-
-
-def response_typing_log_context(
-    request: ResponseRequest,
-    *,
-    response_run_id: str | None,
-) -> dict[str, object]:
-    """Return the stable response attribution shared by one typing lease."""
-    target = request.response_envelope.target
-    return {
-        **target.log_context,
-        "agent_id": request.response_envelope.agent_name,
-        "requester_id": request.response_envelope.requester_id,
-        "session_id": target.session_id,
-        "reply_to_event_id": target.reply_to_event_id,
-        "correlation_id": correlation_id_for_request(request),
-        "response_run_id": response_run_id,
-    }
-
-
-@asynccontextmanager
-async def response_typing_indicator(
-    client: nio.AsyncClient,
-    request: ResponseRequest,
-    *,
-    response_run_id: str | None,
-    participation: ParticipationGate | None = None,
-) -> AsyncIterator[None]:
-    """Expose typing only for response kinds whose progress may be visible."""
-    if _is_silent_schedule_response(request):
-        yield
-        return
-
-    @asynccontextmanager
-    async def show_typing() -> AsyncIterator[None]:
-        async with typing_indicator(
-            client,
-            request.room_id,
-            log_context=response_typing_log_context(request, response_run_id=response_run_id),
-        ):
-            yield
-
-    if participation is None:
-        async with show_typing():
-            yield
-        return
-    finished = asyncio.Event()
-
-    async def approved_typing() -> None:
-        if await participation.wait_for_approval():
-            async with show_typing():
-                await finished.wait()
-
-    task = asyncio.create_task(approved_typing())
-    try:
-        yield
-    finally:
-        finished.set()
-        task.cancel()
-        with suppress(asyncio.CancelledError):
-            await task
 
 
 def _response_thread_id(request: ResponseRequest, resolved_target: MessageTarget) -> str | None:
@@ -654,21 +485,6 @@ class ResponseRunnerDeps:
     redacted_history_events: Callable[[MessageTarget, tuple[str, ...]], Awaitable[Mapping[str, str | None]]]
     # This bot instance's owner of durable reply records.
     replies: ReplyRuntime
-
-
-@dataclass(frozen=True)
-class PreparedResponseRuntime:
-    """Resolved runtime context shared by streaming and non-streaming responses."""
-
-    resolved_target: MessageTarget
-    media_inputs: MediaInputs
-    session_id: str
-    model_prompt: str
-    active_model_name: str
-    show_tool_calls: bool
-    tool_dispatch: ToolDispatchContext
-    participation: ParticipationGate | None = None
-    skill_review_capture: SkillReviewCapture | None = None
 
 
 @dataclass(frozen=True)
@@ -1122,7 +938,7 @@ class ResponseRunner:
                     early_placeholder=early_placeholder,
                     locked_operation=locked_operation,
                 ),
-                signal_queued_message=signal_queued_message and not _is_silent_schedule_response(request),
+                signal_queued_message=signal_queued_message and not is_silent_schedule_response(request),
             )
         except BaseException as error:
             handle = current_span()
@@ -1416,7 +1232,7 @@ class ResponseRunner:
         request: ResponseRequest,
     ) -> MatrixCompactionLifecycle | None:
         """Build the ordered foreground compaction notice adapter for one response."""
-        if _is_silent_schedule_response(request) or request.participation is not None:
+        if is_silent_schedule_response(request) or request.participation is not None:
             return None
         reply_to_event_id = (
             _existing_event_id(request)
@@ -1614,7 +1430,7 @@ class ResponseRunner:
             ),
             system_enrichment_items=tuple(request.system_enrichment_items),
             participation=runtime.participation,
-            allow_no_report_response=_is_silent_schedule_response(request),
+            allow_no_report_response=is_silent_schedule_response(request),
             scheduled_history_budget=request.scheduled_history_budget,
             skill_review_capture=runtime.skill_review_capture,
             redacted_history_events=partial(self.deps.redacted_history_events, runtime.resolved_target),
@@ -1987,7 +1803,7 @@ class ResponseRunner:
                     existing_event_id=_existing_event_id(request),
                     user_id=user_id,
                     on_cancelled=progress.note_task_cancelled,
-                    show_stop_button=not _is_silent_schedule_response(request),
+                    show_stop_button=not is_silent_schedule_response(request),
                 )
             except ResponsePausedForApproval as error:
                 if approval_suspension_handler is None:
@@ -2316,7 +2132,7 @@ class ResponseRunner:
             execution_identity=execution_identity,
             placeholder_message=(
                 None
-                if _is_silent_schedule_response(request) or request.participation is not None
+                if is_silent_schedule_response(request) or request.participation is not None
                 else AGENT_PLACEHOLDER
                 if team is None
                 else TEAM_PLACEHOLDER
@@ -2477,7 +2293,7 @@ class ResponseRunner:
                 matrix_target_item,
             ),
             system_enrichment_items=request.system_enrichment_items,
-            allow_no_report_response=_is_silent_schedule_response(request),
+            allow_no_report_response=is_silent_schedule_response(request),
             scheduled_history_budget=request.scheduled_history_budget,
             redacted_history_events=partial(self.deps.redacted_history_events, resolved_target),
             prompt=prepared_prompt,
@@ -2551,7 +2367,7 @@ class ResponseRunner:
         request = turn.request
         # A resumed reply is a stream, and a whole answer would replace what it already showed.
         use_streaming = _resumed_reply() is not None or (
-            not _is_silent_schedule_response(request)
+            not is_silent_schedule_response(request)
             and await should_use_streaming(
                 self.client(),
                 request.room_id,

@@ -20,7 +20,7 @@ if TYPE_CHECKING:
     from collections.abc import AsyncIterator
     from pathlib import Path
 
-    from mindroom.response_runner import ResponseRequest
+    from mindroom.reply_turn.request import ResponseRequest
     from mindroom.response_turn import ResponseTurnContext
 
 

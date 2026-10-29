@@ -17,8 +17,8 @@ from mindroom.error_handling import get_user_friendly_error_message
 from mindroom.hooks import MessageEnvelope
 from mindroom.inbound_turn_normalizer import DispatchPayloadWithAttachmentsRequest
 from mindroom.matrix.member_display_names import room_member_display_names
+from mindroom.reply_turn.request import ResponseRequest
 from mindroom.response_lifecycle import response_lifecycle_reservation_context
-from mindroom.response_runner import ResponseRequest
 from mindroom.response_sources import ResponseSources
 from mindroom.turn_policy import ResponseAction
 from mindroom.turn_record import TurnRecord, canonicalize_turn_record

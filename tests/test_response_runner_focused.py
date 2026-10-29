@@ -107,6 +107,7 @@ from mindroom.post_response_effects import PostResponseEffectsDeps, ResponseOutc
 from mindroom.reply_presentation import Presentation, Segment, encode_presentation
 from mindroom.reply_scope import SpanHandle
 from mindroom.reply_turn.enrichment import prepare_memory_and_model_context
+from mindroom.reply_turn.request import PreparedResponseRuntime, ResponseRequest, response_typing_indicator
 from mindroom.response_admission import ResponseAdmissionRefusedError
 from mindroom.response_attempt import ResponseAttemptDeps, ResponseAttemptRequest, ResponseAttemptRunner, SpanAttempt
 from mindroom.response_lifecycle import ResponseLifecycleCoordinator, response_lifecycle_reservation_context
@@ -115,12 +116,7 @@ from mindroom.response_payload_preparation import (
     ResponsePayloadPreparation,
     ResponsePayloadPreparer,
 )
-from mindroom.response_runner import (
-    PostLockRequestPreparationError,
-    ResponseRequest,
-    ResponseRunner,
-    response_typing_indicator,
-)
+from mindroom.response_runner import PostLockRequestPreparationError, ResponseRunner
 from mindroom.response_sources import ResponseSources
 from mindroom.response_turn import (
     AttemptResolved,
@@ -3877,7 +3873,7 @@ async def test_team_approval_continuation_streams_into_its_reply(tmp_path: Path)
     async with _resumed_streamable_approval(bot, requester_online=True, entity_kind="team") as claimed:
         with (
             patch("mindroom.approval.continuation_runner.continue_paused_team_run", new=continue_team),
-            patch("mindroom.response_runner.typing_indicator", _noop_typing),
+            patch("mindroom.reply_turn.request.typing_indicator", _noop_typing),
         ):
             outcome = await runner._approvals._run_claimed_approval_lifecycle(
                 claimed,
@@ -4764,7 +4760,7 @@ async def test_team_approval_resume_reuses_persisted_member_models(tmp_path: Pat
             return_value=ToolDispatchContext(execution_identity=identity),
         ),
         patch("mindroom.approval.continuation_runner.continue_paused_team_run", new=continued),
-        patch("mindroom.response_runner.typing_indicator", _noop_typing),
+        patch("mindroom.reply_turn.request.typing_indicator", _noop_typing),
     ):
         async with resumed_approval(bot, continuation) as claimed:
             result = await runner._approvals._continue_entity_call(
@@ -7744,7 +7740,7 @@ async def test_cli_approval_scope_retains_only_shutdown_waits(tmp_path: Path, ca
         cli_call={"kind": "agent_cli"},
     )
     assert await paused_for_approval(store, continuation) is not None
-    runtime = response_runner.PreparedResponseRuntime(
+    runtime = PreparedResponseRuntime(
         resolved_target=target,
         media_inputs=response_runner.MediaInputs(),
         session_id=target.session_id,
@@ -7802,7 +7798,7 @@ async def test_cli_approval_scope_without_cli_pause_reads_no_approval_state(tmp_
     runner = unwrap_extracted_collaborator(_bot(tmp_path)._response_runner)
     request = _plain_request(_target(thread_id="$thread"), source_event_id="$source")
     target = request.response_envelope.target
-    runtime = response_runner.PreparedResponseRuntime(
+    runtime = PreparedResponseRuntime(
         resolved_target=target,
         media_inputs=response_runner.MediaInputs(),
         session_id=target.session_id,
@@ -7841,7 +7837,7 @@ async def test_expired_cli_grant_hands_exact_approval_to_native_resume(  # noqa:
     await _admit_approval_source(store)
     request = _plain_request(_target(thread_id="$thread"), source_event_id="$source")
     target = request.response_envelope.target
-    runtime = response_runner.PreparedResponseRuntime(
+    runtime = PreparedResponseRuntime(
         resolved_target=target,
         media_inputs=response_runner.MediaInputs(),
         session_id=target.session_id,

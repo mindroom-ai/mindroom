@@ -35,10 +35,8 @@ from mindroom.matrix.state import MatrixState
 from mindroom.matrix.thread_history_result import ThreadHistoryResult
 from mindroom.message_target import MessageTarget
 from mindroom.post_response_effects import PostResponseEffectsDeps, PostResponseEffectsSupport
-from mindroom.response_runner import (
-    ResponseRequest,
-    ResponseRunner,
-)
+from mindroom.reply_turn.request import ResponseRequest
+from mindroom.response_runner import ResponseRunner
 from mindroom.response_sources import ResponseSources
 from mindroom.room_model_overrides import set_room_model_override
 from mindroom.teams.formation import TeamIntent, TeamMemberStatus, TeamOutcome, TeamResolution, TeamResolutionMember

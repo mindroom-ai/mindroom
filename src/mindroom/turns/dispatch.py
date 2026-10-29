@@ -33,12 +33,13 @@ from mindroom.matrix.event_info import EventInfo
 from mindroom.matrix.media import is_matrix_media_dispatch_event
 from mindroom.matrix.member_display_names import room_member_display_names
 from mindroom.matrix.thread_history_result import ThreadHistoryResult
+from mindroom.reply_turn.request import ResponseRequest
 from mindroom.response_admission import ResponseAdmissionRefusedError, admitted_response_decision
 from mindroom.response_payload_preparation import (
     DispatchPayloadInputs,
     ResponsePayloadPreparation,
 )
-from mindroom.response_runner import PostLockRequestPreparationError, ResponseRequest
+from mindroom.response_runner import PostLockRequestPreparationError
 from mindroom.response_sources import ResponseSources
 from mindroom.router_relay import execute_router_relay
 from mindroom.teams.formation import TeamIntent, select_ad_hoc_team_mode

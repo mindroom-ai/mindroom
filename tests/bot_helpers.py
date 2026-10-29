@@ -41,9 +41,7 @@ from mindroom.matrix.client import ResolvedVisibleMessage
 from mindroom.matrix.thread_history_result import ThreadHistoryResult
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.message_target import MessageTarget
-from mindroom.response_runner import (
-    ResponseRequest,
-)
+from mindroom.reply_turn.request import ResponseRequest
 from mindroom.response_sources import ResponseSources
 from mindroom.turn_policy import PreparedDispatch, TurnPolicy
 from mindroom.turn_record import SourceEventMetadata, TurnRecord, canonicalize_turn_record

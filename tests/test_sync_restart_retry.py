@@ -26,7 +26,7 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from mindroom.bot import AgentBot
-    from mindroom.response_runner import ResponseRequest
+    from mindroom.reply_turn.request import ResponseRequest
 
 pytestmark = pytest.mark.asyncio
 

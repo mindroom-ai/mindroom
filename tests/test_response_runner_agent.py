@@ -67,18 +67,14 @@ from mindroom.matrix.thread_history_result import ThreadHistoryResult, thread_hi
 from mindroom.message_target import MessageTarget
 from mindroom.reply_scope import ReplyRuntime
 from mindroom.reply_turn.enrichment import _cached_room_display_name, with_matrix_message_target
+from mindroom.reply_turn.request import ResponseRequest, merge_response_extra_content
 from mindroom.response_lifecycle import _response_outcome_label
 from mindroom.response_payload_preparation import (
     DispatchPayloadInputs,
     ResponsePayloadPreparation,
     ResponsePayloadPreparer,
 )
-from mindroom.response_runner import (
-    DeliveryProgress,
-    ResponseRequest,
-    ResponseRunner,
-    merge_response_extra_content,
-)
+from mindroom.response_runner import DeliveryProgress, ResponseRunner
 from mindroom.response_sources import ResponseSources
 from mindroom.response_turn import PausedAttempt, ResponsePausedForApproval
 from mindroom.session_storage.types import ConversationSession
@@ -2642,7 +2638,7 @@ class TestAgentBot(AgentBotTestBase):
         ]
 
         with (
-            patch("mindroom.response_runner.typing_indicator", _noop_typing_indicator),
+            patch("mindroom.reply_turn.request.typing_indicator", _noop_typing_indicator),
             patch("mindroom.response_runner.should_use_streaming", new_callable=AsyncMock, return_value=False),
             patch(
                 "mindroom.response_runner.stream_agent_response",
@@ -2781,7 +2777,7 @@ class TestAgentBot(AgentBotTestBase):
         response_envelope = replace(_hook_envelope(source_event_id=root_event_id), target=resolved_target)
 
         with (
-            patch("mindroom.response_runner.typing_indicator", _noop_typing_indicator),
+            patch("mindroom.reply_turn.request.typing_indicator", _noop_typing_indicator),
             patch("mindroom.response_runner.should_use_streaming", new_callable=AsyncMock, return_value=False),
             patch(
                 "mindroom.response_runner.stream_agent_response",

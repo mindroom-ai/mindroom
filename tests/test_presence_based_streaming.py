@@ -14,7 +14,7 @@ from mindroom.config.main import Config
 from mindroom.delivery_gateway import DeliveryGateway
 from mindroom.matrix.presence import is_user_online, should_use_streaming
 from mindroom.matrix.users import AgentMatrixUser
-from mindroom.response_runner import ResponseRequest
+from mindroom.reply_turn.request import ResponseRequest
 from mindroom.response_sources import ResponseSources
 from tests.access_schema_support import with_current_room_member_access
 from tests.authorization_helpers import (

@@ -2,7 +2,7 @@
 
 Turn dispatch (:class:`~mindroom.turns.dispatch.TurnDispatcher`) builds a complete,
 immutable :class:`ResponsePayloadPreparation` value and hands it to the
-response runner inside the :class:`~mindroom.response_runner.ResponseRequest`.
+response runner inside the :class:`~mindroom.reply_turn.request.ResponseRequest`.
 Once the runner owns the lifecycle lock and has refreshed thread history, it
 calls :meth:`ResponsePayloadPreparer.prepare` to finish assembling the request.
 
@@ -33,7 +33,7 @@ if TYPE_CHECKING:
     from mindroom.hooks.ingress import IngressHookRunner
     from mindroom.inbound_turn_normalizer import DispatchPayload, InboundTurnNormalizer
     from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
-    from mindroom.response_runner import ResponseRequest
+    from mindroom.reply_turn.request import ResponseRequest
     from mindroom.turn_policy import PreparedDispatch
 
 

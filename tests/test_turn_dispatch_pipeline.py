@@ -54,10 +54,7 @@ from mindroom.matrix.thread_history_result import ThreadHistoryResult, thread_hi
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.message_target import MessageTarget
 from mindroom.response_payload_preparation import DispatchPayloadInputs, ResponsePayloadPreparer
-from mindroom.response_runner import (
-    ResponseRequest,
-    ResponseRunner,
-)
+from mindroom.response_runner import ResponseRunner
 from mindroom.response_sources import ResponseSources
 from mindroom.teams.formation import TeamIntent, TeamMemberStatus, TeamResolution, TeamResolutionMember
 from mindroom.teams.spec import TeamMode
@@ -111,6 +108,8 @@ from tests.turn_dispatch_helpers import dispatch_test_turn
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Sequence
     from pathlib import Path
+
+    from mindroom.reply_turn.request import ResponseRequest
 
 
 @pytest.fixture

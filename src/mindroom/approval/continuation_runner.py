@@ -100,8 +100,7 @@ from mindroom.reply_scope import (
     pause_decision,
     pause_write,
 )
-from mindroom.response_runner import (
-    DeliveryProgress,
+from mindroom.reply_turn.request import (
     ResponseRequest,
     correlation_id_for_request,
     merge_response_extra_content,
@@ -109,6 +108,7 @@ from mindroom.response_runner import (
     response_typing_indicator,
     response_typing_log_context,
 )
+from mindroom.response_runner import DeliveryProgress
 from mindroom.response_turn import CompletedApprovalRun, PausedAnswer, PausedAttempt
 from mindroom.streaming import PROGRESS_PLACEHOLDER
 from mindroom.teams.resume import continue_paused_team_run
@@ -133,8 +133,9 @@ if TYPE_CHECKING:
     from mindroom.message_target import MessageTarget
     from mindroom.post_response_effects import PostResponseEffectsDeps
     from mindroom.reply_turn.inbox import InboxResponses
+    from mindroom.reply_turn.request import PreparedResponseRuntime
     from mindroom.response_lifecycle import ResponseLifecycle, ResponseLifecycleCoordinator
-    from mindroom.response_runner import PreparedResponseRuntime, ResponseRunnerDeps
+    from mindroom.response_runner import ResponseRunnerDeps
     from mindroom.streaming import ProgressPublisher
     from mindroom.tool_system.events import ToolTraceEntry
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity

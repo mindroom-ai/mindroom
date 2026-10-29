@@ -23,7 +23,7 @@ from mindroom.constants import STREAM_STATUS_KEY
 from mindroom.matrix.client import DeliveredMatrixEvent
 from mindroom.matrix.thread_history_result import thread_history_result
 from mindroom.matrix.users import AgentMatrixUser
-from mindroom.response_runner import ResponseRequest
+from mindroom.reply_turn.request import ResponseRequest
 from mindroom.response_sources import ResponseSources
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 from mindroom.turn_origin import TurnIntent

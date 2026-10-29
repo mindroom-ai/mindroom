@@ -54,7 +54,7 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from mindroom.event_journal import EventJournalStore, PrincipalStore
-    from mindroom.response_runner import ResponseRequest
+    from mindroom.reply_turn.request import ResponseRequest
 
 pytestmark = pytest.mark.usefixtures("enforce_turn_authorization")
 

@@ -51,7 +51,8 @@ from mindroom.hooks import (
 from mindroom.ingress_validation import IngressValidator
 from mindroom.matrix.thread_history_result import thread_history_result
 from mindroom.message_target import MessageTarget
-from mindroom.response_runner import ResponseRequest, ResponseRunner
+from mindroom.reply_turn.request import ResponseRequest
+from mindroom.response_runner import ResponseRunner
 from mindroom.response_sources import ResponseSources
 from mindroom.response_turn import PausedAttempt
 from mindroom.room_thread_modes import set_room_thread_mode_override

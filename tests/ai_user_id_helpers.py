@@ -38,12 +38,9 @@ from mindroom.matrix.thread_history_result import thread_history_result
 from mindroom.message_target import MessageTarget
 from mindroom.post_response_effects import PostResponseEffectsDeps, PostResponseEffectsSupport
 from mindroom.reply_scope import ReplyRuntime
+from mindroom.reply_turn.request import ResponseRequest
 from mindroom.response_payload_preparation import ResponsePayloadPreparer
-from mindroom.response_runner import (
-    ResponseRequest,
-    ResponseRunner,
-    ResponseRunnerDeps,
-)
+from mindroom.response_runner import ResponseRunner, ResponseRunnerDeps
 from mindroom.response_sources import ResponseSources
 from mindroom.tool_system.runtime_context import (
     ToolRuntimeSupport,

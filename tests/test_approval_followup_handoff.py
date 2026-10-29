@@ -34,7 +34,8 @@ if TYPE_CHECKING:
 
     from mindroom.bot import AgentBot
     from mindroom.message_target import MessageTarget
-    from mindroom.response_runner import ResponseRequest, ResponseRunner, _EarlyPlaceholderState
+    from mindroom.reply_turn.request import ResponseRequest
+    from mindroom.response_runner import ResponseRunner, _EarlyPlaceholderState
     from mindroom.streaming import ProgressPublisher
     from mindroom.tool_system.events import ToolTraceEntry
 

@@ -23,8 +23,8 @@ from mindroom.inbound_turn_normalizer import DispatchPayload
 from mindroom.matrix.thread_history_result import ThreadHistoryResult
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.message_target import MessageTarget
+from mindroom.reply_turn.request import ResponseRequest
 from mindroom.response_payload_preparation import DispatchPayloadInputs, ResponsePayloadPreparation
-from mindroom.response_runner import ResponseRequest
 from mindroom.response_sources import ResponseSources
 from mindroom.turn_policy import PreparedDispatch
 from tests.access_schema_support import with_current_room_member_access

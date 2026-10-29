@@ -42,11 +42,7 @@ from mindroom.llm.events import TextDelta, ToolCompleted
 from mindroom.llm.runs import RunRecord
 from mindroom.llm.usage import HelperUsage, RunMetrics
 from mindroom.message_target import MessageTarget
-from mindroom.response_runner import (
-    ResponseRequest,
-    ResponseRunner,
-    _EarlyPlaceholderState,
-)
+from mindroom.response_runner import ResponseRunner, _EarlyPlaceholderState
 from mindroom.session_storage.agent_storage import create_session_storage, create_state_storage
 from mindroom.session_storage.types import ConversationSession
 from mindroom.streaming import StreamingDeliveryError
@@ -87,6 +83,7 @@ if TYPE_CHECKING:
 
     from mindroom.constants import RuntimePaths
     from mindroom.llm.runs import AnyRunRecord
+    from mindroom.reply_turn.request import ResponseRequest
     from mindroom.response_turn import ResponseTurnContext
     from mindroom.session_storage.store import ConversationStore
 

@@ -29,12 +29,7 @@ from mindroom.matrix.client_delivery import MatrixDeliveryFailure, MatrixDeliver
 from mindroom.matrix.journal_ingress import _inbound_event, _projected_event
 from mindroom.mid_turn import MidTurnGate
 from mindroom.reply_presentation import TEAM_PLACEHOLDER, decode_presentation, render_body
-from mindroom.response_runner import (
-    PostLockRequestPreparationError,
-    ResponseRequest,
-    ResponseRunner,
-    _mid_turn_for_request,
-)
+from mindroom.response_runner import PostLockRequestPreparationError, ResponseRunner, _mid_turn_for_request
 from mindroom.response_sources import ResponseSources
 from mindroom.streaming import RESTART_INTERRUPTED_RESPONSE_NOTE, format_stream_error_note
 from mindroom.tool_system.events import ToolTraceEntry
@@ -59,6 +54,7 @@ if TYPE_CHECKING:
 
     from mindroom.bot import AgentBot
     from mindroom.delivery_gateway import ResponseIdentity
+    from mindroom.reply_turn.request import ResponseRequest
     from mindroom.response_turn import ResponseTurnContext
 
 pytestmark = pytest.mark.asyncio

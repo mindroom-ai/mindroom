@@ -25,7 +25,7 @@ from mindroom.matrix.thread_membership import (
     resolve_related_event_thread_id_best_effort,
     thread_messages_thread_membership_access,
 )
-from mindroom.response_runner import ResponseRequest
+from mindroom.reply_turn.request import ResponseRequest
 from mindroom.response_sources import ResponseSources
 from mindroom.turn_policy import DispatchPlan
 from tests.conftest import (

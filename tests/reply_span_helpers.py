@@ -23,7 +23,8 @@ if TYPE_CHECKING:
     from mindroom.delivery_gateway import DeliveryGateway, FinalDeliveryRequest
     from mindroom.event_journal import PrincipalStore
     from mindroom.final_delivery import FinalDeliveryOutcome
-    from mindroom.response_runner import ResponseRequest, ResponseRunner
+    from mindroom.reply_turn.request import ResponseRequest
+    from mindroom.response_runner import ResponseRunner
 
 
 def _runtime(

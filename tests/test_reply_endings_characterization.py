@@ -91,7 +91,8 @@ if TYPE_CHECKING:
     from mindroom.event_journal import MatrixDelivery
     from mindroom.history.types import HistoryScope
     from mindroom.llm.runs import AnyRunRecord
-    from mindroom.response_runner import ResponseRequest, ResponseRunner
+    from mindroom.reply_turn.request import ResponseRequest
+    from mindroom.response_runner import ResponseRunner
 
 pytestmark = pytest.mark.asyncio
 

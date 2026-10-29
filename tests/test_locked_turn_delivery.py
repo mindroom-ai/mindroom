@@ -44,7 +44,7 @@ if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Awaitable, Callable
     from pathlib import Path
 
-    from mindroom.response_runner import ResponseRequest
+    from mindroom.reply_turn.request import ResponseRequest
     from mindroom.response_turn import TurnSinks
 
 
@@ -337,7 +337,7 @@ async def test_team_post_delivery_failure_settles_error_outcome_without_finalize
             new=AsyncMock(side_effect=fake_post_effects),
         ),
         patch("mindroom.response_runner.team_response_stream", new=_turn_stream("Team answer")),
-        patch("mindroom.response_runner.typing_indicator", _noop_typing),
+        patch("mindroom.reply_turn.request.typing_indicator", _noop_typing),
     ):
         coordinator = _build_response_runner(
             bot,
@@ -408,7 +408,7 @@ async def test_team_pre_delivery_failure_ends_the_reply_failed_and_reraises(tmp_
             "mindroom.response_runner.team_response_stream",
             new=_turn_stream(error=RuntimeError("team prep exploded")),
         ),
-        patch("mindroom.response_runner.typing_indicator", _noop_typing),
+        patch("mindroom.reply_turn.request.typing_indicator", _noop_typing),
     ):
         coordinator = _build_response_runner(
             bot,
