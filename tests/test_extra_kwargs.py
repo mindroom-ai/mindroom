@@ -126,7 +126,7 @@ _ROUTE_SETTINGS: list[tuple[type[Any], dict[str, Any], frozenset[str]]] = [
     ),
     (
         ClaudeSettings,
-        {"temperature": 0.3},
+        {"max_tokens": 8192, "temperature": 0.3},
         frozenset(
             {
                 "api_key",

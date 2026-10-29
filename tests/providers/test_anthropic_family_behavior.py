@@ -76,12 +76,19 @@ def _user(text: str = "Hello") -> list[Message]:
 def test_unknown_extra_kwargs_are_rejected_with_the_accepted_keys() -> None:
     """Dropped Agno features and another route's keys fail at construction and name what is accepted."""
     with pytest.raises(ValueError, match=r"skills.*Accepted keys: .*cache_system_prompt") as skills:
-        parse_claude_settings("anthropic", {"skills": [{"type": "anthropic", "skill_id": "pptx"}]})
+        parse_claude_settings("anthropic", "claude-sonnet-5-5", {"skills": [{"type": "anthropic", "skill_id": "pptx"}]})
     assert "mcp_servers" not in str(skills.value)
     with pytest.raises(ValueError, match="project_id"):
-        parse_claude_settings("anthropic", {"project_id": "p"})
-    assert parse_claude_settings("vertexai_claude", {"project_id": "p", "region": "global"}).region == "global"
-    settings = parse_claude_settings("bedrock_claude", {"aws_region": "us-east-1", "cache_system_prompt": False})
+        parse_claude_settings("anthropic", "claude-sonnet-5-5", {"project_id": "p"})
+    assert (
+        parse_claude_settings("vertexai_claude", "claude-sonnet-5-5", {"project_id": "p", "region": "global"}).region
+        == "global"
+    )
+    settings = parse_claude_settings(
+        "bedrock_claude",
+        "anthropic.claude-sonnet-5-5",
+        {"aws_region": "us-east-1", "cache_system_prompt": False},
+    )
     assert (settings.aws_region, settings.cache_system_prompt, settings.extended_cache_time) == (
         "us-east-1",
         False,
@@ -89,7 +96,7 @@ def test_unknown_extra_kwargs_are_rejected_with_the_accepted_keys() -> None:
     )
     assert settings.max_tokens == 8192
     assert settings.timeout is None
-    assert parse_claude_settings("anthropic", {"timeout": 120.0}).timeout == 120.0
+    assert parse_claude_settings("anthropic", "claude-sonnet-5-5", {"timeout": 120.0}).timeout == 120.0
 
 
 @pytest.mark.parametrize(
@@ -678,6 +685,49 @@ async def test_authored_output_config_and_stop_sequences_reach_the_request(tmp_p
     assert body["output_config"]["effort"] == "low"
     assert body["output_config"]["format"]["type"] == "json_schema"
     assert provider.settings.output_config == {"effort": "low"}, "the format never leaks into the authored setting"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("route", "model_id", "extra_kwargs", "max_tokens"),
+    [
+        ("anthropic", "claude-opus-5-5", {}, 128_000),
+        ("anthropic", "claude-sonnet-4-6", {}, 128_000),
+        ("anthropic", "claude-haiku-4-5-20251001", {}, 64_000),
+        ("anthropic", "claude-3-7-sonnet-20250219", {}, 8192),
+        ("vertexai_claude", "claude-opus-5-5", {}, 8192),
+        ("bedrock_claude", "anthropic.claude-opus-5-5", {}, 8192),
+        ("anthropic", "claude-opus-5-5", {"max_tokens": 2000}, 2000),
+        ("anthropic", "claude-opus-5-5", {"request_params": {"max_tokens": 3000}}, 3000),
+        ("bedrock_claude", "anthropic.claude-opus-5-5", {"max_tokens": 32_000}, 32_000),
+    ],
+    ids=[
+        "direct-claude-5",
+        "direct-sonnet-4-6",
+        "direct-haiku-4-5",
+        "direct-unlisted-model",
+        "vertex",
+        "bedrock",
+        "authored",
+        "authored-request-params",
+        "authored-bedrock",
+    ],
+)
+async def test_a_reply_may_reach_the_models_maximum_output_only_on_the_direct_api(
+    tmp_path: Path,
+    route: str,
+    model_id: str,
+    extra_kwargs: dict[str, Any],
+    max_tokens: int,
+) -> None:
+    """Vertex and Bedrock count the requested output against their quotas up front, so they keep the 8,192 cap.
+
+    An authored ``max_tokens`` wins on every route, and a model the direct route does not list keeps 8,192.
+    """
+    wire = Wire(sse_reply([{"type": "text", "text": "ok"}]))
+    provider = route_provider(route, tmp_path, wire, id=model_id, extra_kwargs=extra_kwargs)
+    await claude_turn(provider, ModelRequest(messages=_user()))
+    assert wire.body()["max_tokens"] == max_tokens
 
 
 @pytest.mark.asyncio
