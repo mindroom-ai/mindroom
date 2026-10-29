@@ -167,7 +167,9 @@ def classify_provider_error(  # noqa: PLR0911 - one return per rule
     3. A 401 status or Anthropic's ``authentication_error`` is ``AuthenticationFailed``.
     4. Wording or a code that names the context window, on a client error or an event without a status, is
        ``ContextWindowExceeded``: a retry cannot make the request fit. A 5xx that mentions it stays transient.
-    5. A transient name, or Anthropic's overloaded wording, is ``ProviderUnavailable``.
+    5. A transient name, or Anthropic's overloaded wording, is ``ProviderUnavailable``, unless the status is a client
+       error, which outranks the name a server gives it: Ollama's OpenAI-compatible endpoint names every status but
+       400 and 404 ``api_error``.
     6. Wording that names the credentials, on a client error or an event without a status, is
        ``AuthenticationFailed``.
     7. An invalid-request status is ``InvalidRequest``.
@@ -203,7 +205,7 @@ def classify_provider_error(  # noqa: PLR0911 - one return per rule
         return typed(AuthenticationFailed)
     if client_side and _is_context_window_error(lowered, code=code):
         return typed(ContextWindowExceeded)
-    if names & _TRANSIENT_NAMES or _OVERLOADED_ERROR_TYPE in lowered:
+    if (names & _TRANSIENT_NAMES or _OVERLOADED_ERROR_TYPE in lowered) and status not in _HTTP_CLIENT_ERROR_RANGE:
         return typed(ProviderUnavailable)
     if client_side and _CREDENTIAL_WORDING.search(lowered):
         return typed(AuthenticationFailed)

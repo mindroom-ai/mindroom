@@ -61,6 +61,10 @@ _REQUEST_TOO_LARGE = (
         (400, "Invalid JSON payload received.", None, InvalidRequest, False),
         (404, "model not found", None, InvalidRequest, False),
         (413, "payload", None, InvalidRequest, False),
+        # A client-error status outranks a transient name, which Ollama's OpenAI-compatible endpoint gives every status
+        # but 400 and 404.
+        (413, "request body must not exceed 32 MiB", "api_error", InvalidRequest, False),
+        (403, "Forbidden", "api_error", ProviderError, False),
         (401, "invalid api key", None, AuthenticationFailed, False),
         (403, "Permission denied", None, ProviderError, False),
         (

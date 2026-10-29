@@ -928,6 +928,14 @@ _CHAT_CASES = [
         1,
         code=QUOTA_EXHAUSTED,
     ),
+    # Ollama's OpenAI-compatible endpoint names every status but 400 and 404 ``api_error``, so the status decides.
+    _Case(
+        "http_413_ollama_api_error",
+        _openai_status(413, "request body must not exceed 32 MiB", "api_error"),
+        InvalidRequest,
+        ERROR,
+        1,
+    ),
     _Case(
         "event_server_error",
         _chat_error(message="The server had an error.", type="server_error"),
