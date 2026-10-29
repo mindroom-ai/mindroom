@@ -26,7 +26,7 @@ from mindroom.cli.config import validate_config_source_quiet
 from mindroom.commands.config_commands import apply_config_change
 from mindroom.config import load_attempt
 from mindroom.config.legacy_access import AccessMigrationError
-from mindroom.config.load_attempt import PublishedConfigLoad
+from mindroom.config.load_attempt import ConfigLoad
 from mindroom.config.main import load_config
 from mindroom.custom_tools.config_manager import ConfigManagerTools
 from mindroom.message_target import MessageTarget
@@ -1096,7 +1096,7 @@ async def test_watch_config_reloads_when_an_included_file_changes(
     load_event = asyncio.Event()
     stop_event = asyncio.Event()
 
-    def _record_load(runtime_paths: constants.RuntimePaths, _app: FastAPI) -> PublishedConfigLoad:
+    def _record_load(runtime_paths: constants.RuntimePaths, _app: FastAPI) -> ConfigLoad:
         loaded_paths.append(runtime_paths.config_path)
         load_event.set()
         return failed_config_load(OSError("this test only records the load"))
@@ -1129,7 +1129,7 @@ async def test_watch_config_coalesces_a_multi_file_burst_into_one_reload(
     loaded_paths: list[Path] = []
     stop_event = asyncio.Event()
 
-    def _record_load(runtime_paths: constants.RuntimePaths, _app: FastAPI) -> PublishedConfigLoad:
+    def _record_load(runtime_paths: constants.RuntimePaths, _app: FastAPI) -> ConfigLoad:
         loaded_paths.append(runtime_paths.config_path)
         return failed_config_load(OSError("this test only records the load"))
 

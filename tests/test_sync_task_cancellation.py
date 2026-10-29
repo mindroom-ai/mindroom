@@ -87,7 +87,7 @@ from tests.bot_helpers import make_test_agent_bot
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
 
-    from mindroom.config.load_attempt import PublishedConfigLoad
+    from mindroom.config.load_attempt import ConfigLoad
 from tests.conftest import (
     SETTLE_TIMEOUT_SECONDS,
     TEST_PASSWORD,
@@ -2876,7 +2876,7 @@ async def test_startup_membership_publication_serializes_config_reload(  # noqa:
         if any(bot.agent_name == ROUTER_AGENT_NAME for bot in bots):
             router_sync_started.set()
 
-    async def blocked_config_load(*_args: object, **_kwargs: object) -> PublishedConfigLoad:
+    async def blocked_config_load(*_args: object, **_kwargs: object) -> ConfigLoad:
         reload_started.set()
         await reload_can_finish.wait()
         return published_config_load(orchestrator._require_config())

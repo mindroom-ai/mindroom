@@ -33,7 +33,7 @@ from mindroom.api import tools as tools_api
 from mindroom.api import workers as workers_api
 from mindroom.api.credentials_target import RequestCredentialsTarget
 from mindroom.commands.config_commands import apply_config_change
-from mindroom.config.load_attempt import PublishedConfigLoad, _ConfigLoadAttempt
+from mindroom.config.load_attempt import ConfigLoad
 from mindroom.config.main import Config, dashboard_config_schema, iter_config_validation_messages
 from mindroom.credentials.manager import get_runtime_credentials_manager, save_scoped_credentials
 from mindroom.custom_tools.homeassistant import HomeAssistantTools
@@ -746,17 +746,16 @@ def test_load_config_into_app_discards_stale_results_after_runtime_swap(tmp_path
     allow_finish = threading.Event()
     original_load_attempt = config_lifecycle.load_config_attempt
 
-    def _fake_load_attempt(runtime_paths: constants.RuntimePaths) -> _ConfigLoadAttempt:
+    def _fake_load_attempt(runtime_paths: constants.RuntimePaths) -> ConfigLoad:
         if runtime_paths == first_runtime:
             started.set()
             allow_finish.wait()
-            return _ConfigLoadAttempt(
+            return ConfigLoad(
                 result=config_lifecycle.ConfigLoadResult(
                     success=False,
                     error_status_code=422,
                     error_detail="invalid old config",
                 ),
-                payload=None,
                 config=None,
                 source_fingerprint="stale-old-source",
                 source_files=frozenset({first_runtime.config_path}),
@@ -922,7 +921,7 @@ def _record_loaded_path(
     runtime_paths: constants.RuntimePaths,
     loaded_paths: list[Path],
     load_event: asyncio.Event,
-) -> PublishedConfigLoad:
+) -> ConfigLoad:
     loaded_paths.append(runtime_paths.config_path)
     load_event.set()
     return failed_config_load(OSError("this test only records the load"))

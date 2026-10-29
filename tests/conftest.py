@@ -78,7 +78,7 @@ from mindroom.bot import AgentBot, TeamBot
 from mindroom.coalescing.batch import PendingEvent
 from mindroom.coalescing.gate import CoalescingDrainResult
 from mindroom.command_turn_executor import CommandTurnExecutor
-from mindroom.config.load_attempt import ConfigLoadResult, PublishedConfigLoad, _ConfigLoadAttempt
+from mindroom.config.load_attempt import ConfigLoad, ConfigLoadResult
 from mindroom.config.main import Config, load_config
 from mindroom.constants import RuntimePaths, resolve_runtime_paths, safe_replace
 from mindroom.conversation_resolver import DispatchContextResult, MessageContext
@@ -2436,16 +2436,13 @@ def load_config_yaml(config_path: Path) -> Config:
     return load_config(resolve_runtime_paths(config_path=Path(config_path).expanduser().resolve()))
 
 
-def published_config_load(config: Config) -> PublishedConfigLoad:
+def published_config_load(config: Config) -> ConfigLoad:
     """Return a successful load of ``config`` that no newer API commit superseded."""
-    return PublishedConfigLoad(
-        _ConfigLoadAttempt(
-            result=ConfigLoadResult(success=True, uses_includes=config.uses_includes),
-            payload=config.authored_model_dump(),
-            config=config,
-            source_fingerprint=config.source_fingerprint,
-            source_files=config.source_files,
-        ),
+    return ConfigLoad(
+        result=ConfigLoadResult(success=True, uses_includes=config.uses_includes),
+        config=config,
+        source_fingerprint=config.source_fingerprint,
+        source_files=config.source_files,
     )
 
 
@@ -2456,17 +2453,14 @@ async def initialize_from_config_file(orchestrator: "_MultiAgentOrchestrator") -
     return config
 
 
-def failed_config_load(error: Exception) -> PublishedConfigLoad:
+def failed_config_load(error: Exception) -> ConfigLoad:
     """Return a load that failed with ``error`` and that no newer API commit superseded."""
-    return PublishedConfigLoad(
-        _ConfigLoadAttempt(
-            result=ConfigLoadResult(success=False, error_status_code=422, error_detail=str(error)),
-            payload=None,
-            config=None,
-            source_fingerprint=None,
-            source_files=None,
-            error=error,
-        ),
+    return ConfigLoad(
+        result=ConfigLoadResult(success=False, error_status_code=422, error_detail=str(error)),
+        config=None,
+        source_fingerprint=None,
+        source_files=None,
+        error=error,
     )
 
 

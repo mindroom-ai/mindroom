@@ -19,8 +19,8 @@ from mindroom import constants
 from mindroom.agent_reply_membership import AgentReplyMembershipIndex
 from mindroom.config.legacy_access import validate_access_migration_source
 from mindroom.config.load_attempt import (
+    ConfigLoad,
     ConfigLoadResult,
-    PublishedConfigLoad,
     config_error_detail,
     load_config_attempt,
     raw_source_fingerprint,
@@ -617,12 +617,13 @@ def _build_and_commit_raw_replacement(
         raise HTTPException(status_code=500, detail=f"{error_prefix}: {exc!s}") from exc
 
 
-def load_config_into_app(runtime_paths: constants.RuntimePaths, api_app: FastAPI) -> PublishedConfigLoad:
+def load_config_into_app(runtime_paths: constants.RuntimePaths, api_app: FastAPI) -> ConfigLoad:
     """Load config from disk into one API app's committed config cache unless a newer commit wins."""
     initial_state = require_api_state(api_app)
     snapshot = initial_state.snapshot
     attempt = load_config_attempt(runtime_paths)
     result = attempt.result
+    payload = attempt.config.authored_model_dump() if attempt.config is not None else None
     with initial_state.config_lock:
         current_state = require_api_state(api_app)
         current = current_state.snapshot
@@ -632,7 +633,7 @@ def load_config_into_app(runtime_paths: constants.RuntimePaths, api_app: FastAPI
                 load_config_path=str(runtime_paths.config_path),
                 active_config_path=str(current.runtime_paths.config_path),
             )
-            return PublishedConfigLoad(attempt, superseded=True)
+            return replace(attempt, superseded=True)
         same_source = (
             attempt.source_fingerprint is not None and attempt.source_fingerprint == current.source_fingerprint
         )
@@ -651,14 +652,14 @@ def load_config_into_app(runtime_paths: constants.RuntimePaths, api_app: FastAPI
         current_state.snapshot = _published_snapshot(
             current,
             increment_generation=not same_source,
-            config_data=attempt.payload if attempt.payload is not None else current.config_data,
+            config_data=payload if payload is not None else current.config_data,
             runtime_config=attempt.config if attempt.config is not None else current.runtime_config,
             config_load_result=result,
             source_fingerprint=attempt.source_fingerprint,
             source_files=published_source_files,
             uses_includes=published_uses_includes,
         )
-    return PublishedConfigLoad(attempt)
+    return attempt
 
 
 def _loaded_config_data(snapshot: ApiSnapshot) -> dict[str, Any]:

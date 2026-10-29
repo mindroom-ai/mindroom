@@ -8,7 +8,7 @@ from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
-from mindroom.config.load_attempt import PublishedConfigLoad, load_config_attempt
+from mindroom.config.load_attempt import ConfigLoad, load_config_attempt
 from mindroom.config.main import failed_config_source_fingerprint
 from mindroom.config.reload_status import ConfigReloadStatus
 from mindroom.config.yaml_includes import source_files_fingerprint
@@ -83,14 +83,14 @@ class _ReplacementDrainState:
         return self.wait_started_at is not None and self.wait_seconds(now) >= force_after_seconds
 
 
-def load_published_config(runtime_paths: RuntimePaths, *, api_enabled: bool) -> PublishedConfigLoad:
+def load_published_config(runtime_paths: RuntimePaths, *, api_enabled: bool) -> ConfigLoad:
     """Load the config once, publishing it to the embedded dashboard API when one runs.
 
     With the API embedded, this load is the dashboard's only one, so the runtime
     and the dashboard always see the same validated config.
     """
     if not api_enabled:
-        return PublishedConfigLoad(load_config_attempt(runtime_paths))
+        return load_config_attempt(runtime_paths)
     from mindroom.api import main as api_main  # noqa: PLC0415
 
     return api_main.config_lifecycle.load_config_into_app(runtime_paths, api_main.app)
@@ -110,7 +110,7 @@ async def load_startup_config(runtime_paths: RuntimePaths, *, api_enabled: bool)
     # Config validation executes plugin modules and walks the filesystem;
     # keep it off the event loop (#1260).
     published = await asyncio.to_thread(load_published_config, runtime_paths, api_enabled=api_enabled)
-    return published.attempt.loaded_config()
+    return published.loaded_config()
 
 
 @dataclass
@@ -128,7 +128,7 @@ class ConfigReloadLifecycle:
     # Reloads run only once startup published its config, so a config always exists here.
     current_config: Callable[[], Config]
     agent_bots: Callable[[], Mapping[str, AgentBot | TeamBot]]
-    load_config: Callable[[], PublishedConfigLoad]
+    load_config: Callable[[], ConfigLoad]
     apply_update_plan: Callable[[Config, ConfigUpdatePlan], Awaitable[bool]]
     response_admission_gate: ResponseAdmissionGate
     before_runtime_replacement: Callable[[], Awaitable[None]]
@@ -244,8 +244,8 @@ class ConfigReloadLifecycle:
             # already changed the files, so the watcher queues the reload
             # that applies it; this stale read is never adopted.
             return None
-        self.record_load_sources(published.attempt.source_files, loaded=published.attempt.config is not None)
-        new_config = published.attempt.loaded_config()
+        self.record_load_sources(published.source_files, loaded=published.config is not None)
+        new_config = published.loaded_config()
         self.status = ConfigReloadStatus(status="pending", fingerprint=new_config.source_fingerprint)
         async with self._response_admission_apply_lock:
             runtime_config = self.current_config()
@@ -570,8 +570,8 @@ class ConfigReloadLifecycle:
                     published = await asyncio.to_thread(self.load_config)
                 if not published.superseded:
                     self.record_load_sources(
-                        published.attempt.source_files,
-                        loaded=published.attempt.config is not None,
+                        published.source_files,
+                        loaded=published.config is not None,
                     )
                 if self._requested_at == requested_at:
                     return

@@ -18,7 +18,7 @@ from starlette.requests import Request
 
 from mindroom import constants
 from mindroom.api import config_lifecycle
-from mindroom.config.load_attempt import _ConfigLoadAttempt
+from mindroom.config.load_attempt import ConfigLoad
 from mindroom.config.main import Config, ConfigRuntimeValidationError, load_config
 from mindroom.config.personal_agents import read_personal_agent_roster
 from mindroom.event_journal.opening import record_opened_event_journal
@@ -461,7 +461,7 @@ class TestFileWatcherReload:
         runtime_paths = state.snapshot.runtime_paths
         real_load = config_lifecycle.load_config_attempt
 
-        def load_then_lose_race(paths: constants.RuntimePaths) -> _ConfigLoadAttempt:
+        def load_then_lose_race(paths: constants.RuntimePaths) -> ConfigLoad:
             attempt = real_load(paths)
             with state.config_lock:
                 state.snapshot = config_lifecycle._published_snapshot(state.snapshot)
@@ -471,7 +471,7 @@ class TestFileWatcherReload:
         racing_generation = state.snapshot.generation + 1
         published = config_lifecycle.load_config_into_app(runtime_paths, loaded_app)
         assert published.superseded
-        assert published.attempt.config is not None
+        assert published.config is not None
         # The concurrent commit's snapshot is left untouched by the stale load.
         assert _snapshot(loaded_app).generation == racing_generation
 

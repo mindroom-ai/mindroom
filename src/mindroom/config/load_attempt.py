@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import hashlib
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
 
 from mindroom.config.main import (
     CONFIG_LOAD_USER_ERROR_TYPES,
@@ -40,19 +40,25 @@ class ConfigLoadResult:
 
 
 @dataclass(frozen=True)
-class _ConfigLoadAttempt:
+class ConfigLoad:
     """Everything one read of the config files produced, whether or not it validated.
 
     ``error`` is the exception that failed the load, kept so the reload owner
-    reports a failure exactly as a raising loader would.
+    reports a failure exactly as a raising loader would. ``superseded`` marks a
+    load the dashboard API discarded because a newer commit won.
     """
 
     result: ConfigLoadResult
-    payload: dict[str, Any] | None
     config: Config | None
     source_fingerprint: str | None
     source_files: frozenset[Path] | None
     error: Exception | None = None
+    superseded: bool = False
+
+    @property
+    def loaded(self) -> bool:
+        """Return whether the load validated and became the published config."""
+        return not self.superseded and self.config is not None
 
     def loaded_config(self) -> Config:
         """Return the validated config, or raise the error that failed this load."""
@@ -60,19 +66,6 @@ class _ConfigLoadAttempt:
             raise self.error
         assert self.config is not None
         return self.config
-
-
-@dataclass(frozen=True)
-class PublishedConfigLoad:
-    """One load attempt and whether a newer API commit superseded it before it could be published."""
-
-    attempt: _ConfigLoadAttempt
-    superseded: bool = False
-
-    @property
-    def loaded(self) -> bool:
-        """Return whether the attempt validated and became the published config."""
-        return not self.superseded and self.attempt.config is not None
 
 
 def config_error_detail(exc: ConfigLoadUserError) -> list[dict[str, object]]:
@@ -88,7 +81,7 @@ def raw_source_fingerprint(source: bytes | str) -> str:
     return hashlib.sha256(source_bytes).hexdigest()
 
 
-def load_config_attempt(runtime_paths: RuntimePaths) -> _ConfigLoadAttempt:
+def load_config_attempt(runtime_paths: RuntimePaths) -> ConfigLoad:
     """Load and validate the config files once, reporting a failure instead of raising it."""
     source_fingerprint: str | None = None
     source_files: frozenset[Path] | None = None
@@ -114,7 +107,6 @@ def load_config_attempt(runtime_paths: RuntimePaths) -> _ConfigLoadAttempt:
         )
         source_files = frozenset(source_digests)
         source_fingerprint = source_files_fingerprint(runtime_paths.config_path, source_digests)
-        validated_payload = runtime_config.authored_model_dump()
     except CONFIG_LOAD_USER_ERROR_TYPES as exc:
         detail = config_error_detail(exc)
         logger.warning(
@@ -128,14 +120,13 @@ def load_config_attempt(runtime_paths: RuntimePaths) -> _ConfigLoadAttempt:
             source_files = partial_source_files(exc)
         if uses_includes is None:
             uses_includes = partial_source_uses_includes(exc)
-        return _ConfigLoadAttempt(
+        return ConfigLoad(
             result=ConfigLoadResult(
                 success=False,
                 error_status_code=422,
                 error_detail=detail,
                 uses_includes=uses_includes,
             ),
-            payload=None,
             config=None,
             source_fingerprint=source_fingerprint,
             source_files=source_files,
@@ -143,14 +134,13 @@ def load_config_attempt(runtime_paths: RuntimePaths) -> _ConfigLoadAttempt:
         )
     except Exception as exc:
         logger.exception("Failed to load config", config_path=str(runtime_paths.config_path))
-        return _ConfigLoadAttempt(
+        return ConfigLoad(
             result=ConfigLoadResult(
                 success=False,
                 error_status_code=500,
                 error_detail="Failed to load configuration",
                 uses_includes=uses_includes,
             ),
-            payload=None,
             config=None,
             source_fingerprint=source_fingerprint,
             source_files=source_files,
@@ -162,9 +152,8 @@ def load_config_attempt(runtime_paths: RuntimePaths) -> _ConfigLoadAttempt:
         source_file_count=len(source_files),
     )
     logger.info("loaded_agent_configuration_count", agent_count=len(runtime_config.agents))
-    return _ConfigLoadAttempt(
+    return ConfigLoad(
         result=ConfigLoadResult(success=True, uses_includes=uses_includes),
-        payload=validated_payload,
         config=runtime_config,
         source_fingerprint=source_fingerprint,
         source_files=source_files,

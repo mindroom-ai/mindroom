@@ -5131,7 +5131,7 @@ class TestMultiAgentOrchestrator:
         with (
             patch(
                 "mindroom.orchestration.config_lifecycle.load_config_attempt",
-                return_value=published_config_load(new_config).attempt,
+                return_value=published_config_load(new_config),
             ) as mock_load_config,
             patch("mindroom.orchestrator.load_plugins"),
             patch(

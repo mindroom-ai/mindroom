@@ -31,7 +31,7 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from mindroom.bot import AgentBot, TeamBot
-    from mindroom.config.load_attempt import PublishedConfigLoad
+    from mindroom.config.load_attempt import ConfigLoad
     from mindroom.orchestration.config_updates import ConfigUpdatePlan
 
 
@@ -42,7 +42,7 @@ def _make_lifecycle(
     current_config: Config | None = None,
     agent_bots: Mapping[str, AgentBot | TeamBot] | None = None,
     response_admission_gate: ResponseAdmissionGate | None = None,
-    load_config: Callable[[], PublishedConfigLoad] | None = None,
+    load_config: Callable[[], ConfigLoad] | None = None,
 ) -> ConfigReloadLifecycle:
     """Return a lifecycle wired to stub dependencies; it loads the test config file unless told otherwise."""
     gate = response_admission_gate or ResponseAdmissionGate()
@@ -121,7 +121,7 @@ async def test_config_change_during_startup_reaches_the_dashboard_and_applies_on
     config = load_config(test_runtime_paths(tmp_path))
     loads: list[Config] = []
 
-    def load_edit() -> PublishedConfigLoad:
+    def load_edit() -> ConfigLoad:
         loads.append(config)
         return published_config_load(config)
 
@@ -412,7 +412,7 @@ async def test_reload_does_not_hold_config_lock_while_draining_responses(
     new_config = Config(defaults={"enable_streaming": False})
     load_started = threading.Event()
 
-    def observed_load_config() -> PublishedConfigLoad:
+    def observed_load_config() -> ConfigLoad:
         load_started.set()
         return published_config_load(new_config)
 
@@ -540,7 +540,7 @@ async def test_reload_loads_an_edit_while_another_replacement_drains(tmp_path: P
     """An edit reaches the dashboard while an MCP restart holds admission, so a dashboard save cannot overwrite it."""
     loaded = threading.Event()
 
-    def load_edit() -> PublishedConfigLoad:
+    def load_edit() -> ConfigLoad:
         loaded.set()
         return published_config_load(Config(timezone="Europe/Amsterdam"))
 
@@ -834,7 +834,7 @@ async def test_config_load_stays_open_then_apply_waits_for_active_responses(
     current_config = Config()
     new_config = Config(defaults={"enable_streaming": False})
 
-    def blocked_load() -> PublishedConfigLoad:
+    def blocked_load() -> ConfigLoad:
         load_started.set()
         assert release_load.wait(timeout=2)
         return published_config_load(new_config)
@@ -1159,7 +1159,7 @@ async def test_update_config_loads_config_off_event_loop(tmp_path: Path) -> None
     load_started = threading.Event()
     loaded_config = Config(agents={"general": AgentConfig(display_name="General")})
 
-    def slow_load_config() -> PublishedConfigLoad:
+    def slow_load_config() -> ConfigLoad:
         load_started.set()
         gate.wait()
         return published_config_load(loaded_config)
