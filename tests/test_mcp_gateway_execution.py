@@ -407,11 +407,13 @@ def _routed_sibling(context: AgentToolContext) -> Toolkit:  # noqa: F811
     return sibling
 
 
+@pytest.mark.parametrize("returns_first", [0, 1], ids=["first-request-returns-first", "second-request-returns-first"])
 async def test_a_cancelled_call_with_two_nested_worker_calls_keeps_capacity_until_both_return(
     context: AgentToolContext,  # noqa: F811
     monkeypatch: pytest.MonkeyPatch,
+    returns_first: int,
 ) -> None:
-    """The call is answered at once, and its slot stays held until the second of its two requests returns."""
+    """The call is answered at once, and its slot stays held until the later of its two requests returns."""
     starts = [threading.Event(), threading.Event()]
     releases = [threading.Event(), threading.Event()]
     finished = [threading.Event(), threading.Event()]
@@ -453,18 +455,74 @@ async def test_a_cancelled_call_with_two_nested_worker_calls_keeps_capacity_unti
                 await _wait(started)
             await client.post("/mcp", json=_cancel(1))
             assert _code(await asyncio.wait_for(first, 2)) == "cancelled"
-            releases[0].set()
-            await _wait(finished[0])
+            releases[returns_first].set()
+            await _wait(finished[returns_first])
             await asyncio.sleep(0.2)
             assert _code(await client.post("/mcp", json=_call(2, arguments={"query": "probe"}))) == "busy"
-            releases[1].set()
-            await _wait(finished[1])
+            releases[1 - returns_first].set()
+            await _wait(finished[1 - returns_first])
             await gateway_toolkits.drain_gateway_tool_cleanup()
             assert _code(await client.post("/mcp", json=_call(3, arguments={"query": "probe"}))) is None
         finally:
             for release in releases:
                 release.set()
             await asyncio.gather(first, return_exceptions=True)
+            await gateway_toolkits.drain_gateway_tool_cleanup()
+
+
+async def test_a_failed_call_is_answered_at_once_and_keeps_capacity_while_a_nested_worker_call_runs(
+    context: AgentToolContext,  # noqa: F811
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A call that fails beside a request it started that still runs keeps its slot until that request returns."""
+    started, release, finished = threading.Event(), threading.Event(), threading.Event()
+    order = iter(range(2))
+    lock = threading.Lock()
+
+    def proxy(**_kwargs: object) -> str:
+        with lock:
+            index = next(order)
+        if index == 1:
+            assert started.wait(5)
+            msg = "the second request failed"
+            raise RuntimeError(msg)
+        started.set()
+        try:
+            assert release.wait(5)
+            return "done"
+        finally:
+            finished.set()
+
+    sibling = _routed_sibling(context)
+
+    async def work() -> list[str]:
+        inner = toolkit_functions(sibling)["inner"]
+        return list(await asyncio.gather(inner(), inner()))
+
+    monkeypatch.setattr(sandbox_proxy, "_call_proxy_sync", proxy)
+    monkeypatch.setattr(
+        agents,
+        "build_agent_toolkit",
+        lambda *_args, **_kwargs: Toolkit(name="calculator", tools=[work]),
+    )
+
+    async def dispatch(_request: Request, _name: str, arguments: dict[str, object]) -> dict[str, object]:
+        if arguments.get("query") == "probe":
+            return {"ok": True}
+        return await gateway.invoke_tool(context, toolkit="calculator", function="work", arguments={})
+
+    async with _client(dispatch, max_active_calls=1) as client:
+        try:
+            failed = await asyncio.wait_for(client.post("/mcp", json=_call(1)), 2)
+            assert _code(failed) == "tool_unavailable"
+            assert not finished.is_set()
+            assert _code(await client.post("/mcp", json=_call(2, arguments={"query": "probe"}))) == "busy"
+            release.set()
+            await _wait(finished)
+            await gateway_toolkits.drain_gateway_tool_cleanup()
+            assert _code(await client.post("/mcp", json=_call(3, arguments={"query": "probe"}))) is None
+        finally:
+            release.set()
             await gateway_toolkits.drain_gateway_tool_cleanup()
 
 

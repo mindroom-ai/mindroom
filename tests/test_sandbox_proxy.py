@@ -1191,8 +1191,10 @@ async def test_a_cancelled_toolkit_function_call_returns_at_once_and_leaves_its_
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("returns_first", [0, 1], ids=["first-request-returns-first", "second-request-returns-first"])
 async def test_the_owner_of_a_cancelled_call_waits_for_every_request_its_nested_calls_started(
     monkeypatch: pytest.MonkeyPatch,
+    returns_first: int,
 ) -> None:
     """A waiting owner, such as a job's, returns from a cancelled call only after each nested request has returned."""
     starts, releases, respond = _blocking_requests(2)
@@ -1211,10 +1213,10 @@ async def test_the_owner_of_a_cancelled_call_waits_for_every_request_its_nested_
         for started in starts:
             await asyncio.to_thread(started.wait, 30)
         owner.cancel()
-        releases[0].set()
+        releases[returns_first].set()
         await asyncio.sleep(0.2)
-        waiting_on_second = not owner.done()
-        releases[1].set()
+        waiting_on_other = not owner.done()
+        releases[1 - returns_first].set()
         with contextlib.suppress(asyncio.CancelledError):
             async with asyncio.timeout(5):
                 await owner
@@ -1223,7 +1225,7 @@ async def test_the_owner_of_a_cancelled_call_waits_for_every_request_its_nested_
             release.set()
         restore()
 
-    assert waiting_on_second
+    assert waiting_on_other
     assert owner.cancelled()
 
 

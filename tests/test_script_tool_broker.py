@@ -1444,9 +1444,11 @@ async def test_cancelled_sync_tool_retains_cleanup_until_body_and_close_finish(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("returns_first", [0, 1], ids=["first-body-returns-first", "second-body-returns-first"])
 async def test_cancelled_call_keeps_its_toolkit_until_every_nested_body_returns(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    returns_first: int,
 ) -> None:
     """A tool that runs two synchronous bodies at once, as two calls through ``toolkit_functions`` do, keeps both."""
     entered = [threading.Event(), threading.Event()]
@@ -1488,16 +1490,16 @@ async def test_cancelled_call_keeps_its_toolkit_until_every_nested_body_returns(
 
     try:
         await asyncio.wait_for(broker.cancel_run(request.run_id), timeout=SETTLE_TIMEOUT_SECONDS)
-        releases[0].set()
-        close_started_before_second_returned = await asyncio.to_thread(close_started.wait, 0.2)
-        releases[1].set()
+        releases[returns_first].set()
+        close_started_before_other_returned = await asyncio.to_thread(close_started.wait, 0.2)
+        releases[1 - returns_first].set()
         close_did_start = await asyncio.to_thread(close_started.wait, SETTLE_TIMEOUT_SECONDS)
     finally:
         for release in releases:
             release.set()
     cleanup_drained = await drain_script_tool_cleanup(broker, timeout_seconds=SETTLE_TIMEOUT_SECONDS)
 
-    assert close_started_before_second_returned is False
+    assert close_started_before_other_returned is False
     assert close_did_start is True
     assert cleanup_drained is True
     await _assert_cleanup_forgotten(broker)
