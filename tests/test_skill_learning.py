@@ -31,7 +31,6 @@ from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
 from mindroom.constants import TURN_INTENT_RUN_METADATA_KEY, resolve_runtime_paths
 from mindroom.custom_tools.skill_manage import SkillManageTools
-from mindroom.history.types import HistoryScope
 from mindroom.llm.messages import Message
 from mindroom.llm.provider import (
     Capabilities,
@@ -245,9 +244,6 @@ def _seed(
 def _stored(session_id: str, *runs: RunRecord | TeamRunRecord) -> ConversationSession:
     """Return the agent session that holds ``runs``."""
     return ConversationSession(session_id=session_id, kind="agent", owner_id="mind", runs=list(runs))
-
-
-_MIND = HistoryScope(kind="agent", scope_id="mind")
 
 
 def _skills_root(config: Config, paths: RuntimePaths, identity: ToolExecutionIdentity | None = None) -> Path:

@@ -29,7 +29,7 @@ from mindroom.history.storage import (
     read_scope_seen_event_ids,
     read_scope_state,
 )
-from mindroom.history.types import HistoryScope, HistoryScopeState, ScopeSummary
+from mindroom.history.types import HistoryScope, HistoryScopeState, ScopeSummary, owner_scope
 from mindroom.llm.messages import Message
 from mindroom.llm.runs import RunRecord, TeamRunRecord
 from mindroom.matrix.identity import MatrixID
@@ -210,11 +210,7 @@ def _seeded_storage(
     """
     if session is not None:
         write_agno_database(AgnoTableNames(name).database_path(tmp_path / name), session, usage=False)
-    owner = (
-        HistoryScope(kind=session.kind, scope_id=session.owner_id)
-        if session is not None
-        else HistoryScope(kind="agent", scope_id=name)
-    )
+    owner = owner_scope(session) if session is not None else HistoryScope(kind="agent", scope_id=name)
     return create_state_storage(name, tmp_path / name, owner)
 
 

@@ -41,6 +41,7 @@ from mindroom.history.types import (
     HistoryScope,
     HistoryScopeState,
     ResolvedHistorySettings,
+    owner_scope,
 )
 from mindroom.hooks import (
     HookRegistry,
@@ -558,8 +559,7 @@ def compact_runs(
     summary: str,
 ) -> None:
     """Append one compaction chunk folding ``run_ids`` behind ``summary`` in ``session``'s scope, as compaction does."""
-    scope_key = HistoryScope(kind=session.kind, scope_id=session.owner_id).key
-    latest = summary_rows.latest_row(storage, session_id=session.session_id, scope_key=scope_key)
+    latest = summary_rows.latest_row(storage, session_id=session.session_id, scope_key=owner_scope(session).key)
     assert append_compaction_chunk(
         storage=storage,
         session=session,
