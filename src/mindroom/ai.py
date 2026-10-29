@@ -662,7 +662,7 @@ def _memory_conversation(
     if entity.memory_backend != "file" or not settings.replays_whole_history or not settings.automatic_compaction:
         return None
     session = scope_context.session
-    compaction = compaction_marker(session, scope_context.scope) if session is not None else (None, None)
+    compaction = compaction_marker(session) if session is not None else (None, None)
     return ConversationRef(scope_context.session_id, compaction)
 
 

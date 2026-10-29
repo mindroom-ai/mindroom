@@ -186,16 +186,15 @@ def current_summary_text(session: ConversationSession) -> str | None:
     return replayed_summary_text(session.summary.text) if session.summary is not None else None
 
 
-def compaction_marker(session: ConversationSession, scope: HistoryScope) -> tuple[str | None, str | None]:
-    """Identify what the scope's replayed history was last compacted into: its summary and newest native checkpoint.
+def compaction_marker(session: ConversationSession) -> tuple[str | None, str | None]:
+    """Identify what ``session``'s replayed history was last compacted into: its summary and newest native checkpoint.
 
     A changed marker means a compaction rewrote the history that requests replay.
     """
     checkpoint = next(
         (
             checkpoint_id
-            for run in reversed(session.runs)
-            if replays_in_scope(run, scope)
+            for run in reversed(scope_visible_runs(session))
             for message in reversed(run.messages)
             if (checkpoint_id := native_checkpoint_id(message)) is not None
         ),
