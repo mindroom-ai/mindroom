@@ -263,7 +263,7 @@ def _image_media_type(image: Image, data: bytes | None) -> str | None:
 
 def _image_block(image: Image, provider: str) -> dict[str, Any] | None:
     data = image.content
-    if image.filepath is not None and data is None:
+    if data is None and image.filepath is not None:
         data = read_media_bytes(image.filepath, kind="image", provider=provider)
         if data is None:
             # The file is empty, which its reader already logged.

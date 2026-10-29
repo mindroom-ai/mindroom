@@ -49,7 +49,7 @@ def _image_url(image: Image, provider: str) -> str | None:
 
 
 def chat_image_part(image: Image, *, provider: str) -> dict[str, Any] | None:
-    """Return a Chat Completions ``image_url`` part, or None for an image without a source."""
+    """Return a Chat Completions ``image_url`` part, or None for an empty file."""
     url = _image_url(image, provider)
     if url is None:
         return None
