@@ -559,6 +559,9 @@ _BILLING_ERROR_TYPE = "billing_error"
 # specified API usage limits" or "You have reached your specified workspace API usage limits" for a spend limit the
 # organization or a workspace set. No retry passes until the credit or the limit changes.
 _BILLING_STOP_WORDING = ("credit balance is too low", "you have reached your specified")
+# The ``error.details.error_code`` of the 429 ``rate_limit_error`` an organization gets once it reached its usage tier's
+# monthly spend cap, with no ``retry-after`` header: no retry passes before the next month or a higher tier.
+_SPEND_CAP_CODE = "enforced_spend_limit_reached"
 
 
 def _progress(event: Any) -> StreamProgress:  # noqa: ANN401 - SDK stream event
@@ -606,24 +609,34 @@ def _provider_error(error: Exception, *, provider: str) -> ProviderError:
 
 @dataclass(frozen=True, slots=True)
 class _ErrorBody:
-    """The ``error`` object of an error response or a stream's ``error`` event, ``{"type": "error", "error": {...}}``."""
+    """The ``error`` object of an error response or a stream's ``error`` event, ``{"type": "error", "error": {...}}``.
+
+    ``code`` is the ``details.error_code`` that tells apart failures sharing a type.
+    """
 
     type: str | None
     message: str | None
+    code: str | None
 
     @classmethod
     def of(cls, body: object) -> _ErrorBody:
         error = as_dict((as_dict(body) or {}).get("error")) or {}
-        error_type, message = error.get("type"), error.get("message")
+        details = as_dict(error.get("details")) or {}
+        error_type, message, code = error.get("type"), error.get("message"), details.get("error_code")
         return cls(
             type=error_type if isinstance(error_type, str) else None,
             message=message if isinstance(message, str) else None,
+            code=code if isinstance(code, str) else None,
         )
 
     def stops_on_billing(self) -> bool:
         """Return whether the organization's billing refused the request, which no retry passes until it changes."""
         lowered = (self.message or "").casefold()
-        return self.type == _BILLING_ERROR_TYPE or any(wording in lowered for wording in _BILLING_STOP_WORDING)
+        return (
+            self.type == _BILLING_ERROR_TYPE
+            or self.code == _SPEND_CAP_CODE
+            or any(wording in lowered for wording in _BILLING_STOP_WORDING)
+        )
 
 
 def _output_event(event: object) -> TextDelta | ReasoningDelta | ToolCallReady | None:

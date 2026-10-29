@@ -437,6 +437,21 @@ _CLAUDE_CREDIT_TOO_LOW = (
     "Your credit balance is too low to access the Anthropic API. Please go to Plans & Billing to upgrade or purchase "
     "credits."
 )
+# Anthropic's 429 once the organization reached its usage tier's monthly spend cap, as its rate-limit docs show it, and
+# without the ``retry-after`` header the docs say it never carries.
+_CLAUDE_SPEND_CAP = (
+    "You have reached your API usage limits: your organization has crossed its monthly API usage threshold, set based "
+    "on your organization's API tier. You will regain access on 2026-09-01 at 00:00 UTC."
+)
+_CLAUDE_SPEND_CAP_BODY = {
+    "type": "error",
+    "error": {
+        "type": "rate_limit_error",
+        "message": _CLAUDE_SPEND_CAP,
+        "details": {"error_code": "enforced_spend_limit_reached"},
+    },
+    "request_id": "req_018EeWyXxfu5pfWkrYcMdjWG",
+}
 _CLAUDE_CASES = [
     _Case(
         "http_429",
@@ -548,6 +563,15 @@ _CLAUDE_CASES = [
         _claude_status(400, "invalid_request_error", "You have reached your specified workspace API usage limits."),
         ProviderError,
         f"{ERROR}You have reached your specified workspace API usage limits.",
+        1,
+        code=QUOTA_EXHAUSTED,
+    ),
+    # A reached spend cap is a rate-limit error by its type, and only its code tells it apart from a throttle.
+    _Case(
+        "http_429_spend_cap",
+        _json(429, _CLAUDE_SPEND_CAP_BODY),
+        ProviderError,
+        f"{ERROR}{_CLAUDE_SPEND_CAP}",
         1,
         code=QUOTA_EXHAUSTED,
     ),
