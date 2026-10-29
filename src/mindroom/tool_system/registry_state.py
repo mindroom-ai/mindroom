@@ -14,7 +14,6 @@ from mindroom.tool_system import plugin_imports
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterable, Iterator, Mapping
     from contextlib import AbstractContextManager
-    from pathlib import Path
     from types import ModuleType
 
     from mindroom.tool_system.agno_toolkits import Toolkit
@@ -41,7 +40,7 @@ class _ToolRegistrySnapshot:
     metadata: dict[str, ToolMetadata]
     builtin_registry: dict[str, Callable[[], type[Toolkit]]]
     builtin_metadata: dict[str, ToolMetadata]
-    module_import_cache: dict[Path, plugin_imports._ModuleCacheEntry]
+    module_import_cache: dict[str, plugin_imports._ModuleCacheEntry]
     plugin_tool_metadata_by_module: dict[str, dict[str, ToolMetadata]]
     plugin_modules: dict[str, ModuleType]
 

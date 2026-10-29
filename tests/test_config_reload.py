@@ -60,6 +60,7 @@ from tests.bot_helpers import make_test_agent_bot
 from tests.conftest import (
     TEST_PASSWORD,
     bind_runtime_paths,
+    cached_plugin_module,
     initialize_from_config_file,
     install_bots,
     install_send_response_mock,
@@ -1062,7 +1063,7 @@ async def test_reload_plugins_now_deactivates_broken_plugin_after_failure(tmp_pa
         assert initial.active_plugin_names == ("broken-reload",)
         assert len(orchestrator.hook_registry.hooks_for(EVENT_MESSAGE_RECEIVED)) == 1
 
-        hooks_module = plugin_module._MODULE_IMPORT_CACHE[hooks_path].module
+        hooks_module = cached_plugin_module(hooks_path)
         hooks_module._AUTO_POKE_TASK = shared_task
 
         hooks_path.unlink()
@@ -1574,8 +1575,8 @@ async def test_update_config_cancels_tasks_for_removed_plugins(
         orchestrator = _MultiAgentOrchestrator(runtime_paths=orchestrator_runtime_paths(tmp_path))
         await initialize_from_config_file(orchestrator)
 
-        hooks_module = plugin_module._MODULE_IMPORT_CACHE[hooks_path.resolve()].module
-        package_root = plugin_module._MODULE_IMPORT_CACHE[hooks_path.resolve()].module_name.split(".", 1)[0]
+        hooks_module = cached_plugin_module(hooks_path.resolve())
+        package_root = hooks_module.__name__.split(".", 1)[0]
         hooks_module._AUTO_POKE_TASK = task
 
         _write_plugin_removal_test_config(tmp_path, with_plugin=False)
@@ -1584,7 +1585,10 @@ async def test_update_config_cancels_tasks_for_removed_plugins(
 
         assert updated is True
         assert task.cancelled()
-        assert hooks_path.resolve() not in plugin_module._MODULE_IMPORT_CACHE
+        assert all(
+            cached.module.__file__ != str(hooks_path.resolve())
+            for cached in plugin_module._MODULE_IMPORT_CACHE.values()
+        )
         assert not any(
             module_name == package_root or module_name.startswith(f"{package_root}.") for module_name in sys.modules
         )
@@ -1742,7 +1746,7 @@ async def test_update_config_serializes_live_plugin_reload_against_staged_plugin
     reload_task: asyncio.Task[PluginReloadResult] | None = None
     try:
         await orchestrator.reload_plugins_now(source="initial")
-        assert plugin_module._MODULE_IMPORT_CACHE[hooks_path.resolve()].module.VALUE == 1
+        assert cached_plugin_module(hooks_path.resolve()).VALUE == 1
 
         async def start_blocked_reload(*_args: object, **_kwargs: object) -> set[str]:
             nonlocal reload_task
@@ -1771,7 +1775,7 @@ async def test_update_config_serializes_live_plugin_reload_against_staged_plugin
         result = await reload_task
 
         assert result.active_plugin_names == ("demo", "other")
-        assert plugin_module._MODULE_IMPORT_CACHE[hooks_path.resolve()].module.VALUE == 2
+        assert cached_plugin_module(hooks_path.resolve()).VALUE == 2
     finally:
         if reload_task is not None:
             await asyncio.gather(reload_task, return_exceptions=True)

@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import re
 import sys
 from contextlib import contextmanager
 from pathlib import Path
@@ -26,7 +27,7 @@ from mindroom.tool_system.agent_tools import resolve_agent_tools
 from mindroom.tool_system.metadata import TOOL_METADATA, TOOL_REGISTRY, get_tool_by_name
 from mindroom.tool_system.plugins import get_configured_plugin_roots, load_plugins, reload_plugins
 from mindroom.tool_system.skills import get_plugin_skill_roots, set_plugin_skill_roots
-from tests.conftest import bind_runtime_paths, runtime_paths_for
+from tests.conftest import bind_runtime_paths, cached_plugin_module, runtime_paths_for
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
@@ -238,6 +239,12 @@ def _write_working_tool_plugin(plugin_root: Path, *, plugin_name: str, tool_name
     )
 
 
+def _bump_mtime(path: Path) -> None:
+    """Move a file's modification time forward, so an edit within the same timestamp tick still counts."""
+    mtime = path.stat().st_mtime + 10
+    os.utime(path, (mtime, mtime))
+
+
 @contextmanager
 def _preserved_plugin_loader_state(*, module_prefixes: tuple[str, ...] = ()) -> Iterator[None]:
     original_registry = TOOL_REGISTRY.copy()
@@ -441,6 +448,51 @@ def test_resolved_tool_metadata_for_runtime_does_not_mutate_live_registry(tmp_pa
         plugin_module._MODULE_IMPORT_CACHE.clear()
         plugin_module._MODULE_IMPORT_CACHE.update(original_module_cache)
         set_plugin_skill_roots(original_plugin_roots)
+
+
+def test_config_validation_reads_a_plugin_manifest_fixed_after_a_rejected_save(tmp_path: Path) -> None:
+    """A save rejected because the manifest names a missing tools file must pass once the manifest is fixed."""
+    plugin_root = tmp_path / "plugins" / "demo"
+    _write_working_tool_plugin(plugin_root, plugin_name="demo", tool_name="demo_tool")
+    manifest_path = plugin_root / "mindroom.plugin.json"
+    manifest_path.write_text(json.dumps({"name": "demo", "tools_module": "missing.py"}), encoding="utf-8")
+    runtime_paths = _minimal_runtime_paths(tmp_path)
+    data = {"plugins": ["./plugins/demo"]}
+
+    with _preserved_plugin_loader_state():
+        with pytest.raises(ConfigRuntimeValidationError, match="Plugin tools module not found"):
+            Config.validate_with_runtime(data, runtime_paths)
+
+        manifest_path.write_text(json.dumps({"name": "demo", "tools_module": "tools.py"}), encoding="utf-8")
+        _bump_mtime(manifest_path)
+
+        Config.validate_with_runtime(data, runtime_paths)
+
+
+def test_config_validation_reads_a_plugin_manifest_that_adds_a_tools_module(tmp_path: Path) -> None:
+    """Validation must see a tools module that a manifest edit adds to an already validated plugin."""
+    plugin_root = tmp_path / "plugins" / "demo"
+    _write_working_tool_plugin(plugin_root, plugin_name="demo", tool_name="demo_tool")
+    manifest_path = plugin_root / "mindroom.plugin.json"
+    manifest_path.write_text(json.dumps({"name": "demo"}), encoding="utf-8")
+    runtime_paths = _minimal_runtime_paths(tmp_path)
+    data = {
+        "models": {"default": {"provider": "openai", "id": "gpt-6-astra"}},
+        "router": {"model": "default"},
+        "agents": {"assistant": {"display_name": "Assistant", "role": "test"}},
+        "plugins": ["./plugins/demo"],
+    }
+
+    with _preserved_plugin_loader_state():
+        Config.validate_with_runtime(data, runtime_paths)
+
+        manifest_path.write_text(json.dumps({"name": "demo", "tools_module": "tools.py"}), encoding="utf-8")
+        _bump_mtime(manifest_path)
+        data["agents"]["assistant"]["tools"] = ["demo_tool"]
+
+        config = Config.validate_with_runtime(data, runtime_paths)
+
+    assert config.get_agent("assistant").tool_names == ["demo_tool"]
 
 
 def test_load_plugins_from_python_package(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1439,7 +1491,7 @@ def test_load_plugins_preserves_metadata_only_built_in_tools(tmp_path: Path) -> 
 
 
 def test_load_plugins_removes_stale_tools_when_enabled_plugin_changes_exports(tmp_path: Path) -> None:
-    """Picking up an edited enabled plugin should drop tool names it no longer registers."""
+    """Reloading an enabled plugin should drop tool names it no longer registers."""
     plugin_root = tmp_path / "plugins" / "demo"
     plugin_root.mkdir(parents=True)
     (plugin_root / "mindroom.plugin.json").write_text(
@@ -1502,7 +1554,6 @@ def test_load_plugins_removes_stale_tools_when_enabled_plugin_changes_exports(tm
         )
         stat_result = tools_path.stat()
         os.utime(tools_path, (stat_result.st_atime, stat_result.st_mtime + 1))
-        plugins_module.forget_edited_plugin_files()
 
         assert [plugin.name for plugin in load_plugins(config, runtime_paths_for(config))] == ["demo_plugin"]
         assert "old_tool" not in TOOL_REGISTRY
@@ -1653,7 +1704,7 @@ def test_load_plugins_rejects_duplicate_tool_names_within_one_plugin(tmp_path: P
 
 
 def test_load_plugins_preserves_tools_when_manifest_name_changes(tmp_path: Path) -> None:
-    """Picking up a manifest that changes only the plugin name should force a logical module reload."""
+    """Changing only the manifest plugin name should force a logical module reload."""
     plugin_root = tmp_path / "plugins" / "demo"
     plugin_root.mkdir(parents=True)
     manifest_path = plugin_root / "mindroom.plugin.json"
@@ -1701,7 +1752,6 @@ def test_load_plugins_preserves_tools_when_manifest_name_changes(tmp_path: Path)
         )
         stat_result = manifest_path.stat()
         os.utime(manifest_path, (stat_result.st_atime, stat_result.st_mtime + 1))
-        plugins_module.forget_edited_plugin_files()
 
         assert [plugin.name for plugin in load_plugins(config, runtime_paths_for(config))] == ["renamed_plugin"]
         assert "renamed_tool" in TOOL_REGISTRY
@@ -1732,6 +1782,46 @@ def test_load_plugins_preserves_tools_when_manifest_name_changes(tmp_path: Path)
         plugin_module._MODULE_IMPORT_CACHE.clear()
         plugin_module._MODULE_IMPORT_CACHE.update(original_module_cache)
         set_plugin_skill_roots(original_plugin_roots)
+
+
+def test_load_plugins_follows_a_manifest_that_moves_the_tools_module(tmp_path: Path) -> None:
+    """A load after a manifest edit that moves the tools module to another file must keep the plugin's tools."""
+    plugin_root = tmp_path / "plugins" / "demo"
+    _write_working_tool_plugin(plugin_root, plugin_name="demo", tool_name="moved_tool")
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text("agents: {}", encoding="utf-8")
+    config = _bind_runtime_paths(Config(plugins=["./plugins/demo"]), config_path)
+    runtime_paths = runtime_paths_for(config)
+
+    with _preserved_plugin_loader_state():
+        assert [plugin.name for plugin in load_plugins(config, runtime_paths)] == ["demo"]
+
+        (plugin_root / "tools.py").rename(plugin_root / "moved_tools.py")
+        manifest_path = plugin_root / "mindroom.plugin.json"
+        manifest_path.write_text(json.dumps({"name": "demo", "tools_module": "moved_tools.py"}), encoding="utf-8")
+        _bump_mtime(manifest_path)
+
+        assert [plugin.name for plugin in load_plugins(config, runtime_paths)] == ["demo"]
+        assert TOOL_REGISTRY["moved_tool"].__module__.endswith(".moved_tools")
+
+
+def test_load_plugins_reads_a_manifest_edited_after_a_discarded_staged_reload(tmp_path: Path) -> None:
+    """A manifest edit after a staged plugin reload that was never applied must reach the next load."""
+    plugin_root = tmp_path / "plugins" / "demo"
+    _write_working_tool_plugin(plugin_root, plugin_name="demo", tool_name="staged_tool")
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text("agents: {}", encoding="utf-8")
+    config = _bind_runtime_paths(Config(plugins=["./plugins/demo"]), config_path)
+    runtime_paths = runtime_paths_for(config)
+
+    with _preserved_plugin_loader_state():
+        plugins_module.prepare_plugin_reload(config, runtime_paths)
+
+        manifest_path = plugin_root / "mindroom.plugin.json"
+        manifest_path.write_text(json.dumps({"name": "renamed", "tools_module": "tools.py"}), encoding="utf-8")
+        _bump_mtime(manifest_path)
+
+        assert [plugin.name for plugin in load_plugins(config, runtime_paths)] == ["renamed"]
 
 
 def test_load_config_tolerates_missing_and_broken_plugins_on_startup(
@@ -2863,6 +2953,24 @@ def test_failed_nested_plugin_module_reload_preserves_other_owner(tmp_path: Path
         assert sys.modules[outer_module.__name__] is outer_module
 
 
+def test_nested_plugin_roots_reuse_each_owners_module_across_loads(tmp_path: Path) -> None:
+    """Loading one file under two nested plugin roots must not run it again on every load."""
+    config, runtime_paths, module_path = _nested_module_plugins(tmp_path, "hooks")
+    module_path = module_path.resolve()
+    module_names = (
+        plugin_module._module_name("outer", module_path.parent.parent, module_path),
+        plugin_module._module_name("inner", module_path.parent, module_path),
+    )
+
+    with _preserved_plugin_loader_state():
+        load_plugins(config, runtime_paths, skip_broken_plugins=False)
+        first_modules = [sys.modules[module_name] for module_name in module_names]
+
+        load_plugins(config, runtime_paths, skip_broken_plugins=False)
+
+        assert all(sys.modules[name] is module for name, module in zip(module_names, first_modules, strict=True))
+
+
 def test_load_plugins_reuses_same_module_when_tools_and_hooks_share_file(tmp_path: Path) -> None:
     """One shared tools/hooks file should be imported only once."""
     plugin_root = tmp_path / "plugins" / "same-file"
@@ -3119,10 +3227,8 @@ async def test_reload_plugins_cancels_module_global_tasks_once(tmp_path: Path) -
     try:
         reload_plugins(config, runtime_paths)
         hooks_path = (plugin_root / "hooks.py").resolve()
-        hooks_module = plugin_module._MODULE_IMPORT_CACHE[hooks_path].module
-        helper_module = sys.modules[
-            f"{plugin_module._MODULE_IMPORT_CACHE[hooks_path].module_name.rsplit('.', 1)[0]}.helper"
-        ]
+        hooks_module = cached_plugin_module(hooks_path)
+        helper_module = sys.modules[f"{hooks_module.__name__.rsplit('.', 1)[0]}.helper"]
         hooks_module._AUTO_POKE_TASK = shared_task
         hooks_module._snooze_tasks = {"shared": shared_task, "extra": extra_task}
         helper_module._AUTO_POKE_TASK = shared_task
@@ -3176,7 +3282,7 @@ async def test_reload_plugins_cancels_tasks_for_removed_plugins(tmp_path: Path) 
         assert initial.active_plugin_names == ("removed-task-plugin",)
 
         hooks_path = (plugin_root / "hooks.py").resolve()
-        hooks_module = plugin_module._MODULE_IMPORT_CACHE[hooks_path].module
+        hooks_module = cached_plugin_module(hooks_path)
         hooks_module._AUTO_POKE_TASK = task
 
         removed = reload_plugins(config_without_plugin, runtime_paths)
@@ -3199,13 +3305,10 @@ async def test_reload_plugins_cancels_tasks_for_removed_plugins(tmp_path: Path) 
                 sys.modules.pop(module_name, None)
 
 
-@pytest.mark.asyncio
-async def test_plugin_load_between_an_edit_and_its_reload_does_not_orphan_module_tasks(tmp_path: Path) -> None:
-    """An agent build that loads plugins between an edit and its reload must not orphan the edited module's tasks."""
-    plugin_root = tmp_path / "plugins" / "edited-task-plugin"
+def _write_task_hooks_plugin(plugin_root: Path, *, plugin_name: str) -> Path:
     plugin_root.mkdir(parents=True)
     (plugin_root / "mindroom.plugin.json").write_text(
-        json.dumps({"name": "edited-task-plugin", "hooks_module": "hooks.py", "skills": []}),
+        json.dumps({"name": plugin_name, "hooks_module": "hooks.py", "skills": []}),
         encoding="utf-8",
     )
     hooks_path = (plugin_root / "hooks.py").resolve()
@@ -3219,6 +3322,19 @@ async def test_plugin_load_between_an_edit_and_its_reload_does_not_orphan_module
         "    del ctx\n",
         encoding="utf-8",
     )
+    return hooks_path
+
+
+def _set_hooks_version(hooks_path: Path, version: int) -> None:
+    source = hooks_path.read_text(encoding="utf-8")
+    hooks_path.write_text(re.sub(r"VERSION = \d+", f"VERSION = {version}", source), encoding="utf-8")
+    _bump_mtime(hooks_path)
+
+
+@pytest.mark.asyncio
+async def test_plugin_load_between_an_edit_and_its_reload_does_not_orphan_module_tasks(tmp_path: Path) -> None:
+    """An agent build that runs an edited plugin file before its reload must leave the replaced module's tasks to that reload."""
+    hooks_path = _write_task_hooks_plugin(tmp_path / "plugins" / "edited-task-plugin", plugin_name="edited-task-plugin")
     config_path = tmp_path / "config.yaml"
     config_path.write_text("agents: {}", encoding="utf-8")
     config = _bind_runtime_paths(Config(plugins=["./plugins/edited-task-plugin"]), config_path)
@@ -3228,24 +3344,86 @@ async def test_plugin_load_between_an_edit_and_its_reload_does_not_orphan_module
     with _preserved_plugin_loader_state():
         try:
             reload_plugins(config, runtime_paths)
-            live_module = plugin_module._MODULE_IMPORT_CACHE[hooks_path].module
-            live_module._AUTO_POKE_TASK = task
-            hooks_path.write_text(
-                hooks_path.read_text(encoding="utf-8").replace("VERSION = 1", "VERSION = 2"),
-                encoding="utf-8",
-            )
-            mtime = hooks_path.stat().st_mtime + 10
-            os.utime(hooks_path, (mtime, mtime))
+            cached_plugin_module(hooks_path)._AUTO_POKE_TASK = task
+            _set_hooks_version(hooks_path, 2)
 
             load_plugins(config, runtime_paths)
-            assert plugin_module._MODULE_IMPORT_CACHE[hooks_path].module is live_module
+            assert cached_plugin_module(hooks_path).VERSION == 2
 
             result = reload_plugins(config, runtime_paths)
             await asyncio.sleep(0)
 
             assert result.cancelled_task_count == 1
             assert task.cancelled()
-            assert plugin_module._MODULE_IMPORT_CACHE[hooks_path].module.VERSION == 2
+            assert cached_plugin_module(hooks_path).VERSION == 2
+            assert all(not cached.replaced_modules for cached in plugin_module._MODULE_IMPORT_CACHE.values())
+        finally:
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+async def test_plugin_rename_between_an_edit_and_its_reload_does_not_orphan_module_tasks(tmp_path: Path) -> None:
+    """A load that follows a manifest rename must leave the old module's tasks and imports to the next reload."""
+    plugin_root = tmp_path / "plugins" / "renamed-task-plugin"
+    hooks_path = _write_task_hooks_plugin(plugin_root, plugin_name="old-name")
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text("agents: {}", encoding="utf-8")
+    config = _bind_runtime_paths(Config(plugins=["./plugins/renamed-task-plugin"]), config_path)
+    runtime_paths = runtime_paths_for(config)
+
+    task = asyncio.create_task(asyncio.Event().wait())
+    with _preserved_plugin_loader_state():
+        try:
+            reload_plugins(config, runtime_paths)
+            old_module = cached_plugin_module(hooks_path)
+            old_module._AUTO_POKE_TASK = task
+            manifest_path = plugin_root / "mindroom.plugin.json"
+            manifest_path.write_text(
+                json.dumps({"name": "new-name", "hooks_module": "hooks.py", "skills": []}),
+                encoding="utf-8",
+            )
+            _bump_mtime(manifest_path)
+
+            assert [plugin.name for plugin in load_plugins(config, runtime_paths)] == ["new-name"]
+
+            result = reload_plugins(config, runtime_paths)
+            await asyncio.sleep(0)
+
+            assert result.cancelled_task_count == 1
+            assert task.cancelled()
+            assert old_module.__name__ not in sys.modules
+            assert cached_plugin_module(hooks_path).__name__ != old_module.__name__
+        finally:
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+async def test_loads_between_reloads_keep_only_the_replaced_modules_a_reload_may_need(tmp_path: Path) -> None:
+    """Edits without a reload keep the first replaced module and those still running a task, not every version."""
+    hooks_path = _write_task_hooks_plugin(tmp_path / "plugins" / "edited-task-plugin", plugin_name="edited-task-plugin")
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text("agents: {}", encoding="utf-8")
+    config = _bind_runtime_paths(Config(plugins=["./plugins/edited-task-plugin"]), config_path)
+    runtime_paths = runtime_paths_for(config)
+
+    task = asyncio.create_task(asyncio.Event().wait())
+    with _preserved_plugin_loader_state():
+        try:
+            load_plugins(config, runtime_paths)
+            first_module = cached_plugin_module(hooks_path)
+            _set_hooks_version(hooks_path, 2)
+            load_plugins(config, runtime_paths)
+            busy_module = cached_plugin_module(hooks_path)
+            busy_module._AUTO_POKE_TASK = task
+            for version in (3, 4, 5):
+                _set_hooks_version(hooks_path, version)
+                load_plugins(config, runtime_paths)
+
+            (cached,) = plugin_module._MODULE_IMPORT_CACHE.values()
+            assert cached.module.VERSION == 5
+            assert cached.replaced_modules == (first_module, busy_module)
         finally:
             task.cancel()
             await asyncio.gather(task, return_exceptions=True)

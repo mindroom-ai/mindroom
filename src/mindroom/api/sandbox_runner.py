@@ -373,11 +373,7 @@ def _ensure_registry_loaded_with_config(runtime_paths: RuntimePaths, config: Con
 
     Used at startup, for each request, and by the subprocess worker so that
     plugin tools are registered even in fresh processes.
-    A runner has no plugin reload, so it picks up plugin edits by forgetting edited files before each load.
     """
-    from mindroom.tool_system.plugins import forget_edited_plugin_files  # noqa: PLC0415
-
-    forget_edited_plugin_files()
     ensure_tool_registry_loaded(runtime_paths, config)
 
 
