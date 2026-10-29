@@ -1531,7 +1531,7 @@ def test_the_dashboard_list_shows_an_edited_personal_name(test_client: TestClien
     config_data = yaml.safe_load(temp_config_file.read_text())
     config_data["personal_agents"] = {"mind": {"agent": {"display_name": "{user_display_name}'s Mind"}}}
     temp_config_file.write_text(yaml.dump(config_data))
-    assert config_lifecycle.load_config_into_app(runtime_paths, main.app)
+    assert config_lifecycle.load_config_into_app(runtime_paths, main.app).loaded
 
     response = test_client.get("/api/config/personal-agents")
 

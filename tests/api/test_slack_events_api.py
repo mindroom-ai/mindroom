@@ -104,7 +104,7 @@ def events_api(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[Even
     persist_entity_accounts(Config.model_validate(data), paths)
     install_slack_state(paths)
     api_main.initialize_api_app(api_main.app, paths)
-    assert config_lifecycle.load_config_into_app(paths, api_main.app) is True
+    assert config_lifecycle.load_config_into_app(paths, api_main.app).loaded
     slack = FakeSlack(answers={"auth.test": AUTH_TEST}, users={SLACK_IDS["ada"]: slack_user("ada")})
     matrix = FakeMatrix()
     monkeypatch.setattr(turns, "send_matrix_message", matrix.send)
