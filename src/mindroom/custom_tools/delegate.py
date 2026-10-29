@@ -56,10 +56,10 @@ class DelegateTools(Toolkit):
         delegate_to: list[str],
         runtime_paths: RuntimePaths,
         config: Config,
+        workspace_root: Path,
         execution_identity: ToolExecutionIdentity | None = None,
         delegation_depth: int = 0,
         refresh_scheduler: KnowledgeRefreshScheduler | None = None,
-        workspace_root: Path | None = None,
         persona: SubagentPersona | None = None,
     ) -> None:
         self._agent_name = agent_name
@@ -186,7 +186,7 @@ class DelegateTools(Toolkit):
         )
 
     def _profile_listing(self) -> str:
-        listing = render_profile_listing(list_profiles(self._workspace_root)) if self._workspace_root else ""
+        listing = render_profile_listing(list_profiles(self._workspace_root))
         return f"Saved profiles:\n{listing}\n" if listing else ""
 
     async def run_subagent(
@@ -232,7 +232,7 @@ class DelegateTools(Toolkit):
             profile=profile,
             model=model,
             minimal=minimal,
-            workspace_root=self._workspace_root,
+            workspace_root=lambda: self._workspace_root,
             # The copy runs one level deeper, where delegate may no longer be offered.
             available_toolkits=lambda: caller_toolkit_names(
                 self._agent_name,

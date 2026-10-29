@@ -84,7 +84,7 @@ def has_personal_slack(config: Config, agent_name: str) -> bool:
     agent = config.agents.get(agent_name)
     return (
         agent is not None
-        and _SLACK_TOOL_NAME in config.resolve_entity(agent_name).available_tools
+        and _SLACK_TOOL_NAME in config.resolve_agent(agent_name).tools.tool_names
         and not _slack_overrides(agent).get("channels")
     )
 
@@ -104,7 +104,7 @@ def _check_channels(path: str, channels: object) -> None:
 
 def _effective_write(config: Config, name: str) -> object:
     """Return the `write` the agent's `slack` tool runs with: its own override over any from `defaults.tools`."""
-    entries = config.resolve_entity(name).authored_tool_configs
+    entries = config.resolve_agent(name).tools.authored
     overrides = next((entry.tool_config_overrides for entry in entries if entry.name == _SLACK_TOOL_NAME), {})
     return overrides.get("write", True)
 

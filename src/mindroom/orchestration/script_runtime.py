@@ -26,6 +26,7 @@ from mindroom.custom_tools.script import bind_script_run_manager
 from mindroom.logging_config import get_logger
 from mindroom.message_target import MessageTarget
 from mindroom.response_activity import ActiveScriptRunInfo
+from mindroom.runtime_resolution import resolve_agent_execution
 from mindroom.script_runs.broker import ScriptRuntimeWorkerAuthority, ScriptToolBroker, drain_script_tool_cleanup
 from mindroom.script_runs.manager import (
     ScriptRunManager,
@@ -51,7 +52,6 @@ from mindroom.script_runs.recovery import script_process_authority, verified_scr
 from mindroom.script_runs.store import ScriptRunStore, ScriptRunStoreError
 from mindroom.script_runs.worker_client import ScriptWorkerClient, ScriptWorkerError
 from mindroom.tool_system.worker_routing import (
-    build_agent_toolkit_worker_target,
     parse_tool_execution_identity_payload,
     worker_log_id,
 )
@@ -281,18 +281,15 @@ class _LiveScriptRuntimeResolver:
                     None,
                 )
                 worker_id = None if worker is None else worker.worker_id
-        config = context.current_config
-        agent_config = config.get_agent(context.agent_name)
-        worker_target = build_agent_toolkit_worker_target(
-            config.resolve_entity(context.agent_name).execution_scope,
+        worker_target = resolve_agent_execution(
             context.agent_name,
-            is_private=agent_config.private is not None,
+            context.current_config,
+            context.runtime_paths,
             execution_identity=parse_tool_execution_identity_payload(
                 run.execution_identity,
                 error_prefix="Background script execution_identity",
             ),
-            runtime_paths=context.runtime_paths,
-        )
+        ).worker_target
         return ScriptRuntimeWorkerAuthority(
             worker_id=worker_id,
             local_unsafe=run.local_unsafe,
@@ -1272,7 +1269,7 @@ def _agent_isolation_changed(current: AgentConfig, updated: AgentConfig) -> bool
 
 def _agent_has_script_tool(config: Config, agent_name: str) -> bool:
     """Return whether one agent's effective tool surface includes script controls."""
-    return any(entry.name == "script" for entry in config.resolve_entity(agent_name).tool_configs)
+    return "script" in config.resolve_agent(agent_name).tools.tool_names
 
 
 def _reload_reason_for(

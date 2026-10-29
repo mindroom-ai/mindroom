@@ -84,8 +84,8 @@ def test_workspace_tool_uses_its_own_chat_login_link(tmp_path: Path) -> None:
     """An additional tool must never reuse the default account's login or functions."""
     config, paths = _plugin(tmp_path)
     with isolated_plugin_runtime(config, paths):
-        tool = get_tool_by_name("secondary_gmail", paths, worker_target=None, disable_sandbox_proxy=True)
-        existing = get_tool_by_name("gmail", paths, worker_target=None, disable_sandbox_proxy=True)
+        tool = get_tool_by_name("secondary_gmail", paths, worker_target=None, runs_in_worker=False)
+        existing = get_tool_by_name("gmail", paths, worker_target=None, runs_in_worker=False)
         assert "secondary_get_latest_emails" in tool.functions
         assert "get_latest_emails" not in tool.functions
         assert "get_latest_emails" in existing.functions
@@ -200,7 +200,7 @@ def test_workspace_tool_filters_use_visible_names(tmp_path: Path, service: str) 
             name,
             paths,
             worker_target=None,
-            disable_sandbox_proxy=True,
+            runs_in_worker=False,
             tool_config_overrides={"include_tools": [visible]},
         )
         assert set(tool.functions) == {visible}
@@ -215,7 +215,7 @@ def test_workspace_tools_ignore_global_service_account(tmp_path: Path, service: 
     config, paths = _plugin(tmp_path)
     paths = replace(paths, process_env={**paths.process_env, "GOOGLE_SERVICE_ACCOUNT_FILE": "/absent/service.json"})
     with isolated_plugin_runtime(config, paths):
-        tool = get_tool_by_name(f"secondary_{service}", paths, worker_target=None, disable_sandbox_proxy=True)
+        tool = get_tool_by_name(f"secondary_{service}", paths, worker_target=None, runs_in_worker=False)
         assert tool._should_fallback_to_original_auth() is False
         # The real entrypoint must return a connection instruction before touching Google.
         function_name, args = {
@@ -249,7 +249,7 @@ def test_registration_and_second_account_preserve_existing_connection(tmp_path: 
     publish_oauth_credentials(original, credentials, credentials_manager=manager, worker_target=None)
     before = load_oauth_credentials_snapshot_sync(original_context)
     with isolated_plugin_runtime(config, paths):
-        other = get_tool_by_name("secondary_gmail", paths, worker_target=None, disable_sandbox_proxy=True)
+        other = get_tool_by_name("secondary_gmail", paths, worker_target=None, runs_in_worker=False)
         assert other.creds is None
         provider = load_oauth_providers(config, paths)["secondary_google_gmail"]
         publish_oauth_credentials(
@@ -258,7 +258,7 @@ def test_registration_and_second_account_preserve_existing_connection(tmp_path: 
             credentials_manager=manager,
             worker_target=None,
         )
-        original_tool = get_tool_by_name("gmail", paths, worker_target=None, disable_sandbox_proxy=True)
+        original_tool = get_tool_by_name("gmail", paths, worker_target=None, runs_in_worker=False)
         assert original_tool.creds.token == "original-access"  # noqa: S105
         assert load_oauth_credentials_snapshot_sync(original_context) == before
 

@@ -48,7 +48,7 @@ def test_media_model_defaults_reach_real_tool_instances(
         tool_name,
         runtime_paths,
         credential_overrides={"api_key": "test-key"},
-        disable_sandbox_proxy=True,
+        runs_in_worker=False,
         worker_target=None,
     )
 
@@ -73,7 +73,7 @@ def test_media_model_defaults_preserve_configured_override_precedence(
         runtime_paths,
         credential_overrides={"api_key": "test-key", "model": "saved-custom-model"},
         tool_config_overrides={"model": authored_model} if authored_model else None,
-        disable_sandbox_proxy=True,
+        runs_in_worker=False,
         worker_target=None,
     )
 
@@ -95,7 +95,7 @@ def test_media_model_inherit_preserves_saved_or_current_default(
         runtime_paths,
         credential_overrides=credentials,
         tool_config_overrides={"model": _AUTHORED_OVERRIDE_INHERIT},
-        disable_sandbox_proxy=True,
+        runs_in_worker=False,
         worker_target=None,
     )
 

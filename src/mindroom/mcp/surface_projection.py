@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING
 
 from agno.tools.function import Function
 
+from mindroom.config.resolution import agent_policy
 from mindroom.logging_config import get_logger
 from mindroom.mcp.config import mcp_oauth_bridge_function_names
 from mindroom.mcp.function_surface import (
@@ -16,8 +17,8 @@ from mindroom.mcp.function_surface import (
     analyze_mcp_function_collisions,
 )
 from mindroom.mcp.registry import mcp_server_id_from_tool_name, mcp_tool_name
+from mindroom.tool_system.agent_tools import resolve_agent_tools
 from mindroom.tool_system.catalog import TOOL_METADATA, ensure_tool_registry_loaded, get_tool_by_name
-from mindroom.tool_system.dynamic_toolkits import visible_tool_surface
 from mindroom.tool_system.filters import tool_name_allowed
 
 if TYPE_CHECKING:
@@ -124,13 +125,11 @@ def scoped_oauth_state_has_configured_agent(
 
 def _configured_tool_configs(context: MCPFunctionSurfaceContext, agent_name: str) -> tuple[EffectiveToolConfig, ...]:
     """Return one agent's eager tool configs; agent builds hide MCP functions that collide with deferred ones."""
-    return visible_tool_surface(
-        agent_name=agent_name,
-        config=context.config,
-        deferred_tools=(),
-        enable_dynamic_tools_manager=True,
-        include_matrix_room_runtime_tools=True,
-    ).runtime_tool_configs
+    return resolve_agent_tools(context.config, agent_name).candidates(
+        deferred=(),
+        matrix_room_tools=True,
+        portable_search=True,
+    )
 
 
 def _mcp_server_id_from_tool_config_name(
@@ -161,17 +160,10 @@ def _partition_tool_configs(
     return local_tool_configs, {server_id: tuple(configs) for server_id, configs in mcp_tool_configs.items()}
 
 
-def _metadata_only_tool_function_names(
-    tool_name: str,
-    *,
-    config: Config,
-    agent_name: str,
-) -> set[str]:
+def _metadata_only_tool_function_names(tool_name: str) -> set[str]:
     """Return provider-visible names for context-built tools declared in metadata."""
     metadata = TOOL_METADATA.get(tool_name)
     if metadata is None or metadata.factory is not None:
-        return set()
-    if tool_name == "memory" and config.resolve_entity(agent_name).memory_backend == "none":
         return set()
     return set(metadata.function_names)
 
@@ -202,12 +194,7 @@ def _configured_function_surface(
         # Local names only collide with this agent's MCP functions; building toolkits can auto-install deps.
         return set(), {}
     metadata_function_names = {
-        tool_config.name: _metadata_only_tool_function_names(
-            tool_config.name,
-            config=context.config,
-            agent_name=agent_name,
-        )
-        for tool_config in local_tool_configs
+        tool_config.name: _metadata_only_tool_function_names(tool_config.name) for tool_config in local_tool_configs
     }
     function_names = {function_name for names in metadata_function_names.values() for function_name in names}
     for tool_config in sorted(local_tool_configs, key=lambda entry: entry.name):
@@ -242,7 +229,7 @@ def _agent_function_surface_snapshot(
     configured_surface: tuple[set[str], dict[str, tuple[EffectiveToolConfig, ...]]],
 ) -> MCPFunctionSurfaceSnapshot:
     """Snapshot one configured agent and credential surface from supplied runtime state."""
-    agent_execution_scope = context.config.resolve_entity(agent_name).execution_scope
+    agent_execution_scope = agent_policy(context.config, agent_name).effective_execution_scope
     local_function_names, configured_mcp_tool_configs = configured_surface
     server_function_sources: list[tuple[str, tuple[frozenset[str], ...]]] = []
     for server_id in sorted(configured_mcp_tool_configs):

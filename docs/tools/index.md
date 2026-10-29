@@ -22,7 +22,6 @@ agents:
     display_name: Assistant
     role: A helpful assistant with file and web access
     model: sonnet
-    memory_backend: file  # gives the agent a workspace for file paths
     tools:
       - file
       - shell
@@ -50,7 +49,6 @@ defaults:
 
 agents:
   code:
-    memory_backend: file                 # gives the agent a workspace for file paths
     tools:
       - file                               # no inline settings
       - shell:                             # this agent only

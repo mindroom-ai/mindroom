@@ -22,6 +22,7 @@ from mindroom.mcp.registry import (
 )
 from mindroom.mcp.toolkit import bind_mcp_server_manager
 from mindroom.mcp.types import MCPServerState
+from mindroom.tool_system.agent_tools import resolve_agent_tools
 from mindroom.tool_system.declarations import SetupType, ToolManagedInitArg, ToolStatus
 from mindroom.tool_system.metadata import (
     TOOL_METADATA,
@@ -29,6 +30,7 @@ from mindroom.tool_system.metadata import (
     get_tool_by_name,
 )
 from mindroom.tool_system.plugins import load_plugins
+from mindroom.tool_system.sandbox_proxy import tool_placement
 from mindroom.tool_system.worker_routing import (
     ToolExecutionIdentity,
     resolve_worker_target,
@@ -74,6 +76,7 @@ def _runtime_paths(tmp_path: Path) -> RuntimePaths:
 def _config(tmp_path: Path) -> Config:
     return Config.validate_with_runtime(
         {
+            "models": {"default": {"provider": "openai", "id": "test-model"}},
             "mcp_servers": {
                 "demo": {
                     "transport": "stdio",
@@ -95,6 +98,7 @@ def _config(tmp_path: Path) -> Config:
 def _oauth_config(tmp_path: Path) -> Config:
     return Config.validate_with_runtime(
         {
+            "models": {"default": {"provider": "openai", "id": "test-model"}},
             "mcp_servers": {
                 "demo": {
                     "transport": "streamable-http",
@@ -128,6 +132,46 @@ def test_sync_mcp_tool_registry_registers_dynamic_tool(tmp_path: Path) -> None:
     assert tool_name in TOOL_METADATA
     assert tool_name in TOOL_REGISTRY
     assert TOOL_METADATA[tool_name].agent_override_fields is not None
+
+
+@pytest.mark.parametrize("worker_tools", [None, ["mcp_demo"]], ids=["mode-all", "explicit-worker-tools"])
+def test_mcp_toolkits_stay_in_the_primary_when_every_tool_routes(
+    tmp_path: Path,
+    worker_tools: list[str] | None,
+) -> None:
+    """Worker configs carry no MCP servers, so an agent's MCP toolkit runs in the primary however tools route."""
+    runtime_paths = resolve_runtime_paths(
+        config_path=tmp_path / "config.yaml",
+        storage_path=tmp_path,
+        process_env={"MINDROOM_SANDBOX_EXECUTION_MODE": "all", "MINDROOM_SANDBOX_PROXY_URL": "http://sandbox.invalid"},
+    )
+    agent: dict[str, object] = {"display_name": "Code", "role": "Write code", "tools": ["mcp_demo"]}
+    if worker_tools is not None:
+        agent["worker_tools"] = worker_tools
+    config = Config.validate_with_runtime(
+        {
+            "models": {"default": {"provider": "openai", "id": "test-model"}},
+            "mcp_servers": {"demo": {"transport": "stdio", "command": "npx"}},
+            "agents": {"code": agent},
+        },
+        runtime_paths,
+    )
+    sync_mcp_tool_registry(config)
+
+    assert resolve_agent_tools(config, "code").runs_in_worker("mcp_demo", tool_placement(runtime_paths)) is False
+
+
+def test_an_mcp_file_access_override_says_no_worker_can_isolate_it(tmp_path: Path) -> None:
+    """A stdio MCP server is unconfined and cannot run in a worker, so the refusal does not offer worker_tools."""
+    with pytest.raises(ConfigRuntimeValidationError, match="It cannot run in a worker"):
+        Config.validate_with_runtime(
+            {
+                "models": {"default": {"provider": "openai", "id": "test-model"}},
+                "mcp_servers": {"demo": {"transport": "stdio", "command": "npx"}},
+                "agents": {"code": {"display_name": "Code", "tools": [{"mcp_demo": {"file_access": "workspace"}}]}},
+            },
+            _runtime_paths(tmp_path),
+        )
 
 
 @pytest.mark.parametrize(
@@ -197,6 +241,7 @@ def test_sync_mcp_tool_registry_removes_deleted_servers(tmp_path: Path) -> None:
     sync_mcp_tool_registry(
         Config.validate_with_runtime(
             {
+                "models": {"default": {"provider": "openai", "id": "test-model"}},
                 "agents": {
                     "code": {
                         "display_name": "Code",
@@ -234,6 +279,7 @@ def test_sync_mcp_tool_registry_removes_untracked_dynamic_entries(tmp_path: Path
     sync_mcp_tool_registry(
         Config.validate_with_runtime(
             {
+                "models": {"default": {"provider": "openai", "id": "test-model"}},
                 "agents": {
                     "code": {
                         "display_name": "Code",
@@ -318,6 +364,7 @@ def test_config_validation_rejects_runtime_mcp_name_collisions(tmp_path: Path) -
     with pytest.raises(ConfigRuntimeValidationError, match="conflicts with an existing registered tool"):
         Config.validate_with_runtime(
             {
+                "models": {"default": {"provider": "openai", "id": "test-model"}},
                 "plugins": ["./plugins/demo"],
                 "mcp_servers": {
                     "demo": {
@@ -367,6 +414,7 @@ def test_config_validation_allows_non_mcp_prefixed_plugin_tools_on_isolating_sco
 
     config = Config.validate_with_runtime(
         {
+            "models": {"default": {"provider": "openai", "id": "test-model"}},
             "plugins": ["./plugins/demo"],
             "agents": {
                 "code": {
@@ -380,7 +428,7 @@ def test_config_validation_allows_non_mcp_prefixed_plugin_tools_on_isolating_sco
         _runtime_paths(tmp_path),
     )
 
-    assert "mcp_custom_plugin" in config.resolve_entity("code").available_tools
+    assert "mcp_custom_plugin" in config.resolve_agent("code").tools.tool_names
 
 
 def test_mcp_tool_registry_returns_empty_toolkit_without_bound_manager(tmp_path: Path) -> None:
@@ -440,6 +488,7 @@ def test_mcp_tool_registry_fails_when_required_server_unavailable(tmp_path: Path
     """A failed required MCP server keeps the old hard-fail toolkit behavior."""
     config = Config.validate_with_runtime(
         {
+            "models": {"default": {"provider": "openai", "id": "test-model"}},
             "mcp_servers": {
                 "demo": {
                     "transport": "stdio",

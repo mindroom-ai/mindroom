@@ -60,7 +60,7 @@ A caller with the [`delegate`](https://docs.mindroom.chat/tools/agent-orchestrat
 Use it for self-contained tasks where the child does not need its role, instructions, and tool guidance up front; it can still read them with `mindroom-agent context`.
 The option is offered only in Matrix conversations, only for allowed subagents that have the `shell` tool and meet the [deployment requirements](#deployment-requirements), and never while shell commands require approval.
 A minimal subagent cannot pause for approval, so approval-gated tools are hidden from it.
-A listed child whose shell permissions or workspace still rule out minimal mode fails with the reason and a hint to start a new subagent without minimal.
+A listed child whose shell permissions still rule out minimal mode fails with the reason and a hint to start a new subagent without minimal.
 A minimal [authored subagent](https://docs.mindroom.chat/tools/agent-orchestration/#authored-subagents) uses its authored prompt in place of the minimal prompt's identity line, keeps its workspace and `mindroom-agent` lines, and an explicit `tools` list for it must include `shell` or `shell.run_shell_command`.
 Its `mindroom-agent context` documents hold its own prompt, runtime guidance, and the skills it keeps, not the caller's configured role or instructions.
 
@@ -116,7 +116,7 @@ Use `--call-id UUID` to fix the call ID before submission; reusing an ID with th
 
 `context read` accepts only names returned by `context list` or by other commands, not filesystem paths.
 Large schemas return a context name for paged reading.
-Large tool results return a preview and a workspace file path holding the full output; for an agent without a workspace, they are shortened instead.
+Large tool results return a preview and a workspace file path holding the full output.
 Images, audio, and files are handled like ordinary response attachments.
 
 ## Exit codes
@@ -152,10 +152,7 @@ A pending approval still resumes after a restart once it is decided, but MindRoo
 
 Minimal Bash runs where the agent's ordinary shell runs.
 Every mode that uses `mindroom-agent` needs the `shell` tool on the agent and MindRoom running with its API server, not `--no-api`.
-Minimal mode and minimal subagents also need:
-
-- the shell's `run_shell_command` allowed;
-- an agent workspace, which `memory_backend: file` or a `private` agent provides.
+Minimal mode and minimal subagents also need the shell's `run_shell_command` allowed.
 
 `!mode <agent> minimal` lists every missing requirement at once.
 Set environment settings in the runtime's `.env` and restart MindRoom.

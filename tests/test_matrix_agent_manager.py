@@ -1570,6 +1570,7 @@ space_room_id: null
         mindroom_username = agent_username_localpart(colliding_entity_name, runtime_paths=runtime_paths)
         config = Config.validate_with_runtime(
             {
+                "models": {"default": {"provider": "openai", "id": "test-model"}},
                 "agents": agents,
                 "teams": teams,
                 "mindroom_user": {

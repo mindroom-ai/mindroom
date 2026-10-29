@@ -21,6 +21,7 @@ from mindroom.config.models import FileAccess
 from mindroom.constants import resolve_runtime_paths
 from mindroom.tool_system.media_transport import decode_media_result
 from mindroom.tool_system.tool_function import ToolValue
+from mindroom.tool_system.worker_routing import agent_workspace_root_path
 from mindroom.workers.protocol import WORKER_PROTOCOL_VERSION, ViewFileRequest
 
 TOKEN = "view-file-test-token"  # noqa: S105
@@ -197,20 +198,22 @@ async def test_view_file_endpoint_keeps_event_loop_responsive_during_decode(
 
 
 @pytest.mark.asyncio
-async def test_view_file_endpoint_prefers_prepared_worker_workspace(
+async def test_view_file_endpoint_reads_the_routing_agent_workspace_in_a_prepared_worker(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A routed public agent reads from its prepared worker rather than an absent local tool directory."""
+    """A routed public agent without file memory reads from its own workspace, not its prepared worker's default."""
     workspace = tmp_path / "prepared-worker" / "workspace"
     workspace.mkdir(parents=True)
-    data = _png_bytes()
-    (workspace / "plot.png").write_bytes(data)
     runtime_paths = resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path / "storage")
+    agent_workspace = agent_workspace_root_path(runtime_paths.storage_root, "writer")
+    agent_workspace.mkdir(parents=True)
+    data = _png_bytes()
+    (agent_workspace / "plot.png").write_bytes(data)
     app = FastAPI()
     app.state.sandbox_runner_context = sandbox_runner._SandboxRunnerContext(
         runtime_paths=runtime_paths,
-        config=Config(agents={}, models={}),
+        config=Config(agents={"writer": AgentConfig(display_name="Writer", memory_backend="none")}, models={}),
         runner_token=TOKEN,
     )
     monkeypatch.setattr(
@@ -222,11 +225,6 @@ async def test_view_file_endpoint_prefers_prepared_worker_workspace(
         sandbox_runner.sandbox_worker_prep,
         "prepare_worker_request",
         lambda **_kwargs: SimpleNamespace(base_dir=workspace),
-    )
-    monkeypatch.setattr(
-        sandbox_runner,
-        "resolve_agent_runtime",
-        lambda *_args, **_kwargs: SimpleNamespace(tool_base_dir=None),
     )
 
     response = await sandbox_runner.view_file_in_worker(

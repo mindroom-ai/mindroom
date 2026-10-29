@@ -94,7 +94,7 @@ def test_image_history_after_summary_does_not_repeat_compaction_for_encoded_byte
         runs=[_completed_run("recent", messages=[message])],
         summary=ScopeSummary(text="Earlier work is complete.", updated_at=datetime.now(UTC)),
     )
-    config, _ = _make_config(
+    config, runtime_paths = _make_config(
         tmp_path,
         defaults_compaction=CompactionConfig(reserve_tokens=1000, replay_window_tokens=10_000),
         models={"default": ModelConfig(provider="openai", id="gpt-6-astra", context_window=20_000)},
@@ -102,8 +102,9 @@ def test_image_history_after_summary_does_not_repeat_compaction_for_encoded_byte
     adapter = responses_adapter(tmp_path, store=True)
     resolved = resolve_entity_preparation_inputs(
         config=config,
+        runtime_paths=runtime_paths,
         entity_name="test_agent",
-        history_settings=config.resolve_entity("test_agent").history_settings,
+        history_settings=config.resolve_scope("test_agent").history_settings,
         static_prompt_tokens=100,
         active_model_name=None,
         active_context_window=None,
@@ -600,8 +601,9 @@ async def test_reply_preparation_sizes_and_fits_history_with_the_route_estimate(
     adapter = responses_adapter(tmp_path)
     inputs = resolve_entity_preparation_inputs(
         config=config,
+        runtime_paths=runtime_paths,
         entity_name="test_agent",
-        history_settings=config.resolve_entity("test_agent").history_settings,
+        history_settings=config.resolve_scope("test_agent").history_settings,
         static_prompt_tokens=0,
         active_model_name=None,
         active_context_window=None,

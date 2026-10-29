@@ -22,6 +22,7 @@ from tests.delegation_helpers import ScriptedAgents, _delegate_runtime_context, 
 from tests.fakes.scripted_model import ScriptedModel, answer, calls, tool_call
 from tests.identity_helpers import persist_entity_accounts
 from tests.tool_job_helpers import run_built_turn, tool_job_runtime
+from tests.turn_model_helpers import turn_model
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -89,7 +90,7 @@ async def test_reserved_controls_run_without_approval_and_emit_plugin_hooks(
                 supports_native_tool_approval=True,
                 persist_runtime_state=False,
                 knowledge=None,
-                active_model_name=None,
+                model=turn_model(config, paths, "leader"),
             )
             response = await run_built_turn(
                 build,

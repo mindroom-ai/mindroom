@@ -1006,7 +1006,7 @@ def test_local_url_fetch_tools_do_not_contact_loopback_targets(
     toolkit = get_tool_by_name(
         tool_name,
         resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path / "storage"),
-        disable_sandbox_proxy=True,
+        runs_in_worker=False,
         worker_target=None,
     )
 
@@ -1613,7 +1613,7 @@ def test_searxng_include_tools_override_filters_registered_functions(tmp_path: P
         tool_config_overrides={
             "include_tools": ["search_web", "news_search", "image_search"],
         },
-        disable_sandbox_proxy=True,
+        runs_in_worker=False,
         worker_target=None,
     )
 
@@ -1632,7 +1632,7 @@ def test_searxng_empty_include_tools_override_filters_all_functions(tmp_path: Pa
         runtime_paths,
         credential_overrides={"host": "https://search.example.com"},
         tool_config_overrides={"include_tools": []},
-        disable_sandbox_proxy=True,
+        runs_in_worker=False,
         worker_target=None,
     )
 
@@ -1650,7 +1650,7 @@ def test_file_empty_exclude_patterns_override_reaches_constructor(tmp_path: Path
         "file",
         runtime_paths,
         tool_config_overrides={"exclude_patterns": []},
-        disable_sandbox_proxy=True,
+        runs_in_worker=False,
         worker_target=None,
     )
 
@@ -1671,7 +1671,7 @@ def test_script_integral_number_overrides_reach_integer_limits(tmp_path: Path) -
             "max_concurrent_runs": 3.0,
             "max_tool_calls_per_minute": 30.0,
         },
-        disable_sandbox_proxy=True,
+        runs_in_worker=False,
         worker_target=None,
     )
 
@@ -1703,7 +1703,7 @@ def test_stored_boolean_tool_config_reaches_constructor_as_boolean(
         "browser",
         runtime_paths,
         credential_overrides={"allow_private_networks": stored},
-        disable_sandbox_proxy=True,
+        runs_in_worker=False,
         worker_target=None,
     )
 
@@ -1723,7 +1723,7 @@ def test_stored_boolean_tool_config_rejects_non_boolean_values(tmp_path: Path, s
             "browser",
             runtime_paths,
             credential_overrides={"allow_private_networks": stored},
-            disable_sandbox_proxy=True,
+            runs_in_worker=False,
             worker_target=None,
         )
 
@@ -1739,7 +1739,7 @@ def test_custom_toolkit_exclude_tools_override_filters_async_functions(tmp_path:
         "scheduler",
         runtime_paths,
         tool_config_overrides={"exclude_tools": ["cancel_schedule"]},
-        disable_sandbox_proxy=True,
+        runs_in_worker=False,
         worker_target=None,
     )
 
@@ -1954,7 +1954,7 @@ def test_get_tool_by_name_rejects_invalid_mcp_assignment_overrides(tmp_path: Pat
                 "include_tools": ["echo"],
                 "exclude_tools": ["echo"],
             },
-            disable_sandbox_proxy=True,
+            runs_in_worker=False,
             worker_target=None,
         )
 
@@ -2182,7 +2182,7 @@ def test_get_tool_by_name_passes_agent_file_access(tmp_path: Path) -> None:
             runtime_paths,
             runtime_config=runtime_config,
             worker_target=worker_target,
-            disable_sandbox_proxy=True,
+            runs_in_worker=False,
         )
         assert isinstance(tool, FileAccessToolkit)
         return tool.file_access
@@ -2273,6 +2273,7 @@ def test_config_load_rejects_a_retired_add_instructions_setting(tmp_path: Path) 
     with pytest.raises(ConfigRuntimeValidationError) as exc_info:
         Config.validate_with_runtime(
             {
+                "models": {"default": {"provider": "openai", "id": "test-model"}},
                 "agents": {
                     "researcher": {
                         "display_name": "Researcher",

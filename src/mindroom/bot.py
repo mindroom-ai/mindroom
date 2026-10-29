@@ -23,6 +23,7 @@ from mindroom.approval.inbound import (
 from mindroom.approval.tool_approval import is_process_active_approval_card
 from mindroom.bot_room_lifecycle import BotRoomLifecycle, BotRoomLifecycleDeps
 from mindroom.bot_runtime_view import BotRuntimeState
+from mindroom.config.resolution import entity_timezone
 from mindroom.desktop.identity import DesktopIdentityError, controller_identity_for_live_bot
 from mindroom.desktop.pairing_receiver import register_desktop_pairing_receiver
 from mindroom.entity_resolution import entity_identity_registry, persisted_bot_user_ids
@@ -596,7 +597,7 @@ class AgentBot:
             dispatch_allowed_now=self._coalesced_dispatch_allowed_now,
             timestamp_formatter=lambda timestamp_ms: format_timestamp_ms(
                 timestamp_ms,
-                timezone=self.config.get_entity_timezone(self.agent_name),
+                timezone=entity_timezone(self.config, self.agent_name),
             ),
             on_dispatch_failure=self._retry_failed_coalesced_dispatch,
             on_undelivered_source=self._retry_pending_dispatch_source,
@@ -817,7 +818,7 @@ class AgentBot:
                 receipt_order=self._journal_dispatcher.receipt_order,
                 timestamp_formatter=lambda timestamp_ms: format_timestamp_ms(
                     timestamp_ms,
-                    timezone=self.config.get_entity_timezone(self.agent_name),
+                    timezone=entity_timezone(self.config, self.agent_name),
                 ),
                 reply_for_sources=self._reply_runtime.store.replies.for_sources,
                 later_human_message=self._later_human_message,

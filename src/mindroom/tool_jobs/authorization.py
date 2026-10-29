@@ -4,13 +4,13 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
-from mindroom.agent_policy import resolve_agent_policy_from_data
 from mindroom.config.knowledge_graph import KNOWLEDGE_GRAPH_EDIT_FUNCTIONS
+from mindroom.config.resolution import edits_knowledge_graph
 from mindroom.mcp.registry import mcp_server_id_from_tool_name
+from mindroom.tool_system.agent_tools import resolve_agent_tools, turn_room_flags
 from mindroom.tool_system.construction import get_toolkit_construction, tool_config_signature
-from mindroom.tool_system.dynamic_toolkits import visible_tool_surface
 from mindroom.tool_system.filters import tool_name_allowed
-from mindroom.tool_system.registry_state import TOOL_METADATA, tool_registry_origin
+from mindroom.tool_system.registry_state import tool_registry_origin
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
@@ -23,12 +23,8 @@ if TYPE_CHECKING:
 
 def authority_snapshot(config: Config, agent_name: str) -> dict[str, Any]:
     """Freeze the actor's execution scope and file access without constructing tools."""
-    policy = resolve_agent_policy_from_data(
-        agent_name,
-        config.agents[agent_name],
-        default_worker_scope=config.defaults.worker_scope,
-    )
-    return {"scope": policy.effective_execution_scope, "file_access": config.resolve_entity(agent_name).file_access}
+    agent = config.resolve_agent(agent_name)
+    return {"scope": agent.policy.effective_execution_scope, "file_access": agent.file_access}
 
 
 def toolkit_authority(snapshot: Mapping[str, Any], toolkit: Toolkit) -> dict[str, Any]:
@@ -70,43 +66,38 @@ def locally_allowed(
     construction = authority.get("construction")
     if not isinstance(construction, dict):
         return False
-    view = config.resolve_entity(owner.agent_name)
-    surface = visible_tool_surface(
-        agent_name=owner.agent_name,
-        config=config,
-        delegation_depth=depth,
-        enable_dynamic_tools_manager=True,
-        include_matrix_room_runtime_tools=owner.room_id is not None,
+    room_tools, matrix_room_tools = turn_room_flags(owner)
+    candidates = resolve_agent_tools(config, owner.agent_name).candidates(
+        depth=depth,
+        room_tools=room_tools,
+        matrix_room_tools=matrix_room_tools,
+        portable_search=True,
     )
     entry = next(
         (
             item
-            for item in surface.runtime_tool_configs
+            for item in candidates
             if (item.authored_name or item.name) == toolkit_name and item.name == construction.get("name")
         ),
         None,
     )
-    if entry is None or (entry.name == "memory" and view.memory_backend == "none"):
+    if entry is None:
         return False
     # Graph edits are functions of the knowledge_graph toolkit that only an agent allowed to edit its graph gets.
     edits_graph = entry.name == "knowledge_graph" and tool_name in KNOWLEDGE_GRAPH_EDIT_FUNCTIONS
-    if edits_graph and not config.agent_edits_knowledge_graph(owner.agent_name):
+    if edits_graph and not edits_knowledge_graph(config, owner.agent_name):
         return False
-    return _configured_tool_allowed(config, owner, entry, tool_name, origin, construction)
+    return _configured_tool_allowed(config, entry, tool_name, origin, construction)
 
 
 def _configured_tool_allowed(
     config: Config,
-    owner: ToolExecutionIdentity,
     entry: EffectiveToolConfig,
     tool_name: str,
     origin: dict[str, Any],
     construction: dict[str, Any],
 ) -> bool:
     if tool_registry_origin(entry.name) != construction.get("factory_origin"):
-        return False
-    metadata = TOOL_METADATA.get(entry.name)
-    if metadata is not None and metadata.requires_room_context and owner.room_id is None:
         return False
     server_id = mcp_server_id_from_tool_name(entry.name)
     authored_filter: dict[str, Any] = dict(entry.tool_config_overrides)

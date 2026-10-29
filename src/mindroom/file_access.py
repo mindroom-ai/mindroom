@@ -12,6 +12,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, BinaryIO
 
+from mindroom.config.resolution import file_access as resolved_file_access
 from mindroom.path_confinement import open_regular_file_within_root, resolve_path_within_root
 
 if TYPE_CHECKING:
@@ -54,7 +55,7 @@ def agent_file_access(config: Config | None, agent_name: str | None) -> FileAcce
     """Resolve one agent's file_access; without an agent the configured default applies, without config ``workspace``."""
     if config is None:
         return "workspace"
-    return config.resolve_entity(agent_name).file_access
+    return resolved_file_access(config, agent_name)
 
 
 def resolve_agent_file(

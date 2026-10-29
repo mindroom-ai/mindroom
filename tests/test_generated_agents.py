@@ -28,6 +28,7 @@ from mindroom.config.personal_agents import (
     read_personal_agent_roster,
     read_personal_agent_roster_file,
 )
+from mindroom.config.resolution import authored_tool_entries
 from mindroom.config.slack import slack_answering_agents
 from mindroom.matrix.state import MatrixState
 from mindroom.matrix.users import AgentMatrixUser
@@ -42,7 +43,7 @@ from mindroom.personal_agents import (
     provision_created_agent,
     update_generated_agent,
 )
-from mindroom.tool_system.dynamic_toolkits import visible_tool_surface
+from mindroom.tool_system.agent_tools import resolve_agent_tools
 from mindroom.workers.runtime import build_worker_launch_config
 from tests.conftest import test_runtime_paths
 
@@ -121,7 +122,7 @@ def test_chosen_tools_turn_defaults_off(tmp_path: Path) -> None:
     config = _config(tmp_path)
     data, _ = _generated_agent_data(config, "creator", GeneratedAgentEdits(tools=["calculator"]))
     child = _validated_child(data, tmp_path)
-    assert [entry.name for entry in child._get_agent_authored_tool_configs("child")] == ["calculator"]
+    assert [entry.name for entry in authored_tool_entries(child, "child")] == ["calculator"]
     assert child.tool_ceiling("child") == ("calculator",)
 
 
@@ -285,7 +286,7 @@ def _slack_creator() -> dict[str, Any]:
 
 
 def _slack_overrides(config: Config, agent_name: str) -> dict[str, Any]:
-    (entry,) = (entry for entry in config._get_agent_authored_tool_configs(agent_name) if entry.name == "slack")
+    (entry,) = (entry for entry in authored_tool_entries(config, agent_name) if entry.name == "slack")
     return entry.tool_config_overrides
 
 
@@ -300,7 +301,7 @@ def test_a_created_agent_loads_from_its_creator(tmp_path: Path) -> None:
     assert agent.display_name == "Research"
     assert agent.model == "default"
     assert agent.access.users == [OWNER, CO_OWNER]
-    assert [entry.name for entry in config._get_agent_authored_tool_configs("creator_research")] == ["shell"]
+    assert [entry.name for entry in authored_tool_entries(config, "creator_research")] == ["shell"]
     assert config.generated_agent("creator_research") == GeneratedAgentInfo(
         created=True,
         allowed_tools=("calculator", "shell"),
@@ -316,7 +317,7 @@ def test_personal_agent_edits_apply_at_load(tmp_path: Path) -> None:
     config = _load(tmp_path, _with_template(), entries=[_personal(edits=edits), _personal(CO_OWNER)])
     alice = config.agents["mind_alice"]
     assert alice.display_name == "Scout"
-    assert [entry.name for entry in config._get_agent_authored_tool_configs("mind_alice")] == ["calculator"]
+    assert [entry.name for entry in authored_tool_entries(config, "mind_alice")] == ["calculator"]
     # The owner may add back shell from defaults.tools, which the edit removed.
     assert config.tool_ceiling("mind_alice") == ("calculator", "shell")
     assert config.generated_agent("mind_alice") == GeneratedAgentInfo(
@@ -346,7 +347,7 @@ def test_a_created_agent_chooses_from_its_creators_granted_tools(tmp_path: Path)
             ),
         ],
     )
-    assert [entry.name for entry in config._get_agent_authored_tool_configs("mind_alice_research")] == ["shell"]
+    assert [entry.name for entry in authored_tool_entries(config, "mind_alice_research")] == ["shell"]
     assert config.tool_ceiling("mind_alice_research") == ("calculator", "shell")
 
 
@@ -358,10 +359,8 @@ def test_a_tool_that_brings_others_keeps_the_creators_settings_for_them(tmp_path
     edits = GeneratedAgentEdits(display_name="Research", tools=["matrix_message"])
     config = _load(tmp_path, data, created=[_created(edits=edits)])
     for name in ("creator", "creator_research"):
-        surface = visible_tool_surface(agent_name=name, config=config)
-        assert {entry.name: entry.tool_config_overrides for entry in surface.runtime_tool_configs}["attachments"] == (
-            restricted
-        )
+        candidates = resolve_agent_tools(config, name).candidates()
+        assert {entry.name: entry.tool_config_overrides for entry in candidates}["attachments"] == restricted
 
 
 def test_a_tool_the_creator_lost_is_dropped_at_load(tmp_path: Path) -> None:
@@ -373,7 +372,7 @@ def test_a_tool_the_creator_lost_is_dropped_at_load(tmp_path: Path) -> None:
     entry = _created(edits=GeneratedAgentEdits(display_name="Research", tools=["calculator", "shell"]))
     with capture_logs() as logs:
         config = _load(tmp_path, data, created=[entry])
-    assert [entry.name for entry in config._get_agent_authored_tool_configs("creator_research")] == ["calculator"]
+    assert [entry.name for entry in authored_tool_entries(config, "creator_research")] == ["calculator"]
     dropped = [log for log in logs if log["event"] == "generated_agent_tool_dropped"]
     assert [(log["agent_name"], log["tools"]) for log in dropped] == [("creator_research", ["shell"])]
 
@@ -640,7 +639,7 @@ async def test_a_tool_that_cannot_be_deferred_can_be_chosen(tmp_path: Path, tool
         reloaded = Config.validate_with_runtime(deepcopy(data), paths)
     assert "generated_agents_invalid" not in [log["event"] for log in logs]
     for name in ("creator_research", "creator_writer"):
-        assert tool in [entry.name for entry in reloaded._get_agent_authored_tool_configs(name)]
+        assert tool in [entry.name for entry in authored_tool_entries(reloaded, name)]
 
 
 @pytest.mark.asyncio
@@ -752,7 +751,7 @@ async def test_create_names_the_agent_after_its_creator_and_registers_it(tmp_pat
     ]
     reloaded = Config.validate_with_runtime(deepcopy(BASE), paths)
     assert reloaded.generated_agent("creator_research") is not None
-    assert [entry.name for entry in reloaded._get_agent_authored_tool_configs("creator_research")] == ["shell"]
+    assert [entry.name for entry in authored_tool_entries(reloaded, "creator_research")] == ["shell"]
 
 
 @pytest.mark.asyncio

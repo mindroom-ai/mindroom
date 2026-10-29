@@ -9,6 +9,7 @@ import pytest
 from mindroom.config.agent import AgentConfig, TeamConfig
 from mindroom.config.calls import CallsConfig, RealtimeCallProfile
 from mindroom.config.main import Config
+from mindroom.config.models import ModelConfig
 from mindroom.constants import ROUTER_AGENT_NAME, resolve_runtime_paths
 from mindroom.entity_resolution import (
     DuplicateManagedEntityIdentityError,
@@ -271,7 +272,10 @@ def test_entity_identity_registry_requires_prepared_entity_accounts(tmp_path: Pa
         process_env={},
     )
     config = Config.validate_with_runtime(
-        Config(agents={"general": AgentConfig(display_name="General", role="General agent")}).authored_model_dump(),
+        Config(
+            agents={"general": AgentConfig(display_name="General", role="General agent")},
+            models={"default": ModelConfig(provider="openai", id="test-model")},
+        ).authored_model_dump(),
         runtime_paths,
     )
 

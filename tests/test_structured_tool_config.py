@@ -12,6 +12,7 @@ import yaml
 from mindroom.config.main import load_config
 from mindroom.constants import resolve_runtime_paths
 from mindroom.credentials.manager import CredentialsManager
+from mindroom.tool_system.agent_tools import resolve_agent_tools
 from mindroom.tool_system.metadata import get_tool_by_name
 
 if TYPE_CHECKING:
@@ -35,12 +36,12 @@ def _configured_tool(tmp_path: Path, tool_name: str, overrides: dict[str, object
     )
     paths = resolve_runtime_paths(config_path=config_path, storage_path=tmp_path / "state", process_env={})
     config = load_config(paths)
-    entry = next(entry for entry in config.resolve_entity("research").tool_configs if entry.name == tool_name)
+    entry = next(entry for entry in resolve_agent_tools(config, "research").candidates() if entry.name == tool_name)
     return get_tool_by_name(
         tool_name,
         paths,
         worker_target=None,
-        disable_sandbox_proxy=True,
+        runs_in_worker=False,
         credentials_manager=CredentialsManager(tmp_path / "credentials"),
         credential_overrides={"api_key": "synthetic-search-key"} if tool_name != "searxng" else None,
         tool_config_overrides=entry.tool_config_overrides,

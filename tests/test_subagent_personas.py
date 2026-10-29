@@ -259,7 +259,7 @@ def _resolve(workspace: Path, **arguments: object) -> PersonaRequest | str:
         "profile": None,
         "model": None,
         "minimal": False,
-        "workspace_root": workspace,
+        "workspace_root": lambda: workspace,
         "available_toolkits": lambda: ["file", "shell"],
         "available_skills": lambda: ["research", "writing"],
         "available_knowledge": lambda: ["docs", "faq"],
@@ -282,7 +282,6 @@ def test_resolve_persona_request_mode_and_model_rules(tmp_path: Path) -> None:
     assert isinstance(plain_minimal, PersonaRequest)
     assert (plain_minimal.model, plain_minimal.agent_mode) == ("sonnet", "minimal")
     assert _resolve(tmp_path, minimal=True) == PersonaRequest(persona=None, model=None, agent_mode="minimal")
-    assert _resolve(None, profile="fast") == "Cannot delegate: subagent profiles need an agent workspace."
 
 
 def test_empty_authoring_arguments_mean_a_plain_copy_or_the_named_profile(tmp_path: Path) -> None:

@@ -10,7 +10,7 @@ import pytest
 
 from mindroom.config.agent import AgentConfig, AgentPrivateConfig
 from mindroom.config.main import Config
-from mindroom.config.models import ModelConfig
+from mindroom.config.models import ModelConfig, ToolConfigEntry
 from mindroom.constants import resolve_runtime_paths
 from mindroom.custom_tools.knowledge_graph import KnowledgeGraphTools, _render_fact, with_knowledge_graph
 from mindroom.knowledge.read_protocol import SearchHit
@@ -24,8 +24,8 @@ from mindroom.knowledge_graph.store import (
     _MergedEntities,
     set_knowledge_graph_store,
 )
+from mindroom.tool_system.agent_tools import resolve_agent_tools
 from mindroom.tool_system.catalog import TOOL_METADATA
-from mindroom.tool_system.dynamic_toolkits import visible_tool_surface
 from mindroom.tool_system.worker_routing import build_requester_execution_identity
 
 if TYPE_CHECKING:
@@ -267,10 +267,23 @@ def test_graph_enabled_agents_are_offered_the_tool() -> None:
     """Enabling the graph gives the agent its tool; disabling removes it."""
 
     def offered(config: Config) -> set[str]:
-        return {entry.name for entry in visible_tool_surface(agent_name="mind", config=config).runtime_tool_configs}
+        return {entry.name for entry in resolve_agent_tools(config, "mind").candidates()}
 
     assert "knowledge_graph" in offered(_config())
     assert "knowledge_graph" not in offered(_config(enabled=False))
+
+
+def test_a_deferred_graph_tool_is_offered_only_once_it_attaches() -> None:
+    """The graph setting never offers a tool the agent's own entry defers before the turn attaches it."""
+    config = _config()
+    config.agents["mind"].tools = [ToolConfigEntry(name="knowledge_graph", defer=True)]
+    agent_tools = resolve_agent_tools(config, "mind")
+
+    def offered(deferred: list[str]) -> bool:
+        return "knowledge_graph" in {entry.name for entry in agent_tools.candidates(deferred=deferred)}
+
+    assert offered(["knowledge_graph"])
+    assert not offered([])
 
 
 def test_graph_edits_are_offered_only_when_allowed(tmp_path: Path) -> None:

@@ -15,6 +15,7 @@ from mindroom.llm.runs import RunRecord, RunStatus
 from mindroom.session_storage.agent_storage import create_session_storage
 from mindroom.thread_models import set_thread_model_override
 from mindroom.tool_system.runtime_context import tool_runtime_context
+from mindroom.tool_system.worker_routing import agent_workspace_root_path
 from tests.delegation_helpers import _delegate_runtime_context, _runtime_paths, respond
 from tests.fakes.scripted_model import ScriptedModel, answer, calls, tool_call
 from tests.identity_helpers import entity_ids
@@ -100,7 +101,14 @@ async def test_subagent_model_selection(
             assert stored.status is RunStatus.completed
             result = next(str(tool.result) for tool in stored.tools or () if tool.tool_name == "run_subagent")
         else:
-            toolkit = DelegateTools("leader", ["leader", "worker"], paths, config, execution_identity=identity)
+            toolkit = DelegateTools(
+                "leader",
+                ["leader", "worker"],
+                paths,
+                config,
+                agent_workspace_root_path(paths.storage_root, "leader"),
+                execution_identity=identity,
+            )
             result = await toolkit.run_subagent(task="Report", agent_name=agent_name, model=model)
 
     records = list(tmp_path.glob("agents/*/workspace/.mindroom/delegations/*/*/run.json"))

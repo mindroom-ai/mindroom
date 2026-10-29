@@ -164,7 +164,7 @@ def _local_shell(tmp_path: Path, **shell_settings: str) -> _Shell:
     toolkit = get_tool_by_name(
         "shell",
         runtime_paths,
-        disable_sandbox_proxy=True,
+        runs_in_worker=False,
         tool_config_overrides={"extra_env_passthrough": "PLUGIN_SECRET", **shell_settings},
         worker_target=None,
     )

@@ -4820,17 +4820,10 @@
           "title": "Accept Invites"
         },
         "model": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
           "default": "default",
           "description": "Configured model alias used for this team's replies",
           "title": "Model",
+          "type": "string",
           "x-mindroom": {
             "reference": "model"
           }

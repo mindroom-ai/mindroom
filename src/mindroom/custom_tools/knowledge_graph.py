@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING
 from agno.tools import Toolkit
 
 from mindroom.config.knowledge_graph import KNOWLEDGE_GRAPH_SOURCE_ID
+from mindroom.config.resolution import edits_knowledge_graph
 from mindroom.knowledge.read_protocol import SearchHit
 from mindroom.knowledge.search import AgentKnowledge, KnowledgeSource, KnowledgeSourceDescription
 from mindroom.knowledge_graph.scope import graph_scope
@@ -104,7 +105,7 @@ class KnowledgeGraphTools(Toolkit):
         self._config = config
         self._runtime_paths = runtime_paths
         self._execution_identity = execution_identity
-        self._edits = config.agent_edits_knowledge_graph(agent_name)
+        self._edits = edits_knowledge_graph(config, agent_name)
         edits = (
             [
                 self.delete_graph_fact,

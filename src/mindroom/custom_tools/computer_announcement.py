@@ -35,7 +35,7 @@ def computer_announcement_middleware(
     """
     if (
         tool_name not in {"browser", "browser_mcp"}
-        or "chat_ui" not in config.resolve_entity(agent_name).available_tools
+        or "chat_ui" not in config.resolve_agent(agent_name).tools.tool_names
         or worker_computer_provider(agent_name, config, runtime_paths) != tool_name
     ):
         return None

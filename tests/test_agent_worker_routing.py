@@ -16,6 +16,7 @@ from mindroom.message_target import MessageTarget
 from mindroom.shell.execution import ShellRunResult
 from mindroom.tool_system import sandbox_proxy
 from mindroom.tool_system.invocation import ToolCallContext
+from mindroom.tool_system.metadata import get_tool_by_name
 from mindroom.tool_system.runtime_context import build_execution_identity_from_runtime_context, tool_runtime_context
 from mindroom.tool_system.worker_routing import ResolvedWorkerTarget, ToolExecutionIdentity
 from mindroom.tools import shell as shell_module
@@ -24,6 +25,7 @@ from tests.agent_tool_helpers import call_entrypoint, offered_function, run_offe
 from tests.authorization_helpers import make_test_tool_runtime_context
 from tests.conftest import make_conversation_reader_mock, make_matrix_client_mock, make_relation_lookup
 from tests.identity_helpers import persist_entity_accounts
+from tests.turn_model_helpers import turn_model
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -70,7 +72,7 @@ def _create_routing_agent(
         persist_runtime_state=False,
         supports_native_tool_approval=True,
         knowledge=None,
-        active_model_name=None,
+        model=turn_model(config, runtime_paths, "routing"),
     )
 
 
@@ -257,6 +259,74 @@ async def test_runner_mode_keeps_real_agent_tools_local(tmp_path: Path) -> None:
 
 @pytest.mark.asyncio
 @pytest.mark.usefixtures("proxy_targets")
+async def test_toolkits_built_in_the_primary_are_never_worker_routed(tmp_path: Path) -> None:
+    """A toolkit MindRoom builds in this process, such as self_config, stays local even when every tool routes."""
+    agent = _create_routing_agent(
+        tmp_path,
+        {"MINDROOM_SANDBOX_EXECUTION_MODE": "all", "MINDROOM_SANDBOX_PROXY_URL": "http://sandbox.invalid"},
+        agent_settings={"allow_self_config": True},
+    )
+
+    assert "- Local tools (primary MindRoom runtime): `self_config`." in agent.prompt.role
+    assert "- Worker-routed tools: `shell`, `calculator`." in agent.prompt.role
+
+
+_ROUTES_EVERY_TOOL = {"MINDROOM_SANDBOX_PROXY_URL": "http://sandbox.invalid"}
+_ROUTES_NO_TOOL = {
+    **_ROUTES_EVERY_TOOL,
+    "MINDROOM_SANDBOX_EXECUTION_MODE": "selective",
+    "MINDROOM_SANDBOX_PROXY_TOOLS": "",
+}
+
+
+@pytest.mark.usefixtures("proxy_targets")
+@pytest.mark.parametrize(
+    ("process_env", "worker_tools", "expected"),
+    [
+        pytest.param(_ROUTES_EVERY_TOOL, None, "worker:calculator", id="runtime-routes"),
+        pytest.param(_ROUTES_EVERY_TOOL, [], "worker:calculator", id="agent-list-cannot-keep-it-local"),
+        pytest.param(_ROUTES_NO_TOOL, ["calculator"], "worker:calculator", id="agent-list-routes"),
+        pytest.param(_ROUTES_NO_TOOL, None, "local:calculator", id="runtime-keeps-local"),
+    ],
+)
+def test_a_toolkit_built_without_a_placement_runs_in_a_worker_when_the_runtime_or_its_agent_routes_it(
+    tmp_path: Path,
+    process_env: dict[str, str],
+    worker_tools: list[str] | None,
+    expected: str,
+) -> None:
+    """A toolkit a tool builds for its agent, such as a plugin's sub-toolkit, never runs looser than the runtime routes it.
+
+    The agent's explicit worker_tools can move it into a worker but not out of one, since the agent may not have it.
+    """
+    runtime_paths = resolve_runtime_paths(
+        config_path=tmp_path / "config.yaml",
+        storage_path=tmp_path / "storage",
+        process_env=process_env,
+    )
+    agent: dict[str, object] = {"display_name": "Routing", "tools": ["calculator"], "include_default_tools": False}
+    if worker_tools is not None:
+        agent["worker_tools"] = worker_tools
+    config = Config.validate_with_runtime(
+        {"models": {"default": {"provider": "ollama", "id": "test-model"}}, "agents": {"routing": agent}},
+        runtime_paths,
+    )
+    target = ResolvedWorkerTarget(
+        worker_scope=None,
+        routing_agent_name="routing",
+        execution_identity=None,
+        tenant_id=None,
+        account_id=None,
+        worker_key=None,
+    )
+
+    toolkit = get_tool_by_name("calculator", runtime_paths, runtime_config=config, worker_target=target)
+
+    assert toolkit.functions["add"].entrypoint(a=1, b=2) == expected
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("proxy_targets")
 @pytest.mark.parametrize("worker_tools", [None, ["usage_stats"]])
 async def test_primary_runtime_tool_stays_local_after_real_materialization(
     tmp_path: Path,
@@ -336,7 +406,7 @@ async def test_room_context_tool_uses_primary_matrix_client(
         persist_runtime_state=False,
         supports_native_tool_approval=True,
         knowledge=None,
-        active_model_name=None,
+        model=turn_model(config, runtime_paths, "routing"),
     )
     with tool_runtime_context(context):
         result = await run_offered(agent, "list_schedules")

@@ -288,6 +288,10 @@ class TestBotIntegration:
                             rooms=["#test:localhost"],
                         ),
                     },
+                    models={
+                        "default": {"provider": "openai", "id": "test-model"},
+                        "gpt-6-astra": {"provider": "openai", "id": "gpt-6-astra"},
+                    },
                 ),
             ),
             test_runtime_paths(tmp_path),
@@ -385,6 +389,10 @@ class TestBotIntegration:
                             model="gpt-6-astra",
                             rooms=["#test:localhost"],
                         ),
+                    },
+                    models={
+                        "default": {"provider": "openai", "id": "test-model"},
+                        "gpt-6-astra": {"provider": "openai", "id": "gpt-6-astra"},
                     },
                 ),
             ),

@@ -149,7 +149,7 @@ async def test_background_shell_leaves_a_process_running_after_the_call_returns(
     toolkit = get_tool_by_name(
         "shell",
         _make_runtime_paths(tmp_path),
-        disable_sandbox_proxy=True,
+        runs_in_worker=False,
         worker_target=None,
         tool_init_overrides={"base_dir": str(tmp_path)},
     )
@@ -267,6 +267,7 @@ async def test_acceptance_reconciles_config_before_browser_continuity(
                 },
             },
             "knowledge_bases": {"history": {"path": str(history)}},
+            "models": {"default": {"provider": "openai", "id": "test-model"}},
         },
     )
     backend, client, _sync_calls = _backend(monkeypatch, tmp_path, config_text=config_text)

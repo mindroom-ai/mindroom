@@ -117,7 +117,6 @@ Paths, including the targets of symbolic links, follow the agent's [`file_access
 
 - With the default `workspace`, paths resolve from the agent workspace and must stay inside it, so pass workspace-relative paths such as `incoming/file.txt`.
   `~` expands to the MindRoom process home, not the worker workspace, so `~/incoming/file.txt` is rejected.
-  Without a configured workspace, path registration is refused.
 - With `unrestricted`, any file the MindRoom process can read is accepted, including absolute paths.
 
 ## Retention

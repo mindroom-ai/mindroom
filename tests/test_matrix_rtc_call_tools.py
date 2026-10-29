@@ -74,6 +74,7 @@ from tests.budget_helpers import budget_monitor_with_spend, set_month_spend
 from tests.conftest import bind_runtime_paths, make_conversation_reader_mock, make_relation_lookup, test_runtime_paths
 from tests.fakes.scripted_model import ScriptedModel, answer
 from tests.history_helpers import replay_settings
+from tests.turn_model_helpers import turn_model
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
@@ -323,7 +324,7 @@ async def test_call_agent_keeps_chat_tool_surface_and_refuses_text_chat_function
         None,
         supports_native_tool_approval=True,
         knowledge=None,
-        active_model_name=None,
+        model=turn_model(config, runtime_paths, AGENT),
     )
     call_functions = _functions(call_build)
     chat_functions = _functions(chat_build)
@@ -397,7 +398,7 @@ async def test_call_agent_cache_build_cancellation_waits_for_the_build(
         config=_config(),
         runtime_paths=test_runtime_paths(tmp_path),
         context=SimpleNamespace(hook_registry=None, tool_function_filter=None),  # type: ignore[arg-type]
-        execution_identity=SimpleNamespace(),  # type: ignore[arg-type]
+        execution_identity=_identity(test_runtime_paths(tmp_path)),  # type: ignore[arg-type]
         active_model_name="default",
     )
 
@@ -1181,7 +1182,7 @@ async def test_cascaded_responder_records_effective_selected_model_metadata(
     assert finalize is not None
     await finalize
 
-    assert create_agent_mock.call_args.kwargs["active_model_name"] == expected_model_name
+    assert create_agent_mock.call_args.kwargs["model"].model_name == expected_model_name
     run_metadata = persisted_interruptions[0]["run_metadata"]
     assert isinstance(run_metadata, dict)
     payload = run_metadata[AI_RUN_METADATA_KEY]
@@ -1196,7 +1197,7 @@ def test_call_response_tracker_keeps_fifo_without_retaining_settled_tokens(tmp_p
         agent_name=AGENT,
         config=_config(),
         runtime_paths=test_runtime_paths(tmp_path),
-        execution_identity=SimpleNamespace(),  # type: ignore[arg-type]
+        execution_identity=_identity(test_runtime_paths(tmp_path)),  # type: ignore[arg-type]
     )
     state = _CallAgentRunState(
         session_id="call-session",
@@ -1304,7 +1305,7 @@ async def test_call_response_tracker_failed_settlement_does_not_abort_next_turn(
         agent_name=AGENT,
         config=_config(),
         runtime_paths=test_runtime_paths(tmp_path),
-        execution_identity=SimpleNamespace(),  # type: ignore[arg-type]
+        execution_identity=_identity(test_runtime_paths(tmp_path)),  # type: ignore[arg-type]
     )
     state = _CallAgentRunState(
         session_id="call-session",
@@ -1364,8 +1365,8 @@ async def test_cascaded_responder_uses_the_fallback_for_an_over_budget_caller(
             context = _runtime_context(config=config, runtime_paths=runtime_paths, target=target)
             return replace(context, active_model_name=cast("str | None", kwargs.get("active_model_name")))
 
-        def build_execution_identity(self, **_kwargs: object) -> SimpleNamespace:
-            return SimpleNamespace()
+        def build_execution_identity(self, **_kwargs: object) -> object:
+            return _identity(runtime_paths)
 
         async def run_in_context(
             self,
@@ -1434,8 +1435,8 @@ async def test_cascaded_responder_switches_to_the_fallback_when_the_caller_cross
             )
             return replace(context, active_model_name=cast("str | None", kwargs.get("active_model_name")))
 
-        def build_execution_identity(self, **_kwargs: object) -> SimpleNamespace:
-            return SimpleNamespace()
+        def build_execution_identity(self, **_kwargs: object) -> object:
+            return _identity(runtime_paths)
 
         async def run_in_context(
             self,
@@ -1479,7 +1480,7 @@ async def test_cascaded_responder_switches_to_the_fallback_when_the_caller_cross
 
     assert ai_models == ["large", "cheap"]
     assert turn_models == ["large", "cheap"]
-    assert [call.kwargs["active_model_name"] for call in create_agent_mock.call_args_list] == ["large", "cheap"]
+    assert [call.kwargs["model"].model_name for call in create_agent_mock.call_args_list] == ["large", "cheap"]
     assert tooling.close is not None
     await tooling.close()
 
@@ -1747,7 +1748,7 @@ async def test_realtime_call_tools_use_the_callers_budget_and_count_helper_usage
         authorize_operation=_authorized_call_operation,
     )
 
-    assert create_agent_mock.call_args.kwargs["active_model_name"] == "cheap"
+    assert create_agent_mock.call_args.kwargs["model"].model_name == "cheap"
     assert await tooling.tools[0]({"prompt": "fix it"}) == "done: fix it"
     report = collect_admin_usage(config=config, runtime_paths=runtime_paths)
     assert [(user.user_id, user.totals.input_tokens) for user in report.user_breakdown] == [(REQUESTER, 100)]
@@ -1764,7 +1765,7 @@ async def test_cascaded_responder_refreshes_knowledge_and_availability_each_turn
     first_scheduler = object()
     second_scheduler = object()
     orchestrator = SimpleNamespace(knowledge_refresh_scheduler=first_scheduler, budgets=None)
-    execution_identity = SimpleNamespace()
+    execution_identity = _identity(runtime_paths)
     ready_knowledge = _ready_knowledge()
     resolver_calls: list[dict[str, object]] = []
     ai_calls: list[tuple[ResponseTurnContext, dict[str, object]]] = []
@@ -1896,7 +1897,7 @@ async def test_call_responder_adds_origin_brief_enrichment(
                 runtime_paths=runtime_paths,
                 target=target,
             ),
-            build_execution_identity=lambda **_kwargs: SimpleNamespace(),
+            build_execution_identity=lambda **_kwargs: _identity(runtime_paths),
             run_in_context=lambda **kwargs: kwargs["operation"](),
         ),  # type: ignore[arg-type]
         room_id="!room:example.org",
@@ -1933,8 +1934,8 @@ async def test_cascaded_responder_waits_for_interrupted_playout_settlement(
         def build_context(self, target: MessageTarget, **_kwargs: object) -> ToolRuntimeContext:
             return _runtime_context(config=config, runtime_paths=runtime_paths, target=target)
 
-        def build_execution_identity(self, **_kwargs: object) -> SimpleNamespace:
-            return SimpleNamespace()
+        def build_execution_identity(self, **_kwargs: object) -> object:
+            return _identity(runtime_paths)
 
         async def run_in_context(
             self,

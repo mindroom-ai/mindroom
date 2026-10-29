@@ -36,7 +36,7 @@ if TYPE_CHECKING:
         ToolManagedInitArg.RUNTIME_PATHS,
         ToolManagedInitArg.WORKER_TARGET,
         ToolManagedInitArg.TOOL_OUTPUT_WORKSPACE_ROOT,
-        ToolManagedInitArg.WORKER_TOOLS_OVERRIDE,
+        ToolManagedInitArg.WORKSPACE_IN_WORKER,
         ToolManagedInitArg.FILE_ACCESS,
     ),
     function_names=("get_attachment", "list_attachments", "register_attachment", "view_file"),

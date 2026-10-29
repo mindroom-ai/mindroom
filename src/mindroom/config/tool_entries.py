@@ -37,11 +37,6 @@ def raw_tool_entry_name_and_lazy_flag_fields(entry: object) -> tuple[str | None,
     return name, defer, initial
 
 
-def raw_tool_entry_name(entry: object) -> str | None:
-    """Extract a raw tool entry name from authored config data."""
-    return raw_tool_entry_name_and_lazy_flag_fields(entry)[0]
-
-
 def raw_tools_entries(data: dict[object, object], section: str) -> list[object]:
     """Return raw tool entries for one top-level config section."""
     raw_section = data.get(section)
