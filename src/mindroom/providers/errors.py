@@ -71,6 +71,20 @@ _QUOTA_EXHAUSTED_NAMES = frozenset(
         "enforced_spend_limit_reached",
     },
 )
+# How providers word a refusal their account's billing causes when they send no billing name, which no retry passes
+# until the credit or the limit changes. Anthropic's 400 ``invalid_request_error``: "Your credit balance is too low to
+# access the Anthropic API. Please go to Plans & Billing to upgrade or purchase credits." for an organization without
+# prepaid credit, and a message that begins "You have reached your specified API usage limits" or "You have reached
+# your specified workspace API usage limits" for a spend limit the organization or a workspace set. Gemini's 429
+# ``RESOURCE_EXHAUSTED``, which it also sends for a rate limit: "Your prepayment credits are depleted. Please go to AI
+# Studio at https://ai.studio/projects to manage your project and billing." and "Your project has exceeded its monthly
+# spending cap.", or "Your billing account has ..." for the billing account's cap.
+_QUOTA_EXHAUSTED_WORDING = (
+    "credit balance is too low",
+    "you have reached your specified",
+    "prepayment credits are depleted",
+    "exceeded its monthly spending cap",
+)
 # The name Anthropic gives rejected credentials, with or without its 401 status.
 _AUTHENTICATION_ERROR_TYPE = "authentication_error"
 # Anthropic reports an overloaded model with this error type, with or without a 529 status.
@@ -179,8 +193,9 @@ def classify_provider_error(  # noqa: PLR0911 - one return per rule
     7. An invalid-request status is ``InvalidRequest``.
     8. Anything else, such as a 403 or an unknown status, is a final ``ProviderError``.
 
-    A name that says the account has no credit left or reached its monthly spend or usage limit outranks every rule:
-    whatever its status, it is a final ``ProviderError`` marked ``QUOTA_EXHAUSTED``, since no wait lets it through.
+    A name or wording that says the account has no credit left or reached its monthly spend or usage limit outranks
+    every rule: whatever its status, it is a final ``ProviderError`` marked ``QUOTA_EXHAUSTED``, since no wait lets it
+    through.
     """
     status = status_code if status_code is not None else (int(code) if code is not None and code.isdecimal() else None)
     names = {code, error_type}
@@ -197,7 +212,7 @@ def classify_provider_error(  # noqa: PLR0911 - one return per rule
             retry_after_seconds=retry_after_seconds,
         )
 
-    if names & _QUOTA_EXHAUSTED_NAMES:
+    if names & _QUOTA_EXHAUSTED_NAMES or any(wording in lowered for wording in _QUOTA_EXHAUSTED_WORDING):
         return typed(ProviderError, marker=QUOTA_EXHAUSTED)
     if status == _RATE_LIMIT_STATUS or names & _RATE_LIMIT_NAMES:
         too_large = _REQUEST_TOO_LARGE in lowered

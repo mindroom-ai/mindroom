@@ -34,7 +34,7 @@ from anthropic.types.beta import (
 
 from mindroom.constants import PROVIDER_ENV_KEYS
 from mindroom.credentials.sync import get_secret_from_env
-from mindroom.llm.errors import QUOTA_EXHAUSTED, ProviderError
+from mindroom.llm.errors import ProviderError
 from mindroom.llm.provider import (
     STRUCTURED_OUTPUT_TOOL,
     Capabilities,
@@ -551,12 +551,6 @@ _COMMITTED_STREAM_STATUS = 200
 _NO_CREDENTIALS_ERROR = '"Could not resolve authentication method.'
 # The blocks the model writes itself; every other block is a server tool's call or result.
 _MODEL_BLOCK_TYPES = frozenset({"text", "thinking", "redacted_thinking", "tool_use"})
-# How Anthropic words the 400 ``invalid_request_error`` of a request the organization's billing stops, which carries no
-# code of its own: "Your credit balance is too low to access the Anthropic API. Please go to Plans & Billing to upgrade
-# or purchase credits." for an organization without prepaid credit, and a message that begins "You have reached your
-# specified API usage limits" or "You have reached your specified workspace API usage limits" for a spend limit the
-# organization or a workspace set. No retry passes until the credit or the limit changes.
-_BILLING_STOP_WORDING = ("credit balance is too low", "you have reached your specified")
 
 
 def _progress(event: Any) -> StreamProgress:  # noqa: ANN401 - SDK stream event
@@ -577,8 +571,8 @@ def _provider_error(error: Exception, *, provider: str) -> ProviderError:
     with the stream's committed 200 status, so it is classified without a status, by its type. An Anthropic-shaped
     body gives the shared classifier its message, type, and ``details.error_code``, and the message becomes the
     error's text, so a reply shows what Anthropic said rather than the SDK's status line and body; any other body keeps
-    the SDK's text. A billing stop Anthropic names by neither type nor code is matched by its wording here. The SDK
-    finds a client's credentials only when it sends, so a client without any fails then, as the missing key it is.
+    the SDK's text. The SDK finds a client's credentials only when it sends, so a client without any fails then, as
+    the missing key it is.
     """
     if isinstance(error, TypeError) and str(error).startswith(_NO_CREDENTIALS_ERROR):
         return missing_api_key_error(PROVIDER_ENV_KEYS["anthropic"], provider=provider)
@@ -587,13 +581,10 @@ def _provider_error(error: Exception, *, provider: str) -> ProviderError:
     if isinstance(error, anthropic.APIStatusError):
         body = _ErrorBody.of(error.body)
         message = body.message or error.message
-        status_code = None if error.status_code == _COMMITTED_STREAM_STATUS else error.status_code
-        if any(wording in message.casefold() for wording in _BILLING_STOP_WORDING):
-            return ProviderError(message, provider=provider, status_code=status_code, code=QUOTA_EXHAUSTED)
         return classify_provider_error(
             message,
             provider=provider,
-            status_code=status_code,
+            status_code=None if error.status_code == _COMMITTED_STREAM_STATUS else error.status_code,
             code=body.code,
             error_type=body.type,
             retry_after_seconds=retry_after_seconds(error.response.headers),

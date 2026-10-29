@@ -222,14 +222,6 @@ class GeminiProvider:
         return params
 
 
-# How Gemini words a request its account's billing stops, which it sends as a 429 ``RESOURCE_EXHAUSTED`` like a rate
-# limit, with no code of its own: "Your prepayment credits are depleted. Please go to AI Studio at
-# https://ai.studio/projects to manage your project and billing." and "Your project has exceeded its monthly spending
-# cap.", or "Your billing account has ..." for the billing account's cap. No retry passes until the credits or the cap
-# change.
-_BILLING_STOP_WORDING = ("prepayment credits are depleted", "exceeded its monthly spending cap")
-
-
 def _provider_error(error: Exception, *, provider: str) -> ProviderError:
     """Return the normalized error for one failed request; any other exception propagates as it is.
 
@@ -239,10 +231,10 @@ def _provider_error(error: Exception, *, provider: str) -> ProviderError:
     if (failure := provider_failure(error, provider=provider)) is not None:
         return failure
     if isinstance(error, APIError):
-        message = error.message or ""
-        if any(wording in message.casefold() for wording in _BILLING_STOP_WORDING):
-            return ProviderError(message, provider=provider, status_code=error.code, code=QUOTA_EXHAUSTED)
-        return classify_provider_error(str(error), provider=provider, status_code=error.code)
+        failure = classify_provider_error(str(error), provider=provider, status_code=error.code)
+        if failure.code == QUOTA_EXHAUSTED and error.message:
+            return ProviderError(error.message, provider=provider, status_code=error.code, code=QUOTA_EXHAUSTED)
+        return failure
     if isinstance(error, ValidationError):
         # The SDK rejected an authored generation setting; the same request cannot succeed.
         return InvalidRequest(str(error), provider=provider)
