@@ -246,6 +246,28 @@ async def test_a_snapshot_the_reader_rejects_stays_as_stored(metadata: str, tmp_
 
 
 @pytest.mark.asyncio
+async def test_an_unreadable_session_file_neither_stops_startup_nor_changes(tmp_path: Path) -> None:
+    """A session file that is not JSON or holds no child stays as it is, with a warning, and the others are rewritten."""
+    paths = _restore("v2026.10.18", tmp_path)
+    sessions = subagent_sessions_dir(paths)
+    unreadable = {"a" * 32 + ".json": b"{not json", "b" * 32 + ".json": b'{"owner": {}}'}
+    for name, content in unreadable.items():
+        (sessions / name).write_bytes(content)
+
+    with capture_logs() as logs:
+        await migrate_subagent_sessions(paths)
+
+    assert {name: (sessions / name).read_bytes() for name in unreadable} == unreadable
+    skipped = [entry["path"] for entry in logs if entry["event"] == "subagent_session_rewrite_skipped"]
+    assert sorted(skipped) == sorted(str(sessions / name) for name in unreadable)
+    rewritten = [
+        json.loads(path.read_text())["child"] for path in sessions.glob("*.json") if path.name not in unreadable
+    ]
+    assert len(rewritten) == 3
+    assert all(set(child) == _CHILD_FIELDS for child in rewritten)
+
+
+@pytest.mark.asyncio
 async def test_a_session_file_the_reader_rejects_stays_as_stored(tmp_path: Path) -> None:
     """A session file whose child the current reader rejects even with every field filled keeps its bytes."""
     paths = _restore("v2026.10.18", tmp_path)

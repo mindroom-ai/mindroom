@@ -174,6 +174,7 @@ Failures from one `sender_device_id` point at that client, while failures across
 ### `conversation_converted`
 
 Logged once for each conversation database the first start after an upgrade that changes the database layout converts, such as [upgrading to conversation storage v2](upgrades.md#upgrading-to-conversation-storage-v2) or [to one owner per conversation database](upgrades.md#upgrading-to-one-owner-per-conversation-database), or that converts at its first use later, such as a restored backup.
+An upgrade the [upgrade notes](upgrades.md) do not list converts without a backup, and the release before it reads the converted databases as they are, so going back needs no restore.
 
 | Field | Meaning |
 |-------|---------|
