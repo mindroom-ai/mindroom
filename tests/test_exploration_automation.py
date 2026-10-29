@@ -321,3 +321,44 @@ def test_an_unreadable_conversation_does_not_stop_exploration(tmp_path: Path) ->
         leads, _ = _collect_leads(_context(config, paths, tmp_path), since=0, limit=10)
 
     assert [lead.arguments for lead in leads] == ['{"repo": "acme/atlas"}']
+
+
+def test_a_turn_approved_after_a_check_is_a_lead_at_the_next(tmp_path: Path) -> None:
+    """A turn that completes after its approval offers its tool calls once, though it was created before a check ran.
+
+    It keeps its creation time, which is older than the check, so reading turns created since the check misses it.
+    """
+    config, paths = _config(), _paths(tmp_path)
+    context = _context(config, paths, tmp_path)
+    created_at = int(time.time()) - 50
+    session_id = "!room:x:$a"
+    run = RunRecord(
+        run_id="run-asks",
+        session_id=session_id,
+        agent_id="mind",
+        created_at=created_at,
+        status=RunStatus.paused,
+        metadata={"room_id": "!room:x", "thread_id": "$a"},
+        messages=[Message(role="user", content="q"), Message(role="assistant", content="a")],
+        tools=[_tool("get_repository", repo="acme/late")],
+    )
+    storage = create_session_storage("mind", config, paths, execution_identity=None)
+    session = seed_session(storage, ConversationSession(kind="agent", session_id=session_id, owner_id="mind", runs=[run]))
+    _finish(check_exploration(context), config)
+
+    run.status = RunStatus.completed
+    storage.save_run(session, run, record_usage=False)
+    with storage.transaction(write=True) as connection:
+        connection.execute(
+            f"UPDATE {storage.names.sessions} SET updated_at = ? WHERE session_id = ?",  # noqa: S608
+            (int(time.time()) + 1, session_id),
+        )
+    with patch.object(exploration.time, "time", return_value=time.time() + 5):
+        ask = check_exploration(context)
+        assert ask is not None
+        assert "acme/late" in ask.text
+        _finish(ask, config)
+    with patch.object(exploration.time, "time", return_value=time.time() + 10):
+        again = check_exploration(context)
+
+    assert again is None or "acme/late" not in again.text

@@ -12,9 +12,10 @@ from typing import TYPE_CHECKING
 
 import pytest
 
-from mindroom.constants import MINDROOM_COMPACTION_METADATA_KEY, MINDROOM_MATRIX_HISTORY_METADATA_KEY
+from mindroom.constants import MINDROOM_HISTORY_METADATA_KEY
 from mindroom.history import legacy_compaction_state
 from mindroom.history.legacy_compaction_state import _legacy_tombstones
+from mindroom.history.legacy_scope_metadata import LEGACY_COMPACTION_METADATA_KEY, LEGACY_MATRIX_HISTORY_METADATA_KEY
 from mindroom.history.types import HistoryScope, ScopeSummary
 from mindroom.llm.runs import RunRecord
 from mindroom.session_storage import summary_rows
@@ -56,11 +57,11 @@ def _migrated(tmp_path: Path, session: ConversationSession) -> ConversationStore
 
 
 def _compaction_metadata(scope_key: str, raw_state: dict[str, object]) -> dict[str, object]:
-    return {MINDROOM_COMPACTION_METADATA_KEY: {"version": 2, "states": {scope_key: raw_state}}}
+    return {LEGACY_COMPACTION_METADATA_KEY: {"version": 2, "states": {scope_key: raw_state}}}
 
 
 def _seen_metadata(scope_key: str, event_ids: list[str]) -> dict[str, object]:
-    return {MINDROOM_MATRIX_HISTORY_METADATA_KEY: {"version": 1, "states": {scope_key: {"seen_event_ids": event_ids}}}}
+    return {LEGACY_MATRIX_HISTORY_METADATA_KEY: {"version": 1, "states": {scope_key: {"seen_event_ids": event_ids}}}}
 
 
 def test_legacy_tombstones_recognize_only_the_destructive_compactor() -> None:
@@ -98,7 +99,7 @@ def test_opening_storage_adopts_legacy_summary_tombstones_and_seen_ids_once(tmp_
     storage = _open(tmp_path)
     stored = storage.load_session("session")
     assert stored is not None
-    assert stored.metadata == _compaction_metadata(_SCOPE.key, {"force_compact_before_next_run": True})
+    assert stored.metadata == {MINDROOM_HISTORY_METADATA_KEY: {"force_compact_before_next_run": True}}
     assert stored.summary is not None
     assert stored.summary.text == "legacy summary"
     assert summary_rows_of(storage, _SCOPE.key, "session") == [
@@ -171,7 +172,7 @@ def test_opening_storage_leaves_uncompacted_scopes_and_their_seen_ids_alone(tmp_
     assert summary_rows_of(storage, _SCOPE.key, "session") == []
     stored = storage.load_session("session")
     assert stored is not None
-    assert stored.metadata == metadata
+    assert stored.metadata == {MINDROOM_HISTORY_METADATA_KEY: {"seen_event_ids": ["$consumed"]}}
 
 
 @pytest.mark.parametrize("column", ["metadata", "summary"])
@@ -205,7 +206,7 @@ def test_opening_storage_keeps_seen_ids_of_a_scope_without_a_summary(tmp_path: P
     assert summary_rows.legacy_event_ids(storage, session_id="session", scope_key=_SCOPE.key) is None
     stored = storage.load_session("session")
     assert stored is not None
-    assert stored.metadata == seen
+    assert stored.metadata == {MINDROOM_HISTORY_METADATA_KEY: {"seen_event_ids": ["$consumed"]}}
 
 
 def test_opening_storage_reads_double_encoded_legacy_metadata(tmp_path: Path) -> None:

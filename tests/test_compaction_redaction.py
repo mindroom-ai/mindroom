@@ -11,10 +11,10 @@ import pytest
 
 from mindroom import constants
 from mindroom.history.compaction import summarize_runs
+from mindroom.history.legacy_scope_metadata import LEGACY_COMPACTION_METADATA_KEY, LEGACY_MATRIX_HISTORY_METADATA_KEY
 from mindroom.history.storage import (
     _read_scope_history_event_ids,
     _remove_redacted_event_from_history,
-    _with_scope_seen_event_ids,
     read_scope_seen_event_ids,
     remove_history_of_redacted_events,
     update_scope_seen_event_ids,
@@ -118,13 +118,20 @@ def _redact(storage: ConversationStore, session: ConversationSession, event_id: 
 def _legacy_session(run_ids: list[str], summary: str, seen_event_ids: list[str]) -> ConversationSession:
     session = _agent_session([_run(run_id) for run_id in run_ids])
     session.summary = ScopeSummary(text=summary, updated_at=_EPOCH)
+    # The destructive compactor's state, as the Agno-layout database the conversion adopts it from held it.
     session.metadata = {
-        constants.MINDROOM_COMPACTION_METADATA_KEY: {
-            "version": 2,
-            "states": {_SCOPE.key: {"compacted_run_ids": ["legacy-gone"]}},
-        },
+        LEGACY_COMPACTION_METADATA_KEY: {"version": 2, "states": {_SCOPE.key: {"compacted_run_ids": ["legacy-gone"]}}},
+        **(
+            {
+                LEGACY_MATRIX_HISTORY_METADATA_KEY: {
+                    "version": 1,
+                    "states": {_SCOPE.key: {"seen_event_ids": seen_event_ids}},
+                },
+            }
+            if seen_event_ids
+            else {}
+        ),
     }
-    session.metadata = _with_scope_seen_event_ids(session.metadata, scope=_SCOPE, event_ids=set(seen_event_ids))
     return session
 
 
@@ -148,7 +155,7 @@ def test_compaction_derives_seen_ids_without_storing_them(storage: ConversationS
     _compact(storage, session, ["r1"], "summary of r1")
 
     stored = _stored(storage)
-    assert constants.MINDROOM_MATRIX_HISTORY_METADATA_KEY not in (stored.metadata or {})
+    assert constants.MINDROOM_HISTORY_METADATA_KEY not in (stored.metadata or {})
     assert _seen(storage, stored) == {"$r1", "$r2"}
 
 

@@ -1457,7 +1457,7 @@ class ResponseRunner:
     ) -> bool:
         try:
             storage = self.deps.state_writer.create_storage(execution_identity, scope=scope)
-            return has_queued_force_compaction(storage, session_id, scope)
+            return has_queued_force_compaction(storage, session_id)
         except Exception as error:
             self.deps.logger.warning(
                 "forced_compaction_placeholder_check_failed",

@@ -44,8 +44,8 @@ from mindroom.dispatch_source import (
     SILENT_SCHEDULE_SOURCE_KIND,
 )
 from mindroom.final_delivery import FinalDeliveryOutcome, StreamTransportOutcome
-from mindroom.history.storage import _with_scope_state
-from mindroom.history.types import CompactionLifecycleStart, HistoryScope, HistoryScopeState
+from mindroom.history.storage import with_force_compaction
+from mindroom.history.types import CompactionLifecycleStart, HistoryScope
 from mindroom.hooks import (
     EVENT_MESSAGE_AFTER_RESPONSE,
     EVENT_MESSAGE_BEFORE_RESPONSE,
@@ -2772,11 +2772,7 @@ class TestAgentBot(AgentBotTestBase):
         scope = HistoryScope(kind="agent", scope_id=bot.agent_name)
         storage = bot._conversation_state_writer.create_storage(None, scope=scope)
         session = ConversationSession(session_id=resolved_target.session_id, kind="agent", owner_id=bot.agent_name)
-        session.metadata = _with_scope_state(
-            session.metadata,
-            scope,
-            HistoryScopeState(force_compact_before_next_run=True),
-        )
+        session.metadata = with_force_compaction(session.metadata)
         seed_session(storage, session)
         response_envelope = replace(_hook_envelope(source_event_id=root_event_id), target=resolved_target)
 

@@ -24,6 +24,7 @@ from hypothesis import HealthCheck, example, given, settings
 from hypothesis import strategies as st
 
 from mindroom import constants
+from mindroom.history.legacy_scope_metadata import LEGACY_COMPACTION_METADATA_KEY, LEGACY_MATRIX_HISTORY_METADATA_KEY
 from mindroom.history.replay import current_summary_text
 from mindroom.history.storage import (
     _remove_redacted_event_from_history,
@@ -148,11 +149,11 @@ class _Runner:
         Releases before the archive had no summary-row tables and replayed the session row's summary.
         """
         metadata = {
-            constants.MINDROOM_COMPACTION_METADATA_KEY: {
+            LEGACY_COMPACTION_METADATA_KEY: {
                 "version": 2,
                 "states": {_SCOPE.key: {"compacted_run_ids": list(_LEGACY_RUNS)}},
             },
-            constants.MINDROOM_MATRIX_HISTORY_METADATA_KEY: {
+            LEGACY_MATRIX_HISTORY_METADATA_KEY: {
                 "version": 1,
                 "states": {_SCOPE.key: {"seen_event_ids": [_event(run_id) for run_id in _LEGACY_RUNS]}},
             },

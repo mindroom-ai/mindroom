@@ -35,8 +35,7 @@ from mindroom.custom_tools import claude_agent
 from mindroom.custom_tools.dynamic_workflow import _run_room_agent_turn
 from mindroom.helper_usage import HelperUsageOwner, helper_usage_owner_context
 from mindroom.history.runtime import _compact_before_reply, resolve_entity_preparation_inputs
-from mindroom.history.storage import _with_scope_state, read_scope_state
-from mindroom.history.types import HistoryScope, HistoryScopeState
+from mindroom.history.storage import read_scope_state, with_force_compaction
 from mindroom.knowledge.chunk_context import chunk_contexts
 from mindroom.knowledge_graph.clients import MindRoomLLMClient
 from mindroom.knowledge_graph.usage import UsageTarget, usage_target
@@ -345,7 +344,6 @@ async def _compaction_summary(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -
     """Compact a stored run before the next reply, with one summary request to the scripted model."""
     config, paths = _make_config(tmp_path, compaction=CompactionOverrideConfig(enabled=True))
     storage = create_session_storage("test_agent", config, paths, execution_identity=None)
-    scope = HistoryScope(kind="agent", scope_id="test_agent")
     run = RunRecord(
         run_id="run-1",
         agent_id="test_agent",
@@ -356,7 +354,7 @@ async def _compaction_summary(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -
     session = _session(
         "session",
         runs=[run],
-        metadata=_with_scope_state(None, scope, HistoryScopeState(force_compact_before_next_run=True)),
+        metadata=with_force_compaction(None),
     )
     seed_session(storage, session)
     _scripted(monkeypatch, "A summary of the conversation.")

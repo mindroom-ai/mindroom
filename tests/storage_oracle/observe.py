@@ -170,7 +170,7 @@ def observe(
         "list_runs": list_error
         or [run.to_dict() for run in sorted(listed or [], key=lambda run: (run.created_at, run.run_id))],
         "session_runs": _safely(lambda: [run.run_id for run in session_runs(store, session_id)]),
-        "force_queued": _safely(lambda: has_queued_force_compaction(store, session_id, scope)),
+        "force_queued": _safely(lambda: has_queued_force_compaction(store, session_id)),
         "ledger": _safely(lambda: _ledger(store, session_id)),
     }
 

@@ -23,9 +23,9 @@ from mindroom.history.runtime import (
     resolve_entity_preparation_inputs,
 )
 from mindroom.history.session_context import ScopeSessionContext
-from mindroom.history.storage import _with_scope_state
+from mindroom.history.storage import with_force_compaction
 from mindroom.history.summary_message import compaction_summary_message
-from mindroom.history.types import HistoryScope, HistoryScopeState, ScopeSummary
+from mindroom.history.types import HistoryScope, ScopeSummary
 from mindroom.llm.messages import Message
 from mindroom.llm.provider import ModelRequest
 from mindroom.llm.runs import RunStatus
@@ -436,11 +436,7 @@ async def test_native_activation_respects_history_policy(
     )
     session = _session("session", runs=[_completed_run("old")])
     if case == "manual":
-        session.metadata = _with_scope_state(
-            session.metadata,
-            _SCOPE,
-            HistoryScopeState(force_compact_before_next_run=True),
-        )
+        session.metadata = with_force_compaction(session.metadata)
     db = create_agent_state_storage("test_agent", tmp_path)
     seed_session(db, session)
     # A manual request must reach the portable text owner, which returns no outcome here.

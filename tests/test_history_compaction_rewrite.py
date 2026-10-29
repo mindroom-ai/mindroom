@@ -27,10 +27,10 @@ from mindroom.history.compaction import (
 from mindroom.history.replay import estimate_prompt_visible_history_tokens
 from mindroom.history.run_visibility import QUEUED_MESSAGE_NOTICE_MARKER_KEY, QUEUED_MESSAGE_NOTICE_PERSISTED_MARKER
 from mindroom.history.storage import (
-    _with_scope_state,
     append_compaction_chunk,
     read_scope_seen_event_ids,
     read_scope_state,
+    with_force_compaction,
 )
 from mindroom.history.summary_call import DEFAULT_SUMMARY_RETRY_POLICY, CompactionSummaryOutputLimitError
 from mindroom.history.summary_input import build_summary_input
@@ -973,8 +973,7 @@ async def test_prepare_history_for_run_emits_compaction_before_and_after_hooks(
             _completed_run("run-2"),
         ],
     )
-    scope = HistoryScope(kind="agent", scope_id="test_agent")
-    session.metadata = _with_scope_state(session.metadata, scope, HistoryScopeState(force_compact_before_next_run=True))
+    session.metadata = with_force_compaction(session.metadata)
     seed_session(storage, session)
 
     observed: list[tuple[str, list[str], int, int | None, str | None]] = []
@@ -1462,8 +1461,7 @@ async def test_prepare_history_for_run_applies_compaction_hook_agent_and_room_sc
             _completed_run("run-2"),
         ],
     )
-    scope = HistoryScope(kind="agent", scope_id="test_agent")
-    session.metadata = _with_scope_state(session.metadata, scope, HistoryScopeState(force_compact_before_next_run=True))
+    session.metadata = with_force_compaction(session.metadata)
     seed_session(storage, session)
 
     observed: list[str] = []
@@ -1586,8 +1584,7 @@ async def test_compaction_hooks_continue_after_timeout(tmp_path: Path, monkeypat
             _completed_run("run-2"),
         ],
     )
-    scope = HistoryScope(kind="agent", scope_id="test_agent")
-    session.metadata = _with_scope_state(session.metadata, scope, HistoryScopeState(force_compact_before_next_run=True))
+    session.metadata = with_force_compaction(session.metadata)
     seed_session(storage, session)
 
     observed: list[str] = []
@@ -2175,8 +2172,7 @@ async def test_prepare_history_for_run_compaction_preserves_seen_event_ids(
             ),
         ],
     )
-    scope = HistoryScope(kind="agent", scope_id="test_agent")
-    session.metadata = _with_scope_state(session.metadata, scope, HistoryScopeState(force_compact_before_next_run=True))
+    session.metadata = with_force_compaction(session.metadata)
     seed_session(storage, session)
 
     install_model_providers(monkeypatch, {"default": summary_model()})

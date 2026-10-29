@@ -30,14 +30,13 @@ from mindroom.history.prompt_tokens import build_static_token_estimator
 from mindroom.history.replay import configured_replay_plan, estimate_request_messages_tokens
 from mindroom.history.request_messages import TurnMessages, build_request, scope_history_messages
 from mindroom.history.run_visibility import QUEUED_MESSAGE_NOTICE_MARKER_KEY as _NOTICE_KEY
-from mindroom.history.storage import _with_scope_state, new_scope_session, read_scope_state
+from mindroom.history.storage import new_scope_session, read_scope_state, with_force_compaction
 from mindroom.history.summary_message import compaction_summary_message, is_compaction_summary, is_scope_summary
 from mindroom.history.types import (
     CompactionLifecycleFailure,
     CompactionLifecycleStart,
     CompactionOutcome,
     HistoryScope,
-    HistoryScopeState,
 )
 from mindroom.hooks import (
     EVENT_COMPACTION_AFTER,
@@ -1402,11 +1401,7 @@ async def test_force_flag_survives_mid_turn_compaction(tmp_path: Path, summary_c
     assert stored is not None
     storage.update_metadata(
         stored,
-        lambda metadata: _with_scope_state(
-            metadata,
-            TEST_AGENT_SCOPE,
-            HistoryScopeState(force_compact_before_next_run=True),
-        ),
+        lambda metadata: with_force_compaction(metadata),
     )
     model = ToolLoopModel(tool_rounds=5)
 

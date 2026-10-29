@@ -401,6 +401,27 @@ async def test_a_paused_turn_holds_back_later_turns_until_it_finishes(tmp_path: 
 
 
 @pytest.mark.asyncio
+async def test_a_turn_approved_after_the_turns_after_it_were_ingested_is_ingested_once(tmp_path: Path) -> None:
+    """A turn that completes after its approval is ingested once, even when the turns after it were ingested first.
+
+    It keeps its creation time, which is older than theirs, so reading turns in creation order would leave it behind.
+    The approval here outlives the window the current settings give it, as when `timeout_days` was lowered meanwhile.
+    """
+    config, paths, store = _config(backfill_days=30), _paths(tmp_path), _FakeStore()
+    _seed(config, paths, "!room:x:$t1", ["r1", "r2"], paused=frozenset({"r1"}))
+    worker = _worker(config, paths, store)
+    await _pass(worker, config, now=T0 + 8 * DAY)
+    assert _answers(store) == ["Mind: answer r2"]
+
+    _seed(config, paths, "!room:x:$t1", ["r1", "r2"], updated_at=T0 + 8 * DAY + 10)
+    await _pass(worker, config, now=T0 + 8 * DAY + 20)
+    _seed(config, paths, "!room:x:$t1", ["r1", "r2"], updated_at=T0 + 8 * DAY + 30)
+    await _pass(worker, config, now=T0 + 8 * DAY + 40)
+
+    assert _answers(store) == ["Mind: answer r2", "Mind: answer r1"]
+
+
+@pytest.mark.asyncio
 async def test_one_failing_agent_does_not_stop_the_others(tmp_path: Path) -> None:
     """An agent whose conversations cannot be read is reported, and other agents are still ingested."""
     config = _config()

@@ -573,6 +573,37 @@ async def test_a_turn_whose_approval_expired_releases_the_turns_after_it_without
 
 
 @pytest.mark.asyncio
+async def test_a_turn_approved_after_the_turns_after_it_were_flushed_is_flushed_once(
+    tmp_path: Path,
+    extractor: _Extractor,
+) -> None:
+    """A turn that completes after its approval is flushed once, even when the turns after it were flushed first.
+
+    It keeps its creation time, which is older than theirs, so reading turns in creation order would leave it behind.
+    The approval here outlives the window the current settings give it, as when `timeout_days` was lowered meanwhile.
+    """
+    config, clock = _config(tmp_path), _Clock()
+    worker = await _started(config, clock)
+    session = _thread("t1")
+    paused = _run("asks", session, T0 + 10, status=RunStatus.paused)
+    after = _run("after", session, T0 + 20)
+    _seed(config, session, [paused, after])
+    clock.now = T0 + 10 + config.tool_approval.timeout_days * 86_400 + 3600
+    await worker._run_cycle(config)
+    assert extractor.lines() == [_lines("after")]
+
+    paused.status = RunStatus.completed
+    _seed(config, session, [paused, after], updated_at=int(clock.now) + 10)
+    clock.now += 1000
+    await worker._run_cycle(config)
+    _seed(config, session, [paused, after], updated_at=int(clock.now) + 10)
+    clock.now += 1000
+    await worker._run_cycle(config)
+
+    assert extractor.lines() == [_lines("after"), _lines("asks")]
+
+
+@pytest.mark.asyncio
 async def test_delegated_task_sessions_are_not_flushed(tmp_path: Path, extractor: _Extractor) -> None:
     """A task another agent delegated is the delegating agent's conversation, not the delegate's."""
     config = _config(tmp_path)

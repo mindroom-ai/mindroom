@@ -28,13 +28,13 @@ from mindroom.history.prompt_tokens import build_static_token_estimator
 from mindroom.history.request_messages import TurnMessages
 from mindroom.history.session_context import load_scope_session
 from mindroom.history.storage import (
-    _with_scope_state,
     read_scope_seen_event_ids,
     update_scope_seen_event_ids,
+    with_force_compaction,
 )
 from mindroom.history.summary_input import build_summary_input
 from mindroom.history.summary_message import is_compaction_summary
-from mindroom.history.types import HistoryPolicy, HistoryScope, HistoryScopeState, PreparedHistoryState
+from mindroom.history.types import HistoryPolicy, HistoryScope, PreparedHistoryState
 from mindroom.hooks import render_transient_context
 from mindroom.llm.events import RunFinished
 from mindroom.llm.messages import Message, system_text
@@ -734,7 +734,7 @@ async def test_memory_md_reloads_in_the_request_that_carries_a_compaction(
     assert session is not None
     storage.update_metadata(
         session,
-        lambda metadata: _with_scope_state(metadata, _SCOPE, HistoryScopeState(force_compact_before_next_run=True)),
+        lambda metadata: with_force_compaction(metadata),
     )
     # The compaction model builds as the agent's provider; its summary is the patched one.
     with patch("mindroom.history.compaction.generate_compaction_summary", new=AsyncMock(return_value="merged summary")):

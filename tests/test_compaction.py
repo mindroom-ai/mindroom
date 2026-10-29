@@ -15,11 +15,10 @@ from mindroom.config.models import DefaultsConfig, ModelConfig
 from mindroom.constants import AI_RUN_METADATA_KEY
 from mindroom.history.policy import classify_compaction_decision
 from mindroom.history.session_context import create_scope_session_storage
-from mindroom.history.storage import _with_scope_state, read_scope_state
+from mindroom.history.storage import read_scope_state, with_force_compaction
 from mindroom.history.types import (
     CompactionOutcome,
     HistoryScope,
-    HistoryScopeState,
     PreparedHistoryState,
     ResolvedHistoryExecutionPlan,
     ResolvedReplayPlan,
@@ -342,7 +341,7 @@ def test_team_scope_storage_is_shared_across_requesters(tmp_path: Path) -> None:
         metadata={"source": "alice"},
         created_at=1,
     )
-    session.metadata = _with_scope_state(session.metadata, scope, HistoryScopeState(force_compact_before_next_run=True))
+    session.metadata = with_force_compaction(session.metadata)
     seed_session(first_storage, session)
 
     persisted = second_storage.load_session("session-1")

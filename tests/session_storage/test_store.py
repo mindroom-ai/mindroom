@@ -991,6 +991,26 @@ def test_list_runs_returns_every_run_with_members_in_seq_order_in_its_replay_vie
     assert stored.messages == []
 
 
+def test_runs_after_lists_top_level_runs_past_a_place_and_a_finished_approval_last(
+    team_store: ConversationStore,
+) -> None:
+    """A run that finishes after its approval moves past the runs that finished meanwhile; members are left out."""
+    team = _team()
+    _save(team_store, _team_run("t0", RunStatus.paused), _member("m1", "t1"), _team_run("t1"), session=team)
+    first = team_store.runs_after("s1", 0)
+    assert [(logged.run.run_id, logged.run.status) for logged in first] == [
+        ("t0", RunStatus.paused),
+        ("t1", RunStatus.completed),
+    ]
+
+    _save(team_store, _team_run("t0"), session=team)
+
+    after = team_store.runs_after("s1", first[-1].seq)
+    assert [logged.run.run_id for logged in after] == ["t0"]
+    assert after[0].seq > first[-1].seq
+    assert team_store.runs_after("s1", after[0].seq) == []
+
+
 @pytest.fixture
 def traced(monkeypatch: pytest.MonkeyPatch) -> Iterator[list[Callable[[str], None]]]:
     """Statement hooks called as each store connection starts executing a statement."""
@@ -1682,6 +1702,24 @@ def test_json_null_session_data_counts_usage_like_an_empty_row(store: Conversati
     assert _totals(store)["input_tokens"] == 7
 
 
+@pytest.mark.parametrize(
+    "totals",
+    [{"input_tokens": "12"}, {"input_tokens": 12, "details": {"model": ["not an object"]}}],
+)
+def test_a_run_saves_with_its_usage_whatever_totals_an_older_release_left(
+    store: ConversationStore,
+    totals: dict[str, object],
+) -> None:
+    """Totals an older release stored that no longer read as counters never stop a run, or its usage, from saving."""
+    seed_session_row(store, _session())
+    _execute(store, f"UPDATE code_sessions SET session_data = '{json.dumps({'session_metrics': totals})}'")  # noqa: S608
+
+    _persist(store, _session(), _run("r1", metrics=_usage(3)))
+
+    assert _row(store, "r1") is not None
+    assert _usage_row(store, "r1")["metrics"]["input_tokens"] == 3
+
+
 # --- usage ------------------------------------------------------------------------------------------------------
 
 
@@ -1753,20 +1791,34 @@ def test_a_usage_write_failure_rolls_back_the_run(store: ConversationStore) -> N
     assert _message_rows(store, "r1") == []
 
 
-def test_usage_saves_move_the_sessions_update_time_and_rewrites_do_not(store: ConversationStore) -> None:
-    """Update-time cursors see a session whose run recorded usage, not one whose runs were only saved or rewritten."""
+def test_news_in_the_log_moves_the_sessions_update_time_and_rewrites_do_not(store: ConversationStore) -> None:
+    """Update-time cursors see a run new to the log, one that finished after waiting, and usage; not a rewrite."""
+
+    def updated_at() -> int:
+        [(value,)] = _query(store, "SELECT updated_at FROM code_sessions")
+        _execute(store, "UPDATE code_sessions SET updated_at = 5")
+        return value
+
     _save(store, _run("r1", RunStatus.paused))
     _execute(store, "UPDATE code_sessions SET updated_at = 5")
-
-    _save(store, _run("r1"), _run("r2"))
+    _save(store, _run("r1", RunStatus.paused))
     store.patch_run_metadata("s1", "r1", {"matrix_response_event_id": "$reply"})
     store.rewrite_run_messages("s1", lambda runs: runs)
+    assert updated_at() == 5
+
+    _save(store, _run("r1"))
+    assert updated_at() > 5
+    _save(store, _run("r2", RunStatus.cancelled))
+    assert updated_at() > 5
+    store.save_interrupted_record(_session(), _run("r2", content="what was heard"))
+    assert updated_at() > 5
+
+    store.save_interrupted_record(_session(), _run("r1", content="what was heard"))
     store.delete_runs(["r2"], session_id="s1")
-    assert _query(store, "SELECT updated_at FROM code_sessions") == [(5,)]
+    assert updated_at() == 5
 
     _persist(store, _session(), _run("r3"))
-    [(updated_at,)] = _query(store, "SELECT updated_at FROM code_sessions")
-    assert updated_at > 5
+    assert updated_at() > 5
 
 
 def test_independent_usage_is_recorded_beside_the_runs_and_not_in_the_totals(store: ConversationStore) -> None:

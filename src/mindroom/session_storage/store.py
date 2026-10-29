@@ -447,7 +447,9 @@ class ConversationStore:
         """Return ``(session_id, updated_at)`` of the sessions updated after ``since``, oldest first.
 
         A session's update time moves when its row is written: a changed state a run save carries, a metadata change,
-        or a run save that records its usage, as a run's terminal save through ``persist_to`` does.
+        a run save that records its usage, as a run's terminal save through ``persist_to`` does, and a save that places
+        a run at the log's end (a new run, or one saved visible over its paused, cancelled, or errored row), so a reader
+        following ``seq`` learns of every run that finished, however it was saved.
         """
         with self.transaction(write=False) as connection:
             return connection.execute(
@@ -780,6 +782,12 @@ def _write_run(
     upsert_run(connection, names, session_id, data, kind, seq=seq, created_at=created_at, updated_at=now)
     set_visible_messages(connection, names, run_id, data["messages"], data["status"])
     _adopt_requester(connection, names, session_id, data.get("user_id"))
+    if moved:
+        # A run new to the log, or one that finished after the turns it waited for, is news to update-time cursors.
+        connection.execute(
+            f"UPDATE {quote_identifier(names.sessions)} SET updated_at = ? WHERE session_id = ?",  # noqa: S608
+            (now, session_id),
+        )
     [written] = _read_runs(connection, names, "run.run_id = ?", (run_id,))
     return _Saved(run_id, "written", created_at, now, moved, written)
 

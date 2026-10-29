@@ -19,12 +19,11 @@ from mindroom.constants import (
     AI_RUN_METADATA_KEY,
     DEFAULT_COMPACTION_TIMEOUT_SECONDS,
     MATRIX_SOURCE_EVENT_PROMPTS_METADATA_KEY,
-    MINDROOM_COMPACTION_METADATA_KEY,
-    MINDROOM_MATRIX_HISTORY_METADATA_KEY,
+    MINDROOM_HISTORY_METADATA_KEY,
 )
 from mindroom.history.storage import (
-    _with_scope_state,
     read_scope_state,
+    with_force_compaction,
 )
 from mindroom.history.summary_call import (
     SummaryRetryPolicy,
@@ -33,10 +32,6 @@ from mindroom.history.summary_call import (
     is_summary_timeout,
 )
 from mindroom.history.summary_input import _compaction_replay_messages, build_summary_input
-from mindroom.history.types import (
-    HistoryScope,
-    HistoryScopeState,
-)
 from mindroom.llm.media import Image
 from mindroom.llm.messages import Message
 from mindroom.llm.provider import RequestOverrides
@@ -362,8 +357,7 @@ async def test_compaction_call_timeout_falls_back_in_runtime(
             _completed_run("run-4"),
         ],
     )
-    scope = HistoryScope(kind="agent", scope_id="test_agent")
-    session.metadata = _with_scope_state(session.metadata, scope, HistoryScopeState(force_compact_before_next_run=True))
+    session.metadata = with_force_compaction(session.metadata)
     seed_session(storage, session)
 
     install_model_providers(monkeypatch, {"default": summary_model([Await(slow), *summary_steps("merged summary")])})
@@ -514,8 +508,7 @@ def test_build_summary_input_normal_run_omits_non_summary_metadata() -> None:
     )
     metadata = {
         AI_RUN_METADATA_KEY: {"compaction": {"decision": "required"}},
-        MINDROOM_COMPACTION_METADATA_KEY: {"states": {"agent:test": {"compacted_run_ids": ["old-run"]}}},
-        MINDROOM_MATRIX_HISTORY_METADATA_KEY: {"states": {"agent:test": {"seen_event_ids": ["$old"]}}},
+        MINDROOM_HISTORY_METADATA_KEY: {"seen_event_ids": ["$old"]},
         MATRIX_SOURCE_EVENT_PROMPTS_METADATA_KEY: {"$request": "Look up the deployment outcome."},
         "matrix_event_id": "$request",
         "started_at": "2026-07-17T20:00:00Z",
@@ -536,8 +529,7 @@ def test_build_summary_input_normal_run_omits_non_summary_metadata() -> None:
     assert run.metadata == metadata
     assert "model_params" not in summary_input
     assert AI_RUN_METADATA_KEY not in summary_input
-    assert MINDROOM_COMPACTION_METADATA_KEY not in summary_input
-    assert MINDROOM_MATRIX_HISTORY_METADATA_KEY not in summary_input
+    assert MINDROOM_HISTORY_METADATA_KEY not in summary_input
     assert MATRIX_SOURCE_EVENT_PROMPTS_METADATA_KEY not in summary_input
     assert "$request" in summary_input
     assert "2026-07-17T20:00:00Z" in summary_input

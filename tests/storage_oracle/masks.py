@@ -341,7 +341,7 @@ class MaskedBackend(StoreBackend):
     def apply(self, action: Action) -> object:
         self.flag_restored = False
         outcome = super().apply(action)
-        if self.flag_restored and not has_queued_force_compaction(self.store, SESSION_ID, self.scope):
+        if self.flag_restored and not has_queued_force_compaction(self.store, SESSION_ID):
             # The old reply moved a queued copy into the flag after a compaction had cleared it, and no request of
             # this action set the flag again, so only the old store compacts again.
             self._diverge(
@@ -379,7 +379,7 @@ class MaskedBackend(StoreBackend):
             return
         # The old reply stored the flag, then its state without the request. The flag is set already unless a
         # compaction cleared it after the request was stored.
-        self.flag_restored = self.flag_restored or not has_queued_force_compaction(self.store, SESSION_ID, self.scope)
+        self.flag_restored = self.flag_restored or not has_queued_force_compaction(self.store, SESSION_ID)
         pending.live = pending.held = self.pending_stored = False
         self.pending_written_at = self.determinism.now
 

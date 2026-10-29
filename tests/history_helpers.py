@@ -7,7 +7,7 @@ import asyncio
 import json
 import re
 import sqlite3
-from collections.abc import AsyncIterator, Sequence
+from collections.abc import AsyncIterator, Iterable, Sequence
 from contextlib import closing
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -21,15 +21,16 @@ from mindroom.config.models import CompactionConfig, CompactionOverrideConfig, D
 from mindroom.config.plugin import PluginEntryConfig
 from mindroom.constants import (
     DEFAULT_COMPACTION_TIMEOUT_SECONDS,
+    MINDROOM_HISTORY_METADATA_KEY,
     RuntimePaths,
     resolve_runtime_paths,
 )
 from mindroom.history.compaction import Summarizer, SummaryModel
 from mindroom.history.storage import (
-    _with_scope_state,
     append_compaction_chunk,
     new_scope_session,
     read_chunk_basis,
+    with_force_compaction,
 )
 from mindroom.history.summary_input import build_summary_input
 from mindroom.history.types import (
@@ -39,7 +40,6 @@ from mindroom.history.types import (
     CompactionOutcome,
     HistoryPolicy,
     HistoryScope,
-    HistoryScopeState,
     ResolvedHistorySettings,
     owner_scope,
 )
@@ -330,6 +330,11 @@ def _completed_team_run(
     )
 
 
+def with_preserved_seen_event_ids(metadata: dict[str, Any] | None, event_ids: Iterable[str]) -> dict[str, Any]:
+    """Return session ``metadata`` holding ``event_ids`` as the owner's preserved seen ids, as a team turn stores them."""
+    return {**(metadata or {}), MINDROOM_HISTORY_METADATA_KEY: {"seen_event_ids": sorted(event_ids)}}
+
+
 def _session(
     session_id: str,
     *,
@@ -420,7 +425,7 @@ def _forced_compaction_context(
     )
     storage = create_session_storage("test_agent", config, runtime_paths, execution_identity=None)
     scope = HistoryScope(kind="agent", scope_id="test_agent")
-    session.metadata = _with_scope_state(session.metadata, scope, HistoryScopeState(force_compact_before_next_run=True))
+    session.metadata = with_force_compaction(session.metadata)
     persist_session(storage, session)
     runtime_context = _hook_runtime_context(
         config=config,

@@ -29,6 +29,7 @@ from mindroom.background_tasks import run_blocking_until_complete
 from mindroom.constants import resolve_session_state_root
 from mindroom.delegation.legacy_snapshots import rewrite_run_snapshots
 from mindroom.history.legacy_compaction_state import adopt_summary_rows, adoption_copy_bytes
+from mindroom.history.legacy_scope_metadata import flatten_history_metadata
 from mindroom.history.legacy_stored_tool_calls import repair_legacy_tool_calls
 from mindroom.history.types import HistoryScope
 from mindroom.llm.messages import Message
@@ -107,11 +108,11 @@ def convert_conversation_database(
     In one ``BEGIN IMMEDIATE``: the backup, the Agno-era steps (usage ledger seeding, summary-row adoption with Agno 2
     blob runs and positions), the conversion, the drop of the Agno tables, the log tables and the meta row, which
     records the current version and ``owner``, once an agent ``owner``'s session rows name it
-    (``adopt_agent_session_owners``), the sessions table's conversion (``convert_session_columns``), and the rewrite of
-    the delegation children its runs hold (``rewrite_run_snapshots``). A file in
-    write-ahead-log mode returns to the rollback journal first, which checkpoints its log. The file is then compacted
-    when that pays off (``_compact``), and its conversion is logged. ``descriptors`` takes the backup's descriptor of
-    the file, which the caller closes after ``connection``.
+    (``adopt_agent_session_owners``), the sessions table's conversion (``convert_session_columns``), the rewrite of
+    the delegation children its runs hold (``rewrite_run_snapshots``), and the owner's history metadata
+    (``flatten_history_metadata``). A file in write-ahead-log mode returns to the rollback journal first, which
+    checkpoints its log. The file is then compacted when that pays off (``_compact``), and its conversion is logged.
+    ``descriptors`` takes the backup's descriptor of the file, which the caller closes after ``connection``.
     """
     leave_write_ahead_log(connection, path)
     started = time.monotonic()
@@ -129,6 +130,7 @@ def convert_conversation_database(
                 adopt_agent_session_owners(connection, names, owner.scope_id)
             convert_session_columns(connection, names)
         rewrite_run_snapshots(connection, names)
+        flatten_history_metadata(connection, names)
         runs, messages = stored_counts(connection, names)
     compacted = _compact(connection, path)
     logger.info(
@@ -261,7 +263,7 @@ def _convert(
         _session_json_encoded_once(connection, names)
         seed_usage_ledger(connection, names)
         adopt_summary_rows(connection, names)
-        _fold_force_requests(connection, names)
+        _fold_force_requests(connection, names, owner)
         # Every Agno table then exists, so each step reads its rows from it.
         for statement in agno_schema_sql(names):
             connection.execute(statement)
@@ -782,8 +784,9 @@ def _decoded[Value, Record](decode: Callable[[Value], Record], data: Value) -> R
 # the scopes a `compact_context` call asked to compact, written beside the metadata force flag, which each scope's next
 # run read into that flag.
 # Last legacy release: v2026.10.608; replacement: the next release, the metadata force flag alone.
-# Handling: Each listed scope gets the force flag in the session's metadata, as its next run would have set it, and the
-# key leaves the session state; an entry that names no scope requests nothing. The row's update time stays.
+# Handling: When the list names the database's owner, the session's metadata gets the owner's force flag, as its next
+# run would have set it; no run of the database reads another scope's flag, so other entries request nothing. The key
+# leaves the session state, and the row's update time stays.
 # Coverage: tests/session_storage/test_legacy_agno3_conversion.py::test_a_queued_compaction_request_becomes_the_metadata_flag,
 # ::test_a_request_queued_before_the_summary_rows_existed_leaves_the_scopes_tombstones_to_their_step,
 # ::test_a_queued_request_that_names_no_scope_requests_nothing, ::test_session_data_that_holds_no_state_object_converts_as_stored,
@@ -791,7 +794,7 @@ def _decoded[Value, Record](decode: Callable[[Value], Record], data: Value) -> R
 _PENDING_FORCE_KEY = "mindroom_pending_compaction_scope_keys"
 
 
-def _fold_force_requests(connection: sqlite3.Connection, names: AgnoTableNames) -> None:
+def _fold_force_requests(connection: sqlite3.Connection, names: AgnoTableNames, owner: HistoryScope) -> None:
     # The owner of the flag imports the store opener, which imports this module.
     from mindroom.history.storage import with_force_compaction  # noqa: PLC0415
 
@@ -803,13 +806,14 @@ def _fold_force_requests(connection: sqlite3.Connection, names: AgnoTableNames) 
         state = data.get("session_state") if data is not None else None
         if not isinstance(state, dict) or _PENDING_FORCE_KEY not in state:
             continue
-        scopes = _requested_scopes(state.pop(_PENDING_FORCE_KEY))
-        metadata = decoded_mapping(raw_metadata)
-        for scope in scopes:
-            metadata = with_force_compaction(metadata, scope)
+        requested = owner in _requested_scopes(state.pop(_PENDING_FORCE_KEY))
         connection.execute(
             f"UPDATE {sessions} SET session_data = ?, metadata = ? WHERE session_id = ?",  # noqa: S608
-            (json.dumps(data), json.dumps(metadata) if scopes else raw_metadata, session_id),
+            (
+                json.dumps(data),
+                json.dumps(with_force_compaction(decoded_mapping(raw_metadata))) if requested else raw_metadata,
+                session_id,
+            ),
         )
 
 

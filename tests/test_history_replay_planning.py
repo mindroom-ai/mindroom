@@ -26,14 +26,12 @@ from mindroom.history.replay import (
     plan_replay_that_fits,
 )
 from mindroom.history.storage import (
-    _with_scope_state,
     read_scope_state,
+    with_force_compaction,
 )
 from mindroom.history.types import (
     COMPACTION_SUMMARY_RETRY_FLOOR_TOKENS,
     HistoryPolicy,
-    HistoryScope,
-    HistoryScopeState,
     ResolvedHistoryExecutionPlan,
     ResolvedHistorySettings,
     ResolvedReplayPlan,
@@ -1274,8 +1272,7 @@ async def test_prepare_history_for_run_forced_compaction_without_budget_clears_f
             _completed_run("run-2"),
         ],
     )
-    scope = HistoryScope(kind="agent", scope_id="test_agent")
-    session.metadata = _with_scope_state(session.metadata, scope, HistoryScopeState(force_compact_before_next_run=True))
+    session.metadata = with_force_compaction(session.metadata)
     seed_session(storage, session)
 
     prepared = await prepare_history_for_run_for_test(
@@ -1416,8 +1413,7 @@ async def test_prepare_history_for_run_preserves_compaction_when_summary_exceeds
             ),
         ],
     )
-    scope = HistoryScope(kind="agent", scope_id="test_agent")
-    session.metadata = _with_scope_state(session.metadata, scope, HistoryScopeState(force_compact_before_next_run=True))
+    session.metadata = with_force_compaction(session.metadata)
     seed_session(storage, session)
 
     install_model_providers(monkeypatch, {"default": summary_model()})

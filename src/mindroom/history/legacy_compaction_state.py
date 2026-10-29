@@ -6,7 +6,7 @@ import json
 import time
 from typing import TYPE_CHECKING, Any
 
-from mindroom.constants import MINDROOM_COMPACTION_METADATA_KEY, MINDROOM_MATRIX_HISTORY_METADATA_KEY
+from mindroom.history.legacy_scope_metadata import LEGACY_COMPACTION_METADATA_KEY, LEGACY_MATRIX_HISTORY_METADATA_KEY
 from mindroom.session_storage.legacy_agno2_runs import (
     has_blob_column,
     insert_run_entry,
@@ -122,10 +122,10 @@ def _adopt_legacy_sessions(connection: sqlite3.Connection, names: AgnoTableNames
         metadata = decoded_mapping(raw_metadata) or {}
         scopes = {
             scope_key: tombstones
-            for scope_key, state in _scope_states(metadata, MINDROOM_COMPACTION_METADATA_KEY).items()
+            for scope_key, state in _scope_states(metadata, LEGACY_COMPACTION_METADATA_KEY).items()
             if isinstance(state, dict) and (tombstones := _legacy_tombstones(state)) is not None
         }
-        seen_states = _scope_states(metadata, MINDROOM_MATRIX_HISTORY_METADATA_KEY)
+        seen_states = _scope_states(metadata, LEGACY_MATRIX_HISTORY_METADATA_KEY)
         summary = _summary_text(decoded_mapping(raw_summary) or {})
         summary_scope = _owner_scope_key(session_type, agent_id, team_id) if summary is not None else None
         if summary_scope is not None:
@@ -292,8 +292,8 @@ def _without_adopted_state(
     """Return metadata without the adopted scopes' retired keys and the summary scope's seen ids."""
     adopted = dict(metadata)
     for metadata_key, retired_keys, scopes in (
-        (MINDROOM_COMPACTION_METADATA_KEY, _LEGACY_STATE_KEYS, scope_keys),
-        (MINDROOM_MATRIX_HISTORY_METADATA_KEY, _SEEN_STATE_KEYS, () if summary_scope is None else (summary_scope,)),
+        (LEGACY_COMPACTION_METADATA_KEY, _LEGACY_STATE_KEYS, scope_keys),
+        (LEGACY_MATRIX_HISTORY_METADATA_KEY, _SEEN_STATE_KEYS, () if summary_scope is None else (summary_scope,)),
     ):
         states = _scope_states(metadata, metadata_key)
         if not states:
@@ -316,7 +316,7 @@ def _without_adopted_state(
 
 def _scope_states(metadata: dict[str, Any], metadata_key: str) -> dict[str, Any]:
     """Return one versioned per-scope metadata mapping, or nothing when its version is not legacy."""
-    version = _COMPACTION_STATE_VERSION if metadata_key == MINDROOM_COMPACTION_METADATA_KEY else _SEEN_STATE_VERSION
+    version = _COMPACTION_STATE_VERSION if metadata_key == LEGACY_COMPACTION_METADATA_KEY else _SEEN_STATE_VERSION
     value = metadata.get(metadata_key)
     if not isinstance(value, dict) or value.get("version") != version:
         return {}

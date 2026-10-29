@@ -21,6 +21,7 @@ from structlog.testing import capture_logs
 
 from mindroom import constants
 from mindroom.constants import resolve_runtime_paths
+from mindroom.history.legacy_scope_metadata import LEGACY_COMPACTION_METADATA_KEY
 from mindroom.history.storage import has_queued_force_compaction
 from mindroom.history.types import HistoryScope
 from mindroom.llm.messages import Message
@@ -1237,7 +1238,10 @@ def _session_columns(database: Path, session_id: str) -> tuple[object, object, o
 
 
 def test_a_queued_compaction_request_becomes_the_metadata_flag(tmp_path: Path) -> None:
-    """Each scope a session state queued gets the metadata force flag, and the state and the rest of the row stay."""
+    """The database owner's queued request becomes its metadata force flag; the state and the rest of the row stay.
+
+    No run of the database reads another scope's flag, so another scope's request, or state, asks for nothing.
+    """
     database = _agno_database(
         tmp_path,
         (_SESSION, "agent", "code"),
@@ -1262,7 +1266,7 @@ def test_a_queued_compaction_request_becomes_the_metadata_flag(tmp_path: Path) -
         "code_sessions",
         "metadata",
         json.dumps(
-            {"other": "kept", constants.MINDROOM_COMPACTION_METADATA_KEY: {"version": 2, "states": other_scope}},
+            {"other": "kept", LEGACY_COMPACTION_METADATA_KEY: {"version": 2, "states": other_scope}},
         ),
         session_id=_SESSION,
     )
@@ -1284,22 +1288,17 @@ def test_a_queued_compaction_request_becomes_the_metadata_flag(tmp_path: Path) -
 
     state, session_data, metadata, updated_at = _session_columns(database, _SESSION)
     assert (json.loads(state), json.loads(session_data)) == ({"tool": "kept"}, {"session_metrics": {"total_tokens": 3}})
-    flagged = {"force_compact_before_next_run": True}
     assert json.loads(metadata) == {
         "other": "kept",
-        constants.MINDROOM_COMPACTION_METADATA_KEY: {
-            "version": 2,
-            "states": {**other_scope, "agent:code": flagged, "team:squad": flagged},
-        },
+        constants.MINDROOM_HISTORY_METADATA_KEY: {"force_compact_before_next_run": True},
     }
     assert updated_at == 1
-    assert has_queued_force_compaction(store, _SESSION, HistoryScope(kind="agent", scope_id="code"))
-    assert has_queued_force_compaction(store, _SESSION, HistoryScope(kind="team", scope_id="squad"))
-    # The database's agent owns the session the team row named too.
+    assert has_queued_force_compaction(store, _SESSION)
+    # The database's agent owns the session the team row named too, and the team's request asks nothing of it.
     team = store.load_session("team")
     assert team is not None
     assert team.session_state == {}
-    assert has_queued_force_compaction(store, "team", HistoryScope(kind="team", scope_id="squad"))
+    assert not has_queued_force_compaction(store, "team")
     assert _session_columns(database, "idle") == ('{"tool": 1}', None, idle_metadata, idle_updated_at)
 
 
@@ -1307,7 +1306,7 @@ def test_a_request_queued_before_the_summary_rows_existed_leaves_the_scopes_tomb
     tmp_path: Path,
 ) -> None:
     """The destructive compactor's tombstones in the scope's state drop their runs before the flag joins that state."""
-    compaction = constants.MINDROOM_COMPACTION_METADATA_KEY
+    compaction = LEGACY_COMPACTION_METADATA_KEY
     database = write_agno_database(
         _NAMES.database_path(tmp_path),
         ConversationSession(
@@ -1327,9 +1326,7 @@ def test_a_request_queued_before_the_summary_rows_existed_leaves_the_scopes_tomb
     session = store.load_session(_SESSION)
     assert session is not None
     assert session.session_state == {}
-    assert session.metadata == {
-        compaction: {"version": 2, "states": {"agent:code": {"force_compact_before_next_run": True}}},
-    }
+    assert session.metadata == {constants.MINDROOM_HISTORY_METADATA_KEY: {"force_compact_before_next_run": True}}
 
 
 @pytest.mark.parametrize(
@@ -1358,7 +1355,7 @@ def test_a_queued_request_that_names_no_scope_requests_nothing(tmp_path: Path, q
     state, session_data, metadata, _updated_at = _session_columns(database, _SESSION)
     assert (json.loads(state), session_data) == ({"tool": "kept"}, None)
     assert metadata == '{"other":  "kept"}'
-    assert not has_queued_force_compaction(store, _SESSION, HistoryScope(kind="agent", scope_id="code"))
+    assert not has_queued_force_compaction(store, _SESSION)
 
 
 @pytest.mark.parametrize(

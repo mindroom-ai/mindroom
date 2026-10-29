@@ -11,9 +11,8 @@ agent's scope, read or write summary rows directly:
 - the summary rows of the conversation log (``session_storage/summary_rows.py``), positioned
   between the runs by ``seq``; replay is the scope's latest summary row and the
   runs it does not cover, and ``session.summary`` is derived from that row on read
-- per-scope control state under ``MINDROOM_COMPACTION_METADATA_KEY`` (force flag)
-- per-scope consumed Matrix event ids under ``MINDROOM_MATRIX_HISTORY_METADATA_KEY``
-  that no stored run carries (team consumption)
+- the database owner's history state under ``MINDROOM_HISTORY_METADATA_KEY``: whether its next run
+  compacts first, and the consumed Matrix event ids no stored run carries (team consumption)
 
 Nothing else the summary rows already know is stored: the event ids compacted
 history represents are derived from them when seen ids are read. A metadata change
@@ -35,10 +34,7 @@ from functools import partial
 from typing import TYPE_CHECKING, Any
 
 from mindroom.background_tasks import run_blocking_until_complete
-from mindroom.constants import (
-    MINDROOM_COMPACTION_METADATA_KEY,
-    MINDROOM_MATRIX_HISTORY_METADATA_KEY,
-)
+from mindroom.constants import MINDROOM_HISTORY_METADATA_KEY
 from mindroom.history.run_visibility import is_model_history_visible_run, replays_in_scope, run_in_scope
 from mindroom.history.types import HistoryScope, HistoryScopeState, owner_scope, replayed_summary_text
 from mindroom.session_storage import summary_rows
@@ -56,8 +52,9 @@ if TYPE_CHECKING:
     from mindroom.session_storage.store import ConversationStore
 
 
-_COMPACTION_METADATA_VERSION = 2
-_MATRIX_HISTORY_METADATA_VERSION = 1
+# The fields of the owner's history state, each left out of the stored value at its default.
+_FORCE_COMPACTION = "force_compact_before_next_run"
+_SEEN_EVENT_IDS = "seen_event_ids"
 
 
 async def record_summary_usage(
@@ -96,67 +93,46 @@ def new_scope_session(*, session_id: str, scope: HistoryScope) -> ConversationSe
 
 def read_scope_state(session: ConversationSession) -> HistoryScopeState:
     """Return the compaction state of the scope owning ``session``."""
-    return _scope_state(session.metadata, owner_scope(session))
+    return _scope_state(session.metadata)
 
 
-def _scope_state(metadata: dict[str, Any] | None, scope: HistoryScope) -> HistoryScopeState:
-    raw_state = _raw_scope_states(metadata).get(scope.key, {})
-    return HistoryScopeState(force_compact_before_next_run=bool(raw_state.get("force_compact_before_next_run")))
+def _scope_state(metadata: dict[str, Any] | None) -> HistoryScopeState:
+    return HistoryScopeState(force_compact_before_next_run=_history_state(metadata).get(_FORCE_COMPACTION) is True)
 
 
-def _raw_scope_states(metadata: dict[str, Any] | None) -> dict[str, dict[str, Any]]:
-    """Return every scope's stored compaction-state mapping from session metadata."""
-    if isinstance(metadata, dict):
-        raw_value = metadata.get(MINDROOM_COMPACTION_METADATA_KEY)
-        if isinstance(raw_value, dict) and raw_value.get("version") == _COMPACTION_METADATA_VERSION:
-            raw_states = raw_value.get("states")
-            if isinstance(raw_states, dict):
-                return {
-                    scope_key: raw_state
-                    for scope_key, raw_state in raw_states.items()
-                    if isinstance(scope_key, str) and scope_key and isinstance(raw_state, dict)
-                }
-    return {}
+def _history_state(metadata: dict[str, Any] | None) -> dict[str, Any]:
+    """Return the owner's stored history state from session ``metadata``, or an empty one."""
+    raw_value = metadata.get(MINDROOM_HISTORY_METADATA_KEY) if isinstance(metadata, dict) else None
+    return raw_value if isinstance(raw_value, dict) else {}
 
 
-def _with_scope_state(
-    metadata: dict[str, Any] | None,
-    scope: HistoryScope,
-    state: HistoryScopeState,
-) -> dict[str, Any]:
-    """Return session ``metadata`` holding ``state`` as one scope's compaction control state.
+def _with_history_state(metadata: dict[str, Any] | None, field: str, value: object) -> dict[str, Any]:
+    """Return session ``metadata`` with one field of the owner's history state changed; ``metadata`` is left alone.
 
-    Other scopes' stored mappings are kept verbatim, and ``metadata`` itself is left alone.
+    A field at its default (false or empty) leaves the stored value, and an empty state leaves the metadata.
     """
-    raw_states = _raw_scope_states(metadata)
-    if state.force_compact_before_next_run:
-        raw_states[scope.key] = {"force_compact_before_next_run": True}
-    else:
-        raw_states.pop(scope.key, None)
-
+    state = {**_history_state(metadata), field: value}
+    state = {name: stored for name, stored in state.items() if stored}
     session_metadata = dict(metadata or {})
-    if not raw_states:
-        session_metadata.pop(MINDROOM_COMPACTION_METADATA_KEY, None)
+    if state:
+        session_metadata[MINDROOM_HISTORY_METADATA_KEY] = state
     else:
-        session_metadata[MINDROOM_COMPACTION_METADATA_KEY] = {
-            "version": _COMPACTION_METADATA_VERSION,
-            "states": raw_states,
-        }
+        session_metadata.pop(MINDROOM_HISTORY_METADATA_KEY, None)
     return session_metadata
 
 
-def with_force_compaction(metadata: dict[str, Any] | None, scope: HistoryScope) -> dict[str, Any]:
-    """Return session ``metadata`` asking ``scope`` to compact before its next run; ``metadata`` itself is left alone."""
-    return _with_scope_state(metadata, scope, HistoryScopeState(force_compact_before_next_run=True))
+def with_force_compaction(metadata: dict[str, Any] | None) -> dict[str, Any]:
+    """Return session ``metadata`` asking its owner to compact before its next run; ``metadata`` itself is left alone."""
+    return _with_history_state(metadata, _FORCE_COMPACTION, value=True)
 
 
-def has_queued_force_compaction(storage: ConversationStore, session_id: str, scope: HistoryScope) -> bool:
-    """Return whether one scope must compact before its next run.
+def has_queued_force_compaction(storage: ConversationStore, session_id: str) -> bool:
+    """Return whether the database owner must compact before its next run in session ``session_id``.
 
     Reads only the session row's metadata, which holds the request; loading the session would also decode every
     stored run, which takes seconds on a long session.
     """
-    return _scope_state(storage.read_session_metadata(session_id), scope).force_compact_before_next_run
+    return _scope_state(storage.read_session_metadata(session_id)).force_compact_before_next_run
 
 
 def run_event_ids(run: AnyRunRecord) -> set[str]:
@@ -173,7 +149,7 @@ def read_scope_seen_event_ids(storage: ConversationStore, session: ConversationS
     history, and session metadata adds ids no stored run carries.
     """
     scope = owner_scope(session)
-    seen = _read_preserved_scope_seen_event_ids(session.metadata, scope)
+    seen = _preserved_seen_event_ids(session.metadata)
     seen |= summary_rows.history_event_ids(storage, session_id=session.session_id, scope_key=scope.key, kind="seen")
     for run in session.runs:
         if replays_in_scope(run, scope):
@@ -198,10 +174,7 @@ def _read_scope_history_event_ids(storage: ConversationStore, session: Conversat
 
 def update_scope_seen_event_ids(storage: ConversationStore, session: ConversationSession, event_ids: list[str]) -> None:
     """Merge consumed Matrix event ids into the owner scope's preserved seen ids on ``session``'s stored row."""
-    storage.update_metadata(
-        session,
-        partial(_with_merged_scope_seen_event_ids, scope=owner_scope(session), event_ids=event_ids),
-    )
+    storage.update_metadata(session, partial(_with_merged_seen_event_ids, event_ids=event_ids))
 
 
 def remove_runs_answering(storage: ConversationStore, session_id: str, scope: HistoryScope, event_id: str) -> bool:
@@ -251,7 +224,7 @@ def _remove_redacted_event_from_history(
         return False
     elif legacy_event_ids is not None:
         summary_rows.retire(storage, session=session, scope_key=scope.key)
-    storage.update_metadata(session, partial(_with_scope_seen_event_ids, scope=scope, event_ids=set()))
+    storage.update_metadata(session, partial(_with_history_state, field=_SEEN_EVENT_IDS, value=[]))
     return True
 
 
@@ -321,12 +294,13 @@ def update_scope_state_on_latest(
     ``session`` then holds the stored metadata. The update callable sees the latest stored state, so it can refuse to
     write (return its input unchanged) when the durable row moved since the caller read it.
     """
-    scope = owner_scope(session)
 
     def change(metadata: dict[str, Any] | None) -> dict[str, Any] | None:
-        latest = _scope_state(metadata, scope)
+        latest = _scope_state(metadata)
         next_state = update(latest)
-        return metadata if next_state == latest else _with_scope_state(metadata, scope, next_state)
+        if next_state == latest:
+            return metadata
+        return _with_history_state(metadata, _FORCE_COMPACTION, value=next_state.force_compact_before_next_run)
 
     storage.update_metadata(session, change)
     return read_scope_state(session)
@@ -475,62 +449,15 @@ def run_folded_tool_call_ids(storage: ConversationStore, *, session_id: str, run
     return summary_rows.folded_tool_call_ids(storage, session_id=session_id, run_id=run_id)
 
 
-def _read_preserved_scope_seen_event_ids(metadata: dict[str, Any] | None, scope: HistoryScope) -> set[str]:
-    raw_value = _valid_matrix_history_metadata(metadata or {})
-    raw_states = raw_value.get("states") if raw_value is not None else None
-    raw_state = raw_states.get(scope.key) if isinstance(raw_states, dict) else None
-    raw_seen_ids = raw_state.get("seen_event_ids") if isinstance(raw_state, dict) else None
+def _preserved_seen_event_ids(metadata: dict[str, Any] | None) -> set[str]:
+    raw_seen_ids = _history_state(metadata).get(_SEEN_EVENT_IDS)
     if not isinstance(raw_seen_ids, list):
         return set()
     return {event_id for event_id in raw_seen_ids if isinstance(event_id, str) and event_id}
 
 
-def _with_merged_scope_seen_event_ids(
-    metadata: dict[str, Any] | None,
-    *,
-    scope: HistoryScope,
-    event_ids: list[str],
-) -> dict[str, Any] | None:
-    """Return ``metadata`` with ``event_ids`` added to the scope's preserved seen ids, as it was when it holds them all."""
-    existing = _read_preserved_scope_seen_event_ids(metadata, scope)
+def _with_merged_seen_event_ids(metadata: dict[str, Any] | None, *, event_ids: list[str]) -> dict[str, Any] | None:
+    """Return ``metadata`` with ``event_ids`` added to the owner's preserved seen ids, as it was when it holds them all."""
+    existing = _preserved_seen_event_ids(metadata)
     merged = existing.union(event_id for event_id in event_ids if event_id)
-    return metadata if merged == existing else _with_scope_seen_event_ids(metadata, scope=scope, event_ids=merged)
-
-
-def _with_scope_seen_event_ids(
-    metadata: dict[str, Any] | None,
-    *,
-    scope: HistoryScope,
-    event_ids: set[str],
-) -> dict[str, Any]:
-    """Return ``metadata`` with ``event_ids`` as the scope's preserved seen ids, leaving other scopes untouched."""
-    session_metadata = dict(metadata or {})
-    raw_value = _valid_matrix_history_metadata(session_metadata)
-    matrix_history: dict[str, Any] = (
-        dict(raw_value) if raw_value is not None else {"version": _MATRIX_HISTORY_METADATA_VERSION}
-    )
-    raw_states = matrix_history.get("states")
-    next_states = dict(raw_states) if isinstance(raw_states, dict) else {}
-    if event_ids:
-        raw_state = next_states.get(scope.key)
-        next_states[scope.key] = {
-            **(raw_state if isinstance(raw_state, dict) else {}),
-            "seen_event_ids": sorted(event_ids),
-        }
-    else:
-        next_states.pop(scope.key, None)
-    if next_states:
-        matrix_history["states"] = next_states
-        session_metadata[MINDROOM_MATRIX_HISTORY_METADATA_KEY] = matrix_history
-    else:
-        session_metadata.pop(MINDROOM_MATRIX_HISTORY_METADATA_KEY, None)
-    return session_metadata
-
-
-def _valid_matrix_history_metadata(metadata: dict[str, Any]) -> dict[str, Any] | None:
-    raw_value = metadata.get(MINDROOM_MATRIX_HISTORY_METADATA_KEY)
-    if not isinstance(raw_value, dict):
-        return None
-    if raw_value.get("version") != _MATRIX_HISTORY_METADATA_VERSION:
-        return None
-    return raw_value
+    return metadata if merged == existing else _with_history_state(metadata, _SEEN_EVENT_IDS, sorted(merged))
