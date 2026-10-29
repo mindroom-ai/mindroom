@@ -7842,6 +7842,7 @@ from = ["mindroom.tool_system.skills"]
 
 [[interfaces]]
 expose = [
+    "DeferredInstructions",
     "DeferredToolkit",
     "ToolDeferral",
     "defer_toolkit",
