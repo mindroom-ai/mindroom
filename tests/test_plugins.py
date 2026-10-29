@@ -3206,7 +3206,7 @@ def _write_import_task_plugin(plugin_root: Path) -> None:
     )
     (plugin_root / "hooks.py").write_text(
         "import asyncio\n"
-        "from mindroom.hooks import hook\n"
+        "from mindroom.plugin_api import hook\n"
         "\n"
         "_BACKGROUND_TASK = asyncio.get_running_loop().create_task(asyncio.Event().wait())\n"
         "\n"
