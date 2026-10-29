@@ -84,7 +84,7 @@ render "$work_dir/custom.yaml" \
 assert_contains "$work_dir/custom.yaml" 'location = /authentication-recovery-probe'
 assert_not_contains "$work_dir/custom.yaml" 'location = /session/check'
 yq -r 'select(.data["default.conf"]) | .data["default.conf"]' "$work_dir/custom.yaml" \
-  | awk '/^log_format test_json / { seen = 1 } /^server \{/ { exit !seen }' \
+  | awk '/^log_format test_json / { seen = 1 } /^server \{/ { found = 1; exit !seen } END { if (!found) exit 1 }' \
   || fail "expected nginx.httpSnippet above the server block"
 render "$work_dir/min-timeout.yaml" \
   --set authenticationRecovery.enabled=true \
@@ -191,8 +191,13 @@ curl --fail --silent --dump-header "$work_dir/asset.headers" \
 assert_contains "$work_dir/asset.headers" "Cache-Control: no-store"
 assert_contains "$work_dir/asset.headers" "Content-Type: application/javascript"
 cmp "$work_dir/html/authentication-recovery.js" "$work_dir/asset.js"
-docker logs "$container_name" 2>/dev/null > "$work_dir/access.log"
-assert_contains "$work_dir/access.log" '{"uri":"/authentication-recovery.js","chart":"mindroom-client"}'
+expected_log='{"uri":"/authentication-recovery.js","chart":"mindroom-client"}'
+for _ in $(seq 1 50); do
+  docker logs "$container_name" 2>/dev/null > "$work_dir/access.log"
+  rg -F --quiet "$expected_log" "$work_dir/access.log" && break
+  sleep 0.1
+done
+assert_contains "$work_dir/access.log" "$expected_log"
 probe_status="$(curl --silent --output /dev/null --dump-header "$work_dir/probe.headers" \
   --write-out '%{http_code}' "$base_url/authentication-recovery-probe")"
 test "$probe_status" = 204 || fail "expected recovery probe status 204, got $probe_status"
