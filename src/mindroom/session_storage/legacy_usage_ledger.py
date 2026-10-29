@@ -21,7 +21,7 @@ if TYPE_CHECKING:
 # Replacement: v2026.9.191 introduced independent usage snapshots; no historical billing completeness is inferred.
 # Handling: Detect by schema in a database's conversion to storage v2; seed in its transaction, prefer current rows,
 # retain unknown dates and content-free gaps.
-# Coverage: tests/test_legacy_usage_storage.py.
+# Coverage: tests/session_storage/test_legacy_usage_ledger.py.
 def seed_usage_ledger(connection: sqlite3.Connection, names: AgnoTableNames) -> None:
     """Seed the usage ledger of a database that has none in the caller's write transaction."""
     if _needs_migration(connection, names):
