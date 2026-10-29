@@ -207,11 +207,11 @@ async def test_chat_fetches_image_urls_and_receives_downloaded_files_and_audio(
 
     pdf = "data:application/pdf;base64,"
     assert wire.body()["messages"][-1]["content"] == [
-        {"type": "file", "file": {"filename": "report", "file_data": f"{pdf}{_b64(b'%PDF-report')}"}},
-        {"type": "file", "file": {"filename": "table.pdf", "file_data": f"{pdf}{_b64(b'%PDF-table')}"}},
         {"type": "text", "text": "Use these"},
         {"type": "image_url", "image_url": {"url": "https://media.test/photo.png"}},
         {"type": "input_audio", "input_audio": {"data": _b64(b"RIFF-speech"), "format": "wav"}},
+        {"type": "file", "file": {"filename": "report", "file_data": f"{pdf}{_b64(b'%PDF-report')}"}},
+        {"type": "file", "file": {"filename": "table.pdf", "file_data": f"{pdf}{_b64(b'%PDF-table')}"}},
     ]
     assert downloaded == ["https://media.test/speech", "https://media.test/report", "https://media.test/table.pdf"]
 
@@ -443,7 +443,7 @@ async def test_a_downloaded_file_the_server_calls_octet_stream_is_typed_and_name
 
     await complete(_provider("openai_chat", tmp_path, wire), ModelRequest(messages=[message]))
 
-    assert wire.body()["messages"][-1]["content"][0] == {
+    assert wire.body()["messages"][-1]["content"][1] == {
         "type": "file",
         "file": {"filename": "report.pdf", "file_data": f"data:application/pdf;base64,{_b64(_PDF)}"},
     }

@@ -181,12 +181,12 @@ def _function_response(result: ToolResultView) -> dict[str, Any]:
 
 
 async def _with_media(message: Message, parts: list[dict[str, Any]], route: MediaRoute) -> list[dict[str, Any]]:
+    """Return the message's text parts followed by its images, audio, videos, and files, each in the order it came."""
     images = [part for image in message.images or () if (part := await _image_part(image, route)) is not None]
     videos = [part for video in message.videos or () if (part := await _video_part(video, route)) is not None]
     audio = [part for clip in message.audio or () if (part := await _audio_part(clip, route)) is not None]
     files = [part for file in message.files or () if (part := await _file_part(file, route)) is not None]
-    # Google recommends videos before the prompt.
-    return [*videos, *parts, *images, *audio, *files]
+    return [*parts, *images, *audio, *videos, *files]
 
 
 def _stored_parts(stored: list[Any], tool_calls: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:

@@ -666,7 +666,7 @@ async def test_a_thread_switching_to_a_chat_route_rewrites_foreign_call_ids(tmp_
 
 @pytest.mark.asyncio
 async def test_a_chat_route_sends_audio_and_file_attachments_inline(tmp_path: Path) -> None:
-    """Chat Completions carries attachments as inline parts, the file ahead of the text and the audio after it.
+    """Chat Completions carries attachments as inline parts after the text, the audio ahead of the file.
 
     The file part is named by the attachment's original filename, not its stored path.
     """
@@ -686,12 +686,12 @@ async def test_a_chat_route_sends_audio_and_file_attachments_inline(tmp_path: Pa
 
     pdf = base64.b64encode(report.read_bytes()).decode()
     assert built.body()["messages"][0]["content"] == [
-        {"type": "file", "file": {"filename": "report.pdf", "file_data": f"data:application/pdf;base64,{pdf}"}},
         {"type": "text", "text": "Summarize both."},
         {
             "type": "input_audio",
             "input_audio": {"data": base64.b64encode(voice.read_bytes()).decode(), "format": "wav"},
         },
+        {"type": "file", "file": {"filename": "report.pdf", "file_data": f"data:application/pdf;base64,{pdf}"}},
     ]
 
 

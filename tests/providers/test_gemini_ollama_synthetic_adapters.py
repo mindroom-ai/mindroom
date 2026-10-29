@@ -1233,9 +1233,9 @@ async def test_gemini_inlines_small_local_audio_and_video(tmp_path: Path, monkey
 
     assert server.uploads == []
     assert _user_parts(server) == [
-        {"inlineData": {"data": base64.urlsafe_b64encode(b"mp4-clip").decode(), "mimeType": "video/mp4"}},
         {"text": "Summarize"},
         {"inlineData": {"data": base64.urlsafe_b64encode(b"OggS-voice").decode(), "mimeType": "audio/ogg"}},
+        {"inlineData": {"data": base64.urlsafe_b64encode(b"mp4-clip").decode(), "mimeType": "video/mp4"}},
     ]
 
 
@@ -1267,9 +1267,9 @@ async def test_gemini_uploads_large_local_audio_and_video_once_and_reuses_the_ac
     audio_name = _upload_name("audio/ogg", b"OggS-voice")
     assert server.uploads == [video_name, audio_name]
     assert first_parts == [
-        _uploaded(video_name, "video/mp4"),
         {"text": "Summarize"},
         _uploaded(audio_name, "audio/ogg"),
+        _uploaded(video_name, "video/mp4"),
     ]
     assert _user_parts(server) == first_parts
 
@@ -1568,8 +1568,8 @@ async def test_gemini_local_audio_of_unknown_type_is_sent_as_mp3(tmp_path: Path)
 
 
 @pytest.mark.asyncio
-async def test_gemini_places_videos_before_the_prompt_and_other_media_after(tmp_path: Path) -> None:
-    """Videos lead the user turn in the order they came; images, audio, and files follow the text in that order."""
+async def test_gemini_places_the_text_first_and_each_kind_of_media_in_the_order_it_came(tmp_path: Path) -> None:
+    """The text leads the user turn; images, audio, videos, and files follow it in that order."""
     message = Message(
         role="user",
         content="Compare",
@@ -1583,17 +1583,17 @@ async def test_gemini_places_videos_before_the_prompt_and_other_media_after(tmp_
 
     parts = request["body"]["contents"][0]["parts"]
     assert [next(iter(part)) for part in parts] == [
-        "fileData",
-        "inlineData",
         "text",
         "inlineData",
+        "inlineData",
+        "fileData",
         "inlineData",
         "inlineData",
     ]
     assert [part["inlineData"]["mimeType"] for part in parts if "inlineData" in part] == [
-        "video/webm",
         "image/png",
         "audio/wav",
+        "video/webm",
         "application/pdf",
     ]
 

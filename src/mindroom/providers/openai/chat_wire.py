@@ -136,8 +136,8 @@ def _chat_message(message: Message, wire: ChatWire, system_role: str, provider: 
     if images or audio or files:
         content = formatted.get("content")
         text = [{"type": "text", "text": content}] if isinstance(content, str) else list(content or [])
-        # The files go ahead of the text, and the images and audio after it.
-        formatted["content"] = [*files, *text, *images, *audio]
+        # The text goes first, then each kind of media in the order it came, as on every wire.
+        formatted["content"] = [*text, *images, *audio, *files]
     elif message.content is None and message.role != "tool":
         formatted["content"] = ""
     reasoning_details = (message.provider_data or {}).get("reasoning_details") if message.role == "assistant" else None

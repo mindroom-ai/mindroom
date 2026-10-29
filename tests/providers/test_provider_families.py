@@ -552,6 +552,57 @@ async def test_every_family_leaves_out_an_empty_attachment_file_with_one_warning
     assert warnings == ([] if omitted else ["media_file_empty"])
 
 
+# The media kind of each part type a wire's user content holds.
+_PART_KINDS = {
+    "text": "text",
+    "input_text": "text",
+    "image": "image",
+    "image_url": "image",
+    "input_image": "image",
+    "input_audio": "audio",
+    "document": "file",
+    "file": "file",
+    "input_file": "file",
+}
+
+
+def _user_part_kinds(body: dict[str, Any]) -> list[str]:
+    """Return the media kind of each part of the request's last user content, in order."""
+    if "contents" in body:
+        # The SDK spells the inline type ``mimeType`` on the Gemini API and ``mime_type`` on Vertex AI.
+        inline = [part.get("inlineData", {}) for part in body["contents"][-1]["parts"]]
+        kinds = [(data.get("mimeType") or data.get("mime_type") or "text").split("/")[0] for data in inline]
+        return [kind.replace("application", "file") for kind in kinds]
+    message = body["messages"][-1] if "messages" in body else body["input"][-1]
+    return [_PART_KINDS[part["type"]] for part in message["content"]]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("family", ["anthropic", "gemini", "gemini_vertexai", "openai_chat", "openai_responses"])
+async def test_every_family_sends_the_text_first_then_images_audio_video_and_files(family: str, tmp_path: Path) -> None:
+    """One order on every wire: the text, then each kind of media the route takes, each in the order it came."""
+    spec = FAMILIES[family]
+    wire = Wire(spec.reply())
+    adapter = spec.adapter(tmp_path, wire)
+    omitted = adapter.capabilities.omitted_media
+    png = b"\x89PNG\r\n\x1a\n" + bytes(8)
+    message = Message(
+        role="user",
+        content="Compare",
+        images=[Image(content=png, mime_type="image/png"), Image(content=png, mime_type="image/png")],
+        audio=None if "audio" in omitted else [Audio(content=b"RIFF", format="wav", mime_type="audio/wav")],
+        videos=None if "video" in omitted else [Video(content=b"mp4", mime_type="video/mp4")],
+        files=[File(content=b"%PDF-1", filename="first.pdf"), File(content=b"%PDF-2", filename="second.pdf")],
+    )
+
+    await complete(pipeline_provider(adapter), ModelRequest(messages=[message]))
+
+    expected = ["text", "image", "image"]
+    expected += [] if "audio" in omitted else ["audio"]
+    expected += [] if "video" in omitted else ["video"]
+    assert _user_part_kinds(wire.body()) == [*expected, "file", "file"]
+
+
 @pytest.mark.asyncio
 async def test_composed_pipeline_serves_the_synthetic_family(tmp_path: Path) -> None:
     """The synthetic model has no wire, but every stage still applies to it as the registry composes it.
