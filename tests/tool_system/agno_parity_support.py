@@ -245,7 +245,7 @@ def build_toolkit(
             "calculator",
             TOOL_METADATA["calculator"].description,
             adapt_toolkit(calculator),
-            instructions="search_results",
+            portable_search=True,
         )
         searched = (DeferredToolkit(deferral, deferred.functions),)
 

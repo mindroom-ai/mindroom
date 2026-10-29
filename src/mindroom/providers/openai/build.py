@@ -514,13 +514,11 @@ def _build_responses(
         provider, provider_name = "OpenAI", "OpenAI Responses"
     endpoint = base_url.rstrip("/")
     identity = ModelIdentity(id=model_id, provider=provider, provider_name=provider_name, endpoint=endpoint)
-    native_tool_search = openai_native_tool_search_supported(route_key, model_id, base_url=base_url)
     capabilities = Capabilities(
         structured_output="native",
         omitted_media=frozenset({"audio", "video"}),
         url_media=frozenset({"file", "image"}),
-        native_tool_search=native_tool_search,
-        deferred_descriptions_upfront=native_tool_search,
+        native_tool_search=openai_native_tool_search_supported(route_key, model_id, base_url=base_url),
         native_compaction=_native_compaction_supported(model_id, endpoint, store, settings),
         provider_default_sampling=_provider_default_sampling(model_id),
     )

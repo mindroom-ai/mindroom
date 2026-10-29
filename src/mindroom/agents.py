@@ -80,7 +80,7 @@ from mindroom.tool_system.declarations import (
     MATRIX_ROOM_RUNTIME_TOOL_NAMES,
     ToolFileAccess,
 )
-from mindroom.tool_system.dynamic_toolkits import DeferredInstructions, DeferredToolkit, ToolDeferral, defer_toolkit
+from mindroom.tool_system.dynamic_toolkits import DeferredToolkit, ToolDeferral, defer_toolkit
 from mindroom.tool_system.output_files import ToolOutputFilePolicy, wrap_toolkit_for_output_files
 from mindroom.tool_system.plugins import load_plugins
 from mindroom.tool_system.runtime_context import ToolDispatchContext
@@ -1138,7 +1138,6 @@ def _assemble_agent_toolkits(  # noqa: C901, PLR0915 - eager and deferred tools 
     supports_native_tool_approval: bool,
     wire_deferred_tools: bool,
     portable_deferred_tools: bool,
-    deferred_instructions: DeferredInstructions,
     eager_deferred_tools: bool,
     required_tool_names: tuple[str, ...],
     minimal_mode: bool,
@@ -1282,7 +1281,7 @@ def _assemble_agent_toolkits(  # noqa: C901, PLR0915 - eager and deferred tools 
                 authored_name,
                 metadata.description if metadata else "",
                 adapted,
-                instructions=deferred_instructions,
+                portable_search=portable_deferred_tools,
             )
         # Refused only now, so a function the filters and the approval policy left out costs its toolkit nothing.
         if (refusal := offered_refusal(adapted)) is not None:
@@ -1771,13 +1770,6 @@ def create_agent(
         agent_mode == "standard" and persona_tools is None and provider.capabilities.native_tool_search
     )
     portable_deferred_tools = agent_mode == "standard" and not eager_deferred_tools and not native_deferred_tools
-    deferred_instructions: DeferredInstructions = (
-        "search_results"
-        if portable_deferred_tools
-        else "prompt"
-        if provider.capabilities.deferred_descriptions_upfront
-        else "descriptions"
-    )
 
     # Loaded before the toolkits are resolved and placed, which read plugin tool metadata, and before the skills,
     # which include the skills of the plugins this config loads.
@@ -1843,7 +1835,6 @@ def create_agent(
         supports_native_tool_approval=supports_native_tool_approval,
         wire_deferred_tools=native_deferred_tools or portable_deferred_tools,
         portable_deferred_tools=portable_deferred_tools,
-        deferred_instructions=deferred_instructions,
         eager_deferred_tools=eager_deferred_tools,
         required_tool_names=required_tool_names,
         minimal_mode=agent_mode == "minimal",

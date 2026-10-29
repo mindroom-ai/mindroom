@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, replace
-from typing import TYPE_CHECKING, Literal
+from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
@@ -17,7 +17,7 @@ class ToolDeferral:
 
     domain_name: str
     description: str
-    # Instructions the toolkit and its functions would render when eager, which the prompt leaves out.
+    # Instructions the toolkit and its functions would render when eager, which portable tool search returns.
     instructions: str | None
     function_instructions: Mapping[str, str]
 
@@ -35,26 +35,19 @@ class DeferredToolkit:
         return tuple(function.name for function in self.functions)
 
 
-# Where a deferred toolkit's instructions reach the model, which depends on what its tool search shows up front.
-type DeferredInstructions = Literal["search_results", "descriptions", "prompt"]
-
-
 def defer_toolkit(
     domain_name: str,
     description: str,
     toolkit: AdaptedToolkit,
     *,
-    instructions: DeferredInstructions,
+    portable_search: bool,
 ) -> tuple[ToolDeferral, AdaptedToolkit]:
-    """Return what tool search shows of a wire-deferred toolkit beside its functions, and the toolkit without them.
+    """Return what tool search shows of a wire-deferred toolkit beside its functions, and the toolkit to offer.
 
-    The instructions the toolkit and its functions would render go where its tool search shows them:
-
-    - ``search_results``: portable tool search returns them beside the definitions it finds.
-    - ``descriptions``: native search that shows nothing of a function until a search loads it gets them in each
-      function's description.
-    - ``prompt``: native search that shows every function's name and description up front keeps the toolkit's in
-      the system prompt, once, and puts each function's own in its description.
+    Portable tool search returns the instructions the toolkit and its functions would render beside the definitions
+    it finds, so the toolkit offered carries none.
+    Native tool search expands only function definitions, so the toolkit keeps its instructions for the system
+    prompt and each function's own instructions go in its description.
     """
     deferral = ToolDeferral(
         domain_name=domain_name,
@@ -62,18 +55,13 @@ def defer_toolkit(
         instructions=toolkit.instructions,
         function_instructions=toolkit.function_instructions,
     )
-    if instructions == "search_results":
+    if portable_search:
         return deferral, replace(toolkit, instructions=None, function_instructions={})
-    shared = toolkit.instructions if instructions == "descriptions" else None
     functions = tuple(
-        replace(
-            function,
-            description=_joined(function.description, shared, toolkit.function_instructions.get(function.name)),
-        )
+        replace(function, description=_joined(function.description, toolkit.function_instructions.get(function.name)))
         for function in toolkit.functions
     )
-    kept = toolkit.instructions if instructions == "prompt" else None
-    return deferral, replace(toolkit, functions=functions, instructions=kept, function_instructions={})
+    return deferral, replace(toolkit, functions=functions, function_instructions={})
 
 
 def _joined(*parts: str | None) -> str | None:

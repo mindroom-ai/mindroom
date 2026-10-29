@@ -51,7 +51,7 @@ The endpoint is a non-empty `extra_kwargs.base_url`, otherwise `OPENAI_BASE_URL`
 On this path, deferred tools stay out of the model's context until the model searches for them, and discovering a tool does not invalidate the prompt cache.
 The system prompt names the deferred toolkits and tells the model to search them before concluding that a tool is unavailable.
 Discovered tools are called directly.
-A deferred toolkit's instructions still reach the model: Claude reads them with each function its search loads, and GPT models keep them in the system prompt.
+Deferred tools keep their toolkit and function instructions.
 
 ## MindRoom Tool Search
 
