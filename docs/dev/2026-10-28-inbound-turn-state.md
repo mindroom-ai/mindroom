@@ -70,7 +70,7 @@ The code shows what each owner does; this record keeps why, what was rejected, a
 - Releasing the lane slot while waiting on a contended claim: the wait still held the room's journal lane.
 - Refusing a re-formed batch whose stored context differs: a configuration change before a replay would leave the turn unanswerable forever.
 - Splitting the surviving sources of a batch that already has a reply across new replies: reply spans pin their sources, so a survivor would meet the finished reply and never be answered.
-- Keeping a latest-event origin beside the batch's reduced source kind.
+- Keeping a latest-event origin beside the batch's reduced source kind: one batch would carry two origins, so turn policy and the dispatch envelope could read different provenance.
 
 ## Limitations
 

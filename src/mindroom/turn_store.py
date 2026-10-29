@@ -316,7 +316,7 @@ class TurnStore:
         """
         if turn_record.turn_key is None:
             return frozenset()
-        return await self.deps.turn_records.read(_deleted_sources, turn_record.turn_key)
+        return await self.deps.turn_records.read(turn_rows.deleted_sources, turn_record.source_event_ids)
 
     async def prepared_voice_for_source(self, source_event_id: str) -> PreparedVoiceSource | None:
         """Return an exact physical source's voice checkpoint."""
@@ -673,9 +673,8 @@ class TurnStore:
         """Return which of a pending response's sources became terminal while it waited for its lock.
 
         ``terminal_source_event_ids`` are the response's physical sources;
-        ``source_event_ids`` also names the discovery aliases a deletion can
-        reach them through. The conversation's edits the history consumes are
-        recorded on the turn first. A redacted message or revision still in the
+        ``source_event_ids`` names the turn the conversation's edits the
+        history consumes are recorded on first. A redacted message or revision still in the
         history means the snapshot predates the redaction, and the request
         retries its preparation.
         """
@@ -686,7 +685,6 @@ class TurnStore:
         preparation, context_redacted = await self.deps.turn_records.read(
             _pending_source_preparation,
             room_id=target.room_id,
-            source_event_ids=source_event_ids,
             terminal_source_event_ids=terminal_source_event_ids,
             history_event_ids=tuple(message.latest_event_id for message in thread_history),
         )
@@ -936,23 +934,8 @@ def _record_pending_turn(
     return PendingTurn(
         record=result.record,
         resumes_response=resumes_response,
-        deleted_sources=_deleted_sources_of(transaction, agent_name, result.record),
+        deleted_sources=turn_rows.deleted_sources(transaction, agent_name, result.record.source_event_ids),
     )
-
-
-def _deleted_sources(transaction: Transaction, agent_name: str, turn_key: str) -> frozenset[str]:
-    record = turn_rows.load_turn(transaction, agent_name, turn_key)
-    return frozenset() if record is None else _deleted_sources_of(transaction, agent_name, record)
-
-
-def _deleted_sources_of(transaction: Transaction, agent_name: str, record: TurnRecord) -> frozenset[str]:
-    assert record.turn_key is not None
-    if record.conversation_target is not None:
-        mapped = {metadata.discovery_event_id for metadata in (record.source_event_metadata or {}).values()}
-        unmapped = [alias for alias in record.discovery_event_ids if alias not in mapped]
-        if turn_rows.redacted_events(transaction, agent_name, record.conversation_target.room_id, unmapped):
-            return frozenset(record.source_event_ids)
-    return turn_rows.deleted_sources(transaction, agent_name, record.turn_key)
 
 
 def _has_pending_response_intent(transaction: Transaction, agent_name: str, source_event_ids: tuple[str, ...]) -> bool:
@@ -1006,18 +989,13 @@ def _pending_source_preparation(
     agent_name: str,
     *,
     room_id: str,
-    source_event_ids: tuple[str, ...],
     terminal_source_event_ids: tuple[str, ...],
     history_event_ids: tuple[str, ...],
 ) -> tuple[SourcePreparation, bool]:
     """Split a turn's sources into invalid and surviving, and report whether its history holds a redaction."""
     sources = terminal_source_event_ids
-    invalid = set(turn_rows.deleted_events(transaction, agent_name, room_id, sources))
+    invalid = turn_rows.deleted_sources(transaction, agent_name, sources)
     invalid |= turn_rows.handled_among(transaction, agent_name, room_id, sources)
-    # A redacted alias that maps to none of these sources, such as the question a selection answers, deletes them all.
-    for alias in turn_rows.redacted_events(transaction, agent_name, room_id, set(source_event_ids) - set(sources)):
-        if set(sources).isdisjoint(turn_rows.sources_deleted_by(transaction, agent_name, room_id, alias)):
-            invalid.update(sources)
     context_redacted = bool(turn_rows.redacted_events(transaction, agent_name, room_id, history_event_ids))
     return (
         SourcePreparation(
@@ -1046,7 +1024,7 @@ def _edit_snapshot_is_stale(  # noqa: PLR0911
     current = turn_rows.load_turn(transaction, agent_name, turn_key)
     if current is None:
         return True
-    if not turn_rows.deleted_sources(transaction, agent_name, turn_key).isdisjoint(live_source_event_ids):
+    if turn_rows.deleted_sources(transaction, agent_name, live_source_event_ids):
         return True
     selections = {
         source: revision

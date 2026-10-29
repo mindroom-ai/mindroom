@@ -415,12 +415,24 @@ def _deleted_among(
     )
 
 
-def deleted_sources(transaction: Transaction, agent_name: str, turn_key: str) -> frozenset[str]:
-    """Return which physical sources of one stored turn are deleted, directly or through their discovery alias."""
-    rows = _load_rows(transaction, agent_name, (turn_key,)).get(turn_key)
-    if rows is None:
-        return frozenset()
-    return _deleted_among(transaction, agent_name, rows.turn.room_id, rows.sources)
+def deleted_sources(transaction: Transaction, agent_name: str, source_event_ids: Iterable[str]) -> frozenset[str]:
+    """Return which of these physical sources are deleted, each as its stored turn reads it.
+
+    A source is deleted when it, or the discovery alias mapped to it, is
+    redacted. A redacted alias of its turn that maps to no source, such as the
+    question a selection answers, deletes every source of that turn.
+    """
+    owners = _physical_owners(transaction, agent_name, source_event_ids)
+    deleted: set[str] = set()
+    for rows in _load_rows(transaction, agent_name, tuple(set(owners.values()))).values():
+        room_id = rows.turn.room_id
+        mapped = {source.discovery_event_id for source in rows.sources}
+        unmapped = [alias for alias in rows.aliases if alias not in mapped]
+        if room_id is not None and redacted_events(transaction, agent_name, room_id, unmapped):
+            deleted.update(source.event_id for source in rows.sources)
+        else:
+            deleted |= _deleted_among(transaction, agent_name, room_id, rows.sources)
+    return frozenset(event_id for event_id in owners if event_id in deleted)
 
 
 def deleted_events(

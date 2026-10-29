@@ -384,7 +384,7 @@ class TestRedactionGuard:
 
         assert stored.source_event_prompts == {"$t": "$t body"}
         assert voice is None
-        assert await read(store, turn_rows.deleted_sources, stored.turn_key) == {"$s"}
+        assert await read(store, turn_rows.deleted_sources, stored.source_event_ids) == {"$s"}
         assert await read(store, turn_rows.handled_among, ROOM, ["$s", "$t"]) == {"$s"}
 
     async def test_a_payload_built_before_the_redaction_is_dropped_when_it_lands_late(
@@ -435,10 +435,24 @@ class TestRedactionGuard:
         found = await lookup(reopened, "$r")
         assert found is not None
         assert found.source_event_prompts is None
-        assert await read(reopened, turn_rows.deleted_sources, stored.turn_key) == {"$r"}
+        assert await read(reopened, turn_rows.deleted_sources, stored.source_event_ids) == {"$r"}
         assert await column(reopened, "SELECT prompt, prepared_voice_json FROM turn_sources WHERE event_id = '$r'") == [
             (None, None),
         ]
+
+    async def test_a_redacted_alias_no_source_answers_for_deletes_every_source(self, store: EventJournalStore) -> None:
+        """Deleting the question a selection answers deletes the whole selection turn; a relay's original only its relay."""
+        selection = await accepted(store, turn(["$answer", "$more"], aliases=["$question"]))
+        relay = await accepted(
+            store,
+            turn(["$r", "$own"], aliases=["$o"], metadata={"$r": SourceEventMetadata(ALICE, discovery_event_id="$o")}),
+        )
+
+        await redact(store, "$question")
+        await redact(store, "$o")
+
+        assert await read(store, turn_rows.deleted_sources, selection.source_event_ids) == {"$answer", "$more"}
+        assert await read(store, turn_rows.deleted_sources, relay.source_event_ids) == {"$r"}
 
     async def test_a_physical_source_is_never_read_as_another_sources_alias(self, store: EventJournalStore) -> None:
         """A physical source is never read as another sources alias."""
@@ -449,7 +463,7 @@ class TestRedactionGuard:
 
         await redact(store, "$s1")
 
-        assert await read(store, turn_rows.deleted_sources, stored.turn_key) == {"$s1"}
+        assert await read(store, turn_rows.deleted_sources, stored.source_event_ids) == {"$s1"}
         found = await lookup(store, "$s2")
         assert found is not None
         assert found.source_event_prompts == {"$s2": "$s2 body"}
