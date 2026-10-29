@@ -1004,7 +1004,8 @@ def _runner_agent_workspace(
             execution_identity=_request_execution_identity(request),
             create=True,
         ).workspace.root
-    except OSError as exc:
+    except (OSError, ValueError) as exc:
+        # The runner's storage cannot hold the workspace, or its config no longer names the agent.
         msg = f"Agent workspace cannot be prepared in this runner: {exc}"
         raise sandbox_worker_prep.WorkerRequestPreparationError(msg) from exc
 

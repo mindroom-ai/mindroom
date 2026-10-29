@@ -378,7 +378,6 @@ def agent_tool_facts(config: Config, agent_name: str, *, policy: ResolvedAgentPo
 class ResolvedScope:
     """What every scope gets: an agent, a team, the router, or the defaults scope of an ad hoc team (``name`` None)."""
 
-    name: str | None
     history_settings: ResolvedHistorySettings
     max_tool_calls_per_turn: int
     file_access: FileAccess
@@ -391,7 +390,6 @@ class ResolvedScope:
 class ResolvedAgent(ResolvedScope):
     """What one configured agent gets."""
 
-    model_name: str
     policy: ResolvedAgentPolicy
     tools: AgentToolFacts
     knowledge_base_ids: tuple[str, ...]
@@ -405,7 +403,6 @@ def resolve_scope(config: Config, name: str | None) -> ResolvedScope:
     entity = configured_entity(config, name) if name is not None and name != ROUTER_AGENT_NAME else None
     own_calls = entity.max_tool_calls_per_turn if entity is not None else None
     return ResolvedScope(
-        name=name,
         history_settings=_history_settings(config, entity),
         max_tool_calls_per_turn=own_calls if own_calls is not None else config.defaults.max_tool_calls_per_turn,
         file_access=file_access(config, name),
@@ -440,7 +437,6 @@ def resolve_agent(config: Config, name: str) -> ResolvedAgent:
     policy = agent_policy(config, name)
     return ResolvedAgent(
         **vars(resolve_scope(config, name)),
-        model_name=agent.model,
         policy=policy,
         tools=agent_tool_facts(config, name, policy=policy),
         knowledge_base_ids=agent_knowledge_base_ids(config, name),

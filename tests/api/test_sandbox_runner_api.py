@@ -2562,6 +2562,28 @@ def test_a_static_runner_that_cannot_create_the_agent_workspace_fails_the_reques
         )
 
 
+def test_a_static_runner_without_the_routing_agent_fails_the_request(tmp_path: Path) -> None:
+    """A call for an agent the runner's config no longer names is a request preparation failure, not a crash."""
+    runner_paths = resolve_runtime_paths(
+        config_path=tmp_path / "runner" / "config.yaml",
+        storage_path=tmp_path / "runner" / "storage",
+        process_env={"MINDROOM_SANDBOX_RUNNER_MODE": "true"},
+    )
+    config = Config.validate_with_runtime({"agents": {"general": {"display_name": "General"}}}, runner_paths)
+
+    with pytest.raises(sandbox_runner_module.sandbox_worker_prep.WorkerRequestPreparationError, match="cannot be"):
+        sandbox_runner_module._prepare_execute_request(
+            sandbox_runner_module.SandboxRunnerExecuteRequest(
+                tool_name="file",
+                function_name="read_file",
+                routing_agent_name="removed",
+                tool_init_overrides={"base_dir": str(tmp_path / "primary" / "agents" / "removed" / "workspace")},
+            ),
+            runner_paths,
+            config=config,
+        )
+
+
 def test_prepared_dedicated_shell_request_preserves_explicit_execution_env(tmp_path: Path) -> None:
     """Prepared Docker/Kubernetes shell workers must keep broker env passed by the primary runtime."""
     config_path = tmp_path / "config.yaml"
