@@ -1722,7 +1722,6 @@ depends_on = [
     "mindroom.llm",
     "mindroom.response_turn",
     "mindroom.run_storage",
-    "mindroom.runtime_resolution",
     "mindroom.approval.tool_approval",
     "mindroom.tool_system",
     "mindroom.tool_system.catalog",
