@@ -29,8 +29,11 @@ Paths below are relative to `src/mindroom/` unless they start with `scripts/` or
   A startup sweep converts every agent's, team's, and private instance's database and the system usage database before any bot or the API starts, so no reply waits on a large conversion and ready means converted, and every store open runs the same entry, which converts a database the sweep skipped and a restored backup, at the cost of one read on a converted one.
   The sweep logs and skips a database it cannot read, lock, or convert, because worker code can write session directories and one database must not stop startup; that database's own open then fails with the error.
   The earlier one-time steps (usage-ledger seeding, summary-row adoption, and Agno 2 run blobs and positions) run only inside the conversion, behind its format marker, because they recognize an old database by a missing table, and a converted one lacks the Agno tables too.
-- A step that changes an already converted database bumps the layout version in `*_log_meta`, and only the startup sweep and an agent's store open run it, because they know whose database it is.
+- A step that changes an already converted database bumps the layout version in `*_log_meta`, and every store open and the startup sweep run it, because each knows whose database it opens.
   Layout version 3 is such a step: it sets an agent's session rows and their runs to name the agent, since the database alone cannot tell an agent's old display-name id from the owner that a team's agent rows or the system ledger's rows rightly name.
+  Layout version 4 records that owner once, in the meta row, and drops the session rows' Agno kind and owner columns, because each database has exactly one owner, while per-row owners let a row of another kind, such as the agent row a team bot's interrupted first reply created, hide a conversation from its team and from the team's usage.
+  The startup sweep takes a team database's owner from the team its rows name whose digest gives the database's name, since a team directory's name does not reverse to its scope; a database no row names converts at that scope's next store open, which is cheap because this step rewrites only the sessions table.
+  The same step moves `session_state` out of `session_data` into its own column, so a state write and a usage-totals write no longer each read and rewrite the other's object; it backs each database up first, as storage v2 did, because an older release started on the converted file archives its sessions directory.
 - A historical shape the conversion can rewrite, such as combined tool results, stored tool schemas, history copies, and legacy tool-call shapes, is normalized once by it instead of being read at every load; a shape it cannot rewrite stays a runtime reader, such as a summary inside a paused run's saved system message, which a resume reuses byte for byte.
 - Upgrades run while no reply is in flight, so reply records adopt no stream, queued delivery, or resume an earlier release left.
   Pending approvals cannot be ruled out, so the reply-records upgrade cancels them; no continuation therefore rebuilds historical context, origin, or tool-call visibility.
@@ -47,6 +50,6 @@ Paths below are relative to `src/mindroom/` unless they start with `scripts/` or
 ## Limitations
 
 - An old invited-room ledger that fails validation is not moved below `tracking/`, so that entity leaves the rooms it kept on its first room pass after the upgrade.
-- Downgrading below conversation storage v2 means restoring each database's backup, which loses every write made since the upgrade.
+- Downgrading below conversation storage v2, or below layout version 4, means restoring each database's backup of that conversion, which loses every write made since the upgrade.
 
 See [Upgrade and reset limits](../deployment/upgrades.md#upgrade-and-reset-limits) for the operator view.
