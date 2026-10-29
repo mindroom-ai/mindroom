@@ -1,7 +1,7 @@
 """The conversation databases Agno 3.0.9 wrote convert to storage v2 and read and write with nothing lost or changed.
 
-A converted run is compared with the run its Agno row decodes to, as typed records, so these tests pin what the rows
-hold and not how MindRoom encodes a run it writes.
+A converted run is compared with the run its Agno row decodes to, as typed records, with the paused-run rewrite applied
+(``upgraded_run_record``), so these tests pin what the rows hold and not how MindRoom encodes a run it writes.
 """
 
 from __future__ import annotations
@@ -21,7 +21,7 @@ from mindroom.session_storage.agent_storage import create_state_storage
 from mindroom.session_storage.legacy_agno3_schema import AgnoTableNames, run_from_row
 from mindroom.session_storage.types import ConversationSession
 from tests.conftest import persist_runs
-from tests.llm.agno_dict_helpers import stored_run_record
+from tests.llm.agno_dict_helpers import upgraded_run_record
 from tests.session_storage.agno_layout import named_owner
 from tests.session_storage.goldens import GoldenStore, agno_loaded_session, golden_sessions, golden_stores, stored_rows
 
@@ -101,7 +101,7 @@ def _folded_message_ids(db_file: Path) -> dict[str, set[str]]:
 
 def _replay_view(run_data: dict[str, Any], kept: Callable[[str], bool]) -> AnyRunRecord:
     """Return the run Agno stored as ``run_data`` with only the messages whose ids ``kept`` accepts."""
-    run = stored_run_record(run_data)
+    run = upgraded_run_record(run_data)
     return replace(run, messages=[message for message in run.messages if kept(message.id)])
 
 
@@ -126,7 +126,7 @@ def test_golden_sessions_load_as_agno_loaded_them(store: GoldenStore, session_id
     )
     assert _summary_dict(session.summary) == agno["summary"]
     assert [run.run_id for run in session.runs] == [run["run_id"] for run in agno["runs"]]
-    assert [_as_agno_reread(run) for run in session.runs] == [stored_run_record(run) for run in agno["runs"]]
+    assert [_as_agno_reread(run) for run in session.runs] == [upgraded_run_record(run) for run in agno["runs"]]
 
 
 @pytest.mark.parametrize(("store", "session_id"), _SESSIONS, ids=_SESSION_IDS)

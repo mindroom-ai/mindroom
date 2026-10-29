@@ -44,6 +44,7 @@ from mindroom.session_storage.legacy_agno3_schema import (
     run_from_row,
 )
 from mindroom.session_storage.legacy_conversion_backup import leave_write_ahead_log, write_conversion_backup
+from mindroom.session_storage.legacy_paused_runs import rewrite_paused_runs
 from mindroom.session_storage.legacy_session_columns import (
     convert_session_columns,
     stored_counts,
@@ -104,7 +105,8 @@ def convert_conversation_database(
     In one ``BEGIN IMMEDIATE``: the backup, the Agno-era steps (usage ledger seeding, summary-row adoption with Agno 2
     blob runs and positions), the conversion, the drop of the Agno tables, the log tables and the meta row, which
     records the current version and ``owner``, and, once an agent ``owner``'s session rows name it
-    (``adopt_agent_session_owners``), the sessions table's conversion (``convert_session_columns``). A file in
+    (``adopt_agent_session_owners``), the sessions table's conversion (``convert_session_columns``), and then the
+    rewrite of the paused runs it copied (``rewrite_paused_runs``). A file in
     write-ahead-log mode returns to the rollback journal first, which checkpoints its log. The file is then compacted
     when that pays off (``_compact``), and its conversion is logged. ``descriptors`` takes the backup's descriptor of
     the file, which the caller closes after ``connection``.
@@ -124,6 +126,7 @@ def convert_conversation_database(
             if owner.kind == "agent":
                 adopt_agent_session_owners(connection, names, owner.scope_id)
             convert_session_columns(connection, names)
+        rewrite_paused_runs(connection, names)
         runs, messages = stored_counts(connection, names)
     compacted = _compact(connection, path)
     logger.info(

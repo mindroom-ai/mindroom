@@ -42,6 +42,7 @@ from mindroom.session_storage.types import ConversationSession
 from tests.conftest import seed_session
 from tests.fakes.scripted_model import ScriptedModel, answer, calls, tool_call, usage
 from tests.history_helpers import _completed_team_run, _team_session, replay_settings, seed_summary
+from tests.session_storage.layout_4 import upgrade_from_layout_4
 from tests.team_turn_helpers import (
     EVENT_ID,
     SESSION_ID,
@@ -354,11 +355,15 @@ async def test_a_team_continued_within_its_turn_replays_the_summary_only_under_a
 
 @pytest.mark.asyncio
 @pytest.mark.usefixtures("squad_probe")
-async def test_resuming_a_pre_release_team_pause_keeps_its_single_summary(
+async def test_resuming_a_pre_release_team_pause_replays_the_scope_s_summary_once(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A team paused while Agno rendered the summary into the leader's system message resumes with only that copy."""
+    """A team paused while Agno rendered the summary into its leader's system message resumes with one summary.
+
+    After the upgrade the system message reads as it did without the summary, and the scope's summary replays as a
+    history message, as it does for a team a current release paused.
+    """
     team = _with_seeded_history(_checker_pauses(tmp_path, monkeypatch))
     paused = await _paused_on_the_checker(team)
     session = team.storage.load_session(SESSION_ID)
@@ -369,11 +374,12 @@ async def test_resuming_a_pre_release_team_pause_keeps_its_single_summary(
     assert system.role == "system"
     stored.messages[0] = replace(system, content=f"{system.content}{_LEGACY_SYSTEM_SUFFIX}")
     team.storage.save_run(session, stored, record_usage=False)
+    upgrade_from_layout_4(team.storage, TEAM_SCOPE)
     team.models["default"] = ScriptedModel([answer("The checker touched it.", usage(50, 5))])
     team.models["checker-model"] = ScriptedModel([answer("Touched.")])
 
     await team.resume(paused, approved=True, approvals=(member_approval("call-touch", "dangerous"),))
 
     [resumed] = team.models["default"].requests
-    assert _owned_summaries(resumed.messages) == []
-    assert resumed.messages[0].content == f"{system.content}{_LEGACY_SYSTEM_SUFFIX}"
+    assert len(_owned_summaries(resumed.messages)) == 1
+    assert resumed.messages[0].content == system.content
