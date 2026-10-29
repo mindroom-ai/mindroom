@@ -207,6 +207,31 @@ def test_a_converted_database_converts_once(name: str, tmp_path: Path) -> None:
     assert database.with_name(f"{database.name}{BACKUP_SUFFIX}").read_bytes() == original
 
 
+@pytest.mark.parametrize("name", sorted(_OWNERS))
+def test_a_conversion_is_logged_once(name: str, tmp_path: Path) -> None:
+    """The open that converts a database logs one INFO record naming it, its rows, and its time; a later open logs none."""
+    database = _restore(name, tmp_path)
+    names = TableNames(_storage_name(name))
+    [(runs, messages)] = _query(
+        database,
+        f"SELECT (SELECT count(*) FROM {names.log_runs}), (SELECT count(*) FROM {names.log_messages})",  # noqa: S608
+    )
+
+    with capture_logs() as logs:
+        _open(name, tmp_path)
+        _open(name, tmp_path)
+
+    [entry] = [entry for entry in logs if entry["event"] == "conversation_converted"]
+    assert {key: entry[key] for key in ("log_level", "path", "runs", "messages", "compacted")} == {
+        "log_level": "info",
+        "path": str(database),
+        "runs": runs,
+        "messages": messages,
+        "compacted": False,
+    }
+    assert entry["duration_seconds"] >= 0
+
+
 def test_a_failed_conversion_leaves_the_database_as_it_was(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """An error after the state moved rolls the whole conversion back; the next open converts it as one that never failed."""
     database = _restore("agent_code", tmp_path)

@@ -44,7 +44,12 @@ from mindroom.session_storage.legacy_agno3_schema import (
     run_from_row,
 )
 from mindroom.session_storage.legacy_conversion_backup import leave_write_ahead_log, write_conversion_backup
-from mindroom.session_storage.legacy_session_columns import convert_session_columns, team_owner, upgrade_layout
+from mindroom.session_storage.legacy_session_columns import (
+    convert_session_columns,
+    stored_counts,
+    team_owner,
+    upgrade_layout,
+)
 from mindroom.session_storage.schema import (
     LOG_VERSION,
     TableNames,
@@ -117,10 +122,7 @@ def convert_conversation_database(
             if owner.kind == "agent":
                 adopt_agent_session_owners(connection, names, owner.scope_id)
             convert_session_columns(connection, names)
-        runs, messages = connection.execute(
-            f"SELECT (SELECT count(*) FROM {quote_identifier(names.log_runs)}), "  # noqa: S608
-            f"(SELECT count(*) FROM {quote_identifier(names.log_messages)})",
-        ).fetchone()
+        runs, messages = stored_counts(connection, names)
     compacted = _compact(connection, path)
     logger.info(
         "conversation_converted",

@@ -10,9 +10,11 @@ first take their agent's name (``legacy_agent_session_owners``).
 from __future__ import annotations
 
 import json
+import time
 from typing import TYPE_CHECKING
 
 from mindroom.history.types import HistoryScope
+from mindroom.logging_config import get_logger
 from mindroom.session_storage.legacy_agent_session_owners import adopt_agent_session_owners
 from mindroom.session_storage.legacy_conversion_backup import leave_write_ahead_log, write_conversion_backup
 from mindroom.session_storage.schema import (
@@ -30,6 +32,8 @@ if TYPE_CHECKING:
     import sqlite3
     from contextlib import ExitStack
     from pathlib import Path
+
+logger = get_logger(__name__)
 
 # The version whose agent rows name their agent (``legacy_agent_session_owners``).
 _AGENT_OWNERS_VERSION = 3
@@ -60,10 +64,11 @@ def upgrade_layout(
 
     In one ``BEGIN IMMEDIATE``, after the byte-for-byte backup beside it (``write_conversion_backup``), so a crash or an
     error leaves the file as it was and the next open converts it again. A file in write-ahead-log mode returns to the
-    rollback journal first. ``descriptors`` takes the backup's descriptor of the file, which the caller closes after
-    ``connection``.
+    rollback journal first, and the conversion is logged once it commits. ``descriptors`` takes the backup's descriptor
+    of the file, which the caller closes after ``connection``.
     """
     leave_write_ahead_log(connection, path)
+    started = time.monotonic()
     with begun(connection, write=True):
         # Asked again under the lock: another opener may have converted the file while this one waited, and backing up
         # the converted file would replace the original's backup.
@@ -82,6 +87,24 @@ def upgrade_layout(
             f"UPDATE {meta} SET version = ?, owner_kind = ?, owner_id = ? WHERE id = 1",  # noqa: S608
             (LOG_VERSION, owner.kind, owner.scope_id),
         )
+        runs, messages = stored_counts(connection, names)
+    # The dropped columns free too little of the file to be worth compacting.
+    logger.info(
+        "conversation_converted",
+        path=str(path),
+        runs=runs,
+        messages=messages,
+        compacted=False,
+        duration_seconds=round(time.monotonic() - started, 3),
+    )
+
+
+def stored_counts(connection: sqlite3.Connection, names: TableNames) -> tuple[int, int]:
+    """Return how many runs and stored messages the database holds, which its conversion's record reports."""
+    return connection.execute(
+        f"SELECT (SELECT count(*) FROM {quote_identifier(names.log_runs)}), "  # noqa: S608
+        f"(SELECT count(*) FROM {quote_identifier(names.log_messages)})",
+    ).fetchone()
 
 
 # LEGACY_COMPAT: Session rows that name their kind and owner and keep their state inside `session_data`.
@@ -160,6 +183,7 @@ def team_owner(connection: sqlite3.Connection, names: TableNames) -> HistoryScop
 __all__ = [
     "BACKUP_SUFFIX",
     "convert_session_columns",
+    "stored_counts",
     "team_owner",
     "upgrade_layout",
 ]
