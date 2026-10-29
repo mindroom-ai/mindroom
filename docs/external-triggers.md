@@ -281,10 +281,12 @@ Callbacks follow `external_trigger_policy` and count toward `max_triggers_per_ow
 `mint_callback(label)` returns a script path and an instruction like this:
 
 ```text
-When finished, run: bash "$MINDROOM_AGENT_WORKSPACE/.mindroom/callbacks/callback_1234.sh" "<short result summary>"
+When finished, run: bash /path/to/workspace/.mindroom/callbacks/callback_1234.sh "<short result summary>"
 ```
 
-The script lives in the agent's workspace, and the instruction names it through `$MINDROOM_AGENT_WORKSPACE`, which the agent's shell sets wherever that workspace is mounted, so start the background task from the agent's shell.
+The script lives in the agent's workspace.
+When the agent's shell runs in a worker, which mounts that workspace at its own path, the instruction names the script as `"$MINDROOM_AGENT_WORKSPACE/.mindroom/callbacks/callback_1234.sh"`, so start the background task from the agent's shell.
+A tmux session does not inherit that variable, so pass it with `tmux new-session -e MINDROOM_AGENT_WORKSPACE="$MINDROOM_AGENT_WORKSPACE"`.
 The script needs only Bash and curl.
 It posts the summary to the room and thread where the callback was minted, which wakes the agent.
 After a successful delivery the callback is used up and the script deletes itself; if delivery fails, the script remains so it can be run again.

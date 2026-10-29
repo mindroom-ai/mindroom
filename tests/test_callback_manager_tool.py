@@ -6,6 +6,7 @@ import errno
 import json
 import os
 import re
+import shlex
 import shutil
 import stat
 import subprocess
@@ -41,7 +42,8 @@ def _runtime_paths(tmp_path: Path, process_env: dict[str, str] | None = None) ->
     return resolve_primary_runtime_paths(
         config_path=tmp_path / "config.yaml",
         storage_path=tmp_path / "mindroom_data",
-        process_env=process_env or {},
+        # The agent's shell runs on this host unless a test routes it to a worker.
+        process_env={"MINDROOM_SANDBOX_EXECUTION_MODE": "off", **(process_env or {})},
     )
 
 
@@ -93,9 +95,9 @@ def test_mint_callback_writes_one_bound_script(tmp_path: Path) -> None:
 
     assert payload["status"] == "ok"
     script_path = Path(payload["script_path"])
-    relative_script = script_path.relative_to(_workspace(tmp_path)).as_posix()
-    assert payload["instruction"] == (
-        f'When finished, run: bash "$MINDROOM_AGENT_WORKSPACE/{relative_script}" "<short result summary>"'
+    assert script_path.is_relative_to(_workspace(tmp_path))
+    assert (
+        payload["instruction"] == f'When finished, run: bash {shlex.quote(str(script_path))} "<short result summary>"'
     )
     assert stat.S_IMODE(script_path.stat().st_mode) == 0o700
     assert script_path.parent.joinpath(".gitignore").read_text(encoding="utf-8") == "*\n"
@@ -282,34 +284,47 @@ def test_generated_script_posts_summary_and_deletes_itself(tmp_path: Path) -> No
     assert not script_path.exists()
 
 
-def test_the_instruction_runs_where_a_worker_mounts_the_workspace(tmp_path: Path) -> None:
-    """A worker mounts the workspace at its own path, so the instruction names the script through the workspace var."""
-    with tool_runtime_context(_context(tmp_path)):
-        payload = _payload(CallbackManagerTools().mint_callback("worker callback"))
-    worker_workspace = tmp_path / "worker" / "workspace"
-    # The worker sees only its own mount of the workspace, never the primary's path.
-    shutil.copytree(_workspace(tmp_path), worker_workspace)
-    shutil.rmtree(_workspace(tmp_path))
+def _run_instruction(tmp_path: Path, instruction: str, env: dict[str, str]) -> str:
+    """Run the instruction's command as a background task would, with curl faked, and return its output."""
     fake_bin = tmp_path / "fake-bin"
     fake_bin.mkdir()
     (fake_bin / "curl").write_text("#!/usr/bin/env bash\ncat > /dev/null\n", encoding="utf-8")
     (fake_bin / "curl").chmod(0o700)
-    command = payload["instruction"].removeprefix("When finished, run: ").replace("<short result summary>", "done")
-
+    command = instruction.removeprefix("When finished, run: ").replace("<short result summary>", "done")
     completed = subprocess.run(
         ["bash", "-c", command],
         check=True,
         capture_output=True,
         text=True,
-        env={
-            **os.environ,
-            "MINDROOM_AGENT_WORKSPACE": str(worker_workspace),
-            "PATH": f"{fake_bin}{os.pathsep}{os.environ['PATH']}",
-        },
+        env={**env, "PATH": f"{fake_bin}{os.pathsep}{os.environ['PATH']}"},
     )
+    return completed.stdout.strip()
 
-    assert completed.stdout.strip() == "MindRoom notified."
-    assert not (worker_workspace / Path(payload["script_path"]).relative_to(_workspace(tmp_path))).exists()
+
+def test_the_instruction_of_a_local_shell_runs_without_the_shell_environment(tmp_path: Path) -> None:
+    """A task that does not inherit the agent shell's env, such as one in a tmux session, still finds the script."""
+    with tool_runtime_context(_context(tmp_path)):
+        payload = _payload(CallbackManagerTools().mint_callback("tmux callback"))
+    env = {name: value for name, value in os.environ.items() if name != "MINDROOM_AGENT_WORKSPACE"}
+
+    assert _run_instruction(tmp_path, payload["instruction"], env) == "MindRoom notified."
+    assert not Path(payload["script_path"]).exists()
+
+
+def test_the_instruction_of_a_worker_shell_runs_where_the_worker_mounts_the_workspace(tmp_path: Path) -> None:
+    """A worker mounts the workspace at its own path, so the instruction names the script through the workspace var."""
+    with tool_runtime_context(_context(tmp_path, process_env={"MINDROOM_SANDBOX_EXECUTION_MODE": "all"})):
+        payload = _payload(CallbackManagerTools().mint_callback("worker callback"))
+    worker_workspace = tmp_path / "worker" / "workspace"
+    # The worker sees only its own mount of the workspace, never the primary's path.
+    shutil.copytree(_workspace(tmp_path), worker_workspace)
+    shutil.rmtree(_workspace(tmp_path))
+    [script] = (worker_workspace / ".mindroom" / "callbacks").glob("*.sh")
+
+    assert payload["script_path"] == f"$MINDROOM_AGENT_WORKSPACE/.mindroom/callbacks/{script.name}"
+    env = {**os.environ, "MINDROOM_AGENT_WORKSPACE": str(worker_workspace)}
+    assert _run_instruction(tmp_path, payload["instruction"], env) == "MindRoom notified."
+    assert not script.exists()
 
 
 def test_script_failure_rolls_back_record(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

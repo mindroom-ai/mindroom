@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import secrets
+import shlex
 from contextlib import suppress
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -25,6 +26,8 @@ from mindroom.external_triggers.store import (
     ExternalTriggerTarget,
 )
 from mindroom.runtime_state import get_api_server_address
+from mindroom.tool_system.agent_tools import resolve_agent_tools
+from mindroom.tool_system.sandbox_proxy import tool_placement
 
 if TYPE_CHECKING:
     from mindroom.tool_system.runtime_context import ToolRuntimeContext
@@ -75,6 +78,8 @@ class CallbackManagerTools(Toolkit):
         try:
             context = self._context()
             normalized_label = _callback_label(label)
+            # The agent's own workspace: a private agent's is its requester's, which only that requester's worker mounts.
+            workspace_root = context.agent_workspace_root(create=True)
             store = ExternalTriggerStore(context.runtime_paths)
             token, token_hash = mint_trigger_capability()
             record = store.create_single_use_capability_record(
@@ -94,8 +99,6 @@ class CallbackManagerTools(Toolkit):
                 config=context.config,
             )
             callback_url = f"{_callback_base_url(context)}/api/triggers/{record.trigger_id}"
-            # The agent's own workspace: a private agent's is its requester's, which only that requester's worker mounts.
-            workspace_root = context.agent_workspace_root(create=True)
             script_path = write_callback_script(
                 workspace_root,
                 _CALLBACKS_DIR,
@@ -106,16 +109,12 @@ class CallbackManagerTools(Toolkit):
                     label=normalized_label,
                 ),
             )
-            # Workers mount the workspace at their own path, which every agent shell names in $MINDROOM_AGENT_WORKSPACE.
-            relative_script = script_path.relative_to(workspace_root).as_posix()
-            instruction = (
-                f'When finished, run: bash "$MINDROOM_AGENT_WORKSPACE/{relative_script}" "<short result summary>"'
-            )
+            shell_path, shell_argument = _shell_script_path(context, workspace_root, script_path)
             return custom_tool_payload(
                 "callback_manager",
                 "ok",
-                script_path=str(script_path),
-                instruction=instruction,
+                script_path=shell_path,
+                instruction=f'When finished, run: bash {shell_argument} "<short result summary>"',
             )
         except (ExternalTriggerContextError, ExternalTriggerStoreError, OSError, ValidationError, ValueError) as exc:
             if record is not None and store is not None and context is not None:
@@ -126,6 +125,17 @@ class CallbackManagerTools(Toolkit):
                         config=context.config,
                     )
             return custom_tool_payload("callback_manager", "error", message=str(exc))
+
+
+def _shell_script_path(context: ToolRuntimeContext, workspace_root: Path, script_path: Path) -> tuple[str, str]:
+    """Return the script's path as the agent's shell sees it, and that path as one shell argument."""
+    placement = tool_placement(context.runtime_paths)
+    if not resolve_agent_tools(context.config, context.agent_name).runs_in_worker("shell", placement):
+        # Every process on this host reaches the absolute path, including ones that do not inherit the shell's env.
+        return str(script_path), shlex.quote(str(script_path))
+    # A worker mounts the workspace at its own path, which the agent's shell names in $MINDROOM_AGENT_WORKSPACE.
+    shell_path = f"$MINDROOM_AGENT_WORKSPACE/{script_path.relative_to(workspace_root).as_posix()}"
+    return shell_path, f'"{shell_path}"'
 
 
 def _callback_label(label: str) -> str:
