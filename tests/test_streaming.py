@@ -21,7 +21,7 @@ import pytest
 from mindroom import interactive
 from mindroom import reply_lifecycle as rl
 from mindroom import streaming as streaming_mod
-from mindroom.cancellation import SYNC_RESTART_CANCEL_MSG, USER_STOP_CANCEL_MSG
+from mindroom.cancellation import SYNC_RESTART_CANCEL_MSG, USER_STOP_CANCEL_MSG, request_task_cancel
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig, RouterConfig
@@ -43,6 +43,7 @@ from mindroom.response_sources import ResponseSources
 from mindroom.streaming import (
     _PROGRESS_PLACEHOLDER,
     RESTART_INTERRUPTED_RESPONSE_NOTE,
+    PausePresentationError,
     ReplacementStreamingResponse,
     StreamingDeliveryError,
     StreamingLifecycleSuspensionError,
@@ -189,7 +190,6 @@ async def test_lifecycle_suspension_escapes_stream_delivery_unchanged(config: Co
 
 
 @pytest.mark.asyncio
-@pytest.mark.xfail(strict=True, reason="a pause that cannot show its presentation raises a plain delivery error")
 async def test_a_refused_flush_before_an_approval_pause_cannot_show_the_pause(config: Config) -> None:
     """A pause whose unsent progress Matrix refuses fails the stream as a pause that could not be shown."""
     suspension = StreamingLifecycleSuspensionError("paused")
@@ -206,17 +206,15 @@ async def test_a_refused_flush_before_an_approval_pause_cannot_show_the_pause(co
 
     with (
         patch("mindroom.streaming.edit_message_result", new=refuse_edit),
-        pytest.raises(StreamingDeliveryError) as raised,
+        pytest.raises(PausePresentationError),
     ):
         await _run_stream(config, suspended_stream(), hooks=gateway.hooks())
 
-    assert type(raised.value).__name__ == "PausePresentationError"
     assert suspension.presentation is None
 
 
 @pytest.mark.asyncio
 @pytest.mark.usefixtures("fake_clock")
-@pytest.mark.xfail(strict=True, reason="a pause that cannot show its presentation raises a plain delivery error")
 async def test_a_progress_edit_that_fails_as_the_stream_pauses_cannot_show_the_pause(config: Config) -> None:
     """A progress edit that fails while a pausing stream stops its delivery leaves a pause that could not be shown."""
     suspension = StreamingLifecycleSuspensionError("paused")
@@ -241,11 +239,10 @@ async def test_a_progress_edit_that_fails_as_the_stream_pauses_cannot_show_the_p
 
     with (
         patch("mindroom.streaming.edit_message_result", new=refuse_once_the_stream_stops),
-        pytest.raises(StreamingDeliveryError) as raised,
+        pytest.raises(PausePresentationError) as raised,
     ):
         await _run_stream(config, suspended_stream(), hooks=gateway.hooks())
 
-    assert type(raised.value).__name__ == "PausePresentationError"
     assert "Failed to edit streaming message" in str(raised.value.error)
     assert suspension.presentation is None
 
@@ -1199,7 +1196,6 @@ async def test_progress_shutdown_outlasts_a_delivery_that_ignores_its_drain_dead
 @pytest.mark.asyncio
 @pytest.mark.usefixtures("fake_clock")
 @pytest.mark.parametrize("ending", ["finished", "failed", "paused", "cancelled"])
-@pytest.mark.xfail(strict=True, reason="a stream stops waiting for a progress edit after a fixed cancel timeout")
 async def test_a_stream_ends_only_after_a_progress_edit_past_the_drain_deadline_ended(
     config: Config,
     monkeypatch: pytest.MonkeyPatch,
@@ -1210,11 +1206,6 @@ async def test_a_stream_ends_only_after_a_progress_edit_past_the_drain_deadline_
     The reply's next write, its terminal update or its span exit's note, can then never be overtaken by the edit.
     """
     monkeypatch.setattr(streaming_mod, "_STREAM_DELIVERY_DRAIN_TIMEOUT_SECONDS", 0)
-    monkeypatch.setattr(
-        streaming_mod._shutdown_stream_delivery,
-        "__kwdefaults__",
-        {"drain_timeout_seconds": 0, "cancel_timeout_seconds": 0},
-    )
     blocking = _BlockingEdit(ignore_first_cancel=True)
     gateway = _FakeGateway()
     suspension = StreamingLifecycleSuspensionError("paused")
@@ -1268,6 +1259,39 @@ async def test_a_stream_ends_only_after_a_progress_edit_past_the_drain_deadline_
     if ending == "paused":
         assert suspension.presentation is not None
         assert suspension.presentation.response_text == "Before. More."
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("fake_clock")
+async def test_a_shutdown_while_a_stream_waits_out_a_progress_edit_propagates_once_the_edit_ended(
+    config: Config,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A process shutdown that lands while a finished stream waits out a progress edit cancels the edit and propagates.
+
+    The stream writes no terminal update, and it raises only once the edit can no longer land.
+    """
+    monkeypatch.setattr(streaming_mod, "_STREAM_DELIVERY_DRAIN_TIMEOUT_SECONDS", 0)
+    blocking = _BlockingEdit(ignore_first_cancel=True)
+    gateway = _FakeGateway()
+
+    async def stream() -> AsyncIterator[object]:
+        yield TextDelta("Before.")
+        await gateway.wait_for_ops(1)
+        yield TextDelta(" More.")
+        await blocking.started.wait()
+
+    with patch("mindroom.streaming.edit_message_result", new=blocking.edit):
+        stream_task = asyncio.create_task(_run_stream(config, stream(), hooks=gateway.hooks()))
+        await blocking.cancel_seen.wait()
+        request_task_cancel(stream_task, process_shutdown=True)
+        with pytest.raises(asyncio.CancelledError):
+            await stream_task
+        assert blocking.finished.is_set()
+        blocking.release.set()
+
+    assert blocking.landed == []
+    assert [op.kind for op in gateway.ops] == ["send"]
 
 
 @pytest.mark.asyncio
