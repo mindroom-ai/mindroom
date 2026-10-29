@@ -183,6 +183,16 @@ def build_resume_request(
     request, this request repeats that one up to its last assistant turn: a signed reasoning block there stays valid
     against an unchanged prefix, and the provider's prompt cache still matches.
     """
+    # LEGACY_COMPAT: Paused runs stored without the context their paused request sent.
+    # Legacy format: a paused run whose stored messages, an Agno-layout ``run_data`` row the storage v2 conversion
+    # copied or its storage v2 message rows, hold no ``add_to_agent_memory: false`` message, because the run ended
+    # without storing its memory results, transient enrichment, job notes, and approval receipt.
+    # Last legacy release: v2026.10.611, whose runs stored no such message; replacement: v2026.10.612, whose paused
+    # runs store them in place.
+    # Handling: such a run resumes from the messages it stored, without that context, as it did before, since nothing
+    # stored it to restore; the run it resumes into stores the current shape when it pauses again.
+    # Coverage: tests/test_history_request_messages.py::test_a_run_paused_without_its_turn_context_resumes_without_it,
+    #   tests/test_approval_resume.py::test_a_paused_approval_resumes_into_a_completed_run
     messages = [
         *(message for message in paused if message.role == "system"),
         *history,

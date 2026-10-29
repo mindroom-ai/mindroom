@@ -110,10 +110,9 @@ def convert_conversation_database(
     records the current version and ``owner``, once an agent ``owner``'s session rows name it
     (``adopt_agent_session_owners``), the sessions table's conversion (``convert_session_columns``), and the rewrites of
     the delegation children its runs hold (``rewrite_run_snapshots``) and of the paused runs it copied
-    (``rewrite_paused_runs``). A file in
-    write-ahead-log mode returns to the rollback journal first, which checkpoints its log. The file is then compacted
-    when that pays off (``_compact``), and its conversion is logged. ``descriptors`` takes the backup's descriptor of
-    the file, which the caller closes after ``connection``.
+    (``rewrite_paused_runs``). A file in write-ahead-log mode returns to the rollback journal first, which checkpoints
+    its log. The file is then compacted when that pays off (``_compact``), and its conversion is logged.
+    ``descriptors`` takes the backup's descriptor of the file, which the caller closes after ``connection``.
     """
     leave_write_ahead_log(connection, path)
     started = time.monotonic()

@@ -69,8 +69,8 @@ def upgrade_layout(
     """Bring the database at ``path``, in the current layout at an older version, to ``LOG_VERSION`` as ``owner``'s.
 
     In one ``BEGIN IMMEDIATE``, so a crash or an error leaves the file as it was and the next open converts it again.
-    Below version 4 the conversion starts with the byte-for-byte backup beside it (``write_conversion_backup``); the steps
-    to version 5 (``rewrite_run_snapshots``) and version 6 (``rewrite_paused_runs``) take none, since a release at
+    Below version 4 the conversion starts with the byte-for-byte backup beside it (``write_conversion_backup``); the
+    steps to version 5 (``rewrite_run_snapshots``) and version 6 (``rewrite_paused_runs``) take none, since a release at
     version 4 or 5 reads the database they leave. A file in write-ahead-log mode returns to the rollback journal first,
     and the conversion is logged once it commits. ``descriptors`` takes the backup's descriptor of the file, which the
     caller closes after ``connection``.

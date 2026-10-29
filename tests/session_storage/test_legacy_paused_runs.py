@@ -30,7 +30,7 @@ from mindroom.history.types import HistoryScope, ScopeSummary
 from mindroom.llm.messages import Message
 from mindroom.llm.runs import RunRecord, RunStatus, TeamRunRecord
 from mindroom.session_storage.agent_storage import create_agent_state_storage, create_state_storage
-from mindroom.session_storage.schema import LOG_VERSION, TableNames, layout_version
+from mindroom.session_storage.schema import LOG_VERSION, TableNames, layout_version, quote_identifier
 from tests.session_storage.layout_4 import store_rows, upgrade_from_layout_4
 
 if TYPE_CHECKING:
@@ -47,6 +47,7 @@ _AGENT = HistoryScope(kind="agent", scope_id="code")
 _SQUAD = HistoryScope(kind="team", scope_id="squad")
 _SESSION = "session-1"
 _NOTICE = "I have tools to execute, but I need confirmation."
+_WAITING = "Member 'Checker' requires human input before continuing."
 
 
 def _agent_store(tmp_path: Path) -> ConversationStore:
@@ -341,6 +342,74 @@ def test_calls_that_name_their_member_runs_stay_as_stored(tmp_path: Path) -> Non
     stored = _team_paused_on([("call-1", "checker", "second"), ("call-2", "checker", "first")], member_runs)
 
     assert _upgraded_links(tmp_path, stored, member_runs) == ["second", "first"]
+
+
+# Each way a worker could leave a candidate row that does not decode: its table, column, run, and stored text.
+_UNDECODABLE = {
+    "member_record": ("runs", "record", "member", '{"content": "I have tools to execute, but I need confirmation."'),
+    "team_message": ("messages", "data", "team", '{"role": "system", "content": "<summary_of_previous_interactions>'),
+    "team_message_without_role": ("messages", "data", "team", '{"content": "<summary_of_previous_interactions>"}'),
+    "team_tool": ("tools", "data", "team", "[1, 2]"),
+    "team_tool_arguments": (
+        "tools",
+        "data",
+        "team",
+        json.dumps({"tool_name": "delegate_task_to_member", "tool_args": ["checker"], "result": _WAITING}),
+    ),
+    "team_tool_result": ("tools", "data", "team", json.dumps({"tool_name": "delegate_task_to_member", "result": [1]})),
+    "team_requirements": ("runs", "requirements", "team", '[{"member_agent_id": ["checker"]}, 1]'),
+}
+
+
+@pytest.mark.parametrize("damaged", sorted(_UNDECODABLE))
+def test_a_row_the_rewrite_cannot_decode_stays_as_stored(damaged: str, tmp_path: Path) -> None:
+    """A row that does not decode neither stops the upgrade nor changes, and every other row is still rewritten.
+
+    Worker code can write conversation databases, and such a row failed only its own run's reads before the upgrade.
+    """
+    team, member = deepcopy(_ROWS["team_paused"]), _ROWS["member_paused"]
+    team["tools"][0]["child_run_id"] = None
+    [system] = [message for message in team["messages"] if message["role"] == "system"]
+    system["content"] = _SYSTEM_MESSAGES["team_leader"]["with_summary"]
+    store = _team_store(tmp_path)
+    store_rows(store, team["session_id"], [team, member])
+    names = TableNames.of_database(store.path)
+    tables = {"runs": names.log_runs, "messages": names.log_messages, "tools": names.log_tools}
+    table_key, column, owner, damage = _UNDECODABLE[damaged]
+    run_id = team["run_id"] if owner == "team" else member["run_id"]
+    # The team's system message is the damaged message row; a run has one tool row here.
+    where = "run_id = ? AND message_id = ?" if table_key == "messages" else "run_id = ?"
+    parameters = (run_id, system["id"]) if table_key == "messages" else (run_id,)
+    damaged_row = f"SELECT {column} FROM {quote_identifier(tables[table_key])} WHERE {where}"  # noqa: S608
+    with closing(sqlite3.connect(store.path)) as connection, connection:
+        connection.execute(
+            f"UPDATE {quote_identifier(tables[table_key])} SET {column} = ? WHERE {where}",  # noqa: S608
+            (damage, *parameters),
+        )
+
+    upgrade_from_layout_4(store, _SQUAD)
+
+    def stored(sql: str, *values: object) -> str:
+        with closing(sqlite3.connect(store.path)) as connection:
+            [(text,)] = connection.execute(sql, values).fetchall()
+        return text
+
+    runs, messages = quote_identifier(names.log_runs), quote_identifier(names.log_messages)
+    record = f"SELECT record FROM {runs} WHERE run_id = ?"  # noqa: S608
+    assert stored(damaged_row, *parameters) == damage
+    with closing(sqlite3.connect(store.path)) as connection:
+        assert layout_version(connection, names) == LOG_VERSION
+    if damaged != "member_record":
+        assert "content" not in json.loads(stored(record, member["run_id"]))
+    # The team's own answers cannot be read while one of its messages does not decode, so it keeps its notice.
+    assert ("content" in json.loads(stored(record, team["run_id"]))) is damaged.startswith("team_message")
+    if not damaged.startswith("team_tool") and damaged != "team_requirements":
+        tool = stored(f"SELECT data FROM {quote_identifier(names.log_tools)} WHERE run_id = ?", team["run_id"])  # noqa: S608
+        assert json.loads(tool)["child_run_id"] == member["run_id"]
+    if not damaged.startswith("team_message"):
+        message = f"SELECT data FROM {messages} WHERE run_id = ? AND message_id = ?"  # noqa: S608
+        system_row = stored(message, team["run_id"], system["id"])
+        assert json.loads(system_row)["content"] == _SYSTEM_MESSAGES["team_leader"]["without_summary"]
 
 
 def test_the_rewrite_runs_once(tmp_path: Path) -> None:
