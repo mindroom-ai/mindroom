@@ -50,6 +50,7 @@ from mindroom.session_storage.legacy_session_columns import (
     team_owner,
     upgrade_layout,
 )
+from mindroom.session_storage.legacy_usage_ledger import seed_usage_ledger
 from mindroom.session_storage.schema import (
     LOG_VERSION,
     TableNames,
@@ -70,7 +71,6 @@ from mindroom.session_storage.store import (
     source_event_ids,
     upsert_run,
 )
-from mindroom.usage.legacy_usage_storage import seed_usage_ledger
 from mindroom.usage.storage import SYSTEM_USAGE_OWNER, SYSTEM_USAGE_STORAGE_NAME
 
 if TYPE_CHECKING:

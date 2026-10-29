@@ -324,6 +324,7 @@ Matrix sync callback
 | `session_storage/legacy_session_columns.py` | The layout version upgrade: session rows that named their kind and owner and held their state inside `session_data` convert once to layout version 4, whose meta row names the owner, with the team owner the startup sweep reads from the rows |
 | `session_storage/legacy_conversion_backup.py` | The `<name>.db.pre-storage-v2` and `<name>.db.pre-storage-v4` copies a database gets before its conversions, after a free-space check, through no-follow descriptors |
 | `session_storage/legacy_agno3_schema.py` | The Agno layout's table names, DDL, run-row decoder, and member-subtree delete, read only by the conversion and its Agno-era steps |
+| `session_storage/legacy_usage_ledger.py` | The conversion's step that seeds the usage ledger of an Agno-layout database without one from its run rows and Agno 2 blobs |
 | `history/summary_rows.py` | The rules of the conversation log's summary rows: compare-and-append of compaction chunks and mid-turn folds, the event ids each row covers, the tool calls folds took, and edit and redaction cuts |
 | `history/legacy_compaction_state.py` | The conversion's step that turns earlier compaction state, the compaction archive, and unpositioned run rows into summary rows and positioned runs before they convert |
 | `history/mid_turn_compaction.py` | Compaction between the model requests of one reply: request sizing, folding, and the scoped or run-local summary |
