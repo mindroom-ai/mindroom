@@ -644,9 +644,7 @@ class AgentBot:
             room_for_id=self._room_for_journal_event,
             # Resolved late: the ingress validator, which owns the trust rule, is built after the dispatcher.
             schedule_trigger_sender_is_managed=lambda sender: (
-                self._ingress_validator.sender_is_trusted_for_ingress_metadata(
-                    sender,
-                )
+                self._ingress_validator.sender_is_trusted_for_ingress_metadata(sender)
             ),
             runtime_generation=self._approval_runtime_generation,
         )

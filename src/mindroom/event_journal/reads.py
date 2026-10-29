@@ -331,7 +331,7 @@ def latest_visible_event_id(
     A withheld body is not enough to tell those apart. A message whose text
     lives in a sidecar is stored exactly the same way -- no body, refresh owed
     -- and its revision is a perfectly good event that was never redacted. Only
-    the tombstone distinguishes them, so only the tombstone is consulted.
+    the recorded redaction distinguishes them, so only it is consulted.
     """
     row = transaction.fetchone(
         """

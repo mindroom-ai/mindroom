@@ -55,7 +55,7 @@ from .models import (
     RoomMembershipPosition,
     SemanticConsumer,
 )
-from .projection import ProjectedEvent, is_tombstoned, project, scrub_redacted_projection
+from .projection import ProjectedEvent, is_redacted, project, scrub_redacted_projection
 from .schema import PENDING_STATE, SETTLED_STATE
 
 if TYPE_CHECKING:
@@ -1303,7 +1303,7 @@ def source_has_redaction_handoff(
         "SELECT room_id FROM journal_events WHERE principal_id = ? AND event_id = ? AND state = 'settled'",
         (principal_id, event_id),
     )
-    if source is None or not is_tombstoned(transaction, principal_id, source["room_id"], event_id):
+    if source is None or not is_redacted(transaction, principal_id, source["room_id"], event_id):
         return False
     return captured.conversation_target is None or captured.conversation_target.room_id == source["room_id"]
 

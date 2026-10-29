@@ -866,7 +866,7 @@ async def _remove_history_of_redacted_events(
     """Remove persisted history derived from events since redacted, before the history is used.
 
     This is the only cleanup after a redaction: every event this scope's history derives
-    from is checked against the room's and the conversation's tombstones each time a
+    from is checked against the agent's recorded redactions each time a
     response opens it, which also covers a message no turn answered but a later turn read
     as context.
     """

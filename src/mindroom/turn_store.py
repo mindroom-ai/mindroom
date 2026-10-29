@@ -314,8 +314,6 @@ class TurnStore:
         A redacted alias that maps to no source, such as the question a
         selection answers, deletes them all.
         """
-        if turn_record.turn_key is None:
-            return frozenset()
         return await self.deps.turn_records.read(turn_rows.deleted_sources, turn_record.source_event_ids)
 
     async def prepared_voice_for_source(self, source_event_id: str) -> PreparedVoiceSource | None:

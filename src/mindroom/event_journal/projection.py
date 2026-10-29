@@ -128,7 +128,7 @@ def _loads(content_json: str) -> Mapping[str, object]:
     return cast("Mapping[str, object]", decoded)
 
 
-def is_tombstoned(
+def is_redacted(
     transaction: Transaction,
     principal_id: str,
     room_id: str,
@@ -169,7 +169,7 @@ def project(
         return None
     if event.redacts_event_id is not None:
         return event.redacts_event_id
-    if is_tombstoned(transaction, principal_id, event.room_id, event.event_id):
+    if is_redacted(transaction, principal_id, event.room_id, event.event_id):
         return event.event_id
     replaces = replacement_target(event.content)
     if replaces is None:
@@ -279,7 +279,7 @@ def _apply_unresolved_edit(
     )
     if held is None:
         return
-    if is_tombstoned(transaction, principal_id, event.room_id, held["edit_event_id"]):
+    if is_redacted(transaction, principal_id, event.room_id, held["edit_event_id"]):
         # Earlier surviving edits were discarded when this held revision won.
         # The original cannot stand in for them: ask the server for its winner.
         transaction.execute(
@@ -332,7 +332,7 @@ def _project_edit(
         (principal_id, event.room_id, target_event_id),
     )
     if current is None:
-        if is_tombstoned(transaction, principal_id, event.room_id, target_event_id):
+        if is_redacted(transaction, principal_id, event.room_id, target_event_id):
             return
         _hold_unresolved_edit(transaction, principal_id, event, target_event_id=target_event_id)
         return
@@ -618,15 +618,16 @@ def install_refetched_revision(
     all, so installing it unread would resolve the debt by satisfying it with
     the very text it was raised about.
 
-    The revision is checked against the tombstone table for a reason the token
-    cannot cover. Redacting a revision that is not the one on screen matches no
-    row, so it correctly moves no token -- but it does record a tombstone. A
-    refetch already in flight, having chosen that very revision from the server,
-    then still matches the token it was issued and would install a body the
-    sender deleted. Nothing later disturbs it: hydration does not re-run under
-    the same membership, so the deleted text would be served to every prompt,
-    summary and export of that room from then on. Every other install path
-    already asks the tombstone table; this was the one that did not.
+    The revision is checked against the agent's recorded redactions for a
+    reason the token cannot cover. Redacting a revision that is not the one on
+    screen matches no row, so it correctly moves no token -- but it does record
+    the redaction. A refetch already in flight, having chosen that very revision
+    from the server, then still matches the token it was issued and would
+    install a body the sender deleted. Nothing later disturbs it: hydration does
+    not re-run under the same membership, so the deleted text would be served to
+    every prompt, summary and export of that room from then on. Every other
+    install path already asks the recorded redactions; this was the one that
+    did not.
     """
     membership_is_current = claim_membership_epoch(
         transaction,
@@ -656,7 +657,7 @@ def install_refetched_revision(
         return 0 if dropped else None
     if holds_unresolved_sidecar(content):
         return None
-    if is_tombstoned(transaction, principal_id, room_id, revision_event_id):
+    if is_redacted(transaction, principal_id, room_id, revision_event_id):
         return None
     content_json = _dumps(content)
     row = transaction.fetchone(
