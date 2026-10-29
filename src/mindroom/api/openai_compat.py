@@ -23,7 +23,6 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, Field, StrictStr, TypeAdapter
 from starlette.background import BackgroundTask
 
-from mindroom.agent_reply_membership import AgentReplyMembershipIndex
 from mindroom.agent_run_context import prepend_knowledge_availability_notice
 from mindroom.ai import AIStreamChunk, ai_response, stream_agent_response
 from mindroom.api import config_lifecycle
@@ -442,7 +441,6 @@ def _requester_authority(
     requester_id = resolve_human_requester_alias(requester_id, config, runtime_paths)
     if not is_human_requester_id(requester_id, config, runtime_paths):
         return error_response(403, "API requester must be a human identity", code="permission_denied")
-    trigger_runtime = config_lifecycle.app_state(request.app).external_trigger_runtime
 
     def current_config() -> Config | None:
         api_state = config_lifecycle.require_api_state(request.app)
@@ -454,9 +452,7 @@ def _requester_authority(
         requester_id=requester_id,
         config=config,
         runtime_paths=runtime_paths,
-        agent_reply_memberships=(
-            trigger_runtime.agent_reply_memberships if trigger_runtime is not None else AgentReplyMembershipIndex()
-        ),
+        agent_reply_memberships=config_lifecycle.app_state(request.app).agent_reply_memberships,
         config_provider=current_config,
         budget_monitor=config_lifecycle.app_state(request.app).budget_monitor,
     )

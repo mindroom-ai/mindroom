@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
@@ -25,8 +26,9 @@ from mindroom.custom_tools.delegate import DelegateTools
 from mindroom.routing import ResponderSelection
 from mindroom.tool_system.runtime_context import get_detached_requester_context, get_tool_runtime_context
 from mindroom.tool_system.worker_routing import agent_workspace_root_path
+from tests.access_schema_support import membership_index
 from tests.budget_helpers import budget_monitor_with_spend
-from tests.conftest import completed_ai_response_mock, completing
+from tests.conftest import bind_runtime_paths, completed_ai_response_mock, completing
 from tests.identity_helpers import persist_entity_accounts
 
 pytestmark = pytest.mark.usefixtures("enforce_turn_authorization")
@@ -264,6 +266,26 @@ def test_team_access_grants_its_members(api: _ApiHarness) -> None:
         json={"model": "team/closed", "messages": [{"role": "user", "content": "help"}]},
     )
     assert response.status_code == 403
+
+
+def test_room_membership_access_reads_the_runtime_membership_index(api: _ApiHarness) -> None:
+    """A caller granted through a room reaches the agent whether or not trigger delivery is bound."""
+    api.config.agents["specialist"].rooms = ["lobby"]
+    api.config.agents["specialist"].access = ResponderAccessConfig(members_of_rooms=["lobby"])
+    config_lifecycle.app_state(api.client.app).agent_reply_memberships = asyncio.run(
+        membership_index(bind_runtime_paths(api.config, api.runtime_paths), {"lobby": {"@alice:example.org"}}),
+    )
+    assert config_lifecycle.app_state(api.client.app).external_trigger_runtime is None
+    headers = {"Authorization": "Bearer alice-key"}
+    response = api.client.get("/v1/models", headers=headers)
+    assert "specialist" in {model["id"] for model in response.json()["data"]}
+    with patch.object(openai_compat, "ai_response", new=completed_ai_response_mock(return_value="done")):
+        response = api.client.post(
+            "/v1/chat/completions",
+            headers=headers,
+            json={"model": "specialist", "messages": [{"role": "user", "content": "help"}]},
+        )
+    assert response.status_code == 200
 
 
 def test_bot_identity_cannot_be_used_as_requester(api: _ApiHarness) -> None:
