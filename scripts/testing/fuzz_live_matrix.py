@@ -4948,6 +4948,7 @@ class ExactReplyOracle:
         self.log_path: Path | None = None
         self.sent_records: Collection[_SentRecord] = ()
         self.source_current_markers: Mapping[str, str] = {}
+        self.source_revision_markers: Mapping[str, Mapping[str, str]] = {}
         self.observed_markers_for = _ModelHandler.observed_markers_for
         self.full_request_markers_for = _ModelHandler.full_request_markers_for
         self.pending_edit_markers: Mapping[str, Mapping[str, str]] = {}
@@ -5050,6 +5051,7 @@ class ExactReplyOracle:
                 ledger_path=self.ledger_path,
                 expected_body_for=self.expected_body_for,
                 source_current_markers=self.source_current_markers,
+                source_revision_markers=self.source_revision_markers,
                 observed_markers_for=self.observed_markers_for,
                 full_request_markers_for=self.full_request_markers_for,
                 pending_edit_markers=self.pending_edit_markers,
@@ -6087,7 +6089,11 @@ class FinalStateAuditor:
         events: Mapping[str, Mapping[str, Any]],
         replies: Mapping[str, set[str]],
     ) -> tuple[str, str] | None:
-        """Require exact durable completion and visible current-source model consumption."""
+        """Require exact durable completion and visible model consumption of the source.
+
+        Which revision the model had to see is the source-revision audit's to
+        judge: MindRoom answers an older revision when it declines a later edit.
+        """
         record = records.get(source)
         if record is None or not record.completed or source not in record.source_event_ids:
             return None
@@ -6099,15 +6105,20 @@ class FinalStateAuditor:
             return None
         body = _final_attempt_body(view.body)
         call = _body_call_id(body)
-        marker = self.source_current_markers.get(source)
         if (
             call is None
             or body != self.expected_body_for(call)
-            or marker is None
-            or marker not in self.observed_markers_for(call)
+            or self._source_markers(source).isdisjoint(self.observed_markers_for(call))
         ):
             return None
         return source, response
+
+    def _source_markers(self, source_id: str) -> set[str]:
+        """Return the marker of every revision of one source: its original and each edit."""
+        return {
+            _source_marker(self.oracle.expected_sources[source_id], ORIGINAL_REVISION),
+            *self.source_revision_markers.get(source_id, {}).values(),
+        }
 
     async def audit(
         self,
@@ -6247,10 +6258,7 @@ class FinalStateAuditor:
         for edits in self.source_revision_markers.values():
             if target_id in edits:
                 return {edits[target_id]}
-        return {
-            _source_marker(self.oracle.expected_sources[target_id], ORIGINAL_REVISION),
-            *self.source_revision_markers.get(target_id, {}).values(),
-        }
+        return self._source_markers(target_id)
 
     def _resolve_source_revision_markers(
         self,
@@ -6797,12 +6805,7 @@ class FinalStateAuditor:
                         "though no later message followed it in its conversation",
                     )
             redacted_markers = {
-                marker
-                for covered in covered_sources & harness_redacted
-                for marker in (
-                    _source_marker(expected_sources[covered], ORIGINAL_REVISION),
-                    *self.source_revision_markers.get(covered, {}).values(),
-                )
+                marker for covered in covered_sources & harness_redacted for marker in self._source_markers(covered)
             }
             missing = required_live - observed
             unexpected = observed - required_live - redacted_markers
@@ -7091,6 +7094,7 @@ class LiveFuzzRunner:
         self._pending_edit_markers: dict[str, dict[str, str]] = {}
         self.oracle.log_path = stack.log_path
         self.oracle.source_current_markers = self.source_current_markers
+        self.oracle.source_revision_markers = self.source_revision_markers
         self.oracle.pending_edit_markers = self._pending_edit_markers
         self.oracle.after_ledger_refresh = self._reconcile_edit_debts
         self._pending_source_tombstones: set[str] = set()
