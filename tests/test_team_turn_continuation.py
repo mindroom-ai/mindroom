@@ -113,7 +113,7 @@ async def test_a_member_s_next_turn_switch_runs_the_turn_again_building_only_the
     )
     with patch("mindroom.teams.members.create_agent", wraps=create_agent) as build:
         text = await team.respond(message=PROMPT, show_tool_calls=show_tool_calls)
-    session = team.storage.load_session(SESSION_ID, "team")
+    session = team.storage.load_session(SESSION_ID)
     assert session is not None
     run_ids = [run.run_id for run in session.runs if isinstance(run, TeamRunRecord)]
 
@@ -148,7 +148,7 @@ async def test_a_continuation_on_the_session_s_first_turn_replays_the_first_atte
         default=[delegate("call-team", "general", "Switch"), answer("Switching."), answer("Finished the task.")],
         general=[calls(_switch("next-turn"))],
     )
-    assert team.storage.load_session(SESSION_ID, "team") is None
+    assert team.storage.load_session(SESSION_ID) is None
     await team.respond(message=PROMPT)
 
     first, *_, continued = team.models["default"].requests
@@ -157,7 +157,7 @@ async def test_a_continuation_on_the_session_s_first_turn_replays_the_first_atte
     assert first_prompt in contents[:-1]
     assert "Switching." in contents
     assert CONTINUATION_MARK in contents[-1]
-    session = team.storage.load_session(SESSION_ID, "team")
+    session = team.storage.load_session(SESSION_ID)
     assert session is not None
     run_ids = [run.run_id for run in session.runs if isinstance(run, TeamRunRecord)]
     assert len(run_ids) == 2
@@ -314,7 +314,7 @@ async def test_the_last_successful_switch_wins_over_a_later_rejected_one(
     text = await team.respond(message=PROMPT)
 
     assert text.endswith("Finished with the successful model.")
-    session = team.storage.load_session(SESSION_ID, "team")
+    session = team.storage.load_session(SESSION_ID)
     assert session is not None
     [member] = [run for run in session.runs if isinstance(run, RunRecord)]
     assert member.tools is not None

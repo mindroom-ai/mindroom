@@ -157,7 +157,7 @@ def test_estimate_prompt_visible_history_tokens_excludes_legacy_persisted_prompt
         messages=[Message(role="system", content="legacy system prompt " * 20), *conversation_messages],
     ).to_dict()
     store = converted_store(TableNames("test_agent").database_path(tmp_path), stored, owner_id="test_agent")
-    contaminated_session = store.load_session(SESSION_ID, "agent")
+    contaminated_session = store.load_session(SESSION_ID)
     assert contaminated_session is not None
     clean_session = _session(
         SESSION_ID,

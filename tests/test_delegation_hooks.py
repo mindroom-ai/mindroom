@@ -239,7 +239,7 @@ async def test_stored_hook_record_never_skips_gated_subagent_plugin_gate(
     assert isinstance(paused, PausedAttempt)
     assert hook_calls == []
     store = create_session_storage("leader", config, paths, identity)
-    session = store.load_session(identity.session_id, "agent")
+    session = store.load_session(identity.session_id)
     assert session is not None
     stored = store.get_run("parent-run")
     assert isinstance(stored, RunRecord)

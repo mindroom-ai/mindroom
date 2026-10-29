@@ -1,4 +1,4 @@
-"""The backup each conversation database gets before its conversion to storage v2."""
+"""The backup each conversation database gets before a one-way conversion, as the conversion to storage v2 takes it."""
 
 from __future__ import annotations
 
@@ -16,12 +16,11 @@ import pytest
 
 from mindroom.constants import resolve_runtime_paths
 from mindroom.debug_report import _session_databases
-from mindroom.session_storage.legacy_agno3_backup import (
-    BACKUP_SUFFIX,
+from mindroom.session_storage.legacy_agno3_conversion import BACKUP_SUFFIX, migrate_conversation_storage
+from mindroom.session_storage.legacy_conversion_backup import (
     ConversionSpaceError,
     write_conversion_backup,
 )
-from mindroom.session_storage.legacy_agno3_conversion import migrate_conversation_storage
 from mindroom.session_storage.store import connect_conversation_database
 from tests.conftest import create_agno_2_sessions_db
 from tests.session_storage.goldens import GoldenStore, golden_stores
@@ -59,7 +58,7 @@ def _write_backup(database: Path) -> Path:
     with ExitStack() as descriptors, closing(connect_conversation_database(database)) as connection:
         connection.execute("BEGIN IMMEDIATE")
         connection.execute("SELECT count(*) FROM sqlite_schema").fetchone()
-        write_conversion_backup(database, descriptors, copied_bytes=0)
+        write_conversion_backup(database, descriptors, suffix=BACKUP_SUFFIX, size_factor=2.5, copied_bytes=0)
         connection.rollback()
     return _backup_name(database)
 
@@ -309,7 +308,7 @@ def test_the_write_lock_outlives_the_backup(tmp_path: Path) -> None:
     with ExitStack() as descriptors:
         with closing(connect_conversation_database(database)) as connection:
             connection.execute("BEGIN IMMEDIATE")
-            write_conversion_backup(database, descriptors, copied_bytes=0)
+            write_conversion_backup(database, descriptors, suffix=BACKUP_SUFFIX, size_factor=2.5, copied_bytes=0)
 
             assert _other_process_takes_write_lock(database) == "database is locked"
 

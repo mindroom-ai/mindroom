@@ -3547,7 +3547,7 @@ async def test_pause_publication_rejects_an_unanchored_team_tool(
         type="tool_call_started",
         tool_name="inspect",
         tool_call_id="call-1",
-        scope_key="agent:member-a",
+        member_id="member-a",
     )
     error = ResponsePausedForApproval(
         PausedAttempt(
@@ -3614,7 +3614,7 @@ def test_pause_presentation_rejects_a_tool_in_the_wrong_member_scope() -> None:
                 type="tool_call_started",
                 tool_name="inspect",
                 tool_call_id="call-1",
-                scope_key="agent:member-b",
+                member_id="member-b",
             ),
         ),
         toolkit_owners={("general", "inspect"): "test_toolkit"},
@@ -3691,19 +3691,12 @@ def test_hidden_textless_team_pause_keeps_internal_continuation_snapshot() -> No
         type="tool_call_started",
         tool_name="inspect",
         tool_call_id="call-1",
-        scope_key="agent:member-a",
+        member_id="member-a",
     )
     state = {
         "kind": "team_stream",
-        "version": 2,
-        "members": [
-            {
-                "id": "member-a",
-                "config_name": "member-a",
-                "display_name": "Member A",
-                "content": "",
-            },
-        ],
+        "version": 3,
+        "members": [{"id": "member-a", "display_name": "Member A", "content": ""}],
         "consensus": "",
     }
     error = ResponsePausedForApproval(
@@ -8761,7 +8754,7 @@ async def test_a_finished_approval_continuation_links_its_reply_event_onto_the_r
     assert deps.persist_response_event_id is not None
     await deps.persist_response_event_id("run-1", "$reply")
 
-    stored = storage.load_session("session-1", entity_kind)
+    stored = storage.load_session("session-1")
     assert stored is not None
     assert [run.metadata for run in stored.runs] == [{MATRIX_RESPONSE_EVENT_ID_METADATA_KEY: "$reply"}]
 

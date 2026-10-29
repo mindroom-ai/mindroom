@@ -2487,7 +2487,7 @@ async def test_handle_message_edit_skips_when_turn_context_was_not_recorded(
 def _persisted_run_metadata(bot: AgentBot, session_id: str) -> dict[str, object]:
     """Return the metadata of the newest run this bot persisted for one session."""
     storage = bot._conversation_state_writer.create_storage(None)
-    session = storage.load_session(session_id, "agent")
+    session = storage.load_session(session_id)
     assert session is not None
     assert session.runs is not None
     return session.runs[0].metadata

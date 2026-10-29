@@ -930,7 +930,7 @@ async def test_a_cancel_of_an_ended_job_does_not_replay_its_outcome(tmp_path: Pa
         record = await cancel()
         assert not record.tools[0].is_error
         assert json.loads(str(record.tools[0].result))["job_id"] == job.job_id
-        session = storage.load_session(context.session_id, "agent")
+        session = storage.load_session(context.session_id)
         assert session is not None
         assert session.session_state.get("counter", 0) == 0
         # The job had already ended, so its outcome stays for the next notice or collect to report.

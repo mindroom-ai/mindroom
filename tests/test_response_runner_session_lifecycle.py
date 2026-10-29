@@ -21,6 +21,7 @@ from mindroom.config.models import ModelConfig
 from mindroom.config.participation import ParticipationConfig
 from mindroom.dispatch_source import MESSAGE_SOURCE_KIND
 from mindroom.final_delivery import FinalDeliveryOutcome, StreamTransportOutcome
+from mindroom.history.types import HistoryScope
 from mindroom.hooks import (
     BUILTIN_EVENT_NAMES,
     EVENT_MESSAGE_AFTER_RESPONSE,
@@ -95,7 +96,7 @@ THREAD_SESSION_ID = "!test:localhost:$thread-root"
 
 def _history_store(tmp_path: Path) -> ConversationStore:
     """Return the agent scope's store the runner opens for its session probe."""
-    return create_state_storage("general", tmp_path / "scope_history")
+    return create_state_storage("general", tmp_path / "scope_history", HistoryScope(kind="agent", scope_id="general"))
 
 
 def _agent_store(config: Config, runtime_paths: RuntimePaths) -> ConversationStore:
@@ -142,7 +143,7 @@ def _start_session(storage: ConversationStore, session_id: str) -> None:
 
 def _persisted_run(storage: ConversationStore, session_id: str = THREAD_SESSION_ID) -> AnyRunRecord:
     """Return the first run the reply stored in its session."""
-    session = storage.load_session(session_id, "agent")
+    session = storage.load_session(session_id)
     assert session is not None
     assert session.runs
     return session.runs[0]
@@ -499,7 +500,7 @@ async def test_session_started_skips_a_reply_that_stores_no_session(tmp_path: Pa
         await coordinator.generate_response(_thread_request())
 
     assert sequence == []
-    assert storage.load_session(THREAD_SESSION_ID, "agent") is None
+    assert storage.load_session(THREAD_SESSION_ID) is None
 
 
 @pytest.mark.asyncio
@@ -1073,7 +1074,7 @@ async def test_generate_response_locked_returns_none_when_final_delivery_is_unha
             resolution = await coordinator.generate_response(_thread_request())
 
     assert resolution is None
-    assert storage.load_session(THREAD_SESSION_ID, "agent") is None
+    assert storage.load_session(THREAD_SESSION_ID) is None
 
 
 @pytest.mark.asyncio
@@ -1127,7 +1128,7 @@ async def test_generate_response_locked_unhandled_delivery_outcome_does_not_pers
             )
 
     assert resolution is None
-    assert history_storage.load_session(THREAD_SESSION_ID, "agent") is None
+    assert history_storage.load_session(THREAD_SESSION_ID) is None
 
 
 @pytest.mark.asyncio
@@ -1204,7 +1205,7 @@ async def test_generate_response_locked_preserves_visible_stream_when_finalize_r
 
     # An interruption whose note did not land leaves its turn to replay.
     assert resolution is None
-    assert storage.load_session(THREAD_SESSION_ID, "agent") is None
+    assert storage.load_session(THREAD_SESSION_ID) is None
 
 
 @pytest.mark.asyncio

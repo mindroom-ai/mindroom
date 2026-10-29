@@ -12,6 +12,7 @@ from typing import TYPE_CHECKING, Any, cast
 
 from mindroom.session_storage.agent_storage import create_state_storage
 from mindroom.session_storage.legacy_agno3_schema import AgnoTableNames
+from tests.session_storage.agno_layout import named_owner
 
 if TYPE_CHECKING:
     from mindroom.session_storage.store import ConversationStore
@@ -48,7 +49,7 @@ class GoldenStore:
 
     def open(self, root: Path) -> ConversationStore:
         """Restore this database under ``root`` and open it as production does, which converts it to storage v2."""
-        return create_state_storage(self.names.storage_name, self.restore(root).parent.parent)
+        return create_state_storage(self.names.storage_name, self.restore(root).parent.parent, named_owner(self.names))
 
 
 def golden_stores() -> list[GoldenStore]:

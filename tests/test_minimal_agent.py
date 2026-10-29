@@ -491,7 +491,7 @@ async def test_saved_minimal_mode_checks_shell_before_initial_or_rebuilt_request
         )
 
     def stored_runs(build):
-        stored = build.store.load_session(runtime.session_id, "agent")
+        stored = build.store.load_session(runtime.session_id)
         return [run.to_dict() for run in stored.runs] if stored is not None else []
 
     with tool_runtime_context(runtime):
@@ -766,7 +766,7 @@ async def test_real_response_requests_only_bash_after_deferred_call_and_history(
         assert "actual current request" in str(request.messages)
     store = owners[0].catalog.store
     assert store is not None
-    saved = store.load_session(ctx.session_id, "agent")
+    saved = store.load_session(ctx.session_id)
     assert saved is not None
     assert saved.runs
     assert saved.runs[-1].status.value == "COMPLETED", [(run.status, len(run.messages)) for run in saved.runs]

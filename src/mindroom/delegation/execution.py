@@ -388,7 +388,7 @@ async def _execute_child(
         required_tool_names=required_tool_names,
         persona=child.persona,
     )
-    session = await asyncio.to_thread(store.load_session, child.session_id, "agent")
+    session = await asyncio.to_thread(store.load_session, child.session_id)
     if session is None:
         msg = "Delegated run's session is no longer available"
         raise RuntimeError(msg)

@@ -162,7 +162,7 @@ def test_session_storage_strips_prompt_roles_before_persisting_history(tmp_path:
         ("assistant", "assistant answer"),
         ("tool", "tool result"),
     ]
-    persisted = storage.load_session("session-1", "agent")
+    persisted = storage.load_session("session-1")
     assert persisted is not None
     stored = [("user", "user request"), ("assistant", "assistant answer"), ("tool", "tool result")]
     assert [(message.role, message.content) for message in persisted.runs[0].messages] == stored
@@ -587,7 +587,7 @@ async def test_a_reply_replays_recent_stored_history_without_persisting_the_repl
     assert [message.from_history for message in history[:3]] == [True, True, True]
     assert (history[-1].role, history[-1].content) == ("user", "Current prompt")
 
-    persisted = storage.load_session("session-1", "agent")
+    persisted = storage.load_session("session-1")
     assert persisted is not None
     latest_run = persisted.runs[-1]
     assert _contents(latest_run.messages) == ["Current prompt", "ok"]
@@ -730,7 +730,7 @@ async def test_memory_md_reloads_in_the_request_that_carries_a_compaction(
     assert "Fact two." not in await system_prompt_of_turn("Second prompt")
 
     storage = create_session_storage("test_agent", config, runtime_paths, execution_identity=None)
-    session = storage.load_session("session-1", "agent")
+    session = storage.load_session("session-1")
     assert session is not None
     storage.update_metadata(
         session,
@@ -830,7 +830,7 @@ async def test_prepare_agent_and_prompt_keeps_transient_memory_out_of_replay_and
     assert third_request[-1]["add_to_agent_memory"] is False
 
     storage = create_session_storage("test_agent", config, runtime_paths, execution_identity=None)
-    persisted = storage.load_session("session-1", "agent")
+    persisted = storage.load_session("session-1")
     assert persisted is not None
     persisted_contents = [str(message.content) for run in persisted.runs for message in run.messages]
     assert persisted_contents == ["First prompt", "ok", "Second prompt", "ok", "Third prompt", "ok"]

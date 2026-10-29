@@ -107,7 +107,7 @@ async def test_persist_response_event_id_keeps_assistant_history_plain(tmp_path:
         response_event_id="$answer",
     )
 
-    persisted = storage.load_session("session-1", "agent")
+    persisted = storage.load_session("session-1")
     assert persisted is not None
     assert persisted.runs is not None
     persisted_run = persisted.runs[0]
@@ -263,7 +263,7 @@ def _reply(
         scope=scope or HistoryScope(kind="agent", scope_id="test_agent"),
         tool_dispatch=LiveToolDispatchContext.from_runtime_context(context),
     )
-    return reply, create_state_storage(reply.scope.scope_id, tmp_path / "sessions")
+    return reply, create_state_storage(reply.scope.scope_id, tmp_path / "sessions", reply.scope)
 
 
 def _first_session(reply: ReplySession, session_id: str = SESSION_ID) -> ConversationSession:

@@ -155,9 +155,9 @@ async def test_a_streamed_team_reply_renders_the_members_and_the_consensus_and_s
     assert all(isinstance(chunk, StructuredStreamChunk) for chunk in chunks)
     assert chunks[-1].content == f"{HEADER}**Writer**: Member answer.\n\n\n**Team Consensus**:\n\nConsensus answer."
     # Hidden tool calls still reach the reply's tool trace: the member's in its slot, the delegation in the team's.
-    assert [(entry.tool_name, entry.scope_key) for entry in chunks[-1].tool_trace or []] == [
-        ("touch", "agent:writer"),
-        ("delegate_task_to_member", "team"),
+    assert [(entry.tool_name, entry.member_id) for entry in chunks[-1].tool_trace or []] == [
+        ("touch", "writer"),
+        ("delegate_task_to_member", None),
     ]
     assert team.recorder.outcome == "completed"
     assert team.recorder.assistant_text == chunks[-1].content
@@ -176,7 +176,7 @@ async def test_a_streamed_team_reply_renders_the_members_and_the_consensus_and_s
     member_request = team.models["writer-model"].requests[0].messages
     assert [message.content for message in member_request if message.role != "system"] == ["Report"]
     assert team.models["checker-model"].requests == []
-    session = team.storage.load_session(SESSION_ID, "team")
+    session = team.storage.load_session(SESSION_ID)
     assert session is not None
     assert EVENT_ID in read_scope_seen_event_ids(team.storage, session, TEAM_SCOPE)
 
@@ -214,7 +214,7 @@ async def test_a_team_turn_whose_attempts_all_came_back_empty_leaves_its_trigger
     chunks = await team.stream()
 
     assert chunks == [ai_runtime.EMPTY_RESPONSE_NOTICE]
-    session = team.storage.load_session(SESSION_ID, "team")
+    session = team.storage.load_session(SESSION_ID)
     assert session is not None
     assert session.runs == []
     assert read_scope_seen_event_ids(team.storage, session, TEAM_SCOPE) == set()
@@ -241,7 +241,7 @@ async def test_a_team_turn_that_only_ran_tools_marks_its_trigger_seen(
     await team.reply(stream=stream, show_tool_calls=False)
 
     assert ProbeToolkit.calls == ["a"]
-    session = team.storage.load_session(SESSION_ID, "team")
+    session = team.storage.load_session(SESSION_ID)
     assert session is not None
     assert read_scope_seen_event_ids(team.storage, session, TEAM_SCOPE) == {EVENT_ID}
     assert history_storage._read_preserved_scope_seen_event_ids(session.metadata, TEAM_SCOPE) == {EVENT_ID}
@@ -758,13 +758,13 @@ async def test_a_member_approval_pauses_the_team_with_the_member_s_identity_and_
     assert paused.approval_agent_name is None
     assert paused.runtime_model_name == "default"
     assert paused.team_member_model_names == (("checker", "checker-model"), ("writer", "writer-model"))
-    assert [member["config_name"] for member in paused.response_presentation_state["members"]] == [
+    assert [member["id"] for member in paused.response_presentation_state["members"]] == [
         "writer",
         "checker",
     ]
-    assert [(entry.tool_name, entry.scope_key) for entry in paused.tool_trace] == [
-        ("touch", "agent:checker"),
-        ("delegate_task_to_member", "team"),
+    assert [(entry.tool_name, entry.member_id) for entry in paused.tool_trace] == [
+        ("touch", "checker"),
+        ("delegate_task_to_member", None),
     ]
     # With tool calls hidden and no member text yet, the pause shows no document of its own.
     assert paused.response_text == ""
@@ -808,9 +808,9 @@ async def test_a_team_pause_shows_the_document_its_events_built_without_paused_n
 
     paused = raised.paused
     assert paused.response_text == text
-    assert [(entry.tool_name, entry.scope_key, entry.type) for entry in paused.tool_trace] == [
-        ("touch", "agent:checker", "tool_call_started"),
-        ("delegate_task_to_member", "team", "tool_call_completed"),
+    assert [(entry.tool_name, entry.member_id, entry.type) for entry in paused.tool_trace] == [
+        ("touch", "checker", "tool_call_started"),
+        ("delegate_task_to_member", None, "tool_call_completed"),
     ]
     state = paused.response_presentation_state
     assert [member["content"] for member in state["members"]] == ["", checker_slot]
@@ -2057,9 +2057,9 @@ async def test_a_member_s_delegation_runs_its_child_and_the_team_continues_with_
         "**Team Consensus**:\n\n🔧 `delegate_task_to_member` [2]\n\nConsensus."
     )
     # The driver's events about the member's call land in the member's slot, once.
-    assert [(entry.tool_name, entry.scope_key) for entry in chunks[-1].tool_trace or []] == [
-        ("run_subagent", "agent:writer"),
-        ("delegate_task_to_member", "team"),
+    assert [(entry.tool_name, entry.member_id) for entry in chunks[-1].tool_trace or []] == [
+        ("run_subagent", "writer"),
+        ("delegate_task_to_member", None),
     ]
     assert team.recorder.outcome == "completed"
     record, member, state = _delegation_state(team)
@@ -2183,16 +2183,16 @@ async def test_two_members_delegations_under_one_call_id_each_run_once_and_the_t
         identity = child_execution_identity(child)
         helper_run = create_session_storage("helper", team.config, team.runtime_paths, identity).get_run(child.run_id)
         assert helper_run is not None
-        answers[f"agent:{child.caller_agent_name}"] = str(helper_run.content)
+        answers[child.caller_agent_name] = str(helper_run.content)
     assert sorted(answers.values()) == ["Helper one.", "Helper two."]
     # The driver's events about each member's call land in that member's slot, each call finished with its child.
     assert sorted(
-        (entry.scope_key or "", entry.type, (entry.result_preview or "").partition("\n")[0])
+        (entry.member_id or "", entry.type, (entry.result_preview or "").partition("\n")[0])
         for entry in chunks[-1].tool_trace or []
         if entry.tool_name == "run_subagent"
     ) == [
-        ("agent:checker", "tool_call_completed", answers["agent:checker"]),
-        ("agent:writer", "tool_call_completed", answers["agent:writer"]),
+        ("checker", "tool_call_completed", answers["checker"]),
+        ("writer", "tool_call_completed", answers["writer"]),
     ]
 
 
@@ -2427,9 +2427,9 @@ async def test_a_member_s_delegation_card_adds_no_marker_and_the_approved_reply_
     paused = raised.value.paused
     [tool] = paused.tools
     assert (tool.tool_name, tool.tool_call_id) == ("run_subagent", "writer:call-sub")
-    assert [(entry.tool_name, entry.scope_key) for entry in paused.tool_trace] == [
-        ("run_subagent", "agent:writer"),
-        ("delegate_task_to_member", "team"),
+    assert [(entry.tool_name, entry.member_id) for entry in paused.tool_trace] == [
+        ("run_subagent", "writer"),
+        ("delegate_task_to_member", None),
     ]
     # The leader's delegation was answered with the member's pause; only the member's call still waits.
     assert (paused.response_text.count("🔧"), paused.response_text.count("⏳")) == (2, 1)
@@ -2998,7 +2998,7 @@ async def test_the_driver_writes_the_interrupted_record_after_the_loop_stored_th
         await asyncio.wait_for(task, timeout=5)
 
     assert statuses_when_interrupted_record_written == [RunStatus.cancelled]
-    session = team.storage.load_session(SESSION_ID, "team")
+    session = team.storage.load_session(SESSION_ID)
     assert session is not None
     [record] = [run for run in session.runs if isinstance(run, TeamRunRecord)]
     assert record.metadata is not None
