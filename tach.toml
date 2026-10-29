@@ -2858,6 +2858,7 @@ depends_on = [
 visibility = [
     "mindroom.providers.anthropic.messages",
     "mindroom.providers.anthropic.native_compaction",
+    "mindroom.providers.anthropic.legacy_stored_turns",
     "mindroom.history.replay",
     "mindroom.history.native",
     "mindroom.history.mid_turn_compaction",
@@ -2876,7 +2877,29 @@ depends_on = ["mindroom.providers.extra_kwargs"]
 [[modules]]
 path = "mindroom.providers.anthropic.repairs"
 depends_on = ["mindroom.providers.claude_wire_blocks"]
-visibility = ["mindroom.providers.anthropic.prompt_cache"]
+visibility = [
+    "mindroom.providers.anthropic.legacy_stored_turns",
+    "mindroom.providers.anthropic.prompt_cache",
+    "mindroom.providers.anthropic.wire",
+]
+
+[[modules]]
+path = "mindroom.providers.anthropic.legacy_stored_turns"
+depends_on = [
+    "mindroom.native_compaction",
+    "mindroom.providers.anthropic.repairs",
+    "mindroom.providers.claude_wire_blocks",
+]
+visibility = ["mindroom.providers.anthropic.native_compaction", "mindroom.providers.anthropic.stored_turns"]
+
+[[modules]]
+path = "mindroom.providers.anthropic.stored_turns"
+depends_on = [
+    "mindroom.llm",
+    "mindroom.providers.anthropic.legacy_stored_turns",
+    "mindroom.providers.claude_wire_blocks",
+]
+visibility = ["mindroom.providers.anthropic.prompt_cache", "mindroom.providers.anthropic.wire"]
 
 [[modules]]
 path = "mindroom.providers.anthropic.wire"
@@ -2884,6 +2907,8 @@ depends_on = [
     "mindroom.llm",
     "mindroom.logging_config",
     "mindroom.model_defaults",
+    "mindroom.providers.anthropic.repairs",
+    "mindroom.providers.anthropic.stored_turns",
     "mindroom.providers.claude_wire_blocks",
     "mindroom.providers.media_files",
 ]
@@ -2902,6 +2927,7 @@ path = "mindroom.providers.anthropic.prompt_cache"
 depends_on = [
     "mindroom.model_defaults",
     "mindroom.providers.anthropic.repairs",
+    "mindroom.providers.anthropic.stored_turns",
     "mindroom.providers.cache_ladder",
     "mindroom.providers.claude_wire_blocks",
     "mindroom.providers.names",
@@ -2910,7 +2936,12 @@ visibility = ["mindroom.history.mid_turn_compaction", "mindroom.providers.anthro
 
 [[modules]]
 path = "mindroom.providers.anthropic.native_compaction"
-depends_on = ["mindroom.model_defaults", "mindroom.native_compaction"]
+depends_on = [
+    "mindroom.model_defaults",
+    "mindroom.native_compaction",
+    "mindroom.providers.anthropic.legacy_stored_turns",
+    "mindroom.providers.claude_wire_blocks",
+]
 visibility = ["mindroom.providers.anthropic.messages"]
 
 [[modules]]
@@ -6225,7 +6256,7 @@ depends_on = [
 
 [[modules]]
 path = "mindroom.llm"
-depends_on = ["mindroom.redaction"]
+depends_on = ["mindroom.logging_config", "mindroom.redaction"]
 
 [[modules]]
 path = "mindroom.providers.openai"
@@ -7235,7 +7266,6 @@ from = ["mindroom.tool_system.dependencies"]
 expose = [
     "LiveToolDispatchContext",
     "ToolDispatchContext",
-    "WorkerRuntimeContext",
     "WorkerProgressEvent",
     "WorkerProgressPump",
     "ToolRuntimeContext",
@@ -7253,7 +7283,6 @@ expose = [
     "emit_custom_event",
     "execution_identity_matches_tool_runtime_context",
     "get_worker_progress_pump",
-    "get_worker_runtime_context",
     "get_tool_runtime_context",
     "get_tool_runtime_media_attachment",
     "list_tool_runtime_attachment_ids",
@@ -7264,7 +7293,6 @@ expose = [
     "tool_runtime_context",
     "tool_runtime_model_context",
     "worker_progress_pump_scope",
-    "worker_runtime_context",
 ]
 from = ["mindroom.tool_system.runtime_context"]
 
@@ -7509,7 +7537,7 @@ expose = [
 from = ["mindroom.tool_system.events"]
 
 [[interfaces]]
-expose = ["build_tool_hook_middleware", "dispatch_external_tool_hooks", "run_async_entrypoint_blocking_call", "run_sync_tool_entrypoint", "SyncToolCompletionTracker", "track_sync_tool_completion"]
+expose = ["build_tool_hook_middleware", "dispatch_external_tool_hooks", "owned_sync_tool_completion", "run_async_entrypoint_blocking_call", "run_sync_tool_entrypoint", "SyncToolCompletionTracker", "track_sync_tool_completion"]
 from = ["mindroom.tool_system.tool_hooks"]
 
 [[modules]]

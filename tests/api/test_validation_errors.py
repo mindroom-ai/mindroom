@@ -11,6 +11,7 @@ from mindroom.api import sandbox_runner_app
 from mindroom.api.sandbox_runner import initialize_sandbox_runner_app
 from mindroom.config.main import Config
 from mindroom.constants import resolve_runtime_paths
+from mindroom.workers.protocol import WORKER_PROTOCOL_VERSION
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -58,17 +59,19 @@ def test_dashboard_api_validation_errors_keep_their_context(test_client: TestCli
 
 
 def test_sandbox_runner_rejects_a_non_finite_field_with_422(tmp_path: Path) -> None:
-    """The sandbox runner answers a non-finite value in a typed body with 422 instead of failing to render it."""
+    """The sandbox runner answers a non-finite value with a typed 422 failure instead of failing to render it."""
     paths = resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path)
     initialize_sandbox_runner_app(sandbox_runner_app.app, paths, config=Config(), runner_token=_RUNNER_TOKEN)
 
     response = TestClient(sandbox_runner_app.app).post(
         "/api/sandbox-runner/execute/cancel",
-        content='{"request_id": NaN}',
+        content=f'{{"protocol": {WORKER_PROTOCOL_VERSION}, "request_id": NaN}}',
         headers={**_JSON_HEADERS, "x-mindroom-sandbox-token": _RUNNER_TOKEN},
     )
 
     assert response.status_code == 422
     assert response.json() == {
-        "detail": [{"type": "string_type", "loc": ["body", "request_id"], "msg": "Input should be a valid string"}],
+        "ok": False,
+        "error": "Invalid request: body.request_id: Input should be a valid string",
+        "failure_kind": "tool",
     }

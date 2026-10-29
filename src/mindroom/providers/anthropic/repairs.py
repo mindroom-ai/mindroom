@@ -1,13 +1,13 @@
-"""Replay-safe transforms of one Claude request body.
+"""Replay-safe shapes of Claude request blocks and request bodies.
 
-Stored assistant turns echo the content blocks the API produced, and some of those blocks carry
-response-only fields or depend on request-scoped state that a later request cannot provide. The API
-rejects such a request with HTTP 400, so every later turn of that thread would fail; these transforms
-repair the wire body instead, which also heals histories stored before the rules existed. Inline media
-Claude cannot read, or past the provider's size limits, becomes a short text note for the same reason.
-Each transform reads the body ``format_claude_messages`` built, whose ``messages`` are role dicts with a block
-list as ``content``; a block is a stored dict or one of the SDK's block models. None of the transforms mutate
-their input.
+A response's blocks carry fields and pairings the request schema rejects, and the API answers such a request with
+HTTP 400, so every later turn of that thread would fail. ``replay_safe_blocks`` gives a response's blocks the shape a
+later request may send, once, when the turn is stored. The body transforms repair what depends on the request itself:
+tool-search references to tools it no longer offers, tool results that must open their user turn, and inline media
+Claude cannot read, or past the provider's size limits, which becomes a short text note. Each body transform reads the
+body ``format_claude_messages`` built, whose ``messages`` are role dicts with a block list as ``content``: an assistant
+turn's blocks are dicts, and a user turn can also carry the content list a message stored. None of the transforms
+mutate their input.
 """
 
 from __future__ import annotations
@@ -53,28 +53,6 @@ def _with_message_contents(
             prepared_messages = list(messages)
         prepared_messages[message_index] = {**message, "content": content}
     return body if prepared_messages is None else {**body, "messages": prepared_messages}
-
-
-def without_replayed_citations(body: dict[str, Any]) -> dict[str, Any]:
-    """Drop response citations from replayed assistant text blocks, keeping their text.
-
-    Citations are response annotations: a null ``document_title`` loses a required field on replay, and
-    document citations point at request-scoped document indexes whose documents are not replayed. The model
-    does not need them to read its earlier answer.
-    """
-
-    def uncited_content(message: dict[str, Any]) -> list[Any] | None:
-        content = message["content"]
-        if message["role"] != "assistant" or not any(_cited_text_block(block) is not None for block in content):
-            return None
-        return [
-            block
-            if (cited := _cited_text_block(block)) is None
-            else {k: v for k, v in cited.items() if k != "citations"}
-            for block in content
-        ]
-
-    return _with_message_contents(body, uncited_content)
 
 
 def with_leading_tool_results(body: dict[str, Any]) -> dict[str, Any]:
@@ -158,52 +136,40 @@ def _inline_media_note(
     return {"type": "text", "text": text}, inline_bytes
 
 
-def with_replay_safe_tool_search_results(body: dict[str, Any]) -> dict[str, Any]:
-    """Replay tool-search blocks in request shape and drop search uses left without their result.
+def replay_safe_blocks(blocks: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Return one response's blocks in the shape a later request may send them.
 
-    Stored search results keep response-only fields the request schema rejects, and a search
-    ``server_tool_use`` can arrive without its ``tool_search_tool_result`` when native search and client
-    tools are called together; either makes every later request fail. Valid pairs and other server-tool
-    types stay intact, and the identity keys (``type``, ``tool_use_id``) are preserved.
+    Three response details would make every later request of the thread fail. Citations are response
+    annotations: a null ``document_title`` loses a required field on replay, and document citations point at
+    request-scoped document indexes whose documents are not replayed, so a text block keeps only its text. A
+    stored tool-search result keeps only the keys its request schema accepts. A search ``server_tool_use`` can
+    arrive without its ``tool_search_tool_result`` when native search and client tools are called together, so
+    it goes. Every other block, including other server-tool types, stays as it came.
     """
-    return _with_message_contents(body, _replay_safe_search_content)
-
-
-def _replay_safe_search_content(message: dict[str, Any]) -> list[Any] | None:
-    content = message["content"]
-    prepared_content: list[Any] = []
-    changed = False
-    for block in content:
-        block_dict = as_dict(block)
-        if (
-            block_dict is not None
-            and block_dict.get("type") == TOOL_SEARCH_RESULT_BLOCK_TYPE
-            and not block_dict.keys() <= _TOOL_SEARCH_RESULT_INPUT_KEYS
-        ):
-            prepared_content.append({k: v for k, v in block_dict.items() if k in _TOOL_SEARCH_RESULT_INPUT_KEYS})
-            changed = True
-        else:
-            prepared_content.append(block)
+    shaped = [_request_shape_block(block) for block in blocks]
     paired_result_ids = {
-        block_dict["tool_use_id"]
-        for block in prepared_content
-        if (block_dict := as_dict(block)) is not None
-        and block_dict.get("type") == TOOL_SEARCH_RESULT_BLOCK_TYPE
-        and isinstance(block_dict.get("tool_use_id"), str)
+        block["tool_use_id"]
+        for block in shaped
+        if block.get("type") == TOOL_SEARCH_RESULT_BLOCK_TYPE and isinstance(block.get("tool_use_id"), str)
     }
-    sanitized_content: list[Any] = []
-    for block in prepared_content:
-        block_dict = as_dict(block)
-        if (
-            block_dict is not None
-            and block_dict.get("type") == SERVER_TOOL_USE_BLOCK_TYPE
-            and block_dict.get("name") == TOOL_SEARCH_TOOL_NAME
-            and block_dict.get("id") not in paired_result_ids
-        ):
-            changed = True
-            continue
-        sanitized_content.append(block)
-    return sanitized_content if changed else None
+    return [
+        block
+        for block in shaped
+        if not (
+            block.get("type") == SERVER_TOOL_USE_BLOCK_TYPE
+            and block.get("name") == TOOL_SEARCH_TOOL_NAME
+            and block.get("id") not in paired_result_ids
+        )
+    ]
+
+
+def _request_shape_block(block: dict[str, Any]) -> dict[str, Any]:
+    block_type = block.get("type")
+    if block_type == "text" and "citations" in block:
+        return {key: value for key, value in block.items() if key != "citations"}
+    if block_type == TOOL_SEARCH_RESULT_BLOCK_TYPE and not block.keys() <= _TOOL_SEARCH_RESULT_INPUT_KEYS:
+        return {key: value for key, value in block.items() if key in _TOOL_SEARCH_RESULT_INPUT_KEYS}
+    return block
 
 
 def without_unavailable_tool_references(body: dict[str, Any]) -> dict[str, Any]:
@@ -220,13 +186,14 @@ def without_unavailable_tool_references(body: dict[str, Any]) -> dict[str, Any]:
     )
 
     def content_without_stale_references(message: dict[str, Any]) -> list[Any] | None:
+        if message["role"] != "assistant":
+            return None
         content = message["content"]
         prepared: list[Any] | None = None
         for index, block in enumerate(content):
-            block_dict = as_dict(block)
-            if block_dict is None or block_dict.get("type") != TOOL_SEARCH_RESULT_BLOCK_TYPE:
+            if block.get("type") != TOOL_SEARCH_RESULT_BLOCK_TYPE:
                 continue
-            filtered = _search_result_with_available_references(block_dict, available)
+            filtered = _search_result_with_available_references(block, available)
             if filtered is None:
                 continue
             if prepared is None:
@@ -261,21 +228,13 @@ def _is_tool_result_block(block: object) -> bool:
     return block_dict is not None and block_dict.get("type") == "tool_result"
 
 
-def _cited_text_block(block: object) -> dict[str, Any] | None:
-    block_dict = as_dict(block)
-    if block_dict is None or block_dict.get("type") != "text" or "citations" not in block_dict:
-        return None
-    return block_dict
-
-
 __all__ = [
     "BEDROCK_MAX_INLINE_MEDIA_BYTES",
     "MAX_INLINE_IMAGE_BYTES",
     "MAX_INLINE_MEDIA_BYTES",
     "PARTNER_MAX_INLINE_IMAGE_BYTES",
+    "replay_safe_blocks",
     "with_leading_tool_results",
-    "with_replay_safe_tool_search_results",
     "with_supported_inline_media",
-    "without_replayed_citations",
     "without_unavailable_tool_references",
 ]

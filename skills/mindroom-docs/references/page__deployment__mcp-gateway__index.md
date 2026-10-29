@@ -327,6 +327,7 @@ Tool errors arrive as an `error` object with a `code` inside a successful MCP re
 | `unauthorized` | Agent access or selection changed, or the agent runs tools with shared credentials and is not [opted in](#agent-eligibility); check Connections |
 | `tool_unavailable` | The tool could not be loaded or failed; its outcome may be unknown |
 | `tool_declined` | A MindRoom plugin declined the call, so it did not run; `message` gives the plugin's reason |
+| `tool_failed` | The tool ran and reported that the call failed; `message` gives the tool's own explanation |
 | `schema_too_large`, `result_too_large` | The schema or result exceeds the size limit |
 | `busy` | A concurrency limit is full |
 | `duplicate_request` | A call with the same request ID is already running |

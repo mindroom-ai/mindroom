@@ -526,7 +526,7 @@ def test_request_sizing_costs_a_tool_what_the_static_estimate_costs_it() -> None
     assert mid_turn_compaction._tool_tokens([lookup], [], frozenset()) == static.estimate("")
 
 
-@pytest.mark.parametrize("provider", ["openai", "claude"])
+@pytest.mark.parametrize("provider", ["openai", "claude", "claude_legacy"])
 def test_request_sizing_counts_deferred_tool_definitions_once_tool_search_loads_them(
     tmp_path: Path,
     provider: str,
@@ -534,7 +534,8 @@ def test_request_sizing_counts_deferred_tool_definitions_once_tool_search_loads_
     """A deferred definition enters the context once when a tool search in the request returns it.
 
     OpenAI replays the loaded definitions inside the search output, which the message estimate counts; Claude
-    replays only references that the provider expands.
+    replays only references that the provider expands, from a turn stored now or one stored only with its
+    server-tool blocks before v2026.9.44.
     """
     if provider == "openai":
         replay_estimator = responses_adapter(tmp_path, "gpt-6-luna", store=False)
@@ -563,19 +564,18 @@ def test_request_sizing_counts_deferred_tool_definitions_once_tool_search_loads_
         }
     else:
         replay_estimator = None
-        provider_data = {
-            "server_tool_blocks": [
-                {"type": "server_tool_use", "id": "srv_1", "name": "tool_search_tool_regex", "input": {"query": "big"}},
-                {
-                    "type": "tool_search_tool_result",
-                    "tool_use_id": "srv_1",
-                    "content": {
-                        "type": "tool_search_tool_search_result",
-                        "tool_references": [{"type": "tool_reference", "tool_name": "big_tool"}],
-                    },
+        search = [
+            {"type": "server_tool_use", "id": "srv_1", "name": "tool_search_tool_regex", "input": {"query": "big"}},
+            {
+                "type": "tool_search_tool_result",
+                "tool_use_id": "srv_1",
+                "content": {
+                    "type": "tool_search_tool_search_result",
+                    "tool_references": [{"type": "tool_reference", "tool_name": "big_tool"}],
                 },
-            ],
-        }
+            },
+        ]
+        provider_data = {"claude_blocks" if provider == "claude" else "server_tool_blocks": search}
     searched = [
         Message(role="user", content="Use the big tool"),
         Message(role="assistant", provider_data=provider_data),

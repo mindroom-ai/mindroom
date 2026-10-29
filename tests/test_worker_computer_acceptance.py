@@ -20,7 +20,9 @@ from mindroom.config.main import Config
 from mindroom.tool_system.media_transport import encode_media_result
 from mindroom.tool_system.metadata import get_tool_by_name
 from mindroom.tool_system.tool_function import ToolValue
+from mindroom.tool_system.worker_routing import parse_tool_execution_identity_payload
 from mindroom.workers.backend import WorkerBackendError
+from mindroom.workers.protocol import WORKER_PROTOCOL_VERSION, ExecuteRequest
 from tests.test_docker_worker_backend import _backend
 from tests.test_shell_async import _make_runtime_paths
 
@@ -110,6 +112,31 @@ def _driver(monkeypatch: pytest.MonkeyPatch) -> ModuleType:
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
+
+
+def test_runner_requests_speak_this_worker_protocol(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The acceptance driver's direct runner calls carry this release's protocol and a parseable identity."""
+    module = _driver(monkeypatch)
+    fixture = object.__new__(module.Fixture)
+    fixture.room = "!fixture:computer.localhost"
+    worker_key = "v1:default:user_agent:@alice:computer.localhost:writer"
+
+    request = fixture.runner_request(
+        "browser",
+        "browser_control",
+        {"action": "status"},
+        user="@alice:computer.localhost",
+        worker_key=worker_key,
+    )
+
+    sent = ExecuteRequest.model_validate(request.model_dump(mode="json"))
+    assert sent.protocol == WORKER_PROTOCOL_VERSION
+    assert sent.worker_key == worker_key
+    assert sent.tool_config_overrides == {"allow_private_networks": True}
+    assert sent.execution_identity is not None
+    assert parse_tool_execution_identity_payload(sent.execution_identity) == fixture.identity(
+        "@alice:computer.localhost",
+    )
 
 
 @pytest.mark.asyncio
@@ -240,6 +267,7 @@ async def test_acceptance_reconciles_config_before_browser_continuity(
                 },
             },
             "knowledge_bases": {"history": {"path": str(history)}},
+            "models": {"default": {"provider": "openai", "id": "test-model"}},
         },
     )
     backend, client, _sync_calls = _backend(monkeypatch, tmp_path, config_text=config_text)

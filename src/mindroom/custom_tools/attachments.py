@@ -520,6 +520,7 @@ class AttachmentTools(Toolkit):
                 result = await asyncio.to_thread(
                     view_file_from_worker,
                     runtime_paths=runtime_paths,
+                    runtime_config=context.config,
                     worker_target=self._worker_target,
                     workspace_root=self._tool_output_workspace_root,
                     path=path,
@@ -746,12 +747,12 @@ class AttachmentTools(Toolkit):
                 worker_receipt = await asyncio.to_thread(
                     save_attachment_to_worker,
                     runtime_paths=runtime_paths,
+                    runtime_config=context.config,
                     worker_target=self._worker_target,
+                    workspace_root=self._tool_output_workspace_root,
                     attachment_id=requested_attachment_id,
                     mindroom_output_path=output_path,
                     payload_bytes=payload_bytes,
-                    mime_type=attachment.mime_type,
-                    filename=attachment.filename,
                 )
             except Exception as exc:
                 return _attachment_tool_payload("error", attachment_id=requested_attachment_id, message=str(exc))

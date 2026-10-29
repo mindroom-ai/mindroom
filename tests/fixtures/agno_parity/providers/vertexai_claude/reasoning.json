@@ -32,7 +32,7 @@
     "message": {
       "content": "Pack a light rain jacket and comfortable shoes.",
       "provider_data": {
-        "content_blocks": [
+        "claude_blocks": [
           {
             "signature": "parity-thinking-signature",
             "thinking": "Rain is likely, so pack for wet weather.",
@@ -48,7 +48,6 @@
           "provider": "VertexAI"
         },
         "mindroom_native_compaction": null,
-        "signature": "parity-thinking-signature",
         "stop_reason": "end_turn"
       },
       "reasoning_content": "Rain is likely, so pack for wet weather.",

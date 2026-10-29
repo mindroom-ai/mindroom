@@ -92,7 +92,6 @@ from mindroom.tool_system.toolkit_connections import run_connection
 from mindroom.tool_system.worker_routing import (
     agent_workspace_root_path,
     resolve_agent_owned_path,
-    shared_storage_root,
 )
 from mindroom.workers.runtime import primary_worker_backend_name
 from mindroom.workspaces import ensure_workspace_template
@@ -716,7 +715,6 @@ def build_agent_toolkit(  # noqa: C901, PLR0911
         )
     storage_path = runtime_paths.storage_root
     credentials_manager = get_runtime_credentials_manager(runtime_paths)
-    shared_storage_path = shared_storage_root(storage_path)
 
     def constructed(toolkit: Toolkit) -> Toolkit:
         return bind_toolkit_construction(
@@ -838,7 +836,6 @@ def build_agent_toolkit(  # noqa: C901, PLR0911
         tool_config_overrides=tool_config_overrides,
         tool_init_overrides=_tool_base_dir_override(tool_name, workspace_path=agent_runtime.workspace.root),
         runs_in_worker=agent_tools.runs_in_worker(tool_name, placement),
-        shared_storage_root_path=shared_storage_path,
         allowed_shared_services=config.get_worker_grantable_credentials() if worker_scope is not None else None,
         tool_output_workspace_root=agent_runtime.workspace.root,
         agent_state_root=agent_runtime.state_root,

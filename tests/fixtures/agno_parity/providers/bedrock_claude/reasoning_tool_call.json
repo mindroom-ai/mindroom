@@ -79,7 +79,7 @@
   "parsed": {
     "message": {
       "provider_data": {
-        "content_blocks": [
+        "claude_blocks": [
           {
             "signature": "parity-thinking-signature",
             "thinking": "Check the forecast first.",
@@ -100,7 +100,6 @@
           "provider": "AwsBedrock"
         },
         "mindroom_native_compaction": null,
-        "signature": "parity-thinking-signature",
         "stop_reason": "tool_use"
       },
       "reasoning_content": "Check the forecast first.",

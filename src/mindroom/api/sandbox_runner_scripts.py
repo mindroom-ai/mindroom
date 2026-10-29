@@ -258,7 +258,7 @@ def _prepare_worker(
     try:
         prepared = sandbox_worker_prep.prepare_worker_request(
             worker_key=normalized_worker_key,
-            tool_init_overrides={},
+            base_dir=None,
             runtime_paths=runtime_paths,
             agent_policies=config.get_agent_policies(),
             private_agent_names=(frozenset(private_agent_names) if private_agent_names is not None else None),

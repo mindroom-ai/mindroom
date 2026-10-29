@@ -72,7 +72,7 @@
     "message": {
       "content": "Add a warm layer.",
       "provider_data": {
-        "content_blocks": [
+        "claude_blocks": [
           {
             "text": "Add a warm layer.",
             "type": "text"

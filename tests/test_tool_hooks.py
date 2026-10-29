@@ -58,7 +58,7 @@ from mindroom.tool_system.runtime_context import (
     tool_runtime_context,
 )
 from mindroom.tool_system.tool_function import ToolOutcome
-from mindroom.tool_system.tool_hooks import BackgroundToolApprovalDenied, build_tool_hook_middleware
+from mindroom.tool_system.tool_hooks import build_tool_hook_middleware
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity, tool_execution_identity
 from tests.agent_tool_helpers import tool_policy
 from tests.authorization_helpers import (
@@ -1728,7 +1728,7 @@ async def test_tool_hook_bridge_declines_and_skips_real_tool(tmp_path: Path) -> 
         "Adjust your approach — try a different tool or different arguments."
     )
     assert next_func.await_count == 0
-    assert result == ToolOutcome(content=declined, is_error=True)
+    assert result == ToolOutcome(content=declined, is_error=True, refused_by="plugin_hook")
     assert after_seen == [(True, declined, None)]
 
 
@@ -1764,7 +1764,7 @@ async def test_a_denied_background_script_call_reaches_the_after_call_hooks_as_a
         result = await bridge("read_file", next_func, {"path": "notes.txt"})
 
     assert next_func.await_count == 0
-    assert result == BackgroundToolApprovalDenied(reason="Not tonight.")
+    assert result == ToolOutcome(content="Not tonight.", is_error=True, refused_by="approval")
     assert after_seen == [
         (
             True,

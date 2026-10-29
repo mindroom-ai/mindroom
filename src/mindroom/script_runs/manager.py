@@ -60,8 +60,10 @@ from mindroom.tool_system.worker_routing import (
     build_agent_toolkit_worker_target,
     serialize_tool_execution_identity,
 )
+from mindroom.workers.backend import WorkerBackendError
 from mindroom.workers.backends.static_runner import StaticSandboxRunnerBackend
 from mindroom.workers.models import ScriptResourceProfileName, WorkerHandle, WorkerSpec
+from mindroom.workers.runtime import current_worker_launch_config
 from mindroom.workers.worker_retirement import remove_directory_tree_at
 
 if TYPE_CHECKING:
@@ -387,7 +389,7 @@ class ScriptRunManager:
             else WorkerSpec(
                 worker_key=_require_worker_key(worker_key),
                 private_agent_names=worker_target.private_agent_names,
-                mirrored_credential_services=frozenset(),
+                mirror_grantable_credentials=False,
                 state_scope_worker_key=worker_target.worker_key,
                 resource_profile=selected_profile,
             )
@@ -403,7 +405,7 @@ class ScriptRunManager:
                     max_concurrent_runs=effective_limits.max_concurrent_runs,
                     worker_spec=worker_spec,
                 )
-            run, worker_spec = self._bind_admitted_worker_profile(
+            run, worker_spec = await self._bind_admitted_worker_profile(
                 context,
                 run=run,
                 worker_spec=_require_worker_spec(worker_spec),
@@ -420,7 +422,7 @@ class ScriptRunManager:
         finally:
             await self._release_launch_admission()
 
-    def _bind_admitted_worker_profile(
+    async def _bind_admitted_worker_profile(
         self,
         context: ToolRuntimeContext,
         *,
@@ -428,7 +430,16 @@ class ScriptRunManager:
         worker_spec: WorkerSpec,
         requested_profile: ScriptResourceProfileName | None,
     ) -> tuple[ScriptRunRecord, WorkerSpec]:
-        """Bind persisted quantities to the same refreshed backend that creates the worker."""
+        """Bind persisted quantities to the same refreshed backend that creates the worker.
+
+        Read once admitted, the launch names the authority the worker launches with: a reload that changes it waits
+        for admitted launches and fences new ones until it is published, and any other reload leaves it unchanged.
+        """
+        # Deriving the launch can build the tool validation snapshot, so it stays off the event loop.
+        try:
+            launch = await asyncio.to_thread(current_worker_launch_config, context.runtime_paths)
+        except WorkerBackendError as exc:
+            raise ScriptRunManagerError(str(exc)) from exc
         backend = _require_script_launch_backend(self._worker_backend_for(None), context.runtime_paths)
         profile, requests, limits = _resolve_script_resource_profile(backend, requested_profile)
         return (
@@ -437,7 +448,8 @@ class ScriptRunManager:
                 worker_backend_locator=backend.cleanup_locator,
                 recovery_signature=script_recovery_signature(
                     backend=self.worker_backend,
-                    config=context.config,
+                    # The config the worker launches with, so recovery binds to the authority it actually got.
+                    config=launch.config,
                     agent_name=context.agent_name,
                     gateway_url=self.gateway_url,
                     resource_profile=profile,

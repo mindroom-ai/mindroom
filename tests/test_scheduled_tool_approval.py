@@ -67,7 +67,7 @@ from mindroom.scheduling.tasks import (
 from mindroom.tool_approval_grants import ScheduledCallBinding, canonical_arguments
 from mindroom.tool_jobs.execution import agent_tool_middleware
 from mindroom.tool_system.agno_toolkits import adapt_toolkit
-from mindroom.tool_system.invocation import ToolCallContext, run_tool_call
+from mindroom.tool_system.invocation import CallResult, ToolCallContext, run_tool_call
 from mindroom.tool_system.output_files import ToolOutputFilePolicy, wrap_toolkit_for_output_files
 from mindroom.tool_system.runtime_context import (
     ToolRuntimeContext,
@@ -1097,6 +1097,13 @@ class _SlackTools(Toolkit):
         return self.outcome
 
 
+def _answer(result: CallResult) -> object:
+    """Return what a call answered with, raising the exception it raised, as these tests read a call's result."""
+    if result.error is not None:
+        raise result.error
+    return result.value
+
+
 @dataclass(frozen=True)
 class _LiveRun:
     """One agent run's tools as its build offers them, beside the scheduler, under the run's tool-call policy.
@@ -1120,7 +1127,7 @@ class _LiveRun:
         }
         policy = bind_live_tools(functions, self.middleware)
         context = ToolCallContext(run_id="run", session_id="session", call_id="call-1", user_id=None)
-        return await run_tool_call(functions[function_name], arguments, context, middleware=policy)
+        return _answer(await run_tool_call(functions[function_name], arguments, context, middleware=policy))
 
 
 _DEFAULT_OUTCOME = object()
@@ -2205,11 +2212,13 @@ async def _run_in_build(manager: ApprovalManager, build: AgentBuild, config: Con
         patch("mindroom.approval.manager.get_approval_store", return_value=manager),
         tool_runtime_context(_turn_context(config)),
     ):
-        return await run_tool_call(
-            build.spec.functions["run_scheduled_call"],
-            {"task_id": _TASK},
-            ToolCallContext(run_id="run", session_id="session", call_id="call-1", user_id=None),
-            middleware=agent_tool_middleware(build),
+        return _answer(
+            await run_tool_call(
+                build.spec.functions["run_scheduled_call"],
+                {"task_id": _TASK},
+                ToolCallContext(run_id="run", session_id="session", call_id="call-1", user_id=None),
+                middleware=agent_tool_middleware(build),
+            ),
         )
 
 
@@ -2302,16 +2311,18 @@ async def test_scheduling_a_name_two_toolkits_share_stores_the_toolkit_the_run_o
         tool_runtime_context(context),
         _responders(config, "general"),
     ):
-        await run_tool_call(
-            build.spec.functions["schedule_tool_call"],
-            {
-                "tool_name": "post_slack_message",
-                "arguments_json": canonical_arguments(_ARGUMENTS),
-                "execute_at": "2030-01-02T09:00:00-05:00",
-                "description": "Morning DM",
-            },
-            ToolCallContext(run_id="run", session_id="session", call_id="call-1", user_id=None),
-            middleware=agent_tool_middleware(build),
+        _answer(
+            await run_tool_call(
+                build.spec.functions["schedule_tool_call"],
+                {
+                    "tool_name": "post_slack_message",
+                    "arguments_json": canonical_arguments(_ARGUMENTS),
+                    "execute_at": "2030-01-02T09:00:00-05:00",
+                    "description": "Morning DM",
+                },
+                ToolCallContext(run_id="run", session_id="session", call_id="call-1", user_id=None),
+                middleware=agent_tool_middleware(build),
+            ),
         )
 
     [binding] = request.await_args.args
@@ -2368,11 +2379,13 @@ async def test_a_stored_call_runs_only_the_function_the_run_offers_under_its_nam
 
         # The model's own call of the name runs the first configured toolkit's function.
         with tool_runtime_context(_turn_context(config)):
-            await run_tool_call(
-                build.spec.functions["post_slack_message"],
-                _OTHER_ARGUMENTS,
-                ToolCallContext(run_id="run", session_id="session", call_id="call-2", user_id=None),
-                middleware=agent_tool_middleware(build),
+            _answer(
+                await run_tool_call(
+                    build.spec.functions["post_slack_message"],
+                    _OTHER_ARGUMENTS,
+                    ToolCallContext(run_id="run", session_id="session", call_id="call-2", user_id=None),
+                    middleware=agent_tool_middleware(build),
+                ),
             )
 
         assert configured_slack_pair[configured[0]][-1] == _OTHER_ARGUMENTS

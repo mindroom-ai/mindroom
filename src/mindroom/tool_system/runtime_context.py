@@ -273,15 +273,6 @@ class ToolRuntimeContext:
 
 
 @dataclass(frozen=True)
-class WorkerRuntimeContext:
-    """Explicit worker configuration for dispatch without a live chat context."""
-
-    runtime_paths: RuntimePaths
-    config: Config
-    storage_path: Path | None = None
-
-
-@dataclass(frozen=True)
 class ToolDispatchContext:
     """Detached execution identity for tool dispatch outside a live Matrix runtime."""
 
@@ -470,7 +461,6 @@ _TOOL_RUNTIME_CONTEXT: ContextVar[ToolRuntimeContext | None] = ContextVar(
     "tool_runtime_context",
     default=None,
 )
-_WORKER_RUNTIME_CONTEXT: ContextVar[WorkerRuntimeContext | None] = ContextVar("worker_runtime_context", default=None)
 _WORKER_PROGRESS_PUMP: ContextVar[WorkerProgressPump | None] = ContextVar(
     "worker_progress_pump",
     default=None,
@@ -480,21 +470,6 @@ _WORKER_PROGRESS_PUMP: ContextVar[WorkerProgressPump | None] = ContextVar(
 def get_tool_runtime_context() -> ToolRuntimeContext | None:
     """Get the current shared tool runtime context."""
     return _TOOL_RUNTIME_CONTEXT.get()
-
-
-def get_worker_runtime_context() -> WorkerRuntimeContext | None:
-    """Return the explicit worker snapshot bound to this operation."""
-    return _WORKER_RUNTIME_CONTEXT.get()
-
-
-@contextmanager
-def worker_runtime_context(context: WorkerRuntimeContext) -> Iterator[None]:
-    """Keep detached worker configuration scoped across async and thread calls."""
-    token = _WORKER_RUNTIME_CONTEXT.set(context)
-    try:
-        yield
-    finally:
-        _WORKER_RUNTIME_CONTEXT.reset(token)
 
 
 def get_worker_progress_pump() -> WorkerProgressPump | None:

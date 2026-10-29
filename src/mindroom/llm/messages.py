@@ -15,9 +15,12 @@ from uuid import uuid4
 
 from mindroom.llm.media import Audio, File, Image, Video
 from mindroom.llm.usage import MessageMetrics
+from mindroom.logging_config import get_logger
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Mapping, Sequence
+
+logger = get_logger(__name__)
 
 
 def _new_id() -> str:
@@ -215,15 +218,17 @@ class Message:
         #   tests/llm/test_codecs.py::test_message_from_dict_reads_non_persisted_flags_from_model_dump_payloads
         metrics = data.get("metrics")
         identifier = data.get("id")
+        message_id = identifier if isinstance(identifier, str) else _new_id()
         created_at = data.get("created_at")
+        tool_call_id, tool_calls = _stored_call_ids(data, message_id)
         return cls(
             role=data["role"],
             content=data.get("content"),
-            id=identifier if isinstance(identifier, str) else _new_id(),
+            id=message_id,
             compressed_content=data.get("compressed_content"),
             name=data.get("name"),
-            tool_call_id=data.get("tool_call_id"),
-            tool_calls=data.get("tool_calls"),
+            tool_call_id=tool_call_id,
+            tool_calls=tool_calls,
             tool_name=data.get("tool_name"),
             tool_args=data.get("tool_args"),
             tool_call_error=data.get("tool_call_error"),
@@ -240,6 +245,43 @@ class Message:
             from_history=data.get("from_history", False),
             add_to_agent_memory=data.get("add_to_agent_memory", True),
         )
+
+
+def _is_malformed_call_id(value: object) -> bool:
+    return value is not None and not (isinstance(value, str) and value)
+
+
+def _has_malformed_id(call: object) -> bool:
+    return isinstance(call, dict) and _is_malformed_call_id(cast("dict[str, Any]", call).get("id"))
+
+
+# LEGACY_COMPAT: Stored call ids that are not non-empty text.
+# Legacy format: a stored message whose ``tool_call_id``, or the ``id`` of a call in its ``tool_calls``, is empty or not
+# a string.
+# Last legacy release: for an empty id, v2026.4.35, the last release on Agno 2.4.7, whose Chat stream parser stored the
+# first delta's id unchecked; v2026.4.36 moved to Agno 2.5.13, which gives a call with an empty id a uuid4 one, and the
+# owned writers from v2026.10.499 store non-empty text. An id that is not text has no known writer: it is unversioned
+# external input, since worker code could write the Agno-era run data the storage v2 conversion read.
+# Handling: the row decodes with that id as None and one ``stored_tool_call_id_dropped`` debug line naming the message,
+# so the load never fails, every wire reads a call id as text or None, and the message's other ids and calls read as
+# stored.
+# Coverage: tests/llm/test_codecs.py::test_a_message_stored_with_a_malformed_call_id_loads_without_it,
+#   tests/llm/test_codecs.py::test_a_message_whose_result_and_call_ids_are_both_malformed_logs_one_line,
+#   tests/providers/test_gemini_ollama_synthetic_adapters.py::test_gemini_tool_history_keeps_valid_call_ids_and_drops_invalid_ones,
+#   tests/session_storage/test_legacy_agno3_conversion.py::test_converted_call_ids_are_text_or_none_so_folded_calls_read
+def _stored_call_ids(data: Mapping[str, Any], message_id: str) -> tuple[Any, Any]:
+    """Return a stored message's ``tool_call_id`` and ``tool_calls``, each malformed call id dropped to None."""
+    tool_call_id = data.get("tool_call_id")
+    tool_calls = data.get("tool_calls")
+    dropped = False
+    if _is_malformed_call_id(tool_call_id):
+        tool_call_id, dropped = None, True
+    if isinstance(tool_calls, list) and any(_has_malformed_id(call) for call in tool_calls):
+        tool_calls, dropped = [{**call, "id": None} if _has_malformed_id(call) else call for call in tool_calls], True
+    if dropped:
+        # The row stays as stored and is read again on every load, so the line repeats and stays at debug level.
+        logger.debug("stored_tool_call_id_dropped", message_id=message_id)
+    return tool_call_id, tool_calls
 
 
 def system_texts(messages: Sequence[Message]) -> tuple[str, ...]:

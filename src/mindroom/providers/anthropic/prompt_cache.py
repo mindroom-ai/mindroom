@@ -1,9 +1,9 @@
 """The wire-level request preparation of one Claude request: history repairs, deferred tools, and cache breakpoints.
 
 The cache breakpoints come from the ladder primitives in ``providers/cache_ladder.py``, which the OpenRouter
-Claude ladder shares. The repairs run on every request, cached or not, because an already-stored history can
-carry blocks the request schema rejects. ``claude_loaded_tool_names`` reads which deferred tools earlier tool
-searches loaded, which the mid-turn history budget counts as sent.
+Claude ladder shares. The repairs run on every request, cached or not, because they depend on the request itself:
+the tools it offers, its tool-result order, and the inline media it carries. ``claude_loaded_tool_names`` reads
+which deferred tools earlier tool searches loaded, which the mid-turn history budget counts as sent.
 """
 
 from __future__ import annotations
@@ -17,11 +17,10 @@ from mindroom.providers.anthropic.repairs import (
     MAX_INLINE_MEDIA_BYTES,
     PARTNER_MAX_INLINE_IMAGE_BYTES,
     with_leading_tool_results,
-    with_replay_safe_tool_search_results,
     with_supported_inline_media,
-    without_replayed_citations,
     without_unavailable_tool_references,
 )
+from mindroom.providers.anthropic.stored_turns import replayed_blocks
 from mindroom.providers.cache_ladder import (
     MAX_CACHE_MARKERS,
     MESSAGE_RUNG_COUNT,
@@ -62,11 +61,9 @@ def claude_loaded_tool_names(messages: Sequence[Message]) -> frozenset[str]:
     """Return the tool names whose definitions tool searches in these messages loaded into Claude's context."""
     names: set[str] = set()
     for message in messages:
-        blocks = message.provider_data.get("server_tool_blocks") if message.provider_data else None
-        for block in blocks if isinstance(blocks, list) else ():
-            block_dict = as_dict(block)
-            content = as_dict(block_dict.get("content")) if block_dict is not None else None
-            if block_dict is None or block_dict.get("type") != TOOL_SEARCH_RESULT_BLOCK_TYPE or content is None:
+        for block in replayed_blocks(message) if message.role == "assistant" else ():
+            content = as_dict(block.get("content"))
+            if block.get("type") != TOOL_SEARCH_RESULT_BLOCK_TYPE or content is None:
                 continue
             references = content.get("tool_references")
             for reference in references if isinstance(references, list) else ():
@@ -183,9 +180,7 @@ def prepare_request_body(
     conversation's system texts. Repairs come first, then the deferred tool search, the tool choice, the system
     prompt, and finally the cache breakpoints when the model caches its prompt. The input body is never mutated.
     """
-    prepared = with_replay_safe_tool_search_results(body)
-    prepared = without_unavailable_tool_references(prepared)
-    prepared = without_replayed_citations(prepared)
+    prepared = without_unavailable_tool_references(body)
     prepared = with_leading_tool_results(prepared)
     prepared = with_supported_inline_media(
         prepared,

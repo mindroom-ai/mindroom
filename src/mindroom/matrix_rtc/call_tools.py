@@ -33,7 +33,6 @@ from mindroom.agent_run_context import append_knowledge_availability_enrichment
 from mindroom.agents import create_agent
 from mindroom.approval.tool_approval import tool_may_require_approval
 from mindroom.background_tasks import wait_for_future_until_complete
-from mindroom.failure_text import failure_text
 from mindroom.helper_usage import HelperUsageOwner, helper_usage_owner_context, record_helper_usage
 from mindroom.history.interrupted_replay import persist_interrupted_replay
 from mindroom.history.session_context import create_scope_session_storage, load_scope_session
@@ -57,7 +56,7 @@ from mindroom.tool_system.declarations import (
     MATRIX_ROOM_RUNTIME_APPROVAL_TYPE,
     MATRIX_ROOM_RUNTIME_TOOL_NAMES,
 )
-from mindroom.tool_system.invocation import ToolCallContext, client_tool_result, run_tool_call
+from mindroom.tool_system.invocation import CallResult, ToolCallContext, client_tool_result, run_tool_call
 from mindroom.tool_system.runtime_context import tool_runtime_context
 from mindroom.tool_system.tool_function import close_toolkits, connect_toolkits
 from mindroom.turn_model import ModelScope, TurnBudget, resolve_turn_model
@@ -983,8 +982,10 @@ def _wrap_tool_function(
                 with tool_runtime_context(context), helper_usage_owner_context(usage_owner):
                     result = await run_tool_call(function, raw_arguments, call_context, middleware=middleware)
             except Exception as error:
-                logger.warning("call_tool_failed", tool=function.name, agent=agent_name, error=str(error))
-                return f"Tool {function.name} failed: {failure_text(error)}"
-        return _normalize_tool_result(client_tool_result(result))
+                result = CallResult("failed", error=error)
+            if result.error is not None:
+                logger.warning("call_tool_failed", tool=function.name, agent=agent_name, error=str(result.error))
+                return f"Tool {function.name} failed: {result.failure_text}"
+        return _normalize_tool_result(client_tool_result(result.value))
 
     return llm.function_tool(_handler, raw_schema=raw_schema)

@@ -85,7 +85,6 @@ from mindroom.knowledge.redaction import (
     credential_free_repo_url,
     credential_free_url_identity,
     redact_credentials_in_text,
-    redact_url_credentials,
 )
 from mindroom.knowledge.refresh_outcome import RefreshOutcome
 from mindroom.knowledge.refresh_runner import _refresh_knowledge_binding as refresh_knowledge_binding
@@ -9950,25 +9949,8 @@ async def test_refresh_scheduler_manual_reindex_runs_without_background_queue(
     assert seen == [(1024, False), (5000, True)]
 
 
-def test_redact_url_credentials_hides_entire_http_userinfo() -> None:
-    """Knowledge Git URL redaction must not leak token usernames or URL parameters."""
-    assert redact_url_credentials("https://user:password@example.com/repo.git") == "https://***@example.com/repo.git"
-    assert redact_url_credentials("https://ghp_secret:x-oauth-basic@example.com/repo.git") == (
-        "https://***@example.com/repo.git"
-    )
-    assert redact_url_credentials("https://username@example.com/repo.git") == "https://***@example.com/repo.git"
-    assert redact_url_credentials("ssh://git@example.com/repo.git") == "ssh://***@example.com/repo.git"
-    assert redact_url_credentials("ssh://user:pass@example.com/repo.git") == "ssh://***@example.com/repo.git"
-    assert redact_url_credentials("git+https://user:pass@example.com/repo.git") == (
-        "git+https://***@example.com/repo.git"
-    )
-    assert redact_url_credentials("https://example.com/repo.git?token=secret#frag-secret") == (
-        "https://example.com/repo.git"
-    )
-    assert (
-        redact_url_credentials("https://user:password@example.com/org/repo.git;token=secret?query=secret#frag-secret")
-        == "https://***@example.com/org/repo.git"
-    )
+def test_credential_free_repo_url_drops_http_userinfo_query_and_fragment() -> None:
+    """A persistent clone URL keeps no HTTP userinfo, query string, or fragment."""
     assert (
         credential_free_repo_url(
             "https://user:password@example.com/repo.git?token=secret#frag-secret",

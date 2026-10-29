@@ -34,6 +34,7 @@ from mindroom.tool_system.runtime_context import (
 )
 from mindroom.tool_system.worker_routing import descriptive_worker_id_for_key, resolve_worker_key
 from tests.agent_tool_helpers import offered_function, run_offered, source_toolkit
+from tests.api.sandbox_runner_support import execute_call
 from tests.authorization_helpers import make_test_tool_runtime_context
 from tests.conftest import (
     call_proxy_sync_for_test,
@@ -78,8 +79,17 @@ def worker_requests(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> list[dic
         assert request.url.path.endswith("/execute")
         payload = json.loads(request.content)
         requests.append(payload)
-        call = sandbox_runner.SandboxRunnerExecuteRequest.model_validate(payload)
-        response = asyncio.run(sandbox_runner._execute_request_inprocess(call, runtime_paths, config))
+        fields = {name: value for name, value in payload.items() if name != "protocol"}
+        # The primary sends its live config; the runner reads the agents it routes from it, as the endpoint does.
+        snapshot = fields.get("config_snapshot")
+        call_config = (
+            config
+            if snapshot is None
+            else sandbox_runner._primary_validated_config(snapshot, runtime_paths, log_skipped_plugins=False)
+        )
+        response = asyncio.run(
+            sandbox_runner._execute_request_inprocess(execute_call(runtime_paths, call_config, **fields)),
+        )
         return httpx.Response(200, json=response.model_dump(mode="json"))
 
     monkeypatch.setattr(
@@ -282,7 +292,7 @@ def test_invalid_arguments_rejected_before_worker_side_effects(
     def provision_forbidden(*_args: object, **_kwargs: object) -> object:
         pytest.fail("Invalid arguments reached worker provisioning")
 
-    monkeypatch.setattr(sandbox_proxy, "_primary_worker_manager_context", provision_forbidden)
+    monkeypatch.setattr(sandbox_proxy, "_lease_worker_manager", provision_forbidden)
     value: object = {
         "value": Opaque(),
         "nested": {"payload": [Opaque()]},

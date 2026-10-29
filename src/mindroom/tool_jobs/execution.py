@@ -56,7 +56,7 @@ from mindroom.tool_system.dedicated_threads import JOB_CALL_EXECUTOR
 from mindroom.tool_system.invocation import run_tool_call
 from mindroom.tool_system.runtime_context import build_execution_identity_from_runtime_context, get_tool_runtime_context
 from mindroom.tool_system.tool_function import ToolOutcome, ToolValue
-from mindroom.tool_system.tool_hooks import SyncToolCompletionTracker, track_sync_tool_completion
+from mindroom.tool_system.tool_hooks import owned_sync_tool_completion
 from mindroom.tool_system.worker_routing import get_tool_execution_identity, tool_execution_identity
 
 if TYPE_CHECKING:
@@ -68,7 +68,7 @@ if TYPE_CHECKING:
     from mindroom.tool_jobs.resources import ExecutionResourceReference, ExecutionResources
     from mindroom.tool_jobs.runtime import ToolJobRuntime
     from mindroom.tool_system.agno_toolkits import Toolkit
-    from mindroom.tool_system.invocation import ToolCall, ToolMiddleware, ToolNext
+    from mindroom.tool_system.invocation import CallResult, ToolCall, ToolMiddleware, ToolNext
     from mindroom.tool_system.runtime_context import ToolRuntimeContext
     from mindroom.tool_system.tool_function import ToolFunction
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
@@ -311,20 +311,10 @@ async def _run_here(call_next: ToolNext, arguments: dict[str, Any], *, unassembl
     """
     if not job_owns_execution():
         return await call_next(arguments)
+    # A managed job keeps its resources until a synchronous leaf the call started finishes.
     with enclosing_grant() if unassembled else nullcontext():
-        return await _owned_by_job(lambda: call_next(arguments))
-
-
-async def _owned_by_job(run: Callable[[], Awaitable[object]]) -> object:
-    """Run one call inside a managed job, which keeps its resources until a synchronous leaf it started finishes."""
-    tracker = SyncToolCompletionTracker(executor=JOB_CALL_EXECUTOR)
-    try:
-        with track_sync_tool_completion(tracker):
-            return await run()
-    finally:
-        started = tracker.started_task()
-        if started is not None:
-            await wait_for_future_until_complete(asyncio.gather(started, return_exceptions=True))
+        async with owned_sync_tool_completion(JOB_CALL_EXECUTOR):
+            return await call_next(arguments)
 
 
 def _detached(call: JobCall) -> JobCall:
@@ -467,9 +457,10 @@ async def _run_operation(
         with tool_execution_identity(owner), authorized_tool_call(owner, call):
             job_checkpoint()
             check_current_execution_authority()
-            value, failure = await _run_job_call(inner, function, call)
+            async with owned_sync_tool_completion(JOB_CALL_EXECUTOR):
+                result = await run_tool_call(function, call.arguments, call.context, middleware=inner)
             encoding = asyncio.create_task(
-                asyncio.to_thread(_saved_outcome, value, failure, baseline, call.context.session_state),
+                asyncio.to_thread(_saved_outcome, result, baseline, call.context.session_state),
             )
             try:
                 return await wait_for_future_until_complete(encoding)
@@ -487,31 +478,13 @@ async def _run_operation(
             logger.exception("Tool execution resource cleanup failed", tool_name=function.name)
 
 
-async def _run_job_call(
-    inner: Sequence[ToolMiddleware],
-    function: ToolFunction,
-    call: JobCall,
-) -> tuple[object, str | None]:
-    """Run the job's call through the actor's tool-call policy: what it returned, or the text of why it failed.
+def _saved_outcome(result: CallResult, baseline: dict[str, Any], state: dict[str, Any]) -> BackgroundOutcome:
+    """Encode a finished call's outcome with the session-state changes it made, off the event loop.
 
     It fails when it raised, or when the policy answered it with a failed outcome, as for a call a plugin hook declined.
     """
-    try:
-        returned = await _owned_by_job(lambda: run_tool_call(function, call.arguments, call.context, middleware=inner))
-    except Exception as error:
-        return None, failure_text(error)
-    if isinstance(returned, ToolOutcome) and returned.is_error:
-        return None, returned.content
-    return returned, None
-
-
-def _saved_outcome(
-    value: object,
-    failure: str | None,
-    baseline: dict[str, Any],
-    state: dict[str, Any],
-) -> BackgroundOutcome:
-    """Encode a finished call's outcome with the session-state changes it made, off the event loop."""
+    failure = None if result.succeeded else result.failure_text
+    value = result.value if failure is None else None
     try:
         payload = ToolResultPayload(value=value, state_delta=session_state_delta(baseline, state), error=failure)
         encoded = encode_result_payload(payload)

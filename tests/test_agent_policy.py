@@ -25,7 +25,6 @@ from mindroom.tool_system.worker_routing import (
     resolve_worker_key,
     visible_workspace_roots,
 )
-from mindroom.workers.backends._dedicated_worker_common import resolved_agent_policies_from_config_data
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -78,8 +77,8 @@ def test_resolve_agent_policy_inherits_default_worker_scope_without_private_work
     assert policy.private_agent_knowledge_enabled is False
 
 
-def test_policy_private_root_is_shared_between_typed_draft_and_backend_config() -> None:
-    """Backends read the config file, the dashboard sends drafts, and the primary reads typed config: same root."""
+def test_policy_private_root_is_shared_between_typed_config_and_drafts() -> None:
+    """The dashboard sends drafts and the primary reads typed config: both resolve the same root."""
     raw_agents: dict[str, Any] = {
         "mind": {"display_name": "Mind", "private": {"per": "user_agent", "root": " workspace/mind "}},
         "notes": {"display_name": "Notes", "private": {"per": "user"}},
@@ -97,15 +96,14 @@ def test_policy_private_root_is_shared_between_typed_draft_and_backend_config() 
             default_worker_scope=None,
         ),
     ).policies
-    backend = resolved_agent_policies_from_config_data({"agents": raw_agents})
 
-    for policies in (typed, draft, backend):
+    for policies in (typed, draft):
         assert {name: policy.private_root for name, policy in policies.items()} == {
             "mind": "workspace/mind",
             "notes": None,
             "helper": None,
         }
-    assert typed == draft == backend
+    assert typed == draft
 
 
 @pytest.mark.parametrize(

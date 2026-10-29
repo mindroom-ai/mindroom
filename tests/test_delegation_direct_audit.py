@@ -281,7 +281,7 @@ async def _deny_in_the_callers_task(tools: DelegateTools) -> None:
         ),
         middleware=(_deny_call,),
     )
-    assert result == "denied before delegation"
+    assert result.value == "denied before delegation"
 
 
 @pytest.mark.asyncio

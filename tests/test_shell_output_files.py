@@ -24,6 +24,7 @@ from mindroom.tool_system.metadata import get_tool_by_name
 from mindroom.tool_system.output_files import ToolOutputFilePolicy, wrap_toolkit_for_output_files
 from mindroom.tools import shell as shell_module
 from mindroom.tools.shell import shell_tools
+from tests.api.sandbox_runner_support import execute_call
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Iterator
@@ -429,15 +430,15 @@ def test_worker_subprocess_saves_supervised_capture(tmp_path: Path) -> None:
 
     def execute(function_name: str, kwargs: dict[str, object]) -> str:
         response = sandbox_runner._execute_request_subprocess_sync(
-            sandbox_runner.SandboxRunnerExecuteRequest(
+            execute_call(
+                runtime_paths,
+                config,
                 tool_name="shell",
                 function_name=function_name,
                 kwargs=kwargs,
                 routing_agent_name="probe",
-                tool_init_overrides={"base_dir": str(workspace)},
+                base_dir=str(workspace),
             ),
-            runtime_paths,
-            config,
         )
         assert response.ok, response.error
         assert isinstance(response.result, str)

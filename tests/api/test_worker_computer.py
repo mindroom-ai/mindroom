@@ -30,6 +30,7 @@ from mindroom.worker_computer.runtime import WorkerComputerRuntime
 from mindroom.worker_computer.worker_browser import WorkerBrowserRuntime
 from mindroom.workers.backends.local import local_worker_state_paths_for_root
 from mindroom.workers.models import WorkerHandle
+from mindroom.workers.protocol import WORKER_PROTOCOL_VERSION, ExecuteResponse
 from tests.test_worker_computer_runtime import FakeDisplay
 
 RUNNER_TOKEN = "test-runner-token"  # noqa: S105 - isolated test credential
@@ -96,7 +97,7 @@ def test_two_execute_requests_reuse_browser_and_disabled_uses_subprocess(
     prepared = sandbox_worker_prep.PreparedWorkerRequest(
         handle=WorkerHandle("test", worker_key, "http://worker/execute", "secret", "ready", "docker", 0, 0),
         paths=local_worker_state_paths_for_root(root),
-        runtime_overrides={"base_dir": root / "workspace"},
+        base_dir=root / "workspace",
     )
     monkeypatch.setattr(sandbox_worker_prep, "prepare_worker_request", lambda **_kwargs: prepared)
     pages = {}
@@ -106,12 +107,13 @@ def test_two_execute_requests_reuse_browser_and_disabled_uses_subprocess(
             pages[id(self)] = "target-one"
         return json.dumps({"targetId": pages.get(id(self)), "same_target": targetId == pages.get(id(self))})
 
-    async def subprocess(*_args: object, **_kwargs: object) -> sandbox_runner.SandboxRunnerExecuteResponse:
-        return sandbox_runner.SandboxRunnerExecuteResponse(ok=True, result="subprocess")
+    async def subprocess(*_args: object, **_kwargs: object) -> ExecuteResponse:
+        return ExecuteResponse(ok=True, result="subprocess")
 
     monkeypatch.setattr(BrowserTools, "browser", browser)
     monkeypatch.setattr(sandbox_runner, "_execute_request_subprocess", subprocess)
     payload = {
+        "protocol": WORKER_PROTOCOL_VERSION,
         "tool_name": "browser",
         "function_name": "browser_control",
         "worker_key": worker_key,
@@ -126,8 +128,9 @@ def test_two_execute_requests_reuse_browser_and_disabled_uses_subprocess(
     with TestClient(app) as client:
         first = client.post("/api/sandbox-runner/execute", headers=headers, json=payload)
         if worker_scope is None:
-            assert first.status_code == 400, first.text
-            assert "user_agent" in first.json()["detail"]
+            assert first.status_code == 200, first.text
+            assert first.json()["failure_kind"] == "tool"
+            assert "user_agent" in first.json()["error"]
             assert not pages
             return
         assert first.status_code == 200, first.text
@@ -363,7 +366,7 @@ def test_native_functions_reuse_one_guarded_session(  # noqa: PLR0915 - full HTT
     prepared = sandbox_worker_prep.PreparedWorkerRequest(
         handle=WorkerHandle("test", worker_key, "http://worker/execute", "secret", "ready", "docker", 0, 0),
         paths=local_worker_state_paths_for_root(root),
-        runtime_overrides={"base_dir": root / "workspace"},
+        base_dir=root / "workspace",
     )
     monkeypatch.setattr(sandbox_worker_prep, "prepare_worker_request", lambda **_kwargs: prepared)
     calls = []
@@ -374,6 +377,7 @@ def test_native_functions_reuse_one_guarded_session(  # noqa: PLR0915 - full HTT
 
     monkeypatch.setattr(WorkerBrowserMCP, "execute", execute)
     payload = {
+        "protocol": WORKER_PROTOCOL_VERSION,
         "tool_name": "browser_mcp",
         "function_name": "browser_snapshot",
         "worker_key": worker_key,
@@ -417,12 +421,12 @@ def test_native_functions_reuse_one_guarded_session(  # noqa: PLR0915 - full HTT
         payload["function_name"] = "browser_run_code_unsafe"
         payload["kwargs"] = {}
         unsupported = client.post("/api/sandbox-runner/execute", headers=headers, json=payload)
-        assert unsupported.status_code == 400
+        assert unsupported.json()["failure_kind"] == "tool"
         payload["function_name"] = "browser_snapshot"
         monkeypatch.setattr(sandbox_runner.TOOL_METADATA["browser_mcp"], "factory", lambda: type(None))
         replaced = client.post("/api/sandbox-runner/execute", headers=headers, json=payload)
-        assert replaced.status_code == 400
-        assert "built-in browser factory" in replaced.json()["detail"]
+        assert replaced.json()["failure_kind"] == "tool"
+        assert "built-in browser factory" in replaced.json()["error"]
         assert len(calls) == 4
         client.portal.call(computer.close)
 
@@ -438,7 +442,7 @@ def test_computer_execute_rejects_malformed_agent_name(
     function: str,
     agent_name: object,
 ) -> None:
-    """Arbitrary identity values return a client error before provider dispatch."""
+    """Arbitrary identity values fail the call before provider dispatch."""
     paths = resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path)
     app = FastAPI()
     initialize_sandbox_runner_app(app, paths, config=Config(), runner_token=RUNNER_TOKEN)
@@ -449,6 +453,7 @@ def test_computer_execute_rejects_malformed_agent_name(
             "/api/sandbox-runner/execute",
             headers={"X-Mindroom-Sandbox-Token": RUNNER_TOKEN},
             json={
+                "protocol": WORKER_PROTOCOL_VERSION,
                 "tool_name": provider,
                 "function_name": function,
                 "execution_identity": {
@@ -462,8 +467,9 @@ def test_computer_execute_rejects_malformed_agent_name(
                 },
             },
         )
-    assert response.status_code == 400, response.text
-    assert "agent_name" in response.json()["detail"]
+    assert response.status_code == 200, response.text
+    assert response.json()["failure_kind"] == "tool"
+    assert "agent_name" in response.json()["error"]
 
 
 @pytest.mark.parametrize(

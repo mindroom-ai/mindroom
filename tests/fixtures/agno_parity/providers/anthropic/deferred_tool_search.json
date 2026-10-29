@@ -90,7 +90,7 @@
     "message": {
       "content": "I can look that up.",
       "provider_data": {
-        "content_blocks": [
+        "claude_blocks": [
           {
             "text": "I can look that up.",
             "type": "text"

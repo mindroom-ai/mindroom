@@ -23,7 +23,7 @@ from mindroom.knowledge.file_listing import git_checkout_present, include_knowle
 from mindroom.knowledge.file_listing import list_git_tracked_knowledge_files as list_git_tracked_managed_knowledge_files
 from mindroom.knowledge.file_listing import list_knowledge_files as list_managed_knowledge_files
 from mindroom.knowledge.indexing_config import knowledge_git_dir
-from mindroom.knowledge.redaction import redact_credentials_in_text, redact_url_credentials
+from mindroom.knowledge.redaction import redact_credentials_in_text
 from mindroom.knowledge.refresh_locks import is_refresh_active_for_binding
 from mindroom.knowledge.refresh_runner import (
     knowledge_binding_mutation_lock,
@@ -38,6 +38,7 @@ from mindroom.knowledge.status import (
 )
 from mindroom.logging_config import get_logger
 from mindroom.path_confinement import open_directory_within_root, open_regular_file_at, resolve_path_within_root
+from mindroom.redaction import redact_url_credentials
 from mindroom.runtime_resolution import shared_knowledge_path
 
 if TYPE_CHECKING:
