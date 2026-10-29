@@ -189,10 +189,6 @@ loaded = sorted(
 print(json.dumps(loaded))
 """
 
-# Building a config runs every integration's validation hook, so these probes measure the footprint after one.
-_BUILDS_CONFIG = frozenset({"mindroom.config.main"})
-_BUILD_CONFIG_SNIPPET = "importlib.import_module('mindroom.config.main').Config(agents={})"
-
 _SLIM_PROBE_TEMPLATE = """
 import importlib, json, sys
 
@@ -236,7 +232,10 @@ def _run_slim_probe(module: str) -> tuple[list[str], frozenset[str]]:
             "-c",
             _SLIM_PROBE_TEMPLATE.format(
                 module=module,
-                build_config=_BUILD_CONFIG_SNIPPET if module in _BUILDS_CONFIG else "",
+                # Building a config runs every integration's validation hook, so its footprint is measured after one.
+                build_config="importlib.import_module('mindroom.config.main').Config(agents={})"
+                if module == "mindroom.config.main"
+                else "",
                 banned_roots=_PROVIDER_SDK_ROOTS + _SLIM_ONLY_ROOTS,
             ),
         ],

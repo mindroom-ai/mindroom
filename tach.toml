@@ -1851,6 +1851,7 @@ depends_on = [
     "mindroom.slack.app",
     "mindroom.slack.delivery",
     "mindroom.slack.events",
+    "mindroom.slack.integration",
 ]
 
 [[modules]]
@@ -9849,13 +9850,15 @@ depends_on = ["mindroom.matrix.identity", "mindroom.slack.api", "mindroom.slack.
 [[modules]]
 path = "mindroom.slack.integration"
 depends_on = [
+    "mindroom.api.config_lifecycle",
     "mindroom.api.slack_events",
     "mindroom.integrations",
     "mindroom.slack.api",
+    "mindroom.slack.delivery",
     "mindroom.slack.reply_mirror",
 ]
 # Core reaches Slack only through the integration registry.
-visibility = ["mindroom.integrations"]
+visibility = ["mindroom.api.slack_events", "mindroom.integrations"]
 
 [[modules]]
 path = "mindroom.slack.oauth"

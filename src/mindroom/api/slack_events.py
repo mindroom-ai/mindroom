@@ -16,20 +16,18 @@ from mindroom.background_tasks import create_background_task
 from mindroom.bounded_bytes import ByteLimitExceededError, collect_bounded_bytes
 from mindroom.credentials.manager import get_runtime_credentials_manager
 from mindroom.slack.app import load_slack_app
-from mindroom.slack.delivery import SlackRuntime, deliver_slack_event, retry_slack_event
+from mindroom.slack.delivery import deliver_slack_event, retry_slack_event
 from mindroom.slack.events import verify_slack_signature
+from mindroom.slack.integration import bound_slack_runtime
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping
-
     from fastapi import FastAPI
 
-    from mindroom.agent_reply_membership import AgentReplyMembershipIndex
-    from mindroom.bot import AgentBot, TeamBot
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
     from mindroom.credentials.manager import CredentialsManager
     from mindroom.slack.app import SlackAppCredentials
+    from mindroom.slack.delivery import SlackRuntime
     from mindroom.slack.turns import DeliveryResult
 
 router = APIRouter(prefix="/api/slack", tags=["slack"])
@@ -37,33 +35,6 @@ _MAX_BODY_BYTES = 1_048_576
 # Slack drops an answer slower than 3 s; a delivery still running by then finishes in the background.
 _ACK_BUDGET_SECONDS = 2.5
 _UNAVAILABLE = "Slack events are not available"
-# The integration's name, which keys its runtime in the app state.
-_RUNTIME_KEY = "slack"
-
-
-def _bound_slack_runtime(api_app: FastAPI) -> SlackRuntime | None:
-    """Return the runtime Slack events reach, or None while it is unbound."""
-    runtime = config_lifecycle.app_state(api_app).integration_runtimes.get(_RUNTIME_KEY)
-    return runtime if isinstance(runtime, SlackRuntime) else None
-
-
-def bind_slack_runtime(
-    api_app: FastAPI,
-    bots: Mapping[str, AgentBot | TeamBot],
-    agent_reply_memberships: AgentReplyMembershipIndex,
-) -> None:
-    """Let Slack events reach the orchestrator's live bots; binding the same bots again keeps the runtime."""
-    runtime = _bound_slack_runtime(api_app)
-    if runtime is None or runtime.bots is not bots:
-        config_lifecycle.app_state(api_app).integration_runtimes[_RUNTIME_KEY] = SlackRuntime(
-            bots,
-            agent_reply_memberships,
-        )
-
-
-def unbind_slack_runtime(api_app: FastAPI) -> object | None:
-    """Refuse Slack events, so Slack resends them after the restart, and return the runtime that owns the deliveries."""
-    return config_lifecycle.app_state(api_app).integration_runtimes.pop(_RUNTIME_KEY, None)
 
 
 @router.post("/events")
@@ -81,7 +52,7 @@ async def post_slack_event(request: Request) -> Response:
     app = await asyncio.to_thread(load_slack_app, credentials_manager)
     if app is None:
         raise HTTPException(status_code=404, detail="Not Found")
-    runtime = _bound_slack_runtime(request.app)
+    runtime = bound_slack_runtime(request.app)
     if runtime is None:
         raise HTTPException(status_code=503, detail=_UNAVAILABLE)
     if not verify_slack_signature(

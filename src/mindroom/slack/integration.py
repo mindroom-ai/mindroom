@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 from mindroom.config.slack import drop_slack_room, validate_slack_agents
 from mindroom.credentials.manager import get_runtime_credentials_manager
@@ -18,6 +18,20 @@ if TYPE_CHECKING:
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
     from mindroom.hooks import MessageEnvelope
+    from mindroom.slack.delivery import SlackRuntime
+
+_NAME = "slack"
+
+
+def bound_slack_runtime(api_app: FastAPI) -> SlackRuntime | None:
+    """Return the runtime Slack events reach, or None while it is unbound."""
+    return cast("SlackRuntime | None", _runtimes(api_app).get(_NAME))
+
+
+def _runtimes(api_app: FastAPI) -> dict[str, object]:
+    from mindroom.api import config_lifecycle  # noqa: PLC0415
+
+    return config_lifecycle.app_state(api_app).integration_runtimes
 
 
 def _events_router() -> APIRouter:
@@ -31,15 +45,17 @@ def _bind(
     bots: Mapping[str, AgentBot | TeamBot],
     agent_reply_memberships: AgentReplyMembershipIndex,
 ) -> None:
-    from mindroom.api.slack_events import bind_slack_runtime  # noqa: PLC0415
+    """Let Slack events reach the orchestrator's live bots; binding the same bots again keeps the runtime."""
+    from mindroom.slack.delivery import SlackRuntime  # noqa: PLC0415
 
-    bind_slack_runtime(api_app, bots, agent_reply_memberships)
+    runtime = bound_slack_runtime(api_app)
+    if runtime is None or runtime.bots is not bots:
+        _runtimes(api_app)[_NAME] = SlackRuntime(bots, agent_reply_memberships)
 
 
 def _unbind(api_app: FastAPI) -> object | None:
-    from mindroom.api.slack_events import unbind_slack_runtime  # noqa: PLC0415
-
-    return unbind_slack_runtime(api_app)
+    """Refuse Slack events, so Slack resends them after the restart, and return the runtime that owns the deliveries."""
+    return _runtimes(api_app).pop(_NAME, None)
 
 
 def _mirror_reply(
@@ -48,7 +64,6 @@ def _mirror_reply(
     config: Config,
     runtime_paths: RuntimePaths,
 ) -> Coroutine[Any, Any, None] | None:
-    """Return the coroutine that posts a Slack project turn's final reply to its Slack thread, or None for other turns."""
     from mindroom.slack.api import slack_http_client  # noqa: PLC0415
     from mindroom.slack.reply_mirror import is_slack_project_turn, mirror_reply_to_slack  # noqa: PLC0415
 
@@ -65,7 +80,7 @@ def _mirror_reply(
 
 
 SLACK_INTEGRATION = Integration(
-    name="slack",
+    name=_NAME,
     router=_events_router,
     bind=_bind,
     unbind=_unbind,
