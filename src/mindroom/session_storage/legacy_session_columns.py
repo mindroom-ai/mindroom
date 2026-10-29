@@ -100,8 +100,7 @@ def upgrade_layout(
 def convert_session_columns(connection: sqlite3.Connection, names: TableNames) -> None:
     """Give each session row its state in a column of its own and drop every sessions column version 4 does not keep."""
     sessions = quote_identifier(names.sessions)
-    if "session_state" not in _columns(connection, names):
-        connection.execute(f"ALTER TABLE {sessions} ADD COLUMN session_state JSON")
+    connection.execute(f"ALTER TABLE {sessions} ADD COLUMN session_state JSON")
     rows = connection.execute(f"SELECT session_id, session_data FROM {sessions}").fetchall()  # noqa: S608
     for session_id, raw_session_data in rows:
         session_data = decoded_mapping(raw_session_data)
