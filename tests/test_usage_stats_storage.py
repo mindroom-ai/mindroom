@@ -5,6 +5,9 @@ from __future__ import annotations
 import json
 import os
 import sqlite3
+import subprocess
+import sys
+from contextlib import closing
 from dataclasses import replace
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
@@ -22,7 +25,7 @@ from mindroom.session_storage.agent_storage import (
     create_state_storage,
     prepare_conversation_database,
 )
-from mindroom.session_storage.schema import TableNames
+from mindroom.session_storage.schema import TableNames, table_names
 from mindroom.session_storage.types import ConversationSession
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity, resolve_worker_key, worker_dir_name
 from mindroom.usage.stats_storage import (
@@ -42,6 +45,15 @@ if TYPE_CHECKING:
     from collections.abc import Iterator
     from pathlib import Path
 
+# Writes inside a transaction until its change reaches the file, then dies, leaving a hot journal beside the database.
+_DIE_MID_WRITE = """
+import os, sqlite3, sys
+connection = sqlite3.connect(sys.argv[1], isolation_level=None)
+connection.execute("PRAGMA cache_size = 1")
+connection.execute("BEGIN IMMEDIATE")
+connection.execute("UPDATE code_sessions SET metadata = ?", ("x" * 200_000,))
+os._exit(0)
+"""
 # An Agno 2 sessions table: its runs blob column, and the metadata and summary columns the conversion reads.
 _SESSION_COLUMNS = """
     session_id TEXT PRIMARY KEY,
@@ -590,6 +602,92 @@ def test_reader_does_not_change_database_bytes(tmp_path: Path) -> None:
 
     assert len(result) == 1
     assert database.read_bytes() == before
+
+
+def test_a_read_leaves_a_crashed_writers_journal_for_the_store_to_roll_back(tmp_path: Path) -> None:
+    """A read never rolls back a write a crashed process left half done; the source reads as unavailable until then."""
+    database = tmp_path / "code.db"
+    _create_database(database)
+    source = _source(database)
+    subprocess.run([sys.executable, "-I", "-c", _DIE_MID_WRITE, str(database)], check=True)
+    journal = database.with_name(f"{database.name}-journal")
+    before = (database.read_bytes(), journal.read_bytes())
+
+    result = list(iter_usage_storage_rows(source))
+
+    assert result == [UsageStorageDiagnostic(path_label="code.db", status="partial", detail="database unavailable")]
+    assert (database.read_bytes(), journal.read_bytes()) == before
+
+
+def test_a_database_not_named_by_a_plain_identifier_is_not_read(tmp_path: Path) -> None:
+    """A source whose file name is not a plain identifier reads as having no sessions table, whatever the file holds."""
+    database = tmp_path / "code-x.db"
+    _create_database(database, table="code-x_sessions")
+    source = _source(database)
+    with closing(sqlite3.connect(database)) as connection:
+        assert TableNames.of_database(database).sessions in table_names(connection)
+
+    result = list(iter_usage_storage_rows(source))
+
+    assert result == [
+        UsageStorageDiagnostic(path_label="code-x.db", status="unsupported_schema", detail="session table unavailable"),
+    ]
+
+
+# The tables a usage read reads, each with only the columns it reads.
+_READ_TABLES = {
+    "code_sessions": "session_id TEXT PRIMARY KEY, user_id TEXT, session_data TEXT",
+    "code_sessions_usage": "id INTEGER PRIMARY KEY, session_id TEXT, run_id TEXT, usage_data TEXT",
+    "code_sessions_log_meta": "id INTEGER PRIMARY KEY, owner_kind TEXT, owner_id TEXT",
+}
+
+
+@pytest.mark.parametrize(
+    ("table", "columns", "detail"),
+    [
+        ("code_sessions", "session_id TEXT PRIMARY KEY, session_data TEXT", "session schema unsupported"),
+        ("code_sessions_usage", "id INTEGER PRIMARY KEY, session_id TEXT, run_id TEXT", "usage schema unsupported"),
+        ("code_sessions_log_meta", "id INTEGER PRIMARY KEY, owner_id TEXT", "session owner unavailable"),
+    ],
+    ids=["sessions", "usage", "owner"],
+)
+def test_a_table_missing_a_column_the_read_needs_is_reported(
+    tmp_path: Path,
+    table: str,
+    columns: str,
+    detail: str,
+) -> None:
+    """A table worker code left without a column the read selects is reported as such instead of failing the read."""
+    database = tmp_path / "code.db"
+    # Named before the file exists, so the source reads the file as written, without the conversion an open runs.
+    source = _source(database)
+    with closing(sqlite3.connect(database)) as connection, connection:
+        for name, definition in {**_READ_TABLES, table: columns}.items():
+            connection.execute(f'CREATE TABLE "{name}" ({definition})')
+        connection.execute("INSERT INTO code_sessions (session_id) VALUES ('session-1')")
+        connection.execute("INSERT INTO code_sessions_log_meta (id, owner_id) VALUES (1, 'code')")
+
+    result = list(iter_usage_storage_rows(source))
+
+    assert result == [UsageStorageDiagnostic(path_label="code.db", status="unsupported_schema", detail=detail)]
+
+
+@pytest.mark.parametrize("since", [None, 0.0], ids=["undated", "dated"])
+def test_a_database_without_a_usage_ledger_reads_its_sessions_without_runs(tmp_path: Path, since: float | None) -> None:
+    """Without a ledger every session is read, a dated read too, and its runs are reported unavailable."""
+    database = tmp_path / "code.db"
+    # Named before the file exists, so the source reads the file as written, without the conversion an open runs.
+    source = _source(database)
+    with closing(sqlite3.connect(database)) as connection, connection:
+        for name in ("code_sessions", "code_sessions_log_meta"):
+            connection.execute(f'CREATE TABLE "{name}" ({_READ_TABLES[name]})')
+        connection.execute("INSERT INTO code_sessions (session_id) VALUES ('session-1')")
+        connection.execute("INSERT INTO code_sessions_log_meta VALUES (1, 'agent', 'code')")
+
+    [row] = iter_usage_storage_rows(source, since=since)
+
+    assert isinstance(row, UsageSessionRow)
+    assert (row.row_key, row.runs, row.runs_available) == ("session-1", (), False)
 
 
 def test_a_system_source_another_owner_owns_reads_as_malformed(tmp_path: Path) -> None:

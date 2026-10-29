@@ -7,7 +7,6 @@ import math
 import re
 import sqlite3
 import sys
-from contextlib import contextmanager
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from types import MappingProxyType
@@ -23,7 +22,14 @@ from mindroom.private_storage.private_instance_identity import (
 from mindroom.requester_identity import equivalent_requester_ids
 from mindroom.runtime_resolution import resolve_agent_storage
 from mindroom.session_storage.legacy_agno2_runs import decode_session_json
-from mindroom.session_storage.schema import TableNames, quote_identifier, table_names
+from mindroom.session_storage.schema import TableNames, table_names
+from mindroom.session_storage.usage_reader import (
+    read_only_snapshot,
+    recorded_owner,
+    stored_sessions,
+    stored_usage,
+    unreadable_layout,
+)
 from mindroom.tool_system.worker_routing import build_requester_execution_identity, worker_dir_name
 from mindroom.usage.storage import (
     SYSTEM_USAGE_ENTITY,
@@ -35,6 +41,7 @@ if TYPE_CHECKING:
     from collections.abc import Iterator, Mapping
 
     from mindroom.config.main import Config
+    from mindroom.session_storage.usage_reader import StoredSession
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
     from mindroom.usage.storage import UsageKind
 
@@ -58,15 +65,6 @@ type _MetricValue = int | float | str | None
 _MAX_STRING_LENGTH = 512
 _IDENTIFIER = re.compile(r"[A-Za-z0-9_]+\Z")
 _WORKER_DIRECTORY = re.compile(r"[A-Za-z0-9._@+-]+-[0-9a-f]{16}\Z")
-_REQUIRED_COLUMNS = frozenset({"session_id", "user_id", "session_data"})
-_OWNER_COLUMNS = frozenset({"owner_kind", "owner_id"})
-_USAGE_REQUIRED_COLUMNS = frozenset({"id", "session_id", "run_id", "usage_data"})
-# A dated read keeps snapshots last written in range, so a run resumed after ``since`` keeps its new requests.
-# Malformed snapshots stay in a dated read, so the reader reports them instead of SQLite failing the whole store.
-_USAGE_SINCE_CONDITION = (
-    "CASE WHEN json_valid(usage_data) THEN "
-    "COALESCE(json_extract(usage_data, '$.updated_at'), json_extract(usage_data, '$.created_at')) >= ? ELSE 1 END"
-)
 
 
 @dataclass(frozen=True, slots=True)
@@ -157,22 +155,6 @@ class UsageStorageDiagnostic:
     status: Literal["absent", "busy", "corrupt", "unsupported_schema", "partial"]
     detail: str
     scope: _UsageStorageScope | None = None
-
-
-@contextmanager
-def _open_read_only_database(source: UsageStorageSource) -> Iterator[sqlite3.Connection]:
-    connection = sqlite3.connect(
-        f"{source.path.resolve().as_uri()}?mode=ro&cache=private",
-        uri=True,
-        timeout=1.0,
-    )
-    try:
-        connection.execute("PRAGMA query_only = ON")
-        connection.execute("BEGIN")
-        connection.row_factory = sqlite3.Row
-        yield connection
-    finally:
-        connection.close()
 
 
 def discover_self_usage_sources(
@@ -469,16 +451,23 @@ def iter_usage_storage_rows(
         yield _source_diagnostic(source, "absent", "database absent")
         return
     try:
-        with _open_read_only_database(source) as connection:
-            diagnostic = _validate_schema(connection, source)
-            if diagnostic is not None:
-                yield diagnostic
+        with read_only_snapshot(source.path) as connection:
+            problem = unreadable_layout(connection, source.names)
+            if problem is not None:
+                yield _source_diagnostic(source, "unsupported_schema", problem)
                 return
             has_usage = source.names.usage in table_names(connection)
             owner: tuple[object, object] | None = None
-            for row in connection.execute(*_session_rows_query(source, mode=mode, has_usage=has_usage, since=since)):
+            # A dated read visits the sessions with a usage snapshot in range, or every one when there is no ledger.
+            rows = stored_sessions(
+                connection,
+                source.names,
+                with_totals=mode == "both",
+                since=since if has_usage else None,
+            )
+            for row in rows:
                 # Read once a row needs it, so a database without sessions reads alike in every layout.
-                owner = owner or _database_owner(connection, source)
+                owner = owner or recorded_owner(connection, source.names)
                 if owner is None:
                     yield _source_diagnostic(source, "unsupported_schema", "session owner unavailable")
                     return
@@ -492,57 +481,9 @@ def iter_usage_storage_rows(
         yield _source_diagnostic(source, "partial", "database unavailable")
 
 
-def _session_rows_query(
-    source: UsageStorageSource,
-    *,
-    mode: _UsageReadMode,
-    has_usage: bool,
-    since: float | None,
-) -> tuple[str, tuple[object, ...]]:
-    """Return the query of the session rows a read visits and its parameters."""
-    # Session counters cover all history, so a run-only read skips their payload.
-    session_data = "session_data" if mode == "both" else "NULL AS session_data"
-    query = f"SELECT session_id, user_id, {session_data} FROM {quote_identifier(source.names.sessions)}"  # noqa: S608
-    if since is None or not has_usage:
-        return query, ()
-    # A dated read visits only sessions with a usage snapshot in range.
-    return (
-        f"{query} WHERE session_id IN (SELECT session_id FROM {quote_identifier(source.names.usage)} "  # noqa: S608
-        f"WHERE {_USAGE_SINCE_CONDITION})",
-        (since,),
-    )
-
-
-def _validate_schema(connection: sqlite3.Connection, source: UsageStorageSource) -> UsageStorageDiagnostic | None:
-    table = source.names.sessions
-    tables = table_names(connection)
-    if _IDENTIFIER.fullmatch(table) is None or table not in tables:
-        return _source_diagnostic(source, "unsupported_schema", "session table unavailable")
-    if not _REQUIRED_COLUMNS.issubset(_table_columns(connection, table)):
-        return _source_diagnostic(source, "unsupported_schema", "session schema unsupported")
-    usage_table = source.names.usage
-    if usage_table in tables and not _USAGE_REQUIRED_COLUMNS.issubset(
-        _table_columns(connection, usage_table),
-    ):
-        return _source_diagnostic(source, "unsupported_schema", "usage schema unsupported")
-    return None
-
-
-def _database_owner(connection: sqlite3.Connection, source: UsageStorageSource) -> tuple[object, object] | None:
-    """Return the kind and id of the database's owner as its meta row records them, or None when it records none."""
-    meta = source.names.log_meta
-    if meta not in table_names(connection) or not _OWNER_COLUMNS.issubset(_table_columns(connection, meta)):
-        return None
-    return connection.execute(f"SELECT owner_kind, owner_id FROM {quote_identifier(meta)} WHERE id = 1").fetchone()  # noqa: S608
-
-
-def _table_columns(connection: sqlite3.Connection, table: str) -> set[str]:
-    return {row[1] for row in connection.execute(f"PRAGMA table_info({quote_identifier(table)})")}
-
-
 def _extract_row(
     source: UsageStorageSource,
-    row: sqlite3.Row,
+    row: StoredSession,
     owner: tuple[object, object],
     connection: sqlite3.Connection,
     *,
@@ -555,8 +496,8 @@ def _extract_row(
         raise ValueError
     if source.scope == "system" and (entity_kind != "agent" or entity_id != SYSTEM_USAGE_ENTITY):
         raise ValueError
-    row_key = row["session_id"]
-    row_requester = _optional_string(row["user_id"])
+    row_key = row.session_id
+    row_requester = _optional_string(row.user_id)
     if not isinstance(entity_id, str) or not entity_id or not isinstance(row_key, str) or not row_key:
         raise ValueError
     runs, runs_available = (
@@ -576,7 +517,7 @@ def _extract_row(
     session_metrics_available = mode == "both"
     if session_metrics_available:
         try:
-            session_metrics, session_model_metrics = _decode_session_usage(row["session_data"])
+            session_metrics, session_model_metrics = _decode_session_usage(row.session_data)
         except (RecursionError, TypeError, ValueError):
             session_model_metrics = None
             session_metrics_available = False
@@ -604,20 +545,12 @@ def _read_runs(
     since: float | None,
 ) -> tuple[list[UsageRunNode], bool]:
     """Read one session's usage snapshots, reporting whether every snapshot was usable."""
-    query = (
-        f"SELECT usage_data FROM {quote_identifier(source.names.usage)} "  # noqa: S608
-        "WHERE session_id = ?"
-    )
-    parameters: tuple[object, ...] = (session_id,)
-    if since is not None:
-        query += f" AND {_USAGE_SINCE_CONDITION}"
-        parameters = (session_id, since)
     runs: list[UsageRunNode] = []
     runs_available = True
-    for (payload,) in connection.execute(query + " ORDER BY id", parameters):
+    for payload in stored_usage(connection, source.names, session_id, since=since):
         try:
             run = _extract_run(
-                json.loads(payload),
+                _decoded_snapshot(payload),
                 row_requester=row_requester,
                 include_team_members=include_team_members,
             )
@@ -626,6 +559,13 @@ def _read_runs(
         except (RecursionError, TypeError, ValueError):
             runs_available = False
     return runs, runs_available
+
+
+def _decoded_snapshot(payload: object) -> object:
+    """Decode one stored usage snapshot; a value that is not text raises as text that is not JSON does."""
+    if not isinstance(payload, (str, bytes)):
+        raise TypeError
+    return json.loads(payload)
 
 
 def _decode_session_usage(

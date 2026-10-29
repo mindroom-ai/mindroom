@@ -313,6 +313,7 @@ Matrix sync callback
 | `session_storage/store.py` | The conversation store: one SQLite database of sessions, runs with a row per stored message and per tool execution, summary rows, and the usage ledger, with full run saves refused once a run is final and single facts patched onto stored rows, each operation in one transaction on its own connection |
 | `session_storage/schema.py` | File and table names, a team scope's database name, identifier quoting, table and column listing, and the layout of a conversation database: the sessions table, the six `*_log_*` tables, the meta row naming the owner, and the usage ledger with its upsert |
 | `session_storage/summaries.py` | The statements `history/summary_rows.py`'s rules run on the summary-row and removed-run tables and the runs they cover, each in the caller's transaction |
+| `session_storage/usage_reader.py` | Read-only reads of a conversation database's sessions, owner, and usage ledger for usage reports, returning what is stored unchecked for the report to validate |
 | `session_storage/codec.py` | A run record to its run row, message rows, and tool-execution rows and back, with the JSON keys stored runs carry, and the JSON decode that reads worker-written text without failing |
 | `session_storage/types.py` | `ConversationSession` and the other values the store reads and writes |
 | `session_storage/lanes.py` | One FIFO lane per conversation database for storage operations started from async code |
