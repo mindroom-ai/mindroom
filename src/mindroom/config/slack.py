@@ -137,6 +137,11 @@ def validate_slack_agents(config: Config) -> None:
     """Check each agent's Slack `channels` and `room`, and that every channel has at most one answering agent."""
     for name, agent in config.agents.items():
         _check_agent(config, name, agent)
+    for key, template in config.personal_agents.items():
+        if "room" in _slack_overrides(template.agent):
+            # Every owner's agent would answer the same channels, which fails only once a second owner onboards.
+            msg = f"personal_agents.{key}.agent.tools.slack.room: a template cannot answer Slack mentions"
+            raise ValueError(msg)
     answered_by: dict[str, str] = {}
     for answering in slack_answering_agents(config):
         for channel in sorted(answering.channels):

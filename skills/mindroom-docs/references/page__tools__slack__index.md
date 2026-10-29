@@ -219,7 +219,7 @@ Who can wake the agent:
 
 Only replies to Slack messages are posted to Slack; what people write in the Matrix thread stays in Matrix.
 A reply can be missing in Slack when Slack is unavailable, although it exists in Matrix.
-A channel has one answering agent, so two agents cannot both set `room` with the same channel.
+A channel has one answering agent, so two agents cannot both set `room` with the same channel, and a `personal_agents` template cannot set `room`.
 
 ## Watches
 

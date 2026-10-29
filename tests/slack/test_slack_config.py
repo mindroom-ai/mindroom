@@ -152,6 +152,17 @@ def test_a_channel_has_one_answering_agent() -> None:
         _config(agents, **_MAPPING)
 
 
+def test_a_personal_agent_template_cannot_answer() -> None:
+    """A template's `room` would make every owner's agent answer the same channels."""
+    data = {
+        **_config_data(**_MAPPING),
+        "personal_agents": {"mind": {"agent": _agent(rooms=["lobby"], channels=["C0123ABCD"], room="lobby")}},
+    }
+
+    with pytest.raises(ValidationError, match=r"personal_agents\.mind\.agent\.tools\.slack\.room"):
+        Config.model_validate(data)
+
+
 def test_answering_needs_the_user_mapping() -> None:
     """Without the email-to-Matrix mapping a Slack mention has no requester to answer."""
     agents = {"helper": _agent(rooms=["lobby"], channels=["C0123ABCD"], room="lobby")}
