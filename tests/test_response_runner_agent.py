@@ -126,7 +126,8 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from mindroom.bot import AgentBot
-    from mindroom.matrix.client import DeliveredMatrixEvent, ResolvedVisibleMessage
+    from mindroom.matrix.client_delivery import DeliveredMatrixEvent
+    from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
     from mindroom.matrix.users import AgentMatrixUser
     from mindroom.post_response_effects import ResponseOutcome
     from mindroom.response_turn import ResponseTurnContext

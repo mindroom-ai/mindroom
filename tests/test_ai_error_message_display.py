@@ -20,7 +20,7 @@ from mindroom.history.types import HistoryScope
 from mindroom.hooks import HookRegistry
 from mindroom.knowledge.utils import _KnowledgeResolution
 from mindroom.llm.provider import TextDelta
-from mindroom.matrix.client import DeliveredMatrixEvent
+from mindroom.matrix.client_delivery import DeliveredMatrixEvent
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.message_target import MessageTarget
 from mindroom.response_runner import ResponseRequest

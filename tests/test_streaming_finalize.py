@@ -30,8 +30,7 @@ from mindroom.hooks import MessageEnvelope
 from mindroom.llm.events import RunFinished, TextDelta, ToolCompleted, ToolStarted
 from mindroom.llm.runs import RunRecord, ToolExecution
 from mindroom.logging_config import get_logger
-from mindroom.matrix.client import DeliveredMatrixEvent
-from mindroom.matrix.client_delivery import MatrixDeliveryFailure, MatrixDeliveryFailureKind
+from mindroom.matrix.client_delivery import DeliveredMatrixEvent, MatrixDeliveryFailure, MatrixDeliveryFailureKind
 from mindroom.message_target import MessageTarget
 from mindroom.post_response_effects import (
     PostResponseEffectsSupport,

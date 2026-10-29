@@ -12,7 +12,7 @@ from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig, RouterConfig
 from mindroom.delivery_gateway import SendTextRequest
-from mindroom.matrix.client import DeliveredMatrixEvent
+from mindroom.matrix.client_delivery import DeliveredMatrixEvent
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.router_relay import execute_router_relay
 from tests.bot_helpers import make_test_agent_bot

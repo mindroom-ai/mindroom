@@ -166,7 +166,7 @@ if TYPE_CHECKING:
     from mindroom.coalescing.ingress_ticket import IngressTicket
     from mindroom.delivery_gateway import DeliveryGateway, EditTextRequest, SendTextRequest
     from mindroom.hooks import MessageEnvelope
-    from mindroom.matrix.client import ResolvedVisibleMessage
+    from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
     from mindroom.matrix.event_info import EventInfo
     from mindroom.matrix.thread_history_result import ThreadHistoryResult
     from mindroom.response_lifecycle import QueuedHumanNoticeReservation

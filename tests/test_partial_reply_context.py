@@ -36,8 +36,7 @@ from mindroom.history.interrupted_replay import (
     InterruptedReplaySnapshot,
     _render_interrupted_replay_content,
 )
-from mindroom.matrix.client import ResolvedVisibleMessage
-from mindroom.matrix.client_visible_messages import _stream_status_from_content
+from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage, _stream_status_from_content
 from mindroom.message_target import MessageTarget
 from mindroom.prompt_message_tags import render_msg_tag
 from mindroom.streaming import (

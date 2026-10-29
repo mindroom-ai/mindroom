@@ -8,7 +8,7 @@ from mindroom.dispatch_thread_context import (
     context_with_dispatch_thread_context,
     planning_history_for,
 )
-from mindroom.matrix.client import ResolvedVisibleMessage
+from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
 from mindroom.matrix.thread_diagnostics import (
     THREAD_HISTORY_DEGRADED_DIAGNOSTIC,
     THREAD_HISTORY_SOURCE_DEGRADED,

@@ -65,7 +65,7 @@ if TYPE_CHECKING:
     from collections.abc import AsyncIterator
 
     from mindroom.config.models import FileAccess
-    from mindroom.matrix.client import DeliveredMatrixEvent
+    from mindroom.matrix.client_delivery import DeliveredMatrixEvent
 
 
 _DEFAULT_RESOLVED_THREAD_ID = object()

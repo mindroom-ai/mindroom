@@ -16,8 +16,7 @@ from mindroom.matrix.appservice import (
     register_appservice_user,
     resolve_managed_account_auth,
 )
-from mindroom.matrix.client import PermanentMatrixStartupError
-from mindroom.matrix.client_session import DEFAULT_MATRIX_SYNC_STORAGE
+from mindroom.matrix.client_session import DEFAULT_MATRIX_SYNC_STORAGE, PermanentMatrixStartupError
 
 if TYPE_CHECKING:
     from pathlib import Path

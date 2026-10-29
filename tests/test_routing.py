@@ -41,7 +41,7 @@ if TYPE_CHECKING:
     from collections.abc import Sequence
 
     from mindroom.bot import AgentBot
-    from mindroom.matrix.client import ResolvedVisibleMessage
+    from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
 
 
 def _runtime_bound_config(config: Config, runtime_root: Path | None = None) -> Config:

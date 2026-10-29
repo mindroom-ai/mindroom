@@ -19,7 +19,7 @@ from mindroom.constants import (
 )
 from mindroom.llm.events import ToolCompleted, ToolStarted
 from mindroom.llm.runs import ToolExecution
-from mindroom.matrix.client import edit_message_result, send_message_result
+from mindroom.matrix.client_delivery import edit_message_result, send_message_result
 from mindroom.matrix.large_messages import (
     _NORMAL_MESSAGE_LIMIT,
     calculate_event_size,

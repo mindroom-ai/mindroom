@@ -13,7 +13,7 @@ from mindroom import constants
 from mindroom.config.main import Config
 from mindroom.constants import ROUTER_AGENT_NAME, resolve_avatar_path
 from mindroom.entity_resolution import mindroom_user_id
-from mindroom.matrix import client as matrix_client
+from mindroom.matrix import client_room_admin
 from mindroom.matrix import rooms as matrix_rooms
 from mindroom.matrix.client_room_admin import RoomJoinOutcome
 from mindroom.matrix.state import MatrixState, matrix_state_for_runtime
@@ -218,7 +218,7 @@ async def test_add_room_to_space_is_idempotent_when_child_link_matches() -> None
         room_id="!space:example.com",
     )
 
-    result = await matrix_client.add_room_to_space(
+    result = await client_room_admin.add_room_to_space(
         client,
         "!space:example.com",
         "!room:example.com",
@@ -248,7 +248,7 @@ async def test_add_room_to_space_writes_child_link_when_missing() -> None:
         room_id="!space:example.com",
     )
 
-    result = await matrix_client.add_room_to_space(
+    result = await client_room_admin.add_room_to_space(
         client,
         "!space:example.com",
         "!room:example.com",
@@ -277,7 +277,7 @@ async def test_add_room_to_space_falls_back_to_state_event_when_child_missing_fr
         room_id="!space:example.com",
     )
 
-    result = await matrix_client.add_room_to_space(
+    result = await client_room_admin.add_room_to_space(
         client,
         "!space:example.com",
         "!room:example.com",
@@ -315,7 +315,7 @@ async def test_ensure_room_admin_power_levels_promotes_missing_and_underpowered_
         room_id="!space:example.com",
     )
 
-    result = await matrix_client.ensure_room_admin_power_levels(
+    result = await client_room_admin.ensure_room_admin_power_levels(
         client,
         "!space:example.com",
         {
@@ -352,7 +352,7 @@ async def test_ensure_room_admin_power_levels_is_idempotent_when_admins_already_
         room_id="!space:example.com",
     )
 
-    result = await matrix_client.ensure_room_admin_power_levels(
+    result = await client_room_admin.ensure_room_admin_power_levels(
         client,
         "!space:example.com",
         {"@owner:example.com"},
@@ -372,7 +372,7 @@ async def test_ensure_room_admin_power_levels_returns_false_when_power_levels_re
         room_id="!space:example.com",
     )
 
-    result = await matrix_client.ensure_room_admin_power_levels(
+    result = await client_room_admin.ensure_room_admin_power_levels(
         client,
         "!space:example.com",
         {"@owner:example.com"},
@@ -398,7 +398,7 @@ async def test_ensure_room_admin_power_levels_returns_false_when_power_level_wri
         room_id="!space:example.com",
     )
 
-    result = await matrix_client.ensure_room_admin_power_levels(
+    result = await client_room_admin.ensure_room_admin_power_levels(
         client,
         "!space:example.com",
         {"@owner:example.com"},

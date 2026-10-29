@@ -63,7 +63,7 @@ from mindroom.hooks import (
     HookRegistry,
 )
 from mindroom.matrix import client_session
-from mindroom.matrix.client import PermanentMatrixStartupError
+from mindroom.matrix.client_session import PermanentMatrixStartupError
 from mindroom.matrix.invited_rooms_store import invited_rooms_path
 from mindroom.matrix.state import MatrixState
 from mindroom.matrix.users import INTERNAL_USER_ACCOUNT_KEY, AgentMatrixUser

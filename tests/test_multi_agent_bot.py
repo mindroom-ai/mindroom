@@ -29,7 +29,7 @@ from mindroom.event_journal import (
     RoomMembershipPosition,
 )
 from mindroom.knowledge.utils import _KnowledgeResolution
-from mindroom.matrix.client import PermanentMatrixStartupError
+from mindroom.matrix.client_session import PermanentMatrixStartupError
 from mindroom.matrix.state import MatrixState
 from mindroom.matrix.sync_loop import bot_ingestion_config
 from mindroom.matrix.thread_history_result import thread_history_result

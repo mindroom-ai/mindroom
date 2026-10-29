@@ -24,8 +24,7 @@ from mindroom.config.matrix import MindRoomUserConfig
 from mindroom.matrix import _owned_session, provisioning
 from mindroom.matrix import users as matrix_users
 from mindroom.matrix.appservice import ManagedAccountAuth
-from mindroom.matrix.client import PermanentMatrixStartupError
-from mindroom.matrix.client_session import DEFAULT_MATRIX_SYNC_STORAGE, olm_store_dir
+from mindroom.matrix.client_session import DEFAULT_MATRIX_SYNC_STORAGE, PermanentMatrixStartupError, olm_store_dir
 from mindroom.matrix.state import MatrixState
 from mindroom.matrix.users import (
     INTERNAL_USER_AGENT_NAME,

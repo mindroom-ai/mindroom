@@ -11,8 +11,8 @@ import pytest
 from nio.exceptions import OlmUnverifiedDeviceError
 from PIL import Image, JpegImagePlugin, PngImagePlugin
 
-from mindroom.matrix.client import DeliveredMatrixEvent, join_room
 from mindroom.matrix.client_delivery import (
+    DeliveredMatrixEvent,
     _msgtype_for_mimetype,
     _upload_file_as_mxc,
     edit_message_result,
@@ -21,7 +21,7 @@ from mindroom.matrix.client_delivery import (
     send_message_result,
     send_runtime_encrypted_media_message,
 )
-from mindroom.matrix.client_room_admin import RoomJoinOutcome
+from mindroom.matrix.client_room_admin import RoomJoinOutcome, join_room
 from mindroom.matrix.media import extract_media_caption
 from mindroom.matrix.runtime_media import RuntimeEncryptedMediaAttachment
 

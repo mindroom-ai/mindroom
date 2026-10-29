@@ -26,8 +26,8 @@ from mindroom.constants import resolve_runtime_paths
 from mindroom.entity_resolution import resolve_room_scoped_model_override
 from mindroom.llm.errors import ProviderError
 from mindroom.llm.provider import Capabilities, RequestOverrides
-from mindroom.matrix.client import ResolvedVisibleMessage
 from mindroom.matrix.client_delivery import DeliveredMatrixEvent
+from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
 from mindroom.matrix.conversation_hydration import HYDRATED_PROMPT_WINDOW_MESSAGES
 from mindroom.matrix.conversation_reads import DeliveredResponse, complete_thread_history
 from mindroom.matrix.thread_history_result import ThreadHistoryResult, thread_history_result

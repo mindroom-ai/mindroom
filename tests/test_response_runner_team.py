@@ -30,7 +30,7 @@ from mindroom.hooks import (
     MessageEnvelope,
     hook,
 )
-from mindroom.matrix.client import DeliveredMatrixEvent, ResolvedVisibleMessage
+from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
 from mindroom.matrix.state import MatrixState
 from mindroom.matrix.thread_history_result import ThreadHistoryResult
 from mindroom.message_target import MessageTarget
@@ -90,6 +90,7 @@ if TYPE_CHECKING:
     from mindroom.constants import (
         RuntimePaths,
     )
+    from mindroom.matrix.client_delivery import DeliveredMatrixEvent
     from mindroom.matrix.conversation_reads import DeliveredResponse
     from mindroom.matrix.users import AgentMatrixUser
 

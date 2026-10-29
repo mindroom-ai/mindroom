@@ -46,8 +46,8 @@ from mindroom.hooks import (
     MessageEnvelope,
 )
 from mindroom.inbound_turn_normalizer import DispatchPayload, InboundTurnNormalizer, _VoiceNormalizationResult
-from mindroom.matrix.client import ResolvedVisibleMessage
 from mindroom.matrix.client_delivery import MatrixDeliveryFailure, MatrixDeliveryFailureKind
+from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
 from mindroom.matrix.conversation_hydration import HYDRATED_PROMPT_WINDOW_MESSAGES
 from mindroom.matrix.conversation_reads import ConversationReader
 from mindroom.matrix.thread_history_result import ThreadHistoryResult, thread_history_result

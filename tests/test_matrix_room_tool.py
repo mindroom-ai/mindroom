@@ -17,8 +17,8 @@ from mindroom.agent_reply_membership import AgentReplyMembershipIndex
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.custom_tools.matrix_room import MatrixRoomTools
-from mindroom.matrix.client import RoomThreadsPageError
 from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
+from mindroom.matrix.room_history_reads import RoomThreadsPageError
 from mindroom.message_target import MessageTarget
 from mindroom.tool_system.metadata import TOOL_METADATA, get_tool_by_name
 from mindroom.tool_system.runtime_context import ToolRuntimeContext, tool_runtime_context

@@ -140,9 +140,9 @@ from mindroom.hooks import EnrichmentItem, MessageEnvelope
 from mindroom.ingress_validation import IngressValidator
 from mindroom.interactive import InteractiveMetadata
 from mindroom.interactive_models import InteractivePrompt, interactive_prompt_content
-from mindroom.matrix.client import DeliveredMatrixEvent, ResolvedVisibleMessage
-from mindroom.matrix.client_delivery import build_edit_event_content
+from mindroom.matrix.client_delivery import DeliveredMatrixEvent, build_edit_event_content
 from mindroom.matrix.client_room_admin import RoomJoinOutcome
+from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
 from mindroom.matrix.conversation_reads import ConversationReader
 from mindroom.matrix.identity import MatrixID
 from mindroom.matrix.large_messages import _oversized_nonterminal_streaming_edit_next_allowed_at

@@ -16,7 +16,8 @@ from mindroom.custom_tools.attachment_helpers import room_access_allowed
 from mindroom.custom_tools.matrix_helpers import check_rate_limit
 from mindroom.custom_tools.tool_payloads import custom_tool_payload
 from mindroom.logging_config import get_logger
-from mindroom.matrix.client import room_admin_power_user, send_room_event_result
+from mindroom.matrix.client_delivery import send_room_event_result
+from mindroom.matrix.client_room_admin import room_admin_power_user
 from mindroom.matrix.thread_mutation_impact import (
     MutationThreadImpactState,
     resolve_event_thread_impact_for_client,
