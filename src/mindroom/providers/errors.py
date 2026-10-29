@@ -43,7 +43,9 @@ __all__ = [
 _RATE_LIMIT_STATUS = 429
 _UNAUTHORIZED_STATUS = 401
 # Payment Required, which OpenRouter and DeepSeek send for an account or key without credit, Gemini for used-up prepaid
-# credit, and Anthropic for a billing or payment problem: no retry passes until the account's billing changes.
+# credit, and Anthropic for a billing or payment problem: no retry passes until the account's billing changes. OpenRouter
+# also sends one with a ``Retry-After`` header when the requests it is still settling fill a low balance's in-flight
+# spending budget, which a wait can let through; that one is final too.
 _PAYMENT_REQUIRED_STATUS = 402
 # Statuses after which an unchanged request can succeed, the ones the OpenAI and Claude SDKs retried: a request
 # timeout, OpenAI's transient conflict (409), and every server error, among them Anthropic's overloaded model (529),
