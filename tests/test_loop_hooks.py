@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from dataclasses import replace
 from typing import TYPE_CHECKING, Any
 
 from mindroom import loop_hooks
@@ -10,13 +9,11 @@ from mindroom.agent_loop.build import AgentBuild, AgentSurface
 from mindroom.agent_loop.prompt import PromptSpec
 from mindroom.agent_loop.spec import AgentSpec
 from mindroom.config.main import Config
-from mindroom.history.storage import new_scope_session
 from mindroom.history.types import HistoryScope
 from mindroom.llm.provider import DeferredTools, ModelRequest
 from mindroom.llm.tool_search import resolve_call_tool_calls
 from mindroom.loop_hooks import HookTurn, agent_loop_hooks, leader_loop_hooks
 from mindroom.participation import ParticipationGate
-from mindroom.run_storage import RunStorage
 from mindroom.skill_learning.capture import SkillReviewCapture
 from mindroom.teams.members import BuiltTeam
 from mindroom.tool_jobs.execution import JobActor
@@ -130,7 +127,7 @@ def test_agent_and_leader_runs_install_their_hooks_in_order(tmp_path: Path) -> N
 
 
 def test_each_run_compacts_as_its_history_scope(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """An agent's run compacts as the scope it stores in, else as the agent itself; a leader compacts as its team."""
+    """An agent's run compacts as the agent, and a leader's as its team."""
     runtime_paths = test_runtime_paths(tmp_path)
     config = bind_runtime_paths(
         Config.model_validate({"agents": {"general": {"display_name": "General"}}}),
@@ -145,7 +142,7 @@ def test_each_run_compacts_as_its_history_scope(tmp_path: Path, monkeypatch: pyt
         return real_compaction_hook(**kwargs)
 
     monkeypatch.setattr(loop_hooks, "mid_turn_compaction_hook", capture_compaction_hook)
-    unstored = HookTurn(
+    turn = HookTurn(
         config=config,
         runtime_paths=runtime_paths,
         model_name="default",
@@ -153,19 +150,12 @@ def test_each_run_compacts_as_its_history_scope(tmp_path: Path, monkeypatch: pyt
         replay_plan=None,
         prompt_id=None,
     )
-    stored_scope = HistoryScope(kind="agent", scope_id="general")
-    stored = replace(
-        unstored,
-        storage=RunStorage(None, new_scope_session(session_id="session-1", scope=stored_scope), stored_scope),
-    )
     team = _built_team(model)
 
-    agent_loop_hooks(_agent_build(model), stored)
-    agent_loop_hooks(_agent_build(model), unstored)
-    leader_loop_hooks(team, stored, entity_name=None)
+    agent_loop_hooks(_agent_build(model), turn)
+    leader_loop_hooks(team, turn, entity_name=None)
 
     assert scopes == [
-        stored_scope,
         HistoryScope(kind="agent", scope_id="general"),
         HistoryScope(kind="team", scope_id=team.spec.leader.id),
     ]

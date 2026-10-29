@@ -79,18 +79,16 @@ def agent_loop_hooks(
 ) -> LoopHooks:
     """Return the hooks of one agent run or resume, from the build's model, history settings, tools, and jobs.
 
-    The run compacts as its build's agent, in the turn's scope when one is given and under its own name otherwise, and
-    a top-level agent hears of its ended jobs. ``queued_notices`` is off for a team member, whose leader owns the
-    turn's notices; ``skill_review_capture`` records the run's final request.
+    The run compacts as its build's agent, and a top-level agent hears of its ended jobs. ``queued_notices`` is off
+    for a team member, whose leader owns the turn's notices; ``skill_review_capture`` records the run's final request.
     """
     jobs = build.tool_jobs
     agent_name = build.spec.id
-    scope = turn.storage.scope if turn.storage is not None else None
     return _loop_hooks(
         turn,
         model=build.spec.model,
         entity_name=agent_name,
-        scope=scope if scope is not None else HistoryScope(kind="agent", scope_id=agent_name),
+        scope=HistoryScope(kind="agent", scope_id=agent_name),
         history_settings=build.history_settings,
         deferred_tools=build.request_template.deferred_tools,
         tool_middleware=agent_tool_middleware(build),
