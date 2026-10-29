@@ -1148,6 +1148,51 @@ def test_continuation_advances_and_resets_turn_state() -> None:
     assert recorder.completed_calls[-1]["completed_tools"] == [first_trace, _trace("sleep")]
 
 
+def test_a_stop_between_continuation_attempts_records_the_turn_under_the_attempt_it_was_starting(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A Stop while a continuation prepares its next attempt stores the turn as a new run, after the spent attempts.
+
+    Recording it under the turn's first run id would replace that attempt's stored run and put the stopped turn
+    before the second attempt's work in replayed history.
+    """
+    log = _AdapterLog()
+    run_ids: list[str | None] = []
+    stored: list[str] = []
+
+    def _persist(*, run_id: str, **_kwargs: object) -> None:
+        stored.append(run_id)
+
+    async def _attempt(run: TurnRunState, continuation: TurnContinuationRunState) -> CompletedAttempt:
+        run_ids.append(continuation.active_run_id)
+        if len(run_ids) == 3:
+            # Stopped while the third attempt prepares, before it starts.
+            raise asyncio.CancelledError
+        run.attempt = _FixedAttempt()
+        return CompletedAttempt(
+            attempt_run_id=continuation.active_run_id,
+            tool_executions=(_model_switch_execution("next-turn"),),
+        )
+
+    monkeypatch.setattr(response_turn_module, "persist_interrupted_replay_snapshot", _persist)
+    with pytest.raises(asyncio.CancelledError):
+        asyncio.run(
+            _collect(
+                stream_response_turn(
+                    _ctx(),
+                    _streaming_adapter(log, _streamed(_attempt)),
+                    TurnSinks(),
+                    continuation=_continuation("original ask"),
+                ),
+            ),
+        )
+
+    first, second, starting = run_ids
+    assert first == "run-1"
+    assert len({first, second, starting}) == 3
+    assert stored == [starting]
+
+
 @pytest.mark.parametrize("hidden", [False, True])
 def test_after_toolcall_switch_selects_new_continuation_model(hidden: bool) -> None:
     """Dropping the requested alias during continuation would rebuild the old model."""

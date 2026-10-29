@@ -808,6 +808,7 @@ async def _record_interrupted(
     adapter: TurnAdapter[Any],
     sinks: TurnSinks,
     run: TurnRunState,
+    continuation: TurnContinuationRunState,
     status: RunStatus,
 ) -> None:
     """Record the turn cut short with its running attempt's partial output, and store it once in the turn's scope.
@@ -819,7 +820,9 @@ async def _record_interrupted(
         return
     snapshot = run.partial_snapshot()
     run.record.record_interrupted(
-        run_id=snapshot.attempt_run_id or ctx.run_id,
+        # Between a continuation's attempts, the attempt it was about to start names the turn, so the record does not
+        # replace a run an earlier attempt stored.
+        run_id=snapshot.attempt_run_id or continuation.active_run_id or ctx.run_id,
         run_metadata=_interrupted_run_metadata(ctx, run),
         assistant_text=snapshot.assistant_text,
         completed_tools=(*run.prior_completed_tools, *snapshot.completed_tools),
@@ -860,6 +863,7 @@ async def _failed_turn_text(
     adapter: TurnAdapter[Any],
     sinks: TurnSinks,
     run: TurnRunState,
+    continuation: TurnContinuationRunState,
     error: Exception,
 ) -> str | None:
     """Settle a turn that raised: return its error reply, None when it is skipped before participation.
@@ -870,7 +874,7 @@ async def _failed_turn_text(
         _settle_skipped_attempt(ctx, adapter, run, skipped)
         logger.exception("Response turn skipped before participation", entity=ctx.entity_label)
         return None
-    await _record_interrupted(ctx, adapter, sinks, run, RunStatus.error)
+    await _record_interrupted(ctx, adapter, sinks, run, continuation, RunStatus.error)
     if adapter.unexpected_error_text is None:
         raise error
     logger.exception("Response turn failed", entity=ctx.entity_label)
@@ -1208,7 +1212,7 @@ async def _stream_response_turn[ChunkT](  # noqa: C901, PLR0912, PLR0915
                     raise ResponsePausedForApproval(replace(resolution, continuation_count=continuation_count))
                 if isinstance(resolution, HandledAttempt):
                     _publish_run_metadata(sinks, resolution.metadata_content)
-                    await _record_interrupted(ctx, adapter, sinks, run, RunStatus.error)
+                    await _record_interrupted(ctx, adapter, sinks, run, continuation, RunStatus.error)
                     if sinks.on_failed is not None:
                         sinks.on_failed(resolution.error)
                     yield resolution.text
@@ -1236,11 +1240,11 @@ async def _stream_response_turn[ChunkT](  # noqa: C901, PLR0912, PLR0915
                 return
         _raise_continuation_budget_exhausted()
     except (asyncio.CancelledError, GeneratorExit):
-        await _record_interrupted(ctx, adapter, sinks, run, RunStatus.cancelled)
+        await _record_interrupted(ctx, adapter, sinks, run, continuation, RunStatus.cancelled)
         raise
     except ResponsePausedForApproval:
         raise
     except Exception as e:
-        failure_text = await _failed_turn_text(ctx, adapter, sinks, run, e)
+        failure_text = await _failed_turn_text(ctx, adapter, sinks, run, continuation, e)
         if failure_text is not None:
             yield failure_text

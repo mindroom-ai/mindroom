@@ -3336,7 +3336,6 @@ depends_on = [
     "mindroom.memory",
     "mindroom.reply_lifecycle",
     "mindroom.teams",
-    "mindroom.tool_system.dynamic_toolkits",
     "mindroom.user_turn_time",
 ]
 visibility = ["mindroom.response_runner"]
@@ -3344,7 +3343,6 @@ visibility = ["mindroom.response_runner"]
 [[interfaces]]
 from = ["mindroom.reply_turn.enrichment"]
 expose = [
-    "agent_has_matrix_messaging_tool",
     "interrupted_attempt_model_prompt",
     "matrix_message_target_item",
     "prepare_memory_and_model_context",
