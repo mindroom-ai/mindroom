@@ -65,7 +65,7 @@ from mindroom.prompt_message_tags import render_msg_tag
 from mindroom.providers.openai.response_replay import RESPONSE_OUTPUT_KEY
 from mindroom.run_storage import RunStorage
 from mindroom.session_storage.agent_storage import create_session_storage, create_state_storage
-from mindroom.session_storage.store import persist_to
+from mindroom.session_storage.store import persist_to, watch_session_row
 from mindroom.tool_system.agno_toolkits import adapt_toolkit
 from mindroom.tool_system.runtime_context import (
     DetachedRequesterContext,
@@ -1015,11 +1015,14 @@ async def test_unscoped_first_request_without_foldable_messages_is_sent_as_is(
 
 @pytest.mark.asyncio
 async def test_run_local_summary_usage_is_recorded(tmp_path: Path, summary_calls: SummaryCalls) -> None:
+    """A first turn's summary usage creates the session row, which it reports to the reply watching its session."""
     config, paths = _config(tmp_path)
     storage = create_session_storage("test_agent", config, paths, execution_identity=None)
 
-    await _run(_agent(ToolLoopModel(tool_rounds=5), config, paths, store=storage), "Do the task")
+    with watch_session_row(TEST_AGENT_SCOPE, "session-1") as watch:
+        await _run(_agent(ToolLoopModel(tool_rounds=5), config, paths, store=storage), "Do the task")
 
+    assert watch.created
     summaries = _summary_usage(storage)
     assert len(summaries) == len(summary_calls.inputs) >= 1
     assert all(usage["metrics"]["input_tokens"] == 7 for _session_id, usage in summaries)
@@ -1155,11 +1158,14 @@ async def test_a_first_turn_compacts_mid_turn_before_its_session_row_exists(
     tmp_path: Path,
     summary_calls: SummaryCalls,
 ) -> None:
+    """The fold's summary usage creates the session row, which it reports to the reply watching its session."""
     config, paths = _config(tmp_path)
     storage = create_session_storage("test_agent", config, paths, execution_identity=None)
 
-    output = await _run(_scoped_agent(ToolLoopModel(tool_rounds=5), config, paths, storage), "Do the task")
+    with watch_session_row(TEST_AGENT_SCOPE, "session-1") as watch:
+        output = await _run(_scoped_agent(ToolLoopModel(tool_rounds=5), config, paths, storage), "Do the task")
 
+    assert watch.created
     assert summary_calls.inputs
     rows = summary_rows_of(storage, TEST_AGENT_SCOPE.key)
     assert rows

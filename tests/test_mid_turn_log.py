@@ -29,6 +29,7 @@ from mindroom.llm.messages import Message
 from mindroom.llm.runs import RunRecord, RunStatus, TeamRunRecord
 from mindroom.media_inputs import MediaInputs
 from mindroom.session_storage.agent_storage import create_agent_state_storage
+from mindroom.session_storage.store import watch_session_row
 from mindroom.session_storage.types import ConversationSession
 from tests.conftest import seed_session
 from tests.history_helpers import compact_runs, log_of, replay_settings, stored_run_ids
@@ -142,7 +143,10 @@ def test_a_first_fold_writes_against_a_row_of_its_scopes_kind(
     team_store: ConversationStore,
     scope: HistoryScope,
 ) -> None:
-    """The row a first turn's fold creates is the kind of session the scope's runs belong to."""
+    """The row a first turn's fold creates is the kind of session the scope's runs belong to.
+
+    The fold reports creating it to the reply watching the scope's session, which starts the session's hooks.
+    """
     storage = team_store if scope.kind == "team" else storage
     running: AnyRunRecord = (
         TeamRunRecord(run_id="live", team_id="crew", session_id="session", status=RunStatus.running)
@@ -150,8 +154,10 @@ def test_a_first_fold_writes_against_a_row_of_its_scopes_kind(
         else _run("live", status=RunStatus.running)
     )
 
-    assert _fold(storage, running, "S")
+    with watch_session_row(scope, "session") as watch:
+        assert _fold(storage, running, "S")
 
+    assert watch.created
     row = storage.load_session("session")
     assert row is not None
     assert (row.kind, row.owner_id) == (scope.kind, scope.scope_id)
