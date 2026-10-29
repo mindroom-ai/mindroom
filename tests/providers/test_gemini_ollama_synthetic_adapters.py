@@ -728,7 +728,7 @@ _SEARCH_ALONE = ([{"googleSearch": {}}], None)
         "vertexai-with-tools",
     ],
 )
-async def test_gemini_search_goes_beside_the_function_tools_only_for_a_gemini_3_name_on_the_gemini_api(
+async def test_gemini_search_goes_beside_the_function_tools_only_for_a_gemini_3_or_later_name_on_the_gemini_api(
     config: dict[str, Any],
     tools: list[ToolSpec],
     sent: tuple[list[dict[str, Any]], dict[str, Any] | None],

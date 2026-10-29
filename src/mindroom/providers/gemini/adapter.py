@@ -194,7 +194,7 @@ class GeminiProvider:
         return config
 
     def _sends_search_beside_tools(self, request: ModelRequest) -> bool:
-        """Return whether ``request`` sends Google Search beside its function tools, as the Gemini API takes it on Gemini 3.
+        """Return whether ``request`` sends Google Search beside its function tools, as Gemini 3 and later take it.
 
         Such a request asks for the server-side search parts, as the Gemini API requires for that combination, which it
         supports on Gemini 3 and later models only (https://ai.google.dev/gemini-api/docs/generate-content/tool-combination).
