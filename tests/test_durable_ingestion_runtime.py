@@ -842,6 +842,8 @@ async def test_entity_removal_leaves_with_retained_input_before_closing_stores(
             "reconcile_removed_entities",
             AsyncMock(return_value=set()),
         )
+        # Failing the removed agent's schedules reads room state this transport does not serve.
+        monkeypatch.setattr(orchestrator.scheduled_tasks, "fail_removed", AsyncMock())
         monkeypatch.setattr(orchestrator, "_shared_journal_store", lambda: MagicMock(end_entity_replies=AsyncMock()))
         sync_tasks: list[asyncio.Task[object]] = []
 
