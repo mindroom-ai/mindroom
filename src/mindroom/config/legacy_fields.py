@@ -156,7 +156,7 @@ def retired_tool_override(overrides: Mapping[str, object]) -> tuple[str, str] | 
 # LEGACY_COMPAT: Retired role_map setting of Chat Completions models.
 # Legacy format: models.<name>.extra_kwargs.role_map on a Chat Completions route, Agno's OpenAIChat field mapping each
 #   message role to the role a request sends.
-# Last legacy release: v2026.10.651, which accepted it as a typed Chat setting, as Agno's model classes did through
+# Last legacy release: v2026.10.663, which accepted it as a typed Chat setting, as Agno's model classes did through
 #   v2026.10.498; replacement: unreleased; requests send the system prompt as developer on provider openai and as
 #   system on every other Chat Completions provider, and every other role as it is.
 # Handling: Reject it at config load on every provider, naming the key and saying what to do instead.
