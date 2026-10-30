@@ -70,8 +70,8 @@ const {
   mockGoogleDriveOnDisconnect,
   mockGoogleGmailOnAction,
   mockGoogleGmailOnDisconnect,
-  mockSpotifyOnAction,
-  mockSpotifyOnDisconnect,
+  mockJukeboxOnAction,
+  mockJukeboxOnDisconnect,
   mockPlexOnAction,
   mockPlexOnDisconnect,
   mockGenericOAuthOnAction,
@@ -80,7 +80,7 @@ const {
   mockGoogleCloudLoadStatus,
   mockGoogleDriveLoadStatus,
   mockGoogleGmailLoadStatus,
-  mockSpotifyLoadStatus,
+  mockJukeboxLoadStatus,
   mockPlexLoadStatus,
   mockEnhancedConfigDialogProps,
 } = vi.hoisted(() => ({
@@ -90,8 +90,8 @@ const {
   mockGoogleDriveOnDisconnect: vi.fn(),
   mockGoogleGmailOnAction: vi.fn(),
   mockGoogleGmailOnDisconnect: vi.fn(),
-  mockSpotifyOnAction: vi.fn(),
-  mockSpotifyOnDisconnect: vi.fn(),
+  mockJukeboxOnAction: vi.fn(),
+  mockJukeboxOnDisconnect: vi.fn(),
   mockPlexOnAction: vi.fn(),
   mockPlexOnDisconnect: vi.fn(),
   mockGenericOAuthOnAction: vi.fn(),
@@ -108,7 +108,7 @@ const {
   mockGoogleGmailLoadStatus: vi
     .fn()
     .mockResolvedValue({ status: "available", connected: false }),
-  mockSpotifyLoadStatus: vi
+  mockJukeboxLoadStatus: vi
     .fn()
     .mockResolvedValue({ status: "available", connected: false }),
   mockPlexLoadStatus: vi
@@ -292,22 +292,37 @@ vi.mock("./integrations/index", () => ({
       }),
       loadStatus: mockGoogleGmailLoadStatus,
     },
-    spotify: {
+    jukebox: {
       getConfig: () => ({
         integration: {
-          id: "spotify",
-          name: "Spotify",
+          id: "jukebox",
+          name: "Jukebox",
           description: "Music streaming service",
           category: "entertainment",
-          icon: <span>Spotify Icon</span>,
+          icon: <span>Jukebox Icon</span>,
           status: "available",
           setup_type: "oauth",
           connected: false,
         },
-        onAction: mockSpotifyOnAction,
-        onDisconnect: mockSpotifyOnDisconnect,
+        onAction: mockJukeboxOnAction,
+        onDisconnect: mockJukeboxOnDisconnect,
       }),
-      loadStatus: mockSpotifyLoadStatus,
+      loadStatus: mockJukeboxLoadStatus,
+    },
+    homeassistant: {
+      getConfig: () => ({
+        integration: {
+          id: "homeassistant",
+          name: "Home Assistant",
+          description: "Smart home control",
+          category: "smart_home",
+          icon: <span>Home Assistant Icon</span>,
+          status: "available",
+          setup_type: "special",
+          connected: false,
+        },
+      }),
+      loadStatus: () => Promise.resolve({}),
     },
     plex: {
       getConfig: () => ({
@@ -383,19 +398,34 @@ vi.mock("./integrations/index", () => ({
     {
       getConfig: () => ({
         integration: {
-          id: "spotify",
-          name: "Spotify",
+          id: "jukebox",
+          name: "Jukebox",
           description: "Music streaming service",
           category: "entertainment",
-          icon: <span>Spotify Icon</span>,
+          icon: <span>Jukebox Icon</span>,
           status: "available",
           setup_type: "oauth",
           connected: false,
         },
-        onAction: mockSpotifyOnAction,
-        onDisconnect: mockSpotifyOnDisconnect,
+        onAction: mockJukeboxOnAction,
+        onDisconnect: mockJukeboxOnDisconnect,
       }),
-      loadStatus: mockSpotifyLoadStatus,
+      loadStatus: mockJukeboxLoadStatus,
+    },
+    {
+      getConfig: () => ({
+        integration: {
+          id: "homeassistant",
+          name: "Home Assistant",
+          description: "Smart home control",
+          category: "smart_home",
+          icon: <span>Home Assistant Icon</span>,
+          status: "available",
+          setup_type: "special",
+          connected: false,
+        },
+      }),
+      loadStatus: () => Promise.resolve({}),
     },
     {
       getConfig: () => ({
@@ -428,8 +458,8 @@ describe("Integrations", () => {
     mockGoogleDriveOnDisconnect.mockResolvedValue(undefined);
     mockGoogleGmailOnAction.mockResolvedValue(undefined);
     mockGoogleGmailOnDisconnect.mockResolvedValue(undefined);
-    mockSpotifyOnAction.mockResolvedValue(undefined);
-    mockSpotifyOnDisconnect.mockResolvedValue(undefined);
+    mockJukeboxOnAction.mockResolvedValue(undefined);
+    mockJukeboxOnDisconnect.mockResolvedValue(undefined);
     mockPlexOnAction.mockResolvedValue(undefined);
     mockPlexOnDisconnect.mockResolvedValue(undefined);
     mockGenericOAuthOnAction.mockResolvedValue(undefined);
@@ -451,7 +481,7 @@ describe("Integrations", () => {
       status: "available",
       connected: false,
     });
-    mockSpotifyLoadStatus.mockResolvedValue({
+    mockJukeboxLoadStatus.mockResolvedValue({
       status: "available",
       connected: false,
     });
@@ -573,7 +603,7 @@ describe("Integrations", () => {
           "Search, read, upload, and organize files in your connected Google Drive",
         ),
       ).toBeInTheDocument();
-      expect(screen.getByText("Spotify")).toBeInTheDocument();
+      expect(screen.getByText("Jukebox")).toBeInTheDocument();
       expect(screen.getByText("Music streaming service")).toBeInTheDocument();
       expect(screen.getByText("Plex")).toBeInTheDocument();
       expect(
@@ -590,9 +620,9 @@ describe("Integrations", () => {
     render(<Integrations />);
 
     await waitFor(() => {
-      // Available integrations (Google Drive, Spotify, and Weather)
+      // Available integrations (Google Drive, Jukebox, and Weather)
       const availableBadges = screen.getAllByText("Available");
-      expect(availableBadges.length).toBeGreaterThanOrEqual(2); // At least Google Drive and Spotify
+      expect(availableBadges.length).toBeGreaterThanOrEqual(2); // At least Google Drive and Jukebox
 
       // Connected integration
       expect(screen.getByText("Connected")).toBeInTheDocument(); // Plex
@@ -959,10 +989,10 @@ describe("Integrations", () => {
     });
 
     const searchInput = screen.getByPlaceholderText("Search tools...");
-    fireEvent.change(searchInput, { target: { value: "spotify" } });
+    fireEvent.change(searchInput, { target: { value: "jukebox" } });
 
     await waitFor(() => {
-      expect(screen.getByText("Spotify")).toBeInTheDocument();
+      expect(screen.getByText("Jukebox")).toBeInTheDocument();
       expect(screen.queryByText("Google Drive")).not.toBeInTheDocument();
       expect(screen.queryByText("Plex")).not.toBeInTheDocument();
     });
@@ -1031,7 +1061,7 @@ describe("Integrations", () => {
     // Wait for initial render
     await waitFor(() => {
       expect(screen.getByText("Google Drive")).toBeInTheDocument();
-      expect(screen.getByText("Spotify")).toBeInTheDocument();
+      expect(screen.getByText("Jukebox")).toBeInTheDocument();
     });
 
     // Click Entertainment tab
@@ -1040,8 +1070,8 @@ describe("Integrations", () => {
 
     // Wait a bit for tab content to change
     await waitFor(() => {
-      // In Entertainment category, we should see Spotify and Plex
-      expect(screen.getByText("Spotify")).toBeInTheDocument();
+      // In Entertainment category, we should see Jukebox and Plex
+      expect(screen.getByText("Jukebox")).toBeInTheDocument();
       expect(screen.getByText("Plex")).toBeInTheDocument();
     });
 
@@ -1369,7 +1399,7 @@ describe("Integrations", () => {
       screen.getByText("worker_scope=shared", { selector: "code" }),
     ).toBeInTheDocument();
     expect(screen.getByText("Google Drive")).toBeInTheDocument();
-    expect(screen.queryByText("Spotify")).not.toBeInTheDocument();
+    expect(screen.queryByText("Home Assistant")).not.toBeInTheDocument();
     expect(screen.queryByText("Weather")).toBeInTheDocument();
     expect(
       screen.getAllByRole("button", { name: /shared-only config/i }),
@@ -1381,20 +1411,20 @@ describe("Integrations", () => {
     }
   });
 
-  it("hides a shared-only OAuth provider that only a tool names in isolating scopes", async () => {
+  it("hides the dynamic Spotify OAuth provider in isolating scopes", async () => {
     mockUseTools.mockReturnValue({
       tools: [
         ...mockTools,
         {
-          name: "media_remote",
-          display_name: "Media Remote",
-          description: "Control media through a shared-only provider",
+          name: "spotify",
+          display_name: "Spotify",
+          description: "Music streaming service",
           icon: null,
           icon_color: null,
           category: "entertainment",
           status: "requires_config",
           setup_type: "oauth",
-          auth_provider: "homeassistant",
+          auth_provider: "spotify",
           execution_scope_supported: false,
           config_fields: null,
           helper_text: null,
@@ -1412,7 +1442,7 @@ describe("Integrations", () => {
           id: "code",
           display_name: "Scoped Agent",
           role: "test",
-          tools: ["media_remote"],
+          tools: ["spotify"],
           skills: [],
           instructions: [],
           rooms: ["lobby"],
@@ -1444,9 +1474,7 @@ describe("Integrations", () => {
         screen.getByText(/home assistant and spotify remain shared-only/i),
       ).toBeInTheDocument();
     });
-    expect(
-      screen.queryByText(/OAuth for Media Remote/),
-    ).not.toBeInTheDocument();
+    expect(screen.queryByText(/OAuth for Spotify/)).not.toBeInTheDocument();
   });
 
   it("treats private agents as isolating scopes in integrations", async () => {
@@ -1502,7 +1530,7 @@ describe("Integrations", () => {
     });
 
     expect(screen.getByText("Google Drive")).toBeInTheDocument();
-    expect(screen.queryByText("Spotify")).not.toBeInTheDocument();
+    expect(screen.queryByText("Home Assistant")).not.toBeInTheDocument();
     expect(screen.queryByText("Weather")).not.toBeInTheDocument();
     expect(screen.getByText("Private Mail")).toBeInTheDocument();
   });
@@ -2018,8 +2046,8 @@ describe("Integrations", () => {
   });
 
   it("ignores stale shared-scope reloads after switching scope mid-action", async () => {
-    const spotifyAction = createDeferred();
-    mockSpotifyOnAction.mockImplementation(() => spotifyAction.promise);
+    const jukeboxAction = createDeferred();
+    mockJukeboxOnAction.mockImplementation(() => jukeboxAction.promise);
     useConfigStore.setState({
       agents: [
         {
@@ -2050,20 +2078,20 @@ describe("Integrations", () => {
     render(<Integrations />);
 
     await waitFor(() => {
-      expect(screen.getByText("Spotify")).toBeInTheDocument();
+      expect(screen.getByText("Jukebox")).toBeInTheDocument();
       expect(screen.getByText("Weather")).toBeInTheDocument();
     });
 
-    const spotifyCard = screen.getByText("Spotify").closest(".h-full");
-    expect(spotifyCard).toBeInstanceOf(HTMLElement);
+    const jukeboxCard = screen.getByText("Jukebox").closest(".h-full");
+    expect(jukeboxCard).toBeInstanceOf(HTMLElement);
     fireEvent.click(
-      within(spotifyCard as HTMLElement).getByRole("button", {
+      within(jukeboxCard as HTMLElement).getByRole("button", {
         name: "Connect",
       }),
     );
 
     await waitFor(() => {
-      expect(mockSpotifyOnAction).toHaveBeenCalledTimes(1);
+      expect(mockJukeboxOnAction).toHaveBeenCalledTimes(1);
     });
 
     const combobox = screen.getByRole("combobox");
@@ -2086,8 +2114,8 @@ describe("Integrations", () => {
     });
 
     await act(async () => {
-      spotifyAction.resolve();
-      await spotifyAction.promise;
+      jukeboxAction.resolve();
+      await jukeboxAction.promise;
     });
 
     await waitFor(() => {

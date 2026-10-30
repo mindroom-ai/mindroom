@@ -311,8 +311,8 @@ class TestGenerationTrackingAndWrites:
         assert config_lifecycle.load_config_into_app(committed.runtime_paths, loaded_app).loaded
         assert api_snapshot(loaded_app).generation == committed.generation
 
-    def test_invalid_mutation_is_rejected_without_commit(self, loaded_app: FastAPI) -> None:
-        """A mutation producing an invalid config raises 422 and leaves the snapshot untouched."""
+    def test_invalid_save_is_rejected_without_commit(self, loaded_app: FastAPI) -> None:
+        """A save of an invalid config raises 422 and leaves the snapshot untouched."""
         before = api_snapshot(loaded_app)
         with pytest.raises(HTTPException) as exc_info:
             save_edited_config(
@@ -349,8 +349,7 @@ class TestGenerationTrackingAndWrites:
         runtime_paths.config_path.write_text("agents: [unclosed\n", encoding="utf-8")
         assert not config_lifecycle.load_config_into_app(runtime_paths, loaded_app).loaded
 
-        # Unlike mutations, full replacement skips the failed-load gate so the
-        # raw editor can repair a broken config through the API.
+        # A save replaces the whole config, so it may repair a broken file through the API.
         save_config(
             request_for(loaded_app),
             copy.deepcopy(VALID_CONFIG),

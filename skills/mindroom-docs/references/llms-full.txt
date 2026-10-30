@@ -11460,7 +11460,7 @@ It provides `search_tracks()`, `search_playlists()`, `search_artists()`, `search
 ### Connect Spotify
 
 1. Create an app in the [Spotify Developer Dashboard](https://developer.spotify.com/dashboard) and add the redirect URI `<public URL>/api/oauth/spotify/callback`.
-2. Save the app's client ID and client secret under the `spotify_oauth_client` credential service.
+2. On the dashboard credentials page, save the app's `client_id` and `client_secret` under the `spotify_oauth_client` credential service.
 3. In the dashboard **Tools** tab, connect Spotify and approve access.
 
 The connection requests the scopes `user-read-private`, `user-read-email`, `user-read-playback-state`, `user-read-currently-playing`, `user-top-read`, `playlist-read-private`, `playlist-modify-public`, `playlist-modify-private`, and `user-modify-playback-state`.
@@ -11473,7 +11473,9 @@ Until Spotify is connected, `spotify` calls return an `OAuthConnectionRequired` 
 
 `/api/integrations/spotify/callback` is gone, and MindRoom no longer configures Spotify from `SPOTIFY_CLIENT_SECRET` or `SPOTIFY_REDIRECT_URI`.
 Register `<public URL>/api/oauth/spotify/callback` as a redirect URI of your Spotify app and save its client ID and secret under `spotify_oauth_client`.
-An existing connection carries over to the same app the first time an agent or the dashboard uses it, as long as `SPOTIFY_CLIENT_ID` is still set then; remove the variable afterwards, or connect Spotify again.
+An existing connection carries over to the same app the first time an agent or the dashboard uses it, as long as `SPOTIFY_CLIENT_ID` is still set then; otherwise connect Spotify again.
+Remove the variable once connections have carried over.
+A shared-scope agent that used the global connection through `defaults.worker_grantable_credentials` needs a Spotify connection of its own, because OAuth connections are never granted.
 
 ### Configuration
 
@@ -15581,7 +15583,7 @@ For other providers, the token follows the agent's effective execution scope: `p
 | _(unset)_ | One installation-level connection in the global credential store |
 
 Private agents derive the scope from `private.per` and cannot also set `worker_scope`.
-OAuth tokens and OAuth client configuration stay in the primary runtime and are never mirrored into worker containers, and GitHub, Google, Microsoft 365, and Slack OAuth tools always run in the primary runtime.
+OAuth tokens and OAuth client configuration stay in the primary runtime and are never mirrored into worker containers, and GitHub, Google, Microsoft 365, Slack, and Spotify OAuth tools always run in the primary runtime.
 
 ### Built-In Providers
 
@@ -15592,6 +15594,7 @@ OAuth tokens and OAuth client configuration stay in the primary runtime and are 
 | Google Drive, Docs, Calendar, Sheets, Tasks, Gmail, and Google Cloud | [Google Services OAuth](https://docs.mindroom.chat/deployment/google-services-oauth/) |
 | Microsoft 365 (OneDrive, SharePoint, Outlook mail and calendar, To Do, Teams, OneNote, and the people directory) | [Microsoft 365](https://docs.mindroom.chat/tools/microsoft-365/) |
 | Slack (each person's own Slack account) | [Slack](https://docs.mindroom.chat/tools/slack/#set-up-the-slack-app) |
+| Spotify | [Spotify](https://docs.mindroom.chat/tools/media-and-content/#connect-spotify) |
 | Remote MCP servers with `auth.type: oauth` | [OAuth-Backed Remote MCP](https://docs.mindroom.chat/mcp/#oauth-backed-remote-mcp) |
 
 A dynamically registered MCP client works from a hosted address only when `MINDROOM_PUBLIC_URL` or `MINDROOM_BASE_URL` is an HTTPS URL without query or fragment on a public DNS hostname, that hostname matches the address the browser used to open MindRoom or the browser opened the dashboard at `MINDROOM_DASHBOARD_URL`, and the authorization server confirmed that callback when registering.
@@ -19767,7 +19770,7 @@ Adding, removing, or re-scoping a `worker_scope: user` agent changes every user 
 ### Dashboard credentials and worker scopes
 
 The dashboard's generic credential forms work only for unscoped agents and agents with `worker_scope: shared`.
-OAuth connections are an exception: the dashboard can connect scoped `user` and `user_agent` credentials for any [OAuth framework](https://docs.mindroom.chat/oauth-framework/) provider, including the Google Drive, Docs, Gmail, Calendar, Sheets, and Tasks providers, whose tools still execute in the primary runtime; the Spotify and Home Assistant integrations are not framework providers and stay shared-only.
+OAuth connections are an exception: the dashboard can connect scoped `user` and `user_agent` credentials for any [OAuth framework](https://docs.mindroom.chat/oauth-framework/) provider, including the Google Drive, Docs, Gmail, Calendar, Sheets, and Tasks providers, whose tools still execute in the primary runtime, except Spotify, which, like the Home Assistant integration, stays shared-only.
 GitHub and Atlassian managed OAuth credentials always use the requester's `user` scope, independently of the agent's `worker_scope`.
 Saved tool settings are stored by the primary per agent for `shared`, per requester across agents for `user`, and per requester-agent pair for `user_agent`, and reach worker-routed calls through [credential leases](#credential-leases).
 Tools without a scoped OAuth provider have no dashboard form for `user` and `user_agent` settings, so configure them in authored config (see [Per-Agent Tool Configuration](https://docs.mindroom.chat/tools/#per-agent-tool-configuration)) or through shared settings granted with `defaults.worker_grantable_credentials`.

@@ -185,7 +185,7 @@ It provides `search_tracks()`, `search_playlists()`, `search_artists()`, `search
 ### Connect Spotify
 
 1. Create an app in the [Spotify Developer Dashboard](https://developer.spotify.com/dashboard) and add the redirect URI `<public URL>/api/oauth/spotify/callback`.
-2. Save the app's client ID and client secret under the `spotify_oauth_client` credential service.
+2. On the dashboard credentials page, save the app's `client_id` and `client_secret` under the `spotify_oauth_client` credential service.
 3. In the dashboard **Tools** tab, connect Spotify and approve access.
 
 The connection requests the scopes `user-read-private`, `user-read-email`, `user-read-playback-state`, `user-read-currently-playing`, `user-top-read`, `playlist-read-private`, `playlist-modify-public`, `playlist-modify-private`, and `user-modify-playback-state`.
@@ -198,7 +198,9 @@ Until Spotify is connected, `spotify` calls return an `OAuthConnectionRequired` 
 
 `/api/integrations/spotify/callback` is gone, and MindRoom no longer configures Spotify from `SPOTIFY_CLIENT_SECRET` or `SPOTIFY_REDIRECT_URI`.
 Register `<public URL>/api/oauth/spotify/callback` as a redirect URI of your Spotify app and save its client ID and secret under `spotify_oauth_client`.
-An existing connection carries over to the same app the first time an agent or the dashboard uses it, as long as `SPOTIFY_CLIENT_ID` is still set then; remove the variable afterwards, or connect Spotify again.
+An existing connection carries over to the same app the first time an agent or the dashboard uses it, as long as `SPOTIFY_CLIENT_ID` is still set then; otherwise connect Spotify again.
+Remove the variable once connections have carried over.
+A shared-scope agent that used the global connection through `defaults.worker_grantable_credentials` needs a Spotify connection of its own, because OAuth connections are never granted.
 
 ### Configuration
 
