@@ -18,7 +18,9 @@ from mindroom.llm.usage import MessageMetrics
 from mindroom.logging_config import get_logger
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Mapping, Sequence
+    from collections.abc import Callable, Iterator, Mapping, Sequence
+
+    from mindroom.llm.provider import MediaKind
 
 logger = get_logger(__name__)
 
@@ -300,6 +302,18 @@ def system_text(messages: Sequence[Message]) -> str:
     return "\n\n".join(system_texts(messages))
 
 
+def media_items(message: Message) -> Iterator[tuple[MediaKind, Image | Audio | Video | File]]:
+    """Yield each media item of ``message`` with its kind: its images, audio, videos, then files, each in their order."""
+    for image in message.images or ():
+        yield "image", image
+    for clip in message.audio or ():
+        yield "audio", clip
+    for video in message.videos or ():
+        yield "video", video
+    for file in message.files or ():
+        yield "file", file
+
+
 def with_joined_system(messages: Sequence[Message]) -> list[Message]:
     """Return ``messages`` with their system messages joined into one (``system_text``), in the first one's place.
 
@@ -366,6 +380,7 @@ __all__ = [
     "ModelProvenance",
     "ToolResultView",
     "is_own_model_message",
+    "media_items",
     "model_provenance",
     "read_model_provenance",
     "system_text",
