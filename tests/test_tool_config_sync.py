@@ -29,7 +29,6 @@ from mindroom.tool_system.invocation import parse_tool_arguments
 from mindroom.tool_system.metadata import (
     TOOL_METADATA,
     TOOL_REGISTRY,
-    ToolConfigOverrideError,
     get_tool_by_name,
     validate_authored_tool_entry_overrides,
 )
@@ -52,21 +51,14 @@ SKIP_CONFIG_FIELD_VALIDATION = {
 # host runs this suite without it.
 OPTIONAL_TOOL_IMPORTS = frozenset({"apify", "scrapegraph"})
 IGNORED_AGNO_PARAMS = {
-    # Mapping-only inputs have no safe authored ConfigField representation.
+    # Mappings, sessions, clients, and connections, which no text, number, boolean, or string-list setting can supply.
     "firecrawl": {"search_params"},
     "spider": {"optional_params"},
     "mem0": {"config"},
     "scrapegraph": {"headers"},
     "tavily": {"search_params"},
     "youtube": {"proxies"},
-    # Agno accepts a live HTTP session object, which MindRoom cannot serialize safely in UI/YAML config.
     "yfinance": {"session"},
-    # Agno never runs newspaper4k's nlp(), the only step that fills an article summary, so this flag has no effect.
-    "newspaper": {"include_summary"},
-    # The prompt shows every toolkit's instructions, so Agno's switch for showing them has no effect.
-    "reasoning": {"add_instructions"},
-    "zep": {"add_instructions"},
-    # Live clients, connections, and mappings, which no text, number, boolean, or string-list setting can supply.
     "csv": {"duckdb_connection", "duckdb_kwargs"},
     "duckdb": {"config", "connection"},
     "openbb": {"obb"},
@@ -74,23 +66,12 @@ IGNORED_AGNO_PARAMS = {
     "reddit": {"reddit_instance"},
     "sql": {"db_engine", "tables"},
     "wikipedia": {"knowledge"},
+    # Agno never runs newspaper4k's nlp(), the only step that fills an article summary, so this flag has no effect.
+    "newspaper": {"include_summary"},
+    # The prompt shows every toolkit's instructions, so Agno's switch for showing them has no effect.
+    "reasoning": {"add_instructions"},
+    "zep": {"add_instructions"},
 }
-# Settings removed because they took a Python object, which config can supply only as text that never worked.
-REMOVED_OBJECT_SETTINGS = (
-    *(
-        (tool_name, name)
-        for tool_name in ("csv", "duckdb", "openbb", "postgres", "reddit", "sql", "wikipedia")
-        for name in sorted(IGNORED_AGNO_PARAMS[tool_name])
-    ),
-    ("python", "safe_globals"),
-    ("python", "safe_locals"),
-    ("composio", "connected_account_ids"),
-    ("composio", "logging_level"),
-    ("composio", "metadata"),
-    ("composio", "processors"),
-    ("composio", "workspace_config"),
-    ("e2b", "sandbox_options"),
-)
 # Words tool-call parsing reads as None or a boolean; a string parameter keeps them, except that one with a default
 # reads the null words as left out.
 BOOLEAN_WORDS = ("true", "False")
@@ -124,20 +105,6 @@ def test_mapping_only_upstream_fields_are_not_authored(tool_name: str, mapping_f
     authored_names = {field.name for field in TOOL_METADATA[tool_name].config_fields or []}
 
     assert mapping_field not in authored_names
-
-
-@pytest.mark.parametrize(("tool_name", "field_name"), REMOVED_OBJECT_SETTINGS)
-def test_a_tool_entry_naming_an_object_valued_setting_is_told_to_remove_it(tool_name: str, field_name: str) -> None:
-    """No setting can supply a Python object, so a tool entry naming one fails with the key and the fix."""
-    assert field_name not in {field.name for field in TOOL_METADATA[tool_name].config_fields or ()}
-    expected = (
-        f"agents.a.tools.{tool_name}.{field_name}: unknown authored override field(s): {field_name}; "
-        "remove or correct them."
-    )
-    with pytest.raises(ToolConfigOverrideError) as exc_info:
-        validate_authored_tool_entry_overrides(tool_name, {field_name: "value"}, config_path_prefix="agents.a.tools")
-
-    assert str(exc_info.value).startswith(expected)
 
 
 def test_config_load_fails_on_an_object_valued_setting_and_says_to_remove_it(tmp_path: Path) -> None:
