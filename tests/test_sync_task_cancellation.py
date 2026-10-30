@@ -3097,7 +3097,7 @@ async def test_orchestrator_stop_cancels_all_tasks(tmp_path: Path, fleet_sync: _
                 ),
                 call(
                     5.0,
-                    owner=orchestrator._dispatch_recovery_task_owner,
+                    owner=orchestrator.turn_recovery.task_owner,
                     shutdown_intent=ORDERLY_SHUTDOWN,
                 ),
                 call(5.0, owner=slack_runtime, shutdown_intent=ORDERLY_SHUTDOWN),

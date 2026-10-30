@@ -149,6 +149,7 @@ from .orchestration.runtime import (
 from .orchestration.script_runtime import ScriptRuntimeLifecycle, build_script_runtime, optional_script_gateway_url
 from .orchestration.todo_poke_runtime import TodoPokeRuntimeCoordinator
 from .orchestration.tool_job_runtime import ToolJobRuntimeCoordinator
+from .orchestration.turn_recovery import TurnJournalRecovery
 from .thread_export.workspace_sync import WorkspaceThreadExportDeps, WorkspaceThreadExportRunner
 
 if TYPE_CHECKING:
@@ -300,10 +301,7 @@ class _MultiAgentOrchestrator:
     config_reload: ConfigReloadLifecycle = field(init=False)
     _mcp_manager: MCPServerManager | None = field(default=None, init=False)
     _config_update_lock: asyncio.Lock = field(default_factory=asyncio.Lock, init=False)
-    _dispatch_recovery_lock: asyncio.Lock = field(default_factory=asyncio.Lock, init=False)
-    _dispatch_recovery_task_owner: object = field(default_factory=object, init=False, repr=False)
-    _dispatch_recovery_task: asyncio.Task[None] | None = field(default=None, init=False, repr=False)
-    _dispatch_recovery_requested: bool = field(default=False, init=False, repr=False)
+    turn_recovery: TurnJournalRecovery = field(init=False, repr=False)
     response_admission_gate: ResponseAdmissionGate = field(default_factory=ResponseAdmissionGate, init=False)
     _mcp_catalog_change_task_owner: object = field(default_factory=object, init=False, repr=False)
     _pending_mcp_catalog_restarts: dict[str, asyncio.Task[None]] = field(default_factory=dict, init=False, repr=False)
@@ -366,6 +364,12 @@ class _MultiAgentOrchestrator:
         self._knowledge_source_watcher = KnowledgeSourceWatcher(self._knowledge_refresh_scheduler, self.runtime_paths)
         self.agent_reply_membership_sync = AgentReplyMembershipSync(self.agent_reply_memberships)
         self.plugin_watch = PluginWatchState(runtime_paths=self.runtime_paths)
+        self.turn_recovery = TurnJournalRecovery(
+            config=lambda: self.config,
+            bots=lambda: self.agent_bots,
+            first_sync_complete=self.entity_first_sync_complete,
+            runtime_ready=self._runtime_ready_event.is_set,
+        )
         self._computer_runtime = ComputerRuntimeCoordinator(
             runtime_paths=self.runtime_paths,
             api_enabled=self.api_enabled,
@@ -737,103 +741,6 @@ class _MultiAgentOrchestrator:
                 running_bots.append(bot)
         return running_bots
 
-    def _ready_bot_for_turn_journal_recovery(
-        self,
-        entity_name: str,
-        config: Config,
-    ) -> AgentBot | None:
-        """Return the current bot when its fleet dependencies are ready."""
-        bot = self.agent_bots.get(entity_name)
-        required_entities = (
-            [entity_name]
-            if entity_name == ROUTER_AGENT_NAME
-            else ([entity_name, *config.teams[entity_name].agents] if entity_name in config.teams else [entity_name])
-        )
-        if bot is None or any(
-            self.entity_first_sync_complete(required_entity) is not True for required_entity in required_entities
-        ):
-            return None
-        return bot
-
-    async def _recover_current_turn_journal_bot(self, entity_name: str) -> Exception | None:
-        """Recover the ready current generation for one configured entity."""
-        config = self.config
-        if entity_name not in configured_entity_names(config):
-            return None
-        bot = self._ready_bot_for_turn_journal_recovery(entity_name, config)
-        if bot is None:
-            return None
-        try:
-            await bot.recover_pending_turn_journal_events()
-        except asyncio.CancelledError:
-            raise
-        except Exception as error:
-            logger.exception(
-                "turn_dispatch_recovery_failed",
-                agent_name=entity_name,
-            )
-            return error
-        return None
-
-    async def _recover_ready_turn_journal_events(self) -> None:
-        """Recover fleet-dependent turns whose required runtimes are ready."""
-        async with self._dispatch_recovery_lock:
-            config = self.config
-            first_error: Exception | None = None
-            ready_bots: list[tuple[str, AgentBot]] = []
-            for entity_name in configured_entity_names(config):
-                bot = self._ready_bot_for_turn_journal_recovery(entity_name, config)
-                if bot is None:
-                    continue
-                ready_bots.append((entity_name, bot))
-            for _entity_name, bot in ready_bots:
-                bot.release_pending_turn_journal_replay()
-            for entity_name, _released_bot in ready_bots:
-                error = await self._recover_current_turn_journal_bot(entity_name)
-                first_error = first_error or error
-            if first_error is not None:
-                raise first_error
-
-    def _schedule_ready_turn_dispatch_recovery(self) -> None:
-        """Coalesce bot-ready signals into one orchestrator-owned recovery task."""
-        if not self._runtime_ready_event.is_set():
-            return
-        config = self.config
-        for entity_name in configured_entity_names(config):
-            ready_bot = self._ready_bot_for_turn_journal_recovery(entity_name, config)
-            if ready_bot is not None:
-                ready_bot.release_pending_turn_journal_replay()
-        self._dispatch_recovery_requested = True
-        task = self._dispatch_recovery_task
-        if task is not None and not task.done():
-            return
-        self._dispatch_recovery_task = create_background_task(
-            self._run_scheduled_turn_dispatch_recovery(),
-            name="recover_ready_turn_journal_events",
-            owner=self._dispatch_recovery_task_owner,
-        )
-
-    async def _run_scheduled_turn_dispatch_recovery(self) -> None:
-        """Drain readiness signals without blocking a Matrix sync callback."""
-
-        async def recover() -> None:
-            if not self._runtime_ready_event.is_set():
-                return
-            await self._recover_ready_turn_journal_events()
-
-        current_task = asyncio.current_task()
-        try:
-            while self._dispatch_recovery_requested:
-                self._dispatch_recovery_requested = False
-                await run_with_retry(
-                    "Recovering ready turn dispatch obligations",
-                    recover,
-                    update_runtime_state=False,
-                )
-        finally:
-            if self._dispatch_recovery_task is current_task:
-                self._dispatch_recovery_task = None
-
     async def _sync_runtime_support_services(self, config: Config, *, previous_config: Config | None = None) -> None:
         """Bring every runtime service in line with the active config."""
         if previous_config is not None:
@@ -1011,7 +918,7 @@ class _MultiAgentOrchestrator:
         """Publish one batch of start outcomes to the runtime services that depend on live bots."""
         self._bind_started_runtime_support_services()
         await self._approval_recovery.reconcile_unavailable_entities(results.permanently_failed_entities)
-        self._schedule_ready_turn_dispatch_recovery()
+        self.turn_recovery.schedule()
 
     async def _setup_rooms_after_retry(self, entity_name: str) -> None:
         """Reconcile rooms after a background retry started one entity, and every bot's rooms after the router started."""
@@ -1281,7 +1188,7 @@ class _MultiAgentOrchestrator:
             router = self.agent_bots.get(ROUTER_AGENT_NAME)
             if router is not None:
                 router.personal_room_target_ready()
-        self._schedule_ready_turn_dispatch_recovery()
+        self.turn_recovery.schedule()
 
     def invalidate_agent_reply_memberships(self, *, reason: str) -> None:
         """Synchronously revoke every room-backed reply grant."""
@@ -1311,7 +1218,7 @@ class _MultiAgentOrchestrator:
             return
         await self.agent_reply_memberships.refresh(config, self.runtime_paths, router_client)
         self.agent_reply_membership_sync.record_authoritative_refresh(config)
-        self._schedule_ready_turn_dispatch_recovery()
+        self.turn_recovery.schedule()
         for bot in self.agent_bots.values():
             bot.schedule_pending_invite_reconciliation()
         await self.revoke_reply_authorized_calls()
@@ -1404,7 +1311,7 @@ class _MultiAgentOrchestrator:
             self.config_reload.startup_published(config)
             set_runtime_ready()
             self._runtime_ready_event.set()
-            self._schedule_ready_turn_dispatch_recovery()
+            self.turn_recovery.schedule()
         # Stay alive until explicit shutdown. Hot reload replaces the fleet's sync
         # tasks, so awaiting the initial task generation would let a
         # config-triggered restart look like normal orchestrator completion.
@@ -1734,7 +1641,7 @@ class _MultiAgentOrchestrator:
             "dispatch_recovery_background",
             wait_for_background_tasks(
                 5.0,
-                owner=self._dispatch_recovery_task_owner,
+                owner=self.turn_recovery.task_owner,
                 shutdown_intent=ORDERLY_SHUTDOWN,
             ),
         )

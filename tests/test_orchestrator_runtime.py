@@ -4200,7 +4200,7 @@ class TestMultiAgentOrchestrator:
             },
         )
 
-        await orchestrator._recover_ready_turn_journal_events()
+        await orchestrator.turn_recovery.recover()
         router_bot.recover_pending_turn_journal_events.assert_awaited_once_with()
 
         responder_bot.first_sync_complete = True
@@ -4208,7 +4208,7 @@ class TestMultiAgentOrchestrator:
             await orchestrator.handle_bot_ready(responder_bot)
         assert await wait_for_background_tasks(
             timeout=1,
-            owner=orchestrator._dispatch_recovery_task_owner,
+            owner=orchestrator.turn_recovery.task_owner,
         )
 
         assert router_bot.recover_pending_turn_journal_events.await_count == 2
@@ -4240,10 +4240,10 @@ class TestMultiAgentOrchestrator:
         install_bots(orchestrator, {ROUTER_AGENT_NAME: router_bot, "general": responder_bot})
 
         with patch("mindroom.orchestration.runtime.retry_delay_seconds", return_value=0) as retry_delay:
-            orchestrator._schedule_ready_turn_dispatch_recovery()
+            orchestrator.turn_recovery.schedule()
             assert await wait_for_background_tasks(
                 timeout=1,
-                owner=orchestrator._dispatch_recovery_task_owner,
+                owner=orchestrator.turn_recovery.task_owner,
             )
 
         assert router_bot.recover_pending_turn_journal_events.await_count == 2
@@ -4253,8 +4253,8 @@ class TestMultiAgentOrchestrator:
             initial_delay_seconds=STARTUP_RETRY_INITIAL_DELAY_SECONDS,
             max_delay_seconds=STARTUP_RETRY_MAX_DELAY_SECONDS,
         )
-        assert not orchestrator._dispatch_recovery_requested
-        assert orchestrator._dispatch_recovery_task is None
+        assert not orchestrator.turn_recovery._requested
+        assert orchestrator.turn_recovery._task is None
 
     @pytest.mark.asyncio
     async def test_regular_agent_turn_recovery_waits_for_own_first_sync(
@@ -4281,11 +4281,11 @@ class TestMultiAgentOrchestrator:
         bot.recover_pending_turn_journal_events = AsyncMock()
         install_bots(orchestrator, {"general": bot})
 
-        await orchestrator._recover_ready_turn_journal_events()
+        await orchestrator.turn_recovery.recover()
         bot.recover_pending_turn_journal_events.assert_not_awaited()
 
         bot.first_sync_complete = True
-        await orchestrator._recover_ready_turn_journal_events()
+        await orchestrator.turn_recovery.recover()
 
         bot.recover_pending_turn_journal_events.assert_awaited_once_with()
 
@@ -4330,7 +4330,7 @@ class TestMultiAgentOrchestrator:
             },
         )
 
-        await orchestrator._recover_ready_turn_journal_events()
+        await orchestrator.turn_recovery.recover()
 
         router_bot.recover_pending_turn_journal_events.assert_awaited_once_with()
         healthy_bot.recover_pending_turn_journal_events.assert_awaited_once_with()
@@ -4363,7 +4363,7 @@ class TestMultiAgentOrchestrator:
             try:
                 await recovery_started.wait()
                 assert ready_task.done()
-                recovery_task = orchestrator._dispatch_recovery_task
+                recovery_task = orchestrator.turn_recovery._task
                 assert recovery_task is not None
                 assert not recovery_task.done()
             finally:
@@ -4372,7 +4372,7 @@ class TestMultiAgentOrchestrator:
 
         assert await wait_for_background_tasks(
             timeout=1,
-            owner=orchestrator._dispatch_recovery_task_owner,
+            owner=orchestrator.turn_recovery.task_owner,
         )
         assert recovery_task.done()
 
@@ -4405,7 +4405,7 @@ class TestMultiAgentOrchestrator:
         general_bot.recover_pending_turn_journal_events = AsyncMock()
         install_bots(orchestrator, {ROUTER_AGENT_NAME: router_bot, "general": general_bot})
 
-        orchestrator._schedule_ready_turn_dispatch_recovery()
+        orchestrator.turn_recovery.schedule()
         await router_draining.wait()
         general_bot.release_pending_turn_journal_replay.assert_not_called()
 
@@ -4415,7 +4415,7 @@ class TestMultiAgentOrchestrator:
         general_bot.release_pending_turn_journal_replay.assert_called()
         general_bot.recover_pending_turn_journal_events.assert_not_awaited()
         release_router.set()
-        assert await wait_for_background_tasks(timeout=1, owner=orchestrator._dispatch_recovery_task_owner)
+        assert await wait_for_background_tasks(timeout=1, owner=orchestrator.turn_recovery.task_owner)
         general_bot.recover_pending_turn_journal_events.assert_awaited()
 
     @pytest.mark.asyncio
@@ -4447,7 +4447,7 @@ class TestMultiAgentOrchestrator:
         retired.recover_pending_turn_journal_events = AsyncMock()
         install_bots(orchestrator, {ROUTER_AGENT_NAME: router_bot, "general": retired})
 
-        await orchestrator._recover_ready_turn_journal_events()
+        await orchestrator.turn_recovery.recover()
 
         retired.recover_pending_turn_journal_events.assert_not_awaited()
         replacement.recover_pending_turn_journal_events.assert_awaited_once_with()
@@ -4512,7 +4512,7 @@ class TestMultiAgentOrchestrator:
             },
         )
 
-        await orchestrator._recover_ready_turn_journal_events()
+        await orchestrator.turn_recovery.recover()
         team_bot.recover_pending_turn_journal_events.assert_not_awaited()
 
         with (
@@ -4590,7 +4590,7 @@ class TestMultiAgentOrchestrator:
             await orchestrator.handle_bot_ready(member_bot)
         assert await wait_for_background_tasks(
             timeout=1,
-            owner=orchestrator._dispatch_recovery_task_owner,
+            owner=orchestrator.turn_recovery.task_owner,
         )
 
         team_bot.recover_pending_turn_journal_events.assert_awaited_once_with()
@@ -4619,8 +4619,8 @@ class TestMultiAgentOrchestrator:
             patch.object(orchestrator, "_bind_started_runtime_support_services"),
             patch.object(orchestrator._rooms, "resolve_aliases"),
             patch.object(
-                orchestrator,
-                "_schedule_ready_turn_dispatch_recovery",
+                orchestrator.turn_recovery,
+                "schedule",
                 side_effect=lambda: order.append("recovery_scheduled"),
             ),
             patch.object(orchestrator.fleet, "start_sync", side_effect=lambda *_args: order.append("sync_started")),

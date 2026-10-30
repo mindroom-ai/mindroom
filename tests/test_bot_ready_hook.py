@@ -292,7 +292,7 @@ async def test_fleet_turn_recovery_releases_every_ready_bot_before_the_first_dra
     code_bot.recover_pending_turn_journal_events = recover_code
     install_bots(orchestrator, {"router": router_bot, "code": code_bot})
 
-    recovery = asyncio.create_task(orchestrator._recover_ready_turn_journal_events())
+    recovery = asyncio.create_task(orchestrator.turn_recovery.recover())
     await router_recovery_started.wait()
     await asyncio.sleep(0)
     try:
@@ -328,7 +328,7 @@ async def test_bot_ready_releases_later_ready_bot_while_serial_recovery_is_block
     code_bot.release_pending_turn_journal_replay = code_released.set
     install_bots(orchestrator, {"router": router_bot, "code": code_bot})
 
-    orchestrator._schedule_ready_turn_dispatch_recovery()
+    orchestrator.turn_recovery.schedule()
     await router_recovery_started.wait()
     try:
         code_bot.first_sync_complete = True
@@ -339,7 +339,7 @@ async def test_bot_ready_releases_later_ready_bot_while_serial_recovery_is_block
         finish_router_recovery.set()
         await wait_for_background_tasks(
             timeout=1.0,
-            owner=orchestrator._dispatch_recovery_task_owner,
+            owner=orchestrator.turn_recovery.task_owner,
         )
 
 
@@ -365,7 +365,7 @@ async def test_fleet_turn_recovery_reloads_current_bot_before_each_serial_drain(
     router_bot.recover_pending_turn_journal_events = AsyncMock(side_effect=recover_router)
     install_bots(orchestrator, {"router": router_bot, "code": retired_code_bot})
 
-    recovery = asyncio.create_task(orchestrator._recover_ready_turn_journal_events())
+    recovery = asyncio.create_task(orchestrator.turn_recovery.recover())
     await router_recovery_started.wait()
     swap_fleet_bot(orchestrator, "code", replacement_code_bot)
     finish_router_recovery.set()
