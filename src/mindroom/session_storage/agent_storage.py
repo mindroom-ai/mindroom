@@ -37,10 +37,13 @@ if TYPE_CHECKING:
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 
 
-# The database files this process prepared, each with the device and inode it had then. A file deleted, replaced, or
-# put behind a link no longer matches and is prepared again at its next open. A file rewritten in place keeps both,
-# which only a foreign writer such as worker code does, so a layout it breaks that way fails that store's operations
-# until the next start instead of converting or being archived at the next open.
+# The database files this process prepared, each with the device and inode it had then. A file replaced, put behind a
+# link, or deleted and not yet recreated no longer matches and is prepared again at its next open. A file rewritten in
+# place keeps both, and so can one deleted and recreated at its path before the next open, even by an open store's
+# next operation, since SQLite creates a missing file and the filesystem may reuse the freed inode. Either then fails
+# that store's operations until the next start instead of being converted, archived, or given its tables at the next
+# open. Only a foreign writer such as worker code rewrites a prepared file in place, and every documented restore stops
+# MindRoom first.
 _PREPARED: dict[Path, tuple[int, int] | None] = {}
 
 

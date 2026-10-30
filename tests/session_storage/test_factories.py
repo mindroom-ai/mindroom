@@ -155,7 +155,7 @@ def test_a_process_prepares_each_database_once(tmp_path: Path, monkeypatch: pyte
 
 
 def test_an_open_after_the_database_was_deleted_creates_it_again(tmp_path: Path) -> None:
-    """A prepared database deleted while the process runs gets every table again at its next open."""
+    """A prepared database deleted and not yet recreated gets every table again at its next open."""
     store = _open(tmp_path)
     seed_session(store, ConversationSession(kind="agent", session_id="session-1", owner_id="code"))
     store.path.unlink()
