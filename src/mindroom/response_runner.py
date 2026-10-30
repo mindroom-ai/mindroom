@@ -7,7 +7,7 @@ import time
 from contextlib import asynccontextmanager, suppress
 from dataclasses import dataclass, field, replace
 from functools import partial
-from typing import TYPE_CHECKING, Any, Literal, TypeVar
+from typing import TYPE_CHECKING, Any, Literal
 from uuid import uuid4
 
 from mindroom import reply_lifecycle as rl
@@ -175,9 +175,6 @@ if TYPE_CHECKING:
     from mindroom.turn_store import SourcePreparation
 
     from .response_admission import ResponseAdmissionGate
-
-_ToolContextResult = TypeVar("_ToolContextResult")
-_ToolStreamChunk = TypeVar("_ToolStreamChunk")
 
 
 def merge_response_extra_content(
@@ -652,7 +649,6 @@ class ResponseRunnerDeps:
 class PreparedResponseRuntime:
     """Resolved runtime context shared by streaming and non-streaming responses."""
 
-    resolved_target: MessageTarget
     media_inputs: MediaInputs
     session_id: str
     model_prompt: str
@@ -986,24 +982,6 @@ class ResponseRunner:
     ) -> ResponseLifecycleReservation:
         """Reserve one canonical response lifecycle before detached preparation starts."""
         return await self._lifecycle_coordinator.reserve_response_lifecycle(response_envelope)
-
-    async def run_in_tool_context(
-        self,
-        *,
-        tool_context: ToolRuntimeContext,
-        operation: Callable[[], Awaitable[_ToolContextResult]],
-    ) -> _ToolContextResult:
-        """Execute one operation inside the response-owned tool context."""
-        return await self.deps.tool_runtime.run_in_context(tool_context=tool_context, operation=operation)
-
-    def _stream_in_tool_context(
-        self,
-        *,
-        tool_context: ToolRuntimeContext,
-        stream_factory: Callable[[], AsyncIterator[_ToolStreamChunk]],
-    ) -> AsyncIterator[_ToolStreamChunk]:
-        """Wrap one stream inside the response-owned tool context."""
-        return self.deps.tool_runtime.stream_in_context(tool_context=tool_context, stream_factory=stream_factory)
 
     async def _active_response_event_ids(self, room_id: str) -> set[str]:
         """Return the events of one room's replies whose span runs in this bot instance."""
@@ -1561,7 +1539,7 @@ class ResponseRunner:
     ) -> ResponseTurnContext:
         """Build every input of one agent response turn."""
         matrix_target_item = matrix_message_target_item(
-            runtime.resolved_target,
+            runtime.tool_context.target,
             matrix_message_available=room_turn_offers(self.deps.runtime.config, self.deps.agent_name, "matrix_message"),
             runtime=self.deps.runtime,
         )
@@ -1580,7 +1558,7 @@ class ResponseRunner:
             correlation_id=correlation_id_for_request(request),
             reply_to_event_id=request.reply_to_event_id,
             room_id=request.room_id,
-            thread_id=runtime.resolved_target.resolved_thread_id,
+            thread_id=runtime.tool_context.target.resolved_thread_id,
             requester_id=request.user_id,
             matrix_run_metadata=_turn_run_metadata(request),
             current_sender_id=request.response_envelope.origin.acting_sender_id,
@@ -1597,7 +1575,7 @@ class ResponseRunner:
             allow_no_report_response=_is_silent_schedule_response(request),
             scheduled_history_budget=request.scheduled_history_budget,
             skill_review_capture=runtime.skill_review_capture,
-            redacted_history_events=partial(self.deps.redacted_history_events, runtime.resolved_target),
+            redacted_history_events=partial(self.deps.redacted_history_events, runtime.tool_context.target),
             prompt=request.prompt,
             model_prompt=runtime.model_prompt,
             current_timestamp_ms=request.current_timestamp_ms,
@@ -2411,7 +2389,6 @@ class ResponseRunner:
             raise RuntimeError(msg)
         show_tool_calls = self._turn_show_tool_calls()
         runtime = PreparedResponseRuntime(
-            resolved_target=target,
             media_inputs=request.media or MediaInputs(),
             session_id=resolved_target.session_id,
             model_prompt=prepared_prompt,
@@ -2647,7 +2624,10 @@ class ResponseRunner:
         """Run the turn's stream into its reply: streamed as it grows, or collected and delivered whole."""
         request = turn.delivery_request
         active_event_ids = await self._active_response_event_ids(request.room_id)
-        compaction_lifecycle = self._build_compaction_lifecycle(target=turn.runtime.resolved_target, request=request)
+        compaction_lifecycle = self._build_compaction_lifecycle(
+            target=turn.runtime.tool_context.target,
+            request=request,
+        )
         # The caller-owned collectors stay live: the gateway snapshots the run metadata as the stream ends.
         run_metadata_content: dict[str, Any] = {}
         tool_trace: list[ToolTraceEntry] = []
@@ -2711,9 +2691,9 @@ class ResponseRunner:
             ):
                 transport_outcome = await self.deps.delivery_gateway.deliver_stream(
                     StreamingDeliveryRequest(
-                        target=runtime.resolved_target,
+                        target=runtime.tool_context.target,
                         identity=response_identity,
-                        response_stream=self._stream_in_tool_context(
+                        response_stream=self.deps.tool_runtime.stream_in_context(
                             tool_context=runtime.tool_context,
                             stream_factory=response_stream,
                         ),
@@ -2728,7 +2708,7 @@ class ResponseRunner:
                         pipeline_timing=request.pipeline_timing,
                         visible_event_id_callback=progress.note_delivery_started,
                         visible_progress_callback=self._lifecycle_coordinator.visible_progress_callback(
-                            runtime.resolved_target,
+                            runtime.tool_context.target,
                         ),
                         allow_new_terminal_message=lambda: participation is None or participation.approved,
                         placeholder_ready=None if participation is None else participation.wait_for_approval,
@@ -2768,7 +2748,7 @@ class ResponseRunner:
         progress.note_delivery_started()
         delivery = await self.deps.delivery_gateway.finalize_streamed_response(
             FinalizeStreamedResponseRequest(
-                target=runtime.resolved_target,
+                target=runtime.tool_context.target,
                 stream_transport_outcome=transport_outcome,
                 initial_delivery_kind="edited" if existing_event_id else "sent",
                 identity=response_identity,
@@ -2817,7 +2797,10 @@ class ResponseRunner:
                 response_run_id=turn.run_id,
                 participation=runtime.participation,
             ):
-                response_text = await self.run_in_tool_context(tool_context=runtime.tool_context, operation=collect)
+                response_text = await self.deps.tool_runtime.run_in_context(
+                    tool_context=runtime.tool_context,
+                    operation=collect,
+                )
             _raise_if_process_shutdown()
         except ResponsePausedForApproval:
             raise
@@ -2842,7 +2825,7 @@ class ResponseRunner:
         progress.note_delivery_started()
         delivery = await self.deps.delivery_gateway.deliver_final(
             FinalDeliveryRequest(
-                target=runtime.resolved_target,
+                target=runtime.tool_context.target,
                 existing_event_id=_existing_event_id(request),
                 response_text=response_text,
                 identity=response_identity,
@@ -2932,7 +2915,6 @@ class ResponseRunner:
             source_envelope=request.response_envelope,
         )
         return PreparedResponseRuntime(
-            resolved_target=resolved_target,
             media_inputs=media_inputs,
             session_id=session_id,
             model_prompt=resolved_model_prompt,
@@ -3131,7 +3113,7 @@ class ResponseRunner:
             execution_identity=execution_identity,
         )
         run_id = str(uuid4())
-        turn_request = self._request_with_locked_target(normalized_request, runtime.resolved_target)
+        turn_request = self._request_with_locked_target(normalized_request, runtime.tool_context.target)
 
         async def stream(
             runtime: PreparedResponseRuntime,
@@ -3167,7 +3149,7 @@ class ResponseRunner:
 
         return _LockedTurn(
             request=request,
-            delivery_request=self._request_with_locked_target(request, runtime.resolved_target),
+            delivery_request=self._request_with_locked_target(request, runtime.tool_context.target),
             response_target=resolved_target,
             response_kind="ai",
             history_scope=history_scope,

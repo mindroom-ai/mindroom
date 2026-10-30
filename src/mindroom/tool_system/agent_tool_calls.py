@@ -157,12 +157,6 @@ class PreparedAgentToolCatalog:
         assert not isinstance(session, UnstoredSession)
         return session
 
-    @contextmanager
-    def execution_context(self) -> Iterator[None]:
-        """Bind trusted runtime and credential routing only while doing owner work."""
-        with tool_runtime_context(self.runtime_context):
-            yield
-
     def owns(self, binding: PreparedAgentToolBinding) -> bool:
         """Check the exact prepared binding, including its live catalog lifetime."""
         return not self._closed and self._bindings.get(binding.key) is binding
@@ -277,7 +271,7 @@ class PreparedAgentToolCatalog:
                 check_current()
             deferred = self._deferred.get(key.toolkit)
             if deferred is not None:
-                with self.execution_context():
+                with tool_runtime_context(self.runtime_context):
                     toolkit = await deferred.materialize()
                 await connect_toolkits((toolkit,), self._closes)
                 # A deferred toolkit's functions are reached under the name it was listed under, which an agent's
@@ -453,7 +447,7 @@ async def _execute_agent_tool_call(
             function = replace(function, entrypoint=pinned_leaf)
         # A job's call has no time limit, so what it offloads must not hold a shared pool's thread. The synchronous
         # bodies the call started keep the catalog until they finish, so their threads never outlive the catalog.
-        with catalog.execution_context():
+        with tool_runtime_context(catalog.runtime_context):
             async with owned_sync_tool_completion(JOB_CALL_EXECUTOR if job_owns_execution() else None):
                 with cli_dispatch_scope():
                     outcome = await execute_tool_call(

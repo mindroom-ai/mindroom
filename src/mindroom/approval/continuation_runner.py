@@ -131,7 +131,6 @@ if TYPE_CHECKING:
     from mindroom.response_runner import PreparedResponseRuntime, ResponseRunnerDeps
     from mindroom.streaming import ProgressPublisher
     from mindroom.tool_system.events import ToolTraceEntry
-    from mindroom.tool_system.runtime_context import ToolRuntimeContext
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
     from mindroom.turn_origin import TurnOrigin
 
@@ -250,13 +249,6 @@ class _ResponseHost(Protocol):
     async def request_remains_authorized(self, request: ResponseRequest) -> bool: ...
 
     async def refresh_mid_turn_context_for_approval(self, request: ResponseRequest) -> None: ...
-
-    async def run_in_tool_context[T](
-        self,
-        *,
-        tool_context: ToolRuntimeContext,
-        operation: Callable[[], Awaitable[T]],
-    ) -> T: ...
 
     async def run_and_settle_locked_response(
         self,
@@ -802,7 +794,7 @@ class ApprovalContinuationRunner:
             request=request,
             progress=progress,
             history_scope=history_scope,
-            target=runtime.resolved_target,
+            target=runtime.tool_context.target,
             execution_identity=runtime.tool_context.execution_identity,
             show_tool_calls=runtime.show_tool_calls,
             settle_terminal=True,
@@ -1295,7 +1287,7 @@ class ApprovalContinuationRunner:
                     request,
                     response_run_id=continuation.run_id,
                 ):
-                    response_text = await self.host.run_in_tool_context(
+                    response_text = await self.deps.tool_runtime.run_in_context(
                         tool_context=tool_context,
                         operation=continue_team,
                     )

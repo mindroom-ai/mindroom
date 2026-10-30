@@ -54,6 +54,7 @@ from mindroom.matrix_rtc.call_tools import (
 )
 from mindroom.matrix_rtc.voice_agent import CallAgentResponse
 from mindroom.memory import MemoryPromptParts
+from mindroom.message_target import MessageTarget
 from mindroom.runtime_resolution import resolve_agent_runtime
 from mindroom.session_storage.store import ConversationStore
 from mindroom.tool_jobs.execution import agent_tool_middleware
@@ -85,7 +86,6 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from mindroom.constants import RuntimePaths
-    from mindroom.message_target import MessageTarget
     from mindroom.response_turn import ResponseTurnContext, TurnSinks
     from mindroom.session_storage.types import ConversationSession
     from mindroom.tool_system.invocation import ToolCall, ToolMiddleware, ToolNext
@@ -248,6 +248,17 @@ def _identity(runtime_paths: object) -> object:
     )
 
 
+def _room_target() -> MessageTarget:
+    """Return the room-level target a call in ``!room:example.org`` runs its turns for."""
+    return MessageTarget(
+        room_id="!room:example.org",
+        source_thread_id=None,
+        resolved_thread_id=None,
+        reply_to_event_id=None,
+        session_id="!room:example.org",
+    )
+
+
 def _tool_support(config: Config, runtime_paths: object) -> SimpleNamespace:
     """Return the call manager's tool support for the requester in one Matrix room."""
     return SimpleNamespace(
@@ -256,7 +267,6 @@ def _tool_support(config: Config, runtime_paths: object) -> SimpleNamespace:
             runtime_paths=runtime_paths,
             target=target,
         ),
-        build_execution_identity=lambda **_kwargs: _identity(runtime_paths),
     )
 
 
@@ -313,16 +323,12 @@ async def test_call_agent_keeps_chat_tool_surface_and_refuses_text_chat_function
         ),
         runtime_paths,
     )
+    context = _runtime_context(config=config, runtime_paths=runtime_paths, target=_room_target())
     cache = _CallAgentCache(
         agent_name=AGENT,
         config=config,
         runtime_paths=runtime_paths,
-        context=SimpleNamespace(  # type: ignore[arg-type]
-            hooks=HookBindings(registry=None),
-            plugins=config_plugins(config, runtime_paths),
-            tool_function_filter=None,
-        ),
-        execution_identity=None,  # type: ignore[arg-type]
+        context=context,
         active_model_name=None,
     )
     call_build = cache._build(knowledge=None, refresh_scheduler=None)
@@ -330,7 +336,7 @@ async def test_call_agent_keeps_chat_tool_surface_and_refuses_text_chat_function
         AGENT,
         config,
         runtime_paths,
-        None,
+        context.execution_identity,
         supports_native_tool_approval=True,
         knowledge=None,
         model=turn_model(config, runtime_paths, AGENT),
@@ -408,12 +414,7 @@ async def test_call_agent_cache_build_cancellation_waits_for_the_build(
         agent_name=AGENT,
         config=config,
         runtime_paths=runtime_paths,
-        context=SimpleNamespace(  # type: ignore[arg-type]
-            hooks=HookBindings(registry=None),
-            plugins=config_plugins(config, runtime_paths),
-            tool_function_filter=None,
-        ),
-        execution_identity=_identity(runtime_paths),  # type: ignore[arg-type]
+        context=_runtime_context(config=config, runtime_paths=runtime_paths, target=_room_target()),
         active_model_name="default",
     )
 
@@ -642,7 +643,6 @@ async def test_call_responder_prepares_full_requester_prompt_before_first_turn(
                 conversation_reader=make_conversation_reader_mock(),
                 hooks=HookBindings(registry=MagicMock()),
             ),
-            build_execution_identity=lambda identity=identity, **_kwargs: identity,
             run_in_context=lambda *, operation, **_kwargs: operation(),
         )
         tooling = await build_call_tools(
@@ -757,18 +757,6 @@ async def test_build_call_tools_returns_same_agent_prompt_and_tools(
             plugins_module.publish_plugins(plugins_module.PluginGeneration())
             return context
 
-        def build_execution_identity(
-            self,
-            *,
-            target: MessageTarget,
-            user_id: str | None,
-            agent_name: str | None = None,
-        ) -> object:
-            assert user_id == REQUESTER
-            assert agent_name == AGENT
-            seen_targets.append(target)
-            return execution_identity
-
     tooling = await build_call_tools(
         agent_name=AGENT,
         config=config,
@@ -789,12 +777,12 @@ async def test_build_call_tools_returns_same_agent_prompt_and_tools(
     assert create_kwargs["refresh_scheduler"] is refresh_scheduler
     assert create_kwargs["tool_function_filter"] is not None
     assert create_calls
-    assert create_calls[0][3] is execution_identity
-    assert knowledge_calls[0]["execution_identity"] is execution_identity
-    assert tooling.execution_identity is execution_identity
-    assert len(seen_targets) == 2
-    assert seen_targets[0] is seen_targets[1]
-    assert seen_targets[0].session_id == "!room:example.org"
+    # The call runs for the identity its context derives from the call's target and requester.
+    assert create_calls[0][3] == execution_identity
+    assert knowledge_calls[0]["execution_identity"] == execution_identity
+    assert tooling.execution_identity == execution_identity
+    [seen_target] = seen_targets
+    assert seen_target.session_id == "!room:example.org"
     assert await tooling.tools[0]({"a": 2, "b": 3}) == "5"
     assert bound_filters[0] is create_kwargs["tool_function_filter"]
     [call_context] = call_contexts
@@ -815,7 +803,6 @@ async def test_call_responder_uses_normal_agent_turn_and_refuses_unsafe_function
     )
     knowledge = _ready_knowledge()
     refresh_scheduler = object()
-    execution_identity = SimpleNamespace()
     calls: list[tuple[ResponseTurnContext, Config]] = []
     persisted_interruptions: list[dict[str, object]] = []
     completed_tools = [
@@ -826,6 +813,16 @@ async def test_call_responder_uses_normal_agent_turn_and_refuses_unsafe_function
     turn_contexts: list[ToolRuntimeContext] = []
     recorded_tool_uses: list[list[str]] = []
     runtime_paths = test_runtime_paths(tmp_path)
+    execution_identity = build_tool_execution_identity(
+        channel="matrix",
+        agent_name=AGENT,
+        runtime_paths=runtime_paths,
+        requester_id=REQUESTER,
+        room_id="!room:example.org",
+        thread_id=None,
+        resolved_thread_id=None,
+        session_id="!room:example.org:call:one",
+    )
     authorization_allowed = True
 
     @asynccontextmanager
@@ -856,9 +853,6 @@ async def test_call_responder_uses_normal_agent_turn_and_refuses_unsafe_function
             )
             contexts.append(context)
             return context
-
-        def build_execution_identity(self, **_kwargs: object) -> SimpleNamespace:
-            return execution_identity
 
         async def run_in_context(
             self,
@@ -939,7 +933,7 @@ async def test_call_responder_uses_normal_agent_turn_and_refuses_unsafe_function
 
     assert tooling.tools == ()
     assert tooling.instructions == ""
-    assert tooling.execution_identity is execution_identity
+    assert tooling.execution_identity == execution_identity
     assert tooling.responder is not None
     response = await tooling.responder("What is the weather?", recorded_tool_uses.append)
 
@@ -964,7 +958,7 @@ async def test_call_responder_uses_normal_agent_turn_and_refuses_unsafe_function
     assert turn.system_enrichment_items[0].text == "Speak briefly."
     assert turn_config is config
     assert turn.knowledge is knowledge
-    assert turn.execution_identity is execution_identity
+    assert turn.execution_identity == execution_identity
     assert turn.refresh_scheduler is refresh_scheduler
     assert turn.include_interactive_questions is True
     assert turn.tool_function_filter is None
@@ -1109,16 +1103,6 @@ async def test_cascaded_responder_records_effective_selected_model_metadata(
         ),
         runtime_paths,
     )
-    execution_identity = build_tool_execution_identity(
-        channel="matrix",
-        agent_name=AGENT,
-        runtime_paths=runtime_paths,
-        requester_id=REQUESTER,
-        room_id="!room:example.org",
-        thread_id=None,
-        resolved_thread_id=None,
-        session_id="!room:example.org:call:metadata",
-    )
     persisted_interruptions: list[dict[str, object]] = []
 
     class StrictToolSupport:
@@ -1142,9 +1126,6 @@ async def test_cascaded_responder_records_effective_selected_model_metadata(
                 hooks=HookBindings(registry=MagicMock()),
                 active_model_name=active_model_name,
             )
-
-        def build_execution_identity(self, **_kwargs: object) -> object:
-            return execution_identity
 
         async def run_in_context(
             self,
@@ -1247,16 +1228,6 @@ async def test_cascaded_cancellation_during_knowledge_resolution_persists_transc
     """Cancellation during knowledge lookup must persist the admitted transcript."""
     config = _config()
     runtime_paths = test_runtime_paths(tmp_path)
-    execution_identity = build_tool_execution_identity(
-        channel="matrix",
-        agent_name=AGENT,
-        runtime_paths=runtime_paths,
-        requester_id=REQUESTER,
-        room_id="!room:example.org",
-        thread_id=None,
-        resolved_thread_id=None,
-        session_id="call-session",
-    )
     resolution_started = asyncio.Event()
 
     async def blocked_resolution(*_args: object, **_kwargs: object) -> SimpleNamespace:
@@ -1284,7 +1255,6 @@ async def test_cascaded_cancellation_during_knowledge_resolution_persists_transc
                 runtime_paths=runtime_paths,
                 target=target,
             ),
-            build_execution_identity=lambda **_kwargs: execution_identity,
         ),  # type: ignore[arg-type]
         room_id="!room:example.org",
         requester_id=REQUESTER,
@@ -1378,9 +1348,6 @@ async def test_cascaded_responder_uses_the_fallback_for_an_over_budget_caller(
             context = _runtime_context(config=config, runtime_paths=runtime_paths, target=target)
             return replace(context, active_model_name=cast("str | None", kwargs.get("active_model_name")))
 
-        def build_execution_identity(self, **_kwargs: object) -> object:
-            return _identity(runtime_paths)
-
         async def run_in_context(
             self,
             *,
@@ -1447,9 +1414,6 @@ async def test_cascaded_responder_switches_to_the_fallback_when_the_caller_cross
                 orchestrator=orchestrator,
             )
             return replace(context, active_model_name=cast("str | None", kwargs.get("active_model_name")))
-
-        def build_execution_identity(self, **_kwargs: object) -> object:
-            return _identity(runtime_paths)
 
         async def run_in_context(
             self,
@@ -1540,7 +1504,6 @@ async def _call_tools_over(build: AgentBuild, tmp_path: Path, monkeypatch: pytes
             runtime_paths=runtime_paths,
             target=target,
         ),
-        build_execution_identity=lambda **_kwargs: MagicMock(),
     )
     return await build_call_tools(
         agent_name=AGENT,
@@ -1701,16 +1664,6 @@ async def test_realtime_call_tools_use_the_callers_budget_and_count_helper_usage
         budgets=BudgetsConfig(fallback_model="cheap", monthly_limit_usd=0),
     )
     runtime_paths = test_runtime_paths(tmp_path)
-    execution_identity = build_tool_execution_identity(
-        channel="matrix",
-        agent_name=AGENT,
-        runtime_paths=runtime_paths,
-        requester_id=REQUESTER,
-        room_id="!room:example.org",
-        thread_id=None,
-        resolved_thread_id=None,
-        session_id="!room:example.org",
-    )
 
     async def claude_send(prompt: str) -> str:
         # Like claude_agent, a paid helper tool records its usage under the bound owner.
@@ -1748,7 +1701,6 @@ async def test_realtime_call_tools_use_the_callers_budget_and_count_helper_usage
             runtime_paths=runtime_paths,
             target=target,
         ),
-        build_execution_identity=lambda **_kwargs: execution_identity,
     )
 
     tooling = await build_call_tools(
@@ -1806,9 +1758,6 @@ async def test_cascaded_responder_refreshes_knowledge_and_availability_each_turn
                 orchestrator=orchestrator,
             )
 
-        def build_execution_identity(self, **_kwargs: object) -> SimpleNamespace:
-            return execution_identity
-
         async def run_in_context(
             self,
             *,
@@ -1857,7 +1806,7 @@ async def test_cascaded_responder_refreshes_knowledge_and_availability_each_turn
     assert tooling.finalize_spoken_response(second.turn_id, second.text, False) is None
 
     assert [call["refresh_scheduler"] for call in resolver_calls] == [first_scheduler, second_scheduler]
-    assert all(call["execution_identity"] is execution_identity for call in resolver_calls)
+    assert all(call["execution_identity"] == execution_identity for call in resolver_calls)
     assert ai_calls[0].knowledge is None
     assert ai_calls[1].knowledge is ready_knowledge
     first_used, second_used = ai_calls[0].reusable_build, ai_calls[1].reusable_build
@@ -1913,7 +1862,6 @@ async def test_call_responder_adds_origin_brief_enrichment(
                 runtime_paths=runtime_paths,
                 target=target,
             ),
-            build_execution_identity=lambda **_kwargs: _identity(runtime_paths),
             run_in_context=lambda **kwargs: kwargs["operation"](),
         ),  # type: ignore[arg-type]
         room_id="!room:example.org",
@@ -1949,9 +1897,6 @@ async def test_cascaded_responder_waits_for_interrupted_playout_settlement(
     class ToolSupport:
         def build_context(self, target: MessageTarget, **_kwargs: object) -> ToolRuntimeContext:
             return _runtime_context(config=config, runtime_paths=runtime_paths, target=target)
-
-        def build_execution_identity(self, **_kwargs: object) -> object:
-            return _identity(runtime_paths)
 
         async def run_in_context(
             self,

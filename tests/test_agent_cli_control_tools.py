@@ -541,7 +541,7 @@ async def test_hidden_child_pause_reuses_native_resume(tmp_path, monkeypatch, mo
             binding = await catalog.bind(ToolKey("delegate", "run_subagent"))
             events = [event async for event in execute_agent_tool_call(binding, str(call_id), arguments)]
             requirement = next(event.requirement for event in events if isinstance(event, AgentToolCallWaiting))
-            with catalog.execution_context():
+            with tool_runtime_context(catalog.runtime_context):
                 paused = await advance_cli_delegation(
                     binding,
                     requirement,

@@ -422,7 +422,7 @@ class ToolRuntimeSupport:
     async def run_in_context(
         self,
         *,
-        tool_context: ToolRuntimeContext | None,
+        tool_context: ToolRuntimeContext,
         operation: Callable[[], Awaitable[_ToolContextReturn]],
     ) -> _ToolContextReturn:
         """Execute one async operation inside the ambient tool runtime context."""
@@ -432,7 +432,7 @@ class ToolRuntimeSupport:
     def stream_in_context(
         self,
         *,
-        tool_context: ToolRuntimeContext | None,
+        tool_context: ToolRuntimeContext,
         stream_factory: Callable[[], AsyncIterator[_StreamChunk]],
     ) -> AsyncIterator[_StreamChunk]:
         """Wrap one async iterator without spanning tool-runtime tokens across yields."""

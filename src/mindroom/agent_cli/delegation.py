@@ -13,6 +13,7 @@ from mindroom.delegation.state import DELEGATION_FUNCTIONS
 from mindroom.event_journal import ApprovalCall, ApprovalDecision, approval_arguments_digest
 from mindroom.llm.runs import RunStatus
 from mindroom.response_turn import PausedAttempt, paused_attempt_from_response
+from mindroom.tool_system.runtime_context import tool_runtime_context
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Sequence
@@ -92,7 +93,7 @@ async def advance_cli_delegation(
 
     # Same mutation/authorization owner as ordinary prepared dispatch. The parent never resumes, and no hidden
     # requirement enters its provider history.
-    with catalog.execution_context():
+    with tool_runtime_context(catalog.runtime_context):
         result = await advance_delegation_call(
             requirement,
             response=response,

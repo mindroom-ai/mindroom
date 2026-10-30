@@ -7749,7 +7749,6 @@ async def test_cli_approval_scope_retains_only_shutdown_waits(tmp_path: Path, ca
     )
     assert await paused_for_approval(store, continuation) is not None
     runtime = response_runner.PreparedResponseRuntime(
-        resolved_target=target,
         media_inputs=response_runner.MediaInputs(),
         session_id=target.session_id,
         model_prompt="test",
@@ -7806,7 +7805,6 @@ async def test_cli_approval_scope_without_cli_pause_reads_no_approval_state(tmp_
     request = _plain_request(_target(thread_id="$thread"), source_event_id="$source")
     target = request.response_envelope.target
     runtime = response_runner.PreparedResponseRuntime(
-        resolved_target=target,
         media_inputs=response_runner.MediaInputs(),
         session_id=target.session_id,
         model_prompt="test",
@@ -7845,7 +7843,6 @@ async def test_expired_cli_grant_hands_exact_approval_to_native_resume(  # noqa:
     request = _plain_request(_target(thread_id="$thread"), source_event_id="$source")
     target = request.response_envelope.target
     runtime = response_runner.PreparedResponseRuntime(
-        resolved_target=target,
         media_inputs=response_runner.MediaInputs(),
         session_id=target.session_id,
         model_prompt="test",

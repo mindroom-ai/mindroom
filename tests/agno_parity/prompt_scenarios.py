@@ -74,7 +74,7 @@ from mindroom.tool_system.runtime_context import (
 )
 from mindroom.tool_system.skills import agent_workspace_skills_root
 from mindroom.tool_system.tool_access import tool_definition
-from mindroom.tool_system.worker_routing import agent_workspace_root_path, build_tool_execution_identity
+from mindroom.tool_system.worker_routing import agent_workspace_root_path
 from mindroom.topic_generator import generate_room_topic_ai
 from mindroom.voice.handler import _process_transcription
 from tests.agno_parity.golden_files import sorted_keys, turn_message
@@ -920,16 +920,12 @@ async def _caller_admitted() -> AsyncIterator[bool]:
 
 @dataclass
 class _CallToolSupport:
-    """The call manager's tool support, reduced to the context and identity one call binds."""
+    """The call manager's tool support, reduced to the context one call binds."""
 
     context: Callable[[MessageTarget, str], ToolRuntimeContext]
-    identity: ToolExecutionIdentity
 
     def build_context(self, target: MessageTarget, *, user_id: str, **_kwargs: object) -> ToolRuntimeContext:
         return self.context(target, user_id)
-
-    def build_execution_identity(self, **_kwargs: object) -> ToolExecutionIdentity:
-        return self.identity
 
     async def run_in_context[T](self, *, operation: Callable[[], Awaitable[T]], **_kwargs: object) -> T:
         return await operation()
@@ -939,16 +935,6 @@ async def _build_voice_call(root: Path, **call: object) -> tuple[dict[str, Any],
     authored = _voice_config()
     config, runtime_paths = _bound_config(root, authored)
     _write_workspace_files(runtime_paths, "assistant")
-    identity = build_tool_execution_identity(
-        channel="matrix",
-        agent_name="assistant",
-        runtime_paths=runtime_paths,
-        requester_id=_REQUESTER_ID,
-        room_id=_ROOM_ID,
-        thread_id=None,
-        resolved_thread_id=None,
-        session_id=_CALL_SESSION_ID,
-    )
     support = _CallToolSupport(
         lambda target, user_id: make_test_tool_runtime_context(
             agent_name="assistant",
@@ -960,7 +946,6 @@ async def _build_voice_call(root: Path, **call: object) -> tuple[dict[str, Any],
             relations=make_relation_lookup(),
             conversation_reader=make_conversation_reader_mock(),
         ),
-        identity,
     )
     tooling = await build_call_tools(
         agent_name="assistant",

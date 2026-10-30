@@ -368,7 +368,6 @@ class _CallAgentCache:
     config: Config
     runtime_paths: RuntimePaths
     context: ToolRuntimeContext
-    execution_identity: ToolExecutionIdentity
     active_model_name: str | None
     build: AgentBuild | None = None
     knowledge_identity: tuple[int, ...] = ()
@@ -385,7 +384,7 @@ class _CallAgentCache:
             self.config,
             self.runtime_paths,
             refresh_scheduler=scheduler,
-            execution_identity=self.execution_identity,
+            execution_identity=self.context.execution_identity,
         )
 
         async def render(build: AgentBuild) -> str:
@@ -442,7 +441,7 @@ class _CallAgentCache:
             self.agent_name,
             self.config,
             self.runtime_paths,
-            execution_identity=self.execution_identity,
+            execution_identity=self.context.execution_identity,
             knowledge=knowledge,
             plugins=self.context.plugins,
             model=resolve_turn_model(
@@ -511,11 +510,7 @@ async def build_call_tools(
             agent_name=agent_name,
         ),
     )
-    execution_identity = tool_support.build_execution_identity(
-        target=target,
-        user_id=requester_id,
-        agent_name=agent_name,
-    )
+    execution_identity = context.execution_identity
     if enable_responder:
         voice_enrichment_items: tuple[EnrichmentItem, ...] = ()
         if voice_instructions:
@@ -536,7 +531,6 @@ async def build_call_tools(
             config=config,
             runtime_paths=runtime_paths,
             context=context,
-            execution_identity=execution_identity,
             active_model_name=active_model_name,
         )
         responder = functools.partial(

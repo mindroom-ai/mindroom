@@ -81,13 +81,12 @@ from mindroom.matrix_rtc.focus import OpenIDToken, request_sfu_grant  # noqa: E4
 from mindroom.response_admission import ResponseAdmissionGate  # noqa: E402
 from mindroom.runtime_env_policy import CREDENTIALS_ENCRYPTION_KEY_ENV  # noqa: E402
 from mindroom.tool_system.runtime_context import ToolRuntimeContext, tool_runtime_context  # noqa: E402
-from mindroom.tool_system.worker_routing import agent_workspace_root_path, build_tool_execution_identity  # noqa: E402
+from mindroom.tool_system.worker_routing import agent_workspace_root_path  # noqa: E402
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
 
     from mindroom.message_target import MessageTarget
-    from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 
 HOMESERVER = "https://mindroom.chat"
 SERVICE_URL = "https://mindroom.chat/livekit/jwt"
@@ -570,25 +569,6 @@ async def main() -> int:  # noqa: C901, PLR0915
                         relations=make_relation_lookup(),
                         conversation_reader=make_conversation_reader_mock(),
                         storage_path=paths.storage_root,
-                    )
-
-                def build_execution_identity(
-                    self,
-                    *,
-                    target: MessageTarget,
-                    user_id: str | None,
-                    agent_name: str | None = None,
-                ) -> ToolExecutionIdentity:
-                    return build_tool_execution_identity(
-                        channel="matrix",
-                        agent_name=agent_name or AGENT,
-                        transport_agent_name=AGENT,
-                        runtime_paths=paths,
-                        requester_id=user_id or bot.user_id,
-                        room_id=target.room_id,
-                        thread_id=target.source_thread_id,
-                        resolved_thread_id=target.resolved_thread_id,
-                        session_id=target.session_id,
                     )
 
                 async def run_in_context(

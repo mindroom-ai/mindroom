@@ -5228,7 +5228,7 @@ class TestMultiAgentOrchestrator:
             patch("mindroom.orchestrator.prepare_plugins", return_value=PluginGeneration()),
             patch("mindroom.orchestrator.HookRegistry.from_plugins", return_value=new_hook_registry),
             patch("mindroom.orchestrator.set_scheduling_hook_registry") as mock_set_scheduling_hook_registry,
-            patch("mindroom.orchestrator.reset_worker_launch_config") as mock_clear_snapshot_cache,
+            patch("mindroom.orchestrator.reset_worker_launch_config") as mock_reset_launch_config,
             patch(
                 "mindroom.orchestration.config_lifecycle.build_config_update_plan",
                 side_effect=lambda **kwargs: replace(plan, plugin_changes=kwargs["plugin_changes"]),
@@ -5245,7 +5245,7 @@ class TestMultiAgentOrchestrator:
         assert orchestrator.config is current_config
         assert orchestrator.hook_registry is old_hook_registry
         mock_set_scheduling_hook_registry.assert_not_called()
-        mock_clear_snapshot_cache.assert_not_called()
+        mock_reset_launch_config.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_update_config_does_not_stop_mcp_entities_before_plugin_reload_succeeds(
@@ -5285,7 +5285,7 @@ class TestMultiAgentOrchestrator:
                 "mindroom.orchestrator.prepare_plugins",
                 side_effect=RuntimeError("broken plugin"),
             ),
-            patch("mindroom.orchestrator.reset_worker_launch_config") as mock_clear_snapshot_cache,
+            patch("mindroom.orchestrator.reset_worker_launch_config") as mock_reset_launch_config,
             pytest.raises(RuntimeError, match="broken plugin"),
         ):
             await orchestrator.config_reload._update_config()
@@ -5293,7 +5293,7 @@ class TestMultiAgentOrchestrator:
         fleet_stop.assert_not_awaited()
         assert bot.running is True
         assert orchestrator.config is current_config
-        mock_clear_snapshot_cache.assert_not_called()
+        mock_reset_launch_config.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_update_config_does_not_leak_plugin_state_before_config_commit(

@@ -69,39 +69,6 @@ if TYPE_CHECKING:
             """Read the latest visible sender message for one room or thread scope."""
 
 
-async def _send_bound_message(
-    logger: structlog.stdlib.BoundLogger,
-    message_sender: HookMessageSender | None,
-    plugin_name: str,
-    event_name: str,
-    room_id: str,
-    text: str,
-    *,
-    thread_id: str | None = None,
-    extra_content: dict[str, Any] | None = None,
-    requester_id: str | None = None,
-    message_received_depth: int = 0,
-    trigger_dispatch: bool = False,
-) -> str | None:
-    """Send one hook-originated Matrix message through a bound sender."""
-    if message_sender is None:
-        logger.warning("send_message called but no sender registered")
-        return None
-    resolved_extra_content = dict(extra_content or {})
-    if requester_id:
-        resolved_extra_content.setdefault(ORIGINAL_SENDER_KEY, requester_id)
-    if message_received_depth > 0:
-        resolved_extra_content[HOOK_MESSAGE_RECEIVED_DEPTH_KEY] = message_received_depth
-    return await message_sender(
-        room_id,
-        text,
-        thread_id,
-        format_hook_source(plugin_name, event_name),
-        resolved_extra_content or None,
-        trigger_dispatch=trigger_dispatch,
-    )
-
-
 @dataclass(frozen=True, slots=True)
 class HookBindings:
     """The hook registry and the Matrix capabilities that hooks emitted for one bot or turn receive.
@@ -304,34 +271,12 @@ class ResponseResult:
     envelope: MessageEnvelope
 
 
-@dataclass(slots=True, kw_only=True)
-class _HookLifecycleContext:
-    """Track whether a bound hook still belongs to the active registry."""
-
-    _hook_registry_state: HookRegistryState | None = field(
-        default=None,
-        repr=False,
-        compare=False,
-    )
-    _hook_registry_snapshot: HookRegistry | None = field(
-        default=None,
-        repr=False,
-        compare=False,
-    )
-
-    def is_active(self) -> bool:
-        """Return whether this hook still belongs to the live registry snapshot."""
-        return (
-            self._hook_registry_state is not None
-            and self._hook_registry_snapshot is not None
-            and self._hook_registry_state.registry is self._hook_registry_snapshot
-        )
-
-
 @dataclass(slots=True)
-class HookContext(_HookLifecycleContext):
+class HookContext:
     """Base fields available to every hook."""
 
+    _hook_registry_state: HookRegistryState | None = field(default=None, kw_only=True, repr=False, compare=False)
+    _hook_registry_snapshot: HookRegistry | None = field(default=None, kw_only=True, repr=False, compare=False)
     event_name: str
     config: Config
     runtime_paths: RuntimePaths
@@ -349,6 +294,14 @@ class HookContext(_HookLifecycleContext):
     matrix_admin: HookMatrixAdmin | None = field(default=None, kw_only=True)
     room_state_querier: HookRoomStateQuerier | None = field(default=None, kw_only=True)
     room_state_putter: HookRoomStatePutter | None = field(default=None, kw_only=True)
+
+    def is_active(self) -> bool:
+        """Return whether this hook still belongs to the live registry snapshot."""
+        return (
+            self._hook_registry_state is not None
+            and self._hook_registry_snapshot is not None
+            and self._hook_registry_state.registry is self._hook_registry_snapshot
+        )
 
     @property
     def state_root(self) -> Path:
@@ -379,17 +332,22 @@ class HookContext(_HookLifecycleContext):
         ``message:received`` re-entry for the rest of that synthetic
         chain to avoid cross-plugin feedback loops.
         """
-        return await _send_bound_message(
-            self.logger,
-            self.message_sender,
-            self.plugin_name,
-            self.event_name,
+        if self.message_sender is None:
+            self.logger.warning("send_message called but no sender registered")
+            return None
+        resolved_extra_content = dict(extra_content or {})
+        requester_id = _requester_id_for_hook_send(self, trigger_dispatch=trigger_dispatch)
+        if requester_id:
+            resolved_extra_content.setdefault(ORIGINAL_SENDER_KEY, requester_id)
+        message_received_depth = _message_received_depth_for_hook_send(self)
+        if message_received_depth > 0:
+            resolved_extra_content[HOOK_MESSAGE_RECEIVED_DEPTH_KEY] = message_received_depth
+        return await self.message_sender(
             room_id,
             text,
-            thread_id=thread_id,
-            extra_content=extra_content,
-            requester_id=_requester_id_for_hook_send(self, trigger_dispatch=trigger_dispatch),
-            message_received_depth=_message_received_depth_for_hook_send(self),
+            thread_id,
+            format_hook_source(self.plugin_name, self.event_name),
+            resolved_extra_content or None,
             trigger_dispatch=trigger_dispatch,
         )
 
@@ -587,18 +545,13 @@ class ScheduleFiredContext(HookContext):
         trigger_dispatch: bool = False,
     ) -> str | None:
         """Send a Matrix message from a schedule hook and return the event ID when available."""
-        resolved_thread_id = self.thread_id if isinstance(thread_id, _UnsetType) else thread_id
-        return await _send_bound_message(
-            self.logger,
-            self.message_sender,
-            self.plugin_name,
-            self.event_name,
+        # Named base call: zero-argument super() breaks in slots dataclasses.
+        return await HookContext.send_message(
+            self,
             room_id,
             text,
-            thread_id=resolved_thread_id,
+            thread_id=self.thread_id if isinstance(thread_id, _UnsetType) else thread_id,
             extra_content=extra_content,
-            requester_id=_requester_id_for_hook_send(self, trigger_dispatch=trigger_dispatch),
-            message_received_depth=_message_received_depth_for_hook_send(self),
             trigger_dispatch=trigger_dispatch,
         )
 
@@ -803,12 +756,12 @@ def _requester_id_for_hook_send(
     return None
 
 
-def _message_received_depth_for_hook_send(context: object) -> int:
+def _message_received_depth_for_hook_send(context: HookContext) -> int:
     """Return the synthetic hook-chain depth to preserve on hook sends."""
     return _next_message_received_depth(_current_message_received_depth(context))
 
 
-def _current_message_received_depth(context: object) -> int:
+def _current_message_received_depth(context: HookContext) -> int:
     """Return the inbound synthetic hook-chain depth for one hook context."""
     envelope = message_envelope_for_hook_context(context)
     if envelope is not None:
@@ -818,7 +771,7 @@ def _current_message_received_depth(context: object) -> int:
     return 0
 
 
-def message_envelope_for_hook_context(context: object) -> MessageEnvelope | None:
+def message_envelope_for_hook_context(context: HookContext) -> MessageEnvelope | None:
     """Return the message envelope carried by one hook context when present."""
     if isinstance(context, MessageReceivedContext | MessageEnrichContext | SystemEnrichContext):
         return context.envelope

@@ -292,7 +292,7 @@ def test_current_worker_launch_config_rebuilds_after_a_plugin_reload_of_the_same
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    """A plugin reload keeps the same config object, so clearing the snapshot cache must drop its launch too."""
+    """A plugin reload keeps the same config object, so resetting the worker launch config must drop its launch too."""
     runtime_paths = _runtime_paths(tmp_path)
     built_for = _count_validation_snapshots(monkeypatch)
     config = Config()

@@ -920,7 +920,7 @@ class TestUserIdPassthrough:
                     (get_tool_runtime_context(), current_execution_identity()),
                 )
 
-        stream = coordinator._stream_in_tool_context(
+        stream = coordinator.deps.tool_runtime.stream_in_context(
             tool_context=tool_context,
             stream_factory=source,
         )

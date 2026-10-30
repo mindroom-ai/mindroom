@@ -38,6 +38,7 @@ from mindroom.timing import elapsed_ms_since, emit_timing_event
 from mindroom.tool_jobs.control import job_checkpoint
 from mindroom.tool_jobs.execution_authority import check_current_execution_authority
 from mindroom.tool_system.call_record import tool_call_recorder
+from mindroom.tool_system.plugins import config_plugins
 from mindroom.tool_system.runtime_context import current_execution_identity, get_tool_runtime_context
 from mindroom.tool_system.tool_calls import ToolCallTiming, record_tool_failure, record_tool_success
 from mindroom.tool_system.tool_environment import ToolEnvironment, collected_tool_environment
@@ -50,7 +51,6 @@ if TYPE_CHECKING:
     from mindroom.approval.tool_approval import BackgroundScriptToolOrigin, ToolApprovalDecision
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
-    from mindroom.hooks import HookRegistry
     from mindroom.tool_system.invocation import ToolCall, ToolMiddleware, ToolNext
     from mindroom.tool_system.runtime_context import ToolRuntimeContext
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
@@ -391,7 +391,6 @@ async def _call_recorded_tool(
 
 async def _emit_after_call(
     *,
-    hook_registry: HookRegistry,
     resolved_context: _ResolvedToolContext,
     arguments: dict[str, Any],
     tool_name: str,
@@ -408,12 +407,11 @@ async def _emit_after_call(
         blocked=blocked,
         duration_ms=duration_ms,
     )
-    await emit(hook_registry, EVENT_TOOL_AFTER_CALL, after_context)
+    await emit(resolved_context.hooks.registry, EVENT_TOOL_AFTER_CALL, after_context)
 
 
 async def _run_before_hooks(
     *,
-    hook_registry: HookRegistry,
     resolved_context: _ResolvedToolContext,
     arguments: dict[str, Any],
     tool_name: str,
@@ -430,7 +428,7 @@ async def _run_before_hooks(
         tool_name=tool_name,
         agent_name=resolved_context.agent_name or None,
     )
-    await emit_gate(hook_registry, EVENT_TOOL_BEFORE_CALL, before_context)
+    await emit_gate(resolved_context.hooks.registry, EVENT_TOOL_BEFORE_CALL, before_context)
     emit_timing_event(
         "Tool hook dispatch timing",
         phase="before_hooks_finish",
@@ -446,7 +444,6 @@ async def _run_before_hooks(
 
 async def _collect_environment(
     *,
-    hook_registry: HookRegistry,
     resolved_context: _ResolvedToolContext,
     arguments: dict[str, Any],
     tool_name: str,
@@ -463,7 +460,7 @@ async def _collect_environment(
         function_name=tool_name,
         registered_toolkit=registered_toolkit,
     )
-    environment = await emit_collect_environment(hook_registry, context)
+    environment = await emit_collect_environment(resolved_context.hooks.registry, context)
     timing.environment_hooks_ms = elapsed_ms_since(started_at, clock=time.perf_counter, ndigits=2)
     if not context.declined:
         return environment, None
@@ -614,7 +611,6 @@ async def _execute_bridge(  # noqa: C901, PLR0915
         if has_after_hooks:
             after_hooks_started_at = time.perf_counter()
             await _emit_after_call(
-                hook_registry=hook_registry,
                 resolved_context=resolved_context,
                 arguments=hook_arguments,
                 tool_name=tool_name,
@@ -640,7 +636,6 @@ async def _execute_bridge(  # noqa: C901, PLR0915
     if has_before_hooks:
         before_hooks_started_at = time.perf_counter()
         declined_result = await _run_before_hooks(
-            hook_registry=hook_registry,
             resolved_context=resolved_context,
             arguments=hook_arguments,
             tool_name=tool_name,
@@ -661,7 +656,6 @@ async def _execute_bridge(  # noqa: C901, PLR0915
     # and declines the call when it cannot.
     environment, declined_result = (
         await _collect_environment(
-            hook_registry=hook_registry,
             resolved_context=resolved_context,
             arguments=hook_arguments,
             tool_name=tool_name,
@@ -701,7 +695,6 @@ async def _execute_bridge(  # noqa: C901, PLR0915
 
 async def dispatch_external_tool_hooks(
     *,
-    detached_hooks: Callable[[], HookBindings],
     execution_identity: ToolExecutionIdentity,
     config: Config,
     runtime_paths: RuntimePaths,
@@ -715,12 +708,12 @@ async def dispatch_external_tool_hooks(
 ) -> str | None:
     """Dispatch one phase of a durable external tool, called by ``execution_identity``, through the ordinary hook policy.
 
-    The phase selects its hooks as a call does; ``detached_hooks`` is computed only for a phase that runs without a
-    Matrix conversation, such as one a restart recovers.
+    The phase selects its hooks as a call does; a phase without a Matrix conversation, such as one a restart recovers,
+    runs the published plugins' hooks for ``config``.
     """
     resolved = _resolve_tool_context(
         execution_identity,
-        detached_hooks=detached_hooks,
+        detached_hooks=lambda: HookBindings(registry=config_plugins(config, runtime_paths).hooks),
         config=config,
         runtime_paths=runtime_paths,
         origin=None,
@@ -730,14 +723,12 @@ async def dispatch_external_tool_hooks(
         if not hook_registry.has_hooks(EVENT_TOOL_BEFORE_CALL):
             return None
         return await _run_before_hooks(
-            hook_registry=hook_registry,
             resolved_context=resolved,
             arguments=deepcopy(arguments),
             tool_name=tool_name,
         )
     if hook_registry.has_hooks(EVENT_TOOL_AFTER_CALL):
         await _emit_after_call(
-            hook_registry=hook_registry,
             resolved_context=resolved,
             arguments=deepcopy(arguments),
             tool_name=tool_name,

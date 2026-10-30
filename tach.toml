@@ -391,9 +391,7 @@ expose = [
 
 [[modules]]
 path = "mindroom.agent_cli.session"
-depends_on = [
-    "mindroom.tool_system.runtime_context",
-]
+depends_on = []
 visibility = [
     "mindroom.agent_cli.response_owner",
     "mindroom.agent_cli.turn",
@@ -432,7 +430,6 @@ depends_on = [
     "mindroom.tool_system.agent_tool_calls",
     "mindroom.tool_system.context_bound_streams",
     "mindroom.tool_system.events",
-    "mindroom.tool_system.runtime_context",
     "mindroom.tool_system.tool_access",
     "mindroom.agent_cli.checkpoint",
     "mindroom.llm",
@@ -810,7 +807,6 @@ depends_on = [
     "mindroom.tool_system.context_bound_streams",
     "mindroom.tool_system.events",
     "mindroom.tool_system.runtime_context",
-    "mindroom.tool_system.worker_routing",
     "mindroom.agent_cli.cli_shell_agent",
     "mindroom.agent_cli.events",
     "mindroom.agent_cli.lifetime",
@@ -1390,7 +1386,6 @@ depends_on = [
     "mindroom.tool_system.context_bound_streams",
     "mindroom.tool_system.events",
     "mindroom.tool_system.runtime_context",
-    "mindroom.tool_system.worker_routing",
     "mindroom.agent_cli.approval",
     "mindroom.turn_model",
     "mindroom.session_storage.lanes",
@@ -1527,7 +1522,6 @@ depends_on = [
     "mindroom.streaming",
     "mindroom.teams",
     "mindroom.tool_system.events",
-    "mindroom.tool_system.runtime_context",
     "mindroom.turn_model",
 ]
 visibility = ["mindroom.response_runner"]
@@ -3520,8 +3514,6 @@ depends_on = [
     "mindroom.tool_jobs.follow_ups",
     "mindroom.tool_jobs.runtime",
     "mindroom.tool_system.events",
-    "mindroom.tool_system.runtime_context",
-    "mindroom.tool_system.worker_routing",
     "mindroom.turn_record",
     "mindroom.turn_store",
     "mindroom.tool_system.context_bound_streams",
@@ -5851,7 +5843,7 @@ depends_on = [
     "mindroom.tool_system.tool_calls",
     "mindroom.tool_system.tool_environment",
     "mindroom.tool_system.tool_function",
-    "mindroom.tool_system.worker_routing",
+    "mindroom.tool_system.plugins",
 ]
 
 [[modules]]
@@ -8195,7 +8187,6 @@ depends_on = [
     "mindroom.tool_jobs.results",
     "mindroom.tool_system.runtime_context",
     "mindroom.tool_system.tool_function",
-    "mindroom.tool_system.worker_routing",
     "mindroom.turn_model",
     "mindroom.tool_system.plugins",
 ]
@@ -8222,9 +8213,6 @@ depends_on = ["mindroom.history.types", "mindroom.tool_system.worker_routing"]
 path = "mindroom.delegation.hooks"
 depends_on = [
     "mindroom.delegation.state",
-    "mindroom.hooks",
-    "mindroom.tool_system.plugins",
-    "mindroom.tool_system.runtime_context",
     "mindroom.tool_system.tool_hooks",
     "mindroom.tool_system.worker_routing",
 ]
@@ -9096,7 +9084,6 @@ depends_on = [
     "mindroom.tool_system.runtime_context",
     "mindroom.tool_system.tool_function",
     "mindroom.tool_system.tool_hooks",
-    "mindroom.tool_system.worker_routing",
 ]
 visibility = [
     # Agent assembly admits the calls of agents and team leaders as jobs, and the loop hooks offer their wait budget.
@@ -9198,7 +9185,6 @@ depends_on = [
     "mindroom.tool_system.runtime_context",
     "mindroom.tool_system.tool_access",
     "mindroom.tool_system.tool_hooks",
-    "mindroom.tool_system.worker_routing",
     "mindroom.llm",
     "mindroom.tool_system.invocation",
     "mindroom.tool_system.tool_function",
