@@ -23,6 +23,7 @@ from mindroom.config.yaml_includes import ConfigIncludeError, load_yaml_config_s
 from mindroom.constants import resolve_runtime_paths
 from mindroom.orchestrator import _watch_config_task
 from tests.conftest import make_config_reload_lifecycle
+from tests.file_watcher_helpers import record_watcher_scans
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -687,10 +688,11 @@ class TestWatchPaths:
         async def on_change() -> None:
             changed.set()
 
+        scans = record_watcher_scans(monkeypatch)
         watch_task = asyncio.create_task(
             file_watcher.watch_paths(lambda: (top, included), on_change, stop_event),
         )
-        await asyncio.sleep(0.05)
+        await scans.wait_for_scan_of(top, included)
         future_time = time.time() + 5
         included.write_text("b: 3\n", encoding="utf-8")
         os.utime(included, (future_time, future_time))
@@ -709,18 +711,22 @@ class TestWatchPaths:
         monkeypatch.setattr(file_watcher, "_WATCH_SCAN_INTERVAL_SECONDS", 0.01)
         files = [_write(tmp_path / name, "a: 1\n") for name in ("config.yaml", "b.yaml", "c.yaml")]
         callbacks: list[bool] = []
+        changed = asyncio.Event()
         stop_event = asyncio.Event()
 
         async def on_change() -> None:
             callbacks.append(True)
+            changed.set()
 
+        scans = record_watcher_scans(monkeypatch)
         watch_task = asyncio.create_task(file_watcher.watch_paths(lambda: tuple(files), on_change, stop_event))
-        await asyncio.sleep(0.05)
+        await scans.wait_for_scan_of(*files)
         future_time = time.time() + 5
         for path in files:
             path.write_text("a: 2\n", encoding="utf-8")
             os.utime(path, (future_time, future_time))
-        await asyncio.sleep(0.2)
+        await asyncio.wait_for(changed.wait(), timeout=2)
+        await scans.wait_for_next_scan()
 
         stop_event.set()
         await watch_task
@@ -804,13 +810,16 @@ class TestWatchPaths:
         top = _write(tmp_path / "config.yaml", "a: 1\n")
         included = _write(tmp_path / "agents.yaml", "b: 2\n")
         callbacks: list[bool] = []
+        changed = asyncio.Event()
         stop_event = asyncio.Event()
 
         async def on_change() -> None:
             callbacks.append(True)
+            changed.set()
 
+        scans = record_watcher_scans(monkeypatch)
         watch_task = asyncio.create_task(file_watcher.watch_paths(lambda: (top, included), on_change, stop_event))
-        await asyncio.sleep(0.05)
+        await scans.wait_for_scan_of(top, included)
         included.unlink()
         await asyncio.sleep(0.1)
         assert callbacks == []
@@ -818,7 +827,8 @@ class TestWatchPaths:
         future_time = time.time() + 5
         _write(included, "b: 3\n")
         os.utime(included, (future_time, future_time))
-        await asyncio.sleep(0.1)
+        await asyncio.wait_for(changed.wait(), timeout=2)
+        await scans.wait_for_next_scan()
 
         stop_event.set()
         await watch_task
@@ -950,8 +960,9 @@ class TestFailedReloadWatchSet:
             await lifecycle._apply_queued_config_reload()
             reloads.set()
 
+        scans = record_watcher_scans(monkeypatch)
         watch_task = asyncio.create_task(file_watcher.watch_paths(provider, on_change, stop_event))
-        await asyncio.sleep(0.05)
+        await scans.wait_for_scan_of(config_path)
 
         future_time = time.time() + 5
         new_file = _write(tmp_path / "agents" / "new.yaml", "code: [unclosed\n")
@@ -965,7 +976,7 @@ class TestFailedReloadWatchSet:
         assert new_file.resolve() in lifecycle.watched_source_files
 
         # Let the watcher baseline the newly watched file, then fix ONLY it.
-        await asyncio.sleep(0.05)
+        await scans.wait_for_scan_of(new_file)
         reloads.clear()
         future_time += 5
         _write(new_file, "code:\n  display_name: Code\n  role: Writes code\n")

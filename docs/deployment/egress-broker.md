@@ -129,6 +129,8 @@ egress_broker:
 | `restrict_to_rules` | No | Default `false`. Set `true` to refuse, with 403 `path_not_allowed`, a request to this service's hosts whose path matches none of its party's rules there, instead of forwarding it without credentials; see [Limiting paths and repositories](#limiting-paths-and-repositories). Presets never set it |
 | `restrict_only` | No | Default `false`. Only for user services; see [Limiting in place](#limiting-in-place) |
 | `oauth_separate_account` | No | Default `false`. Only for user services with an `oauth_provider` other than `github` or `atlassian` on `user` and `user_agent` agents; see [A service's own account](#a-services-own-account) |
+| `admin_key` | No | Default `false`. Set `true` to give every agent the service serves one key that only an administrator sets; see [Administrator keys](#administrator-keys). Only `config.yaml` may set it, and presets never do |
+| `agents` | No | Default every agent. A list of agent names that get the service's key or account; see [Limiting a service to some agents](#limiting-a-service-to-some-agents). Only `config.yaml` may set it |
 
 **Rule fields:**
 
@@ -343,6 +345,48 @@ The dashboard's routes are under `/api/egress-broker/`, the personal page's unde
 A script can set a shared or unscoped agent's key with `PUT /api/egress-broker/services/<name>/secret?agent_name=<agent>` and the body `{"secret": "..."}`, and remove it with `DELETE` on the same URL; without `agent_name` it sets the key that agents without a scope share.
 On a standalone deployment the script authenticates with `Authorization: Bearer $MINDROOM_API_KEY`.
 
+### Administrator keys
+
+An administrator key is one key for every agent a service serves, whatever its worker scope, personal agents included, so users do not need keys of their own:
+
+```yaml
+egress_broker:
+  services:
+    search:
+      display_name: Search API
+      rules:
+        - host: api.search.example
+          auth: { type: bearer }
+      admin_key: true
+```
+
+Set the key in the service's row on the dashboard's **Agent Keys** panel, whichever agent **Keys for** selects, or with `PUT /api/egress-broker/services/search/secret` from a script.
+Users see on their egress page that their administrator set the key, but nobody can read it, and only administrators on the dashboard can replace or remove it.
+The service uses no connected account: a preset's account login is left out, and setting `oauth_provider` or `read_only` next to `admin_key` is an error.
+Keys stored for the service in an agent's own scope are not used while `admin_key` is set.
+Until the key is set, requests to the service get 403 `credential_not_configured` with a message that only an administrator can set it.
+
+### Limiting a service to some agents
+
+`agents` lists the agents that get a service's key or account, so other agents never use it:
+
+```yaml
+egress_broker:
+  services:
+    search:
+      rules:
+        - host: api.search.example
+          auth: { type: bearer }
+      admin_key: true
+      agents: [research, coder]
+```
+
+Requests from any other agent that the service matches get 403 `agent_not_allowed`, its egress page and the [`egress_credentials` tool](#agent-tool) leave the service out for that agent, and its placeholder variables are not set.
+The dashboard lists the service in every scope with the agents it is limited to.
+A user's own service on the same hosts and paths loses the tie to it, so for another agent a request uses that service only by naming it with the `X-Agent-Keys-Service` header (see [A service's own account](#a-services-own-account)).
+Every name must be an existing agent.
+Where agents share a sandbox, the list decides which agents get the key but not which code can reach it: the static runner runs every agent's calls in one process, and a requester's `user` agents share one worker, so code there can use a listed agent's proxy token (see [Personal accounts and shared sandboxes](#personal-accounts-and-shared-sandboxes)).
+
 ### Connecting an account
 
 On the personal egress page and the dashboard panel, a service with an account provider offers **Connect**, which allows Agent Keys to use the provider's account (see [Using a connected account](#using-a-connected-account)) and then opens the provider's login in a popup; the allowance stays on even if the popup is closed without connecting.
@@ -535,13 +579,14 @@ Its one function, `list_egress_credentials`, takes no arguments and returns JSON
 
 - The tool lists the services the broker matches for the calling scope that take a credential: the services in `config.yaml`, then the user's own [user services](#user-services).
   `source` says which, `config` or `user`, so the agent can tell the user whether an administrator defined a service or they added it themselves.
-  A [`restrict_only` service](#limiting-in-place) is left out.
+  A [`restrict_only` service](#limiting-in-place) is left out, and so is a service whose [`agents` list](#limiting-a-service-to-some-agents) leaves out the calling agent.
 - `configured` is true when the calling agent's scope has either source for the service, and `active_source` says which one the broker uses: `key`, `oauth`, or `null`.
   The tool reports the scope the broker uses, so each requester sees only their own keys and, for GitHub and Atlassian, their own account, and an agent with no worker scope reads the global store.
 - `oauth_reuse` says whether Agent Keys may use the service's account (see [Using a connected account](#using-a-connected-account)); it is `null` for a service without an account provider or whose GitHub or Atlassian account the broker never uses in a [shared sandbox](#personal-accounts-and-shared-sandboxes).
   When it is `false`, `provider` names the account to allow, and the note tells the agent that allowing it lets its commands act as the account without the approval prompts the account's tools ask for, and who may allow it.
 - `oauth_access` is `read` or `read_write` for an account Agent Keys may use, and `null` otherwise; under `read`, writes fail with `read_only` until the account is allowed read and write (see [Read-only accounts](#read-only-accounts)).
 - `separate_account: true` marks a service with [its own account](#a-services-own-account), and the note tells the agent to name one of the user's own services with the `X-Agent-Keys-Service` header.
+- `admin_key: true` marks an [administrator key](#administrator-keys), and the note tells the agent to ask an administrator, not the user, when it is not configured.
 - A service with nothing configured also reports `can_connect_account`.
   When it is `true`, the user can connect an account Agent Keys may use instead of adding a key, and `provider` names the OAuth provider id.
   It is `false` when the account is not allowed, the service has no account provider, the provider's OAuth client is not set up, a shared service account serves the provider, a stored connection needs a reset first, or the provider is GitHub or Atlassian in a [shared sandbox](#personal-accounts-and-shared-sandboxes); `provider` is then `null` unless the account is not allowed.
@@ -651,6 +696,8 @@ The broker returns these errors to worker code:
 | Request that an account allowed read only may not make (see [Read-only accounts](#read-only-accounts)) | 403 JSON `{"error": "read_only", "service": "<name>", "provider": "<id>", "manage_url": "<link>", "message": "..."}`; allow read and write at `manage_url` |
 | Matched service, no key, and an account provider nobody allowed Agent Keys to use | 403 JSON `{"error": "credential_not_configured", "service": "<name>", "provider": "<id>", "oauth_reuse": "off", "manage_url": "<link>", "message": "..."}` with no `connect_url`; add a key or allow the account at `manage_url` |
 | Matched service whose [own account](#a-services-own-account) is not connected or not allowed | 403 JSON `{"error": "credential_not_configured", "service": "<name>", "manage_url": "<link>", "message": "..."}` with no `connect_url`, plus `"provider": "<id>"` and `"oauth_reuse": "off"` while nobody allowed it; connect and allow the service's own account at `manage_url` |
+| Matched service whose `agents` list leaves out the calling agent (see [Limiting a service to some agents](#limiting-a-service-to-some-agents)) | 403 JSON `{"error": "agent_not_allowed", "service": "<name>", "message": "..."}`; an administrator changes the list |
+| Matched [administrator key](#administrator-keys) service whose key is not set | 403 JSON `{"error": "credential_not_configured", "service": "<name>", "message": "..."}` with no `manage_url`; an administrator sets the key on the dashboard |
 | Matched service, no key and no connected account in scope | 403 JSON `{"error": "credential_not_configured", "service": "<name>", "manage_url": "<link>", "message": "..."}`, plus `"provider": "<id>"` and `"connect_url": "<link>"` when the user can connect an account that is not shared by everyone using the agent |
 | Connected account revoked, rejected by the provider, or unreadable | 403 JSON `{"error": "oauth_connection_required", "service": "<name>", "provider": "<id>", "connect_url": "<link>", "manage_url": "<link>", "message": "..."}`; `connect_url` is `null` for a shared connection, and an unreadable stored credential adds `"reset_required": true` and has a `null` `connect_url` until it is reset |
 | Provider outage, timeout, or network failure while refreshing the account's token | 503 JSON `{"error": "oauth_refresh_failed", "service": "<name>", "provider": "<id>", "manage_url": "<link>", "message": "..."}`; retry later, do not reconnect |

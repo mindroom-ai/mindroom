@@ -1171,3 +1171,48 @@ def test_services_load_at_most_the_status_load_limit_at_once(
     assert response.status_code == 200, response.text
     assert [service["name"] for service in response.json()["services"]] == ["drive", "gh", "ghost", "github"]
     assert counts == [0, 2]
+
+
+def _add_services(egress_config_file: Path, **services: dict[str, Any]) -> None:
+    """Add `services` to the config file's egress services."""
+    config_data = yaml.safe_load(egress_config_file.read_text(encoding="utf-8"))
+    config_data["egress_broker"]["services"].update(services)
+    egress_config_file.write_text(yaml.dump(config_data), encoding="utf-8")
+
+
+_SEARCH = {"rules": [{"host": "api.search.example", "auth": {"type": "bearer"}}]}
+
+
+def test_an_administrator_key_is_one_key_whichever_scope_sets_it(egress_config_file: Path) -> None:
+    """A key set while an agent's scope is selected is the global one, and every scope shows it set and removed."""
+    from mindroom.api import main  # noqa: PLC0415
+
+    _add_services(egress_config_file, search={**_SEARCH, "admin_key": True, "agents": ["test_agent"]})
+    client = _admin_client(egress_config_file)
+    manager = get_runtime_credentials_manager(main._app_runtime_paths(main.app))
+
+    put = client.put("/api/egress-broker/services/search/secret?agent_name=test_agent", json={"secret": "admin-key"})
+
+    assert put.status_code == 204, put.text
+    assert secrets.load_secret(manager, None, "search", admin_key=True) == "admin-key"
+    assert secrets.load_secret(manager, None, "search") is None
+    for agent_name in (None, "test_agent"):
+        row = _service(client, "search", agent_name)
+        assert (row["configured"], row["admin_key"], row["agents"]) == (True, True, ["test_agent"])
+    assert client.delete("/api/egress-broker/services/search/secret?agent_name=test_agent").status_code == 204
+    assert secrets.load_secret(manager, None, "search", admin_key=True) is None
+
+
+def test_the_dashboard_lists_a_service_for_agents_its_list_leaves_out(egress_config_file: Path) -> None:
+    """The administrator sees every config service in every scope, with the agents each one serves."""
+    _add_services(egress_config_file, search={**_SEARCH, "agents": ["test_agent"]})
+    client = _client_with_agents(
+        egress_config_file,
+        {
+            "test_agent": _keys_agent(["shell"], worker_scope="shared"),
+            "other": _keys_agent(["shell"], worker_scope="shared"),
+        },
+    )
+
+    assert _service(client, "search", "other")["agents"] == ["test_agent"]
+    assert (_service(client, "github", "other")["agents"], _service(client, "github")["admin_key"]) == (None, False)

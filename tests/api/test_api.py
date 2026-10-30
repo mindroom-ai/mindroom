@@ -61,6 +61,7 @@ from tests.api.conftest import (
     use_trusted_upstream_runtime,
 )
 from tests.conftest import failed_config_load
+from tests.file_watcher_helpers import record_watcher_scans
 from tests.matrix_state_helpers import save_matrix_state
 from tests.oauth_test_utils import publish_oauth_credentials
 from tests.test_personal_agents_config import _entry as personal_agent_entry
@@ -878,6 +879,7 @@ def test_api_lifespan_loads_config_from_injected_runtime(
 @pytest.mark.asyncio
 async def test_watch_config_follows_runtime_swaps(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     """Config watching should follow the app's current runtime paths."""
+    loop = asyncio.get_running_loop()
     loaded_paths: list[Path] = []
     load_event = asyncio.Event()
     stop_event = asyncio.Event()
@@ -888,15 +890,19 @@ async def test_watch_config_follows_runtime_swaps(monkeypatch: pytest.MonkeyPatc
     first_runtime = constants.resolve_primary_runtime_paths(config_path=first_config_path, process_env={})
     second_runtime = constants.resolve_primary_runtime_paths(config_path=second_config_path, process_env={})
     main.initialize_api_app(main.app, first_runtime)
-    monkeypatch.setattr(
-        config_lifecycle,
-        "load_config_into_app",
-        lambda runtime_paths, _app: _record_loaded_path(runtime_paths, loaded_paths, load_event),
-    )
+
+    # The watcher loads in a worker thread, so the load reaches the loop through call_soon_threadsafe.
+    def _record_load(runtime_paths: constants.RuntimePaths, _app: FastAPI) -> ConfigLoad:
+        loaded_paths.append(runtime_paths.config_path)
+        loop.call_soon_threadsafe(load_event.set)
+        return failed_config_load(OSError("this test only records the load"))
+
+    monkeypatch.setattr(config_lifecycle, "load_config_into_app", _record_load)
+    scans = record_watcher_scans(monkeypatch)
 
     watch_task = asyncio.create_task(main._watch_config(stop_event, main.app, poll_interval_seconds=0.01))
 
-    await asyncio.sleep(0.02)
+    await scans.wait_for_scan_of(first_config_path)
     first_timestamp = time.time() + 1
     first_config_path.write_text("models: {default: {provider: openai, id: gpt-6-astra}}\n", encoding="utf-8")
     os.utime(first_config_path, (first_timestamp, first_timestamp))
@@ -905,7 +911,7 @@ async def test_watch_config_follows_runtime_swaps(monkeypatch: pytest.MonkeyPatc
 
     main.initialize_api_app(main.app, second_runtime)
     load_event.clear()
-    await asyncio.sleep(0.02)
+    await scans.wait_for_scan_of(second_config_path)
     second_timestamp = first_timestamp + 1
     second_config_path.write_text("models: {default: {provider: openai, id: gpt-6-astra}}\n", encoding="utf-8")
     os.utime(second_config_path, (second_timestamp, second_timestamp))
@@ -916,16 +922,6 @@ async def test_watch_config_follows_runtime_swaps(monkeypatch: pytest.MonkeyPatc
     await watch_task
 
     assert loaded_paths == [first_config_path, second_config_path]
-
-
-def _record_loaded_path(
-    runtime_paths: constants.RuntimePaths,
-    loaded_paths: list[Path],
-    load_event: asyncio.Event,
-) -> ConfigLoad:
-    loaded_paths.append(runtime_paths.config_path)
-    load_event.set()
-    return failed_config_load(OSError("this test only records the load"))
 
 
 @pytest.mark.asyncio

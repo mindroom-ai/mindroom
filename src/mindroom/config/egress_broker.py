@@ -60,6 +60,8 @@ _RESERVED_CA_VARS = {*RUNNER_CA_BUNDLE_ENV, "NODE_EXTRA_CA_CERTS"}
 RESERVED_PLACEHOLDER_NAMES = frozenset(_RESERVED_EXACT | _RESERVED_PROXY_VARS | _RESERVED_CA_VARS)
 # EgressService fields that only matter for a service that sends a credential; restrict_only services cannot set them.
 _CREDENTIAL_FIELDS = ("oauth_provider", "placeholder_env", "oauth_on_shared_workers", "read_only")
+# EgressService fields that only matter for a connected account; admin_key services use only a key, so cannot set them.
+_ACCOUNT_FIELDS = ("oauth_provider", "read_only", "oauth_on_shared_workers")
 
 
 class EgressAuth(BaseModel):
@@ -293,6 +295,25 @@ class EgressService(BaseModel):
         ),
     )
 
+    # Strict, so a string such as "true" is refused instead of silently moving where the service's key lives.
+    admin_key: StrictBool = Field(
+        default=False,
+        description=(
+            "Use one key for every agent the service serves, which only an administrator sets, on the dashboard; "
+            "users and credential managers see that it is set but cannot set, replace, or remove it. Such a service "
+            "uses no connected account, so a preset's oauth_provider and read_only are left out. Only config.yaml may "
+            "set it, and presets never do"
+        ),
+    )
+    agents: list[str] | None = Field(
+        default=None,
+        description=(
+            "Agents whose requests get the service's credential; requests it matches from any other agent are "
+            "refused (403 agent_not_allowed), and it is not offered to them. Omit to serve every agent that uses "
+            "Agent Keys. Only config.yaml may set it, and presets never do"
+        ),
+    )
+
     @model_validator(mode="wrap")
     @classmethod
     def expand_preset(cls, data: object, handler: ModelWrapValidatorHandler[EgressService]) -> EgressService:
@@ -302,7 +323,8 @@ class EgressService(BaseModel):
         so every existing validator runs on the resolved service.
         Afterwards only the authored fields stay in `model_fields_set`,
         so `Config.authored_model_dump()` keeps `{preset: github}` as written and later preset updates still apply.
-        A `restrict_only` service takes no login, placeholders, or `read_only` from its preset, since it never sends a credential.
+        A `restrict_only` service takes no login, placeholders, or `read_only` from its preset, since it never sends a
+        credential, and an `admin_key` service no login or `read_only`, since it uses only its key.
         """
         authored = cast("dict[str, object]", data) if isinstance(data, dict) else {}
         name = authored.get("preset")
@@ -318,6 +340,9 @@ class EgressService(BaseModel):
         if authored.get("restrict_only") is True:
             for credential_field in _CREDENTIAL_FIELDS:
                 defaults.pop(credential_field, None)
+        if authored.get("admin_key") is True:
+            for account_field in _ACCOUNT_FIELDS:
+                defaults.pop(account_field, None)
         service = handler({**defaults, **authored})
         service.model_fields_set.difference_update(set(preset) - set(authored))
         return service
@@ -349,6 +374,23 @@ class EgressService(BaseModel):
             msg = "oauth_separate_account needs an oauth_provider to log in to"
             raise ValueError(msg)
         return self
+
+    @model_validator(mode="after")
+    def _check_operator_fields(self) -> EgressService:
+        """Reject account settings on an `admin_key` service, which sends only its key, and an empty `agents` list."""
+        if self.admin_key:
+            for account_field in _ACCOUNT_FIELDS:
+                if getattr(self, account_field):
+                    msg = f"an admin_key service takes no connected account, so it cannot set {account_field}"
+                    raise ValueError(msg)
+        if self.agents == []:
+            msg = "agents must list at least one agent; leave it out to serve every agent"
+            raise ValueError(msg)
+        return self
+
+    def serves_agent(self, agent_name: str | None) -> bool:
+        """Return whether requests of `agent_name` get the service's credential: every agent's without `agents`."""
+        return self.agents is None or agent_name in self.agents
 
     @field_validator("placeholder_env")
     @classmethod

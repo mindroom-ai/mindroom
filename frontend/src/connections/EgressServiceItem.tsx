@@ -11,6 +11,8 @@ import {
 import { ConfirmDialog } from "./ConfirmDialog";
 import {
   canEdit,
+  adminKeyNote,
+  agentsNote,
   limitedNote,
   limitOverlap,
   limitOf,
@@ -205,6 +207,8 @@ export function EgressServiceItem({
   const asksAboutSharedAccount = sharesAccount(agent, oauth);
   const limitedText = limitedNote(service);
   const unsetText = unsetNote(service);
+  const adminKeyText = adminKeyNote(service);
+  const agentsText = agentsNote(service);
   const limitActions = useLimitActions(
     limit,
     service.display_name,
@@ -491,6 +495,12 @@ export function EgressServiceItem({
               Agents choose it with{" "}
               <Code>X-Agent-Keys-Service: {service.name}</Code>
             </p>
+          )}
+          {adminKeyText && (
+            <p className="text-xs text-muted-foreground">{adminKeyText}</p>
+          )}
+          {agentsText && (
+            <p className="text-xs text-muted-foreground">{agentsText}</p>
           )}
           {limitedText && (
             <p className="text-xs text-muted-foreground">{limitedText}</p>
