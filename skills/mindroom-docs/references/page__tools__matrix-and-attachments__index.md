@@ -65,20 +65,21 @@ Each agent, requester, and room combination may send six voice messages per 30 s
 | Field | Default | Meaning |
 |-------|---------|---------|
 | `api_key` | none | Speech API key; when empty, OpenAI models use `OPENAI_API_KEY` (or `OPENAI_API_KEY_FILE`, or a stored credential) and OpenRouter models use `OPENROUTER_API_KEY` |
-| `model` | `gpt-4o-mini-tts` | Plain IDs use OpenAI; provider-prefixed IDs such as `hexgrad/kokoro-82m` route through OpenRouter |
-| `base_url` | none | Any OpenAI-compatible speech endpoint, such as a local Kokoro server; also settable through the `TTS_URL` secret |
-| `voice` | `alloy` | Voice name passed to the endpoint |
-| `response_format` | `opus` | Format the endpoint returns: `aac`, `flac`, `mp3`, `opus`, or `wav`; OpenRouter always uses `mp3` |
+| `model` | `gpt-realtime-2.1-mini` | `gpt-realtime` IDs use the OpenAI Realtime API, other plain IDs an OpenAI-compatible `/audio/speech` endpoint, and provider-prefixed IDs such as `hexgrad/kokoro-82m` route through OpenRouter |
+| `base_url` | none | Any OpenAI-compatible speech endpoint, such as a local Kokoro server, with `model` set to one it serves; also settable through the `TTS_URL` secret |
+| `voice` | `alloy` | Voice name; `gpt-realtime` models offer `alloy`, `ash`, `ballad`, `coral`, `echo`, `sage`, `shimmer`, `verse`, `marin`, and `cedar` |
+| `response_format` | `opus` | Format the endpoint returns: `aac`, `flac`, `mp3`, `opus`, or `wav`; OpenRouter always uses `mp3`, and `gpt-realtime` models ignore it |
 
 `base_url` accepts a bare host, a `/v1` URL, or a full `/audio/speech` URL, which is used as given.
 A custom non-OpenRouter `base_url` without `api_key` never receives your OpenAI key.
-Formats other than `opus` require `ffmpeg` and `ffprobe` on the backend host; `opus` works without them but the voice note then has no duration.
+`gpt-realtime` models and formats other than `opus` require `ffmpeg` and `ffprobe` on the backend host; `opus` from a speech endpoint works without them but the voice note then has no duration.
 
 ```yaml
 agents:
   assistant:
     tools:
       - matrix_voice_message:
+          model: kokoro
           base_url: http://localhost:8880/v1
 ```
 

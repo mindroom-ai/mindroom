@@ -817,8 +817,10 @@ async def test_a_fresh_child_hands_its_parent_the_record_its_run_ended_with_not_
     def planting_persist_to(
         store: ConversationStore,
         session: ConversationSession,
+        *,
+        replays: Callable[[AnyRunRecord], bool] | None = None,
     ) -> Callable[[AnyRunRecord], Awaitable[None]]:
-        persist = persist_to(store, session)
+        persist = persist_to(store, session, replays=replays)
 
         async def plant(record: AnyRunRecord) -> None:
             # Stands in for a stored row that differs from the record the child's run handed over.

@@ -101,7 +101,7 @@ Each speech service (`stt` and `tts`) has these fields:
 
 `openai` services require `credentials_service` or `api_key`.
 `openai_compatible` services require `host` and may omit credentials, in which case MindRoom sends a non-secret placeholder key.
-STT services must expose `/v1/audio/transcriptions` and TTS services `/v1/audio/speech`.
+STT services must expose `/v1/audio/transcriptions` and TTS services `/v1/audio/speech`, except `gpt-realtime` TTS models, which speak through the OpenAI Realtime API and take only `voice` in `extra_kwargs`.
 The two legs may use the same credential service or different ones.
 
 ## Choosing a backend
@@ -180,7 +180,7 @@ calls:
           language: en
       tts:
         provider: openai
-        model: gpt-4o-mini-tts
+        model: gpt-realtime-2.1-mini
         credentials_service: openai-voice
         extra_kwargs:
           voice: ash
@@ -188,7 +188,7 @@ calls:
     assistant: fast-cascaded
 ```
 
-OpenAI documents [`gpt-transcribe`](https://developers.openai.com/api/docs/models/gpt-transcribe) for transcription and [`gpt-4o-mini-tts`](https://developers.openai.com/api/docs/models/gpt-4o-mini-tts) for text-to-speech.
+OpenAI documents [`gpt-transcribe`](https://developers.openai.com/api/docs/models/gpt-transcribe) for transcription and [`gpt-realtime-2.1-mini`](https://developers.openai.com/api/docs/models/gpt-realtime-2.1-mini) for text-to-speech.
 
 ### Completely local cascaded setup
 
