@@ -158,7 +158,7 @@ agents:
 ## [`twilio`]
 
 `twilio` sends SMS with `send_sms()`, looks up calls with `get_call_details()`, and lists recent messages with `list_messages()`.
-Authenticate with `account_sid` plus either `auth_token` or the `api_key` and `api_secret` pair.
+Authenticate with `account_sid` plus either `auth_token` or the `api_key` and `api_secret` pair; the pair wins when both are set.
 `send_sms()` rejects sender and recipient numbers that are not in E.164 format, such as `+15551234567`, and the sender must be a number on the Twilio account.
 
 | Option | Type | Default | Notes |
@@ -167,8 +167,8 @@ Authenticate with `account_sid` plus either `auth_token` or the `api_key` and `a
 | `auth_token` | `password` | `null` | Auth token, or `TWILIO_AUTH_TOKEN`. |
 | `api_key` | `password` | `null` | API key, or `TWILIO_API_KEY`; used with `api_secret`. |
 | `api_secret` | `password` | `null` | API secret, or `TWILIO_API_SECRET`; used with `api_key`. |
-| `region` | `text` | `null` | Twilio region, such as `au1`. |
-| `edge` | `text` | `null` | Twilio edge location, such as `sydney`. |
+| `region` | `text` | `null` | Twilio region, such as `au1`, or `TWILIO_REGION`. |
+| `edge` | `text` | `null` | Twilio edge location, such as `sydney`, or `TWILIO_EDGE`. |
 | `debug` | `boolean` | `false` | Log Twilio HTTP requests. |
 | `enable_send_sms` | `boolean` | `true` | Enable `send_sms()`. |
 | `enable_get_call_details` | `boolean` | `true` | Enable `get_call_details()`. |
