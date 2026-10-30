@@ -5710,6 +5710,7 @@ depends_on = [
     "mindroom.constants",
     "mindroom.file_access",
     "mindroom.hooks",
+    "mindroom.llm",
     "mindroom.path_confinement",
     "mindroom.providers.registry",
     "mindroom.tool_system.atlassian_connections",
@@ -5721,6 +5722,7 @@ depends_on = [
     "mindroom.tool_system.runtime_context",
     "mindroom.tool_system.tool_function",
     "mindroom.tool_system.worker_routing",
+    "mindroom.turn_model",
 ]
 visibility = []
 
