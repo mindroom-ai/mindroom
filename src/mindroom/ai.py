@@ -1082,10 +1082,10 @@ class TurnResult:
 
     @cached_property
     def run_metadata(self) -> dict[str, Any]:
-        """Return the run metadata of the attempt that ended the turn, its model, status, and usage, built when read.
+        """Return the run metadata of the attempt that ended the turn, built when read.
 
-        Building it prices the run, so a caller that reads only the text, such as a delegated child's parent, never
-        pays for it.
+        It names that attempt's model and status, and its usage covers every attempt of the turn. Building it prices
+        the usage, so a caller that reads only the text, such as a delegated child's parent, never pays for it.
         """
         ending = self.completed or self.failed
         build = ending.build_run_metadata if ending is not None else None

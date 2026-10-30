@@ -213,8 +213,9 @@ def _uncached_input_tokens(
 def _reply_usage(prior_usage: Sequence[RunMetrics], metrics: RunMetrics | None) -> RunMetrics | None:
     """Return the usage of a reply's turn: its spent attempts' ``prior_usage``, then ``metrics``, the final attempt's.
 
-    Counters, costs, durations, and per-model details add up. The reply's first token is its first attempt's that
-    reported one, as a run's is its first request's.
+    A turn of one attempt publishes that attempt's usage as it is. Otherwise counters, costs, durations, and per-model
+    details add up, and the reply's first token is its first attempt's that reported one, as a run's is its first
+    request's.
     """
     if not prior_usage:
         return metrics

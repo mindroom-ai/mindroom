@@ -457,8 +457,7 @@ class TurnRunState:
     ``attempt`` once their attempt starts; the driver drops it when the attempt
     is spent, so an interruption before the next attempt starts records none of
     the spent attempt's partial output, whose finished calls
-    ``prior_completed_tools`` already carries, as ``prior_usage`` carries its
-    usage for the run metadata of the attempt that ends the turn.
+    ``prior_completed_tools`` already carries.
     """
 
     # The turn's record; its run's hooks note the calls a mid-turn fold summarized into it.
