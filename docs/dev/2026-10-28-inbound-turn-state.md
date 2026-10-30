@@ -85,4 +85,4 @@ The code shows what each owner does; this record keeps why, what was rejected, a
 
 - A characterization oracle (`tests/turn_state_oracle/`) recorded the old store's observables before the rewrite; it found the dropped echo, a re-formed batch copying another turn's placeholder until a lookup raised "Multiple turns own visible response", and an ownership error that re-raised on every retry.
 - While the pending-turn write read its rows again, a new one-source turn ran 23 statements on the writer, against 5 for the ledger upsert it replaced; returning what it read and wrote brought it to 8.
-  With 30 new conversations sent at once, most of the wait this added before `Processing` was later messages waiting for one of the eight root-preparation slots.
+  On SQLite, with 30 new conversations sent at once, most of the wait this added before `Processing` was later messages waiting for one of the eight root-preparation slots.
