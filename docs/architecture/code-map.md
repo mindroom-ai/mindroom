@@ -42,6 +42,8 @@ Matrix sync callback
 | `orchestration/` | Extracted orchestrator helpers (config update plans, plugin watch, rooms, runtime) |
 | `orchestration/config_lifecycle.py` | Debounced config-reload lifecycle: the process's one config load (published to the embedded API), queueing, response drain, and update-plan dispatch |
 | `config/load_attempt.py` | The one config-file load attempt that the runtime and the dashboard API share |
+| `config/commit.py` | The one config-file write: validated file content, include and personal-agent name refusals, and the staleness check for changes derived from a loaded config, under the roster lock |
+| `api/config_lifecycle.py` | The dashboard API's published config snapshots: loads, commits published atomically with the file write, and the strict and last-good per-request readers |
 | `orchestration/config_updates.py` | The config update plan: the one decision of what a reload restarts, starts, removes, and re-authorizes |
 | `orchestration/entity_fleet.py` | The one owner of every managed bot's lifecycle: start, background retry, restart stop, removal, and process shutdown |
 | `orchestration/rooms.py` | Managed room setup through the router: room creation, policy, invitations, root Space, and bot memberships |
@@ -409,6 +411,7 @@ Matrix sync callback
 | `attachments/media.py` | Convert attachment records to the model media values in `llm/media.py` |
 | `media_inputs.py` | Shared media-input container passed across bot, teams, and AI layers |
 | `api/` | FastAPI REST API (dashboard, credentials, OpenAI-compatible endpoint) |
+| `api/auth_user.py` | The typed login of one API request and the one rule for which Matrix user it acts as |
 | `api/open_access.py` | Host allow-list and browser-origin guard for requests served without a credential (open dashboard auth, unauthenticated `/v1`) |
 | `api/slack_events.py` | Public `POST /api/slack/events`: verifies Slack's signature, answers `url_verification`, and delivers events within Slack's 3-second limit, finishing slower deliveries in the background |
 | `api/request_body_limit.py` | Pure ASGI middleware answering 413 for dashboard API request bodies over 16 MiB, except knowledge uploads |
