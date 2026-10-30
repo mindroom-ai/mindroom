@@ -7823,6 +7823,7 @@ depends_on = []
 path = "mindroom.mcp_gateway.toolkits"
 depends_on = [
     "mindroom.agents",
+    "mindroom.background_tasks",
     "mindroom.credentials.manager",
     "mindroom.logging_config",
     "mindroom.mcp.toolkit",

@@ -32,7 +32,7 @@ from mindroom.agent_loop.build import prompt_for_turn
 from mindroom.agent_run_context import append_knowledge_availability_enrichment
 from mindroom.agents import create_agent
 from mindroom.approval.tool_approval import tool_may_require_approval
-from mindroom.background_tasks import wait_for_future_until_complete
+from mindroom.background_tasks import drain_tasks, wait_for_future_until_complete
 from mindroom.helper_usage import HelperUsageOwner, helper_usage_owner_context, record_helper_usage
 from mindroom.history.interrupted_replay import persist_interrupted_replay
 from mindroom.history.storage import new_scope_session
@@ -301,11 +301,7 @@ class _CallResponseTracker:
 
     async def wait_for_settlements(self) -> None:
         """Do not start another persisted run while playout reconciliation is active."""
-        while self.settlements:
-            await asyncio.gather(
-                *(asyncio.shield(task) for task in tuple(self.settlements)),
-                return_exceptions=True,
-            )
+        await drain_tasks(self.settlements)
 
     async def persist_unspoken(self, state: _CallAgentRunState, *, default_status: RunStatus) -> None:
         """Persist a terminal generation before LiveKit received any text."""
