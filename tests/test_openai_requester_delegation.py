@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
@@ -17,7 +18,7 @@ from mindroom.ai import TurnResult
 from mindroom.api import config_lifecycle, openai_compat
 from mindroom.api.main import initialize_api_app
 from mindroom.config.access import ResponderAccessConfig
-from mindroom.config.agent import AgentConfig, TeamConfig
+from mindroom.config.agent import AgentConfig, RoomConfig, TeamConfig
 from mindroom.config.budgets import BudgetsConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig, ModelPricing
@@ -26,8 +27,9 @@ from mindroom.custom_tools.delegate import DelegateTools
 from mindroom.routing import ResponderSelection
 from mindroom.tool_system.runtime_context import get_detached_requester_context, get_tool_runtime_context
 from mindroom.tool_system.worker_routing import agent_workspace_root_path
+from tests.access_schema_support import membership_index, with_responder_access
 from tests.budget_helpers import budget_monitor_with_spend
-from tests.conftest import completed_ai_response_mock, completing
+from tests.conftest import bind_runtime_paths, completed_ai_response_mock, completing
 from tests.identity_helpers import persist_entity_accounts
 
 pytestmark = pytest.mark.usefixtures("enforce_turn_authorization")
@@ -424,6 +426,21 @@ def test_auto_route_only_receives_permitted_agents(api: _ApiHarness) -> None:
         )
     assert response.status_code == 200
     assert set(route.call_args.args[1]) == {"leader", "specialist"}
+
+
+def test_room_member_access_reads_the_api_membership_index(api: _ApiHarness) -> None:
+    """A mapped caller's room-member grant counts before the router binds external triggers, as on other routes."""
+    api.config.rooms = {"lobby": RoomConfig()}
+    with_responder_access(api.config, "specialist", members_of_rooms=["lobby"])
+    bound = bind_runtime_paths(api.config, api.runtime_paths)
+    app_state = config_lifecycle.app_state(api.client.app)
+    app_state.agent_reply_memberships = asyncio.run(membership_index(bound, {"lobby": {"@alice:example.org"}}))
+    assert app_state.external_trigger_runtime is None
+
+    response = api.client.get("/v1/models", headers={"Authorization": "Bearer alice-key"})
+
+    assert response.status_code == 200
+    assert "specialist" in {model["id"] for model in response.json()["data"]}
 
 
 def test_rebound_key_has_a_separate_session(api: _ApiHarness) -> None:
