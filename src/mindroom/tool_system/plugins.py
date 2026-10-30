@@ -393,11 +393,7 @@ def staged_plugins(config: Config, runtime_paths: RuntimePaths) -> Iterator[Plug
         try:
             _install_canonical_modules({}, {})
             plugin_imports._PLUGIN_CACHE.clear()
-            try:
-                plugins, skipped = _load_plugins(config, runtime_paths, previous=None)
-            except BaseException:
-                _cancel_module_tasks(_canonical_plugin_modules().values())
-                raise
+            plugins, skipped = _load_plugins(config, runtime_paths, previous=None)
             generation = _installed_generation(plugins, skipped)
             _log_loaded_plugins(generation)
             yield generation
@@ -434,11 +430,10 @@ def dispose_plugins(generation: PluginGeneration) -> None:
 def refresh_plugins(config: Config, runtime_paths: RuntimePaths) -> ConfigPlugins:
     """Load ``config``'s plugins into this process's generation and return ``config``'s view; the worker's publisher.
 
-    Unchanged modules stay as installed and edited ones execute again, on every worker request. The generation
-    only grows or refreshes, so another request's config keeps the plugins it loaded; a plugin that fails to load
-    leaves it until it loads again.
+    Unchanged modules stay as installed and edited ones execute again, on every worker request, ending the tasks of
+    the modules they replace. The generation only grows or refreshes, so another request's config keeps the plugins
+    it loaded; a plugin that fails to load leaves it until it loads again.
     """
-    global _PUBLISHED
     import mindroom.tools  # noqa: F401, PLC0415 - built-ins register before any plugin may collide with them.
 
     with _PLUGIN_LOCK:
@@ -455,7 +450,7 @@ def refresh_plugins(config: Config, runtime_paths: RuntimePaths) -> ConfigPlugin
             )
             if changed:
                 _log_loaded_plugins(generation)
-            _PUBLISHED = generation
+            publish_plugins(generation)
     return config_plugins(config, runtime_paths)
 
 
@@ -602,7 +597,27 @@ def _load_plugins(
     *,
     previous: PluginGeneration | None,
 ) -> tuple[dict[Path, _LoadedPlugin], tuple[SkippedPlugin, ...]]:
-    """Load ``config``'s enabled plugins through the canonical module cache, skipping each one that fails."""
+    """Load ``config``'s enabled plugins through the canonical module cache, skipping each one that fails.
+
+    A structural error raises with the canonical modules as they were before the load and stops what it executed.
+    """
+    installed_modules = _canonical_plugin_modules()
+    installed_cache = dict(plugin_imports._MODULE_IMPORT_CACHE)
+    try:
+        return _load_each_plugin(config, runtime_paths, previous=previous)
+    except BaseException:
+        installed = {id(module) for module in installed_modules.values()}
+        _cancel_module_tasks(module for module in _canonical_plugin_modules().values() if id(module) not in installed)
+        _install_canonical_modules(installed_modules, installed_cache)
+        raise
+
+
+def _load_each_plugin(
+    config: Config,
+    runtime_paths: RuntimePaths,
+    *,
+    previous: PluginGeneration | None,
+) -> tuple[dict[Path, _LoadedPlugin], tuple[SkippedPlugin, ...]]:
     plugin_bases, skipped = plugin_imports._collect_plugin_bases(config.plugins, runtime_paths)
     plugins: dict[Path, _LoadedPlugin] = {}
     for plugin_base, plugin_entry in plugin_bases:

@@ -2849,6 +2849,93 @@ async def test_an_edit_waits_for_its_reload_which_cancels_the_edited_module_s_ta
         await asyncio.gather(task, return_exceptions=True)
 
 
+@pytest.mark.asyncio
+async def test_a_worker_refresh_of_an_edited_plugin_cancels_the_replaced_module_s_task(tmp_path: Path) -> None:
+    """A worker request that loads an edited plugin file ends the tasks the module it replaces holds."""
+    hooks_path = _write_task_hooks_plugin(tmp_path / "plugins" / "refreshed-task", plugin_name="refreshed-task")
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text("agents: {}", encoding="utf-8")
+    config = _bind_runtime_paths(Config(plugins=["./plugins/refreshed-task"]), config_path)
+    runtime_paths = runtime_paths_for(config)
+
+    task = asyncio.create_task(asyncio.Event().wait())
+    try:
+        plugins_module.refresh_plugins(config, runtime_paths)
+        cached_plugin_module(hooks_path)._AUTO_POKE_TASK = task
+        _set_hooks_version(hooks_path, 2)
+
+        plugins_module.refresh_plugins(config, runtime_paths)
+        await asyncio.sleep(0)
+
+        assert task.cancelled()
+        assert cached_plugin_module(hooks_path).VERSION == 2
+    finally:
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+async def test_a_worker_refresh_refused_as_a_whole_keeps_the_published_modules_and_ends_new_tasks(
+    tmp_path: Path,
+) -> None:
+    """A worker refresh refused because two plugins register one tool restores the published modules."""
+    probe = ModuleType(f"mindroom_test_probe_{uuid.uuid4().hex}")
+    probe.tasks = []
+    sys.modules[probe.__name__] = probe
+    for name, starts_task in (("first", False), ("second", True)):
+        plugin_root = tmp_path / "plugins" / name
+        plugin_root.mkdir(parents=True)
+        (plugin_root / "mindroom.plugin.json").write_text(
+            json.dumps({"name": f"{name}_plugin", "tools_module": "tools.py", "skills": []}),
+            encoding="utf-8",
+        )
+        (plugin_root / "tools.py").write_text(
+            "import asyncio\n"
+            f"import {probe.__name__} as probe\n"
+            "from mindroom.tool_system.declarations import ToolCategory, ToolFileAccess\n"
+            "from mindroom.tool_system.registration import register_tool_with_metadata\n"
+            "\n"
+            + (
+                "_POLLER = asyncio.get_running_loop().create_task(asyncio.Event().wait())\nprobe.tasks.append(_POLLER)\n"
+                if starts_task
+                else ""
+            )
+            + "\n"
+            "@register_tool_with_metadata(\n"
+            "    name='shared_tool',\n"
+            "    file_access=ToolFileAccess.NONE,\n"
+            "    display_name='Shared',\n"
+            "    description='Conflicts',\n"
+            "    category=ToolCategory.DEVELOPMENT,\n"
+            ")\n"
+            "def shared_tools():\n"
+            "    return object\n",
+            encoding="utf-8",
+        )
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text("agents: {}", encoding="utf-8")
+    first = _bind_runtime_paths(Config(plugins=["./plugins/first"]), config_path)
+    runtime_paths = runtime_paths_for(first)
+
+    try:
+        plugins_module.refresh_plugins(first, runtime_paths)
+        published = plugins_module._canonical_plugin_modules()
+
+        with pytest.raises(ToolMetadataValidationError, match="conflicts between plugins"):
+            plugins_module.refresh_plugins(Config(plugins=["./plugins/first", "./plugins/second"]), runtime_paths)
+        await asyncio.sleep(0)
+
+        [task] = probe.tasks
+        assert task.cancelled()
+        assert plugins_module._canonical_plugin_modules() == published
+        assert "shared_tool" in plugins_module.refresh_plugins(first, runtime_paths).tools
+    finally:
+        for task in probe.tasks:
+            task.cancel()
+        await asyncio.gather(*probe.tasks, return_exceptions=True)
+        sys.modules.pop(probe.__name__, None)
+
+
 def _write_import_task_plugin(plugin_root: Path) -> None:
     """Write one plugin whose hooks module starts a task at import and keeps it in a module global."""
     plugin_root.mkdir(parents=True)
