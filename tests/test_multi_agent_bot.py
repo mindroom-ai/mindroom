@@ -19,7 +19,6 @@ from mindroom.config.models import ModelConfig
 from mindroom.constants import (
     ROUTER_AGENT_NAME,
 )
-from mindroom.conversation_resolver import MessageContext
 from mindroom.event_journal import (
     DepartureSource,
     IngestionBatchAdmission,
@@ -28,7 +27,7 @@ from mindroom.event_journal import (
     RoomMembershipPosition,
 )
 from mindroom.knowledge.utils import _KnowledgeResolution
-from mindroom.matrix.client import PermanentMatrixStartupError
+from mindroom.matrix.client_session import PermanentMatrixStartupError
 from mindroom.matrix.state import MatrixState
 from mindroom.matrix.sync_loop import bot_ingestion_config
 from mindroom.matrix.thread_history_result import thread_history_result
@@ -49,6 +48,7 @@ from tests.bot_helpers import (
     assert_turn_answered,
     make_mock_agent_user,
     make_test_agent_bot,
+    owned_matrix_login,
     unique_room_send_responses,
 )
 from tests.conftest import (
@@ -62,6 +62,7 @@ from tests.conftest import (
 from tests.fakes.scripted_model import ScriptedModel, answer
 from tests.identity_helpers import entity_ids, persist_entity_accounts
 from tests.journal_helpers import membership_position
+from tests.matrix_state_helpers import save_matrix_state
 from tests.response_attempt_helpers import install_direct_response_admission
 from tests.runtime_fakes import ready_runtime
 from tests.threading_helpers import seed_thread_history
@@ -75,14 +76,6 @@ if TYPE_CHECKING:
 def mock_agent_user() -> AgentMatrixUser:
     """Mock agent user for testing."""
     return make_mock_agent_user()
-
-
-def _owned_login(client: object, session: object | None = None) -> SimpleNamespace:
-    """Return the private Bot login carrier around one test client."""
-    return SimpleNamespace(
-        client=client,
-        session=AsyncMock() if session is None else session,
-    )
 
 
 def test_agent_bot_init_requires_prepared_matrix_user_id(tmp_path: Path) -> None:
@@ -123,7 +116,7 @@ def test_bot_ingestion_config_freezes_existing_transport_settings(tmp_path: Path
 
 
 class TestAgentBot(AgentBotTestBase):
-    """Bot behavior tests moved verbatim from tests/test_multi_agent_bot.py."""
+    """Core AgentBot lifecycle and integration behavior."""
 
     @pytest.mark.asyncio
     async def test_agent_bot_initialization(
@@ -204,7 +197,7 @@ class TestAgentBot(AgentBotTestBase):
         mock_client.add_event_admission_callback = MagicMock()
         mock_client.add_response_callback = MagicMock()
         ingestion_session = AsyncMock()
-        mock_login.return_value = _owned_login(mock_client, ingestion_session)
+        mock_login.return_value = owned_matrix_login(mock_client, ingestion_session)
 
         # Mock ensure_user_account to not change the agent_user
         mock_ensure_user.return_value = None
@@ -282,7 +275,7 @@ class TestAgentBot(AgentBotTestBase):
         ) -> object:
             login_user.user_id = actual_user_id
             login_user.__dict__.pop("matrix_id", None)
-            return _owned_login(mock_client)
+            return owned_matrix_login(mock_client)
 
         mock_login.side_effect = _login_with_actual_identity
 
@@ -345,14 +338,14 @@ class TestAgentBot(AgentBotTestBase):
         )
         mock_client = AsyncMock()
         mock_client.close = AsyncMock()
-        mock_login.return_value = _owned_login(mock_client)
+        mock_login.return_value = owned_matrix_login(mock_client)
         mock_ensure_user.return_value = None
 
         async def _login_with_duplicate_identity(*_args: object, **_kwargs: object) -> object:
             state = MatrixState.load(runtime_paths=runtime_paths)
             state.add_account("agent_general", "actual_writer", TEST_PASSWORD, domain="localhost")
-            state.save(runtime_paths=runtime_paths)
-            return _owned_login(mock_client)
+            save_matrix_state(state, runtime_paths)
+            return owned_matrix_login(mock_client)
 
         mock_login.side_effect = _login_with_duplicate_identity
         bot = make_test_agent_bot(agent_user, config=config, runtime_paths=runtime_paths)
@@ -397,7 +390,7 @@ class TestAgentBot(AgentBotTestBase):
             run=AsyncMock(side_effect=run_owned),
             wait_for_work=wait_for_work,
         )
-        mock_login.return_value = _owned_login(mock_client, ingestion_session)
+        mock_login.return_value = owned_matrix_login(mock_client, ingestion_session)
         mock_ensure_user.return_value = None
 
         bot = make_test_agent_bot(mock_agent_user, config=config, runtime_paths=runtime_paths_for(config))
@@ -1376,18 +1369,6 @@ class TestAgentBot(AgentBotTestBase):
         room.users = {"@mindroom_calculator:localhost": MagicMock(), "@user:localhost": MagicMock()}
 
         event = self._make_handler_event(handler_name, sender="@user:localhost", event_id=f"${handler_name}_denied")
-
-        if handler_name == "image":
-            bot._conversation_resolver.extract_message_context = AsyncMock(
-                return_value=MessageContext(
-                    am_i_mentioned=False,
-                    is_thread=False,
-                    thread_id=None,
-                    thread_history=[],
-                    mentioned_agents=[],
-                    has_non_agent_mentions=False,
-                ),
-            )
 
         wrap_extracted_collaborators(bot, "_turn_policy")
         with (

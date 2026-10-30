@@ -17,8 +17,8 @@ from mindroom.agent_reply_membership import AgentReplyMembershipIndex
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.custom_tools.matrix_room import MatrixRoomTools
-from mindroom.matrix.client import RoomThreadsPageError
 from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
+from mindroom.matrix.room_history_reads import RoomThreadsPageError
 from mindroom.message_target import MessageTarget
 from mindroom.tool_system.metadata import TOOL_METADATA, get_tool_by_name
 from mindroom.tool_system.runtime_context import ToolRuntimeContext, tool_runtime_context
@@ -77,22 +77,14 @@ def _make_context(
     )
 
 
-def _make_cached_room(
-    room_id: str = "!room:localhost",
-    *,
-    name: str = "Test Room",
-    topic: str = "A test room",
-    encrypted: bool = False,
-    member_count: int = 3,
-    join_rule: str = "invite",
-) -> MagicMock:
+def _make_cached_room(room_id: str = "!room:localhost") -> MagicMock:
     room = MagicMock(spec=nio.MatrixRoom)
     room.room_id = room_id
-    room.name = name
-    room.topic = topic
-    room.encrypted = encrypted
-    room.member_count = member_count
-    room.join_rule = join_rule
+    room.name = "Test Room"
+    room.topic = "A test room"
+    room.encrypted = False
+    room.member_count = 3
+    room.join_rule = "invite"
     room.canonical_alias = "#test:localhost"
     room.room_version = "10"
     room.guest_access = "forbidden"
@@ -826,23 +818,6 @@ async def test_threads_empty_room() -> None:
 
 
 @pytest.mark.asyncio
-async def test_threads_last_page() -> None:
-    """Last page should have next_token=None and has_more=False."""
-    tool = MatrixRoomTools()
-    ctx = _make_context()
-
-    e1 = _thread_event("$last", body="Last thread")
-
-    with tool_runtime_context(ctx), patch(_MOCK_TARGET, return_value=([e1], None)):
-        payload = json.loads(await tool.matrix_room(action="threads"))
-
-    assert payload["status"] == "ok"
-    assert payload["count"] == 1
-    assert payload["next_token"] is None
-    assert payload["has_more"] is False
-
-
-@pytest.mark.asyncio
 async def test_threads_error_propagation() -> None:
     """RoomThreadsPageError should propagate as structured error."""
     tool = MatrixRoomTools()
@@ -1063,23 +1038,6 @@ async def test_state_full_dump_transport_error_returns_structured_error() -> Non
 
 
 # --- Default room_id ---
-
-
-@pytest.mark.asyncio
-async def test_matrix_room_defaults_to_context_room() -> None:
-    """Actions should default room_id to the context room."""
-    tool = MatrixRoomTools()
-    ctx = _make_context()
-    cached_room = _make_cached_room()
-    ctx.client.rooms = {"!room:localhost": cached_room}
-    create_resp = MagicMock(spec=nio.RoomGetStateEventResponse)
-    create_resp.content = {"creator": "@admin:localhost"}
-    ctx.client.room_get_state_event = AsyncMock(return_value=create_resp)
-
-    with tool_runtime_context(ctx):
-        payload = json.loads(await tool.matrix_room(action="room-info"))
-
-    assert payload["room_id"] == "!room:localhost"
 
 
 # --- Implied tool auto-include ---

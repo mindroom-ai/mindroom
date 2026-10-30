@@ -39,6 +39,7 @@ from tests.conftest import (
 )
 from tests.delegation_helpers import _delegate_runtime_context, _runtime_paths
 from tests.fakes.knowledge import RecordingRefreshScheduler, published_index_lookup
+from tests.matrix_state_helpers import save_matrix_state
 from tests.turn_model_helpers import turn_model
 
 if TYPE_CHECKING:
@@ -322,7 +323,7 @@ class TestDelegateTools:
         grant_room_id = "!grant:example.org"
         state = MatrixState.load(runtime_paths=runtime_paths)
         state.add_room("grant", grant_room_id, "#grant:example.org", "Grant")
-        state.save(runtime_paths=runtime_paths)
+        save_matrix_state(state, runtime_paths)
         client = AsyncMock(spec=nio.AsyncClient)
         client.joined_rooms.return_value = nio.JoinedRoomsResponse(rooms=[grant_room_id])
         client.joined_members.return_value = nio.JoinedMembersResponse(

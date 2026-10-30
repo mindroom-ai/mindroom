@@ -164,7 +164,7 @@ if TYPE_CHECKING:
     from mindroom.coalescing.ingress_ticket import IngressTicket
     from mindroom.delivery_gateway import DeliveryGateway, EditTextRequest, SendTextRequest
     from mindroom.hooks import MessageEnvelope
-    from mindroom.matrix.client import ResolvedVisibleMessage
+    from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
     from mindroom.matrix.event_info import EventInfo
     from mindroom.matrix.thread_history_result import ThreadHistoryResult
     from mindroom.response_lifecycle import QueuedHumanNoticeReservation
@@ -4355,6 +4355,49 @@ async def test_scheduled_fire_response_starts_per_fire_thread_session(tmp_path: 
     target = harness.runner.requests[0].response_envelope.target
     assert target.resolved_thread_id == "$scheduled:localhost"
     assert target.session_id == f"{_ROOM_ID}:$scheduled:localhost"
+
+
+@pytest.mark.asyncio
+async def test_room_mode_scheduled_fire_is_planned_with_its_own_thread_history(tmp_path: Path) -> None:
+    """A room-mode agent's per-fire thread is where it answers, so its context reads that thread."""
+    config = _single_agent_config(tmp_path, "room")
+    fire_thread = thread_history_result(
+        [make_visible_message(sender=_SENDER, body="Poll the queue", event_id="$scheduled:localhost")],
+        is_full_history=True,
+    )
+    harness = _build_harness(config, tmp_path, thread_history=fire_thread)
+    room = _room_with_members(config, "general")
+
+    await harness.deliver(room, _scheduled_fire_event(config, extra_content={}, new_thread=True))
+
+    assert len(harness.runner.requests) == 1
+    request = harness.runner.requests[0]
+    assert request.response_envelope.target.source_thread_id == "$scheduled:localhost"
+    assert [message.event_id for message in request.thread_history] == ["$scheduled:localhost"]
+
+
+@pytest.mark.asyncio
+async def test_a_threaded_turn_replayed_after_the_room_switched_to_room_mode_is_answered_and_planned_at_room_level(
+    tmp_path: Path,
+) -> None:
+    """Context follows the target: neither may name the persisted thread while the other answers in the room."""
+    config = _single_agent_config(tmp_path, "room")
+    harness = _build_harness(config, tmp_path)
+    room = _room_with_members(config, "general")
+
+    prepared = await harness.dispatcher._prepare_dispatch(
+        make_test_turn(
+            room,
+            _text_event("hello", thread_id=_THREAD_ROOT),
+            _SENDER,
+            # Decided by ingress while the room was still in thread mode.
+            coalescing_key=requester_coalescing_key(_ROOM_ID, _THREAD_ROOT, _SENDER),
+        ),
+    )
+
+    assert prepared is not None
+    assert prepared.target.resolved_thread_id is None
+    assert (prepared.context.is_thread, prepared.context.thread_id) == (False, None)
 
 
 @pytest.mark.asyncio

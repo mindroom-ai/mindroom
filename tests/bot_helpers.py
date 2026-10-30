@@ -36,7 +36,7 @@ from mindroom.hooks import (
     MessageEnvelope,
 )
 from mindroom.knowledge.utils import _KnowledgeResolution
-from mindroom.matrix.client import ResolvedVisibleMessage
+from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.message_target import MessageTarget
 from mindroom.response_runner import (
@@ -734,21 +734,6 @@ def _room_file_event(
 @asynccontextmanager
 async def _noop_typing_indicator(*_args: object, **_kwargs: object) -> AsyncGenerator[None]:
     yield
-
-
-@dataclass
-class MockConfig:
-    """Mock configuration for testing."""
-
-    agents: dict[str, Any] = None
-
-    def __post_init__(self) -> None:
-        """Initialize agents dictionary if not provided."""
-        if self.agents is None:
-            self.agents = {
-                "calculator": MagicMock(rooms=["lobby", "science", "analysis"]),
-                "general": MagicMock(rooms=["lobby", "help"]),
-            }
 
 
 def make_mock_agent_user() -> AgentMatrixUser:

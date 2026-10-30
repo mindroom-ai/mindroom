@@ -16,7 +16,7 @@ from mindroom.config.main import Config
 from mindroom.config.models import DefaultsConfig, ModelConfig, RouterConfig
 from mindroom.llm.events import ToolStarted
 from mindroom.llm.runs import ToolExecution
-from mindroom.matrix.client import DeliveredMatrixEvent
+from mindroom.matrix.client_delivery import DeliveredMatrixEvent
 from mindroom.matrix.thread_history_result import thread_history_result
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.message_target import MessageTarget
@@ -199,9 +199,8 @@ async def test_streaming_e2e_worker_warmup_edit_sequence(tmp_path: Path) -> None
 @pytest.mark.timeout(10)  # Add timeout to prevent hanging on real server connection
 @patch("mindroom.response_attempt.is_user_online")
 @patch("mindroom.bot.login_agent_owned_session")
-@patch("mindroom.bot.AgentBot.ensure_user_account")
+@patch("mindroom.bot.AgentBot.ensure_user_account", new=AsyncMock())
 async def test_streaming_edits_e2e(  # noqa: C901, PLR0915
-    mock_ensure_user: AsyncMock,
     mock_login: AsyncMock,
     mock_is_user_online: AsyncMock,
     tmp_path: Path,
@@ -209,35 +208,6 @@ async def test_streaming_edits_e2e(  # noqa: C901, PLR0915
     """End-to-end test that agents don't respond to streaming edits from other agents."""
     # Mock user as online for stop button to show
     mock_is_user_online.return_value = True
-
-    # Mock ensure_user_account to set proper user IDs
-    async def ensure_user_side_effect(bot_self: object) -> None:
-        # Set a proper user_id based on agent_name if we have agent_name
-        if hasattr(bot_self, "agent_name"):
-            if bot_self.agent_name == "helper":
-                bot_self.agent_user.user_id = "@mindroom_helper:localhost"
-            elif bot_self.agent_name == "calculator":
-                bot_self.agent_user.user_id = "@mindroom_calculator:localhost"
-            elif bot_self.agent_name == "router":
-                bot_self.agent_user.user_id = "@mindroom_router:localhost"
-        elif hasattr(bot_self, "agent_user") and hasattr(bot_self.agent_user, "agent_name"):
-            # Alternative: get agent_name from agent_user
-            agent_user = bot_self.agent_user
-            if agent_user.agent_name == "helper":
-                agent_user.user_id = "@mindroom_helper:localhost"
-            elif agent_user.agent_name == "calculator":
-                agent_user.user_id = "@mindroom_calculator:localhost"
-            elif agent_user.agent_name == "router":
-                agent_user.user_id = "@mindroom_router:localhost"
-
-    # Need to handle both positional and method call
-    async def ensure_user_wrapper(*args: object, **kwargs: object) -> None:
-        if len(args) > 0:
-            await ensure_user_side_effect(args[0])
-            return
-        await ensure_user_side_effect(kwargs.get("self"))
-
-    mock_ensure_user.side_effect = ensure_user_wrapper
 
     # Create test room
     test_room_id = "!streaming_test:localhost"

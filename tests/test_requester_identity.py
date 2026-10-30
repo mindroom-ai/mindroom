@@ -10,6 +10,7 @@ from mindroom.matrix import state as matrix_state
 from mindroom.matrix.state import MatrixState
 from mindroom.requester_identity import is_managed_entity_id
 from tests.conftest import bind_runtime_paths, runtime_paths_for, test_runtime_paths
+from tests.matrix_state_helpers import save_matrix_state
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -30,7 +31,7 @@ def test_managed_entity_check_reads_matrix_state_once(tmp_path: Path, monkeypatc
     state = MatrixState.load(runtime_paths=runtime_paths)
     state.add_account("agent_coder", "renamed_coder", "pw", domain="localhost")
     state.add_account("agent_helper", "helper", "pw", domain="old.example")
-    state.save(runtime_paths=runtime_paths)
+    save_matrix_state(state, runtime_paths)
     reads = 0
     cache_key = matrix_state._matrix_state_cache_key
 

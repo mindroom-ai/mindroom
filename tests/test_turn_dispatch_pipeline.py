@@ -46,8 +46,8 @@ from mindroom.hooks import (
     MessageEnvelope,
 )
 from mindroom.inbound_turn_normalizer import DispatchPayload, InboundTurnNormalizer, _VoiceNormalizationResult
-from mindroom.matrix.client import ResolvedVisibleMessage
 from mindroom.matrix.client_delivery import MatrixDeliveryFailure, MatrixDeliveryFailureKind
+from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
 from mindroom.matrix.conversation_hydration import HYDRATED_PROMPT_WINDOW_MESSAGES
 from mindroom.matrix.conversation_reads import ConversationReader
 from mindroom.matrix.thread_history_result import ThreadHistoryResult, thread_history_result
@@ -94,7 +94,6 @@ from tests.conftest import (
     make_ingress_facts,
     message_origin,
     patch_response_runner_module,
-    prepared_dispatch_result,
     replace_delivery_gateway_deps,
     replace_turn_deps,
     runtime_paths_for,
@@ -439,8 +438,7 @@ class TestAgentBot(AgentBotTestBase):
                 new=AsyncMock(side_effect=AssertionError("dispatch blocked on a strict read")),
             ),
         ):
-            context_result = await bot._conversation_resolver.extract_dispatch_context(room, event)
-            context = context_result.context
+            context = await bot._conversation_resolver.extract_dispatch_context(room, event, thread_id="$thread_root")
 
         assert context.is_thread is True
         assert context.thread_id == "$thread_root"
@@ -505,8 +503,7 @@ class TestAgentBot(AgentBotTestBase):
         )
         dispatch_history = thread_history_result(seeded, is_full_history=True)
 
-        context_result = await bot._conversation_resolver.extract_dispatch_context(room, event)
-        context = context_result.context
+        context = await bot._conversation_resolver.extract_dispatch_context(room, event, thread_id="$thread_root")
 
         assert context.is_thread is True
         assert context.thread_id == "$thread_root"
@@ -627,7 +624,7 @@ class TestAgentBot(AgentBotTestBase):
             patch.object(
                 bot._turn_dispatcher,
                 "_prepare_dispatch",
-                new=AsyncMock(return_value=prepared_dispatch_result(dispatch)),
+                new=AsyncMock(return_value=dispatch),
             ),
             patch.object(bot._turn_policy, "plan_turn", new=AsyncMock(side_effect=fake_plan)),
             patch.object(
@@ -734,7 +731,7 @@ class TestAgentBot(AgentBotTestBase):
             patch.object(
                 bot._turn_dispatcher,
                 "_prepare_dispatch",
-                new=AsyncMock(return_value=prepared_dispatch_result(dispatch)),
+                new=AsyncMock(return_value=dispatch),
             ),
             patch.object(
                 bot._turn_policy,
@@ -815,7 +812,7 @@ class TestAgentBot(AgentBotTestBase):
             patch.object(
                 bot._turn_dispatcher,
                 "_prepare_dispatch",
-                new=AsyncMock(return_value=prepared_dispatch_result(dispatch)),
+                new=AsyncMock(return_value=dispatch),
             ),
             patch.object(
                 bot._command_turn_executor,
@@ -971,7 +968,7 @@ class TestAgentBot(AgentBotTestBase):
             patch.object(
                 bot._turn_dispatcher,
                 "_prepare_dispatch",
-                new=AsyncMock(return_value=prepared_dispatch_result(dispatch)),
+                new=AsyncMock(return_value=dispatch),
             ),
             patch.object(bot._turn_dispatcher, "_has_newer_unresponded_in_thread", return_value=False),
         ):
@@ -1080,7 +1077,7 @@ class TestAgentBot(AgentBotTestBase):
             patch.object(
                 bot._turn_dispatcher,
                 "_prepare_dispatch",
-                new=AsyncMock(return_value=prepared_dispatch_result(dispatch)),
+                new=AsyncMock(return_value=dispatch),
             ),
             patch.object(
                 bot._turn_policy,
@@ -2459,17 +2456,6 @@ class TestAgentBot(AgentBotTestBase):
         event = _room_image_event(sender="@user:localhost", event_id="$img_event_fail", body="photo.jpg")
         event.source = {"content": {"body": "photo.jpg"}}
 
-        bot._conversation_resolver.extract_message_context = AsyncMock(
-            return_value=MessageContext(
-                am_i_mentioned=False,
-                is_thread=False,
-                thread_id=None,
-                thread_history=[],
-                mentioned_agents=[],
-                has_non_agent_mentions=False,
-                requires_model_history_refresh=False,
-            ),
-        )
         wrap_extracted_collaborators(bot, "_turn_policy")
         bot._turn_policy.plan_turn = AsyncMock(
             return_value=DispatchPlan(

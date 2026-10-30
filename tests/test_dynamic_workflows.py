@@ -57,6 +57,7 @@ from tests.conftest import (
 )
 from tests.fakes.scripted_model import Await, ScriptedModel, answer
 from tests.identity_helpers import persist_entity_accounts
+from tests.matrix_state_helpers import save_matrix_state
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterator
@@ -585,7 +586,7 @@ async def test_service_records_a_failure_without_text_by_its_type(
         monkeypatch.setattr(store, "complete_workflow_run", fail)
     service = DynamicWorkflowService(
         store,
-        participant_executor=lambda **_: _written(),
+        participant_executor=_answering("written"),
         spec_validator=fail if stage == "validation" else None,
     )
     store.create_workflow(
@@ -605,10 +606,6 @@ async def test_service_records_a_failure_without_text_by_its_type(
     )
 
     assert (run.status, run.error) == ("failed", "TimeoutError")
-
-
-async def _written() -> ParticipantOutput:
-    return ParticipantOutput("written")
 
 
 @pytest.mark.asyncio
@@ -2243,7 +2240,7 @@ def test_room_agent_participant_runs_as_that_agent_without_durable_state(
     runtime_paths = runtime_paths_for(config)
     state = MatrixState.load(runtime_paths=runtime_paths)
     state.add_room("lobby", room_id="!room:localhost", alias="#lobby:localhost", name="Lobby")
-    state.save(runtime_paths=runtime_paths)
+    save_matrix_state(state, runtime_paths)
     persist_entity_accounts(config, runtime_paths)
     context = replace(context, config=config, runtime_paths=runtime_paths)
     parent_loop = asyncio.new_event_loop()

@@ -10,14 +10,13 @@ import pytest
 
 from mindroom.coalescing.batch import CoalescingKey, PreparedTurn, RequesterCoalescingOwner
 from mindroom.coalescing.gate import _MAX_ROOT_PREPARATIONS, CoalescingGate, ReadyPendingEvent
-from mindroom.matrix.conversation_reads import ThreadReadMode
 from tests.conftest import live_turn_claim, make_pending_event, turn_claim_is_live
 from tests.test_turns_focused import _build_harness, _room_with_members, _single_agent_config, _text_event
 
 if TYPE_CHECKING:
     from pathlib import Path
 
-    from mindroom.conversation_resolver import DispatchContextResult
+    from mindroom.conversation_resolver import MessageContext
     from mindroom.dispatch_handoff import DispatchEvent, DispatchPayloadMetadata
     from mindroom.matrix.media import MatrixMediaEvent
     from mindroom.turn_store import TurnClaim
@@ -378,13 +377,13 @@ async def test_controller_prepares_independent_roots_without_changing_reply_targ
         room: nio.MatrixRoom,
         event: DispatchEvent | MatrixMediaEvent,
         *,
+        thread_id: str | None,
         payload_metadata: DispatchPayloadMetadata | None = None,
-        mode: ThreadReadMode = ThreadReadMode.NONBLOCKING,
-    ) -> DispatchContextResult:
+    ) -> MessageContext:
         started[event.event_id].set()
         if event.event_id == "$a":
             await release.wait()
-        return await original_extract(room, event, payload_metadata=payload_metadata, mode=mode)
+        return await original_extract(room, event, thread_id=thread_id, payload_metadata=payload_metadata)
 
     monkeypatch.setattr(resolver, "extract_dispatch_context", extract)
     try:

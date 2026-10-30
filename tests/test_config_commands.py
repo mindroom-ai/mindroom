@@ -49,6 +49,7 @@ from tests.authorization_helpers import (
     make_test_command_handler_context,
 )
 from tests.conftest import make_conversation_reader_mock, make_matrix_client_mock, write_config_yaml
+from tests.matrix_state_helpers import save_matrix_state
 
 
 def _runtime_paths_for_config(config_path: Path) -> constants_mod.RuntimePaths:
@@ -1514,7 +1515,7 @@ async def test_handle_config_command_rejects_runtime_sensitive_invalid_change(tm
     )
     matrix_state = MatrixState.load(runtime_paths=runtime_paths)
     matrix_state.add_account("agent_assistant", "mindroom_assistant_prod1", "pw", domain="localhost")
-    matrix_state.save(runtime_paths=runtime_paths)
+    save_matrix_state(matrix_state, runtime_paths)
 
     response, change_info = await handle_config_command(
         "set mindroom_user.username mindroom_assistant_prod1",

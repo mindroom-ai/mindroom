@@ -20,7 +20,7 @@ from mindroom.matrix.rooms import (
     ensure_user_in_rooms,
     reconcile_managed_rooms,
 )
-from mindroom.matrix.state import MatrixState, load_rooms, resolve_room_aliases
+from mindroom.matrix.state import load_rooms, matrix_state_for_runtime, resolve_room_aliases
 from mindroom.matrix.users import INTERNAL_USER_ACCOUNT_KEY
 from mindroom.matrix_identifiers import extract_server_name_from_homeserver, split_concrete_matrix_user_ids
 
@@ -51,7 +51,7 @@ def _room_user_ids_to_invite(
     runtime_paths: RuntimePaths,
 ) -> set[str]:
     """Return the membership invitation roster for one room."""
-    state = MatrixState.load(runtime_paths=runtime_paths)
+    state = matrix_state_for_runtime(runtime_paths)
     room_keys = sorted(room_key for room_key, room in state.rooms.items() if room.room_id == room_id)
     if len(room_keys) != 1:
         logger.warning(
@@ -128,23 +128,21 @@ class RoomSetup:
         config = self.config_provider()
         self.resolve_aliases(bots, config)
 
-        async def _ensure_internal_user_memberships() -> None:
-            all_rooms = load_rooms(runtime_paths=self.runtime_paths)
-            all_room_ids = {room_key: room.room_id for room_key, room in all_rooms.items()}
-            if all_room_ids and config.mindroom_user is not None:
-                await ensure_user_in_rooms(
-                    constants.runtime_matrix_homeserver(runtime_paths=self.runtime_paths),
-                    all_room_ids,
-                    self.runtime_paths,
-                )
-
         # Join the router before policy and invitations, including existing private rooms.
         for bot in bots:
             if bot.agent_name == ROUTER_AGENT_NAME:
                 await bot.ensure_rooms()
         snapshots = await self._reconcile_room_policies(room_ids)
         await self._ensure_room_invitations(snapshots)
-        await _ensure_internal_user_memberships()
+        all_rooms = load_rooms(runtime_paths=self.runtime_paths)
+        all_room_ids = {room_key: room.room_id for room_key, room in all_rooms.items()}
+        if all_room_ids and config.mindroom_user is not None:
+            await ensure_user_in_rooms(
+                constants.runtime_matrix_homeserver(runtime_paths=self.runtime_paths),
+                all_room_ids,
+                self.runtime_paths,
+                display_name=config.mindroom_user.display_name,
+            )
 
         await asyncio.gather(*(bot.ensure_rooms() for bot in bots if bot.agent_name != ROUTER_AGENT_NAME))
 

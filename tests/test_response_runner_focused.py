@@ -97,7 +97,7 @@ from mindroom.llm.media import Image
 from mindroom.llm.runs import RunRecord, RunRequirement, RunStatus, TeamRunRecord, ToolExecution
 from mindroom.logging_config import get_logger
 from mindroom.matrix import typing as typing_module
-from mindroom.matrix.client import DeliveredMatrixEvent
+from mindroom.matrix.client_delivery import DeliveredMatrixEvent
 from mindroom.matrix.state import MatrixState
 from mindroom.matrix.thread_history_result import ThreadHistoryResult
 from mindroom.media_inputs import MediaInputs
@@ -195,6 +195,7 @@ from tests.conftest import (
     unwrap_extracted_collaborator,
 )
 from tests.fakes.scripted_model import Await, ScriptedModel, answer
+from tests.matrix_state_helpers import save_matrix_state
 from tests.reply_span_helpers import paused_for_approval, response_span
 from tests.response_runner_helpers import (
     _bot,
@@ -1410,7 +1411,7 @@ async def test_queued_response_rechecks_room_membership_after_acquiring_lifecycl
     grant_room_id = "!grant:localhost"
     state = MatrixState.load(runtime_paths=runner.deps.runtime_paths)
     state.add_room("grant", grant_room_id, "#grant:localhost", "Grant")
-    state.save(runtime_paths=runner.deps.runtime_paths)
+    save_matrix_state(state, runner.deps.runtime_paths)
     membership_client = AsyncMock()
     membership_client.joined_rooms.return_value = nio.JoinedRoomsResponse(rooms=[grant_room_id])
     membership_client.joined_members.return_value = nio.JoinedMembersResponse(
@@ -2179,7 +2180,7 @@ async def test_begin_locked_turn_excludes_early_placeholder_from_refreshed_histo
 
 
 @pytest.mark.asyncio
-async def test_setup_cancellation_preserves_cancel_when_placeholder_cleanup_fails(tmp_path: Path) -> None:
+async def test_setup_cancellation_releases_reply_span(tmp_path: Path) -> None:
     """A setup cancellation propagates, and the reply's span is released for a retry instead of noted directly."""
     bot = _bot(tmp_path)
     coordinator = unwrap_extracted_collaborator(bot._response_runner)
@@ -6594,7 +6595,6 @@ async def test_process_shutdown_skips_terminal_settlement_for_durable_replay(
         request=request,
     )
     attempt_started = asyncio.Event()
-    settlement_started = asyncio.Event()
     release_settlement = asyncio.Event()
 
     async def cancelled_attempt(**_kwargs: object) -> None:
@@ -6602,7 +6602,6 @@ async def test_process_shutdown_skips_terminal_settlement_for_durable_replay(
         await asyncio.Event().wait()
 
     async def blocked_settlement(**_kwargs: object) -> None:
-        settlement_started.set()
         await release_settlement.wait()
 
     with (

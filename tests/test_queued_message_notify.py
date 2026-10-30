@@ -8,7 +8,7 @@ from copy import deepcopy
 from dataclasses import dataclass, field, replace
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, Literal, Self, cast
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, call, patch
 
 import nio
 import pytest
@@ -58,7 +58,7 @@ from mindroom.interactive_models import InteractivePrompt
 from mindroom.llm.messages import Message as OwnedMessage
 from mindroom.llm.runs import AnyRunRecord, RunRecord, TeamRunRecord
 from mindroom.llm.runs import RunStatus as OwnedRunStatus
-from mindroom.matrix.client import ResolvedVisibleMessage
+from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
 from mindroom.matrix.conversation_hydration import HYDRATED_PROMPT_WINDOW_MESSAGES
 from mindroom.matrix.thread_history_result import ThreadHistoryResult
 from mindroom.matrix.users import AgentMatrixUser
@@ -100,7 +100,6 @@ from tests.conftest import (
     make_membership_stub,
     make_pending_event,
     message_origin,
-    prepared_dispatch_result,
     record_store_threads,
     request_envelope,
     runtime_paths_for,
@@ -995,30 +994,18 @@ async def test_post_response_effects_queues_summary_with_stale_hint_inside_margi
     config = _config(tmp_path)
     config.defaults.thread_summary_first_threshold = 5
     client = make_matrix_client_mock()
-    client.room_messages.return_value = nio.RoomMessagesResponse(
-        room_id="!room:localhost",
-        chunk=[
-            nio.RoomMessageText.from_dict(
-                {
-                    "type": "m.room.message",
-                    "event_id": "$thread",
-                    "sender": "@user0:localhost",
-                    "origin_server_ts": 0,
-                    "content": {"msgtype": "m.text", "body": "Thread root"},
-                },
-            ),
-        ],
-        start="",
-        end=None,
-    )
     client.room_send.return_value = nio.RoomSendResponse(event_id="$summary", room_id="!room:localhost")
 
     conversation_reader, thread_history = await _run_queued_summary(config, client, "!room:localhost")
 
-    conversation_reader.read_strict.assert_awaited_once_with(
+    # One strict read for the gate, one after the pin re-check walked the thread again.
+    expected_read = call(room_id="!room:localhost", thread_id="$thread", limit=HYDRATED_PROMPT_WINDOW_MESSAGES)
+    assert conversation_reader.read_strict.await_args_list == [expected_read, expected_read]
+    conversation_reader.hydrator.rewalk.assert_awaited_once_with(
         room_id="!room:localhost",
         thread_id="$thread",
-        limit=HYDRATED_PROMPT_WINDOW_MESSAGES,
+        edits_of=(),
+        unreadable_is_missing=False,
     )
     # Nothing has echoed the response back, so the projection this pass reads
     # stops one message short of the thread. It summarizes the projected
@@ -2295,7 +2282,7 @@ async def test_reserved_command_follow_up_cleanup_when_dispatch_returns(tmp_path
             patch.object(
                 bot._turn_dispatcher,
                 "_prepare_dispatch",
-                new=AsyncMock(return_value=prepared_dispatch_result(case.dispatch)),
+                new=AsyncMock(return_value=case.dispatch),
             ),
             patch("mindroom.turn_policy.TurnPolicy.plan_turn", new=AsyncMock()) as mock_plan_turn,
         ):
@@ -2325,7 +2312,7 @@ async def test_reserved_superseded_follow_up_cleanup_when_dispatch_returns(tmp_p
             patch.object(
                 bot._turn_dispatcher,
                 "_prepare_dispatch",
-                new=AsyncMock(return_value=prepared_dispatch_result(case.dispatch)),
+                new=AsyncMock(return_value=case.dispatch),
             ),
             patch.object(bot._turn_dispatcher, "_has_newer_unresponded_in_thread", return_value=True),
             patch.object(bot._turn_policy, "plan_turn", new=AsyncMock()) as mock_plan_turn,
@@ -2382,7 +2369,7 @@ async def test_reserved_follow_up_cleanup_when_plan_ignores_before_response(tmp_
             patch.object(
                 bot._turn_dispatcher,
                 "_prepare_dispatch",
-                new=AsyncMock(return_value=prepared_dispatch_result(case.dispatch)),
+                new=AsyncMock(return_value=case.dispatch),
             ),
             patch(
                 "mindroom.turn_policy.TurnPolicy.plan_turn",
@@ -2414,7 +2401,7 @@ async def test_reserved_follow_up_cleanup_when_route_returns_before_response(tmp
             patch.object(
                 bot._turn_dispatcher,
                 "_prepare_dispatch",
-                new=AsyncMock(return_value=prepared_dispatch_result(case.dispatch)),
+                new=AsyncMock(return_value=case.dispatch),
             ),
             patch(
                 "mindroom.turn_policy.TurnPolicy.plan_turn",
@@ -2448,7 +2435,7 @@ async def test_reserved_follow_up_cleanup_when_dispatch_raises_before_lifecycle(
             patch.object(
                 bot._turn_dispatcher,
                 "_prepare_dispatch",
-                new=AsyncMock(return_value=prepared_dispatch_result(case.dispatch)),
+                new=AsyncMock(return_value=case.dispatch),
             ),
             patch(
                 "mindroom.turn_policy.TurnPolicy.plan_turn",
@@ -2491,7 +2478,7 @@ async def test_reserved_follow_up_cleanup_when_dispatch_cancelled_before_lifecyc
             patch.object(
                 bot._turn_dispatcher,
                 "_prepare_dispatch",
-                new=AsyncMock(return_value=prepared_dispatch_result(case.dispatch)),
+                new=AsyncMock(return_value=case.dispatch),
             ),
             patch(
                 "mindroom.turn_policy.TurnPolicy.plan_turn",
@@ -2935,7 +2922,7 @@ async def test_coalesced_dispatch_never_creates_queued_signal(tmp_path: Path) ->
         patch.object(
             bot._turn_dispatcher,
             "_prepare_dispatch",
-            new=AsyncMock(return_value=prepared_dispatch_result(dispatch)),
+            new=AsyncMock(return_value=dispatch),
         ),
         patch.object(bot._turn_dispatcher, "_has_newer_unresponded_in_thread", return_value=True),
         patch.object(

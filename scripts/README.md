@@ -5,7 +5,6 @@ This directory contains utility scripts for MindRoom self-hosting.
 ## Available Scripts
 
 ### 🧪 Testing
-- **`testing/benchmark_matrix_throughput.py`** - Benchmark Matrix message throughput performance
 - **`testing/benchmark_tool_call_overhead.py`** - Benchmark synthetic tool-call bridge overhead
 - **`testing/fuzz_live_matrix.py`** - Replay concurrent Matrix mutations through disposable Tuwunel and MindRoom stacks
 
@@ -54,11 +53,6 @@ POSTGRES_CONTAINER=mindroom-postgres ./scripts/utilities/cleanup_agent_edits_doc
 ```
 
 For another Docker deployment, set `POSTGRES_CONTAINER` to its PostgreSQL container name.
-
-### Benchmark Matrix performance
-```bash
-./scripts/testing/benchmark_matrix_throughput.py
-```
 
 ### Benchmark tool-call overhead
 ```bash

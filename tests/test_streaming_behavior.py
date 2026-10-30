@@ -36,8 +36,7 @@ from mindroom.history.interrupted_replay import (
 from mindroom.hooks import MessageEnvelope
 from mindroom.llm.events import ToolCompleted, ToolStarted
 from mindroom.llm.runs import ToolExecution
-from mindroom.matrix.client import DeliveredMatrixEvent
-from mindroom.matrix.client_delivery import build_edit_event_content
+from mindroom.matrix.client_delivery import DeliveredMatrixEvent, build_edit_event_content
 from mindroom.matrix.identity import MatrixID
 from mindroom.matrix.large_messages import calculate_event_size
 from mindroom.matrix.users import AgentMatrixUser
@@ -136,7 +135,7 @@ async def _noop_typing_indicator(*_args: object, **_kwargs: object) -> AsyncIter
     yield
 
 
-class ImmediateStreamingResponse(StreamingResponse):
+class _ImmediateStreamingResponse(StreamingResponse):
     """A streaming response that sends every update as soon as it arrives."""
 
     def __init__(self, **kwargs: object) -> None:
@@ -2530,8 +2529,10 @@ class TestStreamingBehavior:
         assert reindex_all.await_count == 0
 
     @pytest.mark.asyncio
-    async def test_streaming_in_progress_marker(self) -> None:
-        """Test that in-progress marker is shown during streaming but not in final message."""
+    async def test_streaming_bodies_omit_in_progress_marker(
+        self,
+    ) -> None:
+        """Neither a streamed nor a final body carries the static in-progress marker."""
         # Create a mock client
         mock_client = _make_matrix_client_mock()
         mock_send_response = MagicMock()
@@ -2551,7 +2552,7 @@ class TestStreamingBehavior:
         # Stream some content
         await push_stream_chunk(streaming, "Hello world", mock_client)
 
-        # Check that the sent message includes the in-progress marker
+        # Check the streamed message
         first_call = mock_client.room_send.call_args_list[0]
         content = first_call[1]["content"]
         # The body should NOT contain the static in-progress marker (frontend uses stream_status metadata)
@@ -2964,7 +2965,7 @@ class TestStreamingBehavior:
                 response_stream=stream(),
                 existing_event_id="$thinking_123",
                 adopt_existing_placeholder=True,
-                streaming_cls=ImmediateStreamingResponse,
+                streaming_cls=_ImmediateStreamingResponse,
                 **FakeReplyRecords(edit=record_edit).hooks(),
             )
 
@@ -3010,7 +3011,7 @@ class TestStreamingBehavior:
                 response_stream=stream(),
                 existing_event_id="$thinking_123",
                 adopt_existing_placeholder=True,
-                streaming_cls=ImmediateStreamingResponse,
+                streaming_cls=_ImmediateStreamingResponse,
                 **FakeReplyRecords(edit=record_edit).hooks(),
             )
 
@@ -3050,7 +3051,7 @@ class TestStreamingBehavior:
                 response_stream=stream(),
                 existing_event_id="$thinking_123",
                 adopt_existing_placeholder=True,
-                streaming_cls=ImmediateStreamingResponse,
+                streaming_cls=_ImmediateStreamingResponse,
                 **FakeReplyRecords(edit=record_edit).hooks(),
             )
 
@@ -3552,7 +3553,7 @@ class TestStreamingBehavior:
                 response_stream=stream(),
                 existing_event_id="$thinking_123",
                 adopt_existing_placeholder=True,
-                streaming_cls=ImmediateStreamingResponse,
+                streaming_cls=_ImmediateStreamingResponse,
                 **FakeReplyRecords(edit=record_edit).hooks(),
             )
 

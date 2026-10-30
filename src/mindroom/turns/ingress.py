@@ -312,8 +312,6 @@ class TurnIngress:
                 error=str(exc),
             )
             return False
-        if thread_history is None:
-            return False
         return await self.deps.turn_policy.router_thread_skips(room, requester_user_id, thread_history)
 
     @staticmethod
@@ -588,9 +586,9 @@ class TurnIngress:
             or not facts.origin.may_answer_interactive_prompt
         ):
             return 0.0
-        result = await self.deps.resolver.extract_dispatch_context(room, event)
+        context = await self.deps.resolver.extract_dispatch_context(room, event, thread_id=key.thread_id)
         selected = self.deps.turn_policy.adaptive_participation(
-            context=result.context,
+            context=context,
             room=room,
             requester_user_id=facts.lane_requester_id,
         )

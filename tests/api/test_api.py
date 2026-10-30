@@ -63,6 +63,7 @@ from tests.api.conftest import (
     trusted_upstream_jwt_key,
     use_trusted_upstream_runtime,
 )
+from tests.matrix_state_helpers import save_matrix_state
 from tests.oauth_test_utils import publish_oauth_credentials
 from tests.runtime_fakes import bind_test_embedded_runtime
 from tests.test_personal_agents_config import _entry as personal_agent_entry
@@ -1358,7 +1359,7 @@ def test_get_personal_agents_lists_active_pending_and_removed_template_entries(
     )
     matrix_state = MatrixState.load(runtime_paths=runtime_paths)
     matrix_state.add_account("agent_mind_alice_smith", "mindroom_mind_alice_smith_old", None, domain="example.org")
-    matrix_state.save(runtime_paths=runtime_paths)
+    save_matrix_state(matrix_state, runtime_paths)
 
     response = test_client.get("/api/config/personal-agents")
 
@@ -3527,7 +3528,7 @@ def test_save_config_rejects_runtime_sensitive_invalid_payload(tmp_path: Path) -
     )
     matrix_state = MatrixState.load(runtime_paths=runtime_paths)
     matrix_state.add_account("agent_assistant", "mindroom_assistant_prod1", "pw", domain="localhost")
-    matrix_state.save(runtime_paths=runtime_paths)
+    save_matrix_state(matrix_state, runtime_paths)
     main.initialize_api_app(main.app, runtime_paths)
     config_lifecycle.load_config_into_app(runtime_paths, main.app)
 

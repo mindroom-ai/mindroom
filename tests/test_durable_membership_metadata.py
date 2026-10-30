@@ -20,6 +20,7 @@ from mindroom.matrix.durable_ingestion import consume_one_ingestion_batch
 from mindroom.matrix.state import MatrixState
 from tests.conftest import install_call_manager_mock, make_matrix_client_mock
 from tests.journal_helpers import membership_position
+from tests.matrix_state_helpers import save_matrix_state
 from tests.test_bot_ready_hook import _router_bot_with_orchestrator
 
 if TYPE_CHECKING:
@@ -84,7 +85,7 @@ async def test_real_member_state_and_timeline_preserve_tenure_and_hooks(  # noqa
     bot.config.router.access = ResponderAccessConfig(members_of_rooms=["grant"])
     state = MatrixState.load(runtime_paths=bot.runtime_paths)
     state.add_room("grant", ROOM, "#grant:localhost", "Grant")
-    state.save(runtime_paths=bot.runtime_paths)
+    save_matrix_state(state, bot.runtime_paths)
     principal = bot.journal_principal()
     consumer = await principal.load_or_create_ingestion_consumer(new_generation=uuid4())
     client = nio.AsyncClient("https://localhost", account, device_id="DEVICE")

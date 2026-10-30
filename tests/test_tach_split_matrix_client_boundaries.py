@@ -157,17 +157,13 @@ def _runtime_direct_imports(py_path: Path, importer_module: str, target_modules:
     return imports
 
 
-def _runtime_direct_split_imports(py_path: Path, importer_module: str) -> set[str]:
-    return _runtime_direct_imports(py_path, importer_module, SPLIT_MATRIX_CLIENT_MODULES)
-
-
 def _split_matrix_client_importers() -> dict[str, set[str]]:
     importers: dict[str, set[str]] = {}
     for py_path in SOURCE_ROOT.rglob("*.py"):
         importer_module = f"mindroom.{py_path.relative_to(SOURCE_ROOT).with_suffix('').as_posix().replace('/', '.')}"
-        if importer_module in SPLIT_MATRIX_CLIENT_MODULES or importer_module == "mindroom.matrix.client":
+        if importer_module in SPLIT_MATRIX_CLIENT_MODULES:
             continue
-        runtime_imports = _runtime_direct_split_imports(py_path, importer_module)
+        runtime_imports = _runtime_direct_imports(py_path, importer_module, SPLIT_MATRIX_CLIENT_MODULES)
         if runtime_imports:
             importers[importer_module] = runtime_imports
     return importers
@@ -320,9 +316,7 @@ def test_tach_rejects_forbidden_boundary_imports(tmp_path: Path) -> None:
 
     attachments_path = project_root / "src" / "mindroom" / "custom_tools" / "attachments.py"
     original_text = attachments_path.read_text()
-    split_client_probe = (
-        "from mindroom.matrix.client_session import _create_matrix_client as _tach_probe_private_client_session\n"
-    )
+    split_client_probe = "from mindroom.matrix.client_session import _MatrixTransportShutdownError as _tach_probe_private_client_session\n"
     attachments_path.write_text(
         original_text.replace(
             "from __future__ import annotations\n\n",

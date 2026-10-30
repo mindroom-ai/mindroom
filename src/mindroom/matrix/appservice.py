@@ -3,26 +3,18 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Literal, NamedTuple, NoReturn
+from typing import Literal, NamedTuple, NoReturn
 
 import httpx
 
 from mindroom.constants import RuntimePaths, runtime_env_path, runtime_matrix_ssl_verify
-from mindroom.matrix.client_session import (
-    DEFAULT_MATRIX_SYNC_STORAGE,
-    MatrixSyncStorage,
-    create_authenticated_client,
-    matrix_startup_error,
-)
+from mindroom.matrix.client_session import matrix_startup_error
 from mindroom.matrix.identity import parse_current_matrix_user_id
 from mindroom.runtime_env_policy import (
     MATRIX_APPSERVICE_TOKEN_ENV,
     MATRIX_APPSERVICE_TOKEN_FILE_ENV,
     MATRIX_MANAGED_ACCOUNT_AUTH_ENV,
 )
-
-if TYPE_CHECKING:
-    import nio
 
 _ManagedAccountAuthMode = Literal["password", "appservice"]
 
@@ -219,29 +211,3 @@ async def login_appservice_credentials(
         msg = "Matrix application-service login changed the device; restore the original device before restarting"
         raise matrix_startup_error(msg, permanent=True)
     return user_id, returned_device_id, access_token
-
-
-async def login_appservice_user(
-    homeserver: str,
-    *,
-    user_id: str,
-    token: str,
-    runtime_paths: RuntimePaths,
-    sync_storage: MatrixSyncStorage = DEFAULT_MATRIX_SYNC_STORAGE,
-) -> nio.AsyncClient:
-    """Create an ordinary per-user Matrix device through application-service login."""
-    authenticated_user_id, device_id, access_token = await login_appservice_credentials(
-        homeserver,
-        user_id=user_id,
-        token=token,
-        runtime_paths=runtime_paths,
-    )
-
-    return create_authenticated_client(
-        homeserver,
-        authenticated_user_id,
-        device_id,
-        access_token,
-        runtime_paths=runtime_paths,
-        sync_storage=sync_storage,
-    )
