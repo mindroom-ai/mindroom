@@ -74,7 +74,7 @@ def _upgrade_legacy_descriptions(spec: dict[str, object]) -> dict[str, object]:
     """Return the spec with a saved non-text workflow or input-property description read as its text."""
     # LEGACY_COMPAT: Dynamic Workflow non-string descriptions.
     # Legacy format: A saved revision whose top-level description or inputs.properties.<name>.description is a non-null value other than a string, such as a number, list, or mapping; validation never checked either field, so a revision kept the value the author sent.
-    # Last legacy release: v2026.10.729, the newest release when the typed spec landed, because every release since the first Dynamic Workflow release, v2026.6.68, saved both descriptions as sent; replacement: the next release accepts only a string or null there.
+    # Last legacy release: v2026.10.740, the newest release when the typed spec landed, because every release since the first Dynamic Workflow release, v2026.6.68, saved both descriptions as sent; replacement: the next release accepts only a string or null there.
     # Handling: The store replaces each such value with str(value), the text a workflow summary already showed, when it reads a revision, keeps null as null, and leaves every other field to the spec rules, so the revision runs again and the next update writes the text.
     # Coverage: tests/test_dynamic_workflows.py::test_revision_with_non_text_descriptions_reads_them_as_text.
     # The store passes a freshly read revision, so its mappings can be changed in place.
