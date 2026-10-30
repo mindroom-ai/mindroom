@@ -816,7 +816,6 @@ depends_on = [
     "mindroom.agent_cli.minimal_agent",
     "mindroom.turn_model",
     "mindroom.config.resolution",
-    "mindroom.tool_system.plugins",
 ]
 
 [[modules]]
@@ -1388,7 +1387,6 @@ depends_on = [
     "mindroom.tool_system.worker_routing",
     "mindroom.agent_cli.approval",
     "mindroom.turn_model",
-    "mindroom.tool_system.plugins",
 ]
 visibility = ["mindroom.approval.continuation_runner"]
 
@@ -3655,7 +3653,6 @@ depends_on = [
     "mindroom.tool_system.runtime_context",
     "mindroom.config.resolution",
     "mindroom.turn_model",
-    "mindroom.tool_system.plugins",
 ]
 visibility = [
     "mindroom.api.openai_compat",
@@ -4859,7 +4856,6 @@ depends_on = [
     "mindroom.tool_jobs.execution",
     "mindroom.tool_system.agent_tools",
     "mindroom.turn_model",
-    "mindroom.tool_system.plugins",
 ]
 
 [[modules]]
@@ -5552,6 +5548,7 @@ depends_on = [
     "mindroom.runtime_resolution",
     "mindroom.scheduling.tasks",
     "mindroom.tool_system.context_bound_streams",
+    "mindroom.tool_system.plugins",
     "mindroom.tool_system.worker_routing",
 ]
 
@@ -7395,6 +7392,7 @@ expose = [
     "attachment_id_available_in_tool_runtime_context",
     "build_scheduling_runtime_from_tool_runtime_context",
     "current_execution_identity",
+    "current_plugins",
     "detached_tool_scope",
     "emit_custom_event",
     "get_worker_progress_pump",

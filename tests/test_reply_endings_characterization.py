@@ -35,7 +35,6 @@ from mindroom.config.agent import AgentConfig
 from mindroom.config.approval import ApprovalRuleConfig, ToolApprovalConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
-from mindroom.config.plugin import PluginEntryConfig
 from mindroom.constants import STREAM_STATUS_KEY
 from mindroom.dispatch_source import SILENT_SCHEDULE_SOURCE_KIND
 from mindroom.event_journal import DeliveryStage, EventClass, EventKind, InboundEvent
@@ -73,6 +72,7 @@ from tests.conftest import (
     install_runtime_journal_support,
     make_matrix_client_mock,
     message_origin,
+    publish_hook_plugin,
     runtime_paths_for,
     test_runtime_paths,
     unwrap_extracted_collaborator,
@@ -88,6 +88,7 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from mindroom.bot import AgentBot
+    from mindroom.constants import RuntimePaths
     from mindroom.event_journal import MatrixDelivery
     from mindroom.history.types import HistoryScope
     from mindroom.llm.runs import AnyRunRecord
@@ -211,10 +212,16 @@ class _Hooks:
         return payload
 
 
-def _hook_registry(hooks: _Hooks, *, session_started: bool = False) -> HookRegistry:
-    """Return a registry whose response hooks record into ``hooks``; the before hook suppresses when asked.
+def _hook_registry(
+    config: Config,
+    runtime_paths: RuntimePaths,
+    hooks: _Hooks,
+    *,
+    session_started: bool = False,
+) -> HookRegistry:
+    """Publish the bot's plugin, whose response hooks record into ``hooks``, and return its hooks.
 
-    ``session_started`` also registers, and records, a ``session:started`` hook.
+    The before hook suppresses when asked. ``session_started`` also registers, and records, a ``session:started`` hook.
     """
 
     @hook(EVENT_MESSAGE_BEFORE_RESPONSE)
@@ -261,24 +268,8 @@ def _hook_registry(hooks: _Hooks, *, session_started: bool = False) -> HookRegis
     async def on_session_started(ctx: SessionHookContext) -> None:
         hooks.fired.append(("session_started", {"session_id": ctx.session_id}))
 
-    plugin = type(
-        "PluginStub",
-        (),
-        {
-            "name": "reply-endings",
-            "discovered_hooks": (
-                before,
-                transform,
-                after,
-                cancelled,
-                *((on_session_started,) if session_started else ()),
-            ),
-            "discovered_automations": (),
-            "entry_config": PluginEntryConfig(path="./plugins/reply-endings"),
-            "plugin_order": 0,
-        },
-    )()
-    return HookRegistry.from_plugins([plugin])
+    callbacks = [before, transform, after, cancelled, *([on_session_started] if session_started else [])]
+    return publish_hook_plugin(config, runtime_paths, "reply-endings", callbacks).hooks
 
 
 def _config(tmp_path: Path) -> Config:
@@ -421,7 +412,7 @@ async def _turn(
     presence.last_active_ago = 0
     bot.client.get_presence = AsyncMock(return_value=presence)
     hooks = _Hooks()
-    bot.hook_registry = _hook_registry(hooks)
+    bot.hook_registry = _hook_registry(bot.config, bot.runtime_paths, hooks)
     orchestrator = team_orchestrator(bot.config, bot.runtime_paths)
     orchestrator.agent_bots = {name: MagicMock(running=True) for name in bot.config.agents}
     orchestrator.automations = MagicMock()
@@ -686,7 +677,7 @@ async def test_a_stopped_turn_holds_its_conversation_until_its_interrupted_recor
     """
     preparing = asyncio.Event()
     turn = await _turn(tmp_path, monkeypatch, streaming=True, scripts={"default": [answer("Never sent.")]})
-    turn.bot.hook_registry = _hook_registry(turn.hooks, session_started=True)
+    turn.bot.hook_registry = _hook_registry(turn.bot.config, turn.bot.runtime_paths, turn.hooks, session_started=True)
 
     async def prepare_until_stopped(*_args: object, **_kwargs: object) -> None:
         preparing.set()

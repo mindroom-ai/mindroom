@@ -45,7 +45,12 @@ from mindroom.tool_system.runtime_context import (
     get_tool_runtime_context,
     tool_runtime_context,
 )
-from tests.conftest import register_test_tool
+from tests.conftest import (
+    GENERATION_PROBE_TOOL,
+    publish_test_plugins,
+    register_test_tool,
+    write_generation_probe_plugin,
+)
 from tests.oauth_test_utils import publish_oauth_credentials
 from tests.test_mcp_manager import _FakeClientSession, _patch_manager, _tool
 from tests.test_script_tool_broker import _routed_connection_calculator
@@ -292,6 +297,48 @@ async def test_a_publication_during_a_request_leaves_the_request_on_the_tools_it
     assert "error" not in response
     assert built_with == [selected_tools]
     assert config_plugins(context.config, context.runtime_paths).tools is not selected_tools
+
+
+@pytest.mark.asyncio
+async def test_a_publication_during_a_call_leaves_its_tool_and_its_tool_hooks_on_one_generation(
+    context: AgentToolContext,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A plugin publication while a call builds its toolkit reaches neither the tool it runs nor the hooks around it.
+
+    The next request captures the new generation for both.
+    """
+    plugin_root = tmp_path / "plugins" / "generation-probe"
+    seen = write_generation_probe_plugin(plugin_root, 1)
+    config = context.config.model_copy(deep=True)
+    config.plugins = [PluginEntryConfig(path="./plugins/generation-probe")]
+    config.agents["personal"].tools = [ToolConfigEntry(name=GENERATION_PROBE_TOOL)]
+    paths = context.runtime_paths
+    publish_test_plugins(config, paths)
+    context = replace(context, config=config)
+    original = gateway_toolkits._build_native
+
+    def publish_before_build(selected_context: AgentToolContext, entry: EffectiveToolConfig) -> Toolkit:
+        write_generation_probe_plugin(plugin_root, 2)
+        publish_test_plugins(config, paths)
+        return original(selected_context, entry)
+
+    async def call(request: AgentToolContext) -> InvocationResult:
+        return await gateway.invoke_tool(
+            request,
+            toolkit=GENERATION_PROBE_TOOL,
+            function="which_generation",
+            arguments={},
+        )
+
+    monkeypatch.setattr(gateway_toolkits, "_build_native", publish_before_build)
+    during = await call(context)
+    monkeypatch.setattr(gateway_toolkits, "_build_native", original)
+    after = await call(replace(context))
+
+    assert (during, after) == ({"result": "1"}, {"result": "2"})
+    assert seen == [("hook", 1), ("tool", 1), ("hook", 2), ("tool", 2)]
 
 
 @pytest.mark.asyncio

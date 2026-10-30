@@ -46,6 +46,7 @@ from mindroom.mcp.toolkit import bind_mcp_server_manager
 from mindroom.memory import search_agent_memories
 from mindroom.response_turn import apply_exact_approval_decisions
 from mindroom.session_storage.agent_storage import create_session_storage
+from mindroom.tool_system.plugins import config_plugins
 from mindroom.tool_system.runtime_context import (
     current_execution_identity,
     get_tool_runtime_context,
@@ -466,10 +467,11 @@ async def test_deferred_upstream_mcp_response_filters_and_requester(
     script.write_text(
         'from mcp.server.mcpserver import MCPServer\nserver = MCPServer("echo")\n@server.tool()\ndef echo(text: str) -> str:\n return "echo:" + text\n@server.tool()\ndef secret() -> str:\n raise AssertionError("filtered tool ran")\nserver.run()\n',
     )
-    h.runtime.config.mcp_servers = {
+    config = h.runtime.config.model_copy(deep=True)
+    config.mcp_servers = {
         "echo": MCPServerConfig(transport="stdio", command=sys.executable, args=[str(script)]),
     }
-    h.runtime.config.agents["helper"] = AgentConfig(
+    config.agents["helper"] = AgentConfig(
         display_name="Helper",
         memory_backend="file",
         private=AgentPrivateConfig(per="user_agent") if private else None,
@@ -479,6 +481,8 @@ async def test_deferred_upstream_mcp_response_filters_and_requester(
             {"duckduckgo": {"defer": True}},
         ],
     )
+    # The turn starts on the edited config, so its context captures that config's tools.
+    h.runtime = replace(h.runtime, config=config, plugins=config_plugins(config, h.runtime.runtime_paths))
     manager = MCPServerManager(h.runtime.runtime_paths)
     bind_mcp_server_manager(manager)
     calls = []
@@ -715,12 +719,14 @@ async def test_concurrent_factory_owners_scoped_credentials_and_grants(tmp_path,
     for agent in config.agents:
         for requester in requesters:
             session = f"{agent}-{requester}"
+            # Each turn starts after the plugin publication, so its context captures the published plugins.
             runtime = replace(
                 base,
                 agent_name=agent,
                 requester_id=requester,
                 target=replace(base.target, session_id=session),
                 orchestrator=SimpleNamespace(agent_cli_registry=registry),
+                plugins=config_plugins(config, base.runtime_paths),
             )
             runtimes[session] = runtime
             target = runtime.resolve_worker_target()

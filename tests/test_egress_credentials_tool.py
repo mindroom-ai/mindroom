@@ -80,13 +80,15 @@ def _context(
     services: dict[str, object] | None = None,
     agents: dict[str, AgentConfig] | None = None,
 ) -> ToolRuntimeContext:
+    config = Config(agents=agents or {}, egress_broker={"services": _SERVICES if services is None else services})
     return ToolRuntimeContext(
         agent_name="code",
         target=MessageTarget.resolve(room_id="!room:example.org", thread_id="$thread", reply_to_event_id="$request"),
         requester_id=_ALICE,
         client=MagicMock(),
-        config=Config(agents=agents or {}, egress_broker={"services": _SERVICES if services is None else services}),
+        config=config,
         runtime_paths=runtime_paths,
+        plugins=config_plugins(config, runtime_paths),
         relations=make_relation_lookup(),
         conversation_reader=make_conversation_reader_mock(),
     )

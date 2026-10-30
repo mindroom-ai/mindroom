@@ -87,7 +87,6 @@ async def test_reserved_controls_run_without_approval_and_emit_plugin_hooks(
                 config,
                 paths,
                 owner,
-                hook_registry=registry,
                 supports_native_tool_approval=True,
                 persist_runtime_state=False,
                 knowledge=None,

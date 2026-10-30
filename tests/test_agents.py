@@ -45,13 +45,12 @@ from mindroom.config.approval import ApprovalRuleConfig, ToolApprovalConfig
 from mindroom.config.knowledge import KnowledgeBaseConfig, KnowledgeGitConfig
 from mindroom.config.main import Config, iter_config_validation_messages
 from mindroom.config.models import BackgroundToolJobsConfig, DefaultsConfig, ModelConfig
-from mindroom.config.plugin import PluginEntryConfig
 from mindroom.constants import ROUTER_AGENT_NAME, RuntimePaths, resolve_runtime_paths
 from mindroom.credentials.manager import CredentialsManager, get_runtime_credentials_manager, load_scoped_credentials
 from mindroom.delegation.state import SubagentPersona
 from mindroom.entity_resolution import current_entity_id, managed_entity_power_user_ids_for_room
 from mindroom.entity_rooms import get_rooms_for_entity
-from mindroom.hooks import EVENT_TOOL_BEFORE_CALL, HookRegistry, ToolBeforeCallContext, hook
+from mindroom.hooks import EVENT_TOOL_BEFORE_CALL, ToolBeforeCallContext, hook
 from mindroom.knowledge.availability import KnowledgeAvailability
 from mindroom.knowledge.search import AgentKnowledge, KnowledgeSource, KnowledgeSourceDescription
 from mindroom.knowledge.utils import resolve_agent_knowledge_access
@@ -102,7 +101,7 @@ from mindroom.tool_system.worker_routing import (
     worker_root_path,
 )
 from mindroom.workspaces import _copy_workspace_template, validate_workspace_template_dir
-from tests.conftest import register_test_tool
+from tests.conftest import publish_hook_plugin, register_test_tool
 from tests.identity_helpers import persist_entity_accounts
 from tests.tool_approval_helpers import gated_functions
 from tests.turn_model_helpers import turn_model
@@ -4187,15 +4186,9 @@ async def test_create_agent_runs_plugin_tool_hooks_for_generated_functions(tmp_p
     async def decline(ctx: ToolBeforeCallContext) -> None:
         ctx.decline("blocked by plugin")
 
-    plugin = SimpleNamespace(
-        name="gate",
-        entry_config=PluginEntryConfig(path="gate"),
-        plugin_order=0,
-        discovered_hooks=(decline,),
-        discovered_automations=(),
-    )
     config = _config_with_workspace_skill(tmp_path)
-    agent = _create_agent_for_test("general", config, hook_registry=HookRegistry.from_plugins([plugin]))
+    plugins = publish_hook_plugin(config, _runtime_paths(tmp_path), "gate", [decline])
+    agent = _create_agent_for_test("general", config, plugins=plugins)
 
     skill_result = await execute_tool_call(
         _offered(agent)["get_skill_instructions"],

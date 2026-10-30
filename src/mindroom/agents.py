@@ -1116,7 +1116,6 @@ def _assemble_agent_toolkits(  # noqa: C901, PLR0915 - eager and deferred tools 
     agent_runtime: ResolvedAgentRuntime,
     *,
     execution_identity: ToolExecutionIdentity | None,
-    hook_registry: HookRegistry | None,
     disable_runtime_capabilities: bool,
     disabled_tool_names: frozenset[str],
     tool_function_filter: Callable[[ToolFunction], bool] | None,
@@ -1144,7 +1143,7 @@ def _assemble_agent_toolkits(  # noqa: C901, PLR0915 - eager and deferred tools 
     )
     persona_tools = persona.tools if persona is not None else None
     hook_middleware = _build_agent_tool_middleware(
-        hook_registry=hook_registry if hook_registry is not None else plugins.hooks,
+        hook_registry=plugins.hooks,
         config=config,
         runtime_paths=runtime_paths,
     )
@@ -1658,7 +1657,6 @@ def create_agent(
     knowledge: AgentKnowledge | None,
     model: TurnModel,
     plugins: ConfigPlugins,
-    hook_registry: HookRegistry | None = None,
     history_storage: ConversationStore | None = None,
     include_interactive_questions: bool = True,
     include_openai_compat_guidance: bool = False,
@@ -1688,8 +1686,6 @@ def create_agent(
         model: The model this agent's turn runs, which the caller resolved for the turn.
         plugins: The plugin view the caller captured for this operation: the build's tools, placement, skills, and
             tool hooks all come from it, deferred toolkits included.
-        hook_registry: Optional hook registry for plugin-based tool call
-            interception and event hooks; None uses ``plugins``' hooks.
         history_storage: Optional already-open conversation store to reuse for this agent.
         include_interactive_questions: Whether to include the interactive
             question authoring prompt. Set to False for channels that do not
@@ -1810,7 +1806,6 @@ def create_agent(
         runtime_paths,
         agent_runtime,
         execution_identity=execution_identity,
-        hook_registry=hook_registry,
         disable_runtime_capabilities=disable_runtime_capabilities,
         disabled_tool_names=disabled_tool_names,
         tool_function_filter=tool_function_filter,

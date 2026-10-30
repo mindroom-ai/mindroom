@@ -87,6 +87,7 @@ from mindroom.session_storage.agent_storage import create_session_storage
 from mindroom.session_storage.types import ConversationSession
 from mindroom.tool_system.context_bound_streams import context_bound_async_stream
 from mindroom.tool_system.events import CollectedStreamPresentation
+from mindroom.tool_system.plugins import config_plugins
 from mindroom.tool_system.runtime_context import (
     ToolRuntimeContext,
     current_execution_identity,
@@ -258,6 +259,7 @@ def _model_runtime_context(
         client=AsyncMock(),
         config=config,
         runtime_paths=runtime_paths,
+        plugins=config_plugins(config, runtime_paths),
         conversation_reader=MagicMock(),
         relations=MagicMock(),
         active_model_name=active_model_name,

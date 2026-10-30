@@ -33,6 +33,7 @@ from mindroom.approval.receipt_readers import approval_receipt_context
 from mindroom.approval.tool_approval import shutdown_approval_runtime
 from mindroom.coalescing.batch import CoalescingKey, RequesterCoalescingOwner, build_prepared_turn
 from mindroom.config.approval import ApprovalRuleConfig
+from mindroom.config.main import Config
 from mindroom.constants import AI_RUN_METADATA_KEY
 from mindroom.delegation.state import DelegationState, child_execution_identity
 from mindroom.dispatch_source import MESSAGE_SOURCE_KIND
@@ -91,6 +92,7 @@ from tests.approval_continuation_helpers import (
 )
 from tests.bot_helpers import make_test_agent_bot, unique_room_send_responses
 from tests.conftest import (
+    GENERATION_PROBE_TOOL,
     TEST_PASSWORD,
     handle_card_response_for_test,
     initialize_approval_store_for_test,
@@ -100,8 +102,11 @@ from tests.conftest import (
     make_visible_message,
     message_origin,
     patch_response_runner_module,
+    publish_test_plugins,
     restore_builtin_tools,
     snapshot_builtin_tools,
+    test_runtime_paths,
+    write_generation_probe_plugin,
 )
 from tests.delegation_helpers import _saved_approval_calls
 from tests.fakes.scripted_model import Await, ScriptedModel, ScriptStep, answer, calls, tool_call, usage
@@ -654,6 +659,64 @@ async def test_a_member_s_tool_hooks_run_as_the_member_with_the_turn_s_live_bind
 
     assert ProbeToolkit.calls == ["a"]
     assert seen == [("writer", "writer", True)]
+
+
+@pytest.mark.asyncio
+async def test_publications_after_a_team_turn_captured_its_plugins_leave_its_member_calls_on_that_generation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Plugin publications before the turn's builds and before its first member delegation reach no member call.
+
+    The member's tool and the tool hook around its call both come from the generation the turn's context captured.
+    """
+    plugin_root = tmp_path / "plugins" / "generation-probe"
+    seen = write_generation_probe_plugin(plugin_root, 1)
+    authored = authored_team_config(
+        {
+            "writer": {
+                "display_name": "Writer",
+                "role": "Writes.",
+                "model": "writer-model",
+                "tools": [GENERATION_PROBE_TOOL],
+            },
+            "checker": {"display_name": "Checker", "role": "Checks.", "model": "checker-model"},
+        },
+        teams={"squad": {"display_name": "Squad", "role": "Answers.", "agents": ["writer", "checker"]}},
+        models=("default", "writer-model", "checker-model"),
+    )
+    authored["plugins"] = ["./plugins/generation-probe"]
+    # Startup published the plugins before the turn began.
+    publish_test_plugins(Config.model_validate(authored), test_runtime_paths(tmp_path))
+
+    def publish(generation: int) -> None:
+        write_generation_probe_plugin(plugin_root, generation)
+        publish_test_plugins(team.config, team.runtime_paths)
+
+    async def publish_before_the_delegation() -> None:
+        publish(3)
+
+    team = build_team_turn(
+        tmp_path,
+        monkeypatch,
+        authored,
+        members=("writer", "checker"),
+        team_name="squad",
+        scripts={
+            "default": [
+                [Await(publish_before_the_delegation), *delegate("call-team", "writer", "Report the generation")],
+                answer("Reported."),
+            ],
+            "writer-model": [calls(tool_call("which_generation", "call-probe")), answer("Reported.")],
+        },
+    )
+    # The turn's bot binds its captured plugins' hooks into the turn's context.
+    team.runtime = replace(team.runtime, hooks=HookBindings(registry=team.runtime.plugins.hooks))
+    publish(2)
+
+    await team.stream()
+
+    assert seen == [("hook", 1), ("tool", 1)]
 
 
 @pytest.mark.asyncio

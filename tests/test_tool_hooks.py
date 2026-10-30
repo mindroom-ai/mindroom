@@ -17,6 +17,7 @@ import pytest
 from agno.tools import Toolkit
 
 from mindroom.agents import create_agent
+from mindroom.ai import ai_response
 from mindroom.approval.tool_approval import BackgroundScriptToolOrigin, ToolApprovalDecision
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
@@ -69,15 +70,20 @@ from tests.authorization_helpers import (
 )
 from tests.bot_helpers import make_test_agent_bot
 from tests.conftest import (
+    GENERATION_PROBE_TOOL,
     bind_runtime_paths,
     install_bots,
     install_model_providers,
     make_conversation_reader_mock,
     make_relation_lookup,
+    make_turn_context,
+    publish_hook_plugin,
+    publish_test_plugins,
     runtime_paths_for,
     test_runtime_paths,
+    write_generation_probe_plugin,
 )
-from tests.fakes.scripted_model import ScriptedModel
+from tests.fakes.scripted_model import ScriptedModel, answer, calls, tool_call
 from tests.scripted_agent_helpers import registered_toolkit
 from tests.tool_job_helpers import job_tool, tool_job_runtime
 from tests.turn_model_helpers import turn_model
@@ -237,6 +243,7 @@ def test_detached_tool_runtime_context_fails_closed_without_reply_membership_ind
         client=AsyncMock(),
         config=config,
         runtime_paths=runtime_paths,
+        plugins=config_plugins(config, runtime_paths),
         conversation_reader=make_conversation_reader_mock(),
         relations=make_relation_lookup(),
     )
@@ -1126,6 +1133,7 @@ async def test_tool_hook_contexts_expose_router_backed_matrix_admin(tmp_path: Pa
         resolved_aliases.append(await ctx.matrix_admin.resolve_alias("#personal-user:localhost"))
 
     config = _config(tmp_path)
+    plugins = publish_hook_plugin(config, runtime_paths_for(config), "tool-policy", [before, after])
     bot = _agent_bot(tmp_path, config=config)
     bot.client = AsyncMock(spec=nio.AsyncClient)
     bot.client.rooms = {}
@@ -1149,14 +1157,12 @@ async def test_tool_hook_contexts_expose_router_backed_matrix_admin(tmp_path: Pa
     install_bots(orchestrator, {"router": router_bot, "code": bot})
     bot.orchestrator = orchestrator
 
-    registry = HookRegistry.from_plugins([_plugin("tool-policy", [before, after])])
     target = MessageTarget.resolve("!room:localhost", "$thread", None)
-    bridge = tool_policy(registry)
+    bridge = tool_policy(plugins.hooks)
 
     async def next_func(**kwargs: object) -> dict[str, object]:
         return {"echo": kwargs["path"]}
 
-    bot.hook_registry = registry
     runtime_context = bot._tool_runtime_support.build_context(target, user_id="@user:localhost")
     assert runtime_context is not None
 
@@ -1249,7 +1255,20 @@ async def test_tool_hook_context_room_state_helpers_use_runtime_client(tmp_path:
 async def test_agent_bot_tool_runtime_context_room_state_helpers_fallback_to_router(tmp_path: Path) -> None:
     """Bot-built tool runtime contexts should use current-bot-first room-state helpers with router fallback."""
     seen: list[tuple[dict[str, object] | None, bool]] = []
+
+    @hook(EVENT_TOOL_BEFORE_CALL)
+    async def before(ctx: ToolBeforeCallContext) -> None:
+        query_result = await ctx.query_room_state("!room:localhost", "m.room.name", "")
+        put_result = await ctx.put_room_state(
+            "!room:localhost",
+            "com.mindroom.thread.tags",
+            "$resolved-thread",
+            {"tags": {"queued": True}},
+        )
+        seen.append((query_result, put_result))
+
     config = _config(tmp_path)
+    plugins = publish_hook_plugin(config, runtime_paths_for(config), "tool-policy", [before])
     bot = _agent_bot(tmp_path, config=config)
     bot.client = AsyncMock(spec=nio.AsyncClient)
     bot.client.rooms = {}
@@ -1263,26 +1282,12 @@ async def test_agent_bot_tool_runtime_context_room_state_helpers_fallback_to_rou
     orchestrator = _MultiAgentOrchestrator(runtime_paths=runtime_paths_for(config))
     install_bots(orchestrator, {"router": router_bot, "code": bot})
     bot.orchestrator = orchestrator
-
-    @hook(EVENT_TOOL_BEFORE_CALL)
-    async def before(ctx: ToolBeforeCallContext) -> None:
-        query_result = await ctx.query_room_state("!room:localhost", "m.room.name", "")
-        put_result = await ctx.put_room_state(
-            "!room:localhost",
-            "com.mindroom.thread.tags",
-            "$resolved-thread",
-            {"tags": {"queued": True}},
-        )
-        seen.append((query_result, put_result))
-
-    registry = HookRegistry.from_plugins([_plugin("tool-policy", [before])])
     target = MessageTarget.resolve("!room:localhost", "$thread", None)
-    bridge = tool_policy(registry)
+    bridge = tool_policy(plugins.hooks)
 
     async def next_func(**kwargs: object) -> dict[str, object]:
         return {"echo": kwargs["path"]}
 
-    bot.hook_registry = registry
     runtime_context = bot._tool_runtime_support.build_context(target, user_id="@user:localhost")
     assert runtime_context is not None
 
@@ -1793,17 +1798,10 @@ async def test_agent_bot_tool_runtime_context_routes_custom_events_from_tool_hoo
             ),
         )
 
-    plugin_root = tmp_path / "plugins" / "tool-policy"
-    plugin_root.mkdir(parents=True)
-    (plugin_root / "mindroom.plugin.json").write_text(
-        '{"name": "tool-policy", "tools_module": null, "skills": []}',
-        encoding="utf-8",
-    )
-    plugins = [_plugin("tool-policy", [before, on_custom_event])]
     with registered_toolkit(tool_name, DemoToolkit):
-        config = _config(tmp_path, tools=[tool_name], plugins=["./plugins/tool-policy"])
+        config = _config(tmp_path, tools=[tool_name])
+        plugins = publish_hook_plugin(config, runtime_paths_for(config), "tool-policy", [before, on_custom_event])
         bot = _agent_bot(tmp_path, config=config)
-        bot.hook_registry = HookRegistry.from_plugins(plugins)
         bot.orchestrator = MagicMock(knowledge_managers={}, knowledge_refresh_scheduler=None)
 
         install_model_providers(monkeypatch, {"default": ScriptedModel([])})
@@ -1825,10 +1823,9 @@ async def test_agent_bot_tool_runtime_context_routes_custom_events_from_tool_hoo
             config,
             runtime_paths_for(config),
             execution_identity=execution_identity,
-            hook_registry=bot.hook_registry,
             knowledge=None,
             model=turn_model(config, runtime_paths_for(config), "code"),
-            plugins=config_plugins(config, runtime_paths_for(config)),
+            plugins=plugins,
         )
         echo = build.spec.functions["echo"]
 
@@ -2077,9 +2074,9 @@ async def test_create_agent_runs_the_hook_policy_around_its_tool_calls(
     async def after(ctx: ToolAfterCallContext) -> None:
         after_seen.append((ctx.config, ctx.runtime_paths, str(ctx.state_root), ctx.blocked))
 
-    registry = HookRegistry.from_plugins([_plugin("tool-policy", [block_all, after])])
     with registered_toolkit(tool_name, DemoToolkit):
         config = _config(tmp_path, tools=[tool_name])
+        plugins = publish_hook_plugin(config, runtime_paths_for(config), "tool-policy", [block_all, after])
         plugin_state_root = runtime_paths_for(config).storage_root / "plugins" / "tool-policy"
 
         install_model_providers(monkeypatch, {"default": ScriptedModel([])})
@@ -2088,10 +2085,9 @@ async def test_create_agent_runs_the_hook_policy_around_its_tool_calls(
             config,
             runtime_paths_for(config),
             execution_identity=None,
-            hook_registry=registry,
             knowledge=None,
             model=turn_model(config, runtime_paths_for(config), "code"),
-            plugins=config_plugins(config, runtime_paths_for(config)),
+            plugins=plugins,
         )
 
         echo = build.spec.functions["echo"]
@@ -2110,3 +2106,38 @@ async def test_create_agent_runs_the_hook_policy_around_its_tool_calls(
         )
         assert DemoToolkit.calls == []
         assert after_seen == [(config, runtime_paths_for(config), str(plugin_state_root), True)]
+
+
+@pytest.mark.asyncio
+async def test_a_publication_after_a_turn_captured_its_plugins_leaves_its_agent_build_on_that_generation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A plugin publication between a turn's tool context and its agent build reaches neither its tools nor its hooks.
+
+    The turn runs the tool and the tool hook of the generation its context captured; the next turn runs the new ones.
+    """
+    plugin_root = tmp_path / "plugins" / "generation-probe"
+    seen = write_generation_probe_plugin(plugin_root, 1)
+    config = _config(tmp_path, tools=[GENERATION_PROBE_TOOL], plugins=["./plugins/generation-probe"])
+    config.memory.backend = "none"
+    runtime_paths = runtime_paths_for(config)
+    publish_test_plugins(config, runtime_paths)
+    bot = _agent_bot(tmp_path, config=config)
+    target = MessageTarget.resolve("!room:localhost", "$thread", None)
+    turn = [calls(tool_call("which_generation", "call-1")), answer("Done.")]
+    install_model_providers(monkeypatch, {"default": ScriptedModel([*turn, *turn])})
+
+    async def reply(*, publish: int | None = None) -> None:
+        context = bot._tool_runtime_support.build_context(target, user_id="@user:localhost")
+        assert context is not None
+        if publish is not None:
+            write_generation_probe_plugin(plugin_root, publish)
+            publish_test_plugins(config, runtime_paths)
+        with tool_runtime_context(context):
+            await ai_response(replace(make_turn_context("code"), prompt="Which generation?"), runtime_paths, config)
+
+    await reply(publish=2)
+    assert seen == [("hook", 1), ("tool", 1)]
+    await reply()
+    assert seen[2:] == [("hook", 2), ("tool", 2)]

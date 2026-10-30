@@ -29,6 +29,7 @@ from mindroom.oauth.credential_store import _oauth_credential_database_path
 from mindroom.oauth.google_calendar import google_calendar_oauth_provider
 from mindroom.oauth.google_drive import google_drive_oauth_provider
 from mindroom.oauth.providers import OAuthProviderError
+from mindroom.tool_system.plugins import config_plugins
 from mindroom.tool_system.runtime_context import (
     ToolRuntimeContext,
     tool_runtime_context,
@@ -87,6 +88,7 @@ def _tool_and_context(
         client=MagicMock(),
         config=config,
         runtime_paths=runtime_paths,
+        plugins=config_plugins(config, runtime_paths),
         relations=make_relation_lookup(),
         conversation_reader=make_conversation_reader_mock(),
         agent_reply_memberships=isolated_membership_index(),

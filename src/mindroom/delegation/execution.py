@@ -102,7 +102,12 @@ from mindroom.tool_system.output_files import (
     prepare_tool_output_file,
 )
 from mindroom.tool_system.plugins import config_plugins
-from mindroom.tool_system.runtime_context import current_budget_monitor, get_tool_runtime_context, tool_runtime_context
+from mindroom.tool_system.runtime_context import (
+    current_budget_monitor,
+    current_plugins,
+    get_tool_runtime_context,
+    tool_runtime_context,
+)
 from mindroom.tool_system.tool_function import ToolOutcome
 from mindroom.turn_continuation import continuation_decision_from_tools, stopped_calls
 from mindroom.turn_model import ModelScope, resolve_turn_model
@@ -374,7 +379,7 @@ async def _execute_child(
             None,
         ),
         knowledge=knowledge.knowledge,
-        plugins=config_plugins(config, runtime_paths),
+        plugins=current_plugins(config, runtime_paths),
         history_storage=store,
         refresh_scheduler=refresh_scheduler,
         delegation_depth=child.depth,

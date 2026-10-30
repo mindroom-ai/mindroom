@@ -56,6 +56,7 @@ from mindroom.matrix_rtc.voice_agent import CallAgentResponse
 from mindroom.memory import MemoryPromptParts
 from mindroom.runtime_resolution import resolve_agent_runtime
 from mindroom.tool_jobs.execution import agent_tool_middleware
+from mindroom.tool_system import plugins as plugins_module
 from mindroom.tool_system.agno_toolkits import adapt_function, adapt_toolkit
 from mindroom.tool_system.call_record import recording_tool_calls
 from mindroom.tool_system.events import ToolTraceEntry
@@ -314,7 +315,11 @@ async def test_call_agent_keeps_chat_tool_surface_and_refuses_text_chat_function
         agent_name=AGENT,
         config=config,
         runtime_paths=runtime_paths,
-        context=SimpleNamespace(hooks=HookBindings(registry=None), tool_function_filter=None),  # type: ignore[arg-type]
+        context=SimpleNamespace(  # type: ignore[arg-type]
+            hooks=HookBindings(registry=None),
+            plugins=config_plugins(config, runtime_paths),
+            tool_function_filter=None,
+        ),
         execution_identity=None,  # type: ignore[arg-type]
         active_model_name=None,
     )
@@ -396,12 +401,18 @@ async def test_call_agent_cache_build_cancellation_waits_for_the_build(
 
     monkeypatch.setattr("mindroom.matrix_rtc.call_tools.create_scope_session_storage", MagicMock())
     monkeypatch.setattr("mindroom.matrix_rtc.call_tools.create_agent", _create_agent)
+    config = _config()
+    runtime_paths = test_runtime_paths(tmp_path)
     cache = _CallAgentCache(
         agent_name=AGENT,
-        config=_config(),
-        runtime_paths=test_runtime_paths(tmp_path),
-        context=SimpleNamespace(hooks=HookBindings(registry=None), tool_function_filter=None),  # type: ignore[arg-type]
-        execution_identity=_identity(test_runtime_paths(tmp_path)),  # type: ignore[arg-type]
+        config=config,
+        runtime_paths=runtime_paths,
+        context=SimpleNamespace(  # type: ignore[arg-type]
+            hooks=HookBindings(registry=None),
+            plugins=config_plugins(config, runtime_paths),
+            tool_function_filter=None,
+        ),
+        execution_identity=_identity(runtime_paths),  # type: ignore[arg-type]
         active_model_name="default",
     )
 
@@ -691,7 +702,6 @@ async def test_build_call_tools_returns_same_agent_prompt_and_tools(
     create_calls: list[tuple[object, ...]] = []
     create_kwargs: dict[str, object] = {}
     knowledge = object()
-    hook_registry = object()
     refresh_scheduler = object()
     config = _config()
     runtime_paths = test_runtime_paths(tmp_path)
@@ -725,6 +735,7 @@ async def test_build_call_tools_returns_same_agent_prompt_and_tools(
         fake_resolve_knowledge,
     )
     seen_targets: list[MessageTarget] = []
+    built_contexts: list[ToolRuntimeContext] = []
 
     class StrictToolSupport:
         def build_context(
@@ -739,13 +750,16 @@ async def test_build_call_tools_returns_same_agent_prompt_and_tools(
             assert agent_name == AGENT
             assert active_model_name == "default"
             seen_targets.append(target)
-            return _runtime_context(
+            context = _runtime_context(
                 config=config,
                 runtime_paths=runtime_paths,
                 target=target,
-                hook_registry=hook_registry,
                 orchestrator=SimpleNamespace(knowledge_refresh_scheduler=refresh_scheduler, budgets=None),
             )
+            built_contexts.append(context)
+            # A publication after the turn captured its plugins must not reach the turn's agent build.
+            plugins_module.publish_plugins(plugins_module.PluginGeneration())
+            return context
 
         def build_execution_identity(
             self,
@@ -772,7 +786,9 @@ async def test_build_call_tools_returns_same_agent_prompt_and_tools(
     assert tooling.instructions == "<your_role>\nTHE CHAT ROLE\n</your_role>"
     assert create_kwargs["eager_deferred_tools"] is True
     assert create_kwargs["include_interactive_questions"] is False
-    assert create_kwargs["hook_registry"] is hook_registry
+    [built_context] = built_contexts
+    assert create_kwargs["plugins"] is built_context.plugins
+    assert built_context.plugins is not config_plugins(config, runtime_paths)
     assert create_kwargs["knowledge"] is knowledge
     assert create_kwargs["refresh_scheduler"] is refresh_scheduler
     assert create_kwargs["tool_function_filter"] is not None

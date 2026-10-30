@@ -22,6 +22,7 @@ from mindroom.message_target import MessageTarget
 from mindroom.session_storage.agent_storage import create_agent_state_storage
 from mindroom.session_storage.types import ConversationSession
 from mindroom.tool_system.metadata import get_tool_by_name
+from mindroom.tool_system.plugins import config_plugins
 from mindroom.tool_system.registry import builtin_tool_registry
 from mindroom.tool_system.runtime_context import ToolRuntimeContext
 from tests.conftest import (
@@ -71,6 +72,7 @@ def _context(
         ),
         test_runtime_paths(tmp_path),
     )
+    runtime_paths = runtime_paths_for(config)
     return ToolRuntimeContext(
         agent_name="usage",
         target=MessageTarget.resolve(
@@ -81,7 +83,8 @@ def _context(
         requester_id=requester_id,
         client=AsyncMock(),
         config=config,
-        runtime_paths=runtime_paths_for(config),
+        runtime_paths=runtime_paths,
+        plugins=config_plugins(config, runtime_paths),
         conversation_reader=make_conversation_reader_mock(),
         relations=make_relation_lookup(),
     )

@@ -222,7 +222,7 @@ _SIGNATURES = {
         "decline_reason)"
     ),
     "ToolRuntimeContext": (
-        "(agent_name, target, requester_id, client, config, runtime_paths, conversation_reader, relations, "
+        "(agent_name, target, requester_id, client, config, runtime_paths, plugins, conversation_reader, relations, "
         "agent_reply_memberships, transport_agent_name, active_model_name, room, storage_path, attachment_ids, "
         "runtime_attachment_ids, runtime_media_attachments, hooks, correlation_id, message_received_depth, "
         "orchestrator, tool_function_filter, persona, membership, membership_turn_id, source_kind, config_provider, "

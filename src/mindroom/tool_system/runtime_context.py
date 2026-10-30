@@ -19,6 +19,7 @@ from mindroom.hooks import (
     validate_event_name,
 )
 from mindroom.tool_system.context_bound_streams import context_bound_async_stream
+from mindroom.tool_system.plugins import config_plugins
 from mindroom.tool_system.worker_routing import (
     bind_detached_execution_identity,
     build_tool_execution_identity,
@@ -51,6 +52,7 @@ if TYPE_CHECKING:
     from mindroom.response_turn import PausedAttempt
     from mindroom.runtime_protocols import OrchestratorRuntime
     from mindroom.scheduling.tasks import SchedulingRuntime
+    from mindroom.tool_system.plugins import ConfigPlugins
     from mindroom.tool_system.tool_function import ToolFunction
     from mindroom.tool_system.worker_routing import ResolvedWorkerTarget, ToolExecutionIdentity
     from mindroom.workers.models import WorkerReadyProgress
@@ -119,6 +121,8 @@ class ToolRuntimeContext:
     client: nio.AsyncClient
     config: Config
     runtime_paths: RuntimePaths
+    # The plugin generation this turn captured when it started: its tool factories and tool hooks both come from it.
+    plugins: ConfigPlugins
     conversation_reader: ConversationReader
     relations: RelationLookup
     agent_reply_memberships: AgentReplyMembershipIndex | None = None
@@ -129,7 +133,7 @@ class ToolRuntimeContext:
     attachment_ids: tuple[str, ...] = field(default_factory=tuple)
     runtime_attachment_ids: list[str] = field(default_factory=list)
     runtime_media_attachments: dict[str, RuntimeEncryptedMediaAttachment] = field(default_factory=dict)
-    # The turn's hook registry and Matrix capabilities, as its bot had them when the turn started.
+    # The turn's hook registry (its plugins' hooks) and its bot's Matrix capabilities when the turn started.
     hooks: HookBindings = field(default_factory=HookBindings)
     correlation_id: str | None = None
     message_received_depth: int = 0
@@ -344,13 +348,16 @@ class ToolRuntimeSupport:
         client = self.runtime.client
         if client is None:
             return None
+        config = self.runtime.config
+        plugins = config_plugins(config, self.runtime_paths)
         return ToolRuntimeContext(
             agent_name=agent_name or self.agent_name,
             target=target,
             requester_id=user_id or self.matrix_id.full_id,
             client=client,
-            config=self.runtime.config,
+            config=config,
             runtime_paths=self.runtime_paths,
+            plugins=plugins,
             conversation_reader=self.resolver.deps.conversation_reader,
             relations=self.resolver.deps.relations,
             transport_agent_name=self.agent_name,
@@ -358,7 +365,7 @@ class ToolRuntimeSupport:
             room=self.resolver.cached_room(target.room_id),
             storage_path=self.storage_path,
             attachment_ids=tuple(attachment_ids or ()),
-            hooks=self.hook_context.bindings(),
+            hooks=replace(self.hook_context.bindings(), registry=plugins.hooks),
             correlation_id=correlation_id,
             message_received_depth=(source_envelope.message_received_depth if source_envelope is not None else 0),
             orchestrator=self.runtime.orchestrator,
@@ -458,6 +465,16 @@ def current_execution_identity() -> ToolExecutionIdentity | None:
     """
     context = get_tool_runtime_context()
     return context.execution_identity if context is not None else detached_execution_identity()
+
+
+def current_plugins(config: Config, runtime_paths: RuntimePaths) -> ConfigPlugins:
+    """Return the plugins the running turn captured, else ``config``'s view of the published generation.
+
+    A build inside a Matrix turn (its agent, a team member it delegates to on demand, a delegated child) uses the
+    turn's capture, so its tools and the turn's tool hooks come from one plugin generation.
+    """
+    context = get_tool_runtime_context()
+    return context.plugins if context is not None else config_plugins(config, runtime_paths)
 
 
 def get_worker_progress_pump() -> WorkerProgressPump | None:

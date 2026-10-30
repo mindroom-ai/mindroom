@@ -27,6 +27,7 @@ from mindroom.scheduling import runtime as scheduling_runtime
 from mindroom.scheduling import tasks as scheduling
 from mindroom.scheduling.executor import ScheduledWorkflowOutcome
 from mindroom.scheduling.recurring_schedule import RecurringOccurrence, _RecurringCheckpoint
+from mindroom.tool_system.plugins import config_plugins
 from mindroom.tool_system.runtime_context import ToolRuntimeContext, build_scheduling_runtime_from_tool_runtime_context
 from tests.conftest import install_bots, make_conversation_reader_mock, make_matrix_client_mock
 from tests.identity_helpers import persist_entity_accounts
@@ -841,6 +842,7 @@ async def test_running_schedule_stops_after_live_human_alias_revocation(  # noqa
             client=client,
             config=config,
             runtime_paths=runtime_paths,
+            plugins=config_plugins(config, runtime_paths),
             conversation_reader=reader,
             relations=RelationLookup(store=principal, runtime=live_runtime),
             agent_reply_memberships=live_runtime.agent_reply_memberships,
