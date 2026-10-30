@@ -844,7 +844,7 @@ class KubernetesWorkerBackend:
         lifecycle = mark_worker_ready(entry.lifecycle, now=now)
         exists = self._resources.patch_deployment_annotations(
             entry.worker_id,
-            annotations=resources.lifecycle_annotations(lifecycle),
+            annotations=resources.usage_annotations(lifecycle),
         )
         if not exists:
             self._invalidate_ready_worker(entry.spec.worker_key)

@@ -4076,6 +4076,28 @@ def test_kubernetes_backend_cached_touch_uses_one_metadata_patch() -> None:
     )
 
 
+def test_kubernetes_backend_cached_touch_keeps_lifecycle_history_another_manager_wrote() -> None:
+    """A cached touch writes only usage, so a restart another manager recorded on the Deployment survives it."""
+    backend, apps_api, _core_api = _backend()
+    handle = backend.ensure_worker(_spec(_TEST_SCOPED_WORKER_KEY_A), now=10.0)
+    annotations = apps_api.deployments[handle.worker_id].metadata.annotations
+    # Another manager, for example one built after a kubeconfig rotation, restarted the worker meanwhile.
+    annotations["mindroom.ai/startup-count"] = "2"
+    annotations["mindroom.ai/last-started-at"] = "11.5"
+    annotations["mindroom.ai/failure-count"] = "1"
+
+    backend.touch_worker(_TEST_SCOPED_WORKER_KEY_A, now=12.0)
+
+    annotations = apps_api.deployments[handle.worker_id].metadata.annotations
+    assert annotations["mindroom.ai/last-used-at"] == "12.0"
+    assert annotations["mindroom.ai/worker-status"] == "ready"
+    assert (
+        annotations["mindroom.ai/startup-count"],
+        annotations["mindroom.ai/last-started-at"],
+        annotations["mindroom.ai/failure-count"],
+    ) == ("2", "11.5", "1")
+
+
 def test_kubernetes_backend_failure_invalidates_ready_cache() -> None:
     """A failed worker must take the full restart path on its next ensure."""
     backend, apps_api, core_api = _backend()

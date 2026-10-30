@@ -445,6 +445,18 @@ def lifecycle_annotations(state: WorkerLifecycleState) -> dict[str, str]:
     }
 
 
+_USAGE_ANNOTATIONS = frozenset({_ANNOTATION_LAST_USED_AT, _ANNOTATION_WORKER_STATUS, _ANNOTATION_FAILURE_REASON})
+
+
+def usage_annotations(state: WorkerLifecycleState) -> dict[str, str]:
+    """Serialize only what a touch changes: last use, status, and failure reason.
+
+    Start and failure history stay with the writers that read the Deployment first, so a manager whose cached view
+    is older, such as one replaced after a kubeconfig rotation, never rolls back another manager's restart.
+    """
+    return {name: value for name, value in lifecycle_annotations(state).items() if name in _USAGE_ANNOTATIONS}
+
+
 def metadata_annotations(*, worker_key: str, state_subpath: str, state: WorkerLifecycleState) -> dict[str, str]:
     """Build the worker identity and lifecycle annotations a Deployment is applied with."""
     return {
