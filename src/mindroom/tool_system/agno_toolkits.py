@@ -460,7 +460,6 @@ def _adapt(function: Function, finishing: _Finishing) -> ToolFunction:
         stop_after_call=prepared.stop_after_tool_call,
         entrypoint=prepared.entrypoint,
         injected_params=injected_parameters(function.entrypoint),
-        entrypoint_processed=not function.skip_entrypoint_processing,
     )
 
 
@@ -494,7 +493,6 @@ def _owned_function(toolkit: authoring.Toolkit, name: str, finishing: _Finishing
             requires_confirmation=False,
             external_execution=False,
             entrypoint=validated_entrypoint(entrypoint) if derived else entrypoint,
-            entrypoint_processed=derived,
         ),
     )
     if not output_files:

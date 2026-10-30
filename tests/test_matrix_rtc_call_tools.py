@@ -31,7 +31,6 @@ from mindroom.config.models import BackgroundToolJobsConfig, ModelConfig, ModelP
 from mindroom.constants import AI_RUN_METADATA_KEY
 from mindroom.helper_usage import HelperUsageOwner, get_helper_usage_owner, record_helper_usage
 from mindroom.history.turn_recorder import TurnRecorder
-from mindroom.history.types import HistoryScope
 from mindroom.hooks import EnrichmentItem
 from mindroom.knowledge.availability import KnowledgeAvailability
 from mindroom.knowledge.search import AgentKnowledge, KnowledgeSource, KnowledgeSourceDescription
@@ -56,6 +55,7 @@ from mindroom.matrix_rtc.call_tools import (
 from mindroom.matrix_rtc.voice_agent import CallAgentResponse
 from mindroom.memory import MemoryPromptParts
 from mindroom.runtime_resolution import resolve_agent_runtime
+from mindroom.session_storage.store import ConversationStore
 from mindroom.tool_jobs.execution import agent_tool_middleware
 from mindroom.tool_system.agno_toolkits import adapt_toolkit
 from mindroom.tool_system.call_record import recording_tool_calls
@@ -85,6 +85,7 @@ if TYPE_CHECKING:
     from mindroom.constants import RuntimePaths
     from mindroom.message_target import MessageTarget
     from mindroom.response_turn import ResponseTurnContext, TurnSinks
+    from mindroom.session_storage.types import ConversationSession
     from mindroom.tool_system.invocation import ToolCall, ToolMiddleware, ToolNext
     from mindroom.tool_system.tool_function import AdaptedToolkit, ToolFunction
 
@@ -175,7 +176,6 @@ def _build(*toolkits: Toolkit, policy: tuple[ToolMiddleware, ...] = (), role: st
         prompt=PromptSpec(role=role, instructions=()),
         request_template=ModelRequest(messages=()),
         history_settings=replay_settings(),
-        store=None,
         surface=AgentSurface(
             mode="standard",
             cli_shell=False,
@@ -394,7 +394,6 @@ async def test_call_agent_cache_build_cancellation_waits_for_the_build(
     async def render(_build: AgentBuild) -> str:
         return "rendered"
 
-    monkeypatch.setattr("mindroom.matrix_rtc.call_tools.create_scope_session_storage", MagicMock())
     monkeypatch.setattr("mindroom.matrix_rtc.call_tools.create_agent", _create_agent)
     cache = _CallAgentCache(
         agent_name=AGENT,
@@ -550,23 +549,18 @@ _SEARCH_SCHEMA = {"type": "object", "properties": {"query": {"type": "string"}},
 
 
 @pytest.mark.parametrize(
-    ("function", "closed"),
+    "function",
     [
-        pytest.param(Function(name="add", entrypoint=_add_numbers), True, id="processed-with-arguments"),
-        pytest.param(Function(name="ping", entrypoint=_ping), False, id="processed-without-arguments"),
-        pytest.param(_mcp_function(_SEARCH_SCHEMA), False, id="mcp-schema"),
+        pytest.param(Function(name="add", entrypoint=_add_numbers), id="derived-with-arguments"),
+        pytest.param(Function(name="ping", entrypoint=_ping), id="derived-without-arguments"),
+        pytest.param(_mcp_function(_SEARCH_SCHEMA), id="mcp-schema"),
     ],
 )
-def test_realtime_schemas_match_agnos_second_processing_pass(function: Function, *, closed: bool) -> None:
-    """Agno's second pass closes a schema it produced from an entrypoint; an MCP tool's schema reaches the model as sent."""
-    twice_processed = function.model_copy(deep=True)
-    twice_processed.process_entrypoint()
-    twice_processed.process_entrypoint()
-
+def test_realtime_schemas_are_the_schemas_every_other_model_is_offered(function: Function) -> None:
+    """The realtime model reads a function's parameters schema as text chat offers it, an MCP tool's as sent."""
     parameters = _wrap(function).info.raw_schema["parameters"]
 
-    assert parameters == twice_processed.parameters
-    assert ("additionalProperties" in parameters) is closed
+    assert parameters == offered_agno_function(function).parameters
     if function.skip_entrypoint_processing:
         assert parameters == _SEARCH_SCHEMA
 
@@ -889,26 +883,22 @@ async def test_call_responder_uses_normal_agent_turn_and_refuses_unsafe_function
         ),
     )
     create_agent_mock = MagicMock(return_value=cached_build)
-    history_storage = MagicMock()
-    create_scope_session_storage_mock = MagicMock(return_value=history_storage)
     monkeypatch.setattr("mindroom.matrix_rtc.call_tools.create_agent", create_agent_mock)
-    monkeypatch.setattr(
-        "mindroom.matrix_rtc.call_tools.create_scope_session_storage",
-        create_scope_session_storage_mock,
-    )
     monkeypatch.setattr(
         "mindroom.matrix_rtc.call_tools.resolve_agent_knowledge_access_async",
         AsyncMock(return_value=SimpleNamespace(knowledge=knowledge, unavailable=())),
     )
     monkeypatch.setattr("mindroom.ai.ai_response", fake_ai_response)
-    monkeypatch.setattr(
-        "mindroom.matrix_rtc.call_tools.load_scope_session",
-        lambda **kwargs: SimpleNamespace(session_id=kwargs["session_id"]),
-    )
-    monkeypatch.setattr(
-        "mindroom.matrix_rtc.call_tools.persist_interrupted_replay",
-        lambda **kwargs: persisted_interruptions.append(kwargs),
-    )
+    call_store = ConversationStore(tmp_path / "call.db")
+    monkeypatch.setattr("mindroom.matrix_rtc.call_tools.create_session_storage", lambda *_args: call_store)
+
+    def record_interruption(*, storage: ConversationStore, session: ConversationSession, **kwargs: object) -> None:
+        assert storage is call_store
+        # The interrupted run is written in the database's lane, behind the conversation's other storage work.
+        assert threading.current_thread().name.startswith("conversation-store")
+        persisted_interruptions.append({"session": (session.session_id, session.kind, session.owner_id), **kwargs})
+
+    monkeypatch.setattr("mindroom.matrix_rtc.call_tools.persist_interrupted_replay", record_interruption)
     if not reconcile_spoken_response:
         monkeypatch.setattr(
             "mindroom.matrix_rtc.call_tools._CallResponseTracker.register",
@@ -965,7 +955,6 @@ async def test_call_responder_uses_normal_agent_turn_and_refuses_unsafe_function
     used_build = turn.reusable_build
     assert used_build is not None
     assert used_build.prompt == cached_build.prompt
-    assert create_agent_mock.call_args.kwargs["history_storage"] is history_storage
     # The cached delegate keeps chat's tools and prompt, so calls reuse chat's prompt cache.
     assert "tool_function_filter" not in create_agent_mock.call_args.kwargs
     assert "include_interactive_questions" not in create_agent_mock.call_args.kwargs
@@ -983,12 +972,6 @@ async def test_call_responder_uses_normal_agent_turn_and_refuses_unsafe_function
         assert refused.parameters == cached[name].parameters
         result = await run_tool_call(refused, {}, _CALL_CONTEXT, middleware=agent_tool_middleware(used_build))
         assert result.value == _TEXT_CHAT_REQUIRED_MESSAGE
-    create_scope_session_storage_mock.assert_called_once_with(
-        scope=HistoryScope(kind="agent", scope_id=AGENT),
-        config=config,
-        runtime_paths=runtime_paths,
-        execution_identity=execution_identity,
-    )
     if reconcile_spoken_response:
         assert tooling.finalize_spoken_response is not None
         finalize = tooling.finalize_spoken_response(response.turn_id, "It is", True)
@@ -999,7 +982,7 @@ async def test_call_responder_uses_normal_agent_turn_and_refuses_unsafe_function
     assert persisted_interruptions == (
         [
             {
-                "scope_context": SimpleNamespace(session_id="!room:example.org:call:one"),
+                "session": ("!room:example.org:call:one", "agent", AGENT),
                 "run_id": "call-run-1",
                 "user_message": "What is the weather?",
                 "user_message_is_structured": False,
@@ -1172,10 +1155,6 @@ async def test_cascaded_responder_records_effective_selected_model_metadata(
         AsyncMock(return_value=SimpleNamespace(knowledge=None, unavailable=())),
     )
     monkeypatch.setattr(
-        "mindroom.matrix_rtc.call_tools.load_scope_session",
-        lambda **_kwargs: SimpleNamespace(),
-    )
-    monkeypatch.setattr(
         "mindroom.matrix_rtc.call_tools.persist_interrupted_replay",
         lambda **kwargs: persisted_interruptions.append(kwargs),
     )
@@ -1274,10 +1253,6 @@ async def test_cascaded_cancellation_during_knowledge_resolution_persists_transc
         blocked_resolution,
     )
     monkeypatch.setattr(
-        "mindroom.matrix_rtc.call_tools.load_scope_session",
-        lambda **kwargs: SimpleNamespace(session_id=kwargs["session_id"]),
-    )
-    monkeypatch.setattr(
         "mindroom.matrix_rtc.call_tools.persist_interrupted_replay",
         lambda **kwargs: persisted_interruptions.append(kwargs),
     )
@@ -1309,7 +1284,7 @@ async def test_cascaded_cancellation_during_knowledge_resolution_persists_transc
 
     assert len(persisted_interruptions) == 1
     persisted = persisted_interruptions[0]
-    assert persisted["scope_context"] == SimpleNamespace(session_id="call-session")
+    assert persisted["session"].session_id == "call-session"
     assert persisted["user_message"] == "Never speak this"
     assert persisted["partial_text"] == ""
     assert persisted["original_status"] is RunStatus.cancelled
@@ -1993,10 +1968,6 @@ async def test_cascaded_responder_waits_for_interrupted_playout_settlement(
     )
     monkeypatch.setattr("mindroom.matrix_rtc.call_tools.create_agent", MagicMock(return_value=_build()))
     monkeypatch.setattr("mindroom.ai.ai_response", fake_ai_response)
-    monkeypatch.setattr(
-        "mindroom.matrix_rtc.call_tools.load_scope_session",
-        lambda **_kwargs: SimpleNamespace(),
-    )
     monkeypatch.setattr("mindroom.matrix_rtc.call_tools.persist_interrupted_replay", persist_interrupted)
     tooling = await build_call_tools(
         agent_name=AGENT,

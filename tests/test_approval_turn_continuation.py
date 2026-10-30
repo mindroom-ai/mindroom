@@ -48,7 +48,13 @@ from mindroom.tool_system.events import (
 from mindroom.tool_system.runtime_context import LiveToolDispatchContext, ToolDispatchContext
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity, get_tool_execution_identity
 from tests.approval_continuation_helpers import RECEIPT_CALLS, approval_continuation, carries_approval_receipt
-from tests.conftest import bind_runtime_paths, install_model_providers, make_turn_context, unwrap_extracted_collaborator
+from tests.conftest import (
+    bind_runtime_paths,
+    install_model_providers,
+    make_turn_context,
+    record_store_threads,
+    unwrap_extracted_collaborator,
+)
 from tests.fakes.scripted_model import Await, ScriptedModel, ScriptStep, answer, calls, tool_call, usage
 from tests.response_runner_helpers import _bot
 from tests.scripted_agent_helpers import stop_turn, stored_runs
@@ -788,6 +794,7 @@ async def test_an_approved_run_that_answers_without_text_shows_its_earlier_text_
     )
     runner = unwrap_extracted_collaborator(_bot(tmp_path / "runner")._response_runner)
     execution = replace(runner._approvals._approval_execution, config=lambda: config, runtime_paths=paths)
+    threads = record_store_threads(monkeypatch, "load_session", "get_run")
 
     result = await execution.continue_run(
         continuation,
@@ -800,6 +807,9 @@ async def test_an_approved_run_that_answers_without_text_shows_its_earlier_text_
 
     assert isinstance(result, CompletedApprovalRun)
     assert result.response_text == reply
+    # The continuation first reads its session and its paused run in the database's lane.
+    assert threads["load_session"][0].startswith("conversation-store"), threads
+    assert threads["get_run"][0].startswith("conversation-store"), threads
 
 
 @pytest.mark.asyncio

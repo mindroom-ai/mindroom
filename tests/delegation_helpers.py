@@ -408,7 +408,6 @@ async def pause_parent(
         config,
         runtime_paths,
         identity,
-        history_storage=store,
         supports_native_tool_approval=True,
         knowledge=None,
         model=turn_model(config, runtime_paths, agent_name),

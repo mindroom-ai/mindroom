@@ -18,12 +18,14 @@ import socket
 from contextlib import contextmanager, nullcontext
 from importlib.metadata import version
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 from unittest.mock import patch
 
 import httpx
 from agno.tools import Toolkit
+from agno.tools import function as agno_function
 from agno.tools.function import Function
+from agno.utils import json_schema
 from packaging.version import Version
 
 from mindroom.agents import build_agent_toolkit
@@ -48,7 +50,6 @@ from tests.agno_parity import tool_argument_probes as probes
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterator, Mapping
-    from typing import Any
 
     from mindroom.tool_system.tool_function import AdaptedToolkit, ToolFunction
 
@@ -313,10 +314,33 @@ def golden_entry(adapted: AdaptedToolkit) -> dict[str, object]:
 
 
 def agno_derivation(entrypoint: Callable[..., Any]) -> tuple[str | None, dict[str, Any]]:
-    """Return the description and parameter schema Agno's entrypoint processing derives for ``entrypoint``."""
+    """Return the description and parameter schema Agno's entrypoint processing derives for ``entrypoint``.
+
+    Values annotated ``Any`` or ``object`` take any JSON value, as the owned generator renders them and as
+    https://github.com/agno-agi/agno/pull/10423 proposes; Agno 3.0.9 renders an object that admits only ``{}``.
+    """
+    agno_schema = json_schema.get_json_schema_for_arg
+
+    def unconstrained_any(type_hint: object) -> dict[str, Any] | None:
+        return {} if type_hint is Any or type_hint is object else agno_schema(type_hint)
+
     function = Function(name="derived", entrypoint=entrypoint)
-    function.process_entrypoint(strict=False)
+    # Agno caches each callable's derivation, so forget it around the patch: a cached schema would skip the patch,
+    # and the patched one would reach later unpatched derivations.
+    _forget_agno_derivation(entrypoint)
+    try:
+        with patch.object(json_schema, "get_json_schema_for_arg", unconstrained_any):
+            function.process_entrypoint(strict=False)
+    finally:
+        _forget_agno_derivation(entrypoint)
     return function.description, function.parameters
+
+
+def _forget_agno_derivation(entrypoint: Callable[..., Any]) -> None:
+    """Drop Agno's cached schema derivations of ``entrypoint``."""
+    agno_function._cached_entrypoint_schema.cache_clear()
+    if (cache := agno_function._get_lifetime_cache(entrypoint)) is not None:
+        cache.clear()
 
 
 def probe_functions() -> dict[str, ToolFunction]:

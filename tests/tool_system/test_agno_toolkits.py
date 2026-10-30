@@ -221,7 +221,6 @@ def _what_the_loop_reads(function: Function) -> tuple[object, ...]:
         (adapted.requires_confirmation, adapted.external_execution, adapted.approval_type),
         adapted.stop_after_call,
         adapted.external_execution_silent,
-        adapted.entrypoint_processed,
         adapted.injected_params,
     )
 

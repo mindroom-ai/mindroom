@@ -111,7 +111,6 @@ async def test_enabling_jobs_reserves_the_function_name_job(tmp_path: Path, *, f
                     config,
                     paths,
                     execution_identity=owner,
-                    persist_runtime_state=False,
                     tool_function_filter=lambda function: function.name != "job",
                     knowledge=None,
                     model=turn_model(config, paths, "leader"),
@@ -124,7 +123,6 @@ async def test_enabling_jobs_reserves_the_function_name_job(tmp_path: Path, *, f
                         config,
                         paths,
                         execution_identity=owner,
-                        persist_runtime_state=False,
                         knowledge=None,
                         model=turn_model(config, paths, "leader"),
                     )
@@ -229,7 +227,6 @@ async def test_managed_agent_has_one_job_schema(tmp_path: Path, delegate: bool) 
             config,
             paths,
             execution_identity=owner,
-            persist_runtime_state=False,
             knowledge=None,
             model=turn_model(config, paths, "leader"),
         )

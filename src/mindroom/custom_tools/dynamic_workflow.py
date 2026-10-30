@@ -516,7 +516,6 @@ def _build_room_agent_participant(
         knowledge=None,
         model=model,
         include_interactive_questions=False,
-        persist_runtime_state=False,
         disable_runtime_capabilities=True,
     )
     return participant_context, build

@@ -304,7 +304,6 @@ async def test_a_consumer_failure_during_the_continuation_stores_the_cancelled_p
         config,
         paths,
         identity,
-        history_storage=store,
         supports_native_tool_approval=True,
         knowledge=None,
         model=turn_model(config, paths, "leader"),
