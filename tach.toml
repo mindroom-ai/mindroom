@@ -921,7 +921,6 @@ depends_on = [
     "mindroom.path_confinement",
     "mindroom.tool_system.agent_tool_calls",
     "mindroom.agent_descriptions",
-    "mindroom.session_storage.agent_storage",
     "mindroom.constants",
     "mindroom.credentials.manager",
     "mindroom.custom_tools.computer_announcement",
@@ -1004,7 +1003,6 @@ depends_on = [
 ]
 visibility = [
     "mindroom.helper_usage",
-    "mindroom.agents",
     "mindroom.approval.execution",
     "mindroom.conversation_state_writer",
     "mindroom.history.interrupted_replay",
