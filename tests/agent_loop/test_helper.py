@@ -32,7 +32,6 @@ if TYPE_CHECKING:
     from collections.abc import AsyncIterator
 
 IDENTITY = ModelIdentity(id="claude-sonnet-5-5", provider="Anthropic")
-# A route whose stored provider and usage provider differ.
 LUNA = ModelIdentity(id="gpt-6-luna", provider="OpenAI")
 _ANSWERED_AT = 1_790_000_000
 
