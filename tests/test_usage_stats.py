@@ -1197,11 +1197,11 @@ def test_shared_self_reads_each_source_once_for_totals_and_models(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     source = _source()
-    calls: list[tuple[str, str]] = []
+    calls: list[str] = []
     _wire(
         monkeypatch,
         (source,),
-        {source.path_label: (_row(source, _run(), totals_available=False),)},
+        {source.path_label: (_row(source, _run()),)},
         calls,
     )
 
@@ -1380,7 +1380,7 @@ def test_admin_reads_each_source_once_for_session_and_model_views(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     source = _source()
-    calls: list[tuple[str, str]] = []
+    calls: list[str] = []
     _wire(
         monkeypatch,
         (source,),
