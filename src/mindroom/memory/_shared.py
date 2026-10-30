@@ -11,8 +11,6 @@ from uuid import uuid4
 if TYPE_CHECKING:
     from pathlib import Path
 
-    from mindroom.constants import RuntimePaths
-
 
 class MemoryResult(TypedDict, total=False):
     """Type for memory search results from the configured backend."""
@@ -27,8 +25,8 @@ class MemoryResult(TypedDict, total=False):
     user_id: str
 
 
-class ScopedMemoryWriter(Protocol):
-    """Minimal protocol for writing scoped memory entries."""
+class ScopedMemoryCrud(Protocol):
+    """Minimal protocol for mem0 CRUD operations used by this package."""
 
     async def add(
         self,
@@ -38,10 +36,6 @@ class ScopedMemoryWriter(Protocol):
         metadata: dict[str, object] | None = None,
     ) -> object:
         """Persist messages for a scoped memory user ID."""
-
-
-class ScopedMemoryCrud(ScopedMemoryWriter, Protocol):
-    """Minimal protocol for mem0 CRUD operations used by this package."""
 
     async def get(self, memory_id: str) -> dict[str, Any] | None:
         """Return the memory payload for a given memory ID."""
@@ -112,22 +106,11 @@ class MemoryEntrypointContext:
         return max(0, self.total_lines - self.included_lines)
 
 
-@dataclass(frozen=True)
-class FileMemoryResolution:
-    """Resolved file-memory storage settings for a specific caller/context."""
-
-    storage_path: Path
-    runtime_paths: RuntimePaths
-    use_configured_path: bool
-    agent_memory_scope_path: Path | None = None
-
-
-FILE_MEMORY_DEFAULT_DIRNAME = "memory_files"
 FILE_MEMORY_ENTRYPOINT = "MEMORY.md"
+FILE_MEMORY_ENTRYPOINT_HEADER = "# Memory"
 FILE_MEMORY_DAILY_DIR = "memory"
 FILE_MEMORY_ENTRY_PATTERN = re.compile(r"^- \[id=(?P<id>[^\]]+)\]\s*(?P<memory>.+?)\s*$")
 FILE_MEMORY_PATH_ID_PATTERN = re.compile(r"^file:(?P<path>[^:]+):(?P<line>\d+)$")
-MEM0_REPLICA_KEY = "mindroom_replica_key"
 
 
 def new_memory_id() -> str:

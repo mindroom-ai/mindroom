@@ -63,7 +63,7 @@ from mindroom.hooks import (
     emit,
 )
 from mindroom.integrations import bind_integrations, unbind_integrations
-from mindroom.knowledge.refresh_scheduler import KnowledgeRefreshScheduler
+from mindroom.knowledge.refresh_scheduler import KnowledgeRefreshScheduler, runtime_refresh_scheduler
 from mindroom.knowledge.status import reconcile_knowledge_mode_transition_states
 from mindroom.knowledge.watch import KnowledgeSourceWatcher
 from mindroom.knowledge_graph.runtime import KnowledgeGraphRuntime
@@ -81,6 +81,7 @@ from mindroom.matrix_rtc.call_manager import preload_matrix_call_dependencies
 from mindroom.mcp.manager import MCPServerManager
 from mindroom.mcp.toolkit import bind_mcp_server_manager
 from mindroom.memory import MemoryAutoFlushService
+from mindroom.memory.legacy_team_memory import migrate_team_memory
 from mindroom.providers.model_http_client import aclose_model_http_client
 from mindroom.response_activity import ActiveResponseIdentity
 from mindroom.response_admission import ResponseAdmissionGate
@@ -348,7 +349,7 @@ class _MultiAgentOrchestrator:
             matrix_admin=self.hook_matrix_admin,
             hooks=self.hook_registry_state.lifetime(),
         )
-        self._knowledge_refresh_scheduler = KnowledgeRefreshScheduler.from_runtime(self.runtime_paths)
+        self._knowledge_refresh_scheduler = runtime_refresh_scheduler(self.runtime_paths)
         self._knowledge_source_watcher = KnowledgeSourceWatcher(self._knowledge_refresh_scheduler, self.runtime_paths)
         self.agent_reply_membership_sync = AgentReplyMembershipSync(self.agent_reply_memberships)
         self.plugin_watch = PluginWatchState(runtime_paths=self.runtime_paths)
@@ -2154,6 +2155,7 @@ async def _run_runtime(  # noqa: PLR0915
             )
             # Before the API serves and before the homeserver answers, so the dashboard has this one load meanwhile.
             startup_config = await load_startup_config(runtime_paths, api_enabled=api)
+            await migrate_team_memory(runtime_paths, startup_config)
 
         logger.info("Starting orchestrator...")
         orchestrator = _MultiAgentOrchestrator(runtime_paths=runtime_paths, config=startup_config, api_enabled=api)

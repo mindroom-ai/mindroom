@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import weakref
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, cast
 from unittest.mock import MagicMock, patch
@@ -42,7 +43,8 @@ from mindroom.memory import (
 )
 from mindroom.memory._mem0_backend import Mem0MemoryBackend
 from mindroom.memory._mem0_usage import counted_mem0_usage, install_mem0_usage_capture, mem0_usage
-from mindroom.memory.config import _Mem0Embedder, _Mem0StrictOpenAIEmbedder
+from mindroom.memory._shared import MemoryNotFoundError
+from mindroom.memory.config import _Mem0Embedder, _Mem0StrictOpenAIEmbedder, mem0_chroma_path
 from mindroom.redaction import REDACTED, REDACTION_FAILED
 from mindroom.tool_system.worker_routing import (
     ToolExecutionIdentity,
@@ -52,7 +54,7 @@ from mindroom.tool_system.worker_routing import (
     tool_execution_identity,
 )
 from tests.conftest import bind_runtime_paths, runtime_paths_for
-from tests.memory_test_support import FakeMem0ScopedMemory, MockTeamConfig
+from tests.memory_test_support import FakeMem0ScopedMemory, MockTeamConfig, fake_mem0_stores
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
@@ -101,31 +103,7 @@ async def test_store_conversation_memory_uses_explicit_execution_identity_for_de
     config.memory.backend = "mem0"
     config.agents["general"].worker_scope = "user"
 
-    captured_calls: list[tuple[Path, str | None, dict[str, object]]] = []
-
-    class FakeScopedMemory:
-        def __init__(self, scope_storage_path: Path) -> None:
-            self.scope_storage_path = scope_storage_path
-
-        async def add(
-            self,
-            messages: list[dict],
-            *,
-            user_id: str | None = None,
-            metadata: dict[str, object] | None = None,
-        ) -> None:
-            del messages
-            captured_calls.append((self.scope_storage_path, user_id, metadata or {}))
-
-    async def create_fake_memory_instance(
-        scope_storage_path: Path,
-        _config: Config,
-        *,
-        runtime_paths: object,
-        timing_scope: str | None = None,
-    ) -> FakeScopedMemory:
-        del runtime_paths, timing_scope
-        return FakeScopedMemory(scope_storage_path)
+    stores, create_fake_memory_instance = fake_mem0_stores()
 
     execution_identity = ToolExecutionIdentity(
         channel="matrix",
@@ -141,26 +119,21 @@ async def test_store_conversation_memory_uses_explicit_execution_identity_for_de
         await store_conversation_memory(
             "Alice-authored shared memory",
             "general",
-            storage_path,
             "session-alice",
             config,
             runtime_paths_for(config),
             execution_identity=execution_identity,
         )
 
-    expected_storage_path = agent_state_root_path(storage_path, "general")
-    assert captured_calls == [
-        (
-            expected_storage_path,
-            "agent_general",
-            {"type": "conversation", "session_id": "session-alice", "agent": "general"},
-        ),
+    general_root = agent_state_root_path(storage_path, "general")
+    assert list(stores) == [general_root]
+    assert [(entry["user_id"], entry["metadata"]) for entry in (await stores[general_root].get_all())["results"]] == [
+        ("agent_general", {"type": "conversation", "session_id": "session-alice", "agent": "general"}),
     ]
 
 
 @pytest.mark.asyncio
 async def test_store_conversation_memory_redacts_embedder_provider_error(
-    storage_path: Path,
     config: Config,
 ) -> None:
     """Automatic Mem0 writes never log the rejected key from a provider body."""
@@ -175,18 +148,14 @@ async def test_store_conversation_memory_redacts_embedder_provider_error(
             # Mem0's embedder is MindRoom's, which raises the classified error at its boundary.
             raise openai_embedder_error(error) from error
 
-    async def create_failing_memory(*_args: object, **_kwargs: object) -> FailingMemory:
-        return FailingMemory()
-
     try:
         with (
-            patch("mindroom.memory._backend.create_memory_instance", side_effect=create_failing_memory),
+            patch("mindroom.memory._backend.create_memory_instance", return_value=FailingMemory()),
             capture_logs() as logs,
         ):
             await store_conversation_memory(
                 "Remember this",
                 "general",
-                storage_path,
                 "session",
                 config,
                 runtime_paths_for(config),
@@ -194,7 +163,7 @@ async def test_store_conversation_memory_redacts_embedder_provider_error(
 
         assert secret not in str(logs)
         assert "embedder authentication failed (HTTP 401)" in str(logs)
-        assert "Conversation memory was not stored in any target" in str(logs)
+        assert "Failed to add memory" in str(logs)
         assert "Memory added" not in str(logs)
     finally:
         capture_embedder_health_recorder().record(None)
@@ -202,7 +171,6 @@ async def test_store_conversation_memory_redacts_embedder_provider_error(
 
 @pytest.mark.asyncio
 async def test_store_conversation_memory_detects_embedding_failure_swallowed_by_mem0(
-    storage_path: Path,
     config: Config,
 ) -> None:
     """Automatic writes remain degraded when Mem0 catches every embedding error."""
@@ -231,18 +199,14 @@ async def test_store_conversation_memory_detects_embedding_failure_swallowed_by_
                 return {"results": []}
             return {"results": []}
 
-    async def create_swallowing_memory(*_args: object, **_kwargs: object) -> SwallowingMemory:
-        return SwallowingMemory()
-
     try:
         with (
-            patch("mindroom.memory._backend.create_memory_instance", side_effect=create_swallowing_memory),
+            patch("mindroom.memory._backend.create_memory_instance", return_value=SwallowingMemory()),
             capture_logs() as logs,
         ):
             await store_conversation_memory(
                 "Remember this",
                 "general",
-                storage_path,
                 "session",
                 config,
                 runtime_paths_for(config),
@@ -250,7 +214,7 @@ async def test_store_conversation_memory_detects_embedding_failure_swallowed_by_
 
         assert get_embedder_failure() == "embedder authentication failed (HTTP 401)"
         assert "embedder authentication failed (HTTP 401)" in str(logs)
-        assert "Conversation memory was not stored in any target" in str(logs)
+        assert "Failed to add memory" in str(logs)
         assert "Memory added" not in str(logs)
     finally:
         capture_embedder_health_recorder().record(None)
@@ -284,7 +248,6 @@ class _OllamaServerThatFailsAfterExtraction:
 
 @pytest.mark.asyncio
 async def test_a_memory_whose_ollama_embedding_fails_after_extraction_is_not_saved_silently(
-    storage_path: Path,
     config: Config,
 ) -> None:
     """Mem0 drops the extracted facts it cannot embed and reports the add as done, so the save raises the failure."""
@@ -300,18 +263,18 @@ async def test_a_memory_whose_ollama_embedding_fails_after_extraction_is_not_sav
             patch("mem0.llms.ollama.Client", server.client),
             pytest.raises(EmbedderRequestError) as excinfo,
         ):
-            await add_agent_memory("Atlas ships Friday.", "general", storage_path, config, runtime_paths)
+            await add_agent_memory("Atlas ships Friday.", "general", config, runtime_paths)
         assert get_embedder_failure() == "embedder endpoint unreachable"
     finally:
         capture_embedder_health_recorder().record(None)
 
     assert (str(excinfo.value), excinfo.value.retryable) == ("embedder endpoint unreachable", True)
     with patch("mem0.embeddings.ollama.Client", server.client), patch("mem0.llms.ollama.Client", server.client):
-        assert await list_all_agent_memories("general", storage_path, config, runtime_paths) == []
+        assert await list_all_agent_memories("general", config, runtime_paths) == []
 
 
 @pytest.mark.asyncio
-async def test_a_failure_of_mem0_s_memory_model_is_not_an_embedder_failure(storage_path: Path, config: Config) -> None:
+async def test_a_failure_of_mem0_s_memory_model_is_not_an_embedder_failure(config: Config) -> None:
     """A rejected memory LLM key propagates as the model's error and leaves the embedder's health alone."""
     config.memory.backend = "mem0"
     request = httpx.Request("POST", "https://api.openai.com/v1/chat/completions")
@@ -323,21 +286,18 @@ async def test_a_failure_of_mem0_s_memory_model_is_not_an_embedder_failure(stora
             # Mem0's own model calls raise the raw SDK error.
             raise rejected
 
-    async def create_failing_memory(*_args: object, **_kwargs: object) -> FailingMemory:
-        return FailingMemory()
-
     capture_embedder_health_recorder().record(None)
     with (
-        patch("mindroom.memory._backend.create_memory_instance", side_effect=create_failing_memory),
+        patch("mindroom.memory._backend.create_memory_instance", return_value=FailingMemory()),
         pytest.raises(AuthenticationError),
     ):
-        await add_agent_memory("Atlas ships Friday.", "general", storage_path, config, runtime_paths_for(config))
+        await add_agent_memory("Atlas ships Friday.", "general", config, runtime_paths_for(config))
 
     assert get_embedder_failure() is None
 
 
 @pytest.mark.asyncio
-async def test_mem0_write_failure_keeps_the_embedder_retry_judgment(storage_path: Path, config: Config) -> None:
+async def test_mem0_write_failure_keeps_the_embedder_retry_judgment(config: Config) -> None:
     """A failed Mem0 write raises the classified error with its retry flag and hint, and without the raw error."""
     config.memory.backend = "mem0"
     request = httpx.Request("POST", "http://embeddings.local/v1/embeddings")
@@ -348,15 +308,12 @@ async def test_mem0_write_failure_keeps_the_embedder_retry_judgment(storage_path
         async def add(self, *_args: object, **_kwargs: object) -> None:
             raise openai_embedder_error(raw_error) from raw_error
 
-    async def create_failing_memory(*_args: object, **_kwargs: object) -> FailingMemory:
-        return FailingMemory()
-
     try:
         with (
-            patch("mindroom.memory._backend.create_memory_instance", side_effect=create_failing_memory),
+            patch("mindroom.memory._backend.create_memory_instance", return_value=FailingMemory()),
             pytest.raises(EmbedderRequestError) as excinfo,
         ):
-            await add_agent_memory("Atlas ships Friday.", "general", storage_path, config, runtime_paths_for(config))
+            await add_agent_memory("Atlas ships Friday.", "general", config, runtime_paths_for(config))
     finally:
         capture_embedder_health_recorder().record(None)
 
@@ -375,17 +332,7 @@ async def test_private_agent_explicit_mem0_uses_private_instance_storage(
     config.memory.backend = "mem0"
     config.agents["general"].private = AgentPrivateConfig(per="user", root="mind_data")
 
-    memories_by_path: dict[Path, FakeMem0ScopedMemory] = {}
-
-    async def create_fake_memory_instance(
-        scope_storage_path: Path,
-        _config: Config,
-        *,
-        runtime_paths: object,
-        timing_scope: str | None = None,
-    ) -> FakeMem0ScopedMemory:
-        del runtime_paths, timing_scope
-        return memories_by_path.setdefault(scope_storage_path, FakeMem0ScopedMemory(id_prefix=scope_storage_path.name))
+    memories_by_path, create_fake_memory_instance = fake_mem0_stores()
 
     execution_identity = ToolExecutionIdentity(
         channel="matrix",
@@ -407,7 +354,6 @@ async def test_private_agent_explicit_mem0_uses_private_instance_storage(
         await add_agent_memory(
             "Private note",
             "general",
-            storage_path,
             config,
             runtime_paths_for(config),
             execution_identity=execution_identity,
@@ -415,7 +361,6 @@ async def test_private_agent_explicit_mem0_uses_private_instance_storage(
         search_results = await _search_memory_results(
             "Private note",
             "general",
-            storage_path,
             config,
             runtime_paths_for(config),
             execution_identity=execution_identity,
@@ -423,7 +368,6 @@ async def test_private_agent_explicit_mem0_uses_private_instance_storage(
         )
         listed = await list_all_agent_memories(
             "general",
-            storage_path,
             config,
             runtime_paths_for(config),
             execution_identity=execution_identity,
@@ -435,7 +379,6 @@ async def test_private_agent_explicit_mem0_uses_private_instance_storage(
         loaded = await get_agent_memory(
             memory_id,
             "general",
-            storage_path,
             config,
             runtime_paths_for(config),
             execution_identity=execution_identity,
@@ -446,7 +389,6 @@ async def test_private_agent_explicit_mem0_uses_private_instance_storage(
             memory_id,
             "Updated private note",
             "general",
-            storage_path,
             config,
             runtime_paths_for(config),
             execution_identity=execution_identity,
@@ -454,7 +396,6 @@ async def test_private_agent_explicit_mem0_uses_private_instance_storage(
         updated = await get_agent_memory(
             memory_id,
             "general",
-            storage_path,
             config,
             runtime_paths_for(config),
             execution_identity=execution_identity,
@@ -465,7 +406,6 @@ async def test_private_agent_explicit_mem0_uses_private_instance_storage(
         await delete_agent_memory(
             memory_id,
             "general",
-            storage_path,
             config,
             runtime_paths_for(config),
             execution_identity=execution_identity,
@@ -473,7 +413,6 @@ async def test_private_agent_explicit_mem0_uses_private_instance_storage(
         deleted = await get_agent_memory(
             memory_id,
             "general",
-            storage_path,
             config,
             runtime_paths_for(config),
             execution_identity=execution_identity,
@@ -486,12 +425,19 @@ async def test_private_agent_explicit_mem0_uses_private_instance_storage(
     assert any(result.get("memory") == "Private note" for result in search_results)
 
 
+async def _scope_entries(store: FakeMem0ScopedMemory, scope_user_id: str) -> list[str]:
+    return [str(entry["memory"]) for entry in (await store.get_all(filters={"user_id": scope_user_id}))["results"]]
+
+
+_TEAM_ID = "team_calculator+general"
+
+
 @pytest.mark.asyncio
-async def test_mem0_team_conversation_memory_is_shared_across_requesters_for_user_scoped_workers(
+async def test_mem0_team_conversation_memory_is_one_store_every_requester_and_member_reads(
     storage_path: Path,
     config: Config,
 ) -> None:
-    """User-scoped workers should still share one durable team memory view per agent set."""
+    """A team turn is extracted once into the team's own store, which user-scoped workers do not partition."""
     config.memory.backend = "mem0"
     config.agents["general"].worker_scope = "user"
     config.agents["calculator"].worker_scope = "user"
@@ -515,63 +461,22 @@ async def test_mem0_team_conversation_memory_is_shared_across_requesters_for_use
         resolved_thread_id=None,
         session_id="session-bob",
     )
+    team_root = storage_path / "team_memory"
+    stores, create_memory = fake_mem0_stores()
 
-    stored_memories: dict[tuple[Path, str], list[dict[str, object]]] = {}
-
-    class FakeScopedMemory:
-        def __init__(self, scope_storage_path: Path) -> None:
-            self.scope_storage_path = scope_storage_path
-
-        async def add(self, messages: list[dict], user_id: str, metadata: dict) -> None:
-            entry = {
-                "id": f"{user_id}-{len(stored_memories)}",
-                "memory": " ".join(str(message["content"]).strip() for message in messages if message.get("content")),
-                "user_id": user_id,
-                "metadata": metadata,
-            }
-            stored_memories.setdefault((self.scope_storage_path, user_id), []).append(entry)
-
-        async def search(
-            self,
-            query: str,
-            *,
-            filters: dict[str, object],
-            top_k: int = 3,
-            threshold: float = 0.1,
-        ) -> dict[str, list[dict[str, object]]]:
-            del threshold
-            user_id = filters["user_id"]
-            matches = [
-                dict(entry)
-                for entry in stored_memories.get((self.scope_storage_path, user_id), [])
-                if query.lower() in str(entry["memory"]).lower()
-            ]
-            return {"results": matches[:top_k]}
-
-    async def create_fake_memory_instance(
-        scope_storage_path: Path,
-        _config: Config,
-        *,
-        runtime_paths: object,
-        timing_scope: str | None = None,
-    ) -> FakeScopedMemory:
-        del runtime_paths, timing_scope
-        return FakeScopedMemory(scope_storage_path)
-
-    with patch("mindroom.memory._backend.create_memory_instance", side_effect=create_fake_memory_instance):
+    with patch("mindroom.memory._backend.create_memory_instance", side_effect=create_memory):
         with tool_execution_identity(alice_identity):
             await store_conversation_memory(
                 "Alice-authored shared team memory",
                 ["general", "calculator"],
-                storage_path,
                 "session-alice",
                 config,
                 runtime_paths_for(config),
             )
+            assert list(stores) == [team_root]
             alice_results = await _search_memory_results(
                 "Alice-authored shared team",
                 "general",
-                storage_path,
                 config,
                 runtime_paths_for(config),
                 limit=5,
@@ -580,137 +485,83 @@ async def test_mem0_team_conversation_memory_is_shared_across_requesters_for_use
         with tool_execution_identity(bob_identity):
             bob_results = await _search_memory_results(
                 "Alice-authored shared team",
-                "general",
-                storage_path,
+                "calculator",
                 config,
                 runtime_paths_for(config),
                 limit=5,
             )
 
-    assert any(result.get("memory") == "Alice-authored shared team memory" for result in alice_results)
-    assert any(result.get("memory") == "Alice-authored shared team memory" for result in bob_results)
-
-    assert (agent_state_root_path(storage_path, "general"), "team_calculator+general") in stored_memories
-    assert (agent_state_root_path(storage_path, "calculator"), "team_calculator+general") in stored_memories
-    assert (storage_path, "team_calculator+general") not in stored_memories
-
-
-@pytest.mark.asyncio
-async def test_mixed_private_team_mem0_conversation_memory_is_rejected(
-    storage_path: Path,
-    config: Config,
-) -> None:
-    """Mem0 team memory should reject private team members outright."""
-    config.memory.backend = "mem0"
-    config.agents["general"].private = AgentPrivateConfig(per="user", root="mind_data")
-    config.teams = {"mixed_team": MockTeamConfig(agents=["general", "calculator"])}
-
-    with pytest.raises(
-        ValueError,
-        match="private agents are only supported in explicit Matrix ad hoc teams with requester identity",
-    ):
-        await store_conversation_memory(
-            "Alice-authored private team memory",
-            ["general", "calculator"],
-            storage_path,
-            "session-alice",
-            config,
-            runtime_paths_for(config),
-        )
+    [alice_hit] = alice_results
+    [bob_hit] = bob_results
+    assert alice_hit["memory"] == "Alice-authored shared team memory"
+    assert bob_hit["id"] == alice_hit["id"]
+    team_entries = {root: await _scope_entries(store, _TEAM_ID) for root, store in stores.items()}
+    assert {root: entries for root, entries in team_entries.items() if entries} == {
+        team_root: ["Alice-authored shared team memory"],
+    }
 
 
 @pytest.mark.asyncio
-async def test_mixed_private_team_mem0_member_crud_is_rejected(
-    storage_path: Path,
-    config: Config,
-) -> None:
-    """Mem0 team member CRUD should reject private team members."""
+async def test_mixed_private_team_mem0_member_crud_is_rejected(storage_path: Path, config: Config) -> None:
+    """A member of a configured team with a private member can add and list, but not read across its team scopes."""
     config.memory.backend = "mem0"
-    config.memory.team_reads_member_memory = True
     config.agents["general"].private = AgentPrivateConfig(per="user", root="mind_data")
     config.teams = {"mixed_team": MockTeamConfig(agents=["general", "calculator"])}
+    stores, create_memory = fake_mem0_stores()
+    rejection = "private agents are only supported in explicit Matrix ad hoc teams with requester identity"
 
-    memories_by_path: dict[Path, FakeMem0ScopedMemory] = {}
+    with patch("mindroom.memory._backend.create_memory_instance", side_effect=create_memory):
+        await add_agent_memory("Shared calculator note", "calculator", config, runtime_paths_for(config))
+        calculator_memory_id = (await list_all_agent_memories("calculator", config, runtime_paths_for(config)))[0]["id"]
 
-    async def create_fake_memory_instance(
-        scope_storage_path: Path,
-        _config: Config,
-        *,
-        runtime_paths: object,
-        timing_scope: str | None = None,
-    ) -> FakeMem0ScopedMemory:
-        del runtime_paths, timing_scope
-        id_prefix = scope_storage_path.name.replace("/", "_") or "mem"
-        return memories_by_path.setdefault(scope_storage_path, FakeMem0ScopedMemory(id_prefix=id_prefix))
-
-    with patch("mindroom.memory._backend.create_memory_instance", side_effect=create_fake_memory_instance):
-        await add_agent_memory("Shared calculator note", "calculator", storage_path, config, runtime_paths_for(config))
-        calculator_memory_id = (
-            await list_all_agent_memories("calculator", storage_path, config, runtime_paths_for(config), limit=10)
-        )[0]["id"]
-
-        with pytest.raises(
-            ValueError,
-            match="private agents are only supported in explicit Matrix ad hoc teams with requester identity",
-        ):
-            await get_agent_memory(
-                calculator_memory_id,
-                ["general", "calculator"],
-                storage_path,
-                config,
-                runtime_paths_for(config),
-            )
-
-        with pytest.raises(
-            ValueError,
-            match="private agents are only supported in explicit Matrix ad hoc teams with requester identity",
-        ):
+        with pytest.raises(ValueError, match=rejection):
+            await get_agent_memory(calculator_memory_id, "calculator", config, runtime_paths_for(config))
+        with pytest.raises(ValueError, match=rejection):
             await update_agent_memory(
                 calculator_memory_id,
                 "Updated shared calculator note",
-                ["general", "calculator"],
-                storage_path,
+                "calculator",
                 config,
                 runtime_paths_for(config),
             )
+        with pytest.raises(ValueError, match=rejection):
+            await delete_agent_memory(calculator_memory_id, "calculator", config, runtime_paths_for(config))
 
-        with pytest.raises(
-            ValueError,
-            match="private agents are only supported in explicit Matrix ad hoc teams with requester identity",
-        ):
-            await delete_agent_memory(
-                calculator_memory_id,
-                ["general", "calculator"],
-                storage_path,
-                config,
-                runtime_paths_for(config),
-            )
-
-    assert agent_state_root_path(storage_path, "calculator") in memories_by_path
+    assert list(stores) == [agent_state_root_path(storage_path, "calculator")]
 
 
 @pytest.mark.asyncio
-async def test_worker_scoped_team_mem0_memory_can_be_read_updated_and_deleted_across_worker_roots(
-    storage_path: Path,
-    config: Config,
-) -> None:
+async def test_reads_never_create_a_team_store_no_turn_has_written(storage_path: Path, config: Config) -> None:
+    """Reading before a team's first turn neither opens nor creates the team's store."""
+    config.memory.backend = "mem0"
+    config.teams = {"pair": MockTeamConfig(agents=["general", "calculator"])}
+    runtime_paths = runtime_paths_for(config)
+    stores, create_memory = fake_mem0_stores()
+
+    with patch("mindroom.memory._backend.create_memory_instance", side_effect=create_memory):
+        await add_agent_memory("General note", "general", config, runtime_paths)
+        [hit] = await _search_memory_results("General note", "general", config, runtime_paths, limit=5)
+        assert await get_agent_memory("unknown-id", "general", config, runtime_paths) is None
+        with pytest.raises(MemoryNotFoundError):
+            await update_agent_memory("unknown-id", "Edited", "general", config, runtime_paths)
+        with pytest.raises(MemoryNotFoundError):
+            await delete_agent_memory("unknown-id", "general", config, runtime_paths)
+
+    assert hit["memory"] == "General note"
+    assert list(stores) == [agent_state_root_path(storage_path, "general")]
+    assert not (storage_path / "team_memory").exists()
+
+
+@pytest.mark.asyncio
+async def test_a_team_memory_is_one_record_every_member_edits_alone(storage_path: Path, config: Config) -> None:
+    """An edit or deletion through either member changes only that team memory, whichever worker roots they use."""
     config.memory.backend = "mem0"
     config.agents["general"].worker_scope = "user_agent"
     config.agents["calculator"].worker_scope = "user_agent"
     config.teams = {"gc": MockTeamConfig(agents=["general", "calculator"])}
-
-    memories_by_path: dict[Path, FakeMem0ScopedMemory] = {}
-
-    async def create_fake_memory_instance(
-        scope_storage_path: Path,
-        _config: Config,
-        *,
-        runtime_paths: object,
-        timing_scope: str | None = None,
-    ) -> FakeMem0ScopedMemory:
-        del runtime_paths, timing_scope
-        id_prefix = scope_storage_path.name.replace("/", "_") or "mem"
-        return memories_by_path.setdefault(scope_storage_path, FakeMem0ScopedMemory(id_prefix=id_prefix))
+    runtime_paths = runtime_paths_for(config)
+    team_root = storage_path / "team_memory"
+    stores, create_memory = fake_mem0_stores()
 
     execution_identity = ToolExecutionIdentity(
         channel="matrix",
@@ -723,115 +574,36 @@ async def test_worker_scoped_team_mem0_memory_can_be_read_updated_and_deleted_ac
     )
 
     with (
-        patch("mindroom.memory._backend.create_memory_instance", side_effect=create_fake_memory_instance),
+        patch("mindroom.memory._backend.create_memory_instance", side_effect=create_memory),
         tool_execution_identity(execution_identity),
     ):
-        await store_conversation_memory(
-            "Team shared note",
-            ["general", "calculator"],
-            storage_path,
-            "session-alice",
-            config,
-            runtime_paths_for(config),
-        )
+        for note in ("Team shared note", "Team launch plan"):
+            await store_conversation_memory(note, ["general", "calculator"], "session-alice", config, runtime_paths)
+        assert list(stores) == [team_root]
 
-        general_results = await _search_memory_results(
-            "shared note",
-            "general",
-            storage_path,
-            config,
-            runtime_paths_for(config),
-            limit=10,
-        )
-        calculator_results = await _search_memory_results(
-            "shared note",
-            "calculator",
-            storage_path,
-            config,
-            runtime_paths_for(config),
-            limit=10,
-        )
-        assert len(general_results) == 1
-        assert len(calculator_results) == 1
-        general_memory_id = general_results[0]["id"]
-        calculator_memory_id = calculator_results[0]["id"]
-        assert general_memory_id != calculator_memory_id
+        [general_hit] = await _search_memory_results("shared note", "general", config, runtime_paths, limit=10)
+        [calculator_hit] = await _search_memory_results("shared note", "calculator", config, runtime_paths, limit=10)
+        memory_id = general_hit["id"]
+        assert calculator_hit["id"] == memory_id
+        loaded = await get_agent_memory(memory_id, "calculator", config, runtime_paths)
+        assert loaded is not None
+        assert loaded["memory"] == "Team shared note"
 
-        general_loaded = await get_agent_memory(
-            general_memory_id,
-            ["general", "calculator"],
-            storage_path,
-            config,
-            runtime_paths_for(config),
-        )
-        calculator_loaded = await get_agent_memory(
-            calculator_memory_id,
-            ["general", "calculator"],
-            storage_path,
-            config,
-            runtime_paths_for(config),
-        )
-        assert general_loaded is not None
-        assert calculator_loaded is not None
-        assert general_loaded["memory"] == "Team shared note"
-        assert calculator_loaded["memory"] == "Team shared note"
+        await update_agent_memory(memory_id, "Updated team shared note", "calculator", config, runtime_paths)
+        updated = await get_agent_memory(memory_id, "general", config, runtime_paths)
+        assert updated is not None
+        assert updated["memory"] == "Updated team shared note"
+        assert await _scope_entries(stores[team_root], _TEAM_ID) == ["Updated team shared note", "Team launch plan"]
 
-        await update_agent_memory(
-            calculator_memory_id,
-            "Updated team shared note",
-            ["general", "calculator"],
-            storage_path,
-            config,
-            runtime_paths_for(config),
-        )
+        await delete_agent_memory(memory_id, "general", config, runtime_paths)
+        assert await get_agent_memory(memory_id, "calculator", config, runtime_paths) is None
+        assert await _scope_entries(stores[team_root], _TEAM_ID) == ["Team launch plan"]
 
-        general_updated = await _search_memory_results(
-            "updated team",
-            "general",
-            storage_path,
-            config,
-            runtime_paths_for(config),
-            limit=10,
-        )
-        calculator_updated = await _search_memory_results(
-            "updated team",
-            "calculator",
-            storage_path,
-            config,
-            runtime_paths_for(config),
-            limit=10,
-        )
-        assert any(result.get("memory") == "Updated team shared note" for result in general_updated)
-        assert any(result.get("memory") == "Updated team shared note" for result in calculator_updated)
-
-        await delete_agent_memory(
-            general_memory_id,
-            ["general", "calculator"],
-            storage_path,
-            config,
-            runtime_paths_for(config),
-        )
-
-        general_deleted = await _search_memory_results(
-            "team",
-            "general",
-            storage_path,
-            config,
-            runtime_paths_for(config),
-            limit=10,
-        )
-        calculator_deleted = await _search_memory_results(
-            "team",
-            "calculator",
-            storage_path,
-            config,
-            runtime_paths_for(config),
-            limit=10,
-        )
-        assert not any(result.get("memory") == "Team shared note" for result in general_deleted)
-        assert not any(result.get("memory") == "Team shared note" for result in calculator_deleted)
-        assert not any(result.get("memory") == "Updated team shared note" for result in general_deleted)
-        assert not any(result.get("memory") == "Updated team shared note" for result in calculator_deleted)
+    assert set(stores) == {
+        team_root,
+        agent_state_root_path(storage_path, "general"),
+        agent_state_root_path(storage_path, "calculator"),
+    }
 
 
 def _chat_completion(prompt_tokens: int, completion_tokens: int, **usage: object) -> ChatCompletion:
@@ -890,7 +662,7 @@ def _recorder() -> tuple[list[tuple[HelperUsage, dict[str, object]]], Callable[.
 
 
 @pytest.mark.asyncio
-async def test_conversation_memory_extraction_records_its_token_usage(storage_path: Path, config: Config) -> None:
+async def test_conversation_memory_extraction_records_its_token_usage(config: Config) -> None:
     """Mem0 calls its own LLM client, so its extraction tokens are recorded for the conversation that produced them."""
     recorded, record = _recorder()
 
@@ -901,7 +673,6 @@ async def test_conversation_memory_extraction_records_its_token_usage(storage_pa
         await store_conversation_memory(
             "Remember that Atlas ships Friday.",
             "general",
-            storage_path,
             "session-alice",
             config,
             runtime_paths_for(config),
@@ -923,11 +694,11 @@ async def test_conversation_memory_extraction_records_its_token_usage(storage_pa
     # Each extraction call is one request in usage reports.
     [request] = run.requests
     assert request.metrics.tokens.total_tokens == 150
-    assert request.model == ModelProvenance(model_id="gpt-6-luna", provider="OpenAI Chat")
+    assert request.model == ModelProvenance(model_id="gpt-6-luna", provider="OpenAI")
 
 
 @pytest.mark.asyncio
-async def test_team_memory_extraction_counts_as_internal_usage(storage_path: Path, config: Config) -> None:
+async def test_team_memory_extraction_counts_as_internal_usage(config: Config) -> None:
     """A team conversation has no single agent session, so its extraction is reported as internal work."""
     config.teams = {"shared_team": MockTeamConfig(agents=["general", "calculator"])}
     fake_stores = MagicMock(side_effect=_mem0_memory_reporting_usage(config))
@@ -940,7 +711,6 @@ async def test_team_memory_extraction_counts_as_internal_usage(storage_path: Pat
         await store_conversation_memory(
             "Remember that Atlas ships Friday.",
             ["general", "calculator"],
-            storage_path,
             "team-session",
             config,
             runtime_paths_for(config),
@@ -950,37 +720,30 @@ async def test_team_memory_extraction_counts_as_internal_usage(storage_path: Pat
     [(run, kwargs)] = recorded
     # Internal work names no requester, like the team's routing and mode decisions.
     assert kwargs == {"runtime_paths": runtime_paths_for(config), "kind": "memory_extraction"}
-    # Team memory is extracted once into each store it is kept in.
-    assert run.metrics.tokens.total_tokens == 150 * fake_stores.call_count
-    assert len(run.requests) == fake_stores.call_count
+    # A team turn is extracted once, into the team's one store.
+    assert fake_stores.call_count == 1
+    assert run.metrics.tokens.total_tokens == 150
+    assert len(run.requests) == 1
 
 
 @pytest.mark.asyncio
-async def test_extraction_usage_is_recorded_when_a_later_store_fails(storage_path: Path, config: Config) -> None:
-    """The first store's extraction is paid for even when opening the next store fails."""
+async def test_team_extraction_usage_is_recorded_when_storing_the_facts_fails(config: Config) -> None:
+    """A team turn's extraction is paid for even when the team's store rejects the extracted facts."""
     config.teams = {"shared_team": MockTeamConfig(agents=["general", "calculator"])}
-    stores = _mem0_memory_reporting_usage(config)
-    opened = 0
-
-    def open_store(*args: object, **kwargs: object) -> SimpleNamespace:
-        nonlocal opened
-        opened += 1
-        if opened == 2:
-            msg = "the second store is corrupt"
-            raise RuntimeError(msg)
-        return stores(*args, **kwargs)
-
     recorded, record = _recorder()
 
     with (
-        patch.object(AsyncMemory, "from_config", side_effect=open_store),
+        patch.object(
+            AsyncMemory,
+            "from_config",
+            side_effect=_mem0_memory_reporting_usage(config, fail_after_extraction=True),
+        ),
         patch("mindroom.memory._mem0_backend.record_system_usage", side_effect=record),
-        pytest.raises(RuntimeError, match="second store"),
+        capture_logs() as logs,
     ):
         await store_conversation_memory(
             "Remember that Atlas ships Friday.",
             ["general", "calculator"],
-            storage_path,
             "team-session",
             config,
             runtime_paths_for(config),
@@ -988,11 +751,12 @@ async def test_extraction_usage_is_recorded_when_a_later_store_fails(storage_pat
 
     [(run, _kwargs)] = recorded
     assert run.metrics.tokens.total_tokens == 150
+    assert any(log["event"] == "Failed to add memory" for log in logs)
+    assert not any(log["event"] == "Memory added" for log in logs)
 
 
 @pytest.mark.asyncio
 async def test_memory_tool_additions_record_usage_for_the_reply_that_made_them(
-    storage_path: Path,
     config: Config,
 ) -> None:
     """The memory tool runs inside a reply, so its extraction tokens go to that reply's conversation and requester."""
@@ -1016,7 +780,6 @@ async def test_memory_tool_additions_record_usage_for_the_reply_that_made_them(
         await add_agent_memory(
             "Atlas ships Friday.",
             "general",
-            storage_path,
             config,
             runtime_paths_for(config),
             execution_identity=identity,
@@ -1032,7 +795,7 @@ async def test_memory_tool_additions_record_usage_for_the_reply_that_made_them(
 
 
 @pytest.mark.asyncio
-async def test_memory_addition_outside_a_reply_counts_as_internal_usage(storage_path: Path, config: Config) -> None:
+async def test_memory_addition_outside_a_reply_counts_as_internal_usage(config: Config) -> None:
     """An addition with no reply or call to charge is reported as internal work."""
     recorded, record = _recorder()
 
@@ -1040,7 +803,7 @@ async def test_memory_addition_outside_a_reply_counts_as_internal_usage(storage_
         patch.object(AsyncMemory, "from_config", side_effect=_mem0_memory_reporting_usage(config)),
         patch("mindroom.memory._mem0_backend.record_system_usage", side_effect=record),
     ):
-        await add_agent_memory("Atlas ships Friday.", "general", storage_path, config, runtime_paths_for(config))
+        await add_agent_memory("Atlas ships Friday.", "general", config, runtime_paths_for(config))
 
     [(run, kwargs)] = recorded
     assert kwargs["kind"] == "memory_extraction"
@@ -1048,7 +811,7 @@ async def test_memory_addition_outside_a_reply_counts_as_internal_usage(storage_
 
 
 @pytest.mark.asyncio
-async def test_memory_addition_records_usage_when_storing_the_facts_fails(storage_path: Path, config: Config) -> None:
+async def test_memory_addition_records_usage_when_storing_the_facts_fails(config: Config) -> None:
     """The extraction call is paid for even when storing what it extracted fails afterwards."""
     recorded, record = _recorder()
 
@@ -1062,14 +825,14 @@ async def test_memory_addition_records_usage_when_storing_the_facts_fails(storag
         helper_usage_owner_context(HelperUsageOwner(storage_factory=MagicMock(), session_id="reply-session")),
         pytest.raises(RuntimeError, match="rejected the extracted facts"),
     ):
-        await add_agent_memory("Atlas ships Friday.", "general", storage_path, config, runtime_paths_for(config))
+        await add_agent_memory("Atlas ships Friday.", "general", config, runtime_paths_for(config))
 
     [(run, _kwargs)] = recorded
     assert run.metrics.tokens.total_tokens == 150
 
 
 @pytest.mark.asyncio
-async def test_memory_addition_succeeds_when_its_usage_cannot_be_recorded(storage_path: Path, config: Config) -> None:
+async def test_memory_addition_succeeds_when_its_usage_cannot_be_recorded(config: Config) -> None:
     """Usage recording comes after the memory is stored, so a failure there does not fail the memory tool."""
     with (
         patch.object(AsyncMemory, "from_config", side_effect=_mem0_memory_reporting_usage(config)),
@@ -1077,7 +840,7 @@ async def test_memory_addition_succeeds_when_its_usage_cannot_be_recorded(storag
         helper_usage_owner_context(HelperUsageOwner(storage_factory=MagicMock(), session_id="reply-session")),
         capture_logs() as logs,
     ):
-        await add_agent_memory("Atlas ships Friday.", "general", storage_path, config, runtime_paths_for(config))
+        await add_agent_memory("Atlas ships Friday.", "general", config, runtime_paths_for(config))
 
     assert any(log["event"] == "Memory extraction usage could not be recorded" for log in logs)
 
@@ -1212,7 +975,6 @@ def test_calls_without_reported_usage_record_nothing() -> None:
 @pytest.mark.asyncio
 @pytest.mark.parametrize("with_history", [False, True])
 async def test_conversation_memory_removes_credentials_before_mem0(
-    storage_path: Path,
     config: Config,
     with_history: bool,
 ) -> None:
@@ -1231,16 +993,12 @@ async def test_conversation_memory_removes_credentials_before_mem0(
         async def add(self, messages: list[dict], **_: object) -> None:
             sent.append(messages)
 
-    async def create_fake_memory_instance(*_args: object, **_kwargs: object) -> FakeScopedMemory:
-        return FakeScopedMemory()
-
-    with patch("mindroom.memory._backend.create_memory_instance", side_effect=create_fake_memory_instance):
+    with patch("mindroom.memory._backend.create_memory_instance", return_value=FakeScopedMemory()):
         await store_conversation_memory(
             # A line redaction cannot read safely, such as an unclosed quote, is dropped without the rest.
             f'The staging token is {token}.\nenv:\n  password:\nSet the DB password: "correct horse\n{oversized}\n'
             "Use API key: my-secret-key for the local endpoint.\nThe launch is Friday.",
             "general",
-            storage_path,
             "session-alice",
             config,
             runtime_paths_for(config),
@@ -1272,19 +1030,23 @@ def test_memory_text_removes_a_pasted_private_key_whole() -> None:
 
 
 @pytest.mark.asyncio
-async def test_a_memory_both_scopes_return_keeps_its_better_scored_copy_within_the_limit(
+async def test_a_memory_both_scopes_return_appears_once_per_scope_ranked_within_the_limit(
     storage_path: Path,
     config: Config,
 ) -> None:
-    """Agent and team hits rank together, and a text both scopes return keeps the copy that scored higher."""
+    """Agent and team hits rank together by score, and a text both scopes hold is two memories with their own IDs."""
     config.teams = {"pair": MockTeamConfig(agents=["general", "calculator"])}
+    mem0_chroma_path(storage_path / "team_memory").mkdir(parents=True)
     hits_by_scope: dict[str, list[dict[str, object]]] = {
         "agent_general": [
-            {"id": "agent-shared", "memory": "Shared fact", "score": 0.4},
-            {"id": "agent-a", "memory": "Agent fact A", "score": 0.6},
-            {"id": "agent-b", "memory": "Agent fact B", "score": 0.5},
+            {"id": "agent-shared", "memory": "Shared fact", "score": 0.5},
+            {"id": "agent-a", "memory": "Agent fact A", "score": 0.7},
+            {"id": "agent-b", "memory": "Agent fact B", "score": 0.2},
         ],
-        "team_calculator+general": [{"id": "team-shared", "memory": "Shared fact", "score": 0.9}],
+        _TEAM_ID: [
+            {"id": "team-shared", "memory": "Shared fact", "score": 0.9},
+            {"id": "team-c", "memory": "Team fact C", "score": 0.3},
+        ],
     }
 
     class ScopedSearch:
@@ -1299,15 +1061,111 @@ async def test_a_memory_both_scopes_return_keeps_its_better_scored_copy_within_t
             del query, threshold
             return {"results": hits_by_scope[str(filters["user_id"])][:top_k]}
 
-    async def create_memory(_storage_path: Path, _config: Config) -> ScopedSearch:
+    async def create_memory(_store_root: Path, _config: Config) -> ScopedSearch:
         return ScopedSearch()
 
     backend = Mem0MemoryBackend(runtime_paths=runtime_paths_for(config), create_memory=create_memory)
 
-    outcome = await backend.search("shared", "general", storage_path, config, limit=3)
+    outcome = await backend.search("shared", "general", config, limit=4)
 
     assert [(result["id"], result["score"]) for result in outcome.results] == [
         ("team-shared", 0.9),
-        ("agent-a", 0.6),
-        ("agent-b", 0.5),
+        ("agent-a", 0.7),
+        ("agent-shared", 0.5),
+        ("team-c", 0.3),
     ]
+
+
+@pytest.mark.asyncio
+async def test_a_team_store_s_embedder_failure_degrades_search_but_keeps_the_agent_store_s_hits(
+    storage_path: Path,
+    config: Config,
+) -> None:
+    """Stores are built and searched one at a time, and a team store's embedder failure keeps the agent store's hits."""
+    config.teams = {"pair": MockTeamConfig(agents=["general", "calculator"])}
+    mem0_chroma_path(storage_path / "team_memory").mkdir(parents=True)
+    failure_detail = "embedder authentication failed (HTTP 401)"
+    events: list[str] = []
+    agent_hit: dict[str, object] = {"id": "agent-a", "memory": "Agent fact", "score": 0.6}
+
+    class StoreSearch:
+        async def search(
+            self,
+            query: str,
+            *,
+            filters: dict[str, object],
+            top_k: int,
+            threshold: float,
+        ) -> dict[str, list[dict[str, object]]]:
+            del query, top_k, threshold
+            scope_user_id = str(filters["user_id"])
+            events.append(f"search {scope_user_id}")
+            # Yield, so a concurrent build of the next store would run before this search ends.
+            await asyncio.sleep(0)
+            events.append(f"done {scope_user_id}")
+            if scope_user_id == _TEAM_ID:
+                raise EmbedderRequestError(failure_detail)
+            return {"results": [agent_hit]}
+
+    async def create_memory(store_root: Path, _config: Config) -> StoreSearch:
+        events.append(f"build {store_root.name}")
+        return StoreSearch()
+
+    backend = Mem0MemoryBackend(runtime_paths=runtime_paths_for(config), create_memory=create_memory)
+
+    try:
+        outcome = await backend.search("fact", "general", config, limit=3)
+        assert get_embedder_failure() == failure_detail
+    finally:
+        capture_embedder_health_recorder().record(None)
+
+    assert events == [
+        "build general",
+        "search agent_general",
+        "done agent_general",
+        "build team_memory",
+        f"search {_TEAM_ID}",
+        f"done {_TEAM_ID}",
+    ]
+    assert outcome.results == [agent_hit]
+    assert outcome.degraded_reason == failure_detail
+
+
+@pytest.mark.asyncio
+async def test_a_record_of_another_scope_in_an_agents_store_is_not_that_agents_memory(
+    storage_path: Path,
+    config: Config,
+) -> None:
+    """A store answers for its own scope only: a team record an unmerged store still holds is not editable as the agent's."""
+    stores, create_memory = fake_mem0_stores()
+    backend = Mem0MemoryBackend(runtime_paths=runtime_paths_for(config), create_memory=create_memory)
+    agent_store = await create_memory(agent_state_root_path(storage_path, "general"), config)
+    await agent_store.add([{"role": "user", "content": "Left team copy"}], user_id=_TEAM_ID, metadata={})
+    (left,) = (await agent_store.get_all(filters={"user_id": _TEAM_ID}))["results"]
+
+    assert await backend.get(left["id"], "general", config) is None
+    with pytest.raises(MemoryNotFoundError):
+        await backend.update(left["id"], "Edited", "general", config)
+    assert await _scope_entries(stores[agent_state_root_path(storage_path, "general")], _TEAM_ID) == ["Left team copy"]
+
+
+@pytest.mark.asyncio
+async def test_each_store_is_released_before_the_next_one_is_built(storage_path: Path, config: Config) -> None:
+    """Every Mem0 store builds its own embedder, a full copy of a local model, so one search holds one store at a time."""
+    config.teams = {"pair": MockTeamConfig(agents=["general", "calculator"])}
+    mem0_chroma_path(storage_path / "team_memory").mkdir(parents=True)
+    built: list[weakref.ref[FakeMem0ScopedMemory]] = []
+    alive_at_build: list[int] = []
+
+    async def create_memory(_store_root: Path, _config: Config) -> FakeMem0ScopedMemory:
+        alive_at_build.append(sum(ref() is not None for ref in built))
+        memory = FakeMem0ScopedMemory()
+        built.append(weakref.ref(memory))
+        return memory
+
+    backend = Mem0MemoryBackend(runtime_paths=runtime_paths_for(config), create_memory=create_memory)
+
+    await backend.search("fact", "general", config, limit=3)
+    assert await backend.get("unknown-id", "general", config) is None
+
+    assert alive_at_build == [0, 0, 0, 0]

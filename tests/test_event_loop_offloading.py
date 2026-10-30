@@ -23,6 +23,7 @@ from mindroom.constants import resolve_runtime_paths
 from mindroom.history.request_messages import TurnMessages
 from mindroom.history.types import PreparedHistoryState
 from mindroom.hooks import render_transient_context
+from mindroom.knowledge.refresh_scheduler import KnowledgeRefreshScheduler
 from mindroom.llm.messages import Message, system_text
 from mindroom.llm.provider import ModelRequest
 from mindroom.memory import MemoryPromptParts
@@ -92,7 +93,7 @@ async def test_agent_knowledge_lookup_runs_off_event_loop(
             "general",
             config,
             test_runtime_paths(tmp_path),
-            refresh_scheduler=MagicMock(),
+            refresh_scheduler=KnowledgeRefreshScheduler(),
         ),
     )
     try:
@@ -639,10 +640,10 @@ async def test_file_memory_keyword_search_runs_off_event_loop(
         gate.wait()
         return []
 
-    monkeypatch.setattr(file_backend_module, "_search_agent_file_scope_memories", gated_scan)
+    monkeypatch.setattr(file_backend_module, "_agent_keyword_results", gated_scan)
     backend = FileMemoryBackend(runtime_paths)
     search_task = asyncio.get_running_loop().create_task(
-        backend.search("query", "general", tmp_path, config, limit=5),
+        backend.search("query", "general", config, limit=5),
     )
     await asyncio.to_thread(scan_started.wait, 5.0)
 

@@ -15,6 +15,7 @@ from mindroom.agent_cli.cli_approval_recovery import CliFollowUpTurn, continue_c
 from mindroom.agent_loop.build import tool_owners_by_agent
 from mindroom.agents import create_agent
 from mindroom.ai import agent_run_metadata_content, run_delegated_child_response, stream_agent_response
+from mindroom.ai_run_metadata import prior_usage_of
 from mindroom.approval.receipt_readers import add_approval_receipt_reader
 from mindroom.approval.resume import ResumeRunner, approval_decisions
 from mindroom.approval.tool_owners import (
@@ -246,6 +247,8 @@ async def _continue_persisted_agent(
         # Paused on a call no approval asks about and no delegation answers, such as a plugin's externally executed
         # call: nothing can resume it, so the resume fails naming that call, as a live turn does.
         raise pause_without_approval_error(response, entity_label="agent")
+    # The usage of the turn's attempts before the paused run, which its record carries across the pause.
+    prior_usage = prior_usage_of(persisted)
     attempt = CompletedAttempt(
         response_text=collected.terminal_content
         or ("" if presentation.final_text() else "Tool approval continuation completed"),
@@ -262,20 +265,20 @@ async def _continue_persisted_agent(
             agent_run_metadata_content,
             config,
             response,
-            runtime_paths=runtime_paths,
             model_name=model_name,
             run_id=response.run_id,
             session_id=continuation.session_id,
             status=response.status,
             # An approval resume prepares no history of its own.
             prepared_history=None,
+            prior_usage=prior_usage,
         ),
     )
     return await _stream_continuation_turn(
         _continuation_turn_context(continuation, model_name=model_name, metadata=response.metadata),
         presentation,
         prompt=continuation.request_body,
-        resume=TurnResume(attempt, continuation_count=continuation.continuation_count),
+        resume=TurnResume(attempt, continuation_count=continuation.continuation_count, prior_usage=prior_usage),
         config=config,
         runtime_paths=runtime_paths,
         knowledge=knowledge,
@@ -527,7 +530,10 @@ class AgentApprovalExecution:
                                 recovered.presentation,
                                 prompt=recovered.prompt,
                                 reusable_build=recovered.reusable_build,
-                                resume=TurnResume(continuation_count=recovered.initial_continuation_count),
+                                resume=TurnResume(
+                                    continuation_count=recovered.initial_continuation_count,
+                                    prior_usage=prior_usage_of(persisted),
+                                ),
                                 delegation_depth=recovered.delegation_depth,
                                 media=recovered.media,
                                 config=config,

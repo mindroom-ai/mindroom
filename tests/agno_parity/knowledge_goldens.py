@@ -31,13 +31,9 @@ from mindroom.embeddings.errors import EmbedderRequestError
 from mindroom.embeddings.factory import create_configured_embedder
 from mindroom.embeddings.ollama_embedder import OllamaEmbedder
 from mindroom.embeddings.openai_embedder import OpenAIEmbedder
+from mindroom.knowledge.index_metadata import load_publication
 from mindroom.knowledge.refresh_runner import _refresh_knowledge_binding
-from mindroom.knowledge.registry import (
-    load_published_index_state,
-    published_index_metadata_path,
-    published_index_storage_path,
-    resolve_published_index_key,
-)
+from mindroom.knowledge.registry import published_index_storage_path, resolve_published_index_key
 from mindroom.knowledge.utils import resolve_agent_knowledge_access
 from mindroom.tool_system.invocation import ToolCallContext, execute_tool_call
 from tests.agno_parity.golden_files import sorted_keys
@@ -243,14 +239,14 @@ async def refresh_golden_bases(config: Config, runtime_paths: RuntimePaths) -> d
     """Refresh every golden base through the production refresh path and read back the rows it published."""
     published: dict[str, Any] = {}
     for base_id in load(ROWS_PATH)["bases"]:
-        await _refresh_knowledge_binding(base_id, config=config, runtime_paths=runtime_paths)
+        result = await _refresh_knowledge_binding(base_id, config=config, runtime_paths=runtime_paths)
+        assert result.published, result
         key = resolve_published_index_key(base_id, config=config, runtime_paths=runtime_paths)
-        state = load_published_index_state(published_index_metadata_path(key))
-        assert state is not None
-        assert state.status == "complete"
-        assert state.collection is not None
+        publication = load_publication(published_index_storage_path(key))
+        assert publication is not None
+        assert publication.collection is not None
         published[base_id] = {
-            "rows": _normalized_rows(published_index_storage_path(key) / f"{state.collection}.sqlite3"),
+            "rows": _normalized_rows(published_index_storage_path(key) / f"{publication.collection}.sqlite3"),
         }
     return published
 

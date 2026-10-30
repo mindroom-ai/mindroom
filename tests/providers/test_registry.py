@@ -32,6 +32,7 @@ from mindroom.providers import names
 from mindroom.providers.anthropic.messages import ClaudeProvider
 from mindroom.providers.anthropic.settings import ClaudeRouteKind
 from mindroom.providers.gemini.adapter import GeminiProvider
+from mindroom.providers.identity import model_identity
 from mindroom.providers.model_http_client import MODEL_HTTP_CLIENT
 from mindroom.providers.names import PROVIDER_ROUTES
 from mindroom.providers.ollama.adapter import OllamaProvider
@@ -103,51 +104,44 @@ def _texts(gemini_body: dict[str, Any]) -> list[str]:
 
 
 _BEDROCK_KEYS = {"aws_region": "us-east-1", "aws_access_key": "access", "aws_secret_key": "secret"}
-# Every documented ``provider`` value, with its adapter and the persisted identity strings Agno's model had.
-_ROUTES: dict[str, tuple[dict[str, Any], type, str, str]] = {
-    "anthropic": ({"provider": "anthropic", "id": "claude-sonnet-5-5"}, ClaudeProvider, "Anthropic", "Anthropic"),
+# Every documented ``provider`` value, with its adapter and the provider name its runs and usage record.
+_ROUTES: dict[str, tuple[dict[str, Any], type, str]] = {
+    "anthropic": ({"provider": "anthropic", "id": "claude-sonnet-5-5"}, ClaudeProvider, "Anthropic"),
     "bedrock_claude": (
         {"provider": "bedrock_claude", "id": "anthropic.claude-sonnet-5-5", "extra_kwargs": _BEDROCK_KEYS},
         ClaudeProvider,
-        "AwsBedrock",
         "AwsBedrock",
     ),
     "vertexai_claude": (
         {"provider": "vertexai_claude", "id": "claude-sonnet-5-5", "extra_kwargs": {"project_id": "p", "region": "r"}},
         ClaudeProvider,
         "VertexAI",
-        "VertexAI",
     ),
-    "azure": ({"provider": "azure", "id": "gpt-6-astra"}, ChatAdapter, "Azure", "Azure"),
+    "azure": ({"provider": "azure", "id": "gpt-6-astra"}, ChatAdapter, "Azure"),
     "openai-chat-completions": (
         {"provider": "openai", "id": "gpt-6-astra", "api": "chat_completions"},
         ChatAdapter,
         "OpenAI",
-        "OpenAI Chat",
     ),
     "openai-responses": (
         {"provider": "openai", "id": "gpt-6-astra", "api": "responses"},
         ResponsesAdapter,
         "OpenAI",
-        "OpenAI Responses",
     ),
     "openai-unset-searchable": (
         {"provider": "openai", "id": "gpt-6-astra"},
         ResponsesAdapter,
         "OpenAI",
-        "OpenAI Responses",
     ),
     "openai-unset-custom-endpoint": (
         {"provider": "openai", "id": "qwen", "extra_kwargs": {"base_url": "http://localhost:4000/v1"}},
         ChatAdapter,
         "OpenAI",
-        "OpenAI Chat",
     ),
     "openai-unset-older-model": (
         {"provider": "openai", "id": "gpt-4o"},
         ChatAdapter,
         "OpenAI",
-        "OpenAI Chat",
     ),
     "openai-responses-custom-endpoint": (
         {
@@ -158,34 +152,31 @@ _ROUTES: dict[str, tuple[dict[str, Any], type, str, str]] = {
         },
         ResponsesAdapter,
         "OpenAI",
-        "OpenAI Responses",
     ),
-    "codex": ({"provider": "codex", "id": "gpt-6.1-sol"}, ResponsesAdapter, "OpenAI Codex", "OpenAI Codex Responses"),
+    "codex": ({"provider": "codex", "id": "gpt-6.1-sol"}, ResponsesAdapter, "OpenAI Codex"),
     "openai_codex": (
         {"provider": "openai_codex", "id": "gpt-6.1-sol"},
         ResponsesAdapter,
         "OpenAI Codex",
-        "OpenAI Codex Responses",
     ),
-    "kimi": ({"provider": "kimi", "id": "k3"}, ChatAdapter, "Kimi", "Kimi Chat"),
-    "kimi_code": ({"provider": "kimi_code", "id": "k3"}, ChatAdapter, "Kimi", "Kimi Chat"),
-    "google": ({"provider": "google", "id": "gemini-3.8-flash"}, GeminiProvider, "Google", "Google"),
-    "gemini": ({"provider": "gemini", "id": "gemini-3.8-flash"}, GeminiProvider, "Google", "Google"),
+    "kimi": ({"provider": "kimi", "id": "k3"}, ChatAdapter, "Kimi"),
+    "kimi_code": ({"provider": "kimi_code", "id": "k3"}, ChatAdapter, "Kimi"),
+    "google": ({"provider": "google", "id": "gemini-3.8-flash"}, GeminiProvider, "Google"),
+    "gemini": ({"provider": "gemini", "id": "gemini-3.8-flash"}, GeminiProvider, "Google"),
     "google-vertexai": (
         {"provider": "google", "id": "gemini-3.8-flash", "extra_kwargs": {"vertexai": True, "project_id": "p"}},
         GeminiProvider,
         "Google",
-        "Google",
     ),
-    "ollama": ({"provider": "ollama", "id": "qwen3.8:27b"}, OllamaProvider, "Ollama", "Ollama"),
-    "llama_cpp": ({"provider": "llama_cpp", "id": "qwen"}, ChatAdapter, "LlamaCpp", "LlamaCpp"),
-    "llama_cpp-spelled-loosely": ({"provider": " Llama-CPP ", "id": "qwen"}, ChatAdapter, "LlamaCpp", "LlamaCpp"),
-    "groq": ({"provider": "groq", "id": "openai/gpt-oss-120b"}, ChatAdapter, "Groq", "Groq"),
-    "openrouter": ({"provider": "openrouter", "id": "z-ai/glm-5.3"}, ChatAdapter, "OpenRouter", "OpenRouter"),
-    "cerebras": ({"provider": "cerebras", "id": "gpt-oss-120b"}, ChatAdapter, "Cerebras", "Cerebras"),
-    "deepseek": ({"provider": "deepseek", "id": "deepseek-flash"}, ChatAdapter, "DeepSeek", "DeepSeek"),
-    "zai": ({"provider": "zai", "id": "glm-5.3"}, ChatAdapter, "ZAI", "ZAI"),
-    "synthetic": ({"provider": "synthetic", "id": "lorem-ipsum"}, SyntheticProvider, "Synthetic", "Synthetic"),
+    "ollama": ({"provider": "ollama", "id": "qwen3.8:27b"}, OllamaProvider, "Ollama"),
+    "llama_cpp": ({"provider": "llama_cpp", "id": "qwen"}, ChatAdapter, "LlamaCpp"),
+    "llama_cpp-spelled-loosely": ({"provider": " Llama-CPP ", "id": "qwen"}, ChatAdapter, "LlamaCpp"),
+    "groq": ({"provider": "groq", "id": "openai/gpt-oss-120b"}, ChatAdapter, "Groq"),
+    "openrouter": ({"provider": "openrouter", "id": "z-ai/glm-5.3"}, ChatAdapter, "OpenRouter"),
+    "cerebras": ({"provider": "cerebras", "id": "gpt-oss-120b"}, ChatAdapter, "Cerebras"),
+    "deepseek": ({"provider": "deepseek", "id": "deepseek-flash"}, ChatAdapter, "DeepSeek"),
+    "zai": ({"provider": "zai", "id": "glm-5.3"}, ChatAdapter, "ZAI"),
+    "synthetic": ({"provider": "synthetic", "id": "lorem-ipsum"}, SyntheticProvider, "Synthetic"),
 }
 
 
@@ -196,14 +187,16 @@ def test_every_documented_provider_value_gets_its_adapter_and_identity(route: st
     The pipeline hands callers the adapter as its own native-history route (Responses and Claude), replay estimator
     (Responses), and recorded settings, so nothing has to unwrap it.
     """
-    fields, adapter_type, provider_label, provider_name = _ROUTES[route]
+    fields, adapter_type, provider_label = _ROUTES[route]
     config = Config(models={"target": ModelConfig(**fields)})
 
     provider = build_model_provider(config, runtime_paths, "target")
 
     adapter = bare_adapter(provider)
     assert type(adapter) is adapter_type
-    assert (provider.identity.provider, provider.identity.provider_name) == (provider_label, provider_name)
+    assert provider.identity.provider == provider_label
+    # Pricing reads the same identity from the config alone.
+    assert provider.identity == model_identity(config.models["target"], endpoint=provider.identity.endpoint)
     assert (provider.identity, provider.capabilities) == (adapter.identity, adapter.capabilities)
     native_history = adapter if adapter_type in {ResponsesAdapter, ClaudeProvider} else None
     assert provider.native_history_route is native_history
@@ -331,6 +324,53 @@ def test_the_dashboard_provider_fixture_lists_exactly_the_values_config_load_acc
     assert json.loads(fixture_path.read_text(encoding="utf-8")) == sorted(
         PROVIDER_ROUTES | set(names._PROVIDER_ALIASES),
     )
+
+
+@pytest.mark.parametrize(
+    ("configured_id", "endpoint_id"),
+    [
+        ("gpt-6-astra", "gpt-6-astra"),
+        ("openai-codex/gpt-6-astra", "gpt-6-astra"),
+        ("gpt-5.6", "gpt-5.6-sol"),
+        ("openai-codex/gpt-5.6", "gpt-5.6-sol"),
+        ("gpt-5.6-sol", "gpt-5.6-sol"),
+        ("openai-codex/gpt-5.6-terra", "gpt-5.6-terra"),
+        ("gpt-5.4", "gpt-5.4"),
+    ],
+)
+def test_codex_model_ids_resolve_to_the_endpoint_slug(configured_id: str, endpoint_id: str) -> None:
+    """The plugin-style prefix is dropped and the public GPT-5.6 alias resolves to the slug Codex accepts."""
+    assert model_identity(ModelConfig(provider="codex", id=configured_id)).id == endpoint_id
+
+
+@pytest.mark.parametrize(
+    ("configured_id", "endpoint_id"),
+    [("k3", "k3"), ("kimi-code/k3", "k3"), ("k3-256k", "k3-256k"), ("kimi-code/kimi-for-coding", "kimi-for-coding")],
+)
+def test_kimi_model_ids_drop_the_cli_prefix(configured_id: str, endpoint_id: str) -> None:
+    """The kimi-code/ prefix from CLI config model names resolves to the bare slug."""
+    assert model_identity(ModelConfig(provider="kimi", id=configured_id)).id == endpoint_id
+
+
+@pytest.mark.parametrize(
+    ("provider", "configured_id", "endpoint_id"),
+    [("codex", "openai-codex/gpt-6.1-sol", "gpt-6.1-sol"), ("kimi", "kimi-code/k3", "k3")],
+)
+def test_a_cli_style_model_id_gets_the_capabilities_of_the_model_it_names(
+    runtime_paths: RuntimePaths,
+    provider: str,
+    configured_id: str,
+    endpoint_id: str,
+) -> None:
+    """Capabilities follow the id the route sends, so a CLI-config prefix changes none of them."""
+    config = Config(
+        models={
+            "prefixed": ModelConfig(provider=provider, id=configured_id),
+            "bare": ModelConfig(provider=provider, id=endpoint_id),
+        },
+    )
+
+    assert model_capabilities(config, runtime_paths, "prefixed") == model_capabilities(config, runtime_paths, "bare")
 
 
 def test_the_model_in_use_is_logged_with_its_effective_id(runtime_paths: RuntimePaths) -> None:

@@ -685,7 +685,7 @@ def _agent(
 def _model(model_id: str, *turns: list[Any]) -> ScriptedModel:
     return ScriptedModel(
         list(turns),
-        identity=ModelIdentity(id=model_id, provider="Synthetic", provider_name="Synthetic"),
+        identity=ModelIdentity(id=model_id, provider="Synthetic"),
     )
 
 

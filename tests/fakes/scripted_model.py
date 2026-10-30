@@ -35,7 +35,7 @@ class Await:
 
 type ScriptStep = StreamEvent | Await
 
-SYNTHETIC = ModelIdentity(id="scripted-model", provider="Synthetic", provider_name="Synthetic")
+SYNTHETIC = ModelIdentity(id="scripted-model", provider="Synthetic")
 
 
 def scripted_body(identity: ModelIdentity, request: ModelRequest) -> dict[str, Any]:
@@ -135,7 +135,7 @@ def calls(
 
 def estimate_only_model() -> ScriptedModel:
     """Return a provider that answered no stored run and keeps no history itself, so history is sized by estimate alone."""
-    return ScriptedModel([], identity=ModelIdentity(id="estimate-only", provider="Estimate", provider_name="Estimate"))
+    return ScriptedModel([], identity=ModelIdentity(id="estimate-only", provider="Estimate"))
 
 
 __all__ = [

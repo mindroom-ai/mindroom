@@ -7,24 +7,28 @@ importing this module directly.
 
 from __future__ import annotations
 
-import asyncio
 from dataclasses import dataclass, replace
-from datetime import UTC, datetime
+from functools import partial
 from pathlib import Path
-from typing import TYPE_CHECKING, Literal, ParamSpec, TypeVar
+from typing import TYPE_CHECKING, Literal
 
 from mindroom.agent_policy import PRIVATE_KNOWLEDGE_BASE_ID_PREFIX
+from mindroom.background_tasks import run_blocking_until_complete
 from mindroom.embeddings.factory import create_configured_embedder, embedder_client_signature
 from mindroom.knowledge.availability import KnowledgeAvailability
 from mindroom.knowledge.index_metadata import (
-    PublishedIndexState,
-    load_published_index_state,
-    save_published_index_state,
+    Publication,
+    RefreshStatus,
+    load_publication,
+    load_refresh_status,
+    marked_stale,
+    publication_unreadable,
+    update_refresh_status,
+    utc_now,
 )
 from mindroom.knowledge.indexing_config import (
     IndexingSettings,
     indexing_settings_key,
-    published_index_settings_compatible,
     storage_key_for_base,
 )
 from mindroom.knowledge.vector_store import KnowledgeCollection
@@ -34,8 +38,6 @@ from mindroom.tool_system.dependencies import ensure_optional_deps
 from mindroom.tool_system.worker_routing import shared_storage_root, written_by_other_workers
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
-
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
     from mindroom.knowledge.index_reader import PublishedIndexReader
@@ -78,51 +80,49 @@ class KnowledgeSourceRoot:
 
 @dataclass(frozen=True)
 class _PublishedIndexHandle:
-    """Read handle for the published knowledge index."""
+    """A read handle for one key's publication; its reader selects the current publication at each read."""
 
-    key: PublishedIndexKey
     reader: PublishedIndexReader
-    state: PublishedIndexState
-    metadata_path: Path
-    embedder_client_signature: str | None = None
+    embedder_client_signature: str | None
 
 
 @dataclass(frozen=True)
 class PublishedIndexResolution:
-    """Result of resolving the published index for one knowledge base."""
+    """One knowledge base's publication, refresh status, and read handle, as read for one lookup.
+
+    ``availability`` is what the persisted state says. ``while_refreshing`` gives the view while the runtime's
+    scheduler refreshes the base, which only the scheduler knows.
+    """
 
     key: PublishedIndexKey
-    index: _PublishedIndexHandle | None
-    state: PublishedIndexState | None
+    reader: PublishedIndexReader | None
+    publication: Publication | None
+    status: RefreshStatus
     availability: KnowledgeAvailability
+    publication_unreadable: bool = False
     schedule_refresh_on_access: bool = False
 
+    def while_refreshing(self) -> PublishedIndexResolution:
+        """Return this view while a refresh runs: its last failure is being retried, and a ready index may change."""
+        status = reported_refresh_status(self.status, refreshing=True)
+        availability = index_availability(
+            self.key,
+            self.publication,
+            status,
+            publication_unreadable=self.publication_unreadable,
+            refreshing=True,
+        )
+        return replace(self, status=status, availability=availability)
 
+
+#: What the dashboard shows of a base's refresh.
+KnowledgeRefreshState = Literal["none", "stale", "refreshing", "refresh_failed"]
 _published_indexes: dict[PublishedIndexKey, _PublishedIndexHandle] = {}
 _CONSECUTIVE_REFRESH_FAILURE_ALERT_THRESHOLD = 3
 _MAX_PRIVATE_PUBLISHED_INDEXES = 128
 #: Vectors one search may load from a base whose files worker code can write, so code that grows those files cannot
 #: make a search exhaust the primary's memory. About 43,000 chunks of the default 1,536-dimension embedder.
 _WORKER_WRITTEN_BASE_MATRIX_BYTES = 256 * 1024 * 1024
-_P = ParamSpec("_P")
-_T = TypeVar("_T")
-
-
-def _utc_now() -> str:
-    return datetime.now(tz=UTC).isoformat()
-
-
-async def _run_to_thread_to_completion_on_cancel(
-    func: Callable[_P, _T],
-    *args: _P.args,
-    **kwargs: _P.kwargs,
-) -> _T:
-    thread_task = asyncio.create_task(asyncio.to_thread(func, *args, **kwargs))
-    try:
-        return await asyncio.shield(thread_task)
-    except asyncio.CancelledError:
-        await asyncio.shield(thread_task)
-        raise
 
 
 def _published_index_key_from_binding(
@@ -230,143 +230,55 @@ def published_index_storage_path(key: PublishedIndexKey) -> Path:
     return (Path(key.storage_root) / "knowledge_db" / storage_key_for_base(key.base_id, knowledge_path)).resolve()
 
 
-def published_index_metadata_path(key: PublishedIndexKey) -> Path:
-    """Return the single persisted state file for one knowledge base."""
-    return published_index_storage_path(key) / "indexing_settings.json"
+def reported_refresh_status(status: RefreshStatus, *, refreshing: bool) -> RefreshStatus:
+    """Return ``status`` as a base reports it: a refresh in flight supersedes the failure it retries."""
+    return replace(status, last_error=None) if refreshing else status
 
 
-def published_index_refresh_state(
-    state: PublishedIndexState | None,
+def index_availability(
+    key: PublishedIndexKey,
+    publication: Publication | None,
+    status: RefreshStatus,
     *,
-    metadata_exists: bool = False,
-) -> Literal["none", "stale", "refreshing", "refresh_failed"]:
-    """Return the UI refresh state derived from the single metadata file."""
-    if state is None:
-        return "refresh_failed" if metadata_exists else "none"
-    if state.status == "failed" or state.refresh_job == "failed" or state.last_error is not None:
+    publication_unreadable: bool,
+    refreshing: bool,
+) -> KnowledgeAvailability:
+    """Return what a base can serve, from its publication, its reported refresh status, and whether a refresh runs."""
+    if publication is None:
+        return (
+            KnowledgeAvailability.REFRESH_FAILED
+            if publication_unreadable or status.last_error is not None
+            else KnowledgeAvailability.INITIALIZING
+        )
+    if publication.settings != key.indexing_settings:
+        return KnowledgeAvailability.CONFIG_MISMATCH
+    if status.last_error is not None:
+        return KnowledgeAvailability.REFRESH_FAILED
+    if refreshing or status.reason is not None:
+        return KnowledgeAvailability.STALE
+    return KnowledgeAvailability.READY
+
+
+def index_refresh_state(
+    status: RefreshStatus,
+    *,
+    publication_unreadable: bool,
+    refreshing: bool,
+) -> KnowledgeRefreshState:
+    """Return the dashboard's refresh state from a base's reported refresh status."""
+    if publication_unreadable:
         return "refresh_failed"
-    if state.refresh_job == "running":
+    if refreshing:
         return "refreshing"
-    if state.refresh_job == "pending" or state.reason is not None:
+    if status.last_error is not None:
+        return "refresh_failed"
+    if status.reason is not None:
         return "stale"
     return "none"
 
 
-def _state_with_refresh_fields(
-    key: PublishedIndexKey,
-    *,
-    refresh_job: Literal["idle", "pending", "running", "failed"],
-    status_when_missing: Literal["indexing", "failed"],
-    reason: str | None = None,
-    last_error: str | None = None,
-    clear_error: bool = False,
-) -> PublishedIndexState:
-    current = load_published_index_state(published_index_metadata_path(key))
-    now = _utc_now()
-    if current is None:
-        return PublishedIndexState(
-            settings=key.indexing_settings,
-            status=status_when_missing,
-            refresh_job=refresh_job,
-            reason=reason,
-            last_error=last_error,
-            updated_at=now,
-            last_refresh_at=now if refresh_job in {"idle", "failed"} else None,
-        )
-    return replace(
-        current,
-        refresh_job=refresh_job,
-        reason=reason,
-        last_error=None if clear_error else last_error,
-        updated_at=now,
-        last_refresh_at=now if refresh_job in {"idle", "failed"} else current.last_refresh_at,
-    )
-
-
-def mark_published_index_stale(
-    key: PublishedIndexKey,
-    *,
-    reason: str,
-    refresh_job: Literal["idle", "pending", "running", "failed"] = "pending",
-) -> None:
-    """Mark the published index stale without changing the last queryable index."""
-    save_published_index_state(
-        published_index_metadata_path(key),
-        _state_with_refresh_fields(
-            key,
-            refresh_job=refresh_job,
-            status_when_missing="indexing",
-            reason=reason,
-        ),
-    )
-
-
-def mark_published_index_refresh_running(key: PublishedIndexKey, *, reason: str = "refreshing") -> None:
-    """Mark refresh work running while keeping the last queryable index readable."""
-    save_published_index_state(
-        published_index_metadata_path(key),
-        _state_with_refresh_fields(
-            key,
-            refresh_job="running",
-            status_when_missing="indexing",
-            reason=reason,
-        ),
-    )
-
-
-def mark_published_index_refresh_failed_preserving_last_good(key: PublishedIndexKey, *, error: str) -> None:
-    """Record refresh failure while keeping any last queryable index readable."""
-    current = load_published_index_state(published_index_metadata_path(key))
-    state = _state_with_refresh_fields(
-        key,
-        refresh_job="failed",
-        status_when_missing="failed",
-        reason="refresh_failed",
-        last_error=error,
-    )
-    consecutive_refresh_failures = (current.consecutive_refresh_failures if current is not None else 0) + 1
-    state = replace(state, consecutive_refresh_failures=consecutive_refresh_failures)
-    if current is not None and current.status == "complete":
-        state = replace(state, status="complete")
-    save_published_index_state(published_index_metadata_path(key), state)
-    if consecutive_refresh_failures >= _CONSECUTIVE_REFRESH_FAILURE_ALERT_THRESHOLD:
-        logger.error(
-            "knowledge_refresh_failing_repeatedly",
-            base_id=key.base_id,
-            consecutive_refresh_failures=consecutive_refresh_failures,
-            last_error=error,
-        )
-
-
-def mark_published_index_refresh_succeeded(key: PublishedIndexKey) -> None:
-    """Clear refresh status after a successful publish."""
-    state = load_published_index_state(published_index_metadata_path(key))
-    if state is None:
-        return
-    save_published_index_state(
-        published_index_metadata_path(key),
-        replace(
-            state,
-            refresh_job="idle",
-            reason=None,
-            last_error=None,
-            updated_at=_utc_now(),
-            last_refresh_at=_utc_now(),
-            consecutive_refresh_failures=0,
-        ),
-    )
-
-
-def _state_collection_name(state: PublishedIndexState) -> str:
-    if state.collection is None:
-        msg = "Published knowledge metadata is missing a collection name"
-        raise ValueError(msg)
-    return state.collection
-
-
 def _build_published_index_reader(
     key: PublishedIndexKey,
-    state: PublishedIndexState,
     *,
     config: Config,
     runtime_paths: RuntimePaths,
@@ -376,10 +288,9 @@ def _build_published_index_reader(
     # Searching needs numpy, which installs on first use.
     ensure_optional_deps(["numpy"], "numpy", runtime_paths)
     return PublishedIndexReader(
-        collection_name=_state_collection_name(state),
-        path=str(published_index_storage_path(key)),
+        path=published_index_storage_path(key),
         embedder=create_configured_embedder(config, runtime_paths),
-        published_settings=state.settings,
+        settings=key.indexing_settings,
         max_matrix_bytes=(
             _WORKER_WRITTEN_BASE_MATRIX_BYTES
             if _workers_write_sources(Path(key.knowledge_path), shared_storage_root(runtime_paths.storage_root))
@@ -403,105 +314,20 @@ def _workers_write_sources(knowledge_path: Path, storage_root: Path) -> bool:
     return written_by_other_workers(relative) or (relative.parts[:1] == ("agents",) and len(relative.parts) <= 2)
 
 
-def published_index_collection_exists_for_state(key: PublishedIndexKey, state: PublishedIndexState) -> bool:
-    """Return whether persisted metadata points at an existing collection."""
-    if state.status != "complete" or state.collection is None:
+def published_collection_exists(key: PublishedIndexKey, publication: Publication) -> bool:
+    """Return whether the publication names a collection whose file exists."""
+    if publication.collection is None:
         return False
     try:
-        return KnowledgeCollection(path=published_index_storage_path(key), name=state.collection).exists()
+        return KnowledgeCollection(path=published_index_storage_path(key), name=publication.collection).exists()
     except Exception:
         logger.warning(
             "Published knowledge collection existence check failed",
             base_id=key.base_id,
-            collection=state.collection,
+            collection=publication.collection,
             exc_info=True,
         )
         return False
-
-
-def _published_index_state_queryable(key: PublishedIndexKey, state: PublishedIndexState) -> bool:
-    return state.queryable_for(key.indexing_settings)
-
-
-def _published_index_availability(
-    *,
-    key: PublishedIndexKey,
-    state: PublishedIndexState | None,
-    metadata_exists: bool = False,
-) -> KnowledgeAvailability:
-    refresh_state = published_index_refresh_state(state, metadata_exists=metadata_exists)
-    if state is None:
-        availability = (
-            KnowledgeAvailability.REFRESH_FAILED
-            if refresh_state == "refresh_failed"
-            else KnowledgeAvailability.INITIALIZING
-        )
-    elif state.collection is None and refresh_state == "refresh_failed":
-        availability = KnowledgeAvailability.REFRESH_FAILED
-    elif (
-        not published_index_settings_compatible(
-            state.settings,
-            key.indexing_settings,
-        )
-        or state.settings != key.indexing_settings
-    ):
-        availability = KnowledgeAvailability.CONFIG_MISMATCH
-    elif refresh_state == "refresh_failed":
-        availability = KnowledgeAvailability.REFRESH_FAILED
-    elif state.status != "complete":
-        availability = KnowledgeAvailability.INITIALIZING
-    elif refresh_state in {"stale", "refreshing"}:
-        availability = KnowledgeAvailability.STALE
-    else:
-        availability = KnowledgeAvailability.READY
-    return availability
-
-
-def published_index_availability_for_state(
-    *,
-    key: PublishedIndexKey,
-    state: PublishedIndexState | None,
-    metadata_exists: bool = False,
-) -> KnowledgeAvailability:
-    """Return the public availability value for published index state."""
-    return _published_index_availability(
-        key=key,
-        state=state,
-        metadata_exists=metadata_exists,
-    )
-
-
-def _cached_index_still_queryable(index: _PublishedIndexHandle) -> bool:
-    return _published_index_state_queryable(index.key, index.state) and index.reader.exists()
-
-
-def _cached_index_matches_persisted_state(
-    index: _PublishedIndexHandle,
-    state: PublishedIndexState,
-) -> bool:
-    """Return whether a process-local handle still points at persisted metadata."""
-    return (
-        index.state.settings == state.settings
-        and index.state.status == state.status
-        and index.state.collection == state.collection
-        and index.state.last_published_at == state.last_published_at
-        and index.state.published_revision == state.published_revision
-        and index.state.indexed_count == state.indexed_count
-        and index.state.source_signature == state.source_signature
-    )
-
-
-def _load_queryable_index_from_state(
-    key: PublishedIndexKey,
-    state: PublishedIndexState,
-    *,
-    config: Config,
-    runtime_paths: RuntimePaths,
-) -> PublishedIndexReader | None:
-    if not _published_index_state_queryable(key, state):
-        return None
-    reader = _build_published_index_reader(key, state, config=config, runtime_paths=runtime_paths)
-    return reader if reader.exists() else None
 
 
 def get_published_index(
@@ -511,7 +337,11 @@ def get_published_index(
     runtime_paths: RuntimePaths,
     execution_identity: ToolExecutionIdentity | None = None,
 ) -> PublishedIndexResolution:
-    """Return the currently published index, if one is usable."""
+    """Return the base's publication and status, with a read handle when its collection can serve the current config.
+
+    This is the only place read handles are made. A handle is kept per key and rebuilt only when the embedder
+    configuration changes: its reader selects the current compatible publication at each read.
+    """
     key, binding = _resolve_published_index_key_and_binding(
         base_id,
         config=config,
@@ -519,156 +349,114 @@ def get_published_index(
         execution_identity=execution_identity,
         create=False,
     )
-    metadata_path = published_index_metadata_path(key)
-    state = load_published_index_state(metadata_path)
-    availability = _published_index_availability(key=key, state=state, metadata_exists=metadata_path.exists())
-    current_embedder_client_signature = embedder_client_signature(config, runtime_paths)
-
-    try:
-        index = _published_indexes.get(key)
-        if index is not None:
-            if (
-                index.embedder_client_signature == current_embedder_client_signature
-                and state is not None
-                and _cached_index_matches_persisted_state(index, state)
-                and _cached_index_still_queryable(index)
-            ):
-                if index.state != state:
-                    index = replace(index, state=state)
-                    _published_indexes[key] = index
-                return PublishedIndexResolution(
-                    key=key,
-                    index=index,
-                    state=state,
-                    availability=availability,
-                    schedule_refresh_on_access=binding.incremental_sync_on_access,
-                )
-            _published_indexes.pop(key, None)
-
-        if state is None:
-            return PublishedIndexResolution(
-                key=key,
-                index=None,
-                state=state,
-                availability=availability,
-                schedule_refresh_on_access=binding.incremental_sync_on_access,
-            )
-        reader = _load_queryable_index_from_state(key, state, config=config, runtime_paths=runtime_paths)
-    except Exception:
-        logger.warning(
-            "Published knowledge index handle could not be opened",
-            base_id=base_id,
-            exc_info=True,
-        )
-        return PublishedIndexResolution(
-            key=key,
-            index=None,
-            state=state,
-            availability=KnowledgeAvailability.REFRESH_FAILED,
-            schedule_refresh_on_access=binding.incremental_sync_on_access,
-        )
-    if reader is None:
-        return PublishedIndexResolution(
-            key=key,
-            index=None,
-            state=state,
-            availability=availability
-            if availability is not KnowledgeAvailability.READY
-            else KnowledgeAvailability.REFRESH_FAILED,
-            schedule_refresh_on_access=binding.incremental_sync_on_access,
-        )
-
-    index = _PublishedIndexHandle(
-        key=key,
-        reader=reader,
-        state=state,
-        metadata_path=published_index_metadata_path(key),
-        embedder_client_signature=current_embedder_client_signature,
-    )
-    _cache_published_index(index)
+    storage = published_index_storage_path(key)
+    publication = load_publication(storage)
+    collection_exists = publication is not None and published_collection_exists(key, publication)
+    if publication is not None and publication.collection is not None and not collection_exists:
+        # A publication that replaced this one, and deleted its collection, may have landed since it was read.
+        publication = load_publication(storage)
+        collection_exists = publication is not None and published_collection_exists(key, publication)
+    unreadable = publication_unreadable(storage, publication)
+    status = load_refresh_status(storage)
+    availability = index_availability(key, publication, status, publication_unreadable=unreadable, refreshing=False)
+    reader: PublishedIndexReader | None = None
+    # A publication whose settings differ only in ways queries do not see, such as chunking, keeps serving until the
+    # refresh its config mismatch schedules replaces it.
+    if publication is not None and publication.serves(key.indexing_settings):
+        # Checked once per publication read: the reader picks the current publication at each search, so one that
+        # replaced this one since keeps the base searchable.
+        if collection_exists:
+            try:
+                reader = _cached_reader(key, config=config, runtime_paths=runtime_paths)
+            except Exception:
+                logger.warning("Published knowledge index handle could not be opened", base_id=base_id, exc_info=True)
+                availability = KnowledgeAvailability.REFRESH_FAILED
+        elif availability is KnowledgeAvailability.READY:
+            availability = KnowledgeAvailability.REFRESH_FAILED
     return PublishedIndexResolution(
         key=key,
-        index=index,
-        state=state,
+        reader=reader,
+        publication=publication,
+        status=status,
         availability=availability,
+        publication_unreadable=unreadable,
         schedule_refresh_on_access=binding.incremental_sync_on_access,
     )
 
 
-def _publish_knowledge_index(
-    key: PublishedIndexKey,
-    *,
-    reader: PublishedIndexReader,
-    state: PublishedIndexState,
-    metadata_path: Path | None = None,
-    embedder_client_signature: str | None = None,
-) -> _PublishedIndexHandle:
-    """Publish a read handle in this process."""
-    _evict_published_indexes_for_refresh_target(refresh_target_for_published_index_key(key))
-    index = _PublishedIndexHandle(
-        key=key,
-        reader=reader,
-        state=state,
-        metadata_path=metadata_path or published_index_metadata_path(key),
-        embedder_client_signature=embedder_client_signature,
-    )
-    _cache_published_index(index)
-    return index
+def _cached_reader(key: PublishedIndexKey, *, config: Config, runtime_paths: RuntimePaths) -> PublishedIndexReader:
+    signature = embedder_client_signature(config, runtime_paths)
+    handle = _published_indexes.get(key)
+    if handle is None or handle.embedder_client_signature != signature:
+        handle = _PublishedIndexHandle(
+            reader=_build_published_index_reader(key, config=config, runtime_paths=runtime_paths),
+            embedder_client_signature=signature,
+        )
+        # A config change gives the same binding a new key; the old key's handle serves nothing new.
+        target = refresh_target_for_published_index_key(key)
+        for cached in [
+            cached for cached in _published_indexes if refresh_target_for_published_index_key(cached) == target
+        ]:
+            del _published_indexes[cached]
+        _published_indexes[key] = handle
+        # Private knowledge has one key per requester, so only the most recent private handles stay cached.
+        private_keys = [
+            cached for cached in _published_indexes if cached.base_id.startswith(PRIVATE_KNOWLEDGE_BASE_ID_PREFIX)
+        ]
+        for stale in private_keys[:-_MAX_PRIVATE_PUBLISHED_INDEXES]:
+            _published_indexes.pop(stale, None)
+    return handle.reader
 
 
-def publish_knowledge_index_from_state(
-    key: PublishedIndexKey,
-    *,
-    state: PublishedIndexState,
-    config: Config,
-    runtime_paths: RuntimePaths,
-    metadata_path: Path | None = None,
-) -> _PublishedIndexHandle | None:
-    """Publish a read handle rebuilt from persisted metadata."""
-    reader = _load_queryable_index_from_state(key, state, config=config, runtime_paths=runtime_paths)
-    if reader is None:
-        return None
-    return _publish_knowledge_index(
-        key,
-        reader=reader,
-        state=state,
-        metadata_path=metadata_path,
-        embedder_client_signature=embedder_client_signature(config, runtime_paths),
-    )
+def mark_published_index_stale(key: PublishedIndexKey, *, reason: str) -> None:
+    """Record that the base's source changed since its publication, without touching the publication."""
+    update_refresh_status(published_index_storage_path(key), lambda status: marked_stale(status, reason))
 
 
-def _same_physical_binding(key: PublishedIndexKey, refresh_target: KnowledgeRefreshTarget) -> bool:
-    return (
-        key.base_id == refresh_target.base_id
-        and key.storage_root == refresh_target.storage_root
-        and key.knowledge_path == refresh_target.knowledge_path
-    )
+def record_refresh_succeeded(key: PublishedIndexKey, *, reason_generation: int) -> None:
+    """Record a refresh that left a current publication; a source change marked since it started stays marked."""
+
+    def succeeded(status: RefreshStatus) -> RefreshStatus:
+        reason = None if status.reason_generation == reason_generation else status.reason
+        return replace(
+            status,
+            reason=reason,
+            last_error=None,
+            consecutive_refresh_failures=0,
+            last_refresh_at=utc_now(),
+        )
+
+    update_refresh_status(published_index_storage_path(key), succeeded)
+
+
+def record_refresh_failed(key: PublishedIndexKey, *, error: str) -> None:
+    """Record a failed refresh; the last publication stays served, and an unpublished source change stays marked."""
+
+    def failed(status: RefreshStatus) -> RefreshStatus:
+        return replace(
+            status,
+            last_error=error,
+            consecutive_refresh_failures=status.consecutive_refresh_failures + 1,
+            last_refresh_at=utc_now(),
+        )
+
+    status = update_refresh_status(published_index_storage_path(key), failed)
+    if status.consecutive_refresh_failures >= _CONSECUTIVE_REFRESH_FAILURE_ALERT_THRESHOLD:
+        logger.error(
+            "knowledge_refresh_failing_repeatedly",
+            base_id=key.base_id,
+            consecutive_refresh_failures=status.consecutive_refresh_failures,
+            last_error=error,
+        )
+
+
+def refresh_reason_generation(key: PublishedIndexKey) -> int:
+    """Return the base's current source-change generation, which a refresh records before it starts."""
+    return load_refresh_status(published_index_storage_path(key)).reason_generation
 
 
 def _same_physical_source(left: PublishedIndexKey, right: PublishedIndexKey) -> bool:
     return left.storage_root == right.storage_root and left.knowledge_path == right.knowledge_path
-
-
-def _published_index_key_is_private(key: PublishedIndexKey) -> bool:
-    return key.base_id.startswith(PRIVATE_KNOWLEDGE_BASE_ID_PREFIX)
-
-
-def prune_private_index_bookkeeping() -> None:
-    """Bound PrivateAgentKnowledge in-process published index handles."""
-    private_index_keys = [key for key in _published_indexes if _published_index_key_is_private(key)]
-    for key in private_index_keys[:-_MAX_PRIVATE_PUBLISHED_INDEXES]:
-        _published_indexes.pop(key, None)
-
-
-def _cache_published_index(index: _PublishedIndexHandle) -> None:
-    _published_indexes[index.key] = index
-    prune_private_index_bookkeeping()
-
-
-def _evict_published_indexes_for_refresh_target(refresh_target: KnowledgeRefreshTarget) -> None:
-    for cached_key in tuple(_published_indexes):
-        if _same_physical_binding(cached_key, refresh_target):
-            _published_indexes.pop(cached_key, None)
 
 
 def _published_index_keys_for_shared_source(
@@ -713,18 +501,6 @@ def _published_index_keys_for_shared_source(
     return tuple(matching_keys)
 
 
-def _mark_published_index_key_stale_on_disk(matching_key: PublishedIndexKey, *, reason: str) -> bool:
-    mark_published_index_stale_and_evict(matching_key, reason=reason)
-    return True
-
-
-def mark_published_index_stale_and_evict(matching_key: PublishedIndexKey, *, reason: str) -> bool:
-    """Mark one published index stale and evict matching process-local handles."""
-    mark_published_index_stale(matching_key, reason=reason)
-    _evict_published_indexes_for_refresh_target(refresh_target_for_published_index_key(matching_key))
-    return True
-
-
 def _mark_knowledge_source_changed(
     base_id: str,
     *,
@@ -732,17 +508,22 @@ def _mark_knowledge_source_changed(
     runtime_paths: RuntimePaths,
     execution_identity: ToolExecutionIdentity | None = None,
     reason: str = "source_mutated",
+    excluding: PublishedIndexKey | None = None,
 ) -> tuple[str, ...]:
-    """Mark same-source published indexes stale after a source mutation."""
-    matching_keys = _published_index_keys_for_shared_source(
-        base_id,
-        config=config,
-        runtime_paths=runtime_paths,
-        execution_identity=execution_identity,
+    """Mark same-source published indexes stale after a source mutation, except ``excluding``."""
+    matching_keys = tuple(
+        key
+        for key in _published_index_keys_for_shared_source(
+            base_id,
+            config=config,
+            runtime_paths=runtime_paths,
+            execution_identity=execution_identity,
+        )
+        if key != excluding
     )
     for matching_key in matching_keys:
-        _mark_published_index_key_stale_on_disk(matching_key, reason=reason)
-    return tuple(dict.fromkeys(key.base_id for key in matching_keys))
+        mark_published_index_stale(matching_key, reason=reason)
+    return tuple(key.base_id for key in matching_keys)
 
 
 async def mark_knowledge_source_changed_async(
@@ -752,13 +533,17 @@ async def mark_knowledge_source_changed_async(
     runtime_paths: RuntimePaths,
     execution_identity: ToolExecutionIdentity | None = None,
     reason: str = "source_mutated",
+    excluding: PublishedIndexKey | None = None,
 ) -> tuple[str, ...]:
-    """Async stale marker that keeps metadata I/O off the event loop."""
-    return await _run_to_thread_to_completion_on_cancel(
-        _mark_knowledge_source_changed,
-        base_id,
-        config=config,
-        runtime_paths=runtime_paths,
-        execution_identity=execution_identity,
-        reason=reason,
+    """Async stale marker that keeps status I/O off the event loop and finishes even when cancelled."""
+    return await run_blocking_until_complete(
+        partial(
+            _mark_knowledge_source_changed,
+            base_id,
+            config=config,
+            runtime_paths=runtime_paths,
+            execution_identity=execution_identity,
+            reason=reason,
+            excluding=excluding,
+        ),
     )

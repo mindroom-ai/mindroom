@@ -312,18 +312,18 @@ async def _team_memory_saves(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("edited", [False, True])
-async def test_completed_team_reply_saves_the_conversation_to_its_members_memory(
+async def test_completed_team_reply_saves_the_conversation_to_its_team_memory(
     config_with_team: Config,
     tmp_path: Path,
     edited: bool,
 ) -> None:
-    """A configured team's reply, first or after an edit, saves the conversation once for all its members."""
+    """A configured team's reply, first or after an edit, saves the conversation once to the team's memory."""
     store_calls = await _team_memory_saves(config_with_team, tmp_path, edited=edited)
 
     [(args, kwargs)] = store_calls
     assert args[0] == "@team remember this"
     assert args[1] == ["a1", "a2"]
-    assert [message.body for message in args[6]] == ["Earlier note"]
+    assert [message.body for message in args[5]] == ["Earlier note"]
     assert kwargs["execution_identity"].requester_id == "@user:localhost"
 
 
@@ -382,7 +382,7 @@ async def test_team_reply_resumed_after_approval_saves_the_conversation(
         await asyncio.sleep(0)
 
     [(args, _kwargs)] = store_calls
-    assert (args[0], args[1], args[3]) == ("@team remember this", ["a1", "a2"], "session-1")
+    assert args[:3] == ("@team remember this", ["a1", "a2"], "session-1")
 
 
 @pytest.mark.asyncio

@@ -42,6 +42,7 @@ from mindroom.constants import (
 from mindroom.delegation.state import DelegationState
 from mindroom.failure_text import failure_text
 from mindroom.helper_usage import helper_usage_context
+from mindroom.history.mid_turn_compaction import without_run_usage
 from mindroom.history.storage import remove_history_of_redacted_events
 from mindroom.history.turn_recorder import TurnRecorder
 from mindroom.llm.events import RunFinished, TextDelta, ToolStarted
@@ -53,7 +54,7 @@ from mindroom.streaming import StreamingLifecycleSuspensionError, StreamingPrese
 from mindroom.tool_jobs.consumption import finalize_consumption, set_consumption_storage
 from mindroom.tool_jobs.execution_scope import owned_tool_execution
 from mindroom.tool_system.context_bound_streams import closing_async_stream, context_bound_async_stream
-from mindroom.tool_system.events import CollectedStreamPresentation, StructuredStreamChunk
+from mindroom.tool_system.events import CollectedStreamPresentation, FailedReply, StructuredStreamChunk
 from mindroom.turn_continuation import TURN_CONTINUATION_LIMIT, continuation_decision_from_tools, stopped_calls
 
 if TYPE_CHECKING:
@@ -162,10 +163,9 @@ def build_matrix_run_metadata(
     thread_id: str | None = None,
     requester_id: str | None = None,
     correlation_id: str | None = None,
-    model_params: dict[str, Any] | None = None,
     extra_metadata: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """Build metadata dict for a run, tracking consumed Matrix event ids; it always records the model params."""
+    """Build metadata dict for a run, tracking consumed Matrix event ids."""
     metadata = dict(extra_metadata or {})
     if room_id is not None:
         metadata["room_id"] = room_id
@@ -177,10 +177,6 @@ def build_matrix_run_metadata(
         metadata["requester_id"] = requester_id
     if correlation_id is not None:
         metadata["correlation_id"] = correlation_id
-    if model_params is not None:
-        metadata["model_params"] = model_params
-    else:
-        metadata.setdefault("model_params", {})
     source_event_ids = _normalized_string_list(metadata.get(MATRIX_SOURCE_EVENT_IDS_METADATA_KEY))
     discovery_event_ids = _normalized_string_list(metadata.get(MATRIX_TURN_DISCOVERY_EVENT_IDS_METADATA_KEY))
     if reply_to_event_id:
@@ -423,10 +419,15 @@ class TurnSinks:
 
 @dataclass(frozen=True)
 class TurnResume:
-    """Where a resumed turn starts: the restored attempt to settle first, if any, and the same-turn attempts spent."""
+    """Where a resumed turn starts: the restored attempt to settle first, if any, and the same-turn attempts spent.
+
+    ``prior_usage`` is the usage of the turn's attempts before the first one the resume settles or runs, which the
+    reply's usage adds (``TurnRunState.prior_usage``).
+    """
 
     attempt: CompletedAttempt | None = None
     continuation_count: int = 0
+    prior_usage: tuple[RunMetrics, ...] = ()
 
 
 class _LiveAttempt(Protocol):
@@ -541,6 +542,8 @@ def _apply_collected_chunk(presentation: CollectedStreamPresentation, chunk: Str
         presentation.show_text(chunk)
     elif isinstance(chunk, TextDelta):
         presentation.append_text(chunk.text)
+    elif isinstance(chunk, FailedReply):
+        presentation.show_text(chunk.text)
     elif isinstance(chunk, StructuredStreamChunk):
         presentation.show_document(chunk)
     elif isinstance(chunk, RunFinished):
@@ -713,11 +716,9 @@ def _paused_attempt_from_pause(
 
 @dataclass(frozen=True)
 class HandledAttempt:
-    """One attempt that failed: the reply text that says so, which the driver emits once it recorded the failure."""
+    """One attempt that failed: the reply that says so, which the driver yields once it recorded the failure."""
 
-    text: str
-    # The failure the text reports.
-    error: Exception
+    reply: FailedReply
     # Builds the run metadata the attempt publishes, as ``CompletedAttempt.build_run_metadata`` does.
     build_run_metadata: Callable[[], dict[str, Any]] | None = None
 
@@ -781,7 +782,7 @@ def _interrupted_run_metadata(ctx: ResponseTurnContext, run: TurnRunState) -> di
         thread_id=ctx.thread_id,
         requester_id=ctx.requester_id,
         correlation_id=ctx.correlation_id,
-        extra_metadata=deepcopy(ctx.matrix_run_metadata),
+        extra_metadata=deepcopy(without_run_usage(ctx.matrix_run_metadata)),
     )
 
 
@@ -850,13 +851,13 @@ async def _settle_failure(
     run: TurnRunState,
     continuation: TurnContinuationRunState,
     failure: HandledAttempt,
-) -> str:
+) -> FailedReply:
     """Record a failed turn as interrupted and report its failure to the caller; return its error reply."""
     _publish_run_metadata(sinks, failure.build_run_metadata)
-    await _record_interrupted(ctx, sinks, run, continuation, failure.error)
+    await _record_interrupted(ctx, sinks, run, continuation, failure.reply.error)
     if sinks.on_failed is not None:
         sinks.on_failed(failure)
-    return failure.text
+    return failure.reply
 
 
 def _settle_empty_run(
@@ -1110,12 +1111,8 @@ async def stream_response_turn[ChunkT](
     *,
     continuation: TurnContinuationRunState,
     resume: TurnResume | None = None,
-) -> AsyncGenerator[ChunkT | str, None]:
-    """Own the whole response while binding context only during pulls and close.
-
-    A failed turn's reply is a bare string, never the adapter's text chunk: for an agent, whose text is ``TextDelta``,
-    that is how the OpenAI-compatible API tells a failed run's reply from its answer.
-    """
+) -> AsyncGenerator[ChunkT | FailedReply, None]:
+    """Own the whole response while binding context only during pulls and close; a failed turn ends with its reply."""
     lifetime = CliTurnLifetime()
     stream = context_bound_async_stream(
         context_factory=lifetime.bind,
@@ -1144,14 +1141,14 @@ async def _stream_response_turn[ChunkT](  # noqa: C901, PLR0912, PLR0915
     continuation: TurnContinuationRunState,
     cli_lifetime: CliTurnLifetime,
     resume: TurnResume,
-) -> AsyncGenerator[ChunkT | str, None]:
+) -> AsyncGenerator[ChunkT | FailedReply, None]:
     """Run one response turn, yielding the attempt chunks as they arrive.
 
     The driver is the only writer of the turn's record: it settles the record before it yields the text that ends the
     turn, so a consumer that closes the stream right after cannot leave it unsettled, and a consumer that closes it
     earlier (a Stop that lands in the streamer, a delivery failure) leaves the turn recorded as stopped.
     """
-    run = TurnRunState(record=sinks.turn_recorder or TurnRecorder())
+    run = TurnRunState(record=sinks.turn_recorder or TurnRecorder(), prior_usage=resume.prior_usage)
     run.record.start(run_metadata=_interrupted_run_metadata(ctx, run))
     resumed_attempt = resume.attempt
     try:
@@ -1222,7 +1219,7 @@ async def _stream_response_turn[ChunkT](  # noqa: C901, PLR0912, PLR0915
             run.record.mark_skipped()
             logger.exception("Response turn skipped before participation", entity=ctx.entity_label)
             return
-        failure = HandledAttempt(adapter.unexpected_error_text(e), error=e)
-        text = await _settle_failure(ctx, sinks, run, continuation, failure)
+        failure = HandledAttempt(FailedReply(adapter.unexpected_error_text(e), e))
+        reply = await _settle_failure(ctx, sinks, run, continuation, failure)
         logger.exception("Response turn failed", entity=ctx.entity_label)
-        yield text
+        yield reply

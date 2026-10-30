@@ -30,6 +30,7 @@ from mindroom.session_storage.usage_reader import (
     unreadable_layout,
 )
 from mindroom.tool_system.worker_routing import build_requester_execution_identity, worker_dir_name
+from mindroom.usage.legacy_usage_storage import current_provider_name
 from mindroom.usage.storage import (
     SYSTEM_USAGE_ENTITY,
     SYSTEM_USAGE_STORAGE_NAME,
@@ -592,7 +593,7 @@ def _extract_run(
         ),
         run_id=_optional_string(run.get("run_id")),
         parent_run_id=parent_run_id,
-        model_provider=_optional_string(run.get("model_provider")),
+        model_provider=_stored_provider(run.get("model_provider")),
         model=_optional_string(run.get("model")),
         metrics=selected_metrics,
         created_at=created_at if _is_timestamp(created_at) else None,
@@ -624,7 +625,7 @@ def _extract_request_metrics(requests: object) -> tuple[UsageRequestMetrics, ...
                 UsageRequestMetrics(
                     created_at,
                     _select_metrics(cast("dict[str, object]", metrics)),
-                    model_provider=_optional_string(request.get("model_provider")),
+                    model_provider=_stored_provider(request.get("model_provider")),
                     model=_optional_string(request.get("model")),
                 ),
             )
@@ -650,7 +651,7 @@ def _extract_model_metrics(details: object) -> tuple[UsageModelMetrics, ...] | N
                 model_metrics = cast("dict[str, object]", entry)
                 models.append(
                     UsageModelMetrics(
-                        model_provider=_optional_string(model_metrics.get("provider")),
+                        model_provider=_stored_provider(model_metrics.get("provider")),
                         model=_optional_string(model_metrics.get("id")),
                         metrics=_select_metrics(model_metrics),
                     ),
@@ -681,6 +682,11 @@ def _is_timestamp(value: object) -> TypeGuard[int | float]:
 
 def _optional_string(value: object) -> str | None:
     return _bounded_string(value) if isinstance(value, str) and value else None
+
+
+def _stored_provider(value: object) -> str | None:
+    provider = _optional_string(value)
+    return current_provider_name(provider) if provider is not None else None
 
 
 def _bounded_string(value: str) -> str:

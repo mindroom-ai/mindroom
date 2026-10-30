@@ -22,10 +22,12 @@ from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig, ModelPricing
 from mindroom.constants import resolve_runtime_paths
 from mindroom.custom_tools.delegate import DelegateTools
+from mindroom.llm.events import TextDelta
 from mindroom.routing import ResponderSelection
 from mindroom.tool_system.runtime_context import get_detached_requester_context, get_tool_runtime_context
 from mindroom.tool_system.worker_routing import agent_workspace_root_path
 from tests.access_schema_support import membership_index
+from tests.api.conftest import publish_api_config
 from tests.budget_helpers import budget_monitor_with_spend
 from tests.conftest import bind_runtime_paths, completed_ai_response_mock, completing
 from tests.identity_helpers import persist_entity_accounts
@@ -90,8 +92,8 @@ def api(tmp_path: Path) -> Iterator[_ApiHarness]:
     )
     persist_entity_accounts(config, runtime_paths)
     app = openai_compat_app(runtime_paths)
-    config_lifecycle.require_api_state(app).snapshot.runtime_config = config
-    with patch.object(openai_compat, "_load_config", return_value=(config, runtime_paths)), TestClient(app) as client:
+    publish_api_config(app, config)
+    with TestClient(app) as client:
         yield _ApiHarness(client, config, runtime_paths)
 
 
@@ -127,9 +129,9 @@ def test_mapped_request_delegates_with_canonical_identity(api: _ApiHarness, stre
         )
         return await tool.run_subagent(agent_name="specialist", task="help")
 
-    async def streaming(ctx: ResponseTurnContext, *_args: object, **_kwargs: object) -> AsyncIterator[str]:
-        yield "Working: "
-        yield await delegate(ctx)
+    async def streaming(ctx: ResponseTurnContext, *_args: object, **_kwargs: object) -> AsyncIterator[TextDelta]:
+        yield TextDelta("Working: ")
+        yield TextDelta(await delegate(ctx))
 
     with (
         patch.object(openai_compat, "ai_response", side_effect=completing(delegate)),

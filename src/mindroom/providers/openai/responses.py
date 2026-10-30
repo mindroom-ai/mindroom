@@ -115,7 +115,7 @@ class ResponsesAdapter:
                 model_id=self.identity.id,
                 cache_system_prompt=self.settings.cache_system_prompt,
                 explicit_breakpoint=self.wire.explicit_breakpoint,
-                provider=self.identity.provider_name,
+                provider=self.identity.provider,
             )
         except InvalidRequest:
             return None
@@ -126,7 +126,7 @@ class ResponsesAdapter:
             request=request,
             settings=request_settings(self.settings, request.overrides, self.capabilities),
             wire=self.wire,
-            provider=self.identity.provider_name,
+            provider=self.identity.provider,
         )
 
     async def _streamed(
@@ -151,7 +151,7 @@ class ResponsesAdapter:
         timer = TurnTimer()
         kwargs = await asyncio.to_thread(self._request_kwargs, request)
         accumulator = ResponsesStream(
-            provider=self.identity.provider_name,
+            provider=self.identity.provider,
             store=request_store(self.wire, request),
             portable_replay=request.portable_replay,
             native_compaction=request.native_compaction,
@@ -165,7 +165,7 @@ class ResponsesAdapter:
                 async for event in events:
                     yield event
         except sdk_failures() as error:
-            failure = provider_error(error, provider=self.identity.provider_name)
+            failure = provider_error(error, provider=self.identity.provider)
             # A request that continues a stored response sends only the messages after it.
             replay = request_replay(self.wire, request)
             failure.rejected_media = rejected_media(error, kwargs, replay.history[replay.sent_from :], chat=False)

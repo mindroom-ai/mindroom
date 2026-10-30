@@ -47,7 +47,7 @@ from mindroom.response_turn import (
 from mindroom.session_storage.agent_storage import create_state_storage
 from mindroom.session_storage.store import ConversationStore
 from mindroom.session_storage.types import ConversationSession
-from mindroom.tool_system.events import ToolTraceEntry
+from mindroom.tool_system.events import FailedReply, ToolTraceEntry
 from tests.approval_continuation_helpers import answered_calls
 from tests.conftest import seed_session
 
@@ -142,6 +142,8 @@ def _continuation(prompt: str = "hello") -> TurnContinuationRunState:
 
 # The name the fake adapter's queued notices carry: a configured team's, unlike the context's label.
 _ENTITY_NAME = "squad"
+# The reply a failed attempt hands the driver, which the driver yields as the turn's last chunk.
+_FRIENDLY_ERROR = FailedReply("friendly error", RuntimeError("friendly error"))
 
 type _RunAttempt = Callable[[TurnRunState, TurnContinuationRunState], AsyncGenerator[str | AttemptResolved, None]]
 
@@ -355,7 +357,7 @@ def _streaming_adapter(
     )
 
 
-async def _collect(stream: AsyncIterator[str]) -> list[str]:
+async def _collect(stream: AsyncIterator[str | FailedReply]) -> list[str | FailedReply]:
     return [chunk async for chunk in stream]
 
 
@@ -367,7 +369,7 @@ async def _collect_turn(
     continuation: TurnContinuationRunState | None = None,
     resume: TurnResume | None = None,
     **adapter_options: object,
-) -> list[str]:
+) -> list[str | FailedReply]:
     """Run one turn of ``attempt`` to its end and return what it streamed; unset inputs are the usual test ones."""
     return await _collect(
         stream_response_turn(
@@ -380,7 +382,7 @@ async def _collect_turn(
     )
 
 
-def _run_turn(attempt: _RunAttempt, **options: object) -> list[str]:
+def _run_turn(attempt: _RunAttempt, **options: object) -> list[str | FailedReply]:
     """Run ``_collect_turn`` on its own event loop."""
     return asyncio.run(_collect_turn(attempt, **options))
 
@@ -768,11 +770,11 @@ def test_handled_attempt_preserves_seeded_turn_metadata() -> None:
         _run: TurnRunState,
         _c: TurnContinuationRunState,
     ) -> AsyncGenerator[str | AttemptResolved, None]:
-        yield AttemptResolved(HandledAttempt("friendly error", error=RuntimeError("friendly error")))
+        yield AttemptResolved(HandledAttempt(_FRIENDLY_ERROR))
 
     chunks = _run_turn(_attempt, ctx=_ctx(matrix_run_metadata=seeded_metadata), sinks=TurnSinks(turn_recorder=recorder))
 
-    assert chunks == ["friendly error"]
+    assert chunks == [_FRIENDLY_ERROR]
     assert recorder.interrupted_calls[-1]["run_metadata"] == {
         "matrix_source_event_ids": ["$source"],
         "matrix_seen_event_ids": ["$reply", "$source"],
@@ -781,7 +783,6 @@ def test_handled_attempt_preserves_seeded_turn_metadata() -> None:
         "reply_to_event_id": "$reply",
         "requester_id": "@user:hs",
         "correlation_id": "corr-1",
-        "model_params": {},
         "matrix_event_id": "$reply",
     }
 
@@ -797,11 +798,12 @@ def test_handled_attempt_marks_its_run_interrupted_with_the_failure(
     ) -> AsyncGenerator[str | AttemptResolved, None]:
         run.run_metadata = {"room_id": "!room"}
         run.attempt = _FixedAttempt("run-live")
-        yield AttemptResolved(HandledAttempt("friendly error", error=RuntimeError("model down")))
+        yield AttemptResolved(HandledAttempt(failure))
 
+    failure = FailedReply("friendly error", RuntimeError("model down"))
     chunks = _run_turn(_attempt)
 
-    assert chunks == ["friendly error"]
+    assert chunks == [failure]
     # The failure's text, as the loop records it on a failed run.
     assert marked == [("run-live", "model down")]
 
@@ -858,7 +860,7 @@ def test_external_cancel_skips_the_mark_after_a_handled_attempt_marked_its_run(
         _c: TurnContinuationRunState,
     ) -> AsyncGenerator[str | AttemptResolved, None]:
         run.run_metadata = {"room_id": "!room"}
-        yield AttemptResolved(HandledAttempt("friendly error", error=RuntimeError("friendly error")))
+        yield AttemptResolved(HandledAttempt(_FRIENDLY_ERROR))
 
     def _cancel_once_failed(_failure: HandledAttempt) -> None:
         raise asyncio.CancelledError
@@ -1166,12 +1168,12 @@ def test_an_empty_run_s_metadata_stays_out_of_collector() -> None:
                 ),
             )
             return
-        yield AttemptResolved(HandledAttempt("friendly error", error=RuntimeError("friendly error")))
+        yield AttemptResolved(HandledAttempt(_FRIENDLY_ERROR))
 
     chunks = _run_turn(_attempt, sinks=TurnSinks(run_metadata_collector=collector))
 
     assert attempts == 2
-    assert chunks == ["friendly error"]
+    assert chunks == [_FRIENDLY_ERROR]
     assert collector == {}
 
 
@@ -1234,16 +1236,12 @@ def test_streaming_handled_attempt_records_and_publishes_its_metadata() -> None:
         _c: TurnContinuationRunState,
     ) -> AsyncGenerator[str | AttemptResolved, None]:
         yield AttemptResolved(
-            HandledAttempt(
-                "friendly error",
-                error=RuntimeError("friendly error"),
-                build_run_metadata=lambda: error_metadata,
-            ),
+            HandledAttempt(_FRIENDLY_ERROR, build_run_metadata=lambda: error_metadata),
         )
 
     chunks = _run_turn(_attempt, sinks=TurnSinks(turn_recorder=recorder, run_metadata_collector=collector))
 
-    assert chunks == ["friendly error"]
+    assert chunks == [_FRIENDLY_ERROR]
     assert collector == error_metadata
     assert recorder.completed_calls == []
     assert len(recorder.interrupted_calls) == 1
@@ -1497,7 +1495,7 @@ def test_fresh_continuation_saves_count_before_first_approval() -> None:
 
 @pytest.mark.parametrize(
     "resolution",
-    [HandledAttempt("failed", error=RuntimeError("failed")), SkippedAttempt()],
+    [HandledAttempt(FailedReply("failed", RuntimeError("failed"))), SkippedAttempt()],
 )
 def test_noncompletion_does_not_publish_completed_attempt(resolution: StreamAttemptResolution) -> None:
     """Handled errors and quiet turns cannot report typed success."""
@@ -1528,7 +1526,9 @@ def test_a_started_attempt_hands_the_scope_to_queued_notice_finalization_even_wh
     with queued_message_signal_context(None) as notices:
         chunks = _run_turn(_attempt)
 
-    assert chunks == ["chunk", "failed: stream blew up"]
+    assert chunks[0] == "chunk"
+    assert isinstance(chunks[1], FailedReply)
+    assert chunks[1].text == "failed: stream blew up"
     assert list(notices.storage_targets) == [(_ENTITY_NAME, "session-1", "agent")]
 
 
@@ -1539,12 +1539,12 @@ def test_an_attempt_that_fails_before_it_starts_hands_over_no_scope() -> None:
         _run: TurnRunState,
         _c: TurnContinuationRunState,
     ) -> AsyncGenerator[str | AttemptResolved, None]:
-        yield AttemptResolved(HandledAttempt("friendly error", error=RuntimeError("friendly error")))
+        yield AttemptResolved(HandledAttempt(_FRIENDLY_ERROR))
 
     with queued_message_signal_context(None) as notices:
         chunks = _run_turn(_attempt)
 
-    assert chunks == ["friendly error"]
+    assert chunks == [_FRIENDLY_ERROR]
     assert notices.storage_targets == {}
 
 
@@ -1564,18 +1564,18 @@ def test_the_attempt_a_continuation_drops_still_hands_its_scope_to_queued_notice
                 CompletedAttempt(attempt_run_id="run-1", tool_executions=(_model_switch_execution("next-turn"),)),
             )
             return
-        yield AttemptResolved(HandledAttempt("friendly error", error=RuntimeError("friendly error")))
+        yield AttemptResolved(HandledAttempt(_FRIENDLY_ERROR))
 
     with queued_message_signal_context(None) as notices:
         chunks = _run_turn(_attempt)
 
-    assert chunks == ["friendly error"]
+    assert chunks == [_FRIENDLY_ERROR]
     assert attempts == 2
     assert list(notices.storage_targets) == [(_ENTITY_NAME, "session-1", "agent")]
 
 
 def test_streaming_unexpected_error_yields_its_shaped_error_text() -> None:
-    """An unexpected exception becomes the adapter's shaped error text, a bare string as every failed turn's reply is.
+    """An unexpected exception becomes the turn's failed reply, the adapter's shaped error text.
 
     The caller's failure sink receives the error and its text, as it does for a failure an attempt handled.
     """
@@ -1595,8 +1595,8 @@ def test_streaming_unexpected_error_yields_its_shaped_error_text() -> None:
         unexpected_error_text=lambda e: f"shaped: {e}",
     )
 
-    assert chunks == ["chunk", "shaped: boom"]
-    assert failures == [HandledAttempt("shaped: boom", error=error)]
+    assert chunks == ["chunk", FailedReply("shaped: boom", error)]
+    assert failures == [HandledAttempt(FailedReply("shaped: boom", error))]
 
 
 def test_streaming_completed_response_text_is_emitted_after_settle() -> None:
@@ -1687,7 +1687,8 @@ def test_streaming_attempt_without_sentinel_fails_the_turn(marked: list[tuple[st
     chunks = _run_turn(_attempt, sinks=TurnSinks(turn_recorder=recorder))
 
     assert chunks[0] == "chunk"
-    assert "AttemptResolved sentinel" in chunks[1]
+    assert isinstance(chunks[1], FailedReply)
+    assert "AttemptResolved sentinel" in chunks[1].text
     assert recorder.completed_calls == []
     assert recorder.outcome == "interrupted"
     [(_run_id, error)] = marked
@@ -1872,20 +1873,20 @@ async def test_outer_turn_failure_is_quiet_until_participation_approves(
     async def attempt(_run: TurnRunState, _continuation: TurnContinuationRunState) -> CompletedAttempt:
         pytest.fail("Scope must load before an attempt")
 
-    result = "".join(
-        await _collect_turn(
-            _streamed(attempt),
-            ctx=_ctx(participation=gate),
-            sinks=TurnSinks(turn_recorder=recorder),
-            load_scope=broken_scope,
-            unexpected_error_text=lambda _: "Visible error",
-        ),
+    chunks = await _collect_turn(
+        _streamed(attempt),
+        ctx=_ctx(participation=gate),
+        sinks=TurnSinks(turn_recorder=recorder),
+        load_scope=broken_scope,
+        unexpected_error_text=lambda _: "Visible error",
     )
     if gate_state in {"absent", "approved"}:
-        assert "Visible error" in result
+        [failed] = chunks
+        assert isinstance(failed, FailedReply)
+        assert failed.text == "Visible error"
         assert recorder.outcome == "interrupted"
     else:
-        assert result == ""
+        assert chunks == []
         assert gate is not None
         assert gate.is_silent
         assert gate.decided.is_set()

@@ -1,0 +1,12 @@
+{
+  "base_id": "docs",
+  "description": "First build failed for one file: no publication, a failed state, and a candidate checkpoint.",
+  "docs": {
+    "a.md": "alpha one",
+    "b.md": "bravo one",
+    "c.md": "charlie one"
+  },
+  "knowledge_path": "/dev/shm/pytest-of-basnijholt/pytest-8778/test_resumed_publication_and_c0/docs",
+  "storage_key": "docs_d8623f01",
+  "storage_root": "/dev/shm/pytest-of-basnijholt/pytest-8778/test_resumed_publication_and_c0/mindroom_data"
+}

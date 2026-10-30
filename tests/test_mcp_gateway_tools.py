@@ -85,7 +85,7 @@ def context(tmp_path: Path) -> AgentToolContext:
         },
     )
     user = resolve_connection_user(
-        ApiSnapshot(generation=1, runtime_paths=paths, config_data=config.model_dump(), runtime_config=config),
+        ApiSnapshot(generation=1, runtime_paths=paths, runtime_config=config),
         "@alice:example.org",
     )
     return resolve_connection_agent(user, "personal")
@@ -122,7 +122,6 @@ async def test_agent_query_finds_later_selection_after_default_result_limit(cont
         ApiSnapshot(
             generation=1,
             runtime_paths=context.runtime_paths,
-            config_data=config.model_dump(),
             runtime_config=config,
         ),
         context.requester_id,
@@ -215,7 +214,7 @@ async def test_egress_credentials_is_offered_only_while_the_broker_is_on(tmp_pat
         },
         paths,
     )
-    snapshot = ApiSnapshot(generation=1, runtime_paths=paths, config_data=config.model_dump(), runtime_config=config)
+    snapshot = ApiSnapshot(generation=1, runtime_paths=paths, runtime_config=config)
     context = resolve_connection_agent(resolve_connection_user(snapshot, "@alice:example.org"), "personal")
 
     searched = await gateway.search_tools(context)
@@ -824,6 +823,57 @@ async def test_cancelled_sync_preparation_keeps_cleanup_owner(
 
 
 @pytest.mark.asyncio
+async def test_drain_returns_when_a_cleanup_finished_before_its_done_callback_ran(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A finished cleanup still in the set, because its done callback has not run yet, does not hold the drain."""
+    monkeypatch.setattr(gateway_toolkits, "_CLEANUP_TASKS", set())
+
+    async def cleanup() -> None:
+        return None
+
+    task = gateway_toolkits._retain(cleanup())
+    # The cleanup's only step runs just before this coroutine resumes, so its done callback has not run yet.
+    await asyncio.sleep(0)
+    assert task.done()
+    assert task in gateway_toolkits._CLEANUP_TASKS
+    drained, stuck = threading.Event(), threading.Event()
+
+    def unstick() -> None:
+        # A drain spinning on the finished task never yields to the loop, so only another thread can end it.
+        if not drained.wait(5):
+            stuck.set()
+            gateway_toolkits._CLEANUP_TASKS.discard(task)
+
+    watchdog = threading.Thread(target=unstick, daemon=True)
+    watchdog.start()
+    await gateway_toolkits.drain_gateway_tool_cleanup()
+    drained.set()
+    watchdog.join()
+    assert not stuck.is_set()
+
+
+@pytest.mark.asyncio
+async def test_drain_waits_for_a_cleanup_retained_while_it_drains(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A cleanup retained while the drain waits, as an unwinding call retains its own, is drained too."""
+    monkeypatch.setattr(gateway_toolkits, "_CLEANUP_TASKS", set())
+    closed: list[str] = []
+
+    async def later() -> None:
+        # Still running several loop iterations after the drain's wait for the first cleanup returns.
+        for _ in range(10):
+            await asyncio.sleep(0)
+        closed.append("later")
+
+    async def first() -> None:
+        gateway_toolkits._retain(later())
+
+    gateway_toolkits._retain(first())
+    await gateway_toolkits.drain_gateway_tool_cleanup()
+    assert closed == ["later"]
+
+
+@pytest.mark.asyncio
 async def test_close_failure_does_not_swallow_cancellation(
     context: AgentToolContext,
     monkeypatch: pytest.MonkeyPatch,
@@ -907,7 +957,6 @@ async def test_native_credentials_follow_authored_agent_scope(
     snapshot = ApiSnapshot(
         generation=1,
         runtime_paths=context.runtime_paths,
-        config_data=config.model_dump(),
         runtime_config=config,
     )
     context = resolve_connection_agent(resolve_connection_user(snapshot, "@alice:example.org"), agent_name)

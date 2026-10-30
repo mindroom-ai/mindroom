@@ -15,6 +15,7 @@ from typing import TYPE_CHECKING, cast
 
 from mindroom import ai_runtime
 from mindroom.ai import run_delegated_child_response
+from mindroom.ai_run_metadata import prior_usage_of
 from mindroom.approval.receipt_readers import add_approval_receipt_reader
 from mindroom.approval.resume import approval_decisions, with_resumed_turn_log_context
 from mindroom.approval.tool_owners import require_original_toolkit, required_approval_tool_names
@@ -453,9 +454,10 @@ async def continue_paused_team_run(
             response_text=response_text,
             metadata_content=attempt.metadata_content(
                 config,
-                runtime_paths=runtime_paths,
                 session_id=session_id,
                 status=continued.status,
+                # The usage of the turn's attempts before the paused run, which its record carries across the pause.
+                prior_usage=prior_usage_of(persisted),
             ),
         )
     finally:

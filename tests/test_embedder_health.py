@@ -160,7 +160,7 @@ def test_generic_exception_maps_to_type_only_detail() -> None:
 
 def test_embedder_request_error_detail_passes_through() -> None:
     """Already-classified errors keep their exact detail."""
-    exc = embedding_errors.EmbedderRequestError("embedder authentication failed (HTTP 401)")
+    exc = embedding_errors.EmbedderRequestError("embedder authentication failed (HTTP 401)", kind="credentials")
     assert describe_embedder_error(exc) == "embedder authentication failed (HTTP 401)"
 
 

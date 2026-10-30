@@ -177,10 +177,10 @@ Authoring errors:
 
 Each child turn writes `run.json`, `events.jsonl`, and `transcript.md` to `.mindroom/delegations/YYYY-MM-DD/<delegation-id>/` in the child's workspace, dated by the delegation's start in UTC.
 `run.json` and `events.jsonl` update as the child runs, and `transcript.md` is written when the turn finishes.
-The `usage` in `run.json` reports the child turn's token counts (`input_tokens`, `output_tokens`, `total_tokens`, `cache_read_tokens`, `cache_write_tokens`, `reasoning_tokens`, and the audio counts), `uncached_input_tokens` (input not read from the provider's cache), a `cost` when the provider reports one, and `time_to_first_token` and `duration` in seconds.
-It covers the turn's model runs, except a run that ended before the child paused for approval, such as an empty answer retried before the call it asked approval for.
+The `usage` in `run.json` reports the child turn's token counts (`input_tokens`, `output_tokens`, `total_tokens`, `cache_read_tokens`, `cache_write_tokens`, `reasoning_tokens`, and the audio counts), `uncached_input_tokens` (input not read from the provider's cache), and `time_to_first_token` and `duration` in seconds.
+It covers every model run of the turn, also across an approval pause.
 Each `usage` event of `events.jsonl` reports the same values for one model run as it stood when the event was written, so a run's last `usage` event is that run's total.
-Fractional values are decimal strings; a token count of zero and an unreported value are left out, while `uncached_input_tokens` and a reported cost or timing appear even when zero once the turn reported any usage.
+Fractional values are decimal strings; a token count of zero and an unreported value are left out, while `uncached_input_tokens` and a reported timing appear even when zero once the turn reported any usage.
 The caller receives a receipt at `.mindroom/delegation_receipts/YYYY-MM-DD/<delegation-id>.json` in its own workspace.
 Sensitive fields are redacted, and large outputs are stored as referenced artifacts.
 Each follow-up turn gets its own record, linked to earlier turns by `subagent_id` and `previous_delegation_id`.
@@ -572,6 +572,7 @@ Redacted output masks every value inside fields the config schema marks secret, 
 It also masks free-form map entries whose key names look like credentials, and credential patterns such as URL credentials and bearer tokens in any text.
 A write whose value contains the `***redacted***` marker or masked URL credentials such as `***@host` is refused, so copying redacted output back cannot overwrite a hidden real value.
 Every write is validated against the full runtime config before `config.yaml` is saved, and an invalid change saves nothing.
+A write is refused and saves nothing when `config.yaml` changed after the tool read it, for example through a dashboard save or a hand edit; the agent can read the configuration again and retry.
 Saved changes take effect through the normal config hot reload after the current response.
 When a plain list of tool names replaces an agent's tools, inline overrides for tools that stay in the list are kept.
 

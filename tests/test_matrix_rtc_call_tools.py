@@ -1136,7 +1136,7 @@ async def test_cascaded_responder_records_effective_selected_model_metadata(
         model_id = config.models[model_name].id
         return ScriptedModel(
             [answer("It is sunny.")],
-            identity=ModelIdentity(id=model_id, provider="OpenAI", provider_name="OpenAI"),
+            identity=ModelIdentity(id=model_id, provider="OpenAI"),
         )
 
     create_agent_mock = MagicMock(side_effect=create_agent)
@@ -1312,6 +1312,88 @@ async def test_call_response_tracker_failed_settlement_does_not_abort_next_turn(
     await next_turn
     with pytest.raises(RuntimeError, match="history unavailable"):
         await settlement
+
+
+@pytest.mark.asyncio
+async def test_waiting_for_settlements_returns_when_one_finished_before_its_done_callback_ran(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A finished settlement still in the set, because its done callback has not run yet, does not hold the next turn."""
+    tracker = _settlement_tracker(tmp_path)
+
+    async def persisted(*_args: object) -> None:
+        return None
+
+    monkeypatch.setattr(tracker, "_persist_serialized", persisted)
+    settlement = tracker.finalize(tracker.register(_completed_run_state("settled-run")), "partial", True)
+    assert isinstance(settlement, asyncio.Task)
+    # The settlement's only step runs just before this coroutine resumes, so its done callback has not run yet.
+    await asyncio.sleep(0)
+    assert settlement.done()
+    assert settlement in tracker.settlements
+    waited, stuck = threading.Event(), threading.Event()
+
+    def unstick() -> None:
+        # A wait spinning on the finished settlement never yields to the loop, so only another thread can end it.
+        if not waited.wait(5):
+            stuck.set()
+            tracker.settlements.discard(settlement)
+
+    watchdog = threading.Thread(target=unstick, daemon=True)
+    watchdog.start()
+    await tracker.wait_for_settlements()
+    waited.set()
+    watchdog.join()
+    assert not stuck.is_set()
+
+
+@pytest.mark.asyncio
+async def test_waiting_for_settlements_also_waits_for_one_started_meanwhile(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A settlement started while the next turn waits, as a later playout's is, is waited for too."""
+    tracker = _settlement_tracker(tmp_path)
+    later = tracker.register(_completed_run_state("later-run"))
+    settled: list[str] = []
+
+    async def persisted(state: _CallAgentRunState, *_args: object) -> None:
+        if state.run_id != "later-run":
+            tracker.finalize(later, "partial", True)
+            return
+        # Still running several loop iterations after the wait for the first settlement returns.
+        for _ in range(10):
+            await asyncio.sleep(0)
+        settled.append(state.run_id)
+
+    monkeypatch.setattr(tracker, "_persist_serialized", persisted)
+    tracker.finalize(tracker.register(_completed_run_state("first-run")), "partial", True)
+    await tracker.wait_for_settlements()
+    assert settled == ["later-run"]
+
+
+def _settlement_tracker(tmp_path: Path) -> _CallResponseTracker:
+    runtime_paths = test_runtime_paths(tmp_path)
+    return _CallResponseTracker(
+        agent_name=AGENT,
+        config=_config(),
+        runtime_paths=runtime_paths,
+        execution_identity=_identity(runtime_paths),  # type: ignore[arg-type]
+    )
+
+
+def _completed_run_state(run_id: str) -> _CallAgentRunState:
+    return _CallAgentRunState(
+        session_id="call-session",
+        run_id=run_id,
+        user_message="hello",
+        completed_tools=(),
+        interrupted_tools=(),
+        run_metadata={},
+        outcome="completed",
+        original_status=None,
+    )
 
 
 @pytest.mark.asyncio

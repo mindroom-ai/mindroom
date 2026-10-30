@@ -382,7 +382,6 @@ async def test_durable_memory_standard_minimal_standard(response_harness) -> Non
     found = await search_agent_memories(
         "Release parity durable",
         "helper",
-        h.runtime.runtime_paths.storage_root,
         h.runtime.config,
         h.runtime.runtime_paths,
         limit=5,

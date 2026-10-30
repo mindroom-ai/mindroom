@@ -17,6 +17,7 @@ from typing import TYPE_CHECKING
 from uuid import uuid4
 
 from mindroom.agent_loop.model_loop import SendRequest
+from mindroom.constants import PRIOR_USAGE_RUN_METADATA_KEY
 from mindroom.helper_usage import get_helper_usage_owner
 from mindroom.history.policy import context_budget_after_reserve
 from mindroom.history.prompt_tokens import tool_definition_tokens
@@ -71,6 +72,9 @@ if TYPE_CHECKING:
     from mindroom.session_storage.types import ConversationSession
 
 logger = get_logger(__name__)
+
+# Run metadata keys holding usage that belongs to the run whose record holds them, which a run seeded from it drops.
+_RUN_USAGE_METADATA_KEYS = frozenset({COMPACTED_REQUESTS_METADATA_KEY, PRIOR_USAGE_RUN_METADATA_KEY})
 
 
 @dataclass
@@ -167,11 +171,15 @@ def mid_turn_compaction_hook(
     return hook
 
 
-def without_fold_records(metadata: dict[str, Any] | None) -> dict[str, Any] | None:
-    """Return a run's metadata for seeding a new run, without the folded usage that belongs to that run."""
+def without_run_usage(metadata: dict[str, Any] | None) -> dict[str, Any] | None:
+    """Return a run's metadata for seeding a new run, without the usage that belongs to that run.
+
+    That is the usage of the requests its mid-turn folds carried out of its messages, and the usage its turn spent
+    before it (``with_prior_usage``).
+    """
     if metadata is None:
         return None
-    return {key: value for key, value in metadata.items() if key != COMPACTED_REQUESTS_METADATA_KEY}
+    return {key: value for key, value in metadata.items() if key not in _RUN_USAGE_METADATA_KEYS}
 
 
 @dataclass(frozen=True)
@@ -699,4 +707,4 @@ def _carry_request_usage(record: AnyRunRecord, folded: Sequence[Message]) -> Non
     record.metadata = metadata
 
 
-__all__ = ["mid_turn_compaction_hook", "without_fold_records"]
+__all__ = ["mid_turn_compaction_hook", "without_run_usage"]

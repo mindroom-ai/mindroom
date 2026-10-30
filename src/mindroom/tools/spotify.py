@@ -25,29 +25,19 @@ if TYPE_CHECKING:
     description="Search tracks, manage playlists, get recommendations, and control playback on Spotify",
     category=ToolCategory.ENTERTAINMENT,
     status=ToolStatus.REQUIRES_CONFIG,
-    setup_type=SetupType.API_KEY,
+    setup_type=SetupType.OAUTH,
+    auth_provider="spotify",
     icon="SiSpotify",
     icon_color="text-green-500",
-    # Token renewal needs SPOTIFY_CLIENT_SECRET, which only the primary process holds.
+    # Token refresh needs the OAuth client secret, which only the primary process holds.
     requires_primary_runtime=True,
     managed_init_args=(
         ToolManagedInitArg.RUNTIME_PATHS,
         ToolManagedInitArg.CREDENTIALS_MANAGER,
         ToolManagedInitArg.WORKER_TARGET,
+        ToolManagedInitArg.RUNTIME_CONFIG,
     ),
     config_fields=[
-        ConfigField(
-            name="access_token",
-            label="Access Token",
-            type="password",
-            required=True,
-            placeholder="Spotify OAuth access token",
-            description=(
-                "OAuth access token with the scopes the toolkit uses (user-read-private, user-top-read, "
-                "user-read-currently-playing, playlist-read-private, playlist-modify-public, "
-                "playlist-modify-private, user-modify-playback-state)"
-            ),
-        ),
         ConfigField(
             name="default_market",
             label="Default Market",
@@ -66,7 +56,6 @@ if TYPE_CHECKING:
     ],
     dependencies=["httpx"],
     docs_url="https://docs.mindroom.chat/tools/media-and-content/#spotify",
-    helper_text="Get an access token from the [Spotify Developer Dashboard](https://developer.spotify.com/dashboard)",
     function_names=(
         "add_tracks_to_playlist",
         "create_playlist",

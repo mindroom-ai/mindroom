@@ -13,6 +13,7 @@ if TYPE_CHECKING:
 
     from mindroom.agent_cli.session import TurnToolRegistry
     from mindroom.agent_reply_membership import AgentReplyMembershipIndex
+    from mindroom.api.auth import ApiAuthState
     from mindroom.api.computers import ComputerRuntime
     from mindroom.api.config_lifecycle import ApiState
     from mindroom.api.mcp_gateway import GatewayRuntime
@@ -70,7 +71,8 @@ class _MindroomAppState:
     """Single typed namespace for FastAPI ``app.state`` attributes used across the API."""
 
     api_state: ApiState | None = None
-    api_auth_account_id: str | None = None
+    # The auth clients of the runtime the app last authenticated a request for.
+    api_auth_state: ApiAuthState | None = None
     # What `mindroom run` lends this app while it serves it; read through `runtime`.
     embedded: EmbeddedRuntime | None = None
     # Rebound per published config generation, or as integrations start and stop.

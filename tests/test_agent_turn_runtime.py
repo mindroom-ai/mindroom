@@ -53,7 +53,6 @@ from mindroom.llm.events import RunFinished
 from mindroom.llm.messages import Message, system_text
 from mindroom.llm.provider import (
     Capabilities,
-    ModelIdentity,
     NativeCompactionReplay,
     TextDelta,
     ToolCallReady,
@@ -66,6 +65,7 @@ from mindroom.matrix.users import AgentMatrixUser
 from mindroom.message_target import MessageTarget
 from mindroom.native_compaction import replay_basis
 from mindroom.participation import ParticipationGate
+from mindroom.providers.identity import model_identity
 from mindroom.reply_turn.request import ResponseRequest
 from mindroom.response_sources import ResponseSources
 from mindroom.response_turn import ResponsePausedForApproval, TurnSinks
@@ -74,6 +74,7 @@ from mindroom.session_storage.store import ConversationStore
 from mindroom.session_storage.types import ConversationSession
 from mindroom.skill_learning.capture import SkillReviewCapture
 from mindroom.tool_system.call_record import recording_tool_calls
+from mindroom.tool_system.events import FailedReply
 from mindroom.tool_system.runtime_context import build_execution_identity_from_runtime_context, tool_runtime_context
 from mindroom.usage.storage import COMPACTED_REQUESTS_METADATA_KEY
 from tests.access_schema_support import with_current_room_member_access
@@ -869,6 +870,24 @@ async def test_only_a_reply_whose_attempt_started_hands_its_session_to_queued_no
 
 @pytest.mark.asyncio
 @pytest.mark.usefixtures("probe")
+async def test_a_reply_whose_preparation_fails_ends_with_a_failed_reply_that_carries_the_error(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The reply's last chunk is its failed reply, which carries the error it reports for readers such as the API."""
+    reply = _reply(tmp_path, monkeypatch, [answer("Done.")])
+    error = RuntimeError("history unavailable")
+
+    async def history_unavailable(*_args: object, **_kwargs: object) -> None:
+        raise error
+
+    monkeypatch.setattr(ai, "_prepare_agent_run_context", history_unavailable)
+
+    assert await _stream(reply) == [FailedReply("[assistant] ⚠️ Error: history unavailable", error)]
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("probe")
 async def test_a_silent_participation_decision_ends_the_reply_before_any_model_request(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -1138,11 +1157,6 @@ async def test_a_reply_publishes_the_usage_and_cost_of_every_attempt_its_turn_ra
         tools=(PROBE_TOOL, "thread_model"),
     )
     with_current_room_member_access(reply.config)
-    large = ScriptedModel(
-        [final],
-        identity=ModelIdentity(id="large-model", provider="Synthetic", provider_name="Synthetic"),
-    )
-    install_model_providers(monkeypatch, {"large": large})
     reply.config.models["default"].pricing = ModelPricing(input=2, output=10)
     reply.config.models["default"].context_window = 1_000
     reply.config.models["large"] = ModelConfig(
@@ -1151,6 +1165,10 @@ async def test_a_reply_publishes_the_usage_and_cost_of_every_attempt_its_turn_ra
         context_window=2_000,
         pricing=ModelPricing(input=3, output=15),
     )
+    # Each scripted model answers as the model its config names, whose prices the reply's cost reads.
+    reply.model.identity = model_identity(reply.config.models["default"])
+    large = ScriptedModel([final], identity=model_identity(reply.config.models["large"]))
+    install_model_providers(monkeypatch, {"large": large})
     sinks = TurnSinks(turn_recorder=reply.recorder)
 
     with tool_runtime_context(reply.runtime):

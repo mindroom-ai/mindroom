@@ -10,6 +10,7 @@ from contextvars import copy_context
 from functools import partial
 from typing import TYPE_CHECKING, Any, cast
 
+from mindroom.background_tasks import drain_tasks
 from mindroom.credentials.manager import get_runtime_credentials_manager
 from mindroom.logging_config import get_logger
 from mindroom.mcp.toolkit import MindRoomMCPToolkit
@@ -80,8 +81,7 @@ def _retain(cleanup: Coroutine[Any, Any, None]) -> asyncio.Task[None]:
 
 async def drain_gateway_tool_cleanup() -> None:
     """Drain retained tool owners before shutting down the gateway's MCP manager."""
-    while _CLEANUP_TASKS:
-        await asyncio.gather(*(asyncio.shield(task) for task in tuple(_CLEANUP_TASKS)), return_exceptions=True)
+    await drain_tasks(_CLEANUP_TASKS)
 
 
 async def _close_after(pending: asyncio.Future[Any], toolkit: AnyToolkit | None = None) -> None:

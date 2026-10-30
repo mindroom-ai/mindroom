@@ -39,7 +39,6 @@ export interface ModelConfig {
 
 export interface MemoryConfig {
   backend?: MemoryBackend;
-  team_reads_member_memory?: boolean;
   embedder: {
     provider: string;
     config: {
@@ -50,7 +49,6 @@ export interface MemoryConfig {
     };
   };
   file?: {
-    path?: string | null;
     max_entrypoint_lines?: number;
     max_entrypoint_tokens?: number;
   };

@@ -1,0 +1,166 @@
+{
+ "calculator": {
+  "mindroom_memories_8f334045": [
+   {
+    "document": null,
+    "embedding": [
+     0.37184685468673706,
+     -0.47100603580474854,
+     0.1735285371541977,
+     -0.7808784246444702
+    ],
+    "id": "0d8bc0c0-7e96-4811-b999-6162f2d0199a",
+    "metadata": {
+     "created_at": "2026-10-30T02:45:18.892119+00:00",
+     "data": "Team fact four, revised",
+     "hash": "f2a1b7e6a69814d3e07d5ef8ea0613a8",
+     "is_team": true,
+     "mindroom_replica_key": "m_20261030024518_cb8755af",
+     "session_id": "session-pair",
+     "team_members": [
+      "general",
+      "calculator"
+     ],
+     "text_lemmatized": "Team fact four, revised",
+     "type": "conversation",
+     "updated_at": "2026-10-30T02:45:19.251388+00:00",
+     "user_id": "team_calculator+general"
+    }
+   },
+   {
+    "document": null,
+    "embedding": [
+     0.37184685468673706,
+     -0.47100603580474854,
+     0.1735285371541977,
+     -0.7808784246444702
+    ],
+    "id": "8b5e7c72-7730-4b92-bb00-ec8be6fd47d7",
+    "metadata": {
+     "created_at": "2026-10-30T02:45:18.892141+00:00",
+     "data": "Team fact four, revised",
+     "hash": "f2a1b7e6a69814d3e07d5ef8ea0613a8",
+     "is_team": true,
+     "mindroom_replica_key": "m_20261030024518_cb8755af",
+     "session_id": "session-pair",
+     "team_members": [
+      "general",
+      "calculator"
+     ],
+     "text_lemmatized": "Team fact four, revised",
+     "type": "conversation",
+     "updated_at": "2026-10-30T02:45:19.277678+00:00",
+     "user_id": "team_calculator+general"
+    }
+   }
+  ]
+ },
+ "general": {
+  "mindroom_memories_8f334045": [
+   {
+    "document": null,
+    "embedding": [
+     0.37184685468673706,
+     -0.47100603580474854,
+     0.1735285371541977,
+     -0.7808784246444702
+    ],
+    "id": "05bff8b0-ea6d-4812-8b19-fd5003472906",
+    "metadata": {
+     "created_at": "2026-10-30T02:45:18.828753+00:00",
+     "data": "Team fact four, revised",
+     "hash": "f2a1b7e6a69814d3e07d5ef8ea0613a8",
+     "is_team": true,
+     "mindroom_replica_key": "m_20261030024518_cb8755af",
+     "session_id": "session-pair",
+     "team_members": [
+      "general",
+      "calculator"
+     ],
+     "text_lemmatized": "Team fact four, revised",
+     "type": "conversation",
+     "updated_at": "2026-10-30T02:45:19.184471+00:00",
+     "user_id": "team_calculator+general"
+    }
+   },
+   {
+    "document": null,
+    "embedding": [
+     -0.47869277000427246,
+     -0.22923316061496735,
+     0.7483788728713989,
+     0.397786945104599
+    ],
+    "id": "1fb81d00-e575-40d6-bb11-559c3911edb1",
+    "metadata": {
+     "created_at": "2026-10-30T02:45:18.828774+00:00",
+     "data": "Team fact five",
+     "hash": "9fffd42ec5cfd15e53e7304e35a8de51",
+     "is_team": true,
+     "mindroom_replica_key": "m_20261030024518_cb8755af",
+     "session_id": "session-pair",
+     "team_members": [
+      "general",
+      "calculator"
+     ],
+     "text_lemmatized": "Team fact five",
+     "type": "conversation",
+     "updated_at": "2026-10-30T02:45:18.828774+00:00",
+     "user_id": "team_calculator+general"
+    }
+   },
+   {
+    "document": null,
+    "embedding": [
+     0.2548772394657135,
+     0.43895524740219116,
+     -0.6301131844520569,
+     0.5876336097717285
+    ],
+    "id": "78f7654c-d15d-438e-bcae-21527807d9aa",
+    "metadata": {
+     "created_at": "2026-10-30T02:45:18.554795+00:00",
+     "data": "Team fact three",
+     "hash": "353a30a0c680bc144ab45d61a8211c60",
+     "is_team": true,
+     "mindroom_replica_key": "m_20261030024517_7e00805d",
+     "session_id": "session-pair",
+     "team_members": [
+      "general",
+      "calculator"
+     ],
+     "text_lemmatized": "Team fact three",
+     "type": "conversation",
+     "updated_at": "2026-10-30T02:45:18.554795+00:00",
+     "user_id": "team_calculator+general"
+    }
+   },
+   {
+    "document": null,
+    "embedding": [
+     -0.45651498436927795,
+     0.38586387038230896,
+     -0.521731436252594,
+     0.6086866855621338
+    ],
+    "id": "ad286f3e-f03a-48e5-b5eb-7a8dd3736e7b",
+    "metadata": {
+     "created_at": "2026-10-30T02:45:18.554782+00:00",
+     "data": "Team fact two",
+     "hash": "b569a5e966a057e0f39e4586999047ba",
+     "is_team": true,
+     "mindroom_replica_key": "m_20261030024517_7e00805d",
+     "session_id": "session-pair",
+     "team_members": [
+      "general",
+      "calculator"
+     ],
+     "text_lemmatized": "Team fact two",
+     "type": "conversation",
+     "updated_at": "2026-10-30T02:45:18.554782+00:00",
+     "user_id": "team_calculator+general"
+    }
+   }
+  ]
+ }
+}

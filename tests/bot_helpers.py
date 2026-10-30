@@ -40,7 +40,6 @@ from mindroom.hooks import (
     EnrichmentItem,
     MessageEnvelope,
 )
-from mindroom.knowledge.indexing_config import IndexingSettings
 from mindroom.knowledge.utils import _KnowledgeResolution
 from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
 from mindroom.matrix.users import AgentMatrixUser
@@ -421,31 +420,6 @@ def _runtime_bound_config(config: Config, runtime_root: Path) -> Config:
     )
     persist_entity_accounts(bound_config, runtime_paths_for(bound_config))
     return bound_config
-
-
-def _fake_indexing_settings(base_id: str) -> IndexingSettings:
-    return IndexingSettings(
-        base_id=base_id,
-        storage_root="storage",
-        knowledge_path=f"knowledge/{base_id}",
-        mode="semantic",
-        embedder_provider="openai",
-        embedder_model="text-embedding-3-small",
-        embedder_host="",
-        embedder_dimensions="",
-        chunk_size="5000",
-        chunk_overlap="0",
-        repo_identity="",
-        git_branch="",
-        git_lfs="",
-        git_skip_hidden="",
-        git_include_patterns="",
-        git_exclude_patterns="",
-        include_patterns="",
-        exclude_patterns="",
-        include_extensions="",
-        exclude_extensions="()",
-    )
 
 
 def _configured_team_test_config(runtime_root: Path) -> Config:

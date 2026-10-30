@@ -10,8 +10,11 @@ from typing import TYPE_CHECKING
 import pytest
 
 import mindroom.knowledge.index_reader as index_reader_module
+from mindroom.knowledge.index_metadata import new_publication, save_publication
 from mindroom.knowledge.index_reader import PublishedIndexReader
+from mindroom.knowledge.indexing_config import IndexingSettings
 from mindroom.knowledge.vector_store import KnowledgeCollection, StoredRow
+from tests.knowledge_test_support import collection_meta
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -30,13 +33,49 @@ class _Embedder:
 
 
 def _reader(tmp_path: Path, embedder: _Embedder) -> PublishedIndexReader:
+    # Parsed from stored metadata, as the publication's own settings are, so the two compare equal.
+    settings = IndexingSettings.from_metadata(
+        {
+            "base_id": "docs",
+            "storage_root": str(tmp_path),
+            "knowledge_path": str(tmp_path / "docs"),
+            "mode": "semantic",
+            "embedder_provider": "openai",
+            "embedder_model": "text-embedding-3-small",
+            "embedder_host": "",
+            "embedder_dimensions": "2",
+            "chunk_size": "1000",
+            "chunk_overlap": "100",
+            "repo_identity": "",
+            "git_branch": "",
+            "git_lfs": "",
+            "git_skip_hidden": "",
+            "git_include_patterns": "",
+            "git_exclude_patterns": "",
+            "include_extensions": ".md",
+            "exclude_extensions": "",
+            "vector_store": "sqlite-1",
+        },
+    )
+    assert settings is not None
     collection = KnowledgeCollection(path=tmp_path, name="docs")
-    collection.reset()
-    collection.write_source_rows(
+    collection.create(collection_meta(settings.to_metadata()))
+    collection.write_file(
         "a.md",
+        (1, 5, "digest"),
         [StoredRow(id="a1", document="alpha", metadata={"source_path": "a.md"}, embedding=[1.0, 0.0])],
     )
-    return PublishedIndexReader("docs", str(tmp_path), embedder)
+    save_publication(
+        tmp_path,
+        new_publication(
+            settings=settings,
+            collection=collection.name,
+            indexed_count=1,
+            source_signature="signature",
+            published_revision=None,
+        ),
+    )
+    return PublishedIndexReader(tmp_path, embedder, settings)
 
 
 @pytest.mark.asyncio

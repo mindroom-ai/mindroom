@@ -41,11 +41,8 @@ _RUNTIME_ENV_ALLOWLIST = {
     "src/mindroom/workers/backends/local.py",
 }
 _EXECUTION_IDENTITY_ENV_ALLOWLIST = {
-    "src/mindroom/api/dashboard_credential_scope.py",
-    "src/mindroom/api/main.py",
-    "src/mindroom/api/openai_compat.py",
-    "src/mindroom/bot.py",
-    "src/mindroom/commands/handler.py",
+    # The platform login check compares the signed-in user with the instance's account.
+    "src/mindroom/api/auth.py",
     "src/mindroom/tool_system/worker_routing.py",
 }
 _AMBIENT_EXECUTION_IDENTITY_ALLOWLIST = {
