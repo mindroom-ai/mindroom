@@ -91,7 +91,7 @@ def test_work_template_writes_a_template_dir_the_printed_block_points_at(tmp_pat
     assert not (tmp_path / "mindroom_data" / "agents" / "helper").exists()
 
 
-@pytest.mark.parametrize("template", ["project", "work", "hermes", "coding"])
+@pytest.mark.parametrize("template", ["project", "work", "hermes", "coding", "legal", "finance"])
 @pytest.mark.parametrize("name", ["apollo", "on", "123", "null"])
 def test_agent_block_validates_in_the_starter_config(tmp_path: Path, template: str, name: str) -> None:
     """Each printed block, pasted under the starter config's agents: line, is valid config next to Mind."""
@@ -112,10 +112,29 @@ def test_agent_block_validates_in_the_starter_config(tmp_path: Path, template: s
         written, context_files = tmp_path / "templates" / name, agent.private.context_files or []
     assert context_files
     assert all((written / context_file).is_file() for context_file in context_files)
-    assert (agent.private is None) == (template != "work")
+    assert (agent.private is None) == (template not in {"work", "legal", "finance"})
     assert (written / "memory").is_dir() == (template == "project")
 
     assert "Nothing to create" in _new_agent(config_path, name, template)
+
+
+@pytest.mark.parametrize("template", ["legal", "finance"])
+def test_personal_templates_keep_each_copy_out_of_other_peoples_tools(tmp_path: Path, template: str) -> None:
+    """Legal and finance give each person a private copy and no tool that runs as MindRoom itself."""
+    config_path = tmp_path / "config.yaml"
+
+    output = _new_agent(config_path, "helper", template)
+
+    block = yaml.safe_load(output[output.index('\n  "helper":\n') :])["helper"]
+    tools = {tool if isinstance(tool, str) else tool.get("name", next(iter(tool))) for tool in block["tools"]}
+    assert block["private"] == {
+        "per": "user",
+        "template_dir": "templates/helper",
+        "context_files": ["AGENTS.md", "SOUL.md", "USER.md"],
+    }
+    assert not tools & {"shell", "python", "coding"}
+    assert block["include_default_tools"] is False
+    assert (tmp_path / "templates" / "helper" / "USER.md").is_file()
 
 
 @pytest.mark.parametrize(

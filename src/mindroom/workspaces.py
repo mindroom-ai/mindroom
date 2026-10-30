@@ -28,7 +28,7 @@ if TYPE_CHECKING:
     from mindroom.config.main import Config
 
 BUILTIN_TEMPLATES_DIR = Path(__file__).resolve().parent / "cli" / "templates"
-_WORKSPACE_TEMPLATES = ("mind", "project", "work", "hermes", "coding")
+_WORKSPACE_TEMPLATES = ("mind", "project", "work", "hermes", "coding", "legal", "finance")
 
 # Agent builds now run on worker threads (#1260), so concurrent scaffolding of
 # the same workspace must not interleave template copies or link reconciliation.

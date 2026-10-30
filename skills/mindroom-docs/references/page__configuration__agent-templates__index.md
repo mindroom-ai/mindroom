@@ -11,6 +11,8 @@ It writes into a directory that already has files only when `config.yaml` lists 
 | `work` | A private work assistant for each person | A template directory, `<config dir>/templates/<name>/` | A private copy, made the first time they talk to the agent |
 | `hermes` | A personal assistant for one person, modeled on the persona and working practices of [Hermes Agent](https://github.com/NousResearch/hermes-agent) | The agent's workspace, `<storage>/agents/<name>/workspace/` | The same workspace, so give it one owner |
 | `coding` | A minimal coding agent that works in git repositories | The agent's workspace, `<storage>/agents/<name>/workspace/` | The same workspace and cloned repositories |
+| `legal` | A private helper for each person's contracts, leases, letters, and legal deadlines; legal information, not advice | A template directory, `<config dir>/templates/<name>/` | A private copy, made the first time they talk to the agent |
+| `finance` | A private helper for each person's budget, spending, savings goals, and bills; it never moves money | A template directory, `<config dir>/templates/<name>/` | A private copy, made the first time they talk to the agent |
 
 ## Setup
 
@@ -19,12 +21,14 @@ mindroom config new-agent apollo --template project
 mindroom config new-agent assistant --template work
 mindroom config new-agent hermes --template hermes
 mindroom config new-agent coder --template coding
+mindroom config new-agent counsel --template legal
+mindroom config new-agent money --template finance
 ```
 
 1. Run the command with the agent name you want; names use letters, digits, and underscores.
 2. Paste the printed lines under the `agents:` line of `config.yaml` and change what you need, such as `display_name`, `model`, or `tools`.
 3. Run `mindroom config validate`.
-4. Talk to the agent: a `project`, `hermes`, or `coding` agent joins the room named after it, which MindRoom creates, and a `work` agent answers direct messages and invites.
+4. Talk to the agent: a `project`, `hermes`, or `coding` agent joins the room named after it, which MindRoom creates, and a `work`, `legal`, or `finance` agent answers direct messages and invites.
 
 On its first conversation a `project` agent works through `BOOTSTRAP.md`: it asks the room for its operators, scope, and sources, records the answers, marks setup as finished in `IDENTITY.md`, and deletes `BOOTSTRAP.md`.
 To choose the operators yourself, fill the **Operators** line of the `IDENTITY.md` that `new-agent` created before that first conversation, because otherwise whoever answers in the room decides.
@@ -35,8 +39,12 @@ A `coding` agent has no checklist either: its `AGENTS.md` sets a way of working,
 Its block has only `shell`, `file`, a deferred `github`, and self-delegation, with no memory, so every request stays small.
 To cut its tokens further, switch it to [minimal mode](https://docs.mindroom.chat/tools/agent-cli/) in a conversation with `!mode <name> minimal`.
 In minimal mode the agent reads `AGENTS.md` only when it looks it up, so put rules it must follow on every request in [`minimal_instructions`](https://docs.mindroom.chat/tools/agent-cli/#prompt-and-minimal_instructions).
+A `legal` or `finance` agent introduces itself like `work`, then asks where the person lives, because the answers depend on local law, currency, and tax.
+Both say they are not a lawyer or financial adviser, and say when a professional is needed in their first reply rather than at the end.
+A `legal` agent quotes the clause it explains, counts deadlines out loud, and keeps one file per matter in `memory/matters/`; a `finance` agent computes every figure with the `calculator` tool and shows its working.
+Neither has `shell`, `python`, or the deployment's default tools, so their private copies stay out of reach of other people's tools without [dedicated workers](https://docs.mindroom.chat/deployment/sandbox-proxy/#worker-scopes).
 
-The `work` block admits only MindRoom's administrators until you uncomment its `access.users` line, for example `"@*:example.org"` for everyone on your homeserver.
+The `work`, `legal`, and `finance` blocks admit only MindRoom's administrators until you uncomment their `access.users` line, for example `"@*:example.org"` for everyone on your homeserver.
 The `project`, `hermes`, and `coding` blocks admit members of the agent's room, the [default](https://docs.mindroom.chat/authorization/#responder-access) when `access` is omitted.
 
 ## Files
@@ -47,19 +55,19 @@ A `coding` workspace has only `AGENTS.md`; this table covers the other templates
 | --- | --- | --- |
 | `AGENTS.md` | Operating rules | Every turn, as a context file |
 | `SOUL.md` | Purpose and tone | Every turn, as a context file |
-| `IDENTITY.md` (not `hermes`) | `project`: name, scope, operators, and source precedence; `work`: name, style, and where it runs | Every turn, as a context file |
-| `TOOLS.md` (not `hermes`) | Tool notes, connected accounts, and agreed schedules | Every turn, as a context file |
-| `USER.md` (`work` and `hermes`) | The person's profile | Every turn, as a context file |
+| `IDENTITY.md` (`project` and `work`) | `project`: name, scope, operators, and source precedence; `work`: name, style, and where it runs | Every turn, as a context file |
+| `TOOLS.md` (`project` and `work`) | Tool notes, connected accounts, and agreed schedules | Every turn, as a context file |
+| `USER.md` (not `project`) | The person's profile | Every turn, as a context file |
 | `MEMORY.md` | Curated long-term memory | Every turn, through [file memory](https://docs.mindroom.chat/memory/) |
-| `memory/` | `project`: source register, people, decisions, questions, and tracker; `work`: daily notes the agent creates; `hermes`: daily notes from [auto-flush](https://docs.mindroom.chat/memory/#file-auto-flush-worker) when it is on | When the agent reads or searches them |
+| `memory/` | `project`: source register, people, decisions, questions, and tracker; `work`: daily notes the agent creates; `hermes`: daily notes from [auto-flush](https://docs.mindroom.chat/memory/#file-auto-flush-worker) when it is on; `legal`: one file per matter and daily notes; `finance`: daily notes and past monthly reviews | When the agent reads or searches them |
 | `BOOTSTRAP.md` (`project` only) | First-run checklist | Read while setup is unfinished |
-| `skills/` | `project`: `status-report` and `meeting-notes-to-updates`; `work`: `meeting-prep` and `weekly-review`; `hermes`: only the ones it learns | Name and description every turn, full text when used ([Skills](https://docs.mindroom.chat/skills/)) |
+| `skills/` | `project`: `status-report` and `meeting-notes-to-updates`; `work`: `meeting-prep` and `weekly-review`; `hermes`: only the ones it learns; `legal`: `contract-review` and `deadline-check`; `finance`: `monthly-review` and `savings-goal` | Name and description every turn, full text when used ([Skills](https://docs.mindroom.chat/skills/)) |
 
 ## Updating and Rerunning
 
 Once the agent's entry is in `config.yaml`, running the command again restores files that are missing and keeps every existing file.
 Once a `project` agent's setup is marked finished, a restored `BOOTSTRAP.md` no longer starts onboarding again.
-For `work`, edits to `templates/<name>/` reach existing people only as new files, because MindRoom never overwrites a person's copy; see [Private Instances](https://docs.mindroom.chat/configuration/agents/#private-instances).
+For `work`, `legal`, and `finance`, edits to `templates/<name>/` reach existing people only as new files, because MindRoom never overwrites a person's copy; see [Private Instances](https://docs.mindroom.chat/configuration/agents/#private-instances).
 
 ## Notes
 

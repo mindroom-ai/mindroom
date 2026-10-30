@@ -770,13 +770,14 @@ def _destination_refusal(target: Path, destination: Path, name: str, template: s
 )
 def config_new_agent(
     name: str = typer.Argument(..., help="Agent name: letters, digits, and underscores, not at the start or end."),
-    template: Literal["project", "work", "hermes", "coding"] = typer.Option(
+    template: Literal["project", "work", "hermes", "coding", "legal", "finance"] = typer.Option(
         ...,
         "--template",
         "-t",
         help=(
             "project: one shared workspace for a team. work: a private copy for each person. "
-            "hermes: a personal assistant modeled on Hermes Agent. coding: a minimal coding agent."
+            "hermes: a personal assistant modeled on Hermes Agent. coding: a minimal coding agent. "
+            "legal: a private legal-information helper for each person. finance: a private money helper for each person."
         ),
     ),
     path: Path | None = CONFIG_PATH_OPTION,
@@ -786,6 +787,7 @@ def config_new_agent(
     Prints the agent's config block to paste into config.yaml.
     Existing files are never overwritten, so rerunning for an agent already in config.yaml only restores missing ones.
     """
+    from mindroom import yaml_io  # noqa: PLC0415
     from mindroom.tool_system.worker_routing import agent_workspace_root_path  # noqa: PLC0415
     from mindroom.workspaces import ensure_workspace_template  # noqa: PLC0415
 
@@ -801,8 +803,9 @@ def config_new_agent(
         raise typer.Exit(1)
     target = _resolve_config_path(path)
     block = _agent_template_block(template, name)
-    if template == "work":
-        destination = target.parent / "templates" / name
+    template_dir, _context_files = _agent_layout(yaml_io.safe_load(block)[name])
+    if template_dir is not None:
+        destination = target.parent / template_dir
     else:
         storage_root = constants.resolve_runtime_paths(config_path=target).storage_root
         destination = agent_workspace_root_path(storage_root, name)

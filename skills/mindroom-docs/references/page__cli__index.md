@@ -272,7 +272,7 @@ llama-server -hf unsloth/Qwen3.8-27B-GGUF:UD-Q4_K_XL --host 127.0.0.1 --port 808
 ### config new-agent
 
 Create an agent's starter files from a built-in template and print the block to add under `agents:` in `config.yaml`; existing files are never overwritten.
-`--template project` seeds a shared agent's workspace for a team, `--template work` writes a template that gives each person a private copy, `--template hermes` seeds a personal assistant modeled on Hermes Agent, and `--template coding` seeds a minimal coding agent.
+`--template project` seeds a shared agent's workspace for a team, `--template work` writes a template that gives each person a private copy, `--template hermes` seeds a personal assistant modeled on Hermes Agent, `--template coding` seeds a minimal coding agent, and `--template legal` and `--template finance` write templates for private legal and money helpers.
 See [Agent Templates](https://docs.mindroom.chat/configuration/agent-templates/) for what each template contains.
 
 ```bash
