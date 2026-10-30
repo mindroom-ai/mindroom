@@ -490,7 +490,7 @@ def test_reader_keeps_stored_totals_beside_runs_it_cannot_read(tmp_path: Path) -
     assert row.totals_available is True
 
 
-def test_reader_reads_no_session_data(tmp_path: Path) -> None:
+def test_unreadable_session_data_neither_stops_the_read_nor_changes_usage(tmp_path: Path) -> None:
     """Session data an earlier release left unreadable neither stops the read nor changes the session's usage."""
     database = tmp_path / "code.db"
     _create_database(database)
@@ -529,14 +529,18 @@ def test_a_database_below_the_ledger_totals_version_reads_without_whole_history_
 def test_reader_excludes_persisted_child_runs(tmp_path: Path) -> None:
     """Delegated sibling runs must not be counted as top-level usage."""
     database = tmp_path / "code.db"
-    _create_database(database, runs=[_run(), _run(parent_run_id="run-1")])
+    _create_database(database, runs=[_run(), {**_run(parent_run_id="run-1"), "run_id": "child-run"}])
+    source = _source(database)
+    with closing(sqlite3.connect(database)) as connection:
+        ledger = connection.execute("SELECT run_id FROM code_sessions_usage ORDER BY run_id").fetchall()
+    assert ledger == [("child-run",), ("run-1",)]
 
-    result = list(iter_usage_storage_rows(_source(database)))
+    result = list(iter_usage_storage_rows(source))
 
     assert len(result) == 1
     row = result[0]
     assert isinstance(row, UsageSessionRow)
-    assert len(row.runs) == 1
+    assert [run.run_id for run in row.runs] == ["run-1"]
 
 
 def test_reader_returns_every_retained_row(tmp_path: Path) -> None:
