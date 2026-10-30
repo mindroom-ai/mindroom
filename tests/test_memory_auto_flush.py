@@ -21,6 +21,7 @@ from mindroom.constants import (
     resolve_runtime_paths,
 )
 from mindroom.history import session_runs
+from mindroom.history.interrupted_replay import mark_interrupted
 from mindroom.hooks import EnrichmentItem, render_enrichment_block
 from mindroom.llm.errors import ModelSafeguardRefusal, ProviderError
 from mindroom.llm.messages import Message
@@ -538,8 +539,11 @@ async def test_a_conversation_whose_redactions_cannot_be_checked_backs_off_witho
 
 
 @pytest.mark.asyncio
-async def test_a_stopped_turn_saved_completed_later_is_flushed(tmp_path: Path, extractor: _Extractor) -> None:
-    """A stopped turn's record saved as completed after the conversation was caught up, without usage, is still read."""
+async def test_a_stopped_turn_marked_later_is_flushed_without_its_cut_off_reply(
+    tmp_path: Path,
+    extractor: _Extractor,
+) -> None:
+    """A stopped turn its driver marks after the conversation was caught up is read: what was said, not its reply."""
     config, clock = _config(tmp_path), _Clock()
     worker = await _started(config, clock)
     session = _thread("t1")
@@ -549,14 +553,14 @@ async def test_a_stopped_turn_saved_completed_later_is_flushed(tmp_path: Path, e
     assert extractor.calls == []
     assert _entry(tmp_path, session)["updated_at"] == T0 + 11
 
-    stopped.status = RunStatus.completed
+    mark_interrupted(stopped, error=None)
     storage = create_session_storage("general", config, runtime_paths_for(config), execution_identity=None)
     conversation = ConversationSession(session_id=session, kind="agent", owner_id="general")
     assert storage.save_interrupted_record(conversation, stopped) == "written"
     clock.now = time.time() + 10
     await worker._run_cycle(config)
 
-    assert extractor.lines() == [_lines("stopped")]
+    assert extractor.lines() == [[f"{ALICE}: question stopped"]]
 
 
 @pytest.mark.asyncio
