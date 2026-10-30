@@ -16,7 +16,6 @@ import re
 import secrets
 import stat
 import threading
-from collections.abc import Mapping
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import ExitStack
 from dataclasses import dataclass
@@ -41,7 +40,7 @@ from mindroom.tool_system.worker_routing import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Callable, Mapping
 
     from mindroom.constants import RuntimePaths
     from mindroom.credentials.environment import DeclaredCredential
@@ -61,6 +60,8 @@ _MAX_CREDENTIALS_PAYLOAD_BYTES = 1024 * 1024
 # A missing path, a link, and a non-directory parent all mean the same thing to the
 # store: no credential payload it owns is stored there.
 _ABSENT_CREDENTIALS_ERRNOS = frozenset({errno.ELOOP, errno.ENOENT, errno.ENOTDIR})
+# A saved document that raises one of these on read or decode, such as one encrypted under another key, is unreadable.
+_UNREADABLE_CREDENTIALS_ERRORS = (OSError, TypeError, ValueError, InvalidTag)
 # A directory whose name is now held by something else is never hardened through, and a
 # layer mounted read-only into a worker is hardened by the primary that owns it.
 _UNHARDENABLE_DIRECTORY_ERRNOS = _ABSENT_CREDENTIALS_ERRNOS | {errno.EEXIST, errno.EROFS}
@@ -521,7 +522,6 @@ class CredentialsManager:
         scoped_path = self.storage_root / _PRIMARY_RUNTIME_SCOPED_CREDENTIALS_DIRNAME / requester_dir / agent_dir
         return CredentialsManager(
             base_path=scoped_path,
-            shared_base_path=scoped_path,
             encryption_key=self._encryption_key_config,
         )
 
@@ -536,7 +536,6 @@ class CredentialsManager:
         )
         return CredentialsManager(
             base_path=scoped_path,
-            shared_base_path=scoped_path,
             encryption_key=self._encryption_key_config,
         )
 
@@ -608,14 +607,15 @@ class CredentialsManager:
         credentials_path = self._credentials_file(normalized_service)
         return self._load_credentials_file(normalized_service, credentials_path)
 
+    def _read_saved(self, normalized_service: str, credentials_path: Path) -> dict[str, Any] | None:
+        """Return the document saved at ``credentials_path``, raising ``_UNREADABLE_CREDENTIALS_ERRORS`` if unreadable."""
+        payload = _read_credentials_payload(credentials_path)
+        return None if payload is None else self.decode_credentials(normalized_service, payload)
+
     def _load_credentials_file(self, normalized_service: str, credentials_path: Path) -> dict[str, Any] | None:
         try:
-            payload = _read_credentials_payload(credentials_path)
-            if payload is None:
-                declared = self._declared.get(normalized_service)
-                return dict(declared.credentials) if declared is not None else None
-            return self.decode_credentials(normalized_service, payload)
-        except (OSError, TypeError, ValueError, InvalidTag) as exc:
+            saved = self._read_saved(normalized_service, credentials_path)
+        except _UNREADABLE_CREDENTIALS_ERRORS as exc:
             logger.warning(
                 "Failed to load encrypted credentials"
                 if self._encryption_key is not None
@@ -625,6 +625,10 @@ class CredentialsManager:
                 error_type=type(exc).__name__,
             )
             return None
+        if saved is not None:
+            return saved
+        declared = self._declared.get(normalized_service)
+        return dict(declared.credentials) if declared is not None else None
 
     def save_credentials(self, service: str, credentials: dict[str, Any]) -> None:
         """Save credentials for a service.
@@ -645,16 +649,16 @@ class CredentialsManager:
         credentials: dict[str, Any],
     ) -> None:
         stored_payload = _read_credentials_payload(credentials_path)
-        if self._encryption_key is not None:
-            if stored_payload is not None and self._load_credentials_file(normalized_service, credentials_path) is None:
+        if stored_payload is not None:
+            if (
+                self._encryption_key is not None
+                and self._load_credentials_file(normalized_service, credentials_path) is None
+            ):
                 msg = f"Stored credentials for {normalized_service} could not be loaded; refusing to overwrite"
                 raise ValueError(msg)
-            payload = self.encode_credentials(normalized_service, credentials)
-            _atomic_write_private_file(credentials_path, payload)
-            return
-        if stored_payload is not None and stored_payload.startswith(_ENCRYPTED_CREDENTIALS_MAGIC):
-            msg = f"Stored credentials for {normalized_service} are encrypted; refusing to overwrite without a key"
-            raise ValueError(msg)
+            if self._encryption_key is None and stored_payload.startswith(_ENCRYPTED_CREDENTIALS_MAGIC):
+                msg = f"Stored credentials for {normalized_service} are encrypted; refusing to overwrite without a key"
+                raise ValueError(msg)
         _atomic_write_private_file(credentials_path, self.encode_credentials(normalized_service, credentials))
 
     def delete_credentials(self, service: str) -> None:
@@ -702,9 +706,8 @@ class CredentialsManager:
         for service in self._saved_services():
             credentials_path = self._credentials_file(service)
             try:
-                payload = _read_credentials_payload(credentials_path)
-                credentials = None if payload is None else self.decode_credentials(service, payload)
-            except (OSError, TypeError, ValueError, InvalidTag):
+                credentials = self._read_saved(service, credentials_path)
+            except _UNREADABLE_CREDENTIALS_ERRORS:
                 unreadable += 1
                 continue
             if credentials is not None and matches(credentials):
@@ -867,9 +870,8 @@ def update_stored_service_credentials(
     for directory in (manager.base_path, *_worker_credential_paths(manager.storage_root).existing):
         credentials_path = directory / f"{normalized_service}{_CREDENTIALS_FILE_SUFFIX}"
         try:
-            payload = _read_credentials_payload(credentials_path)
-            credentials = None if payload is None else manager.decode_credentials(normalized_service, payload)
-        except (OSError, TypeError, ValueError, InvalidTag) as exc:
+            credentials = manager._read_saved(normalized_service, credentials_path)
+        except _UNREADABLE_CREDENTIALS_ERRORS as exc:
             logger.warning(
                 "Stored credentials could not be read for an update",
                 service=normalized_service,
@@ -966,23 +968,25 @@ def _merge_credential_layers(
     worker_credentials: Mapping[str, Any] | None,
 ) -> dict[str, Any] | None:
     merged_credentials: dict[str, Any] = {}
-    if isinstance(shared_credentials, Mapping):
+    if shared_credentials is not None:
         merged_credentials.update(shared_credentials)
-    if isinstance(worker_credentials, Mapping):
+    if worker_credentials is not None:
         merged_credentials.update(worker_credentials)
     return merged_credentials or None
 
 
 def _granted(service: str, allowed_services: frozenset[str] | None) -> bool:
     """Return whether the worker grant passes a service's shared document on to workers."""
-    return service in (allowed_services or frozenset()) and credential_service_policy(service, None).grantable
+    return (
+        allowed_services is not None
+        and service in allowed_services
+        and credential_service_policy(service, None).grantable
+    )
 
 
 def _grantable_document(credentials: Mapping[str, Any] | None) -> dict[str, Any] | None:
     """Return a shared document a grant may pass on: one saved in the dashboard or declared by the environment."""
-    if not isinstance(credentials, Mapping):
-        return None
-    if credentials.get("_source") not in _WORKER_GRANTABLE_SHARED_CREDENTIAL_SOURCES:
+    if credentials is None or credentials.get("_source") not in _WORKER_GRANTABLE_SHARED_CREDENTIAL_SOURCES:
         return None
     return dict(credentials)
 
@@ -999,8 +1003,7 @@ def sync_shared_credentials_to_worker(
     mirrored into the worker's shared credential layer, regardless of whether the
     shared credential was declared by the environment or saved through the dashboard/API.
     """
-    manager = credentials_manager
-    worker_shared_manager = manager.for_worker(worker_key).shared_manager()
+    worker_shared_manager = credentials_manager.for_worker(worker_key).shared_manager()
     mirrored_services = set(worker_shared_manager.list_services())
     copied_services: set[str] = set()
     logger.debug(
@@ -1014,7 +1017,7 @@ def sync_shared_credentials_to_worker(
     # default configuration and it runs on every worker-routed tool call, so short-circuit it and
     # fall straight through to the cleanup pass, which still tears down any stale mirror.
     if allowed_services:
-        source_manager = manager.shared_manager()
+        source_manager = credentials_manager.shared_manager()
         for service in source_manager.list_services():
             shared_credentials = (
                 _grantable_document(source_manager.load_credentials(service))

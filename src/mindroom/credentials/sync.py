@@ -126,13 +126,12 @@ def get_embedder_api_key(
     """
     if explicit_api_key and explicit_api_key.strip():
         return explicit_api_key.strip()
-    creds_manager = get_runtime_shared_credentials_manager(runtime_paths)
     if credentials_service is not None:
         service_api_key = get_api_key_for_service(credentials_service, runtime_paths)
         if service_api_key and service_api_key.strip():
             return service_api_key.strip()
         return _EMBEDDER_KEYLESS_PLACEHOLDER_API_KEY
-    embedder_api_key = creds_manager.get_api_key(EMBEDDER_CREDENTIAL_SERVICE)
+    embedder_api_key = get_runtime_shared_credentials_manager(runtime_paths).get_api_key(EMBEDDER_CREDENTIAL_SERVICE)
     if embedder_api_key and embedder_api_key.strip():
         return embedder_api_key.strip()
     openai_api_key = get_api_key_for_provider("openai", runtime_paths=runtime_paths)

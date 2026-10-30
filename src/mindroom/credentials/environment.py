@@ -109,21 +109,21 @@ def _decode_seed_entries(
     source_env_var: str,
     source_path: Path | None = None,
 ) -> list[Mapping[str, Any]]:
+    path_context = {} if source_path is None else {"path": str(source_path)}
     try:
         raw_value = json.loads(raw_json)
     except json.JSONDecodeError as exc:
-        log_context = {"env_var": source_env_var, "error": str(exc)}
-        if source_path is not None:
-            log_context["path"] = str(source_path)
-        logger.warning("credential_seed_declaration_json_invalid", **log_context)
+        logger.warning(
+            "credential_seed_declaration_json_invalid",
+            env_var=source_env_var,
+            error=str(exc),
+            **path_context,
+        )
         return []
     try:
         return _coerce_seed_entries(raw_value, source=source_env_var)
-    except (TypeError, ValueError) as exc:
-        log_context = {"env_var": source_env_var, "error": str(exc)}
-        if source_path is not None:
-            log_context["path"] = str(source_path)
-        logger.warning("credential_seed_declaration_invalid", **log_context)
+    except TypeError as exc:
+        logger.warning("credential_seed_declaration_invalid", env_var=source_env_var, error=str(exc), **path_context)
         return []
 
 

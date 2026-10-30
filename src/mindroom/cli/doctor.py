@@ -77,7 +77,7 @@ def doctor(config_path: Path | None = None, storage_path: Path | None = None) ->
     config_path = runtime_paths.config_path
     console.print(f"[dim]Config directory: {runtime_paths.config_dir}[/dim]")
 
-    # Open the credential store the way `mindroom run` will, so preflight probes validate the keys the runtime uses.
+    # Open the credential store before the checks so a failure to open it is reported once, here.
     # Credential-store failures must not abort the remaining diagnostics, but
     # they are counted because the general storage check may target another path.
     try:
