@@ -21,7 +21,7 @@ from mindroom.constants import (
     RuntimePaths,
     resolve_runtime_paths,
 )
-from mindroom.delivery_gateway import DeliveryGateway, DeliveryGatewayDeps, ResponseHookService
+from mindroom.delivery_gateway import DeliveryGateway, DeliveryGatewayDeps, SendTextRequest
 from mindroom.event_journal import EventJournalStore
 from mindroom.event_journal.approval_store import ApprovalStore
 from mindroom.event_journal.identity import journal_principal_id
@@ -38,13 +38,11 @@ from mindroom.matrix.thread_history_result import thread_history_result
 from mindroom.message_target import MessageTarget
 from mindroom.post_response_effects import PostResponseEffectsDeps, PostResponseEffectsSupport
 from mindroom.reply_scope import ReplyRuntime
+from mindroom.reply_turn.locked_turn import ReplyTurnDeps
+from mindroom.reply_turn.request import ResponseRequest
 from mindroom.response_admission import ResponseAdmissionGate
+from mindroom.response_lifecycle import ResponseHookService
 from mindroom.response_payload_preparation import ResponsePayloadPreparer
-from mindroom.response_runner import (
-    ResponseRequest,
-    ResponseRunner,
-    ResponseRunnerDeps,
-)
 from mindroom.response_sources import ResponseSources
 from mindroom.tool_system.runtime_context import (
     ToolRuntimeSupport,
@@ -59,6 +57,7 @@ from tests.conftest import (
     request_envelope,
 )
 from tests.identity_helpers import persist_entity_accounts
+from tests.reply_turn_helpers import runner_for
 from tests.runtime_fakes import ready_runtime
 
 if TYPE_CHECKING:
@@ -68,6 +67,7 @@ if TYPE_CHECKING:
     from mindroom.knowledge.search import AgentKnowledge
     from mindroom.media_inputs import MediaInputs
     from mindroom.reply_scope import SpanSlot
+    from mindroom.response_runner import ResponseRunner
 
 
 T = TypeVar("T")
@@ -250,7 +250,6 @@ def _build_response_runner(
     team_history_storage: object | None = None,
     message_target: MessageTarget | None = None,
     orchestrator: object | None = None,
-    knowledge_access_support: SimpleNamespace | None = None,
 ) -> ResponseRunner:
     """Build a real response runner for one bot-shaped test double."""
 
@@ -317,8 +316,7 @@ def _build_response_runner(
         hook_send_message=AsyncMock(),
     )
     response_hook_service = ResponseHookService(hook_context=hook_context)
-    response_hook_service.emit_cancelled_response = AsyncMock(wraps=response_hook_service.emit_cancelled_response)
-    response_hook_service.emit_after_response = AsyncMock(wraps=response_hook_service.emit_after_response)
+    response_hook_service._emit_cancelled_response = AsyncMock(wraps=response_hook_service._emit_cancelled_response)
     # One principal's records, as a bot's gateway and reply runtime share them.
     principal = EventJournalStore.open_sqlite(storage_path / "reply_records.db").principal(
         journal_principal_id(bot.agent_name, bot.matrix_id.full_id),
@@ -355,9 +353,9 @@ def _build_response_runner(
     bot.client.rooms.setdefault("!test:localhost", nio.MatrixRoom("!test:localhost", "@mindroom_general:localhost"))
     record_send_text = delivery_gateway.send_text
 
-    async def send_text(request: object) -> str | None:
-        if getattr(request, "reply_write", None) is not None:
-            return await record_send_text(request)  # type: ignore[arg-type]
+    async def send_text(request: SendTextRequest) -> str | None:
+        if request.reply_write is not None:
+            return await record_send_text(request)
         return "$thinking"
 
     _set_gateway_method(delivery_gateway, "send_text", AsyncMock(side_effect=send_text))
@@ -382,12 +380,12 @@ def _build_response_runner(
         membership=membership,
         agent_name=bot.agent_name,
     )
-    bot._knowledge_access_support = knowledge_access_support or _knowledge_access_support()
+    bot._knowledge_access_support = _knowledge_access_support()
     approval_store = MagicMock(spec=ApprovalStore)
     approval_store.approval_continuation_for_source = AsyncMock(return_value=None)
 
-    return ResponseRunner(
-        ResponseRunnerDeps(
+    return runner_for(
+        ReplyTurnDeps(
             runtime=runtime,
             logger=bot.logger,
             runtime_paths=runtime_paths,
@@ -407,6 +405,7 @@ def _build_response_runner(
             ),
             approval_store=approval_store,
             retry_approval_sources=lambda _room_id, _source_event_ids: None,
+            settle_ignored_sources=AsyncMock(),
             approval_runtime_generation="test-runtime",
             redacted_history_events=AsyncMock(return_value={}),
             replies=_StartedReplyRuntime(
@@ -480,7 +479,7 @@ class _InertPostResponseEffects(PostResponseEffectsSupport):
 def _install_inert_post_response_effects(coordinator: ResponseRunner) -> None:
     """Swap the post-response collaborator for the inert variant at the deps seam."""
     support = coordinator.deps.post_response_effects
-    coordinator.deps = replace(
+    coordinator.locked.deps = replace(
         coordinator.deps,
         post_response_effects=_InertPostResponseEffects(
             runtime=support.runtime,

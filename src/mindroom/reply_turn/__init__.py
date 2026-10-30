@@ -1,1 +1,1 @@
-"""What one Matrix reply turn needs around its locked lifecycle: inbox ownership and request enrichment."""
+"""What one Matrix reply turn runs with and settles through: its request, the locked-turn settlement, inbox ownership, and request enrichment."""

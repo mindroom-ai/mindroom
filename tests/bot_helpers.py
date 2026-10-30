@@ -29,7 +29,12 @@ from mindroom.dispatch_source import (
     VOICE_SOURCE_KIND,
 )
 from mindroom.event_journal import EventClass, EventKind
-from mindroom.final_delivery import FinalDeliveryOutcome
+from mindroom.final_delivery import (
+    AwaitingApproval,
+    FinalDeliveryOutcome,
+    Owed,
+    Suppressed,
+)
 from mindroom.history.types import HistoryScope
 from mindroom.hooks import (
     EnrichmentItem,
@@ -40,9 +45,7 @@ from mindroom.knowledge.utils import _KnowledgeResolution
 from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.message_target import MessageTarget
-from mindroom.response_runner import (
-    ResponseRequest,
-)
+from mindroom.reply_turn.request import ResponseRequest
 from mindroom.response_sources import ResponseSources
 from mindroom.turn_policy import PreparedDispatch, TurnPolicy
 from mindroom.turn_record import SourceEventMetadata, TurnRecord, canonicalize_turn_record
@@ -107,51 +110,7 @@ def make_test_agent_bot(
     return bot
 
 
-def _outcome(
-    terminal_status: str,
-    final_visible_event_id: str | None = None,
-    visible_response_event_id: str | None = None,
-    response_identity_event_id: str | None = None,
-    turn_completion_event_id: str | None = None,
-    last_physical_stream_event_id: str | None = None,
-    final_visible_body: str | None = None,
-    delivery_kind: str | None = None,
-    failure_reason: str | None = None,
-    suppressed: bool = False,
-    extra_content: dict[str, object] | None = None,
-) -> FinalDeliveryOutcome:
-    event_id = (
-        response_identity_event_id
-        or visible_response_event_id
-        or final_visible_event_id
-        or turn_completion_event_id
-        or last_physical_stream_event_id
-    )
-    resolved_suppressed = suppressed or (failure_reason == "suppressed_by_hook" and response_identity_event_id is None)
-    is_visible_response = any(
-        value is not None
-        for value in (
-            final_visible_event_id,
-            visible_response_event_id,
-            response_identity_event_id,
-            last_physical_stream_event_id,
-        )
-    )
-    return FinalDeliveryOutcome(
-        terminal_status=terminal_status,
-        event_id=event_id,
-        is_visible_response=is_visible_response,
-        final_visible_body=final_visible_body,
-        delivery_kind=delivery_kind,
-        failure_reason=failure_reason,
-        suppressed=resolved_suppressed,
-        extra_content=extra_content,
-    )
-
-
-def _visible_response_event_id(outcome: FinalDeliveryOutcome | str | None) -> str | None:
-    if isinstance(outcome, str) or outcome is None:
-        return outcome
+def _visible_response_event_id(outcome: FinalDeliveryOutcome) -> str | None:
     return outcome.final_visible_event_id
 
 
@@ -176,10 +135,9 @@ async def dispatch_reaction_durably(
     await bot._journal_dispatcher.drain_once()
 
 
-def _handled_response_event_id(outcome: FinalDeliveryOutcome | str | None) -> str | None:
-    if isinstance(outcome, str) or outcome is None:
-        return outcome
-    return outcome.event_id if outcome.mark_handled and outcome.is_visible_response and not outcome.suppressed else None
+def _handled_response_event_id(outcome: FinalDeliveryOutcome) -> str | None:
+    answered = not isinstance(outcome.ending, AwaitingApproval | Owed | Suppressed)
+    return outcome.final_visible_event_id if answered else None
 
 
 def _assert_ready_voice_text_fallback(ready_event: ReadyPendingEvent | None) -> None:

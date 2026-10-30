@@ -563,7 +563,7 @@ async def test_voice_message_signals_active_turn_before_stt(mock_home_bot: Agent
         reply_to_event_id=voice_event.event_id,
         event_source=voice_event.source,
     )
-    lifecycle = unwrap_extracted_collaborator(bot._response_runner)._lifecycle_coordinator
+    lifecycle = unwrap_extracted_collaborator(bot._response_runner).lifecycle_coordinator
     queued_signal = lifecycle._get_or_create_queued_signal(target)
     prepare_started = asyncio.Event()
     allow_prepare = asyncio.Event()
@@ -645,7 +645,7 @@ async def test_voice_message_clears_active_turn_signal_when_post_stt_echo_fails(
         reply_to_event_id=voice_event.event_id,
         event_source=voice_event.source,
     )
-    lifecycle = unwrap_extracted_collaborator(bot._response_runner)._lifecycle_coordinator
+    lifecycle = unwrap_extracted_collaborator(bot._response_runner).lifecycle_coordinator
     queued_signal = lifecycle._get_or_create_queued_signal(target)
     normalized_voice = inbound_turn_normalizer._VoiceNormalizationResult(
         event=PreparedIngress(
@@ -777,7 +777,7 @@ async def test_voice_message_uses_canonical_target_for_queued_notice_before_stt(
         reply_to_event_id=normalized_event.event_id,
         event_source=normalized_event.source,
     )
-    lifecycle = unwrap_extracted_collaborator(bot._response_runner)._lifecycle_coordinator
+    lifecycle = unwrap_extracted_collaborator(bot._response_runner).lifecycle_coordinator
     pre_stt_signal = lifecycle._get_or_create_queued_signal(pre_stt_target)
     alternate_signal = lifecycle._get_or_create_queued_signal(alternate_target)
     dispatch_count = 0
@@ -870,7 +870,7 @@ async def test_room_mode_voice_notice_survives_until_queued_dispatch_owns_it(
         reply_to_event_id=voice_event.event_id,
         event_source=voice_event.source,
     )
-    lifecycle = unwrap_extracted_collaborator(bot._response_runner)._lifecycle_coordinator
+    lifecycle = unwrap_extracted_collaborator(bot._response_runner).lifecycle_coordinator
     queued_signal = lifecycle._get_or_create_queued_signal(target)
     dispatch_count = 0
     prepare_started = asyncio.Event()

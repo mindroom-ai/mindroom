@@ -62,7 +62,6 @@ class _InboxResponseOwnership:
     """Own a response through terminal cleanup and consumption of its recovery proof."""
 
     recovery_proof_ready: Callable[[], bool | Awaitable[bool]]
-    on_failure: Callable[[], None] | None
     shutdown_phase_trace: ResponseShutdownPhaseTrace
     source_event_ids: frozenset[str]
     room_id: str
@@ -92,7 +91,6 @@ class InboxResponses:
         name: str,
         room_id: str,
         recovery_proof_ready: Callable[[], bool | Awaitable[bool]],
-        on_failure: Callable[[], None] | None = None,
         claim: TurnClaim | None = None,
         source_event_ids: tuple[str, ...] = (),
     ) -> asyncio.Task[None]:
@@ -114,7 +112,6 @@ class InboxResponses:
         )
         self._inbox_response_tasks[task] = _InboxResponseOwnership(
             recovery_proof_ready=recovery_proof_ready,
-            on_failure=on_failure,
             shutdown_phase_trace=shutdown_phase_trace,
             source_event_ids=frozenset(source_event_ids),
             room_id=room_id,
@@ -177,8 +174,6 @@ class InboxResponses:
             # refusal into sync-checkpoint failure accounting.
             return
         if error is not None:
-            if ownership is not None and ownership.on_failure is not None:
-                ownership.on_failure()
             self.logger.error(
                 "inbox_response_task_failed",
                 task_name=task.get_name(),
