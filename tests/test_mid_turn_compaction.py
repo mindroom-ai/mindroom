@@ -31,7 +31,7 @@ from mindroom.history.replay import configured_replay_plan, estimate_request_mes
 from mindroom.history.request_messages import TurnMessages, build_request, scope_history_messages
 from mindroom.history.run_visibility import QUEUED_MESSAGE_NOTICE_MARKER_KEY as _NOTICE_KEY
 from mindroom.history.storage import _with_scope_state, new_scope_session, read_scope_state
-from mindroom.history.summary_message import compaction_summary_message, is_compaction_summary, is_scope_summary
+from mindroom.history.summary_message import is_compaction_summary, is_scope_summary
 from mindroom.history.types import (
     CompactionLifecycleFailure,
     CompactionLifecycleStart,
@@ -1787,30 +1787,6 @@ async def test_a_storage_failure_while_folding_costs_no_reply(
     assert [request.roles.count("tool") for request in model.requests] == [0, 1, 2, 3, 4, 5]
     assert not any(is_compaction_summary(message) for request in model.requests for message in request.messages)
     assert summary_rows_of(storage, TEST_AGENT_SCOPE.key) == []
-
-
-def test_legacy_resume_then_mid_turn_compaction_leaves_one_summary() -> None:
-    legacy_system = Message(
-        role="system",
-        content=(
-            "Be precise.\n\nHere is a brief summary of your previous interactions:\n\n"
-            "<summary_of_previous_interactions>\nOLD\n</summary_of_previous_interactions>\n\n"
-            "Note: this information is from previous interactions and may be outdated. "
-            "You should ALWAYS prefer information from this conversation over the past summary.\n\n"
-            "Current date: Monday"
-        ),
-    )
-    prompt = Message(role="user", content="Do the task")
-    messages = [legacy_system, prompt, Message(role="assistant", content="step"), Message(role="tool", content="r")]
-
-    layout = mid_turn_compaction._layout(messages, prompt.id, scoped=True)
-    mid_turn_compaction._rewrite(messages, layout, compaction_summary_message("NEW", run_local=False))
-
-    # The leading message is edited in place.
-    assert messages[0] is legacy_system
-    assert messages[0].content == "Be precise.\n\nCurrent date: Monday"
-    assert [is_compaction_summary(message) for message in messages] == [False, False, True]
-    assert messages[1] is prompt
 
 
 _NATIVE_ROUTE = "test-route"

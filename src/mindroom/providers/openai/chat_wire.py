@@ -43,6 +43,7 @@ if TYPE_CHECKING:
     from mindroom.providers.openai.settings import ChatSettings
 
 __all__ = [
+    "SDK_OPTION_KEYS",
     "ChatStream",
     "ChatTurnParts",
     "ChatWire",
@@ -62,7 +63,8 @@ _GROQ_COMPOUND_MODELS = frozenset({"groq/compound", "groq/compound-mini", "compo
 _CEREBRAS_SERIAL_TOOL_MODEL = "llama-4-scout-17b-16e-instruct"
 # Routes that stream usage in the last chunk unasked; Cerebras does not take the ``stream_options`` that ask for it.
 _UNASKED_STREAM_USAGE_ROUTES = frozenset({"groq", "cerebras"})
-_SDK_OPTION_KEYS = ("extra_headers", "extra_query", "extra_body", "timeout")
+# The ``create`` arguments that are request options, not body fields; ``extra_body`` merges into the body.
+SDK_OPTION_KEYS = ("extra_headers", "extra_query", "extra_body", "timeout")
 _CHAT_STOP_REASONS: dict[str, StopReason] = {
     "stop": "end",
     "length": "output_limit",
@@ -316,7 +318,7 @@ def _sdk_body_fields(endpoint: _SDKEndpoint) -> frozenset[str]:
         from openai.resources.responses import AsyncResponses  # noqa: PLC0415 - keep the SDK out of module import time
 
         create = AsyncResponses.create
-    return frozenset(inspect.signature(create).parameters) - {"self", *_SDK_OPTION_KEYS}
+    return frozenset(inspect.signature(create).parameters) - {"self", *SDK_OPTION_KEYS}
 
 
 def sdk_call_kwargs(params: Mapping[str, Any], endpoint: _SDKEndpoint) -> dict[str, Any]:
@@ -327,7 +329,7 @@ def sdk_call_kwargs(params: Mapping[str, Any], endpoint: _SDKEndpoint) -> dict[s
     Authored ``extra_body`` keys still win, because the SDK merges them over the fields it serializes.
     """
     named = _sdk_body_fields(endpoint)
-    kwargs = {key: value for key, value in params.items() if key in named or key in _SDK_OPTION_KEYS}
+    kwargs = {key: value for key, value in params.items() if key in named or key in SDK_OPTION_KEYS}
     unnamed = {key: value for key, value in params.items() if key not in kwargs}
     if body := {**unnamed, **(kwargs.pop("extra_body", None) or {})}:
         kwargs["extra_body"] = body

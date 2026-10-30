@@ -1,7 +1,5 @@
 """What the owned codecs write for a dict Agno stored: the same dict minus the keys the owned types dropped.
 
-A run's content that is a paused notice, as earlier releases stored for a run paused without text, goes too, since
-the owned reader reads it as no content (see the ``LEGACY_COMPAT`` marker in ``mindroom.llm.legacy_run_content``).
 So does every key a message or tool execution holds at its default, which the owned writers leave out.
 """
 
@@ -100,10 +98,8 @@ def expected_tool_dict(data: dict[str, Any]) -> dict[str, Any]:
 
 
 def expected_run_dict(data: dict[str, Any]) -> dict[str, Any]:
-    """Agno's run dict minus dropped keys, defaults, and paused notices, recursively over every nested record."""
+    """Agno's run dict minus dropped keys and defaults, recursively over every nested record."""
     result = without(data, DROPPED_RUN_KEYS)
-    if isinstance(result.get("content"), str) and result["content"].startswith(PAUSED_NOTICE_OPENINGS):
-        del result["content"]
     if isinstance(result.get("metrics"), dict):
         result["metrics"] = without(result["metrics"], DROPPED_METRICS_KEYS)
     if "messages" in result:
@@ -127,3 +123,22 @@ def expected_requirement_dict(data: dict[str, Any]) -> dict[str, Any]:
 def stored_run_record(data: Mapping[str, Any]) -> AnyRunRecord:
     """Decode a stored run dict as its row's ``run_type`` does: a ``team_id`` key marks a team run."""
     return TeamRunRecord.from_dict(data) if "team_id" in data else RunRecord.from_dict(data)
+
+
+def upgraded_run_record(data: Mapping[str, Any]) -> AnyRunRecord:
+    """Decode a run dict an earlier release stored as the store reads it once layout version 6 rewrote it.
+
+    A paused notice is no longer its content or its members', and a paused team run's waiting delegation call names
+    the paused run of the member it names (see the ``LEGACY_COMPAT`` marker in
+    ``mindroom.session_storage.legacy_paused_runs``).
+    """
+    run = stored_run_record(data)
+    members = run.member_responses if isinstance(run, TeamRunRecord) else []
+    for record in (run, *members):
+        if str(record.content).startswith(PAUSED_NOTICE_OPENINGS):
+            record.content = None
+    paused_runs = {item.member_agent_id: item.member_run_id for item in run.requirements or ()}
+    for tool in run.tools or ():
+        if tool.child_run_id is None and str(tool.result).endswith("requires human input before continuing."):
+            tool.child_run_id = paused_runs.get((tool.tool_args or {}).get("member_id"))
+    return run
