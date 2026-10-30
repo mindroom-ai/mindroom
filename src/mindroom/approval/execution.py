@@ -465,7 +465,6 @@ class AgentApprovalExecution:
             config,
             self.runtime_paths,
             execution_identity,
-            history_storage=store,
             model=model,
             knowledge=knowledge,
             refresh_scheduler=self.refresh_scheduler(),

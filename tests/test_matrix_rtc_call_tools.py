@@ -31,7 +31,6 @@ from mindroom.config.models import BackgroundToolJobsConfig, ModelConfig, ModelP
 from mindroom.constants import AI_RUN_METADATA_KEY
 from mindroom.helper_usage import HelperUsageOwner, get_helper_usage_owner, record_helper_usage
 from mindroom.history.turn_recorder import TurnRecorder
-from mindroom.history.types import HistoryScope
 from mindroom.hooks import EnrichmentItem
 from mindroom.knowledge.availability import KnowledgeAvailability
 from mindroom.knowledge.search import AgentKnowledge, KnowledgeSource, KnowledgeSourceDescription
@@ -175,7 +174,6 @@ def _build(*toolkits: Toolkit, policy: tuple[ToolMiddleware, ...] = (), role: st
         prompt=PromptSpec(role=role, instructions=()),
         request_template=ModelRequest(messages=()),
         history_settings=replay_settings(),
-        store=None,
         surface=AgentSurface(
             mode="standard",
             cli_shell=False,
@@ -394,7 +392,6 @@ async def test_call_agent_cache_build_cancellation_waits_for_the_build(
     async def render(_build: AgentBuild) -> str:
         return "rendered"
 
-    monkeypatch.setattr("mindroom.matrix_rtc.call_tools.create_scope_session_storage", MagicMock())
     monkeypatch.setattr("mindroom.matrix_rtc.call_tools.create_agent", _create_agent)
     cache = _CallAgentCache(
         agent_name=AGENT,
@@ -889,13 +886,7 @@ async def test_call_responder_uses_normal_agent_turn_and_refuses_unsafe_function
         ),
     )
     create_agent_mock = MagicMock(return_value=cached_build)
-    history_storage = MagicMock()
-    create_scope_session_storage_mock = MagicMock(return_value=history_storage)
     monkeypatch.setattr("mindroom.matrix_rtc.call_tools.create_agent", create_agent_mock)
-    monkeypatch.setattr(
-        "mindroom.matrix_rtc.call_tools.create_scope_session_storage",
-        create_scope_session_storage_mock,
-    )
     monkeypatch.setattr(
         "mindroom.matrix_rtc.call_tools.resolve_agent_knowledge_access_async",
         AsyncMock(return_value=SimpleNamespace(knowledge=knowledge, unavailable=())),
@@ -965,7 +956,6 @@ async def test_call_responder_uses_normal_agent_turn_and_refuses_unsafe_function
     used_build = turn.reusable_build
     assert used_build is not None
     assert used_build.prompt == cached_build.prompt
-    assert create_agent_mock.call_args.kwargs["history_storage"] is history_storage
     # The cached delegate keeps chat's tools and prompt, so calls reuse chat's prompt cache.
     assert "tool_function_filter" not in create_agent_mock.call_args.kwargs
     assert "include_interactive_questions" not in create_agent_mock.call_args.kwargs
@@ -983,12 +973,6 @@ async def test_call_responder_uses_normal_agent_turn_and_refuses_unsafe_function
         assert refused.parameters == cached[name].parameters
         result = await run_tool_call(refused, {}, _CALL_CONTEXT, middleware=agent_tool_middleware(used_build))
         assert result.value == _TEXT_CHAT_REQUIRED_MESSAGE
-    create_scope_session_storage_mock.assert_called_once_with(
-        scope=HistoryScope(kind="agent", scope_id=AGENT),
-        config=config,
-        runtime_paths=runtime_paths,
-        execution_identity=execution_identity,
-    )
     if reconcile_spoken_response:
         assert tooling.finalize_spoken_response is not None
         finalize = tooling.finalize_spoken_response(response.turn_id, "It is", True)

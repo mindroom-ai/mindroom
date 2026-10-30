@@ -35,7 +35,7 @@ from mindroom.approval.tool_approval import tool_may_require_approval
 from mindroom.background_tasks import wait_for_future_until_complete
 from mindroom.helper_usage import HelperUsageOwner, helper_usage_owner_context, record_helper_usage
 from mindroom.history.interrupted_replay import persist_interrupted_replay
-from mindroom.history.session_context import create_scope_session_storage, load_scope_session
+from mindroom.history.session_context import load_scope_session
 from mindroom.history.turn_recorder import TurnRecorder
 from mindroom.history.types import HistoryScope
 from mindroom.hooks import EnrichmentItem
@@ -421,13 +421,7 @@ class _CallAgentCache:
         knowledge: AgentKnowledge | None,
         refresh_scheduler: KnowledgeRefreshScheduler | None,
     ) -> AgentBuild:
-        """Build the call's agent with canonical prompt-sanitizing history storage."""
-        history_storage = create_scope_session_storage(
-            scope=HistoryScope(kind="agent", scope_id=self.agent_name),
-            config=self.config,
-            runtime_paths=self.runtime_paths,
-            execution_identity=self.execution_identity,
-        )
+        """Build the call's agent."""
         # Build the same tools and system prompt as text chat, less its Markdown output format, which a call speaks.
         # The shell's mindroom-agent CLI stays off: call turns have no turn identity to own it.
         build = create_agent(
@@ -437,7 +431,6 @@ class _CallAgentCache:
             execution_identity=self.execution_identity,
             hook_registry=self.context.hook_registry,
             knowledge=knowledge,
-            history_storage=history_storage,
             model=resolve_turn_model(
                 self.config,
                 self.runtime_paths,

@@ -377,7 +377,6 @@ async def _execute_child(
             None,
         ),
         knowledge=knowledge.knowledge,
-        history_storage=store,
         refresh_scheduler=refresh_scheduler,
         delegation_depth=child.depth,
         supports_native_tool_approval=True,

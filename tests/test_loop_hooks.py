@@ -50,7 +50,6 @@ def _agent_build(model: ScriptedModel) -> AgentBuild:
             deferred_tools=DeferredTools(names=frozenset({"deferred_tool"}), portable=True),
         ),
         history_settings=replay_settings(),
-        store=None,
         surface=AgentSurface(
             mode="standard",
             cli_shell=False,
