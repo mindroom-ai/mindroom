@@ -18,7 +18,7 @@ A member's Mem0 store holding a link or special file, or one Chroma cannot read,
 A storage error while writing a team's store stops startup before any member's Mem0 copy is removed, and the next start merges the rest.
 The first start installs Chroma for this when any agent the config lists has a Mem0 store; with `MINDROOM_NO_AUTO_INSTALL_TOOLS=1` and no `chromadb` extra, the Mem0 copies stay until the first start with Chroma.
 The Mem0 copies also wait for a start whose configuration loads; after fixing a configuration that failed to load, restart MindRoom to merge them.
-An older release does not read `team_memory/`; after going back and upgrading again, delete `tracking/team_memory_merged.json` before the start so the copies that release wrote merge too.
+An older release does not read `team_memory/`; after going back and upgrading again, delete `tracking/team_memory_merged.json` before the start so the copies that release wrote merge too; copies a `Left` warning named merge again then, so first remove any of them whose memories you do not want back.
 
 ## Upgrading to one owner per conversation database
 

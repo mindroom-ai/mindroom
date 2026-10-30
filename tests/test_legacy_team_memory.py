@@ -10,6 +10,7 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+import os
 import shutil
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -457,6 +458,7 @@ async def test_a_start_stopped_after_a_refused_delete_keeps_the_same_extraction(
 
 
 @pytest.mark.asyncio
+@pytest.mark.skipif(os.geteuid() == 0, reason="root ignores directory permissions")
 async def test_a_file_copy_that_cannot_be_removed_stays_and_the_merge_finishes(storage: Path) -> None:
     """A merged copy whose directory refuses the removal stays behind, never read again, instead of stopping startup."""
     copy = storage / "agents" / "general" / "memory_files" / _TEAM
