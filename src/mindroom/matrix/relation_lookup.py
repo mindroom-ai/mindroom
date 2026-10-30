@@ -89,8 +89,9 @@ class RelationLookup:
         so local state is the whole answer.
 
         Not knowing is reported as not in a thread. That is the conservative
-        direction for the room scan that asks: an event it cannot place stays
-        where it is rather than being reattached to a thread on a guess.
+        direction for the tool thread normalization that asks: an event it
+        cannot place stays where it is rather than being reattached to a thread
+        on a guess.
         """
         try:
             admitted, thread_id = await self.store.admitted_thread_id(room_id=room_id, event_id=event_id)

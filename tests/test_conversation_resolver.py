@@ -304,8 +304,8 @@ async def test_reply_to_plain_message_demotes_to_room_level(config: Config) -> N
 
 
 @pytest.mark.asyncio
-async def test_reply_to_missing_parent_decides_no_thread(config: Config) -> None:
-    """A parent the homeserver will not serve leaves the turn without any thread, never a guessed one."""
+async def test_reply_to_a_parent_the_homeserver_will_not_serve_is_unplaceable(config: Config) -> None:
+    """A parent the homeserver will not serve cannot place the turn, so ingress ends it rather than guess a thread."""
     resolver = _resolver(config, relations=make_relation_lookup(client=_ClientWithoutEvents()))
 
     with pytest.raises(RelatedEventUnavailableError):
@@ -346,7 +346,7 @@ async def test_room_thread_mode_decides_every_message_room_level(tmp_path: Path)
 
 @pytest.mark.asyncio
 async def test_a_thread_the_target_names_in_a_room_mode_room_is_read_like_any_other(tmp_path: Path) -> None:
-    """A trusted automation fire keeps its own root in a room-mode room, and its context reads that thread."""
+    """Context reads any thread it is given in a room-mode room, which is where a per-fire thread arrives."""
     config = bind_runtime_paths(
         Config(agents={"general": AgentConfig(display_name="General", thread_mode="room")}),
         test_runtime_paths(tmp_path),

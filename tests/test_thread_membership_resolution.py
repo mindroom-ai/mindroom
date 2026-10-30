@@ -413,7 +413,6 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
 
         assert resolution.state is ThreadResolutionState.INDETERMINATE
         assert resolution.thread_id is None
-        assert resolution.candidate_thread_root_id == original_id
 
     @pytest.mark.asyncio
     async def test_related_thread_resolution_marks_event_lookup_failure_indeterminate(
@@ -444,7 +443,6 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
         )
 
         assert resolution.state is ThreadResolutionState.INDETERMINATE
-        assert resolution.candidate_thread_root_id == related_event_id
         assert isinstance(resolution.error, RuntimeError)
         assert str(resolution.error) == "lookup unavailable"
 
@@ -608,7 +606,6 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
         )
 
         assert resolution.state is ThreadResolutionState.INDETERMINATE
-        assert resolution.candidate_thread_root_id == thread_root_id
         assert resolution.thread_id is None
         assert isinstance(resolution.error, RuntimeError)
         assert str(resolution.error) == "snapshot unavailable"
@@ -672,7 +669,6 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
         )
 
         assert resolution.state is ThreadResolutionState.INDETERMINATE
-        assert resolution.candidate_thread_root_id == related_event_id
 
     @pytest.mark.asyncio
     async def test_related_thread_resolution_preserves_candidate_when_event_lookup_returns_none(
@@ -702,7 +698,6 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
         )
 
         assert resolution.state is ThreadResolutionState.INDETERMINATE
-        assert resolution.candidate_thread_root_id == related_event_id
 
     @pytest.mark.asyncio
     async def test_best_effort_related_thread_resolution_degrades_when_root_proof_fails(

@@ -1,8 +1,10 @@
 """Building a conversation from the server, once per membership.
 
 Hydration is the only thing in MindRoom that reads conversation history from
-Matrix -- turns, tools, and summaries all read the projection it fills -- and it
-runs at most once per conversation per membership, except for an explicit
+Matrix -- turns, thread tools, and summaries all read the projection it fills;
+the one exception is the `matrix_message` tool's room timeline read, which no
+conversation in the projection answers -- and it runs at most once per
+conversation per membership, except for an explicit
 `rewalk` by a caller that must see another runtime's write before sync delivers
 it. There is no periodic repair scan and no room-wide fallback: if hydration
 fails, the read fails, which is visible. A background repairer that quietly

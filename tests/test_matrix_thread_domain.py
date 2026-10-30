@@ -198,7 +198,6 @@ async def test_thread_root_proof_from_degraded_history_is_indeterminate() -> Non
     )
 
     assert resolution.state is ThreadResolutionState.INDETERMINATE
-    assert resolution.candidate_thread_root_id == thread_root_id
     assert resolution.thread_id is None
 
 

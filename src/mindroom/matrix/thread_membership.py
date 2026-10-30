@@ -34,9 +34,9 @@ Invariants enforced here (every resolver in the repo must go through this module
 
 4. Root proof is three-valued (PROVEN, NOT_A_THREAD_ROOT, PROOF_UNAVAILABLE) and proof failure never
    silently demotes to room level.
-   PROOF_UNAVAILABLE maps to ``ThreadResolution._indeterminate`` with the candidate root preserved so
-   callers can fail closed: tools and outbound mutations refuse, and ingress retries a non-blocking
-   read strictly, then refuses the event until its scope can be decided.
+   PROOF_UNAVAILABLE maps to ``ThreadResolution._indeterminate`` so callers can fail closed: tools and
+   outbound mutations refuse, and ingress retries a non-blocking read strictly, then refuses the event
+   until its scope can be decided.
    Lookup failures and missing related events during the walk are likewise INDETERMINATE, never ROOM_LEVEL.
    A related event the homeserver will not serve, or one that is not a message, carries
    ``RelatedEventUnavailableError``, which no retry changes.
@@ -119,7 +119,6 @@ class ThreadResolution:
 
     state: ThreadResolutionState
     thread_id: str | None = None
-    candidate_thread_root_id: str | None = None
     error: Exception | None = None
 
     @classmethod
@@ -133,17 +132,9 @@ class ThreadResolution:
         return cls(ThreadResolutionState.ROOM_LEVEL)
 
     @classmethod
-    def _indeterminate(
-        cls,
-        error: Exception,
-        candidate_thread_root_id: str | None = None,
-    ) -> ThreadResolution:
+    def _indeterminate(cls, error: Exception) -> ThreadResolution:
         """Return one unresolved result caused by proof failure."""
-        return cls(
-            ThreadResolutionState.INDETERMINATE,
-            candidate_thread_root_id=candidate_thread_root_id,
-            error=error,
-        )
+        return cls(ThreadResolutionState.INDETERMINATE, error=error)
 
 
 class ThreadMembershipLookupError(RuntimeError):
@@ -209,7 +200,7 @@ def _resolution_from_root_proof(
     if proof.state is _ThreadRootProofState.NOT_A_THREAD_ROOT:
         return ThreadResolution._room_level()
     assert proof.error is not None
-    return ThreadResolution._indeterminate(proof.error, candidate_thread_root_id=thread_root_id)
+    return ThreadResolution._indeterminate(proof.error)
 
 
 async def resolve_event_thread_membership(
@@ -262,14 +253,13 @@ async def resolve_related_event_thread_membership(
         try:
             related_event_info = await access.fetch_event_info(room_id, current_event_id)
         except Exception as exc:
-            # Keep lookup-failed related events separately scoped for dispatch coalescing and replay checks.
-            resolution = ThreadResolution._indeterminate(exc, candidate_thread_root_id=current_event_id)
+            # A related event nobody could read may be the thread's root, so its scope stays unknown.
+            resolution = ThreadResolution._indeterminate(exc)
             break
         if related_event_info is None:
-            # Missing related events are still possible thread roots; demote later without losing the candidate.
+            # A missing related event may still be a thread root; unknown, never room level.
             resolution = ThreadResolution._indeterminate(
                 RelatedEventUnavailableError(f"Related event {current_event_id} is unavailable"),
-                candidate_thread_root_id=current_event_id,
             )
             break
 

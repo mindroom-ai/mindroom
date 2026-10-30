@@ -4351,6 +4351,25 @@ async def test_scheduled_fire_response_starts_per_fire_thread_session(tmp_path: 
 
 
 @pytest.mark.asyncio
+async def test_room_mode_scheduled_fire_is_planned_with_its_own_thread_history(tmp_path: Path) -> None:
+    """A room-mode agent's per-fire thread is where it answers, so its context reads that thread."""
+    config = _single_agent_config(tmp_path, "room")
+    fire_thread = thread_history_result(
+        [make_visible_message(sender=_SENDER, body="Poll the queue", event_id="$scheduled:localhost")],
+        is_full_history=True,
+    )
+    harness = _build_harness(config, tmp_path, thread_history=fire_thread)
+    room = _room_with_members(config, "general")
+
+    await harness.deliver(room, _scheduled_fire_event(config, extra_content={}, new_thread=True))
+
+    assert len(harness.runner.requests) == 1
+    request = harness.runner.requests[0]
+    assert request.response_envelope.target.source_thread_id == "$scheduled:localhost"
+    assert [message.event_id for message in request.thread_history] == ["$scheduled:localhost"]
+
+
+@pytest.mark.asyncio
 async def test_external_trigger_fire_response_starts_per_fire_thread_session(tmp_path: Path) -> None:
     """A room-level external trigger delivery roots a per-fire thread and session in room mode."""
     config = _single_agent_config(tmp_path, "room")

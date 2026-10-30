@@ -531,7 +531,6 @@ async def test_voice_plain_reply_unproven_thread_candidate_is_not_admitted(
             new=AsyncMock(
                 return_value=ThreadResolution._indeterminate(
                     RuntimeError("proof unavailable"),
-                    candidate_thread_root_id="$maybe-thread-root",
                 ),
             ),
         ),

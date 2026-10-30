@@ -374,7 +374,7 @@ class ConversationResolver:
             event_info,
             mode=ThreadReadMode.NONBLOCKING,
         )
-        if resolution.state is ThreadResolutionState.INDETERMINATE and resolution.candidate_thread_root_id is not None:
+        if resolution.state is ThreadResolutionState.INDETERMINATE:
             # A non-blocking read cannot prove a root in a conversation it has
             # never hydrated, and a plain reply to an unthreaded message is the
             # ordinary way to reach one. This is the one decision of the turn's

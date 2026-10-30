@@ -1596,7 +1596,6 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
                 new=AsyncMock(
                     return_value=ThreadResolution._indeterminate(
                         RuntimeError("proof unavailable"),
-                        candidate_thread_root_id="$thread_root:localhost",
                     ),
                 ),
             ),
