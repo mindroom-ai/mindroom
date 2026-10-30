@@ -12,13 +12,14 @@
 #   File entries union by id; a copy holding anything MindRoom did not write stays where it was. Mem0 copies merge
 #   from the stores the runtime opens, those of configured shared agents on Mem0, since no copy elsewhere was read.
 #   Each member's extraction of a turn shares the turn's replica key, so a turn keeps the extraction with the most
-#   distinct facts, the first member's by name among equals; an edit or delete through another
-#   member had rewritten or removed the turn in the other copies. Records move with their ids, embeddings, and
-#   metadata, so nothing is embedded or extracted again. A member store holding links or special files, or that Chroma
-#   cannot read, and a team whose store refuses its records stay as they are, with a warning starting with "Left",
-#   and no later start merges them, so none undoes an edit made since. Every step is idempotent, so a start
-#   interrupted anywhere finishes on the next; a receipt stops later starts from opening every store, and waits while
-#   Chroma cannot be installed or no config loaded.
+#   distinct facts, the first member's by name among equals; an edit or delete through another member had rewritten
+#   or removed the turn in the other copies. Records move with their ids, embeddings, and metadata, so nothing is
+#   embedded or extracted again. A member store holding links or special files, or that Chroma cannot read, and a
+#   team whose store rejects a record as invalid stay as they are, with a warning starting with
+#   "Left", and no later start merges them, so none undoes an edit made since; any other write failure stops the
+#   start before a copy goes. Every step is idempotent, so a start interrupted anywhere finishes on the next; a
+#   receipt stops later starts from opening every store, and waits while Chroma cannot be installed or no config
+#   loaded.
 # Coverage: tests/test_legacy_team_memory.py.
 
 from __future__ import annotations
@@ -240,26 +241,27 @@ def _merge_mem0_copies(runtime_paths: RuntimePaths, member_stores: list[Path]) -
         return False
     copies = [copy for store in stores for copy in _member_copies(store)]
     kept = _kept_records(copies)
-    refused: set[tuple[str, str]] = set()
+    rejected: set[tuple[str, str]] = set()
     for (scope, collection_name), records in sorted(kept.items()):
         try:
             _write_team_records(mem0_chroma_path(team_scope(scope, runtime_paths).root), collection_name, records)
-        except Exception as error:
-            # A planted record can make the team's store refuse a batch, such as one of another dimension. The copies
-            # stay, and no later start writes them again, so none undoes an edit made since.
-            logger.warning("Left a team's Mem0 copies its store refused", team=scope, error=str(error))
-            refused.add((scope, collection_name))
+        except _rejected_record_errors() as error:
+            # A planted record can make the team's store reject a batch, such as one of another dimension. The copies
+            # stay, and no later start writes them again, so none undoes an edit made since. Any other failure, such as
+            # a storage error, stops the start before a copy goes, and the next start merges again.
+            logger.warning("Left a team's Mem0 copies its store rejected", team=scope, error=str(error))
+            rejected.add((scope, collection_name))
     # Only after every team's store holds its records do the member copies go, the dropped extractions first, and the
     # kept ones only once every dropped one went: a start interrupted meanwhile still finds each kept extraction beside
     # any dropped one, so it keeps the same one.
-    kept_ids = {record.id for team, records in kept.items() if team not in refused for record in records}
+    kept_ids = {record.id for team, records in kept.items() if team not in rejected for record in records}
     for keep in (False, True):
         all_removed = True
         for copy in copies:
             removed = [
                 record.id
                 for record in copy.records
-                if (record.id in kept_ids) is keep and (record.team, copy.collection.name) not in refused
+                if (record.id in kept_ids) is keep and (record.team, copy.collection.name) not in rejected
             ]
             try:
                 for batch in batched(removed, copy.client.get_max_batch_size()):
@@ -275,6 +277,14 @@ def _merge_mem0_copies(runtime_paths: RuntimePaths, member_stores: list[Path]) -
         if not all_removed:
             break
     return True
+
+
+def _rejected_record_errors() -> tuple[type[Exception], ...]:
+    """Return the errors Chroma raises for a record it rejects, such as one of another dimension or a malformed one."""
+    with optional_dependency_environment():
+        from chromadb.errors import InvalidArgumentError  # noqa: PLC0415
+
+    return (InvalidArgumentError, ValueError)
 
 
 def _write_team_records(chroma_path: Path, collection_name: str, records: list[_Record]) -> None:

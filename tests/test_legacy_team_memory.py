@@ -346,6 +346,42 @@ async def test_a_team_whose_store_refuses_its_records_keeps_its_copies_and_is_no
 
 
 @pytest.mark.asyncio
+async def test_a_record_chroma_rejects_as_malformed_leaves_its_team_unmerged(storage: Path) -> None:
+    """Chroma validates a planted record's metadata on write, and rejecting it never stops startup."""
+    malformed = ValueError("Expected metadata value to be a str, int, float, bool, SparseVector, list, or None")
+    with patch.object(Collection, "upsert", side_effect=malformed):
+        await _migrate(storage)
+
+    assert (tracking_dir(runtime_paths_for(_config(storage, "mem0"))) / "team_memory_merged.json").exists()
+    for member in ("calculator", "general"):
+        assert set(_stored(storage / "agents" / member / "chroma")) == {
+            row["id"] for row in _RECORDED[member][_COLLECTION]
+        }
+
+
+@pytest.mark.asyncio
+async def test_a_storage_error_writing_a_team_store_stops_the_start_and_the_next_one_merges(storage: Path) -> None:
+    """A failure that is not a rejected record leaves every copy and no receipt, so a later start merges everything."""
+    upsert = Collection.upsert
+    upserts: list[object] = []
+
+    def failing_upsert(collection: Collection, *args: object, **kwargs: object) -> None:
+        if not upserts:
+            upserts.append(collection)
+            msg = "disk I/O error"
+            raise RuntimeError(msg)
+        upsert(collection, *args, **kwargs)
+
+    with patch.object(Collection, "upsert", failing_upsert), pytest.raises(RuntimeError, match="disk I/O error"):
+        await _migrate(storage)
+
+    assert not (tracking_dir(runtime_paths_for(_config(storage, "mem0"))) / "team_memory_merged.json").exists()
+    await _migrate(storage)
+
+    _assert_merged(storage)
+
+
+@pytest.mark.asyncio
 async def test_a_copy_a_member_store_refuses_to_delete_stays_and_the_merge_finishes(storage: Path) -> None:
     """A store that reads but refuses writes keeps its now unread copies instead of stopping startup."""
     delete = Collection.delete
