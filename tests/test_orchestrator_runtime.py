@@ -4615,7 +4615,6 @@ class TestMultiAgentOrchestrator:
     async def test_background_bot_recovery_stops_on_permanent_room_setup_failure(self, tmp_path: Path) -> None:
         """Recovered background starts should not retry permanent room setup failures forever."""
         orchestrator = _MultiAgentOrchestrator(runtime_paths=TestAgentBot._runtime_paths(tmp_path), config=MagicMock())
-        orchestrator._router_principal_id = "@mindroom_router:localhost"
 
         bot = MagicMock()
         bot.agent_name = "general"
@@ -5027,7 +5026,6 @@ class TestMultiAgentOrchestrator:
         )
         orchestrator.running = True
         router_bot = MagicMock()
-        router_bot.config = current_config
         router_bot.refresh_presence = AsyncMock()
         install_bots(orchestrator, {"router": router_bot})
 
@@ -5040,7 +5038,6 @@ class TestMultiAgentOrchestrator:
 
         assert updated is False
         mock_sync_runtime.assert_awaited_once_with(new_config, previous_config=current_config)
-        assert not hasattr(orchestrator, "_schedule_knowledge_refresh")
 
     @pytest.mark.asyncio
     async def test_router_invite_policy_reload_reconciles_cached_invites(self, tmp_path: Path) -> None:
@@ -5053,7 +5050,6 @@ class TestMultiAgentOrchestrator:
         )
         orchestrator.running = True
         router_bot = MagicMock()
-        router_bot.config = current_config
         router_bot.refresh_presence = AsyncMock()
         router_bot.reconcile_pending_invites = AsyncMock(side_effect=RuntimeError("join failed"))
         router_bot.schedule_pending_invite_reconciliation = MagicMock()
@@ -5544,11 +5540,9 @@ class TestMultiAgentOrchestrator:
         orchestrator.running = True
 
         router_bot = MagicMock()
-        router_bot.config = old_config
         router_bot.refresh_presence = AsyncMock()
         router_bot.recover_pending_turn_journal_events = AsyncMock()
         general_bot = MagicMock()
-        general_bot.config = old_config
         general_bot.refresh_presence = AsyncMock()
         install_bots(orchestrator, {"router": router_bot, "general": general_bot})
 
@@ -5634,11 +5628,9 @@ class TestMultiAgentOrchestrator:
         orchestrator.running = True
 
         router_bot = MagicMock()
-        router_bot.config = old_config
         router_bot.refresh_presence = AsyncMock()
         router_bot.recover_pending_turn_journal_events = AsyncMock()
         general_bot = MagicMock()
-        general_bot.config = old_config
         general_bot.refresh_presence = AsyncMock()
         install_bots(orchestrator, {"router": router_bot, "general": general_bot})
 

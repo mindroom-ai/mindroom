@@ -104,10 +104,8 @@ from mindroom.event_journal import (
     EventKind,
     FinalAnswerEnqueue,
     InboundEvent,
-    JournalEvent,
     MatrixDelivery,
     MatrixDeliveryView,
-    PendingTurnView,
     PermanentDeliveryFailure,
     PrincipalStore,
     ProjectedEvent,
@@ -2172,34 +2170,6 @@ async def ignore_delivered_projection(
 
 
 @dataclass
-class FakePendingTurnStore:
-    """A journal holding no unfinished work, for tests that are not about the replay guard.
-
-    The empty answer is the one that changes nothing: the degraded replay
-    guard acts only on positive proof, so a store with nothing pending never
-    suppresses a turn. Tests that are about the guard admit into a real journal
-    instead, because the filtering they exercise happens in SQL.
-    """
-
-    async def pending_thread_events_after(
-        self,
-        *,
-        room_id: str,  # noqa: ARG002 - part of the view's shape
-        thread_id: str,  # noqa: ARG002 - part of the view's shape
-        after_origin_server_ts: int,  # noqa: ARG002 - part of the view's shape
-        excluding_event_id: str,  # noqa: ARG002 - part of the view's shape
-        limit: int = 256,  # noqa: ARG002 - part of the view's shape
-    ) -> tuple[JournalEvent, ...]:
-        """Return no unsettled events in this thread."""
-        return ()
-
-
-def make_pending_turn_view() -> PendingTurnView:
-    """Return a journal view that reports no unfinished work in any conversation."""
-    return cast("PendingTurnView", FakePendingTurnStore())
-
-
-@dataclass
 class FakeRelationStore:
     """The journal's answer about which events it admitted, and their threads."""
 
@@ -2577,17 +2547,6 @@ async def initialize_from_config_file(runtime_paths: RuntimePaths) -> "_MultiAge
     orchestrator = _MultiAgentOrchestrator(runtime_paths=runtime_paths, config=config)
     await orchestrator.initialize()
     return orchestrator
-
-
-def failed_config_load(error: Exception) -> ConfigLoad:
-    """Return a load that failed with ``error`` and that no newer API commit superseded."""
-    return ConfigLoad(
-        result=ConfigLoadResult(success=False, error_status_code=422, error_detail=str(error)),
-        config=None,
-        source_fingerprint=None,
-        source_files=None,
-        error=error,
-    )
 
 
 def make_config_reload_lifecycle(

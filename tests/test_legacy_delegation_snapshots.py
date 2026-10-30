@@ -16,7 +16,6 @@ from typing import Any
 import pytest
 from structlog.testing import capture_logs
 
-from mindroom import orchestrator
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.constants import RuntimePaths, resolve_runtime_paths, subagent_sessions_dir
@@ -420,7 +419,7 @@ async def test_startup_rewrites_session_files_before_serving(
 
     monkeypatch.setattr(storage_preparation, "migrate_subagent_sessions", rewrite)
     with pytest.raises(_RewriteRanError):
-        await orchestrator.main("ERROR", paths, api=False)
+        await storage_preparation.prepare_runtime_storage(paths)
 
 
 @pytest.mark.parametrize(

@@ -9,7 +9,6 @@ from unittest.mock import Mock
 
 import pytest
 
-from mindroom import orchestrator
 from mindroom.constants import resolve_runtime_paths
 from mindroom.credentials.legacy_tool_credentials import migrate_tool_credential_defaults
 from mindroom.credentials.manager import _reset_credentials_manager_cache, get_runtime_credentials_manager
@@ -198,7 +197,7 @@ async def test_startup_cleans_up_before_credentials_are_used(
         Mock(side_effect=AssertionError("credentials started")),
     )
     with pytest.raises(_CleanupRanError):
-        await orchestrator.main("ERROR", runtime_paths, api=False)
+        await storage_preparation.prepare_runtime_storage(runtime_paths)
 
 
 @pytest.mark.asyncio

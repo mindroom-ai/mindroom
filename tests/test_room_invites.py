@@ -497,36 +497,6 @@ async def test_pending_invite_ledger_keeps_only_the_newest_invites_off_the_event
     assert threading.current_thread() not in save_threads
 
 
-@pytest.fixture
-def mock_config(tmp_path: Path) -> Config:
-    """Create a mock config with agents and teams."""
-    return bind_runtime_paths(
-        Config(
-            agents={
-                "agent1": AgentConfig(
-                    display_name="Agent 1",
-                    role="Test agent",
-                    rooms=["room1", "room2"],
-                ),
-                "agent2": AgentConfig(
-                    display_name="Agent 2",
-                    role="Another test agent",
-                    rooms=["room1"],
-                ),
-            },
-            teams={
-                "team1": TeamConfig(
-                    display_name="Team 1",
-                    role="Test team",
-                    agents=["agent1", "agent2"],
-                    rooms=["room2"],
-                ),
-            },
-        ),
-        tmp_path,
-    )
-
-
 @pytest.mark.asyncio
 async def test_agent_joins_configured_rooms(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     """Test that agents join their configured rooms on startup."""

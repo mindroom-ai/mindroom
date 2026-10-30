@@ -25,7 +25,6 @@ import pytest
 from pydantic import ValidationError
 
 from mindroom import constants, interactive
-from mindroom.agent_reply_membership import AgentReplyMembershipIndex
 from mindroom.attachments.storage import register_local_attachment
 from mindroom.authorization import ReplyMembershipPendingError
 from mindroom.background_tasks import wait_for_background_tasks
@@ -576,7 +575,7 @@ def _build_harness(
     matrix_id = registry.current_id(agent_name)
     logger = get_logger("test_turns_focused")
     runtime = BotRuntimeState(
-        orchestrator=ready_runtime(config, runtime_paths, agent_reply_memberships=AgentReplyMembershipIndex()),
+        orchestrator=ready_runtime(config, runtime_paths),
         client=make_matrix_client_mock(user_id=matrix_id.full_id),
     )
 

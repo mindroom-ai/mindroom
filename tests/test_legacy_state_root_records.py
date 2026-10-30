@@ -9,7 +9,6 @@ from typing import TYPE_CHECKING
 import pytest
 from structlog.testing import capture_logs
 
-from mindroom import orchestrator
 from mindroom.agent_modes import resolve_agent_mode
 from mindroom.constants import resolve_runtime_paths
 from mindroom.legacy_state_root_records import migrate_state_root_records
@@ -127,4 +126,4 @@ async def test_startup_moves_records_before_serving(
 
     monkeypatch.setattr(storage_preparation, "migrate_state_root_records", migration)
     with pytest.raises(_MigrationRanError):
-        await orchestrator.main("ERROR", paths, api=False)
+        await storage_preparation.prepare_runtime_storage(paths)

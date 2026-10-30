@@ -2,17 +2,12 @@
 
 from __future__ import annotations
 
-import tempfile
-from contextlib import nullcontext
-from pathlib import Path
 from typing import TYPE_CHECKING, cast
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock
 
 import nio
 import pytest_asyncio
-from nio.api import RelationshipType
 
-from mindroom.bot_runtime_view import BotRuntimeState
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig, RouterConfig
@@ -21,10 +16,8 @@ from mindroom.event_journal import (
     EventKind,
     InboundEvent,
     ProjectedEvent,
-    VisibleMessage,
 )
 from mindroom.matrix.client import ResolvedVisibleMessage
-from mindroom.matrix.event_info import EventInfo
 from mindroom.matrix.thread_history_result import thread_history_result as _thread_history_result_impl
 from mindroom.matrix.users import AgentMatrixUser
 from tests.access_schema_support import with_current_room_member_access
@@ -35,13 +28,12 @@ from tests.conftest import (
     make_matrix_client_mock,
     runtime_paths_for,
     test_runtime_paths,
-    unwrap_extracted_collaborator,
     wrap_extracted_collaborators,
 )
-from tests.runtime_fakes import ready_runtime
 
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator, Sequence
+    from pathlib import Path
 
     from mindroom.bot import AgentBot
     from mindroom.matrix.thread_history_result import ThreadHistoryResult
@@ -215,11 +207,6 @@ def thread_history_result(
         is_full_history=is_full_history,
         diagnostics=diagnostics,
     )
-
-
-def _state_writer(bot: AgentBot) -> object:
-    """Return the writer instance actually captured by the resolver."""
-    return unwrap_extracted_collaborator(bot._conversation_state_writer)
 
 
 def _make_client_mock(*, user_id: str = "@mindroom_general:localhost") -> AsyncMock:
@@ -400,112 +387,6 @@ def _image_event(
     return event
 
 
-async def _event_iter(events: Sequence[nio.Event]) -> AsyncGenerator[nio.Event, None]:
-    """Yield one concrete sequence as a Matrix relations iterator."""
-    for event in events:
-        yield event
-
-
-def _make_room_get_event_response(event: nio.Event) -> nio.RoomGetEventResponse:
-    """Wrap one nio event in a RoomGetEventResponse."""
-    response = nio.RoomGetEventResponse()
-    response.event = event
-    return response
-
-
-def _relations_client(
-    *,
-    root_event: nio.RoomMessageText,
-    thread_events: Sequence[nio.Event],
-    replacements_by_event_id: dict[str, Sequence[nio.Event]] | None = None,
-    user_id: str = "@mindroom_general:localhost",
-    next_batch: str = "s_test_token",
-) -> AsyncMock:
-    """Return one AsyncClient mock serving thread events through room history."""
-    client = _make_client_mock(user_id=user_id)
-    client.next_batch = next_batch
-    replacement_map = replacements_by_event_id or {}
-
-    def relation_events(event_id: str, rel_type: RelationshipType) -> Sequence[nio.Event]:
-        if rel_type == RelationshipType.thread and event_id == root_event.event_id:
-            return thread_events
-        if rel_type == RelationshipType.replacement:
-            return replacement_map.get(event_id, ())
-        return ()
-
-    client.room_get_event = AsyncMock(return_value=_make_room_get_event_response(root_event))
-
-    def room_get_event_relations(
-        _room_id: str,
-        event_id: str,
-        *,
-        rel_type: RelationshipType,
-        event_type: str | None = None,  # noqa: ARG001
-        direction: nio.MessageDirection = nio.MessageDirection.back,  # noqa: ARG001
-        limit: int | None = None,  # noqa: ARG001
-        _event_type: str | None = None,
-        _direction: nio.MessageDirection = nio.MessageDirection.back,
-        _limit: int | None = None,
-    ) -> AsyncGenerator[nio.Event, None]:
-        return _event_iter(relation_events(event_id, rel_type))
-
-    client.room_get_event_relations = MagicMock(side_effect=room_get_event_relations)
-    room_scan_chunk = [
-        *[event for events in replacement_map.values() for event in events],
-        *thread_events,
-        root_event,
-    ]
-    client.room_messages = AsyncMock(
-        return_value=nio.RoomMessagesResponse(room_id="!test:localhost", chunk=room_scan_chunk, start="", end=None),
-    )
-    return client
-
-
-def _message_mutation_event_info(*, original_event_id: str = "$target:localhost") -> EventInfo:
-    """Return one thread-affecting event info for direct mutation-helper tests."""
-    return EventInfo.from_event(
-        {
-            "type": "m.room.message",
-            "content": {
-                "body": "* updated",
-                "msgtype": "m.text",
-                "m.new_content": {"body": "updated", "msgtype": "m.text"},
-                "m.relates_to": {"rel_type": "m.replace", "event_id": original_event_id},
-            },
-        },
-    )
-
-
-class EmptyProjection:
-    """A projection holding nothing, for tests that never point-look-up an event.
-
-    Point lookups fall through to the homeserver on a projection miss, so a
-    store that always misses gives these tests the client-only behavior they
-    were written against. A test that means to prove something about the
-    projection seeds a real store instead.
-    """
-
-    async def visible_message(self, *, room_id: str, logical_event_id: str) -> VisibleMessage | None:
-        """Return nothing, so every point lookup reaches the homeserver."""
-        del room_id, logical_event_id
-        return None
-
-
-def _conversation_runtime(*, client: nio.AsyncClient | None = None) -> BotRuntimeState:
-    """Build one minimal live runtime state for conversation-read tests."""
-    config = _conversation_runtime_config()
-    return BotRuntimeState(orchestrator=ready_runtime(config, runtime_paths_for(config)), client=client)
-
-
-def _conversation_runtime_config() -> Config:
-    """Return one runtime-bound config for conversation-read tests."""
-    runtime_paths = test_runtime_paths(Path(tempfile.mkdtemp(prefix="mindroom-threading-runtime-")))
-    return bind_runtime_paths(
-        Config(agents={"code": AgentConfig(display_name="Code", rooms=["!room:localhost"])}),
-        runtime_paths,
-    )
-
-
 class ThreadingBehaviorTestBase:
     """Shared fixtures and helpers for the split TestThreadingBehavior modules."""
 
@@ -549,34 +430,3 @@ class ThreadingBehaviorTestBase:
         bot.client = _make_client_mock(user_id="@mindroom_general:localhost")
         # Initialize components that depend on client
         yield bot
-
-    @staticmethod
-    def _sync_response(joined_rooms: dict[str, nio.RoomInfo]) -> nio.SyncResponse:
-        return nio.SyncResponse(
-            next_batch="",
-            rooms=nio.Rooms(invite={}, join=joined_rooms, leave={}),
-            device_key_count=nio.DeviceOneTimeKeyCount(
-                curve25519=None,
-                signed_curve25519=None,
-            ),
-            device_list=nio.DeviceList(changed=[], left=[]),
-            to_device_events=[],
-            presence_events=[],
-        )
-
-    async def _run_sync_response_without_startup_side_effects(
-        self,
-        bot: AgentBot,
-        sync_response: nio.SyncResponse,
-    ) -> None:
-        if bot.client is not None and not sync_response.next_batch:
-            sync_response.next_batch = bot.client.next_batch
-        orchestrator = bot.orchestrator
-        bot_ready_context = (
-            patch.object(orchestrator, "handle_bot_ready", AsyncMock()) if orchestrator is not None else nullcontext()
-        )
-        with (
-            patch.object(bot, "_emit_agent_lifecycle_event", AsyncMock()),
-            bot_ready_context,
-        ):
-            await bot._on_sync_response(sync_response)

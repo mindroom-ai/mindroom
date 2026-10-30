@@ -218,7 +218,6 @@ async def run_once_task(
     matrix_admin: HookMatrixAdmin | None = None,
     *,
     config_provider: Callable[[], Config] | None = None,
-    hooks: HookRegistryLifetime | None = None,
 ) -> None:
     """Run one one-time task to completion on a ready router bot."""
     assert workflow.room_id is not None
@@ -231,7 +230,6 @@ async def run_once_task(
         conversation_reader,
         matrix_admin,
         config_provider=config_provider,
-        hooks=hooks,
     )
     await runner.run_once(workflow)
 

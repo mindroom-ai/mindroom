@@ -10,7 +10,6 @@ from unittest.mock import AsyncMock, patch
 import nio
 import pytest
 
-from mindroom.agent_reply_membership import AgentReplyMembershipIndex
 from mindroom.bot_runtime_view import BotRuntimeState
 from mindroom.config.main import Config
 from mindroom.constants import ROUTER_AGENT_NAME, VISIBLE_ROUTER_VOICE_ECHO_KEY
@@ -131,7 +130,7 @@ def _echo_harness(
         test_runtime_paths(tmp_path),
     )
     runtime_paths = runtime_paths_for(config)
-    orchestrator = ready_runtime(config, runtime_paths, agent_reply_memberships=AgentReplyMembershipIndex())
+    orchestrator = ready_runtime(config, runtime_paths)
     if not router_ready:
         orchestrator.not_ready.add(ROUTER_AGENT_NAME)
     runtime = BotRuntimeState(orchestrator=orchestrator)

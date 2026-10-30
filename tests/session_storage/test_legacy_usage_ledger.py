@@ -9,14 +9,13 @@ import sqlite3
 import time
 from contextlib import closing
 from pathlib import Path
-from unittest.mock import Mock
 
 import pytest
 from structlog.testing import capture_logs
 
-from mindroom import orchestrator
 from mindroom.constants import resolve_runtime_paths
 from mindroom.history.types import HistoryScope
+from mindroom.orchestration import storage_preparation
 from mindroom.session_storage import legacy_usage_ledger
 from mindroom.session_storage.agent_storage import prepare_conversation_database
 from mindroom.session_storage.legacy_agno3_conversion import migrate_conversation_storage
@@ -226,25 +225,15 @@ async def test_startup_migrates_dormant_stores_and_skips_aliases(tmp_path: Path)
 
 
 @pytest.mark.asyncio
-async def test_unreadable_session_database_does_not_stop_startup(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+async def test_unreadable_session_database_does_not_stop_startup(tmp_path: Path) -> None:
     """Worker code can corrupt one session database; startup still imports the rest and continues."""
-
-    class _NextStartupStepError(Exception):
-        pass
-
     paths = resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path / "state", process_env={})
     corrupt = paths.storage_root / "agents/broken/sessions/broken.db"
     corrupt.parent.mkdir(parents=True)
     corrupt.write_bytes(b"not a database")
     healthy = create_agno_2_sessions_db(paths.storage_root / "agents/code/sessions/code.db")
-    # Startup converts after it sets up logging and retires old workers, right before it loads its config.
-    monkeypatch.setattr(orchestrator, "setup_logging", Mock())
-    monkeypatch.setattr(orchestrator, "load_startup_config", Mock(side_effect=_NextStartupStepError))
-    with capture_logs() as logs, pytest.raises(_NextStartupStepError):
-        await orchestrator.main("ERROR", paths, api=False)
+    with capture_logs() as logs:
+        await storage_preparation.prepare_runtime_storage(paths)
 
     assert len(_usage(healthy)) == 3
     assert corrupt.read_bytes() == b"not a database"

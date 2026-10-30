@@ -114,27 +114,6 @@ def _router_bot_with_orchestrator(tmp_path: Path) -> tuple[AgentBot, ReadyRuntim
     return bot, orchestrator
 
 
-def _thread_root_event(
-    event_id: str,
-    *,
-    body: str,
-    origin_server_ts: int,
-    room_id: str = "!room:localhost",
-) -> nio.RoomMessageText:
-    event = nio.RoomMessageText.from_dict(
-        {
-            "content": {"body": body, "msgtype": "m.text"},
-            "event_id": event_id,
-            "sender": "@user:localhost",
-            "origin_server_ts": origin_server_ts,
-            "room_id": room_id,
-            "type": "m.room.message",
-        },
-    )
-    assert isinstance(event, nio.RoomMessageText)
-    return event
-
-
 _CONSUMER_GENERATION = UUID("20000000-0000-4000-8000-000000000001")
 _STREAM_ID = UUID("20000000-0000-4000-8000-000000000002")
 _DEVICE_ID = "READY-HOOK-DEVICE"

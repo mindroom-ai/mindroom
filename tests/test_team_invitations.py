@@ -31,28 +31,6 @@ def _bind_runtime_paths(config: Config, tmp_path: Path) -> Config:
     return bind_runtime_paths(config, test_runtime_paths(tmp_path))
 
 
-@pytest.fixture
-def mock_config_with_teams() -> Config:
-    """Create a mock config with agents and teams."""
-    return Config(
-        agents={
-            "agent1": AgentConfig(
-                display_name="Agent 1",
-                role="Test agent",
-                rooms=["test_room"],
-            ),
-        },
-        teams={
-            "team1": TeamConfig(
-                display_name="Team 1",
-                role="Test team",
-                agents=["agent1"],
-                rooms=["test_room"],
-            ),
-        },
-    )
-
-
 class TestTeamRoomMembership:
     """Test team room membership functionality."""
 

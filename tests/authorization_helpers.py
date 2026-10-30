@@ -8,7 +8,6 @@ if TYPE_CHECKING:
     import nio
 
     from mindroom.agent_reply_membership import AgentReplyMembershipIndex
-    from mindroom.agent_reply_membership_sync import AgentReplyMembershipSync
     from mindroom.bot import AgentBot
     from mindroom.commands.handler import CommandHandlerContext
     from mindroom.config.main import Config
@@ -88,20 +87,12 @@ def make_test_bot_for_entity(
     agent_user: AgentMatrixUser,
     config: Config,
     runtime_paths: RuntimePaths,
-    *,
-    agent_reply_memberships: AgentReplyMembershipIndex | None = None,
-    agent_reply_membership_sync: AgentReplyMembershipSync | None = None,
 ) -> AgentBot:
     """Build one configured entity's bot through the production factory, in a ready test runtime of its own."""
     from mindroom.bot import create_bot_for_entity  # noqa: PLC0415
     from tests.runtime_fakes import ready_runtime  # noqa: PLC0415
 
-    runtime = ready_runtime(
-        config,
-        runtime_paths,
-        agent_reply_memberships=agent_reply_memberships,
-        agent_reply_membership_sync=agent_reply_membership_sync,
-    )
+    runtime = ready_runtime(config, runtime_paths)
     bot = create_bot_for_entity(entity_name, agent_user, runtime)
     runtime.fleet.add(entity_name, bot)
     return bot

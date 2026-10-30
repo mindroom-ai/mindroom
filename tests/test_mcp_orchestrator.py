@@ -358,7 +358,7 @@ async def test_startup_room_setup_binds_external_trigger_runtime_after_setup(tmp
         assert started_bots == [bot]
         call_order.append("setup")
 
-    def bind_runtime(_config: Config | None, _bots: object) -> None:
+    def bind_runtime(_config: Config, _bots: object) -> None:
         call_order.append("bind")
 
     with (
@@ -499,34 +499,11 @@ async def test_unreferenced_mcp_catalog_change_skips_response_drain(tmp_path: Pa
     assert orchestrator.response_admission_gate.closed is False
 
 
-def _mcp_demo_config(runtime_paths: RuntimePaths) -> Config:
-    """Return a config whose `code` agent uses the `demo` MCP server's tools."""
-    return Config.validate_with_runtime(
-        {
-            "models": {"default": {"provider": "openai", "id": "test-model"}},
-            "mcp_servers": {
-                "demo": {
-                    "transport": "stdio",
-                    "command": "npx",
-                },
-            },
-            "agents": {
-                "code": {
-                    "display_name": "Code",
-                    "role": "Write code",
-                    "tools": ["mcp_demo"],
-                },
-            },
-        },
-        runtime_paths,
-    )
-
-
 @pytest.mark.asyncio
 async def test_handle_mcp_catalog_change_sets_up_rooms_before_trigger_runtime_rebind(tmp_path: Path) -> None:
     """MCP restarts refresh rooms before publishing trigger runtime."""
     runtime_paths = _runtime_paths(tmp_path)
-    orchestrator = _MultiAgentOrchestrator(runtime_paths=runtime_paths, config=_mcp_demo_config(runtime_paths))
+    orchestrator = _MultiAgentOrchestrator(runtime_paths=runtime_paths, config=_config(tmp_path))
     orchestrator.running = True
     install_bots(orchestrator, {"code": MagicMock(spec=AgentBot)})
     started_bot = MagicMock(spec=AgentBot)
@@ -536,7 +513,7 @@ async def test_handle_mcp_catalog_change_sets_up_rooms_before_trigger_runtime_re
         assert started_bots == [started_bot]
         call_order.append("setup")
 
-    def bind_runtime(_config: Config | None, _bots: object) -> None:
+    def bind_runtime(_config: Config, _bots: object) -> None:
         call_order.append("bind")
 
     with (
@@ -565,7 +542,7 @@ async def test_mcp_restart_rebinds_trigger_delivery_unless_shutdown_withdrew_it(
 ) -> None:
     """A failed room setup still rebinds trigger delivery; a cancelled setup, or one shutdown began during, does not."""
     runtime_paths = _runtime_paths(tmp_path)
-    orchestrator = _MultiAgentOrchestrator(runtime_paths=runtime_paths, config=_mcp_demo_config(runtime_paths))
+    orchestrator = _MultiAgentOrchestrator(runtime_paths=runtime_paths, config=_config(tmp_path))
     orchestrator.running = True
     install_bots(orchestrator, {"code": MagicMock(spec=AgentBot)})
 
@@ -758,7 +735,7 @@ async def test_apply_config_update_plan_rebinds_trigger_runtime_after_support_se
         assert previous_config is current_config
         call_order.append("support")
 
-    def bind_runtime(_config: Config | None, _bots: object) -> None:
+    def bind_runtime(_config: Config, _bots: object) -> None:
         assert _config is new_config
         call_order.append("bind")
 

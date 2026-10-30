@@ -11,7 +11,6 @@ import nio
 import pytest
 
 import mindroom.hooks as hook_api
-from mindroom.agent_reply_membership import AgentReplyMembershipIndex
 from mindroom.config.main import Config
 from mindroom.config.plugin import PluginEntryConfig
 from mindroom.constants import ROUTER_AGENT_NAME
@@ -107,30 +106,6 @@ def _room_member_event(
     return event
 
 
-def _sync_response_with_state(
-    room_id: str,
-    events: list[object],
-    *,
-    timeline_events: list[object] | None = None,
-    timeline_limited: bool = False,
-) -> nio.SyncResponse:
-    response = MagicMock()
-    response.__class__ = nio.SyncResponse
-    response.next_batch = "s_next"
-    response.unrecovered_room_ids = frozenset()
-    response.rooms = SimpleNamespace(
-        invite={},
-        join={
-            room_id: SimpleNamespace(
-                state=events,
-                timeline=SimpleNamespace(events=timeline_events or [], limited=timeline_limited),
-            ),
-        },
-        leave={},
-    )
-    return cast("nio.SyncResponse", response)
-
-
 def _router_bot(
     tmp_path: Path,
     *,
@@ -140,13 +115,7 @@ def _router_bot(
     runtime_paths = test_runtime_paths(tmp_path)
     config = bind_runtime_paths(Config(bot_accounts=bot_accounts or [], mindroom_user=mindroom_user), runtime_paths)
     persist_entity_accounts(config, runtime_paths, usernames={ROUTER_AGENT_NAME: "mindroom_router"})
-    memberships = AgentReplyMembershipIndex()
-    bot = make_test_agent_bot(
-        _router_user(),
-        config=config,
-        runtime_paths=runtime_paths,
-        agent_reply_memberships=memberships,
-    )
+    bot = make_test_agent_bot(_router_user(), config=config, runtime_paths=runtime_paths)
     install_runtime_journal_support(bot)
     bot.client = make_matrix_client_mock(user_id=bot.agent_user.user_id)
     bot.client.homeserver = "http://localhost:8008"

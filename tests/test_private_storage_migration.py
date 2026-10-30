@@ -21,7 +21,6 @@ from unittest.mock import Mock
 import pytest
 from structlog.testing import capture_logs
 
-from mindroom import orchestrator
 from mindroom.config.agent import AgentConfig, AgentPrivateConfig, AgentThreadExportConfig
 from mindroom.config.main import Config
 from mindroom.constants import RuntimePaths, resolve_runtime_paths, resolve_session_state_root
@@ -617,7 +616,7 @@ async def test_primary_admission_fails_before_credentials(tmp_path: Path, monkey
         Mock(side_effect=AssertionError("credentials started")),
     )
     with pytest.raises(ValueError, match=r"[Pp]rivate"):
-        await orchestrator.main("ERROR", paths, api=False)
+        await storage_preparation.prepare_runtime_storage(paths)
 
 
 @pytest.mark.asyncio

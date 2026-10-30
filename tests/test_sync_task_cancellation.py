@@ -2874,7 +2874,6 @@ async def test_new_agent_not_started_twice(tmp_path: Path, fleet_sync: _FleetSyn
 
         mock_existing_bot = MagicMock(spec=AgentBot)
         mock_existing_bot.running = True
-        mock_existing_bot.config = old_config
         mock_existing_bot.matrix_id = MatrixID.parse("@mindroom_general:localhost")
         mock_router_bot = MagicMock(spec=AgentBot)
         mock_router_bot.running = True
@@ -2957,7 +2956,6 @@ async def test_reload_replaces_restarted_entities_when_one_reply_outlives_the_dr
     old_bots: dict[str, AsyncMock] = {}
     for entity_name in ("general", "coach", ROUTER_AGENT_NAME):
         bot = _fleet_bot(entity_name)
-        bot.config = old_config
         bot.matrix_id = MatrixID.parse(f"@mindroom_{entity_name}:localhost")
         bot.schedule_reply_authorized_call_reconciliation = MagicMock()
         bot.schedule_reply_authorized_call_revocation = MagicMock()

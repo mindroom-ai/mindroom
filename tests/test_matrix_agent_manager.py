@@ -38,7 +38,7 @@ from mindroom.matrix.users import (
 )
 from mindroom.matrix_identifiers import agent_username_localpart
 from mindroom.orchestrator import _MultiAgentOrchestrator
-from tests.conftest import TEST_ACCESS_TOKEN, TEST_PASSWORD, bind_runtime_paths
+from tests.conftest import TEST_ACCESS_TOKEN, TEST_PASSWORD
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -64,28 +64,6 @@ def _runtime_paths(tmp_path: Path, **env: str) -> constants_mod.RuntimePaths:
     config_path = tmp_path / "config.yaml"
     config_path.write_text("agents: {}\nmodels: {}\nrouter:\n  model: default\n", encoding="utf-8")
     return constants_mod.resolve_runtime_paths(config_path=config_path, process_env={**os.environ, **env})
-
-
-def _bound_agent_manager_config(tmp_path: Path) -> Config:
-    runtime_paths = _runtime_paths(tmp_path)
-    return bind_runtime_paths(
-        Config.model_validate(
-            {
-                "agents": {
-                    "calculator": {"display_name": "CalculatorAgent"},
-                    "general": {"display_name": "GeneralAgent"},
-                },
-                "teams": {
-                    "helpers": {
-                        "display_name": "HelpersTeam",
-                        "role": "Coordinate support work",
-                        "agents": ["calculator", "general"],
-                    },
-                },
-            },
-        ),
-        runtime_paths,
-    )
 
 
 def _recording_httpx_async_client(
@@ -176,17 +154,6 @@ def temp_matrix_users_file(tmp_path: Path) -> Path:
     with file_path.open("w") as f:
         yaml.dump(initial_data, f)
     return file_path
-
-
-@pytest.fixture
-def mock_agent_config() -> dict:
-    """Mock agent configuration."""
-    return {
-        "agents": {
-            "calculator": {"display_name": "CalculatorAgent"},
-            "general": {"display_name": "GeneralAgent"},
-        },
-    }
 
 
 class TestAgentMatrixUser:
