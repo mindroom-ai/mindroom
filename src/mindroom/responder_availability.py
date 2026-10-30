@@ -25,14 +25,9 @@ def materializable_agent_names_for_orchestrator(
     return resolve_live_shared_agent_names(orchestrator, config=config)
 
 
-def live_responder_entity_names(
-    orchestrator: OrchestratorRuntime | None,
-    config: Config,
-) -> set[str] | None:
-    """Return running agent/team responder bot names when runtime state is known."""
-    if orchestrator is None:
-        return None
-    return {name for name in orchestrator.running_entity_names() if name in config.agents or name in config.teams}
+def live_responder_entity_names(orchestrator: OrchestratorRuntime | None) -> set[str] | None:
+    """Return the names of the entities the runtime runs, when runtime state is known."""
+    return None if orchestrator is None else set(orchestrator.running_entity_names())
 
 
 def _configured_team_is_materializable(

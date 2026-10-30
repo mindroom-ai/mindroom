@@ -130,8 +130,6 @@ class BotRuntimeState:
 
     async def wait_for_admission_or_shutdown(self) -> bool:
         """Return whether the runtime reopened response admission before this generation stopped accepting work."""
-        if self.phase is not RunPhase.ACCEPTING:
-            return False
         admission_opened = asyncio.create_task(self.response_admission_gate.wait_until_open())
         stopping = asyncio.create_task(self._stopping.wait())
         try:

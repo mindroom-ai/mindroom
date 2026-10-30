@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import contextvars
+from contextlib import nullcontext
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -498,11 +499,9 @@ async def test_unreferenced_mcp_catalog_change_skips_response_drain(tmp_path: Pa
     assert orchestrator.response_admission_gate.closed is False
 
 
-@pytest.mark.asyncio
-async def test_handle_mcp_catalog_change_sets_up_rooms_before_trigger_runtime_rebind(tmp_path: Path) -> None:
-    """MCP restarts refresh rooms before publishing trigger runtime."""
-    runtime_paths = _runtime_paths(tmp_path)
-    config = Config.validate_with_runtime(
+def _mcp_demo_config(runtime_paths: RuntimePaths) -> Config:
+    """Return a config whose `code` agent uses the `demo` MCP server's tools."""
+    return Config.validate_with_runtime(
         {
             "models": {"default": {"provider": "openai", "id": "test-model"}},
             "mcp_servers": {
@@ -521,7 +520,13 @@ async def test_handle_mcp_catalog_change_sets_up_rooms_before_trigger_runtime_re
         },
         runtime_paths,
     )
-    orchestrator = _MultiAgentOrchestrator(runtime_paths=runtime_paths, config=config)
+
+
+@pytest.mark.asyncio
+async def test_handle_mcp_catalog_change_sets_up_rooms_before_trigger_runtime_rebind(tmp_path: Path) -> None:
+    """MCP restarts refresh rooms before publishing trigger runtime."""
+    runtime_paths = _runtime_paths(tmp_path)
+    orchestrator = _MultiAgentOrchestrator(runtime_paths=runtime_paths, config=_mcp_demo_config(runtime_paths))
     orchestrator.running = True
     install_bots(orchestrator, {"code": MagicMock(spec=AgentBot)})
     started_bot = MagicMock(spec=AgentBot)
@@ -546,6 +551,46 @@ async def test_handle_mcp_catalog_change_sets_up_rooms_before_trigger_runtime_re
         await orchestrator._handle_mcp_catalog_change("demo")
 
     assert call_order == ["setup", "bind"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("room_setup", "rebinds"),
+    [("fails", True), ("is_cancelled", False), ("outlives_shutdown", False)],
+)
+async def test_mcp_restart_rebinds_trigger_delivery_unless_shutdown_withdrew_it(
+    tmp_path: Path,
+    room_setup: str,
+    rebinds: bool,
+) -> None:
+    """A failed room setup still rebinds trigger delivery; a cancelled setup, or one shutdown began during, does not."""
+    runtime_paths = _runtime_paths(tmp_path)
+    orchestrator = _MultiAgentOrchestrator(runtime_paths=runtime_paths, config=_mcp_demo_config(runtime_paths))
+    orchestrator.running = True
+    install_bots(orchestrator, {"code": MagicMock(spec=AgentBot)})
+
+    async def setup_rooms(_started_bots: list[object]) -> None:
+        if room_setup == "fails":
+            msg = "room setup failed"
+            raise RuntimeError(msg)
+        if room_setup == "is_cancelled":
+            raise asyncio.CancelledError
+        orchestrator.running = False
+
+    expected_error = {"fails": RuntimeError, "is_cancelled": asyncio.CancelledError}.get(room_setup)
+    with (
+        patch.object(
+            orchestrator.fleet,
+            "replace",
+            new=AsyncMock(return_value=EntityStartResults(started_bots=[MagicMock(spec=AgentBot)])),
+        ),
+        patch.object(orchestrator._rooms, "setup", side_effect=setup_rooms),
+        patch.object(orchestrator._external_trigger_runtime, "bind_if_ready") as bind,
+        pytest.raises(expected_error) if expected_error is not None else nullcontext(),
+    ):
+        await orchestrator._handle_mcp_catalog_change("demo")
+
+    assert bind.called is rebinds
 
 
 @pytest.mark.asyncio

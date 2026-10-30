@@ -244,10 +244,7 @@ class TurnPolicy:
         if materializable_agent_names is not None and self.deps.agent_name in self.deps.runtime.config.agents:
             materializable_agent_names = materializable_agent_names | {self.deps.agent_name}
         live_entity_names = (
-            live_responder_entity_names(
-                self.deps.runtime.orchestrator,
-                self.deps.runtime.config,
-            )
+            live_responder_entity_names(self.deps.runtime.orchestrator)
             if materializable_agent_names is not None
             else None
         )

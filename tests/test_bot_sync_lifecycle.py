@@ -561,6 +561,42 @@ class TestBotRunPhase(ThreadingBehaviorTestBase):
         assert await self._accepts_waiting_responses(bot)
 
     @pytest.mark.asyncio
+    async def test_a_drain_refuses_a_response_already_waiting_for_admission(self, bot: AgentBot) -> None:
+        """A response waiting while a config apply holds admission closed is refused when a drain begins."""
+        gate = bot.orchestrator.response_admission_gate
+        gate.close()
+        try:
+            waiting = asyncio.create_task(bot._runtime_view.wait_for_admission_or_shutdown())
+            await asyncio.sleep(0)
+            assert not waiting.done()
+            bot._sync_shutdown_budget = ShutdownBudget.start(0.01)
+            await asyncio.wait_for(bot.prepare_for_sync_shutdown(shutdown_intent=SYNC_RESTART_SHUTDOWN), timeout=2.0)
+            assert await asyncio.wait_for(waiting, timeout=1.0) is False
+        finally:
+            gate.reopen()
+
+    @pytest.mark.asyncio
+    async def test_a_response_waiting_for_admission_enters_once_the_apply_reopens_it(self, bot: AgentBot) -> None:
+        """A response that waited out a config apply is admitted when the gate reopens."""
+        gate = bot.orchestrator.response_admission_gate
+        gate.close()
+        waiting = asyncio.create_task(bot._runtime_view.wait_for_admission_or_shutdown())
+        await asyncio.sleep(0)
+        assert not waiting.done()
+        gate.reopen()
+        assert await asyncio.wait_for(waiting, timeout=1.0) is True
+
+    @pytest.mark.asyncio
+    async def test_a_drain_after_process_shutdown_keeps_the_generation_shut_down(self, bot: AgentBot) -> None:
+        """A stop that drains once process shutdown began never turns the shutdown back into a restart drain."""
+        bot.begin_process_shutdown()
+        bot._sync_shutdown_budget = ShutdownBudget.start(0.01)
+
+        await asyncio.wait_for(bot.prepare_for_sync_shutdown(shutdown_intent=SYNC_RESTART_SHUTDOWN), timeout=2.0)
+
+        assert bot._runtime_view.phase is RunPhase.SHUTTING_DOWN
+
+    @pytest.mark.asyncio
     async def test_process_shutdown_refuses_everything_and_no_sync_loop_reopens_it(self, bot: AgentBot) -> None:
         """Orderly process shutdown closes admission for good, including new inbox responses."""
         bot.begin_process_shutdown()

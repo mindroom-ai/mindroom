@@ -54,7 +54,7 @@ async def available_room_agents(context: ToolRuntimeContext, room_id: str) -> li
         context.config,
         context.runtime_paths,
         materializable_agent_names=materializable_agent_names_for_orchestrator(context.orchestrator, context.config),
-        live_entity_names=live_responder_entity_names(context.orchestrator, context.config),
+        live_entity_names=live_responder_entity_names(context.orchestrator),
     )
     registry = entity_identity_registry(context.config, context.runtime_paths)
     agents: dict[str, _MatrixRoomAgent] = {}

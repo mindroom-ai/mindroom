@@ -7816,6 +7816,47 @@ async def test_router_early_skip_only_honors_joined_non_agent_mentions(
 
 
 @pytest.mark.asyncio
+async def test_router_early_skip_keeps_a_question_to_the_router_itself(tmp_path: Path) -> None:
+    """A message mentioning only the router reaches its dispatch plan, which answers it with guidance."""
+    bot = _make_bot(tmp_path, agent_name=ROUTER_AGENT_NAME)
+    room = nio.MatrixRoom("!room:localhost", bot.matrix_id.full_id)
+    room.add_member(bot.matrix_id.full_id, "Router", None)
+    room.add_member("@user:localhost", "User", None)
+    room.members_synced = True
+    event = _text_event(event_id="$router-mention", body=f"hello {bot.matrix_id.full_id}")
+    content = event.source["content"]
+    assert isinstance(content, dict)
+    content["m.mentions"] = {"user_ids": [bot.matrix_id.full_id]}
+
+    should_skip = await bot._turn_ingress._should_skip_router_before_shared_ingress_work(
+        room,
+        event,
+        facts=make_ingress_facts(event.sender, requester_user_id="@user:localhost"),
+        thread_id=None,
+    )
+
+    assert should_skip is False
+
+
+@pytest.mark.asyncio
+async def test_router_early_skip_continues_when_the_thread_snapshot_is_missing(tmp_path: Path) -> None:
+    """Without a thread snapshot the early skip cannot tell whom a follow-up addresses, so normal ingress decides."""
+    bot = _make_bot(tmp_path, agent_name=ROUTER_AGENT_NAME)
+    room = _make_room()
+    event = _text_event(event_id="$follow-up", body="and then?")
+
+    with patch.object(bot._turn_ingress.deps.resolver, "dispatch_thread_snapshot", AsyncMock(return_value=None)):
+        should_skip = await bot._turn_ingress._should_skip_router_before_shared_ingress_work(
+            room,
+            event,
+            facts=make_ingress_facts(event.sender, requester_user_id="@user:localhost"),
+            thread_id="$thread",
+        )
+
+    assert should_skip is False
+
+
+@pytest.mark.asyncio
 async def test_first_router_turn_refreshes_lazy_members_before_mention_routing(tmp_path: Path) -> None:
     """A partial lazy-member cache must not hide a joined mentioned participant."""
     bot = _make_bot(tmp_path, agent_name=ROUTER_AGENT_NAME)
