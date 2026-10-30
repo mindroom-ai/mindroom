@@ -354,25 +354,14 @@ class TeamTurnSpec:
     configured_team_name: str | None = None
     # The Matrix account the team's reply is sent from, which its prompt names.
     response_sender_id: str | None = None
-    reason_prefix: str = "Team request"
 
 
 @dataclass
-class _TeamTurnHolder:
-    """Live per-turn team state shared between the turn's attempts.
-
-    ``members`` are the members the turn's latest attempt runs with: the ones the turn resolved, on the models the
-    latest continuation that applied a model to the members chose.
-    """
-
-    members: ResolvedExactTeamMembers
-
-
-@dataclass(frozen=True)
 class _TeamTurn:
-    """The constants of one team turn, shared by its attempts.
+    """The constants of one team turn, shared by its attempts, and the members its latest attempt runs with.
 
-    ``config`` is the config the turn started with, which every attempt builds its leader and members under, as an
+    ``members`` are the ones the turn resolved, on the models the latest continuation that applied a model to the
+    members chose. ``config`` is the config the turn started with, which every attempt builds its leader and members under, as an
     agent turn runs on the config it was given; ``spec.orchestrator`` supplies the runtime paths and the knowledge
     refresh scheduler.
     """
@@ -381,7 +370,7 @@ class _TeamTurn:
     spec: TeamTurnSpec
     config: Config
     requested_agent_names: list[str]
-    holder: _TeamTurnHolder
+    members: ResolvedExactTeamMembers
     # The zone of the entity whose bot runs the turn, which dates all of it.
     timezone: str
 
@@ -438,13 +427,12 @@ class _TeamTurn:
 
         Each attempt's team builds only the members its leader delegates to.
         """
-        holder = self.holder
         if continuation_state.apply_model_to_team_members and continuation_state.active_model_name is not None:
-            holder.members = replace(
-                holder.members,
+            self.members = replace(
+                self.members,
                 model_names=dict.fromkeys(self.requested_agent_names, continuation_state.active_model_name),
             )
-        return holder.members
+        return self.members
 
     async def start_attempt(
         self,
@@ -765,7 +753,7 @@ def _team_turn(spec: TeamTurnSpec, ctx: ResponseTurnContext) -> _TeamTurn | str:
             ctx.execution_identity,
             config=config,
             unavailable_bases=unavailable_bases,
-            reason_prefix=spec.reason_prefix,
+            reason_prefix="Team request",
             configured_team_name=spec.configured_team_name,
             active_model_names=spec.member_model_names,
         )
@@ -784,7 +772,7 @@ def _team_turn(spec: TeamTurnSpec, ctx: ResponseTurnContext) -> _TeamTurn | str:
         spec=spec,
         config=config,
         requested_agent_names=requested_agent_names,
-        holder=_TeamTurnHolder(members=team_members),
+        members=team_members,
         # ``ctx`` still names the entity whose bot runs the turn; the turn's own context took the team's label above.
         timezone=entity_timezone(config, ctx.entity_label),
     )

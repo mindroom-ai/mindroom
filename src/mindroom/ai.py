@@ -275,6 +275,7 @@ def _agent_turn_adapter(
         [TurnRunState, TurnContinuationRunState],
         AsyncIterator[AIStreamChunk | AttemptResolved],
     ],
+    error_text: Callable[[Exception], str],
 ) -> TurnAdapter[AIStreamChunk]:
     """Return the turn driver's adapter for one agent response: its scope, its attempts, and its error reply."""
 
@@ -299,11 +300,7 @@ def _agent_turn_adapter(
         on_scope_loaded=_on_scope_loaded,
         make_text_chunk=TextDelta,
         user_message=user_message,
-        unexpected_error_text=partial(
-            get_user_friendly_error_message,
-            agent_name=agent_name,
-            runtime_paths=runtime_paths,
-        ),
+        unexpected_error_text=error_text,
         entity_name=agent_name,
     )
 
@@ -1074,8 +1071,8 @@ def _with_background_tool_jobs(
 class TurnResult:
     """How one blocking agent turn ended: its reply text, and the attempt that ended it.
 
-    A completed turn holds the attempt that completed it, and a turn whose attempt failed with a reply text holds that
-    attempt; a turn with neither was skipped, or failed where no attempt could report it.
+    A completed turn holds the attempt that completed it, and a turn that failed with a reply text holds that failure;
+    a turn with neither was skipped, or refused before it ran, as one that names a configured team is.
     """
 
     text: str
@@ -1246,6 +1243,8 @@ async def stream_agent_response(  # noqa: C901, PLR0915
     ctx = _with_background_tool_jobs(ctx, config, runtime_paths)
     sinks = sinks or TurnSinks()
     agent_name = ctx.entity_label
+    # The agent's reply to an error, its credentials redacted.
+    error_text = partial(get_user_friendly_error_message, agent_name=agent_name, runtime_paths=runtime_paths)
     logger.info("AI request", agent=agent_name, room_id=ctx.room_id)
     session_id = _turn_session_id(ctx)
     media_inputs = ctx.media or MediaInputs()
@@ -1253,7 +1252,7 @@ async def stream_agent_response(  # noqa: C901, PLR0915
     try:
         _assert_agent_target(agent_name, config)
     except ValueError as e:
-        yield get_user_friendly_error_message(e, agent_name, runtime_paths=runtime_paths)
+        yield error_text(e)
         return
 
     async def _run_attempt(  # noqa: C901
@@ -1277,7 +1276,7 @@ async def stream_agent_response(  # noqa: C901, PLR0915
                 yield AttemptResolved(skipped)
                 return
             yield AttemptResolved(
-                HandledAttempt(get_user_friendly_error_message(e, agent_name, runtime_paths=runtime_paths), error=e),
+                HandledAttempt(error_text(e), error=e),
             )
             return
         prepared_run = run_context.prepared_run
@@ -1299,12 +1298,12 @@ async def stream_agent_response(  # noqa: C901, PLR0915
             if skipped := skip_unapproved_attempt(ctx.participation, reason="run_failed_before_decision"):
                 yield AttemptResolved(skipped)
             else:
-                error_text = get_user_friendly_error_message(state.error, agent_name, runtime_paths=runtime_paths)
+                failure_text = error_text(state.error)
                 # Below the text this attempt already streamed, the error starts a paragraph of its own.
                 shown = state.assistant_text
                 yield AttemptResolved(
                     HandledAttempt(
-                        append_stream_text(shown, error_text, separate=True)[len(shown) :],
+                        append_stream_text(shown, failure_text, separate=True)[len(shown) :],
                         build_run_metadata=_attempt_run_metadata_builder(
                             run_context,
                             record,
@@ -1377,6 +1376,7 @@ async def stream_agent_response(  # noqa: C901, PLR0915
         config=config,
         execution_identity=ctx.execution_identity,
         run_attempt=_run_attempt,
+        error_text=error_text,
     )
     response_stream = stream_response_turn(
         ctx,

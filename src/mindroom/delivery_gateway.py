@@ -2290,7 +2290,7 @@ class DeliveryGateway:
         self,
         request: FinalizeStreamedResponseRequest,
     ) -> FinalDeliveryOutcome:
-        """Apply hooks and any final edit needed after streamed delivery completes."""
+        """Resolve how a finished stream ended from its transport facts, sending a final-only body as a whole answer."""
         stream_outcome = request.stream_transport_outcome
         try:
             streamed_event_id = stream_outcome.last_physical_stream_event_id

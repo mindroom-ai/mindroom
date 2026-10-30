@@ -66,7 +66,7 @@ from mindroom.streaming import (
 )
 from mindroom.streaming import _consume_streaming_chunks as _consume_streaming_chunks_impl
 from mindroom.timing import DispatchPipelineTiming
-from mindroom.tool_system.events import StructuredStreamChunk, format_tool_started_event
+from mindroom.tool_system.events import StructuredStreamChunk, ToolTraceEntry, format_tool_started_event
 from mindroom.tool_system.runtime_context import WorkerProgressEvent, get_worker_progress_pump
 from mindroom.workers.models import WorkerReadyProgress
 from tests.access_schema_support import with_current_room_member_access
@@ -214,6 +214,40 @@ async def test_delivery_queue_bounds_optional_updates() -> None:
     assert delivery_queue.qsize() == 33
     _queue_delivery_request(delivery_queue, force_refresh=True)
     assert delivery_queue.qsize() == 34
+
+
+def _call(name: str) -> ToolTraceEntry:
+    return ToolTraceEntry(type="tool_call_started", tool_name=name)
+
+
+@pytest.mark.parametrize(
+    ("existing", "incoming", "expected"),
+    [
+        pytest.param(["a"], ["a", "b"], ["a", "b"], id="incoming-extends"),
+        pytest.param(["a", "b"], ["a"], ["a", "b"], id="incoming-is-a-shorter-prefix"),
+        pytest.param(["a"], ["b"], ["b"], id="same-length-takes-incoming"),
+        pytest.param(["a", "b", "c"], ["x", "y"], ["a", "b", "c"], id="longer-existing-wins"),
+    ],
+)
+def test_a_tool_trace_snapshot_never_drops_the_longer_trace(
+    tmp_path: Path,
+    existing: list[str],
+    incoming: list[str],
+    expected: list[str],
+) -> None:
+    """A snapshot from another stream style keeps the longer trace, and a same-length one replaces it."""
+    config = bind_runtime_paths(Config(), test_runtime_paths(tmp_path))
+    streaming = StreamingResponse(
+        target=MessageTarget.resolve("!test:localhost", None, "$original_123"),
+        config=config,
+        runtime_paths=runtime_paths_for(config),
+        **reply_hooks(),
+    )
+    streaming.tool_trace = [_call(name) for name in existing]
+
+    streaming.apply_tool_trace_snapshot([_call(name) for name in incoming])
+
+    assert [entry.tool_name for entry in streaming.tool_trace] == expected
 
 
 @pytest.mark.asyncio

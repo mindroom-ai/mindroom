@@ -593,12 +593,10 @@ class ResponseLifecycleCoordinator:
             # This response now owns the reservation locally. Descendant tasks
             # must acquire their own lifecycle instead of inheriting this one-shot claim.
             _current_response_lifecycle_reservation.set(None)
-        lock_acquired = False
         try:
             if pipeline_timing is not None:
                 pipeline_timing.mark("lock_wait_start")
             await self._acquire_response_turn_lock(lifecycle_lock, reservation)
-            lock_acquired = True
             if pipeline_timing is not None:
                 pipeline_timing.mark("lock_acquired")
             try:
@@ -619,8 +617,7 @@ class ResponseLifecycleCoordinator:
                         queued_signal.mid_turn_gate = None
                         await finalize_queued_notice_response_turn_async(notice_context)
             finally:
-                if lock_acquired:
-                    await self._release_response_turn_lock(lifecycle_lock, reservation)
+                await self._release_response_turn_lock(lifecycle_lock, reservation)
         finally:
             await self._finish_response_turn(
                 reservation=reservation,

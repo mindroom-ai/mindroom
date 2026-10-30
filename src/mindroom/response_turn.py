@@ -410,7 +410,7 @@ class TurnSinks:
     turn_recorder: TurnRecorder | None = None
     run_metadata_collector: dict[str, Any] | None = None
     on_completed: Callable[[CompletedAttempt], None] | None = None
-    # Receives the attempt that failed with a reply text.
+    # Receives the failure the turn answered with a reply text, an attempt's or one no attempt handled.
     on_failed: Callable[[HandledAttempt], None] | None = None
     # Receives each attempt's run id and configured model name before the attempt starts.
     on_attempt_start: Callable[[str, str], None] | None = None
@@ -857,25 +857,20 @@ def _persist_interrupted(
         logger.exception("Failed to persist interrupted replay state", entity=ctx.entity_label)
 
 
-async def _failed_turn_text(
+async def _settle_failure(
     ctx: ResponseTurnContext,
     adapter: TurnAdapter[Any],
     sinks: TurnSinks,
     run: TurnRunState,
     continuation: TurnContinuationRunState,
-    error: Exception,
-) -> str | None:
-    """Settle a turn that raised: return its error reply, None when it is skipped before participation."""
-    if skip_unapproved_attempt(ctx.participation, reason="run_failed_before_decision"):
-        run.record.mark_skipped()
-        logger.exception("Response turn skipped before participation", entity=ctx.entity_label)
-        return None
+    failure: HandledAttempt,
+) -> str:
+    """Record a failed turn as interrupted and report its failure to the caller; return its error reply."""
+    _publish_run_metadata(sinks, failure.build_run_metadata)
     await _record_interrupted(ctx, adapter, sinks, run, continuation, RunStatus.error)
-    logger.exception("Response turn failed", entity=ctx.entity_label)
-    text = adapter.unexpected_error_text(error)
     if sinks.on_failed is not None:
-        sinks.on_failed(HandledAttempt(text, error=error))
-    return text
+        sinks.on_failed(failure)
+    return failure.text
 
 
 def _settle_empty_run(
@@ -1213,11 +1208,7 @@ async def _stream_response_turn[ChunkT](  # noqa: C901, PLR0912, PLR0915
                     run.record.mark_suspended()
                     raise ResponsePausedForApproval(replace(resolution, continuation_count=continuation_count))
                 if isinstance(resolution, HandledAttempt):
-                    _publish_run_metadata(sinks, resolution.build_run_metadata)
-                    await _record_interrupted(ctx, adapter, sinks, run, continuation, RunStatus.error)
-                    if sinks.on_failed is not None:
-                        sinks.on_failed(resolution)
-                    yield resolution.text
+                    yield await _settle_failure(ctx, adapter, sinks, run, continuation, resolution)
                     return
                 settle = _settle_completed_attempt(
                     ctx,
@@ -1244,6 +1235,12 @@ async def _stream_response_turn[ChunkT](  # noqa: C901, PLR0912, PLR0915
     except ResponsePausedForApproval:
         raise
     except Exception as e:
-        failure_text = await _failed_turn_text(ctx, adapter, sinks, run, continuation, e)
-        if failure_text is not None:
-            yield failure_text
+        if skip_unapproved_attempt(ctx.participation, reason="run_failed_before_decision"):
+            # A failure before the participation decision stays quiet: the turn is skipped.
+            run.record.mark_skipped()
+            logger.exception("Response turn skipped before participation", entity=ctx.entity_label)
+            return
+        failure = HandledAttempt(adapter.unexpected_error_text(e), error=e)
+        text = await _settle_failure(ctx, adapter, sinks, run, continuation, failure)
+        logger.exception("Response turn failed", entity=ctx.entity_label)
+        yield text

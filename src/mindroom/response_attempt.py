@@ -243,5 +243,4 @@ __all__ = [
     "ResponseAttemptRequest",
     "ResponseAttemptRunner",
     "SpanAttempt",
-    "log_cancelled_response",
 ]

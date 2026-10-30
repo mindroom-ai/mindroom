@@ -187,6 +187,10 @@ def format_stream_error_note(error: Exception | str) -> str:
     return f"{_STREAM_ERROR_RESPONSE_NOTE}: {normalized_error}]**"
 
 
+# The notes that end a reply a Stop, a restart, or an interruption cut short, in the order their stripping checks them.
+_PARTIAL_REPLY_NOTES = (CANCELLED_RESPONSE_NOTE, _INTERRUPTED_RESPONSE_NOTE, RESTART_INTERRUPTED_RESPONSE_NOTE)
+
+
 def is_interrupted_partial_reply(text: object) -> bool:
     """Return True when text carries a terminal interrupted partial-reply marker."""
     if not isinstance(text, str):
@@ -194,13 +198,7 @@ def is_interrupted_partial_reply(text: object) -> bool:
     trimmed_text = text.rstrip()
     return (
         has_legacy_terminal_suffix(trimmed_text)
-        or trimmed_text.endswith(
-            (
-                CANCELLED_RESPONSE_NOTE,
-                _INTERRUPTED_RESPONSE_NOTE,
-                RESTART_INTERRUPTED_RESPONSE_NOTE,
-            ),
-        )
+        or trimmed_text.endswith(_PARTIAL_REPLY_NOTES)
         or (_STREAM_ERROR_RESPONSE_NOTE in trimmed_text)
     )
 
@@ -209,11 +207,7 @@ def clean_partial_reply_text(text: str) -> str:
     """Strip partial-reply status notes from persisted text."""
     cleaned = strip_legacy_terminal_suffixes(text.rstrip())
 
-    for marker in (
-        CANCELLED_RESPONSE_NOTE,
-        _INTERRUPTED_RESPONSE_NOTE,
-        RESTART_INTERRUPTED_RESPONSE_NOTE,
-    ):
+    for marker in _PARTIAL_REPLY_NOTES:
         if cleaned.endswith(marker):
             cleaned = cleaned[: -len(marker)].rstrip()
 
@@ -990,7 +984,6 @@ class StreamingResponse:
         if not self.accumulated_text.strip() and not allow_empty_progress and not warmup_suffix_lines:
             return None
 
-        assert self.target is not None
         return _StreamingDeliverySnapshot(
             config=self.config,
             runtime_paths=self.runtime_paths,
@@ -1033,8 +1026,6 @@ class StreamingResponse:
             # nothing. Cancellation is left alone: that is the turn ending.
             try:
                 transformed = await self.final_text_transform(snapshot.accumulated_text)
-            except asyncio.CancelledError:
-                raise
             except Exception:
                 logger.exception("final_response_transform_failed_preserving_streamed_text")
             else:
@@ -1288,30 +1279,9 @@ class ReplacementStreamingResponse(StreamingResponse):
         self.last_delta_at = time.time()
 
 
-def _longest_common_prefix_len(first: list[ToolTraceEntry], second: list[ToolTraceEntry]) -> int:
-    """Return the number of leading tool-trace entries shared by both lists."""
-    max_len = min(len(first), len(second))
-    index = 0
-    while index < max_len and first[index] == second[index]:
-        index += 1
-    return index
-
-
 def _merge_tool_trace(existing: list[ToolTraceEntry], incoming: list[ToolTraceEntry]) -> list[ToolTraceEntry]:
-    """Merge a trace snapshot without dropping entries when stream styles are mixed."""
-    if not existing:
-        return incoming.copy()
-    if not incoming:
-        return existing.copy()
-
-    shared_prefix = _longest_common_prefix_len(existing, incoming)
-    if shared_prefix == len(existing):
-        return incoming.copy()
-    if shared_prefix == len(incoming):
-        return existing.copy()
-    if len(incoming) >= len(existing):
-        return incoming.copy()
-    return existing.copy()
+    """Merge a trace snapshot without dropping entries when stream styles are mixed: the longer one wins, ties incoming."""
+    return (incoming if len(incoming) >= len(existing) else existing).copy()
 
 
 def _merge_prior_delta_at(existing: float | None, incoming: float | None) -> float | None:
@@ -1661,9 +1631,7 @@ async def _drive_stream_delivery(  # noqa: C901, PLR0912
                     allow_empty_progress=False,
                 )
             if prepared_phase_boundary_flush is None:
-                for capture_completion in phase_boundary_capture_completions:
-                    if not capture_completion.done():
-                        capture_completion.set_result(None)
+                _complete_capture_completions(tuple(phase_boundary_capture_completions))
             if prepared_phase_boundary_flush is not None:
                 await streaming._send_prepared_delivery(
                     client,
@@ -1820,7 +1788,7 @@ async def _cancel_stream_task(task: asyncio.Task[None]) -> None:
             await task
         return
     request_task_cancel(task, process_shutdown=current_task_is_process_shutdown())
-    with suppress(asyncio.CancelledError, TimeoutError, Exception):
+    with suppress(asyncio.CancelledError, Exception):
         await asyncio.wait_for(task, timeout=0.5)
 
 
@@ -1992,7 +1960,6 @@ async def send_streaming_response(  # noqa: C901, PLR0912, PLR0915
 
     worker_progress_queue: asyncio.Queue[WorkerProgressEvent] = asyncio.Queue()
     delivery_queue: asyncio.Queue[_DeliveryRequest | None] = asyncio.Queue()
-    transport_outcome: StreamTransportOutcome | None = None
     task_errors: tuple[Exception | None, Exception | None] = (None, None)
     with worker_progress_pump_scope(asyncio.get_running_loop(), worker_progress_queue) as pump:
         delivery_task = asyncio.create_task(_drive_stream_delivery(client, streaming, delivery_queue))
@@ -2066,7 +2033,6 @@ async def send_streaming_response(  # noqa: C901, PLR0912, PLR0915
             if tool_trace_collector is not None:
                 tool_trace_collector[:] = streaming.tool_trace
 
-    assert transport_outcome is not None
     return transport_outcome
 
 
