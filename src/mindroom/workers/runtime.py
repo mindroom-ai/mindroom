@@ -574,8 +574,3 @@ def reset_primary_worker_manager() -> None:
         _PRIMARY_WORKER_MANAGER_EPOCH += 1
         _PRIMARY_WORKER_MANAGER_ACCEPTING_BUILDS = True
         _PRIMARY_WORKER_MANAGER_CONDITION.notify_all()
-
-
-def _reset_primary_worker_manager() -> None:
-    """Reset the cached primary worker manager. Intended for tests."""
-    reset_primary_worker_manager()

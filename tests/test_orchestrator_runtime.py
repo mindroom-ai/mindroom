@@ -345,11 +345,11 @@ if TYPE_CHECKING:
 @pytest.fixture(autouse=True)
 def _isolate_primary_worker_manager_runtime() -> Iterator[None]:
     """Reopen the process-global worker runtime around final-shutdown tests."""
-    workers_runtime_module._reset_primary_worker_manager()
+    workers_runtime_module.reset_primary_worker_manager()
     try:
         yield
     finally:
-        workers_runtime_module._reset_primary_worker_manager()
+        workers_runtime_module.reset_primary_worker_manager()
 
 
 def _retry_tasks() -> list[asyncio.Task[Any]]:
