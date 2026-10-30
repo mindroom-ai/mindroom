@@ -47,7 +47,7 @@ from mindroom.ai_run_metadata import build_ai_run_metadata_content, build_prepar
 from mindroom.api import config_lifecycle, openai_compat
 from mindroom.api.main import initialize_api_app
 from mindroom.api.openai_request_parsing import ChatMessage, _extract_content_text, convert_messages, derive_session_id
-from mindroom.api.openai_streaming_protocol import is_error_response
+from mindroom.api.openai_streaming_protocol import _is_error_response
 from mindroom.approval.tool_approval import shutdown_approval_runtime
 from mindroom.config.access import ResponderAccessConfig
 from mindroom.config.agent import AgentConfig, AgentPrivateConfig, TeamConfig
@@ -1884,7 +1884,7 @@ def test_a_streamed_turn_that_fails_after_partial_text_ends_with_its_failure(
         if "content" in delta
     ]
     assert contents[0] == "Checking..."
-    assert is_error_response(contents[-1])
+    assert _is_error_response(contents[-1])
 
 
 @dataclass
@@ -3113,7 +3113,7 @@ class TestSessionIdDerivation:
 
 
 class TestErrorDetection:
-    """Tests for is_error_response()."""
+    """Tests for _is_error_response()."""
 
     @pytest.mark.parametrize(
         "text",
@@ -3126,7 +3126,7 @@ class TestErrorDetection:
     )
     def test_detects_error_prefixes(self, text: str) -> None:
         """Detects all error emoji prefixes."""
-        assert is_error_response(text) is True
+        assert _is_error_response(text) is True
 
     @pytest.mark.parametrize(
         "text",
@@ -3138,7 +3138,7 @@ class TestErrorDetection:
     )
     def test_detects_agent_prefix_errors(self, text: str) -> None:
         """Detects errors with [agent_name] prefix."""
-        assert is_error_response(text) is True
+        assert _is_error_response(text) is True
 
     @pytest.mark.parametrize(
         "text",
@@ -3151,15 +3151,15 @@ class TestErrorDetection:
     )
     def test_detects_raw_provider_errors(self, text: str) -> None:
         """Detects raw provider error strings surfaced by agno."""
-        assert is_error_response(text) is True
+        assert _is_error_response(text) is True
 
     def test_normal_response_not_error(self) -> None:
         """Normal response text is not detected as error."""
-        assert is_error_response("Hello! How can I help you?") is False
+        assert _is_error_response("Hello! How can I help you?") is False
 
     def test_empty_string_not_error(self) -> None:
         """Empty string is not detected as error."""
-        assert is_error_response("") is False
+        assert _is_error_response("") is False
 
 
 # ---------------------------------------------------------------------------
@@ -4527,6 +4527,25 @@ class TestTeamCompletion:
 
         assert response.status_code == 500
         assert response.json()["error"]["type"] == "server_error"
+
+    @pytest.mark.parametrize(
+        "answer_text",
+        ["❌ The build failed: the disk is full.", "Error code: 404 means the page is gone."],
+    )
+    def test_a_team_answer_that_starts_like_an_error_is_an_answer(
+        self,
+        team_app_client: TestClient,
+        answer_text: str,
+    ) -> None:
+        """A non-streaming team completion reads failure from how its run ended, not from the leader's text."""
+        with patch("mindroom.api.openai_compat._build_team", return_value=_scripted_team(answer(answer_text))):
+            response = team_app_client.post(
+                "/v1/chat/completions",
+                json={"model": "team/super_team", "messages": [{"role": "user", "content": "Why?"}]},
+            )
+
+        assert response.status_code == 200
+        assert response.json()["choices"][0]["message"]["content"] == answer_text
 
     def test_team_streaming_skips_member_content(self, team_app_client: TestClient) -> None:
         """Member content is skipped; only the leader's content is streamed."""

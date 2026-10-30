@@ -50,7 +50,6 @@ from mindroom.api.openai_streaming_protocol import (
     extract_stream_text,
     finalize_pending_tools,
     format_stream_tool_event,
-    is_error_response,
     new_completion_id,
     sse_chunk,
 )
@@ -1166,12 +1165,9 @@ async def _non_stream_team_completion(
         logger.exception("Team execution failed", team=team_name)
         return error_response(500, "Team execution failed", error_type="server_error")
     record = records.terminal(team_name)
-    # The leader's answer, the text a streamed team completion sends; members' text reaches the client through it.
+    # The leader's answer, the text a streamed team completion sends; members' text reaches the client through it. A
+    # failed team run raises above and hands over no record, so this one's text is never a failure's.
     response_text = record.handover_content or ""
-
-    if is_error_response(response_text):
-        logger.warning("Team response returned error", team=team_name, error=response_text)
-        return error_response(500, "Team execution failed", error_type="server_error")
 
     logger.info("Team completion sent", team=team_name, stream=False)
     result = _ChatCompletionResponse(
