@@ -204,7 +204,7 @@ async def test_response_direct_cli_parity(tmp_path, monkeypatch, function) -> No
             show_tool_calls=True,
         )
         with tool_runtime_context(runtime):
-            result = await ai.ai_response(ctx, runtime.runtime_paths, runtime.config)
+            result = (await ai.ai_response(ctx, runtime.runtime_paths, runtime.config)).text
         results.append(result)
     assert effects[0][:4] == effects[1][:4]
     assert effects[1][4] == identity
@@ -340,7 +340,7 @@ def response_harness(tmp_path, monkeypatch) -> SimpleNamespace:
         persist_entity_accounts(runtime.config, runtime.runtime_paths)
         provider.steps = steps
         with tool_runtime_context(runtime):
-            return await ai.ai_response(
+            result = await ai.ai_response(
                 replace(
                     _turn_context(),
                     agent_mode=mode,
@@ -354,6 +354,7 @@ def response_harness(tmp_path, monkeypatch) -> SimpleNamespace:
                 runtime.runtime_paths,
                 runtime.config,
             )
+        return result.text
 
     h.respond = respond
     return h
@@ -752,7 +753,7 @@ async def test_concurrent_factory_owners_scoped_credentials_and_grants(tmp_path,
             supports_native_tool_approval=True,
         )
         with tool_runtime_context(runtime):
-            return await ai.ai_response(turn, runtime.runtime_paths, config)
+            return (await ai.ai_response(turn, runtime.runtime_paths, config)).text
 
     minimal_steps = {session: provider.steps for session, provider in providers.items()}
     for session, runtime in runtimes.items():

@@ -117,7 +117,7 @@ async def test_local_minimal_bash_runs_the_real_cli_against_the_running_api(
             runtime.config,
         )
 
-    assert "done" in result
+    assert "done" in result.text
     assert offered_tools(provider.requests[0]) == ["bash"]
     output = next(message.get_content_string() for message in provider.requests[1].messages if message.role == "tool")
     assert '"toolkit":"calculator"' in output.replace(" ", ""), output

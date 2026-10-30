@@ -400,8 +400,8 @@ class TurnSinks:
     turn_recorder: TurnRecorder | None = None
     run_metadata_collector: dict[str, Any] | None = None
     on_completed: Callable[[CompletedAttempt], None] | None = None
-    # Receives the failure an attempt that failed with a reply text reports.
-    on_failed: Callable[[Exception], None] | None = None
+    # Receives the attempt that failed with a reply text.
+    on_failed: Callable[[HandledAttempt], None] | None = None
     # Receives each attempt's run id and configured model name before the attempt starts.
     on_attempt_start: Callable[[str, str], None] | None = None
     # Whether the driver stores an interrupted turn in its scope's history; a delegated child's interruption belongs
@@ -492,7 +492,8 @@ class CompletedAttempt:
     tool_executions: tuple[ToolExecution, ...] = ()
     control_calls: tuple[ReportedCall, ...] = ()
     completed_tools: tuple[ToolTraceEntry, ...] = ()
-    metadata_content: dict[str, Any] | None = None
+    # Builds the run metadata the attempt publishes; building prices the run, so only a reader of it calls this.
+    build_run_metadata: Callable[[], dict[str, Any]] | None = None
     status: RunStatus = RunStatus.completed
 
 
@@ -717,9 +718,10 @@ class HandledAttempt:
     """One attempt that failed: the reply text that says so, which the driver emits once it recorded the failure."""
 
     text: str
-    # The failure the text reports, which ``TurnSinks.on_failed`` receives.
+    # The failure the text reports.
     error: Exception
-    metadata_content: dict[str, Any] | None = None
+    # Builds the run metadata the attempt publishes, as ``CompletedAttempt.build_run_metadata`` does.
+    build_run_metadata: Callable[[], dict[str, Any]] | None = None
 
 
 @dataclass(frozen=True)
@@ -1005,10 +1007,10 @@ def _settle_skipped_attempt(
     run.record.mark_skipped()
 
 
-def _publish_run_metadata(sinks: TurnSinks, metadata_content: dict[str, Any] | None) -> None:
-    """Publish one attempt's run metadata payload to the caller's collector."""
-    if sinks.run_metadata_collector is not None and metadata_content is not None:
-        sinks.run_metadata_collector.update(metadata_content)
+def _publish_run_metadata(sinks: TurnSinks, build: Callable[[], dict[str, Any]] | None) -> None:
+    """Publish one attempt's run metadata to the caller's collector, building it only for a caller that collects it."""
+    if sinks.run_metadata_collector is not None and build is not None:
+        sinks.run_metadata_collector.update(build())
 
 
 def _record_completed_turn(
@@ -1018,7 +1020,7 @@ def _record_completed_turn(
     settle: _CompletionSettle,
 ) -> None:
     """Publish the turn-ending attempt's run metadata, record the completed turn, and hand the attempt to the caller."""
-    _publish_run_metadata(sinks, resolution.metadata_content)
+    _publish_run_metadata(sinks, resolution.build_run_metadata)
     run.record.record_completed(
         run_id=resolution.attempt_run_id or resolution.run_id,
         run_metadata=run.run_metadata,
@@ -1209,10 +1211,10 @@ async def _stream_response_turn[ChunkT](  # noqa: C901, PLR0912, PLR0915
                     run.record.mark_suspended()
                     raise ResponsePausedForApproval(replace(resolution, continuation_count=continuation_count))
                 if isinstance(resolution, HandledAttempt):
-                    _publish_run_metadata(sinks, resolution.metadata_content)
+                    _publish_run_metadata(sinks, resolution.build_run_metadata)
                     await _record_interrupted(ctx, adapter, sinks, run, continuation, RunStatus.error)
                     if sinks.on_failed is not None:
-                        sinks.on_failed(resolution.error)
+                        sinks.on_failed(resolution)
                     yield resolution.text
                     return
                 settle = _settle_completed_attempt(

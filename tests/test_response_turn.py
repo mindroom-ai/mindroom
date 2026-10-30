@@ -714,7 +714,7 @@ def test_completion_records_and_updates_collector() -> None:
             replayable_text="replayable",
             has_visible_content=True,
             completed_tools=(trace,),
-            metadata_content={"io.mindroom.ai_run": {"usage": 1}},
+            build_run_metadata=lambda: {"io.mindroom.ai_run": {"usage": 1}},
         )
 
     chunks = asyncio.run(
@@ -787,7 +787,7 @@ def test_tool_only_agent_and_team_presentations_respect_quiet_delivery(
             has_visible_content=False,
             tool_executions=(tool,),
             completed_tools=(trace,),
-            metadata_content={"ai_run": {"tools": 1}},
+            build_run_metadata=lambda: {"ai_run": {"tools": 1}},
         )
 
     chunks = asyncio.run(
@@ -839,7 +839,7 @@ def test_a_quiet_turn_without_an_answer_ends_with_an_empty_final_text(
     assert chunks == ["tool document", *ending]
 
 
-def test_completion_skips_collector_without_metadata_content() -> None:
+def test_completion_skips_collector_without_run_metadata() -> None:
     """No collector update happens when the attempt resolved without metadata."""
     log = _AdapterLog()
     collector: dict[str, Any] = {}
@@ -1371,7 +1371,7 @@ def test_discarded_empty_run_metadata_stays_out_of_collector() -> None:
                 CompletedAttempt(
                     is_empty=True,
                     run_id="run-empty",
-                    metadata_content={"io.mindroom.ai_run": {"run_id": "run-empty", "status": "completed"}},
+                    build_run_metadata=lambda: {"io.mindroom.ai_run": {"run_id": "run-empty", "status": "completed"}},
                 ),
             )
             return
@@ -1406,13 +1406,13 @@ def test_superseded_continuation_metadata_stays_out_of_collector() -> None:
             return CompletedAttempt(
                 attempt_run_id="run-1",
                 tool_executions=(_model_switch_execution("next-turn"),),
-                metadata_content={"io.mindroom.ai_run": {"run_id": "run-1"}},
+                build_run_metadata=lambda: {"io.mindroom.ai_run": {"run_id": "run-1"}},
             )
         return CompletedAttempt(
             response_text="final",
             replayable_text="final",
             has_visible_content=True,
-            metadata_content={"io.mindroom.ai_run": {"run_id": "run-2"}},
+            build_run_metadata=lambda: {"io.mindroom.ai_run": {"run_id": "run-2"}},
         )
 
     chunks = asyncio.run(
@@ -1474,7 +1474,11 @@ def test_streaming_handled_attempt_records_and_publishes_its_metadata() -> None:
         _c: TurnContinuationRunState,
     ) -> AsyncGenerator[str | AttemptResolved, None]:
         yield AttemptResolved(
-            HandledAttempt("friendly error", error=RuntimeError("friendly error"), metadata_content=error_metadata),
+            HandledAttempt(
+                "friendly error",
+                error=RuntimeError("friendly error"),
+                build_run_metadata=lambda: error_metadata,
+            ),
         )
 
     chunks = asyncio.run(
@@ -1775,7 +1779,7 @@ def test_resumed_continuation_uses_remaining_budget(saved_count: int, expected_a
     assert "stale" not in chunks[0]
     assert len(completed) == 1
     assert completed[0].status is RunStatus.completed
-    assert completed[0].metadata_content is None
+    assert completed[0].build_run_metadata is None
 
 
 def test_resumed_continuation_preserves_count_on_next_pause() -> None:

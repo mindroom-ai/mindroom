@@ -39,9 +39,10 @@ from mindroom.config.agent import AgentConfig
 from mindroom.config.plugin import PluginEntryConfig
 from mindroom.constants import resolve_primary_runtime_paths
 from mindroom.credentials.manager import get_runtime_credentials_manager
+from mindroom.history.turn_recorder import TurnRecorder
 from mindroom.logging_config import setup_logging
 from mindroom.message_target import MessageTarget
-from mindroom.response_turn import apply_exact_approval_decisions
+from mindroom.response_turn import TurnSinks, apply_exact_approval_decisions
 from mindroom.runtime_resolution import resolve_agent_storage
 from mindroom.runtime_state import clear_api_server_address, set_api_server_address
 from mindroom.session_storage.agent_storage import create_session_storage
@@ -368,17 +369,19 @@ async def smoke(image, evidence_dir) -> None:  # noqa: C901, PLR0912, PLR0915 - 
         provider.install(patch)
         original_response = ai.ai_response
 
-        async def response_with_capture(ctx, *args, **kwargs):  # noqa: ANN002, ANN003
-            trace = kwargs.setdefault("tool_trace_collector", [])
-            presentation = await original_response(ctx, *args, **kwargs)
+        async def response_with_capture(ctx, runtime_paths, config, *, sinks=None):
+            # The turn's recorder holds the tool calls it completed, which the trace keeps.
+            sinks = sinks or TurnSinks()
+            recorder = sinks.turn_recorder or TurnRecorder(user_message=ctx.prompt)
+            result = await original_response(ctx, runtime_paths, config, sinks=replace(sinks, turn_recorder=recorder))
             audit.capture_response(
                 ctx.agent_mode,
-                presentation,
-                [asdict(entry) for entry in trace],
+                result.text,
+                [asdict(entry) for entry in recorder.completed_tools],
                 entity_name=ctx.entity_label,
                 child=ctx.session_id.startswith("delegate:"),
             )
-            return presentation
+            return result
 
         patch.setattr(ai, "ai_response", response_with_capture)
         identity = build_execution_identity_from_runtime_context(runtime)
@@ -396,7 +399,7 @@ async def smoke(image, evidence_dir) -> None:  # noqa: C901, PLR0912, PLR0915 - 
         async def respond(prompt):
             mode = resolve_agent_mode(paths, state_root, "helper", runtime.session_id)
             with tool_runtime_context(runtime):
-                return await ai.ai_response(
+                result = await ai.ai_response(
                     replace(
                         _turn_context(),
                         session_id=runtime.session_id,
@@ -410,6 +413,7 @@ async def smoke(image, evidence_dir) -> None:  # noqa: C901, PLR0912, PLR0915 - 
                     paths,
                     config,
                 )
+            return result.text
 
         provider.steps = ["standard history sentinel"]
         initial = await respond("Remember this same-conversation history sentinel")
