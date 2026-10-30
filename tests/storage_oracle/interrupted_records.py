@@ -1,4 +1,4 @@
-"""The interrupted-turn record v2026.10.729's turn driver saved over a stopped, failed, or unspoken run.
+"""The interrupted-turn record v2026.10.732's turn driver saved over a stopped, failed, or unspoken run.
 
 The recordings hold the runs the Agno-layout store kept of it, so the oracle's ``interrupted`` action saves the same
 record through ``ConversationStore.save_interrupted_record``, whose storage rules voice playout and CLI approval
