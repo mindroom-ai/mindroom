@@ -17,6 +17,7 @@ from mindroom.workers.backends.kubernetes_config import kubernetes_backend_confi
 
 _POLICY_OWNED_ENV_PREFIXES = (
     "MINDROOM_CREDENTIAL_SEEDS_",
+    "MINDROOM_DOCKER_WORKER_",
     "MINDROOM_KUBERNETES_WORKER_",
     "MINDROOM_SANDBOX_",
     "MINDROOM_SHARED_CREDENTIALS_",
@@ -454,7 +455,11 @@ def test_sandbox_runner_runtime_state_keeps_dedicated_storage_subpath_prefix() -
 
 def test_worker_backend_config_names_are_classified_and_filter_public_startup() -> None:
     """Only worker runtime state survives public startup filtering for backend config env names."""
-    backend_names = runtime_env_policy.KUBERNETES_WORKER_BACKEND_CONFIG_ENV_NAMES
+    backend_names = {
+        runtime_env_policy.WORKER_BACKEND_ENV,
+        *runtime_env_policy.KUBERNETES_WORKER_BACKEND_CONFIG_ENV_NAMES,
+        *runtime_env_policy.DOCKER_WORKER_BACKEND_CONFIG_ENV_BY_KEY.values(),
+    }
     env = dict.fromkeys(backend_names, "value")
 
     assert all(runtime_env_policy.is_worker_backend_config_env_name(name) for name in backend_names)

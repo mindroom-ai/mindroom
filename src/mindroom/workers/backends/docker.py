@@ -76,7 +76,6 @@ from mindroom.workers.backends.dedicated_launch import (
     write_dedicated_worker_startup_manifest,
 )
 from mindroom.workers.backends.docker_config import (
-    DEFAULT_WORKER_PORT,
     DOCKER_HOST_ALIAS,
     DOCKER_RESERVED_EXTRA_ENV_NAMES,
     DockerWorkerBackendConfig,
@@ -86,12 +85,12 @@ from mindroom.workers.backends.docker_config import (
     resolve_docker_storage_path,
 )
 from mindroom.workers.backends.docker_projection import PROJECTED_CONFIGS_DIRNAME, DockerProjectionManager
-from mindroom.workers.backends.legacy_docker_worker_metadata import legacy_docker_worker_keys
-from mindroom.workers.backends.local import LocalWorkerStatePaths, local_worker_state_paths_for_root
-from mindroom.workers.backends.worker_security import (
-    docker_worker_security_options,
-    docker_worker_security_policy_signature,
+from mindroom.workers.backends.legacy_docker_worker_metadata import (
+    drop_retired_docker_worker_record_keys,
+    legacy_docker_worker_keys,
 )
+from mindroom.workers.backends.local import LocalWorkerStatePaths, local_worker_state_paths_for_root
+from mindroom.workers.backends.worker_security import docker_worker_security_options
 from mindroom.workers.compatibility import WorkerProtocolMismatch, ready_worker_protocol_mismatch
 from mindroom.workers.models import (
     ProgressSink,
@@ -104,7 +103,7 @@ from mindroom.workers.models import (
 from mindroom.workers.worker_retirement import open_worker_state_root
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Iterable, Sequence
+    from collections.abc import Callable, Iterable, Mapping, Sequence
 
     from mindroom.workers.models import WorkerLaunchConfig
 
@@ -176,8 +175,9 @@ _DEDICATED_WORKER_KEY_ENV = SANDBOX_RUNTIME_ENV_BY_KEY["dedicated_worker_key"]
 # workers have no memory limit, so its size is capped.
 _WORKER_TMPFS = {"/tmp": "rw,nosuid,nodev,mode=1777,size=1g"}  # noqa: S108
 # Minimal-mode shells call the MindRoom API back, which usually listens on the Docker host.
-# Kept out of the launch identity: the worker image that supports minimal mode changes it anyway.
 _WORKER_EXTRA_HOSTS = {DOCKER_HOST_ALIAS: "host-gateway"}
+# Only the image command is replaced, so the image's init entrypoint stays PID 1 and reaps orphaned children.
+_WORKER_COMMAND = ["/app/run-sandbox-runner.sh"]
 
 # Backend-owned control state lives beside the worker roots, never inside one.
 # Each worker root is bind-mounted read-write into its own container, so any
@@ -193,6 +193,9 @@ _LABEL_NAME = "app.mindroom.ai/name"
 _LABEL_NAME_VALUE = "mindroom-docker-worker"
 _LABEL_WORKER_ID = "mindroom.ai/worker-id"
 _LABEL_LAUNCH_CONFIG_HASH = "mindroom.ai/launch-config-hash"
+# Launch inputs no other run argument carries, labelled so that the launch hash covers them.
+_LABEL_STARTUP_MANIFEST_HASH = "mindroom.ai/startup-manifest-hash"
+_LABEL_IMAGE_REFERENCE = "mindroom.ai/image-reference"
 _LABEL_RUNTIME_NAMESPACE = "mindroom.ai/runtime-namespace"
 # Containers that mount only workspaces; earlier releases mounted whole state roots.
 LABEL_STORAGE_LAYOUT = "mindroom.ai/storage-layout"
@@ -214,35 +217,6 @@ __all__ = [
     "ensure_docker_dependencies",
     "list_docker_worker_containers",
 ]
-
-
-def _docker_seccomp_profile_matches(options: list[str]) -> bool:
-    seccomp_options = [option for option in options if option.lower().startswith("seccomp=")]
-    if len(options) != 2 or len(seccomp_options) != 1:
-        return False
-    actual_profile_json = seccomp_options[0].split("=", 1)[1]
-    expected_profile_json = docker_worker_security_options()[1].split("=", 1)[1]
-    try:
-        return json.loads(actual_profile_json) == json.loads(expected_profile_json)
-    except (json.JSONDecodeError, TypeError):
-        return False
-
-
-def _container_root_filesystem_read_only(container: _DockerContainer) -> bool:
-    host_config = container.attrs.get("HostConfig")
-    return isinstance(host_config, dict) and cast("dict[str, object]", host_config).get("ReadonlyRootfs") is True
-
-
-def _docker_security_options_match(value: object) -> bool:
-    if not isinstance(value, list) or not all(isinstance(option, str) for option in value):
-        return False
-    options = cast("list[str]", value)
-    no_new_privileges_options = [
-        option for option in options if option.lower() in {"no-new-privileges", "no-new-privileges:true"}
-    ]
-    if len(no_new_privileges_options) != 1:
-        return False
-    return _docker_seccomp_profile_matches(options)
 
 
 def _protected_runtime_env_names(runtime_paths: RuntimePaths) -> frozenset[str]:
@@ -272,23 +246,10 @@ def _container_name_for_worker(worker_key: str, *, prefix: str, runtime_namespac
     return f"{_container_name_prefix(prefix)}-{digest}"
 
 
-def _docker_image_identity_state(
-    image: str,
-    *,
-    client: _DockerClient,
-    docker_errors: _DockerErrors,
-) -> tuple[str, bool]:
-    try:
-        docker_image = client.images.get(image)
-    except docker_errors.NotFound:
-        return image, False
-    except docker_errors.DockerException:
-        return image, False
-
-    image_id = docker_image.id
-    if isinstance(image_id, str) and image_id.strip():
-        return image_id, True
-    return image, False
+def _launch_hash(image: str, arguments: Mapping[str, object]) -> str:
+    """Return the digest of one ``containers.run`` call, given without its launch-hash label."""
+    payload = json.dumps({"image": image, **arguments}, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
 def ensure_docker_dependencies(runtime_paths: RuntimePaths | None = None) -> None:
@@ -367,20 +328,12 @@ def _docker_worker_paths(workers_root: Path, worker_dir: str) -> _DockerWorkerPa
 
 @dataclass
 class _DockerWorkerMetadata:
+    """One worker's control record; its endpoint, port, and container ID are read from the live container."""
+
     worker_id: str
     worker_key: str
-    endpoint: str
-    backend_name: str
     container_name: str
     lifecycle: WorkerLifecycleState
-    host_port: int | None = None
-    container_id: str | None = None
-    image: str | None = None
-    publish_host: str | None = None
-    worker_port: int = DEFAULT_WORKER_PORT
-    launch_config_hash: str | None = None
-    # The container's startup manifest is written once, when it is created, so its hash tells whether it is current.
-    startup_manifest_hash: str | None = None
 
 
 def _set_docker_request_timeout(client: _DockerClient, timeout_seconds: float) -> None:
@@ -446,13 +399,31 @@ def list_docker_worker_containers(runtime_paths: RuntimePaths) -> Sequence[_Dock
 
 
 @dataclass(frozen=True, slots=True)
-class _DockerLaunchConfig:
-    """One provisioning's launch: the applied launch read inside the worker's lock and the image it starts."""
+class _DockerLaunch:
+    """One worker container's ``containers.run`` call: the image ID it passes and exactly its keyword arguments.
 
-    launch: WorkerLaunchConfig
-    image_reference: str
-    launch_config_hash: str
-    image_resolved: bool
+    ``launch_hash`` digests the image and every argument but the launch-hash label that carries it, so a
+    container whose label differs from a launch rendered now was run with some other argument.
+    """
+
+    image: str
+    arguments: dict[str, object]
+    launch_hash: str
+
+
+@dataclass(frozen=True, slots=True)
+class _WorkerContainerState:
+    """What one ensure finds for its worker, evaluated once before it acts.
+
+    ``current`` holds when the owned container was run with the launch rendered now and its config projection
+    is still intact on disk; a rebuilt projection keeps its pathname, which a running bind mount does not follow.
+    ``image_id`` is the configured image's local ID, or None when it is not local.
+    """
+
+    container: _DockerContainer | None
+    current: bool
+    image_id: str | None
+    mounts: list[tuple[Path, str, bool]]
 
 
 class DockerWorkerBackend:
@@ -526,6 +497,7 @@ class DockerWorkerBackend:
             self._credentials_manager = get_runtime_credentials_manager(self._runtime_paths)
         self._runtime_namespace = _runtime_namespace_for_workers_root(self._workers_root)
         self._workers_root.mkdir(parents=True, exist_ok=True)
+        drop_retired_docker_worker_record_keys(self._control_root)
         self._adopt_legacy_worker_records()
 
     @classmethod
@@ -563,10 +535,6 @@ class DockerWorkerBackend:
                     failures.append(str(exc))
                     continue
                 metadata.lifecycle = mark_worker_idle(metadata.lifecycle)
-                metadata.endpoint = self._endpoint_for_host_port(None)
-                metadata.host_port = None
-                metadata.container_id = None
-                metadata.launch_config_hash = None
                 self._save_metadata(paths, metadata)
         if failures:
             failure_text = "; ".join(failures)
@@ -608,20 +576,18 @@ class DockerWorkerBackend:
                 resolved_agent_policies=launch.agent_policies,
                 create_shared=True,
             )
-            launch_config = self._resolve_launch_config(launch)
             paths = self._worker_paths(spec.worker_key)
             metadata = self._load_metadata(paths, expected_worker_key=spec.worker_key) or self._default_metadata(
                 spec.worker_key,
                 timestamp,
-                launch_config_hash=launch_config.launch_config_hash,
             )
-            identity_changed = self._sync_metadata_identity(metadata)
+            self._sync_metadata_identity(metadata)
+            state = self._worker_container_state(paths, spec=spec, launch=launch)
 
-            should_restart = identity_changed or self._should_restart(
-                metadata,
-                paths,
-                spec=spec,
-                launch_config=launch_config,
+            should_restart = (
+                metadata.lifecycle.status == "failed"
+                or not state.current
+                or not self._container_is_running(state.container)
             )
             metadata.lifecycle = prepare_worker_ensure_lifecycle(
                 metadata.lifecycle,
@@ -633,21 +599,15 @@ class DockerWorkerBackend:
             if cold_start_emitted:
                 emit_progress("cold_start")
 
-            sync_shared_credentials_to_worker(
-                spec.worker_key,
-                allowed_services=mirrored_credential_services(spec, launch),
-                credentials_manager=self._credentials_manager,
-            )
-
             try:
-                container = self._ensure_container(
-                    metadata,
-                    paths,
-                    spec=spec,
-                    launch_config=launch_config,
+                sync_shared_credentials_to_worker(
+                    spec.worker_key,
+                    allowed_services=mirrored_credential_services(spec, launch),
+                    credentials_manager=self._credentials_manager,
                 )
+                container = self._ensure_container(paths, spec=spec, launch=launch, state=state)
                 try:
-                    endpoint = self._wait_for_ready(container)
+                    self._wait_for_ready(container)
                 except _WorkerImageIncompatibleError as stale_error:
                     metadata.lifecycle = prepare_worker_ensure_lifecycle(
                         metadata.lifecycle,
@@ -657,15 +617,15 @@ class DockerWorkerBackend:
                     self._save_metadata(paths, metadata)
                     if not cold_start_emitted:
                         emit_progress("cold_start")
-                    container, launch_config = self._relaunch_after_stale_image(
-                        metadata,
+                    container = self._relaunch_after_stale_image(
                         paths,
                         spec=spec,
-                        launch_config=launch_config,
+                        launch=launch,
+                        image_id=state.image_id,
                         mismatch=stale_error.mismatch,
                     )
                     # A worker is replaced once; a replacement that still mismatches fails the request.
-                    endpoint = self._wait_for_ready(container)
+                    self._wait_for_ready(container)
             except Exception as exc:
                 failure_reason = str(exc)
                 self._record_failure_locked(paths, metadata, failure_reason, now=timestamp, stop_container=True)
@@ -675,13 +635,6 @@ class DockerWorkerBackend:
                 raise WorkerBackendError(failure_reason) from exc
 
             metadata.lifecycle = mark_worker_ready(metadata.lifecycle, now=timestamp)
-            metadata.endpoint = endpoint
-            metadata.host_port = self._container_host_port(container)
-            metadata.container_id = self._container_id(container)
-            metadata.image = self.config.image
-            metadata.publish_host = self.config.publish_host
-            metadata.worker_port = self.config.worker_port
-            metadata.launch_config_hash = launch_config.launch_config_hash
             self._save_metadata(paths, metadata)
             handle = self._to_handle(metadata, container, now=timestamp, paths=paths)
             emit_progress("ready")
@@ -697,7 +650,6 @@ class DockerWorkerBackend:
                 return None
             metadata.lifecycle = touch_worker_lifecycle(metadata.lifecycle, now=timestamp)
             container = self._read_owned_container(metadata.worker_key)
-            metadata = self._reconcile_missing_container_metadata(paths, metadata, container)
             self._save_metadata(paths, metadata)
             return self._to_handle(metadata, container, now=timestamp, paths=paths)
 
@@ -714,7 +666,6 @@ class DockerWorkerBackend:
                 if metadata is None:
                     continue
                 container = self._read_owned_container(metadata.worker_key)
-                metadata = self._reconcile_missing_container_metadata(paths, metadata, container)
                 handles.append(self._to_handle(metadata, container, now=timestamp, paths=paths))
         return filter_and_sort_worker_handles(handles, include_idle)
 
@@ -731,7 +682,6 @@ class DockerWorkerBackend:
                 if metadata is None:
                     continue
                 container = self._read_owned_container(metadata.worker_key)
-                metadata = self._reconcile_missing_container_metadata(paths, metadata, container)
                 handle = self._to_handle(metadata, container, now=timestamp, paths=paths)
                 idle_timed_out = timestamp - metadata.lifecycle.last_used_at >= self.idle_timeout_seconds
                 if handle.status == "idle" and self._container_is_running(container):
@@ -747,7 +697,6 @@ class DockerWorkerBackend:
                     # and a later ensure recreates the container.
                     self._stop_container(container)
                     self._remove_container(container)
-                    self._reconcile_missing_container_metadata(paths, metadata, None)
         return filter_and_sort_worker_handles(cleaned, True)
 
     def retire_worker(self, worker_key: str) -> None:
@@ -820,7 +769,7 @@ class DockerWorkerBackend:
     def _adopt_legacy_worker_records(self) -> None:
         """Give workers from before the control directory a fresh backend-owned record.
 
-        The record has no launch identity, so the next ensure replaces the worker's container.
+        Their containers carry a launch hash of an older form, so the next ensure replaces each one.
         """
         worker_keys = legacy_docker_worker_keys(self._workers_root, control_root=self._control_root)
         if not worker_keys:
@@ -842,25 +791,13 @@ class DockerWorkerBackend:
     def _worker_paths(self, worker_key: str) -> _DockerWorkerPaths:
         return _docker_worker_paths(self._workers_root, worker_dir_name(worker_key))
 
-    def _default_metadata(
-        self,
-        worker_key: str,
-        now: float,
-        *,
-        launch_config_hash: str | None = None,
-    ) -> _DockerWorkerMetadata:
+    def _default_metadata(self, worker_key: str, now: float) -> _DockerWorkerMetadata:
         worker_id = self._container_name_for_worker(worker_key)
         return _DockerWorkerMetadata(
             worker_id=worker_id,
             worker_key=worker_key,
-            endpoint=self._endpoint_for_host_port(None),
-            backend_name=self.backend_name,
             container_name=worker_id,
             lifecycle=initial_worker_lifecycle_state(now=now),
-            image=self.config.image,
-            publish_host=self.config.publish_host,
-            worker_port=self.config.worker_port,
-            launch_config_hash=launch_config_hash,
         )
 
     def _container_name_for_worker(self, worker_key: str) -> str:
@@ -870,11 +807,8 @@ class DockerWorkerBackend:
             runtime_namespace=self._runtime_namespace,
         )
 
-    def _sync_metadata_identity(self, metadata: _DockerWorkerMetadata) -> bool:
+    def _sync_metadata_identity(self, metadata: _DockerWorkerMetadata) -> None:
         expected_container_name = self._container_name_for_worker(metadata.worker_key)
-        if metadata.container_name == expected_container_name and metadata.worker_id == expected_container_name:
-            return False
-
         if metadata.container_name != expected_container_name:
             # The recorded name is only a hint for reaping the container this
             # backend started for this worker key under an earlier naming config;
@@ -884,11 +818,6 @@ class DockerWorkerBackend:
             )
         metadata.worker_id = expected_container_name
         metadata.container_name = expected_container_name
-        metadata.endpoint = self._endpoint_for_host_port(None)
-        metadata.host_port = None
-        metadata.container_id = None
-        metadata.launch_config_hash = None
-        return True
 
     def _metadata_paths(self) -> list[_DockerWorkerPaths]:
         return list_worker_state_paths(
@@ -924,22 +853,6 @@ class DockerWorkerBackend:
             ensure_root=True,
             lock=self._metadata_lock,
         )
-
-    def _reconcile_missing_container_metadata(
-        self,
-        paths: _DockerWorkerPaths,
-        metadata: _DockerWorkerMetadata,
-        container: _DockerContainer | None,
-    ) -> _DockerWorkerMetadata:
-        if container is not None:
-            return metadata
-        if metadata.host_port is None and metadata.container_id is None:
-            return metadata
-        metadata.endpoint = self._endpoint_for_host_port(None)
-        metadata.host_port = None
-        metadata.container_id = None
-        self._save_metadata(paths, metadata)
-        return metadata
 
     def _read_container(self, container_name: str) -> _DockerContainer | None:
         try:
@@ -1011,160 +924,164 @@ class DockerWorkerBackend:
             raise WorkerBackendError(msg)
         return container
 
-    def _should_restart(
+    def _worker_container_state(
         self,
-        metadata: _DockerWorkerMetadata,
         paths: _DockerWorkerPaths,
         *,
         spec: WorkerSpec,
-        launch_config: _DockerLaunchConfig,
-    ) -> bool:
-        container = self._require_owned_container(metadata.worker_key)
-        if metadata.lifecycle.status == "failed":
-            return True
+        launch: WorkerLaunchConfig,
+    ) -> _WorkerContainerState:
+        """Evaluate once whether the worker's container was run with the launch rendered now.
+
+        When the configured image is not local, the container's own image may only prove reuse, so an idle-stopped
+        worker restarts without the registry: the launch is rendered from it, so its configured-image label still has
+        to match. Any replacement starts from the configured image, pulled when it is not local.
+        """
+        container = self._require_owned_container(spec.worker_key)
+        image_id = self._configured_image_id()
         if container is None:
-            return True
-        if (
-            self._current_container_mounts(
-                metadata,
-                container,
-                paths,
-                spec=spec,
-                launch_config=launch_config,
-            )
-            is None
-        ):
-            return True
-        return not self._container_is_running(container)
-
-    def _current_container_mounts(
-        self,
-        metadata: _DockerWorkerMetadata,
-        container: _DockerContainer,
-        paths: _DockerWorkerPaths,
-        *,
-        spec: WorkerSpec,
-        launch_config: _DockerLaunchConfig,
-    ) -> list[tuple[Path, str, bool]] | None:
-        """Return the bind mounts of a container that matches the current config, or None when it must be replaced."""
-        compatible_launch_config_hashes = self._compatible_launch_config_hashes(container, launch_config)
-        if metadata.launch_config_hash not in compatible_launch_config_hashes:
-            return None
-        if self._container_launch_config_hash(container) not in compatible_launch_config_hashes:
-            return None
-        if not _container_root_filesystem_read_only(container) or (
-            self.config.security_policy == "computer" and not self._container_runtime_security_matches(container)
-        ):
-            return None
-
-        launch = launch_config.launch
+            return _WorkerContainerState(container=None, current=False, image_id=image_id, mounts=[])
         mounts = self._worker_mounts(paths, spec=spec, launch=launch, materialize_projection=False)
-        if mounts is None:
-            return None
-
-        if not self._container_env_matches(
-            container,
-            expected_env=self._container_env(metadata.worker_key),
-        ) or metadata.startup_manifest_hash != self._startup_manifest_hash(spec, launch):
-            return None
-
-        return mounts if self._container_mount_layout_matches(container, expected_mounts=mounts) else None
-
-    def _container_runtime_security_matches(self, container: _DockerContainer) -> bool:
-        host_config = container.attrs.get("HostConfig")
-        if not isinstance(host_config, dict):
-            return False
-        host_config = cast("dict[str, object]", host_config)
-        cap_add = host_config.get("CapAdd")
-        cap_drop = host_config.get("CapDrop")
-        return (
-            host_config.get("Privileged") is False
-            and (cap_add is None or (isinstance(cap_add, list) and not cap_add))
-            and isinstance(cap_drop, list)
-            and [str(cap).upper() for cap in cap_drop] == ["ALL"]
-            and _docker_security_options_match(host_config.get("SecurityOpt"))
+        render_image_id = image_id
+        if render_image_id is None:
+            render_image_id = self._container_image_id(container)
+        current = (
+            mounts is not None
+            and render_image_id is not None
+            and self._container_config_labels(container).get(_LABEL_LAUNCH_CONFIG_HASH)
+            == self._render_launch(
+                spec.worker_key,
+                image_id=render_image_id,
+                mounts=mounts,
+                startup_manifest_hash=self._startup_manifest_hash(spec, launch),
+            ).launch_hash
         )
+        return _WorkerContainerState(container=container, current=current, image_id=image_id, mounts=mounts or [])
+
+    def _render_launch(
+        self,
+        worker_key: str,
+        *,
+        image_id: str,
+        mounts: Sequence[tuple[Path, str, bool]],
+        startup_manifest_hash: str,
+    ) -> _DockerLaunch:
+        """Return the ``containers.run`` call that starts the worker's container from ``image_id`` now."""
+        container_name = self._container_name_for_worker(worker_key)
+        labels = {
+            _LABEL_COMPONENT: _LABEL_COMPONENT_VALUE,
+            _LABEL_MANAGED_BY: _LABEL_MANAGED_BY_VALUE,
+            _LABEL_NAME: _LABEL_NAME_VALUE,
+            _LABEL_WORKER_ID: container_name,
+            _LABEL_RUNTIME_NAMESPACE: self._runtime_namespace,
+            LABEL_STORAGE_LAYOUT: LABEL_STORAGE_LAYOUT_VALUE,
+            _LABEL_STARTUP_MANIFEST_HASH: startup_manifest_hash,
+            _LABEL_IMAGE_REFERENCE: self.config.image,
+            **self.config.extra_labels,
+        }
+        arguments: dict[str, object] = {
+            "command": _WORKER_COMMAND,
+            "name": container_name,
+            "detach": True,
+            "environment": self._container_env(worker_key),
+            "volumes": [
+                f"{host_path}:{container_path}:{'ro' if read_only else 'rw'}"
+                for host_path, container_path, read_only in mounts
+            ],
+            "ports": {f"{self.config.worker_port}/tcp": (self.config.publish_host, None)},
+            "labels": labels,
+            "user": self.config.user,
+            "read_only": True,
+            "tmpfs": _WORKER_TMPFS,
+            "extra_hosts": _WORKER_EXTRA_HOSTS,
+            "runtime": self.config.runtime,
+        }
+        if self.config.security_policy == "computer":
+            arguments["cap_drop"] = ["ALL"]
+            arguments["security_opt"] = docker_worker_security_options()
+        launch_hash = _launch_hash(image_id, arguments)
+        labels[_LABEL_LAUNCH_CONFIG_HASH] = launch_hash
+        return _DockerLaunch(image=image_id, arguments=arguments, launch_hash=launch_hash)
 
     def _ensure_container(
         self,
-        metadata: _DockerWorkerMetadata,
         paths: _DockerWorkerPaths,
         *,
         spec: WorkerSpec,
-        launch_config: _DockerLaunchConfig,
+        launch: WorkerLaunchConfig,
+        state: _WorkerContainerState,
     ) -> _DockerContainer:
         paths.state.root.mkdir(parents=True, exist_ok=True)
-        container_name = self._container_name_for_worker(metadata.worker_key)
-        container = self._require_owned_container(metadata.worker_key)
-        if container is not None:
-            mounts = self._current_container_mounts(
-                metadata,
-                container,
-                paths,
-                spec=spec,
-                launch_config=launch_config,
-            )
-            if mounts is None:
-                self._remove_container(container)
-                container = None
-            elif not self._container_is_running(container):
-                # Docker resolves every bind destination again on start, through whatever worker code left in its root.
-                self._prepare_nested_storage_mount_targets(paths, (mount[1] for mount in mounts))
-                try:
-                    container.start()
-                except self._docker_errors.DockerException as exc:
-                    msg = f"Failed to start Docker worker '{container_name}': {exc}"
-                    raise WorkerBackendError(msg) from exc
+        container = state.container
+        if container is None or not state.current:
+            self._remove_container(container)
+            return self._create_container(paths, spec=spec, launch=launch, image_id=state.image_id)
+        if not self._container_is_running(container):
+            # Docker resolves every bind destination again on start, through whatever worker code left in its root.
+            self._prepare_nested_storage_mount_targets(paths, (mount[1] for mount in state.mounts))
+            try:
+                container.start()
+            except self._docker_errors.DockerException as exc:
+                msg = f"Failed to start Docker worker '{worker_log_id(spec.worker_key)}': {exc}"
+                raise WorkerBackendError(msg) from exc
+        return self._published_container(container, worker_key=spec.worker_key)
 
-        if container is None:
-            metadata.startup_manifest_hash = self._write_startup_manifest(paths, spec=spec, launch=launch_config.launch)
-            mounts = self._worker_mounts(paths, spec=spec, launch=launch_config.launch, materialize_projection=True)
-            assert mounts is not None, "a materialized config projection is ready"
-            self._prepare_nested_storage_mount_targets(paths, (mount[1] for mount in mounts))
-            security_kwargs = (
-                {"cap_drop": ["ALL"], "security_opt": docker_worker_security_options()}
-                if self.config.security_policy == "computer"
-                else {}
-            )
-            container = self._client.containers.run(
-                launch_config.image_reference,
-                command=["/app/run-sandbox-runner.sh"],
-                name=container_name,
-                detach=True,
-                environment=self._container_env(metadata.worker_key),
-                volumes=[
-                    f"{host_path}:{container_path}:{'ro' if read_only else 'rw'}"
-                    for host_path, container_path, read_only in mounts
-                ],
-                ports={f"{self.config.worker_port}/tcp": (self.config.publish_host, None)},
-                labels=self._container_labels(
-                    container_name,
-                    launch_config_hash=launch_config.launch_config_hash,
-                ),
-                user=self.config.user,
-                read_only=True,
-                tmpfs=_WORKER_TMPFS,
-                extra_hosts=_WORKER_EXTRA_HOSTS,
-                runtime=self.config.runtime,
-                **security_kwargs,
-            )
+    def _create_container(
+        self,
+        paths: _DockerWorkerPaths,
+        *,
+        spec: WorkerSpec,
+        launch: WorkerLaunchConfig,
+        image_id: str | None,
+    ) -> _DockerContainer:
+        """Write what a new container boots from, then run it from ``image_id``, or the configured image pulled now."""
+        if image_id is None:
+            image_id = self._pull_configured_image()
+        startup_manifest_hash = self._write_startup_manifest(paths, spec=spec, launch=launch)
+        mounts = self._worker_mounts(paths, spec=spec, launch=launch, materialize_projection=True)
+        assert mounts is not None, "a materialized config projection is ready"
+        self._prepare_nested_storage_mount_targets(paths, (mount[1] for mount in mounts))
+        rendered = self._render_launch(
+            spec.worker_key,
+            image_id=image_id,
+            mounts=mounts,
+            startup_manifest_hash=startup_manifest_hash,
+        )
+        container = self._client.containers.run(rendered.image, **rendered.arguments)
+        return self._published_container(container, worker_key=spec.worker_key)
 
+    def _published_container(self, container: _DockerContainer, *, worker_key: str) -> _DockerContainer:
         self._reload_container(container)
         if self._container_host_port(container) is None:
-            msg = f"Docker worker '{container_name}' is missing a published port."
+            msg = f"Docker worker '{worker_log_id(worker_key)}' is missing a published port."
             raise WorkerBackendError(msg)
         return container
 
+    def _configured_image_id(self) -> str | None:
+        """Return the local ID of the configured image, or None when the daemon has no such image."""
+        try:
+            image_id = self._client.images.get(self.config.image).id
+        except self._docker_errors.DockerException:
+            return None
+        return image_id if isinstance(image_id, str) and image_id.strip() else None
+
+    def _pull_configured_image(self) -> str:
+        try:
+            return self._client.images.pull(self.config.image).id
+        except self._docker_errors.DockerException as exc:
+            msg = f"Pulling '{self.config.image}' failed: {exc}"
+            raise WorkerBackendError(msg) from exc
+
     def _relaunch_after_stale_image(
         self,
-        metadata: _DockerWorkerMetadata,
         paths: _DockerWorkerPaths,
         *,
         spec: WorkerSpec,
-        launch_config: _DockerLaunchConfig,
+        launch: WorkerLaunchConfig,
+        image_id: str | None,
         mismatch: WorkerProtocolMismatch,
-    ) -> tuple[_DockerContainer, _DockerLaunchConfig]:
-        """Relaunch once after a protocol mismatch, first pulling the configured image when the worker is older.
+    ) -> _DockerContainer:
+        """Replace the worker once after a protocol mismatch, first pulling the configured image when it is older.
 
         A stale local image otherwise fails every worker start until someone
         pulls by hand, since tag references like ``:latest`` keep resolving to
@@ -1172,29 +1089,14 @@ class DockerWorkerBackend:
         """
         if not mismatch.worker_is_newer:
             try:
-                pulled_image = self._client.images.pull(self.config.image)
-            except self._docker_errors.DockerException as exc:
-                msg = f"{mismatch.error} Pulling '{self.config.image}' failed: {exc}"
+                image_id = self._pull_configured_image()
+            except WorkerBackendError as exc:
+                msg = f"{mismatch.error} {exc}"
                 raise WorkerBackendError(msg) from exc
-            launch_config = self._launch_config_from_image_identity(
-                launch_config.launch,
-                pulled_image.id,
-                image_resolved=True,
-            )
-            metadata.launch_config_hash = launch_config.launch_config_hash
-            self._save_metadata(paths, metadata)
-        container = self._require_owned_container(metadata.worker_key)
+        container = self._require_owned_container(spec.worker_key)
         self._stop_container(container)
         self._remove_container(container)
-        return (
-            self._ensure_container(
-                metadata,
-                paths,
-                spec=spec,
-                launch_config=launch_config,
-            ),
-            launch_config,
-        )
+        return self._create_container(paths, spec=spec, launch=launch, image_id=image_id)
 
     def _reload_container(self, container: _DockerContainer) -> None:
         try:
@@ -1203,7 +1105,7 @@ class DockerWorkerBackend:
             msg = f"Failed to refresh Docker worker state: {exc}"
             raise WorkerBackendError(msg) from exc
 
-    def _wait_for_ready(self, container: _DockerContainer) -> str:
+    def _wait_for_ready(self, container: _DockerContainer) -> None:
         host_port = self._container_host_port(container)
         if host_port is None:
             msg = "Docker worker is missing a published port."
@@ -1231,7 +1133,7 @@ class DockerWorkerBackend:
                     )
                     if mismatch is not None:
                         raise _WorkerImageIncompatibleError(mismatch)
-                    return f"{endpoint_root}/api/sandbox-runner/execute"
+                    return
 
                 if time.time() >= deadline:
                     msg = (
@@ -1439,72 +1341,6 @@ class DockerWorkerBackend:
         )
         return mount_specs
 
-    def _container_labels(
-        self,
-        container_name: str,
-        *,
-        launch_config_hash: str,
-    ) -> dict[str, str]:
-        labels = {
-            _LABEL_COMPONENT: _LABEL_COMPONENT_VALUE,
-            _LABEL_MANAGED_BY: _LABEL_MANAGED_BY_VALUE,
-            _LABEL_NAME: _LABEL_NAME_VALUE,
-            _LABEL_WORKER_ID: container_name,
-            _LABEL_LAUNCH_CONFIG_HASH: launch_config_hash,
-            _LABEL_RUNTIME_NAMESPACE: self._runtime_namespace,
-            LABEL_STORAGE_LAYOUT: LABEL_STORAGE_LAYOUT_VALUE,
-        }
-        labels.update(self.config.extra_labels)
-        return labels
-
-    def _compute_launch_config_hash(self, *, image_identity: str) -> str:
-        # The worker's own projected config and assets restart it through the projection mount it compares, and the
-        # tool snapshot through the startup manifest hash, so edits other workers or only the primary see never
-        # restart this one.
-        config_payload: dict[str, object] = {
-            "auth_token": self.auth_token or "",
-            "config_path": self.config.config_path,
-            "extra_env": self.config.extra_env,
-            "extra_labels": self.config.extra_labels,
-            "host_config_path": str(self.config.host_config_path or ""),
-            "image": self.config.image,
-            "resolved_image": image_identity,
-            "name_prefix": self.config.name_prefix,
-            "publish_host": self.config.publish_host,
-            "storage_mount_path": self.config.storage_mount_path,
-            "workers_root": str(self._workers_root),
-            "user": self.config.user or "",
-            "worker_port": self.config.worker_port,
-        }
-        if self.config.security_policy == "computer":
-            config_payload["runtime_security"] = docker_worker_security_policy_signature()
-        if self.config.runtime is not None:
-            config_payload["runtime"] = self.config.runtime
-        normalized = json.dumps(config_payload, sort_keys=True, separators=(",", ":"))
-        return hashlib.sha256(normalized.encode("utf-8")).hexdigest()
-
-    def _resolve_launch_config(self, launch: WorkerLaunchConfig) -> _DockerLaunchConfig:
-        image_identity, image_resolved = _docker_image_identity_state(
-            self.config.image,
-            client=self._client,
-            docker_errors=self._docker_errors,
-        )
-        return self._launch_config_from_image_identity(launch, image_identity, image_resolved=image_resolved)
-
-    def _launch_config_from_image_identity(
-        self,
-        launch: WorkerLaunchConfig,
-        image_identity: str,
-        *,
-        image_resolved: bool,
-    ) -> _DockerLaunchConfig:
-        return _DockerLaunchConfig(
-            launch=launch,
-            image_reference=image_identity if image_resolved else self.config.image,
-            launch_config_hash=self._compute_launch_config_hash(image_identity=image_identity),
-            image_resolved=image_resolved,
-        )
-
     def _container_config_labels(self, container: _DockerContainer) -> dict[str, str]:
         """Return the string labels recorded on one container."""
         config = container.attrs.get("Config")
@@ -1519,82 +1355,9 @@ class DockerWorkerBackend:
             if isinstance(name, str) and isinstance(value, str)
         }
 
-    def _container_launch_config_hash(self, container: _DockerContainer | None) -> str | None:
-        if container is None:
-            return None
-        return self._container_config_labels(container).get(_LABEL_LAUNCH_CONFIG_HASH) or None
-
-    def _container_image_identity(self, container: _DockerContainer | None) -> str | None:
-        if container is None:
-            return None
-
-        attrs = container.attrs
-        raw_image = attrs.get("Image")
-        if isinstance(raw_image, str) and raw_image.strip():
-            return raw_image
-
-        config = attrs.get("Config")
-        if not isinstance(config, dict):
-            return None
-        config_image = cast("dict[str, object]", config).get("Image")
-        if isinstance(config_image, str) and config_image.strip():
-            return config_image
-        return None
-
-    def _compatible_launch_config_hashes(
-        self,
-        container: _DockerContainer | None,
-        launch_config: _DockerLaunchConfig,
-    ) -> set[str]:
-        # One ensure uses one image snapshot; the next call resolves the tag again.
-        current_image_identity = launch_config.image_reference
-        compatible_hashes = {launch_config.launch_config_hash}
-        container_image_identity = self._container_image_identity(container)
-        if container_image_identity is None:
-            return compatible_hashes
-
-        if not launch_config.image_resolved:
-            compatible_hashes.add(self._compute_launch_config_hash(image_identity=container_image_identity))
-            return compatible_hashes
-
-        if container_image_identity == current_image_identity:
-            compatible_hashes.add(self._compute_launch_config_hash(image_identity=self.config.image))
-        return compatible_hashes
-
-    def _container_mount_layout_matches(
-        self,
-        container: _DockerContainer,
-        *,
-        expected_mounts: list[tuple[Path, str, bool]],
-    ) -> bool:
-        attrs = container.attrs
-        mounts = attrs.get("Mounts", [])
-        if not isinstance(mounts, list):
-            return False
-
-        actual_layout: set[tuple[str, str, bool]] = set()
-        for mount in mounts:
-            if not isinstance(mount, dict):
-                return False
-            mount_data = cast("dict[str, object]", mount)
-            mount_type = mount_data.get("Type")
-            source = mount_data.get("Source")
-            destination = mount_data.get("Destination")
-            if mount_type != "bind" or not isinstance(source, str) or not isinstance(destination, str):
-                continue
-            writable = mount_data.get("RW")
-            if isinstance(writable, bool):
-                read_only = not writable
-            else:
-                mode = mount_data.get("Mode")
-                read_only = "ro" in mode if isinstance(mode, str) else False
-            actual_layout.add((str(Path(source).expanduser().resolve()), destination, read_only))
-
-        expected_layout = {
-            (str(host_path.expanduser().resolve()), container_path, read_only)
-            for host_path, container_path, read_only in expected_mounts
-        }
-        return actual_layout == expected_layout
+    def _container_image_id(self, container: _DockerContainer) -> str | None:
+        image_id = container.attrs.get("Image")
+        return image_id if isinstance(image_id, str) and image_id.strip() else None
 
     def _container_status(self, container: _DockerContainer) -> str | None:
         status = container.status
@@ -1688,7 +1451,7 @@ class DockerWorkerBackend:
 
     def _endpoint_for_host_port(self, host_port: int | None) -> str:
         if host_port is None:
-            return "/api/sandbox-runner/execute"
+            return ""
         return f"{self._endpoint_root(host_port)}/api/sandbox-runner/execute"
 
     def _effective_status(
@@ -1719,7 +1482,8 @@ class DockerWorkerBackend:
         now: float,
         paths: _DockerWorkerPaths,
     ) -> WorkerHandle:
-        host_port = self._container_host_port(container) or metadata.host_port
+        # Only a running container publishes a port, so any other worker has no endpoint.
+        host_port = self._container_host_port(container) if self._container_is_running(container) else None
         endpoint = self._endpoint_for_host_port(host_port)
         return worker_handle(
             worker_id=metadata.worker_id,
@@ -1731,7 +1495,7 @@ class DockerWorkerBackend:
             backend_name=self.backend_name,
             debug_metadata={
                 "container_name": metadata.container_name,
-                "container_id": self._container_id(container) or metadata.container_id or "",
+                "container_id": self._container_id(container) or "",
                 "host_port": str(host_port or ""),
                 "state_root": str(paths.state.root),
                 "api_root": endpoint.removesuffix("/execute").rstrip("/"),

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import os
 import re
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from pathlib import PurePosixPath
 from typing import TYPE_CHECKING, Literal, cast
 
@@ -18,8 +18,9 @@ from mindroom.constants import (
 )
 from mindroom.credentials.manager import runtime_credentials_manager_key
 from mindroom.runtime_env_policy import (
-    KUBERNETES_WORKER_BACKEND_CONFIG_ENV_BY_KEY,
+    DOCKER_WORKER_BACKEND_CONFIG_ENV_BY_KEY,
     SANDBOX_RUNTIME_ENV_BY_KEY,
+    WORKER_BACKEND_ENV,
     WORKER_COMPUTER_ENABLED_ENV,
 )
 from mindroom.tool_system.worker_routing import worker_root_path
@@ -43,7 +44,6 @@ if TYPE_CHECKING:
     from pathlib import Path
 
 __all__ = [
-    "DEFAULT_WORKER_PORT",
     "DOCKER_HOST_ALIAS",
     "DOCKER_RESERVED_EXTRA_ENV_NAMES",
     "DockerWorkerBackendConfig",
@@ -58,8 +58,7 @@ __all__ = [
 ]
 
 _DEFAULT_READY_TIMEOUT_SECONDS = 60.0
-DEFAULT_WORKER_PORT = 8766
-_DEFAULT_WORKER_PORT = DEFAULT_WORKER_PORT
+_DEFAULT_WORKER_PORT = 8766
 _DEFAULT_STORAGE_MOUNT_PATH = "/app/worker"
 _DEFAULT_CONFIG_PATH = "/app/config-host/config.yaml"
 _DEFAULT_NAME_PREFIX = "mindroom-worker"
@@ -67,22 +66,21 @@ _DEFAULT_PUBLISH_HOST = "127.0.0.1"
 # Workers reach the Docker host, where the MindRoom API usually listens, under this name.
 DOCKER_HOST_ALIAS = "host.docker.internal"
 
-_WORKER_BACKEND_ENV = KUBERNETES_WORKER_BACKEND_CONFIG_ENV_BY_KEY["worker_backend"]
-_IMAGE_ENV = "MINDROOM_DOCKER_WORKER_IMAGE"
-_PORT_ENV = "MINDROOM_DOCKER_WORKER_PORT"
-_STORAGE_MOUNT_PATH_ENV = "MINDROOM_DOCKER_WORKER_STORAGE_MOUNT_PATH"
-_CONFIG_PATH_ENV = "MINDROOM_DOCKER_WORKER_CONFIG_PATH"
-_HOST_CONFIG_PATH_ENV = "MINDROOM_DOCKER_WORKER_HOST_CONFIG_PATH"
-_IDLE_TIMEOUT_ENV = "MINDROOM_DOCKER_WORKER_IDLE_TIMEOUT_SECONDS"
-_READY_TIMEOUT_ENV = "MINDROOM_DOCKER_WORKER_READY_TIMEOUT_SECONDS"
-_NAME_PREFIX_ENV = "MINDROOM_DOCKER_WORKER_NAME_PREFIX"
-_PUBLISH_HOST_ENV = "MINDROOM_DOCKER_WORKER_PUBLISH_HOST"
-_ENDPOINT_HOST_ENV = "MINDROOM_DOCKER_WORKER_ENDPOINT_HOST"
-_USER_ENV = "MINDROOM_DOCKER_WORKER_USER"
-_SECURITY_POLICY_ENV = "MINDROOM_DOCKER_WORKER_SECURITY_POLICY"
-_RUNTIME_ENV = "MINDROOM_DOCKER_WORKER_RUNTIME"
-_EXTRA_ENV_JSON_ENV = "MINDROOM_DOCKER_WORKER_ENV_JSON"
-_EXTRA_LABELS_JSON_ENV = "MINDROOM_DOCKER_WORKER_LABELS_JSON"
+_IMAGE_ENV = DOCKER_WORKER_BACKEND_CONFIG_ENV_BY_KEY["image"]
+_PORT_ENV = DOCKER_WORKER_BACKEND_CONFIG_ENV_BY_KEY["port"]
+_STORAGE_MOUNT_PATH_ENV = DOCKER_WORKER_BACKEND_CONFIG_ENV_BY_KEY["storage_mount_path"]
+_CONFIG_PATH_ENV = DOCKER_WORKER_BACKEND_CONFIG_ENV_BY_KEY["config_path"]
+_HOST_CONFIG_PATH_ENV = DOCKER_WORKER_BACKEND_CONFIG_ENV_BY_KEY["host_config_path"]
+_IDLE_TIMEOUT_ENV = DOCKER_WORKER_BACKEND_CONFIG_ENV_BY_KEY["idle_timeout"]
+_READY_TIMEOUT_ENV = DOCKER_WORKER_BACKEND_CONFIG_ENV_BY_KEY["ready_timeout"]
+_NAME_PREFIX_ENV = DOCKER_WORKER_BACKEND_CONFIG_ENV_BY_KEY["name_prefix"]
+_PUBLISH_HOST_ENV = DOCKER_WORKER_BACKEND_CONFIG_ENV_BY_KEY["publish_host"]
+_ENDPOINT_HOST_ENV = DOCKER_WORKER_BACKEND_CONFIG_ENV_BY_KEY["endpoint_host"]
+_USER_ENV = DOCKER_WORKER_BACKEND_CONFIG_ENV_BY_KEY["user"]
+_SECURITY_POLICY_ENV = DOCKER_WORKER_BACKEND_CONFIG_ENV_BY_KEY["security_policy"]
+_RUNTIME_ENV = DOCKER_WORKER_BACKEND_CONFIG_ENV_BY_KEY["runtime"]
+_EXTRA_ENV_JSON_ENV = DOCKER_WORKER_BACKEND_CONFIG_ENV_BY_KEY["extra_env_json"]
+_EXTRA_LABELS_JSON_ENV = DOCKER_WORKER_BACKEND_CONFIG_ENV_BY_KEY["extra_labels_json"]
 DOCKER_RESERVED_EXTRA_ENV_NAMES = frozenset(
     {
         SANDBOX_RUNTIME_ENV_BY_KEY["proxy_token"],
@@ -97,6 +95,8 @@ _DOCKER_RESERVED_LABEL_NAMES = frozenset(
         "mindroom.ai/worker-id",
         "mindroom.ai/worker-key",
         "mindroom.ai/launch-config-hash",
+        "mindroom.ai/startup-manifest-hash",
+        "mindroom.ai/image-reference",
         "mindroom.ai/runtime-namespace",
         "mindroom.ai/storage-layout",
     },
@@ -235,7 +235,7 @@ class _DockerWorkerBackendConfig:
         env = runtime_env_values(runtime_paths)
         image = read_env(env, _IMAGE_ENV)
         if not image:
-            msg = f"{_IMAGE_ENV} must be set when {_WORKER_BACKEND_ENV}=docker."
+            msg = f"{_IMAGE_ENV} must be set when {WORKER_BACKEND_ENV}=docker."
             raise WorkerBackendError(msg)
 
         publish_host = read_env(env, _PUBLISH_HOST_ENV, _DEFAULT_PUBLISH_HOST) or _DEFAULT_PUBLISH_HOST
@@ -328,17 +328,6 @@ def docker_backend_config_signature(
         prefix_parts=(
             "docker",
             *security_policy_signature,
-            config.image,
-            str(config.worker_port),
-            config.storage_mount_path,
-            config.config_path,
-            str(config.host_config_path or ""),
-            str(config.idle_timeout_seconds),
-            str(config.ready_timeout_seconds),
-            config.name_prefix,
-            config.publish_host,
-            config.endpoint_host,
-            config.user or "",
             str(workers_root),
             str(credentials_key.shared_base_path),
             credentials_key.current_worker_key or "",
@@ -348,9 +337,7 @@ def docker_backend_config_signature(
             runtime_env.get("DOCKER_CERT_PATH", ""),
         ),
         runtime_paths=effective_runtime_paths,
-        json_values=(
-            config.extra_env,
-            config.extra_labels,
-        ),
+        # Every parsed setting, so a change to any of them, now or added later, builds a new backend.
+        json_values=({**asdict(config), "host_config_path": str(config.host_config_path or "")},),
         suffix_parts=(auth_token or "",),
     )

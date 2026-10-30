@@ -59,7 +59,6 @@ from mindroom.workers.backends import docker_projection as docker_projection_mod
 from mindroom.workers.backends.docker import (
     _WORKER_CONTROL_DIRNAME,
     DockerWorkerBackend,
-    _DockerLaunchConfig,
     _load_docker_client_and_errors,
     _WorkerImageIncompatibleError,
     check_docker_workers_absent_for_storage_upgrade,
@@ -172,19 +171,13 @@ class _FakeContainer:
 
 
 class _FakeContainersApi:
-    def __init__(
-        self,
-        *,
-        images: _FakeImagesApi | None = None,
-        auto_pull_missing_image: bool = False,
-    ) -> None:
+    def __init__(self, *, images: _FakeImagesApi | None = None) -> None:
         self.by_name: dict[str, _FakeContainer] = {}
         self.created_containers: list[_FakeContainer] = []
         self.run_calls: list[dict[str, object]] = []
         self.list_calls: list[dict[str, object]] = []
         self.next_host_port = 43001
         self.images = images
-        self.auto_pull_missing_image = auto_pull_missing_image
 
     def get(self, name: str) -> _FakeContainer:
         container = self.by_name.get(name)
@@ -211,9 +204,6 @@ class _FakeContainersApi:
         ]
 
     def run(self, image: str, **kwargs: object) -> _FakeContainer:
-        if self.auto_pull_missing_image and self.images is not None and image not in self.images.by_name:
-            self.images.by_name[image] = _FakeImage("sha256:auto-pulled-image")
-
         image_identity = image
         if self.images is not None:
             docker_image = self.images.by_name.get(image)
@@ -288,13 +278,10 @@ class _FakeImagesApi:
 
 
 class _FakeDockerClient:
-    def __init__(self, *, auto_pull_missing_image: bool = False) -> None:
+    def __init__(self) -> None:
         self.api = SimpleNamespace(timeout=None)
         self.images = _FakeImagesApi()
-        self.containers = _FakeContainersApi(
-            images=self.images,
-            auto_pull_missing_image=auto_pull_missing_image,
-        )
+        self.containers = _FakeContainersApi(images=self.images)
 
 
 class _WorkerThreadContext(threading.local):
@@ -314,27 +301,25 @@ class _ConcurrentTagUpdate:
         self.stale_reader_key = stale_reader_key
         self.recovering_container_name = backend._container_name_for_worker(recovering_key)
         self.stale_reader_container_name = backend._container_name_for_worker(stale_reader_key)
-        self.original_resolve_launch_config = backend._resolve_launch_config
-        self.stale_launch_config = self.original_resolve_launch_config(_launch(backend._runtime_paths))
+        self.original_configured_image_id = backend._configured_image_id
+        self.stale_image_id = self.original_configured_image_id()
         self.thread_context = _WorkerThreadContext()
-        self.stale_launch_resolved = threading.Event()
+        self.stale_image_resolved = threading.Event()
         self.recovering_worker_ready = threading.Event()
 
-    def resolve_launch_config(self, launch: WorkerLaunchConfig) -> _DockerLaunchConfig:
-        launch_config = self.original_resolve_launch_config(launch)
+    def configured_image_id(self) -> str | None:
+        image_id = self.original_configured_image_id()
         if self.thread_context.worker_key == self.stale_reader_key:
-            self.stale_launch_resolved.set()
+            self.stale_image_resolved.set()
             assert self.recovering_worker_ready.wait(timeout=5.0)
-            return self.stale_launch_config
-        return launch_config
+            return self.stale_image_id
+        return image_id
 
-    def wait_for_ready(self, container: _FakeContainer) -> str:
+    def wait_for_ready(self, container: _FakeContainer) -> None:
         if container.attrs["Image"] == "sha256:image-v1":
             raise _WorkerImageIncompatibleError(_STALE_IMAGE_MISMATCH)
         if self.thread_context.worker_key == self.recovering_key:
             self.recovering_worker_ready.set()
-        host_port = self.backend._container_host_port(container)
-        return f"http://127.0.0.1:{host_port}/api/sandbox-runner/execute"
 
     def ensure_worker(self, worker_key: str) -> None:
         self.thread_context.worker_key = worker_key
@@ -815,11 +800,7 @@ def _backend(
         storage_path=tmp_path if storage_path is None else storage_path,
         runtime_paths=runtime_paths,
     )
-    monkeypatch.setattr(
-        backend,
-        "_wait_for_ready",
-        lambda container: f"http://127.0.0.1:{backend._container_host_port(container)}/api/sandbox-runner/execute",
-    )
+    monkeypatch.setattr(backend, "_wait_for_ready", lambda _container: None)
     return backend, fake_client, sync_calls
 
 
@@ -1835,20 +1816,11 @@ def test_docker_workers_run_with_read_only_root_filesystem(
     """Tool code must not rewrite the image's /app tree, which the runner imports from and keeps across restarts."""
     backend, fake_client, _sync_calls = _backend(monkeypatch, tmp_path)
 
-    handle = backend.ensure_worker(_spec(backend, _TEST_UNSCOPED_WORKER_KEY), now=10.0)
+    backend.ensure_worker(_spec(backend, _TEST_UNSCOPED_WORKER_KEY), now=10.0)
 
     run_call = fake_client.containers.run_calls[0]
     assert run_call["read_only"] is True
     assert run_call["tmpfs"] == {"/tmp": "rw,nosuid,nodev,mode=1777,size=1g"}  # noqa: S108
-    writable_container = fake_client.containers.by_name[handle.worker_id]
-    writable_container.attrs["HostConfig"]["ReadonlyRootfs"] = False
-    writable_container.stop()
-
-    backend.ensure_worker(_spec(backend, _TEST_UNSCOPED_WORKER_KEY), now=20.0)
-
-    assert writable_container.removed == 1
-    assert writable_container.started == 0
-    assert fake_client.containers.run_calls[1]["read_only"] is True
 
 
 def test_docker_workers_keep_the_image_init_entrypoint(
@@ -1911,13 +1883,7 @@ def test_docker_backend_recreates_container_when_runtime_changes(
         auth_token=_TEST_AUTH_TOKEN,
         storage_path=tmp_path,
     )
-    monkeypatch.setattr(
-        sandboxed_backend,
-        "_wait_for_ready",
-        lambda container: (
-            f"http://127.0.0.1:{sandboxed_backend._container_host_port(container)}/api/sandbox-runner/execute"
-        ),
-    )
+    monkeypatch.setattr(sandboxed_backend, "_wait_for_ready", lambda _container: None)
     sandboxed_backend.ensure_worker(_spec(sandboxed_backend, _TEST_UNSCOPED_WORKER_KEY), now=20.0)
 
     assert first_container.removed == 1
@@ -1951,15 +1917,64 @@ def test_docker_workers_mount_the_startup_manifest_directory_read_only(
     assert run_call["environment"]["MINDROOM_SANDBOX_STARTUP_MANIFEST_PATH"] == (
         "/app/worker/.runtime/startup_manifest.json"
     )
-    container = fake_client.containers.by_name[handle.worker_id]
-    runtime_mount = next(mount for mount in container.attrs["Mounts"] if mount["Destination"] == "/app/worker/.runtime")
-    runtime_mount["Mode"] = "rw"
-    runtime_mount["RW"] = True
 
+
+def test_docker_worker_manifest_holds_no_docker_backend_settings(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Primary-side Docker backend settings never reach the startup manifest that worker code can read."""
+    backend_env = {
+        "MINDROOM_WORKER_BACKEND": "docker",
+        "MINDROOM_DOCKER_WORKER_HOST_CONFIG_PATH": "/srv/primary/config.yaml",
+        "MINDROOM_DOCKER_WORKER_ENV_JSON": json.dumps({"EXTRA_ENV": "present"}),
+        "MINDROOM_DOCKER_WORKER_LABELS_JSON": json.dumps({"team": "ops"}),
+        "MINDROOM_DOCKER_WORKER_PUBLISH_HOST": "127.0.0.1",
+    }
+    (tmp_path / ".env").write_text(
+        "".join(f"{name}={value!r}\n" for name, value in backend_env.items()),
+        encoding="utf-8",
+    )
+    runtime_paths = resolve_primary_runtime_paths(
+        config_path=tmp_path / "config.yaml",
+        storage_path=tmp_path,
+        process_env={"MATRIX_HOMESERVER": "https://chat.example.test", **backend_env},
+    )
+    backend, _fake_client, _sync_calls = _backend(monkeypatch, tmp_path, runtime_paths=runtime_paths)
+
+    backend.ensure_worker(_spec(backend, _TEST_UNSCOPED_WORKER_KEY), now=10.0)
+
+    committed = _committed_startup_runtime(backend, _TEST_UNSCOPED_WORKER_KEY)
+    assert committed.process_env["MATRIX_HOMESERVER"] == "https://chat.example.test"
+    leaked = {*committed.process_env, *committed.env_file_values} & set(backend_env)
+    assert leaked == set()
+
+
+@pytest.mark.parametrize(
+    ("constant", "changed"),
+    [
+        ("_WORKER_TMPFS", {"/tmp": "rw,nosuid,nodev,mode=1777,size=2g"}),  # noqa: S108
+        ("_WORKER_EXTRA_HOSTS", {"host.docker.internal": "host-gateway", "api.internal": "host-gateway"}),
+        ("_WORKER_COMMAND", ["/app/run-sandbox-runner.sh", "--verbose"]),
+    ],
+    ids=["tmpfs", "extra-hosts", "command"],
+)
+def test_docker_backend_recreates_a_container_whose_run_arguments_changed(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    constant: str,
+    changed: object,
+) -> None:
+    """Any change to the arguments a container is run with replaces it, even when the image is unchanged."""
+    backend, fake_client, _sync_calls = _backend(monkeypatch, tmp_path)
+    handle = backend.ensure_worker(_spec(backend, _TEST_UNSCOPED_WORKER_KEY), now=10.0)
+    first_container = fake_client.containers.by_name[handle.worker_id]
+
+    monkeypatch.setattr(docker_backend_module, constant, changed, raising=False)
     backend.ensure_worker(_spec(backend, _TEST_UNSCOPED_WORKER_KEY), now=20.0)
 
-    assert container.removed == 1
-    assert f"{worker_root}/.runtime:/app/worker/.runtime:ro" in fake_client.containers.run_calls[1]["volumes"]
+    assert first_container.removed == 1
+    assert len(fake_client.containers.run_calls) == 2
 
 
 @pytest.mark.parametrize(
@@ -1994,11 +2009,7 @@ def test_docker_backend_recreates_container_when_its_startup_manifest_changes(
         storage_path=tmp_path,
         runtime_paths=runtime_paths({**base_env, **changed_env}),
     )
-    monkeypatch.setattr(
-        restarted,
-        "_wait_for_ready",
-        lambda container: f"http://127.0.0.1:{restarted._container_host_port(container)}/api/sandbox-runner/execute",
-    )
+    monkeypatch.setattr(restarted, "_wait_for_ready", lambda _container: None)
 
     restarted.ensure_worker(_spec(restarted, _TEST_UNSCOPED_WORKER_KEY), now=20.0)
 
@@ -2735,11 +2746,7 @@ def test_docker_backend_preserves_container_config_path_without_host_projection(
         storage_path=tmp_path / "storage",
         runtime_paths=runtime_paths,
     )
-    monkeypatch.setattr(
-        backend,
-        "_wait_for_ready",
-        lambda container: f"http://127.0.0.1:{backend._container_host_port(container)}/api/sandbox-runner/execute",
-    )
+    monkeypatch.setattr(backend, "_wait_for_ready", lambda _container: None)
 
     backend.ensure_worker(_spec(backend, _TEST_UNSCOPED_WORKER_KEY), now=10.0)
 
@@ -3350,8 +3357,6 @@ def test_docker_backend_adopts_legacy_mounted_worker_records(
     assert adopted["container_name"] == handle.worker_id
     assert adopted["status"] == "idle"
     assert adopted["last_used_at"] < 1e12
-    # The adopted record has no launch identity, so the next ensure replaces the container.
-    assert adopted["launch_config_hash"] is None
     assert [listed.worker_id for listed in upgraded.list_workers()] == [handle.worker_id]
 
     cleaned = upgraded.cleanup_idle_workers(now=adopted["last_used_at"] + 120.0)
@@ -3366,6 +3371,48 @@ def test_docker_backend_adopts_legacy_mounted_worker_records(
     assert foreign_container.removed == 0
     assert worker_root_path(tmp_path, _TEST_UNSCOPED_WORKER_KEY).exists() is False
     assert _control_metadata_path(tmp_path, _TEST_UNSCOPED_WORKER_KEY).exists() is False
+
+
+def test_docker_backend_drops_retired_keys_from_old_control_records(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A control record from the last release keeps its worker and history, and its old container is replaced once."""
+    backend, fake_client, _sync_calls = _backend(monkeypatch, tmp_path)
+    handle = backend.ensure_worker(_spec(backend, _TEST_UNSCOPED_WORKER_KEY), now=10.0)
+    container = fake_client.containers.by_name[handle.worker_id]
+    record_path = _control_metadata_path(tmp_path, _TEST_UNSCOPED_WORKER_KEY)
+    current_record = json.loads(record_path.read_text(encoding="utf-8")) | {"startup_count": 3}
+    old_hash = "0" * 64
+    old_record = current_record | {
+        "endpoint": f"http://127.0.0.1:{backend._container_host_port(container)}/api/sandbox-runner/execute",
+        "backend_name": "docker",
+        "host_port": backend._container_host_port(container),
+        "container_id": container.id,
+        "image": backend.config.image,
+        "publish_host": "127.0.0.1",
+        "worker_port": 8766,
+        "launch_config_hash": old_hash,
+        "startup_manifest_hash": "1" * 64,
+    }
+    record_path.write_text(json.dumps(old_record), encoding="utf-8")
+    # The container that release started carries its launch hash in the older form.
+    container.attrs["Config"]["Labels"]["mindroom.ai/launch-config-hash"] = old_hash
+    unreadable_path = _control_metadata_path(tmp_path, "v1:default:unscoped:broken")
+    unreadable_path.parent.mkdir(parents=True)
+    unreadable_path.write_text("{malformed", encoding="utf-8")
+
+    upgraded = _restart_backend(backend, tmp_path)
+
+    assert json.loads(record_path.read_text(encoding="utf-8")) == current_record
+    assert unreadable_path.read_text(encoding="utf-8") == "{malformed"
+    [listed] = upgraded.list_workers(now=20.0)
+    assert (listed.worker_key, listed.created_at, listed.startup_count) == (_TEST_UNSCOPED_WORKER_KEY, 10.0, 3)
+    monkeypatch.setattr(upgraded, "_wait_for_ready", lambda _container: None)
+    upgraded.ensure_worker(_spec(upgraded, _TEST_UNSCOPED_WORKER_KEY), now=30.0)
+    upgraded.ensure_worker(_spec(upgraded, _TEST_UNSCOPED_WORKER_KEY), now=40.0)
+    assert container.removed == 1
+    assert len(fake_client.containers.run_calls) == 2
 
 
 @pytest.mark.parametrize("tampering", ["foreign_key", "symlinked_record", "malformed_record"])
@@ -3555,6 +3602,34 @@ def test_docker_backend_records_failure_and_stops_container(
     container = next(iter(fake_client.containers.by_name.values()))
     assert container.stopped == 1
     assert container.status == "exited"
+
+
+def test_docker_backend_records_a_credential_mirroring_failure(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A worker whose credentials cannot be mirrored fails like any other start, so its caller is told."""
+    backend, fake_client, _sync_calls = _backend(monkeypatch, tmp_path)
+
+    def _failing_sync(*_args: object, **_kwargs: object) -> None:
+        msg = "credential store unreadable"
+        raise OSError(msg)
+
+    monkeypatch.setattr("mindroom.workers.backends.docker.sync_shared_credentials_to_worker", _failing_sync)
+    progress_events: list[WorkerReadyProgress] = []
+
+    with pytest.raises(WorkerBackendError, match="credential store unreadable"):
+        backend.ensure_worker(
+            _spec(backend, _TEST_UNSCOPED_WORKER_KEY),
+            now=10.0,
+            progress_sink=progress_events.append,
+        )
+
+    assert [event.phase for event in progress_events] == ["cold_start", "failed"]
+    assert fake_client.containers.run_calls == []
+    [listed] = backend.list_workers(now=11.0)
+    assert listed.status == "failed"
+    assert listed.failure_reason == "credential store unreadable"
 
 
 def test_docker_worker_ready_failure_surfaces_container_logs(
@@ -3769,7 +3844,7 @@ def test_docker_worker_failed_stale_replacement_retains_launch_identity_for_retr
     fake_client.images.pull_image_id = "sha256:image-v2"
     readiness_calls = 0
 
-    def _wait_for_ready(container: _FakeContainer) -> str:
+    def _wait_for_ready(container: _FakeContainer) -> None:
         nonlocal readiness_calls
         readiness_calls += 1
         if container.attrs["Image"] == "sha256:image-v1":
@@ -3777,8 +3852,6 @@ def test_docker_worker_failed_stale_replacement_retains_launch_identity_for_retr
         if readiness_calls == 2:
             message = "replacement failed"
             raise WorkerBackendError(message)
-        host_port = backend._container_host_port(container)
-        return f"http://127.0.0.1:{host_port}/api/sandbox-runner/execute"
 
     monkeypatch.setattr(backend, "_wait_for_ready", _wait_for_ready)
 
@@ -3786,10 +3859,7 @@ def test_docker_worker_failed_stale_replacement_retains_launch_identity_for_retr
         backend.ensure_worker(_spec(backend, _TEST_UNSCOPED_WORKER_KEY), now=0.0)
 
     replacement = fake_client.containers.created_containers[-1]
-    replacement_hash = replacement.attrs["Config"]["Labels"]["mindroom.ai/launch-config-hash"]
-    failed_metadata = backend._load_metadata(backend._worker_paths(_TEST_UNSCOPED_WORKER_KEY))
-    assert failed_metadata is not None
-    assert failed_metadata.launch_config_hash == replacement_hash
+    assert replacement.attrs["Image"] == "sha256:image-v2"
 
     backend.ensure_worker(_spec(backend, _TEST_UNSCOPED_WORKER_KEY), now=1.0)
 
@@ -3813,28 +3883,20 @@ def test_docker_worker_concurrent_tag_update_keeps_request_local_launch_identity
         recovering_key=recovering_key,
         stale_reader_key=stale_reader_key,
     )
-    monkeypatch.setattr(backend, "_resolve_launch_config", race.resolve_launch_config)
+    monkeypatch.setattr(backend, "_configured_image_id", race.configured_image_id)
     monkeypatch.setattr(backend, "_wait_for_ready", race.wait_for_ready)
 
     with ThreadPoolExecutor(max_workers=2) as executor:
         stale_reader = executor.submit(race.ensure_worker, stale_reader_key)
-        assert race.stale_launch_resolved.wait(timeout=5.0)
+        assert race.stale_image_resolved.wait(timeout=5.0)
         recovering_worker = executor.submit(race.ensure_worker, recovering_key)
         recovering_worker.result(timeout=5.0)
         stale_reader.result(timeout=5.0)
 
     replacement = fake_client.containers.by_name[race.recovering_container_name]
-    replacement_labels = replacement.attrs["Config"]["Labels"]
     stale_reader_container = fake_client.containers.by_name[race.stale_reader_container_name]
-    stale_reader_labels = stale_reader_container.attrs["Config"]["Labels"]
-    recovering_metadata = backend._load_metadata(backend._worker_paths(recovering_key))
-    stale_reader_metadata = backend._load_metadata(backend._worker_paths(stale_reader_key))
-    assert recovering_metadata is not None
-    assert stale_reader_metadata is not None
     assert replacement.attrs["Image"] == "sha256:image-v2"
-    assert recovering_metadata.launch_config_hash == replacement_labels["mindroom.ai/launch-config-hash"]
     assert stale_reader_container.attrs["Image"] == "sha256:image-v2"
-    assert stale_reader_metadata.launch_config_hash == stale_reader_labels["mindroom.ai/launch-config-hash"]
 
     created_count = len(fake_client.containers.created_containers)
     backend.ensure_worker(_spec(backend, recovering_key), now=1.0)
@@ -4099,13 +4161,7 @@ def test_docker_backend_recreates_container_when_launch_config_changes(
         extra_env={"EXTRA_ENV": "updated"},
     )
     updated_backend = _docker_backend(config=updated_config, auth_token=_ROTATED_AUTH_TOKEN, storage_path=tmp_path)
-    monkeypatch.setattr(
-        updated_backend,
-        "_wait_for_ready",
-        lambda container: (
-            f"http://127.0.0.1:{updated_backend._container_host_port(container)}/api/sandbox-runner/execute"
-        ),
-    )
+    monkeypatch.setattr(updated_backend, "_wait_for_ready", lambda _container: None)
 
     second_handle = updated_backend.ensure_worker(_spec(updated_backend, _TEST_UNSCOPED_WORKER_KEY), now=20.0)
 
@@ -4123,11 +4179,11 @@ def test_docker_backend_recreates_container_when_launch_config_changes(
     assert second_run_call["user"] == "2000:2000"
 
 
-def test_docker_backend_recreates_container_missing_runtime_security_options(
+def test_docker_backend_recreates_computer_container_when_its_seccomp_profile_changes(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    """An old matching container must be replaced if its effective host security is stale."""
+    """A worker run under an older Computer security profile is replaced by one run under the current profile."""
     runtime_paths = resolve_primary_runtime_paths(
         config_path=tmp_path / "config.yaml",
         storage_path=tmp_path,
@@ -4141,79 +4197,13 @@ def test_docker_backend_recreates_container_missing_runtime_security_options(
     )
     first_handle = backend.ensure_worker(_spec(backend, _TEST_UNSCOPED_WORKER_KEY), now=10.0)
     first_container = fake_client.containers.by_name[first_handle.worker_id]
-    first_container.attrs["HostConfig"] = {"CapDrop": [], "SecurityOpt": []}
+    updated_options = ["no-new-privileges:true", 'seccomp={"defaultAction":"SCMP_ACT_ERRNO"}']
+    monkeypatch.setattr(docker_backend_module, "docker_worker_security_options", lambda: list(updated_options))
 
     backend.ensure_worker(_spec(backend, _TEST_UNSCOPED_WORKER_KEY), now=20.0)
 
     assert first_container.removed == 1
-    assert len(fake_client.containers.run_calls) == 2
-
-
-@pytest.mark.parametrize(
-    "weakened_setting",
-    [
-        "privileged",
-        "cap_add",
-        "missing_drop",
-        "missing_nnp",
-        "unconfined",
-        "normalized_seccomp_marker",
-        "wrong_profile",
-        "invalid_profile",
-        "missing_host_config",
-    ],
-)
-@pytest.mark.parametrize("computer_enabled", [False, True])
-def test_docker_backend_recreates_container_with_weakened_runtime_security(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-    *,
-    weakened_setting: str,
-    computer_enabled: bool,
-) -> None:
-    """A matching worker must not be reused when its effective Docker policy is weaker."""
-    runtime_paths = resolve_primary_runtime_paths(
-        config_path=tmp_path / "config.yaml",
-        storage_path=tmp_path / "state",
-        process_env={WORKER_COMPUTER_ENABLED_ENV: str(computer_enabled).lower()},
-    )
-    backend, fake_client, _sync_calls = _backend(
-        monkeypatch,
-        tmp_path,
-        runtime_paths=runtime_paths,
-        security_policy="computer",
-    )
-    first_handle = backend.ensure_worker(_spec(backend, _TEST_UNSCOPED_WORKER_KEY), now=10.0)
-    first_container = fake_client.containers.by_name[first_handle.worker_id]
-    host_config = first_container.attrs["HostConfig"]
-    assert isinstance(host_config, dict)
-
-    if weakened_setting == "privileged":
-        host_config["Privileged"] = True
-    elif weakened_setting == "cap_add":
-        host_config["CapAdd"] = ["SYS_ADMIN"]
-    elif weakened_setting == "missing_drop":
-        host_config["CapDrop"] = []
-    elif weakened_setting == "missing_nnp":
-        host_config["SecurityOpt"] = host_config["SecurityOpt"][1:]
-    elif weakened_setting == "invalid_profile":
-        host_config["SecurityOpt"] = ["no-new-privileges:true", "seccomp={"]
-    elif weakened_setting == "missing_host_config":
-        first_container.attrs.pop("HostConfig")
-    elif weakened_setting == "normalized_seccomp_marker":
-        host_config["SecurityOpt"] = ["no-new-privileges:true", "seccomp"]
-    else:
-        replacement = (
-            "unconfined"
-            if weakened_setting == "unconfined"
-            else json.dumps({"defaultAction": "SCMP_ACT_ALLOW", "syscalls": []})
-        )
-        host_config["SecurityOpt"] = ["no-new-privileges:true", f"seccomp={replacement}"]
-
-    backend.ensure_worker(_spec(backend, _TEST_UNSCOPED_WORKER_KEY), now=20.0)
-
-    assert first_container.removed == 1
-    assert len(fake_client.containers.run_calls) == 2
+    assert fake_client.containers.run_calls[-1]["security_opt"] == updated_options
 
 
 @pytest.mark.parametrize(
@@ -4290,13 +4280,7 @@ def test_docker_backend_recreates_container_when_name_prefix_changes(
 
     updated_config = replace(backend.config, name_prefix="other-prefix")
     updated_backend = _docker_backend(config=updated_config, auth_token=_TEST_AUTH_TOKEN, storage_path=tmp_path)
-    monkeypatch.setattr(
-        updated_backend,
-        "_wait_for_ready",
-        lambda container: (
-            f"http://127.0.0.1:{updated_backend._container_host_port(container)}/api/sandbox-runner/execute"
-        ),
-    )
+    monkeypatch.setattr(updated_backend, "_wait_for_ready", lambda _container: None)
 
     second_handle = updated_backend.ensure_worker(_spec(updated_backend, _TEST_UNSCOPED_WORKER_KEY), now=20.0)
 
@@ -4356,6 +4340,7 @@ def test_docker_backend_uses_distinct_container_names_for_different_storage_root
         extra_labels={},
     )
     fake_client = _FakeDockerClient()
+    fake_client.images.by_name[config.image] = _FakeImage("sha256:image-v1")
 
     monkeypatch.setattr(
         "mindroom.workers.backends.docker._load_docker_client_and_errors",
@@ -4375,22 +4360,10 @@ def test_docker_backend_uses_distinct_container_names_for_different_storage_root
     first_storage_root = tmp_path / "runtime-a"
     second_storage_root = tmp_path / "runtime-b"
     first_backend = _docker_backend(config=config, auth_token=_TEST_AUTH_TOKEN, storage_path=first_storage_root)
-    monkeypatch.setattr(
-        first_backend,
-        "_wait_for_ready",
-        lambda container: (
-            f"http://127.0.0.1:{first_backend._container_host_port(container)}/api/sandbox-runner/execute"
-        ),
-    )
+    monkeypatch.setattr(first_backend, "_wait_for_ready", lambda _container: None)
 
     second_backend = _docker_backend(config=config, auth_token=_TEST_AUTH_TOKEN, storage_path=second_storage_root)
-    monkeypatch.setattr(
-        second_backend,
-        "_wait_for_ready",
-        lambda container: (
-            f"http://127.0.0.1:{second_backend._container_host_port(container)}/api/sandbox-runner/execute"
-        ),
-    )
+    monkeypatch.setattr(second_backend, "_wait_for_ready", lambda _container: None)
 
     first_handle = first_backend.ensure_worker(_spec(first_backend, _TEST_UNSCOPED_WORKER_KEY), now=10.0)
     second_handle = second_backend.ensure_worker(_spec(second_backend, _TEST_UNSCOPED_WORKER_KEY), now=20.0)
@@ -4416,80 +4389,6 @@ def test_docker_backend_shutdown_removes_running_containers_and_keeps_idle_metad
     idle_handle = backend.list_workers(now=20.0)[0]
     assert idle_handle.status == "idle"
     assert idle_handle.failure_reason is None
-
-
-def test_docker_backend_recreates_container_when_storage_mount_does_not_match(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> None:
-    """Worker reuse should fail closed when an existing container points at the wrong state root."""
-    backend, fake_client, _sync_calls = _backend(monkeypatch, tmp_path)
-
-    handle = backend.ensure_worker(_spec(backend, _TEST_UNSCOPED_WORKER_KEY), now=10.0)
-    existing_container = fake_client.containers.by_name[handle.worker_id]
-    existing_container.attrs["Mounts"][0]["Source"] = str(tmp_path / "wrong-root")
-
-    backend.ensure_worker(_spec(backend, _TEST_UNSCOPED_WORKER_KEY), now=20.0)
-
-    replacement_container = fake_client.containers.by_name[handle.worker_id]
-    assert replacement_container is not existing_container
-    assert existing_container.removed == 1
-    assert len(fake_client.containers.run_calls) == 2
-
-
-def test_docker_backend_recreates_container_when_extra_stale_mount_is_present(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> None:
-    """Worker reuse should fail closed when a stale container keeps extra bind mounts."""
-    config_text, _projected_paths = _private_user_agent_projected_config_fixture(tmp_path)
-    backend, fake_client, _sync_calls = _backend(monkeypatch, tmp_path, config_text=config_text)
-    worker_key = "v1:tenant-123:user_agent:@alice:example.org:alpha"
-
-    handle = backend.ensure_worker(_spec(backend, worker_key, private_agent_names=frozenset({"alpha"})), now=10.0)
-    existing_container = fake_client.containers.by_name[handle.worker_id]
-    existing_container.attrs["Mounts"].append(
-        {
-            "Type": "bind",
-            "Source": str((tmp_path / "agents" / "beta").resolve()),
-            "Destination": "/app/worker/agents/beta",
-            "Mode": "rw",
-            "RW": True,
-        },
-    )
-
-    backend.ensure_worker(_spec(backend, worker_key, private_agent_names=frozenset({"alpha"})), now=20.0)
-
-    replacement_container = fake_client.containers.by_name[handle.worker_id]
-    assert replacement_container is not existing_container
-    assert existing_container.removed == 1
-    assert len(fake_client.containers.run_calls) == 2
-
-
-def test_docker_backend_ignores_container_runtime_non_bind_mounts(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> None:
-    """Anonymous volumes and tmpfs mounts should not force otherwise compatible workers to restart."""
-    backend, fake_client, _sync_calls = _backend(monkeypatch, tmp_path)
-
-    handle = backend.ensure_worker(_spec(backend, _TEST_UNSCOPED_WORKER_KEY), now=10.0)
-    existing_container = fake_client.containers.by_name[handle.worker_id]
-    existing_container.attrs["Mounts"].append(
-        {
-            "Type": "volume",
-            "Name": "anonymous-volume",
-            "Destination": "/var/lib/mindroom/runtime-volume",
-            "Mode": "",
-            "RW": True,
-        },
-    )
-
-    backend.ensure_worker(_spec(backend, _TEST_UNSCOPED_WORKER_KEY), now=20.0)
-
-    assert fake_client.containers.by_name[handle.worker_id] is existing_container
-    assert existing_container.removed == 0
-    assert len(fake_client.containers.run_calls) == 1
 
 
 def _edit_config_file(path: Path, edit: Callable[[dict[str, Any]], None]) -> None:
@@ -5503,35 +5402,30 @@ def test_docker_backend_rejects_private_user_agent_container_without_target_visi
     assert handle.status == "ready"
 
 
-def test_docker_backend_reconciles_missing_container_metadata_without_stale_endpoint(
+def test_docker_worker_without_a_running_container_has_no_endpoint(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    """Missing containers should not keep advertising a stale published endpoint."""
+    """Only a running container publishes a port, and the control record keeps no copy of one."""
     backend, fake_client, _sync_calls = _backend(monkeypatch, tmp_path, idle_timeout_seconds=60.0)
-
     handle = backend.ensure_worker(_spec(backend, _TEST_UNSCOPED_WORKER_KEY), now=10.0)
-    container_name = next(iter(fake_client.containers.by_name))
-    del fake_client.containers.by_name[container_name]
+    container = fake_client.containers.by_name[handle.worker_id]
+    assert handle.endpoint == f"http://127.0.0.1:{backend._container_host_port(container)}/api/sandbox-runner/execute"
 
-    handles = backend.list_workers(include_idle=True, now=100.0)
+    container.stop()
+    [stopped] = backend.list_workers(include_idle=True, now=20.0)
+    del fake_client.containers.by_name[handle.worker_id]
+    [missing] = backend.list_workers(include_idle=True, now=20.0)
 
-    assert [worker.worker_key for worker in handles] == [_TEST_UNSCOPED_WORKER_KEY]
-    assert handles[0].status == "idle"
-    assert handles[0].endpoint == "/api/sandbox-runner/execute"
-    assert handle.endpoint != handles[0].endpoint
-
-    metadata_path = _control_metadata_path(tmp_path, _TEST_UNSCOPED_WORKER_KEY)
-    metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
-    assert metadata["host_port"] is None
-    assert metadata["container_id"] is None
-
-    cleaned = backend.cleanup_idle_workers(now=1000.0)
-
-    assert cleaned == []
-    metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
-    assert metadata["host_port"] is None
-    assert metadata["container_id"] is None
+    for listed in (stopped, missing):
+        assert listed.status == "idle"
+        assert listed.endpoint == ""
+        assert listed.debug_metadata["host_port"] == ""
+        assert listed.debug_metadata["api_root"] == ""
+    assert stopped.debug_metadata["container_id"] == container.id
+    assert missing.debug_metadata["container_id"] == ""
+    record = json.loads(_control_metadata_path(tmp_path, _TEST_UNSCOPED_WORKER_KEY).read_text(encoding="utf-8"))
+    assert {"endpoint", "host_port", "container_id"}.isdisjoint(record)
 
 
 def test_docker_projection_hash_is_stable_across_hash_seeds(tmp_path: Path) -> None:
@@ -5834,7 +5728,7 @@ def test_docker_backend_reuses_container_after_first_run_pulls_missing_image(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    """The first auto-pull should not force a second worker recreation on the next ensure."""
+    """The first run pulls a missing image, and the next ensure reuses the container it started."""
     config = _DockerWorkerBackendConfig(
         image="ghcr.io/mindroom-ai/mindroom:latest",
         worker_port=8766,
@@ -5850,7 +5744,8 @@ def test_docker_backend_reuses_container_after_first_run_pulls_missing_image(
         extra_env={},
         extra_labels={},
     )
-    fake_client = _FakeDockerClient(auto_pull_missing_image=True)
+    fake_client = _FakeDockerClient()
+    fake_client.images.pull_image_id = "sha256:pulled-image"
 
     monkeypatch.setattr(
         "mindroom.workers.backends.docker._load_docker_client_and_errors",
@@ -5868,17 +5763,15 @@ def test_docker_backend_reuses_container_after_first_run_pulls_missing_image(
     )
 
     backend = _docker_backend(config=config, auth_token=_TEST_AUTH_TOKEN, storage_path=tmp_path)
-    monkeypatch.setattr(
-        backend,
-        "_wait_for_ready",
-        lambda container: f"http://127.0.0.1:{backend._container_host_port(container)}/api/sandbox-runner/execute",
-    )
+    monkeypatch.setattr(backend, "_wait_for_ready", lambda _container: None)
 
     first_handle = backend.ensure_worker(_spec(backend, _TEST_UNSCOPED_WORKER_KEY), now=10.0)
     first_container = fake_client.containers.by_name[first_handle.worker_id]
 
     second_handle = backend.ensure_worker(_spec(backend, _TEST_UNSCOPED_WORKER_KEY), now=20.0)
 
+    assert fake_client.images.pulls == [config.image]
+    assert fake_client.containers.run_calls[0]["image"] == "sha256:pulled-image"
     assert second_handle.worker_id == first_handle.worker_id
     assert fake_client.containers.by_name[second_handle.worker_id] is first_container
     assert len(fake_client.containers.run_calls) == 1
@@ -5907,6 +5800,24 @@ def test_docker_backend_reuses_container_after_its_image_leaves_the_local_daemon
 
     backend.ensure_worker(_spec(backend, _TEST_UNSCOPED_WORKER_KEY, tool_validation_snapshot=snapshot), now=20.0)
 
+    assert first_container.removed == 0
+    assert len(fake_client.containers.run_calls) == 1
+
+
+def test_docker_backend_restarts_a_stopped_worker_whose_image_left_the_local_daemon(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A stopped worker's own image proves it current, so an idle-stopped worker restarts without the registry."""
+    backend, fake_client, _sync_calls = _backend(monkeypatch, tmp_path)
+    handle = backend.ensure_worker(_spec(backend, _TEST_UNSCOPED_WORKER_KEY), now=10.0)
+    first_container = fake_client.containers.by_name[handle.worker_id]
+    first_container.stop()
+    del fake_client.images.by_name[backend.config.image]
+
+    backend.ensure_worker(_spec(backend, _TEST_UNSCOPED_WORKER_KEY), now=20.0)
+
+    assert fake_client.images.pulls == []
     assert first_container.removed == 0
     assert len(fake_client.containers.run_calls) == 1
 
@@ -5949,14 +5860,12 @@ def test_docker_workers_get_their_own_runner_tokens(monkeypatch: pytest.MonkeyPa
 
 
 @pytest.mark.parametrize("flag", [None, "false"])
-@pytest.mark.parametrize("check", ["launch", "signature", "kwargs", "reuse"])
-def test_docker_ordinary_workers_preserve_pre_computer_identity(
+def test_docker_ordinary_workers_run_without_computer_security_options(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
     flag: str | None,
-    check: str,
 ) -> None:
-    """Historical identities and default Docker HostConfig remain reusable without the opt-in."""
+    """Without the Computer opt-in, a worker keeps Docker's default security and is reused while nothing changes."""
     env = {
         "MINDROOM_WORKER_BACKEND": "docker",
         "MINDROOM_DOCKER_WORKER_IMAGE": "ghcr.io/mindroom-ai/mindroom:latest",
@@ -5970,49 +5879,62 @@ def test_docker_ordinary_workers_preserve_pre_computer_identity(
         process_env=env,
     )
     backend, client, _ = _backend(monkeypatch, tmp_path, runtime_paths=runtime_paths)
-    # Captured from actual main74bc modules: substitute only the test root, never
-    # reconstruct the production hash payload or require git/history at runtime.
-    baseline = json.loads((Path(__file__).parent / "fixtures/docker_pre_computer_identity.json").read_text())
-    # Later releases dropped the config contents hash and the raw tool snapshot, which the startup manifest hash
-    # covers; the rest of the historical payload pins that the Computer opt-in adds nothing to an ordinary worker.
-    launch = _launch(backend._runtime_paths)
-    payload = json.loads(baseline["launch_payload"].replace("__TEST_ROOT__", str(tmp_path)))
-    del payload["config_contents_hash"], payload["tool_validation_snapshot"]
-    expected_hash = hashlib.sha256(json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
-    if check == "launch":
-        assert backend._resolve_launch_config(launch).launch_config_hash == expected_hash
-        return
-    if check == "signature":
-        expected_signature = tuple(
-            part.replace("__TEST_ROOT__", str(tmp_path))
-            for part in baseline["backend_signatures"]["absent" if flag is None else flag]
-        )
-        assert docker_backend_config_signature(runtime_paths, auth_token=_TEST_AUTH_TOKEN) == expected_signature
-        return
-    first = backend.ensure_worker(_spec(backend, _TEST_UNSCOPED_WORKER_KEY), now=10.0)
-    container = client.containers.by_name[first.worker_id]
-    if check == "kwargs":
-        assert "cap_drop" not in client.containers.run_calls[0]
-        assert "security_opt" not in client.containers.run_calls[0]
-        return
-    metadata_path = _control_metadata_path(tmp_path, _TEST_UNSCOPED_WORKER_KEY)
-    metadata = json.loads(metadata_path.read_text())
-    metadata["launch_config_hash"] = expected_hash
-    metadata_path.write_text(json.dumps(metadata))
-    container.attrs["Config"]["Labels"]["mindroom.ai/launch-config-hash"] = expected_hash
-    container.attrs["HostConfig"] = {
-        "Privileged": False,
-        "CapAdd": None,
-        "CapDrop": None,
-        "SecurityOpt": None,
-        "ReadonlyRootfs": True,
-    }
 
+    first = backend.ensure_worker(_spec(backend, _TEST_UNSCOPED_WORKER_KEY), now=10.0)
     second = backend.ensure_worker(_spec(backend, _TEST_UNSCOPED_WORKER_KEY), now=20.0)
 
+    assert "cap_drop" not in client.containers.run_calls[0]
+    assert "security_opt" not in client.containers.run_calls[0]
     assert second.worker_id == first.worker_id
-    assert container.removed == 0
+    assert client.containers.by_name[first.worker_id].removed == 0
     assert len(client.containers.run_calls) == 1
+
+
+def test_docker_launch_hash_label_digests_the_whole_run_call(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """The launch-hash label is the digest of every ``containers.run`` argument, the image ID included, but itself."""
+    backend, fake_client, _sync_calls = _backend(monkeypatch, tmp_path)
+
+    handle = backend.ensure_worker(_spec(backend, _TEST_UNSCOPED_WORKER_KEY), now=10.0)
+
+    run_call = copy.deepcopy(fake_client.containers.run_calls[0])
+    launch_hash = run_call["labels"].pop("mindroom.ai/launch-config-hash")
+    canonical_call = json.dumps(run_call, sort_keys=True, separators=(",", ":"))
+    assert launch_hash == hashlib.sha256(canonical_call.encode()).hexdigest()
+    assert run_call["image"] == "sha256:image-v1"
+    assert run_call["labels"]["mindroom.ai/image-reference"] == backend.config.image
+    manifest_path = sandbox_startup_manifest_path(Path(handle.debug_metadata["state_root"]))
+    assert (
+        run_call["labels"]["mindroom.ai/startup-manifest-hash"]
+        == hashlib.sha256(manifest_path.read_bytes()).hexdigest()
+    )
+
+
+def test_docker_backend_pulls_a_changed_image_that_is_not_local_and_replaces_the_worker(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A running worker's own image never stands in for a newly configured image, which is pulled to replace it."""
+    backend, fake_client, _sync_calls = _backend(monkeypatch, tmp_path)
+    handle = backend.ensure_worker(_spec(backend, _TEST_UNSCOPED_WORKER_KEY), now=10.0)
+    first_container = fake_client.containers.by_name[handle.worker_id]
+    fake_client.images.pull_image_id = "sha256:image-next"
+    changed = _docker_backend(
+        config=replace(backend.config, image="ghcr.io/mindroom-ai/mindroom:next"),
+        auth_token=_TEST_AUTH_TOKEN,
+        storage_path=tmp_path,
+    )
+    monkeypatch.setattr(changed, "_wait_for_ready", lambda _container: None)
+
+    changed.ensure_worker(_spec(changed, _TEST_UNSCOPED_WORKER_KEY), now=20.0)
+
+    assert fake_client.images.pulls == ["ghcr.io/mindroom-ai/mindroom:next"]
+    assert first_container.removed == 1
+    run_call = fake_client.containers.run_calls[-1]
+    assert run_call["image"] == "sha256:image-next"
+    assert run_call["labels"]["mindroom.ai/image-reference"] == "ghcr.io/mindroom-ai/mindroom:next"
 
 
 @pytest.mark.parametrize("initial_policy", ["runtime_default", "computer"])
@@ -6044,11 +5966,6 @@ def test_docker_security_policy_changes_identity_and_replaces_worker(
         runtime_paths=changed_paths,
     )
     monkeypatch.setattr(replacement, "_wait_for_ready", backend._wait_for_ready)
-    launch = _launch(paths)
-    assert (
-        replacement._resolve_launch_config(launch).launch_config_hash
-        != backend._resolve_launch_config(launch).launch_config_hash
-    )
     assert docker_backend_config_signature(paths, auth_token=_TEST_AUTH_TOKEN) != docker_backend_config_signature(
         changed_paths,
         auth_token=_TEST_AUTH_TOKEN,
