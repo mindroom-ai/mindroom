@@ -62,7 +62,6 @@ from mindroom.oauth.credential_binding import (
 from mindroom.oauth.credential_lifecycle import (
     OAuthCredentialConflictError,
     OAuthCredentialContext,
-    OAuthCredentialsStatus,
     exchange_and_store_oauth_credentials,
     load_oauth_credentials_snapshot,
     load_oauth_credentials_status,
@@ -92,14 +91,10 @@ from mindroom.oauth.service import (
 )
 from mindroom.origins import dashboard_origin
 from mindroom.runtime_resolution import resolve_agent_execution
-from mindroom.tool_system.worker_routing import (
-    ResolvedWorkerTarget,
-    build_requester_execution_identity,
-)
+from mindroom.tool_system.worker_routing import build_requester_execution_identity
 
 if TYPE_CHECKING:
     from mindroom.api.credentials_target import RequestCredentialsTarget
-    from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
     from mindroom.tool_system.worker_routing import WorkerScope
 
@@ -274,14 +269,13 @@ def _resolve_oauth_credentials_target(
             execution_scope_override=execution_scope_override,
             allow_private_scopes=True,
         )
-    snapshot = config_lifecycle.bind_current_request_snapshot(request)
     context = resolve_oauth_credential_context(
         provider,
         target.runtime_paths,
         target.base_manager,
         worker_target_for_credentials_target(target),
         execution_identity=target.execution_identity,
-        config=snapshot.runtime_config,
+        config=config_lifecycle.last_good_runtime_config(request),
     )
     worker_target = context.worker_target
     if worker_target is None or worker_target.worker_key is None:
@@ -313,7 +307,7 @@ async def _issue_authorization_url(
         context = conversation_context
     else:
         target = _resolve_oauth_credentials_target(request, provider, agent_name=agent_name)
-        context = _credential_context(provider, target.runtime_paths, target)
+        context = _credential_context(provider, target)
     try:
         payload = (
             await _conversation_target_payload(context, connect_target)
@@ -351,10 +345,6 @@ async def _issue_authorization_url(
     return OAuthConnectResponse(provider=provider.id, auth_url=auth_url, completion_origin=completion_origin)
 
 
-async def _target_binding_payload(provider: OAuthProvider, target: RequestCredentialsTarget) -> dict[str, str]:
-    return await _credential_context_binding_payload(_credential_context(provider, target.runtime_paths, target))
-
-
 async def _credential_context_binding_payload(context: OAuthCredentialContext) -> dict[str, str]:
     snapshot = await load_oauth_credentials_snapshot(context)
     binding = oauth_credential_binding(context.provider, context.worker_target)
@@ -374,28 +364,6 @@ async def _conversation_target_payload(
     return payload
 
 
-def _verify_conversation_connect_target_authorized(request: Request, target: OAuthConnectTarget) -> Config:
-    snapshot = config_lifecycle.bind_current_request_snapshot(request)
-    config = snapshot.runtime_config
-    agent_name = target.binding.requested_agent_name
-    requester_id = target.requester_id
-    if (
-        config is None
-        or not agent_name
-        or not requester_id
-        or not is_sender_allowed_for_agent_oauth_connection(
-            requester_id,
-            agent_name,
-            config,
-            snapshot.runtime_paths,
-            config_lifecycle.app_state(request.app).agent_reply_memberships,
-            requester_owned=target.binding.requester_owned,
-        )
-    ):
-        raise HTTPException(status_code=403, detail="The link requester cannot manage this agent's credentials")
-    return config
-
-
 def _conversation_connect_context(
     request: Request,
     provider: OAuthProvider,
@@ -411,7 +379,16 @@ def _conversation_connect_context(
     # requester-owned grant is only ever used by its owner and a link holder learns nothing about it.
     if binding.worker_scope != "shared":
         _verify_connect_target_authorized(request, requester_id, runtime_paths)
-    config = _verify_conversation_connect_target_authorized(request, target)
+    config = config_lifecycle.last_good_runtime_config(request)
+    if config is None or not is_sender_allowed_for_agent_oauth_connection(
+        requester_id,
+        agent_name,
+        config,
+        runtime_paths,
+        config_lifecycle.app_state(request.app).agent_reply_memberships,
+        requester_owned=binding.requester_owned,
+    ):
+        raise HTTPException(status_code=403, detail="The link requester cannot manage this agent's credentials")
     identity = build_requester_execution_identity(
         agent_name=agent_name,
         runtime_paths=runtime_paths,
@@ -466,11 +443,10 @@ def _conversation_context_from_pending_payload(
 
 
 def _verify_connect_target_authorized(request: Request, requester_id: str | None, runtime_paths: RuntimePaths) -> None:
-    snapshot = config_lifecycle.bind_current_request_snapshot(request)
     dashboard_identity = build_dashboard_execution_identity(
         request,
         "oauth",
-        config=snapshot.runtime_config,
+        config=config_lifecycle.last_good_runtime_config(request),
         runtime_paths=runtime_paths,
     )
     if requester_id and requester_id != dashboard_identity.requester_id:
@@ -487,15 +463,6 @@ def _verify_connect_target_query(
         raise HTTPException(status_code=400, detail="OAuth link target does not match this request")
 
 
-def _verify_connect_target_binding(
-    binding: OAuthCredentialBinding,
-    provider: OAuthProvider,
-    worker_target: ResolvedWorkerTarget | None,
-) -> None:
-    if binding != oauth_credential_binding(provider, worker_target):
-        raise HTTPException(status_code=400, detail="OAuth link target does not match this request")
-
-
 def _verify_browser_reset_intent(
     request: Request,
     provider: OAuthProvider,
@@ -507,8 +474,7 @@ def _verify_browser_reset_intent(
 ) -> OAuthCredentialContext:
     """Reauthorize and resolve the exact browser reset target."""
     _verify_connect_target_query(intent.binding, agent_name, execution_scope)
-    snapshot = config_lifecycle.bind_current_request_snapshot(request)
-    config = snapshot.runtime_config
+    config = config_lifecycle.last_good_runtime_config(request)
     if config is None:
         raise HTTPException(status_code=503, detail="OAuth reset requires an active configuration")
     if not agent_name:
@@ -546,7 +512,8 @@ def _verify_browser_reset_intent(
         )
     except OAuthResetTargetError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
-    _verify_connect_target_binding(intent.binding, provider, target.worker_target)
+    if intent.binding != oauth_credential_binding(provider, target.worker_target):
+        raise HTTPException(status_code=400, detail="OAuth link target does not match this request")
     return target.credential_context
 
 
@@ -555,7 +522,7 @@ async def _verify_pending_target_binding(
     pending_payload: dict[str, str] | None,
     target: RequestCredentialsTarget,
 ) -> None:
-    if pending_payload != await _target_binding_payload(provider, target):
+    if pending_payload != await _credential_context_binding_payload(_credential_context(provider, target)):
         raise HTTPException(status_code=409, detail=_OAUTH_STALE_CONNECTION_MESSAGE)
 
 
@@ -566,14 +533,10 @@ def _pending_connection_generation(pending_payload: dict[str, str] | None) -> st
     return generation
 
 
-def _credential_context(
-    provider: OAuthProvider,
-    runtime_paths: RuntimePaths,
-    target: RequestCredentialsTarget,
-) -> OAuthCredentialContext:
+def _credential_context(provider: OAuthProvider, target: RequestCredentialsTarget) -> OAuthCredentialContext:
     return resolve_oauth_credential_context(
         provider,
-        runtime_paths,
+        target.runtime_paths,
         target.base_manager,
         worker_target_for_credentials_target(target),
     )
@@ -977,10 +940,8 @@ async def reset_and_authorize(
         raise
     except OAuthProviderError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
-    snapshot = config_lifecycle.bind_current_request_snapshot(request)
-    config = snapshot.runtime_config
-    if config is None:
-        raise HTTPException(status_code=503, detail="OAuth reset requires an active configuration")
+    config = config_lifecycle.last_good_runtime_config(request)
+    assert config is not None  # `_verify_browser_reset_intent` refused a missing one.
     try:
         deleted = await retire_and_reset_oauth_credentials(
             context,
@@ -1078,7 +1039,7 @@ async def _store_callback_credentials(
             execution_scope_override_provided=pending.execution_scope_override_provided,
             execution_scope_override=pending.execution_scope_override,
         )
-        context = _credential_context(provider, runtime_paths, target)
+        context = _credential_context(provider, target)
     else:
         target = None
         context = _conversation_context_from_pending_payload(request, provider, runtime_paths, pending.payload)
@@ -1213,9 +1174,9 @@ def dashboard_oauth_context(
 
     The connection is the one stored under `credential_service` when given (Agent Keys).
     """
-    provider, runtime_paths = _load_provider(request, provider_id, credential_service)
+    provider, _ = _load_provider(request, provider_id, credential_service)
     target = _resolve_oauth_credentials_target(request, provider, agent_name=agent_name)
-    return _credential_context(provider, runtime_paths, target)
+    return _credential_context(provider, target)
 
 
 @dataclass(frozen=True)
@@ -1272,7 +1233,7 @@ async def connection_status(
     is the same (it uses the stored client either way), and `has_client_config` stays false until a client is stored.
     """
     provider, runtime_paths = context.provider, context.runtime_paths
-    credential_status: OAuthCredentialsStatus = await load_oauth_credentials_status(context, create_store=refresh)
+    credential_status = await load_oauth_credentials_status(context, create_store=refresh)
     credentials = credential_status.credentials or {}
     has_service_account_config = oauth_provider_service_account_configured(provider, runtime_paths)
     client_config_resolution = (
@@ -1297,10 +1258,9 @@ async def connection_status(
                 error_type=type(exc).__name__,
             )
             credentials = (await load_oauth_credentials_snapshot(context)).credentials or {}
-            credentials_usable = await _credentials_usable(provider, runtime_paths, credentials)
         else:
             credentials = refreshed_credentials or {}
-            credentials_usable = await _credentials_usable(provider, runtime_paths, credentials)
+        credentials_usable = await _credentials_usable(provider, runtime_paths, credentials)
     connected = has_service_account_config or credentials_usable
     if client_config_resolution is not None:
         client_config_service = client_config_resolution.service

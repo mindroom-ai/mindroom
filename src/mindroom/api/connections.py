@@ -141,7 +141,6 @@ class _EmptyMutation(BaseModel):
 
 @dataclass(frozen=True)
 class _Connections:
-    runtime_paths: RuntimePaths
     user: ConnectionUserContext
     catalog: ConnectionsCatalog
     providers: dict[str, OAuthProvider]
@@ -177,7 +176,6 @@ async def _connections(request: Request, user: _ConnectionUserContext) -> _Conne
         for name in user.visible_agent_names
     ]
     return _Connections(
-        runtime_paths=snapshot.runtime_paths,
         user=user,
         catalog=ConnectionsCatalog(agents=agents),
         providers=providers,
@@ -284,8 +282,8 @@ async def _connection_status(
         agent = resolve_connection_agent(context.user, agent_name)
         credential_context = resolve_oauth_credential_context(
             context.providers[service.provider],
-            context.runtime_paths,
-            get_runtime_credentials_manager(context.runtime_paths),
+            context.user.runtime_paths,
+            get_runtime_credentials_manager(context.user.runtime_paths),
             agent.worker_target,
             execution_identity=agent.execution_identity,
             config=agent.config,
@@ -482,9 +480,9 @@ async def connect(
     _body: _EmptyMutation,
 ) -> oauth.OAuthConnectResponse:
     """Start existing OAuth state handling with an authorized agent target."""
-    require_connections_same_origin(request, context.runtime_paths)
+    require_connections_same_origin(request, context.user.runtime_paths)
     provider = _require_management(context, agent_name, provider_id)
-    if oauth_provider_service_account_configured(provider, context.runtime_paths):
+    if oauth_provider_service_account_configured(provider, context.user.runtime_paths):
         raise HTTPException(
             409,
             "Personal account linking is unavailable for this service",
@@ -505,7 +503,7 @@ async def disconnect(
     _body: _EmptyMutation,
 ) -> dict[str, str]:
     """Reset the authorized agent's scoped provider credentials."""
-    require_connections_same_origin(request, context.runtime_paths)
+    require_connections_same_origin(request, context.user.runtime_paths)
     _require_management(context, agent_name, provider_id)
     return await masked_oauth_call(
         oauth.reset_connection(request, provider_id, agent_name=agent_name),

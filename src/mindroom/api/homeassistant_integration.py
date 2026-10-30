@@ -36,10 +36,6 @@ from mindroom.server_fetch_url import ServerFetchAsyncHTTPTransport, ServerFetch
 
 router = APIRouter(prefix="/api/homeassistant", tags=["homeassistant-integration"])
 
-# OAuth scopes for Home Assistant
-# Home Assistant doesn't use traditional OAuth scopes, but we request full API access
-_SCOPES: list[str] = []
-
 
 class HomeAssistantStatus(BaseModel):
     """Home Assistant integration status."""
@@ -74,11 +70,6 @@ def _normalize_instance_url(instance_url: str) -> str:
     if not normalized.startswith(("http://", "https://")):
         normalized = f"http://{normalized}"
     return normalized
-
-
-def _get_stored_config(target: RequestCredentialsTarget) -> dict[str, Any] | None:
-    """Get stored Home Assistant configuration."""
-    return load_credentials_for_target("homeassistant", target)
 
 
 def _save_config(target: RequestCredentialsTarget, config: dict[str, Any]) -> None:
@@ -185,7 +176,7 @@ async def _test_connection(config: dict[str, Any], target: RequestCredentialsTar
 async def get_status(request: Request, agent_name: str | None = None) -> HomeAssistantStatus:
     """Check Home Assistant integration status."""
     target = resolve_request_credentials_target(request, agent_name=agent_name, service_names=("homeassistant",))
-    config = _get_stored_config(target)
+    config = load_credentials_for_target("homeassistant", target)
 
     if not config:
         return HomeAssistantStatus(
@@ -422,7 +413,7 @@ def _connected_instance(
 ) -> tuple[RequestCredentialsTarget, dict[str, Any], str, bool]:
     """Return the request's stored connection, its validated fetch URL, and whether it allows private URLs."""
     target = resolve_request_credentials_target(request, agent_name=agent_name, service_names=("homeassistant",))
-    config = _get_stored_config(target)
+    config = load_credentials_for_target("homeassistant", target)
     if not config:
         raise HTTPException(status_code=401, detail="Not connected to Home Assistant")
     instance_url = config.get("instance_url")

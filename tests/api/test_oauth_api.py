@@ -3373,6 +3373,52 @@ def test_browser_reset_rejects_target_removed_by_config_reload(tmp_path: Path) -
     assert credentials["refresh_token"] == "old-refresh-token"
 
 
+def test_browser_reset_rejects_a_target_whose_scope_changed_since_the_link(tmp_path: Path) -> None:
+    """A link cannot reset the credentials of another scope after a reload moves the agent to it."""
+    runtime_paths = _runtime_paths(
+        tmp_path,
+        {
+            "TEST_OAUTH_CLIENT_ID": "client-id",
+            "TEST_OAUTH_CLIENT_SECRET": "client-secret",
+            constants.OWNER_MATRIX_USER_ID_ENV: "@alice:example.org",
+        },
+    )
+    api_app = _make_test_app(runtime_paths, _config_payload(worker_scope="user_agent"))
+    provider = _fake_provider(
+        provider_id="google_drive",
+        credential_service="google_drive_oauth",
+        tool_config_service="google_drive",
+    )
+    config = main._app_context(api_app).runtime_config
+    assert config is not None
+    target = oauth_reset.resolve_oauth_reset_target(
+        provider.id,
+        agent_name="general",
+        config=config,
+        runtime_paths=runtime_paths,
+        membership_index=AgentReplyMembershipIndex(),
+        execution_identity=ToolExecutionIdentity(
+            channel="matrix",
+            agent_name="general",
+            requester_id="@alice:example.org",
+            room_id="!room:example.org",
+            thread_id=None,
+            resolved_thread_id=None,
+            session_id=None,
+        ),
+    )
+    reset_url = asyncio.run(oauth_reset.issue_browser_oauth_reset_url(target))
+    _publish_config(api_app, runtime_paths, _config_payload(worker_scope="user"))
+
+    with patch("mindroom.api.oauth.load_oauth_providers_for_snapshot", return_value={provider.id: provider}):
+        with TestClient(api_app, base_url="http://localhost:8765") as client:
+            _login(client)
+            response = client.post(reset_url, follow_redirects=False)
+
+    assert response.status_code == 400
+    assert response.json()["detail"] == "OAuth link target does not match this request"
+
+
 def test_browser_reset_rejects_a_different_authenticated_requester(tmp_path: Path) -> None:
     """A reset link visible to another room member cannot cross requester scope."""
     runtime_paths = _runtime_paths(tmp_path, _trusted_upstream_oauth_env())
@@ -4461,7 +4507,7 @@ async def test_callback_saves_exchanged_credentials_before_propagating_cancellat
         agent_name=None,
         execution_scope_override_provided=False,
         execution_scope_override=None,
-        payload=await oauth_api._target_binding_payload(provider, target),
+        payload=await oauth_api._credential_context_binding_payload(oauth_api._credential_context(provider, target)),
         code_verifier=None,
         token_url=provider.token_url,
         credential_service=None,
