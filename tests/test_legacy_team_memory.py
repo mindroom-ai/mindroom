@@ -817,7 +817,8 @@ async def test_a_record_planted_under_another_teams_id_never_costs_that_team_its
     """A planted record that takes a team record's ID first keeps that record out of team memory, never off the disk."""
     victim = _recorded("calculator", "The team ships on Fridays")
     planted = "team_aaaa+planter"
-    _plant(storage, "planter", [(victim["id"], "planted-turn", "Planted fact")], team=planted)
+    # The planted record copies the victim's text too, so only its scope tells the two apart.
+    _plant(storage, "planter", [(victim["id"], "planted-turn", victim["metadata"]["data"])], team=planted)
     if interrupted:
         with patch.object(Collection, "delete", _delete_stopping_after(0)), pytest.raises(_StartStoppedError):
             await _migrate(storage, "planter")
@@ -831,6 +832,18 @@ async def test_a_record_planted_under_another_teams_id_never_costs_that_team_its
     left = _stored(storage / "agents" / "calculator" / "chroma")
     assert left == _as_stored(victim)
     assert _receipt(storage).exists()
+
+
+@pytest.mark.asyncio
+async def test_a_record_a_teammate_planted_under_ones_id_never_costs_the_team_that_fact(storage: Path) -> None:
+    """A member's worker can plant a record under a teammate's record ID; the teammate's copy stays on disk."""
+    standup = _recorded("general", "The team standup is at 9am")
+    _plant(storage, "calculator", [(standup["id"], "planted-turn", "Planted fact")])
+
+    await _migrate(storage)
+
+    assert _team_records(storage)[standup["id"]]["metadata"]["data"] == "Planted fact"
+    assert standup["id"] in _stored(storage / "agents" / "general" / "chroma")
 
 
 @pytest.mark.asyncio

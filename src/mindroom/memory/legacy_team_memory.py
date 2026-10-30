@@ -224,6 +224,11 @@ class _Record:
         return replica_key if isinstance(replica_key, str) and replica_key else self.id
 
     @property
+    def key(self) -> tuple[str, str, str]:
+        """Return what tells one source record from another, as only a planted record shares another's ID."""
+        return (self.team, self.id, self.fact)
+
+    @property
     def fact(self) -> str:
         """Return what tells the record's fact from another's: Mem0's hash of its text, else the record itself."""
         text_hash = self.metadata.get("hash")
@@ -306,7 +311,7 @@ def _merge_mem0_copies(runtime_paths: RuntimePaths, config: Config, copies: list
     target = mem0_chroma_path(team_memory_root(runtime_paths))
     collection_name = mem0_collection_name(config)
     rejected: set[str] = set()
-    merged: set[tuple[str, str]] = set()
+    merged: set[tuple[str, str, str]] = set()
     for scope, records in sorted(kept.items()):
         try:
             merged |= _write_team_records(target, collection_name, records)
@@ -320,16 +325,15 @@ def _merge_mem0_copies(runtime_paths: RuntimePaths, config: Config, copies: list
     # kept ones only once every dropped one went: a start interrupted meanwhile still finds each kept extraction beside
     # any dropped one, so it keeps the same one.
     # A kept record goes only once team memory holds its fact, so one a planted record kept out stays where it was;
-    # records are told apart by scope and ID, as only a planted record shares another's ID.
-    kept_keys = {(record.team, record.id) for records in kept.values() for record in records}
+    # records are told apart by scope, ID, and fact, as only a planted record shares another's ID.
+    kept_keys = {record.key for records in kept.values() for record in records}
     for keep in (False, True):
         all_removed = True
         for copy in copies:
             removed = [
                 record.id
                 for record in copy.records
-                if record.team not in rejected
-                and ((record.team, record.id) in merged if keep else (record.team, record.id) not in kept_keys)
+                if record.team not in rejected and (record.key in merged if keep else record.key not in kept_keys)
             ]
             try:
                 for batch in batched(removed, copy.client.get_max_batch_size()):
@@ -367,8 +371,8 @@ def _rejected_record_errors() -> tuple[type[Exception], ...]:
     return (InvalidArgumentError, ValueError)
 
 
-def _write_team_records(chroma_path: Path, collection_name: str, records: list[_Record]) -> set[tuple[str, str]]:
-    """Write the records whose fact the team store does not hold yet; return the scope and ID of those it then holds.
+def _write_team_records(chroma_path: Path, collection_name: str, records: list[_Record]) -> set[tuple[str, str, str]]:
+    """Write the records whose fact the team store does not hold yet; return the keys of those whose fact it then holds.
 
     Mem0 keeps one record per fact in a scope, so a fact two turns' kept extractions share, or one an interrupted
     earlier start already wrote, is written once per scope; every scope in the team store keeps its own. Only a planted
@@ -387,17 +391,17 @@ def _write_team_records(chroma_path: Path, collection_name: str, records: list[_
         )
     }
     written: list[_Record] = []
-    merged: set[tuple[str, str]] = set()
+    merged: set[tuple[str, str, str]] = set()
     for record in records:
         if (record.team, record.fact) in held_facts:
-            merged.add((record.team, record.id))
+            merged.add(record.key)
         elif record.id in held_ids:
             logger.warning("Left a Mem0 team copy whose ID another team record holds", team=record.team, id=record.id)
         else:
             held_ids.add(record.id)
             held_facts.add((record.team, record.fact))
             written.append(record)
-            merged.add((record.team, record.id))
+            merged.add(record.key)
     for batch in batched(written, target.get_max_batch_size()):
         collection.upsert(
             ids=[record.id for record in batch],
