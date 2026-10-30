@@ -1037,7 +1037,7 @@ async def test_minimal_recovery_keeps_mode_media_and_uses_fresh_shell_grant(  # 
         steps=[[("bash", {"command": "later model shell"})], "finished"] if nested == "approval" else ["finished"],
     )
     provider.install(monkeypatch)
-    build = _with_toolkit(_minimal_build(runtime, history_storage=store), media_toolkit)
+    build = _with_toolkit(_minimal_build(runtime), media_toolkit)
 
     def check_follow_up(follow_up: cli_approval_recovery.CliFollowUpTurn) -> None:
         assert follow_up.ctx.agent_mode == "minimal"

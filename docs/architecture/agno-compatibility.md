@@ -15,7 +15,7 @@ Issue and PR states were checked on September 24, 2026, unless a row gives anoth
 
 | Agno weakness | Upstream issue / PR | Boundary |
 | --- | --- | --- |
-| Tool schemas render `Any`, such as the values of `dict[str, Any]`, as an object that only accepts `{}`. | [Issue #10422](https://github.com/agno-agi/agno/issues/10422), [PR #10423](https://github.com/agno-agi/agno/pull/10423), both open (checked October 21, 2026). | `custom_tools/google_sheets.py` (`batch_update_sheet`) |
+| Tool schemas render `Any`, such as the values of `dict[str, Any]`, as an object that only accepts `{}`. | [Issue #10422](https://github.com/agno-agi/agno/issues/10422), [PR #10423](https://github.com/agno-agi/agno/pull/10423), both open (checked October 30, 2026). | `custom_tools/google_sheets.py` (`batch_update_sheet`) |
 | Library loggers install their own stdout handler at INFO with propagation disabled, so their records bypass the host's level, format, redaction, and stream. | [Issue #4097](https://github.com/agno-agi/agno/issues/4097), closed (checked October 10, 2026) after Agno 2.0 added `configure_agno_logging`, which swaps module globals but leaves the default handlers on the loggers that modules imported directly. | `logging_config.py` |
 | Mem0Tools passes its user to Mem0 2 search and listing as a top-level `user_id`, which Mem0 rejects, so `search_memory` and `get_all_memories` return Mem0's error instead of memories. | [Issue #11340](https://github.com/agno-agi/agno/issues/11340), open with no fix PR (checked October 27, 2026). | `tools/agno_compat_mem0.py` |
 

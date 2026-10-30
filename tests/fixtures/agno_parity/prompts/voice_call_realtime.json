@@ -33,8 +33,7 @@
           "required": [
             "a",
             "b"
-          ],
-          "additionalProperties": false
+          ]
         }
       },
       {
@@ -67,8 +66,7 @@
           "required": [
             "a",
             "b"
-          ],
-          "additionalProperties": false
+          ]
         }
       },
       {
@@ -101,8 +99,7 @@
           "required": [
             "a",
             "b"
-          ],
-          "additionalProperties": false
+          ]
         }
       },
       {
@@ -135,8 +132,7 @@
           "required": [
             "a",
             "b"
-          ],
-          "additionalProperties": false
+          ]
         }
       },
       {
@@ -169,8 +165,7 @@
           "required": [
             "a",
             "b"
-          ],
-          "additionalProperties": false
+          ]
         }
       },
       {
@@ -198,8 +193,7 @@
           },
           "required": [
             "n"
-          ],
-          "additionalProperties": false
+          ]
         }
       },
       {
@@ -227,8 +221,7 @@
           },
           "required": [
             "n"
-          ],
-          "additionalProperties": false
+          ]
         }
       },
       {
@@ -256,8 +249,7 @@
           },
           "required": [
             "n"
-          ],
-          "additionalProperties": false
+          ]
         }
       },
       {
@@ -323,8 +315,7 @@
           "required": [
             "request",
             "new_thread"
-          ],
-          "additionalProperties": false
+          ]
         }
       },
       {
@@ -367,8 +358,7 @@
             "arguments_json",
             "execute_at",
             "description"
-          ],
-          "additionalProperties": false
+          ]
         }
       },
       {
@@ -407,8 +397,7 @@
           },
           "required": [
             "task_id"
-          ],
-          "additionalProperties": false
+          ]
         }
       },
       {
@@ -474,8 +463,7 @@
           "required": [
             "task_id",
             "request"
-          ],
-          "additionalProperties": false
+          ]
         }
       },
       {
@@ -497,8 +485,7 @@
               "description": "Optional MindRoom-managed workspace-relative path. If set, the full supported tool output is written to this file in your workspace and the tool returns only a compact receipt. Use this for large output you plan to inspect later with file, coding, python, or shell tools."
             }
           },
-          "required": [],
-          "additionalProperties": false
+          "required": []
         }
       },
       {
@@ -526,8 +513,7 @@
           },
           "required": [
             "task_id"
-          ],
-          "additionalProperties": false
+          ]
         }
       },
       {
@@ -549,8 +535,7 @@
               "description": "Optional MindRoom-managed workspace-relative path. If set, the full supported tool output is written to this file in your workspace and the tool returns only a compact receipt. Use this for large output you plan to inspect later with file, coding, python, or shell tools."
             }
           },
-          "required": [],
-          "additionalProperties": false
+          "required": []
         }
       },
       {
@@ -578,8 +563,7 @@
           },
           "required": [
             "skill_name"
-          ],
-          "additionalProperties": false
+          ]
         }
       },
       {
@@ -618,8 +602,7 @@
           },
           "required": [
             "skill_name"
-          ],
-          "additionalProperties": false
+          ]
         }
       },
       {
@@ -658,8 +641,7 @@
           },
           "required": [
             "skill_name"
-          ],
-          "additionalProperties": false
+          ]
         }
       }
     ]
