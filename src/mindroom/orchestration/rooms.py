@@ -141,6 +141,7 @@ class RoomSetup:
                 constants.runtime_matrix_homeserver(runtime_paths=self.runtime_paths),
                 all_room_ids,
                 self.runtime_paths,
+                display_name=config.mindroom_user.display_name,
             )
 
         await asyncio.gather(*(bot.ensure_rooms() for bot in bots if bot.agent_name != ROUTER_AGENT_NAME))

@@ -1147,7 +1147,7 @@ async def login_agent_http_client(
     agent_user: AgentMatrixUser,
     runtime_paths: RuntimePaths,
 ) -> nio.AsyncClient:
-    """Authenticate an HTTP-only client for an account whose device holds no encryption state.
+    """Authenticate an HTTP-only client for an account whose device holds no encryption state, and sync its profile name.
 
     No device keys are at stake, so a saved session the server no longer accepts
     falls back to the configured auth on the same device.
@@ -1188,4 +1188,9 @@ async def login_agent_http_client(
         runtime_paths,
         matrix_id=MatrixID.parse(credentials.user_id),
     )
+    try:
+        await _sync_profile_display_name(client, agent_user)
+    except BaseException:
+        await client.close()
+        raise
     return client

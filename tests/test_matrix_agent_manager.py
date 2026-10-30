@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import hmac
+import json
 import os
 import re
 from typing import TYPE_CHECKING, Self
@@ -1649,19 +1650,26 @@ space_room_id: null
 class TestAgentLogin:
     """Test agent login functionality."""
 
+    _PROFILE_NAME_URL = re.compile(r"http://localhost:8008/_matrix/client/v3/profile/.+/displayname$")
+
     @staticmethod
-    def _internal_user(**session: str) -> AgentMatrixUser:
+    def _internal_user(*, password: str | None = TEST_PASSWORD, **session: str) -> AgentMatrixUser:
         return AgentMatrixUser(
             agent_name=INTERNAL_USER_AGENT_NAME,
             user_id="@mindroom_user:localhost",
-            display_name=INTERNAL_USER_AGENT_NAME,
-            password=TEST_PASSWORD,
+            display_name="MindRoomUser",
+            password=password,
             **session,
         )
 
     @pytest.mark.asyncio
-    async def test_http_login_reuses_the_saved_session_without_a_crypto_store(self, tmp_path: Path) -> None:
+    async def test_http_login_reuses_the_saved_session_without_a_crypto_store(
+        self,
+        tmp_path: Path,
+        aioresponse: aioresponses,
+    ) -> None:
         """A saved session the server accepts is reused, on a client that never opens a crypto store."""
+        aioresponse.get(self._PROFILE_NAME_URL, payload={"displayname": "MindRoomUser"})
         agent_user = self._internal_user(device_id="SAVED", access_token="saved-token")  # noqa: S106
         runtime_paths = _runtime_paths(tmp_path)
         restored = MatrixCredentials("@mindroom_user:localhost", "SAVED", "saved-token")
@@ -1689,10 +1697,16 @@ class TestAgentLogin:
             runtime_paths,
         )
         password_login.assert_not_awaited()
+        assert [method for method, _url in aioresponse.requests] == ["GET"]
 
     @pytest.mark.asyncio
-    async def test_http_login_replaces_a_rejected_session_on_the_saved_device(self, tmp_path: Path) -> None:
+    async def test_http_login_replaces_a_rejected_session_on_the_saved_device(
+        self,
+        tmp_path: Path,
+        aioresponse: aioresponses,
+    ) -> None:
         """A session the server rejects, such as one signed out from another client, falls back to password login."""
+        aioresponse.get(self._PROFILE_NAME_URL, payload={"displayname": "MindRoomUser"})
         agent_user = self._internal_user(device_id="SAVED", access_token="revoked-token")  # noqa: S106
         runtime_paths = _runtime_paths(tmp_path)
         renewed = MatrixCredentials("@mindroom_user:localhost", "SAVED", "new-token")
@@ -1726,14 +1740,15 @@ class TestAgentLogin:
         )
 
     @pytest.mark.asyncio
-    async def test_http_login_in_appservice_mode_needs_no_password(self, tmp_path: Path) -> None:
-        """Application-service mode logs in without a password and persists the session it gets."""
-        agent_user = AgentMatrixUser(
-            agent_name=INTERNAL_USER_AGENT_NAME,
-            user_id="@mindroom_user:localhost",
-            display_name=INTERNAL_USER_AGENT_NAME,
-            password=None,
-        )
+    async def test_http_login_in_appservice_mode_needs_no_password_and_sets_the_profile_name(
+        self,
+        tmp_path: Path,
+        aioresponse: aioresponses,
+    ) -> None:
+        """Application-service registration sets no profile name, so the first login sets the configured one."""
+        aioresponse.get(self._PROFILE_NAME_URL, payload={"displayname": "mindroom_user"})
+        aioresponse.put(self._PROFILE_NAME_URL, payload={})
+        agent_user = self._internal_user(password=None)
         runtime_paths = _runtime_paths(
             tmp_path,
             MATRIX_MANAGED_ACCOUNT_AUTH="appservice",
@@ -1756,6 +1771,8 @@ class TestAgentLogin:
         account = MatrixState.load(runtime_paths=runtime_paths).accounts["agent_user"]
         assert account.password is None
         assert (account.device_id, account.access_token) == ("NEW", "new-token")
+        [profile_update] = [calls for (method, _url), calls in aioresponse.requests.items() if method == "PUT"]
+        assert json.loads(profile_update[0].kwargs["data"]) == {"displayname": "MindRoomUser"}
 
     @pytest.mark.asyncio
     async def test_http_login_failure_persists_nothing(self, tmp_path: Path) -> None:

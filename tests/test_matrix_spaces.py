@@ -98,12 +98,12 @@ def test_matrix_state_load_is_backward_compatible_without_space_room_id(tmp_path
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("already_joined", [False, True])
-async def test_ensure_user_in_rooms_uses_managed_login_boundary(
+async def test_ensure_user_in_rooms_joins_with_the_saved_internal_account(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     already_joined: bool,
 ) -> None:
-    """The internal user room-join path should share managed Matrix session persistence."""
+    """The internal user joins missing rooms with its saved session and configured display name."""
     runtime_paths = orchestrator_runtime_paths(tmp_path, config_path=tmp_path / "config.yaml")
     state = MatrixState.load(runtime_paths=runtime_paths)
     state.add_account(
@@ -117,30 +117,12 @@ async def test_ensure_user_in_rooms_uses_managed_login_boundary(
     save_matrix_state(state, runtime_paths)
 
     client = AsyncMock()
-    client.user_id = "@actual_internal:matrix.example"
+    client.user_id = "@requested_internal:localhost"
     client.close = AsyncMock()
-    login_calls = []
-
-    async def _login_user(
-        _homeserver: str,
-        agent_user: matrix_rooms.AgentMatrixUser,
-        login_runtime_paths: constants.RuntimePaths,
-    ) -> object:
-        login_calls.append(agent_user)
-        updated_state = MatrixState.load(runtime_paths=login_runtime_paths)
-        updated_state.add_account(
-            "agent_user",
-            "actual_internal",
-            agent_user.password,
-            domain="matrix.example",
-            device_id="new_device",
-            access_token=TEST_PASSWORD,
-        )
-        save_matrix_state(updated_state, login_runtime_paths)
-        return client
+    login = AsyncMock(return_value=client)
 
     join_room = AsyncMock(return_value=RoomJoinOutcome.JOINED)
-    monkeypatch.setattr(matrix_rooms, "login_agent_http_client", _login_user)
+    monkeypatch.setattr(matrix_rooms, "login_agent_http_client", login)
     monkeypatch.setattr(matrix_rooms, "join_room", join_room)
     monkeypatch.setattr(
         matrix_rooms,
@@ -154,22 +136,23 @@ async def test_ensure_user_in_rooms_uses_managed_login_boundary(
         "http://localhost:8008",
         {"lobby": "!lobby:localhost"},
         runtime_paths,
+        display_name="MindRoomUser",
     )
 
-    assert len(login_calls) == 1
-    assert login_calls[0].user_id == "@requested_internal:localhost"
-    assert login_calls[0].device_id == "old_device"
-    assert login_calls[0].access_token == TEST_PASSWORD
+    login.assert_awaited_once()
+    homeserver, user, login_runtime_paths = login.await_args.args
+    assert (homeserver, login_runtime_paths) == ("http://localhost:8008", runtime_paths)
+    assert (user.user_id, user.display_name, user.device_id, user.access_token) == (
+        "@requested_internal:localhost",
+        "MindRoomUser",
+        "old_device",
+        TEST_PASSWORD,
+    )
     if already_joined:
         join_room.assert_not_awaited()
     else:
         join_room.assert_awaited_once_with(client, "!lobby:localhost")
     client.close.assert_awaited_once()
-
-    persisted = MatrixState.load(runtime_paths=runtime_paths).get_account("agent_user")
-    assert persisted is not None
-    assert persisted.username == "actual_internal"
-    assert persisted.domain == "matrix.example"
 
 
 def test_config_rejects_room_key_that_conflicts_with_root_space_alias() -> None:

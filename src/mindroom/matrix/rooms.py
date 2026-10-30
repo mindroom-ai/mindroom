@@ -626,6 +626,8 @@ async def ensure_user_in_rooms(
     homeserver: str,
     room_ids: dict[str, str],
     runtime_paths: RuntimePaths,
+    *,
+    display_name: str,
 ) -> None:
     """Join the internal user account to every given room through an HTTP-only client.
 
@@ -633,6 +635,7 @@ async def ensure_user_in_rooms(
         homeserver: Matrix homeserver URL
         room_ids: Dict mapping room keys to room IDs
         runtime_paths: Explicit runtime context holding the saved account.
+        display_name: The account's configured display name.
 
     """
     user = load_agent_user(INTERNAL_USER_AGENT_NAME, runtime_paths)
@@ -640,6 +643,7 @@ async def ensure_user_in_rooms(
         logger.warning("No user account found, skipping user room membership")
         return
 
+    user.display_name = display_name
     user_client = await login_agent_http_client(homeserver, user, runtime_paths)
     try:
         logger.info("matrix_user_logged_in", user_id=user_client.user_id)
