@@ -602,18 +602,22 @@ def _offered_entries(
 
 def _without_colliding_mcp_functions(entries: Sequence[_ToolkitEntry], *, agent_name: str) -> list[AdaptedToolkit]:
     """Return the toolkits of ``entries``, each MCP one without the functions whose name another toolkit offers."""
-    # A reserved room-recovery function is its registered tool's, offered or not.
-    owners: dict[str, list[str]] = {name: [name] for name in MATRIX_ROOM_RUNTIME_TOOL_NAMES}
+    # Each owner is an entry, named by its toolkit; a reserved room-recovery function is its registered tool's,
+    # offered or not.
+    owners: dict[str, list[tuple[_ToolkitEntry | None, str]]] = {
+        name: [(None, name)] for name in MATRIX_ROOM_RUNTIME_TOOL_NAMES
+    }
     for entry in entries:
         for function in entry.adapted.functions:
-            owners.setdefault(function.name, []).append(entry.adapted.name)
+            owners.setdefault(function.name, []).append((entry, entry.adapted.name))
     toolkits: list[AdaptedToolkit] = []
     for entry in entries:
         toolkit = entry.adapted
         if isinstance(entry.toolkit, MindRoomMCPToolkit):
             kept: list[ToolFunction] = []
             for function in toolkit.functions:
-                if not (others := [*dict.fromkeys(name for name in owners[function.name] if name != toolkit.name)]):
+                others = [*dict.fromkeys(name for owner, name in owners[function.name] if owner is not entry)]
+                if not others:
                     kept.append(function)
                     continue
                 logger.warning(

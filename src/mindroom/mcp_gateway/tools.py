@@ -215,10 +215,10 @@ async def search_tools(
             if not _handle(name) or (allowed_toolkits is not None and name not in allowed_toolkits):
                 continue
             metadata = context.plugins.tools.get(name)
-            server = context.config.mcp_servers.get(name.removeprefix("mcp_")) if name.startswith("mcp_") else None
+            server_id = metadata.mcp_server_id if metadata is not None else None
             description = (
-                (server.description or "Remote tools")
-                if server is not None
+                (context.config.mcp_servers[server_id].description or "Remote tools")
+                if server_id is not None
                 else (metadata.description if metadata else name)
             )
             items.append(

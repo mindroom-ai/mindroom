@@ -122,11 +122,11 @@ async def _build_selected(
     manager: MCPServerManager | None,
     require_current_access: Callable[[], None] | None,
 ) -> AnyToolkit:
-    server_id = entry.name.removeprefix("mcp_")
-    server = context.config.mcp_servers.get(server_id) if entry.name.startswith("mcp_") else None
-    if server is not None:
-        if not server.enabled or manager is None:
+    server_id = context.plugins.tools.mcp_server_id(entry.name)
+    if server_id is not None:
+        if manager is None:
             raise GatewayError(code=GatewayErrorCode.TOOL_UNAVAILABLE)
+        server = context.config.mcp_servers[server_id]
         credentials = get_runtime_credentials_manager(context.runtime_paths)
         catalog = await manager.get_request_catalog(
             server_id,

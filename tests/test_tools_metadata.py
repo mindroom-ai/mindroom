@@ -96,6 +96,7 @@ def test_export_tools_metadata_json() -> None:
         './.venv/bin/python -c "import json; import mindroom.tools; '
         "from pathlib import Path; "
         "from mindroom.tool_system.metadata import export_tools_metadata; "
+        "from mindroom.tool_system.registry import builtin_tool_registry; "
         "Path('src/mindroom/tools_metadata.json').write_text("
         "json.dumps({'tools': export_tools_metadata(builtin_tool_registry().entries)}, indent=2, sort_keys=True) + '\\n', "
         "encoding='utf-8')\""

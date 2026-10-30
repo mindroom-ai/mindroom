@@ -294,6 +294,7 @@ def _run_sandbox_dispatch_case(mode: str, iterations: int, warmup: int) -> dict[
     from mindroom.api import sandbox_runner  # noqa: PLC0415
     from mindroom.constants import resolve_primary_runtime_paths  # noqa: PLC0415
     from mindroom.model_defaults import CONFIG_INIT_MODEL_PRESETS  # noqa: PLC0415
+    from mindroom.tool_system.plugins import refresh_plugins  # noqa: PLC0415
     from mindroom.workers.protocol import WORKER_PROTOCOL_VERSION, ExecuteRequest, WorkerFailure  # noqa: PLC0415
 
     default_model = CONFIG_INIT_MODEL_PRESETS["openai"]
@@ -327,7 +328,9 @@ def _run_sandbox_dispatch_case(mode: str, iterations: int, warmup: int) -> dict[
         if isinstance(route, WorkerFailure):
             msg = f"sandbox dispatch route failed: {route.error}"
             raise RuntimeError(msg)  # noqa: TRY004
-        call = sandbox_runner._ExecuteCall(request=request, route=route)
+        # The registry the runner itself validates and builds the call from.
+        tools = refresh_plugins(route.config, route.runtime_paths).tools
+        call = sandbox_runner._ExecuteCall(request=request, route=route, tools=tools)
 
         def _call() -> None:
             response = sandbox_runner._execute_request_subprocess_sync(call)

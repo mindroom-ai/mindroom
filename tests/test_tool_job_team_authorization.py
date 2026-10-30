@@ -21,6 +21,7 @@ from mindroom.delegation.lifecycle import (
     start_child_turn,
 )
 from mindroom.delegation.state import PersonaSourceKind, SubagentPersona
+from mindroom.hooks import EVENT_TOOL_BEFORE_CALL, ToolBeforeCallContext, hook
 from mindroom.llm.messages import Message
 from mindroom.loop_hooks import HookTurn, leader_loop_hooks
 from mindroom.teams.members import _team_member, build_team_spec, resolve_exact_team_members
@@ -41,13 +42,18 @@ from mindroom.tool_system.invocation import ToolCallContext, execute_tool_call
 from mindroom.tool_system.metadata import get_tool_by_name
 from mindroom.tool_system.plugins import config_plugins
 from mindroom.tool_system.registry import builtin_tool_registry
-from mindroom.tool_system.runtime_context import member_tool_scope, tool_runtime_context
+from mindroom.tool_system.runtime_context import detached_tool_scope, member_tool_scope, tool_runtime_context
 from mindroom.tool_system.worker_routing import (
     ToolExecutionIdentity,
     serialize_tool_execution_identity,
 )
 from tests.agent_tool_helpers import offered_agno_function
-from tests.conftest import bind_runtime_paths, install_model_providers, unstored_team_scope_context
+from tests.conftest import (
+    bind_runtime_paths,
+    install_model_providers,
+    publish_hook_plugin,
+    unstored_team_scope_context,
+)
 from tests.delegation_helpers import _delegate_runtime_context
 from tests.fakes.scripted_model import ScriptedModel, answer, calls, tool_call
 from tests.history_helpers import _runtime_paths as history_runtime_paths
@@ -525,6 +531,82 @@ async def test_a_team_built_with_jobs_on_gets_its_leaders_job_controls_and_notic
             for hook in hooks.after_tool_batch:
                 await hook(messages, messages)
         assert "`ended` (report) completed" in str(messages[0].content)
+    finally:
+        await runtime.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_a_detached_team_turn_s_leader_job_hooks_come_from_the_plugins_its_members_captured(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A team turn outside a Matrix conversation reads the plugins once, so a later publication changes nothing."""
+    runtime_paths = history_runtime_paths(tmp_path)
+    config = bind_runtime_paths(
+        Config(
+            agents={"alpha": AgentConfig(display_name="Alpha"), "zeta": AgentConfig(display_name="Zeta")},
+            teams={"pair": TeamConfig(display_name="Pair", role="Test team", agents=["alpha", "zeta"])},
+            defaults=DefaultsConfig(tools=[]),
+            models={"default": ModelConfig(provider="openai", id="test-model", context_window=2_000)},
+            background_tool_jobs=BackgroundToolJobsConfig(enabled=True),
+        ),
+        runtime_paths,
+    )
+    runtime = await tool_job_runtime(tmp_path / "jobs")
+    pin_background_tool_jobs(config, runtime_paths)
+    register_background_runtime(runtime_paths, runtime)
+    identity = ToolExecutionIdentity(
+        channel="matrix",
+        agent_name="pair",
+        requester_id="@user:localhost",
+        room_id="!room:localhost",
+        thread_id=None,
+        resolved_thread_id=None,
+        session_id="session-1",
+        transport_agent_name="pair",
+    )
+    install_model_providers(monkeypatch, {"default": ScriptedModel([])})
+    seen: list[str] = []
+
+    @hook(EVENT_TOOL_BEFORE_CALL)
+    async def captured(ctx: ToolBeforeCallContext) -> None:
+        seen.append(f"captured {ctx.tool_name}")
+
+    @hook(EVENT_TOOL_BEFORE_CALL)
+    async def published_later(ctx: ToolBeforeCallContext) -> None:
+        seen.append(f"published later {ctx.tool_name}")
+
+    try:
+        publish_hook_plugin(config, runtime_paths, "job-policy", [captured])
+        members = resolve_exact_team_members(
+            ["alpha", "zeta"],
+            config=config,
+            runtime_paths=runtime_paths,
+            execution_identity=identity,
+            refresh_scheduler=None,
+            active_model_names=dict.fromkeys(["alpha", "zeta"], "default"),
+        )
+        publish_hook_plugin(config, runtime_paths, "job-policy", [published_later])
+        built = build_team_spec(
+            members=members,
+            mode=TeamMode.COORDINATE,
+            config=config,
+            runtime_paths=runtime_paths,
+            scope_context=unstored_team_scope_context(config, ["alpha", "zeta"], team_name="pair"),
+            execution_identity=identity,
+            model_name="default",
+            configured_team_name="pair",
+            timezone="UTC",
+        )
+        [job] = [function for toolkit in built.spec.leader.toolkits for function in toolkit.functions]
+        with detached_tool_scope(identity):
+            await execute_tool_call(
+                job,
+                {"action": "list"},
+                ToolCallContext(run_id="team-run", session_id=identity.session_id, user_id=None),
+                middleware=built.leader_middleware,
+            )
+        assert seen == ["captured job"]
     finally:
         await runtime.shutdown()
 

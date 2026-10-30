@@ -1479,22 +1479,48 @@ def test_a_plugin_edit_taking_a_configured_mcp_server_s_tool_name_fails_the_load
 
 
 @pytest.mark.parametrize(
-    ("oauth_source", "error"),
+    ("modules", "oauth_source", "error"),
     [
-        pytest.param("import missing_oauth_dependency\n", "No module named 'missing_oauth_dependency'", id="import"),
-        pytest.param("PROVIDERS = []\n", "must define callable register_oauth_providers", id="callback"),
+        pytest.param(
+            {"oauth_module": "oauth.py"},
+            "import missing_oauth_dependency\n",
+            "No module named 'missing_oauth_dependency'",
+            id="import",
+        ),
+        pytest.param(
+            {"oauth_module": "oauth.py"},
+            "PROVIDERS = []\n",
+            "must define callable register_oauth_providers",
+            id="callback",
+        ),
+        pytest.param(
+            {"tools_module": "oauth.py", "oauth_module": "oauth.py"},
+            "PROVIDERS = []\n",
+            "must define callable register_oauth_providers",
+            id="callback-in-the-tools-module",
+        ),
+        pytest.param(
+            {"hooks_module": "oauth.py", "oauth_module": "oauth.py"},
+            "PROVIDERS = []\n",
+            "must define callable register_oauth_providers",
+            id="callback-in-the-hooks-module",
+        ),
     ],
 )
 def test_config_validation_rejects_a_plugin_whose_oauth_module_does_not_load(
     tmp_path: Path,
+    modules: dict[str, str],
     oauth_source: str,
     error: str,
 ) -> None:
-    """Validation executes a plugin's OAuth module as loading it does, so a plugin loading would skip is rejected."""
+    """Validation executes a plugin's OAuth module as loading it does, so a plugin loading would skip is rejected.
+
+    That holds when the OAuth module is also the plugin's tools or hooks module.
+    """
     plugin_root = tmp_path / "plugins" / "oauth-demo"
     plugin_root.mkdir(parents=True)
     (plugin_root / "mindroom.plugin.json").write_text(
-        json.dumps({"name": "oauth-demo", "oauth_module": "oauth.py", "skills": []}),
+        json.dumps({"name": "oauth-demo", **modules, "skills": []}),
         encoding="utf-8",
     )
     (plugin_root / "oauth.py").write_text(oauth_source, encoding="utf-8")

@@ -511,17 +511,20 @@ def _execute_candidate_plugin(
     prefix = f"{CANDIDATE_PLUGIN_MODULE_PREFIX}{next(_CANDIDATE_NAMESPACES)}_"
     loaded_before = set(sys.modules)
     try:
-        executed: set[Path] = set()
+        # A file that serves several kinds executes once, and each kind it serves is checked on that module.
+        executed: dict[Path, plugin_imports._ModuleCacheEntry] = {}
         for kind, module_path in (
             ("tools", plugin.tools_module_path),
             ("hooks", plugin.hooks_module_path),
             ("oauth", plugin.oauth_module_path),
         ):
-            if module_path is None or module_path in executed:
+            if module_path is None:
                 continue
-            executed.add(module_path)
-            entry = _load_plugin_module(plugin.name, plugin.root, module_path, kind=kind, prefix=prefix)
-            assert entry is not None
+            entry = executed.get(module_path)
+            if entry is None:
+                entry = _load_plugin_module(plugin.name, plugin.root, module_path, kind=kind, prefix=prefix)
+                assert entry is not None
+                executed[module_path] = entry
             if kind == "tools":
                 registrations.update(entry.registrations)
             elif kind == "oauth":

@@ -825,6 +825,37 @@ async def test_gateway_call_context_covers_construction_body_and_cleanup(
 
 
 @pytest.mark.asyncio
+async def test_a_tool_named_like_a_disabled_mcp_server_is_the_tool_not_the_server(
+    context: AgentToolContext,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Only the registry says which tool names stand for MCP servers, so a disabled server's prefix names nothing."""
+    register_test_tool(
+        monkeypatch,
+        replace(builtin_tool_registry().entries["calculator"], name="mcp_demo", description="Local arithmetic"),
+    )
+    config = context.config.model_copy(deep=True)
+    config.agents["personal"].tools = ["mcp_demo"]
+    config.mcp_servers["demo"] = MCPServerConfig(transport="stdio", command="never-start", enabled=False)
+    snapshot = ApiSnapshot(
+        generation=1,
+        runtime_paths=context.runtime_paths,
+        config_data=config.model_dump(),
+        runtime_config=config,
+    )
+    local = resolve_connection_agent(resolve_connection_user(snapshot, context.requester_id), "personal")
+
+    searched = await gateway.search_tools(local)
+    invoked = await gateway.invoke_tool(local, toolkit="mcp_demo", function="add", arguments={"a": 2, "b": 3})
+
+    assert "error" not in searched
+    assert [(item["toolkit"], item["description"]) for item in searched["results"]] == [
+        ("mcp_demo", "Local arithmetic"),
+    ]
+    assert invoked == {"result": json.dumps({"operation": "addition", "result": 5.0})}
+
+
+@pytest.mark.asyncio
 async def test_gateway_leaves_a_worker_routed_toolkit_s_connection_to_the_worker(
     context: AgentToolContext,
     monkeypatch: pytest.MonkeyPatch,

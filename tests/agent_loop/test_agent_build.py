@@ -439,6 +439,27 @@ def test_a_function_hidden_across_toolkits_leaves_the_run_and_its_owners(tmp_pat
     assert _owners(build) == {"ping": "calculator"}
 
 
+def test_an_mcp_function_yields_to_a_local_toolkit_that_shares_its_toolkit_name(tmp_path: Path) -> None:
+    """A local toolkit whose name matches an MCP toolkit's still counts as another owner of the function name."""
+    config, runtime_paths = _config(tmp_path, tools=["wikipedia", "calculator"])
+
+    def build_toolkit(tool_name: str, **_kwargs: object) -> Toolkit:
+        if tool_name == "calculator":
+            return Toolkit(name="demo", tools=[ping])
+        server = MindRoomMCPToolkit(server_id="demo", manager=None, catalog=None)
+        server.functions["ping"] = ping
+        return server
+
+    with patch.object(agents_module, "build_agent_toolkit", side_effect=build_toolkit):
+        build = _build(config, runtime_paths)
+
+    server, local = build.spec.toolkits[:2]
+    assert (server.name, server.functions) == ("demo", ())
+    assert (local.name, [function.name for function in local.functions]) == ("demo", ["ping"])
+    assert _offered(build)["ping"] is local.functions[0]
+    assert _owners(build) == {"ping": "calculator"}
+
+
 def test_an_mcp_function_yields_to_a_generated_one_and_mcp_copies_of_one_name_all_leave(tmp_path: Path) -> None:
     """A remote catalog never takes the knowledge search's name, and two servers offering one name both lose it."""
     config, runtime_paths = _config(tmp_path, tools=["wikipedia", "arxiv"])

@@ -224,6 +224,7 @@ class _ResolvedToolContext:
             "agent_name": self.agent_name,
             "room_id": self.room_id,
             "requester_id": self.requester_id,
+            "message_received_depth": self.message_received_depth,
         }
 
     def call_hook_context_kwargs(self, event_name: str, arguments: dict[str, Any]) -> dict[str, Any]:
@@ -232,7 +233,6 @@ class _ResolvedToolContext:
             **self.hook_context_kwargs(event_name, arguments),
             "thread_id": self.thread_id,
             "session_id": self.session_id,
-            "message_received_depth": self.message_received_depth,
         }
 
     def record_kwargs(self) -> dict[str, Any]:

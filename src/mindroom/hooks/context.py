@@ -683,6 +683,7 @@ class ToolEnvironmentContext(HookContext):
     agent_name: str
     room_id: str | None
     requester_id: str | None
+    message_received_depth: int = 0
     declined: bool = False
     decline_reason: str = ""
     _environment: ToolEnvironment = field(default_factory=ToolEnvironment, repr=False)
@@ -766,7 +767,10 @@ def _current_message_received_depth(context: HookContext) -> int:
     envelope = message_envelope_for_hook_context(context)
     if envelope is not None:
         return envelope.message_received_depth
-    if isinstance(context, CustomEventContext | ToolBeforeCallContext | ToolAfterCallContext):
+    if isinstance(
+        context,
+        CustomEventContext | ToolBeforeCallContext | ToolAfterCallContext | ToolEnvironmentContext,
+    ):
         return context.message_received_depth
     return 0
 

@@ -48,6 +48,7 @@ if TYPE_CHECKING:
     from mindroom.teams.spec import TeamMode
     from mindroom.tool_jobs.execution import JobActor
     from mindroom.tool_system.invocation import ToolCall, ToolMiddleware, ToolNext
+    from mindroom.tool_system.plugins import ConfigPlugins
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 
 logger = get_logger(__name__)
@@ -58,12 +59,14 @@ class ResolvedExactTeamMembers:
     """One exact requested member set: each member's config name, display name, and model for this turn, and its build.
 
     ``build(agent_name, model_name)`` builds one member on ``model_name`` under this set's settings and knowledge,
-    blocking; a team builds each member on its first delegation (``TeamMember.ensure_built``).
+    blocking; a team builds each member on its first delegation (``TeamMember.ensure_built``). ``plugins`` is the view
+    the turn captured, which the members' tools and the leader's job hooks both come from.
     """
 
     requested_agent_names: list[str]
     display_names: list[str]
     model_names: dict[str, str]
+    plugins: ConfigPlugins = field(repr=False, compare=False)
     build: Callable[[str, str], AgentBuild] = field(repr=False, compare=False)
 
 
@@ -125,6 +128,7 @@ def resolve_exact_team_members(
         requested_agent_names=requested_agent_names,
         display_names=[config.get_agent(agent_name).display_name for agent_name in requested_agent_names],
         model_names=model_names,
+        plugins=plugins,
         build=build,
     )
 
@@ -353,7 +357,7 @@ def build_team_spec(
     )
     label = materialized_team_label(members.display_names)
     team_scope = config.resolve_scope(configured_team_name)
-    jobs = team_background_jobs(config, runtime_paths, execution_identity, current_plugins(config, runtime_paths))
+    jobs = team_background_jobs(config, runtime_paths, execution_identity, members.plugins)
     team_members = tuple(
         _team_member(agent_name, members, system_enrichment, config=config, runtime_paths=runtime_paths)
         for agent_name in members.requested_agent_names

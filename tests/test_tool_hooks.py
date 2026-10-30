@@ -29,12 +29,14 @@ from mindroom.hooks import (
     EVENT_MESSAGE_RECEIVED,
     EVENT_TOOL_AFTER_CALL,
     EVENT_TOOL_BEFORE_CALL,
+    EVENT_TOOL_ENVIRONMENT,
     CustomEventContext,
     HookBindings,
     HookRegistry,
     HookRegistryState,
     ToolAfterCallContext,
     ToolBeforeCallContext,
+    ToolEnvironmentContext,
     build_hook_room_state_putter,
     build_hook_room_state_querier,
     emit_gate,
@@ -1059,8 +1061,12 @@ async def test_tool_hook_context_send_message_uses_bound_sender(tmp_path: Path) 
 
 
 @pytest.mark.asyncio
-async def test_tool_hook_context_send_message_advances_existing_message_received_depth(tmp_path: Path) -> None:
-    """Tool hook sends should keep advancing an existing synthetic message:received chain."""
+@pytest.mark.parametrize("event_name", [EVENT_TOOL_BEFORE_CALL, EVENT_TOOL_ENVIRONMENT, EVENT_TOOL_AFTER_CALL])
+async def test_tool_hook_context_send_message_advances_existing_message_received_depth(
+    tmp_path: Path,
+    event_name: str,
+) -> None:
+    """Every tool hook's sends keep advancing an existing synthetic message:received chain."""
     sent: list[dict[str, object] | None] = []
 
     async def hook_message_sender(
@@ -1076,12 +1082,12 @@ async def test_tool_hook_context_send_message_advances_existing_message_received
         sent.append(extra_content)
         return "$dispatch-event"
 
-    @hook(EVENT_TOOL_BEFORE_CALL)
-    async def before(ctx: ToolBeforeCallContext) -> None:
+    @hook(event_name)
+    async def send(ctx: ToolBeforeCallContext | ToolEnvironmentContext | ToolAfterCallContext) -> None:
         event_id = await ctx.send_message("!room:localhost", "dispatch", trigger_dispatch=True)
         assert event_id == "$dispatch-event"
 
-    registry = HookRegistry.from_plugins([_plugin("tool-policy", [before])])
+    registry = HookRegistry.from_plugins([_plugin("tool-policy", [send])])
     bridge = tool_policy(registry)
 
     async def next_func(**kwargs: object) -> dict[str, object]:
