@@ -40,7 +40,7 @@ from mindroom.llm.provider import (
     complete,
 )
 from mindroom.llm.runs import RunRecord, RunRequirement, RunStatus, TeamRunRecord, ToolExecution
-from mindroom.llm.usage import MessageMetrics, RunMetrics, TokenCounts
+from mindroom.llm.usage import TOKEN_FIELDS, MessageMetrics, RunMetrics, TokenCounts
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Sequence
@@ -228,6 +228,15 @@ def test_a_cost_sums_by_one_rule_in_requests_runs_models_and_teams(costs: tuple[
 
     request_sum = (reports[0] + reports[1]).cost
     assert [repr(run.cost), repr(entry.cost), repr(team.cost)] == [repr(request_sum)] * 3
+
+
+@pytest.mark.parametrize("counter", TOKEN_FIELDS)
+def test_usage_with_any_counter_not_zero_is_reported(counter: str) -> None:
+    """A provider that reports no usage leaves every counter zero; any other counter, a cache one too, is a report."""
+    assert MessageMetrics(tokens=TokenCounts(**{counter: 1})).reported
+    assert RunMetrics(tokens=TokenCounts(**{counter: 1})).reported
+    assert not MessageMetrics(duration=1.5, time_to_first_token=0.5).reported
+    assert not RunMetrics(duration=1.5).reported
 
 
 def test_token_counts_add_and_subtract_every_counter() -> None:
