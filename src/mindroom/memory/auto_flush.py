@@ -24,7 +24,6 @@ from mindroom.constants import tracking_dir
 from mindroom.durable_write import write_json_file_durable
 from mindroom.helper_usage import HelperUsageOwner, record_helper_usage
 from mindroom.history.conversation_text import one_line, utterances
-from mindroom.history.legacy_session_cursors import released_flush_start, released_note_bound
 from mindroom.history.session_runs import (
     DELEGATION_SESSION_PREFIX,
     Cursor,
@@ -38,7 +37,7 @@ from mindroom.llm.errors import ModelSafeguardRefusal
 from mindroom.logging_config import get_logger
 from mindroom.memory._prompting import redact_memory_text
 from mindroom.memory.functions import append_agent_daily_memory, list_all_agent_memories
-from mindroom.memory.legacy_auto_flush import remove_legacy_flush_queue
+from mindroom.memory.legacy_auto_flush import released_flush_start, released_note_bound, remove_legacy_flush_queue
 from mindroom.providers import registry as provider_registry
 from mindroom.requester_identity import agent_instances
 from mindroom.runtime_resolution import resolve_agent_storage

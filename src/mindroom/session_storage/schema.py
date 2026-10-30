@@ -20,8 +20,9 @@ if TYPE_CHECKING:
 
     from mindroom.history.types import HistoryScope
 
-# The sessions table's columns and their types, each one a current writer or reader uses, in the order a database
-# converted from an older layout holds them. ``session_data`` holds the session's usage totals.
+# The sessions table's columns and their types, in the order a database converted from an older layout holds them.
+# ``session_data`` held the session's usage totals and no current writer fills it; it stays because older releases'
+# preflight requires it on a rollback, and the step to layout version 7 reads the totals stored there once.
 _SESSION_COLUMN_TYPES = {
     "session_id": "VARCHAR NOT NULL",
     "user_id": "VARCHAR",

@@ -17,7 +17,6 @@ from typing import TYPE_CHECKING, TypedDict
 from mindroom.automations.threads import automation_threads
 from mindroom.durable_write import write_json_file_durable
 from mindroom.entity_resolution import prepared_entity_names_by_user_id
-from mindroom.history.legacy_session_cursors import released_ingestion_markers
 from mindroom.history.session_runs import Cursor, back_off, caught_up, due_conversations, start_seq, unredacted
 from mindroom.knowledge_graph.episodes import (
     RUN_DONE,
@@ -27,6 +26,7 @@ from mindroom.knowledge_graph.episodes import (
     newest_display_names,
     render_episodes,
 )
+from mindroom.knowledge_graph.legacy_ingestion import released_ingestion_markers
 from mindroom.knowledge_graph.names import entity_names
 from mindroom.knowledge_graph.scope import graph_scopes
 from mindroom.knowledge_graph.store import UnusableExtractionError, record_knowledge_graph_failure

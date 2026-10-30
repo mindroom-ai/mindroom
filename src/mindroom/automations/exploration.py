@@ -54,13 +54,15 @@ def _collect_leads(
     *,
     since: int,
     read_through: dict[str, int],
+    log_end: int | None,
     limit: int,
-) -> tuple[list[_Lead], bool]:
+) -> tuple[list[_Lead], bool, int]:
     """Return distinct tool calls of new turns in conversations updated after ``since``, newest first, at most ``limit``.
 
     A turn is new once it completes after the place ``read_through`` holds for its conversation, which moves to the
-    conversation's last place read; a conversation without one starts with the turns created after ``since``. Also
-    return whether any conversation was updated after ``since``.
+    conversation's last place read. A conversation without one starts at ``log_end``, the log's end at the last
+    check, or, before any check recorded it, with the turns created after ``since``. Also return whether any
+    conversation was updated after ``since``, and the log's end at this check.
     """
     storage = create_session_storage(
         ctx.agent_name,
@@ -68,6 +70,8 @@ def _collect_leads(
         ctx.runtime_paths,
         execution_identity=ctx.execution_identity,
     )
+    # Read before the conversations, so every turn stored after this check's reads takes a place after it.
+    checked_end = storage.log_end()
     automation_thread_ids = automation_threads(ctx.runtime_paths)
     seen: dict[tuple[str, str], tuple[int, int]] = {}
     active = False
@@ -83,7 +87,9 @@ def _collect_leads(
         active = True
         start = read_through.get(session_id)
         if start is None:
-            start = start_seq(turns, older=lambda run: run.created_at <= since)
+            # A turn is stored when it completes, so a conversation first listed now can hold a turn created before
+            # the last check that completed after it.
+            start = log_end if log_end is not None else start_seq(turns, older=lambda run: run.created_at <= since)
         # A turn waiting for approval takes a later place once it completes, so the next check reads it.
         read_through[session_id] = max(start, turns[-1].seq) if turns else start
         for seq, run in turns:
@@ -98,7 +104,7 @@ def _collect_leads(
                 seen[key] = (count + 1, max(last_seen, run.created_at))
     leads = [_Lead(function, arguments, count, last_seen) for (function, arguments), (count, last_seen) in seen.items()]
     leads.sort(key=lambda lead: lead.last_seen, reverse=True)
-    return leads[:limit], active
+    return leads[:limit], active, checked_end
 
 
 def _render_leads(leads: list[_Lead]) -> str:
@@ -116,20 +122,23 @@ def _without_mentions(text: str) -> str:
     return text.replace("@", "\uff20")
 
 
-def _state(ctx: AutomationContext) -> tuple[float | None, dict[str, int]]:
-    """Return when the last run ended, and the place each conversation was read through for it."""
+def _state(ctx: AutomationContext) -> tuple[float | None, dict[str, int], int | None]:
+    """Return when the last run ended, the place each conversation was read through for it, and the log's end then."""
     try:
         state = json.loads((ctx.state_dir / _STATE_FILE).read_text(encoding="utf-8"))
     except FileNotFoundError:
-        return None, {}
+        return None, {}, None
     # LEGACY_COMPAT: Exploration state without conversation places.
     # Legacy format: `exploration.json` holding only `last_run_at`, the time of the check whose run ended last.
-    # Last legacy release: v2026.10.696; replacement: the next release also keeps `sessions`, each conversation's place.
-    # Handling: Every conversation starts as one without a place does, with its completed turns created after the last
-    # check; a turn created before that check and approved after it is offered only when it completed after one of
+    # Last legacy release: v2026.10.696; replacement: the next release also keeps `sessions`, each conversation's place,
+    # and `log_end`, the log's end at the check.
+    # Handling: Every conversation starts with its completed turns created after the last check, as before any check
+    # ran; a turn created before that check that completed after it is offered only when it completed after one of
     # those turns.
     # Coverage: tests/test_exploration_automation.py::test_a_state_file_without_places_offers_turns_created_since_the_check.
-    return float(state["last_run_at"]), {session_id: int(seq) for session_id, seq in state.get("sessions", {}).items()}
+    sessions = {session_id: int(seq) for session_id, seq in state.get("sessions", {}).items()}
+    log_end = state.get("log_end")
+    return float(state["last_run_at"]), sessions, int(log_end) if log_end is not None else None
 
 
 @automation("exploration")
@@ -143,11 +152,17 @@ def check_exploration(ctx: AutomationContext) -> Ask | None:
         msg = f"exploration cannot run the {entry.name} entry"
         raise ValueError(msg)  # noqa: TRY004 - the runner turns ValueError into a visible notice
     now = time.time()
-    last_run_at, read_through = _state(ctx)
+    last_run_at, read_through, log_end = _state(ctx)
     revisit_due = last_run_at is None or now - last_run_at >= entry.revisit_days * _DAY_SECONDS
     # Update times are whole seconds, so the second of the last check is listed again rather than missed.
     since = int(last_run_at) - 1 if last_run_at is not None else int(now) - entry.revisit_days * _DAY_SECONDS
-    leads, active = _collect_leads(ctx, since=since, read_through=read_through, limit=entry.max_leads)
+    leads, active, checked_end = _collect_leads(
+        ctx,
+        since=since,
+        read_through=read_through,
+        log_end=log_end,
+        limit=entry.max_leads,
+    )
     # A revisit catches changes in the sources people use; an agent or instance nobody talked to since needs none.
     if not leads and not (revisit_due and active):
         return None
@@ -159,13 +174,14 @@ def check_exploration(ctx: AutomationContext) -> Ask | None:
         fix_step=ctx.config.get_prompt("EXPLORATION_FIX_STEP") if fixes else "",
         fix_exception=ctx.config.get_prompt("EXPLORATION_FIX_EXCEPTION") if fixes else "",
     )
-    return Ask(prompt, new_thread=True, then=partial(_after_run, ctx.state_dir, now, read_through))
+    return Ask(prompt, new_thread=True, then=partial(_after_run, ctx.state_dir, now, read_through, checked_end))
 
 
 def _after_run(
     state_dir: Path,
     checked_at: float,
     read_through: dict[str, int],
+    log_end: int,
     config: Config,
     thread_id: str,
     timed_out: bool,
@@ -174,7 +190,10 @@ def _after_run(
 
     The run is recorded only once it ends, so a prompt that never posted offers the same leads next time.
     """
-    write_json_file_durable(state_dir / _STATE_FILE, {"last_run_at": checked_at, "sessions": read_through})
+    write_json_file_durable(
+        state_dir / _STATE_FILE,
+        {"last_run_at": checked_at, "sessions": read_through, "log_end": log_end},
+    )
     notice = "⚠️ Exploration did not finish within an hour." if timed_out else "🔭 Exploration ended."
     return Done(
         notice,

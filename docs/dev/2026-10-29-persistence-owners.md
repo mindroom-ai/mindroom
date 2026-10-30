@@ -1,6 +1,6 @@
 # Persistence owners: one owner for each stored fact readers used to copy
 
-Status: in progress (2026-10-29).
+Status: implemented (2026-10-30).
 Scope: background readers of conversation logs (memory auto-flush, knowledge-graph ingestion, exploration), usage totals, the event journal's view declarations, thread-summary state, and per-scope history metadata.
 The design went through several critique rounds before implementation; this record keeps what the code cannot show.
 
@@ -24,7 +24,8 @@ Readers consume each turn's first completion: a completed top-level turn is read
 In-place rewrites of a completed turn (interrupted records over a final run, metadata patches) keep their `seq` and are not read again, as the old markers ignored them too.
 Readers need no approval rule: a paused turn takes the next `seq` when it finishes, and its approval holds its conversation meanwhile.
 A save that places a visible run at the log's end moves the session's update time even without usage, so the readers' update-time check sees an interrupted turn's canonical record saved completed over its cancelled row; checkpoint saves of a running turn stay quiet.
-Each reader keeps its own progress (flush one position, ingestion per-kind positions with pieces of split runs, exploration the positions a check read through, committed when its run ends); the follower shares only ordered reads, eligibility, the due scan, and backoff.
+Each reader keeps its own progress (flush one position, ingestion per-kind positions with pieces of split runs, exploration the positions a check read through and the log's end at that check, committed when its run ends); the follower shares only ordered reads, eligibility, the due scan, and backoff.
+A turn is stored when it completes, so exploration starts a conversation it first lists at the log's end of the last check rather than at turns created since it: a new thread's first turn that was running during that check is still offered.
 
 ### Redaction eligibility comes from the store's cut rule
 

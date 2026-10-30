@@ -398,6 +398,14 @@ class ConversationStore:
         with self.transaction(write=False) as connection:
             return logged_runs(connection, self.names, session_id)
 
+    def log_end(self) -> int:
+        """Return the last place the database's log handed out, or 0 before its first run; later saves place after it."""
+        with self.transaction(write=False) as connection:
+            (next_seq,) = connection.execute(
+                f"SELECT next_seq FROM {quote_identifier(self.names.log_meta)} WHERE id = 1",  # noqa: S608
+            ).fetchone()
+        return next_seq - 1
+
     def _write_state(
         self,
         connection: sqlite3.Connection,
