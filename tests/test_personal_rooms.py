@@ -55,6 +55,7 @@ from tests.bot_helpers import make_test_agent_bot
 from tests.conftest import TEST_PASSWORD, install_runtime_journal_support, test_runtime_paths
 from tests.identity_helpers import persist_entity_accounts
 from tests.journal_helpers import admit_dispatch_event
+from tests.matrix_state_helpers import save_matrix_state
 from tests.runtime_fakes import ready_runtime
 from tests.test_personal_agents_config import BASE as PERSONAL_AGENTS_BASE
 from tests.test_personal_agents_config import _entry as personal_agent_entry
@@ -132,7 +133,6 @@ class MatrixServer:
         self.unkickable: set[str] = set()
         self.kicks: list[tuple[str, str]] = []
         self.fail_send = False
-        self.fail_receipt = False
         self.create_count = 0
         self.lobby_members = {"@alice:localhost", "@bob:localhost"}
 
@@ -175,7 +175,11 @@ class MatrixServer:
     async def room_get_state_event(self, room_id: str, event_type: str, state_key: str = "") -> object:
         """Read one authoritative state event."""
         event = next(
-            (event for event in self.state[room_id] if (event["type"], event["state_key"]) == (event_type, state_key)),
+            (
+                event
+                for event in self.state.get(room_id, ())
+                if (event["type"], event["state_key"]) == (event_type, state_key)
+            ),
             None,
         )
         if event is None:
@@ -271,7 +275,7 @@ def service(tmp_path: Path, server: MatrixServer, monkeypatch: pytest.MonkeyPatc
     paths = test_runtime_paths(tmp_path)
     state = MatrixState.load(paths)
     state.add_room("lobby", "!lobby:localhost", "#lobby:localhost", "Lobby")
-    state.save(paths)
+    save_matrix_state(state, paths)
     monkeypatch.setattr("mindroom.matrix.personal_rooms.send_message_result", server.deliver)
     return PersonalRoomService("helper", runtime, paths, AsyncMock(return_value=True))
 
@@ -282,7 +286,7 @@ def move_onboarding_to_new_room(owner: PersonalRoomService, server: MatrixServer
     owner.runtime.config.personal_rooms.onboarding_rooms = ["new"]
     state = MatrixState.load(owner.runtime_paths)
     state.add_room("new", "!new:localhost", "#new:localhost", "New")
-    state.save(owner.runtime_paths)
+    save_matrix_state(state, owner.runtime_paths)
     server.state["!new:localhost"] = [
         {"type": "m.room.member", "state_key": "@alice:localhost", "content": {"membership": "join"}},
     ]
@@ -463,7 +467,7 @@ async def test_generated_agent_service_serves_only_its_owner(tmp_path: Path, mon
     paths = test_runtime_paths(tmp_path)
     state = MatrixState.load(paths)
     state.add_room("lobby", "!lobby:localhost", "#lobby:localhost", "Lobby")
-    state.save(paths)
+    save_matrix_state(state, paths)
     entry = personal_agent_entry("@alice:localhost", source_room_id="!lobby:localhost")
     _append_personal_agent_roster_entry(paths, entry)
     data = deepcopy(PERSONAL_AGENTS_BASE)
@@ -492,7 +496,7 @@ async def test_generated_agent_service_serves_its_owners_bridge_alias(
     paths = test_runtime_paths(tmp_path)
     state = MatrixState.load(paths)
     state.add_room("lobby", "!lobby:localhost", "#lobby:localhost", "Lobby")
-    state.save(paths)
+    save_matrix_state(state, paths)
     _append_personal_agent_roster_entry(
         paths,
         personal_agent_entry("@alice:localhost", source_room_id="!lobby:localhost"),
@@ -1011,7 +1015,7 @@ def _template_router(tmp_path: Path, profile: object, status: str = "applied") -
     paths = test_runtime_paths(tmp_path)
     state = MatrixState.load(paths)
     state.add_room("lobby", "!lobby:localhost", "#lobby:localhost", "Lobby")
-    state.save(paths)
+    save_matrix_state(state, paths)
     config = Config.validate_with_runtime(deepcopy(PERSONAL_AGENTS_BASE), paths)
     user = AgentMatrixUser(
         agent_name=ROUTER_AGENT_NAME,
@@ -2845,11 +2849,10 @@ async def test_dispatched_welcome_selects_target_through_real_turn_policy(
     facts = target._ingress_validator.classify(event)
     assert await target._ingress_validator.precheck_event(room, event, facts)
     assert facts.lane_requester_id == "@alice:localhost"
-    prepared = await target._turn_dispatcher._prepare_dispatch(
+    dispatch = await target._turn_dispatcher._prepare_dispatch(
         make_test_turn(room, event, facts=facts, handled_turn=TurnRecord.create([event.event_id])),
     )
-    assert prepared is not None
-    dispatch = prepared.dispatch
+    assert dispatch is not None
     plan = await target._turn_policy.plan_turn(
         room,
         event,

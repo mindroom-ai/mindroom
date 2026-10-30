@@ -16,6 +16,7 @@ from mindroom.commands.parsing import Command, CommandType
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
+from mindroom.conversation_resolver import MessageContext
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.message_target import MessageTarget
 from mindroom.router.relay import execute_router_relay
@@ -24,7 +25,6 @@ from tests.bot_helpers import make_test_agent_bot
 from tests.conftest import (
     TEST_PASSWORD,
     bind_runtime_paths,
-    dispatch_context_result,
     drain_coalescing,
     install_runtime_journal_support,
     install_send_response_mock,
@@ -134,7 +134,6 @@ class TestResponseTrackingRegression:
         assert bot.client.room_send.call_count == 1
 
         # IMPORTANT: Check if event was marked as responded
-        # This should be True after the fix
         assert await bot._turn_store.is_handled(test_room_id, command_event.event_id), (
             "Command event should be marked as responded to prevent re-processing"
         )
@@ -156,7 +155,6 @@ class TestResponseTrackingRegression:
         )
 
         # Should NOT send another response if properly tracked
-        # (In real scenario, _should_skip_duplicate_response would prevent this)
         # But here we're testing that the tracking was done
 
     @pytest.mark.asyncio
@@ -208,16 +206,15 @@ class TestResponseTrackingRegression:
         mock_room.users = {mock_router_agent.user_id: MagicMock()}
 
         # Mock the necessary methods for _on_message flow
-        mock_context = MagicMock()
-        mock_context.am_i_mentioned = False
-        mock_context.is_thread = False
-        mock_context.thread_id = None
-        mock_context.thread_history = []
-        mock_context.mentioned_agents = []
-        mock_context.has_non_agent_mentions = False
-        mock_context.requires_model_history_refresh = False
         bot._conversation_resolver.extract_dispatch_context = AsyncMock(
-            return_value=dispatch_context_result(mock_context),
+            return_value=MessageContext(
+                am_i_mentioned=False,
+                is_thread=False,
+                thread_id=None,
+                thread_history=[],
+                mentioned_agents=[],
+                has_non_agent_mentions=False,
+            ),
         )
 
         send_response = AsyncMock(return_value="$response_456")
@@ -231,7 +228,6 @@ class TestResponseTrackingRegression:
         assert "❌ Unknown command" in send_response.await_args.kwargs["response_text"]
 
         # IMPORTANT: Check if event was marked as responded
-        # This should be True after the fix in bot.py at line 371
         assert await bot._turn_store.is_handled(test_room_id, unknown_command_event.event_id), (
             "Unknown command event should be marked as responded"
         )
@@ -314,7 +310,6 @@ class TestResponseTrackingRegression:
         assert bot.client.room_send.call_count == 1
 
         # IMPORTANT: Check if event was marked as responded
-        # This should be True after the fix
         assert await bot._turn_store.is_handled(test_room_id, message_event.event_id), (
             "Router event should be marked as responded to prevent re-routing"
         )
@@ -342,4 +337,3 @@ class TestResponseTrackingRegression:
         )
 
         # With proper tracking, this shouldn't happen again
-        # (In real scenario, _should_skip_duplicate_response would prevent reaching here)

@@ -17,6 +17,7 @@ from mindroom.matrix.state import MatrixState, load_rooms
 from mindroom.matrix_identifiers import managed_room_alias_localpart, managed_space_alias_localpart
 from tests.access_schema_support import membership_config
 from tests.conftest import runtime_paths_for
+from tests.matrix_state_helpers import save_matrix_state
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -107,7 +108,7 @@ def _room_state(
 def _record_lobby(config: Config, room_id: str) -> None:
     state = MatrixState.load(runtime_paths_for(config))
     state.add_room("lobby", room_id, _lobby_alias(config), "Lobby")
-    state.save(runtime_paths_for(config))
+    save_matrix_state(state, runtime_paths_for(config))
 
 
 def _recorded_lobby(config: Config) -> str | None:
@@ -353,7 +354,7 @@ async def test_recorded_root_space_is_kept_when_alias_points_elsewhere(
     create_space, join = space_calls
     state = MatrixState.load(runtime_paths_for(config))
     state.set_space_room_id(_OURS)
-    state.save(runtime_paths_for(config))
+    save_matrix_state(state, runtime_paths_for(config))
     client = _client(_space_alias(config), _THEIRS)
 
     assert await _ensure_space(client, config) == _OURS
@@ -423,7 +424,7 @@ async def test_deleted_alias_of_recorded_root_space(
     create_space, _join = space_calls
     state = MatrixState.load(runtime_paths_for(config))
     state.set_space_room_id(_OURS)
-    state.save(runtime_paths_for(config))
+    save_matrix_state(state, runtime_paths_for(config))
     alias = _space_alias(config)
     client = _client(alias, _OURS)
     client.room_resolve_alias.return_value = nio.RoomResolveAliasError("missing", "M_NOT_FOUND")

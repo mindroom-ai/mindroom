@@ -36,8 +36,7 @@ from mindroom.history.interrupted_replay import (
 from mindroom.hooks import MessageEnvelope
 from mindroom.llm.events import ToolCompleted, ToolStarted
 from mindroom.llm.runs import ToolExecution
-from mindroom.matrix.client import DeliveredMatrixEvent
-from mindroom.matrix.client_delivery import build_edit_event_content
+from mindroom.matrix.client_delivery import DeliveredMatrixEvent, build_edit_event_content
 from mindroom.matrix.identity import MatrixID
 from mindroom.matrix.large_messages import calculate_event_size
 from mindroom.matrix.users import AgentMatrixUser
@@ -148,7 +147,7 @@ async def _noop_typing_indicator(*_args: object, **_kwargs: object) -> AsyncIter
     yield
 
 
-class ImmediateStreamingResponse(StreamingResponse):
+class _ImmediateStreamingResponse(StreamingResponse):
     """A streaming response that sends every update as soon as it arrives."""
 
     def __init__(self, **kwargs: object) -> None:

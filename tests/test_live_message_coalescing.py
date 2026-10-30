@@ -76,7 +76,7 @@ from mindroom.inbound_turn_normalizer import (
     DispatchPayloadWithAttachmentsRequest,
     _BatchMediaAttachmentResult,
 )
-from mindroom.matrix.client import ResolvedVisibleMessage
+from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
 from mindroom.matrix.event_info import EventInfo
 from mindroom.matrix.identity import MatrixID
 from mindroom.matrix.journal_ingress import _inbound_event
@@ -103,7 +103,6 @@ from tests.conftest import (
     SETTLE_TIMEOUT_SECONDS,
     TEST_PASSWORD,
     bind_runtime_paths,
-    dispatch_context_result,
     drain_coalescing,
     install_generate_response_mock,
     install_send_response_mock,
@@ -113,7 +112,6 @@ from tests.conftest import (
     make_visible_message,
     message_origin,
     prepare_payload_via_seam,
-    prepared_dispatch_result,
     replace_turn_deps,
     runtime_paths_for,
     test_runtime_paths,
@@ -576,7 +574,6 @@ def _prepared_dispatch(
         is_thread=thread_id is not None,
         thread_id=thread_id,
         thread_history=history,
-        replay_guard_history=history,
         mentioned_agents=[],
         has_non_agent_mentions=False,
     )
@@ -603,12 +600,6 @@ def _prepared_dispatch(
     )
 
 
-def _set_context_histories(dispatch: PreparedDispatch, history: Sequence[ResolvedVisibleMessage]) -> None:
-    """Keep replay-snapshot and planning history aligned for tests that need both."""
-    dispatch.context.thread_history = list(history)
-    dispatch.context.replay_guard_history = list(history)
-
-
 @pytest.mark.asyncio
 @pytest.mark.parametrize("terminal_path", ["policy_ignore", "non_owner_command"])
 async def test_post_gate_terminal_drop_settles_real_deferred_dispatch_obligation(
@@ -631,7 +622,7 @@ async def test_post_gate_terminal_drop_settles_real_deferred_dispatch_obligation
         patch.object(
             bot._turn_dispatcher,
             "_prepare_dispatch",
-            new=AsyncMock(return_value=prepared_dispatch_result(dispatch)),
+            new=AsyncMock(return_value=dispatch),
         ),
         patch.object(
             bot._turn_policy,
@@ -2153,7 +2144,7 @@ async def test_active_follow_up_owner_includes_later_media_payload(tmp_path: Pat
             dispatch_policy_source_kind=ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND,
         )
         dispatch.context.am_i_mentioned = True
-        return prepared_dispatch_result(dispatch)
+        return dispatch
 
     async def fake_register_batch_media_attachments(
         request: BatchMediaAttachmentRequest,
@@ -4758,7 +4749,7 @@ async def test_turn_store_marks_all_batch_event_ids(tmp_path: Path) -> None:
         patch.object(
             bot._turn_dispatcher,
             "_prepare_dispatch",
-            new=AsyncMock(return_value=prepared_dispatch_result(dispatch)),
+            new=AsyncMock(return_value=dispatch),
         ),
         patch.object(bot._turn_policy, "plan_turn", new=AsyncMock(return_value=_respond_dispatch_plan())),
         patch.object(
@@ -4915,14 +4906,14 @@ async def test_backlog_replay_skips_older_message_when_newer_exists(tmp_path: Pa
         thread_id=None,
         latest_event_id="$m2",
     )
-    _set_context_histories(dispatch, [newer_msg])
+    dispatch.context.thread_history = [newer_msg]
 
     action_mock = AsyncMock()
     with (
         patch.object(
             bot._turn_dispatcher,
             "_prepare_dispatch",
-            new=AsyncMock(return_value=prepared_dispatch_result(dispatch)),
+            new=AsyncMock(return_value=dispatch),
         ),
         patch.object(bot._turn_policy, "plan_turn", new=action_mock),
     ):
@@ -5011,7 +5002,6 @@ async def test_backlog_replay_respects_coalesced_source_ownership(
             },
         )
         dispatch.context.thread_history = degraded_history
-        dispatch.context.replay_guard_history = degraded_history
         await _admit_pending_thread_event(
             bot,
             _text_event(
@@ -5023,7 +5013,7 @@ async def test_backlog_replay_respects_coalesced_source_ownership(
             ).source,
         )
     else:
-        _set_context_histories(dispatch, [newer_bob_message])
+        dispatch.context.thread_history = [newer_bob_message]
     pending_turns = _watch_pending_turns(bot)
     handled_turn = _coalesced_ownership_record(ownership)
     superseded = ownership == "single"
@@ -5031,7 +5021,7 @@ async def test_backlog_replay_respects_coalesced_source_ownership(
     plan_calls: list[PreparedDispatch] = []
 
     async def prepare_dispatch(*_args: object, **_kwargs: object) -> object:
-        return prepared_dispatch_result(dispatch)
+        return dispatch
 
     async def plan_turn(
         _room: object,
@@ -5097,20 +5087,17 @@ async def test_backlog_replay_fails_closed_when_physical_source_collides_with_al
         body="relay",
         thread_id="$thread",
     )
-    _set_context_histories(
-        dispatch,
-        [
-            ResolvedVisibleMessage(
-                sender="@bob:localhost",
-                body="newer bob",
-                timestamp=3000,
-                event_id="$newer-bob",
-                content={"body": "newer bob"},
-                thread_id="$thread",
-                latest_event_id="$newer-bob",
-            ),
-        ],
-    )
+    dispatch.context.thread_history = [
+        ResolvedVisibleMessage(
+            sender="@bob:localhost",
+            body="newer bob",
+            timestamp=3000,
+            event_id="$newer-bob",
+            content={"body": "newer bob"},
+            thread_id="$thread",
+            latest_event_id="$newer-bob",
+        ),
+    ]
     source_event_metadata = {
         relay_event_id: SourceEventMetadata(
             sender="@bob:localhost",
@@ -5130,7 +5117,7 @@ async def test_backlog_replay_fails_closed_when_physical_source_collides_with_al
         patch.object(
             bot._turn_dispatcher,
             "_prepare_dispatch",
-            new=AsyncMock(return_value=prepared_dispatch_result(dispatch)),
+            new=AsyncMock(return_value=dispatch),
         ),
         patch.object(bot._turn_policy, "plan_turn", new=plan_turn),
     ):
@@ -5172,7 +5159,6 @@ async def test_backlog_replay_degraded_thread_history_uses_pending_journal_event
     )
     dispatch.context.am_i_mentioned = False
     dispatch.context.thread_history = degraded_history
-    dispatch.context.replay_guard_history = degraded_history
     dispatch.context.requires_model_history_refresh = True
     newer_event_source = {
         "event_id": "$m2",
@@ -5195,7 +5181,7 @@ async def test_backlog_replay_degraded_thread_history_uses_pending_journal_event
         patch.object(
             bot._turn_dispatcher,
             "_prepare_dispatch",
-            new=AsyncMock(return_value=prepared_dispatch_result(dispatch)),
+            new=AsyncMock(return_value=dispatch),
         ),
         patch.object(bot._turn_dispatcher, "_has_newer_unresponded_in_thread", new=history_guard),
         patch.object(bot._turn_policy, "plan_turn", new=action_mock),
@@ -5233,7 +5219,6 @@ async def test_backlog_replay_degraded_thread_history_ignores_equal_timestamp_pe
     )
     dispatch.context.am_i_mentioned = False
     dispatch.context.thread_history = degraded_history
-    dispatch.context.replay_guard_history = degraded_history
     dispatch.context.requires_model_history_refresh = True
     same_timestamp_event_source = {
         "event_id": "$m2",
@@ -5256,7 +5241,7 @@ async def test_backlog_replay_degraded_thread_history_ignores_equal_timestamp_pe
         patch.object(
             bot._turn_dispatcher,
             "_prepare_dispatch",
-            new=AsyncMock(return_value=prepared_dispatch_result(dispatch)),
+            new=AsyncMock(return_value=dispatch),
         ),
         patch.object(bot._turn_dispatcher, "_has_newer_unresponded_in_thread", new=history_guard),
         patch.object(bot._turn_policy, "plan_turn", new=action_mock),
@@ -5292,7 +5277,6 @@ async def test_backlog_replay_degraded_thread_history_counts_trusted_voice_comma
     )
     dispatch.context.am_i_mentioned = False
     dispatch.context.thread_history = degraded_history
-    dispatch.context.replay_guard_history = degraded_history
     dispatch.context.requires_model_history_refresh = True
     newer_voice_event_source = {
         "event_id": "$m2",
@@ -5315,7 +5299,7 @@ async def test_backlog_replay_degraded_thread_history_counts_trusted_voice_comma
         patch.object(
             bot._turn_dispatcher,
             "_prepare_dispatch",
-            new=AsyncMock(return_value=prepared_dispatch_result(dispatch)),
+            new=AsyncMock(return_value=dispatch),
         ),
         patch.object(bot._turn_policy, "plan_turn", new=action_mock),
     ):
@@ -5473,7 +5457,6 @@ async def test_backlog_replay_degraded_thread_history_ignores_visible_router_voi
     )
     dispatch.context.am_i_mentioned = False
     dispatch.context.thread_history = degraded_history
-    dispatch.context.replay_guard_history = degraded_history
     dispatch.context.requires_model_history_refresh = True
     visible_echo_source = {
         "event_id": "$visible_echo",
@@ -5499,7 +5482,7 @@ async def test_backlog_replay_degraded_thread_history_ignores_visible_router_voi
         patch.object(
             bot._turn_dispatcher,
             "_prepare_dispatch",
-            new=AsyncMock(return_value=prepared_dispatch_result(dispatch)),
+            new=AsyncMock(return_value=dispatch),
         ),
         patch.object(bot._turn_dispatcher, "_has_newer_unresponded_in_thread", new=history_guard),
         patch.object(bot._turn_policy, "plan_turn", new=action_mock),
@@ -5535,7 +5518,6 @@ async def test_backlog_replay_degraded_thread_history_counts_non_router_visible_
     )
     dispatch.context.am_i_mentioned = False
     dispatch.context.thread_history = degraded_history
-    dispatch.context.replay_guard_history = degraded_history
     dispatch.context.requires_model_history_refresh = True
     marked_helper_relay_source = {
         "event_id": "$helper_relay",
@@ -5561,7 +5543,7 @@ async def test_backlog_replay_degraded_thread_history_counts_non_router_visible_
         patch.object(
             bot._turn_dispatcher,
             "_prepare_dispatch",
-            new=AsyncMock(return_value=prepared_dispatch_result(dispatch)),
+            new=AsyncMock(return_value=dispatch),
         ),
         patch.object(bot._turn_dispatcher, "_has_newer_unresponded_in_thread", new=history_guard),
         patch.object(bot._turn_policy, "plan_turn", new=action_mock),
@@ -5605,7 +5587,6 @@ async def test_backlog_replay_degraded_thread_history_ignores_plain_reply_outsid
     )
     dispatch.context.am_i_mentioned = False
     dispatch.context.thread_history = degraded_history
-    dispatch.context.replay_guard_history = degraded_history
     dispatch.context.requires_model_history_refresh = True
     newer_event_source = {
         "event_id": "$m2",
@@ -5627,7 +5608,7 @@ async def test_backlog_replay_degraded_thread_history_ignores_plain_reply_outsid
         patch.object(
             bot._turn_dispatcher,
             "_prepare_dispatch",
-            new=AsyncMock(return_value=prepared_dispatch_result(dispatch)),
+            new=AsyncMock(return_value=dispatch),
         ),
         patch.object(bot._turn_dispatcher, "_has_newer_unresponded_in_thread", new=history_guard),
         patch.object(bot._turn_policy, "plan_turn", new=action_mock),
@@ -5663,7 +5644,6 @@ async def test_backlog_replay_degraded_thread_history_ignores_edit_events(tmp_pa
     )
     dispatch.context.am_i_mentioned = False
     dispatch.context.thread_history = degraded_history
-    dispatch.context.replay_guard_history = degraded_history
     dispatch.context.requires_model_history_refresh = True
     edit_event_source = {
         "event_id": "$edit",
@@ -5690,7 +5670,7 @@ async def test_backlog_replay_degraded_thread_history_ignores_edit_events(tmp_pa
         patch.object(
             bot._turn_dispatcher,
             "_prepare_dispatch",
-            new=AsyncMock(return_value=prepared_dispatch_result(dispatch)),
+            new=AsyncMock(return_value=dispatch),
         ),
         patch.object(bot._turn_dispatcher, "_has_newer_unresponded_in_thread", new=history_guard),
         patch.object(bot._turn_policy, "plan_turn", new=action_mock),
@@ -5727,7 +5707,6 @@ async def test_backlog_replay_degraded_thread_history_fails_open_without_positiv
     )
     dispatch.context.am_i_mentioned = False
     dispatch.context.thread_history = degraded_history
-    dispatch.context.replay_guard_history = degraded_history
     dispatch.context.requires_model_history_refresh = True
     pending_turns = _watch_pending_turns(bot)
 
@@ -5738,7 +5717,7 @@ async def test_backlog_replay_degraded_thread_history_fails_open_without_positiv
         patch.object(
             bot._turn_dispatcher,
             "_prepare_dispatch",
-            new=AsyncMock(return_value=prepared_dispatch_result(dispatch)),
+            new=AsyncMock(return_value=dispatch),
         ),
         patch.object(bot._turn_dispatcher, "_has_newer_unresponded_in_thread", new=history_guard),
         patch.object(bot._turn_policy, "plan_turn", new=action_mock),
@@ -5789,7 +5768,6 @@ async def test_backlog_replay_degraded_thread_history_only_counts_unsettled_jour
     )
     dispatch.context.am_i_mentioned = False
     dispatch.context.thread_history = degraded_history
-    dispatch.context.replay_guard_history = degraded_history
     dispatch.context.requires_model_history_refresh = True
     await _admit_pending_thread_event(
         bot,
@@ -5815,7 +5793,7 @@ async def test_backlog_replay_degraded_thread_history_only_counts_unsettled_jour
         patch.object(
             bot._turn_dispatcher,
             "_prepare_dispatch",
-            new=AsyncMock(return_value=prepared_dispatch_result(dispatch)),
+            new=AsyncMock(return_value=dispatch),
         ),
         patch.object(bot._turn_policy, "plan_turn", new=action_mock),
     ):
@@ -5824,59 +5802,6 @@ async def test_backlog_replay_degraded_thread_history_only_counts_unsettled_jour
     assert pending_turns.calls == [(room.room_id, "$thread", 1000, "$m1")]
     assert action_mock.await_count == (1 if settled else 0)
     assert not await bot._turn_store.is_handled(room.room_id, "$m1")
-
-
-@pytest.mark.asyncio
-async def test_media_dispatch_uses_replay_snapshot_instead_of_mutated_planning_history(tmp_path: Path) -> None:
-    """Media-backed turns must use replay snapshot history instead of mutable planning history."""
-    bot = _make_bot(tmp_path)
-    room = _make_room()
-    image_event = _image_event(event_id="$img1", server_timestamp=1000)
-    dispatch_event = PreparedIngress(
-        sender="@user:localhost",
-        event_id="$img1",
-        body="[Attached image]",
-        source={"content": {"msgtype": "m.text", "body": "[Attached image]"}},
-        server_timestamp=1000,
-    )
-    dispatch = _prepared_dispatch(event_id="$img1", body="[Attached image]")
-    hydrated_msg = ResolvedVisibleMessage(
-        sender="@user:localhost",
-        body="hydrated newer message",
-        timestamp=2000,
-        event_id="$img2",
-        content={"body": "hydrated newer message"},
-        thread_id=None,
-        latest_event_id="$img2",
-    )
-
-    action_mock = AsyncMock(return_value=DispatchPlan(kind="ignore"))
-    dispatch.context.thread_history = [hydrated_msg]
-    dispatch.context.replay_guard_history = []
-
-    newer_mock = AsyncMock(return_value=False)
-    with (
-        patch.object(
-            bot._turn_dispatcher,
-            "_prepare_dispatch",
-            new=AsyncMock(return_value=prepared_dispatch_result(dispatch)),
-        ),
-        patch.object(bot._turn_policy, "plan_turn", new=action_mock),
-        patch.object(bot._turn_dispatcher, "_has_newer_unresponded_in_thread", new=newer_mock),
-        patch.object(ResponsePayloadPreparer, "_log_dispatch_latency"),
-    ):
-        await dispatch_test_turn(
-            bot._turn_dispatcher,
-            room,
-            dispatch_event,
-            "@user:localhost",
-            media_events=[image_event],
-        )
-
-    newer_mock.assert_called_once()
-    assert list(newer_mock.call_args.args[3]) == []
-    action_mock.assert_awaited_once()
-    assert not await bot._turn_store.is_handled(room.room_id, "$img1")
 
 
 @pytest.mark.asyncio
@@ -5902,7 +5827,7 @@ async def test_thread_history_guard_does_not_interfere_with_normal_dispatch(tmp_
         patch.object(
             bot._turn_dispatcher,
             "_prepare_dispatch",
-            new=AsyncMock(return_value=prepared_dispatch_result(dispatch)),
+            new=AsyncMock(return_value=dispatch),
         ),
         patch.object(bot._turn_policy, "plan_turn", new=AsyncMock(return_value=_respond_dispatch_plan())),
         patch.object(
@@ -6182,7 +6107,7 @@ async def test_newer_command_does_not_suppress_older_message(tmp_path: Path) -> 
         thread_id=None,
         latest_event_id="$m2",
     )
-    _set_context_histories(dispatch, [newer_cmd])
+    dispatch.context.thread_history = [newer_cmd]
     send_response = AsyncMock(return_value="$placeholder")
     generate_response = AsyncMock(return_value="$response")
     install_send_response_mock(bot, send_response)
@@ -6193,7 +6118,7 @@ async def test_newer_command_does_not_suppress_older_message(tmp_path: Path) -> 
         patch.object(
             bot._turn_dispatcher,
             "_prepare_dispatch",
-            new=AsyncMock(return_value=prepared_dispatch_result(dispatch)),
+            new=AsyncMock(return_value=dispatch),
         ),
         patch.object(bot._turn_policy, "plan_turn", new=action_mock),
         patch.object(
@@ -6232,7 +6157,7 @@ async def test_newer_command_with_whitespace_does_not_suppress(tmp_path: Path) -
         thread_id=None,
         latest_event_id="$m2",
     )
-    _set_context_histories(dispatch, [newer_cmd])
+    dispatch.context.thread_history = [newer_cmd]
     send_response = AsyncMock(return_value="$placeholder")
     generate_response = AsyncMock(return_value="$response")
     install_send_response_mock(bot, send_response)
@@ -6243,7 +6168,7 @@ async def test_newer_command_with_whitespace_does_not_suppress(tmp_path: Path) -
         patch.object(
             bot._turn_dispatcher,
             "_prepare_dispatch",
-            new=AsyncMock(return_value=prepared_dispatch_result(dispatch)),
+            new=AsyncMock(return_value=dispatch),
         ),
         patch.object(bot._turn_policy, "plan_turn", new=action_mock),
         patch.object(
@@ -6289,7 +6214,7 @@ async def test_scheduled_event_not_suppressed(tmp_path: Path) -> None:
         thread_id=None,
         latest_event_id="$s2",
     )
-    _set_context_histories(dispatch, [newer_msg])
+    dispatch.context.thread_history = [newer_msg]
     send_response = AsyncMock(return_value="$placeholder")
     generate_response = AsyncMock(return_value="$response")
     install_send_response_mock(bot, send_response)
@@ -6300,7 +6225,7 @@ async def test_scheduled_event_not_suppressed(tmp_path: Path) -> None:
         patch.object(
             bot._turn_dispatcher,
             "_prepare_dispatch",
-            new=AsyncMock(return_value=prepared_dispatch_result(dispatch)),
+            new=AsyncMock(return_value=dispatch),
         ),
         patch.object(bot._turn_policy, "plan_turn", new=action_mock),
         patch.object(
@@ -6338,7 +6263,7 @@ async def test_hook_event_not_suppressed(tmp_path: Path) -> None:
         thread_id=None,
         latest_event_id="$h2",
     )
-    _set_context_histories(dispatch, [newer_msg])
+    dispatch.context.thread_history = [newer_msg]
     send_response = AsyncMock(return_value="$placeholder")
     generate_response = AsyncMock(return_value="$response")
     install_send_response_mock(bot, send_response)
@@ -6349,7 +6274,7 @@ async def test_hook_event_not_suppressed(tmp_path: Path) -> None:
         patch.object(
             bot._turn_dispatcher,
             "_prepare_dispatch",
-            new=AsyncMock(return_value=prepared_dispatch_result(dispatch)),
+            new=AsyncMock(return_value=dispatch),
         ),
         patch.object(bot._turn_policy, "plan_turn", new=action_mock),
         patch.object(
@@ -6389,7 +6314,7 @@ async def test_multiple_scheduled_fires_not_suppressed(tmp_path: Path) -> None:
         thread_id=None,
         latest_event_id="$s2",
     )
-    _set_context_histories(dispatch, [second_fire_msg])
+    dispatch.context.thread_history = [second_fire_msg]
     send_response = AsyncMock(return_value="$placeholder")
     generate_response = AsyncMock(return_value="$response")
     install_send_response_mock(bot, send_response)
@@ -6400,7 +6325,7 @@ async def test_multiple_scheduled_fires_not_suppressed(tmp_path: Path) -> None:
         patch.object(
             bot._turn_dispatcher,
             "_prepare_dispatch",
-            new=AsyncMock(return_value=prepared_dispatch_result(dispatch)),
+            new=AsyncMock(return_value=dispatch),
         ),
         patch.object(bot._turn_policy, "plan_turn", new=action_mock),
         patch.object(
@@ -6444,14 +6369,14 @@ async def test_coalesced_user_batch_suppressed_by_thread_guard(tmp_path: Path) -
         thread_id=None,
         latest_event_id="$m2",
     )
-    _set_context_histories(dispatch, [newer_msg])
+    dispatch.context.thread_history = [newer_msg]
 
     action_mock = AsyncMock()
     with (
         patch.object(
             bot._turn_dispatcher,
             "_prepare_dispatch",
-            new=AsyncMock(return_value=prepared_dispatch_result(dispatch)),
+            new=AsyncMock(return_value=dispatch),
         ),
         patch.object(bot._turn_policy, "plan_turn", new=action_mock),
     ):
@@ -6486,14 +6411,14 @@ async def test_coalesced_media_batch_suppressed_by_replay_snapshot(tmp_path: Pat
         thread_id=None,
         latest_event_id="$img2",
     )
-    _set_context_histories(dispatch, [newer_msg])
+    dispatch.context.thread_history = [newer_msg]
 
     action_mock = AsyncMock()
     with (
         patch.object(
             bot._turn_dispatcher,
             "_prepare_dispatch",
-            new=AsyncMock(return_value=prepared_dispatch_result(dispatch)),
+            new=AsyncMock(return_value=dispatch),
         ),
         patch.object(bot._turn_policy, "plan_turn", new=action_mock),
     ):
@@ -6530,7 +6455,7 @@ async def test_normal_text_command_still_dispatches_as_command(tmp_path: Path) -
     dispatch = _prepared_dispatch(event_id="$c1", body="!schedule tomorrow at 9am turn off the lights")
 
     handle_cmd_mock = AsyncMock(return_value=True)
-    prepare_dispatch_mock = AsyncMock(return_value=prepared_dispatch_result(dispatch))
+    prepare_dispatch_mock = AsyncMock(return_value=dispatch)
     with (
         patch.object(bot._turn_dispatcher, "_prepare_dispatch", new=prepare_dispatch_mock),
         patch.object(bot._command_turn_executor, "execute_if_owned", new=handle_cmd_mock),
@@ -6572,7 +6497,7 @@ async def test_active_voice_follow_up_preserves_voice_command_policy(tmp_path: P
     plan_mock = AsyncMock(return_value=_respond_dispatch_plan())
     execute_command_mock = AsyncMock()
     execute_response_mock = AsyncMock()
-    prepare_dispatch_mock = AsyncMock(return_value=prepared_dispatch_result(dispatch))
+    prepare_dispatch_mock = AsyncMock(return_value=dispatch)
     with (
         patch.object(
             bot._turn_dispatcher,
@@ -6626,14 +6551,14 @@ async def test_older_command_not_suppressed_during_replay(tmp_path: Path) -> Non
         thread_id=None,
         latest_event_id="$c2",
     )
-    _set_context_histories(dispatch, [newer_msg])
+    dispatch.context.thread_history = [newer_msg]
 
     handle_cmd_mock = AsyncMock(return_value=True)
     with (
         patch.object(
             bot._turn_dispatcher,
             "_prepare_dispatch",
-            new=AsyncMock(return_value=prepared_dispatch_result(dispatch)),
+            new=AsyncMock(return_value=dispatch),
         ),
         patch.object(bot._command_turn_executor, "execute_if_owned", new=handle_cmd_mock),
     ):
@@ -6763,20 +6688,17 @@ async def _capture_gate_dispatches(
     async def extract_dispatch_context(
         _room: nio.MatrixRoom,
         event: nio.Event | PreparedIngress,
+        *,
+        thread_id: str | None,
         **_kwargs: object,
     ) -> object:
-        thread_id = EventInfo.from_event(event.source).thread_id
-        history: list[ResolvedVisibleMessage] = []
-        return dispatch_context_result(
-            MessageContext(
-                am_i_mentioned=True,
-                is_thread=thread_id is not None,
-                thread_id=thread_id,
-                thread_history=history,
-                mentioned_agents=_mentioned_matrix_ids_from_source(event.source),
-                has_non_agent_mentions=False,
-                replay_guard_history=history,
-            ),
+        return MessageContext(
+            am_i_mentioned=True,
+            is_thread=thread_id is not None,
+            thread_id=thread_id,
+            thread_history=[],
+            mentioned_agents=_mentioned_matrix_ids_from_source(event.source),
+            has_non_agent_mentions=False,
         )
 
     with (
@@ -6973,19 +6895,18 @@ async def test_trusted_router_relay_context_uses_handoff_ingress_metadata(tmp_pa
         thread_history=[],
         mentioned_agents=[],
         has_non_agent_mentions=False,
-        replay_guard_history=[],
     )
 
     with (
         patch.object(
             bot._conversation_resolver,
             "extract_trusted_router_relay_context",
-            new=AsyncMock(return_value=dispatch_context_result(trusted_context)),
+            new=AsyncMock(return_value=trusted_context),
         ) as trusted_context_mock,
         patch.object(
             bot._conversation_resolver,
             "extract_dispatch_context",
-            new=AsyncMock(return_value=dispatch_context_result(trusted_context)),
+            new=AsyncMock(return_value=trusted_context),
         ) as normal_context_mock,
     ):
         envelopes, _media_batches, _payload_requests = await _capture_gate_dispatches(
@@ -7501,21 +7422,18 @@ async def test_untrusted_sidecar_payload_metadata_spoofing_does_not_reach_envelo
 
     async def extract_dispatch_context(
         _room: nio.MatrixRoom,
-        event: nio.Event | PreparedIngress,
+        _event: nio.Event | PreparedIngress,
+        *,
+        thread_id: str | None,
         **_kwargs: object,
     ) -> object:
-        thread_id = EventInfo.from_event(event.source).thread_id
-        history: list[ResolvedVisibleMessage] = []
-        return dispatch_context_result(
-            MessageContext(
-                am_i_mentioned=True,
-                is_thread=thread_id is not None,
-                thread_id=thread_id,
-                thread_history=history,
-                mentioned_agents=[MatrixID(username="mindroom_test_agent", domain="localhost")],
-                has_non_agent_mentions=False,
-                replay_guard_history=history,
-            ),
+        return MessageContext(
+            am_i_mentioned=True,
+            is_thread=thread_id is not None,
+            thread_id=thread_id,
+            thread_history=[],
+            mentioned_agents=[MatrixID(username="mindroom_test_agent", domain="localhost")],
+            has_non_agent_mentions=False,
         )
 
     with (
@@ -7835,24 +7753,6 @@ async def test_router_early_skip_keeps_a_question_to_the_router_itself(tmp_path:
         facts=make_ingress_facts(event.sender, requester_user_id="@user:localhost"),
         thread_id=None,
     )
-
-    assert should_skip is False
-
-
-@pytest.mark.asyncio
-async def test_router_early_skip_continues_when_the_thread_snapshot_is_missing(tmp_path: Path) -> None:
-    """Without a thread snapshot the early skip cannot tell whom a follow-up addresses, so normal ingress decides."""
-    bot = _make_bot(tmp_path, agent_name=ROUTER_AGENT_NAME)
-    room = _make_room()
-    event = _text_event(event_id="$follow-up", body="and then?")
-
-    with patch.object(bot._turn_ingress.deps.resolver, "dispatch_thread_snapshot", AsyncMock(return_value=None)):
-        should_skip = await bot._turn_ingress._should_skip_router_before_shared_ingress_work(
-            room,
-            event,
-            facts=make_ingress_facts(event.sender, requester_user_id="@user:localhost"),
-            thread_id="$thread",
-        )
 
     assert should_skip is False
 

@@ -141,7 +141,7 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from mindroom.bot import AgentBot
-    from mindroom.matrix.client import ResolvedVisibleMessage
+    from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
     from mindroom.matrix.users import AgentMatrixUser
     from mindroom.post_response_effects import ResponseOutcome
     from mindroom.response_turn import ResponseTurnContext
@@ -923,17 +923,14 @@ class TestAgentBot(AgentBotTestBase):
         bot.client.rooms = {}
         _set_knowledge_for_agent(bot, MagicMock(return_value=None))
 
-        def fake_stream_agent_response(*_args: object, **kwargs: object) -> AsyncGenerator[str, None]:
-            async def _gen() -> AsyncGenerator[str, None]:
-                yield "hello"
-                # Populate after first yield, mimicking production ai.py ordering
-                kwargs["sinks"].run_metadata_collector["io.mindroom.ai_run"] = {
-                    "version": 1,
-                    "model": "test-model",
-                    "tokens": {"input": 10, "output": 5},
-                }
-
-            return _gen()
+        async def fake_stream_agent_response(*_args: object, **kwargs: object) -> AsyncGenerator[str, None]:
+            yield "hello"
+            # Populate after first yield, mimicking production ai.py ordering
+            kwargs["sinks"].run_metadata_collector["io.mindroom.ai_run"] = {
+                "version": 1,
+                "model": "test-model",
+                "tokens": {"input": 10, "output": 5},
+            }
 
         with (
             patch(
@@ -984,13 +981,10 @@ class TestAgentBot(AgentBotTestBase):
         bot.client.rooms = {}
         _set_knowledge_for_agent(bot, MagicMock(return_value=None))
 
-        def fake_stream_agent_response(*_args: object, **kwargs: object) -> AsyncGenerator[str, None]:
-            async def _gen() -> AsyncGenerator[str, None]:
-                kwargs["sinks"].run_metadata_collector["io.mindroom.ai_run"] = {"version": 1}
-                yield "partial"
-                raise asyncio.CancelledError
-
-            return _gen()
+        async def fake_stream_agent_response(*_args: object, **kwargs: object) -> AsyncGenerator[str, None]:
+            kwargs["sinks"].run_metadata_collector["io.mindroom.ai_run"] = {"version": 1}
+            yield "partial"
+            raise asyncio.CancelledError
 
         captured_extra_content_ref: list[dict[str, Any] | None] = [None]
 

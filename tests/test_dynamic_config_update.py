@@ -12,7 +12,7 @@ import pytest_asyncio
 from mindroom.bot import AgentBot
 from mindroom.config.main import Config
 from mindroom.constants import ROUTER_AGENT_NAME, resolve_runtime_paths
-from mindroom.matrix.client import PermanentMatrixStartupError
+from mindroom.matrix.client_session import PermanentMatrixStartupError
 from mindroom.matrix.identity import MatrixID
 from mindroom.matrix.state import MatrixState
 from mindroom.orchestrator import _MultiAgentOrchestrator
@@ -21,6 +21,7 @@ from mindroom.scheduling.tasks import CronSchedule, ScheduledWorkflow, _parse_wo
 from tests.conftest import install_bots, install_model_providers, orchestrator_runtime_paths, published_config_load
 from tests.fakes.scripted_model import ScriptedModel, answer
 from tests.identity_helpers import persist_entity_accounts
+from tests.matrix_state_helpers import save_matrix_state
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Callable
@@ -509,7 +510,7 @@ class TestDynamicConfigUpdate:
         room_id = "!lobby:example.com"
         state = MatrixState.load(runtime_paths=orchestrator.runtime_paths)
         state.add_room("lobby", room_id, "#lobby:example.com", "Lobby")
-        state.save(runtime_paths=orchestrator.runtime_paths)
+        save_matrix_state(state, orchestrator.runtime_paths)
         membership_client = AsyncMock(spec=nio.AsyncClient)
         membership_client.joined_rooms.return_value = nio.JoinedRoomsResponse(rooms=[room_id])
         membership_client.joined_members.return_value = nio.JoinedMembersResponse(
@@ -583,7 +584,7 @@ class TestDynamicConfigUpdate:
         room_id = "!lobby:example.com"
         state = MatrixState.load(runtime_paths=orchestrator.runtime_paths)
         state.add_room("lobby", room_id, "#lobby:example.com", "Lobby")
-        state.save(runtime_paths=orchestrator.runtime_paths)
+        save_matrix_state(state, orchestrator.runtime_paths)
         membership_client = AsyncMock(spec=nio.AsyncClient)
         membership_client.joined_rooms.return_value = nio.JoinedRoomsResponse(rooms=[room_id])
         membership_client.joined_members.return_value = nio.JoinedMembersResponse(

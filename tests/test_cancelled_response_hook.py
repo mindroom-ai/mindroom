@@ -632,7 +632,7 @@ async def test_team_edit_regeneration_empty_prompt_emits_cancelled_hook_once(tmp
     edit_event.server_timestamp = 1000
     edit_event.sender = "@user:localhost"
     edit_event.source = {}
-    event_info = MagicMock(original_event_id="$original", thread_id=None, thread_id_from_edit=None)
+    event_info = MagicMock(original_event_id="$original", thread_id=None)
 
     with (
         patch.object(

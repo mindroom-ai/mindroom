@@ -38,7 +38,6 @@ from tests.conftest import (
     TEST_ACCESS_TOKEN,
     TEST_PASSWORD,
     bind_runtime_paths,
-    dispatch_context_result,
     drain_coalescing,
     install_edit_message_mock,
     install_generate_response_mock,
@@ -353,7 +352,7 @@ async def test_voice_message_in_main_room_creates_thread(
         requires_model_history_refresh=False,
     )
     bot._conversation_resolver.extract_dispatch_context = AsyncMock(
-        return_value=dispatch_context_result(mock_context),
+        return_value=mock_context,
     )
 
     room = MagicMock(spec=nio.MatrixRoom)
@@ -401,7 +400,7 @@ async def test_voice_message_in_thread_continues_thread(
         requires_model_history_refresh=False,
     )
     bot._conversation_resolver.extract_dispatch_context = AsyncMock(
-        return_value=dispatch_context_result(mock_context),
+        return_value=mock_context,
     )
 
     room = MagicMock(spec=nio.MatrixRoom)
@@ -472,7 +471,7 @@ async def test_voice_plain_reply_to_thread_message_stays_threaded_transitively(
         requires_model_history_refresh=False,
     )
     bot._conversation_resolver.extract_dispatch_context = AsyncMock(
-        return_value=dispatch_context_result(mock_context),
+        return_value=mock_context,
     )
 
     with (
@@ -529,7 +528,6 @@ async def test_voice_plain_reply_unproven_thread_candidate_is_not_admitted(
             new=AsyncMock(
                 return_value=ThreadResolution._indeterminate(
                     RuntimeError("proof unavailable"),
-                    candidate_thread_root_id="$maybe-thread-root",
                 ),
             ),
         ),
@@ -706,16 +704,14 @@ async def test_non_router_skips_visible_echo_and_dispatches_canonical_voice(
         thread_id="$thread_root",
     )
     bot._conversation_resolver.extract_dispatch_context = AsyncMock(
-        return_value=dispatch_context_result(
-            MessageContext(
-                am_i_mentioned=True,
-                is_thread=True,
-                thread_id="$thread_root",
-                thread_history=[],
-                mentioned_agents=[bot.matrix_id],
-                has_non_agent_mentions=False,
-                requires_model_history_refresh=False,
-            ),
+        return_value=MessageContext(
+            am_i_mentioned=True,
+            is_thread=True,
+            thread_id="$thread_root",
+            thread_history=[],
+            mentioned_agents=[bot.matrix_id],
+            has_non_agent_mentions=False,
+            requires_model_history_refresh=False,
         ),
     )
 

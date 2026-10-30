@@ -88,7 +88,6 @@ from mindroom.command_turn_executor import CommandTurnExecutor
 from mindroom.config.load_attempt import ConfigLoad, ConfigLoadResult
 from mindroom.config.main import Config, load_config
 from mindroom.constants import RuntimePaths, resolve_runtime_paths, safe_replace
-from mindroom.conversation_resolver import DispatchContextResult, MessageContext
 from mindroom.delivery_gateway import DeliveryGateway, EditTextRequest, FinalDeliveryRequest, SendTextRequest
 from mindroom.dispatch_handoff import (
     MediaDispatchEvent,
@@ -142,15 +141,15 @@ from mindroom.hooks import EnrichmentItem, MessageEnvelope
 from mindroom.ingress_validation import IngressValidator
 from mindroom.interactive import InteractiveMetadata
 from mindroom.interactive_models import InteractivePrompt, interactive_prompt_content
-from mindroom.matrix.client import DeliveredMatrixEvent, ResolvedVisibleMessage
-from mindroom.matrix.client_delivery import build_edit_event_content
+from mindroom.matrix.client_delivery import DeliveredMatrixEvent, build_edit_event_content
 from mindroom.matrix.client_room_admin import RoomJoinOutcome
+from mindroom.matrix.client_session import MindRoomAsyncClient, matrix_client_config, olm_store_dir
+from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
 from mindroom.matrix.conversation_reads import ConversationReader
 from mindroom.matrix.identity import MatrixID
 from mindroom.matrix.large_messages import _oversized_nonterminal_streaming_edit_next_allowed_at
 from mindroom.matrix.media import is_matrix_media_dispatch_event
 from mindroom.matrix.relation_lookup import RelationLookup
-from mindroom.matrix.thread_diagnostics import is_thread_history_degraded
 from mindroom.mcp import toolkit as mcp_toolkit_module
 from mindroom.message_target import MessageTarget
 from mindroom.model_defaults import OLLAMA_HOST_DEFAULT
@@ -189,7 +188,7 @@ from mindroom.tool_system import plugin_imports
 from mindroom.turn_origin import TurnOrigin, classify_turn_origin
 from mindroom.turn_policy import PreparedDispatch, TurnPolicy
 from mindroom.turn_store import _CLAIM_REGISTRIES, TurnClaim, TurnStore, _ClaimRegistry
-from mindroom.turns.dispatch import TurnDispatcher, _DispatchPreparation, _ReplayGuardContext
+from mindroom.turns.dispatch import TurnDispatcher
 from mindroom.turns.facts import IngressFacts
 from mindroom.turns.ingress import TurnIngress
 from mindroom.turns.interactive_selection import InteractiveSelections
@@ -499,7 +498,6 @@ __all__ = [
     "create_mock_room",
     "delivered_matrix_event",
     "delivered_matrix_side_effect",
-    "dispatch_context_result",
     "drain_coalescing",
     "enforce_turn_authorization",
     "handle_card_response_for_test",
@@ -522,7 +520,6 @@ __all__ = [
     "patch_response_runner_module",
     "prepare_history_for_run_for_test",
     "prepare_payload_via_seam",
-    "prepared_dispatch_result",
     "replace_delivery_gateway_deps",
     "replace_edit_regenerator_deps",
     "replace_response_runner_deps",
@@ -804,23 +801,6 @@ async def prepare_history_for_run_for_test(
         config=config,
         static_prompt_tokens=static_prompt_tokens,
         pipeline_timing=None,
-    )
-
-
-def dispatch_context_result(context: MessageContext) -> DispatchContextResult:
-    """Wrap a stable message context in the dispatch extraction result shape."""
-    return DispatchContextResult(context=context, thread_context=None)
-
-
-def prepared_dispatch_result(dispatch: PreparedDispatch) -> _DispatchPreparation:
-    """Wrap a prepared dispatch in the private turn-dispatch preparation result shape."""
-    return _DispatchPreparation(
-        dispatch=dispatch,
-        replay_guard=_ReplayGuardContext(
-            history=dispatch.context.replay_guard_history,
-            degraded=is_thread_history_degraded(dispatch.context.replay_guard_history),
-            thread_id=dispatch.target.resolved_thread_id,
-        ),
     )
 
 
@@ -1493,6 +1473,21 @@ async def push_stream_chunk(streaming: "StreamingResponse", chunk: str, client: 
     prior_delta_at = streaming.last_delta_at
     streaming._update(chunk)
     await streaming._throttled_send(client, prior_delta_at=prior_delta_at)
+
+
+def legacy_default_store_client(
+    homeserver: str,
+    user_id: str,
+    device_id: str,
+    access_token: str,
+    runtime_paths: RuntimePaths,
+) -> MindRoomAsyncClient:
+    """Open a client on the ordinary nio DefaultStore that MindRoom wrote before owned sessions existed."""
+    store_dir = olm_store_dir(user_id, runtime_paths)
+    store_dir.mkdir(parents=True, exist_ok=True)
+    client = MindRoomAsyncClient(homeserver, user_id, store_path=str(store_dir), config=matrix_client_config())
+    client.restore_login(user_id, device_id, access_token)
+    return client
 
 
 def make_matrix_client_mock(*, user_id: str = "@mindroom_test:example.com") -> AsyncMock:
@@ -2275,6 +2270,8 @@ def make_conversation_reader_mock() -> ConversationReader:
             read=AsyncMock(return_value=page),
             read_strict=AsyncMock(return_value=page),
             latest_thread_event_id=AsyncMock(return_value=None),
+            # A walk on the server again that read the whole conversation.
+            hydrator=SimpleNamespace(rewalk=AsyncMock(return_value=True)),
         ),
     )
 

@@ -20,6 +20,7 @@ from mindroom.config.main import Config
 from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.matrix.state import MatrixState
 from tests.api.conftest import trusted_upstream_headers, use_trusted_upstream_runtime
+from tests.matrix_state_helpers import save_matrix_state
 from tests.runtime_fakes import bind_test_embedded_runtime
 
 
@@ -76,13 +77,13 @@ def _save_matrix_identity(
         domain="example.org",
         access_token=access_token,
     )
-    state.save(runtime_paths)
+    save_matrix_state(state, runtime_paths)
 
 
 def _save_matrix_room(runtime_paths: constants.RuntimePaths, room_key: str, room_id: str) -> None:
     state = MatrixState.load(runtime_paths)
     state.add_room(room_key, room_id, f"#{room_key}:example.org", room_key)
-    state.save(runtime_paths)
+    save_matrix_state(state, runtime_paths)
 
 
 @pytest.fixture

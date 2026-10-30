@@ -30,7 +30,7 @@ from mindroom.hooks import (
     MessageEnvelope,
     hook,
 )
-from mindroom.matrix.client import DeliveredMatrixEvent, ResolvedVisibleMessage
+from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
 from mindroom.matrix.state import MatrixState
 from mindroom.matrix.thread_history_result import ThreadHistoryResult
 from mindroom.message_target import MessageTarget
@@ -73,6 +73,7 @@ from tests.conftest import (
     unwrap_extracted_collaborator,
 )
 from tests.identity_helpers import entity_ids, persist_entity_accounts
+from tests.matrix_state_helpers import save_matrix_state
 from tests.reply_span_helpers import seed_finished_reply
 from tests.response_attempt_helpers import install_direct_response_admission
 from tests.response_runner_helpers import recorded_reply_event
@@ -88,6 +89,7 @@ if TYPE_CHECKING:
     from mindroom.constants import (
         RuntimePaths,
     )
+    from mindroom.matrix.client_delivery import DeliveredMatrixEvent
     from mindroom.matrix.conversation_reads import DeliveredResponse
     from mindroom.matrix.users import AgentMatrixUser
     from mindroom.response_sources import SourceFate
@@ -1025,7 +1027,7 @@ class TestAgentBot(AgentBotTestBase):
             TEST_PASSWORD,
             domain=config.get_domain(runtime_paths),
         )
-        state.save(runtime_paths=runtime_paths)
+        save_matrix_state(state, runtime_paths)
         current_member = entity_ids(config, runtime_paths)["general"]
         assert stale_member.full_id != current_member.full_id
 

@@ -63,7 +63,6 @@ from tests.bot_helpers import (
     make_test_agent_bot,
 )
 from tests.conftest import (
-    dispatch_context_result,
     drain_coalescing,
     install_generate_response_mock,
     replace_turn_deps,
@@ -114,16 +113,6 @@ class TestAgentBot(AgentBotTestBase):
         _wrap_extracted_collaborators(bot)
         bot.client = AsyncMock()
 
-        bot._conversation_resolver.extract_message_context = AsyncMock(
-            return_value=MessageContext(
-                am_i_mentioned=False,
-                is_thread=False,
-                thread_id=None,
-                thread_history=[],
-                mentioned_agents=[],
-                has_non_agent_mentions=False,
-            ),
-        )
         generate_response = AsyncMock(return_value="$response")
         install_generate_response_mock(bot, generate_response)
 
@@ -175,7 +164,7 @@ class TestAgentBot(AgentBotTestBase):
         assert attachment_id in generate_kwargs["model_prompt"]
         assert response_target.reply_to_event_id == "$img_event"
         assert response_target.resolved_thread_id == "$img_event"
-        assert generate_kwargs["thread_history"] == []
+        assert generate_kwargs["thread_history"] == ()
         assert response_target.source_thread_id is None
         assert generate_kwargs["user_id"] == "@user:localhost"
         media = generate_kwargs["media"]
@@ -710,15 +699,13 @@ class TestAgentBot(AgentBotTestBase):
             is_full_history=True,
         )
         bot._conversation_resolver.extract_dispatch_context = AsyncMock(
-            return_value=dispatch_context_result(
-                MessageContext(
-                    am_i_mentioned=False,
-                    is_thread=True,
-                    thread_id="$thread_root",
-                    thread_history=routed_history,
-                    mentioned_agents=[],
-                    has_non_agent_mentions=False,
-                ),
+            return_value=MessageContext(
+                am_i_mentioned=False,
+                is_thread=True,
+                thread_id="$thread_root",
+                thread_history=routed_history,
+                mentioned_agents=[],
+                has_non_agent_mentions=False,
             ),
         )
         generate_response = AsyncMock(return_value="$response")
@@ -1272,16 +1259,6 @@ class TestAgentBot(AgentBotTestBase):
         bot = make_test_agent_bot(mock_agent_user, config=config, runtime_paths=runtime_paths_for(config))
         bot.client = AsyncMock()
 
-        bot._conversation_resolver.extract_message_context = AsyncMock(
-            return_value=MessageContext(
-                am_i_mentioned=False,
-                is_thread=False,
-                thread_id=None,
-                thread_history=[],
-                mentioned_agents=[],
-                has_non_agent_mentions=False,
-            ),
-        )
         generate_response = AsyncMock()
         install_generate_response_mock(bot, generate_response)
 
@@ -1318,16 +1295,6 @@ class TestAgentBot(AgentBotTestBase):
         bot = make_test_agent_bot(mock_agent_user, config=config, runtime_paths=runtime_paths_for(config))
         bot.client = AsyncMock()
 
-        bot._conversation_resolver.extract_message_context = AsyncMock(
-            return_value=MessageContext(
-                am_i_mentioned=False,
-                is_thread=False,
-                thread_id=None,
-                thread_history=[],
-                mentioned_agents=[],
-                has_non_agent_mentions=False,
-            ),
-        )
         generate_response = AsyncMock(return_value="$response")
         install_generate_response_mock(bot, generate_response)
 
@@ -1379,7 +1346,7 @@ class TestAgentBot(AgentBotTestBase):
         assert response_target.room_id == "!test:localhost"
         assert response_target.reply_to_event_id == "$file_event"
         assert response_target.resolved_thread_id == "$file_event"
-        assert generate_kwargs["thread_history"] == []
+        assert generate_kwargs["thread_history"] == ()
         assert response_target.source_thread_id is None
         assert generate_kwargs["user_id"] == "@user:localhost"
         assert generate_kwargs["attachment_ids"] == [attachment_id]
@@ -1422,16 +1389,6 @@ class TestAgentBot(AgentBotTestBase):
         bot = make_test_agent_bot(mock_agent_user, config=config, runtime_paths=runtime_paths_for(config))
         bot.client = AsyncMock()
 
-        bot._conversation_resolver.extract_message_context = AsyncMock(
-            return_value=MessageContext(
-                am_i_mentioned=False,
-                is_thread=False,
-                thread_id=None,
-                thread_history=[],
-                mentioned_agents=[],
-                has_non_agent_mentions=False,
-            ),
-        )
         generate_response = AsyncMock()
         install_generate_response_mock(bot, generate_response)
 

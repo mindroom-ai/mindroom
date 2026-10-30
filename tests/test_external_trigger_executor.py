@@ -26,6 +26,7 @@ from mindroom.matrix.client_delivery import DeliveredMatrixEvent
 from mindroom.matrix.identity import managed_account_key
 from mindroom.matrix.state import MatrixState
 from tests.conftest import bind_runtime_paths, runtime_paths_for, test_runtime_paths
+from tests.matrix_state_helpers import save_matrix_state
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -44,12 +45,6 @@ def _config(tmp_path: Path) -> Config:
     )
 
 
-def _private_config(tmp_path: Path) -> Config:
-    config = _config(tmp_path)
-    config.agents["research"].private = AgentPrivateConfig(per="user", root="research_data")
-    return config
-
-
 def _config_with_unprepared_stale_agent(tmp_path: Path) -> Config:
     config = bind_runtime_paths(
         Config(
@@ -65,7 +60,7 @@ def _config_with_unprepared_stale_agent(tmp_path: Path) -> Config:
     runtime_paths = runtime_paths_for(config)
     state = MatrixState.load(runtime_paths)
     state.accounts.pop(managed_account_key("mindtest"))
-    state.save(runtime_paths)
+    save_matrix_state(state, runtime_paths)
     return config
 
 
@@ -223,7 +218,7 @@ async def test_execute_external_trigger_resolves_configured_room_alias(
     runtime_paths = runtime_paths_for(config)
     state = MatrixState.load(runtime_paths)
     state.add_room("lobby", "!resolved:localhost", "#lobby:localhost", "Lobby")
-    state.save(runtime_paths)
+    save_matrix_state(state, runtime_paths)
     conversation_reader = _conversation_reader(latest_thread_event_id="$latest")
     send_and_track_message = AsyncMock(
         return_value=DeliveredMatrixEvent(event_id="$matrix-event", content_sent={}),
@@ -285,7 +280,8 @@ async def test_execute_external_trigger_private_target_preserves_owner_metadata(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Private target dispatch should mention the private account but preserve external owner metadata."""
-    config = _private_config(tmp_path)
+    config = _config(tmp_path)
+    config.agents["research"].private = AgentPrivateConfig(per="user", root="research_data")
     runtime_paths = runtime_paths_for(config)
     send_and_track_message = AsyncMock(
         return_value=DeliveredMatrixEvent(event_id="$matrix-event", content_sent={}),

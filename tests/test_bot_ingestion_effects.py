@@ -301,7 +301,7 @@ async def test_call_room_updates_are_preserved_while_reconciliation_is_running(t
             await asyncio.wait_for(first_started.wait(), timeout=1)
 
             await bot._post_join_room_setup(second_room_id)
-            await _complete_frame(bot, 1)
+            await _complete_frame(bot)
             await asyncio.wait_for(second_started.wait(), timeout=1)
         finally:
             release_first.set()

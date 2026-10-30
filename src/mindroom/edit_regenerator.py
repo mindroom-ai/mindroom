@@ -6,7 +6,6 @@ from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING
 
 from mindroom.coalescing.batch import coalesced_prompt, tagged_coalesced_prompt
-from mindroom.conversation_resolver import MessageContext
 from mindroom.entity_resolution import persisted_bot_user_ids
 from mindroom.hooks import hook_ingress_policy
 from mindroom.logging_config import get_logger
@@ -30,13 +29,12 @@ if TYPE_CHECKING:
 
     from mindroom.coalescing.batch import TimestampFormatter
     from mindroom.constants import RuntimePaths
-    from mindroom.conversation_resolver import ConversationResolver
+    from mindroom.conversation_resolver import ConversationResolver, MessageContext
     from mindroom.event_journal import PrincipalStore
     from mindroom.hooks import MessageEnvelope
     from mindroom.hooks.ingress import IngressHookRunner
     from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
     from mindroom.matrix.event_info import EventInfo
-    from mindroom.message_target import MessageTarget
     from mindroom.reply_lifecycle import Reply
     from mindroom.response_runner import ResponseRunner
     from mindroom.response_sources import SourceFate
@@ -113,34 +111,6 @@ class EditRegenerator:
             msg = "Matrix client is not ready for edit regeneration"
             raise RuntimeError(msg)
         return client
-
-    async def _edit_regeneration_context(
-        self,
-        context: MessageContext,
-        room: nio.MatrixRoom,
-        *,
-        conversation_target: MessageTarget,
-    ) -> MessageContext:
-        """Return edit context aligned with the recorded thread root."""
-        if (
-            conversation_target.resolved_thread_id is None
-            or context.thread_id == conversation_target.resolved_thread_id
-        ):
-            return context
-        thread_history = await self.deps.resolver.fetch_thread_history(
-            room.room_id,
-            conversation_target.resolved_thread_id,
-        )
-        return MessageContext(
-            am_i_mentioned=context.am_i_mentioned,
-            is_thread=True,
-            thread_id=conversation_target.resolved_thread_id,
-            thread_history=thread_history,
-            mentioned_agents=context.mentioned_agents,
-            has_non_agent_mentions=context.has_non_agent_mentions,
-            replay_guard_history=thread_history,
-            requires_model_history_refresh=context.requires_model_history_refresh,
-        )
 
     async def _later_human_message(self, record: TurnRecord) -> bool:
         """Return whether a human wrote in the turn's conversation after it, so an edit of it regenerates nothing."""
@@ -233,10 +203,10 @@ class EditRegenerator:
         )
         if edited_content is None:
             return None
-        context = await self._edit_regeneration_context(
-            await self.deps.resolver.extract_message_context(room, event),
+        context = await self.deps.resolver.extract_message_context(
             room,
-            conversation_target=turn_record.conversation_target,
+            event,
+            thread_id=turn_record.conversation_target.resolved_thread_id,
         )
         envelope = self.deps.resolver.build_envelope(
             event=event,

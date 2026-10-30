@@ -1,7 +1,7 @@
 """Room cleanup utilities for removing stale bot memberships from Matrix rooms.
 
-With the new self-managing agent pattern, agents handle their own room
-memberships. This module only handles cleanup of stale/orphaned bots.
+Configured agents manage their own room memberships; this module only
+removes retired bot identities.
 
 DM rooms are preserved and not cleaned up.
 """
@@ -35,7 +35,7 @@ async def _cleanup_orphaned_bots_in_room(
 ) -> list[str]:
     """Remove orphaned bots from a single room.
 
-    When DM mode is enabled, actual DM rooms are skipped to preserve them.
+    DM rooms and the root space are skipped to preserve them.
 
     Args:
         client: An authenticated Matrix client with kick permissions
@@ -49,16 +49,14 @@ async def _cleanup_orphaned_bots_in_room(
     """
     # Root-space membership is managed separately from ordinary room cleanup.
     state = matrix_state_for_runtime(runtime_paths)
-    if state.space_room_id and room_id == state.space_room_id:
+    if room_id == state.space_room_id:
         logger.debug("orphaned_bot_cleanup_skipped_root_space", room_id=room_id)
         return []
 
-    # When DM mode is enabled, check if this is actually a DM room
     if await is_dm_room(client, room_id):
         logger.debug("orphaned_bot_cleanup_skipped_dm_room", room_id=room_id)
         return []
 
-    # Get room members
     member_ids = await get_room_members(client, room_id)
     if not member_ids:
         logger.warning("orphaned_bot_cleanup_members_unavailable", room_id=room_id)
@@ -69,9 +67,9 @@ async def _cleanup_orphaned_bots_in_room(
 
     removed_bots = []
 
-    # Sweep the client's own account last — once it leaves the room it can no
-    # longer kick the remaining orphans.
-    for user_id in sorted(member_ids, key=lambda member_id: member_id == client.user_id):
+    # The sweeping client is the current router, never a retired identity, so
+    # every orphan here is another account it can kick.
+    for user_id in member_ids:
         matrix_id = MatrixID.parse(user_id)
         agent_name = registry.current_entity_name_for_user_id(user_id)
         # Current bots reconcile their own memberships after startup hooks and
@@ -91,26 +89,8 @@ async def _cleanup_orphaned_bots_in_room(
 
 
 async def _remove_orphaned_bot(client: nio.AsyncClient, room_id: str, matrix_id: MatrixID) -> bool:
-    """Remove one orphaned bot from a room, returning True on success.
-
-    Matrix forbids kicking your own account (M_FORBIDDEN), so when the orphan
-    is the sweeping client itself it leaves the room instead of kicking.
-    """
+    """Kick one orphaned bot from a room, returning True on success."""
     user_id = matrix_id.full_id
-    if user_id == client.user_id:
-        leave_response = await client.room_leave(room_id)
-        if isinstance(leave_response, nio.RoomLeaveResponse):
-            logger.info("orphaned_bot_left", agent=matrix_id.username, room_id=room_id, user_id=user_id)
-            return True
-        logger.error(
-            "orphaned_bot_leave_failed",
-            agent=matrix_id.username,
-            room_id=room_id,
-            user_id=user_id,
-            error=str(leave_response),
-        )
-        return False
-
     kick_response = await client.room_kick(room_id, user_id, reason="Bot no longer configured for this room")
     if isinstance(kick_response, nio.RoomKickResponse):
         logger.info("orphaned_bot_kicked", agent=matrix_id.username, room_id=room_id, user_id=user_id)
@@ -132,8 +112,8 @@ async def cleanup_all_orphaned_bots(
 ) -> dict[str, list[str]]:
     """Remove retired bot identities from all rooms the client has access to.
 
-    This should be called by a user or bot with admin/moderator permissions
-    in the rooms that need cleaning.
+    Called with the running router's client, which needs kick permission in
+    the rooms it cleans and is never itself a retired identity.
     Configured entities manage their own memberships, even if startup has not
     completed or their invited-room retention records have not been restored.
 
@@ -141,18 +121,15 @@ async def cleanup_all_orphaned_bots(
         Dictionary mapping room IDs to lists of removed bot Matrix user IDs
 
     """
-    # Track what we're doing
     kicked_bots: dict[str, list[str]] = {}
 
-    # Get all rooms the client is in
     joined_rooms = await get_joined_rooms(client)
     if joined_rooms is None:
         return kicked_bots
 
     logger.info("orphaned_bot_cleanup_started", room_count=len(joined_rooms))
 
-    # Only independent rooms overlap. Each room still kicks other orphans
-    # before leaving itself, and cancellation drains all workers before return.
+    # Only independent rooms overlap, and cancellation drains all workers before return.
     pending_rooms = iter(joined_rooms)
 
     async def clean_rooms() -> None:
@@ -170,7 +147,6 @@ async def cleanup_all_orphaned_bots(
         for _ in range(min(4, len(joined_rooms))):
             workers.create_task(clean_rooms())
 
-    # Summary
     total_kicked = sum(len(bots) for bots in kicked_bots.values())
     if total_kicked > 0:
         logger.info(

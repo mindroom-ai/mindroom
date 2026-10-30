@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from contextlib import asynccontextmanager
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 from mindroom.attachments.storage import parse_attachment_ids_from_event_source
@@ -15,18 +15,13 @@ from mindroom.dispatch_source import (
     per_fire_thread_root_event_id_from_content,
     source_kind_from_content,
 )
-from mindroom.dispatch_thread_context import (
-    DispatchThreadContext,
-    context_with_dispatch_thread_context,
-    planning_history_for,
-    planning_history_unavailable_for,
-)
 from mindroom.entity_resolution import entity_identity_registry
 from mindroom.matrix.client_delivery import cached_room as matrix_cached_room
 from mindroom.matrix.conversation_hydration import HYDRATED_PROMPT_WINDOW_MESSAGES
 from mindroom.matrix.conversation_reads import (
     ConversationReader,
     ThreadReadMode,
+    complete_thread_history,
     projected_thread_history,
 )
 from mindroom.matrix.event_info import EventInfo
@@ -40,7 +35,7 @@ from mindroom.matrix.thread_membership import (
     ThreadResolution,
     ThreadResolutionState,
     resolve_event_thread_membership,
-    resolve_related_event_thread_id_best_effort,
+    resolve_related_event_thread_membership,
     thread_messages_thread_membership_access,
 )
 from mindroom.message_target import MessageTarget
@@ -112,7 +107,7 @@ def _source_with_payload_metadata(
 
 @dataclass
 class MessageContext:
-    """Context extracted from a Matrix message event."""
+    """Context extracted from a Matrix message event, in the thread its turn was decided to belong to."""
 
     am_i_mentioned: bool
     is_thread: bool
@@ -120,110 +115,32 @@ class MessageContext:
     thread_history: Sequence[ResolvedVisibleMessage]
     mentioned_agents: list[MatrixID]
     has_non_agent_mentions: bool
-    replay_guard_history: Sequence[ResolvedVisibleMessage] = field(default_factory=tuple)
     requires_model_history_refresh: bool = False
 
     @property
     def planning_thread_history(self) -> Sequence[ResolvedVisibleMessage]:
         """Return thread history only when it is safe to use for planning decisions."""
-        return planning_history_for(self.thread_history)
+        history = self.thread_history
+        if (
+            not isinstance(history, ThreadHistoryResult)
+            or not history.is_full_history
+            or is_thread_history_degraded(history)
+        ):
+            return ()
+        return tuple(history)
 
     @property
     def planning_thread_history_unavailable(self) -> bool:
         """Return whether thread policy history degraded and must not be treated as empty."""
-        return self.is_thread and planning_history_unavailable_for(
-            self.thread_history,
-            requires_model_history_refresh=self.requires_model_history_refresh,
-        )
-
-
-@dataclass(frozen=True)
-class _ThreadIdLookup:
-    """Resolved thread id plus any dispatch-local candidate."""
-
-    thread_id: str | None
-    candidate_thread_root_id: str | None = None
-    thread_history: ThreadHistoryResult | None = None
-
-
-@dataclass(frozen=True)
-class _ThreadContextLookup:
-    """Resolved thread context from one Matrix event."""
-
-    is_thread: bool
-    thread_id: str | None
-    thread_history: Sequence[ResolvedVisibleMessage]
-    requires_model_history_refresh: bool
-    candidate_thread_root_id: str | None = None
-    replay_guard_history: Sequence[ResolvedVisibleMessage] = field(default_factory=tuple)
-    replay_guard_degraded: bool = False
-
-    @classmethod
-    def room_level(cls) -> _ThreadContextLookup:
-        """Return a proven room-level context."""
-        return cls(
-            is_thread=False,
-            thread_id=None,
-            thread_history=[],
-            requires_model_history_refresh=False,
-        )
-
-    @classmethod
-    def unproven_candidate_without_history(
-        cls,
-        candidate_thread_root_id: str,
-    ) -> _ThreadContextLookup:
-        """Return a room-level demotion when candidate proof produced no reusable history."""
-        return cls(
-            is_thread=False,
-            thread_id=None,
-            thread_history=[],
-            requires_model_history_refresh=False,
-            candidate_thread_root_id=candidate_thread_root_id,
-            replay_guard_history=[],
-            replay_guard_degraded=True,
-        )
-
-    @classmethod
-    def unproven_candidate_demoted(
-        cls,
-        candidate_thread_root_id: str,
-        candidate_history: Sequence[ResolvedVisibleMessage],
-    ) -> _ThreadContextLookup:
-        """Return a room-level demotion that keeps candidate history only for replay safety."""
-        return cls(
-            is_thread=False,
-            thread_id=None,
-            thread_history=[],
-            requires_model_history_refresh=False,
-            candidate_thread_root_id=candidate_thread_root_id,
-            replay_guard_history=candidate_history,
-            replay_guard_degraded=is_thread_history_degraded(candidate_history),
-        )
-
-    @classmethod
-    def proven_thread(
-        cls,
-        thread_id: str,
-        history: ThreadHistoryResult,
-    ) -> _ThreadContextLookup:
-        """Return a proven thread context with model and replay history."""
-        return cls(
-            is_thread=True,
-            thread_id=thread_id,
-            thread_history=history,
-            requires_model_history_refresh=not history.is_full_history,
-            replay_guard_history=history,
-            replay_guard_degraded=is_thread_history_degraded(history),
-        )
-
-
-@dataclass(frozen=True)
-class DispatchContextResult:
-    """Stable message context plus dispatch-local thread resolution evidence."""
-
-    context: MessageContext
-    thread_context: DispatchThreadContext | None
+        if not self.is_thread:
+            return False
+        history = self.thread_history
+        if is_thread_history_degraded(history):
+            return True
+        if isinstance(history, ThreadHistoryResult):
+            return not history.is_full_history
+        # Plain sequences have no completeness signal, so visible content must not masquerade as policy-grade history.
+        return self.requires_model_history_refresh or bool(history)
 
 
 @dataclass(frozen=True)
@@ -263,9 +180,6 @@ class ConversationResolver:
             raise RuntimeError(msg)
         return client
 
-    def _matrix_id(self) -> MatrixID:
-        return self.deps.matrix_id
-
     def _mention_facts(
         self,
         event_source: dict[str, Any],
@@ -277,7 +191,7 @@ class ConversationResolver:
             return [], False, False
         return check_agent_mentioned(
             event_source,
-            self._matrix_id(),
+            self.deps.matrix_id,
             self.deps.runtime.config,
             self.deps.runtime_paths,
             room=room,
@@ -448,15 +362,13 @@ class ConversationResolver:
             event_info,
             mode=ThreadReadMode.NONBLOCKING,
         )
-        if resolution.state is ThreadResolutionState.INDETERMINATE and resolution.candidate_thread_root_id is not None:
+        if resolution.state is ThreadResolutionState.INDETERMINATE:
             # A non-blocking read cannot prove a root in a conversation it has
             # never hydrated, and a plain reply to an unthreaded message is the
-            # ordinary way to reach one. Unlike thread-context resolution, which
-            # repairs an unproven candidate a moment later, coalescing has no
-            # later stage to correct a wrong key in -- the batch is formed here.
-            # So the same repair happens here, and it costs nothing extra: it is
-            # the walk this turn was about to do anyway, and `ensure_hydrated`
-            # shares one of those per conversation.
+            # ordinary way to reach one. This is the one decision of the turn's
+            # thread -- the batch is formed under it and dispatch never revisits
+            # it -- so an unproven candidate gets the strict walk here, which
+            # `ensure_hydrated` shares per conversation.
             resolution = await self._coalescing_thread_resolution(
                 room,
                 event,
@@ -490,7 +402,6 @@ class ConversationResolver:
             return await resolve_event_thread_membership(
                 room.room_id,
                 event_info,
-                event_id=event.event_id,
                 access=self._thread_membership_access(
                     mode=mode,
                     requires_complete_history=True,
@@ -501,47 +412,13 @@ class ConversationResolver:
         except Exception as exc:
             raise ThreadMembershipLookupError(msg) from exc
 
-    async def _explicit_thread_id_for_event(
-        self,
-        room_id: str,
-        event_id: str | None,
-        event_info: EventInfo,
-        *,
-        mode: ThreadReadMode,
-    ) -> _ThreadIdLookup:
-        """Resolve thread membership and identify unproven dispatch candidates."""
-        access = self._thread_membership_access(
-            mode=mode,
-            requires_complete_history=True,
-        )
-        resolution = await resolve_event_thread_membership(
-            room_id,
-            event_info,
-            event_id=event_id,
-            access=access,
-        )
-        thread_history = (
-            resolution.thread_history if isinstance(resolution.thread_history, ThreadHistoryResult) else None
-        )
-        if mode is ThreadReadMode.STRICT:
-            return _ThreadIdLookup(thread_id=resolution.thread_id, thread_history=thread_history)
-        if resolution.thread_id is not None:
-            return _ThreadIdLookup(thread_id=resolution.thread_id, thread_history=thread_history)
-        if resolution.candidate_thread_root_id is not None:
-            return _ThreadIdLookup(
-                thread_id=None,
-                candidate_thread_root_id=resolution.candidate_thread_root_id,
-                thread_history=thread_history,
-            )
-        return _ThreadIdLookup(thread_id=None, thread_history=thread_history)
-
     async def resolve_related_event_thread_id_dispatch_snapshot_best_effort(
         self,
         room_id: str,
         related_event_id: str,
     ) -> str | None:
         """Return thread membership from local state without waiting on the homeserver."""
-        return await resolve_related_event_thread_id_best_effort(
+        resolution = await resolve_related_event_thread_membership(
             room_id,
             related_event_id,
             access=self._thread_membership_access(
@@ -551,6 +428,7 @@ class ConversationResolver:
                 requires_complete_history=False,
             ),
         )
+        return resolution.thread_id
 
     def _thread_membership_access(
         self,
@@ -568,13 +446,18 @@ class ConversationResolver:
         """
         return thread_messages_thread_membership_access(
             lookup_thread_id=self.deps.relations.thread_id,
-            fetch_event_info=self._event_info_for_event_id,
+            fetch_event_info=self.deps.relations.event_info,
             fetch_thread_messages=lambda room_id, thread_id: self._read_thread_messages(
                 room_id,
                 thread_id,
                 mode=mode,
                 requires_complete_history=requires_complete_history,
             ),
+            # A turn has to be answered. A reply to a message whose replies this
+            # bot cannot read is answered as a reply to a plain message, which
+            # starts a thread of its own, rather than held back until history
+            # nobody will ever decrypt turns up.
+            absence_needs_full_history=False,
         )
 
     async def _read_thread_messages(
@@ -597,35 +480,33 @@ class ConversationResolver:
         above what any consumer renders -- teams cut to thirty messages -- so
         the bound removes work rather than context.
         """
-        # A non-blocking read runs before the turn is accepted, so it never
-        # waits on the homeserver; a strict read feeds a prompt or a root
-        # proof, both of which are wrong when a message is missing, so it
-        # blocks.
-        strict = mode is ThreadReadMode.STRICT
         reader = self.deps.conversation_reader
+        # A strict read feeds a prompt or a root proof, both of which are wrong
+        # when a message is missing, so it blocks. A non-blocking read runs
+        # before the turn is accepted, so it never waits on the homeserver.
+        if mode is ThreadReadMode.STRICT:
+            return await complete_thread_history(reader, room_id, thread_id)
         # A non-blocking read is still complete when the conversation was
         # already hydrated and nothing is pending -- completeness is a property
         # of what is known, not of how hard the caller was willing to work for
         # it. Claiming otherwise would send every dispatch through a redundant
         # strict re-read of a conversation it had already proven whole.
-        source_degraded = (
-            not strict
-            and requires_complete_history
-            and await reader.may_have_unread_history(room_id=room_id, thread_id=thread_id)
+        source_degraded = requires_complete_history and await reader.may_have_unread_history(
+            room_id=room_id,
+            thread_id=thread_id,
         )
-        page = await (reader.read_strict if strict else reader.read)(
+        page = await reader.read(
             room_id=room_id,
             thread_id=thread_id,
             limit=HYDRATED_PROMPT_WINDOW_MESSAGES,
         )
         # Two independent ways this page can fall short of the conversation.
-        # `source_degraded` means local state might not have caught up yet, and
-        # a strict read rules it out. Hydration stopping at a ceiling is not
-        # ruled out by anything a caller can do: the walk already ran, it
-        # already installed its marker, and it will not run again under this
-        # membership. Only the recorded flag distinguishes a page that ends
-        # because the conversation does from one that ends because the walk
-        # ran out of allowance.
+        # `source_degraded` means local state might not have caught up yet.
+        # Hydration stopping at a ceiling is not ruled out by anything a caller
+        # can do: the walk already ran, it already installed its marker, and it
+        # will not run again under this membership. Only the recorded flag
+        # distinguishes a page that ends because the conversation does from one
+        # that ends because the walk ran out of allowance.
         hydration_truncated = await reader.hydration_was_truncated(room_id=room_id, thread_id=thread_id)
         return projected_thread_history(
             page,
@@ -633,85 +514,34 @@ class ConversationResolver:
             source_degraded=source_degraded,
         )
 
-    async def _event_info_for_event_id(
+    async def _message_context(
         self,
-        room_id: str,
-        event_id: str,
-    ) -> EventInfo | None:
-        return await self.deps.relations.event_info(room_id, event_id)
-
-    async def _resolve_thread_context(
-        self,
-        room_id: str,
-        event_id: str | None,
-        event_info: EventInfo,
+        room: nio.MatrixRoom,
+        event: DispatchEvent | MatrixMediaEvent,
         *,
-        mode: ThreadReadMode,
-    ) -> _ThreadContextLookup:
-        """Resolve one thread context using either snapshot or full history."""
-        thread_lookup = await self._explicit_thread_id_for_event(
-            room_id,
-            event_id,
-            event_info,
-            mode=mode,
+        thread_id: str | None,
+        thread_history: ThreadHistoryResult | None,
+        payload_metadata: DispatchPayloadMetadata | None,
+    ) -> MessageContext:
+        """Assemble one context from the event's mentions and its thread's history, which is ``None`` while deferred."""
+        resolved_event_source = await resolve_event_source_content(event.source, self._client())
+        resolved_event_source = _source_with_payload_metadata(resolved_event_source, payload_metadata)
+        mentioned_agents, am_i_mentioned, has_non_agent_mentions = self._mention_facts(
+            resolved_event_source,
+            room=room,
         )
-        thread_id = thread_lookup.thread_id
-        if thread_id is None:
-            candidate_thread_root_id = thread_lookup.candidate_thread_root_id
-            candidate_history = thread_lookup.thread_history
-            if (
-                candidate_thread_root_id is not None
-                and candidate_history is not None
-                and mode is ThreadReadMode.NONBLOCKING
-                and is_thread_history_degraded(candidate_history)
-            ):
-                strict_lookup = await self._explicit_thread_id_for_event(
-                    room_id,
-                    event_id,
-                    event_info,
-                    mode=ThreadReadMode.STRICT,
-                )
-                if strict_lookup.thread_id is not None:
-                    thread_lookup = strict_lookup
-                    thread_id = strict_lookup.thread_id
-                elif strict_lookup.thread_history is None:
-                    return _ThreadContextLookup.unproven_candidate_without_history(
-                        candidate_thread_root_id,
-                    )
-                else:
-                    return _ThreadContextLookup.unproven_candidate_demoted(
-                        candidate_thread_root_id,
-                        strict_lookup.thread_history,
-                    )
-            if thread_id is None:
-                if candidate_thread_root_id is None:
-                    return _ThreadContextLookup.room_level()
-                if candidate_history is None:
-                    return _ThreadContextLookup.unproven_candidate_without_history(
-                        candidate_thread_root_id,
-                    )
-                return _ThreadContextLookup.unproven_candidate_demoted(
-                    candidate_thread_root_id,
-                    candidate_history,
-                )
-
-        thread_messages = thread_lookup.thread_history
-        if thread_messages is None:
-            thread_messages = await self._read_thread_messages(
-                room_id,
-                thread_id,
-                mode=mode,
-            )
-        if mode is ThreadReadMode.NONBLOCKING and is_thread_history_degraded(thread_messages):
-            # Proven threads must not plan from degraded history; wait for Matrix-backed refill.
-            thread_messages = await self._read_thread_messages(
-                room_id,
-                thread_id,
-                mode=ThreadReadMode.STRICT,
-            )
-        return _ThreadContextLookup.proven_thread(
-            thread_id,
-            thread_messages,
+        if am_i_mentioned:
+            self.deps.logger.info("Mentioned", event_id=event.event_id, room_id=room.room_id)
+        return MessageContext(
+            am_i_mentioned=am_i_mentioned,
+            is_thread=thread_id is not None,
+            thread_id=thread_id,
+            thread_history=() if thread_history is None else thread_history,
+            mentioned_agents=mentioned_agents,
+            has_non_agent_mentions=has_non_agent_mentions,
+            requires_model_history_refresh=(
+                thread_id is not None and (thread_history is None or not thread_history.is_full_history)
+            ),
         )
 
     async def extract_dispatch_context(
@@ -719,154 +549,66 @@ class ConversationResolver:
         room: nio.MatrixRoom,
         event: DispatchEvent | MatrixMediaEvent,
         *,
+        thread_id: str | None,
         payload_metadata: DispatchPayloadMetadata | None = None,
-        mode: ThreadReadMode = ThreadReadMode.NONBLOCKING,
-    ) -> DispatchContextResult:
-        """Extract dispatch context, escalating to a strict read when a non-blocking one degrades."""
-        context, thread_context = await self._extract_message_context_parts(
+    ) -> MessageContext:
+        """Extract dispatch context in the thread this turn was decided to belong to.
+
+        The thread is an input and is never resolved again here: ingress
+        decided it once, formed the batch under it, and persisted it for
+        replay, and the target says which thread the source is in under the
+        room's thread mode. A non-blocking read that degrades is repeated
+        strictly, because planning must not take a partial read for the thread.
+        """
+        history: ThreadHistoryResult | None = None
+        if thread_id is not None:
+            snapshot = await self.dispatch_thread_snapshot(room.room_id, thread_id)
+            history = (
+                await self.fetch_thread_history(room.room_id, thread_id)
+                if is_thread_history_degraded(snapshot)
+                else snapshot
+            )
+        return await self._message_context(
             room,
             event,
-            mode=mode,
-            include_dispatch_context=True,
+            thread_id=thread_id,
+            thread_history=history,
             payload_metadata=payload_metadata,
         )
-        return DispatchContextResult(context=context, thread_context=thread_context)
 
     async def extract_trusted_router_relay_context(
         self,
         room: nio.MatrixRoom,
         event: DispatchEvent,
         *,
+        thread_id: str | None,
         payload_metadata: DispatchPayloadMetadata | None = None,
-    ) -> DispatchContextResult:
-        """Extract minimal context for router relays and defer thread hydration until after lock."""
-        resolved_event_source = await resolve_event_source_content(event.source, self._client())
-        resolved_event_source = _source_with_payload_metadata(resolved_event_source, payload_metadata)
-
-        mentioned_agents, am_i_mentioned, has_non_agent_mentions = self._mention_facts(
-            resolved_event_source,
-            room=room,
+    ) -> MessageContext:
+        """Extract minimal context for a router relay, deferring its thread read until after the lock."""
+        return await self._message_context(
+            room,
+            event,
+            thread_id=thread_id,
+            thread_history=None,
+            payload_metadata=payload_metadata,
         )
-
-        if am_i_mentioned:
-            self.deps.logger.info("Mentioned", event_id=event.event_id, room_id=room.room_id)
-
-        if self.room_is_one_conversation(room.room_id):
-            resolved_thread_id = None
-        else:
-            # The relay's own ``m.thread`` relation, and nothing else. This context skips the
-            # canonical resolver on purpose, so a thread named inside an ``m.new_content`` is the
-            # only value here that no lookup would ever confirm - and Matrix ignores it anyway,
-            # placing an edit by the event it replaces. Believing it would hand whoever wrote the
-            # relayed payload the choice of which thread this response appears in.
-            resolved_thread_id = EventInfo.from_event(resolved_event_source).thread_id
-        context = MessageContext(
-            am_i_mentioned=am_i_mentioned,
-            is_thread=resolved_thread_id is not None,
-            thread_id=resolved_thread_id,
-            thread_history=(),
-            mentioned_agents=mentioned_agents,
-            has_non_agent_mentions=has_non_agent_mentions,
-            replay_guard_history=(),
-            requires_model_history_refresh=resolved_thread_id is not None,
-        )
-        return DispatchContextResult(context=context, thread_context=None)
 
     async def extract_message_context(
         self,
         room: nio.MatrixRoom,
         event: DispatchEvent,
         *,
-        payload_metadata: DispatchPayloadMetadata | None = None,
+        thread_id: str | None,
     ) -> MessageContext:
-        """Extract strict message context for one inbound turn."""
-        context, _thread_context = await self._extract_message_context_parts(
+        """Extract strict context in a recorded thread, whatever the room's thread mode is now."""
+        history = None if thread_id is None else await self.fetch_thread_history(room.room_id, thread_id)
+        return await self._message_context(
             room,
             event,
-            mode=ThreadReadMode.STRICT,
-            include_dispatch_context=False,
-            payload_metadata=payload_metadata,
-        )
-        return context
-
-    async def _extract_message_context_parts(
-        self,
-        room: nio.MatrixRoom,
-        event: DispatchEvent | MatrixMediaEvent,
-        *,
-        mode: ThreadReadMode,
-        include_dispatch_context: bool,
-        payload_metadata: DispatchPayloadMetadata | None = None,
-    ) -> tuple[MessageContext, DispatchThreadContext | None]:
-        """Resolve event metadata, mentions, stable context, and optional dispatch-local state."""
-        resolved_event_source = await resolve_event_source_content(event.source, self._client())
-        resolved_event_source = _source_with_payload_metadata(resolved_event_source, payload_metadata)
-
-        mentioned_agents, am_i_mentioned, has_non_agent_mentions = self._mention_facts(
-            resolved_event_source,
-            room=room,
-        )
-
-        if am_i_mentioned:
-            self.deps.logger.info("Mentioned", event_id=event.event_id, room_id=room.room_id)
-
-        event_info = EventInfo.from_event(resolved_event_source)
-        dispatch_context: DispatchThreadContext | None = None
-        if self.room_is_one_conversation(room.room_id):
-            is_thread = False
-            thread_id = None
-            thread_history: list[ResolvedVisibleMessage] = []
-            requires_model_history_refresh = False
-            replay_guard_history: Sequence[ResolvedVisibleMessage] = ()
-        else:
-            thread_lookup = await self._resolve_thread_context(
-                room.room_id,
-                event.event_id,
-                event_info,
-                mode=mode,
-            )
-            is_thread = thread_lookup.is_thread
-            thread_id = thread_lookup.thread_id
-            thread_history = thread_lookup.thread_history
-            requires_model_history_refresh = thread_lookup.requires_model_history_refresh
-            replay_guard_history = thread_lookup.replay_guard_history
-            if include_dispatch_context:
-                if thread_lookup.candidate_thread_root_id is not None and thread_lookup.thread_id is None:
-                    stable_target = MessageTarget.resolve(
-                        room_id=room.room_id,
-                        thread_id=None,
-                        reply_to_event_id=event.event_id,
-                        room_mode=True,
-                    )
-                else:
-                    stable_target = self.build_message_target(
-                        room_id=room.room_id,
-                        thread_id=thread_lookup.thread_id,
-                        reply_to_event_id=event.event_id,
-                        event_source=event.source,
-                    )
-                dispatch_context = DispatchThreadContext(
-                    stable_target=stable_target,
-                    candidate_thread_root_id=thread_lookup.candidate_thread_root_id,
-                    thread_history=thread_lookup.thread_history,
-                    requires_model_history_refresh=thread_lookup.requires_model_history_refresh,
-                    replay_guard_history=thread_lookup.replay_guard_history,
-                    replay_guard_degraded=thread_lookup.replay_guard_degraded,
-                )
-
-        context = MessageContext(
-            am_i_mentioned=am_i_mentioned,
-            is_thread=is_thread,
             thread_id=thread_id,
-            thread_history=thread_history,
-            mentioned_agents=mentioned_agents,
-            has_non_agent_mentions=has_non_agent_mentions,
-            replay_guard_history=replay_guard_history,
-            requires_model_history_refresh=requires_model_history_refresh,
+            thread_history=history,
+            payload_metadata=None,
         )
-        if dispatch_context is not None:
-            context = context_with_dispatch_thread_context(context, dispatch_context)
-        return context, dispatch_context
 
     def cached_room(self, room_id: str) -> nio.MatrixRoom | None:
         """Return room from client cache when available."""

@@ -27,6 +27,7 @@ from mindroom.matrix.state import MatrixState
 from mindroom.matrix.users import INTERNAL_USER_ACCOUNT_KEY, _register_user
 from mindroom.orchestrator import _MultiAgentOrchestrator
 from tests.conftest import TEST_ACCESS_TOKEN, TEST_PASSWORD
+from tests.matrix_state_helpers import save_matrix_state
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -189,12 +190,12 @@ class TestUserAccountManagement:
             mock_client.set_displayname.assert_called_once_with(DEFAULT_INTERNAL_DISPLAY_NAME)
 
     @pytest.mark.asyncio
-    async def test_ensure_user_account_logs_in_with_existing_credentials(
+    async def test_ensure_user_account_keeps_stored_credentials_without_login(
         self,
         tmp_path: Path,
         mock_matrix_client: tuple[MagicMock, AsyncMock],
     ) -> None:
-        """Existing stored credentials should be reused without re-registration."""
+        """Existing stored credentials are kept without logging in or re-registering."""
         mock_context, mock_client = mock_matrix_client
 
         # Create existing config with internal user account
@@ -202,7 +203,7 @@ class TestUserAccountManagement:
         state.add_account(INTERNAL_USER_ACCOUNT_KEY, DEFAULT_INTERNAL_USERNAME, "existing_password")
 
         runtime_paths = _runtime_paths(tmp_path)
-        state.save(runtime_paths=runtime_paths)
+        save_matrix_state(state, runtime_paths)
 
         with (
             patch("mindroom.matrix.users.matrix_client", return_value=mock_context),
@@ -224,46 +225,6 @@ class TestUserAccountManagement:
 
             mock_client.register.assert_not_called()
             mock_client.login.assert_not_called()
-            mock_client.set_displayname.assert_not_called()
-
-    @pytest.mark.asyncio
-    async def test_ensure_user_account_recreates_account_when_stored_login_fails(
-        self,
-        tmp_path: Path,
-        mock_matrix_client: tuple[MagicMock, AsyncMock],
-    ) -> None:
-        """Stored credentials should be preserved until an explicit login happens."""
-        mock_context, mock_client = mock_matrix_client
-
-        # Create existing config with invalid credentials
-        state = MatrixState()
-        state.add_account(INTERNAL_USER_ACCOUNT_KEY, DEFAULT_INTERNAL_USERNAME, "wrong_password")
-
-        runtime_paths = _runtime_paths(tmp_path)
-        state.save(runtime_paths=runtime_paths)
-
-        with (
-            patch("mindroom.matrix.users.matrix_client", return_value=mock_context),
-            patch("mindroom.constants.runtime_matrix_homeserver", return_value="http://localhost:8008"),
-        ):
-            _config = Config(
-                mindroom_user={
-                    "username": DEFAULT_INTERNAL_USERNAME,
-                    "display_name": DEFAULT_INTERNAL_DISPLAY_NAME,
-                },
-            )
-            orchestrator = _MultiAgentOrchestrator(runtime_paths=runtime_paths, config=_config)
-            await orchestrator._ensure_user_account(_config)
-
-            # Should have kept the existing account credentials
-            # (create_agent_user doesn't regenerate passwords on login failure)
-            result_config = MatrixState.load(runtime_paths=runtime_paths)
-            assert INTERNAL_USER_ACCOUNT_KEY in result_config.accounts
-            assert result_config.accounts[INTERNAL_USER_ACCOUNT_KEY].username == DEFAULT_INTERNAL_USERNAME
-            assert result_config.accounts[INTERNAL_USER_ACCOUNT_KEY].password == "wrong_password"  # noqa: S105
-
-            mock_client.login.assert_not_called()
-            mock_client.register.assert_not_called()
             mock_client.set_displayname.assert_not_called()
 
     @pytest.mark.asyncio
@@ -323,7 +284,7 @@ class TestUserAccountManagement:
         custom_config = Config(mindroom_user={"username": "alice", "display_name": "Alice Smith"})
 
         runtime_paths = _runtime_paths(tmp_path)
-        state.save(runtime_paths=runtime_paths)
+        save_matrix_state(state, runtime_paths)
         with (
             patch("mindroom.matrix.users.matrix_client", return_value=mock_context),
             patch("mindroom.constants.runtime_matrix_homeserver", return_value="http://localhost:8008"),
@@ -363,7 +324,7 @@ def test_mindroom_user_username_rejects_persisted_router_collision(tmp_path: Pat
     runtime_paths = _runtime_paths(tmp_path)
     state = MatrixState.load(runtime_paths=runtime_paths)
     state.add_account("agent_router", "mindroom_router", TEST_PASSWORD, domain="localhost")
-    state.save(runtime_paths=runtime_paths)
+    save_matrix_state(state, runtime_paths)
 
     with pytest.raises(ValueError, match="conflicts with router 'router'"):
         Config.model_validate(
@@ -398,7 +359,7 @@ def test_mindroom_user_username_rejects_persisted_agent_username_collision(tmp_p
     runtime_paths = _runtime_paths(tmp_path)
     state = MatrixState.load(runtime_paths=runtime_paths)
     state.add_account("agent_assistant", "actual_assistant", TEST_PASSWORD, domain="localhost")
-    state.save(runtime_paths=runtime_paths)
+    save_matrix_state(state, runtime_paths)
 
     with pytest.raises(ValueError, match="conflicts with agent 'assistant'"):
         Config.model_validate(
@@ -421,7 +382,7 @@ def test_mindroom_user_username_allows_prepared_agent_proposal_name(tmp_path: Pa
     runtime_paths = _runtime_paths(tmp_path)
     state = MatrixState.load(runtime_paths=runtime_paths)
     state.add_account("agent_assistant", "actual_assistant", TEST_PASSWORD, domain="localhost")
-    state.save(runtime_paths=runtime_paths)
+    save_matrix_state(state, runtime_paths)
 
     config = Config.model_validate(
         {
