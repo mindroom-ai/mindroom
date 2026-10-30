@@ -24,6 +24,7 @@ from mindroom.config.approval import ToolApprovalConfig
 from mindroom.config.models import ModelConfig, ToolConfigEntry
 from mindroom.custom_tools.calculator import CalculatorTools
 from mindroom.custom_tools.dynamic_workflow import _execute_participant, _run_room_agent_turn, _WorkflowRun
+from mindroom.dynamic_workflows.spec import RoomAgentParticipant
 from mindroom.event_journal import ApprovalCall, approval_arguments_digest
 from mindroom.helper_usage import (
     HelperUsageOwner,
@@ -538,7 +539,7 @@ async def test_workflow_first_turn_uses_actual_caller_store(
         storage = scope_context.storage
         result = await _execute_participant(
             context,
-            {"id": "writer", "kind": "room_agent", "agent": "test_agent"},
+            RoomAgentParticipant.model_validate({"id": "writer", "kind": "room_agent", "agent": "test_agent"}),
             "Sample task.",
             _WorkflowRun("sample-workflow"),
         )
@@ -619,7 +620,7 @@ async def test_workflow_participant_usage_counts_however_its_run_ends(
         participant = asyncio.create_task(
             _execute_participant(
                 context,
-                {"id": "writer", "kind": "room_agent", "agent": "test_agent"},
+                RoomAgentParticipant.model_validate({"id": "writer", "kind": "room_agent", "agent": "test_agent"}),
                 "Sample task.",
                 _WorkflowRun("sample-workflow"),
             ),
