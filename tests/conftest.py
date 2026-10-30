@@ -2395,12 +2395,17 @@ def normalize_console_output(text: str) -> str:
     return " ".join(_SOFT_WRAP_RE.sub("", _ANSI_RE.sub("", text)).split())
 
 
-@pytest.fixture
-def thread_summary_baselines(monkeypatch: pytest.MonkeyPatch) -> _ThreadSummaryBaselines:
-    """Give the test its own process-wide thread-summary baselines and locks."""
+def fresh_thread_summary_baselines(monkeypatch: pytest.MonkeyPatch) -> _ThreadSummaryBaselines:
+    """Install fresh process-wide thread-summary baselines and locks, as a restart starts with."""
     fresh = _ThreadSummaryBaselines()
     monkeypatch.setattr(thread_summary_schedule, "THREAD_SUMMARY_BASELINES", fresh)
     return fresh
+
+
+@pytest.fixture
+def thread_summary_baselines(monkeypatch: pytest.MonkeyPatch) -> _ThreadSummaryBaselines:
+    """Give the test its own process-wide thread-summary baselines and locks."""
+    return fresh_thread_summary_baselines(monkeypatch)
 
 
 @pytest.fixture

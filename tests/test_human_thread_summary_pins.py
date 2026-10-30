@@ -16,13 +16,12 @@ from mindroom.constants import THREAD_SUMMARY_CONTENT_KEY
 from mindroom.entity_resolution import current_internal_sender_ids, entity_identity_registry
 from mindroom.matrix.conversation_reads import DeliveredResponse
 from mindroom.matrix.room_membership import ensure_room_membership_synced
-from mindroom.thread_summary import schedule
 from mindroom.thread_summary.automatic import maybe_generate_thread_summary
 from mindroom.thread_summary.notices import ThreadSummaryWriteError, set_manual_thread_summary
-from mindroom.thread_summary.schedule import _ThreadSummaryBaselines
 from mindroom.thread_summary.state import SummaryState, current_thread_summary_from_history, human_summary_authorizer
 from tests.access_schema_support import membership_config, membership_index
 from tests.conftest import (
+    fresh_thread_summary_baselines,
     install_model_providers,
     make_conversation_reader_mock,
     make_matrix_client_mock,
@@ -40,6 +39,7 @@ if TYPE_CHECKING:
 
     from mindroom.config.main import Config
     from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
+    from mindroom.thread_summary.schedule import _ThreadSummaryBaselines
 
 pytestmark = pytest.mark.usefixtures("enforce_turn_authorization", "thread_summary_baselines")
 
@@ -75,11 +75,7 @@ def _agent(config: Config) -> str:
     return next(iter(current_internal_sender_ids(config, runtime_paths_for(config))))
 
 
-def _summary_model(answers: int = 1) -> ScriptedModel:
-    return ScriptedModel([answer('{"summary": "Automatic"}') for _ in range(answers)])
-
-
-def _state(config: Config, history: Sequence[ResolvedVisibleMessage], *, entity_name: str = "talent") -> SummaryState:
+def _state(config: Config, history: Sequence[ResolvedVisibleMessage]) -> SummaryState:
     """Classify one history under the config's trusted senders and the responder's human pin authority."""
     runtime_paths = runtime_paths_for(config)
     return SummaryState.from_history(
@@ -91,7 +87,7 @@ def _state(config: Config, history: Sequence[ResolvedVisibleMessage], *, entity_
             "!room:x",
             config,
             runtime_paths,
-            entity_name,
+            "talent",
             AgentReplyMembershipIndex(),
         ),
     )
@@ -113,7 +109,7 @@ async def _run_automatic_summary(
     client.room_get_state.return_value = nio.RoomGetStateResponse(events=[], room_id="!room:x")
     client.room_send.return_value = nio.RoomSendResponse(event_id="$automatic", room_id="!room:x")
     serve_source_thread(client, source_history)
-    model = _summary_model()
+    model = ScriptedModel([answer('{"summary": "Automatic"}')])
     install_model_providers(monkeypatch, {"default": model})
     reader = make_conversation_reader_mock()
     serve_conversation_reader(reader, history, room_id="!room:x", thread_id="$thread1")
@@ -143,8 +139,7 @@ async def test_authorized_human_pin_survives_restart(
     config.authorization.aliases = {"@owner:example.com": ["@bridge-owner:example.com"]}
     history = [*_make_thread_history(12), _human_notice(sender)]
     for _ in range(2):
-        restarted = _ThreadSummaryBaselines()
-        monkeypatch.setattr(schedule, "THREAD_SUMMARY_BASELINES", restarted)
+        restarted = fresh_thread_summary_baselines(monkeypatch)
         client, model = await _run_automatic_summary(config, history, [], monkeypatch)
         assert not model.requests
         client.room_send.assert_not_awaited()
@@ -213,7 +208,7 @@ async def test_later_human_pin_overrides_unseen_future_release(
     if pin_source == "history":
         history.append(notice)
     for _ in range(2):
-        monkeypatch.setattr(schedule, "THREAD_SUMMARY_BASELINES", _ThreadSummaryBaselines())
+        fresh_thread_summary_baselines(monkeypatch)
         client, model = await _run_automatic_summary(config, history, [notice, release], monkeypatch)
         client.room_send.assert_not_awaited()
         assert len(model.requests) == (0 if pin_source == "history" else 1)
@@ -416,8 +411,7 @@ async def test_partial_ad_hoc_room_cache_defers_pin_until_membership_refresh(
     assert thread_summary_baselines.count("!room:x", "$thread1") == (0 if pin_source == "history" else 12)
 
     assert await ensure_room_membership_synced(client, room, sender_id=notice.sender)
-    restarted = _ThreadSummaryBaselines()
-    monkeypatch.setattr(schedule, "THREAD_SUMMARY_BASELINES", restarted)
+    restarted = fresh_thread_summary_baselines(monkeypatch)
     client, model = await _run_automatic_summary(
         config,
         [*_make_thread_history(12), notice],
@@ -650,35 +644,22 @@ async def test_a_released_human_pin_is_neither_a_message_nor_conversation(
     """Once an agent releases a person's pinned summary, the next summary neither counts nor reads that pin."""
     config = _config(tmp_path, access={"users": ["@owner:example.com"]})
     config.defaults.thread_summary_subsequent_interval = 1
-    agent = next(iter(current_internal_sender_ids(config, runtime_paths_for(config))))
     pin = _human_notice()
     pin.timestamp = 1000
     # One message has arrived since the agent released the pin, so the next summary is due at three messages.
-    release = _make_summary_notice_message("$thread1", message_count=2, event_id="$release", sender=agent, pinned=False)
+    release = _make_summary_notice_message(
+        "$thread1",
+        message_count=2,
+        event_id="$release",
+        sender=_agent(config),
+        pinned=False,
+    )
     release.timestamp = 2000
     history = [*_make_thread_history(3), pin, release]
-    model = ScriptedModel([answer('{"summary": "Automatic"}')])
-    install_model_providers(monkeypatch, {"default": model})
-    client = make_matrix_client_mock()
-    client.room_get_state.return_value = nio.RoomGetStateResponse(events=[], room_id="!room:x")
-    client.room_send.return_value = nio.RoomSendResponse(event_id="$automatic", room_id="!room:x")
-    reader = make_conversation_reader_mock()
-    serve_conversation_reader(reader, history, thread_id="$thread1")
-    serve_source_thread(client, history)
 
-    await maybe_generate_thread_summary(
-        client,
-        "!room:x",
-        "$thread1",
-        config,
-        runtime_paths_for(config),
-        conversation_reader=reader,
-        delivered_response=DeliveredResponse(event_id="$event0", body="Message 0"),
-        entity_name="talent",
-        membership_index=AgentReplyMembershipIndex(),
-    )
+    client, model = await _run_automatic_summary(config, history, history, monkeypatch)
 
     (request,) = model.requests
     assert "@owner:example.com" not in json.dumps([message.content for message in request.messages], default=str)
-    sent = client.room_send.call_args.kwargs["content"]["io.mindroom.thread_summary"]
+    sent = client.room_send.call_args.kwargs["content"][THREAD_SUMMARY_CONTENT_KEY]
     assert sent["message_count"] == 3
