@@ -44,6 +44,7 @@ from mindroom.tool_system.automation_approval import NEVER_PREAPPROVE_TOOLKITS, 
 from mindroom.tool_system.metadata import TOOL_METADATA
 from mindroom.tool_system.runtime_context import ToolRuntimeContext, tool_runtime_context
 from tests.access_schema_support import with_responder_access
+from tests.agent_tool_helpers import toolkit_offers
 from tests.authorization_helpers import (
     make_test_tool_runtime_context,
 )
@@ -1881,11 +1882,10 @@ async def test_dynamic_workflow_tool_denies_run_read_for_different_requester(tmp
 def test_dynamic_workflow_tool_json_schemas_allow_arbitrary_json_values() -> None:
     """Tool-call schemas should accept scalar, array, and object values inside JSON payload fields."""
     tool = DynamicWorkflowTools()
-    async_functions = tool.get_async_functions()
 
-    spec_schema = async_functions["create_workflow"].parameters["properties"]["spec"]
-    patch_schema = async_functions["update_workflow"].parameters["properties"]["patch"]
-    input_schema = async_functions["run_workflow"].parameters["properties"]["input"]
+    spec_schema = toolkit_offers(tool, "create_workflow").parameters["properties"]["spec"]
+    patch_schema = toolkit_offers(tool, "update_workflow").parameters["properties"]["patch"]
+    input_schema = toolkit_offers(tool, "run_workflow").parameters["properties"]["input"]
 
     for schema in (spec_schema, patch_schema, input_schema):
         value_schema = schema["additionalProperties"]

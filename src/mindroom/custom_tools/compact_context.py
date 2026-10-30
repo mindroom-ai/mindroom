@@ -4,13 +4,11 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from agno.tools import Toolkit
-
 from mindroom.config.main import Config  # noqa: TC001
 from mindroom.constants import RuntimePaths  # noqa: TC001
 from mindroom.history.manual import request_compaction_before_next_reply
 from mindroom.history.types import HistoryScope
-from mindroom.tool_system.invocation import current_tool_call
+from mindroom.tool_system.authoring import Toolkit, current_call
 from mindroom.tool_system.runtime_context import get_tool_runtime_context, resolve_current_session_id
 
 if TYPE_CHECKING:
@@ -37,10 +35,10 @@ class CompactContextTools(Toolkit):
         """Request compaction before the next reply."""
         runtime_context = get_tool_runtime_context()
         # The scope the running entity stores to: a team member's is its team's, an agent's own is its own.
-        call = current_tool_call()
+        call = current_call()
         scope = (
-            call.context.history_scope
-            if call is not None and call.context.history_scope is not None
+            call.history_scope
+            if call is not None and call.history_scope is not None
             else HistoryScope(kind="agent", scope_id=self._agent_name)
         )
         session_id = resolve_current_session_id(

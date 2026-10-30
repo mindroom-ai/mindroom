@@ -7,8 +7,6 @@ import json
 from dataclasses import replace
 from typing import TYPE_CHECKING, Any, Literal
 
-from agno.tools import Toolkit
-
 from mindroom.tool_jobs.consumption import consume_tool_job, job_failure, job_failure_text
 from mindroom.tool_jobs.conversation import current_approval_wait_timeout, current_conversation
 from mindroom.tool_jobs.runtime import (
@@ -19,8 +17,8 @@ from mindroom.tool_jobs.runtime import (
     get_background_runtime,
     job_summary,
 )
-from mindroom.tool_system.declarations import tool_schema_source
-from mindroom.tool_system.output_files import wrap_toolkit_for_output_files
+from mindroom.tool_system.agno_toolkits import configure_toolkit_functions
+from mindroom.tool_system.authoring import Toolkit
 from mindroom.tool_system.runtime_context import get_tool_runtime_context
 from mindroom.tool_system.tool_function import ToolValue
 
@@ -42,8 +40,8 @@ _UNAVAILABLE = (
 
 
 def is_job_function(function: ToolFunction) -> bool:
-    """Recognize the reserved implementation through SDK and MindRoom output wrappers, never a same-named plugin."""
-    entrypoint = tool_schema_source(inspect.unwrap(function.entrypoint))
+    """Recognize the reserved implementation through its validation and output wrappers, never a same-named plugin."""
+    entrypoint = inspect.unwrap(function.entrypoint)
     return (
         inspect.ismethod(entrypoint)
         and isinstance(entrypoint.__self__, JobTools)
@@ -145,7 +143,7 @@ class JobTools(Toolkit):
         if "job" in offered:
             msg = "Tool function name job is reserved for managed job controls"
             raise ValueError(msg)
-        return wrap_toolkit_for_output_files(JobTools(runtime_paths, owner), output_file_policy)
+        return configure_toolkit_functions(JobTools(runtime_paths, owner), output_files=output_file_policy)
 
     def caller_identity(self) -> ToolExecutionIdentity:
         """Keep the original execution owner with the current conversation session."""

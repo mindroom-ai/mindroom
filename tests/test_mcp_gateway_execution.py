@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import threading
 from concurrent.futures import ThreadPoolExecutor
+from functools import partial
 from typing import TYPE_CHECKING
 
 import httpx
@@ -23,6 +24,7 @@ from mindroom.mcp_gateway import server
 from mindroom.mcp_gateway import toolkits as gateway_toolkits
 from mindroom.mcp_gateway import tools as gateway
 from mindroom.tool_system import sandbox_proxy
+from mindroom.tool_system.agno_toolkits import configure_toolkit_functions
 from mindroom.tool_system.authoring import toolkit_functions
 from mindroom.tool_system.runtime_context import get_tool_runtime_context
 from mindroom.tool_system.worker_routing import get_tool_execution_identity
@@ -268,19 +270,16 @@ async def test_cancelled_worker_proxy_call_keeps_capacity_until_proxy_thread_exi
     work.__name__ = "work"
 
     def build(*_args: object, **_kwargs: object) -> Toolkit:
-        toolkit = Toolkit(name="calculator", tools=[work])
-        # Like wrap_toolkit_for_sandbox_proxy, every worker-routed function gets the async proxy.
-        toolkit.async_functions = {
-            name: sandbox_proxy._wrap_async_proxy(
-                function,
-                "calculator",
-                name,
+        # As get_tool_by_name routes a worker-routed toolkit, every function sends its calls through the async proxy.
+        return configure_toolkit_functions(
+            Toolkit(name="calculator", tools=[work]),
+            to_worker=partial(
+                sandbox_proxy._worker_stand_in,
+                tool_name="calculator",
                 runtime_paths=context.runtime_paths,
                 credentials_manager=None,
-            )
-            for name, function in {**toolkit.functions, **toolkit.async_functions}.items()
-        }
-        return toolkit
+            ),
+        )
 
     monkeypatch.setattr(sandbox_proxy, "_call_proxy_sync", proxy)
     monkeypatch.setattr(agents, "build_agent_toolkit", build)
@@ -341,18 +340,7 @@ async def test_a_nested_worker_call_keeps_capacity_on_the_gateway_pool_until_its
 
     inner = async_inner if async_body else sync_inner
     inner.__name__ = "inner"
-    sibling = Toolkit(name="sibling", tools=[inner])
-    # Like maybe_wrap_toolkit_for_sandbox_proxy, every worker-routed function gets the async proxy.
-    sibling.async_functions = {
-        name: sandbox_proxy._wrap_async_proxy(
-            function,
-            "sibling",
-            name,
-            runtime_paths=context.runtime_paths,
-            credentials_manager=None,
-        )
-        for name, function in {**sibling.functions, **sibling.async_functions}.items()
-    }
+    sibling = _routed(Toolkit(name="sibling", tools=[inner]), context)
 
     async def work() -> str:
         return await toolkit_functions(sibling)["inner"]()
@@ -393,18 +381,20 @@ def _routed_sibling(context: AgentToolContext) -> Toolkit:  # noqa: F811
     def inner() -> str:
         return "local"
 
-    sibling = Toolkit(name="sibling", tools=[inner])
-    sibling.async_functions = {
-        name: sandbox_proxy._wrap_async_proxy(
-            function,
-            "sibling",
-            name,
+    return _routed(Toolkit(name="sibling", tools=[inner]), context)
+
+
+def _routed(toolkit: Toolkit, context: AgentToolContext) -> Toolkit:  # noqa: F811
+    """Return ``toolkit`` with every function sending its calls through the async worker proxy, as a routed one does."""
+    return configure_toolkit_functions(
+        toolkit,
+        to_worker=partial(
+            sandbox_proxy._worker_stand_in,
+            tool_name=toolkit.name,
             runtime_paths=context.runtime_paths,
             credentials_manager=None,
-        )
-        for name, function in {**sibling.functions, **sibling.async_functions}.items()
-    }
-    return sibling
+        ),
+    )
 
 
 @pytest.mark.parametrize("returns_first", [0, 1], ids=["first-request-returns-first", "second-request-returns-first"])

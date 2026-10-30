@@ -13,8 +13,6 @@ from typing import TYPE_CHECKING, Any, Literal, cast
 from urllib.parse import unquote, urlsplit
 from uuid import uuid4
 
-from agno.tools import Toolkit
-
 from mindroom.attachments.storage import register_bytes_attachment
 from mindroom.background_tasks import run_blocking_until_complete
 from mindroom.config.main import Config  # noqa: TC001  # resolved by tool contract introspection
@@ -60,6 +58,7 @@ from mindroom.oauth.service import (
     OAUTH_RESET_REQUIRED_REASON,
     oauth_connection_required,
 )
+from mindroom.tool_system.authoring import Toolkit
 from mindroom.tool_system.runtime_context import append_tool_runtime_attachment_id, get_tool_runtime_context
 from mindroom.tool_system.sandbox_proxy import INLINE_ATTACHMENT_BYTES_ENV, inline_attachment_byte_limit
 
@@ -416,8 +415,9 @@ class AtlassianToolkit(Toolkit):
             "confluence_update_page": self.confluence_update_page,
             "confluence_add_comment": self.confluence_add_comment,
         }
-        for name in atlassian_function_names(products, write=write):
-            self.register(functions[name], name=f"{function_prefix}{name}")
+        self.functions = {
+            f"{function_prefix}{name}": functions[name] for name in atlassian_function_names(products, write=write)
+        }
 
     def _payload(self, status: str, **fields: object) -> str:
         return custom_tool_payload(self.name, status, **fields)

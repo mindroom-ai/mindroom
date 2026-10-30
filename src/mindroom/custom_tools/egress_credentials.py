@@ -16,8 +16,6 @@ import functools
 import json
 from typing import TYPE_CHECKING
 
-from agno.tools import Toolkit
-
 from mindroom.credentials.manager import get_runtime_credentials_manager
 from mindroom.egress_broker.env import egress_tool_without_worker_commands, personal_page_served
 from mindroom.egress_broker.messages import CONNECTIONS_PAGE_NOT_SERVED
@@ -26,6 +24,7 @@ from mindroom.egress_broker.secrets import is_personal_target, service_status
 from mindroom.egress_broker.service import manage_url
 from mindroom.egress_broker.user_services import effective_config, service_source, services_for_agent
 from mindroom.logging_config import get_logger
+from mindroom.tool_system.authoring import Toolkit
 from mindroom.tool_system.runtime_context import get_tool_runtime_context
 
 if TYPE_CHECKING:

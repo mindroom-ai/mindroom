@@ -20,7 +20,7 @@ from docstring_parser import parse
 from pydantic import BaseModel, ConfigDict, validate_call
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Callable
+    from collections.abc import AsyncIterator, Callable, Mapping
 
 _JSON_TYPES = {
     "int": "integer",
@@ -74,6 +74,22 @@ def tool_parameters(entrypoint: Callable[..., Any]) -> dict[str, Any]:
         if parameter.default is inspect.Parameter.empty and name in properties
     ]
     return {"type": "object", "properties": properties, "required": required}
+
+
+def closed_parameters(entrypoint: Callable[..., Any], parameters: Mapping[str, Any]) -> dict[str, Any]:
+    """Return ``parameters``, the schema a toolkit authored for ``entrypoint`` in place of the derived one, completed.
+
+    As Agno completes an authored schema whose arguments it still validates, it requires each of its properties the
+    signature gives no default, and admits no other property.
+    """
+    # TODO(simplify): the toolkits that author a schema could state its required properties and closure themselves.
+    properties = parameters.get("properties") or {}
+    required = [
+        name
+        for name, parameter in inspect.signature(entrypoint).parameters.items()
+        if parameter.default is inspect.Parameter.empty and name in properties
+    ]
+    return {**parameters, "required": required, "additionalProperties": False}
 
 
 def validated_entrypoint[F: Callable[..., Any]](entrypoint: F) -> F:
@@ -149,8 +165,10 @@ def _schema(hint: Any) -> dict[str, Any]:  # noqa: ANN401, PLR0911 - One branch 
     if json_type != "object":
         return {"type": json_type}
     # TODO(simplify): ``Any``, ``object``, and any class without a JSON type render as an object that admits no
-    # property, which tells the model it can send only ``{}``; the AGNO_COMPAT markers in custom_tools/google_sheets.py
-    # and custom_tools/microsoft_sharepoint.py work around it. Rendering ``Any`` unconstrained changes those schemas.
+    # property, so the local argument validation the agent tool calls run (``validate_tool_arguments``) rejects any
+    # real value there. custom_tools/microsoft_sharepoint.py annotates a bare ``dict`` to avoid it; the browser, Matrix
+    # API, and thread-tags tools are still affected, and the AGNO_COMPAT marker in custom_tools/google_sheets.py works
+    # around Agno's identical rendering. Rendering ``Any`` unconstrained changes those tools' schemas.
     return {"type": "object", "properties": {}, "additionalProperties": False}
 
 
@@ -186,4 +204,4 @@ def _inlined(node: Any, definitions: dict[str, Any], active: frozenset[str]) -> 
     return _inlined(definitions[name], definitions, active | {name})
 
 
-__all__ = ["tool_description", "tool_parameters", "validated_entrypoint"]
+__all__ = ["closed_parameters", "tool_description", "tool_parameters", "validated_entrypoint"]

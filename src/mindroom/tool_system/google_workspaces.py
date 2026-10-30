@@ -20,7 +20,6 @@ from mindroom.oauth.google_sheets import google_sheets_oauth_provider
 from mindroom.oauth.google_tasks import google_tasks_oauth_provider
 from mindroom.tool_system.catalog import TOOL_METADATA
 from mindroom.tool_system.registration import register_tool_with_metadata
-from mindroom.tool_system.toolkit_aliases import apply_toolkit_function_aliases
 
 __all__ = ["GoogleWorkspaceConfig", "google_workspace_oauth_providers", "register_google_workspace_tools"]
 
@@ -28,7 +27,7 @@ if TYPE_CHECKING:
     from collections.abc import Callable
 
     from mindroom.oauth.providers import OAuthProvider
-    from mindroom.tool_system.agno_toolkits import Toolkit
+    from mindroom.tool_system.agno_toolkits import AnyToolkit
     from mindroom.tool_system.declarations import ToolMetadata
 
 _GoogleService = Literal["gmail", "google_calendar", "google_drive", "google_docs", "google_sheets", "google_tasks"]
@@ -116,11 +115,16 @@ def _workspace_tool_factory(
         assert metadata.factory is not None
         base_class = metadata.factory()
 
-        def initialize(toolkit: Toolkit, **kwargs: Any) -> None:  # noqa: ANN401
+        def initialize(toolkit: AnyToolkit, **kwargs: Any) -> None:  # noqa: ANN401
+            # Deferred: the toolkit adapter loads Agno, which plugin code importing this module must not load.
+            from mindroom.tool_system.agno_toolkits import (  # noqa: PLC0415
+                rename_toolkit_functions,
+                toolkit_function_names,
+            )
+
             base_class.__init__(toolkit, **kwargs)
             toolkit.name = tool_name
-            aliases = {name: f"{prefix}_{name}" for name in {*toolkit.functions, *toolkit.async_functions}}
-            apply_toolkit_function_aliases(toolkit, aliases)
+            rename_toolkit_functions(toolkit, {name: f"{prefix}_{name}" for name in toolkit_function_names(toolkit)})
 
         def oauth_only_kwargs(_self: object, _kwargs: dict[str, Any]) -> bool:
             # A workspace-specific OAuth tool must never inherit global delegated auth.

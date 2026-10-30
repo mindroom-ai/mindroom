@@ -511,6 +511,11 @@ worker_target = context.resolve_worker_target()
 A plugin tool always runs as an agent, inside a team as the member that called it, so `resolve_worker_target()` returns that agent's target.
 A sub-toolkit built with that target runs in a worker when the sandbox settings and the tool's default target route it there; with `runtime_config=context.config` it also does when the agent's explicit `worker_tools` list names it, and a list that leaves it out never moves it to the primary runtime.
 
+Call a sub-toolkit's functions through `toolkit_functions(toolkit)` from `mindroom.plugin_api`, which returns each function by name as an agent's run calls it: with its arguments validated, its output saved to a file when the call asks, and its calls sent to the worker when it runs in one.
+A function that runs in a worker is async, so await a function `inspect.iscoroutinefunction` reports and run any other off the event loop, for example with `asyncio.to_thread`.
+A tool that calls other tools this way must itself be async.
+Calling `toolkit.functions[name]` directly skips all of that: the validation, the output file, and the worker.
+
 ## OAuth providers
 
 An OAuth module defines providers, and MindRoom core handles the connect, callback, credential storage, status, and disconnect flows described in the [OAuth framework](https://docs.mindroom.chat/oauth-framework/#oauth-framework).

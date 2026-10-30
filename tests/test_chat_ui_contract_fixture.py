@@ -80,7 +80,7 @@ async def test_contract_rejects_unmapped_registered_action(tmp_path: Path, monke
 
     def init_with_new_action(self: ChatUITools, **kwargs: object) -> None:
         original_init(self, **kwargs)  # type: ignore[arg-type]
-        self.register(self.show_computer, name="new_action")
+        self.functions["new_action"] = self.show_computer
 
     monkeypatch.setattr(ChatUITools, "__init__", init_with_new_action)
 

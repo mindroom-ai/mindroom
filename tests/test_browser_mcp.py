@@ -6,21 +6,24 @@ import json
 import os
 import subprocess
 from pathlib import Path
+from typing import TYPE_CHECKING, cast
 
 import pytest
-from agno.tools.function import Function
 from mcp.types import CallToolResult, TextContent, Tool
 
 from mindroom.custom_tools.browser_mcp import BrowserMCPTools
 from mindroom.llm.media import Image
 from mindroom.providers.openai.chat_wire import function_definition
 from mindroom.tool_system import media_transport
-from mindroom.tool_system.agno_toolkits import adapt_function
 from mindroom.tool_system.media_transport import decode_media_result, encode_media_result
-from mindroom.tool_system.output_files import ToolOutputFilePolicy, wrap_function_for_output_files
+from mindroom.tool_system.output_files import ToolOutputFilePolicy, output_file_entrypoint
 from mindroom.tool_system.tool_function import ToolValue
 from mindroom.worker_computer.mcp_catalog import browser_mcp_catalog, verify_browser_mcp_catalog
 from mindroom.worker_computer.mcp_provider import WorkerBrowserMCP
+from tests.agent_tool_helpers import toolkit_offers
+
+if TYPE_CHECKING:
+    from collections.abc import Awaitable
 
 
 def test_native_catalog_has_fixed_safe_schemas() -> None:
@@ -32,14 +35,14 @@ def test_native_catalog_has_fixed_safe_schemas() -> None:
     assert "browser_route" not in tools
     assert "browser_evaluate" in tools
     assert "browser_pdf_save" in tools
-    assert toolkit.get_async_functions().keys() == tools.keys()
+    assert toolkit.functions.keys() == tools.keys()
     for name, tool in tools.items():
-        assert toolkit.get_async_functions()[name].parameters == tool["inputSchema"]
+        assert toolkit_offers(toolkit, name).parameters == tool["inputSchema"]
 
 
 def test_native_screenshot_wire_keeps_optional_fields_optional() -> None:
     """OpenAI formatting cannot promote omitted native screenshot fields to required empty values."""
-    function = adapt_function(BrowserMCPTools().get_async_functions()["browser_take_screenshot"])
+    function = toolkit_offers(BrowserMCPTools(), "browser_take_screenshot")
 
     formatted = function_definition(function.definition())
 
@@ -106,7 +109,7 @@ def test_primary_materialization_has_no_process_or_workspace_effects(
             runs_in_worker=tool_placement(paths).runs_in_worker("browser_mcp", ["browser_mcp"]),
             tool_output_workspace_root=workspace,
         )
-    assert toolkit.get_async_functions().keys() == browser_mcp_catalog().keys()
+    assert toolkit.functions.keys() == browser_mcp_catalog().keys()
     assert {
         str(path.relative_to(tmp_path)): path.read_bytes() for path in tmp_path.rglob("*") if path.is_file()
     } == before
@@ -129,7 +132,7 @@ def test_primary_materialization_has_no_process_or_workspace_effects(
 async def test_native_calls_require_worker_binding() -> None:
     """Primary-side materialization never authorizes local execution."""
     toolkit = BrowserMCPTools()
-    function = toolkit.get_async_functions()["browser_snapshot"]
+    function = toolkit_offers(toolkit, "browser_snapshot")
     with pytest.raises(RuntimeError, match="dedicated computer worker"):
         await function.entrypoint()
 
@@ -204,9 +207,10 @@ async def test_output_wrapper_precedes_wire_encoding(tmp_path: Path, media: bool
             images=(Image(content=b"image", mime_type="image/png"),) if media else (),
         )
 
-    function = Function(name="browser_snapshot", entrypoint=result)
-    wrap_function_for_output_files(function, ToolOutputFilePolicy(workspace_root=tmp_path, auto_save_threshold_bytes=5))
-    output = await function.entrypoint(mindroom_output_path=path)
+    policy = ToolOutputFilePolicy(workspace_root=tmp_path, auto_save_threshold_bytes=5)
+    entrypoint = output_file_entrypoint(result, policy, tool_name="browser_snapshot")
+    assert entrypoint is not None
+    output = await cast("Awaitable[object]", entrypoint(mindroom_output_path=path))
     decoded = decode_media_result(encode_media_result(output))
     if media and path is None:
         assert isinstance(decoded, ToolValue)

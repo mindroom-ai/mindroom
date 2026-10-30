@@ -16,7 +16,6 @@ from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
-from agno.tools.function import FunctionCall
 
 from mindroom.attachments.storage import load_attachment, register_local_attachment
 from mindroom.config.agent import AgentConfig
@@ -41,6 +40,7 @@ from mindroom.tool_system.sandbox_proxy import tool_placement
 from mindroom.tool_system.tool_function import ToolValue
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity, resolve_worker_target
 from tests.access_schema_support import with_current_room_member_access
+from tests.agent_tool_helpers import toolkit_offers
 from tests.authorization_helpers import (
     make_test_tool_runtime_context,
 )
@@ -128,7 +128,7 @@ def _tool_context_with_thread_scope(
 def test_attachments_tool_hides_send_method_from_exposed_tools() -> None:
     """Attachments tool should expose discovery, registration, and model viewing without send operations."""
     tool = AttachmentTools()
-    exposed = {method.__name__ for method in tool.tools}
+    exposed = {method.__name__ for method in tool.functions.values()}
     assert exposed == {"list_attachments", "get_attachment", "register_attachment", "view_file"}
     assert not hasattr(tool, "send_attachments")
 
@@ -218,13 +218,8 @@ async def test_get_attachment_view_returns_image_media(tmp_path: Path) -> None:
         registered = json.loads(await tool.register_attachment("plot.jpg"))
         attachment_id = registered["attachment_id"]
         metadata = await tool.get_attachment(attachment_id)
-        execution = await FunctionCall(
-            function=tool.async_functions["get_attachment"],
-            arguments={"attachment_id": attachment_id, "view": True},
-        ).aexecute()
+        result = await toolkit_offers(tool, "get_attachment").entrypoint(attachment_id=attachment_id, view=True)
 
-    assert execution.status == "success"
-    result = execution.result
     assert isinstance(result, ToolValue)
     receipt = json.loads(result.content)
     assert receipt.items() >= json.loads(metadata).items()
@@ -270,6 +265,31 @@ async def test_get_attachment_view_returns_other_media(
         assert result.audios[0].format == "mp3"
     if result.files:
         assert result.files[0].filename == filename
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("filename", "payload_bytes", "media_field"),
+    [("document.pdf", b"%PDF-1.4 document bytes", "files"), ("recording.mp3", b"ID3 audio bytes", "audios")],
+)
+async def test_the_offered_get_attachment_sends_a_pdf_or_audio_file_it_is_asked_to_view(
+    tmp_path: Path,
+    filename: str,
+    payload_bytes: bytes,
+    media_field: str,
+) -> None:
+    """The model, offered ``view``, can ask for an attached PDF or audio file as media."""
+    (tmp_path / filename).write_bytes(payload_bytes)
+    tool = AttachmentTools(tool_output_workspace_root=tmp_path)
+    get_attachment = toolkit_offers(tool, "get_attachment")
+    assert "view" in get_attachment.parameters["properties"]
+    with tool_runtime_context(_tool_context(tmp_path)):
+        registered = json.loads(await tool.register_attachment(filename))
+        result = await get_attachment.entrypoint(attachment_id=registered["attachment_id"], view=True)
+
+    assert isinstance(result, ToolValue)
+    media = {"audios": result.audios, "files": result.files}[media_field]
+    assert [item.content for item in media] == [payload_bytes]
 
 
 @pytest.mark.asyncio
@@ -393,10 +413,15 @@ async def test_attachments_tool_get_attachment_schema_describes_output_path(
     del tmp_path
     tool = AttachmentTools()
 
-    parameters = tool.async_functions["get_attachment"].parameters
+    parameters = toolkit_offers(tool, "get_attachment").parameters
     schema = parameters["properties"]
 
-    assert schema["attachment_id"]["description"] == "Context-scoped attachment ID returned by list_attachments."
+    assert schema["attachment_id"] == {
+        "type": "string",
+        "description": "Context-scoped attachment ID returned by list_attachments.",
+    }
+    assert schema["view"]["type"] == "boolean"
+    assert "view" not in parameters["required"]
     assert schema["mindroom_output_path"]["anyOf"] == [{"type": "string"}, {"type": "null"}]
     assert schema["mindroom_output_path"]["default"] is None
     assert "Use this for large output" in schema["mindroom_output_path"]["description"]

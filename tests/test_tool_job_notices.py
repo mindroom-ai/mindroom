@@ -28,8 +28,9 @@ from mindroom.tool_jobs.notices import (
     job_notice_context,
 )
 from mindroom.tool_jobs.runtime import BackgroundOutcome, JobUnavailableError, register_background_runtime
-from mindroom.tool_system.agno_toolkits import Function, adapt_function
+from mindroom.tool_system.agno_toolkits import Function
 from mindroom.tool_system.runtime_context import build_execution_identity_from_runtime_context, tool_runtime_context
+from tests.agent_tool_helpers import offered_agno_function
 from tests.conftest import make_turn_context
 from tests.delegation_helpers import _delegate_runtime_context, _runtime_paths
 from tests.fakes.scripted_model import ScriptedModel, ScriptStep, answer, calls, tool_call
@@ -125,7 +126,7 @@ async def _run(
         """Do nothing."""
         return "nothing"
 
-    generated = tuple(adapt_function(Function.from_callable(tool)) for tool in (end_jobs, noop))
+    generated = tuple(offered_agno_function(Function.from_callable(tool)) for tool in (end_jobs, noop))
     model = ScriptedModel(list(turns))
     with tool_runtime_context(conversation.context):
         if not notices:
@@ -184,7 +185,7 @@ async def test_a_tool_call_that_ends_the_reply_leaves_its_ended_jobs_for_the_nex
         await conversation.cancel(job_id)
         return "switched"
 
-    stopping = replace(adapt_function(Function.from_callable(switch_away)), stop_after_call=True)
+    stopping = replace(offered_agno_function(Function.from_callable(switch_away)), stop_after_call=True)
     model = ScriptedModel([calls(tool_call("switch_away", "switch", job_id="job_a"))])
     try:
         await conversation.start("job_a")

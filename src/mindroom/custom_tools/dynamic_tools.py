@@ -4,11 +4,9 @@ from __future__ import annotations
 
 import json
 import re
-from copy import deepcopy
 from typing import TYPE_CHECKING, Any
 
-from agno.tools import Toolkit
-
+from mindroom.tool_system.authoring import Toolkit, passthrough_tool, tool
 from mindroom.tool_system.tool_access import tool_definition
 
 if TYPE_CHECKING:
@@ -48,18 +46,13 @@ class DynamicToolsToolkit(Toolkit):
 
     def __init__(self, *, deferred_toolkits: Callable[[], Sequence[DeferredToolkit]]) -> None:
         self._deferred_toolkits = deferred_toolkits
-        super().__init__(name="dynamic_tools", tools=[self.tool_search, self.call_tool])
-        # Agno would render the argument values of a typed dict as empty objects, and Gemini conversion drops the
-        # description of an optional object, so the wrapper declares the same shape as the MCP call_tool bridge.
-        call_tool = self.functions["call_tool"]
-        call_tool.description = _CALL_TOOL_DESCRIPTION
-        call_tool.parameters = deepcopy(_CALL_TOOL_PARAMETERS)
-        call_tool.skip_entrypoint_processing = True
+        super().__init__(name="dynamic_tools")
 
     @staticmethod
     def _payload(status: str, **kwargs: object) -> str:
         return json.dumps({"status": status, "tool": "dynamic_tools", **kwargs}, sort_keys=True)
 
+    @tool
     def tool_search(self, query: str = "", max_results: int = 5) -> str:
         """Search deferred functions by name or keywords and return their full definitions, or list them.
 
@@ -132,6 +125,9 @@ class DynamicToolsToolkit(Toolkit):
         payload["functions"] = listed
         return self._payload("ok", **payload)
 
+    # A typed dict would render its argument values as empty objects, and Gemini conversion drops the description of
+    # an optional object, so the wrapper declares the same shape as the MCP call_tool bridge.
+    @passthrough_tool(description=_CALL_TOOL_DESCRIPTION, parameters=_CALL_TOOL_PARAMETERS)
     def call_tool(self, name: str = "", arguments: object = None, **_extra: object) -> str:
         """Report a wrapper call that could not be routed to a deferred function.
 

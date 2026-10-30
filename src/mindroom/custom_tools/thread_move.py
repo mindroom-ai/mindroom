@@ -8,7 +8,6 @@ from typing import TYPE_CHECKING, Any
 from urllib.parse import quote
 
 import nio
-from agno.tools import Toolkit
 
 from mindroom.constants import (
     ORIGINAL_SENDER_KEY,
@@ -38,6 +37,7 @@ from mindroom.matrix.message_builder import build_thread_relation
 from mindroom.matrix.message_extras import MINDROOM_MESSAGE_EXTRAS_KEY
 from mindroom.matrix.sidecar_content import holds_unresolved_sidecar
 from mindroom.thread_tags import RESOLVED_THREAD_TAG, ThreadTagsError, get_thread_tags, set_thread_tag
+from mindroom.tool_system.authoring import Toolkit
 from mindroom.tool_system.events import is_visible_tool_marker_line
 from mindroom.tool_system.runtime_context import get_tool_runtime_context
 

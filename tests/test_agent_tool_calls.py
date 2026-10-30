@@ -27,13 +27,14 @@ from mindroom.message_target import MessageTarget
 from mindroom.session_storage.types import ConversationSession
 from mindroom.tool_jobs.control import JobControl, job_control_context
 from mindroom.tool_system import agent_tool_calls
-from mindroom.tool_system.agno_toolkits import adapt_function, adapt_toolkit
+from mindroom.tool_system.agno_toolkits import adapt_toolkit
 from mindroom.tool_system.invocation import ToolCall, current_tool_call
 from mindroom.tool_system.runtime_context import get_tool_runtime_context
 from mindroom.tool_system.tool_access import ToolKey, UnknownToolError
 from mindroom.tool_system.tool_function import AdaptedToolkit, ToolFunction, ToolOutcome
 from mindroom.tool_system.tool_hooks import run_async_entrypoint_blocking_call
 from mindroom.tool_system.worker_routing import get_tool_execution_identity
+from tests.agent_tool_helpers import offered_agno_function
 from tests.authorization_helpers import make_test_tool_runtime_context
 from tests.conftest import make_conversation_reader_mock, make_relation_lookup, test_runtime_paths
 
@@ -54,7 +55,7 @@ def _function(entrypoint: Callable[..., object], **flags: object) -> AdaptedTool
     function = Function.from_callable(entrypoint)
     for name, value in flags.items():
         setattr(function, name, value)
-    return AdaptedToolkit(name="actions", functions=(adapt_function(function),), instructions=None)
+    return AdaptedToolkit(name="actions", functions=(offered_agno_function(function),), instructions=None)
 
 
 def _runtime(tmp_path: Path) -> ToolRuntimeContext:
@@ -645,7 +646,7 @@ async def test_generator_failure_is_terminal_and_does_not_leak_context(tmp_path:
 async def test_a_deferred_toolkit_whose_functions_collide_is_refused(tmp_path: Path) -> None:
     """A materialized toolkit that names one function twice binds nothing."""
     catalog = await _catalog(tmp_path, [])
-    function = adapt_function(Function(name="duplicate", entrypoint=lambda: "first"))
+    function = offered_agno_function(Function(name="duplicate", entrypoint=lambda: "first"))
 
     async def materialize() -> AdaptedToolkit:
         return AdaptedToolkit(name="deferred", functions=(function, function), instructions=None)
@@ -981,7 +982,7 @@ async def test_generated_cli_authorization_keeps_exact_owner(
         current.agents["helper"].tools = ["shell"]
         catalog.runtime_context = replace(runtime, config_provider=lambda: current)
     if revocation == "forged":
-        binding = replace(binding, function=adapt_function(Function(name="arbitrary", entrypoint=lambda: "bad")))
+        binding = replace(binding, function=offered_agno_function(Function(name="arbitrary", entrypoint=lambda: "bad")))
     if revocation == "stale":
         await catalog.close()
     if revocation:

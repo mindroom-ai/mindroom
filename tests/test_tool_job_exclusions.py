@@ -18,6 +18,7 @@ from mindroom.tool_jobs.control import pending_human_messages_context
 from mindroom.tool_jobs.instances import pin_background_tool_jobs, release_background_tool_jobs
 from mindroom.tool_jobs.resources import execution_resources
 from mindroom.tool_jobs.runtime import ToolJobRuntime, register_background_runtime
+from mindroom.tool_system.agno_toolkits import toolkit_function_names
 from mindroom.tool_system.metadata import get_tool_by_name
 from mindroom.tool_system.plugins import isolated_plugin_runtime
 from mindroom.tool_system.runtime_context import (
@@ -43,11 +44,11 @@ if TYPE_CHECKING:
 
     from mindroom.llm.runs import ToolExecution
     from mindroom.tool_jobs.execution import JobActor
-    from mindroom.tool_system.agno_toolkits import Toolkit
+    from mindroom.tool_system.agno_toolkits import AnyToolkit
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 
 
-type _ShellRuntime = tuple[JobActor, ToolJobRuntime, ToolExecutionIdentity, Toolkit]
+type _ShellRuntime = tuple[JobActor, ToolJobRuntime, ToolExecutionIdentity, AnyToolkit]
 
 
 @pytest_asyncio.fixture(params=["shell", "openclaw_compat"], ids=["shell", "preset"])
@@ -119,7 +120,7 @@ async def test_an_excluded_shell_command_stops_at_its_timeout_without_a_job(
         with pytest.raises(ProcessLookupError):
             os.kill(int((tmp_path / "started").read_text()), 0)
         assert await runtime.list_jobs(owner=owner, depth=0) == []
-        for name in toolkit.get_async_functions():
+        for name in toolkit_function_names(toolkit):
             assert "background_after" not in schemas[name]["properties"]
         run_schema = schemas["run_shell_command"]
         assert "timeout" in run_schema["properties"]
@@ -277,7 +278,7 @@ async def test_registered_plugin_exclusion_is_pinned_for_every_function(  # noqa
                 assert step.result == "step:3"
                 status, schemas = await _invoke(actor, "native_status")
                 assert not status.is_error
-                for name in toolkit.get_async_functions():
+                for name in toolkit_function_names(toolkit):
                     properties = schemas[name]["properties"]
                     if name == "native_step":
                         assert properties["background_after"]["type"] == "integer"

@@ -1,0 +1,285 @@
+{
+  "family": "vertexai_claude",
+  "input": {
+    "deferred_tool_search": null,
+    "messages": [
+      {
+        "content": "You are Parity, a concise travel assistant used by the MindRoom provider goldens.",
+        "role": "system"
+      },
+      {
+        "audio": [
+          {
+            "content": "UklGRiQAAABXQVZFZm10IBAAAAABAAEAQB8AAIA+AAACABAAZGF0YQAAAAA=",
+            "id": "parity-audio",
+            "mime_type": "audio/wav"
+          }
+        ],
+        "content": "Use the attached media to plan my packing.",
+        "files": [
+          {
+            "content": "JVBERi0xLjQKJSVFT0YK",
+            "filename": "itinerary.pdf",
+            "id": "parity-pdf",
+            "mime_type": "application/pdf"
+          },
+          {
+            "content": "UEsDBHBhcml0eS1kb2N4",
+            "filename": "packing.docx",
+            "id": "parity-docx",
+            "mime_type": "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+          },
+          {
+            "content": "Pack light.\n",
+            "filename": "notes.txt",
+            "id": "parity-txt",
+            "mime_type": "text/plain"
+          },
+          {
+            "content": "PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSIxIiBoZWlnaHQ9IjEiLz4=",
+            "filename": "route.svg",
+            "id": "parity-svg-file",
+            "mime_type": "image/svg+xml"
+          },
+          {
+            "filename": "empty.txt",
+            "id": "parity-empty",
+            "mime_type": "text/plain"
+          }
+        ],
+        "images": [
+          {
+            "content": "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==",
+            "format": "png",
+            "id": "parity-image",
+            "mime_type": "image/png"
+          },
+          {
+            "content": "PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSIxIiBoZWlnaHQ9IjEiLz4=",
+            "id": "parity-svg-image",
+            "mime_type": "image/svg+xml"
+          }
+        ],
+        "role": "user",
+        "videos": [
+          {
+            "content": "AAAAGGZ0eXBtcDQy",
+            "id": "parity-video",
+            "mime_type": "video/mp4"
+          }
+        ]
+      }
+    ],
+    "model_config": {
+      "extra_kwargs": {
+        "project_id": "parity-project",
+        "region": "us-east5"
+      },
+      "id": "claude-sonnet-5-5",
+      "provider": "vertexai_claude"
+    },
+    "output_schema": null,
+    "portable_replay": null,
+    "tool_choice": null,
+    "tools": []
+  },
+  "parsed": {
+    "message": {
+      "content": "Pack a light rain jacket and comfortable shoes.",
+      "provider_data": {
+        "claude_blocks": [
+          {
+            "text": "Pack a light rain jacket and comfortable shoes.",
+            "type": "text"
+          }
+        ],
+        "mindroom_model": {
+          "id": "claude-sonnet-5-5",
+          "provider": "VertexAI"
+        },
+        "mindroom_native_compaction": null,
+        "stop_reason": "end_turn"
+      },
+      "role": "assistant"
+    },
+    "metrics": {
+      "input_tokens": 42,
+      "output_tokens": 12,
+      "provider_metrics": {
+        "context_usage": {
+          "cache_read_tokens": 0,
+          "cache_write_tokens": 0,
+          "input_tokens": 42
+        }
+      },
+      "total_tokens": 54
+    },
+    "stop_reason": "end"
+  },
+  "request": {
+    "body": {
+      "max_tokens": 8192,
+      "messages": [
+        {
+          "role": "user",
+          "content": [
+            {
+              "type": "text",
+              "text": "Use the attached media to plan my packing.\n\n[Inline media unavailable for this model]\nThe model or provider adapter could not accept some inline attachments for this request. Their content was not inspected. Do not claim to have seen, heard, or read the removed media. Do not repeat get_attachment(view=True) for it on this model. Use get_attachment without view to inspect metadata or save the file with mindroom_output_path. Then use other available tools to extract or interpret its content. If no suitable tool is available, explain the limitation to the user."
+            },
+            {
+              "type": "image",
+              "source": {
+                "type": "base64",
+                "media_type": "image/png",
+                "data": "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg=="
+              }
+            },
+            {
+              "type": "document",
+              "source": {
+                "type": "base64",
+                "media_type": "application/pdf",
+                "data": "JVBERi0xLjQKJSVFT0YK"
+              }
+            },
+            {
+              "type": "text",
+              "text": "[Attached document not sent inline: Claude reads only PDF and plain-text documents inline, not application/vnd.openxmlformats-officedocument.wordprocessingml.document. Its content was not inspected. Use get_attachment without view to inspect or save it, then use other available tools.]"
+            },
+            {
+              "type": "document",
+              "source": {
+                "type": "text",
+                "media_type": "text/plain",
+                "data": "Pack light.\n"
+              }
+            },
+            {
+              "type": "text",
+              "text": "[Attached document not sent inline: Claude reads only PDF and plain-text documents inline, not image/svg+xml. Its content was not inspected. Use get_attachment without view to inspect or save it, then use other available tools.]",
+              "cache_control": {
+                "type": "ephemeral",
+                "ttl": "1h"
+              }
+            }
+          ]
+        }
+      ],
+      "system": [
+        {
+          "text": "You are Parity, a concise travel assistant used by the MindRoom provider goldens.",
+          "type": "text",
+          "cache_control": {
+            "type": "ephemeral",
+            "ttl": "1h"
+          }
+        }
+      ],
+      "thinking": {
+        "type": "adaptive",
+        "block_binding": {
+          "prefix_mismatch_behavior": "drop_block"
+        }
+      },
+      "stream": true,
+      "anthropic_version": "vertex-2023-10-16"
+    },
+    "headers": {
+      "accept": "application/json",
+      "anthropic-beta": "thinking-binding-controls-2026-08-01",
+      "content-type": "application/json"
+    },
+    "method": "POST",
+    "url": "https://us-east5-aiplatform.googleapis.com/v1/projects/parity-project/locations/us-east5/publishers/anthropic/models/claude-sonnet-5-5:streamRawPredict"
+  },
+  "response_raw": {
+    "headers": {
+      "content-type": "text/event-stream"
+    },
+    "sse": [
+      {
+        "data": {
+          "message": {
+            "content": [],
+            "id": "msg_parity",
+            "model": "claude-sonnet-5-5",
+            "role": "assistant",
+            "stop_reason": null,
+            "stop_sequence": null,
+            "type": "message",
+            "usage": {
+              "cache_creation_input_tokens": 0,
+              "cache_read_input_tokens": 0,
+              "input_tokens": 42,
+              "output_tokens": 1
+            }
+          },
+          "type": "message_start"
+        },
+        "event": "message_start"
+      },
+      {
+        "data": {
+          "content_block": {
+            "text": "",
+            "type": "text"
+          },
+          "index": 0,
+          "type": "content_block_start"
+        },
+        "event": "content_block_start"
+      },
+      {
+        "data": {
+          "delta": {
+            "text": "Pack a light rain jacket",
+            "type": "text_delta"
+          },
+          "index": 0,
+          "type": "content_block_delta"
+        },
+        "event": "content_block_delta"
+      },
+      {
+        "data": {
+          "delta": {
+            "text": " and comfortable shoes.",
+            "type": "text_delta"
+          },
+          "index": 0,
+          "type": "content_block_delta"
+        },
+        "event": "content_block_delta"
+      },
+      {
+        "data": {
+          "index": 0,
+          "type": "content_block_stop"
+        },
+        "event": "content_block_stop"
+      },
+      {
+        "data": {
+          "delta": {
+            "stop_reason": "end_turn",
+            "stop_sequence": null
+          },
+          "type": "message_delta",
+          "usage": {
+            "output_tokens": 12
+          }
+        },
+        "event": "message_delta"
+      },
+      {
+        "data": {
+          "type": "message_stop"
+        },
+        "event": "message_stop"
+      }
+    ],
+    "status": 200
+  },
+  "scenario": "mixed_media_input"
+}

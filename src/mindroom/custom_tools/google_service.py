@@ -6,7 +6,6 @@ import json
 import threading
 from typing import TYPE_CHECKING, Any, TypeVar, cast
 
-from agno.tools import Toolkit
 from google.api_core.exceptions import GoogleAPICallError
 from google_auth_httplib2 import AuthorizedHttp
 from googleapiclient.discovery import build
@@ -14,6 +13,7 @@ from googleapiclient.http import build_http
 
 from mindroom.logging_config import get_logger
 from mindroom.oauth.client import ScopedOAuthClientMixin
+from mindroom.tool_system.authoring import Toolkit
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -208,6 +208,12 @@ class _GoogleOAuthToolkit(ScopedOAuthClientMixin, ThreadLocalGoogleServiceMixin,
         super().__init__(name=name, tools=tools)
         self._set_original_auth(_GoogleOAuthToolkit._service_account_auth)
         self._wrap_oauth_function_entrypoints()
+
+    def _wrap_oauth_function_entrypoints(self) -> None:
+        """Route each of the toolkit's functions, and a direct call of its method, through the OAuth call policy."""
+        for name, function in tuple(self.functions.items()):
+            self.functions[name] = self._oauth_entrypoint(function)
+            setattr(self, name, self.functions[name])
 
     def _should_fallback_to_original_auth(self) -> bool:
         return bool(self.service_account_path or self._runtime_paths.env_value("GOOGLE_SERVICE_ACCOUNT_FILE"))
