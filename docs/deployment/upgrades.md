@@ -14,6 +14,7 @@ MindRoom no longer supports Agent Vault; [Agent Keys](egress-broker.md) injects 
 Before upgrading, remove `agent_vault_access` from agents' `tools:` lists and `defaults.tools`, because a config that still lists it fails to load, and give agents that need brokered credentials the [`egress_credentials` tool](egress-broker.md#agent-tool).
 In runtime chart values, enable the [egress broker](https://github.com/mindroom-ai/mindroom/blob/main/cluster/k8s/runtime/README.md#egress-broker) and delete `workers.kubernetes.agentVault`, `approvedEgress.parentProxy.enabled`, `approvedEgress.parentProxy.host`, and `approvedEgress.parentProxy.port`, which the chart now ignores; `approvedEgress.parentProxy.bypassDomains` still applies to the broker chain.
 A `helm upgrade` of a release that ran the chart-managed Agent Vault server deletes that server, its Jobs, and its data claim, so first back up the volume and its bootstrap Secret if you still need the stored secrets.
+Helm leaves behind the CA ConfigMap (`workers.kubernetes.agentVault.workerCaConfigMapName`) and the admin token Secret (default `agent-vault-access-admin`) that the bootstrap Job created, so delete them yourself, and remove the archived `agent-vault-bridge` plugin from `plugins:` if you use it.
 
 ## Upgrading to shared team memory
 

@@ -32,6 +32,20 @@ def test_broker_env_keeps_its_proxy_and_materializes_its_ca(tmp_path: Path, test
     assert "NODE_EXTRA_CA_CERTS" in final_env
 
 
+def test_non_execution_tools_get_no_request_env(tmp_path: Path, test_ca_pem: str) -> None:
+    """Only `shell` and `python` get an execution env, even when the call carries broker env."""
+    runtime_paths = resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path, process_env={})
+    broker_env = broker_execution_env(
+        broker_url="http://broker:8768",
+        token="mrb1.token",  # noqa: S106
+        ca_pem=test_ca_pem,
+        placeholder_env={},
+        extra_no_proxy_hosts=[],
+    )
+
+    assert sandbox_exec.request_execution_env("website", broker_env, runtime_paths) == {}
+
+
 def test_request_env_without_broker_ca_is_kept_as_sent(tmp_path: Path) -> None:
     """Without a broker CA the call's env is applied unchanged, with no proxy or CA bundle added."""
     runtime_paths = resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path, process_env={})

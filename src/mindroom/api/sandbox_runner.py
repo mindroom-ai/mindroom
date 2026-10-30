@@ -926,7 +926,7 @@ def _prepare_execute_request(call: _ExecuteCall) -> _PreparedSandboxRequestConte
         runtime_paths,
         extra_env_passthrough=request.extra_env_passthrough,
     )
-    # The call's own changes, except where the worker's call env changes the name, as its egress settings do.
+    # The call's own changes, except where the worker's call env changes the name, as its CA bundle does.
     kept_set_names = [
         name
         for name in request.environment.set_names

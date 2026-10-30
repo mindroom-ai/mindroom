@@ -382,7 +382,6 @@ def _context_agent(
     *,
     routing: str = "url",
     tool_config: dict[str, object] | None = None,
-    extra_env: dict[str, str] | None = None,
     roomless: bool = False,
     require_approval: bool = False,
 ) -> tuple[AgentBuild, ToolRuntimeContext]:
@@ -390,7 +389,6 @@ def _context_agent(
     process_env = {
         "MINDROOM_SANDBOX_PROXY_URL": "http://sandbox.invalid",
         "MINDROOM_SANDBOX_PROXY_TOKEN": "dummy-worker-token",
-        **(extra_env or {}),
     }
     if routing != "url":
         process_env["MINDROOM_SANDBOX_EXECUTION_MODE"] = "off" if routing == "explicit" else "all"
