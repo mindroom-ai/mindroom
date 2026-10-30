@@ -7,10 +7,12 @@ local embedder to test that a file exists.
 from __future__ import annotations
 
 import asyncio
+import os
 from typing import TYPE_CHECKING
 
 import pytest
 
+import mindroom.knowledge.corpus_signature as knowledge_corpus_signature
 import mindroom.knowledge.index_metadata as knowledge_index_metadata
 import mindroom.knowledge.manager as knowledge_manager_module
 import mindroom.knowledge.registry as knowledge_registry
@@ -200,6 +202,30 @@ async def test_an_unchanged_refresh_builds_no_embedder(tmp_path: Path, embedder_
     runtime_paths = runtime_paths_for(config)
     (tmp_path / "docs" / "a.md").write_text("alpha one", encoding="utf-8")
     await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)
+    embedder_builds.clear()
+
+    result = await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)
+
+    assert result.published
+    assert embedder_builds == []
+
+
+@pytest.mark.asyncio
+async def test_a_refresh_that_only_restamps_files_builds_no_embedder(
+    tmp_path: Path,
+    embedder_builds: list[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A checkout or sync that rewrites only timestamps changes the corpus hash but leaves nothing to embed."""
+    # Files written just now sit inside the racy window, whose stamps never count; close it so the stamps change.
+    monkeypatch.setattr(knowledge_corpus_signature, "_RACY_WINDOW_NS", 0)
+    config = _config(tmp_path)
+    runtime_paths = runtime_paths_for(config)
+    path = tmp_path / "docs" / "a.md"
+    path.write_text("alpha one", encoding="utf-8")
+    await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)
+    stat = path.stat()
+    os.utime(path, ns=(stat.st_atime_ns + 10**10, stat.st_mtime_ns + 10**10))
     embedder_builds.clear()
 
     result = await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)

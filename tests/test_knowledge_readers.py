@@ -86,7 +86,7 @@ def _indexer(root: Path, *, chunk_size: int = _CHUNK_SIZE, chunk_overlap: int = 
         runtime_paths=runtime_paths_for(config),
         knowledge_root=docs_path,
         collection=KnowledgeCollection(path=root / "collections", name="docs"),
-        embedder=RefreshEmbedder(_FakeEmbedder()),
+        build_embedder=lambda: RefreshEmbedder(_FakeEmbedder()),
         max_concurrent_file_indexes=max_concurrent_file_indexes(runtime_paths_for(config)),
     )
 

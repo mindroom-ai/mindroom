@@ -15,7 +15,7 @@ import uuid
 from contextlib import contextmanager
 from copy import deepcopy
 from dataclasses import dataclass, field, replace
-from functools import partial
+from functools import cached_property, partial
 from pathlib import Path
 from typing import IO, TYPE_CHECKING, Any
 
@@ -184,7 +184,8 @@ class FileIndexer:
     runtime_paths: RuntimePaths
     knowledge_root: Path
     collection: KnowledgeCollection
-    embedder: RefreshEmbedder
+    #: Builds the refresh's embedder at its first embedding request, so a pass with nothing to embed loads no model.
+    build_embedder: Callable[[], RefreshEmbedder]
     #: Files indexed at once, from ``max_concurrent_file_indexes``.
     max_concurrent_file_indexes: int
     #: The first file failure's credential-safe detail, which the refresh error quotes.
@@ -193,6 +194,11 @@ class FileIndexer:
     global_failure: str | None = field(default=None, init=False)
     retry_count: int = field(default=0, init=False)
     _failure_streak: int = field(default=0, init=False, repr=False)
+
+    @cached_property
+    def embedder(self) -> RefreshEmbedder:
+        """The refresh's embedder, built on the event loop the first time a file needs vectors."""
+        return self.build_embedder()
 
     async def index_files(
         self,
@@ -533,9 +539,10 @@ class FileIndexer:
             logger.warning("Indexing produced no vectors for file", base_id=self.base_id, path=prepared.relative_path)
             return None
         missing = [text for text in dict.fromkeys(chunk.text for chunk in prepared.chunks) if text not in batch_vectors]
+        embedder = self.embedder
         try:
             own_vectors = await run_with_embedding_retry(
-                partial(asyncio.to_thread, lambda: dict(zip(missing, self.embedder.embed_each(missing), strict=True))),
+                partial(asyncio.to_thread, lambda: dict(zip(missing, embedder.embed_each(missing), strict=True))),
                 policy=_EMBEDDING_RETRY_POLICY,
                 sleep=_EMBEDDING_RETRY_SLEEP,
                 on_retry=self._record_embedding_retry,

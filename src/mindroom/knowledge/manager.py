@@ -325,7 +325,7 @@ class KnowledgeManager:
             runtime_paths=self.runtime_paths,
             knowledge_root=self._knowledge_root(),
             collection=run.collection,
-            embedder=RefreshEmbedder(
+            build_embedder=lambda: RefreshEmbedder(
                 create_configured_embedder(self.config, self.runtime_paths, caller_retries=True),
             ),
             max_concurrent_file_indexes=self._max_concurrent_file_indexes,

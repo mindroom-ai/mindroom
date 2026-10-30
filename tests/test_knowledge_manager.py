@@ -2481,7 +2481,7 @@ async def test_file_indexer_notes_files_vanishing_during_refresh(tmp_path: Path)
         runtime_paths=runtime_paths_for(config),
         knowledge_root=docs_path,
         collection=collection,
-        embedder=RefreshEmbedder(_FakeEmbedder()),
+        build_embedder=lambda: RefreshEmbedder(_FakeEmbedder()),
         max_concurrent_file_indexes=max_concurrent_file_indexes(runtime_paths_for(config)),
     )
     completed: dict[str, FileSignature] = {}

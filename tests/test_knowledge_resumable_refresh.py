@@ -427,7 +427,7 @@ def _file_indexer(
         runtime_paths=runtime_paths_for(config),
         knowledge_root=docs_path,
         collection=collection,
-        embedder=RefreshEmbedder(embedder),
+        build_embedder=lambda: RefreshEmbedder(embedder),
         max_concurrent_file_indexes=max_concurrent_file_indexes(runtime_paths_for(config)),
     )
 
