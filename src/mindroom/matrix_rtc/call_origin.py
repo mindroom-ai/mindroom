@@ -15,7 +15,7 @@ from mindroom.dispatch_source import hook_source_from_content
 from mindroom.entity_resolution import current_internal_sender_ids
 from mindroom.logging_config import get_logger
 from mindroom.matrix.conversation_reads import complete_thread_history, projected_thread_history
-from mindroom.thread_summary.state import current_thread_summary_from_history
+from mindroom.thread_summary.state import current_thread_summary_from_history, trusted_summary_metadata
 from mindroom.token_budget import approximate_o200k_tokens
 from mindroom.tool_system.events import body_without_tool_markers
 
@@ -34,7 +34,6 @@ AGENT_CALL_STATE_EVENT_TYPE = "io.mindroom.agent_call"
 CALL_BRIEF_TOKEN_BUDGET = 6_000
 _BRIEF_MESSAGE_MAX_CHARS = 2_000
 _ROOM_ORIGIN_READ_LIMIT = 200
-_THREAD_SUMMARY_CONTENT_KEY = "io.mindroom.thread_summary"
 
 
 @dataclass(frozen=True)
@@ -168,7 +167,7 @@ async def resolve_call_origin_context(  # noqa: PLR0911
     trusted_sender_ids = current_internal_sender_ids(context.config, context.runtime_paths)
     messages: list[_CallBriefMessage] = []
     for message in history:
-        if message.sender in trusted_sender_ids and isinstance(message.content.get(_THREAD_SUMMARY_CONTENT_KEY), dict):
+        if trusted_summary_metadata(message, trusted_sender_ids=trusted_sender_ids) is not None:
             continue
         body = body_without_tool_markers(message.body, message.content).strip()
         if not body:

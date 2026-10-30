@@ -138,7 +138,7 @@ async def _apply_initial_tags(
 ) -> bool:
     """Apply generated tags only when no manual or concurrent tags exist."""
     set_by = client.user_id
-    if not tags or not set_by:
+    if not set_by:
         return False
     try:
         result = await set_thread_tags_if_empty(

@@ -12,7 +12,6 @@ from mindroom.llm.usage import TokenCounts
 from mindroom.requester_identity import resolve_human_requester_alias
 from mindroom.usage.legacy_usage_storage import legacy_request_model
 from mindroom.usage.stats_storage import (
-    UsageModelMetrics,
     UsageRunNode,
     UsageSessionRow,
     UsageStorageDiagnostic,
@@ -411,16 +410,21 @@ class _UsageAccumulator:
                 self.cumulative_model_unavailable_sources.add(row.source.path_label)
                 return
         try:
-            entity_id, row_totals = self._entity_totals(
-                row,
-                scope=scope,
-                expected_agent=expected_agent,
-                expected_requester=expected_requester,
-            )
+            if scope == "self":
+                row_totals = _self_row_totals(
+                    row,
+                    expected_agent=expected_agent,
+                    expected_requester=expected_requester,
+                    seen_runs=self.seen_runs,
+                )
+                entity_id = None
+            else:
+                entity_id = _admin_entity_id(row)
+                row_totals = _session_totals(row) if entity_id is not None else None
         except ValueError:
+            # Only run rows of a shared agent's self report can be unreadable here; session totals skip what they
+            # cannot count.
             self.unavailable_sources.add(row.source.path_label)
-            if not uses_runs:
-                self.cumulative_model_unavailable_sources.add(row.source.path_label)
             return
         if not uses_runs and _has_uncountable_row(row):
             self.unavailable_sources.add(row.source.path_label)
@@ -441,26 +445,6 @@ class _UsageAccumulator:
                 models,
                 count=0 if is_system else 1,
             )
-
-    def _entity_totals(
-        self,
-        row: UsageSessionRow,
-        *,
-        scope: _Scope,
-        expected_agent: str | None,
-        expected_requester: str | None,
-    ) -> tuple[str | None, TokenCounts | None]:
-        """Return the entity an admin report files the row under, none for a self report, and the row's totals."""
-        if scope == "self":
-            totals = _self_row_totals(
-                row,
-                expected_agent=expected_agent,
-                expected_requester=expected_requester,
-                seen_runs=self.seen_runs,
-            )
-            return None, totals
-        entity_id = _admin_entity_id(row)
-        return entity_id, _session_totals(row) if entity_id is not None else None
 
     def _add_cumulative_models(self, row: UsageSessionRow) -> Mapping[tuple[str, str], TokenCounts]:
         models = _session_model_totals(row)
@@ -1105,7 +1089,20 @@ def _run_model_totals(run: UsageRunNode, totals: TokenCounts) -> dict[tuple[str,
         return None
     if not run.model_metrics:
         return {(run.model_provider or "unknown", run.model or "unknown"): totals}
-    return _detailed_model_totals(run.model_metrics, totals)
+    models: dict[tuple[str, str], TokenCounts] = {}
+    combined = TokenCounts()
+    try:
+        for entry in run.model_metrics:
+            model_totals = stored_token_counts(entry.metrics)
+            # A run also records a model whose requests reported no usage, as an entry without counters.
+            if model_totals is None:
+                continue
+            key = (entry.model_provider or "unknown", entry.model or "unknown")
+            models[key] = models.get(key, TokenCounts()) + model_totals
+            combined += model_totals
+    except ValueError:
+        return None
+    return models if models and combined == totals else None
 
 
 def _session_totals(row: UsageSessionRow) -> TokenCounts | None:
@@ -1126,26 +1123,6 @@ def _session_model_totals(row: UsageSessionRow) -> dict[tuple[str, str], TokenCo
         for key, value in (_run_model_totals(run, run_totals) or {("unknown", "unknown"): run_totals}).items():
             models[key] = models.get(key, TokenCounts()) + value
     return models
-
-
-def _detailed_model_totals(
-    model_metrics: tuple[UsageModelMetrics, ...],
-    totals: TokenCounts,
-) -> dict[tuple[str, str], TokenCounts] | None:
-    models: dict[tuple[str, str], TokenCounts] = {}
-    combined = TokenCounts()
-    try:
-        for entry in model_metrics:
-            model_totals = stored_token_counts(entry.metrics)
-            # A run also records a model whose requests reported no usage, as an entry without counters.
-            if model_totals is None:
-                continue
-            key = (entry.model_provider or "unknown", entry.model or "unknown")
-            models[key] = models.get(key, TokenCounts()) + model_totals
-            combined += model_totals
-    except ValueError:
-        return None
-    return models if models and combined == totals else None
 
 
 def _run_requester(run: UsageRunNode, owner: str | None) -> str | None:

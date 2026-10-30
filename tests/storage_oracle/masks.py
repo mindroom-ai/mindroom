@@ -30,7 +30,7 @@ from mindroom.delegation.state import DELEGATION_STATE_KEY
 from mindroom.history.storage import has_queued_force_compaction
 from mindroom.llm.messages import Message
 from mindroom.llm.runs import RunRecord, RunStatus, TeamRunRecord
-from mindroom.llm.usage import ModelMetrics, RunMetrics, TokenCounts
+from mindroom.llm.usage import TOKEN_FIELDS, ModelMetrics, RunMetrics, TokenCounts
 from mindroom.session_storage.legacy_scope_metadata import (
     LEGACY_COMPACTION_METADATA_KEY,
     LEGACY_MATRIX_HISTORY_METADATA_KEY,
@@ -228,8 +228,14 @@ def _old_reader_view(runs: Sequence[AnyRunRecord]) -> list[str]:
     return [run.run_id for run in sorted(turns, key=lambda run: (run.created_at, run.run_id))]
 
 
-def _counted(value: object) -> int:
-    return value if isinstance(value, int) and not isinstance(value, bool) else 0
+def _counted_tokens(values: dict[str, Any]) -> TokenCounts:
+    """Return the counters of a stored usage dict the way the old totals counted them: a non-count counts as 0."""
+    return TokenCounts(
+        **{
+            name: value if isinstance(value := values.get(name), int) and not isinstance(value, bool) else 0
+            for name in TOKEN_FIELDS
+        },
+    )
 
 
 def _old_session_totals(ledger: object) -> dict[str, Any] | None:
@@ -250,7 +256,7 @@ def _old_session_totals(ledger: object) -> dict[str, Any] | None:
         metrics = snapshot.get("metrics")
         if not isinstance(metrics, dict):
             continue
-        totals.tokens = totals.tokens + TokenCounts.from_mapping(metrics, _counted)
+        totals.tokens = totals.tokens + _counted_tokens(metrics)
         details = metrics.get("details")
         models = details.get("model") if isinstance(details, dict) else None
         if not isinstance(models, list):
@@ -262,7 +268,7 @@ def _old_session_totals(ledger: object) -> dict[str, Any] | None:
                 continue
             model_id, provider = raw.get("id"), raw.get("provider")
             entry = ModelMetrics(
-                tokens=TokenCounts.from_mapping(raw, _counted),
+                tokens=_counted_tokens(raw),
                 id=model_id if isinstance(model_id, str) else "",
                 provider=provider if isinstance(provider, str) else "",
             )

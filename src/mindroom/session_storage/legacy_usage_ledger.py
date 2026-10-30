@@ -120,7 +120,7 @@ def _project_usage(run: Mapping[str, object]) -> dict[str, object]:
 
 
 def _project_requests(messages: object) -> list[dict[str, object]] | None:
-    """Project current assistant counters, timestamps and recorded model attribution."""
+    """Project assistant counters and timestamps."""
     if not isinstance(messages, list):
         return None
     requests: list[dict[str, object]] = []

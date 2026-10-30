@@ -12,7 +12,7 @@ from time import time
 from typing import TYPE_CHECKING, Any, Self
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Mapping
+    from collections.abc import Mapping
 
     from mindroom.llm.messages import ModelProvenance
 
@@ -30,11 +30,6 @@ class TokenCounts:
     audio_input_tokens: int = 0
     audio_output_tokens: int = 0
     audio_total_tokens: int = 0
-
-    @classmethod
-    def from_mapping(cls, values: Mapping[str, object], read: Callable[[object], int]) -> TokenCounts:
-        """Read each counter of a stored dict, None when it is missing, through the reader's own validation rule."""
-        return cls(**{name: read(values.get(name)) for name in TOKEN_FIELDS})
 
     def with_totals(self) -> TokenCounts:
         """Return these counts with ``total_tokens`` and ``audio_total_tokens`` the sums of their parts."""
@@ -200,26 +195,6 @@ class ModelMetrics(_Counts):
             _merge_numeric(self.provider_metrics, other.provider_metrics)
 
 
-def _detailed_dict(record: RunMetrics) -> dict[str, Any]:
-    """Return the stored dict of a usage record with a per-model breakdown, its ``details`` entries flattened too."""
-    values = _flattened(record)
-    if record.details is not None:
-        # TODO(simplify): details entries keep an empty ``provider_metrics`` that ``ModelMetrics.to_dict`` drops.
-        # Write each entry with ``to_dict``. Stored data would notice: details entries lose ``"provider_metrics": {}``.
-        values["details"] = {
-            model_type: [_compact(_flattened(entry), keep_empty=True) for entry in entries]
-            for model_type, entries in record.details.items()
-        }
-    return _compact(values)
-
-
-def _details_from_dict(details: Mapping[str, list[Any]]) -> dict[str, list[ModelMetrics]]:
-    return {
-        model_type: [ModelMetrics.from_dict(entry) if isinstance(entry, dict) else entry for entry in entries]
-        for model_type, entries in details.items()
-    }
-
-
 @dataclass(slots=True, kw_only=True)
 class RunMetrics(_Counts):
     """Usage one run accumulated over all its requests, with a per-model breakdown in ``details``.
@@ -257,15 +232,26 @@ class RunMetrics(_Counts):
         _add_counts(self, usage)
 
     def to_dict(self) -> dict[str, Any]:
-        """Return the stored dict shape."""
-        return _detailed_dict(self)
+        """Return the stored dict shape, its ``details`` entries flattened too."""
+        values = _flattened(self)
+        if self.details is not None:
+            # TODO(simplify): details entries keep an empty ``provider_metrics`` that ``ModelMetrics.to_dict`` drops.
+            # Write each entry with ``to_dict``. Stored data would notice: details entries lose ``"provider_metrics": {}``.
+            values["details"] = {
+                model_type: [_compact(_flattened(entry), keep_empty=True) for entry in entries]
+                for model_type, entries in self.details.items()
+            }
+        return _compact(values)
 
     @classmethod
     def from_dict(cls, data: Mapping[str, Any]) -> Self:
         """Rebuild from a stored dict, ignoring keys this type does not model."""
         values = _known_counts(cls, data)
         if values.get("details") is not None:
-            values["details"] = _details_from_dict(values["details"])
+            values["details"] = {
+                model_type: [ModelMetrics.from_dict(entry) if isinstance(entry, dict) else entry for entry in entries]
+                for model_type, entries in values["details"].items()
+            }
         return cls(**values)
 
     def __add__(self, other: RunMetrics) -> RunMetrics:

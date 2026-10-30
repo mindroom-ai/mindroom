@@ -21,9 +21,6 @@ if TYPE_CHECKING:
 
 type UnreadableLayout = Literal["session table unavailable", "session schema unsupported", "usage schema unsupported"]
 
-# The layout version from which each session's ledger rows sum to its totals: the step to it keeps what the session's
-# stored totals counted beyond its run rows as a row of its own (``legacy_usage_totals``).
-LEDGER_TOTALS_VERSION = 7
 _SESSION_COLUMNS = frozenset({"session_id", "user_id"})
 _META_COLUMNS = frozenset({"version", "owner_kind", "owner_id"})
 _USAGE_COLUMNS = frozenset({"id", "session_id", "run_id", "usage_data"})
@@ -131,7 +128,6 @@ def stored_usage(
 
 
 __all__ = [
-    "LEDGER_TOTALS_VERSION",
     "RecordedMeta",
     "StoredSession",
     "UnreadableLayout",

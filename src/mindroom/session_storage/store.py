@@ -44,7 +44,7 @@ from mindroom.session_storage.schema import (
     usage_upsert_sql,
 )
 from mindroom.session_storage.types import ConversationSession, session_state_snapshot
-from mindroom.usage.storage import project_helper_usage, run_usage_snapshot
+from mindroom.usage.storage import helper_usage_snapshot, run_usage_snapshot
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Collection, Iterable, Iterator, Mapping, Sequence
@@ -280,9 +280,23 @@ class ConversationStore:
         with self.transaction(write=True) as connection:
             created = ensure_session_row(connection, self.names, session)
             saved = _write_run(connection, self.names, session.session_id, data, kind, interrupted=interrupted)
+            # A run saved again when it continues after a pause, or at a checkpoint, replaces its snapshot, so it
+            # counts once.
+            recorded = False
             if usage is not None and saved.outcome != "final":
+                recorded = True
                 snapshot = {**usage, "created_at": saved.created_at, "updated_at": saved.updated_at}
-                _record_run_usage(connection, self.names, session.session_id, data["run_id"], snapshot)
+                connection.execute(
+                    usage_upsert_sql(self.names),
+                    (session.session_id, data["run_id"], json.dumps(snapshot)),
+                )
+            # Background readers learn of recorded usage, and of a finished run new to the log or finished after the
+            # turns it waited for, through the session's update time (``list_updated_sessions``).
+            if recorded or (saved.moved and data["status"] not in _NON_VISIBLE):
+                connection.execute(
+                    f"UPDATE {quote_identifier(self.names.sessions)} SET updated_at = ? WHERE session_id = ?",  # noqa: S608
+                    (saved.updated_at, session.session_id),
+                )
             stored = self._write_state(connection, session, created, state)
         _record_stored_state(session, stored)
         _mirror(session, saved)
@@ -466,7 +480,7 @@ class ConversationStore:
 
         ``initial_session`` creates the conversation's row when no run has yet.
         """
-        snapshot = project_helper_usage(usage, usage_id=usage_id, kind=kind, requester_id=requester_id)
+        snapshot = helper_usage_snapshot(usage, usage_id=usage_id, kind=kind, requester_id=requester_id)
         created = None
         with self.transaction(write=True) as connection:
             if initial_session is not None and ensure_session_row(connection, self.names, initial_session) is not None:
@@ -788,13 +802,6 @@ def _write_run(
     upsert_run(connection, names, session_id, data, kind, seq=seq, created_at=created_at, updated_at=now)
     set_visible_messages(connection, names, run_id, data["messages"], data["status"])
     _adopt_requester(connection, names, session_id, data.get("user_id"))
-    if moved and data["status"] not in _NON_VISIBLE:
-        # A finished run new to the log, or one finished after the turns it waited for, is news to update-time cursors,
-        # whether or not its save records usage.
-        connection.execute(
-            f"UPDATE {quote_identifier(names.sessions)} SET updated_at = ? WHERE session_id = ?",  # noqa: S608
-            (now, session_id),
-        )
     [written] = _read_runs(connection, names, "run.run_id = ?", (run_id,))
     return _Saved(run_id, "written", created_at, now, moved, written)
 
@@ -1117,25 +1124,6 @@ def delete_runs_in_transaction(
             (session_id, selected),
         ).fetchall()
     }
-
-
-def _record_run_usage(
-    connection: sqlite3.Connection,
-    names: TableNames,
-    session_id: str,
-    run_id: str,
-    snapshot: dict[str, object],
-) -> None:
-    """Replace the run's usage snapshot in the ledger and move the session's update time.
-
-    A run saved again when it continues after a pause, or at a checkpoint, replaces its snapshot, so it counts once;
-    background readers learn of the save through the update time (``list_updated_sessions``).
-    """
-    connection.execute(usage_upsert_sql(names), (session_id, run_id, json.dumps(snapshot)))
-    connection.execute(
-        f"UPDATE {quote_identifier(names.sessions)} SET updated_at = ? WHERE session_id = ?",  # noqa: S608
-        (int(time()), session_id),
-    )
 
 
 __all__ = [

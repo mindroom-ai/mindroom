@@ -14,7 +14,7 @@ if TYPE_CHECKING:
 
     from mindroom.llm.messages import Message
     from mindroom.llm.runs import AnyRunRecord
-    from mindroom.llm.usage import HelperUsage, MessageMetrics, ModelMetrics, RunMetrics
+    from mindroom.llm.usage import HelperUsage, ModelMetrics, RunMetrics
 
 # Run metadata key holding the projected usage of requests mid-turn compaction folded out of the run's messages.
 COMPACTED_REQUESTS_METADATA_KEY = "mindroom_compacted_requests"
@@ -98,7 +98,7 @@ def request_usage(message: Message) -> RequestUsage | None:
         message.role != "assistant"
         or message.from_history
         or usage_sums_attempts(provider_data)
-        or not _reported_counters(message.metrics)
+        or not project_token_counters(message.metrics.to_dict())
     ):
         return None
     return RequestUsage(
@@ -115,8 +115,10 @@ def message_request_snapshot(message: Message) -> dict[str, object] | None:
     attribution (``False``), apart from a message stored before stamps existed, whose model the report infers.
     """
     request = request_usage(message)
-    if request is None or (snapshot := _project_request(request)) is None:
+    if request is None:
         return None
+    snapshot = _project_request(request)
+    assert snapshot is not None, "a request reported counters, so it projects to a snapshot"
     if request.model is None and MODEL_PROVENANCE_KEY in (_provider_data(message) or {}):
         snapshot["model"] = snapshot["model_provider"] = False
     return snapshot
@@ -125,10 +127,6 @@ def message_request_snapshot(message: Message) -> dict[str, object] | None:
 def _provider_data(message: Message) -> dict[str, object] | None:
     # A message read from a row worker code wrote can hold provider data of any shape.
     return message.provider_data if isinstance(message.provider_data, dict) else None
-
-
-def _reported_counters(metrics: MessageMetrics) -> bool:
-    return bool(project_token_counters(metrics.to_dict()))
 
 
 def _carried_requests(record: AnyRunRecord, metadata: Mapping[str, object]) -> list[dict[str, object]]:
@@ -150,7 +148,7 @@ def _carried_requests(record: AnyRunRecord, metadata: Mapping[str, object]) -> l
     return requests
 
 
-def project_helper_usage(
+def helper_usage_snapshot(
     usage: HelperUsage,
     *,
     usage_id: str,
@@ -226,29 +224,18 @@ def stored_token_counts(values: Mapping[str, object]) -> TokenCounts | None:
     """
     if all(values.get(name) is None for name in TOKEN_FIELDS):
         return None
-    return TokenCounts.from_mapping(values, _stored_count)
+    return TokenCounts(**{name: _stored_count(values.get(name)) for name in TOKEN_FIELDS})
 
 
 def _stored_count(value: object) -> int:
-    if (count := _whole_count(value)) is None:
-        raise ValueError
-    return count
-
-
-def _whole_count(value: object) -> int | None:
     if value is None:
         return 0
-    if isinstance(value, bool):
-        return None
-    if isinstance(value, int):
-        parsed = value
-    elif isinstance(value, float) and value.is_integer():
-        parsed = int(value)
-    elif isinstance(value, str) and len(value) <= 32:
-        try:
-            parsed = int(value)
-        except ValueError:
-            return None
+    if isinstance(value, int) and not isinstance(value, bool):
+        count = value
+    elif (isinstance(value, float) and value.is_integer()) or (isinstance(value, str) and len(value) <= 32):
+        count = int(value)
     else:
-        return None
-    return parsed if parsed >= 0 else None
+        raise ValueError
+    if count < 0:
+        raise ValueError
+    return count

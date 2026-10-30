@@ -43,6 +43,9 @@ _SESSION_COLUMN_SQL = ", ".join(f"{column} {column_type}" for column, column_typ
 LOG_VERSION = 7
 # The first version whose meta row names the database's owner.
 OWNER_VERSION = 4
+# The first version whose ledger rows sum to each session's totals: the step to it keeps what a session's stored totals
+# counted beyond its run rows as a row of its own (``legacy_usage_totals``).
+LEDGER_TOTALS_VERSION = 7
 _TEAM_STORAGE_NAME_PATTERN = re.compile(r"[^a-zA-Z0-9_]+")
 # The statuses of a run that does not replay as model history, as stored, and as an SQL list.
 NON_VISIBLE_RUN_STATUS_VALUES = tuple(sorted(status.value for status in NON_VISIBLE_RUN_STATUSES))
@@ -247,6 +250,7 @@ def index_sql(table: str, *columns: str) -> str:
 
 
 __all__ = [
+    "LEDGER_TOTALS_VERSION",
     "LOG_VERSION",
     "NON_VISIBLE_RUN_STATUS_SQL",
     "NON_VISIBLE_RUN_STATUS_VALUES",

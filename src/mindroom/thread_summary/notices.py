@@ -7,7 +7,6 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING
 
-from mindroom.authorization import ReplyMembershipPendingError
 from mindroom.constants import THREAD_SUMMARY_CONTENT_KEY
 from mindroom.entity_resolution import current_internal_sender_ids
 from mindroom.logging_config import get_logger
@@ -16,9 +15,8 @@ from mindroom.matrix.message_builder import build_message_content
 from mindroom.thread_summary import schedule
 from mindroom.thread_summary.state import (
     THREAD_SUMMARY_MAX_LENGTH,
-    SummaryState,
     TruncatedThreadHistoryError,
-    human_summary_authorizer,
+    current_thread_summary_from_history,
     load_complete_thread_history,
 )
 
@@ -210,12 +208,7 @@ async def set_manual_thread_summary(
     re-summarization. ``pin=False`` writes the summary and releases any pin an
     earlier manual write established.
     """
-    if not isinstance(summary, str) or not summary.strip():
-        msg = "summary must be a non-empty string."
-        raise ThreadSummaryWriteError(msg)
-
-    normalized_summary = normalize_thread_summary_text(summary)
-    if not normalized_summary:
+    if not isinstance(summary, str) or not (normalized_summary := normalize_thread_summary_text(summary)):
         msg = "summary must be a non-empty string."
         raise ThreadSummaryWriteError(msg)
     if len(normalized_summary) > THREAD_SUMMARY_MAX_LENGTH:
@@ -233,23 +226,20 @@ async def set_manual_thread_summary(
             msg = "Failed to fetch thread history for the target thread."
             raise ThreadSummaryWriteError(msg) from exc
 
-        try:
-            state = SummaryState.from_history(
-                thread_history,
-                thread_id=thread_id,
-                trusted_sender_ids=current_internal_sender_ids(config, runtime_paths),
-                authorize_human=human_summary_authorizer(
-                    client,
-                    room_id,
-                    config,
-                    runtime_paths,
-                    entity_name,
-                    membership_index,
-                ),
-            )
-        except ReplyMembershipPendingError as exc:
+        state = current_thread_summary_from_history(
+            client,
+            room_id,
+            thread_id,
+            thread_history,
+            config=config,
+            runtime_paths=runtime_paths,
+            entity_name=entity_name,
+            membership_index=membership_index,
+            trusted_sender_ids=current_internal_sender_ids(config, runtime_paths),
+        )
+        if state is None:
             msg = "Summary authorization awaits room membership; retry after membership is available."
-            raise ThreadSummaryWriteError(msg) from exc
+            raise ThreadSummaryWriteError(msg)
         generated_at = summary_generated_at(state.newest_generated_at)
         try:
             event_id = await send_thread_summary_notice(

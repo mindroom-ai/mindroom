@@ -25,9 +25,8 @@ from mindroom.session_storage.agent_storage import (
     create_state_storage,
     prepare_conversation_database,
 )
-from mindroom.session_storage.schema import TableNames, table_names
+from mindroom.session_storage.schema import LEDGER_TOTALS_VERSION, TableNames, table_names
 from mindroom.session_storage.types import ConversationSession
-from mindroom.session_storage.usage_reader import LEDGER_TOTALS_VERSION
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity, resolve_worker_key, worker_dir_name
 from mindroom.usage import stats_storage
 from mindroom.usage.stats_storage import (

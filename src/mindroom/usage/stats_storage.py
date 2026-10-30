@@ -21,9 +21,8 @@ from mindroom.private_storage.private_instance_identity import (
 )
 from mindroom.requester_identity import equivalent_requester_ids
 from mindroom.runtime_resolution import resolve_agent_storage
-from mindroom.session_storage.schema import TableNames, table_names
+from mindroom.session_storage.schema import LEDGER_TOTALS_VERSION, TableNames, table_names
 from mindroom.session_storage.usage_reader import (
-    LEDGER_TOTALS_VERSION,
     read_only_snapshot,
     recorded_meta,
     stored_sessions,
