@@ -8,7 +8,7 @@ conversion still reads. The record is mutable: history replay, compaction, and n
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from time import time
 from typing import TYPE_CHECKING, Any, Literal, cast
 from uuid import uuid4
@@ -86,6 +86,18 @@ def usage_sums_attempts(provider_data: Mapping[str, object] | None) -> bool:
     Such usage counts toward the totals but describes no one request: not its size, its price, or its time.
     """
     return (provider_data or {}).get(AGGREGATE_USAGE_KEY) is True
+
+
+def without_replay_state(message: Message) -> Message:
+    """Return ``message`` without the replay state its provider stored, keeping MindRoom's provenance and usage marks.
+
+    A provider replays a reply from the state it stored, such as Claude's blocks, a Responses id, digest, and output
+    items, a native checkpoint, or Gemini's parts, which describe the reply as it arrived. A reply MindRoom edits
+    drops that state, so every provider formats it from its canonical fields, as it does another provider's reply.
+    """
+    data = message.provider_data or {}
+    kept = {key: data[key] for key in (MODEL_PROVENANCE_KEY, AGGREGATE_USAGE_KEY) if key in data}
+    return replace(message, provider_data=kept or None)
 
 
 def is_own_model_message(message: Message) -> bool:
@@ -388,4 +400,5 @@ __all__ = [
     "tool_result_view",
     "usage_sums_attempts",
     "with_joined_system",
+    "without_replay_state",
 ]

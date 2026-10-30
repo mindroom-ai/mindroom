@@ -17,12 +17,14 @@ Before, the loop stored a `CANCELLED` or `ERROR` record that history never repla
   The calls of a batch that a stop cut off all count as unfinished, because the loop records a batch's results only once every call in it has ended.
 - Marking drops each call no stored result answers from its assistant message, as the tool-call window drops a call whose result it leaves out, so every stored call has its answer and any release's request is provider-valid.
   A message left with no text and no call stays stored, because it holds its request's usage, and replay leaves it out.
-  Providers that replay a reply's stored blocks (Claude, Gemini, OpenAI Responses) already replay only the calls the message still holds.
+- A message MindRoom edits, by dropping a call or the text a voice call never spoke, also drops the replay state its provider stored, keeping only MindRoom's model provenance and usage marks, and every provider formats it from its canonical fields, as it formats another provider's reply.
+  That state describes the reply as it arrived: Claude's blocks and Gemini's parts replay its text, a stored Responses id and digest let the next request continue a server response that still waits for the dropped call's output, and a native checkpoint's items replay the dropped call directly.
+  One rule for every edited message covers every route, the earlier releases included, which read the same state; messages the mark leaves whole keep their state, so their signed reasoning and prompt cache stay.
+  A request after a dropped checkpoint replays the history the checkpoint stood for once, from an earlier checkpoint or in full, and the next response the provider compacts records a new one.
 - The replay ends with a note derived from the stored record, `(turn stopped before completion)`, or `(turn failed before completion)` when the record holds a failure's text, with the number of calls that did not finish, so no synthetic text is stored and the wording can change without a migration.
   The note is an assistant message of its own: Claude and Gemini replay a reply's stored blocks rather than its text, so a note joined to that text never reached them.
 - The model now sees a stopped turn's finished tool results in full, as it does a completed turn's, instead of redacted previews capped at 32,000 characters.
 - Owners that end a run themselves rewrite that run's record instead of building another: a voice call keeps of its answer only what playout spoke, and CLI approval recovery ends the paused run it does not resume.
-  A voice reply's unspoken text leaves both its message and the replay data its provider stored, which would replay that text; the model provenance and usage marks stay, so the reply's usage keeps its model.
 - The rendered summaries earlier releases stored stay `COMPLETED` rows that replay as stored; only background readers check their flag, to leave the summary out of what the agent said.
 
 ## Rejected alternatives
@@ -31,6 +33,7 @@ Before, the loop stored a `CANCELLED` or `ERROR` record that history never repla
 - Storing the stopped turn as `CANCELLED` or `ERROR` and making those statuses replay needed a new status for every pending row above, a layout step marking every `CANCELLED` and `ERROR` row stored so far as pending, and changed the meaning of the stop endings the storage oracle's recordings hold; `RUNNING` could not serve, because the rows Agno stored as `RUNNING` replay today.
 - Marking the run with the loop's own save kept one write per run but needed the loop to know whether its owner ends the turn, or the stored status to differ from the record's, which readers of the record such as the team runtime and the OpenAI-compatible API check.
 - Dropping unfinished calls only at replay kept the stored row as the loop wrote it, but an earlier release would replay those calls without results, which providers reject.
+- Editing each provider's stored state to match an edited message (pruning Claude's blocks, a checkpoint's items, Gemini's parts) needs one rewrite per provider format, and still leaves a server-side response that waits for the dropped call.
 - Storing the note in the record would have tied model-visible wording to stored data.
 
 ## Limitations

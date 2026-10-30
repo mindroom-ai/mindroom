@@ -10,7 +10,7 @@ from __future__ import annotations
 from dataclasses import replace
 from typing import TYPE_CHECKING
 
-from mindroom.llm.messages import Message
+from mindroom.llm.messages import Message, without_replay_state
 from mindroom.llm.runs import RunStatus
 
 if TYPE_CHECKING:
@@ -26,8 +26,10 @@ def mark_interrupted(record: AnyRunRecord, *, error: str | None) -> None:
     """Make ``record`` the record of its interrupted turn: completed, marked, and holding only calls that finished.
 
     A call no stored result answers did not finish, and a request answers every call it replays, so the call leaves its
-    assistant message, as the tool-call window drops a call, and the marker counts it. Every message keeps its place,
-    an emptied one included, since it holds its request's usage. ``error``, when given, is the failure's text.
+    assistant message, as the tool-call window drops a call, and the marker counts it. A message that loses a call
+    loses the replay state its provider stored with it (``without_replay_state``), which still holds the call; every
+    other message stays as stored. Every message keeps its place, an emptied one included, since it holds its
+    request's usage. ``error``, when given, is the failure's text.
     """
     answered = {message.tool_call_id for message in record.messages if message.role == "tool"}
     unfinished = 0
@@ -36,7 +38,9 @@ def mark_interrupted(record: AnyRunRecord, *, error: str | None) -> None:
         calls = message.tool_calls or []
         kept = [call for call in calls if call.get("id") in answered]
         unfinished += len(calls) - len(kept)
-        messages.append(message if len(kept) == len(calls) else replace(message, tool_calls=kept or None))
+        messages.append(
+            message if len(kept) == len(calls) else without_replay_state(replace(message, tool_calls=kept or None)),
+        )
     record.messages = messages
     record.status = RunStatus.completed
     record.error = error or record.error

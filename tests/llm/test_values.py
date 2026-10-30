@@ -24,7 +24,7 @@ from mindroom.llm.events import (
     ToolStarted,
 )
 from mindroom.llm.media import Audio, File, Image, Video, canonical_mime_type
-from mindroom.llm.messages import Message
+from mindroom.llm.messages import AGGREGATE_USAGE_KEY, MODEL_PROVENANCE_KEY, Message, without_replay_state
 from mindroom.llm.provider import (
     Capabilities,
     ModelIdentity,
@@ -442,3 +442,30 @@ def test_a_tool_event_reports_the_call_as_it_was_when_the_event_was_made() -> No
     assert ToolCompleted(tool.call).call == ReportedCall("c", "t", {"q": 1}, result="done", is_error=False)
     with pytest.raises(FrozenInstanceError):
         started.call.result = "changed"  # type: ignore[misc]
+
+
+def test_a_message_without_its_replay_state_keeps_only_mindroom_s_provenance_and_usage_marks() -> None:
+    """What any route stored to replay a reply as it arrived goes; the marks usage reports read stay."""
+    marks = {MODEL_PROVENANCE_KEY: {"id": "m", "provider": "p"}, AGGREGATE_USAGE_KEY: True}
+    replay_state = {
+        # Claude, and Claude's native compaction.
+        "claude_blocks": [{"type": "text", "text": "Checking."}],
+        "context_management": {"applied_edits": []},
+        # OpenAI Responses and Codex: the stored response, its chain digest, its output items, its replay policy.
+        "response_id": "resp_1",
+        "mindroom_response_stored": True,
+        "mindroom_conversation_sha256": "digest",
+        "mindroom_response_output": [{"type": "function_call", "call_id": "c1"}],
+        "mindroom_portable_replay": False,
+        "mindroom_native_compaction": {"route": "r", "items": [{"type": "compaction"}]},
+        # Gemini, and its legacy message-level signature.
+        "gemini_parts": [{"text": "Checking."}],
+        "thought_signature": "c2ln",
+        # OpenRouter chat reasoning.
+        "reasoning_details": [{"type": "reasoning.text"}],
+    }
+    message = Message(role="assistant", content="Checking.", provider_data={**replay_state, **marks})
+
+    assert without_replay_state(message).provider_data == marks
+    assert without_replay_state(Message(role="assistant", provider_data=replay_state)).provider_data is None
+    assert message.provider_data == {**replay_state, **marks}

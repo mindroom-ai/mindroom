@@ -6,6 +6,7 @@ replays it from the store; a rendered summary an earlier release stored in its p
 
 from __future__ import annotations
 
+import json
 from typing import TYPE_CHECKING
 
 import pytest
@@ -18,18 +19,23 @@ from mindroom.history.request_messages import replayable_messages, scope_history
 from mindroom.history.session_context import ScopeSessionContext
 from mindroom.history.types import HistoryScope
 from mindroom.llm.messages import Message
+from mindroom.llm.provider import ModelRequest
 from mindroom.llm.runs import RunRecord, RunRequirement, RunStatus, ToolExecution
+from mindroom.native_compaction import NATIVE_CHECKPOINT_KEY, native_checkpoint_state
 from mindroom.providers.anthropic.wire import format_claude_messages
+from mindroom.providers.openai.responses_wire import conversation_digest, responses_request_kwargs
 from mindroom.response_turn import ResponseTurnContext
 from mindroom.session_storage.agent_storage import create_agent_state_storage
 from mindroom.session_storage.types import ConversationSession
 from tests.conftest import seed_session
 from tests.fakes.scripted_model import usage
+from tests.providers.openai_family_support import responses_adapter
 
 if TYPE_CHECKING:
     from pathlib import Path
 
     from mindroom.llm.runs import AnyRunRecord
+    from mindroom.providers.openai.responses import ResponsesAdapter
 
 _SCOPE = HistoryScope(kind="agent", scope_id="test_agent")
 
@@ -230,6 +236,117 @@ def test_claude_reads_the_note_and_only_the_finished_call_of_a_stopped_reply(tmp
     ]
     assert [block["id"] for block in sent if block["type"] == "tool_use"] == ["c1"]
     assert [block["tool_use_id"] for block in sent if block["type"] == "tool_result"] == ["c1"]
+    # A release without the marker replays the stored messages as they are: no note, and the same calls.
+    rollback = _claude_blocks([*stopped.messages, Message(role="user", content="Go on.")])
+    assert [block["id"] for block in rollback if block["type"] == "tool_use"] == ["c1"]
+    assert [block.get("text") for block in rollback if block["type"] == "text"] == [
+        "List the files, then the processes.",
+        "Reading.",
+        "Looking.",
+        "Go on.",
+    ]
+
+
+def _responses_request(adapter: ResponsesAdapter, messages: list[Message]) -> dict[str, object]:
+    """Return the body ``adapter``'s OpenAI Responses route sends for ``messages``, with native compaction on."""
+    native = adapter.native_compaction_settings(threshold=1024, history_generation="", allow_authored=False)
+    kwargs = responses_request_kwargs(
+        model_id=adapter.identity.id,
+        request=ModelRequest(messages=messages, native_compaction=native),
+        settings=adapter.settings,
+        wire=adapter.wire,
+        provider=adapter.identity.provider,
+    )
+    return {**kwargs.pop("extra_body", {}), **kwargs}
+
+
+def _sent_calls(body: dict[str, object]) -> tuple[list[object], list[object]]:
+    """Return the call ids of a Responses body's function calls and of its function call outputs."""
+    items = [item for item in body["input"] if isinstance(item, dict)]  # type: ignore[union-attr]
+    calls = [item["call_id"] for item in items if item.get("type") == "function_call"]
+    outputs = [item["call_id"] for item in items if item.get("type") == "function_call_output"]
+    return calls, outputs
+
+
+def _stopped_responses_reply(provider_data: dict[str, object]) -> RunRecord:
+    """Return a stopped run whose Responses reply asked for two calls, of which only the first finished."""
+    return _interrupted(
+        "stopped",
+        Message(role="user", content="Check both."),
+        Message(
+            role="assistant",
+            content="Checking.",
+            tool_calls=[_call("c1"), _call("c2")],
+            provider_data=provider_data,
+        ),
+        Message(role="tool", tool_call_id="c1", tool_name="shell", content="first"),
+    )
+
+
+def test_a_stopped_responses_reply_is_never_continued_on_the_server(tmp_path: Path) -> None:
+    """The stored response still waits for the call that did not finish, so the next request replays the history.
+
+    A release without the marker replays the stored messages as they are, and sends the same valid request.
+    """
+    stored = {
+        "response_id": "resp_1",
+        "mindroom_response_stored": True,
+        "mindroom_conversation_sha256": conversation_digest([Message(role="user", content="Check both.")]),
+    }
+    stopped = _stopped_responses_reply(stored)
+    follow_up = Message(role="user", content="Go on.")
+
+    for history in (replayable_messages([stopped]), stopped.messages):
+        body = _responses_request(
+            responses_adapter(tmp_path, model_id="custom-alias", store=True),
+            [*history, follow_up],
+        )
+        assert "previous_response_id" not in body
+        # One call goes, under the id the request gives it, with its output.
+        calls, outputs = _sent_calls(body)
+        assert (len(calls), outputs) == (1, calls)
+
+
+def test_a_stopped_reply_s_native_checkpoint_never_brings_back_a_call_that_did_not_finish(tmp_path: Path) -> None:
+    """The checkpoint stored the reply's output, both calls included, so the reply replays from its own fields."""
+    adapter = responses_adapter(tmp_path, store=False)
+    native = adapter.native_compaction_settings(threshold=1024, history_generation="", allow_authored=False)
+    assert native is not None
+    output = [
+        {"type": "compaction", "id": "cmp_1", "encrypted_content": "opaque-checkpoint"},
+        {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "Checking."}]},
+        *(
+            {"type": "function_call", "call_id": call_id, "name": "shell", "arguments": "{}"}
+            for call_id in ("c1", "c2")
+        ),
+    ]
+    stopped = _stopped_responses_reply({NATIVE_CHECKPOINT_KEY: native_checkpoint_state(output, native)})
+    follow_up = Message(role="user", content="Go on.")
+
+    for history in (replayable_messages([stopped]), stopped.messages):
+        body = _responses_request(adapter, [*history, follow_up])
+        # One call goes, under the id the request gives it, with its output; the history before it replays in full.
+        calls, outputs = _sent_calls(body)
+        assert (len(calls), outputs) == (1, calls)
+        assert "opaque-checkpoint" not in json.dumps(body)
+
+
+def test_a_message_marking_left_whole_keeps_its_replay_state() -> None:
+    """Only a message that lost a call drops what its provider stored; the others replay as they arrived."""
+    whole = {"claude_blocks": [{"type": "tool_use", "id": "c1", "name": "shell", "input": {}}]}
+    cut = {"claude_blocks": [{"type": "tool_use", "id": "c2", "name": "shell", "input": {}}], "mindroom_model": {}}
+    stopped = _interrupted(
+        "stopped",
+        Message(role="user", content="Run both."),
+        Message(role="assistant", tool_calls=[_call("c1")], provider_data=whole),
+        Message(role="tool", tool_call_id="c1", tool_name="shell", content="first"),
+        Message(role="assistant", tool_calls=[_call("c2")], provider_data=cut),
+    )
+
+    assert [message.provider_data for message in stopped.messages if message.role == "assistant"] == [
+        whole,
+        {"mindroom_model": {}},
+    ]
 
 
 def _rendered_summary() -> RunRecord:
