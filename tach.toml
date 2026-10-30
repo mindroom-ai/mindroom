@@ -3962,7 +3962,7 @@ visibility = ["mindroom.cli.doctor", "mindroom.memory._backend", "mindroom.memor
 
 [[modules]]
 path = "mindroom.memory._mem0_usage"
-depends_on = ["mindroom.llm"]
+depends_on = ["mindroom.llm", "mindroom.providers.names"]
 visibility = ["mindroom.memory._mem0_backend", "mindroom.memory.config"]
 
 [[modules]]
@@ -4920,6 +4920,7 @@ depends_on = [
     "mindroom.llm",
     "mindroom.logging_config",
     "mindroom.message_target",
+    "mindroom.providers.names",
     "mindroom.session_ids",
     "mindroom.approval.tool_approval",
     "mindroom.tool_system.agno_toolkits",
