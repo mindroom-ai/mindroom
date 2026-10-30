@@ -17,7 +17,7 @@ from uuid import UUID
 import nio
 import pytest
 
-from mindroom import bot_room_lifecycle, thread_summary
+from mindroom import bot_room_lifecycle
 from mindroom.agent_reply_membership import AgentReplyMembershipIndex
 from mindroom.agent_reply_membership_sync import AgentReplyMembershipSync
 from mindroom.authorization import is_sender_allowed_for_responder
@@ -45,6 +45,7 @@ from mindroom.matrix.room_cleanup import cleanup_all_orphaned_bots
 from mindroom.matrix.state import MatrixState
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.orchestrator import _MultiAgentOrchestrator
+from mindroom.thread_summary import notices
 from mindroom.tool_system.worker_routing import agent_state_root_path
 from tests.access_schema_support import with_responder_access
 from tests.bot_helpers import make_test_agent_bot
@@ -1926,7 +1927,7 @@ async def test_router_welcome_gets_thread_summary(
     )
     install_send_response_mock(bot, AsyncMock(return_value="$welcome"))
     send_message_result = AsyncMock(return_value=None)
-    monkeypatch.setattr(thread_summary, "send_message_result", send_message_result)
+    monkeypatch.setattr(notices, "send_message_result", send_message_result)
 
     assert await bot._room_lifecycle.send_welcome_message_if_empty("!empty:localhost")
 

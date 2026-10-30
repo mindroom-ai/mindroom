@@ -257,7 +257,7 @@ def _apply_semantic_ingestion_disposition(
     if semantic_result is AdmissionResult.DUPLICATE:
         retained = _require_matching_semantic_event(transaction, principal_id, event)
         if retained["kind"] == EventKind.OPAQUE_HISTORY and projected is not None:
-            project_with_redactions(
+            _project_with_redactions(
                 transaction,
                 principal_id,
                 projected,
@@ -474,22 +474,7 @@ def _record_room_history_recovery_locked(
     return _room_history_recovery_from_row(room_id, row)
 
 
-def record_room_history_recovery(
-    transaction: Transaction,
-    principal_id: str,
-    room_id: str,
-) -> RoomHistoryRecovery | None:
-    """Record one unknown gap while serialized with membership fencing."""
-    state = _claim_membership_state(transaction, principal_id, room_id)
-    return _record_room_history_recovery_locked(
-        transaction,
-        principal_id,
-        room_id,
-        state,
-    )
-
-
-def claim_room_history_recovery(
+def _claim_room_history_recovery(
     transaction: Transaction,
     principal_id: str,
     recovery: RoomHistoryRecovery,
@@ -562,10 +547,10 @@ def install_room_history_recovery_chunk(
         expected_membership_epoch=expected_membership_epoch,
     ):
         return False
-    if not claim_room_history_recovery(transaction, principal_id, recovery):
+    if not _claim_room_history_recovery(transaction, principal_id, recovery):
         return False
     for event in events:
-        project_with_redactions(
+        _project_with_redactions(
             transaction,
             principal_id,
             event,
@@ -594,7 +579,7 @@ def settle_room_history_recovery(
         expected_membership_epoch=expected_membership_epoch,
     ):
         return HistoryRecoveryOutcome.SUPERSEDED
-    if not claim_room_history_recovery(transaction, principal_id, recovery):
+    if not _claim_room_history_recovery(transaction, principal_id, recovery):
         return HistoryRecoveryOutcome.SUPERSEDED
     if exhausted_server and unreadable:
         # Repairing unmasks every marker the gap retracted, and one from before
@@ -637,7 +622,7 @@ def install_hydration_chunk(
     ):
         return False
     for event in events:
-        project_with_redactions(
+        _project_with_redactions(
             transaction,
             principal_id,
             event,
@@ -659,33 +644,6 @@ def current_membership_epoch(
         (principal_id, room_id),
     )
     return 0 if row is None else int(row["membership_epoch"])
-
-
-def membership_position(
-    transaction: Transaction,
-    principal_id: str,
-    room_id: str,
-) -> RoomMembershipPosition:
-    """Return the journal tenure that owns this room's events and deliveries."""
-    row = transaction.fetchone(
-        "SELECT membership_epoch, departure_fenced FROM room_membership WHERE principal_id = ? AND room_id = ?",
-        (principal_id, room_id),
-    )
-    if row is None:
-        return RoomMembershipPosition("leave", 0)
-    membership_epoch = row["membership_epoch"]
-    departure_fenced = row["departure_fenced"]
-    if (
-        type(membership_epoch) is not int
-        or membership_epoch < 0
-        or type(departure_fenced) is not int
-        or departure_fenced not in (0, 1)
-    ):
-        raise IngestionBatchIntegrityError
-    return RoomMembershipPosition(
-        "leave" if departure_fenced else "join",
-        membership_epoch,
-    )
 
 
 def ingestion_membership_position(
@@ -944,7 +902,7 @@ def admit(
     if row is None:
         return AdmissionResult.DUPLICATE
     if projected is not None:
-        project_with_redactions(
+        _project_with_redactions(
             transaction,
             principal_id,
             projected,
@@ -976,7 +934,7 @@ def _snapshot_interactive_source(
         raise DeliveryProjectionPendingError(msg)
 
 
-def project_with_redactions(
+def _project_with_redactions(
     transaction: Transaction,
     principal_id: str,
     projected: ProjectedEvent,
@@ -1392,7 +1350,7 @@ def is_pending(transaction: Transaction, principal_id: str, event_id: str) -> bo
     return row is not None
 
 
-def source_has_redaction_handoff(
+def _source_has_redaction_handoff(
     transaction: Transaction,
     principal_id: str,
     event_id: str,
@@ -1411,7 +1369,7 @@ def source_has_redaction_handoff(
     return captured.conversation_target is None or captured.conversation_target.room_id == source["room_id"]
 
 
-def sources_settled_by_departure(
+def _sources_settled_by_departure(
     transaction: Transaction,
     principal_id: str,
     event_ids: tuple[str, ...],
@@ -1456,7 +1414,7 @@ def response_recovery_state(
     return ResponseRecoveryState(
         pending_sources=pending,
         redacted_sources=tuple(
-            not source_pending and source_has_redaction_handoff(transaction, principal_id, event_id, turn_record)
+            not source_pending and _source_has_redaction_handoff(transaction, principal_id, event_id, turn_record)
             for event_id, source_pending in zip(source_event_ids, pending, strict=True)
         ),
         turn_records=tuple(
@@ -1464,7 +1422,7 @@ def response_recovery_state(
         ),
         final_delivery=delivery,
         sources_settled_by_departure=(
-            not any(pending) and sources_settled_by_departure(transaction, principal_id, source_event_ids)
+            not any(pending) and _sources_settled_by_departure(transaction, principal_id, source_event_ids)
         ),
         reply=reply_messages.for_sources(transaction, principal_id, source_event_ids),
     )

@@ -39,7 +39,7 @@ from mindroom.budgets.monitor import BudgetMonitor
 from mindroom.config.main import Config
 from mindroom.constants import resolve_runtime_paths
 from mindroom.custom_tools.dynamic_workflow import _execute_room_agent_participant
-from mindroom.entity_resolution import current_internal_sender_ids, entity_identity_registry
+from mindroom.entity_resolution import entity_identity_registry
 from mindroom.history.turn_recorder import TurnRecorder
 from mindroom.hooks import EnrichmentItem
 from mindroom.knowledge.search import AgentKnowledge, KnowledgeSource, KnowledgeSourceDescription
@@ -67,7 +67,7 @@ from mindroom.skill_learning.tools import ReviewProgress
 from mindroom.teams.envelope import TeamTurnSpec, team_response_stream
 from mindroom.teams.formation import select_ad_hoc_team_mode
 from mindroom.teams.spec import TeamMode
-from mindroom.thread_summary import _generate_summary, _resolve_thread_summary_model_name, _ThreadEnrichment
+from mindroom.thread_summary.generation import GeneratedSummary, generate_summary, resolve_thread_summary_model_name
 from mindroom.tool_system.runtime_context import (
     build_execution_identity_from_runtime_context,
     tool_runtime_context,
@@ -817,26 +817,25 @@ async def _summarize(
     config: Config,
     runtime_paths: RuntimePaths,
     tag_vocabulary: str | None,
-) -> str | _ThreadEnrichment | None:
-    """Generate the helper thread's summary as the automatic pass does, with its model and trusted senders."""
-    return await _generate_summary(
+) -> GeneratedSummary | None:
+    """Summarize the helper thread with the summary model the automatic pass resolves."""
+    return await generate_summary(
         _helper_history(),
         config,
         runtime_paths,
-        model_name=_resolve_thread_summary_model_name(config, runtime_paths, None),
+        model_name=resolve_thread_summary_model_name(config, runtime_paths, None),
         tag_vocabulary=tag_vocabulary,
-        trusted_sender_ids=current_internal_sender_ids(config, runtime_paths),
     )
 
 
 async def _thread_summary(config: Config, runtime_paths: RuntimePaths) -> None:
     summary = await _summarize(config, runtime_paths, None)
-    assert summary == _SUMMARY, summary
+    assert summary == GeneratedSummary(summary=_SUMMARY), summary
 
 
 async def _thread_enrichment(config: Config, runtime_paths: RuntimePaths) -> None:
     enrichment = await _summarize(config, runtime_paths, _TAG_VOCABULARY)
-    assert enrichment == _ThreadEnrichment(summary=_SUMMARY, tags=["travel"]), enrichment
+    assert enrichment == GeneratedSummary(summary=_SUMMARY, tags=("travel",)), enrichment
 
 
 async def _room_topic(config: Config, runtime_paths: RuntimePaths) -> None:
@@ -1418,13 +1417,13 @@ SCENARIOS: dict[str, Scenario] = {
     ),
     **_structured_helper(
         "thread_summary",
-        "mindroom.thread_summary._generate_summary",
+        "mindroom.thread_summary.generation.generate_summary",
         _thread_summary,
         json.dumps({"summary": _SUMMARY}),
     ),
     **_structured_helper(
         "thread_enrichment",
-        "mindroom.thread_summary._generate_summary",
+        "mindroom.thread_summary.generation.generate_summary",
         _thread_enrichment,
         json.dumps({"summary": _SUMMARY, "tags": ["travel"]}),
     ),

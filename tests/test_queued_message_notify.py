@@ -8,7 +8,7 @@ from copy import deepcopy
 from dataclasses import dataclass, field, replace
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, Literal, Self, cast
-from unittest.mock import ANY, AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import nio
 import pytest
@@ -37,6 +37,7 @@ from mindroom.config.judgment import LLMJudgmentConfig
 from mindroom.config.main import Config
 from mindroom.config.mid_turn import MidTurnConfig
 from mindroom.config.models import ModelConfig
+from mindroom.constants import THREAD_SUMMARY_CONTENT_KEY
 from mindroom.conversation_resolver import MessageContext
 from mindroom.dispatch_handoff import PreparedIngress
 from mindroom.dispatch_source import (
@@ -48,7 +49,6 @@ from mindroom.dispatch_source import (
     TRUSTED_INTERNAL_RELAY_SOURCE_KIND,
     VOICE_SOURCE_KIND,
 )
-from mindroom.entity_resolution import current_internal_sender_ids
 from mindroom.final_delivery import FinalDeliveryOutcome
 from mindroom.history.request_messages import TurnMessages, build_request, scope_history_messages
 from mindroom.history.session_context import ScopeSessionContext
@@ -84,6 +84,8 @@ from mindroom.response_sources import ResponseSources
 from mindroom.session_storage.agent_storage import create_agent_state_storage, create_state_storage
 from mindroom.session_storage.store import ConversationStore, persist_to
 from mindroom.session_storage.types import ConversationSession, SessionKind
+from mindroom.thread_summary import schedule
+from mindroom.thread_summary.schedule import _ThreadSummaryBaselines
 from mindroom.turn_policy import DispatchPlan, PreparedDispatch, ResponseAction
 from mindroom.turns.dispatch import TurnDispatcher
 from tests.access_schema_support import with_current_room_member_access
@@ -119,6 +121,7 @@ if TYPE_CHECKING:
 
     from mindroom.bot import AgentBot
     from mindroom.delivery_gateway import FinalDeliveryRequest
+    from mindroom.llm.provider import ModelRequest
     from mindroom.turn_origin import TurnOrigin
 
 
@@ -909,9 +912,22 @@ async def test_post_response_effects_skip_buttons_when_prompt_membership_ended(t
     client.room_send.assert_not_awaited()
 
 
+def _summarized_lines(request: ModelRequest) -> list[str]:
+    """Return the thread lines one summary request asked the model to summarize."""
+    prompt = request.messages[-1].get_content_string()
+    start = prompt.index("<thread_messages>\n") + len("<thread_messages>\n")
+    return prompt[start : prompt.index("\n</thread_messages>")].splitlines()
+
+
 @pytest.mark.asyncio
-async def test_post_response_effects_queues_summary_with_stale_hint_inside_margin(tmp_path: Path) -> None:
+async def test_post_response_effects_queues_summary_with_stale_hint_inside_margin(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """A stale hint just below threshold should still reach the live summary check."""
+    monkeypatch.setattr(schedule, "THREAD_SUMMARY_BASELINES", _ThreadSummaryBaselines())
+    model = ScriptedModel([answer('{"summary": "Summary"}')])
+    install_model_providers(monkeypatch, {"default": model})
     config = _config(tmp_path)
     config.defaults.thread_summary_first_threshold = 5
     runtime_paths = runtime_paths_for(config)
@@ -976,14 +992,9 @@ async def test_post_response_effects_queues_summary_with_stale_hint_inside_margi
         scheduled_tasks.append(task)
         return task
 
-    with (
-        patch("mindroom.post_response_effects.create_background_task", side_effect=schedule_background_task),
-        patch("mindroom.thread_summary._generate_summary", new=AsyncMock(return_value="Summary")) as mock_generate,
-        patch(
-            "mindroom.thread_summary._send_thread_summary_event",
-            new=AsyncMock(return_value="$summary"),
-        ) as mock_send,
-    ):
+    client.room_send.return_value = nio.RoomSendResponse(event_id="$summary", room_id="!room:localhost")
+
+    with patch("mindroom.post_response_effects.create_background_task", side_effect=schedule_background_task):
         await apply_post_response_effects(
             FinalDeliveryOutcome(
                 terminal_status="completed",
@@ -1015,31 +1026,29 @@ async def test_post_response_effects_queues_summary_with_stale_hint_inside_margi
     # stops one message short of the thread. It summarizes the projected
     # messages plus the answer it was queued for, and counts that answer -- the
     # same number the pre-queue gate above already used.
-    generated_history = mock_generate.await_args.args[0]
-    assert list(generated_history[:-1]) == thread_history
-    assert (generated_history[-1].sender, generated_history[-1].body) == (client.user_id, "response")
-    assert mock_generate.await_args.args[1:] == (config, runtime_paths)
-    assert mock_generate.await_args.kwargs == {
-        "model_name": "default",
-        "tag_vocabulary": None,
-        "trusted_sender_ids": current_internal_sender_ids(config, runtime_paths),
-    }
-    mock_send.assert_awaited_once_with(
-        client,
-        "!room:localhost",
-        "$thread",
-        "Summary",
-        6,
-        "default",
-        conversation_reader,
-        initial_enrichment_complete=None,
-        generated_at=ANY,
-    )
+    (request,) = model.requests
+    assert _summarized_lines(request) == [
+        *(f"{message.sender}: {message.body}" for message in thread_history),
+        f"{client.user_id}: response",
+    ]
+    (sent,) = [call.kwargs["content"] for call in client.room_send.await_args_list]
+    assert sent["body"] == "Summary"
+    assert sent["m.relates_to"]["event_id"] == "$thread"
+    assert sent[THREAD_SUMMARY_CONTENT_KEY]["message_count"] == 6
+    assert sent[THREAD_SUMMARY_CONTENT_KEY]["model"] == "default"
+    assert "initial_enrichment_complete" not in sent[THREAD_SUMMARY_CONTENT_KEY]
 
 
 @pytest.mark.asyncio
-async def test_post_response_effects_queues_summary_with_entity_model_for_adhoc_room(tmp_path: Path) -> None:
+async def test_post_response_effects_queues_summary_with_entity_model_for_adhoc_room(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """Ad-hoc invited rooms should inherit the responding entity's summary model override."""
+    monkeypatch.setattr(schedule, "THREAD_SUMMARY_BASELINES", _ThreadSummaryBaselines())
+    # Only "qwen" is served, so summarizing with the default model would fail to build it.
+    model = ScriptedModel([answer('{"summary": "Summary"}')])
+    install_model_providers(monkeypatch, {"qwen": model})
     config = _config(tmp_path)
     config.defaults.thread_summary_first_threshold = 1
     config.room_thread_summary_models["general"] = "qwen"
@@ -1090,11 +1099,7 @@ async def test_post_response_effects_queues_summary_with_entity_model_for_adhoc_
         scheduled_tasks.append(task)
         return task
 
-    with (
-        patch("mindroom.post_response_effects.create_background_task", side_effect=schedule_background_task),
-        patch("mindroom.thread_summary._generate_summary", new=AsyncMock(return_value="Summary")) as mock_generate,
-        patch("mindroom.thread_summary._send_thread_summary_event", new=AsyncMock(return_value="$summary")),
-    ):
+    with patch("mindroom.post_response_effects.create_background_task", side_effect=schedule_background_task):
         await apply_post_response_effects(
             FinalDeliveryOutcome(
                 terminal_status="completed",
@@ -1118,15 +1123,11 @@ async def test_post_response_effects_queues_summary_with_entity_model_for_adhoc_
         assert scheduled_tasks
         await asyncio.gather(*scheduled_tasks)
 
-    generated_history = mock_generate.await_args.args[0]
-    assert list(generated_history[:-1]) == thread_history
-    assert (generated_history[-1].sender, generated_history[-1].body) == (client.user_id, "response")
-    assert mock_generate.await_args.args[1:] == (config, runtime_paths)
-    assert mock_generate.await_args.kwargs == {
-        "model_name": "qwen",
-        "tag_vocabulary": None,
-        "trusted_sender_ids": current_internal_sender_ids(config, runtime_paths),
-    }
+    (request,) = model.requests
+    assert _summarized_lines(request) == [
+        *(f"{message.sender}: {message.body}" for message in thread_history),
+        f"{client.user_id}: response",
+    ]
 
 
 @pytest.mark.asyncio

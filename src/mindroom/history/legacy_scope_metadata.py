@@ -43,11 +43,11 @@ def flatten_history_metadata(connection: sqlite3.Connection, names: TableNames) 
         if metadata is not None and _VERSIONS.keys() & metadata.keys():
             connection.execute(
                 f"UPDATE {sessions} SET metadata = ? WHERE session_id = ?",  # noqa: S608
-                (json.dumps(flattened_history_metadata(metadata, owner_key)), session_id),
+                (json.dumps(_flattened_history_metadata(metadata, owner_key)), session_id),
             )
 
 
-def flattened_history_metadata(metadata: dict[str, Any], owner_key: str) -> dict[str, Any]:
+def _flattened_history_metadata(metadata: dict[str, Any], owner_key: str) -> dict[str, Any]:
     """Return session ``metadata`` with the per-scope history state of ``owner_key`` moved into one value."""
     state = {**_owner_state(metadata, owner_key), **_current_state(metadata)}
     flattened = {key: value for key, value in metadata.items() if key not in _VERSIONS}

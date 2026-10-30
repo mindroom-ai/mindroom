@@ -98,7 +98,7 @@ from mindroom.teams.envelope import TeamTurnSpec, team_response_stream
 from mindroom.teams.members import requested_team_agent_names
 from mindroom.teams.spec import TeamMode
 from mindroom.thread_models import set_thread_model_override
-from mindroom.thread_summary import thread_summary_message_count_hint
+from mindroom.thread_summary.schedule import thread_summary_message_count_hint
 from mindroom.timing import DispatchPipelineTiming, timed
 from mindroom.tool_jobs.follow_ups import follow_up_envelope, follow_up_jobs, follow_up_key
 from mindroom.tool_jobs.runtime import get_background_runtime
@@ -858,7 +858,7 @@ class ResponseRunner:
         return handle.base.show_tool_calls
 
     def thread_summary_message_count_hint(self, request: ResponseRequest) -> int:
-        """Return a lower bound on the thread's size after this reply, counted from the request's visible history."""
+        """Return the thread's size after this reply, counted from the request's visible history; it can over-count."""
         return thread_summary_message_count_hint(
             request.thread_history,
             trusted_sender_ids=current_internal_sender_ids(self.deps.runtime.config, self.deps.runtime_paths),

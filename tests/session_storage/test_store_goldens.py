@@ -15,7 +15,7 @@ from typing import TYPE_CHECKING, Any
 
 import pytest
 
-from mindroom.history.legacy_scope_metadata import flattened_history_metadata
+from mindroom.history.legacy_scope_metadata import _flattened_history_metadata
 from mindroom.history.storage import new_scope_session
 from mindroom.history.types import HistoryScope, owner_scope
 from mindroom.llm.runs import TeamRunRecord
@@ -123,7 +123,7 @@ def test_golden_sessions_load_as_agno_loaded_them(store: GoldenStore, session_id
         agno["session_id"],
         agno["team_id"] if session.kind == "team" else agno["agent_id"],
         # Layout version 6 moved the owner's per-scope history state into one value.
-        flattened_history_metadata(agno["metadata"], owner_scope(session).key)
+        _flattened_history_metadata(agno["metadata"], owner_scope(session).key)
         if agno["metadata"]
         else agno["metadata"],
         agno["session_data"]["session_state"],

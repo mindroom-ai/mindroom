@@ -15,7 +15,7 @@ from mindroom.llm.provider import Capabilities
 from mindroom.routing import _RoutingSuggestion
 from mindroom.scheduling.tasks import ScheduledWorkflow
 from mindroom.teams.formation import _TeamModeDecision
-from mindroom.thread_summary import _ThreadEnrichment, _ThreadSummary
+from mindroom.thread_summary.generation import _ThreadEnrichment, _ThreadSummary
 from mindroom.topic_generator import _RoomTopic
 from tests.agno_parity.prompt_scenarios import load_golden
 

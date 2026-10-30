@@ -25,7 +25,7 @@ import pytest
 from claude_agent_sdk import AssistantMessage, ResultMessage, TextBlock
 from openai.types import CompletionUsage
 
-from mindroom import routing, thread_summary, topic_generator
+from mindroom import routing, topic_generator
 from mindroom.agents import create_agent
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
@@ -55,6 +55,7 @@ from mindroom.session_storage.agent_storage import create_session_storage
 from mindroom.skill_learning.reviewer import review_conversation
 from mindroom.skill_learning.tools import ReviewProgress
 from mindroom.teams.formation import select_ad_hoc_team_mode
+from mindroom.thread_summary.generation import generate_summary
 from mindroom.tool_system.runtime_context import build_execution_identity_from_runtime_context
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 from mindroom.voice import handler as voice_handler
@@ -170,13 +171,12 @@ async def _thread_summary(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Pa
     paths = test_runtime_paths(tmp_path)
     config = _system_config(paths)
     _scripted(monkeypatch, json.dumps({"summary": "A summary"}))
-    await thread_summary._generate_summary(
+    await generate_summary(
         [ResolvedVisibleMessage.synthetic(sender="@person:localhost", body="Help", event_id="$message")],
         config,
         paths,
         model_name="default",
         tag_vocabulary=None,
-        trusted_sender_ids=frozenset(),
     )
     return paths.storage_root
 
