@@ -78,7 +78,7 @@ from mindroom.teams.presentation import (
     format_team_header,
 )
 from mindroom.teams.resume import TeamResume, continued_team_pause, drive_team_delegations
-from mindroom.teams.runtime import leader_tool_specs
+from mindroom.teams.runtime import leader_tool_specs, team_usage
 from mindroom.tool_jobs.notices import append_turn_start_job_note
 from mindroom.tool_jobs.settings import background_tool_jobs_enabled
 from mindroom.tool_system.context_bound_streams import closing_async_stream
@@ -96,6 +96,7 @@ if TYPE_CHECKING:
     from mindroom.history.types import CompactionLifecycle, PreparedHistoryState, ScopeSummary
     from mindroom.knowledge.utils import KnowledgeAvailabilityDetail
     from mindroom.llm.runs import AnyRunRecord, TeamRunRecord
+    from mindroom.llm.usage import RunMetrics
     from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
     from mindroom.response_turn import TurnRunState
     from mindroom.run_storage import RunStorage
@@ -592,7 +593,7 @@ class _TeamTurn:
             yield AttemptResolved(
                 HandledAttempt(
                     self.error_text(error),
-                    build_run_metadata=self.run_metadata_builder(attempt, RunStatus.error),
+                    build_run_metadata=self.run_metadata_builder(attempt, RunStatus.error, run.prior_usage),
                     error=error,
                 ),
             )
@@ -635,8 +636,16 @@ class _TeamTurn:
             and not any((member.handover_content or "").strip() for member in record.ended_member_runs)
         )
 
-    def run_metadata_builder(self, attempt: TeamAttempt, status: RunStatus) -> Callable[[], dict[str, Any]] | None:
-        """Return how to build the attempt's run metadata, or None when the run stored no record."""
+    def run_metadata_builder(
+        self,
+        attempt: TeamAttempt,
+        status: RunStatus,
+        prior_usage: tuple[RunMetrics, ...],
+    ) -> Callable[[], dict[str, Any]] | None:
+        """Return how to build the attempt's run metadata, or None when the run stored no record.
+
+        ``prior_usage`` is the usage of the turn's attempts before this one, which it publishes if it ends the turn.
+        """
         if attempt.records.record is None:
             return None
         return partial(
@@ -645,6 +654,7 @@ class _TeamTurn:
             runtime_paths=self.runtime_paths,
             session_id=self.session_id,
             status=status,
+            prior_usage=prior_usage,
         )
 
     async def finalize_attempt(self, scope_context: ScopeSessionContext | None) -> None:
@@ -715,10 +725,10 @@ class _TeamTurn:
             run_id=record.run_id,
             attempt_run_id=attempt.run_id,
             runtime_model_name=attempt.runtime_model_name,
-            output_tokens=record.metrics.tokens.output_tokens if record.metrics is not None else None,
+            usage=team_usage(record),
             tool_executions=tuple(tool_executions),
             completed_tools=tuple(attempt.presentation.tool_tracker.completed_tools),
-            build_run_metadata=self.run_metadata_builder(attempt, record.status),
+            build_run_metadata=self.run_metadata_builder(attempt, record.status, run.prior_usage),
         )
 
     def replays(self, record: AnyRunRecord) -> bool:

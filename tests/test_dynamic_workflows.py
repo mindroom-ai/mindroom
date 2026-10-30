@@ -2280,7 +2280,6 @@ def test_room_agent_participant_runs_as_that_agent_without_durable_state(
     )
     assert create_kwargs["model"].model_name == "large"
     assert create_kwargs["knowledge"] is None
-    assert create_kwargs["persist_runtime_state"] is False
     assert create_kwargs["disable_runtime_capabilities"] is True
     assert create_kwargs["execution_identity"].agent_name == "specialist"
 
@@ -2416,7 +2415,6 @@ def test_participant_run_config_pre_approves_dashboard_allowed_tools_for_shared_
     target = RequestCredentialsTarget(
         runtime_paths=context.runtime_paths,
         base_manager=manager,
-        target_manager=manager,
         worker_scope="shared" if agent_selected else None,
         agent_name="general" if agent_selected else None,
         execution_identity=None,

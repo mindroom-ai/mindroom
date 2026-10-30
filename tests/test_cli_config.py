@@ -41,8 +41,8 @@ from mindroom.cli.main import (
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig, RouterConfig
 from mindroom.constants import OWNER_MATRIX_USER_ID_ENV, OWNER_MATRIX_USER_ID_PLACEHOLDER
+from mindroom.credentials.environment import get_secret_from_env
 from mindroom.credentials.manager import get_runtime_shared_credentials_manager
-from mindroom.credentials.sync import get_secret_from_env, sync_env_to_credentials
 from mindroom.error_handling import AvatarGenerationError, AvatarSyncError
 from mindroom.logging_config import configure_default_logging, uses_default_logging
 from mindroom.matrix.state import MatrixAccount, MatrixState
@@ -948,7 +948,6 @@ class TestConfigInit:
             env_text.replace("OLLAMA_HOST=http://localhost:11434\n", "OLLAMA_HOST=http://gpu.example:11434\n"),
         )
         runtime_paths = constants_module.resolve_primary_runtime_paths(config_path=target, process_env={})
-        sync_env_to_credentials(runtime_paths)
 
         config = config_cli.load_config_quiet(runtime_paths)
 
@@ -3094,8 +3093,7 @@ class TestRunFirstRunSetup:
         assert "OpenAI API key" in result.output
         assert "Skipped" in result.output
         assert "OPENAI_API_KEY=your-openai-key-here # replace this\n" in env_path.read_text(encoding="utf-8")
-        # Startup credential sync stores nothing, so the dashboard still offers to connect the provider.
-        sync_env_to_credentials(started[0])
+        # The placeholder supplies no key, so the dashboard still offers to connect the provider.
         config = load_config_yaml(config_path)
         assert missing_model_api_key_provider(config, started[0], "default") == "openai"
 

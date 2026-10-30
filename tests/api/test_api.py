@@ -35,7 +35,11 @@ from mindroom.api.credentials_target import RequestCredentialsTarget
 from mindroom.commands.config_commands import apply_config_change
 from mindroom.config.load_attempt import ConfigLoad
 from mindroom.config.main import Config, dashboard_config_schema, iter_config_validation_messages
-from mindroom.credentials.manager import get_runtime_credentials_manager, save_scoped_credentials
+from mindroom.credentials.manager import (
+    CredentialsManager,
+    get_runtime_credentials_manager,
+    save_scoped_credentials,
+)
 from mindroom.custom_tools.homeassistant import HomeAssistantTools
 from mindroom.embeddings.embedder_health import capture_embedder_health_recorder
 from mindroom.knowledge_graph.store import record_knowledge_graph_failure
@@ -45,7 +49,7 @@ from mindroom.matrix.state import MatrixState
 from mindroom.oauth.credential_lifecycle import resolve_oauth_credential_context
 from mindroom.oauth.credential_store import oauth_credential_transaction
 from mindroom.oauth.github import github_oauth_provider
-from mindroom.oauth.google_drive import google_drive_oauth_provider
+from mindroom.oauth.google import google_oauth_provider
 from mindroom.personal_agents import _append_personal_agent_roster_entry
 from mindroom.runtime_state import reset_runtime_state, set_runtime_ready, set_runtime_starting
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity, resolve_worker_key, resolve_worker_target
@@ -85,7 +89,6 @@ def test_worker_api_modules_share_response_dtos_and_serializer() -> None:
             last_used_at=12.0,
             created_at=1.0,
             last_started_at=2.0,
-            expires_at=30.0,
             startup_count=3,
             failure_count=2,
             failure_reason="startup failed",
@@ -97,7 +100,6 @@ def test_worker_api_modules_share_response_dtos_and_serializer() -> None:
     assert serialized_worker["failure_reason"] == "startup failed"
     assert serialized_worker["debug_metadata"] == {"namespace": "mindroom-instances"}
     assert serialized_worker["last_started_at"] == 2.0
-    assert serialized_worker["expires_at"] == 30.0
 
 
 def _runtime_paths(tmp_path: Path, *, process_env: dict[str, str] | None = None) -> constants.RuntimePaths:
@@ -554,21 +556,20 @@ def test_ensure_writable_config_path_seeds_from_template(
     assert writable_config.read_text(encoding="utf-8") == template_config.read_text(encoding="utf-8")
 
 
-def test_api_lifespan_syncs_env_credentials_on_startup(
+def test_api_startup_removes_copies_an_earlier_release_imported_from_the_environment(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    """API startup should run env credential sync via the FastAPI lifespan hook."""
-    sync_calls: list[str] = []
+    """A standalone API opens the credential store at startup, so a copy of a removed variable stops working."""
     watch_calls: list[str] = []
-    main.initialize_api_app(
-        main.app,
-        constants.resolve_primary_runtime_paths(
-            config_path=tmp_path / "config.yaml",
-            storage_path=tmp_path / "mindroom_data",
-            process_env={},
-        ),
+    runtime_paths = constants.resolve_primary_runtime_paths(
+        config_path=tmp_path / "config.yaml",
+        storage_path=tmp_path / "mindroom_data",
+        process_env={},
     )
+    copy_path = runtime_paths.storage_root / "credentials" / "openai_credentials.json"
+    CredentialsManager(copy_path.parent).save_credentials("openai", {"api_key": "sk-old", "_source": "env"})
+    main.initialize_api_app(main.app, runtime_paths)
 
     async def _fake_watch_config(
         stop_event: asyncio.Event,
@@ -578,17 +579,12 @@ def test_api_lifespan_syncs_env_credentials_on_startup(
         watch_calls.append("watch")
         await stop_event.wait()
 
-    monkeypatch.setattr(
-        main,
-        "sync_env_to_credentials",
-        lambda runtime_paths: sync_calls.append(str(runtime_paths.config_path)),
-    )
     monkeypatch.setattr(main, "_watch_config", _fake_watch_config)
 
     with TestClient(main.app) as client:
         assert client.get("/api/health").status_code == 200
+        assert not copy_path.exists()
 
-    assert len(sync_calls) == 1
     assert watch_calls == ["watch"]
 
 
@@ -864,7 +860,6 @@ def test_api_lifespan_loads_config_from_injected_runtime(
     async def _idle_worker_cleanup(stop_event: asyncio.Event, _app: FastAPI) -> None:
         await stop_event.wait()
 
-    monkeypatch.setattr(main, "sync_env_to_credentials", lambda runtime_paths: None)  # noqa: ARG005
     monkeypatch.setattr(main, "_watch_config", _idle_watch_config)
     monkeypatch.setattr(main, "_worker_cleanup_loop", _idle_worker_cleanup)
 
@@ -1682,6 +1677,7 @@ def test_get_tools(test_client: TestClient) -> None:
             "authored_override": True,
             "default": None,
             "description": "Extra env var names or glob patterns exposed to shell execution for this agent only.",
+            "env": [],
             "label": "Env Passthrough",
             "name": "extra_env_passthrough",
             "options": None,
@@ -1694,6 +1690,7 @@ def test_get_tools(test_client: TestClient) -> None:
             "authored_override": True,
             "default": None,
             "description": "Path entries prepended to PATH for this agent's shell tool only.",
+            "env": [],
             "label": "PATH Prepend",
             "name": "shell_path_prepend",
             "options": None,
@@ -1721,6 +1718,7 @@ async def test_non_oauth_auth_provider_uses_required_credential_fields(tmp_path:
     )
     context = tools_api._ResolvedToolAvailabilityContext(
         execution_scope=None,
+        agent_name=None,
         status_authoritative=True,
         credentials_manager=credentials_manager,
         worker_target=None,
@@ -1741,44 +1739,6 @@ async def test_non_oauth_auth_provider_uses_required_credential_fields(tmp_path:
     await tools_api._update_tools_statuses(tools, context)
 
     assert tools[0]["status"] == "available"
-
-
-@pytest.mark.parametrize(
-    ("service", "execution_scope", "expected_allowed_services"),
-    [
-        ("google_drive", "shared", frozenset({"google_drive"})),
-        ("google_calendar", "shared", frozenset({"google_calendar"})),
-        ("google_docs", "shared", frozenset({"google_docs"})),
-        ("google_sheets", "shared", frozenset({"google_sheets"})),
-        ("google_tasks", "shared", frozenset({"google_tasks"})),
-        ("gmail", "shared", frozenset({"gmail"})),
-        # Agent-scoped OAuth token services no longer inject themselves into the
-        # shared allowlist; they fall through to the context allowlist unchanged.
-        ("google_drive_oauth", "shared", frozenset({"weather"})),
-        ("weather", "shared", frozenset({"weather"})),
-        ("google_drive", "user", frozenset({"weather"})),
-        ("google_drive", "user_agent", frozenset({"weather"})),
-    ],
-)
-def test_effective_allowed_shared_services_uses_credential_policy(
-    tmp_path: Path,
-    service: str,
-    execution_scope: str,
-    expected_allowed_services: frozenset[str],
-) -> None:
-    """Tool availability should apply local-only credential policy before worker grants."""
-    context = tools_api._ResolvedToolAvailabilityContext(
-        execution_scope=execution_scope,
-        status_authoritative=True,
-        credentials_manager=get_runtime_credentials_manager(_runtime_paths(tmp_path)),
-        worker_target=None,
-        allowed_shared_services=frozenset({"weather"}),
-        auth_provider_credential_services={},
-        oauth_providers={},
-        runtime_paths=_runtime_paths(tmp_path),
-    )
-
-    assert tools_api._effective_allowed_shared_services(service, context) == expected_allowed_services
 
 
 def test_get_tools_marks_shared_only_integrations_unsupported_for_isolating_worker_scope(
@@ -1902,6 +1862,44 @@ def test_get_tools_unknown_agent_previews_draft_scope(test_client: TestClient) -
     assert "calculator" in tools_by_name
     assert tools_by_name["homeassistant"]["execution_scope_supported"] is False
     assert tools_by_name["calculator"]["execution_scope_supported"] is True
+
+
+@pytest.mark.parametrize("agent_name", ["draft_agent", "general"], ids=["unknown-agent", "scope-override"])
+@pytest.mark.parametrize(("granted", "expected"), [(False, "requires_config"), (True, "available")])
+def test_get_tools_draft_scope_preview_reads_what_the_scope_reads(
+    test_client: TestClient,
+    agent_name: str,
+    granted: bool,
+    expected: str,
+) -> None:
+    """A draft scope previews what that scope would read: a global key makes a tool available only when granted."""
+    config = _config_with_worker_scope("shared", worker_grantable_credentials=["weather"] if granted else None)
+    runtime_paths = main._app_runtime_paths(main.app)
+    get_runtime_credentials_manager(runtime_paths).save_credentials(
+        "weather",
+        {"WEATHER_API_KEY": "k", "_source": "ui"},
+    )
+    tools = [
+        {
+            "name": "weather",
+            "display_name": "Weather",
+            "description": "Weather lookup",
+            "category": "information",
+            "status": "requires_config",
+            "setup_type": "api_key",
+            "config_fields": [{"name": "WEATHER_API_KEY", "required": True}],
+        },
+    ]
+
+    with (
+        patch("mindroom.api.tools._read_tools_runtime_config", return_value=(config, runtime_paths)),
+        patch("mindroom.api.tools.export_tools_metadata", return_value=tools),
+    ):
+        response = test_client.get(f"/api/tools/?agent_name={agent_name}&execution_scope=user")
+
+    assert response.status_code == 200
+    assert response.json()["status_authoritative"] is False
+    assert response.json()["tools"][0]["status"] == expected
 
 
 def test_get_tools_requires_agent_reply_permission_for_agent_scoped_status(test_client: TestClient) -> None:
@@ -2122,7 +2120,7 @@ def test_get_tools_requires_oauth_token_for_generic_auth_provider(test_client: T
 
     worker_target = resolve_worker_target("shared", "general", execution_identity=identity)
     credential_context = resolve_oauth_credential_context(
-        google_drive_oauth_provider(),
+        google_oauth_provider("google_drive"),
         runtime_paths,
         manager,
         worker_target,
@@ -2296,7 +2294,7 @@ def test_get_tools_does_not_treat_scoped_credentials_as_dashboard_truth(
     with (
         patch("mindroom.api.tools._read_tools_runtime_config", return_value=(config, runtime_paths)),
         patch("mindroom.api.tools.export_tools_metadata", return_value=tools),
-        patch("mindroom.api.tools.load_scoped_credentials") as mock_load_scoped_credentials,
+        patch("mindroom.api.tools.load_scoped_credentials", return_value=None) as mock_load_scoped_credentials,
     ):
         response = test_client.get("/api/tools/?agent_name=general")
 
@@ -2307,7 +2305,10 @@ def test_get_tools_does_not_treat_scoped_credentials_as_dashboard_truth(
     assert tool["name"] == "weather"
     assert tool["status"] == "requires_config"
     assert tool["dashboard_configuration_supported"] is False
-    mock_load_scoped_credentials.assert_not_called()
+    # The preview reads what the scope holds for no requester, never a requester's own store.
+    targets = [call.kwargs["worker_target"] for call in mock_load_scoped_credentials.call_args_list]
+    assert targets
+    assert all(target.execution_identity is None and target.worker_key is None for target in targets)
 
 
 def test_get_tools_reports_requester_scoped_github_manual_fallback(test_client: TestClient) -> None:
@@ -2346,8 +2347,8 @@ def test_get_tools_reports_requester_scoped_github_manual_fallback(test_client: 
             "setup_type": "oauth",
             "auth_provider": "github",
             "config_fields": [
-                {"name": "access_token", "required": False},
-                {"name": "base_url", "required": False},
+                {"name": "access_token", "required": False, "env": ["GITHUB_ACCESS_TOKEN"]},
+                {"name": "base_url", "required": False, "env": []},
             ],
             "oauth_fallback_fields": ["access_token"],
         },
@@ -2429,7 +2430,7 @@ def test_get_tools_reports_requester_scoped_github_oauth_for_unscoped_agent(test
             "status": "requires_config",
             "setup_type": "oauth",
             "auth_provider": "github",
-            "config_fields": [{"name": "access_token", "required": False}],
+            "config_fields": [{"name": "access_token", "required": False, "env": ["GITHUB_ACCESS_TOKEN"]}],
             "oauth_fallback_fields": ["access_token"],
         },
     ]
@@ -2486,6 +2487,7 @@ def test_get_tools_uses_one_runtime_snapshot(
         captured_runtime_paths.append(runtime_paths)
         return tools_api._ResolvedToolAvailabilityContext(
             execution_scope=None,
+            agent_name=None,
             status_authoritative=True,
             credentials_manager=MagicMock(),
             worker_target=None,
@@ -3651,7 +3653,6 @@ def test_save_config_rejects_runtime_sensitive_invalid_payload(
     async def _idle_worker_cleanup(stop_event: asyncio.Event, _app: FastAPI) -> None:
         await stop_event.wait()
 
-    monkeypatch.setattr(main, "sync_env_to_credentials", lambda runtime_paths: None)  # noqa: ARG005
     monkeypatch.setattr(main, "_watch_config", _idle_watch_config)
     monkeypatch.setattr(main, "_worker_cleanup_loop", _idle_worker_cleanup)
 

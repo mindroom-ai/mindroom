@@ -17,6 +17,8 @@ import pytest
 
 from mindroom import ai_runtime
 from mindroom.agents import create_agent
+from mindroom.budgets.pricing import format_cost_usd
+from mindroom.config.models import ModelPricing
 from mindroom.constants import AI_RUN_METADATA_KEY, SILENT_SCHEDULE_NO_REPLY_TOKEN
 from mindroom.llm.errors import ProviderError
 from mindroom.llm.messages import Message
@@ -40,7 +42,7 @@ from tests.team_turn_helpers import (
     delegate,
     registered_probe,
 )
-from tests.usage_helpers import assert_counted_usage
+from tests.usage_helpers import assert_counted_usage, counted_total
 
 if TYPE_CHECKING:
     from collections.abc import Iterator, Sequence
@@ -145,6 +147,74 @@ async def test_an_empty_attempt_s_retry_leaves_its_usage_in_the_ledger_the_total
         model=team.models["default"].identity,
         requester_id=REQUESTER_ID,
     )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("stream", [True, False], ids=["streamed", "collected"])
+@pytest.mark.parametrize("ending", ["empty_retry", "model_switch"])
+async def test_a_team_reply_publishes_the_usage_and_cost_of_every_attempt_its_turn_ran(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    ending: str,
+    stream: bool,
+) -> None:
+    """The reply's usage and cost sum its attempts, an empty one and its retry or a member's switch and the continuation.
+
+    They are what the usage ledger counts, the leader's and the member's. The run is the attempt that answered.
+    """
+    if ending == "empty_retry":
+        team = _team(tmp_path, monkeypatch, leader=[answer("", usage(100, 5)), answer("Recovered.", usage(120, 9))])
+    else:
+        switch = tool_call("switch_thread_model", "call-switch", model_name="large", when="next-turn")
+        team = _team(
+            tmp_path,
+            monkeypatch,
+            leader=[
+                delegate("call-team", "general", "Go"),
+                answer("Asked.", usage(60, 6)),
+                answer("Done.", usage(120, 9)),
+            ],
+            general=[calls(switch, metrics=usage(30, 3))],
+        )
+    # Every scripted model answers as one identity, which the leader's prices price.
+    team.config.models["default"].pricing = ModelPricing(input=2, output=10)
+    run_metadata: dict[str, Any] = {}
+
+    await team.reply(stream=stream, run_metadata_collector=run_metadata)
+
+    published = run_metadata[AI_RUN_METADATA_KEY]
+    input_tokens, output_tokens = counted_total(team.storage, SESSION_ID)
+    assert (input_tokens, output_tokens) == ((220, 14) if ending == "empty_retry" else (250, 22))
+    assert (published["usage"]["input_tokens"], published["usage"]["output_tokens"]) == (input_tokens, output_tokens)
+    assert published["cost"] == {"usd": format_cost_usd((input_tokens * 2 + output_tokens * 10) / 1_000_000)}
+    [*_, final_run_id] = _team_run_ids(team)
+    assert (published["run_id"], published["status"]) == (final_run_id, "completed")
+    assert final_run_id != "run-1"
+
+
+@pytest.mark.asyncio
+async def test_a_team_reply_whose_continuation_failed_publishes_the_usage_of_the_attempt_before_it(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The failed attempt ends the turn, and the reply's usage still holds the switch's attempt, as the ledger does."""
+    switch = tool_call("switch_thread_model", "call-switch", model_name="large", when="next-turn")
+    team = _team(
+        tmp_path,
+        monkeypatch,
+        leader=[delegate("call-team", "general", "Go"), answer("Asked.", usage(60, 6)), _failing("Leader failed")],
+        general=[calls(switch, metrics=usage(30, 3))],
+    )
+    run_metadata: dict[str, Any] = {}
+
+    text = await team.respond(run_metadata_collector=run_metadata)
+
+    assert "Leader failed" in text
+    published = run_metadata[AI_RUN_METADATA_KEY]
+    assert published["status"] == "error"
+    assert counted_total(team.storage, SESSION_ID) == (130, 13)
+    assert (published["usage"]["input_tokens"], published["usage"]["output_tokens"]) == (130, 13)
 
 
 @pytest.mark.asyncio

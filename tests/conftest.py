@@ -176,6 +176,7 @@ from mindroom.response_turn import CompletedAttempt, ResponseTurnContext
 from mindroom.session_storage.agent_storage import create_state_storage
 from mindroom.session_storage.schema import quote_identifier
 from mindroom.session_storage.store import (
+    ConversationStore,
     _session_state,
     _write_session_state,
     delete_runs_in_transaction,
@@ -217,7 +218,6 @@ if TYPE_CHECKING:
     from mindroom.llm.runs import AnyRunRecord
     from mindroom.matrix_rtc.call_manager import CallManager
     from mindroom.orchestrator import _MultiAgentOrchestrator
-    from mindroom.session_storage.store import ConversationStore
     from mindroom.session_storage.types import ConversationSession
     from mindroom.streaming import StreamingResponse
     from mindroom.tool_system.agent_tool_calls import PreparedAgentToolCatalog
@@ -4007,6 +4007,25 @@ def store(tmp_path: Path) -> "ConversationStore":
 def team_store(tmp_path: Path) -> "ConversationStore":
     """Open team ``crew``'s conversation database, named ``code`` as ``store``'s is, so tests query the same tables."""
     return create_state_storage("code", tmp_path / "team", HistoryScope(kind="team", scope_id="crew"))
+
+
+def record_store_threads(monkeypatch: pytest.MonkeyPatch, *method_names: str) -> dict[str, list[str]]:
+    """Record the name of the thread each call of the named ``ConversationStore`` methods runs on, by method.
+
+    A database's lane runs its operations on a thread named ``conversation-store``.
+    """
+    threads: dict[str, list[str]] = {name: [] for name in method_names}
+
+    def recording(real: Callable[..., Any], calls: list[str]) -> Callable[..., Any]:
+        def recorded(self: "ConversationStore", *args: object, **kwargs: object) -> object:
+            calls.append(threading.current_thread().name)
+            return real(self, *args, **kwargs)
+
+        return recorded
+
+    for name in method_names:
+        monkeypatch.setattr(ConversationStore, name, recording(getattr(ConversationStore, name), threads[name]))
+    return threads
 
 
 def seed_session_row(storage: "ConversationStore", session: "ConversationSession") -> None:

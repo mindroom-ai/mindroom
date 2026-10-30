@@ -5592,7 +5592,7 @@ class TestOutbox:
                 room_id=ROOM,
             ),
         )
-        assert isinstance(turn, turn_rows.Accepted)
+        assert isinstance(turn, turn_rows.PendingTurn)
         await alice.enqueue_final_answer(
             delivery_id="$source",
             room_id=ROOM,
@@ -5702,7 +5702,7 @@ class TestOutbox:
                 room_id=ROOM,
             ),
         )
-        assert isinstance(turn, turn_rows.Accepted)
+        assert isinstance(turn, turn_rows.PendingTurn)
         await first.enqueue_final_answer(
             delivery_id="turn-1",
             room_id=ROOM,

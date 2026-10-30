@@ -12,7 +12,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Literal
 
 from mindroom.constants import PROVIDER_ENV_KEYS
-from mindroom.credentials.sync import get_secret_from_env
+from mindroom.credentials.environment import get_secret_from_env
 from mindroom.llm.errors import MISSING_API_KEY, AuthenticationFailed, ProviderError
 from mindroom.llm.provider import Capabilities, MediaKind, ModelIdentity, StructuredOutput
 from mindroom.logging_config import get_logger

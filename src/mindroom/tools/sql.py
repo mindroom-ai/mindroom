@@ -31,13 +31,6 @@ if TYPE_CHECKING:
             default=None,
         ),
         ConfigField(
-            name="db_engine",
-            label="Db Engine",
-            type="text",
-            required=False,
-            default=None,
-        ),
-        ConfigField(
             name="user",
             label="User",
             type="text",
@@ -75,13 +68,6 @@ if TYPE_CHECKING:
         ConfigField(
             name="dialect",
             label="Dialect",
-            type="text",
-            required=False,
-            default=None,
-        ),
-        ConfigField(
-            name="tables",
-            label="Tables",
             type="text",
             required=False,
             default=None,

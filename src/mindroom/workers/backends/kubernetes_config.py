@@ -6,7 +6,7 @@ import hashlib
 import json
 import os
 import re
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal, TypedDict, cast
 
@@ -20,6 +20,7 @@ from mindroom.private_storage.private_instance_identity_store import (
 from mindroom.runtime_env_policy import (
     CREDENTIALS_ENCRYPTION_KEY_ENV,
     KUBERNETES_WORKER_BACKEND_CONFIG_ENV_BY_KEY,
+    WORKER_BACKEND_ENV,
     WORKER_COMPUTER_ENABLED_ENV,
     credentials_encryption_key_value,
 )
@@ -34,6 +35,7 @@ from mindroom.workers.backends._config_helpers import (
     read_json_object_list_env,
 )
 from mindroom.workers.backends._dedicated_worker_common import stable_signature_json
+from mindroom.workers.backends._lifecycle import DEFAULT_IDLE_TIMEOUT_SECONDS
 from mindroom.workers.backends.kubernetes_pod_names import (
     RESERVED_EXTRA_CONTAINER_NAMES,
     RESERVED_EXTRA_VOLUME_NAMES,
@@ -52,7 +54,6 @@ class _WorkerSeccompProfile(TypedDict):
     localhostProfile: str
 
 
-_DEFAULT_IDLE_TIMEOUT_SECONDS = 1800.0
 _DEFAULT_READY_TIMEOUT_SECONDS = 60.0
 _DEFAULT_WORKER_PORT = 8766
 _DEFAULT_IMAGE_PULL_POLICY = "IfNotPresent"
@@ -74,7 +75,6 @@ _DEFAULT_AGENT_VAULT_API_URL = "http://agent-vault:14321"
 _DEFAULT_AGENT_VAULT_PROXY_URL = "http://agent-vault:14322"
 _DEFAULT_AGENT_VAULT_BOOTSTRAP_SECRET_NAME = "agent-vault-bootstrap"  # noqa: S105
 
-_WORKER_BACKEND_ENV = KUBERNETES_WORKER_BACKEND_CONFIG_ENV_BY_KEY["worker_backend"]
 _NAMESPACE_ENV = KUBERNETES_WORKER_BACKEND_CONFIG_ENV_BY_KEY["namespace"]
 _IMAGE_ENV = KUBERNETES_WORKER_BACKEND_CONFIG_ENV_BY_KEY["image"]
 _IMAGE_PULL_POLICY_ENV = KUBERNETES_WORKER_BACKEND_CONFIG_ENV_BY_KEY["image_pull_policy"]
@@ -406,17 +406,7 @@ class KubernetesAgentVaultConfig:
 
     def signature(self) -> str:
         """Return a stable signature fragment for backend cache keys."""
-        return stable_signature_json(
-            {
-                "vault_name_prefix": self.vault_name_prefix,
-                "cli_image": self.cli_image,
-                "api_url": self.api_url,
-                "proxy_url": self.proxy_url,
-                "owner_email": self.owner_email,
-                "bootstrap_secret_name": self.bootstrap_secret_name,
-                "worker_ca_configmap_name": self.worker_ca_configmap_name,
-            },
-        )
+        return stable_signature_json(asdict(self))
 
 
 @dataclass(frozen=True, slots=True)
@@ -521,12 +511,12 @@ class KubernetesWorkerBackendConfig:
         namespace = read_env(env, _NAMESPACE_ENV) or read_env(env, _POD_NAMESPACE_ENV) or "default"
         image = read_env(env, _IMAGE_ENV)
         if not image:
-            msg = f"{_IMAGE_ENV} must be set when {_WORKER_BACKEND_ENV}=kubernetes."
+            msg = f"{_IMAGE_ENV} must be set when {WORKER_BACKEND_ENV}=kubernetes."
             raise WorkerBackendError(msg)
 
         storage_pvc_name = read_env(env, _STORAGE_PVC_ENV)
         if not storage_pvc_name:
-            msg = f"{_STORAGE_PVC_ENV} must be set when {_WORKER_BACKEND_ENV}=kubernetes."
+            msg = f"{_STORAGE_PVC_ENV} must be set when {WORKER_BACKEND_ENV}=kubernetes."
             raise WorkerBackendError(msg)
 
         resource_requests = {
@@ -552,7 +542,7 @@ class KubernetesWorkerBackendConfig:
             or _DEFAULT_STORAGE_MOUNT_PATH,
             storage_subpath_prefix=read_env(env, _STORAGE_SUBPATH_PREFIX_ENV, _DEFAULT_STORAGE_SUBPATH_PREFIX)
             or _DEFAULT_STORAGE_SUBPATH_PREFIX,
-            idle_timeout_seconds=read_float_env(env, _IDLE_TIMEOUT_ENV, _DEFAULT_IDLE_TIMEOUT_SECONDS),
+            idle_timeout_seconds=read_float_env(env, _IDLE_TIMEOUT_ENV, DEFAULT_IDLE_TIMEOUT_SECONDS),
             ready_timeout_seconds=read_float_env(env, _READY_TIMEOUT_ENV, _DEFAULT_READY_TIMEOUT_SECONDS),
             name_prefix=read_env(env, _NAME_PREFIX_ENV, _DEFAULT_NAME_PREFIX) or _DEFAULT_NAME_PREFIX,
             node_name=read_env(env, _NODE_NAME_ENV) or None,
@@ -585,13 +575,13 @@ class KubernetesWorkerBackendConfig:
 
 
 def kubernetes_backend_config_signature(
+    config: KubernetesWorkerBackendConfig,
     runtime_paths: RuntimePaths,
     *,
     auth_token: str | None,
-    storage_root: Path | None = None,
+    storage_root: Path,
 ) -> tuple[str, ...]:
     """Return a cache signature for one concrete Kubernetes backend config."""
-    config = KubernetesWorkerBackendConfig.from_runtime(runtime_paths)
     credentials_encryption_key = runtime_paths.env_value(CREDENTIALS_ENCRYPTION_KEY_ENV)
     credentials_encryption_key_marker = _credentials_encryption_key_hash(credentials_encryption_key) or ""
     extra_env_json = stable_signature_json(config.extra_env)
@@ -637,7 +627,7 @@ def kubernetes_backend_config_signature(
         config.agent_vault.signature() if config.agent_vault is not None else "",
         credentials_encryption_key_marker,
         auth_token or "",
-        str(storage_root.expanduser().resolve()) if storage_root is not None else "",
+        str(storage_root),
     )
     if config.runtime_class_name is not None:
         signature = (*signature, f"runtime-class:{config.runtime_class_name}")
@@ -651,12 +641,12 @@ def kubernetes_backend_config_signature(
 
 
 def kubernetes_backend_cleanup_signature(
+    config: KubernetesWorkerBackendConfig,
     runtime_paths: RuntimePaths,
     *,
-    storage_root: Path | None = None,
+    storage_root: Path,
 ) -> tuple[str, ...]:
     """Return the stable fields needed to find and retire an existing Kubernetes worker."""
-    config = KubernetesWorkerBackendConfig.from_runtime(runtime_paths)
     return (
         "kubernetes",
         config.namespace,
@@ -665,7 +655,7 @@ def kubernetes_backend_cleanup_signature(
         config.storage_subpath_prefix,
         config.auth_secret_name or "",
         _kubernetes_cleanup_client_identity(runtime_paths),
-        str(storage_root.expanduser().resolve()) if storage_root is not None else "",
+        str(storage_root),
     )
 
 

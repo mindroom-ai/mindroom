@@ -41,7 +41,8 @@ from mindroom.llm.messages import Message, system_text
 from mindroom.memory.functions import MemoryPromptParts
 from mindroom.run_storage import RunStorage
 from mindroom.runtime_resolution import resolve_agent_storage
-from mindroom.session_storage.store import persist_to
+from mindroom.session_storage.agent_storage import create_session_storage
+from mindroom.session_storage.store import ConversationStore, persist_to
 from mindroom.session_storage.types import ConversationSession
 from mindroom.tool_system.invocation import ToolCallContext, execute_tool_call
 from mindroom.tool_system.runtime_context import build_execution_identity_from_runtime_context, tool_runtime_context
@@ -73,7 +74,14 @@ def _session(runtime) -> ConversationSession:
     return ConversationSession(session_id=runtime.session_id, kind="agent", owner_id="helper")
 
 
-async def _attempt(build, runtime, session: ConversationSession, *, run_id: str = "generation-1"):
+async def _attempt(
+    build,
+    runtime,
+    session: ConversationSession,
+    *,
+    store: ConversationStore | None = None,
+    run_id: str = "generation-1",
+):
     """Bind one managed minimal attempt of ``build`` as a reply does, returning the run's spec, hooks, and context."""
     run = RunContext(
         run_id=run_id,
@@ -85,7 +93,7 @@ async def _attempt(build, runtime, session: ConversationSession, *, run_id: str 
         replace(build.spec, system_messages=_turn(build).system_messages),
         NO_HOOKS,
         run=run,
-        storage=RunStorage(build.store, session, None),
+        storage=RunStorage(store, session, None),
         response_context=_turn_context(),
         context_documents=minimal_context_documents(build),
         delegation_depth=0,
@@ -94,15 +102,23 @@ async def _attempt(build, runtime, session: ConversationSession, *, run_id: str 
     return spec, hooks, run
 
 
-async def _run_attempt(build, runtime, session: ConversationSession, prompt: str, *, run_id: str = "generation-1"):
-    """Run one minimal attempt on the owned loop and return its terminal record."""
-    spec, hooks, run = await _attempt(build, runtime, session, run_id=run_id)
+async def _run_attempt(
+    build,
+    runtime,
+    session: ConversationSession,
+    prompt: str,
+    *,
+    store: ConversationStore | None = None,
+    run_id: str = "generation-1",
+):
+    """Run one minimal attempt on the owned loop, saving into ``store`` when given, and return its terminal record."""
+    spec, hooks, run = await _attempt(build, runtime, session, store=store, run_id=run_id)
     events = run_agent(
         spec,
         [Message(role="user", content=prompt)],
         ctx=run,
         hooks=hooks,
-        persist=persist_to(build.store, session) if build.store is not None else None,
+        persist=persist_to(store, session) if store is not None else None,
         request_template=build.request_template,
     )
     record = None
@@ -133,7 +149,6 @@ def test_explicit_mode_keeps_standard_factory_default(tmp_path: Path) -> None:
         config,
         runtime,
         None,
-        persist_runtime_state=False,
         knowledge=None,
         model=turn_model(config, runtime, "helper"),
     )
@@ -142,7 +157,6 @@ def test_explicit_mode_keeps_standard_factory_default(tmp_path: Path) -> None:
         config,
         runtime,
         None,
-        persist_runtime_state=False,
         agent_mode="minimal",
         knowledge=None,
         model=turn_model(config, runtime, "helper"),
@@ -173,7 +187,6 @@ def test_minimal_mode_with_background_jobs_keeps_its_shell_command(tmp_path: Pat
         config,
         runtime,
         None,
-        persist_runtime_state=False,
         agent_mode="minimal",
         knowledge=None,
         model=turn_model(config, runtime, "helper"),
@@ -222,7 +235,6 @@ def test_toolkit_construction_failure_keeps_minimal_recovery_hint(
             runtime.runtime_paths,
             identity,
             agent_mode="minimal",
-            persist_runtime_state=False,
             delegation_depth=delegation_depth,
             knowledge=None,
             model=turn_model(runtime.config, runtime.runtime_paths, "helper"),
@@ -239,7 +251,6 @@ def test_toolkit_construction_failure_keeps_minimal_recovery_hint(
         runtime.config,
         runtime.runtime_paths,
         identity,
-        persist_runtime_state=False,
         knowledge=None,
         model=turn_model(runtime.config, runtime.runtime_paths, "helper"),
     )
@@ -280,7 +291,6 @@ def test_context_files_remain_complete_and_notes_untouched(
         config,
         runtime,
         None,
-        persist_runtime_state=False,
         agent_mode="minimal",
         knowledge=None,
         model=turn_model(config, runtime, "helper"),
@@ -359,7 +369,6 @@ async def test_minimal_attempt_requires_managed_owner(tmp_path: Path) -> None:
         runtime.runtime_paths,
         build_execution_identity_from_runtime_context(runtime),
         agent_mode="minimal",
-        persist_runtime_state=False,
         knowledge=None,
         model=turn_model(runtime.config, runtime.runtime_paths, "helper"),
     )
@@ -490,8 +499,10 @@ async def test_saved_minimal_mode_checks_shell_before_initial_or_rebuilt_request
             model=turn_model(runtime.config, runtime.runtime_paths, "helper"),
         )
 
-    def stored_runs(build):
-        stored = build.store.load_session(runtime.session_id)
+    store = create_session_storage("helper", runtime.config, runtime.runtime_paths, identity)
+
+    def stored_runs():
+        stored = store.load_session(runtime.session_id)
         return [run.to_dict() for run in stored.runs] if stored is not None else []
 
     with tool_runtime_context(runtime):
@@ -499,9 +510,9 @@ async def test_saved_minimal_mode_checks_shell_before_initial_or_rebuilt_request
             history = []
             if rebuild:
                 initial = create()
-                record = await _run_attempt(initial, runtime, session, "First request", run_id="first")
+                record = await _run_attempt(initial, runtime, session, "First request", store=store, run_id="first")
                 assert record.content == "done"
-                history = stored_runs(initial)
+                history = stored_runs()
                 await lifetime.retire_attempt()
             previous_owner = lifetime.owner
             previous_shell_env = previous_owner.shell_env if previous_owner is not None else None
@@ -510,14 +521,14 @@ async def test_saved_minimal_mode_checks_shell_before_initial_or_rebuilt_request
             build = create()
             if "exclude_tools" in shell_settings:
                 with pytest.raises(MinimalModeUnavailableError) as raised:
-                    await _run_attempt(build, runtime, session, "Restricted request")
+                    await _run_attempt(build, runtime, session, "Restricted request", store=store)
                 assert "`run_shell_command` shell permission" in str(raised.value)
                 assert "!mode helper standard" in str(raised.value)
                 assert provider.requests == prior_requests
                 assert lifetime.owner is previous_owner
-                assert stored_runs(build)[: len(history)] == history
+                assert stored_runs()[: len(history)] == history
             else:
-                record = await _run_attempt(build, runtime, session, "Supported request")
+                record = await _run_attempt(build, runtime, session, "Supported request", store=store)
                 assert record.content == "done"
                 assert offered_tools(provider.requests[-1]) == ["bash"]
                 assert len(provider.requests) == len(prior_requests) + 1

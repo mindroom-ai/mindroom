@@ -23,14 +23,8 @@ if TYPE_CHECKING:
     icon_color="text-orange-500",  # Reddit's signature orange color
     config_fields=[
         ConfigField(
-            name="reddit_instance",
-            label="Reddit Instance",
-            type="text",
-            required=False,
-            default=None,
-        ),
-        ConfigField(
             name="client_id",
+            env=("REDDIT_CLIENT_ID",),
             label="Client ID",
             type="text",
             required=False,
@@ -38,6 +32,7 @@ if TYPE_CHECKING:
         ),
         ConfigField(
             name="client_secret",
+            env=("REDDIT_CLIENT_SECRET",),
             label="Client Secret",
             type="password",
             required=False,
@@ -45,6 +40,7 @@ if TYPE_CHECKING:
         ),
         ConfigField(
             name="user_agent",
+            env=("REDDIT_USER_AGENT",),
             label="User Agent",
             type="text",
             required=False,
@@ -52,6 +48,7 @@ if TYPE_CHECKING:
         ),
         ConfigField(
             name="username",
+            env=("REDDIT_USERNAME",),
             label="Username",
             type="text",
             required=False,
@@ -59,6 +56,7 @@ if TYPE_CHECKING:
         ),
         ConfigField(
             name="password",
+            env=("REDDIT_PASSWORD",),
             label="Password",
             type="password",
             required=False,

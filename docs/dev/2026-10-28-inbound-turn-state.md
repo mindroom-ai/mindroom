@@ -50,6 +50,7 @@ The code shows what each owner does; this record keeps why, what was rejected, a
 - A voice echo is a per-source publication fact and never the turn's answer identity: two finalized echoes in one coalesced routing turn otherwise completed the routing turn without sending the relay after a crash.
 - Re-forming a batch is one explicit merge policy (absorb physical owners, keep the candidate's context, adopt an interrupted placeholder, copy watermarks and consumed-revision proofs), not a generic merge engine.
 - Lookup prefers the turn that completed, so an edit of an original whose relay answered regenerates the relay's answer.
+- The pending-turn write returns what it read and wrote instead of reading its rows again: every reply awaits it on the journal's single writer before it starts, and a new conversation holds one of the eight root-preparation slots meanwhile, so each statement it adds lengthens that wait and the queue of every other write.
 
 ### Migration
 
@@ -65,6 +66,8 @@ The code shows what each owner does; this record keeps why, what was rejected, a
 ## Rejected alternatives
 
 - A read cache derived from the rows: it would keep two copies of "answered" and the publication rules that came with them.
+- Starting a response while its pending-turn write is still queued: the stored turn supplies the request's sources, run metadata, and recovery proof, and the write decides whether a response starts at all, so only the lifecycle-lock acquisition could overlap it.
+- Writing the pending turn in the reply claim's transaction: the decision to start would move past the lifecycle lock into the response runner, which also serves edits, approvals, and replays.
 - Whole blobs rewritten inside one transaction: it removes lost updates but keeps one copy per index and the stale-row cleanup.
 - Principal-scoped redactions: they lose redactions on re-login and on departure.
 - Releasing the lane slot while waiting on a contended claim: the wait still held the room's journal lane.
@@ -81,3 +84,5 @@ The code shows what each owner does; this record keeps why, what was rejected, a
 ## Evidence
 
 - A characterization oracle (`tests/turn_state_oracle/`) recorded the old store's observables before the rewrite; it found the dropped echo, a re-formed batch copying another turn's placeholder until a lookup raised "Multiple turns own visible response", and an ownership error that re-raised on every retry.
+- While the pending-turn write read its rows again, a new one-source turn ran 23 statements on the writer, against 5 for the ledger upsert it replaced; returning what it read and wrote brought it to 8.
+  On SQLite, with 30 new conversations sent at once, most of the wait this added before `Processing` was later messages waiting for one of the eight root-preparation slots.

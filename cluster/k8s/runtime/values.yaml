@@ -286,8 +286,8 @@ contentBundles: []
 
 # Model-provider API keys sourced from existing Kubernetes Secrets.
 # Each entry binds one Secret key to the provider's native credential env var
-# (for example OPENAI_API_KEY); at startup the runtime syncs that value into
-# its credential service as <storage.mountPath>/credentials/<provider>_credentials.json.
+# (for example OPENAI_API_KEY); the runtime reads it as that provider's shared
+# credential without storing a copy.
 # Supported providers mirror PROVIDER_ENV_KEYS in src/mindroom/constants.py:
 # anthropic, azure, openai, google, openrouter, deepseek, cerebras, groq, zai, ollama.
 providerCredentials: []

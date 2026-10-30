@@ -7,7 +7,7 @@ import json
 from collections.abc import Callable  # noqa: TC003  # resolved by Agno function schema introspection
 from contextlib import contextmanager, suppress
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, override
+from typing import TYPE_CHECKING, override
 
 import httpx
 from agno.agent import Agent  # noqa: TC002  # resolved by Agno function schema introspection
@@ -127,15 +127,13 @@ class MindRoomE2BTools(E2BTools):
         self,
         api_key: str | None = None,
         timeout: int = 300,
-        sandbox_options: dict[str, Any] | None = None,
         *,
         tool_output_workspace_root: Path | None = None,
         file_access: FileAccess = "workspace",
-        **kwargs: Any,  # noqa: ANN401
     ) -> None:
         self._workspace_root = tool_output_workspace_root
         self._file_access = file_access
-        super().__init__(api_key=api_key, timeout=timeout, sandbox_options=sandbox_options, **kwargs)
+        super().__init__(api_key=api_key, timeout=timeout)
 
     def _workspace_location(self, path: str) -> tuple[Path, Path]:
         """Return the workspace root as spelled, so a replaced workspace is refused, and the canonical path below it."""

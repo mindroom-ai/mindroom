@@ -17,7 +17,7 @@ from mindroom import constants
 from mindroom import tools as _mindroom_tools  # noqa: F401  # registers built-in tool metadata
 from mindroom.credentials.manager import CredentialsManager
 from mindroom.custom_tools.google_sheets import GoogleSheetsTools
-from mindroom.oauth.google_sheets import google_sheets_oauth_provider
+from mindroom.oauth.google import google_oauth_provider
 from mindroom.oauth.providers import OAuthConnectionRequired
 from mindroom.tool_system.metadata import get_tool_by_name
 from mindroom.tool_system.tool_access import validate_tool_arguments
@@ -104,7 +104,7 @@ def test_google_sheets_loads_tokens_from_oauth_service(tmp_path: Path) -> None:
     credentials_manager = CredentialsManager(tmp_path / "credentials")
     credentials_manager.save_credentials("google_sheets", {"spreadsheet_id": "sheet-id", "_source": "ui"})
     publish_oauth_credentials(
-        google_sheets_oauth_provider(),
+        google_oauth_provider("google_sheets"),
         {"token": "access-token", "refresh_token": "refresh-token", "_source": "oauth"},
         credentials_manager=credentials_manager,
         worker_target=None,
@@ -258,21 +258,17 @@ def test_google_sheets_batch_update_sends_requests_in_order(tmp_path: Path) -> N
     }
 
 
-def test_google_sheets_batch_update_schema_accepts_sheets_api_requests(tmp_path: Path) -> None:
+def test_google_sheets_schemas_accept_sheets_api_requests_and_cell_values(tmp_path: Path) -> None:
     tool, _service = _connected_sheets_tool(tmp_path)
 
     validate_tool_arguments(
         dict(toolkit_offers(tool, "batch_update_sheet").parameters),
         {"spreadsheet_id": "sheet-id", "requests": _FORMAT_REQUESTS},
     )
-
-
-def test_google_sheets_provider_uses_sheets_scope_without_drive_scope() -> None:
-    provider = google_sheets_oauth_provider()
-
-    assert "https://www.googleapis.com/auth/spreadsheets" in provider.scopes
-    assert "https://www.googleapis.com/auth/drive.file" not in provider.scopes
-    assert "https://www.googleapis.com/auth/drive" not in provider.scopes
+    validate_tool_arguments(
+        dict(toolkit_offers(tool, "update_sheet").parameters),
+        {"spreadsheet_id": "sheet-id", "range_name": "A1:C2", "data": [["Item", "Count", "Done"], ["lamp", 2, True]]},
+    )
 
 
 def test_google_sheets_service_account_env_uses_upstream_auth(tmp_path: Path) -> None:

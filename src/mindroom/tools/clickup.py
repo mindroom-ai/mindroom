@@ -24,6 +24,7 @@ if TYPE_CHECKING:
     config_fields=[
         ConfigField(
             name="api_key",
+            env=("CLICKUP_API_KEY",),
             label="API Key",
             type="password",
             required=True,
@@ -32,6 +33,7 @@ if TYPE_CHECKING:
         ),
         ConfigField(
             name="master_space_id",
+            env=("MASTER_SPACE_ID",),
             label="Master Space ID",
             type="text",
             required=True,

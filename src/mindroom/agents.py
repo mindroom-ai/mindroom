@@ -49,7 +49,6 @@ from mindroom.runtime_resolution import (
     resolve_agent_runtime,
 )
 from mindroom.scheduling.scheduled_tool_calls import bind_live_tools
-from mindroom.session_storage import agent_storage
 from mindroom.shared_directories.paths import describe_agent_shared_directories
 from mindroom.system_prompt import render_session_context
 from mindroom.timing import timed, timed_block
@@ -94,7 +93,7 @@ from mindroom.tool_system.worker_routing import (
     agent_workspace_root_path,
     resolve_agent_owned_path,
 )
-from mindroom.workers.runtime import primary_worker_backend_name
+from mindroom.workers.backend_kinds import WorkerBackendKind, worker_backend_kind
 from mindroom.workspaces import ensure_workspace_template
 
 if TYPE_CHECKING:
@@ -111,7 +110,6 @@ if TYPE_CHECKING:
     from mindroom.knowledge.refresh_scheduler import KnowledgeRefreshScheduler
     from mindroom.knowledge.search import AgentKnowledge
     from mindroom.llm.provider import ModelProvider
-    from mindroom.session_storage.store import ConversationStore
     from mindroom.tool_system.agno_toolkits import AnyToolkit
     from mindroom.tool_system.invocation import ToolCall, ToolMiddleware, ToolNext
     from mindroom.tool_system.skills import RefusedWorkspaceSkill, SkillsToolkit
@@ -892,14 +890,14 @@ def _render_tool_execution_environment(
             ],
         )
 
-    backend = primary_worker_backend_name(runtime_paths)
+    backend = worker_backend_kind(runtime_paths)
     lines = [
         "## Tool Execution Environment",
         f"- Local tools (primary MindRoom runtime): {tool_list(local_tool_names)}.",
         f"- Worker-routed tools: {tool_list(worker_routed_tool_names)}.",
-        f"- Worker backend: `{backend}`.",
+        f"- Worker backend: `{backend.value}`.",
     ]
-    if backend == "static_runner":
+    if backend is WorkerBackendKind.STATIC_RUNNER:
         lines.append(
             "- Worker reuse: requests use the configured static runner; no per-user or per-agent "
             "worker state boundary is selected.",
@@ -912,8 +910,8 @@ def _render_tool_execution_environment(
             "user_agent": "one runtime used only by this user-agent pair",
         }[worker_scope]
         idle_behavior = {
-            "docker": "the container stops",
-            "kubernetes": "the deployment scales to zero",
+            WorkerBackendKind.DOCKER: "the container stops",
+            WorkerBackendKind.KUBERNETES: "the deployment scales to zero",
         }[backend]
         lines.extend(
             (
@@ -1396,22 +1394,6 @@ def _assemble_agent_toolkits(  # noqa: C901, PLR0915 - eager and deferred tools 
     return assembly
 
 
-def _open_agent_session_storage(
-    agent_name: str,
-    agent_runtime: ResolvedAgentRuntime,
-    *,
-    history_storage: ConversationStore | None,
-    persist_runtime_state: bool,
-) -> ConversationStore | None:
-    """Open (or reuse) the durable conversation store for one agent instance."""
-    with _agent_create_timing("storage_open"):
-        if not persist_runtime_state:
-            return None
-        if history_storage is not None:
-            return history_storage
-        return agent_storage.create_agent_state_storage(agent_name, agent_runtime.session_state_root)
-
-
 def _build_agent_role_context(
     agent_name: str,
     agent_config: AgentConfig,
@@ -1674,10 +1656,8 @@ def create_agent(
     knowledge: AgentKnowledge | None,
     model: TurnModel,
     hook_registry: HookRegistry | None = None,
-    history_storage: ConversationStore | None = None,
     include_interactive_questions: bool = True,
     include_openai_compat_guidance: bool = False,
-    persist_runtime_state: bool = True,
     disable_runtime_capabilities: bool = False,
     tool_function_filter: Callable[[ToolFunction], bool] | None = None,
     delegation_depth: int = 0,
@@ -1689,7 +1669,7 @@ def create_agent(
     agent_cli_in_shell: bool = False,
     persona: SubagentPersona | None = None,
 ) -> AgentBuild:
-    """Build an agent from configuration: its model, tools, prompt, request settings, store, and surface.
+    """Build an agent from configuration: its model, tools, prompt, request settings, and surface.
 
     Args:
         agent_name: Name of the agent to create
@@ -1703,13 +1683,11 @@ def create_agent(
         model: The model this agent's turn runs, which the caller resolved for the turn.
         hook_registry: Optional hook registry for plugin-based tool call
             interception and event hooks.
-        history_storage: Optional already-open conversation store to reuse for this agent.
         include_interactive_questions: Whether to include the interactive
             question authoring prompt. Set to False for channels that do not
             support Matrix reaction-based question flows.
         include_openai_compat_guidance: Whether to include OpenAI-compatible
             history-format guidance in the shared identity prompt.
-        persist_runtime_state: Whether this agent's runs should write durable history.
         disable_runtime_capabilities: Whether to omit tools, skills, knowledge,
             and preloaded context files for a restricted in-process agent run.
         tool_function_filter: Optional policy applied to each fully resolved
@@ -1841,12 +1819,6 @@ def create_agent(
         plugins=plugins,
         knowledge=enabled_knowledge,
         skills=offered_skills,
-    )
-    store = _open_agent_session_storage(
-        agent_name,
-        agent_runtime,
-        history_storage=history_storage,
-        persist_runtime_state=persist_runtime_state,
     )
 
     role_context = _build_agent_role_context(
@@ -1987,7 +1959,6 @@ def create_agent(
         prompt=prompt,
         request_template=ModelRequest(messages=(), deferred_tools=deferred_tools),
         history_settings=agent.history_settings,
-        store=store,
         tool_policy=bind_live_tools(spec.functions, tool_assembly.tool_middleware),
         tool_jobs=tool_jobs,
         surface=surface,

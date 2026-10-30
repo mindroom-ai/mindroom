@@ -33,6 +33,11 @@ Examples are symlinks or files planted in shared workspaces that the primary lat
 ### Config and state kept out of workers
 
 Runners and dedicated workers never receive the primary's config file, its directory, its `.env`, a ConfigMap holding it, or the credential encryption key.
+Neither Docker nor Kubernetes backend settings reach a dedicated worker's startup manifest; Kubernetes passes only its storage-subpath prefix, which the runner needs.
+Credentials the primary's environment declares (provider keys, `GITHUB_TOKEN`, credential seeds) are read only by the primary, under the credentials saved in its store, and never stored; every runner establishes runner mode at startup and never reads them, and a worker receives one only as a granted mirror copy or in a per-call credential lease.
+OAuth app client configurations (`*_oauth_client`) live in the primary's own store for every worker scope, so a worker's store never supplies one.
+A secret tool setting the primary reads from its `.env` configures only the toolkit the primary builds; a worker-routed call rebuilds the toolkit from its leased saved settings and the worker's own environment.
+A Docker dedicated worker's environment includes the non-secret startup names it receives from the primary's environment and `.env`, so the tool settings among them, `AWS_REGION`, `AWS_DEFAULT_REGION`, `AWS_PROFILE`, `GOOGLE_CLOUD_PROJECT`, and `GOOGLE_CLOUD_LOCATION`, also configure the toolkit it rebuilds.
 The config sent to runners with each request, and the config file projected into each Docker worker, hold only the fields runners resolve; models, MCP servers, plugin settings, and every other section stay in the primary, and a worker-routed call carries only the called tool's own inline overrides.
 
 Of the agents' data, dedicated Docker and Kubernetes workers mount only workspaces and shared directories, never the agent state roots around them, so sessions, memory, Mem0 data, and private-instance identity records stay out of every worker.
@@ -253,7 +258,7 @@ Do not report or "fix" these; they are deliberate.
 - Inviting an agent to a shared directory makes it readable to every requester of that agent, and the invitation needs only the inviting user's access to that agent, because that user could already relay the files in chat.
 - A user who may use both agents can restart the invited agent's dedicated workers by inviting and removing it repeatedly, which ends their background shells.
 - Removing a member or deleting a shared directory takes effect for a member's dedicated worker on that worker's next tool call, so until then its running processes can still read the directory, including files written after the removal.
-- Removing a service from `defaults.worker_grantable_credentials` deletes its copy from a running dedicated worker at that worker's next tool call, not at the config reload, so until then, or until the worker stops for being idle, its running processes can still read the credential.
+- Removing a service from `defaults.worker_grantable_credentials`, or removing the environment variable that declares a granted credential and restarting, deletes its copy from a running dedicated worker at that worker's next tool call, not at the config reload, so until then, or until the worker stops for being idle, its running processes can still read the credential.
   Worker code may already have copied a credential it was granted, so rotate the credential at its provider to revoke it.
 - A team's `access` authorizes its exact member agents for team requests, in Matrix and the OpenAI-compatible API, even members whose own `access` would not admit the requester directly; adding an agent to a team is a deliberate grant.
 - A response's CLI grant, in minimal mode or for a standard-mode agent whose shell can reach MindRoom, is in the environment of its shell commands, so other code in the same worker can use that requester's tools through it until the response and its background jobs end; code that shares a worker already shares its trust.

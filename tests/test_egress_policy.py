@@ -10,6 +10,7 @@ import pytest
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
+from mindroom.constants import resolve_runtime_paths
 from mindroom.egress.policy import (
     EgressGrantSubject,
     WorkerEgressPolicy,
@@ -29,21 +30,18 @@ from mindroom.tools import approved_egress as approved_egress_module
 if TYPE_CHECKING:
     from pathlib import Path
 
+    from mindroom.constants import RuntimePaths
     from mindroom.tool_system.worker_routing import WorkerScope
 
 
-@pytest.fixture(autouse=True)
-def _egress_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    for name in (
-        "MINDROOM_APPROVED_EGRESS_ALLOWLIST",
-        "MINDROOM_EGRESS_ALLOWLIST_PATH",
-        "MINDROOM_APPROVED_EGRESS_API_URL",
-        "MINDROOM_APPROVED_EGRESS_TOKEN",
-        "MINDROOM_APPROVED_EGRESS_MAX_TTL_SECONDS",
-    ):
-        monkeypatch.delenv(name, raising=False)
-    # Keep tests hermetic on hosts that mount a real allowlist at the default path.
-    monkeypatch.setenv("MINDROOM_APPROVED_EGRESS_ALLOWLIST_PATH", str(tmp_path / "missing-allowlist.txt"))
+def _runtime_paths(tmp_path: Path, env: dict[str, str] | None = None) -> RuntimePaths:
+    """Return a runtime whose process environment holds only ``env``, with no `.env` beside its config."""
+    return resolve_runtime_paths(
+        config_path=tmp_path / "config.yaml",
+        storage_path=tmp_path / "storage",
+        # Keep tests hermetic on hosts that mount a real allowlist at the default path.
+        process_env={"MINDROOM_APPROVED_EGRESS_ALLOWLIST_PATH": str(tmp_path / "missing-allowlist.txt"), **(env or {})},
+    )
 
 
 def _identity(requester_id: str | None = "@user:server") -> ToolExecutionIdentity:
@@ -60,41 +58,48 @@ def _identity(requester_id: str | None = "@user:server") -> ToolExecutionIdentit
     )
 
 
-def test_load_static_allowlist_from_inline_env(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_load_static_allowlist_from_inline_env(tmp_path: Path) -> None:
     """Inline env entries split on commas, drop comments, and deduplicate in order."""
-    monkeypatch.setenv(
-        "MINDROOM_APPROVED_EGRESS_ALLOWLIST",
-        "docs.example.com, .api.example.com,docs.example.com,# comment",
+    runtime_paths = _runtime_paths(
+        tmp_path,
+        {"MINDROOM_APPROVED_EGRESS_ALLOWLIST": "docs.example.com, .api.example.com,docs.example.com,# comment"},
     )
 
-    assert load_static_allowlist() == ("docs.example.com", ".api.example.com")
+    assert load_static_allowlist(runtime_paths) == ("docs.example.com", ".api.example.com")
 
 
-def test_load_static_allowlist_from_file(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+def test_load_static_allowlist_from_file(tmp_path: Path) -> None:
     """File entries drop comments and blank lines."""
     allowlist_path = tmp_path / "allowed-domains.txt"
     allowlist_path.write_text("docs.example.com\n# comment\n\n.api.example.com  # trailing\n", encoding="utf-8")
-    monkeypatch.setenv("MINDROOM_APPROVED_EGRESS_ALLOWLIST_PATH", str(allowlist_path))
+    runtime_paths = _runtime_paths(tmp_path, {"MINDROOM_APPROVED_EGRESS_ALLOWLIST_PATH": str(allowlist_path)})
 
-    assert load_static_allowlist() == ("docs.example.com", ".api.example.com")
+    assert load_static_allowlist(runtime_paths) == ("docs.example.com", ".api.example.com")
 
 
-def test_load_static_allowlist_falls_back_to_legacy_path_env(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> None:
+def test_load_static_allowlist_falls_back_to_legacy_path_env(tmp_path: Path) -> None:
     """MINDROOM_EGRESS_ALLOWLIST_PATH backs the proxy-shared mount when the tool env is unset."""
     allowlist_path = tmp_path / "allowed-domains.txt"
     allowlist_path.write_text("docs.example.com\n", encoding="utf-8")
-    monkeypatch.delenv("MINDROOM_APPROVED_EGRESS_ALLOWLIST_PATH", raising=False)
-    monkeypatch.setenv("MINDROOM_EGRESS_ALLOWLIST_PATH", str(allowlist_path))
+    runtime_paths = resolve_runtime_paths(
+        config_path=tmp_path / "config.yaml",
+        storage_path=tmp_path / "storage",
+        process_env={"MINDROOM_EGRESS_ALLOWLIST_PATH": str(allowlist_path)},
+    )
 
-    assert load_static_allowlist() == ("docs.example.com",)
+    assert load_static_allowlist(runtime_paths) == ("docs.example.com",)
 
 
-def test_load_static_allowlist_empty_when_file_missing() -> None:
+def test_load_static_allowlist_reads_the_env_file(tmp_path: Path) -> None:
+    """An allowlist set only in the `.env` beside `config.yaml` applies."""
+    (tmp_path / ".env").write_text("MINDROOM_APPROVED_EGRESS_ALLOWLIST=docs.example.com\n", encoding="utf-8")
+
+    assert load_static_allowlist(_runtime_paths(tmp_path)) == ("docs.example.com",)
+
+
+def test_load_static_allowlist_empty_when_file_missing(tmp_path: Path) -> None:
     """A missing allowlist file resolves to the empty allowlist."""
-    assert load_static_allowlist() == ()
+    assert load_static_allowlist(_runtime_paths(tmp_path)) == ()
 
 
 @pytest.mark.parametrize(
@@ -159,24 +164,31 @@ def test_is_hostname_allowed_static_matching(entries: tuple[str, ...], hostname:
     assert is_hostname_allowed(hostname, policy) is expected
 
 
-def test_resolve_policy_static_only_without_subject(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_resolve_policy_static_only_without_subject(tmp_path: Path) -> None:
     """Resolving without an agent yields the allowlist and no grant subject."""
-    monkeypatch.setenv("MINDROOM_APPROVED_EGRESS_ALLOWLIST", ".example.com")
+    runtime_paths = _runtime_paths(tmp_path, {"MINDROOM_APPROVED_EGRESS_ALLOWLIST": ".example.com"})
 
-    policy = resolve_worker_egress_policy()
+    policy = resolve_worker_egress_policy(runtime_paths)
 
     assert policy == WorkerEgressPolicy(static_allowlist=(".example.com",), grant_subject=None)
 
 
-def test_resolve_policy_empty_inputs() -> None:
+def test_resolve_policy_empty_inputs(tmp_path: Path) -> None:
     """No allowlist sources and no agent resolve to the empty policy."""
-    assert resolve_worker_egress_policy() == WorkerEgressPolicy(static_allowlist=(), grant_subject=None)
+    assert resolve_worker_egress_policy(_runtime_paths(tmp_path)) == WorkerEgressPolicy(
+        static_allowlist=(),
+        grant_subject=None,
+    )
 
 
 @pytest.mark.parametrize("worker_scope", [None, "shared"])
-def test_resolve_policy_agent_subject_for_non_isolating_scopes(worker_scope: WorkerScope | None) -> None:
+def test_resolve_policy_agent_subject_for_non_isolating_scopes(
+    worker_scope: WorkerScope | None,
+    tmp_path: Path,
+) -> None:
     """Shared and unscoped agents receive agent-addressed grants."""
     policy = resolve_worker_egress_policy(
+        _runtime_paths(tmp_path),
         agent_name="assistant",
         worker_scope=worker_scope,
         execution_identity=None,
@@ -185,12 +197,12 @@ def test_resolve_policy_agent_subject_for_non_isolating_scopes(worker_scope: Wor
     assert policy.grant_subject == EgressGrantSubject(subject_type="agent", subject="assistant")
 
 
-def test_resolve_policy_worker_key_subject_for_user_agent_scope(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_resolve_policy_worker_key_subject_for_user_agent_scope(tmp_path: Path) -> None:
     """user_agent scope addresses grants to the resolved worker key."""
-    monkeypatch.setenv("MINDROOM_APPROVED_EGRESS_ALLOWLIST", "docs.example.com")
     identity = _identity()
 
     policy = resolve_worker_egress_policy(
+        _runtime_paths(tmp_path, {"MINDROOM_APPROVED_EGRESS_ALLOWLIST": "docs.example.com"}),
         agent_name="assistant",
         worker_scope="user_agent",
         execution_identity=identity,
@@ -221,7 +233,7 @@ def test_resolve_grant_subject_requires_resolvable_user_agent_key(
         )
 
 
-def test_tool_and_worker_provisioning_resolve_the_same_policy(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_tool_and_worker_provisioning_resolve_the_same_policy(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     """The grant subject the tool POSTs equals the worker key the provisioning path uses.
 
     This is the cross-layer egress boundary: a worker_key grant created via the
@@ -237,7 +249,9 @@ def test_tool_and_worker_provisioning_resolve_the_same_policy(monkeypatch: pytes
     assert provisioning_key is not None
 
     # Policy-resolver path.
+    runtime_paths = _runtime_paths(tmp_path)
     policy = resolve_worker_egress_policy(
+        runtime_paths,
         agent_name="assistant",
         worker_scope="user_agent",
         execution_identity=identity,
@@ -248,7 +262,7 @@ def test_tool_and_worker_provisioning_resolve_the_same_policy(monkeypatch: pytes
     # and capture the grant payload it would POST to the policy service.
     captured: dict[str, object] = {}
 
-    def post_grant(payload: dict[str, object]) -> dict[str, object]:
+    def post_grant(_runtime_paths: object, payload: dict[str, object]) -> dict[str, object]:
         captured.update(payload)
         return {"expires_at": 123}
 
@@ -274,7 +288,7 @@ def test_tool_and_worker_provisioning_resolve_the_same_policy(monkeypatch: pytes
     )
 
     result = asyncio.run(
-        approved_egress_module.approved_egress_tools()().request_network_access(
+        approved_egress_module.approved_egress_tools()(runtime_paths=runtime_paths).request_network_access(
             ["docs.example.com"],
             5,
             "Need docs",
@@ -288,20 +302,21 @@ def test_tool_and_worker_provisioning_resolve_the_same_policy(monkeypatch: pytes
 
 def test_tool_static_allow_short_circuit_agrees_with_policy_decision(
     monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
 ) -> None:
     """The tool's static-allow early return is exactly the policy allow-decision."""
-    monkeypatch.setenv("MINDROOM_APPROVED_EGRESS_ALLOWLIST", ".example.com")
+    runtime_paths = _runtime_paths(tmp_path, {"MINDROOM_APPROVED_EGRESS_ALLOWLIST": ".example.com"})
 
-    assert is_hostname_allowed("docs.example.com", resolve_worker_egress_policy())
+    assert is_hostname_allowed("docs.example.com", resolve_worker_egress_policy(runtime_paths))
 
-    def post_grant(_payload: dict[str, object]) -> dict[str, object]:
+    def post_grant(_runtime_paths: object, _payload: dict[str, object]) -> dict[str, object]:
         msg = "static allowlist match should not create a grant"
         raise AssertionError(msg)
 
     monkeypatch.setattr(approved_egress_module, "_post_grant", post_grant)
 
     result = asyncio.run(
-        approved_egress_module.approved_egress_tools()().request_network_access(
+        approved_egress_module.approved_egress_tools()(runtime_paths=runtime_paths).request_network_access(
             ["docs.example.com"],
             5,
             "Need docs",

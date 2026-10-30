@@ -195,7 +195,7 @@ Matrix sync callback
 | `orchestration/tool_job_runtime.py` | Managed job lifecycle: recovery, revocation, published jobs state, follow-ups, and retention |
 | `workspaces.py` | Agent workspace scaffolding, template seeding, and context file resolution |
 | `worker_computer/worker_browser.py` | Serializes dedicated-worker headless browser calls, retains browser resources, and owns configuration/environment retirement and shutdown cleanup |
-| `agents.py` | `create_agent`: builds one configured agent's toolkits, prompt, model provider, store, and surface into an `AgentBuild` |
+| `agents.py` | `create_agent`: builds one configured agent's toolkits, prompt, model provider, and surface into an `AgentBuild` |
 | `config/` | Pydantic models for YAML config parsing (root model in `config/main.py`) |
 | `config/resolution.py` | What one agent, team, or scope gets from the config, every inherited value filled in (`resolve_scope`, `resolve_agent`, and one function per fact) |
 | `config/personal_rooms.py` | Opt-in personal-room settings and validation for commands, aliases, and message templates |
@@ -365,7 +365,9 @@ Matrix sync callback
 | `delegation/direct.py` | Reserve, run, and settle one child turn inside the caller's tool call, shared by `run_subagent` and Dynamic Workflow subagent participants |
 | `delegation/legacy_records.py` | Delegation records whose working state lived only in their workspace files, left as they were |
 | `delegation/legacy_snapshots.py` | Delegation child snapshots stored without a field a later release added, rewritten once in subagent session files at startup and in runs' metadata as conversation layout version 5 |
-| `credentials/manager.py` | Unified credential management (CredentialsManager) |
+| `credentials/manager.py` | Credential stores (CredentialsManager) and `credential_layers`, the one resolver of where a service's credentials are read and written for a target |
+| `credentials/policy.py` | Each credential service's placement per worker scope, and whether workers may receive it by grant or lease |
+| `credentials/environment.py` | Credentials the environment declares (provider keys, bootstrap values, seeds), read by the primary under its saved ones |
 | `matrix/` | Matrix protocol integration (client, users, rooms, presence, provisioning, message formatting) |
 | `matrix/large_messages.py` | Large-message sidecar storage and retrieval for oversized Matrix payloads |
 | `matrix/segmented_messages.py` | Lossless splitting of oversized text responses into ordered rich-text events (`defaults.large_message_strategy: split`) |
@@ -407,6 +409,8 @@ Matrix sync callback
 | `tool_system/dedicated_threads.py` | One thread per blocking call of a background job or worker proxy call, outside the bounded shared pools |
 | `workers/in_flight.py` | Workers with a call in flight, which idle cleanup refreshes before it runs |
 | `workers/protocol.py` | The typed requests and responses the primary and its sandbox runners exchange, and the worker protocol version both check |
+| `workers/backend_kinds.py` | The worker backends `MINDROOM_WORKER_BACKEND` can select, the one table of its accepted values, and which backends are dedicated |
+| `workers/progress.py` | Warmup progress of the workers a dedicated Docker or Kubernetes backend starts, sent to every caller waiting on the same worker |
 | `workers/backends/dedicated_launch.py` | The runner environment and startup manifest every dedicated Docker or Kubernetes worker starts with, from its backend's container layout |
 | `shell/output_capture.py` | Bounded shell output spools, completion validation, and atomic output-file publication |
 | `shell/execution.py` | Shell command execution core: spawning, output buffering, stopping at a timeout, and the handle registry of Desktop shell and script runs |
@@ -467,7 +471,7 @@ Matrix sync callback
 | `tool_system/runtime_context.py` | Shared runtime ContextVar for tool calls (including attachment scope) |
 | `tool_system/tool_function.py` | The tool values, free of Agno: `ToolFunction`, the only tool shape the agent loop sees (finished schema, loop flags, entrypoint, what each injected parameter receives) and the owner of how a call of it pauses, `AdaptedToolkit`, `ToolValue`, a finished tool value's text and media, and `ToolOutcome`, a call's value with its stop and failure flags |
 | `tool_system/authoring.py` | MindRoom's Agno-free tool authoring API, which MindRoom's own tools use and plugins import: `Toolkit`, `@tool`, `passthrough_tool` for a function offered with the schema it authors, `current_call()` for the call a function runs for, and `toolkit_functions()` for a toolkit's callables by name as a run calls them |
-| `tool_system/tool_schema.py` | Derives a tool function's description and parameter schema from its docstring and annotations, as Agno derives them for the annotations in use, and validates a call's arguments against them |
+| `tool_system/tool_schema.py` | Derives the description and parameter schema of every tool function whose signature gives them, MindRoom's own and Agno toolkits' alike, from its docstring and annotations, as Agno derives them for the annotations in use except that `Any` and `object` take any JSON value and `*args` and `**kwargs` stay out of the schema, and validates a call's arguments against them |
 | `tool_system/agno_toolkits.py` | Adapts Agno and owned toolkits and functions to `ToolFunction`, applying the function filters, output files, and worker stand-ins their builder configured, and, besides the vendor toolkit subclasses and the Google auth binding in `oauth/agno_compat_google_auth.py`, is the only module that looks inside an Agno toolkit: its function names, one function by name, renames, and connection; builds the Agno-shaped call-time arguments (run context, actor stand-in) vendor entrypoints expect, and reads the Agno `ToolResult` a vendor tool returns or streams as a `ToolValue` |
 | `tool_system/toolkit_connections.py` | Connects the `requires_connect` toolkits, such as Postgres, around each run that offers them, and holds the cancellation-safe connect and close helpers the script broker and MCP gateway share |
 | `tool_system/invocation.py` | Decodes a model's tool-call arguments, runs one call through middleware to its outcome for the loop or to the tool's own value for runners outside it (injection, synchronous offload, generator draining, error text), and reads that value as the text and media references a runner hands its client |
@@ -511,7 +515,7 @@ Matrix sync callback
 | `cli/help_format.py` | Help-page panel order, green help theme, and the examples epilog shared by CLI commands |
 | `cli/interactive.py` | Arrow-key prompts and step headers for terminal setup, with line prompts for piped input |
 | `cli/local_stack.py` | Local stack setup command |
-| `credentials/sync.py` | Shared provider/bootstrap env to credentials sync |
+| `credentials/sync.py` | Shared provider keys, the embedder key, and the Ollama host as the runtime resolves them |
 | `logging_config.py` | Structured logging setup |
 | `knowledge/utils.py` | Resolves the knowledge bases an agent searches: published indexes, availability notices, and refresh scheduling |
 | `custom_tools/chat_ui.py` | Runtime-bound MindRoom Chat UI action requests with canonical Matrix conversation and sender identity |

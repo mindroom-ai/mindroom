@@ -25,6 +25,7 @@ from mindroom.runtime_env_policy import COMPUTER_ALLOWED_ORIGINS_ENV, WORKER_COM
 from mindroom.worker_computer.client import computer_request, computer_stream
 from mindroom.worker_computer.sessions import ComputerError, ComputerSession, ComputerSessionStore, ComputerTarget
 from mindroom.workers.backend import WorkerBackend, WorkerBackendError
+from mindroom.workers.backend_kinds import worker_backend_kind
 from mindroom.workers.runtime import lease_configured_primary_worker_manager
 
 if TYPE_CHECKING:
@@ -121,12 +122,12 @@ def _session(request: Request, session_id: str) -> ComputerSession:
 
 def _resolve_worker(paths: RuntimePaths, target: ComputerTarget, *, start: bool) -> WorkerHandle:
     try:
+        if not worker_backend_kind(paths).dedicated:
+            raise ComputerError(503, "Computer requires a dedicated Docker or Kubernetes backend.")
         lease = lease_configured_primary_worker_manager(paths)
         if lease is None:
             raise ComputerError(503, "A dedicated computer worker backend is required.")
         with lease as manager:
-            if manager.backend_name not in {"docker", "kubernetes"}:
-                raise ComputerError(503, "Computer requires a dedicated Docker or Kubernetes backend.")
             handle = manager.ensure_worker(target.spec) if start else manager.touch_worker(target.spec.worker_key)
         if handle is None or handle.status != "ready" or not handle.auth_token:
             raise ComputerError(503, "Computer worker is unavailable; create a new session to restart.")

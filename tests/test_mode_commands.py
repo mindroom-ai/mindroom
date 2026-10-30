@@ -398,7 +398,6 @@ def test_selection_checks_effective_shell_permissions(
         context.config,
         paths,
         identity,
-        persist_runtime_state=False,
         knowledge=None,
         model=turn_model(context.config, paths, "helper"),
     )

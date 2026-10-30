@@ -37,6 +37,7 @@ if TYPE_CHECKING:
     config_fields=[
         ConfigField(
             name="access_token",
+            env=("GITHUB_ACCESS_TOKEN",),
             label="Access Token",
             type="password",
             required=False,

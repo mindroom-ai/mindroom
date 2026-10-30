@@ -211,7 +211,6 @@ def _build(turn_context: str | None = None) -> AgentBuild:
         prompt=PromptSpec(role="test", turn_context=turn_context, instructions=()),
         request_template=ModelRequest(messages=()),
         history_settings=replay_settings(),
-        store=None,
         surface=AgentSurface(
             mode="standard",
             cli_shell=False,
