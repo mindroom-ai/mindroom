@@ -44,6 +44,7 @@ from mindroom.workers.backend import (
     filter_and_sort_worker_handles,
     mirrored_credential_services,
 )
+from mindroom.workers.backend_kinds import WorkerBackendKind
 from mindroom.workers.backends._dedicated_worker_common import (
     plan_scoped_workspace_mounts,
     plan_shared_directory_mounts,
@@ -446,7 +447,7 @@ class _WorkerContainerState:
 class DockerWorkerBackend:
     """Docker-backed worker provider for dedicated local sandbox-runner containers."""
 
-    backend_name = "docker"
+    backend_name = WorkerBackendKind.DOCKER.value
     cleanup_locator: str | None = None
 
     def __init__(
