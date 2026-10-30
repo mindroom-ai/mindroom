@@ -618,6 +618,23 @@ def _set_config_generation_header(response: Response, generation: int) -> None:
     response.headers[config_lifecycle.CONFIG_GENERATION_HEADER] = str(generation)
 
 
+async def _commit_dashboard_save(
+    request: Request,
+    response: Response,
+    build: Callable[[constants.RuntimePaths], ConfigCommit],
+    expected_generation: int | None,
+) -> dict[str, bool]:
+    """Commit one dashboard save off the event loop, which validation would block, and attach its generation."""
+    published = await asyncio.to_thread(
+        config_lifecycle.commit_dashboard_config,
+        request,
+        build,
+        expected_generation=expected_generation,
+    )
+    _set_config_generation_header(response, published.generation)
+    return {"success": True}
+
+
 # Include routers
 app.include_router(auth_router)
 app.include_router(connections_session_router)
@@ -730,14 +747,8 @@ async def save_config(
     x_mindroom_config_generation: Annotated[int | None, Header()] = None,
 ) -> dict[str, bool]:
     """Save configuration to file."""
-    published = await asyncio.to_thread(
-        config_lifecycle.commit_dashboard_config,
-        request,
-        partial(ConfigCommit.from_payload, new_config),
-        expected_generation=x_mindroom_config_generation,
-    )
-    _set_config_generation_header(response, published.generation)
-    return {"success": True}
+    build = partial(ConfigCommit.from_payload, new_config)
+    return await _commit_dashboard_save(request, response, build, x_mindroom_config_generation)
 
 
 @app.get("/api/config/raw")
@@ -765,14 +776,8 @@ async def save_raw_config_source(
     x_mindroom_config_generation: Annotated[int | None, Header()] = None,
 ) -> dict[str, bool]:
     """Replace the raw config source text after validating it against the active runtime."""
-    published = await asyncio.to_thread(
-        config_lifecycle.commit_dashboard_config,
-        request,
-        partial(ConfigCommit.from_source, payload.source),
-        expected_generation=x_mindroom_config_generation,
-    )
-    _set_config_generation_header(response, published.generation)
-    return {"success": True}
+    build = partial(ConfigCommit.from_source, payload.source)
+    return await _commit_dashboard_save(request, response, build, x_mindroom_config_generation)
 
 
 @app.post("/api/config/agent-policies")

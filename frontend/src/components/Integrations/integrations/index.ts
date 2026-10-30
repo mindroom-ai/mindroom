@@ -69,11 +69,9 @@ export class GenericOAuthIntegrationProvider implements IntegrationProvider {
     const integrationStatus: Partial<Integration> = {
       status: status.connected
         ? "connected"
-        : status.resetRequired
-          ? "not_connected"
-          : status.hasClientConfig
-            ? "available"
-            : "not_connected",
+        : !status.resetRequired && status.hasClientConfig
+          ? "available"
+          : "not_connected",
       connected: status.connected,
       oauth_client_configured: status.hasClientConfig,
       oauth_custom_client_configured: status.hasCustomClientConfig,
@@ -373,11 +371,4 @@ export type {
 // Helper function to get all integrations
 export function getAllIntegrations(): IntegrationProvider[] {
   return Object.values(integrationProviders);
-}
-
-// Helper function to get integration by ID
-export function getIntegrationById(
-  id: string,
-): IntegrationProvider | undefined {
-  return integrationProviders[id];
 }

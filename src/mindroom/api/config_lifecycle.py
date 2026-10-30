@@ -297,8 +297,6 @@ def commit_dashboard_config(
         raise _stale_snapshot_error()
     try:
         commit = build(pinned.runtime_paths)
-    except HTTPException:
-        raise
     except CONFIG_LOAD_USER_ERROR_TYPES as exc:
         raise HTTPException(status_code=422, detail=config_error_detail(exc)) from exc
     except Exception as exc:
@@ -496,8 +494,7 @@ def config_pending_restart(request: Request) -> bool:
 
 def config_uses_includes(request: Request) -> bool:
     """Return whether the committed config uses include or expansion tags."""
-    snapshot = _request_or_current_snapshot(request)
-    return snapshot.uses_includes is True
+    return _request_or_current_snapshot(request).uses_includes is True
 
 
 def read_raw_config_source(request: Request) -> str:

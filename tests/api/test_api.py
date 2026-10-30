@@ -2569,6 +2569,30 @@ def test_homeassistant_shared_scope_token_connect_uses_store_the_toolkit_reads(a
     assert toolkit._load_config() is None
 
 
+def test_homeassistant_status_reports_stored_settings_without_a_token(api_key_client: TestClient) -> None:
+    """Stored settings without a token read as not connected, naming what is missing, without calling the instance."""
+    config = _config_with_worker_scope("shared")
+    runtime_paths = main._app_runtime_paths(api_key_client.app)
+    assert api_key_client.post("/api/auth/session", json={"api_key": "test-key"}).status_code == 200
+    _publish_committed_runtime_config(api_key_client.app, runtime_paths, config.model_dump())
+    save_scoped_credentials(
+        "homeassistant",
+        {"instance_url": "http://93.184.216.34:8123", "_source": "ui"},
+        credentials_manager=get_runtime_credentials_manager(runtime_paths),
+        worker_target=resolve_worker_target("shared", "general", execution_identity=None),
+        primary_built_tool=True,
+    )
+
+    with patch("mindroom.api.homeassistant_integration._test_connection", new_callable=AsyncMock) as test_connection:
+        response = api_key_client.get("/api/homeassistant/status?agent_name=general")
+
+    assert response.status_code == 200
+    assert response.json()["connected"] is False
+    assert response.json()["has_credentials"] is True
+    assert response.json()["error"] == "Missing instance URL or token"
+    test_connection.assert_not_awaited()
+
+
 def test_homeassistant_status_renews_an_expired_oauth_token(api_key_client: TestClient) -> None:
     """The status probe renews a rejected OAuth access token, saves it, and reports the connection."""
     config = _config_with_worker_scope("shared")

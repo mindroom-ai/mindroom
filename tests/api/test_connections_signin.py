@@ -49,6 +49,8 @@ if TYPE_CHECKING:
     from httpx import Response
 
 PORTAL_ORIGIN = "https://portal.example.org"
+# Any route the dashboard login guards; this one reads the in-memory config the sign-in fixture publishes.
+_DASHBOARD_ROUTE = "/api/config/personal-agents"
 CHAT_ORIGIN = "https://chat.example.org"
 CONNECTIONS_SESSION_COOKIE = connections_session_cookie(PORTAL_ORIGIN)
 
@@ -525,10 +527,8 @@ def test_session_ignored_on_dashboard_routes(signin: dict[str, Any]) -> None:
     """A portal session is not a dashboard credential; the API key still is."""
     client = signin["client"]
     assert sign_in(client, "alice").status_code == 200
-    assert client.get("/api/config/personal-agents").status_code == 401
-    assert (
-        client.get("/api/config/personal-agents", headers={"Authorization": "Bearer dashboard-key"}).status_code == 200
-    )
+    assert client.get(_DASHBOARD_ROUTE).status_code == 401
+    assert client.get(_DASHBOARD_ROUTE, headers={"Authorization": "Bearer dashboard-key"}).status_code == 200
 
 
 def _admin_dashboard_client(signin: dict[str, Any]) -> TestClient:
@@ -543,7 +543,7 @@ def _admin_dashboard_client(signin: dict[str, Any]) -> TestClient:
 def test_admin_dashboard_session_reaches_dashboard_api(signin: dict[str, Any]) -> None:
     """An administrator signed in with a bound token uses the dashboard API without the API key."""
     client = _admin_dashboard_client(signin)
-    assert client.get("/api/config/personal-agents").status_code == 200
+    assert client.get(_DASHBOARD_ROUTE).status_code == 200
 
 
 def test_admin_dashboard_session_loads_dashboard_page(
@@ -568,17 +568,15 @@ def test_session_without_dashboard_bit_keeps_api_key_rule(signin: dict[str, Any]
     _with_admin(signin)
     client = signin["client"]
     assert sign_in(client, "alice").status_code == 200
-    assert client.get("/api/config/personal-agents").status_code == 401
-    assert (
-        client.get("/api/config/personal-agents", headers={"Authorization": "Bearer dashboard-key"}).status_code == 200
-    )
+    assert client.get(_DASHBOARD_ROUTE).status_code == 401
+    assert client.get(_DASHBOARD_ROUTE, headers={"Authorization": "Bearer dashboard-key"}).status_code == 200
 
 
 def test_removed_admin_loses_dashboard_access_next_request(signin: dict[str, Any]) -> None:
     """Administrator authority is read on every request, not frozen into the session."""
     client = _admin_dashboard_client(signin)
     _serve(signin)
-    assert client.get("/api/config/personal-agents").status_code == 401
+    assert client.get(_DASHBOARD_ROUTE).status_code == 401
 
 
 def test_dashboard_session_ignored_in_platform_mode(signin: dict[str, Any], monkeypatch: pytest.MonkeyPatch) -> None:
@@ -606,7 +604,7 @@ def test_dashboard_session_ignored_in_platform_mode(signin: dict[str, Any], monk
         )
         return auth._connections_session_auth_user(request)
 
-    assert session_user("/api/config/personal-agents") is None
+    assert session_user(_DASHBOARD_ROUTE) is None
     assert session_user("/api/connections/session") is not None
 
 
@@ -696,8 +694,8 @@ def test_session_cookie_ignored_for_admin_on_dashboard_routes(
 
     assert sign_in(client, "alice").status_code == 200
     assert client.get("/api/connections/session").json() == {"matrix_user_id": "@alice:example.org"}
-    assert client.get("/api/config/personal-agents").status_code == 401
-    assert client.get("/api/config/personal-agents", headers=upstream("alice")).status_code == 200
+    assert client.get(_DASHBOARD_ROUTE).status_code == 401
+    assert client.get(_DASHBOARD_ROUTE, headers=upstream("alice")).status_code == 200
 
 
 def test_upstream_identity_refuses_a_page_showing_another_account(
@@ -802,13 +800,7 @@ def test_dashboard_oauth_flow_completes_with_portal_session_present(signin: dict
     client = signin["client"]
     assert sign_in(client, "alice").status_code == 200
     assert client.post("/api/auth/session", json={"api_key": "dashboard-key"}).status_code == 200
-    connect = client.post(
-        "/api/oauth/google_drive/connect",
-        params={"agent_name": "personal"},
-        headers={"Origin": PORTAL_ORIGIN},
-    )
-    assert connect.status_code == 200, connect.text
-    _complete_callback(client, parse_qs(urlparse(connect.json()["auth_url"]).query)["state"][0])
+    _complete_callback(client, _dashboard_connect_state(client))
     stored = partial(_stored_oauth_credentials, signin["provider"], signin["paths"], agent_name="personal")
     assert stored(requester_id="@owner:example.org") is not None
     assert stored(requester_id="@alice:example.org") is None
@@ -981,7 +973,7 @@ def test_binding_switched_on_during_sign_in_grants_no_dashboard(
         assert sign_in(signin["client"], "alice").status_code == 200
         assert binding["on"] is True
         assert _session_of(signin["client"]) == ("@alice:example.org", False)
-        assert signin["client"].get("/api/config/personal-agents").status_code == 401
+        assert signin["client"].get(_DASHBOARD_ROUTE).status_code == 401
     finally:
         run(runner.cleanup())
         loop.call_soon_threadsafe(loop.stop)

@@ -1,14 +1,4 @@
-"""Home Assistant Integration for MindRoom.
-
-This module provides OAuth2 integration with Home Assistant, supporting:
-- Device control (lights, switches, climate, etc.)
-- State monitoring (sensors, binary sensors)
-- Scene activation
-- Service calls
-- Automation triggers
-
-Uses the official Home Assistant REST API.
-"""
+"""Dashboard routes that connect, check, and disconnect a Home Assistant instance."""
 
 from __future__ import annotations
 
@@ -86,11 +76,6 @@ def _save_config(target: RequestCredentialsTarget, config: dict[str, Any]) -> No
     save_credentials_for_target("homeassistant", config_to_save, target)
 
 
-def _private_url_allowed(config: dict[str, Any]) -> bool:
-    """Return whether stored Home Assistant credentials explicitly allow private URLs."""
-    return config.get("allow_private_url") is True
-
-
 def _validate_homeassistant_instance_url(instance_url: str, *, allow_private_url: bool) -> str:
     """Validate a Home Assistant instance URL before server-side fetches."""
     try:
@@ -116,7 +101,7 @@ def _homeassistant_http_client(*, allow_private_url: bool) -> httpx.AsyncClient:
 
 async def _test_connection(config: dict[str, Any], target: RequestCredentialsTarget) -> dict[str, Any]:
     """Test connection to Home Assistant, renewing an expired OAuth access token."""
-    allow_private_url = _private_url_allowed(config)
+    allow_private_url = config.get("allow_private_url") is True
     try:
         instance_url = _normalize_instance_url(config["instance_url"])
         fetch_url = _validate_homeassistant_instance_url(instance_url, allow_private_url=allow_private_url)
@@ -188,18 +173,16 @@ async def get_status(request: Request, agent_name: str | None = None) -> HomeAss
             has_credentials=False,
         )
 
+    instance_url = config.get("instance_url")
+    token = config.get("access_token") or config.get("long_lived_token")
+    if not instance_url or not token:
+        return HomeAssistantStatus(
+            connected=False,
+            has_credentials=True,
+            error="Missing instance URL or token",
+        )
+
     try:
-        # Test the connection
-        instance_url = config.get("instance_url")
-        token = config.get("access_token") or config.get("long_lived_token")
-
-        if not instance_url or not token:
-            return HomeAssistantStatus(
-                connected=False,
-                has_credentials=True,
-                error="Missing instance URL or token",
-            )
-
         info = await _test_connection(config, target)
 
         return HomeAssistantStatus(
@@ -346,9 +329,10 @@ async def callback(request: Request) -> RedirectResponse:
         execution_scope_override=pending.execution_scope_override,
     )
 
-    instance_url = (pending.payload or {}).get("instance_url")
-    client_id = (pending.payload or {}).get("client_id")
-    allow_private_url = (pending.payload or {}).get("allow_private_url") == "true"
+    payload = pending.payload or {}
+    instance_url = payload.get("instance_url")
+    client_id = payload.get("client_id")
+    allow_private_url = payload.get("allow_private_url") == "true"
 
     if not all([instance_url, client_id]) or not isinstance(instance_url, str):
         raise HTTPException(status_code=503, detail="Incomplete configuration")
