@@ -455,7 +455,7 @@ async def test_message_exactly_at_limit() -> None:
     text = "e" * text_size
     content = {"body": text, "msgtype": "m.text"}
 
-    result = await prepare_large_message(client, "!room:server", content)
+    result = await prepare_large_message(client, "!room:server", content, room_encrypted=False)
 
     # Should pass through unchanged (just under limit)
     assert result == content
@@ -477,7 +477,7 @@ async def test_message_with_formatted_body_no_tools() -> None:
         "format": "org.matrix.custom.html",
     }
 
-    result = await prepare_large_message(client, "!room:server", content)
+    result = await prepare_large_message(client, "!room:server", content, room_encrypted=False)
 
     # Should be an m.file message with truncated preview
     assert result["msgtype"] == "m.file"
@@ -513,7 +513,7 @@ async def test_large_message_with_plain_tool_markers_uploads_full_content_json()
         _TOOL_TRACE_KEY: {"version": 2, "events": [{"type": "tool_call_started", "tool_name": "web_search"}]},
     }
 
-    result = await prepare_large_message(client, "!room:server", content)
+    result = await prepare_large_message(client, "!room:server", content, room_encrypted=False)
 
     assert result["msgtype"] == "m.file"
     assert result["info"]["mimetype"] == "application/json"
@@ -545,7 +545,7 @@ async def test_large_message_preview_uses_generic_truncation_with_plain_markers(
         "msgtype": "m.text",
     }
 
-    result = await prepare_large_message(client, "!room:server", content)
+    result = await prepare_large_message(client, "!room:server", content, room_encrypted=False)
 
     assert result["msgtype"] == "m.file"
 

@@ -15,6 +15,7 @@ from types import SimpleNamespace
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import nio
 import pytest
 from agno.tools.function import FunctionCall
 
@@ -24,7 +25,6 @@ from mindroom.config.main import Config
 from mindroom.constants import SKIP_MENTIONS_KEY, resolve_runtime_paths
 from mindroom.custom_tools.attachments import AttachmentTools
 from mindroom.custom_tools.matrix_message import MatrixMessageTools
-from mindroom.matrix.client_delivery import DeliveredMatrixEvent
 from mindroom.matrix.runtime_media import RuntimeEncryptedMediaAttachment
 from mindroom.message_target import MessageTarget
 from mindroom.session_ids import create_session_id
@@ -924,16 +924,16 @@ async def test_matrix_message_attachments_tell_receivers_to_ignore_mentions_in_f
     register_tool_runtime_media_attachment(context, media)
     sent_contents: list[dict[str, object]] = []
 
-    async def capture_send(_client: object, _room_id: str, content: dict[str, object], **_kwargs: object) -> object:
+    async def capture_send(*, room_id: str, content: dict[str, object], **_kwargs: object) -> nio.RoomSendResponse:
         sent_contents.append(content)
-        return DeliveredMatrixEvent(event_id=f"$sent{len(sent_contents)}", content_sent=content)
+        return nio.RoomSendResponse(f"$sent{len(sent_contents)}", room_id)
 
+    context.client.room_send = AsyncMock(side_effect=capture_send)
     with (
         patch(
             "mindroom.matrix.client_delivery._upload_file_as_mxc",
             new=AsyncMock(return_value=("mxc://localhost/file", {"info": {"size": 7, "mimetype": "text/plain"}})),
         ),
-        patch("mindroom.matrix.client_delivery.send_message_result", side_effect=capture_send),
         tool_runtime_context(context),
     ):
         result = json.loads(await MatrixMessageTools().matrix_message(attachments=["att_named", "att_media"]))

@@ -88,6 +88,30 @@ def test_continuations_use_thread_fallback_relation() -> None:
         }
 
 
+def test_thread_continuations_without_reply_target_fall_back_to_the_thread_root() -> None:
+    """A thread continuation with no known reply target points its fallback at the thread root."""
+    body = _body()
+    content = {
+        "msgtype": "m.text",
+        "body": body,
+        "format": "org.matrix.custom.html",
+        "formatted_body": markdown_to_html(body),
+    }
+
+    segmented = segment_matrix_content(content, room_encrypted=False, continuation_thread_id="$thread")
+
+    assert segmented is not None
+    assert "m.relates_to" not in segmented.first
+    assert segmented.continuations
+    for continuation in segmented.continuations:
+        assert continuation["m.relates_to"] == {
+            "rel_type": "m.thread",
+            "event_id": "$thread",
+            "is_falling_back": True,
+            "m.in_reply_to": {"event_id": "$thread"},
+        }
+
+
 def test_room_mode_continuations_carry_no_reply_relation() -> None:
     """Outside threads a continuation is a bare message, not a second reply."""
     body = _body()

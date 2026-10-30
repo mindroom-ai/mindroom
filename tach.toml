@@ -7133,7 +7133,6 @@ expose = [
     "edit_message_outcome",
     "edit_message_result",
     "prepare_message_content",
-    "resolve_room_encryption_for_delivery",
     "resolve_room_encryption_outcome",
     "send_audio_message",
     "send_file_message",

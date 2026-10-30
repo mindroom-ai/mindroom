@@ -149,10 +149,6 @@ def _copy_inline_streaming_preview_metadata(source_content: dict[str, Any], targ
     _copy_preview_metadata(source_content, target_content)
 
 
-def _room_is_encrypted(client: nio.AsyncClient, room_id: str | None) -> bool:
-    return bool(room_id and room_id in client.rooms and client.rooms[room_id].encrypted)
-
-
 def _add_sidecar_metadata(
     target_content: dict[str, Any],
     *,
@@ -546,16 +542,16 @@ async def _upload_text_as_mxc(
     room_id: str | None = None,
     *,
     mimetype: str = "text/plain",
-    room_encrypted: bool | None = None,
+    room_encrypted: bool,
 ) -> tuple[str | None, dict[str, Any] | None]:
     """Upload text content as an MXC file.
 
     Args:
         client: The Matrix client
         text: The text content to upload
-        room_id: Optional room ID to check for encryption
+        room_id: Optional room ID for failure logs
         mimetype: MIME type for the uploaded content (default: "text/plain")
-        room_encrypted: Authoritative encryption state when the room cache is unavailable
+        room_encrypted: Authoritative room encryption state, which decides whether the upload is encrypted
 
     Returns:
         Tuple of (mxc_uri, file_info_dict) or (None, None) on failure
@@ -569,9 +565,6 @@ async def _upload_text_as_mxc(
         filename = "message-content.json"
     else:
         filename = "message.txt"
-
-    if room_encrypted is None:
-        room_encrypted = _room_is_encrypted(client, room_id)
 
     try:
         prepared = prepare_media_upload(text_bytes, filename=filename, mimetype=mimetype, encrypt=room_encrypted)
@@ -700,7 +693,7 @@ async def upload_json_sidecar(
     room_id: str,
     payload: dict[str, Any],
     *,
-    room_encrypted: bool | None = None,
+    room_encrypted: bool,
 ) -> tuple[str | None, dict[str, Any] | None]:
     """Upload one JSON payload as an MXC sidecar and return ``(mxc_uri, file_info)``."""
     text = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
@@ -805,7 +798,7 @@ async def prepare_large_message(
     room_id: str,
     content: dict[str, Any],
     *,
-    room_encrypted: bool | None = None,
+    room_encrypted: bool,
     prepare_for_encrypted_delivery: bool = False,
 ) -> dict[str, Any]:
     """Check if message is too large and prepare it if needed.
@@ -820,7 +813,7 @@ async def prepare_large_message(
         client: The Matrix client
         room_id: The room to send to
         content: The message content dictionary
-        room_encrypted: Authoritative encryption state when the room cache is unavailable
+        room_encrypted: Authoritative room encryption state from the delivery boundary
         prepare_for_encrypted_delivery: Encrypt sidecars and fit a durable payload for later encrypted delivery
 
     Returns:
@@ -832,8 +825,6 @@ async def prepare_large_message(
     """
     is_edit = is_edit_message(content)
     size_limit = EDIT_MESSAGE_SIZE_LIMIT if is_edit else _NORMAL_MESSAGE_LIMIT
-    if room_encrypted is None:
-        room_encrypted = _room_is_encrypted(client, room_id)
     encrypted_delivery_safe = room_encrypted or prepare_for_encrypted_delivery
     calculate_delivery_event_size = _delivery_event_size_calculator(
         client,

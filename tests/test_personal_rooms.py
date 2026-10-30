@@ -175,7 +175,11 @@ class MatrixServer:
     async def room_get_state_event(self, room_id: str, event_type: str, state_key: str = "") -> object:
         """Read one authoritative state event."""
         event = next(
-            (event for event in self.state[room_id] if (event["type"], event["state_key"]) == (event_type, state_key)),
+            (
+                event
+                for event in self.state.get(room_id, ())
+                if (event["type"], event["state_key"]) == (event_type, state_key)
+            ),
             None,
         )
         if event is None:

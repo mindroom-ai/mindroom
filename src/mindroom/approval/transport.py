@@ -14,8 +14,9 @@ from mindroom.event_journal import DeliveryStage
 from mindroom.event_journal.matrix_delivery import MatrixDeliveryWorker
 from mindroom.logging_config import get_logger
 from mindroom.matrix.client_delivery import (
+    MatrixDeliveryFailure,
     can_send_to_encrypted_room,
-    resolve_room_encryption_for_delivery,
+    resolve_room_encryption_outcome,
     send_room_event_result,
 )
 from mindroom.matrix.large_messages import content_fits_normal_event, sidecar_upload_is_usable, upload_json_sidecar
@@ -80,12 +81,12 @@ async def _offload_oversized_full_arguments(
     ):
         return send_content
     offloaded = {key: value for key, value in send_content.items() if key != "full_arguments"}
-    room_encrypted = await resolve_room_encryption_for_delivery(
+    room_encrypted = await resolve_room_encryption_outcome(
         client,
         room_id,
         operation="offload_approval_full_arguments",
     )
-    if room_encrypted is None:
+    if isinstance(room_encrypted, MatrixDeliveryFailure):
         offloaded["approvable"] = False
         return offloaded
     mxc_uri, file_info = await upload_json_sidecar(

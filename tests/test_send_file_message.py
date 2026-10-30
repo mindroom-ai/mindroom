@@ -50,6 +50,41 @@ def _upload_response(content_uri: str = "mxc://localhost/abc123") -> nio.UploadR
     return resp
 
 
+_TEST_ENCRYPTION_KEYS = {"key": {"k": "k1"}, "iv": "iv1", "hashes": {"sha256": "h1"}}
+
+
+def _delivering_client(*, encrypted: bool) -> AsyncMock:
+    """Return a cached-room client whose sends succeed, so tests read the exact wire content."""
+    client = _mock_client(encrypted=encrypted)
+    client.upload.return_value = (_upload_response("mxc://localhost/media"), {})
+    client.room_send.return_value = nio.RoomSendResponse("$media:localhost", "!room:localhost")
+    return client
+
+
+def _wire_content(client: AsyncMock) -> dict[str, object]:
+    client.room_send.assert_awaited_once()
+    return cast("dict[str, object]", client.room_send.await_args.kwargs["content"])
+
+
+def _encrypted_file(mimetype: str, size: int) -> dict[str, object]:
+    return {
+        "url": "mxc://localhost/media",
+        **_TEST_ENCRYPTION_KEYS,
+        "v": "v2",
+        "mimetype": mimetype,
+        "size": size,
+    }
+
+
+def _thread_fallback(latest_event_id: str = "$latest:localhost") -> dict[str, object]:
+    return {
+        "rel_type": "m.thread",
+        "event_id": "$thread:localhost",
+        "is_falling_back": True,
+        "m.in_reply_to": {"event_id": latest_event_id},
+    }
+
+
 class TestUploadFileAsMxc:
     """Tests for _upload_file_as_mxc."""
 
@@ -389,208 +424,42 @@ class TestSendFileMessage:
     """Tests for send_file_message."""
 
     @pytest.mark.asyncio
-    async def test_sends_unencrypted_file_with_url(self, tmp_path: Path) -> None:
-        """Unencrypted file should produce content with 'url' and no 'file' key."""
-        client = _mock_client(encrypted=False)
-        client.upload.return_value = (_upload_response("mxc://localhost/f1"), {})
-
-        sent_content: dict | None = None
-
-        async def capture_send(
-            _client: object,
-            _room: str,
-            content: dict,
-        ) -> DeliveredMatrixEvent:
-            nonlocal sent_content
-            sent_content = content
-            return DeliveredMatrixEvent(event_id="$evt:localhost", content_sent=content)
-
-        file = tmp_path / "report.pdf"
-        file.write_bytes(b"%PDF")
-
-        with patch("mindroom.matrix.client_delivery.send_message_result", side_effect=capture_send):
-            event_id = await send_file_message(
-                client,
-                "!room:localhost",
-                file,
-            )
-
-        assert event_id == "$evt:localhost"
-        assert sent_content is not None
-        assert sent_content["msgtype"] == "m.file"
-        assert sent_content["body"] == "report.pdf"
-        assert sent_content["filename"] == "report.pdf"
-        assert sent_content["url"] == "mxc://localhost/f1"
-        assert "file" not in sent_content
-        assert "m.relates_to" not in sent_content
-
-    @pytest.mark.asyncio
     async def test_named_upload_uses_given_filename_and_mimetype(self, tmp_path: Path) -> None:
         """A retained copy with an opaque name is sent under its original name and type."""
-        client = _mock_client(encrypted=False)
-        client.upload.return_value = (_upload_response("mxc://localhost/f2"), {})
-        sent_content: dict | None = None
-
-        async def capture_send(
-            _client: object,
-            _room: str,
-            content: dict,
-        ) -> DeliveredMatrixEvent:
-            nonlocal sent_content
-            sent_content = content
-            return DeliveredMatrixEvent(event_id="$evt:localhost", content_sent=content)
-
+        client = _delivering_client(encrypted=False)
         file = tmp_path / "att_0123.xsl"
         file.write_bytes(b"<data/>")
 
-        with patch("mindroom.matrix.client_delivery.send_message_result", side_effect=capture_send):
-            event_id = await send_file_message(
-                client,
-                "!room:localhost",
-                file,
-                filename="data.xml",
-                mimetype="application/xml",
-            )
+        event_id = await send_file_message(
+            client,
+            "!room:localhost",
+            file,
+            filename="data.xml",
+            mimetype="application/xml",
+        )
 
-        assert event_id == "$evt:localhost"
-        assert sent_content is not None
+        assert event_id == "$media:localhost"
+        sent_content = _wire_content(client)
         assert sent_content["body"] == "data.xml"
         assert sent_content["filename"] == "data.xml"
-        assert sent_content["info"]["mimetype"] == "application/xml"
+        assert sent_content["info"] == {"size": 7, "mimetype": "application/xml"}
         assert client.upload.await_args.kwargs["filename"] == "data.xml"
-
-    @pytest.mark.asyncio
-    async def test_sends_encrypted_file_with_file_key(self, tmp_path: Path) -> None:
-        """Encrypted file should produce content with 'file' key and no 'url'."""
-        client = _mock_client(encrypted=True)
-        client.upload.return_value = (_upload_response("mxc://localhost/enc1"), {})
-
-        sent_content: dict | None = None
-
-        async def capture_send(
-            _client: object,
-            _room: str,
-            content: dict,
-        ) -> DeliveredMatrixEvent:
-            nonlocal sent_content
-            sent_content = content
-            return DeliveredMatrixEvent(event_id="$evt:localhost", content_sent=content)
-
-        file = tmp_path / "secret.bin"
-        file.write_bytes(b"\x00" * 8)
-
-        with (
-            patch("mindroom.matrix.client_delivery.crypto.ENCRYPTION_ENABLED", True),
-            patch(
-                "mindroom.matrix.media.crypto.attachments.encrypt_attachment",
-                return_value=(
-                    b"encrypted",
-                    {
-                        "key": {"k": "k1"},
-                        "iv": "iv1",
-                        "hashes": {"sha256": "h1"},
-                    },
-                ),
-            ),
-            patch("mindroom.matrix.client_delivery.send_message_result", side_effect=capture_send),
-        ):
-            event_id = await send_file_message(
-                client,
-                "!room:localhost",
-                file,
-            )
-
-        assert event_id == "$evt:localhost"
-        assert sent_content is not None
-        assert "file" in sent_content
-        assert sent_content["file"]["url"] == "mxc://localhost/enc1"
-        assert "url" not in sent_content
-
-    @pytest.mark.asyncio
-    async def test_thread_relation_is_set(self, tmp_path: Path) -> None:
-        """When thread_id is provided, m.relates_to should be set."""
-        client = _mock_client(encrypted=False)
-        client.upload.return_value = (_upload_response("mxc://localhost/t1"), {})
-
-        sent_content: dict | None = None
-
-        async def capture_send(
-            _client: object,
-            _room: str,
-            content: dict,
-        ) -> DeliveredMatrixEvent:
-            nonlocal sent_content
-            sent_content = content
-            return DeliveredMatrixEvent(event_id="$evt:localhost", content_sent=content)
-
-        file = tmp_path / "data.csv"
-        file.write_text("a,b,c", encoding="utf-8")
-
-        with patch("mindroom.matrix.client_delivery.send_message_result", side_effect=capture_send):
-            event_id = await send_file_message(
-                client,
-                "!room:localhost",
-                file,
-                thread_id="$root:localhost",
-                latest_thread_event_id="$latest:localhost",
-            )
-
-        assert event_id == "$evt:localhost"
-        assert sent_content is not None
-        relates_to = sent_content["m.relates_to"]
-        assert relates_to["rel_type"] == "m.thread"
-        assert relates_to["event_id"] == "$root:localhost"
-        assert relates_to["is_falling_back"] is True
-        assert relates_to["m.in_reply_to"]["event_id"] == "$latest:localhost"
-
-    @pytest.mark.asyncio
-    async def test_uses_precomputed_latest_thread_event_id_when_provided(self, tmp_path: Path) -> None:
-        """Threaded sends should skip lookup when the caller already resolved the latest event."""
-        client = _mock_client(encrypted=False)
-        client.upload.return_value = (_upload_response("mxc://localhost/t1"), {})
-
-        sent_content: dict | None = None
-
-        async def capture_send(
-            _client: object,
-            _room: str,
-            content: dict,
-        ) -> DeliveredMatrixEvent:
-            nonlocal sent_content
-            sent_content = content
-            return DeliveredMatrixEvent(event_id="$evt:localhost", content_sent=content)
-
-        file = tmp_path / "data.csv"
-        file.write_text("a,b,c", encoding="utf-8")
-
-        with patch("mindroom.matrix.client_delivery.send_message_result", side_effect=capture_send):
-            event_id = await send_file_message(
-                client,
-                "!room:localhost",
-                file,
-                thread_id="$root:localhost",
-                latest_thread_event_id="$precomputed:localhost",
-            )
-
-        assert event_id == "$evt:localhost"
-        assert sent_content is not None
-        assert sent_content["m.relates_to"]["m.in_reply_to"]["event_id"] == "$precomputed:localhost"
 
     @pytest.mark.asyncio
     async def test_threaded_send_requires_precomputed_latest_thread_event_id(self, tmp_path: Path) -> None:
         """Threaded file sends should require fallback resolution from the conversation-cache seam."""
-        client = _mock_client(encrypted=False)
-        client.upload.return_value = (_upload_response("mxc://localhost/t1"), {})
+        client = _delivering_client(encrypted=False)
         file = tmp_path / "data.csv"
         file.write_text("a,b,c", encoding="utf-8")
 
-        with pytest.raises(ValueError, match="latest_thread_event_id is required for thread fallback"):
+        with pytest.raises(AssertionError, match="latest_thread_event_id is required for thread fallback"):
             await send_file_message(
                 client,
                 "!room:localhost",
                 file,
                 thread_id="$root:localhost",
             )
+        client.room_send.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_returns_none_for_missing_file(self, tmp_path: Path) -> None:
@@ -605,16 +474,13 @@ class TestSendFileMessage:
 
     @pytest.mark.asyncio
     async def test_returns_none_for_encrypted_room_when_e2ee_support_is_unavailable(self, tmp_path: Path) -> None:
-        """Encrypted-room file sends should fail early when nio E2EE support is disabled."""
+        """Encrypted-room file sends should fail before uploading when nio E2EE support is disabled."""
         client = _mock_client(encrypted=True)
 
         file = tmp_path / "secret.bin"
         file.write_bytes(b"\x00" * 8)
 
-        with (
-            patch("mindroom.matrix.client_delivery.crypto.ENCRYPTION_ENABLED", False),
-            patch("mindroom.matrix.client_delivery._upload_file_as_mxc", new_callable=AsyncMock) as mock_upload,
-        ):
+        with patch("mindroom.matrix.client_delivery.crypto.ENCRYPTION_ENABLED", False):
             result = await send_file_message(
                 client,
                 "!room:localhost",
@@ -622,7 +488,8 @@ class TestSendFileMessage:
             )
 
         assert result is None
-        mock_upload.assert_not_awaited()
+        client.upload.assert_not_awaited()
+        client.room_send.assert_not_awaited()
 
 
 class TestSendAudioMessage:
@@ -630,116 +497,33 @@ class TestSendAudioMessage:
 
     @pytest.mark.asyncio
     async def test_sends_unencrypted_voice_audio_with_url(self) -> None:
-        """Unencrypted voice audio should produce m.audio content with voice metadata."""
-        client = _mock_client(encrypted=False)
-        client.upload.return_value = (_upload_response("mxc://localhost/voice"), {})
+        """A captioned voice note keeps its caption readable by receivers."""
+        client = _delivering_client(encrypted=False)
 
-        sent_content: dict | None = None
+        event_id = await send_audio_message(
+            client,
+            "!room:localhost",
+            b"audio-bytes",
+            mimetype="audio/mpeg",
+            filename="reply.mp3",
+            caption="Voice reply",
+            duration_ms=1234,
+            waveform=[0, 512, 1024],
+        )
 
-        async def capture_send(
-            _client: object,
-            _room: str,
-            content: dict,
-        ) -> DeliveredMatrixEvent:
-            nonlocal sent_content
-            sent_content = content
-            return DeliveredMatrixEvent(event_id="$voice:localhost", content_sent=content)
-
-        with patch("mindroom.matrix.client_delivery.send_message_result", side_effect=capture_send):
-            event_id = await send_audio_message(
-                client,
-                "!room:localhost",
-                b"audio-bytes",
-                mimetype="audio/mpeg",
-                filename="reply.mp3",
-                caption="Voice reply",
-                duration_ms=1234,
-                waveform=[0, 512, 1024],
-            )
-
-        assert event_id == "$voice:localhost"
-        assert sent_content is not None
-        assert sent_content["msgtype"] == "m.audio"
-        assert sent_content["body"] == "Voice reply"
-        assert sent_content["filename"] == "reply.mp3"
-        assert sent_content["url"] == "mxc://localhost/voice"
-        assert sent_content["info"] == {"size": 11, "mimetype": "audio/mpeg", "duration": 1234}
-        assert sent_content["org.matrix.msc3245.voice"] == {}
-        assert sent_content["org.matrix.msc1767.audio"] == {
-            "duration": 1234,
-            "waveform": [0, 512, 1024],
-        }
-        assert "file" not in sent_content
-
+        assert event_id == "$media:localhost"
+        sent_content = _wire_content(client)
         received_event = MagicMock(spec=nio.RoomMessageAudio)
         received_event.body = sent_content["body"]
         received_event.source = {"content": sent_content}
         assert extract_media_caption(received_event, default="[Attached voice message]") == "Voice reply"
 
     @pytest.mark.asyncio
-    async def test_sends_encrypted_voice_audio_with_file_payload(self) -> None:
-        """Encrypted voice audio should produce an encrypted file payload."""
-        client = _mock_client(encrypted=True)
-        client.upload.return_value = (_upload_response("mxc://localhost/voice-enc"), {})
-
-        sent_content: dict | None = None
-
-        async def capture_send(
-            _client: object,
-            _room: str,
-            content: dict,
-        ) -> DeliveredMatrixEvent:
-            nonlocal sent_content
-            sent_content = content
-            return DeliveredMatrixEvent(event_id="$voice:localhost", content_sent=content)
-
-        with (
-            patch("mindroom.matrix.client_delivery.crypto.ENCRYPTION_ENABLED", True),
-            patch(
-                "mindroom.matrix.media.crypto.attachments.encrypt_attachment",
-                return_value=(
-                    b"encrypted",
-                    {
-                        "key": {"k": "k1"},
-                        "iv": "iv1",
-                        "hashes": {"sha256": "h1"},
-                    },
-                ),
-            ),
-            patch("mindroom.matrix.client_delivery.send_message_result", side_effect=capture_send),
-        ):
-            event_id = await send_audio_message(
-                client,
-                "!room:localhost",
-                b"audio-bytes",
-                mimetype="audio/mpeg",
-                filename="reply.mp3",
-                duration_ms=1234,
-                waveform=[1024],
-            )
-
-        assert event_id == "$voice:localhost"
-        assert sent_content is not None
-        assert sent_content["msgtype"] == "m.audio"
-        assert sent_content["body"] == "reply.mp3"
-        assert sent_content["org.matrix.msc3245.voice"] == {}
-        assert sent_content["org.matrix.msc1767.audio"] == {
-            "duration": 1234,
-            "waveform": [1024],
-        }
-        assert sent_content["file"]["url"] == "mxc://localhost/voice-enc"
-        assert sent_content["file"]["mimetype"] == "audio/mpeg"
-        assert "url" not in sent_content
-
-    @pytest.mark.asyncio
     async def test_returns_none_for_encrypted_room_when_e2ee_support_is_unavailable(self) -> None:
-        """Encrypted-room audio sends should fail early when nio E2EE support is disabled."""
+        """Encrypted-room audio sends should fail before uploading when nio E2EE support is disabled."""
         client = _mock_client(encrypted=True)
 
-        with (
-            patch("mindroom.matrix.client_delivery.crypto.ENCRYPTION_ENABLED", False),
-            patch("mindroom.matrix.client_delivery.upload_media_bytes_as_mxc", new_callable=AsyncMock) as mock_upload,
-        ):
+        with patch("mindroom.matrix.client_delivery.crypto.ENCRYPTION_ENABLED", False):
             result = await send_audio_message(
                 client,
                 "!room:localhost",
@@ -748,73 +532,8 @@ class TestSendAudioMessage:
             )
 
         assert result is None
-        mock_upload.assert_not_awaited()
-
-    @pytest.mark.asyncio
-    async def test_thread_relation_is_set(self) -> None:
-        """Voice audio should preserve Matrix thread fallback metadata."""
-        client = _mock_client(encrypted=False)
-        client.upload.return_value = (_upload_response("mxc://localhost/thread-voice"), {})
-
-        sent_content: dict | None = None
-
-        async def capture_send(
-            _client: object,
-            _room: str,
-            content: dict,
-        ) -> DeliveredMatrixEvent:
-            nonlocal sent_content
-            sent_content = content
-            return DeliveredMatrixEvent(event_id="$voice:localhost", content_sent=content)
-
-        with patch("mindroom.matrix.client_delivery.send_message_result", side_effect=capture_send):
-            await send_audio_message(
-                client,
-                "!room:localhost",
-                b"audio-bytes",
-                mimetype="audio/ogg",
-                duration_ms=1000,
-                thread_id="$thread-root",
-                latest_thread_event_id="$latest",
-            )
-
-        assert sent_content is not None
-        assert sent_content["m.relates_to"] == {
-            "rel_type": "m.thread",
-            "event_id": "$thread-root",
-            "is_falling_back": True,
-            "m.in_reply_to": {"event_id": "$latest"},
-        }
-
-    @pytest.mark.asyncio
-    async def test_audio_without_duration_omits_voice_marker(self) -> None:
-        """Audio without voice details should not claim Matrix voice-note metadata."""
-        client = _mock_client(encrypted=False)
-        client.upload.return_value = (_upload_response("mxc://localhost/audio"), {})
-
-        sent_content: dict | None = None
-
-        async def capture_send(
-            _client: object,
-            _room: str,
-            content: dict,
-        ) -> DeliveredMatrixEvent:
-            nonlocal sent_content
-            sent_content = content
-            return DeliveredMatrixEvent(event_id="$audio:localhost", content_sent=content)
-
-        with patch("mindroom.matrix.client_delivery.send_message_result", side_effect=capture_send):
-            await send_audio_message(
-                client,
-                "!room:localhost",
-                b"audio-bytes",
-                mimetype="audio/mpeg",
-                filename="reply.mp3",
-            )
-
-        assert sent_content is not None
-        assert "org.matrix.msc3245.voice" not in sent_content
-        assert "org.matrix.msc1767.audio" not in sent_content
+        client.upload.assert_not_awaited()
+        client.room_send.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_uncached_unencrypted_room_uses_raw_send_fallback(self) -> None:
@@ -1214,66 +933,300 @@ class TestSendFileMessageMsgtype:
     """Tests for send_file_message msgtype selection."""
 
     @pytest.mark.asyncio
-    async def test_image_uses_m_image_msgtype(self, tmp_path: Path) -> None:
-        """Image files should be sent as m.image without filename field."""
-        client = _mock_client(encrypted=False)
-        client.upload.return_value = (_upload_response("mxc://localhost/img1"), {})
-
-        sent_content: dict | None = None
-
-        async def capture_send(
-            _client: object,
-            _room: str,
-            content: dict,
-        ) -> DeliveredMatrixEvent:
-            nonlocal sent_content
-            sent_content = content
-            return DeliveredMatrixEvent(event_id="$evt:localhost", content_sent=content)
-
-        file = tmp_path / "photo.png"
-        file.write_bytes(b"\x89PNG\r\n\x1a\n")
-
-        with patch("mindroom.matrix.client_delivery.send_message_result", side_effect=capture_send):
-            event_id = await send_file_message(
-                client,
-                "!room:localhost",
-                file,
-            )
-
-        assert event_id == "$evt:localhost"
-        assert sent_content is not None
-        assert sent_content["msgtype"] == "m.image"
-        assert sent_content["body"] == "photo.png"
-        assert "filename" not in sent_content
-        assert sent_content["url"] == "mxc://localhost/img1"
-
-    @pytest.mark.asyncio
     async def test_video_uses_m_video_msgtype(self, tmp_path: Path) -> None:
         """Video files should be sent as m.video."""
-        client = _mock_client(encrypted=False)
-        client.upload.return_value = (_upload_response("mxc://localhost/vid1"), {})
-
-        sent_content: dict | None = None
-
-        async def capture_send(
-            _client: object,
-            _room: str,
-            content: dict,
-        ) -> DeliveredMatrixEvent:
-            nonlocal sent_content
-            sent_content = content
-            return DeliveredMatrixEvent(event_id="$evt:localhost", content_sent=content)
-
+        client = _delivering_client(encrypted=False)
         file = tmp_path / "clip.mp4"
         file.write_bytes(b"\x00\x00\x00\x1cftyp")
 
-        with patch("mindroom.matrix.client_delivery.send_message_result", side_effect=capture_send):
-            event_id = await send_file_message(
+        await send_file_message(client, "!room:localhost", file)
+
+        assert _wire_content(client)["msgtype"] == "m.video"
+
+
+class TestMediaWireContent:
+    """Pin the complete content each media send puts on the wire."""
+
+    @pytest.mark.asyncio
+    async def test_plaintext_file_unthreaded(self, tmp_path: Path) -> None:
+        """A plaintext room gets the MXC URL and the file name."""
+        client = _delivering_client(encrypted=False)
+        file = tmp_path / "report.pdf"
+        file.write_bytes(b"%PDF")
+
+        assert await send_file_message(client, "!room:localhost", file) == "$media:localhost"
+
+        assert _wire_content(client) == {
+            "msgtype": "m.file",
+            "body": "report.pdf",
+            "info": {"size": 4, "mimetype": "application/pdf"},
+            "filename": "report.pdf",
+            "url": "mxc://localhost/media",
+        }
+
+    @pytest.mark.asyncio
+    async def test_plaintext_image_threaded_with_extra_content(self, tmp_path: Path) -> None:
+        """Images carry no filename, and extra content cannot replace the media URL or thread relation."""
+        client = _delivering_client(encrypted=False)
+        file = tmp_path / "photo.png"
+        file.write_bytes(b"\x89PNG\r\n\x1a\n")
+
+        await send_file_message(
+            client,
+            "!room:localhost",
+            file,
+            thread_id="$thread:localhost",
+            latest_thread_event_id="$latest:localhost",
+            extra_content={
+                "com.mindroom.skip_mentions": True,
+                "body": "renamed",
+                "url": "mxc://localhost/forged",
+                "m.relates_to": {"rel_type": "m.replace", "event_id": "$forged"},
+            },
+        )
+
+        assert _wire_content(client) == {
+            "msgtype": "m.image",
+            "body": "renamed",
+            "info": {"size": 8, "mimetype": "image/png"},
+            "com.mindroom.skip_mentions": True,
+            "url": "mxc://localhost/media",
+            "m.relates_to": _thread_fallback(),
+        }
+
+    @pytest.mark.asyncio
+    async def test_encrypted_file_threaded(self, tmp_path: Path) -> None:
+        """An encrypted room gets the encrypted-file object instead of a URL."""
+        client = _delivering_client(encrypted=True)
+        file = tmp_path / "data.csv"
+        file.write_text("a,b,c", encoding="utf-8")
+
+        with (
+            patch("mindroom.matrix.client_delivery.crypto.ENCRYPTION_ENABLED", True),
+            patch(
+                "mindroom.matrix.media.crypto.attachments.encrypt_attachment",
+                return_value=(b"encrypted", _TEST_ENCRYPTION_KEYS),
+            ),
+        ):
+            await send_file_message(
                 client,
                 "!room:localhost",
                 file,
+                thread_id="$thread:localhost",
+                latest_thread_event_id="$latest:localhost",
             )
 
-        assert event_id == "$evt:localhost"
-        assert sent_content is not None
-        assert sent_content["msgtype"] == "m.video"
+        assert _wire_content(client) == {
+            "msgtype": "m.file",
+            "body": "data.csv",
+            "info": {"size": 5, "mimetype": "text/csv"},
+            "filename": "data.csv",
+            "file": _encrypted_file("text/csv", 5),
+            "m.relates_to": _thread_fallback(),
+        }
+
+    @pytest.mark.asyncio
+    async def test_plaintext_voice_threaded_with_caption(self) -> None:
+        """A captioned voice note names its file and carries voice metadata."""
+        client = _delivering_client(encrypted=False)
+
+        await send_audio_message(
+            client,
+            "!room:localhost",
+            b"audio-bytes",
+            mimetype="audio/ogg",
+            filename="reply.opus",
+            caption="Voice reply",
+            duration_ms=1234,
+            waveform=[-5, 512, 2048],
+            thread_id="$thread:localhost",
+            latest_thread_event_id="$latest:localhost",
+        )
+
+        assert _wire_content(client) == {
+            "msgtype": "m.audio",
+            "body": "Voice reply",
+            "info": {"size": 11, "mimetype": "audio/ogg", "duration": 1234},
+            "org.matrix.msc3245.voice": {},
+            "org.matrix.msc1767.audio": {"duration": 1234, "waveform": [0, 512, 1024]},
+            "filename": "reply.opus",
+            "url": "mxc://localhost/media",
+            "m.relates_to": _thread_fallback(),
+        }
+
+    @pytest.mark.asyncio
+    async def test_encrypted_audio_unthreaded_without_caption_or_duration(self) -> None:
+        """Audio without a caption or duration is a plain m.audio event."""
+        client = _delivering_client(encrypted=True)
+
+        with (
+            patch("mindroom.matrix.client_delivery.crypto.ENCRYPTION_ENABLED", True),
+            patch(
+                "mindroom.matrix.media.crypto.attachments.encrypt_attachment",
+                return_value=(b"encrypted", _TEST_ENCRYPTION_KEYS),
+            ),
+        ):
+            await send_audio_message(client, "!room:localhost", b"audio-bytes", mimetype="audio/mpeg")
+
+        assert _wire_content(client) == {
+            "msgtype": "m.audio",
+            "body": "voice-message.opus",
+            "info": {"size": 11, "mimetype": "audio/mpeg"},
+            "file": _encrypted_file("audio/mpeg", 11),
+        }
+
+    @pytest.mark.asyncio
+    async def test_runtime_media_file_threaded_with_caption(self) -> None:
+        """Runtime media reuses its encrypted MXC object, captioned, in an encrypted room."""
+        client = _delivering_client(encrypted=True)
+        attachment = RuntimeEncryptedMediaAttachment(
+            attachment_id="att_report",
+            filename="report.pdf",
+            url="mxc://localhost/existing",
+            key="key",
+            iv="iv",
+            sha256="hash",
+            mime_type="application/pdf",
+            size=321,
+        )
+
+        with patch("mindroom.matrix.client_delivery.crypto.ENCRYPTION_ENABLED", True):
+            await send_runtime_encrypted_media_message(
+                client,
+                "!room:localhost",
+                attachment,
+                thread_id="$thread:localhost",
+                caption="Quarterly report",
+                latest_thread_event_id="$latest:localhost",
+                extra_content={"com.mindroom.skip_mentions": True},
+            )
+
+        assert _wire_content(client) == {
+            "msgtype": "m.file",
+            "body": "Quarterly report",
+            "info": {"size": 321, "mimetype": "application/pdf"},
+            "file": attachment.encrypted_file_content(),
+            "filename": "report.pdf",
+            "com.mindroom.skip_mentions": True,
+            "m.relates_to": _thread_fallback(),
+        }
+        client.upload.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_runtime_media_image_unthreaded_in_plaintext_room(self) -> None:
+        """A plaintext room still receives the existing encrypted object."""
+        client = _delivering_client(encrypted=False)
+        attachment = RuntimeEncryptedMediaAttachment(
+            attachment_id="att_photo",
+            filename="photo.png",
+            url="mxc://localhost/existing",
+            key="key",
+            iv="iv",
+            sha256="hash",
+            mime_type="image/png",
+            size=12,
+        )
+
+        await send_runtime_encrypted_media_message(client, "!room:localhost", attachment)
+
+        assert _wire_content(client) == {
+            "msgtype": "m.image",
+            "body": "photo.png",
+            "info": {"size": 12, "mimetype": "image/png"},
+            "file": attachment.encrypted_file_content(),
+        }
+
+
+class TestEncryptionEnabledDuringMediaUpload:
+    """A plaintext upload must never be referenced from a room that became encrypted meanwhile."""
+
+    @pytest.mark.asyncio
+    async def test_cached_room_file_send_refuses_plaintext_upload(self, tmp_path: Path) -> None:
+        """Encryption turning on during the upload stops the send instead of exposing a plaintext URL."""
+        client = _delivering_client(encrypted=False)
+
+        async def upload_then_enable_encryption(**_kwargs: object) -> tuple[nio.UploadResponse, None]:
+            client.rooms["!room:localhost"].encrypted = True
+            client.olm = MagicMock()
+            client.olm.device_id = "DEVICE"
+            return _upload_response("mxc://localhost/plaintext"), None
+
+        client.upload.side_effect = upload_then_enable_encryption
+        file = tmp_path / "secret.txt"
+        file.write_text("secret", encoding="utf-8")
+
+        with patch("mindroom.matrix.client_delivery.crypto.ENCRYPTION_ENABLED", True):
+            assert await send_file_message(client, "!room:localhost", file) is None
+
+        assert client.upload.await_args.kwargs["content_type"] == "text/plain"
+        client.room_send.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_uncached_room_audio_send_refuses_plaintext_upload(self) -> None:
+        """The post-upload state read decides, so an uncached room is protected too."""
+        client = AsyncMock(spec=nio.AsyncClient)
+        client.rooms = {}
+        client.olm = MagicMock()
+        client.olm.device_id = "DEVICE"
+        client.access_token = "token"  # noqa: S105
+        client.upload.return_value = (_upload_response("mxc://localhost/plaintext"), None)
+        client.room_get_state_event.side_effect = [
+            nio.RoomGetStateEventError("not found", status_code="M_NOT_FOUND"),
+            nio.RoomGetStateEventResponse({"algorithm": "m.megolm.v1.aes-sha2"}, "m.room.encryption", "", "!room"),
+        ]
+
+        with patch("mindroom.matrix.client_delivery.crypto.ENCRYPTION_ENABLED", True):
+            assert await send_audio_message(client, "!room:localhost", b"audio", mimetype="audio/ogg") is None
+
+        assert client.upload.await_args.kwargs["content_type"] == "audio/ogg"
+        client.room_send.assert_not_awaited()
+        client._send.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_unreadable_state_after_upload_refuses_plaintext_upload(self) -> None:
+        """A post-upload state read that fails cannot prove the room stayed plaintext."""
+        client = AsyncMock(spec=nio.AsyncClient)
+        client.rooms = {}
+        client.olm = None
+        client.access_token = "token"  # noqa: S105
+        client.upload.return_value = (_upload_response("mxc://localhost/plaintext"), None)
+        client.room_get_state_event.side_effect = [
+            nio.RoomGetStateEventError("not found", status_code="M_NOT_FOUND"),
+            nio.RoomGetStateEventError("unavailable", status_code="M_UNKNOWN"),
+        ]
+
+        assert await send_audio_message(client, "!room:localhost", b"audio", mimetype="audio/ogg") is None
+
+        client.upload.assert_awaited_once()
+        client.room_send.assert_not_awaited()
+        client._send.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_uncached_encrypted_room_never_takes_the_plaintext_raw_send(self) -> None:
+        """An encrypted upload to an uncached room goes through nio's encrypting send path."""
+        client = AsyncMock(spec=nio.AsyncClient)
+        client.rooms = {}
+        client.olm = MagicMock()
+        client.olm.device_id = "DEVICE"
+        client.access_token = "token"  # noqa: S105
+        client.upload.return_value = (_upload_response("mxc://localhost/media"), None)
+        client.room_get_state_event.return_value = nio.RoomGetStateEventResponse(
+            {"algorithm": "m.megolm.v1.aes-sha2"},
+            "m.room.encryption",
+            "",
+            "!room:localhost",
+        )
+        client.room_send.return_value = nio.RoomSendResponse("$media:localhost", "!room:localhost")
+
+        with (
+            patch("mindroom.matrix.client_delivery.crypto.ENCRYPTION_ENABLED", True),
+            patch(
+                "mindroom.matrix.media.crypto.attachments.encrypt_attachment",
+                return_value=(b"encrypted", _TEST_ENCRYPTION_KEYS),
+            ),
+        ):
+            event_id = await send_audio_message(client, "!room:localhost", b"audio", mimetype="audio/ogg")
+
+        assert event_id == "$media:localhost"
+        assert _wire_content(client)["file"] == _encrypted_file("audio/ogg", 5)
+        client._send.assert_not_awaited()
