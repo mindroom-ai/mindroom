@@ -386,14 +386,16 @@ async def refetched_thread_history(
     """Return one thread's history after walking it on the server again.
 
     For the caller that must observe a write another runtime just made, which
-    the projection only learns about when sync delivers it. The result is full
-    history only when this walk itself read the whole thread, so a caller that
-    needs proof of absence can tell a fresh view from an old marker's.
+    the projection only learns about when sync delivers it, or that must prove
+    a thread has no reply. The result is full history only when this walk
+    itself read the whole thread, so such a caller can tell a fresh view from
+    an old marker's.
     ``edits_of`` names messages whose newest revision the caller must see; see
     `ConversationHydrator.rewalk`.
     """
     walk_complete = await reader.hydrator.rewalk(room_id=room_id, thread_id=thread_id, edits_of=edits_of)
-    history = await complete_thread_history(reader, room_id, thread_id)
-    if walk_complete:
-        return history
-    return thread_history_result(history, is_full_history=False)
+    page = await reader.read_strict(room_id=room_id, thread_id=thread_id, limit=HYDRATED_PROMPT_WINDOW_MESSAGES)
+    # Whole only as far as this walk of this thread vouches. A room-wide
+    # recovery that stopped short concerns the room timeline, which a thread's
+    # own relation walk does not read through.
+    return projected_thread_history(page, complete=walk_complete)

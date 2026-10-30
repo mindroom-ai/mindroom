@@ -20,7 +20,7 @@ from mindroom.matrix.rooms import (
     ensure_user_in_rooms,
     reconcile_managed_rooms,
 )
-from mindroom.matrix.state import MatrixState, load_rooms, resolve_room_aliases
+from mindroom.matrix.state import load_rooms, matrix_state_for_runtime, resolve_room_aliases
 from mindroom.matrix.users import INTERNAL_USER_ACCOUNT_KEY
 from mindroom.matrix_identifiers import extract_server_name_from_homeserver, split_concrete_matrix_user_ids
 
@@ -51,7 +51,7 @@ def _room_user_ids_to_invite(
     runtime_paths: RuntimePaths,
 ) -> set[str]:
     """Return the membership invitation roster for one room."""
-    state = MatrixState.load(runtime_paths=runtime_paths)
+    state = matrix_state_for_runtime(runtime_paths)
     room_keys = sorted(room_key for room_key, room in state.rooms.items() if room.room_id == room_id)
     if len(room_keys) != 1:
         logger.warning(

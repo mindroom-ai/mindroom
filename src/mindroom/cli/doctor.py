@@ -122,9 +122,9 @@ def doctor(config_path: Path | None = None, storage_path: Path | None = None) ->
 def _check_e2ee_stores(runtime_paths: RuntimePaths) -> tuple[int, int, int]:
     """Check persisted Matrix devices have their encryption stores on disk."""
     from mindroom.matrix.client_session import olm_store_exists  # noqa: PLC0415
-    from mindroom.matrix.state import MatrixState  # noqa: PLC0415
+    from mindroom.matrix.state import matrix_state_for_runtime  # noqa: PLC0415
 
-    state = MatrixState.load(runtime_paths=runtime_paths)
+    state = matrix_state_for_runtime(runtime_paths)
     accounts_with_devices = [
         (key, account) for key, account in state.accounts.items() if account.device_id and account.domain
     ]

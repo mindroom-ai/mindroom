@@ -11,7 +11,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 from mindroom.logging_config import get_logger
-from mindroom.matrix.conversation_reads import complete_thread_history
+from mindroom.matrix.conversation_reads import complete_thread_history, refetched_thread_history
 from mindroom.matrix.thread_membership import (
     ThreadMembershipAccess,
     resolve_event_thread_membership,
@@ -24,6 +24,7 @@ if TYPE_CHECKING:
     from mindroom.matrix.conversation_reads import ConversationReader
     from mindroom.matrix.event_info import EventInfo
     from mindroom.matrix.relation_lookup import RelationLookup
+    from mindroom.matrix.thread_history_result import ThreadHistoryResult
 
 logger = get_logger(__name__)
 
@@ -38,17 +39,35 @@ def projected_thread_membership_access(
 
     Every answer here may be acted on, so none of them is a guess. The thread
     lookup is journal-only and raises on a failed read, a strict read that
-    cannot vouch for the thread raises, and a thread whose history may be
-    incomplete -- replies this bot could not decrypt, a walk that stopped at a
-    ceiling -- cannot be ruled out by the replies it happens to hold. Each of
-    those is an unavailable proof, never "no thread".
+    cannot vouch for the thread raises, and a thread whose own walk could not
+    read everything -- replies this bot could not decrypt, a walk that stopped
+    at a ceiling -- cannot be ruled out by the replies it happens to hold. Each
+    of those is an unavailable proof, never "no thread".
     """
     return thread_messages_thread_membership_access(
         lookup_thread_id=relations.strict_thread_id,
         fetch_event_info=fetch_event_info or relations.event_info,
-        fetch_thread_messages=lambda room_id, thread_id: complete_thread_history(reader, room_id, thread_id),
+        fetch_thread_messages=lambda room_id, thread_id: _thread_history_for_root_proof(reader, room_id, thread_id),
         absence_needs_full_history=True,
     )
+
+
+async def _thread_history_for_root_proof(
+    reader: ConversationReader,
+    room_id: str,
+    thread_id: str,
+) -> ThreadHistoryResult:
+    """Return a candidate root's thread, walked on the server again when nothing in it proves a reply.
+
+    A projected reply proves the root at once. Its absence proves nothing
+    unless this thread's own walk read everything: the projection's
+    completeness also folds in room-wide recovery, and sync may not have
+    delivered a reply another runtime just sent.
+    """
+    history = await complete_thread_history(reader, room_id, thread_id)
+    if any(message.event_id != thread_id for message in history):
+        return history
+    return await refetched_thread_history(reader, room_id, thread_id)
 
 
 async def _degradable_event_info(

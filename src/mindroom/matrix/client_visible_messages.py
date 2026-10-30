@@ -444,7 +444,7 @@ def _edit_payload_rank(event: VisibleRoomMessage) -> tuple[bool, int, str]:
 
 
 @dataclass(slots=True)
-class ThreadEditCandidates:
+class EditCandidates:
     """Replacement candidates among raw message events, kept per original and per sender.
 
     Matrix replacement events are only legitimate from the sender of the event they replace, but
@@ -513,7 +513,7 @@ async def apply_latest_edits_to_messages(
     client: nio.AsyncClient | None,
     *,
     messages_by_event_id: dict[str, ResolvedVisibleMessage],
-    edit_candidates: ThreadEditCandidates,
+    edit_candidates: EditCandidates,
     trusted_sender_ids: Collection[str] = (),
 ) -> None:
     """Apply latest edits to message records, reconstructing originals that were never seen."""
@@ -579,7 +579,7 @@ async def resolve_latest_visible_messages(
 ) -> dict[str, ResolvedVisibleMessage]:
     """Resolve the latest visible message state by original event ID for a set of message events."""
     messages_by_event_id: dict[str, ResolvedVisibleMessage] = {}
-    edit_candidates = ThreadEditCandidates()
+    edit_candidates = EditCandidates()
 
     for event in events:
         if sender is not None and event.sender != sender:
@@ -613,8 +613,8 @@ async def resolve_latest_visible_messages(
 
 
 __all__ = [
+    "EditCandidates",
     "ResolvedVisibleMessage",
-    "ThreadEditCandidates",
     "apply_latest_edits_to_messages",
     "bundled_replacement_body",
     "bundled_replacement_candidates",

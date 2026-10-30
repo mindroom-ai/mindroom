@@ -569,14 +569,13 @@ class ConversationResolver:
 
         The thread is an input and is never resolved again here: ingress
         decided it once, formed the batch under it, and persisted it for
-        replay. A non-blocking read that degrades is repeated strictly, because
-        planning must not take a partial read for the thread. A room that is one
-        conversation reads no thread history; its turns are planned against
-        the room.
+        replay, and the target says which thread the source is in under the
+        room's thread mode. A non-blocking read that degrades is repeated
+        strictly, because planning must not take a partial read for the thread.
         """
         history: Sequence[ResolvedVisibleMessage] = ()
         requires_model_history_refresh = False
-        if thread_id is not None and not self.room_is_one_conversation(room.room_id):
+        if thread_id is not None:
             snapshot = await self.dispatch_thread_snapshot(room.room_id, thread_id)
             history = (
                 await self.fetch_thread_history(room.room_id, thread_id)

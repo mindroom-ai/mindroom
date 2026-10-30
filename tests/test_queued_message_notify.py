@@ -992,7 +992,11 @@ async def test_post_response_effects_queues_summary_with_stale_hint_inside_margi
     # One strict read for the gate, one after the pin re-check walked the thread again.
     expected_read = call(room_id="!room:localhost", thread_id="$thread", limit=HYDRATED_PROMPT_WINDOW_MESSAGES)
     assert conversation_reader.read_strict.await_args_list == [expected_read, expected_read]
-    conversation_reader.hydrator.rewalk.assert_awaited_once_with(room_id="!room:localhost", thread_id="$thread")
+    conversation_reader.hydrator.rewalk.assert_awaited_once_with(
+        room_id="!room:localhost",
+        thread_id="$thread",
+        edits_of=[],
+    )
     # Nothing has echoed the response back, so the projection this pass reads
     # stops one message short of the thread. It summarizes the projected
     # messages plus the answer it was queued for, and counts that answer -- the

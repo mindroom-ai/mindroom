@@ -18,7 +18,7 @@ from mindroom.matrix.thread_membership import (
     resolve_related_event_thread_membership,
     thread_messages_thread_membership_access,
 )
-from mindroom.matrix.thread_mutation_impact import event_thread_membership_known
+from mindroom.matrix.thread_mutation_impact import event_thread_membership_known, redaction_thread_membership_known
 from tests.journal_membership_helpers import admit_room_membership
 from tests.test_conversation_hydration import ROOM, FakeClient, encrypted, hydrator, raw
 
@@ -217,3 +217,65 @@ async def test_a_rewalk_asked_for_a_message_s_edits_sees_one_the_recursive_walk_
 
     assert [message.body for message in plain] == ["root", "old title"]
     assert [message.body for message in asked] == ["root", "pinned title"]
+
+
+async def _truncate_room_recovery(principal: PrincipalStore, client: FakeClient, thread_id: str) -> None:
+    """Leave the room with a recovery that stopped at its ceiling, and confirm the projection now reports it."""
+    recovery = await principal.record_room_history_recovery(ROOM)
+    assert recovery is not None
+    await principal.settle_room_history_recovery(
+        recovery,
+        exhausted_server=False,
+        unreadable=False,
+        attempted_policy_rank=1,
+        expected_membership_epoch=await principal.membership_epoch(ROOM),
+    )
+    assert not (await complete_thread_history(_reader(principal, client), ROOM, thread_id)).is_full_history
+
+
+class TestRoomRecoveryThatStoppedShort:
+    """A room-wide recovery ceiling says nothing about one thread's own relation walk."""
+
+    async def test_a_redaction_of_a_plain_message_is_still_allowed(self, principal: PrincipalStore) -> None:
+        """The plain message's own walk is whole, so it is proven to have no thread."""
+        client = FakeClient(events={"$plain": raw("$plain", "plain", ts=1_000)})
+        await _truncate_room_recovery(principal, client, "$plain")
+
+        known = await redaction_thread_membership_known(
+            _reader(principal, client),
+            _relations(principal, client),
+            ROOM,
+            event_id="$plain",
+        )
+
+        assert known is True
+
+    async def test_a_reply_to_a_plain_message_is_still_allowed(self, principal: PrincipalStore) -> None:
+        """A send replying to a message nobody threaded from is room level, not unknown."""
+        client = FakeClient(events={"$plain": raw("$plain", "plain", ts=1_000)})
+        await _truncate_room_recovery(principal, client, "$plain")
+
+        known = await event_thread_membership_known(
+            _reader(principal, client),
+            _relations(principal, client),
+            ROOM,
+            event_type="m.room.message",
+            content={"body": "hi", "msgtype": "m.text", "m.relates_to": {"m.in_reply_to": {"event_id": "$plain"}}},
+        )
+
+        assert known is True
+
+    async def test_a_root_whose_replies_cannot_be_read_is_still_refused(self, principal: PrincipalStore) -> None:
+        """The thread's own walk is incomplete, so its absence of readable replies proves nothing."""
+        client = _root_with_only_unreadable_replies()
+        await _truncate_room_recovery(principal, client, "$root")
+
+        known = await event_thread_membership_known(
+            _reader(principal, client),
+            _relations(principal, client),
+            ROOM,
+            event_type="m.room.message",
+            content={"body": "hi", "msgtype": "m.text", "m.relates_to": {"m.in_reply_to": {"event_id": "$root"}}},
+        )
+
+        assert known is False

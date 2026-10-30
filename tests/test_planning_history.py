@@ -2,14 +2,19 @@
 
 from __future__ import annotations
 
-from mindroom.conversation_resolver import MessageContext, _planning_history_for
+from typing import TYPE_CHECKING
+
+from mindroom.conversation_resolver import MessageContext
 from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
 from mindroom.matrix.thread_diagnostics import (
     THREAD_HISTORY_DEGRADED_DIAGNOSTIC,
     THREAD_HISTORY_SOURCE_DEGRADED,
     THREAD_HISTORY_SOURCE_DIAGNOSTIC,
 )
-from mindroom.matrix.thread_history_result import thread_history_result
+from mindroom.matrix.thread_history_result import ThreadHistoryResult, thread_history_result
+
+if TYPE_CHECKING:
+    from collections.abc import Sequence
 
 
 def _message(event_id: str) -> ResolvedVisibleMessage:
@@ -24,6 +29,19 @@ def _message(event_id: str) -> ResolvedVisibleMessage:
     )
 
 
+def _planning_history(history: ThreadHistoryResult) -> Sequence[ResolvedVisibleMessage]:
+    """Return the history a thread context with this read would plan against."""
+    context = MessageContext(
+        am_i_mentioned=False,
+        is_thread=True,
+        thread_id="$thread:localhost",
+        thread_history=history,
+        mentioned_agents=[],
+        has_non_agent_mentions=False,
+    )
+    return context.planning_thread_history
+
+
 def test_planning_history_for_hides_degraded_history() -> None:
     """Degraded thread snapshots are not proof for policy decisions."""
     history = thread_history_result(
@@ -35,7 +53,7 @@ def test_planning_history_for_hides_degraded_history() -> None:
         },
     )
 
-    assert _planning_history_for(history) == ()
+    assert _planning_history(history) == ()
 
 
 def test_planning_history_for_hides_healthy_partial_history() -> None:
@@ -43,7 +61,7 @@ def test_planning_history_for_hides_healthy_partial_history() -> None:
     message = _message("$event:localhost")
     history = thread_history_result([message], is_full_history=False)
 
-    assert _planning_history_for(history) == ()
+    assert _planning_history(history) == ()
 
 
 def test_planning_history_for_keeps_complete_history() -> None:
@@ -51,7 +69,7 @@ def test_planning_history_for_keeps_complete_history() -> None:
     message = _message("$event:localhost")
     history = thread_history_result([message], is_full_history=True)
 
-    assert _planning_history_for(history) == (message,)
+    assert _planning_history(history) == (message,)
 
 
 def test_message_context_marks_partial_planning_history_unavailable() -> None:

@@ -95,6 +95,20 @@ async def _offload_oversized_full_arguments(
         full_arguments,
         room_encrypted=room_encrypted,
     )
+    if not room_encrypted:
+        # Encryption can turn on while a plaintext upload is in flight, and an
+        # encrypted room must never point at plaintext bytes. Matrix room
+        # encryption cannot later be disabled, so one encrypted upload settles it.
+        room_encrypted = await resolve_room_encryption_outcome(
+            client,
+            room_id,
+            operation="offload_approval_full_arguments",
+        )
+        if isinstance(room_encrypted, MatrixDeliveryFailure):
+            offloaded["approvable"] = False
+            return offloaded
+        if room_encrypted:
+            mxc_uri, file_info = await upload_json_sidecar(client, room_id, full_arguments, room_encrypted=True)
     if not sidecar_upload_is_usable(mxc_uri, file_info, room_encrypted=room_encrypted):
         logger.warning(
             "approval_full_arguments_sidecar_unavailable",

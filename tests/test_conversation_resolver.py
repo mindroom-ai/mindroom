@@ -328,8 +328,8 @@ def test_room_is_one_conversation_only_in_room_thread_mode(
 
 
 @pytest.mark.asyncio
-async def test_room_thread_mode_skips_thread_resolution(tmp_path: Path) -> None:
-    """Agents in room thread mode decide every message room-level and read no thread history."""
+async def test_room_thread_mode_decides_every_message_room_level(tmp_path: Path) -> None:
+    """Agents in room thread mode place an ordinary threaded message at room level without reading its thread."""
     config = bind_runtime_paths(
         Config(agents={"general": AgentConfig(display_name="General", thread_mode="room")}),
         test_runtime_paths(tmp_path),
@@ -338,15 +338,26 @@ async def test_room_thread_mode_skips_thread_resolution(tmp_path: Path) -> None:
     resolver = _resolver(config, conversation_reader=reader)
 
     thread_id = await resolver.coalescing_thread_id(_room(), _threaded_event())
-    # A trusted automation fire keeps its own root even here, and is still planned against the room.
-    rooted_context = await resolver.extract_dispatch_context(_room(), _threaded_event(), thread_id=_THREAD_ROOT)
 
     assert thread_id is None
-    assert rooted_context.thread_id == _THREAD_ROOT
-    assert rooted_context.thread_history == ()
-    assert rooted_context.requires_model_history_refresh is False
     reader.read.assert_not_awaited()  # type: ignore[attr-defined]
     reader.read_strict.assert_not_awaited()  # type: ignore[attr-defined]
+
+
+@pytest.mark.asyncio
+async def test_a_thread_the_target_names_in_a_room_mode_room_is_read_like_any_other(tmp_path: Path) -> None:
+    """A trusted automation fire keeps its own root in a room-mode room, and its context reads that thread."""
+    config = bind_runtime_paths(
+        Config(agents={"general": AgentConfig(display_name="General", thread_mode="room")}),
+        test_runtime_paths(tmp_path),
+    )
+    reader = _empty_conversation_reader()
+    resolver = _resolver(config, conversation_reader=reader)
+
+    context = await resolver.extract_dispatch_context(_room(), _threaded_event(), thread_id=_THREAD_ROOT)
+
+    assert (context.is_thread, context.thread_id) == (True, _THREAD_ROOT)
+    reader.read.assert_awaited_once()  # type: ignore[attr-defined]
 
 
 @pytest.mark.asyncio

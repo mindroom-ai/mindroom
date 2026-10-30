@@ -28,8 +28,8 @@ from unittest.mock import AsyncMock
 import pytest
 
 from mindroom.matrix.client_visible_messages import (
+    EditCandidates,
     ResolvedVisibleMessage,
-    ThreadEditCandidates,
     apply_latest_edits_to_messages,
     bundled_replacement_candidates,
     is_visible_room_message,
@@ -61,7 +61,7 @@ def _original_message(*, sender: str = _AUTHOR, body: str = "original") -> Resol
     )
 
 
-def _record(candidates: ThreadEditCandidates, event: VisibleRoomMessage) -> None:
+def _record(candidates: EditCandidates, event: VisibleRoomMessage) -> None:
     # The pool gate is asserted rather than assumed. `record` itself type-checks
     # nothing, so every caller in production decides membership first with
     # `is_visible_room_message`; a fixture that skipped that would be able to
@@ -72,7 +72,7 @@ def _record(candidates: ThreadEditCandidates, event: VisibleRoomMessage) -> None
 
 
 async def _apply(
-    candidates: ThreadEditCandidates,
+    candidates: EditCandidates,
     messages: dict[str, ResolvedVisibleMessage],
 ) -> None:
     await apply_latest_edits_to_messages(
@@ -89,7 +89,7 @@ class TestReplacementSenderRule:
     @pytest.mark.asyncio
     async def test_foreign_replacement_does_not_rewrite_another_members_message(self) -> None:
         """A room member cannot rewrite someone else's message as the agent reads it."""
-        candidates = ThreadEditCandidates()
+        candidates = EditCandidates()
         _record(
             candidates,
             _text_event(
@@ -115,7 +115,7 @@ class TestReplacementSenderRule:
         Keeping a single global newest candidate would drop the author's edit on the floor the
         moment anyone else sent a later replacement for the same event.
         """
-        candidates = ThreadEditCandidates()
+        candidates = EditCandidates()
         _record(
             candidates,
             _text_event(
@@ -148,7 +148,7 @@ class TestReplacementSenderRule:
     @pytest.mark.asyncio
     async def test_synthesized_missing_original_keeps_the_editors_own_sender(self) -> None:
         """An unseen original cannot be impersonated: the synthesized message is the editor's."""
-        candidates = ThreadEditCandidates()
+        candidates = EditCandidates()
         _record(
             candidates,
             _text_event(
@@ -180,7 +180,7 @@ class TestSynthesizedMessagePlacement:
         scrolled out of it. Reporting ``thread_id=None`` there tells a reader the reply was posted
         at room level, and the reader answers it in the room rather than in its thread.
         """
-        candidates = ThreadEditCandidates()
+        candidates = EditCandidates()
         _record(
             candidates,
             _text_event(
@@ -211,7 +211,7 @@ class TestSynthesizedMessagePlacement:
         turns into a fact. Believing it lets anyone who can send an edit file the message it
         reconstructs under a thread of their choosing.
         """
-        candidates = ThreadEditCandidates()
+        candidates = EditCandidates()
         _record(
             candidates,
             _text_event(
@@ -237,7 +237,7 @@ class TestSynthesizedMessagePlacement:
     @pytest.mark.asyncio
     async def test_message_read_with_its_edit_keeps_its_own_thread_and_position(self) -> None:
         """A message that was read is placed by itself, whatever its edit does or does not say."""
-        candidates = ThreadEditCandidates()
+        candidates = EditCandidates()
         _record(
             candidates,
             _text_event(
@@ -268,7 +268,7 @@ class TestSynthesizedMessagePlacement:
         either a client bug or an attempt to drag a conversation somewhere its participants cannot
         see it, and both answers are the same: leave the message where its own event put it.
         """
-        candidates = ThreadEditCandidates()
+        candidates = EditCandidates()
         _record(
             candidates,
             _text_event(
@@ -293,7 +293,7 @@ class TestSynthesizedMessagePlacement:
     @pytest.mark.asyncio
     async def test_edit_naming_a_thread_does_not_file_a_room_level_message_into_it(self) -> None:
         """A room-level message stays at room level however its edit is decorated."""
-        candidates = ThreadEditCandidates()
+        candidates = EditCandidates()
         _record(
             candidates,
             _text_event(
@@ -340,7 +340,7 @@ class TestReplacementWinnerSelection:
                 replacement_of=_ORIGINAL_ID,
             ),
         ]
-        candidates = ThreadEditCandidates()
+        candidates = EditCandidates()
         for event in reversed(events) if reversed_arrival else events:
             _record(candidates, event)
         messages = {_ORIGINAL_ID: _original_message()}
@@ -370,7 +370,7 @@ class TestReplacementWinnerSelection:
             server_timestamp=4_000,
             replacement_of=_ORIGINAL_ID,
         )
-        candidates = ThreadEditCandidates()
+        candidates = EditCandidates()
         for event in [duplicate, older, duplicate] if reversed_arrival else [older, duplicate, duplicate]:
             _record(candidates, event)
         messages = {_ORIGINAL_ID: _original_message()}
@@ -401,13 +401,13 @@ class TestReplacementWinnerSelection:
         )
 
         forward: dict[str, ResolvedVisibleMessage] = {_ORIGINAL_ID: _original_message()}
-        forward_candidates = ThreadEditCandidates()
+        forward_candidates = EditCandidates()
         _record(forward_candidates, first_payload)
         _record(forward_candidates, second_payload)
         await _apply(forward_candidates, forward)
 
         backward: dict[str, ResolvedVisibleMessage] = {_ORIGINAL_ID: _original_message()}
-        backward_candidates = ThreadEditCandidates()
+        backward_candidates = EditCandidates()
         _record(backward_candidates, second_payload)
         _record(backward_candidates, first_payload)
         await _apply(backward_candidates, backward)
@@ -426,7 +426,7 @@ class TestReplacementWinnerSelection:
             replacement_of=_ORIGINAL_ID,
         )
         malformed.source["content"].pop("m.new_content")
-        candidates = ThreadEditCandidates()
+        candidates = EditCandidates()
         _record(candidates, malformed)
         messages = {_ORIGINAL_ID: _original_message()}
 
@@ -459,7 +459,7 @@ class TestEveryMsgtypeWithABodyRanksTogether:
     @pytest.mark.asyncio
     async def test_the_newest_replacement_wins_even_when_it_is_an_emote(self) -> None:
         """The stale text edit used to win because the newer emote was invisible."""
-        candidates = ThreadEditCandidates()
+        candidates = EditCandidates()
         _record(
             candidates,
             _text_event(
@@ -497,7 +497,7 @@ class TestEveryMsgtypeWithABodyRanksTogether:
         every already-collapsed conversation containing one emote edit would
         start reading at an older revision than it does today.
         """
-        candidates = ThreadEditCandidates()
+        candidates = EditCandidates()
         _record(
             candidates,
             _emote_event(
@@ -530,7 +530,7 @@ class TestEveryMsgtypeWithABodyRanksTogether:
     @pytest.mark.asyncio
     async def test_the_newest_replacement_wins_even_when_it_is_a_picture(self) -> None:
         """The stale text edit used to win because the newer caption edit was invisible."""
-        candidates = ThreadEditCandidates()
+        candidates = EditCandidates()
         _record(
             candidates,
             _text_event(
@@ -572,7 +572,7 @@ class TestEveryMsgtypeWithABodyRanksTogether:
         every already-collapsed conversation containing one caption edit would
         start reading at an older revision than it does today.
         """
-        candidates = ThreadEditCandidates()
+        candidates = EditCandidates()
         _record(
             candidates,
             _image_event(
