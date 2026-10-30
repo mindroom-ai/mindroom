@@ -64,10 +64,11 @@ from tests.delegation_helpers import (
     respond,
     resume,
 )
-from tests.fakes.scripted_model import Await, ScriptedModel, ScriptStep, answer, calls, tool_call
+from tests.fakes.scripted_model import Await, ScriptedModel, ScriptStep, answer, calls, tool_call, usage
 from tests.identity_helpers import entity_ids
 from tests.test_delegation_direct_audit import _identity
 from tests.tool_approval_helpers import gated_functions
+from tests.usage_helpers import counted_total
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Sequence
@@ -1658,3 +1659,132 @@ async def test_a_run_keeps_its_hooks_across_its_delegation_continuations(
                 execution_identity=identity,
             )
     assert len(leader.requests) == 5
+
+
+# A rejected model switch continues the turn on the current model.
+_SWITCH = tool_call("switch_thread_model", "call-switch", model_name="missing", when="next-turn")
+
+
+def _child_turn_usage(tmp_path: Path, config: Config, paths: RuntimePaths) -> tuple[tuple[int, int], tuple[int, int]]:
+    """Return the input and output tokens the leader's child's ``run.json`` reports and those the ledger counts for it."""
+    parent = _parent_record(config, paths, _leader_identity(), "parent-run")
+    [child] = DelegationState.from_metadata(parent.metadata).children
+    [record] = (record for record in _record_files(tmp_path) if record["delegation_id"] == child.delegation_id)
+    usage = record["usage"]
+    assert isinstance(usage, dict)
+    storage = create_session_storage("code", config, paths, _child_identity(child))
+    return (usage["input_tokens"], usage["output_tokens"]), counted_total(storage, child.session_id)
+
+
+def _run_usage_events(tmp_path: Path) -> list[tuple[int, int]]:
+    """Return the input and output tokens of each ``usage`` event of the child's ``events.jsonl``."""
+    return [
+        (event["data"]["input_tokens"], event["data"]["output_tokens"])  # type: ignore[index]
+        for event in _record_events(tmp_path)
+        if event["kind"] == "usage"
+    ]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("attempts", ["empty_retry", "model_switch", "switch_then_retry"])
+async def test_a_child_record_reports_the_usage_of_every_attempt_its_turn_ran(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    attempts: str,
+) -> None:
+    """A child whose empty answer was retried, or whose model switch continued, reports every attempt, as counted.
+
+    Each ``usage`` event of ``events.jsonl`` stays the usage of the one attempt it records.
+    """
+    paths = _runtime_paths(tmp_path)
+    config = _config(paths, child_tools=("thread_model",))
+    leader = ScriptedModel(
+        [calls(tool_call("run_subagent", "delegate-0", agent_name="code", task="Write report")), answer("Parent done")],
+    )
+    spent = {
+        "empty_retry": [answer("", usage(100, 5))],
+        "model_switch": [calls(_SWITCH, metrics=usage(100, 5))],
+        "switch_then_retry": [calls(_SWITCH, metrics=usage(100, 5)), answer("", usage(40, 2))],
+    }[attempts]
+    code = ScriptedModel([*spent, answer("Report written", usage(120, 9))])
+    ScriptedAgents({"leader": leader, "code": code}).install(monkeypatch)
+
+    await respond(
+        "leader",
+        "delegate",
+        config=config,
+        runtime_paths=paths,
+        identity=_leader_identity(),
+        run_id="parent-run",
+    )
+
+    per_attempt = [(100, 5), (40, 2), (120, 9)] if attempts == "switch_then_retry" else [(100, 5), (120, 9)]
+    assert _run_usage_events(tmp_path) == per_attempt
+    reported, counted = _child_turn_usage(tmp_path, config, paths)
+    assert counted == (sum(tokens[0] for tokens in per_attempt), sum(tokens[1] for tokens in per_attempt))
+    assert reported == counted
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("after", ["answered", "continued", "delegated"])
+async def test_a_child_record_reports_the_usage_of_its_resumed_run_and_the_attempt_after_it(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    after: str,
+) -> None:
+    """An approved child reports every leg of its resumed run once, with the attempt a model switch continued it with.
+
+    That is what the ledger counts: the resumed run replaced its paused row each time it stopped, and the continuation
+    ran apart. A resumed child that delegates stops on that call too, and its grandchild's usage is its own record's.
+    """
+    paths = _runtime_paths(tmp_path)
+    config = _config(paths, child_tools=("report", "thread_model"))
+    identity = _leader_identity()
+    leader = ScriptedModel(
+        [calls(tool_call("run_subagent", "delegate-0", agent_name="code", task="Write report")), answer("Parent done")],
+    )
+    gated = calls(tool_call("write_report", "same-call"), metrics=usage(10, 1))
+    resumed = {
+        "answered": [answer("child result", usage(20, 2))],
+        "continued": [calls(_SWITCH, metrics=usage(20, 2)), answer("child result", usage(30, 3))],
+        "delegated": [
+            calls(tool_call("run_subagent", "nested-0", agent_name="code", task="Nested"), metrics=usage(20, 2)),
+            answer("nested result", usage(5, 1)),
+            calls(_SWITCH, metrics=usage(30, 3)),
+            answer("child result", usage(40, 4)),
+        ],
+    }[after]
+    code = ScriptedModel([gated, *resumed])
+    ScriptedAgents({"leader": leader, "code": code}).install(monkeypatch)
+
+    with registered_report_tool() as report:
+        paused = await respond(
+            "leader",
+            "delegate",
+            config=config,
+            runtime_paths=paths,
+            identity=identity,
+            run_id="parent-run",
+        )
+        assert isinstance(paused, PausedAttempt)
+        state = DelegationState.from_metadata(_parent_record(config, paths, identity, "parent-run").metadata)
+        call_id = str(state.pending_tools[0]["tool_call_id"])
+        result = await resume(
+            approval_executor(config, paths),
+            paused,
+            _saved_approval_calls(state),
+            agent_name="leader",
+            identity=identity,
+            config=config,
+            runtime_paths=paths,
+            decisions={call_id: True},
+            denial_reasons={call_id: None},
+            approval_id="card-0",
+        )
+
+    assert isinstance(result, CompletedApprovalRun)
+    assert report.written == ["written"]
+    assert len(code.requests) == 1 + len(resumed)
+    reported, counted = _child_turn_usage(tmp_path, config, paths)
+    assert counted == {"answered": (30, 3), "continued": (60, 6), "delegated": (100, 10)}[after]
+    assert reported == counted
