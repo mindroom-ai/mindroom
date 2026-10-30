@@ -17,6 +17,7 @@ Set these fields in `defaults`, on an agent, or on a team (see [Team History and
 An agent or team that leaves both `num_history_runs` and `num_history_messages` at `null` inherits both from `defaults`; setting either one replaces both defaults.
 History replay is unlimited only when the inherited values are also `null`.
 Tool results replay unchanged.
+A reply that was stopped or failed replays as far as it got, its finished tool calls and their results included, followed by a note that it did not finish.
 
 ## Context Window
 

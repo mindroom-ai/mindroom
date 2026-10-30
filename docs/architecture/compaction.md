@@ -7,7 +7,7 @@ User-facing behavior is in [Context Window](../configuration/history.md#context-
 
 Runs are saved whole from in-memory snapshots, so a stale save can arrive after a compaction or a redaction has moved on.
 The summary rows are therefore authoritative: `session.summary` is derived from the owner scope's latest row on every read, and a full save of a run is refused once it, or a member's team run, has completed, or once a cut has removed it.
-Only an interrupted record, which holds what the user saw or heard, replaces a completed run, and facts added after a run ends, such as its reply event or delegation state, are patched onto its stored row.
+Only an interrupted turn's rewrite of its run replaces a completed run, and facts added after a run ends, such as its reply event or delegation state, are patched onto its stored row.
 A compaction, a redaction, and an approval's completion can overlap on one scope, so each summary chunk checks, under the write lock, that the history it summarized is still the stored history before it appends.
 
 ## Decisions
@@ -41,8 +41,8 @@ A compaction, a redaction, and an approval's completion can overlap on one scope
   The row keeps the event ids the running run had answered and read at the fold, so a cut finds what the fold summarized even after that run's row is gone.
 - A cut removes a run whole: when a removed run folded into an earlier summary row, the cut starts at that row, and the running run of every removed fold row is fenced, so a running turn whose row the cut removed stores nothing more.
   Retiring summaries also removes every run that folded mid-turn, because its stored part starts mid-turn and would replay without what it built on.
-- The fold's in-memory effects (the request rewrite, the recorder's folded tool calls, the folded requests' usage in run metadata, and the live session summary) and its success notice happen together with its commit, even when the turn is cancelled meanwhile, so a stopped reply never reports a stored fold as failed.
-  An interrupted record therefore leaves out exactly the calls the stored summary holds; its write also reads that set from the run's folded rows, so paths without a turn recorder and a restarted CLI approval recovery leave them out too.
+- The fold's in-memory effects (the request rewrite, the folded requests' usage in run metadata, and the live session summary) and its success notice happen together with its commit, even when the turn is cancelled meanwhile, so a stopped reply never reports a stored fold as failed.
+  A stopped turn's record is its run's own, whose folded messages never replay, so it leaves out exactly the calls the stored summary holds.
 - A fold survives a crash of its turn: the restarted attempt replays its summary and knows which tool calls already ran and what they returned, and an edit or redaction of the turn's message still removes it through the fold's row.
 - Text compaction starts from the latest readable native checkpoint, because the provider already summarized everything its request replayed, and re-summarizing that history after a model switch took a local model over an hour.
   The checkpoint's text also covers its own run's prompt, so the summary built on it always folds that run; an edit or redaction of the prompt then removes that summary with the run.

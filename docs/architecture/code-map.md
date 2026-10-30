@@ -121,7 +121,7 @@ Matrix sync callback
 | `reply_turn/enrichment.py` | Request enrichment for one reply turn: Matrix targeting context, silent-schedule guidance, timestamped model context, and the account of an interrupted attempt |
 | `reply_turn/locked_turn.py` | `LockedTurns`: the settlement every locked reply turn shares (its ending, span exit, and lifecycle finalization), its effects and identity, and `ReplyTurnDeps`, which the response runner and the approval runner both settle through |
 | `reply_turn/request.py` | `ResponseRequest`, the values one reply turn runs with, and the helpers every owner of its locked lifecycle shares (correlation, typing, reply authorization) |
-| `response_turn.py` | The streaming response-turn driver behind agent and team turns and the collector blocking callers read it with (attempt loop, model-switch continuation, empty-run retry, the turn record and its interrupted row), `ResponseTurnContext` with a turn's inputs, and the run metadata and request-log context a turn binds around its model requests and stream pulls |
+| `response_turn.py` | The streaming response-turn driver behind agent and team turns and the collector blocking callers read it with (attempt loop, model-switch continuation, empty-run retry, the turn record, and marking an interrupted turn's run `INTERRUPTED`), `ResponseTurnContext` with a turn's inputs, and the run metadata and request-log context a turn binds around its model requests and stream pulls |
 | `loop_hooks.py` | The hooks every run or resume installs on the agent loop, composed once in the order the turn applies them; `agent_loop_hooks` and `leader_loop_hooks` name what an agent's and a team leader's run differ by, and `HookTurn` holds what every run takes from its turn |
 | `run_storage.py` | Where an agent or team run stores (`RunStorage`, taken from a scope context or bound to a turn), the terminal record it hands over and the error when it hands none, and the persist callback that keeps and stores it |
 | `response_attempt.py` | Runs one visible response attempt as its reply span's cancellable task |
@@ -229,7 +229,7 @@ Matrix sync callback
 | `teams/legacy_team_presentation.py` | Team reply snapshots of version 2, which keyed member slots by Agno's url-safe member id, read as version 3 when an approval resume restores one |
 | `teams/envelope.py` | `team_response_stream`: prepare a team turn, run its leader through the turn driver, and render the reply; `run_prepared_team` runs an OpenAI-compatible API team turn under the same leader hooks and storage |
 | `teams/leader.py` | `LeaderRun`: how a team's leader runs in one turn or resume, its storage, hooks, request settings, and model, which a live turn and a saved approval's resume both build to start or continue the leader's run |
-| `teams/attempt.py` | One attempt of a team run, a turn's or a resume's: the reply document its events build, the records the run hands over, the text an interrupted turn records (its document without tool markers), and its run metadata |
+| `teams/attempt.py` | One attempt of a team run, a turn's or a resume's: the reply document its events build, the records the run hands over, and its run metadata |
 | `teams/resume.py` | Resuming a paused team run: `TeamResume` routes decisions to the calls the team waits for, `drive_team_delegations` runs a member's delegations and continues with their results, `continue_paused_team_run` rebuilds the team from a saved approval, and the document a team pause shows |
 | `agent_policy.py` | Execution-policy derivation from one typed input, `PolicyInputs`, for validated agents, dashboard drafts, and worker config files |
 | `agent_cli/minimal_agent.py` | Minimal mode: the bootstrap prompt and context documents from the build surface, and the turn's one provider-facing Bash tool over the build's catalog |
@@ -240,7 +240,7 @@ Matrix sync callback
 | `agent_cli/minimal_mode_preflight.py` | Minimal-mode eligibility for `!mode` and minimal subagents, reported as one actionable checklist |
 | `commands/mode_commands.py` | Authorized agent mode selection with canonical session scope and deployment preflight |
 | `api/agent_cli.py` | Authenticated transport for response-owned CLI operations and live call receipts |
-| `agent_cli/cli_approval_recovery.py` | Exact saved CLI approval execution through rebuilt canonical bindings and ordinary interrupted-response recovery |
+| `agent_cli/cli_approval_recovery.py` | Exact saved CLI approval execution through rebuilt canonical bindings, ending the paused run it does not resume as the turn's interrupted record |
 | `agent_cli/cli_approval_waits.py` | Response-owned CLI approval waits, exact journal claims, and the end of each scope, which it reports to the approval runner |
 | `tool_system/agent_tool_calls.py` | The live turn's catalog of qualified tools and their serialized execution through the build's tool policy |
 | `tool_system/tool_access.py` | Shared qualified tool identities, discovery, schemas, and local argument validation |
@@ -349,11 +349,11 @@ Matrix sync callback
 | `session_storage/legacy_scope_metadata.py` | The layout version 7 step that moves the owner's per-scope force-compaction flag and preserved seen ids into one metadata value |
 | `session_storage/legacy_compaction_state.py` | The conversion's step that turns earlier compaction state, the compaction archive, and unpositioned run rows into summary rows and positioned runs before they convert |
 | `history/mid_turn_compaction.py` | Compaction between the model requests of one reply: request sizing, folding, and the scoped or run-local summary |
-| `history/turn_recorder.py` | `TurnRecorder`: what one turn did, which the turn driver writes, and the interrupted-replay snapshot the driver stores when the turn stops |
+| `history/turn_recorder.py` | `TurnRecorder`: how one turn ended, which the turn driver writes: the run that holds its record, its Matrix metadata, and a completed turn's calls |
 | `history/legacy_stored_tool_calls.py` | Tool-call shapes earlier releases stored, which the conversion to storage v2 stores in the current shape in every message a converted run replays |
 | `history/summary_message.py` | The compaction summary as a user message: its text, its scope or run-local marker, and the marker that replays the scope's summary after a mid-turn compacted prompt |
 | `history/session_runs.py` | The follower background readers share: a conversation's Matrix turns in log order, read in one snapshot with what a redaction would cut, the due scan, backoff, and where a conversation never read starts |
-| `history/` | Persisted history: what a request replays from stored runs, the replay budget, compaction before and during a reply, summary rows, and interrupted-turn replay |
+| `history/` | Persisted history: what a request replays from stored runs, the replay budget, compaction before and during a reply, summary rows, and how an interrupted turn's run replays |
 | `history/request_messages.py` | A model request assembled from a scope's stored runs, its compaction summary, and the current turn |
 | `history/replay.py` | Materializes, estimates, and fits persisted history within one replay budget |
 | `history/runtime.py` | Prepares a scope's history before a reply (replay plan and compaction check) and runs its mid-turn and run-local compactions |

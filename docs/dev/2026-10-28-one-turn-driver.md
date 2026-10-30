@@ -49,4 +49,4 @@ A non-success reply ending was decided by the streamer (a terminal row with the 
 
 ## Open
 
-- An interrupted turn's record still comes from the running attempt's partial output and is stored as an interrupted replay row, not as an "interrupted" run status (#3108).
+- Resolved in `2026-10-30-stopped-turn-records.md`: an interrupted turn's record is its run's own, stored as an `INTERRUPTED` run (#3108).
