@@ -326,14 +326,14 @@ async def test_chunk_progress_survives_interruption_and_restart(
     assert interrupted is not None
     assert interrupted.summary is not None
     assert interrupted.summary.text == "summary chunk 1"
-    assert [run.run_id for run in interrupted.runs or []] == ["run-2"]
+    assert [run.run_id for run in interrupted.runs] == ["run-2"]
     assert folded_run_ids(storage) == ["run-1"]
     assert read_scope_state(interrupted).force_compact_before_next_run is True
     assert "RUN1-MARKER" in first_pass_inputs[0]
 
     # A stale writer saves the already-compacted run again before the restart.
     stale_session = deepcopy(interrupted)
-    stale_session.runs = [_completed_run("run-1", marker="RUN1-MARKER", padding=16_000), *(interrupted.runs or [])]
+    stale_session.runs = [_completed_run("run-1", marker="RUN1-MARKER", padding=16_000), *interrupted.runs]
     seed_session(storage, stale_session)
 
     restart_inputs: list[str] = []
@@ -1546,7 +1546,7 @@ async def test_near_cap_durable_summary_with_tiny_budget_is_unavailable_without_
     assert repeated is not None
     assert repeated.summary is not None
     assert repeated.summary.text == previous_summary
-    assert [run.run_id for run in repeated.runs or []] == ["run-1"]
+    assert [run.run_id for run in repeated.runs] == ["run-1"]
     assert read_scope_state(repeated) == HistoryScopeState()
 
 

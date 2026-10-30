@@ -142,7 +142,7 @@ async def _rewrite_single_run(
             ),
             session_id=working_session.session_id,
         ),
-        runs=[run for run in working_session.runs or [] if run.run_id in selected_run_ids],
+        runs=[run for run in working_session.runs if run.run_id in selected_run_ids],
         before_persist=AsyncMock(),
         after_persist=after_persist,
     )
@@ -259,7 +259,20 @@ def test_build_summary_input_leaves_the_stored_runs_unchanged() -> None:
 
 
 @pytest.mark.asyncio
-async def test_rewrite_retries_summary_with_smaller_chunk_after_timeout(tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    "first_error",
+    [
+        pytest.param(
+            TimeoutError(f"compaction summary timed out after {DEFAULT_COMPACTION_TIMEOUT_SECONDS}s"),
+            id="timeout",
+        ),
+        pytest.param(CompactionSummaryOutputLimitError("renamed owned output-limit signal"), id="output-cap"),
+    ],
+)
+async def test_rewrite_retries_summary_with_smaller_chunk_after_shrinkable_error(
+    tmp_path: Path,
+    first_error: Exception,
+) -> None:
     config, runtime_paths = _make_config(tmp_path)
     storage = create_session_storage("test_agent", config, runtime_paths, execution_identity=None)
     working_session = _session(
@@ -279,44 +292,7 @@ async def test_rewrite_retries_summary_with_smaller_chunk_after_timeout(tmp_path
     async def fake_summary(*, summary_input: str, **_kwargs: object) -> str:
         summary_inputs.append(summary_input)
         if len(summary_inputs) == 1:
-            msg = f"compaction summary timed out after {DEFAULT_COMPACTION_TIMEOUT_SECONDS}s"
-            raise TimeoutError(msg)
-        return "merged summary"
-
-    with patch(
-        "mindroom.history.compaction.generate_compaction_summary",
-        new=AsyncMock(side_effect=fake_summary),
-    ):
-        rewrite_result = await _rewrite_single_run(storage=storage, working_session=working_session)
-
-    assert rewrite_result is not None
-    assert len(summary_inputs) == 2
-    assert estimate_text_tokens(summary_inputs[1]) < estimate_text_tokens(summary_inputs[0])
-
-
-@pytest.mark.asyncio
-async def test_rewrite_retries_summary_with_smaller_chunk_after_output_cap(tmp_path: Path) -> None:
-    config, runtime_paths = _make_config(tmp_path)
-    storage = create_session_storage("test_agent", config, runtime_paths, execution_identity=None)
-    working_session = _session(
-        "session-1",
-        runs=[
-            _completed_run(
-                "run-1",
-                messages=[
-                    Message(role="user", content="u" * 8_000),
-                    Message(role="assistant", content="a" * 8_000),
-                ],
-            ),
-        ],
-    )
-    summary_inputs: list[str] = []
-
-    async def fake_summary(*, summary_input: str, **_kwargs: object) -> str:
-        summary_inputs.append(summary_input)
-        if len(summary_inputs) == 1:
-            msg = "renamed owned output-limit signal"
-            raise CompactionSummaryOutputLimitError(msg)
+            raise first_error
         return "merged summary"
 
     with patch(
@@ -755,7 +731,7 @@ async def test_rewrite_propagates_fallback_refusal_without_persisting(tmp_path: 
     retry_sleep.assert_not_awaited()
     persist_spy.assert_not_called()
     assert working_session.summary is None
-    assert [run.run_id for run in working_session.runs or []] == ["run-1"]
+    assert [run.run_id for run in working_session.runs] == ["run-1"]
 
 
 @pytest.mark.parametrize(
@@ -860,7 +836,7 @@ async def test_rewrite_bounds_retry_attempts(
         retry_sleep.assert_not_awaited()
     persist_spy.assert_not_called()
     assert working_session.summary is None
-    assert [run.run_id for run in working_session.runs or []] == ["run-1"]
+    assert [run.run_id for run in working_session.runs] == ["run-1"]
 
 
 @pytest.mark.asyncio
@@ -941,7 +917,7 @@ async def test_rewrite_propagates_cancellation_during_transient_retry_delay(tmp_
     retry_sleep.assert_awaited_once_with(DEFAULT_SUMMARY_RETRY_POLICY.same_input_retry_delay_seconds)
     persist_spy.assert_not_called()
     assert working_session.summary is None
-    assert [run.run_id for run in working_session.runs or []] == ["run-1"]
+    assert [run.run_id for run in working_session.runs] == ["run-1"]
 
 
 def test_compaction_hook_events_are_registered() -> None:
@@ -1729,7 +1705,7 @@ async def test_rewrite_working_session_for_compaction_keeps_the_remaining_runs_t
         if len(
             build_summary_input(
                 previous_summary=None,
-                compacted_runs=list(working_session.runs or []),
+                compacted_runs=list(working_session.runs),
                 max_input_tokens=budget,
                 history_settings=_ALL_HISTORY_SETTINGS,
                 token_estimator=estimate_compaction_input_tokens,
@@ -1756,7 +1732,7 @@ async def test_rewrite_working_session_for_compaction_keeps_the_remaining_runs_t
             persisted_session=working_session,
             working_session=working_session,
             summarizer=_summarizer(input_budget_tokens=summary_input_budget),
-            runs=list(working_session.runs or []),
+            runs=list(working_session.runs),
             before_persist=AsyncMock(),
             after_persist=AsyncMock(),
         )
@@ -1768,7 +1744,7 @@ async def test_rewrite_working_session_for_compaction_keeps_the_remaining_runs_t
     assert stored is not None
     for session in (working_session, stored):
         assert [run.run_id for run in session.runs] == ["run-2"]
-        remaining_messages = session.runs[0].messages or []
+        remaining_messages = session.runs[0].messages
         assert remaining_messages[1].provider_data == {"signature": "sig-old", "keep": "yes"}
         assert remaining_messages[1].reasoning_content == "old thinking"
         assert remaining_messages[1].redacted_reasoning_content == "old redacted"
@@ -1829,7 +1805,7 @@ async def test_compact_scope_history_persists_the_remaining_runs_as_they_were(tm
         if len(
             build_summary_input(
                 previous_summary=None,
-                compacted_runs=list(session.runs or []),
+                compacted_runs=list(session.runs),
                 max_input_tokens=budget,
                 history_settings=_ALL_HISTORY_SETTINGS,
                 token_estimator=estimate_compaction_input_tokens,
@@ -1868,7 +1844,7 @@ async def test_compact_scope_history_persists_the_remaining_runs_as_they_were(tm
     persisted = storage.load_session("session-1")
     assert persisted is not None
     assert [run.run_id for run in persisted.runs] == [run.run_id for run in remaining_runs]
-    remaining_messages = [message for run in persisted.runs for message in run.messages or []]
+    remaining_messages = [message for run in persisted.runs for message in run.messages]
     assert remaining_messages[1].provider_data == {"signature": "sig-old", "keep": "yes"}
     assert remaining_messages[1].reasoning_content == "old thinking"
     assert remaining_messages[1].redacted_reasoning_content == "old redacted"

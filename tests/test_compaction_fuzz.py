@@ -218,7 +218,7 @@ class _Runner:
         session = self._load()
         chunk = [
             run.run_id
-            for run in session.runs or []
+            for run in session.runs
             if isinstance(run, RunRecord) and run.run_id and run.status == RunStatus.completed
         ][:count]
         if not chunk:
@@ -371,8 +371,8 @@ class _Runner:
 
     def _resurrect(self, action: Action) -> None:
         """Save an old copy of a run that no longer loads, as a late run save would."""
-        loaded = {run.run_id for run in self._load().runs or []}
-        copies = [run for snapshot in self._snapshots for run in snapshot.runs or [] if run.run_id not in loaded]
+        loaded = {run.run_id for run in self._load().runs}
+        copies = [run for snapshot in self._snapshots for run in snapshot.runs if run.run_id not in loaded]
         if copies:
             run = copies[action.index % len(copies)]
             self._storage.save_run(_session_row(), run, record_usage=False)
@@ -432,8 +432,8 @@ class _Runner:
 
     def _check(self) -> None:
         session = self._load()
-        loaded = {run.run_id for run in session.runs or [] if run.run_id}
-        visible = {run.run_id for run in session.runs or [] if run.run_id and run.status == RunStatus.completed}
+        loaded = {run.run_id for run in session.runs if run.run_id}
+        visible = {run.run_id for run in session.runs if run.run_id and run.status == RunStatus.completed}
         folded = set(folded_run_ids(self._storage, _SESSION))
         covered = _covered(session)
         stored = set(stored_run_ids(self._storage, _SESSION))
