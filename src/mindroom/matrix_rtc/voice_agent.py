@@ -31,6 +31,7 @@ if TYPE_CHECKING:
     from livekit.agents import Agent as LiveKitAgent
     from livekit.agents import AgentSession, APIConnectOptions, NotGivenOr
     from livekit.agents.llm import LLM, ChatContext, LLMStream, Tool, ToolChoice
+    from livekit.agents.tts import TTS
     from livekit.agents.voice.events import (
         CloseEvent,
         ConversationItemAddedEvent,
@@ -852,7 +853,7 @@ class CascadedVoiceBridge(RealtimeVoiceBridge):
         stt_kwargs.pop("base_url", None)
         try:
             stt = openai.STT(client=stt_client, **stt_kwargs)
-            tts = openai.TTS(**_speech_component_kwargs(options.tts))
+            tts = _cascaded_tts(options.tts)
         except BaseException:
             await stt_client.close()
             raise
@@ -938,6 +939,19 @@ def _exception_chain_text(error: object) -> str:
         parts.append(f"{type(current).__name__}: {current}".lower())
         current = getattr(current, "__cause__", None) or getattr(current, "__context__", None)
     return " | ".join(parts)
+
+
+def _cascaded_tts(options: SpeechServiceOptions) -> TTS:
+    """Build a cascaded call's TTS: Realtime for ``gpt-realtime`` models, the speech endpoint otherwise."""
+    from livekit.plugins import openai  # noqa: PLC0415
+
+    from mindroom.voice.openai_realtime_speech import is_realtime_speech_model  # noqa: PLC0415
+
+    if is_realtime_speech_model(options.model):
+        from mindroom.matrix_rtc.realtime_tts import RealtimeTTS  # noqa: PLC0415
+
+        return RealtimeTTS(**_speech_component_kwargs(options))
+    return openai.TTS(**_speech_component_kwargs(options))
 
 
 def _speech_component_kwargs(options: SpeechServiceOptions) -> dict[str, Any]:

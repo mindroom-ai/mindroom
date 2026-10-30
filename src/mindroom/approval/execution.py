@@ -250,7 +250,6 @@ async def _continue_persisted_agent(
         or ("" if presentation.final_text() else "Tool approval continuation completed"),
         replayable_text=presentation.final_text(),
         has_visible_content=collected.has_visible_content,
-        session_id=response.session_id,
         run_id=response.run_id,
         attempt_run_id=response.run_id,
         runtime_model_name=model_name,
