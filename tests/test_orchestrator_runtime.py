@@ -4965,8 +4965,8 @@ class TestMultiAgentOrchestrator:
         """Presence failures must not expose mixed config or block later unchanged bots."""
         new_config = Config(defaults={"enable_streaming": False})
         orchestrator = _MultiAgentOrchestrator(runtime_paths=TestAgentBot._runtime_paths(tmp_path), config=new_config)
-        first_bot = _mock_managed_bot(new_config)
-        second_bot = _mock_managed_bot(new_config)
+        first_bot = _mock_managed_bot()
+        second_bot = _mock_managed_bot()
         install_bots(orchestrator, {"first": first_bot, "second": second_bot})
         second_bot_adopted_at_first_await: list[bool] = []
 
@@ -5273,7 +5273,7 @@ class TestMultiAgentOrchestrator:
             runtime_paths=TestAgentBot._runtime_paths(tmp_path),
             config=current_config,
         )
-        bot = _mock_managed_bot(current_config)
+        bot = _mock_managed_bot()
         bot.running = True
         install_bots(orchestrator, {"general": bot})
         plan = ConfigUpdatePlan(

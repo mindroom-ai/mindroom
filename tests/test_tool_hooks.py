@@ -261,7 +261,6 @@ def _dispatch_context(
 
 
 def _agent_bot(
-    tmp_path: Path,
     *,
     config: Config,
     agent_name: str = "code",
@@ -274,7 +273,6 @@ def _agent_bot(
             display_name=agent_name.title(),
             password="test-password",  # noqa: S106
         ),
-        storage_path=tmp_path,
         config=config,
         runtime_paths=runtime_paths_for(config),
         rooms=["!room:localhost"],
@@ -1199,7 +1197,7 @@ async def test_tool_hook_contexts_expose_router_backed_matrix_admin(tmp_path: Pa
 
     config = _config(tmp_path)
     runtime = ready_runtime(config, runtime_paths_for(config))
-    bot = _agent_bot(tmp_path, config=config, orchestrator=runtime)
+    bot = _agent_bot(config=config, orchestrator=runtime)
     bot.client = AsyncMock(spec=nio.AsyncClient)
     bot.client.rooms = {}
     bot.client.homeserver = "http://agent.local:8008"
@@ -1208,7 +1206,7 @@ async def test_tool_hook_contexts_expose_router_backed_matrix_admin(tmp_path: Pa
         status_code="M_NOT_FOUND",
     )
 
-    router_bot = _agent_bot(tmp_path, config=config, agent_name="router", orchestrator=runtime)
+    router_bot = _agent_bot(config=config, agent_name="router", orchestrator=runtime)
     router_bot.client = AsyncMock(spec=nio.AsyncClient)
     router_bot.client.rooms = {}
     router_bot.client.homeserver = "http://localhost:8008"
@@ -1322,12 +1320,12 @@ async def test_agent_bot_tool_runtime_context_room_state_helpers_fallback_to_rou
     seen: list[tuple[dict[str, object] | None, bool]] = []
     config = _config(tmp_path)
     runtime = ready_runtime(config, runtime_paths_for(config))
-    bot = _agent_bot(tmp_path, config=config, orchestrator=runtime)
+    bot = _agent_bot(config=config, orchestrator=runtime)
     bot.client = AsyncMock(spec=nio.AsyncClient)
     bot.client.rooms = {}
     bot.client.room_get_state_event.return_value = nio.RoomGetStateEventError(message="forbidden")
     bot.client.room_put_state.return_value = nio.RoomPutStateError(message="forbidden")
-    router_bot = _agent_bot(tmp_path, config=config, agent_name="router", orchestrator=runtime)
+    router_bot = _agent_bot(config=config, agent_name="router", orchestrator=runtime)
     router_bot.client = AsyncMock(spec=nio.AsyncClient)
     router_bot.client.rooms = {}
     router_bot.client.room_get_state_event.return_value = SimpleNamespace(content={"name": "Router Lobby"})
@@ -1949,7 +1947,7 @@ async def test_agent_bot_tool_runtime_context_routes_custom_events_from_tool_hoo
     plugins = [_plugin("tool-policy", [before, on_custom_event])]
     with registered_toolkit(tool_name, DemoToolkit):
         config = _config(tmp_path, tools=[tool_name], plugins=["./plugins/tool-policy"])
-        bot = _agent_bot(tmp_path, config=config)
+        bot = _agent_bot(config=config)
         bot.orchestrator.hook_registry = HookRegistry.from_plugins(plugins)
 
         install_model_providers(monkeypatch, {"default": ScriptedModel([])})

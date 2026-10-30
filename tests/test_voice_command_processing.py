@@ -69,12 +69,11 @@ def _attach_runtime_paths(config: Config, tmp_path: Path) -> Config:
     return bind_runtime_paths(config, orchestrator_runtime_paths(tmp_path, config_path=tmp_path / "config.yaml"))
 
 
-def _agent_bot(*, agent_user: object, storage_path: Path, config: Config, rooms: list[str]) -> AgentBot:
+def _agent_bot(*, agent_user: object, config: Config, rooms: list[str]) -> AgentBot:
     """Construct an agent bot with the explicit runtime bound to the test config."""
     bot = install_runtime_journal_support(
         make_test_agent_bot(
             agent_user=agent_user,
-            storage_path=storage_path,
             config=config,
             runtime_paths=runtime_paths_for(config),
             rooms=rooms,
@@ -169,7 +168,6 @@ def _make_visible_router_echo_scenario(
 
     bot = _agent_bot(
         agent_user=agent_user,
-        storage_path=tmp_path,
         config=config,
         rooms=["!test:example.com"],
     )
@@ -206,7 +204,6 @@ async def test_router_voice_text_for_a_user_is_conversation_not_a_command(tmp_pa
 
     bot = _agent_bot(
         agent_user=agent_user,
-        storage_path=tmp_path,
         config=_attach_runtime_paths(with_current_room_member_access(Config(authorization={})), tmp_path),
         rooms=["!test:localhost"],
     )
@@ -259,7 +256,6 @@ async def test_router_ignores_non_voice_self_messages(tmp_path) -> None:  # noqa
 
     bot = _agent_bot(
         agent_user=agent_user,
-        storage_path=tmp_path,
         config=_attach_runtime_paths(with_current_room_member_access(Config(authorization={})), tmp_path),
         rooms=["!test:example.com"],
     )
@@ -299,7 +295,6 @@ async def test_a_sidecar_relay_the_router_sent_stays_conversation(tmp_path) -> N
 
     bot = _agent_bot(
         agent_user=agent_user,
-        storage_path=tmp_path,
         config=_attach_runtime_paths(
             with_current_room_member_access(
                 Config(
@@ -378,7 +373,6 @@ async def test_router_parses_sidecar_schedule_command_from_canonical_body(tmp_pa
 
     bot = _agent_bot(
         agent_user=agent_user,
-        storage_path=tmp_path,
         config=_attach_runtime_paths(
             with_current_room_member_access(
                 Config(
@@ -460,7 +454,6 @@ async def test_router_treats_sidecar_skill_command_as_unknown_command(tmp_path) 
 
     bot = _agent_bot(
         agent_user=agent_user,
-        storage_path=tmp_path,
         config=_attach_runtime_paths(
             with_current_room_member_access(
                 Config(
@@ -538,7 +531,6 @@ async def test_router_skips_unauthorized_sidecar_commands_before_hydration(tmp_p
 
     bot = _agent_bot(
         agent_user=agent_user,
-        storage_path=tmp_path,
         config=_attach_runtime_paths(with_current_room_member_access(Config(authorization={})), tmp_path),
         rooms=["!test:example.com"],
     )
@@ -742,7 +734,6 @@ async def test_router_ignores_audio_events_from_internal_agents(tmp_path) -> Non
 
     bot = _agent_bot(
         agent_user=agent_user,
-        storage_path=tmp_path,
         config=config,
         rooms=["!test:example.com"],
     )
@@ -790,7 +781,6 @@ async def test_agent_handles_audio_without_router_when_voice_disabled(tmp_path) 
 
     bot = _agent_bot(
         agent_user=agent_user,
-        storage_path=tmp_path,
         config=_attach_runtime_paths(
             with_current_room_member_access(
                 Config(
@@ -870,7 +860,6 @@ async def test_agent_handles_audio_with_router_present_in_single_agent_room(tmp_
 
     bot = _agent_bot(
         agent_user=agent_user,
-        storage_path=tmp_path,
         config=_attach_runtime_paths(
             with_current_room_member_access(
                 Config(
@@ -936,7 +925,6 @@ async def test_router_and_agent_share_audio_normalization_when_router_is_present
         agent_user.matrix_id = MatrixID.parse(f"@mindroom_{agent_name}:localhost")
         bot = _agent_bot(
             agent_user=agent_user,
-            storage_path=tmp_path,
             config=config,
             rooms=["!test:example.com"],
         )
@@ -1772,7 +1760,6 @@ async def test_router_routes_transcribed_audio_when_multiple_agents_are_present(
 
     bot = _agent_bot(
         agent_user=agent_user,
-        storage_path=tmp_path,
         config=config,
         rooms=["!test:example.com"],
     )
@@ -1861,7 +1848,6 @@ async def test_transcribed_mentions_target_the_mentioned_agent_when_router_absen
         agent_user.matrix_id = MatrixID.parse(f"@mindroom_{agent_name}:localhost")
         bot = _agent_bot(
             agent_user=agent_user,
-            storage_path=tmp_path,
             config=config,
             rooms=["!test:example.com"],
         )
@@ -1938,7 +1924,6 @@ async def test_caption_mentions_still_target_agent_when_stt_drops_the_mention(tm
         agent_user.matrix_id = MatrixID.parse(f"@mindroom_{agent_name}:localhost")
         bot = _agent_bot(
             agent_user=agent_user,
-            storage_path=tmp_path,
             config=config,
             rooms=["!test:example.com"],
         )

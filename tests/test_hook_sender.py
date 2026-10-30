@@ -181,7 +181,6 @@ def _hook_bot(tmp_path: Path) -> AgentBot:
             display_name="Router",
             user_id="@mindroom_router:localhost",
         ),
-        storage_path=tmp_path,
         config=config,
         runtime_paths=runtime_paths_for(config),
     )
@@ -218,7 +217,6 @@ def _agent_bot(tmp_path: Path, *, agent_name: str = "code") -> AgentBot:
             display_name=agent_name.title(),
             user_id=f"@mindroom_{agent_name}:localhost",
         ),
-        storage_path=tmp_path,
         config=config,
         runtime_paths=runtime_paths_for(config),
     )

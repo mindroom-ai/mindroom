@@ -311,7 +311,7 @@ def _new_bot(tmp_path: Path) -> AgentBot:
         display_name="General",
         user_id="@mindroom_general:localhost",
     )
-    bot = make_test_agent_bot(agent_user, tmp_path, config, runtime_paths_for(config), rooms=[_ROOM])
+    bot = make_test_agent_bot(agent_user, config, runtime_paths_for(config), rooms=[_ROOM])
     install_direct_response_admission(bot)
     bot.client = make_matrix_client_mock(user_id="@mindroom_general:localhost")
     install_runtime_journal_support(bot)

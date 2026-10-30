@@ -274,7 +274,6 @@ def _live_router_invite_scenario(
     )
     bot = make_test_agent_bot(
         agent_user=_router_user(),
-        storage_path=tmp_path,
         config=config,
         runtime_paths=runtime_paths_for(config),
     )
@@ -544,7 +543,6 @@ async def test_agent_joins_configured_rooms(monkeypatch: pytest.MonkeyPatch, tmp
 
     bot = make_test_agent_bot(
         agent_user=agent_user,
-        storage_path=tmp_path,
         config=config,
         runtime_paths=runtime_paths_for(config),
         rooms=["!room1:localhost", "!room2:localhost"],
@@ -587,7 +585,6 @@ async def test_agent_skips_rejoining_rooms_it_already_has(monkeypatch: pytest.Mo
     config = bind_runtime_paths(Config(router=RouterConfig(model="default")), test_runtime_paths(tmp_path))
     bot = make_test_agent_bot(
         agent_user=agent_user,
-        storage_path=tmp_path,
         config=config,
         runtime_paths=runtime_paths_for(config),
         rooms=["!room1:localhost", "!room2:localhost"],
@@ -626,7 +623,6 @@ async def test_startup_already_joined_reconciles_gateway_without_membership_http
     )
     bot = make_test_agent_bot(
         agent_user=agent_user,
-        storage_path=tmp_path,
         config=config,
         runtime_paths=runtime_paths_for(config),
         rooms=[room_id],
@@ -683,7 +679,6 @@ async def test_unconfigured_leave_uses_durable_gateway_without_direct_http(
     )
     bot = make_test_agent_bot(
         agent_user=agent_user,
-        storage_path=tmp_path,
         config=config,
         runtime_paths=runtime_paths_for(config),
         rooms=[],
@@ -740,7 +735,6 @@ async def test_join_configured_rooms_retries_when_membership_inventory_is_unavai
     config = bind_runtime_paths(Config(router=RouterConfig(model="default")), test_runtime_paths(tmp_path))
     bot = make_test_agent_bot(
         agent_user=agent_user,
-        storage_path=tmp_path,
         config=config,
         runtime_paths=runtime_paths_for(config),
         rooms=["!room1:localhost", "!room2:localhost"],
@@ -777,7 +771,6 @@ async def test_stale_client_room_after_leave_cannot_reopen_cache(
     config = bind_runtime_paths(Config(router=RouterConfig(model="default")), test_runtime_paths(tmp_path))
     bot = make_test_agent_bot(
         agent_user=agent_user,
-        storage_path=tmp_path,
         config=config,
         runtime_paths=runtime_paths_for(config),
         rooms=[room_id],
@@ -831,7 +824,6 @@ async def test_agent_rejoins_persisted_invited_rooms_on_startup(
 
     bot = make_test_agent_bot(
         agent_user=agent_user,
-        storage_path=tmp_path,
         config=config,
         runtime_paths=runtime_paths_for(config),
     )
@@ -864,7 +856,6 @@ async def test_router_accepts_agent_invite_persists_and_rejoins_on_startup(
     )
     bot = make_test_agent_bot(
         agent_user=_router_user(),
-        storage_path=tmp_path,
         config=config,
         runtime_paths=runtime_paths_for(config),
     )
@@ -903,7 +894,6 @@ async def test_router_accepts_agent_invite_persists_and_rejoins_on_startup(
 
     restarted_bot = make_test_agent_bot(
         agent_user=_router_user(),
-        storage_path=tmp_path,
         config=config,
         runtime_paths=runtime_paths_for(config),
     )
@@ -931,7 +921,6 @@ async def test_live_invite_forbidden_join_remains_retryable(
     )
     bot = make_test_agent_bot(
         agent_user=_router_user(),
-        storage_path=tmp_path,
         config=config,
         runtime_paths=runtime_paths_for(config),
     )
@@ -968,7 +957,6 @@ async def test_unconfirmed_invite_join_failure_retains_retry_state(
     )
     bot = make_test_agent_bot(
         agent_user=_router_user(),
-        storage_path=tmp_path,
         config=config,
         runtime_paths=runtime_paths_for(config),
     )
@@ -1012,7 +1000,6 @@ async def test_recovered_invite_without_current_invite_is_forgotten_without_join
     )
     bot = make_test_agent_bot(
         agent_user=_router_user(),
-        storage_path=tmp_path,
         config=config,
         runtime_paths=runtime_paths_for(config),
     )
@@ -1048,7 +1035,6 @@ async def test_initial_sync_invite_is_current_membership_work(
     )
     bot = make_test_agent_bot(
         agent_user=_router_user(),
-        storage_path=tmp_path,
         config=config,
         runtime_paths=runtime_paths_for(config),
     )
@@ -1106,7 +1092,6 @@ async def test_only_authenticated_self_invites_start_invite_work(
     )
     bot = make_test_agent_bot(
         agent_user=_router_user(),
-        storage_path=tmp_path,
         config=config,
         runtime_paths=runtime_paths_for(config),
     )
@@ -1138,7 +1123,6 @@ async def test_invite_sync_callback_runs_durable_join_in_background(tmp_path: Pa
     )
     bot = make_test_agent_bot(
         agent_user=_router_user(),
-        storage_path=tmp_path,
         config=config,
         runtime_paths=runtime_paths_for(config),
     )
@@ -1194,7 +1178,6 @@ async def test_invite_sync_callback_does_not_start_work_when_identity_save_fails
     )
     bot = make_test_agent_bot(
         agent_user=_router_user(),
-        storage_path=tmp_path,
         config=config,
         runtime_paths=runtime_paths_for(config),
     )
@@ -1229,7 +1212,6 @@ async def test_invite_persistence_failure_propagates_to_sync_boundary(
     )
     bot = make_test_agent_bot(
         agent_user=_router_user(),
-        storage_path=tmp_path,
         config=config,
         runtime_paths=runtime_paths_for(config),
     )
@@ -1267,7 +1249,6 @@ async def test_router_invite_preserves_room_created_after_lifecycle_loaded(
     )
     bot = make_test_agent_bot(
         agent_user=_router_user(),
-        storage_path=tmp_path,
         config=config,
         runtime_paths=runtime_paths_for(config),
     )
@@ -1321,7 +1302,6 @@ async def test_router_cleanup_preserves_room_created_after_lifecycle_loaded(
     )
     bot = make_test_agent_bot(
         agent_user=_router_user(),
-        storage_path=tmp_path,
         config=config,
         runtime_paths=runtime_paths_for(config),
     )
@@ -1385,7 +1365,6 @@ async def test_router_cleanup_loads_invited_rooms_off_event_loop(
     )
     bot = make_test_agent_bot(
         agent_user=_router_user(),
-        storage_path=tmp_path,
         config=config,
         runtime_paths=runtime_paths_for(config),
     )
@@ -1425,7 +1404,6 @@ async def test_router_invite_retries_after_transient_persistence_failure(
     )
     bot = make_test_agent_bot(
         agent_user=_router_user(),
-        storage_path=tmp_path,
         config=config,
         runtime_paths=runtime_paths_for(config),
     )
@@ -1487,7 +1465,6 @@ async def test_router_deduplicates_concurrent_invite_callbacks(
     )
     bot = make_test_agent_bot(
         agent_user=_router_user(),
-        storage_path=tmp_path,
         config=config,
         runtime_paths=runtime_paths_for(config),
     )
@@ -1551,7 +1528,6 @@ async def test_router_departure_allows_fresh_reinvite(
     )
     bot = make_test_agent_bot(
         agent_user=_router_user(),
-        storage_path=tmp_path,
         config=config,
         runtime_paths=runtime_paths_for(config),
     )
@@ -1613,7 +1589,6 @@ async def test_agent_forgets_persisted_invited_room_after_being_kicked(
             display_name="Agent 1",
             password=TEST_PASSWORD,
         ),
-        storage_path=tmp_path,
         config=config,
         runtime_paths=runtime_paths_for(config),
     )
@@ -1650,7 +1625,6 @@ async def test_agent_retries_failed_persisted_invited_room_forget(
             display_name="Agent 1",
             password=TEST_PASSWORD,
         ),
-        storage_path=tmp_path,
         config=config,
         runtime_paths=runtime_paths_for(config),
     )
@@ -1663,7 +1637,6 @@ async def test_agent_retries_failed_persisted_invited_room_forget(
 
     restarted = make_test_agent_bot(
         agent_user=bot.agent_user,
-        storage_path=tmp_path,
         config=config,
         runtime_paths=runtime_paths_for(config),
     )
@@ -1673,7 +1646,6 @@ async def test_agent_retries_failed_persisted_invited_room_forget(
     await bot._room_lifecycle.forget_invited_room(room_id)
     restarted = make_test_agent_bot(
         agent_user=bot.agent_user,
-        storage_path=tmp_path,
         config=config,
         runtime_paths=runtime_paths_for(config),
     )
@@ -1702,7 +1674,6 @@ async def test_an_entity_that_stops_accepting_invites_keeps_no_invited_rooms(tmp
             display_name="Agent 1",
             password=TEST_PASSWORD,
         ),
-        storage_path=tmp_path,
         config=config,
         runtime_paths=runtime_paths_for(config),
     )
@@ -1727,7 +1698,6 @@ async def test_router_duplicate_invite_retries_failed_welcome_delivery(
     )
     bot = make_test_agent_bot(
         agent_user=_router_user(),
-        storage_path=tmp_path,
         config=config,
         runtime_paths=runtime_paths_for(config),
     )
@@ -1780,7 +1750,6 @@ async def test_redelivered_invite_retries_a_failed_welcome(
     )
     bot = make_test_agent_bot(
         agent_user=_router_user(),
-        storage_path=tmp_path,
         config=config,
         runtime_paths=runtime_paths_for(config),
     )
@@ -1838,7 +1807,6 @@ async def test_router_welcome_send_is_idempotent_for_concurrent_empty_room_check
     )
     bot = make_test_agent_bot(
         agent_user=_router_user(),
-        storage_path=tmp_path,
         config=config,
         runtime_paths=runtime_paths_for(config),
     )
@@ -1876,7 +1844,6 @@ async def test_router_welcome_gets_thread_summary(
     )
     bot = make_test_agent_bot(
         agent_user=_router_user(),
-        storage_path=tmp_path,
         config=config,
         runtime_paths=runtime_paths_for(config),
     )
@@ -1908,7 +1875,6 @@ async def test_router_welcome_send_retries_after_delivery_failure(
     )
     bot = make_test_agent_bot(
         agent_user=_router_user(),
-        storage_path=tmp_path,
         config=config,
         runtime_paths=runtime_paths_for(config),
     )
@@ -1940,7 +1906,6 @@ async def test_router_welcome_lookup_failure_propagates_for_retry(tmp_path: Path
     )
     bot = make_test_agent_bot(
         agent_user=_router_user(),
-        storage_path=tmp_path,
         config=config,
         runtime_paths=runtime_paths_for(config),
     )
@@ -1976,7 +1941,6 @@ async def test_router_auto_welcome_lists_ad_hoc_present_responder(tmp_path: Path
     )
     bot = make_test_agent_bot(
         agent_user=_router_user(),
-        storage_path=tmp_path,
         config=config,
         runtime_paths=runtime_paths_for(config),
     )
@@ -2025,7 +1989,6 @@ async def test_router_startup_welcome_without_requester_omits_responder_list(tmp
     )
     bot = make_test_agent_bot(
         agent_user=_router_user(),
-        storage_path=tmp_path,
         config=config,
         runtime_paths=runtime_paths_for(config),
     )
@@ -2083,7 +2046,6 @@ async def test_router_invite_welcome_filters_ad_hoc_responders_for_inviter(
     )
     bot = make_test_agent_bot(
         agent_user=_router_user(),
-        storage_path=tmp_path,
         config=config,
         runtime_paths=runtime_paths_for(config),
     )
@@ -2144,7 +2106,6 @@ async def test_router_invite_welcome_requires_current_reply_authorization(
     )
     bot = make_test_agent_bot(
         agent_user=_router_user(),
-        storage_path=tmp_path,
         config=config,
         runtime_paths=runtime_paths_for(config),
     )
@@ -2187,7 +2148,6 @@ async def test_router_invite_welcome_waits_for_replacement_authorization(
     with_responder_access(denied_config, ROUTER_AGENT_NAME, users=[])
     bot = make_test_agent_bot(
         agent_user=_router_user(),
-        storage_path=tmp_path,
         config=config,
         runtime_paths=runtime_paths_for(config),
     )
@@ -2232,7 +2192,6 @@ async def test_router_ignores_invite_when_accept_invites_disabled(
     )
     bot = make_test_agent_bot(
         agent_user=_router_user(),
-        storage_path=tmp_path,
         config=config,
         runtime_paths=runtime_paths_for(config),
     )
@@ -2267,7 +2226,6 @@ async def test_router_leave_unconfigured_rooms_preserves_persisted_invited_room(
     invited_rooms_path.write_text('[\n  "!router-invited:localhost"\n]\n', encoding="utf-8")
     bot = make_test_agent_bot(
         agent_user=_router_user(),
-        storage_path=tmp_path,
         config=config,
         runtime_paths=runtime_paths_for(config),
         rooms=["!configured-room:localhost"],
@@ -2361,7 +2319,6 @@ async def test_agent_leaves_unconfigured_rooms(monkeypatch: pytest.MonkeyPatch, 
 
     bot = make_test_agent_bot(
         agent_user=agent_user,
-        storage_path=tmp_path,
         config=config,
         runtime_paths=runtime_paths_for(config),
         rooms=["!room1:localhost"],  # Only configured for room1
@@ -2412,7 +2369,6 @@ async def test_router_preserves_root_space_when_leaving_unconfigured_rooms(
     config = bind_runtime_paths(Config(router=RouterConfig(model="default")), test_runtime_paths(tmp_path))
     bot = make_test_agent_bot(
         agent_user=agent_user,
-        storage_path=tmp_path,
         config=config,
         runtime_paths=runtime_paths_for(config),
         rooms=["!room1:localhost"],
@@ -2466,7 +2422,6 @@ async def test_agent_manages_rooms_on_config_update(monkeypatch: pytest.MonkeyPa
 
     bot = make_test_agent_bot(
         agent_user=agent_user,
-        storage_path=tmp_path,
         config=config,
         runtime_paths=runtime_paths_for(config),
         rooms=["!room1:localhost"],
@@ -2543,7 +2498,6 @@ async def test_agent_refuses_invite_when_accept_invites_disabled(
     )
     bot = make_test_agent_bot(
         agent_user=agent_user,
-        storage_path=tmp_path,
         config=config,
         runtime_paths=runtime_paths_for(config),
     )
@@ -2591,7 +2545,6 @@ async def test_agent_accepts_invite_independently_of_conversation_access(
     )
     bot = make_test_agent_bot(
         agent_user=agent_user,
-        storage_path=tmp_path,
         config=config,
         runtime_paths=runtime_paths_for(config),
     )
@@ -2658,7 +2611,6 @@ async def test_agent_explains_joining_a_managed_room_it_cannot_answer_in(
     )
     bot = make_test_agent_bot(
         agent_user=agent_user,
-        storage_path=tmp_path,
         config=config,
         runtime_paths=runtime_paths_for(config),
     )
@@ -2711,7 +2663,6 @@ async def test_managed_room_notice_is_not_repeated_when_reconciling_a_joined_inv
             display_name="Agent 1",
             password=TEST_PASSWORD,
         ),
-        storage_path=tmp_path,
         config=config,
         runtime_paths=runtime_paths_for(config),
     )
@@ -2759,7 +2710,6 @@ async def test_managed_room_notice_stays_silent_for_inviters_the_agent_does_not_
             display_name="Agent 1",
             password=TEST_PASSWORD,
         ),
-        storage_path=tmp_path,
         config=config,
         runtime_paths=runtime_paths_for(config),
     )
@@ -2824,7 +2774,6 @@ async def test_team_invitation_policy_is_independent_of_conversation_access(
     )
     bot = make_test_agent_bot(
         agent_user=team_user,
-        storage_path=tmp_path,
         config=config,
         runtime_paths=runtime_paths_for(config),
     )
@@ -2859,7 +2808,6 @@ async def test_unknown_entity_refuses_invite(
     )
     bot = make_test_agent_bot(
         agent_user=agent_user,
-        storage_path=tmp_path,
         config=config,
         runtime_paths=runtime_paths_for(config),
     )
@@ -2901,7 +2849,6 @@ async def test_agent_persists_non_dm_invited_room(monkeypatch: pytest.MonkeyPatc
     )
     bot = make_test_agent_bot(
         agent_user=agent_user,
-        storage_path=tmp_path,
         config=config,
         runtime_paths=runtime_paths_for(config),
     )
@@ -3023,7 +2970,6 @@ async def test_leave_unconfigured_rooms_preserves_persisted_invited_room(
     invited_rooms_path.write_text('[\n  "!invited-room:localhost"\n]\n', encoding="utf-8")
     bot = make_test_agent_bot(
         agent_user=agent_user,
-        storage_path=tmp_path,
         config=config,
         runtime_paths=runtime_paths_for(config),
         rooms=["!configured-room:localhost"],
@@ -3096,7 +3042,6 @@ def test_corrupt_retention_stops_lifecycle_initialization(tmp_path: Path, conten
     with pytest.raises(ValueError, match=message):
         make_test_agent_bot(
             agent_user=agent_user,
-            storage_path=tmp_path,
             config=config,
             runtime_paths=runtime_paths_for(config),
         )
@@ -3123,7 +3068,6 @@ def test_ledgers_planted_in_a_worker_mounted_state_root_are_ignored(tmp_path: Pa
 
     bot = make_test_agent_bot(
         agent_user=agent_user,
-        storage_path=tmp_path,
         config=config,
         runtime_paths=runtime_paths_for(config),
     )

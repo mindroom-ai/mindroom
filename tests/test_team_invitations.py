@@ -72,7 +72,6 @@ class TestTeamRoomMembership:
         config.defaults.enable_streaming = False
         bot = make_test_agent_bot(
             agent_user=team_user,
-            storage_path=tmp_path,
             config=config,
             runtime_paths=runtime_paths_for(config),
             rooms=["!test_room:localhost"],
@@ -116,7 +115,6 @@ class TestTeamRoomMembership:
         config.defaults.enable_streaming = False
         bot = make_test_agent_bot(
             agent_user=team_user,
-            storage_path=tmp_path,
             config=config,
             runtime_paths=runtime_paths_for(config),
             rooms=[],  # No configured rooms
@@ -186,7 +184,6 @@ class TestTeamRoomMembership:
         config.defaults.enable_streaming = False
         bot = make_test_agent_bot(
             agent_user=team_user,
-            storage_path=tmp_path,
             config=config,
             runtime_paths=runtime_paths_for(config),
         )

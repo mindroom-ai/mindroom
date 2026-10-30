@@ -105,7 +105,6 @@ def _context_bot(tmp_path: Path, config: Config | None = None) -> AgentBot:
             display_name="Email Agent",
             user_id=current_ids["email_agent"].full_id,
         ),
-        storage_path=tmp_path,
         config=config,
         runtime_paths=runtime_paths,
     )

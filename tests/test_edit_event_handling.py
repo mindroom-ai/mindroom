@@ -68,7 +68,6 @@ async def test_bot_ignores_edit_events(tmp_path: Path) -> None:
     # Create the bot
     bot = make_test_agent_bot(
         agent_user=agent_user,
-        storage_path=tmp_path,
         config=config,
         runtime_paths=runtime_paths,
         rooms=["!test:example.com"],
@@ -157,7 +156,6 @@ async def test_edit_event_reserves_prompt_order_while_regenerating(tmp_path: Pat
     )
     bot = make_test_agent_bot(
         agent_user=agent_user,
-        storage_path=tmp_path,
         config=config,
         runtime_paths=runtime_paths,
         rooms=["!test:example.com"],
@@ -240,7 +238,6 @@ async def test_edit_waits_for_reload_and_rechecks_authorization(tmp_path: Path) 
     with_responder_access(replacement_config, ROUTER_AGENT_NAME, users=[])
     bot = make_test_agent_bot(
         agent_user=agent_user,
-        storage_path=tmp_path,
         config=config,
         runtime_paths=runtime_paths,
         rooms=["!test:example.com"],
@@ -314,7 +311,6 @@ async def test_bot_ignores_multiple_edits(tmp_path: Path) -> None:
     # Create the bot
     bot = make_test_agent_bot(
         agent_user=agent_user,
-        storage_path=tmp_path,
         config=config,
         runtime_paths=runtime_paths,
         rooms=["!test:example.com"],
@@ -410,7 +406,6 @@ async def test_regular_agent_ignores_edits(tmp_path: Path) -> None:
     # Create the bot
     bot = make_test_agent_bot(
         agent_user=agent_user,
-        storage_path=tmp_path,
         config=config,
         runtime_paths=runtime_paths,
         rooms=["!test:example.com"],

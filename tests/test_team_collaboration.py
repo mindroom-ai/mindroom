@@ -140,7 +140,6 @@ class TestTeamFormation:
 
         research_bot = make_test_agent_bot(
             mock_research_agent,
-            tmp_path,
             config,
             runtime_paths_for(config),
             rooms=[team_room_id],
@@ -149,7 +148,6 @@ class TestTeamFormation:
 
         analyst_bot = make_test_agent_bot(
             mock_analyst_agent,
-            tmp_path,
             config,
             runtime_paths_for(config),
             rooms=[team_room_id],

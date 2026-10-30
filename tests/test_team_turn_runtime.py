@@ -2787,7 +2787,7 @@ async def test_a_team_turn_that_fails_after_its_run_ended_records_the_document_i
     assert team.recorder.assistant_text == "**Writer**: Let me touch it.\n\n**Checker**: Checker overloaded"
 
 
-def _team_bot(team: TeamTurn, tmp_path: Path, entity: str = "squad") -> AgentBot:
+def _team_bot(team: TeamTurn, entity: str = "squad") -> AgentBot:
     """Build the squad's team bot on the team's config, with a mocked Matrix client and inert post-response effects.
 
     A completed reply would otherwise queue a thread summary on the config's real ``default`` model. An agent
@@ -2800,7 +2800,6 @@ def _team_bot(team: TeamTurn, tmp_path: Path, entity: str = "squad") -> AgentBot
             display_name=entity.title(),
             user_id=f"@mindroom_{entity}:localhost",
         ),
-        tmp_path,
         team.config,
         team.runtime_paths,
         rooms=[ROOM_ID],
@@ -2813,9 +2812,9 @@ def _team_bot(team: TeamTurn, tmp_path: Path, entity: str = "squad") -> AgentBot
     return bot
 
 
-def _runner(team: TeamTurn, tmp_path: Path) -> Any:  # noqa: ANN401
+def _runner(team: TeamTurn) -> Any:  # noqa: ANN401
     """Return the runner of the squad's team bot."""
-    return _team_bot(team, tmp_path)._response_runner
+    return _team_bot(team)._response_runner
 
 
 def _request(prompt: str = "Hello") -> ResponseRequest:
@@ -2874,7 +2873,7 @@ async def test_an_ad_hoc_team_turn_is_dated_in_the_zone_of_the_agent_whose_bot_r
     """
     team = squad_turn(tmp_path, monkeypatch, leader=[], writer=[answer("Done.")])
     team.config.agents["writer"].timezone = "America/Los_Angeles"
-    bot = _team_bot(team, tmp_path, "writer")
+    bot = _team_bot(team, "writer")
     room = nio.MatrixRoom(ROOM_ID, "@mindroom_writer:localhost")
     messages = [
         ("$first:localhost", "first", _OLDER_MESSAGE_MS + 900_000),
@@ -2936,7 +2935,7 @@ async def test_a_configured_team_turn_is_dated_in_the_global_zone(
     team = squad_turn(tmp_path, monkeypatch, leader=[answer("Done.")])
     team.config.agents["writer"].timezone = "America/Los_Angeles"
     request = replace(_request("What changed?"), current_timestamp_ms=_OLDER_MESSAGE_MS + 960_000)
-    bot = _team_bot(team, tmp_path)
+    bot = _team_bot(team)
 
     with _older_thread_history(bot), patch_response_runner_module(should_use_streaming=AsyncMock(return_value=False)):
         await bot._response_runner.generate_team_response_helper(
@@ -2975,7 +2974,7 @@ async def test_the_driver_writes_the_interrupted_record_after_the_loop_stored_th
         leader=[delegate("call-team", "writer", "Write")],
         writer=[[TextDelta("Dra"), UsageReported(usage(30, 2), final=False), Await(wait_to_be_cancelled)]],
     )
-    runner = _runner(team, tmp_path)
+    runner = _runner(team)
     statuses_when_interrupted_record_written: list[RunStatus | None] = []
     original = response_turn.persist_interrupted_replay_snapshot
 
@@ -3080,12 +3079,11 @@ async def test_a_stopped_team_turn_cancelled_again_while_its_record_is_stored_en
 @asynccontextmanager
 async def _approving_team_bot(
     team: TeamTurn,
-    tmp_path: Path,
     *,
     streaming: bool = True,
 ) -> AsyncIterator[tuple[AgentBot, list[MatrixDelivery]]]:
     """Yield the squad's team bot with its approval cards published into the yielded list, the n-th as ``$card-n``."""
-    bot = _team_bot(team, tmp_path)
+    bot = _team_bot(team)
     cards: list[MatrixDelivery] = []
 
     async def prepare_event(_room_id: str, _thread_id: str | None, content: dict[str, Any]) -> dict[str, Any]:
@@ -3161,7 +3159,7 @@ async def test_a_member_s_gated_delegation_posts_its_card_and_the_approved_reply
         helper=[answer("Dug.")],
         approval_rules=[ApprovalRuleConfig(match="run_subagent", action="require_approval")],
     )
-    async with _approving_team_bot(team, tmp_path, streaming=streaming) as (bot, cards):
+    async with _approving_team_bot(team, streaming=streaming) as (bot, cards):
         await bot._response_runner.generate_team_response_helper(
             _request(),
             member_names=team.member_names,
@@ -3206,7 +3204,7 @@ async def test_a_member_s_next_gated_delegation_during_the_resume_posts_the_next
         helper=[answer("Dug."), answer("Dug more.")],
         approval_rules=[ApprovalRuleConfig(match="run_subagent", action="require_approval")],
     )
-    async with _approving_team_bot(team, tmp_path) as (bot, cards):
+    async with _approving_team_bot(team) as (bot, cards):
         await bot._response_runner.generate_team_response_helper(
             _request(),
             member_names=team.member_names,
@@ -3254,7 +3252,7 @@ async def test_a_member_s_child_s_gated_delegation_posts_its_card_in_the_team_sl
         approval_rules=[ApprovalRuleConfig(match="run_subagent", action="require_approval")],
     )
     team.config.agents["helper"].delegate_to = ["checker"]
-    async with _approving_team_bot(team, tmp_path) as (bot, cards):
+    async with _approving_team_bot(team) as (bot, cards):
         await bot._response_runner.generate_team_response_helper(
             _request(),
             member_names=team.member_names,

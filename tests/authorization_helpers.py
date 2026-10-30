@@ -5,8 +5,6 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
-    from pathlib import Path
-
     import nio
 
     from mindroom.agent_reply_membership import AgentReplyMembershipIndex
@@ -90,17 +88,14 @@ def make_test_bot_for_entity(
     agent_user: AgentMatrixUser,
     config: Config,
     runtime_paths: RuntimePaths,
-    storage_path: Path | None = None,
     *,
     agent_reply_memberships: AgentReplyMembershipIndex | None = None,
     agent_reply_membership_sync: AgentReplyMembershipSync | None = None,
-    **_unused: object,
 ) -> AgentBot:
     """Build one configured entity's bot through the production factory, in a ready test runtime of its own."""
     from mindroom.bot import create_bot_for_entity  # noqa: PLC0415
     from tests.runtime_fakes import ready_runtime  # noqa: PLC0415
 
-    del storage_path
     runtime = ready_runtime(
         config,
         runtime_paths,

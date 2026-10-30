@@ -138,7 +138,7 @@ async def test_router_does_not_route_when_preformed_team_is_mentioned(config_wit
         display_name="Router",
         password="p",  # noqa: S106
     )
-    router = make_test_agent_bot(router_user, tmp_path, config_with_team, runtime_paths)
+    router = make_test_agent_bot(router_user, config_with_team, runtime_paths)
     router.client = _make_matrix_client_mock()
     install_runtime_journal_support(router)
 
@@ -174,7 +174,6 @@ async def test_preformed_team_bot_responds_when_mentioned(config_with_team: Conf
     config_with_team.defaults.enable_streaming = False
     bot = make_test_agent_bot(
         agent_user=team_user,
-        storage_path=tmp_path,
         config=config_with_team,
         runtime_paths=runtime_paths,
         rooms=["!room:localhost"],
@@ -236,7 +235,6 @@ async def _team_memory_saves(
     config.defaults.enable_streaming = False
     bot = make_test_agent_bot(
         agent_user=user,
-        storage_path=tmp_path,
         config=config,
         runtime_paths=runtime_paths,
         rooms=["!room:localhost"],
@@ -358,7 +356,6 @@ async def test_team_reply_resumed_after_approval_saves_the_conversation(
     ids = entity_ids(config, runtime_paths)
     bot = make_test_agent_bot(
         agent_user=AgentMatrixUser(agent_name="t1", user_id=ids["t1"].full_id, display_name="t1", password="p"),  # noqa: S106
-        storage_path=tmp_path,
         config=config,
         runtime_paths=runtime_paths,
         rooms=["!room:localhost"],
@@ -409,7 +406,6 @@ async def test_preformed_team_rejection_edits_existing_message(config_with_team:
     config_with_team.defaults.enable_streaming = False
     bot = make_test_agent_bot(
         agent_user=team_user,
-        storage_path=tmp_path,
         config=config_with_team,
         runtime_paths=runtime_paths,
         rooms=["!room:localhost"],
@@ -476,7 +472,6 @@ async def test_preformed_team_plain_reply_does_not_continue_existing_thread_root
     config_with_team.defaults.enable_streaming = False
     bot = make_test_agent_bot(
         agent_user=team_user,
-        storage_path=tmp_path,
         config=config_with_team,
         runtime_paths=runtime_paths,
         rooms=["!room:localhost"],
@@ -545,7 +540,6 @@ async def test_team_does_not_respond_to_different_domain_mention(config_with_tea
     config_with_team.defaults.enable_streaming = False
     bot = make_test_agent_bot(
         agent_user=team_user,
-        storage_path=tmp_path,
         config=config_with_team,
         runtime_paths=runtime_paths,
         rooms=["!room:localhost"],
@@ -593,7 +587,6 @@ async def test_agent_reply_saves_its_conversation_only_with_mem0(
     ids = entity_ids(config, runtime_paths)
     bot = make_test_agent_bot(
         agent_user=AgentMatrixUser(agent_name="a1", user_id=ids["a1"].full_id, display_name="a1", password="p"),  # noqa: S106
-        storage_path=tmp_path,
         config=config,
         runtime_paths=runtime_paths,
         rooms=["!room:localhost"],
@@ -640,7 +633,6 @@ async def test_job_follow_up_hands_no_prompt_to_memory(
     ids = entity_ids(config, runtime_paths)
     bot = make_test_agent_bot(
         agent_user=AgentMatrixUser(agent_name="t1", user_id=ids["t1"].full_id, display_name="t1", password="p"),  # noqa: S106
-        storage_path=tmp_path,
         config=config,
         runtime_paths=runtime_paths,
         rooms=["!room:localhost"],

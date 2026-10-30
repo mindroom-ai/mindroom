@@ -1170,7 +1170,7 @@ async def test_redaction_lookup_repairs_a_room_whose_sync_skipped_a_gap(
         test_runtime_paths(tmp_path),
     )
     agent_user = AgentMatrixUser(agent_name="general", password=TEST_PASSWORD, display_name="General", user_id=BOT)
-    bot = make_test_agent_bot(agent_user, tmp_path, config, runtime_paths_for(config), journal_store=journal_store)
+    bot = make_test_agent_bot(agent_user, config, runtime_paths_for(config), journal_store=journal_store)
     await bot._turn_store.warm()
     redaction = {
         "event_id": "$redaction",

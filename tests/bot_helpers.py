@@ -87,7 +87,6 @@ if TYPE_CHECKING:
 
 def make_test_agent_bot(
     agent_user: AgentMatrixUser,
-    storage_path: Path | None = None,
     config: Config | None = None,
     runtime_paths: RuntimePaths | None = None,
     rooms: list[str] | None = None,
@@ -97,13 +96,9 @@ def make_test_agent_bot(
     agent_reply_memberships: AgentReplyMembershipIndex | None = None,
     agent_reply_membership_sync: AgentReplyMembershipSync | None = None,
 ) -> AgentBot:
-    """Build one bot through the production constructor, in a ready test runtime of its own unless one is given.
-
-    The bot stores its data under the runtime's storage root; ``storage_path`` is accepted for older call sites.
-    """
+    """Build one bot through the production constructor, in a ready test runtime of its own unless one is given."""
     from mindroom.bot import AgentBot as RuntimeAgentBot  # noqa: PLC0415
 
-    del storage_path
     if orchestrator is None:
         assert config is not None
         orchestrator = ready_runtime(
@@ -559,10 +554,9 @@ def _configured_team_user(config: Config, runtime_paths: RuntimePaths) -> AgentM
     )
 
 
-def _mock_managed_bot(config: Config) -> MagicMock:
+def _mock_managed_bot() -> MagicMock:
     """Return a lightweight managed-bot double for orchestrator reload tests."""
     bot = MagicMock()
-    bot.config = config
     bot.refresh_presence = AsyncMock()
     bot.recover_pending_turn_journal_events = AsyncMock()
     return bot

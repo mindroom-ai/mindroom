@@ -318,7 +318,6 @@ def test_agent_bot_tags_coalesced_and_regenerated_messages_in_its_own_timezone(t
             display_name="Test Agent",
             password="test_password",  # noqa: S106
         ),
-        storage_path=tmp_path,
         config=config,
         runtime_paths=runtime_paths_for(config),
         rooms=["!test:example.com"],
@@ -349,7 +348,6 @@ async def test_bot_regenerates_response_on_edit(tmp_path: Path) -> None:
     # Create the bot
     bot = make_test_agent_bot(
         agent_user=agent_user,
-        storage_path=tmp_path,
         config=config,
         runtime_paths=runtime_paths_for(config),
         rooms=["!test:example.com"],
@@ -514,7 +512,6 @@ async def test_bot_edit_hooks_see_best_available_sidecar_edit_body(
     config = _test_config(tmp_path)
     bot = make_test_agent_bot(
         agent_user=agent_user,
-        storage_path=tmp_path,
         config=config,
         runtime_paths=runtime_paths_for(config),
         rooms=["!test:example.com"],
@@ -625,7 +622,6 @@ async def test_bot_edit_regeneration_does_not_rerun_response_gating_after_hydrat
     config = _test_config(tmp_path, agent_names=("test_agent", "other_agent"))
     bot = make_test_agent_bot(
         agent_user=agent_user,
-        storage_path=tmp_path,
         config=config,
         runtime_paths=runtime_paths_for(config),
         rooms=["!test:example.com"],
@@ -713,7 +709,6 @@ async def test_handle_message_edit_reuses_persisted_target_and_thread_scope(
     config = _test_config(tmp_path)
     bot = make_test_agent_bot(
         agent_user=agent_user,
-        storage_path=tmp_path,
         config=config,
         runtime_paths=runtime_paths_for(config),
         rooms=["!test:example.com"],
@@ -840,7 +835,6 @@ async def test_team_bot_regenerates_edits_against_team_history_storage(tmp_path:
     runtime_paths = runtime_paths_for(config)
     bot = make_test_agent_bot(
         agent_user=agent_user,
-        storage_path=tmp_path,
         config=config,
         runtime_paths=runtime_paths,
         rooms=["!test:example.com"],
@@ -969,7 +963,6 @@ async def test_team_edit_regeneration_uses_the_live_team_mode(tmp_path: Path) ->
             display_name="Test Team",
             password="test_password",  # noqa: S106
         ),
-        storage_path=tmp_path,
         config=config,
         runtime_paths=runtime_paths,
         rooms=["!test:example.com"],
@@ -1035,7 +1028,6 @@ async def test_bot_ignores_edit_without_previous_response(tmp_path: Path) -> Non
     # Create the bot
     bot = make_test_agent_bot(
         agent_user=agent_user,
-        storage_path=tmp_path,
         config=config,
         runtime_paths=runtime_paths_for(config),
         rooms=["!test:example.com"],
@@ -1120,7 +1112,6 @@ async def test_bot_ignores_agent_edits(tmp_path: Path) -> None:
     # Create the bot
     bot = make_test_agent_bot(
         agent_user=agent_user,
-        storage_path=tmp_path,
         config=config,
         runtime_paths=runtime_paths_for(config),
         rooms=["!test:example.com"],
@@ -1268,7 +1259,6 @@ async def test_bot_ignores_agent_edits_from_actual_persisted_id_after_drift(tmp_
 
     bot = make_test_agent_bot(
         agent_user=agent_user,
-        storage_path=tmp_path,
         config=config,
         runtime_paths=runtime_paths,
         rooms=["!test:example.com"],
@@ -1335,7 +1325,6 @@ async def test_handle_message_edit_ignores_edits_of_replies_an_agent_wrote_for_t
     config = _test_config(tmp_path)
     bot = make_test_agent_bot(
         agent_user=agent_user,
-        storage_path=tmp_path,
         config=config,
         runtime_paths=runtime_paths_for(config),
         rooms=["!test:example.com"],
@@ -1411,7 +1400,6 @@ async def test_handle_message_edit_rebuilds_coalesced_prompt_for_non_primary_edi
 
     bot = make_test_agent_bot(
         agent_user=agent_user,
-        storage_path=tmp_path,
         config=config,
         runtime_paths=runtime_paths_for(config),
         rooms=["!test:example.com"],
@@ -1562,7 +1550,6 @@ async def test_handle_message_edit_reuses_existing_response_without_placeholder_
 
     bot = make_test_agent_bot(
         agent_user=agent_user,
-        storage_path=tmp_path,
         config=config,
         runtime_paths=runtime_paths_for(config),
         rooms=["!test:example.com"],
@@ -1679,7 +1666,6 @@ async def test_handle_message_edit_does_not_remark_response_when_regeneration_is
 
     bot = make_test_agent_bot(
         agent_user=agent_user,
-        storage_path=tmp_path,
         config=config,
         runtime_paths=runtime_paths_for(config),
         rooms=["!test:example.com"],
@@ -1793,7 +1779,6 @@ async def test_handle_message_edit_does_not_mark_regeneration_success_when_exist
 
     bot = make_test_agent_bot(
         agent_user=agent_user,
-        storage_path=tmp_path,
         config=config,
         runtime_paths=runtime_paths_for(config),
         rooms=["!test:example.com"],
@@ -1976,7 +1961,6 @@ async def test_handle_message_edit_does_not_backfill_existing_coalesced_prompt_f
 
     bot = make_test_agent_bot(
         agent_user=agent_user,
-        storage_path=tmp_path,
         config=config,
         runtime_paths=runtime_paths_for(config),
         rooms=["!test:example.com"],
@@ -2111,7 +2095,6 @@ async def test_edit_regenerator_preserves_interactive_selection_run_metadata(tmp
     config = _test_config(tmp_path)
     bot = make_test_agent_bot(
         agent_user=agent_user,
-        storage_path=tmp_path,
         config=config,
         runtime_paths=runtime_paths_for(config),
         rooms=["!test:example.com"],
@@ -2250,7 +2233,6 @@ async def test_suppressed_interactive_regeneration_keeps_ledger_anchor(
     config = _test_config(tmp_path)
     bot = make_test_agent_bot(
         agent_user=agent_user,
-        storage_path=tmp_path,
         config=config,
         runtime_paths=runtime_paths_for(config),
         rooms=["!test:example.com"],
@@ -2385,7 +2367,6 @@ async def test_handle_message_edit_skips_when_turn_context_was_not_recorded(
     config = _test_config(tmp_path)
     bot = make_test_agent_bot(
         agent_user=agent_user,
-        storage_path=tmp_path,
         config=config,
         runtime_paths=runtime_paths_for(config),
         rooms=["!test:example.com"],
@@ -2503,7 +2484,6 @@ async def test_on_reaction_tracks_response_event_id(tmp_path: Path) -> None:
     # Create the bot
     bot = make_test_agent_bot(
         agent_user=agent_user,
-        storage_path=tmp_path,
         config=config,
         runtime_paths=runtime_paths_for(config),
         rooms=["!test:example.com"],
@@ -2608,7 +2588,6 @@ async def test_on_reaction_leaves_question_retryable_when_ack_response_is_suppre
 
     bot = make_test_agent_bot(
         agent_user=agent_user,
-        storage_path=tmp_path,
         config=config,
         runtime_paths=runtime_paths_for(config),
         rooms=["!test:example.com"],
@@ -2693,7 +2672,6 @@ async def test_on_message_routes_interactive_text_selection_through_turn_ingress
     config = _test_config(tmp_path)
     bot = make_test_agent_bot(
         agent_user=agent_user,
-        storage_path=tmp_path,
         config=config,
         runtime_paths=runtime_paths_for(config),
         rooms=["!test:example.com"],
@@ -2820,7 +2798,6 @@ async def test_on_reaction_respects_responder_access(tmp_path: Path) -> None:
 
     bot = make_test_agent_bot(
         agent_user=agent_user,
-        storage_path=tmp_path,
         config=config,
         runtime_paths=runtime_paths_for(config),
         rooms=["!test:example.com"],
@@ -2937,7 +2914,6 @@ async def test_config_confirmation_blocked_by_reply_permissions(tmp_path: Path) 
 
     bot = make_test_agent_bot(
         agent_user=agent_user,
-        storage_path=tmp_path,
         config=config,
         runtime_paths=runtime_paths_for(config),
         rooms=["!test:example.com"],
@@ -3006,7 +2982,6 @@ async def test_committed_config_confirmation_resumes_before_changed_responder_ac
     )
     bot = make_test_agent_bot(
         agent_user=agent_user,
-        storage_path=tmp_path,
         config=config,
         runtime_paths=runtime_paths_for(config),
         rooms=["!test:example.com"],
@@ -3073,7 +3048,6 @@ async def test_on_media_message_tracks_relay_event_id(tmp_path: Path) -> None:
     # Create the bot
     bot = make_test_agent_bot(
         agent_user=agent_user,
-        storage_path=tmp_path,
         config=config,
         runtime_paths=runtime_paths_for(config),
         rooms=["!test:example.com"],
@@ -3181,7 +3155,6 @@ async def test_on_media_message_no_transcription_still_marks_relayed(tmp_path: P
     # Create the bot
     bot = make_test_agent_bot(
         agent_user=agent_user,
-        storage_path=tmp_path,
         config=config,
         runtime_paths=runtime_paths_for(config),
         rooms=["!test:example.com"],
@@ -3304,7 +3277,6 @@ async def test_unauthorized_user_cannot_edit_regenerate(tmp_path: Path) -> None:
     # Create the bot
     bot = make_test_agent_bot(
         agent_user=agent_user,
-        storage_path=tmp_path,
         config=config,
         runtime_paths=runtime_paths_for(config),
         rooms=["!test:example.com"],
@@ -3378,7 +3350,6 @@ async def test_on_media_message_unauthorized_sender_marks_responded(tmp_path: Pa
     # Create the bot
     bot = make_test_agent_bot(
         agent_user=agent_user,
-        storage_path=tmp_path,
         config=config,
         runtime_paths=runtime_paths_for(config),
         rooms=["!test:example.com"],

@@ -73,7 +73,6 @@ class TestResponseTrackingRegression:
         self,
         mock_router_agent: AgentMatrixUser,
         mock_config: Config,
-        tmp_path: Path,
     ) -> None:
         """Test that commands are tracked in response tracker.
 
@@ -87,7 +86,6 @@ class TestResponseTrackingRegression:
         bot = make_test_agent_bot(
             agent_user=mock_router_agent,
             config=mock_config,
-            storage_path=tmp_path,
             runtime_paths=runtime_paths_for(mock_config),
             rooms=[test_room_id],
         )
@@ -165,7 +163,6 @@ class TestResponseTrackingRegression:
         self,
         mock_router_agent: AgentMatrixUser,
         mock_config: Config,
-        tmp_path: Path,
     ) -> None:
         """Test that unknown commands are tracked in response tracker.
 
@@ -179,7 +176,6 @@ class TestResponseTrackingRegression:
         bot = make_test_agent_bot(
             agent_user=mock_router_agent,
             config=mock_config,
-            storage_path=tmp_path,
             runtime_paths=runtime_paths_for(mock_config),
             rooms=[test_room_id],
         )
@@ -248,7 +244,6 @@ class TestResponseTrackingRegression:
         mock_suggest_responder: AsyncMock,
         mock_router_agent: AgentMatrixUser,
         mock_config: Config,
-        tmp_path: Path,
     ) -> None:
         """Test that router AI routing is tracked in the turn rows.
 
@@ -262,7 +257,6 @@ class TestResponseTrackingRegression:
         bot = make_test_agent_bot(
             agent_user=mock_router_agent,
             config=mock_config,
-            storage_path=tmp_path,
             runtime_paths=runtime_paths_for(mock_config),
             rooms=[test_room_id],
         )

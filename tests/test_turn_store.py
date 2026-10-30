@@ -2060,7 +2060,6 @@ def test_agent_bot_does_not_expose_removed_handled_turn_ledger_shim(tmp_path: Pa
             display_name="Agent",
             password=TEST_PASSWORD,
         ),
-        storage_path=tmp_path,
         config=config,
         runtime_paths=runtime_paths_for(config),
     )

@@ -1251,7 +1251,7 @@ async def test_the_skill_review_capture_keeps_the_final_request(
     assert {"remember", "touch"} <= {tool.name for tool in capture.latest.request.tools}
 
 
-def _runner(reply: _Reply, tmp_path: Path) -> ResponseRunner:
+def _runner(reply: _Reply) -> ResponseRunner:
     """Build the agent's bot on the reply's config, with a mocked Matrix client, and return its response runner."""
     with_current_room_member_access(reply.config)
     agent_user = AgentMatrixUser(
@@ -1260,7 +1260,7 @@ def _runner(reply: _Reply, tmp_path: Path) -> ResponseRunner:
         display_name="Assistant",
         user_id="@mindroom_assistant:localhost",
     )
-    bot = make_test_agent_bot(agent_user, tmp_path, reply.config, reply.runtime_paths, rooms=[ROOM_ID])
+    bot = make_test_agent_bot(agent_user, reply.config, reply.runtime_paths, rooms=[ROOM_ID])
     install_direct_response_admission(bot)
     bot.client = make_matrix_client_mock(user_id="@mindroom_assistant:localhost")
     unique_room_send_responses(bot.client)
@@ -1342,7 +1342,7 @@ async def test_the_runner_writes_the_interrupted_record_after_the_loop_stored_th
         monkeypatch,
         [[TextDelta("Partial "), UsageReported(usage(10, 2), final=False), Await(_cancel_current_task)]],
     )
-    runner = _runner(reply, tmp_path)
+    runner = _runner(reply)
     replaced = _runs_under_interrupted_records(monkeypatch, reply.storage)
 
     task = asyncio.create_task(_respond_through_runner(runner, _request(), streaming=streaming))
@@ -1379,7 +1379,7 @@ async def test_the_runner_leaves_a_paused_run_as_the_loop_stored_it(
         [calls(tool_call("touch", "call_1", label="dangerous"), metrics=usage(7, 1))],
         approval_rules=[ApprovalRuleConfig(match="touch", action="require_approval")],
     )
-    runner = unwrap_extracted_collaborator(_runner(reply, tmp_path))
+    runner = unwrap_extracted_collaborator(_runner(reply))
     replaced = _runs_under_interrupted_records(monkeypatch, reply.storage)
     suspend = AsyncMock(
         return_value=FinalDeliveryOutcome(terminal_status="suspended", event_id=None, is_visible_response=False),
@@ -1422,7 +1422,7 @@ async def test_the_runner_records_the_failure_over_a_pause_with_no_approval_to_a
         [calls(tool_call("touch", "call_1", label="outside"), metrics=usage(7, 1))],
         tools=(EXTERNAL_PROBE_TOOL,),
     )
-    runner = _runner(reply, tmp_path)
+    runner = _runner(reply)
     presence = MagicMock(spec=nio.PresenceGetResponse)
     presence.presence = "online" if streaming else "offline"
     presence.last_active_ago = 0

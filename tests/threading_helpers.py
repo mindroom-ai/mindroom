@@ -535,7 +535,6 @@ class ThreadingBehaviorTestBase:
 
         bot = make_test_agent_bot(
             agent_user=agent_user,
-            storage_path=tmp_path,
             rooms=["!test:localhost"],
             config=config,
             runtime_paths=runtime_paths_for(config),

@@ -65,7 +65,6 @@ def _bot(tmp_path: Path, *, journal_store: EventJournalStore | None = None) -> A
     )
     bot = make_test_agent_bot(
         agent_user,
-        tmp_path,
         config,
         runtime_paths_for(config),
         rooms=["!room:localhost"],

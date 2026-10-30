@@ -534,7 +534,6 @@ async def test_compaction_lifecycle_success_edits_notice_with_html_body(tmp_path
             display_name="Test Agent",
             user_id="@mindroom_test_agent:localhost",
         ),
-        storage_path=tmp_path,
         config=config,
         runtime_paths=runtime_paths,
         rooms=["!room:localhost"],

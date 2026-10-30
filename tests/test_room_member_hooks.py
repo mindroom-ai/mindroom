@@ -164,7 +164,7 @@ def _agent_bot(tmp_path: Path) -> AgentBot:
         password=TEST_PASSWORD,
     )
     return install_runtime_journal_support(
-        make_test_agent_bot(agent_user, tmp_path, config=config, runtime_paths=runtime_paths),
+        make_test_agent_bot(agent_user, config=config, runtime_paths=runtime_paths),
     )
 
 

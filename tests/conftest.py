@@ -2872,12 +2872,10 @@ async def prepare_payload_via_seam(bot: RuntimeBot, execute_args: tuple[object, 
 
 
 def sync_bot_runtime_state(bot: RuntimeBot) -> None:
-    """Update the extracted runtime state after tests mutate bot internals."""
-    runtime = bot._runtime_view
+    """Give a client a test swapped in the bot's user id, as a logged-in client has."""
     client = bot.client
     if client is not None and getattr(client, "user_id", None) is None:
         client.user_id = bot.matrix_id.full_id
-    runtime.client = bot.client
 
 
 def replace_turn_policy_deps(bot: RuntimeBot, **changes: object) -> TurnPolicy:

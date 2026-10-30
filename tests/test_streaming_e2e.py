@@ -593,7 +593,6 @@ async def test_user_edits_with_mentions_e2e(tmp_path: Path) -> None:
 
         bot = make_test_agent_bot(
             calc_user,
-            tmp_path,
             config,
             runtime_paths_for(config),
             rooms=["!test:localhost"],

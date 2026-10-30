@@ -89,7 +89,6 @@ class TestRoutingIntegration:
 
         research_bot = make_test_agent_bot(
             research_agent,
-            tmp_path,
             rooms=["!research:localhost"],
             config=config,
             runtime_paths=runtime_paths_for(config),
@@ -97,7 +96,6 @@ class TestRoutingIntegration:
 
         news_bot = make_test_agent_bot(
             news_agent,
-            tmp_path,
             config,
             runtime_paths_for(config),
             rooms=["!research:localhost"],

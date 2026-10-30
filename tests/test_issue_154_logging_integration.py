@@ -176,7 +176,6 @@ async def test_cross_sink_correlation_invariant_for_matrix_turn_processing_log(
     )
     bot = make_test_agent_bot(
         agent_user=agent_user,
-        storage_path=tmp_path,
         config=config,
         runtime_paths=runtime_paths_for(config),
         rooms=["!test:localhost"],

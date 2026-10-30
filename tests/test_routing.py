@@ -366,7 +366,7 @@ class TestAIRouting:
         assert len(failing.requests) == 1
 
     @pytest.mark.asyncio
-    async def test_only_router_agent_routes(self, tmp_path: Path) -> None:
+    async def test_only_router_agent_routes(self) -> None:
         """Test that only the router agent handles routing."""
         # Create general agent (not router)
         agent = AgentMatrixUser(
@@ -379,7 +379,7 @@ class TestAIRouting:
 
         config = _runtime_bound_config(Config(router=RouterConfig(model="default")))
 
-        bot = _agent_bot(agent, tmp_path, config=config)
+        bot = _agent_bot(agent, config=config)
 
         mock_room = MagicMock()
         mock_room.users = MagicMock()

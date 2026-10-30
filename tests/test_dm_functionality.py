@@ -214,7 +214,6 @@ class TestDMMessageContext:
         )
         bot = make_test_agent_bot(
             agent_user=agent_user,
-            storage_path=tmp_path,
             config=config,
             runtime_paths=runtime_paths_for(config),
             rooms=[],  # Not configured for any rooms
@@ -276,7 +275,6 @@ class TestDMIntegration:
 
         bot = make_test_agent_bot(
             agent_user=agent_user,
-            storage_path=tmp_path,
             config=config,
             runtime_paths=runtime_paths_for(config),
             rooms=[],
@@ -329,7 +327,6 @@ class TestDMIntegration:
         # Important: bot is NOT configured for the DM room
         bot = make_test_agent_bot(
             agent_user=agent_user,
-            storage_path=tmp_path,
             config=config,
             runtime_paths=runtime_paths_for(config),
             rooms=[],  # Empty rooms list - not configured for any room
@@ -424,7 +421,6 @@ class TestDMIntegration:
         # Agent is NOT configured for any rooms
         bot = make_test_agent_bot(
             agent_user=agent_user,
-            storage_path=tmp_path,
             config=config,
             runtime_paths=runtime_paths_for(config),
             rooms=[],  # Empty - not configured for any room

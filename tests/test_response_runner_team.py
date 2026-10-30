@@ -171,7 +171,7 @@ class TestAgentBot(AgentBotTestBase):
             room_id="!test:localhost",
             model_name="large",
         )
-        bot = make_test_agent_bot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths)
+        bot = make_test_agent_bot(mock_agent_user, config=config, runtime_paths=runtime_paths)
         bot.client = _make_matrix_client_mock()
         coordinator = unwrap_extracted_collaborator(bot._response_runner)
         original_prepare_admitted_turn = coordinator._prepare_admitted_locked_turn
@@ -234,7 +234,7 @@ class TestAgentBot(AgentBotTestBase):
             room_id="!test:localhost",
             model_name="large",
         )
-        bot = make_test_agent_bot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths)
+        bot = make_test_agent_bot(mock_agent_user, config=config, runtime_paths=runtime_paths)
         bot.client = _make_matrix_client_mock()
         coordinator = unwrap_extracted_collaborator(bot._response_runner)
         original_prepare_admitted_turn = coordinator._prepare_admitted_locked_turn
@@ -301,7 +301,7 @@ class TestAgentBot(AgentBotTestBase):
         config.agents["general"].model = "local"
         config.budgets = BudgetsConfig(fallback_model="cheap", monthly_limit_usd=0)
         runtime_paths = runtime_paths_for(config)
-        bot = make_test_agent_bot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths)
+        bot = make_test_agent_bot(mock_agent_user, config=config, runtime_paths=runtime_paths)
         bot.client = _make_matrix_client_mock()
         coordinator = unwrap_extracted_collaborator(bot._response_runner)
         team_stream = scripted_team_stream("Team reply")
@@ -353,7 +353,7 @@ class TestAgentBot(AgentBotTestBase):
             room_id="!test:localhost",
             model_name="large",
         )
-        bot = make_test_agent_bot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths)
+        bot = make_test_agent_bot(mock_agent_user, config=config, runtime_paths=runtime_paths)
         bot.client = _make_matrix_client_mock()
         team_stream = scripted_team_stream("Team reply")
 
@@ -422,7 +422,7 @@ class TestAgentBot(AgentBotTestBase):
 
         config = self._config_for_storage(tmp_path)
         config.defaults.show_stop_button = False
-        bot = make_test_agent_bot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
+        bot = make_test_agent_bot(mock_agent_user, config=config, runtime_paths=runtime_paths_for(config))
         install_direct_response_admission(bot)
         bot.client = _make_matrix_client_mock()
         bot.orchestrator.hook_registry = HookRegistry.from_plugins([_hook_plugin("hooked", [before_hook, after_hook])])
@@ -479,7 +479,7 @@ class TestAgentBot(AgentBotTestBase):
         config = self._config_for_storage(tmp_path)
         config.defaults.show_stop_button = False
         config.defaults.show_tool_calls = show_tool_calls
-        bot = make_test_agent_bot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
+        bot = make_test_agent_bot(mock_agent_user, config=config, runtime_paths=runtime_paths_for(config))
         install_direct_response_admission(bot)
         bot.client = _make_matrix_client_mock()
         trace = ToolTraceEntry(type="tool_call_completed", tool_name="touch", args_preview="label=a")
@@ -534,7 +534,7 @@ class TestAgentBot(AgentBotTestBase):
         """Shared team responses should never scrub enriched history after delivery."""
         config = self._config_for_storage(tmp_path)
         config.defaults.show_stop_button = False
-        bot = make_test_agent_bot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
+        bot = make_test_agent_bot(mock_agent_user, config=config, runtime_paths=runtime_paths_for(config))
         install_direct_response_admission(bot)
         bot.client = _make_matrix_client_mock()
         bot._conversation_state_writer.create_storage = MagicMock(return_value=MagicMock())
@@ -580,7 +580,7 @@ class TestAgentBot(AgentBotTestBase):
         """Team helper must preserve the raw user prompt when model-only context is present."""
         config = self._config_for_storage(tmp_path)
         config.defaults.show_stop_button = False
-        bot = make_test_agent_bot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
+        bot = make_test_agent_bot(mock_agent_user, config=config, runtime_paths=runtime_paths_for(config))
         install_direct_response_admission(bot)
         bot.client = _make_matrix_client_mock()
         team_stream = scripted_team_stream("Team reply")
@@ -638,7 +638,7 @@ class TestAgentBot(AgentBotTestBase):
         """Team helper should treat an already timestamped prompt as the same user turn."""
         config = self._config_for_storage(tmp_path)
         config.defaults.show_stop_button = False
-        bot = make_test_agent_bot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
+        bot = make_test_agent_bot(mock_agent_user, config=config, runtime_paths=runtime_paths_for(config))
         install_direct_response_admission(bot)
         bot.client = _make_matrix_client_mock()
         team_stream = scripted_team_stream("Team reply")
@@ -695,7 +695,7 @@ class TestAgentBot(AgentBotTestBase):
         config.timezone = "UTC"
         config.agents["calculator"].timezone = "America/Los_Angeles"
         config.defaults.show_stop_button = False
-        bot = make_test_agent_bot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
+        bot = make_test_agent_bot(mock_agent_user, config=config, runtime_paths=runtime_paths_for(config))
         install_direct_response_admission(bot)
         bot.client = _make_matrix_client_mock()
         team_stream = scripted_team_stream("Team reply")
@@ -758,7 +758,7 @@ class TestAgentBot(AgentBotTestBase):
         config = self._config_for_storage(tmp_path)
         config.defaults.show_stop_button = False
         runtime_paths = runtime_paths_for(config)
-        bot = make_test_agent_bot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths)
+        bot = make_test_agent_bot(mock_agent_user, config=config, runtime_paths=runtime_paths)
         install_direct_response_admission(bot)
         bot.client = _make_matrix_client_mock()
         envelope = MessageEnvelope(
@@ -829,7 +829,6 @@ class TestAgentBot(AgentBotTestBase):
         team_member = entity_ids(config, runtime_paths)["general"]
         bot = make_test_agent_bot(
             _configured_team_user(config, runtime_paths),
-            tmp_path,
             config=config,
             runtime_paths=runtime_paths,
         )
@@ -900,7 +899,6 @@ class TestAgentBot(AgentBotTestBase):
         stale_member = initial_ids["general"]
         bot = make_test_agent_bot(
             _configured_team_user(config, runtime_paths),
-            tmp_path,
             config=config,
             runtime_paths=runtime_paths,
         )
@@ -1009,7 +1007,6 @@ class TestAgentBot(AgentBotTestBase):
         runtime_paths = runtime_paths_for(config)
         bot = make_test_agent_bot(
             _configured_team_user(config, runtime_paths),
-            tmp_path,
             config=config,
             runtime_paths=runtime_paths,
         )
@@ -1070,7 +1067,6 @@ class TestAgentBot(AgentBotTestBase):
         runtime_paths = runtime_paths_for(config)
         bot = make_test_agent_bot(
             _configured_team_user(config, runtime_paths),
-            tmp_path,
             config=config,
             runtime_paths=runtime_paths,
         )
@@ -1175,7 +1171,7 @@ class TestAgentBot(AgentBotTestBase):
             yield "stream chunk"
 
         config = self._config_for_storage(tmp_path)
-        bot = make_test_agent_bot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
+        bot = make_test_agent_bot(mock_agent_user, config=config, runtime_paths=runtime_paths_for(config))
         bot.client = _make_matrix_client_mock()
         # The startup placeholder lands, binding the reply's event.
         unique_room_send_responses(bot.client, prefix="$placeholder")
@@ -1246,7 +1242,7 @@ class TestAgentBot(AgentBotTestBase):
 
         config = self._config_for_storage(tmp_path)
         assert config.defaults.show_tool_calls is True
-        bot = make_test_agent_bot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
+        bot = make_test_agent_bot(mock_agent_user, config=config, runtime_paths=runtime_paths_for(config))
         bot.client = _make_matrix_client_mock()
         unique_room_send_responses(bot.client, prefix="$response")
         team_stream = scripted_team_stream("Finding")
@@ -1305,7 +1301,7 @@ class TestAgentBot(AgentBotTestBase):
         """A dynamic team's resolved participants must each receive the run receipt."""
         config = self._config_for_storage(tmp_path)
         runtime_paths = runtime_paths_for(config)
-        bot = make_test_agent_bot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths)
+        bot = make_test_agent_bot(mock_agent_user, config=config, runtime_paths=runtime_paths)
         bot.client = _make_matrix_client_mock()
 
         async def team_response_with_started_receipt_check(*_args: object, **_kwargs: object) -> AsyncIterator[str]:
@@ -1377,7 +1373,7 @@ class TestAgentBot(AgentBotTestBase):
             yield "stream chunk"
 
         config = self._config_for_storage(tmp_path)
-        bot = make_test_agent_bot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
+        bot = make_test_agent_bot(mock_agent_user, config=config, runtime_paths=runtime_paths_for(config))
         bot.client = _make_matrix_client_mock()
         unique_room_send_responses(bot.client, prefix="$stream")
         bot.orchestrator.hook_registry = HookRegistry.from_plugins([_hook_plugin("hooked", [before_hook])])
@@ -1430,7 +1426,7 @@ class TestAgentBot(AgentBotTestBase):
             ctx.draft.suppress = True
 
         config = self._config_for_storage(tmp_path)
-        bot = make_test_agent_bot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
+        bot = make_test_agent_bot(mock_agent_user, config=config, runtime_paths=runtime_paths_for(config))
         bot.client = _make_matrix_client_mock()
         bot._redact_message_event = AsyncMock(return_value=True)
         bot.orchestrator.hook_registry = HookRegistry.from_plugins([_hook_plugin("hooked", [before_hook])])
@@ -1505,7 +1501,6 @@ async def _team_bot_with_existing_reply(tmp_path: Path) -> AgentBot:
     runtime_paths = runtime_paths_for(config)
     bot = make_test_agent_bot(
         _configured_team_user(config, runtime_paths),
-        tmp_path,
         config=config,
         runtime_paths=runtime_paths,
     )

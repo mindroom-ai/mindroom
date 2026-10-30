@@ -93,7 +93,6 @@ def _make_bot(tmp_path: Path) -> AgentBot:
     )
     bot = make_test_agent_bot(
         agent_user=agent_user,
-        storage_path=tmp_path,
         config=config,
         runtime_paths=runtime_paths_for(config),
         rooms=["!team:localhost"],

@@ -194,7 +194,6 @@ def _team_bot(tmp_path: Path) -> AgentBot:
     )
     bot = make_test_agent_bot(
         team_user,
-        tmp_path,
         config=config,
         runtime_paths=runtime_paths,
     )

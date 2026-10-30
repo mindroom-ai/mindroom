@@ -169,7 +169,6 @@ def _make_bot_with_shared_knowledge(
     persist_entity_accounts(config, runtime_paths_for(config))
     bot = make_test_agent_bot(
         agent,
-        tmp_path,
         rooms=["!test:localhost"],
         config=config,
         runtime_paths=runtime_paths_for(config),
@@ -346,7 +345,6 @@ class TestStreamingBehavior:
         mock_stream_agent_response: MagicMock,
         mock_helper_agent: AgentMatrixUser,
         mock_calculator_agent: AgentMatrixUser,
-        tmp_path: Path,
         streaming: bool,
     ) -> None:
         """Test complete flow of one agent replying, streamed or not, and mentioning another."""
@@ -369,7 +367,6 @@ class TestStreamingBehavior:
 
         helper_bot = make_test_agent_bot(
             mock_helper_agent,
-            tmp_path,
             rooms=["!test:localhost"],
             config=config,
             runtime_paths=runtime_paths_for(config),
@@ -384,7 +381,6 @@ class TestStreamingBehavior:
 
         calc_bot = make_test_agent_bot(
             mock_calculator_agent,
-            tmp_path,
             rooms=["!test:localhost"],
             config=config,
             runtime_paths=runtime_paths_for(config),
@@ -484,7 +480,6 @@ class TestStreamingBehavior:
         mock_stream_agent_response: MagicMock,
         mock_helper_agent: AgentMatrixUser,  # noqa: ARG002
         mock_calculator_agent: AgentMatrixUser,
-        tmp_path: Path,
     ) -> None:
         """Test that agents respond to the final complete message, not edits."""
         # Set up calculator bot
@@ -493,7 +488,6 @@ class TestStreamingBehavior:
 
         calc_bot = make_test_agent_bot(
             mock_calculator_agent,
-            tmp_path,
             rooms=["!test:localhost"],
             config=config,
             runtime_paths=runtime_paths_for(config),
@@ -2278,7 +2272,6 @@ class TestStreamingBehavior:
     async def test_streaming_first_send_uses_resolved_thread_root(
         self,
         mock_helper_agent: AgentMatrixUser,
-        tmp_path: Path,
     ) -> None:
         """A streamed reply to a plain reply in a started thread keeps the original thread root on its first event."""
 
@@ -2293,7 +2286,6 @@ class TestStreamingBehavior:
         config = self.config
         bot = make_test_agent_bot(
             mock_helper_agent,
-            tmp_path,
             rooms=["!test:localhost"],
             config=config,
             runtime_paths=runtime_paths_for(config),

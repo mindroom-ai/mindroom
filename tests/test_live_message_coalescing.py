@@ -179,7 +179,7 @@ def _make_bot(
         display_name="TestAgent",
         user_id=f"@mindroom_{agent_name}:localhost",
     )
-    bot = make_test_agent_bot(agent_user, tmp_path, config, runtime_paths_for(config), rooms=["!room:localhost"])
+    bot = make_test_agent_bot(agent_user, config, runtime_paths_for(config), rooms=["!room:localhost"])
     bot.client = make_matrix_client_mock(user_id=agent_user.user_id)
     wrap_extracted_collaborators(bot)
     replace_turn_deps(

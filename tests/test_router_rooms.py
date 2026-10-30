@@ -112,7 +112,6 @@ async def test_router_gets_all_configured_rooms(
         router_user,
         config_with_rooms,
         runtime_paths_for(config_with_rooms),
-        tmp_path,
         agent_reply_memberships=memberships,
         agent_reply_membership_sync=membership_sync,
     )
@@ -155,7 +154,6 @@ def test_team_bot_uses_defaults_streaming_setting(
         team_user,
         config_with_rooms,
         runtime_paths,
-        tmp_path,
     )
 
     assert team_bot is not None
@@ -194,7 +192,6 @@ def test_team_bot_uses_persisted_member_usernames(
         ),
         config_with_rooms,
         runtime_paths,
-        tmp_path,
     )
 
     action = team_bot._turn_policy.effective_response_action(ResponseAction(kind="individual"))
@@ -248,7 +245,6 @@ async def test_router_joins_rooms_on_start(
         router_user,
         config_with_rooms,
         runtime_paths_for(config_with_rooms),
-        tmp_path,
         agent_reply_memberships=memberships,
         agent_reply_membership_sync=membership_sync,
     )

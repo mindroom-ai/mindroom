@@ -83,7 +83,6 @@ def setup_test_bot(
 
     bot = make_test_agent_bot(
         agent,
-        storage_path,
         config,
         runtime_paths_for(config),
         rooms=[room_id],

@@ -2188,7 +2188,6 @@ def _durable_response_bot(tmp_path: Path) -> AgentBot:
             display_name="Code",
             user_id="@mindroom_code:localhost",
         ),
-        storage_path=tmp_path,
         config=config,
         runtime_paths=runtime_paths_for(config),
         rooms=["!room:localhost"],

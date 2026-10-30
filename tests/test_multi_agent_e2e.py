@@ -132,7 +132,6 @@ async def test_agent_processes_direct_mention(  # noqa: PLR0915
 
         bot = make_test_agent_bot(
             mock_calculator_agent,
-            tmp_path,
             config,
             runtime_paths_for(config),
             rooms=[test_room_id],
@@ -248,7 +247,6 @@ async def test_agent_ignores_other_agents(
 
         bot = make_test_agent_bot(
             mock_calculator_agent,
-            tmp_path,
             config,
             runtime_paths_for(config),
             rooms=[test_room_id],
@@ -328,7 +326,6 @@ async def test_agent_responds_in_threads_based_on_participation(  # noqa: PLR091
 
         bot = make_test_agent_bot(
             mock_calculator_agent,
-            tmp_path,
             config,
             runtime_paths_for(config),
             rooms=[test_room_id],
@@ -636,7 +633,6 @@ async def test_agent_handles_room_invite(mock_calculator_agent: AgentMatrixUser,
 
         bot = make_test_agent_bot(
             mock_calculator_agent,
-            tmp_path,
             config,
             runtime_paths_for(config),
             rooms=[initial_room],

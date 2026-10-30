@@ -82,7 +82,7 @@ class TestAgentBot(AgentBotTestBase):
         )
 
         config = self._config_for_storage(tmp_path)
-        bot = make_test_agent_bot(agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
+        bot = make_test_agent_bot(agent_user, config=config, runtime_paths=runtime_paths_for(config))
         _wrap_extracted_collaborators(bot)
         bot.client = AsyncMock()
         bot.logger = MagicMock()
@@ -164,7 +164,7 @@ class TestAgentBot(AgentBotTestBase):
             access_token="mock_test_token",  # noqa: S106
         )
         config = self._config_for_storage(tmp_path)
-        bot = make_test_agent_bot(agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
+        bot = make_test_agent_bot(agent_user, config=config, runtime_paths=runtime_paths_for(config))
         install_runtime_journal_support(bot)
         bot.rooms = ["!welcome:localhost"]
         bot.client = AsyncMock()
@@ -215,7 +215,7 @@ class TestAgentBot(AgentBotTestBase):
         )
 
         config = self._config_for_storage(tmp_path)
-        bot = make_test_agent_bot(agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
+        bot = make_test_agent_bot(agent_user, config=config, runtime_paths=runtime_paths_for(config))
         _wrap_extracted_collaborators(bot)
         bot.client = AsyncMock()
         bot.logger = MagicMock()
@@ -315,7 +315,7 @@ class TestAgentBot(AgentBotTestBase):
         config = self._config_for_storage(tmp_path)
         # A top-level caption joins its upload only when sent within the debounce window of it.
         config.defaults.coalescing.debounce_ms = 1000
-        bot = make_test_agent_bot(agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
+        bot = make_test_agent_bot(agent_user, config=config, runtime_paths=runtime_paths_for(config))
         _wrap_extracted_collaborators(bot)
         bot.client = make_matrix_client_mock(user_id=agent_user.user_id)
         bot.logger = MagicMock()
@@ -412,7 +412,7 @@ class TestAgentBot(AgentBotTestBase):
             ),
             tmp_path,
         )
-        bot = make_test_agent_bot(agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
+        bot = make_test_agent_bot(agent_user, config=config, runtime_paths=runtime_paths_for(config))
         bot.client = AsyncMock()
         send_response = AsyncMock(return_value="$route")
         install_send_response_mock(bot, send_response)
@@ -587,7 +587,6 @@ class TestAgentBot(AgentBotTestBase):
                 password=TEST_PASSWORD,
                 access_token="mock_test_token",  # noqa: S106
             ),
-            tmp_path,
             config=config,
             runtime_paths=runtime_paths_for(config),
         )
@@ -599,7 +598,6 @@ class TestAgentBot(AgentBotTestBase):
                 password=TEST_PASSWORD,
                 access_token="mock_test_token",  # noqa: S106
             ),
-            tmp_path,
             config=config,
             runtime_paths=runtime_paths_for(config),
         )
@@ -713,7 +711,7 @@ class TestAgentBot(AgentBotTestBase):
             ),
             tmp_path,
         )
-        bot = make_test_agent_bot(agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
+        bot = make_test_agent_bot(agent_user, config=config, runtime_paths=runtime_paths_for(config))
         _wrap_extracted_collaborators(bot)
         bot.client = AsyncMock()
         bot._conversation_resolver.extract_message_context = AsyncMock(
@@ -798,7 +796,7 @@ class TestAgentBot(AgentBotTestBase):
             ),
             tmp_path,
         )
-        bot = make_test_agent_bot(agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
+        bot = make_test_agent_bot(agent_user, config=config, runtime_paths=runtime_paths_for(config))
         _wrap_extracted_collaborators(bot)
         bot.client = AsyncMock()
         bot._conversation_resolver.extract_message_context = AsyncMock(
@@ -888,7 +886,7 @@ class TestAgentBot(AgentBotTestBase):
             ),
             tmp_path,
         )
-        bot = make_test_agent_bot(agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
+        bot = make_test_agent_bot(agent_user, config=config, runtime_paths=runtime_paths_for(config))
         _wrap_extracted_collaborators(bot)
         bot.client = AsyncMock()
         send_response = AsyncMock(return_value="$handoff")
@@ -939,7 +937,7 @@ class TestAgentBot(AgentBotTestBase):
             ),
             tmp_path,
         )
-        bot = make_test_agent_bot(agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
+        bot = make_test_agent_bot(agent_user, config=config, runtime_paths=runtime_paths_for(config))
         _wrap_extracted_collaborators(bot)
         bot.client = AsyncMock()
         install_send_response_mock(bot, AsyncMock(return_value=None))
@@ -986,7 +984,7 @@ class TestAgentBot(AgentBotTestBase):
             ),
             tmp_path,
         )
-        bot = make_test_agent_bot(agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
+        bot = make_test_agent_bot(agent_user, config=config, runtime_paths=runtime_paths_for(config))
         _wrap_extracted_collaborators(bot)
         bot.client = AsyncMock()
         bot._conversation_resolver.extract_message_context = AsyncMock(
@@ -1045,7 +1043,7 @@ class TestAgentBot(AgentBotTestBase):
             access_token="mock_test_token",  # noqa: S106
         )
         config = self._config_for_storage(tmp_path)
-        bot = make_test_agent_bot(agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
+        bot = make_test_agent_bot(agent_user, config=config, runtime_paths=runtime_paths_for(config))
         _wrap_extracted_collaborators(bot)
         bot.client = AsyncMock()
         bot.client.room_send.return_value = _room_send_response("$router_guidance")
@@ -1097,7 +1095,7 @@ class TestAgentBot(AgentBotTestBase):
     ) -> None:
         """After router routes an image, the selected agent should resolve it via attachments."""
         config = self._config_for_storage(tmp_path)
-        bot = make_test_agent_bot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
+        bot = make_test_agent_bot(mock_agent_user, config=config, runtime_paths=runtime_paths_for(config))
         bot.client = AsyncMock()
 
         generate_response = AsyncMock(return_value="$response")

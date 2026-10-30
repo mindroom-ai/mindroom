@@ -303,7 +303,7 @@ class TestBotIntegration:
             access_token="test_token",  # noqa: S106
         )
 
-        bot = make_test_bot_for_entity("test_agent", agent_user, config, runtime_paths_for(config), tmp_path)
+        bot = make_test_bot_for_entity("test_agent", agent_user, config, runtime_paths_for(config))
         assert isinstance(bot, AgentBot)
         bot.client = _mock_client()
         bot.client.user_id = "@mindroom_test_agent:localhost"
@@ -411,7 +411,7 @@ class TestBotIntegration:
             access_token="test_token",  # noqa: S106
         )
 
-        bot = make_test_bot_for_entity("test_agent", agent_user, config, runtime_paths_for(config), tmp_path)
+        bot = make_test_bot_for_entity("test_agent", agent_user, config, runtime_paths_for(config))
         assert isinstance(bot, AgentBot)
         bot.client = _mock_client()
         bot.client.user_id = "@mindroom_test_agent:localhost"

@@ -1848,7 +1848,6 @@ async def test_queued_config_reload_waits_for_in_flight_response_without_event_i
     )
     bot = make_test_agent_bot(
         agent_user=mock_agent_users["agent1"],
-        storage_path=tmp_path,
         config=config,
         runtime_paths=runtime_paths_for(config),
     )
@@ -3083,7 +3082,6 @@ async def test_agent_joins_new_rooms_on_config_reload(  # noqa: C901
     config = _runtime_bound_config(Config(router=RouterConfig(model="default")), tmp_path)
     agent1_bot = make_test_agent_bot(
         agent_user=mock_agent_users["agent1"],
-        storage_path=tmp_path,
         config=config,
         runtime_paths=runtime_paths_for(config),
         rooms=["room1", "room2"],  # Initial rooms
@@ -3154,7 +3152,6 @@ async def test_router_updates_rooms_on_config_reload(
     config = _runtime_bound_config(Config(router=RouterConfig(model="default")), tmp_path)
     router_bot = make_test_agent_bot(
         agent_user=mock_agent_users[ROUTER_AGENT_NAME],
-        storage_path=tmp_path,
         config=config,
         runtime_paths=runtime_paths_for(config),
         rooms=list(updated_router_rooms),
@@ -3212,7 +3209,6 @@ async def test_new_agent_joins_rooms_on_config_reload(
     config = _runtime_bound_config(Config(router=RouterConfig(model="default")), tmp_path)
     agent3_bot = make_test_agent_bot(
         agent_user=mock_agent_users["agent3"],
-        storage_path=tmp_path,
         config=config,
         runtime_paths=runtime_paths_for(config),
         rooms=["room5"],
@@ -3277,7 +3273,6 @@ async def test_team_room_changes_on_config_reload(
     config = _runtime_bound_config(Config(router=RouterConfig(model="default")), tmp_path)
     team1_bot = make_test_agent_bot(
         agent_user=mock_agent_users["team1"],
-        storage_path=tmp_path,
         config=config,
         runtime_paths=runtime_paths_for(config),
         rooms=["room3", "room6"],
@@ -3487,7 +3482,6 @@ async def test_room_membership_state_after_config_update(  # noqa: C901
 
         bot = make_test_agent_bot(
             agent_user=agent_user,
-            storage_path=tmp_path,
             config=config,
             runtime_paths=runtime_paths_for(config),
             rooms=bot_config["new"],
@@ -3540,7 +3534,6 @@ async def test_in_flight_response_count_nonzero_during_send_response(
     )
     bot = make_test_agent_bot(
         agent_user=mock_agent_users["agent1"],
-        storage_path=tmp_path,
         config=config,
         runtime_paths=runtime_paths_for(config),
     )
@@ -3683,7 +3676,6 @@ async def test_closed_admission_defers_response_until_gate_reopens(
     )
     bot = make_test_agent_bot(
         agent_user=mock_agent_users["agent1"],
-        storage_path=tmp_path,
         config=config,
         runtime_paths=runtime_paths_for(config),
     )
@@ -3747,7 +3739,6 @@ async def test_replaced_runtime_refuses_deferred_response_without_matrix_io(
     )
     bot = make_test_agent_bot(
         agent_user=mock_agent_users["agent1"],
-        storage_path=tmp_path,
         config=config,
         runtime_paths=runtime_paths_for(config),
     )

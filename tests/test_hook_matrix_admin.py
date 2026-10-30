@@ -533,7 +533,6 @@ async def test_hook_matrix_admin_created_room_survives_lifecycle_cleanup(
 
     bot = make_test_agent_bot(
         agent_user=_router_user(ids[ROUTER_AGENT_NAME].full_id),
-        storage_path=tmp_path,
         config=config,
         runtime_paths=runtime_paths,
         rooms=[],
@@ -573,7 +572,6 @@ def test_a_room_a_plugin_retains_for_the_running_router_owns_its_approvals_at_on
     router_id = entity_ids(config, runtime_paths)[ROUTER_AGENT_NAME].full_id
     bot = make_test_agent_bot(
         agent_user=_router_user(router_id),
-        storage_path=tmp_path,
         config=config,
         runtime_paths=runtime_paths,
         rooms=[],
