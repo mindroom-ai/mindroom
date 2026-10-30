@@ -9,7 +9,7 @@ import pytest
 
 from mindroom.event_journal import EventJournalStore, journal, turn_rows
 from mindroom.event_journal.identity import journal_principal_id
-from mindroom.event_journal.turn_rows import Accepted, Answered, Refused
+from mindroom.event_journal.turn_rows import Answered, PendingTurn, Refused
 from mindroom.history.types import HistoryScope
 from mindroom.message_target import MessageTarget
 from mindroom.turn_record import (
@@ -20,6 +20,7 @@ from mindroom.turn_record import (
     TurnRecord,
 )
 from tests.test_event_journal_store import admit
+from tests.turn_state_oracle.adapter import checked_pending_write
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Mapping, Sequence
@@ -82,14 +83,14 @@ async def read(store: EventJournalStore, operation: Callable[..., Any], *args: o
 
 
 async def pending(store: EventJournalStore, record: TurnRecord, room_id: str = ROOM) -> turn_rows.ReshapeResult:
-    """Record one pending turn in ``room_id``."""
-    return await write(store, turn_rows.record_pending_turn, record, room_id=room_id)
+    """Record one pending turn in ``room_id``, requiring what it returns to be what a read of its rows finds."""
+    return await write(store, checked_pending_write, record, room_id=room_id)
 
 
 async def accepted(store: EventJournalStore, record: TurnRecord, room_id: str = ROOM) -> TurnRecord:
     """Record one pending turn and return it, requiring the write to land."""
     result = await pending(store, record, room_id)
-    assert isinstance(result, Accepted), result
+    assert isinstance(result, PendingTurn), result
     return result.record
 
 
@@ -132,6 +133,29 @@ class TestReshape:
         assert reordered.source_event_ids == ("$b", "$a")
         assert reordered.anchor_event_id == "$a"
         assert await read(store, turn_rows.load_turn, first.turn_key) is None
+
+    async def test_a_rewrite_returns_each_revisions_response_proof_as_stored(self, store: EventJournalStore) -> None:
+        """A pending write repeating revisions returns the proof each stored row ends with: one it kept or one it gained."""
+        await accepted(
+            store,
+            turn(
+                ["$a"],
+                replay={"$e1": RevisionReplay("$a", 10, response_event_id="$answer"), "$e2": RevisionReplay("$a", 20)},
+            ),
+        )
+
+        again = await accepted(
+            store,
+            turn(
+                ["$a"],
+                replay={"$e1": RevisionReplay("$a", 10), "$e2": RevisionReplay("$a", 20, response_event_id="$later")},
+            ),
+        )
+
+        assert again.revision_replay == {
+            "$e1": RevisionReplay("$a", 10, response_event_id="$answer"),
+            "$e2": RevisionReplay("$a", 20, response_event_id="$later"),
+        }
 
     async def test_watermarks_and_consumed_revision_proof_survive_reshape(self, store: EventJournalStore) -> None:
         """Watermarks and consumed revision proof survive reshape."""
@@ -337,7 +361,7 @@ class TestAliases:
         assert await pending(store, turn(["$o"])) == Refused()
         # Waiting in a batch beside a fresh source, the original refuses the batch so each source retries alone.
         assert await pending(store, turn(["$o", "$fresh"])) == Refused()
-        assert isinstance(await pending(store, turn(["$fresh"])), Accepted)
+        assert isinstance(await pending(store, turn(["$fresh"])), PendingTurn)
 
     async def test_a_relay_handed_to_its_final_delivery_also_refuses_a_batch_naming_its_original(
         self,
@@ -373,6 +397,25 @@ class TestAliases:
         relay = await accepted(store, turn(["$r"], aliases=["$o"]))
 
         assert relay.discovery_event_ids == ()
+
+    async def test_coalesced_relays_return_their_originals_in_the_order_a_read_finds_them(
+        self,
+        store: EventJournalStore,
+    ) -> None:
+        """Two relays coalesced into one turn return their originals in byte order, whichever arrived first."""
+        relays = await accepted(
+            store,
+            turn(
+                ["$r1", "$r2"],
+                aliases=["$z-original", "$a-original"],
+                metadata={
+                    "$r1": SourceEventMetadata(ALICE, discovery_event_id="$z-original"),
+                    "$r2": SourceEventMetadata(ALICE, discovery_event_id="$a-original"),
+                },
+            ),
+        )
+
+        assert relays.discovery_event_ids == ("$a-original", "$z-original")
 
 
 class TestRedactionGuard:
@@ -457,6 +500,18 @@ class TestRedactionGuard:
         assert await read(store, turn_rows.deleted_sources, selection.source_event_ids) == {"$answer", "$more"}
         assert await read(store, turn_rows.deleted_sources, relay.source_event_ids) == {"$r"}
 
+    async def test_a_selection_written_after_its_question_was_deleted_returns_every_source_deleted(
+        self,
+        store: EventJournalStore,
+    ) -> None:
+        """The redacted question a selection's pending write indexes deletes every source the write returns."""
+        await redact(store, "$question")
+
+        result = await pending(store, turn(["$answer", "$more"], aliases=["$question"]))
+
+        assert isinstance(result, PendingTurn)
+        assert result.deleted_sources == {"$answer", "$more"}
+
     async def test_a_physical_source_is_never_read_as_another_sources_alias(self, store: EventJournalStore) -> None:
         """A physical source is never read as another sources alias."""
         stored = await accepted(
@@ -492,7 +547,7 @@ class TestRedactionGuard:
         await redact(store, "$e1")
         # Nothing newer is selected now, so only the redaction refuses a late write carrying E1.
         late = turn(["$s"], prompts={"$s": "E1 text"}, revisions={"$s": (10, "$e1")})
-        assert isinstance(await pending(store, late), Accepted)
+        assert isinstance(await pending(store, late), PendingTurn)
         await write(
             store,
             turn_rows.record_edit,
@@ -512,7 +567,7 @@ class TestRedactionGuard:
             prompt="E2 text",
             revision=(20, "$e2"),
         )
-        assert isinstance(await pending(store, late), Accepted)
+        assert isinstance(await pending(store, late), PendingTurn)
         await write(
             store,
             turn_rows.record_edit,

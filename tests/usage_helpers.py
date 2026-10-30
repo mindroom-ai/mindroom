@@ -1,4 +1,4 @@
-"""Check what a session's runs counted: its usage ledger, its session totals, the usage report, and monthly spend."""
+"""Check what a session's runs counted: its usage ledger, the usage report's totals, and monthly spend."""
 
 from __future__ import annotations
 
@@ -26,6 +26,28 @@ if TYPE_CHECKING:
 _INPUT_PRICE, _OUTPUT_PRICE = 2, 10
 
 
+def counted_usage(storage: ConversationStore, session_id: str) -> list[tuple[int, int]]:
+    """Return the input and output tokens of each usage snapshot the session's ledger counts.
+
+    A snapshot omits a zero counter, which reads as 0.
+    """
+    with storage.transaction(write=False) as connection:
+        snapshots = connection.execute(
+            f"SELECT usage_data FROM {quote_identifier(storage.names.usage)} WHERE session_id = ?",  # noqa: S608
+            (session_id,),
+        ).fetchall()
+    return [
+        (metrics.get("input_tokens", 0), metrics.get("output_tokens", 0))
+        for metrics in (json.loads(snapshot)["metrics"] for (snapshot,) in snapshots)
+    ]
+
+
+def counted_total(storage: ConversationStore, session_id: str) -> tuple[int, int]:
+    """Return the input and output tokens the session's ledger counts over all its usage snapshots."""
+    counted = counted_usage(storage, session_id)
+    return sum(tokens[0] for tokens in counted), sum(tokens[1] for tokens in counted)
+
+
 def assert_counted_usage(
     storage: ConversationStore,
     session_id: str,
@@ -38,27 +60,10 @@ def assert_counted_usage(
 ) -> None:
     """Assert the session's usage snapshots are the ``expected`` input and output tokens, in any order.
 
-    Their sum must be the session's stored totals, the usage report's totals, and ``requester_id``'s monthly spend on
-    ``model``.
+    Their sum must be the usage report's session totals and ``requester_id``'s monthly spend on ``model``.
     """
-    names = storage.names
-    with storage.transaction(write=False) as connection:
-        snapshots = connection.execute(
-            f"SELECT usage_data FROM {quote_identifier(names.usage)} WHERE session_id = ?",  # noqa: S608
-            (session_id,),
-        ).fetchall()
-        (session_data,) = connection.execute(
-            f"SELECT session_data FROM {quote_identifier(names.sessions)} WHERE session_id = ?",  # noqa: S608
-            (session_id,),
-        ).fetchone()
-    counted = sorted(
-        (metrics["input_tokens"], metrics["output_tokens"])
-        for metrics in (json.loads(snapshot)["metrics"] for (snapshot,) in snapshots)
-    )
-    assert counted == sorted(expected)
+    assert sorted(counted_usage(storage, session_id)) == sorted(expected)
     totals = (sum(tokens[0] for tokens in expected), sum(tokens[1] for tokens in expected))
-    stored = json.loads(session_data)["session_metrics"]
-    assert (stored["input_tokens"], stored["output_tokens"]) == totals
     report = collect_admin_usage(config=config, runtime_paths=runtime_paths)
     assert (report.totals.input_tokens, report.totals.output_tokens) == totals
     priced = PricedModel(pricing=ModelPricing(input=_INPUT_PRICE, output=_OUTPUT_PRICE), input_includes_cache=False)
@@ -68,4 +73,4 @@ def assert_counted_usage(
     }
 
 
-__all__ = ["assert_counted_usage"]
+__all__ = ["assert_counted_usage", "counted_total", "counted_usage"]

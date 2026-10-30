@@ -25,6 +25,7 @@ if TYPE_CHECKING:
         # Authentication/Connection parameters first
         ConfigField(
             name="access_token",
+            env=("WHATSAPP_ACCESS_TOKEN",),
             label="Access Token",
             type="password",
             required=False,
@@ -33,6 +34,7 @@ if TYPE_CHECKING:
         ),
         ConfigField(
             name="phone_number_id",
+            env=("WHATSAPP_PHONE_NUMBER_ID",),
             label="Phone Number ID",
             type="text",
             required=False,
@@ -41,6 +43,7 @@ if TYPE_CHECKING:
         ),
         ConfigField(
             name="version",
+            env=("WHATSAPP_VERSION",),
             label="API Version",
             type="text",
             required=False,
@@ -50,6 +53,7 @@ if TYPE_CHECKING:
         ),
         ConfigField(
             name="recipient_waid",
+            env=("WHATSAPP_RECIPIENT_WAID",),
             label="Default Recipient WhatsApp ID",
             type="text",
             required=False,

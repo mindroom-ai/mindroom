@@ -32,11 +32,10 @@ from mindroom.approval.receipt_readers import approval_receipt_context
 from mindroom.approval.tool_approval import shutdown_approval_runtime
 from mindroom.coalescing.batch import CoalescingKey, RequesterCoalescingOwner, build_prepared_turn
 from mindroom.config.approval import ApprovalRuleConfig
-from mindroom.constants import AI_RUN_METADATA_KEY
+from mindroom.constants import AI_RUN_METADATA_KEY, MINDROOM_HISTORY_METADATA_KEY
 from mindroom.delegation.state import DelegationState, child_execution_identity
 from mindroom.dispatch_source import MESSAGE_SOURCE_KIND
 from mindroom.event_journal import ApprovalDecision
-from mindroom.history import storage as history_storage
 from mindroom.history.interrupted_replay import _render_interrupted_replay_content
 from mindroom.history.storage import read_scope_seen_event_ids
 from mindroom.hooks import EVENT_TOOL_BEFORE_CALL, EnrichmentItem, MessageEnvelope, ToolBeforeCallContext, hook
@@ -244,7 +243,7 @@ async def test_a_team_turn_that_only_ran_tools_marks_its_trigger_seen(
     session = team.storage.load_session(SESSION_ID)
     assert session is not None
     assert read_scope_seen_event_ids(team.storage, session) == {EVENT_ID}
-    assert history_storage._read_preserved_scope_seen_event_ids(session.metadata, TEAM_SCOPE) == {EVENT_ID}
+    assert session.metadata == {MINDROOM_HISTORY_METADATA_KEY: {"seen_event_ids": [EVENT_ID]}}
 
 
 @pytest.mark.asyncio
@@ -846,8 +845,8 @@ async def test_an_approved_member_call_resumes_the_stored_team_run_and_renders_t
 ) -> None:
     """The reply ends with each run's text after its approval, and no paused notice.
 
-    The member and the leader paused without text of their own, so their runs held the paused notices, which no
-    longer hold once the approved call ran.
+    The member and the leader paused without text of their own, so the reply shows only what they wrote after the
+    approved call ran.
     """
     team, raised = await _pause_on_the_checker(tmp_path, monkeypatch, show_tool_calls=show_tool_calls)
     team.models["default"] = ScriptedModel([answer("The checker touched it.", usage(50, 5))])
@@ -1302,8 +1301,7 @@ async def test_a_resume_that_pauses_on_another_member_s_call_shows_no_paused_not
 ) -> None:
     """A resume that pauses again on a call of the writer shows no paused notice, nor does the reply it completes.
 
-    The writer the resumed leader hands a task pauses on its own gated call without text, so its run and the leader's
-    hold paused notices naming that call, which no earlier pause showed.
+    The writer the resumed leader hands a task pauses on its own gated call without text.
     """
     team, raised = await _pause_on_the_checker(tmp_path, monkeypatch)
     team.models["default"] = ScriptedModel([delegate("call-write", "writer", "Touch it too"), answer("Both touched.")])
@@ -1368,7 +1366,7 @@ async def test_an_approved_resume_shows_a_failed_member_s_redacted_reason(
     """A member whose run fails in an approval resume shows why in the resumed reply, credentials redacted.
 
     The writer the resumed leader hands a task fails before it writes anything. The approved checker fails after its
-    approved call ran, while its record still holds its paused notice, which the reply does not show for it.
+    approved call ran.
     """
     team, raised = await _pause_on_the_checker(tmp_path, monkeypatch)
     team.models["default"] = ScriptedModel(leader)
@@ -1661,10 +1659,7 @@ async def test_an_approved_member_that_answers_without_text_shows_no_paused_noti
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A member that paused without text and answers after its approved call without text adds nothing to its slot.
-
-    Its run still holds the paused notice from before the pause, which no longer holds once the call ran.
-    """
+    """A member that paused without text and answers after its approved call without text adds nothing to its slot."""
     team, raised = await _pause_on_the_checker(tmp_path, monkeypatch)
     team.models["default"] = ScriptedModel([answer("Done.")])
     team.models["checker-model"] = ScriptedModel([answer("")])
@@ -1682,7 +1677,7 @@ async def test_a_member_that_pauses_again_after_approval_shows_its_earlier_text_
 ) -> None:
     """A member whose approved call leads only to another gated call keeps its earlier text once in the new pause.
 
-    The leader sends no request while its member waits, so its run holds a paused notice, which the pause does not show.
+    The leader sends no request while its member waits, so it adds nothing to the pause.
     """
     team, paused = await _pause_after_the_checker_wrote(tmp_path, monkeypatch)
     team.models["default"] = ScriptedModel([])
@@ -1828,12 +1823,7 @@ async def test_a_failed_resume_stores_the_error_over_the_paused_row_and_ran_the_
 ) -> None:
     """A leader request that fails after the approved call ran reaches the caller; the rows record the outcome."""
     team, raised = await _pause_on_the_checker(tmp_path, monkeypatch)
-
-    async def lose_the_provider() -> None:
-        msg = "provider connection lost"
-        raise ProviderError(msg, provider="Synthetic")
-
-    team.models["default"] = ScriptedModel([[Await(lose_the_provider)]])
+    team.models["default"] = ScriptedModel([[Await(_lose_the_provider)]])
     team.models["checker-model"] = ScriptedModel([answer("Touched.")])
 
     with pytest.raises(ProviderError, match="provider connection lost"):
@@ -1856,15 +1846,10 @@ async def test_a_team_reply_that_fails_mid_turn_reports_its_stored_run_in_the_me
 
     The turn driver stores the failed turn as its interrupted record, in the failed run's place.
     """
-
-    async def lose_the_provider() -> None:
-        msg = "provider connection lost"
-        raise ProviderError(msg, provider="Synthetic")
-
     team = squad_turn(
         tmp_path,
         monkeypatch,
-        leader=[delegate("call-team", "writer", "Draft it"), [Await(lose_the_provider)]],
+        leader=[delegate("call-team", "writer", "Draft it"), [Await(_lose_the_provider)]],
         writer=[answer("Draft.", usage(20, 2))],
     )
     metadata: dict[str, Any] = {}
@@ -2603,36 +2588,6 @@ async def test_a_stopped_member_keeps_its_usage_and_its_row_ends_cancelled(
 
 
 @pytest.mark.asyncio
-async def test_a_stopped_team_turn_records_the_text_its_members_streamed(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """A Stop records what the reply showed: the writer, stopped while its call ran, records what it wrote before.
-
-    The checker failed before any text; the stopped turn records its reason in its slot all the same.
-    """
-    team = squad_turn(
-        tmp_path,
-        monkeypatch,
-        leader=[delegate("call-check", "checker", "Check"), delegate("call-write", "writer", "Write")],
-        checker=[[Await(_checker_overloaded)]],
-        writer=[calls(tool_call("touch", "call-touch", label="draft", wait=True), content="Drafting.")],
-    )
-    task = asyncio.create_task(team.respond(show_tool_calls=False))
-    await asyncio.wait_for(ProbeToolkit.waiting.wait(), timeout=5)
-    task.cancel()
-    with pytest.raises(asyncio.CancelledError):
-        await task
-
-    record, members = team.stored_runs()
-    assert [run.status for run in (record, *members)] == [RunStatus.completed, RunStatus.error, RunStatus.cancelled]
-    assert record.metadata is not None
-    assert record.metadata["mindroom_original_status"] == "cancelled"
-    assert team.recorder.outcome == "interrupted"
-    assert team.recorder.assistant_text == "**Writer**: Drafting.\n\n**Checker**: Checker overloaded"
-
-
-@pytest.mark.asyncio
 @pytest.mark.parametrize("stream", [True, False])
 async def test_a_stopped_team_turn_records_its_member_runs_in_configured_order(
     tmp_path: Path,
@@ -2814,11 +2769,6 @@ def _team_bot(team: TeamTurn, tmp_path: Path, entity: str = "squad") -> AgentBot
     return bot
 
 
-def _runner(team: TeamTurn, tmp_path: Path) -> Any:  # noqa: ANN401
-    """Return the runner of the squad's team bot."""
-    return _team_bot(team, tmp_path)._response_runner
-
-
 def _request(prompt: str = "Hello") -> ResponseRequest:
     target = MessageTarget.resolve(room_id=ROOM_ID, thread_id=THREAD_ID, reply_to_event_id=EVENT_ID)
     return ResponseRequest(
@@ -2976,7 +2926,7 @@ async def test_the_driver_writes_the_interrupted_record_after_the_loop_stored_th
         leader=[delegate("call-team", "writer", "Write")],
         writer=[[TextDelta("Dra"), UsageReported(usage(30, 2), final=False), Await(wait_to_be_cancelled)]],
     )
-    runner = _runner(team, tmp_path)
+    runner = _team_bot(team, tmp_path)._response_runner
     statuses_when_interrupted_record_written: list[RunStatus | None] = []
     original = response_turn.persist_interrupted_replay_snapshot
 

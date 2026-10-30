@@ -12,6 +12,7 @@ if TYPE_CHECKING:
 
     from mindroom.agent_policy import ResolvedAgentPolicy
     from mindroom.config.main import Config
+    from mindroom.workers.backend import WorkerBackend
 
 WorkerStatus = Literal["starting", "ready", "idle", "failed"]
 WorkerReadyPhase = Literal["cold_start", "waiting", "ready", "failed"]
@@ -62,7 +63,6 @@ class WorkerHandle:
     last_used_at: float
     created_at: float
     last_started_at: float | None = None
-    expires_at: float | None = None
     startup_count: int = 0
     failure_count: int = 0
     failure_reason: str | None = None
@@ -90,8 +90,23 @@ class WorkerReadyProgress:
 
 ProgressSink = Callable[[WorkerReadyProgress], None]
 
+
+@dataclass(frozen=True, slots=True)
+class ConfiguredWorkerBackend:
+    """One reading of the selected worker backend's settings.
+
+    ``signature`` changes whenever these settings would build a different manager.
+    ``cleanup_signature`` names the workers that manager owns, which outlive routine changes of its settings.
+    ``build`` constructs the manager from this same reading; its dedicated workers launch from ``current_launch``.
+    """
+
+    signature: tuple[str, ...]
+    cleanup_signature: tuple[str, ...]
+    build: Callable[[Callable[[], WorkerLaunchConfig]], WorkerBackend]
+
+
+SANDBOX_RUNNER_API_ROOT = "/api/sandbox-runner"
 _API_ROUTES = {
-    "cleanup": "workers/cleanup",
     "script-run": "scripts/run",
     "script-status": "scripts",
     "script-cancel": "scripts",
@@ -99,13 +114,21 @@ _API_ROUTES = {
 }
 
 
+def normalize_sandbox_runner_api_root(url: str) -> str:
+    """Normalize a sandbox-runner base URL, API root, or execute endpoint into its API root; blank stays blank."""
+    normalized = url.strip().rstrip("/")
+    if not normalized or normalized.endswith(SANDBOX_RUNNER_API_ROOT):
+        return normalized
+    if normalized.endswith("/execute"):
+        return normalized.removesuffix("/execute")
+    return f"{normalized}{SANDBOX_RUNNER_API_ROOT}"
+
+
 def worker_api_endpoint(
     handle: WorkerHandle,
     operation: Literal[
         "execute",
         "leases",
-        "workers",
-        "cleanup",
         "save-attachment",
         "view-file",
         "script-run",

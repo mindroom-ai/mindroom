@@ -47,9 +47,7 @@ from mindroom.oauth import reset_execution as oauth_reset_execution
 from mindroom.oauth import service as oauth_service
 from mindroom.oauth.credential_binding import oauth_credential_binding, oauth_credential_binding_payload
 from mindroom.oauth.credential_lifecycle import OAuthCredentialConflictError, oauth_credentials_satisfy_identity_policy
-from mindroom.oauth.google_calendar import google_calendar_oauth_provider
-from mindroom.oauth.google_docs import google_docs_oauth_provider
-from mindroom.oauth.google_drive import google_drive_oauth_provider
+from mindroom.oauth.google import google_oauth_provider
 from mindroom.oauth.providers import (
     RUNTIME_BOOTSTRAPPED_CLIENT_CONFIG_KEY,
     OAuthClientConfig,
@@ -1828,7 +1826,7 @@ def test_google_provider_refresh_preserves_verified_claim_summary(
             "_source": "ui",
         },
     )
-    provider = google_drive_oauth_provider()
+    provider = google_oauth_provider("google_drive")
     seen: dict[str, Any] = {}
 
     class FakeOAuth2Client:
@@ -2171,7 +2169,7 @@ def test_safe_token_result_preserves_verified_claims_for_custom_validator(tmp_pa
 
 def test_google_drive_refresh_parser_accepts_existing_verified_claim_summary(tmp_path: Path) -> None:
     runtime_paths = _runtime_paths(tmp_path)
-    provider = google_drive_oauth_provider()
+    provider = google_oauth_provider("google_drive")
     assert provider.token_parser is not None
     assert provider.credential_service == "google_drive_oauth"
     assert provider.tool_config_service == "google_drive"
@@ -2212,7 +2210,7 @@ def test_google_oauth_client_config_prefers_stored_provider_config(tmp_path: Pat
         },
     )
 
-    client_config = google_drive_oauth_provider().client_config(runtime_paths)
+    client_config = google_oauth_provider("google_drive").client_config(runtime_paths)
 
     assert client_config == OAuthClientConfig(
         client_id="stored-client-id",
@@ -2231,7 +2229,7 @@ def test_google_oauth_client_config_ignores_env_for_public_deployment(tmp_path: 
         },
     )
 
-    client_config = google_drive_oauth_provider().client_config(runtime_paths)
+    client_config = google_oauth_provider("google_drive").client_config(runtime_paths)
 
     assert client_config is None
 
@@ -2258,7 +2256,7 @@ def test_google_provider_oauth_client_config_wins_over_shared_config(tmp_path: P
         },
     )
 
-    client_config = google_drive_oauth_provider().client_config(runtime_paths)
+    client_config = google_oauth_provider("google_drive").client_config(runtime_paths)
 
     assert client_config == OAuthClientConfig(
         client_id="drive-client-id",
@@ -2283,7 +2281,7 @@ def test_google_shared_oauth_client_config_uses_provider_redirect_uri(tmp_path: 
         },
     )
 
-    client_config = google_calendar_oauth_provider().client_config(runtime_paths)
+    client_config = google_oauth_provider("google_calendar").client_config(runtime_paths)
 
     assert client_config == OAuthClientConfig(
         client_id="shared-client-id",
@@ -2294,7 +2292,7 @@ def test_google_shared_oauth_client_config_uses_provider_redirect_uri(tmp_path: 
 
 def test_google_drive_refresh_parser_rejects_unverified_existing_claim_summary(tmp_path: Path) -> None:
     runtime_paths = _runtime_paths(tmp_path)
-    provider = google_drive_oauth_provider()
+    provider = google_oauth_provider("google_drive")
     assert provider.token_parser is not None
 
     with pytest.raises(OAuthClaimValidationError, match="verifiable identity token"):
@@ -2318,7 +2316,7 @@ def test_google_token_parser_rejects_invalid_id_token_with_claim_error(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     runtime_paths = _runtime_paths(tmp_path)
-    provider = google_drive_oauth_provider()
+    provider = google_oauth_provider("google_drive")
     assert provider.token_parser is not None
 
     def _raise_invalid_token(*_args: object, **_kwargs: object) -> None:
@@ -2359,7 +2357,7 @@ def test_default_redirect_uri_uses_public_mindroom_origin(tmp_path: Path) -> Non
             "_source": "ui",
         },
     )
-    provider = google_drive_oauth_provider()
+    provider = google_oauth_provider("google_drive")
 
     client_config = provider.client_config(runtime_paths)
 
@@ -3565,7 +3563,6 @@ async def test_callback_maps_locked_connection_generation_race_to_conflict(
     target = RequestCredentialsTarget(
         runtime_paths=runtime_paths,
         base_manager=manager,
-        target_manager=manager,
         worker_scope=None,
         agent_name=None,
         execution_identity=None,
@@ -3619,7 +3616,6 @@ async def test_callback_hides_provider_controlled_exchange_error(
     target = RequestCredentialsTarget(
         runtime_paths=runtime_paths,
         base_manager=manager,
-        target_manager=manager,
         worker_scope=None,
         agent_name=None,
         execution_identity=None,
@@ -4452,7 +4448,6 @@ async def test_callback_saves_exchanged_credentials_before_propagating_cancellat
     target = RequestCredentialsTarget(
         runtime_paths=runtime_paths,
         base_manager=manager,
-        target_manager=manager,
         worker_scope=None,
         agent_name=None,
         execution_identity=None,
@@ -4534,7 +4529,6 @@ async def test_callback_finishes_target_verification_after_state_consumption_bef
     target = RequestCredentialsTarget(
         runtime_paths=runtime_paths,
         base_manager=manager,
-        target_manager=manager,
         worker_scope=None,
         agent_name=None,
         execution_identity=None,
@@ -6402,7 +6396,7 @@ def test_google_status_reports_connected_with_service_account(tmp_path: Path) ->
         },
     )
     api_app = _make_test_app(runtime_paths, _config_payload(worker_scope="user_agent"))
-    provider = google_drive_oauth_provider()
+    provider = google_oauth_provider("google_drive")
 
     with TestClient(api_app, base_url="http://localhost:8765") as client:
         _login(client)
@@ -6426,7 +6420,7 @@ def test_google_docs_status_reports_capabilities_with_service_account(tmp_path: 
         },
     )
     api_app = _make_test_app(runtime_paths, _config_payload(worker_scope="user_agent"))
-    provider = google_docs_oauth_provider()
+    provider = google_oauth_provider("google_docs")
 
     with TestClient(api_app, base_url="http://localhost:8765") as client:
         _login(client)
@@ -6447,7 +6441,7 @@ def test_status_hides_runtime_bootstrapped_client_from_remote_request(tmp_path: 
         {constants.OWNER_MATRIX_USER_ID_ENV: "@alice:example.org"},
     )
     api_app = _make_test_app(runtime_paths, _config_payload())
-    provider = google_drive_oauth_provider()
+    provider = google_oauth_provider("google_drive")
     get_runtime_credentials_manager(runtime_paths).save_credentials(
         "google_oauth_client",
         {

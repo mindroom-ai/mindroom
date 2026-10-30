@@ -39,15 +39,8 @@ def _load_openbb_tools() -> type[OpenBBTools]:
     icon_color="text-blue-500",
     config_fields=[
         ConfigField(
-            name="obb",
-            label="OpenBB Instance",
-            type="text",
-            required=False,
-            default=None,
-            description="Optional pre-configured OpenBB instance (advanced usage)",
-        ),
-        ConfigField(
             name="openbb_pat",
+            env=("OPENBB_PAT",),
             label="Personal Access Token",
             type="password",
             required=False,

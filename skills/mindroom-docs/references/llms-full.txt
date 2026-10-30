@@ -1137,7 +1137,7 @@ See [Knowledge Bases](https://docs.mindroom.chat/knowledge/) for configuration a
 
 A new service named after a provider key environment variable, such as `ANTHROPIC_API_KEY`, is saved as the canonical provider service (`anthropic`) that the Models tab and runtime read.
 An existing service with an environment-variable name keeps receiving writes, because config may reference it by that exact name.
-See [Credential Storage](https://docs.mindroom.chat/oauth-framework/#credential-storage) for credentials imported from `.env`, such as `GITHUB_TOKEN`.
+See [Credentials from the Environment](https://docs.mindroom.chat/oauth-framework/#credentials-from-the-environment) for credentials read from `.env`, such as `GITHUB_TOKEN`.
 
 ### Voice
 
@@ -1654,7 +1654,7 @@ Hosted pairing variables written by `mindroom connect` are described in [Hosted 
 ### Model Providers
 
 Provider API keys such as `ANTHROPIC_API_KEY` and `OPENAI_API_KEY`, their `_FILE` variants, and Vertex AI and Bedrock settings are listed in [Models — Environment Variables](https://docs.mindroom.chat/configuration/models/#environment-variables), and `codex login` and `CODEX_HOME` in [Codex Models with ChatGPT Login](https://docs.mindroom.chat/configuration/models/#codex-models-with-chatgpt-login).
-Provider keys from the environment or `.env` are also copied into the shared credentials store, as described in [Automatic Credential Import](https://docs.mindroom.chat/oauth-framework/#automatic-credential-import).
+Provider keys from the environment or `.env` also supply shared credentials, as described in [Credentials from the Environment](https://docs.mindroom.chat/oauth-framework/#credentials-from-the-environment).
 
 | Variable | Description |
 |----------|-------------|
@@ -3086,7 +3086,7 @@ Set these fields in `defaults`, on an agent, or on a team (see [Team History and
 
 An agent or team that leaves both `num_history_runs` and `num_history_messages` at `null` inherits both from `defaults`; setting either one replaces both defaults.
 History replay is unlimited only when the inherited values are also `null`.
-Tool results replay unchanged; the retired `compress_tool_results` field fails validation with `Unknown key`, so remove it.
+Tool results replay unchanged.
 
 ## Context Window
 
@@ -3486,7 +3486,7 @@ It applies only to agents whose effective backend is `file`, including each requ
 Compacted turns and voice-call turns are included.
 Not auto-flushed: turns that [automations](https://docs.mindroom.chat/scheduling/#automations) start, tasks another agent delegated, team conversations, conversations through the OpenAI-compatible API, and context that hooks attach to messages, such as location.
 A message redacted before its turn is flushed stays out of memory, and so do the turn that read it and every later turn its redaction removes from [history](https://docs.mindroom.chat/configuration/history/#compacted-history-and-redaction).
-A turn waiting for tool approval holds back the later turns of its conversation until it finishes or its approval expires.
+A turn that waits for tool approval is flushed once it finishes.
 Enabling auto-flush starts with the turns after that; earlier conversation is not flushed, and turning it off and on again flushes the turns in between.
 An agent switched to `file` memory later starts with its turns from about one `flush_interval_seconds` before auto-flush first sees it, and its private instances, including new ones, keep all their turns since then.
 
@@ -3583,11 +3583,6 @@ Failures are returned as readable error messages rather than raised into the con
 The Dashboard **Memory** page edits the `memory` section: backend, `team_reads_member_memory`, embedder provider, model, credential service, and host, file settings (`path`, `max_entrypoint_lines`, `max_entrypoint_tokens`), search settings, and all auto-flush settings.
 The remaining fields, such as `llm`, are under **More settings**.
 Save from the Memory page to write the changes to `config.yaml`.
-
-## Agno Learning
-
-Agno Learning is retired: a config that sets `learning` or `learning_mode` on an agent or in `defaults` fails validation with `Unknown key`, so remove them.
-Its existing `learning/<agent>.db` databases under agent state roots stay on disk unused, and you can delete them.
 
 # Knowledge Bases
 
@@ -4182,7 +4177,7 @@ The old graphs keep their memory until you stop MindRoom and delete `knowledge_g
 
 Not added: threads started by other automations such as `dreaming`, graph lookups and edits, including those through a shell, the graph facts that `search_knowledge_base` returns, knowledge searches through a shell, the `reasoning` tool's thoughts, answers from subagents, workflows, and Claude Code, results collected from background jobs, conversations through the OpenAI-compatible API, team conversations, and context that hooks attach to messages, such as location.
 Credential-like values are removed on a best-effort basis before anything is sent for extraction.
-A turn waiting for tool approval holds back the later turns of its conversation until it finishes or its approval expires.
+A turn that waits for tool approval is added once it finishes.
 
 Extraction asks the model to sort what it finds into people, agents, organizations, locations, events, projects, products, documents, and accounts, to leave out what fits none of them, and to keep file paths, URLs, and the like inside the facts that mention them, so pets, foods, hobbies, and topics get no entity of their own.
 It records what the agent reports as facts about their subjects and leaves out the agent's own lookups and housekeeping, such as what it searched, read, or saved, its access, accounts, tools, and configuration, and the counts and progress of its own tasks; what the agent did for others, such as filing an issue or sending a message, is kept.
@@ -6417,7 +6412,7 @@ Every completed report includes `schema_version: 1` and `generated_at`, the UTC 
 Each `breakdown` row has session `totals`, `session_count`, and `cumulative_model_breakdown`, plus `retained_run_totals`, `run_count`, and a `user_breakdown` showing which requesters used that agent or team.
 Requester totals sum to `retained_run_totals`, which can differ from the cumulative session `totals`.
 
-`cumulative_model_breakdown` comes from per-model totals stored with each session, so it includes compacted history still in retained sessions but has no dates or requesters.
+`cumulative_model_breakdown` splits each session's `totals` by the models that produced them, so it includes compacted history still in retained sessions but has no dates or requesters.
 A session using several models counts once in each model's `session_count`.
 
 ### Daily Rows
@@ -7527,7 +7522,7 @@ Each tool's page lists the settings it accepts.
 
 Some fields cannot be set inline:
 
-- `password` fields, such as API keys and tokens, must be set through the dashboard or credential store.
+- `password` fields, such as API keys and tokens, must be set through the dashboard, the credential store, or the environment variables the tool's page names.
 - Fields MindRoom manages itself, such as `base_dir`, cannot be overridden.
 - Per-agent-only fields, such as the [`usage_stats`](https://docs.mindroom.chat/usage/#usage_stats) tool's `admin_scope`, are rejected in `defaults.tools`.
 
@@ -7538,13 +7533,17 @@ MindRoom rejects these fields, unknown field names, and values of the wrong type
 From lowest to highest priority, a tool's settings come from:
 
 1. The tool's built-in defaults.
-2. Saved tool settings from the dashboard or credential store.
-3. `defaults.tools` inline settings.
-4. `agents.<name>.tools` inline settings.
-5. Values MindRoom sets for the agent's runtime, such as its workspace directory.
+2. The environment variables its page names, such as `TAVILY_API_KEY`, read from the process environment or, when unset there, from the `.env` next to `config.yaml`.
+3. Saved tool settings from the dashboard or credential store.
+4. `defaults.tools` inline settings.
+5. `agents.<name>.tools` inline settings.
+6. Values MindRoom sets for the agent's runtime, such as its workspace directory.
 
 When a tool appears in both `defaults.tools` and an agent's `tools`, the settings merge field by field.
 Per-agent values win for the same field, and fields set in only one place are kept.
+An empty saved value counts as unset, so the environment variable still applies.
+A call that runs in a worker rebuilds the tool there from its [leased](https://docs.mindroom.chat/deployment/sandbox-proxy/#credential-leases) saved settings and the worker's own environment, without the primary's `.env` secrets, so save a key such a call needs in the dashboard.
+The dashboard's Tools page counts only saved settings, so it can list a tool that environment variables configure as needing configuration.
 
 ### Clearing An Inherited Override
 
@@ -9494,13 +9493,6 @@ It runs arbitrary code, so its file functions are never confined to the workspac
 Both install functions install into the interpreter running the tool, which is the worker's environment when `python` is worker-routed.
 Worker-routed code can import modules saved in the workspace, but installed and standard-library modules take precedence over same-named workspace files, and user site-packages under the workspace home are not loaded.
 
-### Configuration
-
-| Option | Type | Required | Default | Notes |
-| --- | --- | --- | --- | --- |
-| `safe_globals` | `text` | `no` | `null` | Passed to Agno's `safe_globals` constructor argument; meant for programmatic wiring rather than hand-written YAML. |
-| `safe_locals` | `text` | `no` | `null` | Passed to Agno's `safe_locals` constructor argument; meant for programmatic wiring rather than hand-written YAML. |
-
 ### Example
 
 ```yaml
@@ -9778,7 +9770,7 @@ Use it to pick a tool, configure its connection, and understand why a tool is un
 | [`redshift`](#redshift) | Amazon Redshift inspection, queries, and export | Host, database, user, password |
 | [`neo4j`](#neo4j) | Neo4j labels, relationship types, schema, and Cypher queries | URI, user, password |
 | [`duckdb`](#duckdb) | Local analytical SQL over Parquet, CSV, JSON, and S3 files, with exports and full-text search | None |
-| [`csv`](#csv) | SQL over pre-registered CSV files | Not configurable from `config.yaml`; use `duckdb` |
+| [`csv`](#csv) | Reading and querying a fixed list of CSV files | Paths of the CSV files |
 | [`pandas`](#pandas) | In-memory dataframes and dataframe methods | None |
 | [`google_bigquery`](#google_bigquery) | Tables and SQL in one BigQuery dataset | Project, dataset, location, Google Cloud connection or service account |
 | [`google_drive`](#google_drive) | Listing, searching, reading, downloading, uploading, and organizing Drive files | Google Drive OAuth |
@@ -9792,7 +9784,6 @@ Use it to pick a tool, configure its connection, and understand why a tool is un
 
 Tools that need a connection or account stay unavailable in the dashboard until their required fields or OAuth connection are stored.
 Options of type `password` in the tables below cannot be set inline in `config.yaml`; see [Security Restrictions](https://docs.mindroom.chat/tools/#security-restrictions).
-`db_engine`, `tables`, `connection`, `init_commands`, `config`, `csvs`, `duckdb_connection`, `duckdb_kwargs`, and `obb` expect Python objects, lists, or mappings, so they cannot be set usefully from `config.yaml` or the dashboard.
 `sql`, `postgres`, `redshift`, `duckdb`, `csv`, and `pandas` can read or write local files that the agent's `file_access` setting does not confine, and `sql`, `duckdb`, and `pandas` always run in the primary runtime, so enable them only for agents you trust with what the MindRoom process can reach; see [File access](https://docs.mindroom.chat/architecture/security-posture/#file-access).
 The Google Drive, Docs, and Sheets tools connect through per-service OAuth, and `google_bigquery` uses the Google Cloud connection; see [Google Services OAuth For Local Installs](https://docs.mindroom.chat/deployment/google-services-user-oauth/) or [Google Services OAuth](https://docs.mindroom.chat/deployment/google-services-oauth/) for custom and hosted setups.
 Missing Python dependencies install automatically on first use; see [Automatic Dependency Installation](https://docs.mindroom.chat/tools/#automatic-dependency-installation).
@@ -9814,8 +9805,6 @@ For PostgreSQL or Redshift, the dedicated [`postgres`](#postgres) and [`redshift
 | `host` | `url` | `null` | Host for the assembled URL. |
 | `port` | `number` | `null` | Port for the assembled URL. |
 | `schema` | `text` | `null` | Database name in the assembled URL and schema for inspection. |
-| `db_engine` | `text` | `null` | Programmatic only: a live SQLAlchemy `Engine`. |
-| `tables` | `text` | `null` | Programmatic only: a table mapping that `list_tables()` returns instead of inspecting the database. |
 | `enable_list_tables` | `boolean` | `true` | Enable `list_tables()`. |
 | `enable_describe_table` | `boolean` | `true` | Enable `describe_table()`. |
 | `enable_run_sql_query` | `boolean` | `true` | Enable `run_sql_query()`. |
@@ -9836,7 +9825,6 @@ The connection is read-only, so queries cannot modify the database.
 | `user` | `text` | yes | `null` | Username. |
 | `password` | `password` | yes | `null` | Password. |
 | `table_schema` | `text` | no | `public` | Schema for table operations and the connection search path. |
-| `connection` | `text` | no | `null` | Programmatic only: an existing Psycopg connection. |
 
 ```yaml
 agents:
@@ -9853,7 +9841,9 @@ agents:
 
 `redshift` provides the same functions as [`postgres`](#postgres): `show_tables()`, `describe_table()`, `summarize_table()`, `inspect_query()`, `run_query()`, and `export_table_to_path()`.
 It authenticates with `user` and `password`, or with IAM through an AWS `profile` or explicit AWS keys when `iam: true`.
-Unset fields can fall back to the environment variables `REDSHIFT_HOST`, `REDSHIFT_DATABASE`, `REDSHIFT_DB_USER`, `REDSHIFT_CLUSTER_IDENTIFIER`, `AWS_REGION`, and `AWS_PROFILE`.
+Unset fields can fall back to the environment variables `REDSHIFT_HOST`, `REDSHIFT_DATABASE`, `REDSHIFT_DB_USER`, `REDSHIFT_CLUSTER_IDENTIFIER`, `AWS_REGION` (then `AWS_DEFAULT_REGION`), `AWS_PROFILE`, `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, and `AWS_SESSION_TOKEN`.
+These are the standard AWS variables, so AWS values set for another client, such as [Amazon Bedrock Claude](https://docs.mindroom.chat/configuration/models/#amazon-bedrock-claude), apply here too.
+With IAM, a `profile` wins over explicit AWS keys, so an `AWS_PROFILE` in the environment replaces keys saved for this tool.
 The dashboard treats `user` and `password` as required even when `iam` is enabled, so store values for both before the tool becomes available.
 
 | Option | Type | Required | Default | Notes |
@@ -9892,9 +9882,9 @@ Set `enable_run_cypher: false` to give an agent schema visibility without free-f
 
 | Option | Type | Required | Default | Notes |
 | --- | --- | --- | --- | --- |
-| `uri` | `url` | no | `null` | Connection URI such as `bolt://localhost:7687`; set it in practice. |
-| `user` | `text` | yes | `null` | Username. |
-| `password` | `password` | yes | `null` | Password. |
+| `uri` | `url` | no | `null` | Connection URI such as `bolt://localhost:7687`, or `NEO4J_URI`; set it in practice. |
+| `user` | `text` | yes | `null` | Username, or `NEO4J_USERNAME`. |
+| `password` | `password` | yes | `null` | Password, or `NEO4J_PASSWORD`. |
 | `database` | `text` | no | `null` | Target database. |
 | `enable_list_labels` | `boolean` | no | `true` | Enable `list_labels()`. |
 | `enable_list_relationships` | `boolean` | no | `true` | Enable `list_relationship_types()`. |
@@ -9924,9 +9914,7 @@ Without `db_path`, the database lives in memory and is not saved.
 | --- | --- | --- | --- |
 | `db_path` | `text` | `null` | Path to a persistent DuckDB database file. |
 | `read_only` | `boolean` | `false` | Open the database read-only. |
-| `connection` | `text` | `null` | Programmatic only: an existing DuckDB connection. |
-| `init_commands` | `text` | `null` | Programmatic only: a list of startup SQL commands. |
-| `config` | `text` | `null` | Programmatic only: a DuckDB config mapping. |
+| `init_commands` | `string[]` | `null` | SQL statements run in order when the tool opens its database, such as `INSTALL httpfs` and `LOAD httpfs`. |
 
 ```yaml
 agents:
@@ -9944,16 +9932,13 @@ export_table_to_path("orders", format="CSV", path="/tmp")
 
 ## [`csv`]
 
-`csv` provides `list_csv_files()`, `read_csv_file()`, `get_columns()`, and `query_csv_file()` over a pre-registered list of CSV files, each named by its filename stem.
-`config.yaml` and the dashboard accept `csvs` only as a string, so they cannot register a file list and the tool has no files to read; use [`duckdb`](#duckdb) to query CSV files.
+`csv` provides `list_csv_files()`, `read_csv_file()`, `get_columns()`, and `query_csv_file()` over the CSV files listed in `csvs`, each named by its filename stem.
 `query_csv_file()` runs only the first SQL statement it receives.
 
 | Option | Type | Default | Notes |
 | --- | --- | --- | --- |
-| `csvs` | `text` | `null` | Programmatic only: the list of CSV paths. |
+| `csvs` | `string[]` | `null` | Absolute paths of the CSV files the tool reads. |
 | `row_limit` | `number` | `null` | Default row cap for `read_csv_file()`. |
-| `duckdb_connection` | `text` | `null` | Programmatic only: an existing DuckDB connection. |
-| `duckdb_kwargs` | `text` | `null` | Programmatic only: DuckDB connection arguments. |
 | `enable_read_csv_file` | `boolean` | `true` | Enable `read_csv_file()`. |
 | `enable_list_csv_files` | `boolean` | `true` | Enable `list_csv_files()`. |
 | `enable_get_columns` | `boolean` | `true` | Enable `get_columns()`. |
@@ -10039,6 +10024,7 @@ Uploads and content replacement read local files according to the agent's [`file
 To change the content of a native Google Doc, use [`google_docs`](#google_docs).
 If the account is not connected, the tool returns an `OAuthConnectionRequired` result with a connect link; see [Google Services OAuth For Local Installs](https://docs.mindroom.chat/deployment/google-services-user-oauth/#connect).
 A connection that granted only read-only Drive access keeps working for reads, while writes ask the user to reconnect; see [Scope Rationale](https://docs.mindroom.chat/deployment/google-services-oauth/#scope-rationale).
+Set the `GOOGLE_CLOUD_QUOTA_PROJECT_ID` environment variable to charge Drive API quota and billing to that Google Cloud project.
 
 | Option | Type | Default | Notes |
 | --- | --- | --- | --- |
@@ -10127,7 +10113,6 @@ Choose `openbb` over [`yfinance`](#yfinance) when you need to switch data provid
 | --- | --- | --- | --- |
 | `provider` | `text` | `yfinance` | One of `yfinance`, `benzinga`, `fmp`, `intrinio`, `polygon`, `tiingo`, or `tmx`. |
 | `openbb_pat` | `password` | `null` | OpenBB personal access token for premium providers. |
-| `obb` | `text` | `null` | Programmatic only: a configured OpenBB instance. |
 | `enable_get_stock_price` | `boolean` | `true` | Enable `get_stock_price()`. |
 | `enable_search_company_symbol` | `boolean` | `false` | Enable `search_company_symbol()`. |
 | `enable_get_company_news` | `boolean` | `false` | Enable `get_company_news()`. |
@@ -10551,7 +10536,6 @@ WebRTC cannot send UDP from these browsers.
 
 `website` exposes `read_url(url)` and returns JSON page documents from MindRoom's WebsiteReader variant, which drops search UI, navigation, headers, footers, sidebars, hidden content, and modals before choosing the page text.
 Pages larger than 2 MiB fail, as do pages a server sends compressed.
-An entry that sets the retired `website.knowledge` option fails config load until you remove it.
 
 ```yaml
 agents:
@@ -10692,7 +10676,7 @@ agents:
 
 `spider` exposes `search_web(query, max_results=5)`, `scrape(url)`, and `crawl(url, limit=None)`, returning Markdown.
 Search results do not include full page content.
-It requires `SPIDER_API_KEY` in the environment even though the dashboard lists it as needing no setup, and it has no `api_key` field.
+It requires `SPIDER_API_KEY` in the process environment, which the `.env` does not set, even though the dashboard lists it as needing no setup, and it has no `api_key` field.
 
 | Option | Type | Default | Notes |
 | --- | --- | --- | --- |
@@ -10757,8 +10741,8 @@ It requires `api_key` or `BRIGHT_DATA_API_KEY`.
 | `enable_search_engine` | `boolean` | `true` | Enable `search_engine()`. |
 | `enable_web_data_feed` | `boolean` | `true` | Enable `web_data_feed()`. |
 | `all` | `boolean` | `false` | Enable every function. |
-| `serp_zone` | `text` | `serp_api` | SERP zone; `BRIGHT_DATA_SERP_ZONE` overrides it. |
-| `web_unlocker_zone` | `text` | `web_unlocker1` | Web unlocker zone; `BRIGHT_DATA_WEB_UNLOCKER_ZONE` overrides it. |
+| `serp_zone` | `text` | `serp_api` | SERP zone; `BRIGHT_DATA_SERP_ZONE` in the process environment overrides it, while a `.env` value applies only when no zone is set. |
+| `web_unlocker_zone` | `text` | `web_unlocker1` | Web unlocker zone; `BRIGHT_DATA_WEB_UNLOCKER_ZONE` in the process environment overrides it, while a `.env` value applies only when no zone is set. |
 | `verbose` | `boolean` | `false` | Log extra request detail. |
 | `timeout` | `number` | `600` | Timeout in seconds. |
 
@@ -10990,7 +10974,6 @@ An ambiguous query returns a list of candidate page titles instead of a summary,
 | Option | Type | Default | Notes |
 | --- | --- | --- | --- |
 | `auto_suggest` | `boolean` | `true` | Let Wikipedia suggest or correct the title before lookup; set `false` for exact-title lookup. |
-| `knowledge` | `text` | unset | Has no effect in YAML configuration; leave unset. |
 | `all` | `boolean` | `false` | Has no effect for this toolkit. |
 
 ```yaml
@@ -11117,7 +11100,7 @@ Generated images are square (1:1).
 | Option | Type | Default | Notes |
 | --- | --- | --- | --- |
 | `api_key` | `password` | `null` | Gemini API key, falling back to `GOOGLE_API_KEY`. Required unless Vertex AI mode is on. |
-| `vertexai` | `boolean` | `false` | Use Vertex AI instead of the Gemini API. `GOOGLE_GENAI_USE_VERTEXAI=true` also enables it. Required for `generate_video()`. |
+| `vertexai` | `boolean` | `false` | Use Vertex AI instead of the Gemini API. `GOOGLE_GENAI_USE_VERTEXAI=true` in the process environment also enables it; the `.env` does not. Required for `generate_video()`. |
 | `project_id` | `text` | `null` | Vertex project, falling back to `GOOGLE_CLOUD_PROJECT`. |
 | `location` | `text` | `null` | Vertex location, falling back to `GOOGLE_CLOUD_LOCATION`. |
 | `image_generation_model` | `text` | `gemini-nano-banana-2.1` | Model for `generate_image()` (Nano Banana 2.1). |
@@ -12229,7 +12212,7 @@ agents:
 ## [`twilio`]
 
 `twilio` sends SMS with `send_sms()`, looks up calls with `get_call_details()`, and lists recent messages with `list_messages()`.
-Authenticate with `account_sid` plus either `auth_token` or the `api_key` and `api_secret` pair.
+Authenticate with `account_sid` plus either `auth_token` or the `api_key` and `api_secret` pair; the pair wins when both are set.
 `send_sms()` rejects sender and recipient numbers that are not in E.164 format, such as `+15551234567`, and the sender must be a number on the Twilio account.
 
 | Option | Type | Default | Notes |
@@ -12238,8 +12221,8 @@ Authenticate with `account_sid` plus either `auth_token` or the `api_key` and `a
 | `auth_token` | `password` | `null` | Auth token, or `TWILIO_AUTH_TOKEN`. |
 | `api_key` | `password` | `null` | API key, or `TWILIO_API_KEY`; used with `api_secret`. |
 | `api_secret` | `password` | `null` | API secret, or `TWILIO_API_SECRET`; used with `api_key`. |
-| `region` | `text` | `null` | Twilio region, such as `au1`. |
-| `edge` | `text` | `null` | Twilio edge location, such as `sydney`. |
+| `region` | `text` | `null` | Twilio region, such as `au1`, or `TWILIO_REGION`. |
+| `edge` | `text` | `null` | Twilio edge location, such as `sydney`, or `TWILIO_EDGE`. |
 | `debug` | `boolean` | `false` | Log Twilio HTTP requests. |
 | `enable_send_sms` | `boolean` | `true` | Enable `send_sms()`. |
 | `enable_get_call_details` | `boolean` | `true` | Enable `get_call_details()`. |
@@ -12328,7 +12311,6 @@ A nonempty `allowed_subreddits` list limits posts and replies to those subreddit
 | `username` | `text` | `null` | Reddit username for posts and replies. |
 | `password` | `password` | `null` | Reddit password for posts and replies. |
 | `allowed_subreddits` | `string[]` | `null` | Subreddits permitted for posts and replies; `null` or `[]` allows all. |
-| `reddit_instance` | `text` | `null` | Programmatic only: an existing PRAW `Reddit` client, not settable from YAML. |
 
 ```yaml
 agents:
@@ -13902,7 +13884,7 @@ Use the per-function `enable_*` flags when an agent should, for example, only ch
 | `enable_cancel_booking` | `boolean` | `no` | `true` | Enable `cancel_booking()`. |
 | `all` | `boolean` | `no` | `false` | Enable every Cal.com function regardless of the `enable_*` flags. |
 
-Every function needs `api_key`, and slot lookup and new bookings also need `event_type_id`; supply them as stored credentials or through the `CALCOM_API_KEY` and `CALCOM_EVENT_TYPE_ID` environment variables of the MindRoom process.
+Every function needs `api_key`, and slot lookup and new bookings also need `event_type_id`; supply them as stored credentials or through the `CALCOM_API_KEY` and `CALCOM_EVENT_TYPE_ID` environment variables.
 
 ```yaml
 agents:
@@ -13943,7 +13925,7 @@ API keys are `password` fields, so set them in the dashboard or through the envi
 
 `mem0` gives the agent `add_memory()`, `search_memory()`, `get_all_memories()`, and `delete_all_memories()` backed by the `mem0ai` client.
 With an API key, it uses the hosted Mem0 Platform; without one, it uses Mem0's default setup, which stores memories locally but calls OpenAI for embeddings and memory extraction.
-That default setup requires `OPENAI_API_KEY` even when the agent itself uses another provider; without it, the `mem0` tool fails to load.
+That default setup requires `OPENAI_API_KEY` in the process environment, not the `.env`, even when the agent itself uses another provider; without it, the `mem0` tool fails to load.
 Local memories live outside MindRoom's storage directory, in `/tmp/qdrant` with history in `history.db` in Mem0's directory (`~/.mem0/`, or `MEM0_DIR` when set), so persist and back up those paths separately or the memories can be lost on reboot or container recreation.
 A custom local Mem0 config object cannot be set through MindRoom.
 
@@ -14186,7 +14168,9 @@ Authoring errors:
 
 Each child turn writes `run.json`, `events.jsonl`, and `transcript.md` to `.mindroom/delegations/YYYY-MM-DD/<delegation-id>/` in the child's workspace, dated by the delegation's start in UTC.
 `run.json` and `events.jsonl` update as the child runs, and `transcript.md` is written when the turn finishes.
-The `usage` in `run.json` and in each `usage` event of `events.jsonl` reports the child turn's token counts (`input_tokens`, `output_tokens`, `total_tokens`, `cache_read_tokens`, `cache_write_tokens`, `reasoning_tokens`, and the audio counts), `uncached_input_tokens` (input not read from the provider's cache), a `cost` when the provider reports one, and `time_to_first_token` and `duration` in seconds.
+The `usage` in `run.json` reports the child turn's token counts (`input_tokens`, `output_tokens`, `total_tokens`, `cache_read_tokens`, `cache_write_tokens`, `reasoning_tokens`, and the audio counts), `uncached_input_tokens` (input not read from the provider's cache), a `cost` when the provider reports one, and `time_to_first_token` and `duration` in seconds.
+It covers the turn's model runs, except a run that ended before the child paused for approval, such as an empty answer retried before the call it asked approval for.
+Each `usage` event of `events.jsonl` reports the same values for one model run as it stood when the event was written, so a run's last `usage` event is that run's total.
 Fractional values are decimal strings; a token count of zero and an unreported value are left out, while `uncached_input_tokens` and a reported cost or timing appear even when zero once the turn reported any usage.
 The caller receives a receipt at `.mindroom/delegation_receipts/YYYY-MM-DD/<delegation-id>.json` in its own workspace.
 Sensitive fields are redacted, and large outputs are stored as referenced artifacts.
@@ -14748,7 +14732,7 @@ The sandbox and platform tools read their key from the environment when none is 
 | --- | --- |
 | `e2b` | `E2B_API_KEY` |
 | `daytona` | `DAYTONA_API_KEY` (and `DAYTONA_API_URL` for `api_url`) |
-| `composio` | `COMPOSIO_API_KEY`, or cached Composio user data |
+| `composio` | `COMPOSIO_API_KEY` in the process environment, not the `.env`, or cached Composio user data |
 
 All these tools run in the primary runtime by default; `e2b`, `daytona`, and `composio` always do, even when listed in `worker_tools` (see [Worker Routing](https://docs.mindroom.chat/deployment/sandbox-proxy/#worker-routed-execution)).
 Missing Python dependencies install on first use; see [Automatic Dependency Installation](https://docs.mindroom.chat/tools/#automatic-dependency-installation).
@@ -14845,7 +14829,6 @@ Downloads always land inside the agent workspace at workspace-relative paths; ab
 | --- | --- | --- | --- |
 | `api_key` | `password` | `null` | E2B API key. |
 | `timeout` | `number` | `300` | Sandbox timeout in seconds. |
-| `sandbox_options` | `text` | `null` | Extra E2B sandbox-creation options; the SDK expects a mapping that tool config cannot express, so leave it unset. |
 
 ```yaml
 agents:
@@ -14913,10 +14896,6 @@ It is not confined by `file_access` and cannot run in a worker, so enable it onl
 | `base_url` | `url` | `null` | Composio API base URL. |
 | `entity_id` | `text` | `default` | Composio entity whose connected accounts run the actions. |
 | `workspace_id` | `text` | `null` | Composio workspace ID. |
-| `workspace_config` | `text` | `null` | Composio workspace configuration object; tool config cannot express it, so leave it unset. |
-| `connected_account_ids` | `text` | `null` | Mapping of apps to connected account IDs; tool config cannot express it, so leave it unset. |
-| `metadata` | `text` | `null` | Action metadata mapping; tool config cannot express it, so leave it unset. |
-| `processors` | `text` | `null` | Request, response, and schema processor mapping; tool config cannot express it, so leave it unset. |
 | `output_dir` | `text` | `null` | Directory for file-based results. |
 | `output_in_file` | `boolean` | `false` | Write action output to files. |
 | `lockfile` | `text` | `null` | Lockfile path for action-version locking. |
@@ -14924,7 +14903,6 @@ It is not confined by `file_access` and cannot run in a worker, so enable it onl
 | `max_retries` | `number` | `3` | Retries for failed Composio operations. |
 | `verbosity_level` | `number` | `null` | Verbosity from `0` to `3`. |
 | `allow_tracing` | `boolean` | `false` | Enable Composio tracing. |
-| `logging_level` | `text` | `INFO` | `DEBUG`, `INFO`, `WARNING`, `ERROR`, or `CRITICAL`. |
 
 ```yaml
 agents:
@@ -15009,7 +14987,7 @@ Missing Python dependencies install automatically on first use (see [Automatic D
 
 | Option | Type | Default | Notes |
 | --- | --- | --- | --- |
-| `key` | `password` | `null` | Google Maps API key; falls back to the `GOOGLE_MAPS_API_KEY` process environment variable. |
+| `key` | `password` | `null` | Google Maps API key; falls back to `GOOGLE_MAPS_API_KEY`. |
 | `search_places` | `boolean` | `true` | Enable `search_places()`. |
 | `get_directions` | `boolean` | `true` | Enable `get_directions()`. |
 | `validate_address` | `boolean` | `true` | Enable `validate_address()`. |
@@ -15044,7 +15022,7 @@ Weather lookups use the first geocoding match for the location name, so ambiguou
 
 | Option | Type | Default | Notes |
 | --- | --- | --- | --- |
-| `api_key` | `password` | `null` | OpenWeather API key; falls back to the `OPENWEATHER_API_KEY` process environment variable. A key is required for every call. |
+| `api_key` | `password` | `null` | OpenWeather API key; falls back to `OPENWEATHER_API_KEY`. A key is required for every call. |
 | `units` | `text` | `metric` | `standard`, `metric`, or `imperial`. |
 | `enable_current_weather` | `boolean` | `true` | Enable `get_current_weather()`. |
 | `enable_forecast` | `boolean` | `true` | Enable `get_forecast()`. |
@@ -15466,22 +15444,23 @@ An [adopted personal room](https://docs.mindroom.chat/personal-rooms/#adopting-a
 # OAuth Integration Framework
 
 This page covers how MindRoom stores credentials and how users connect OAuth accounts for tools and MCP servers.
-Use it to import or seed credentials, encrypt the credential store, connect or reset an OAuth account, decide who may manage a connection, and build OAuth providers in plugins.
+Use it to supply credentials from the environment or seeds, encrypt the credential store, connect or reset an OAuth account, decide who may manage a connection, and build OAuth providers in plugins.
 
 ## Credential Storage
 
-### Automatic Credential Import
+### Credentials from the Environment
 
-When MindRoom starts or `mindroom doctor` runs, it copies these variables from the process environment or the config-adjacent `.env` into the shared credentials store: `ANTHROPIC_API_KEY`, `AZURE_OPENAI_API_KEY`, `OPENAI_API_KEY`, `GOOGLE_API_KEY`, `OPENROUTER_API_KEY`, `DEEPSEEK_API_KEY`, `CEREBRAS_API_KEY`, `GROQ_API_KEY`, `ZAI_API_KEY`, `OLLAMA_HOST`, `GITHUB_TOKEN` (stored as `github_private`), `EMBEDDER_API_KEY` (stored as `embedder`), and `GOOGLE_APPLICATION_CREDENTIALS` (stored as `google_vertex_adc`).
+MindRoom reads these variables from the process environment or the config-adjacent `.env` as shared credentials: `ANTHROPIC_API_KEY`, `AZURE_OPENAI_API_KEY`, `OPENAI_API_KEY`, `GOOGLE_API_KEY`, `OPENROUTER_API_KEY`, `DEEPSEEK_API_KEY`, `CEREBRAS_API_KEY`, `GROQ_API_KEY`, `ZAI_API_KEY`, `OLLAMA_HOST`, `GITHUB_TOKEN` (as service `github_private`), `EMBEDDER_API_KEY` (as `embedder`), and `GOOGLE_APPLICATION_CREDENTIALS` (as `google_vertex_adc`).
 Every one of these except `GOOGLE_APPLICATION_CREDENTIALS` also accepts a `_FILE` variant, read only when the plain variable is unset or empty.
-Services declared through [Credential Seeds](#credential-seeds) are imported the same way.
-Import never overwrites credentials saved through the dashboard or credentials with no recorded source.
-When an imported value is first stored or changes, MindRoom logs a notice naming the service, the supplying variable, and whether it came from the process environment or `.env`; values are never logged.
-To stop an import, remove the variable and any `_FILE` variant from both the process environment and `.env`, then delete the stored credential in the dashboard or with `DELETE /api/credentials/{service}`.
+Services declared through [Credential Seeds](#credential-seeds) are supplied the same way.
+A credential saved for the same service in the dashboard wins over the variable; deleting that saved credential makes the variable apply again.
+MindRoom stores no copy: changes to these variables, their `_FILE` files, and seed declarations apply when MindRoom restarts, and a removed variable stops supplying its credential, including to workers granted it through `worker_grantable_credentials`.
+Deleting a credential that only the environment supplies changes nothing; remove the variable and restart instead.
+`mindroom doctor` reports which variable supplies each model provider's key.
 
 ### Credential Seeds
 
-Credential seeds create shared credential services at startup for deployment-managed credentials, such as an OAuth app's client ID and secret.
+Credential seeds supply shared credential services for deployment-managed credentials, such as an OAuth app's client ID and secret.
 Set `MINDROOM_CREDENTIAL_SEEDS_FILE` to a JSON file path (relative paths resolve from the config directory), or `MINDROOM_CREDENTIAL_SEEDS_JSON` to the same JSON inline.
 
 ```json
@@ -15500,10 +15479,10 @@ Set `MINDROOM_CREDENTIAL_SEEDS_FILE` to a JSON file path (relative paths resolve
 - If an env ref such as `EXAMPLE_CLIENT_SECRET` is unset, MindRoom also checks `EXAMPLE_CLIENT_SECRET_FILE` and reads that file.
 - If any declared field is missing or empty, MindRoom skips that seed instead of creating a partial credential.
 - Env and file refs always produce strings, so a tool's boolean field accepts the exact strings `true` and `false` as well as JSON booleans, and any other value makes that tool fail to load.
-- Seeds are reapplied on every startup but never replace credentials saved through the dashboard or with no recorded source.
+- A credential saved for the same service in the dashboard wins over its seed.
 - OAuth token services, whose names end with `_oauth`, cannot be seeded; connect them through OAuth instead.
   OAuth client configuration services, whose names end with `_oauth_client`, can be seeded.
-- To stop seeding one service, remove its entry from each declaration that lists it and delete the stored credential with `DELETE /api/credentials/{service}`.
+- To stop seeding one service, remove its entry from each declaration that lists it and restart.
 
 ### Credential Storage Encryption
 
@@ -15616,7 +15595,7 @@ These rules apply to built-in providers and to providers that plugins register (
   Only the OAuth callback writes it, and the generic credentials API neither returns OAuth token fields nor accepts direct writes to these services.
 - An optional `tool_config_service` holds the tool's editable dashboard settings separately from the token.
 - `tool_config_oauth_fallback_fields` (tuple of strings, default `()`) names token-like fields, such as `access_token`, that the dashboard may save to and show from `tool_config_service` as manual credentials; otherwise the dashboard strips token fields from that service.
-- `tool_config_oauth_fallback_env_vars` (tuple of strings, default `()`) names environment variables that, when all are set, make the dashboard show the provider's tools as configured without an OAuth connection.
+- The dashboard also shows a provider's tool as configured without an OAuth connection when the environment sets every one of the tool's `oauth_fallback_fields` through the variables those fields declare in `env`.
 - `client_config_services` lists, in lookup order, services holding the OAuth app's `client_id`, `client_secret`, and optional `redirect_uri`; every name must end with `_oauth_client`.
 - `shared_client_config_services` are checked after those and supply one app ID and secret for several providers, such as `google_oauth_client`; they never supply `redirect_uri`, so each provider keeps its own callback URL.
 - Public clients set `token_endpoint_auth_method: none` and need only `client_id`; confidential clients need both `client_id` and `client_secret`.
@@ -16058,6 +16037,11 @@ Examples are symlinks or files planted in shared workspaces that the primary lat
 ### Config and state kept out of workers
 
 Runners and dedicated workers never receive the primary's config file, its directory, its `.env`, a ConfigMap holding it, or the credential encryption key.
+Neither Docker nor Kubernetes backend settings reach a dedicated worker's startup manifest; Kubernetes passes only its storage-subpath prefix, which the runner needs.
+Credentials the primary's environment declares (provider keys, `GITHUB_TOKEN`, credential seeds) are read only by the primary, under the credentials saved in its store, and never stored; every runner establishes runner mode at startup and never reads them, and a worker receives one only as a granted mirror copy or in a per-call credential lease.
+OAuth app client configurations (`*_oauth_client`) live in the primary's own store for every worker scope, so a worker's store never supplies one.
+A secret tool setting the primary reads from its `.env` configures only the toolkit the primary builds; a worker-routed call rebuilds the toolkit from its leased saved settings and the worker's own environment.
+A Docker dedicated worker's environment includes the non-secret startup names it receives from the primary's environment and `.env`, so the tool settings among them, `AWS_REGION`, `AWS_DEFAULT_REGION`, `AWS_PROFILE`, `GOOGLE_CLOUD_PROJECT`, and `GOOGLE_CLOUD_LOCATION`, also configure the toolkit it rebuilds.
 The config sent to runners with each request, and the config file projected into each Docker worker, hold only the fields runners resolve; models, MCP servers, plugin settings, and every other section stay in the primary, and a worker-routed call carries only the called tool's own inline overrides.
 
 Of the agents' data, dedicated Docker and Kubernetes workers mount only workspaces and shared directories, never the agent state roots around them, so sessions, memory, Mem0 data, and private-instance identity records stay out of every worker.
@@ -16278,7 +16262,7 @@ Do not report or "fix" these; they are deliberate.
 - Inviting an agent to a shared directory makes it readable to every requester of that agent, and the invitation needs only the inviting user's access to that agent, because that user could already relay the files in chat.
 - A user who may use both agents can restart the invited agent's dedicated workers by inviting and removing it repeatedly, which ends their background shells.
 - Removing a member or deleting a shared directory takes effect for a member's dedicated worker on that worker's next tool call, so until then its running processes can still read the directory, including files written after the removal.
-- Removing a service from `defaults.worker_grantable_credentials` deletes its copy from a running dedicated worker at that worker's next tool call, not at the config reload, so until then, or until the worker stops for being idle, its running processes can still read the credential.
+- Removing a service from `defaults.worker_grantable_credentials`, or removing the environment variable that declares a granted credential and restarting, deletes its copy from a running dedicated worker at that worker's next tool call, not at the config reload, so until then, or until the worker stops for being idle, its running processes can still read the credential.
   Worker code may already have copied a credential it was granted, so rotate the credential at its provider to revoke it.
 - A team's `access` authorizes its exact member agents for team requests, in Matrix and the OpenAI-compatible API, even members whose own `access` would not admit the requester directly; adding an agent to a team is a deliberate grant.
 - A response's CLI grant, in minimal mode or for a standard-mode agent whose shell can reach MindRoom, is in the environment of its shell commands, so other code in the same worker can use that requester's tools through it until the response and its background jobs end; code that shares a worker already shares its trust.
@@ -16702,25 +16686,34 @@ Pointing `tools_module` and `hooks_module` at the same file is allowed.
 ## Tools module
 
 A tools module registers tool factories with `@register_tool_with_metadata`.
-Each factory returns a **Toolkit class**, not an instance, and MindRoom constructs it when building agents.
+Each factory returns a toolkit class, not an instance, and MindRoom constructs it when building agents.
 
 ### Minimal example
 
 ```python
-from __future__ import annotations
-
-from typing import TYPE_CHECKING
-
 from mindroom.plugin_api import (
     SetupType,
     ToolCategory,
     ToolFileAccess,
+    Toolkit,
     ToolStatus,
     register_tool_with_metadata,
+    tool,
 )
 
-if TYPE_CHECKING:
-    from agno.tools import Toolkit
+
+class GreeterTools(Toolkit):
+    name = "greeter"
+    instructions = "Greet people by the name they gave."
+
+    @tool
+    def greet(self, name: str) -> str:
+        """Greet someone by name.
+
+        Args:
+            name: The person's name.
+        """
+        return f"Hello, {name}!"
 
 
 @register_tool_with_metadata(
@@ -16732,21 +16725,18 @@ if TYPE_CHECKING:
     status=ToolStatus.AVAILABLE,
     setup_type=SetupType.NONE,
 )
-def greeter_tools() -> type[Toolkit]:
-    from agno.tools import Toolkit
-
-    class GreeterTools(Toolkit):
-        def __init__(self) -> None:
-            super().__init__(name="greeter", tools=[self.greet])
-
-        def greet(self, name: str) -> str:
-            """Greet someone by name."""
-            return f"Hello, {name}!"
-
+def greeter_tools() -> type[GreeterTools]:
     return GreeterTools
 ```
 
-Pass `instructions="..."` to `Toolkit.__init__` for guidance on the toolkit as a whole: it appears in the system prompt of every agent that offers one of the toolkit's functions, while each function's docstring is that function's description.
+Each `@tool` method, synchronous or `async`, is a function the model can call, and `@tool(name="...")` offers it under another name.
+The model reads its docstring as its description, its `Args:` entries as parameter descriptions, and its annotations as parameter types.
+A `@tool` method receives only the model's arguments, so MindRoom refuses one that takes `agent`, `team`, or `run_context`; read the call through `current_call()` instead.
+Annotations are read when an agent is built, so import the types they name at runtime, not only under `TYPE_CHECKING`.
+An agent leaves out a toolkit with a refused parameter or an annotation that does not resolve, and logs `Could not load tool for agent construction`.
+`mindroom plugins check` reports both for the `@tool` methods of a `mindroom.plugin_api.Toolkit` class, naming the tool and function.
+`instructions` is guidance on the toolkit as a whole: it appears in the system prompt of every agent that offers one of the toolkit's functions.
+A factory may also return an Agno toolkit class, for example to offer one of Agno's own toolkits.
 
 A `str` parameter receives the model's string unchanged, and a `Literal[...]` parameter each of its choices, so a choice may be named `none` or `true`.
 A parameter with a default, such as `title: str | None = None`, receives a model's `"none"` or `"null"`, in any case, as `None` unless that exact string is one of its choices.
@@ -16809,11 +16799,12 @@ See [Security Posture](https://docs.mindroom.chat/architecture/security-posture/
 | `requires_conversation` | bool | `False` | The tool needs the calling agent's conversation but no room, so it is hidden from the MCP gateway |
 | `executes_code` | bool | `False` | The tool runs arbitrary programs; MindRoom warns at startup when such a tool runs in a worker while the same agent keeps unconfined tools in the primary process |
 | `supports_toolkit_filters` | bool | `True` | Accept the [`include_tools` and `exclude_tools`](https://docs.mindroom.chat/tools/#filtering-toolkit-functions) inline overrides |
-| `worker_inert_agent_functions` | tuple of strings | `()` | Functions whose injected `agent` parameter is unused and can receive `None` in a worker |
+| `worker_inert_agent_functions` | tuple of strings | `()` | Agno toolkit functions whose injected `agent` parameter is unused and can receive `None` in a worker |
 
-Set `requires_primary_runtime=True` when the toolkit depends on primary-process services, keeps state or an open resource between calls, or reads or changes an injected `Agent`, `Team`, or `RunContext`.
+Set `requires_primary_runtime=True` when the toolkit depends on primary-process services, keeps state or an open resource between calls, or needs what [`current_call()` or `get_tool_runtime_context()`](#tool-runtime-context) returns, since both return `None` in a worker.
 A worker builds a fresh toolkit for every call and accepts only JSON values and paths as arguments.
-If an SDK function accepts an `agent` parameter but never uses it, list it in `worker_inert_agent_functions` instead; never do this for functions that depend on agent identity, configuration, or session state.
+An Agno toolkit function that reads its injected `agent`, `team`, or `run_context` needs the primary runtime too.
+If it accepts an `agent` parameter but never uses it, list it in `worker_inert_agent_functions` instead; never do this for functions that depend on agent identity, configuration, or session state.
 `requires_room_context` and `requires_primary_runtime` describe where a tool can run; they do not grant or replace tool authorization.
 
 ### Dependencies
@@ -16839,19 +16830,44 @@ Each `ConfigField` describes one constructor parameter that users can set throug
 | `options` | list | `None` | For `select`: a list of `{"label": "...", "value": "..."}` dicts |
 | `validation` | dict | `None` | Validation rules such as min, max, or pattern |
 | `authored_override` | bool | `True` | Set to `False` to forbid setting the field inline in `config.yaml`; `password` fields are never allowed inline (see [Per-Agent Tool Configuration](https://docs.mindroom.chat/tools/#per-agent-tool-configuration)) |
+| `env` | tuple of strings | `()` | Environment variables the field falls back to, in order, when nothing else sets it (see [How Settings Combine](https://docs.mindroom.chat/tools/#how-settings-combine)) |
 
 A `ConfigField` `default` only pre-fills the dashboard form and is not passed to the constructor.
 When no value is stored or configured, the constructor's Python default applies, so give optional parameters matching defaults, such as `units: str = "metric"` below.
 
 ```python
+import httpx
+
 from mindroom.plugin_api import (
     ConfigField,
     SetupType,
     ToolCategory,
     ToolFileAccess,
+    Toolkit,
     ToolStatus,
     register_tool_with_metadata,
+    tool,
 )
+
+
+class WeatherTools(Toolkit):
+    name = "weather"
+
+    def __init__(self, *, api_key: str, units: str = "metric") -> None:
+        super().__init__()
+        self.api_key = api_key
+        self.units = units
+
+    @tool
+    def current_weather(self, city: str) -> str:
+        """Get the current weather in a city."""
+        response = httpx.get(
+            "https://api.openweathermap.org/data/2.5/weather",
+            params={"q": city, "units": self.units, "appid": self.api_key},
+            timeout=10,
+        )
+        return response.text
+
 
 @register_tool_with_metadata(
     name="weather",
@@ -16876,8 +16892,8 @@ from mindroom.plugin_api import (
         ),
     ],
 )
-def weather_tools() -> type[Toolkit]:
-    ...
+def weather_tools() -> type[WeatherTools]:
+    return WeatherTools
 ```
 
 ### Managed init args
@@ -16887,7 +16903,7 @@ Only declared values are passed; MindRoom does not detect them from parameter na
 
 | Value | Constructor kwarg | Description |
 | --- | --- | --- |
-| `RUNTIME_PATHS` | `runtime_paths` | Storage paths, environment values, and data directory access |
+| `RUNTIME_PATHS` | `runtime_paths` | Storage paths, environment values, and data directory access; in a worker, the worker's own, so a variable set only for the primary reads as unset |
 | `CREDENTIALS_MANAGER` | `credentials_manager` | Read and write the per-tool credentials store |
 | `RUNTIME_CONFIG` | `runtime_config` | The active MindRoom config, when available |
 | `AGENT_NAME` | `agent_name` | The constructing agent's name, when available |
@@ -16899,8 +16915,27 @@ Only declared values are passed; MindRoom does not detect them from parameter na
 | `AGENT_STATE_ROOT` | `agent_state_root` | The constructing agent's state root in the primary runtime, requester-scoped for private agents; `None` inside workers |
 
 ```python
-from agno.tools import Toolkit
-from mindroom.plugin_api import ToolCategory, ToolFileAccess, ToolManagedInitArg, register_tool_with_metadata
+from mindroom.plugin_api import (
+    ToolCategory,
+    ToolFileAccess,
+    Toolkit,
+    ToolManagedInitArg,
+    register_tool_with_metadata,
+    tool,
+)
+
+
+class NeedsRuntimeTools(Toolkit):
+    name = "needs_runtime"
+
+    def __init__(self, *, runtime_paths) -> None:
+        super().__init__()
+        self.runtime_paths = runtime_paths
+
+    @tool
+    def greeting(self) -> str:
+        """Return the greeting set in MindRoom's environment."""
+        return self.runtime_paths.env_value("GREETING", default="Hello!")
 
 
 @register_tool_with_metadata(
@@ -16911,12 +16946,7 @@ from mindroom.plugin_api import ToolCategory, ToolFileAccess, ToolManagedInitArg
     category=ToolCategory.DEVELOPMENT,
     managed_init_args=(ToolManagedInitArg.RUNTIME_PATHS,),
 )
-def needs_runtime_tools() -> type[Toolkit]:
-    class NeedsRuntimeTools(Toolkit):
-        def __init__(self, *, runtime_paths):
-            self.runtime_paths = runtime_paths
-            super().__init__(name="needs_runtime", tools=[])
-
+def needs_runtime_tools() -> type[NeedsRuntimeTools]:
     return NeedsRuntimeTools
 ```
 
@@ -16926,6 +16956,9 @@ Inside a Matrix-connected agent run, `mindroom.plugin_api.get_tool_runtime_conte
 It carries `room_id`, `thread_id`, `resolved_thread_id`, `requester_id`, `agent_name`, the Matrix client, the active config, and runtime paths.
 `thread_id` is the thread the inbound message named, while `resolved_thread_id` is the conversation thread after plain replies are resolved to their thread.
 
+Inside a tool call, `mindroom.plugin_api.current_call()` returns a `CurrentCall`, or `None` outside one, such as when code calls the method directly.
+It carries the provider's `call_id`, the agent's `tools:` entry that offered the function as `toolkit`, the `session_id`, the `session_state` dict the function may change in place and MindRoom stores after the run, the team's stored conversation as `history_scope` in a team run, and the same `ToolRuntimeContext` as `runtime`.
+
 ### Calling a configured model
 
 A tool that runs its own model calls, such as a research loop, builds a provider for a model named in `config.yaml` and sends it one prompt at a time:
@@ -16934,10 +16967,12 @@ A tool that runs its own model calls, such as a research loop, builds a provider
 from pydantic import BaseModel
 
 from mindroom.plugin_api import (
+    ModelScope,
     build_execution_identity_from_runtime_context,
     build_model_provider,
     complete_prompt,
     get_tool_runtime_context,
+    resolve_turn_model,
 )
 
 
@@ -16950,16 +16985,26 @@ async def find(question: str) -> Finding | str:
     context = get_tool_runtime_context()
     if context is None:
         return "This tool runs only inside an agent's Matrix conversation."
+    scope = ModelScope(
+        entity=context.agent_name,
+        room_id=context.room_id,
+        thread_id=context.resolved_thread_id,
+        explicit=context.active_model_name,
+    )
     provider = build_model_provider(
         context.config,
         context.runtime_paths,
-        "default",
+        resolve_turn_model(context.config, context.runtime_paths, scope, None).model_name,
         execution_identity=build_execution_identity_from_runtime_context(context),
     )
     result = await complete_prompt(provider, question, instructions=["Cite one source."], schema=Finding)
     return result.content
 ```
 
+`resolve_turn_model` names the model the calling agent's turn runs: the model the turn is running with (`active_model_name`, such as a scheduled task's model or a switch), else the model chosen for its thread or room.
+Inside an agent's reply the active model already reflects the requester's [budget](https://docs.mindroom.chat/budgets/) fallback; where no model is active, `None` as the last argument skips that fallback.
+Pass a model name from `config.yaml` to `build_model_provider` instead to call a fixed model.
+`build_model_provider` returns a `ModelProvider`, the type to annotate a provider with.
 The provider uses the model entry's credentials, base URL, and request settings.
 With `schema`, `result.content` is an instance of that model, or the raw text when the answer does not parse; without it, `result.content` is the answer text.
 Each call is one request with no tools and no conversation history.
@@ -19801,7 +19846,7 @@ Runtime `.env` values and provider API keys such as `OPENAI_API_KEY` and `ANTHRO
 Worker-routed `python` receives only allowed runtime names.
 
 To pass more variables to `shell`, set the shell tool's `extra_env_passthrough` to exact names or glob patterns of exported process variables; it does not match config-adjacent `.env` entries.
-Everything that matches passes through, including service tokens and provider credentials, except MindRoom's own control variables such as credential seeds, Kubernetes worker backend settings, `MINDROOM_CREDENTIALS_ENCRYPTION_KEY`, and any name starting with `MINDROOM_SANDBOX_`.
+Everything that matches passes through, including service tokens and provider credentials, except MindRoom's own control variables such as credential seeds, Docker and Kubernetes worker backend settings, `MINDROOM_CREDENTIALS_ENCRYPTION_KEY`, and any name starting with `MINDROOM_SANDBOX_`.
 Use `shell_path_prepend` to add directories, such as wrapper directories, ahead of the existing `PATH`.
 Both options are documented with the [shell tool](https://docs.mindroom.chat/tools/execution-and-coding/#shell).
 A plugin's [`tool:environment` hook](https://docs.mindroom.chat/hooks/#shell-command-environment-toolenvironment) can also set, remove, or pass through variables for one call's commands.
@@ -21309,7 +21354,7 @@ MindRoom stores data in `mindroom_data/` next to `config.yaml` by default; set `
 - `knowledge_git/` - Git data of [Git-backed knowledge bases](https://docs.mindroom.chat/knowledge/#checkout-layout)
 - `tracking/` - Durable response and callback state, including the SQLite event journal, that prevents duplicate replies across restarts
 - `control_state/` - Primary-only control records, such as [external triggers](https://docs.mindroom.chat/external-triggers/), [background script](https://docs.mindroom.chat/tools/background-scripts/) runs, and [`matrix_message`](https://docs.mindroom.chat/tools/matrix-message/#safe-send-retries) send receipts, unless [`MINDROOM_CONTROL_STATE_PATH`](https://docs.mindroom.chat/configuration/#environment-variables) points elsewhere
-- `credentials/` - Secrets synchronized from `.env`
+- `credentials/` - Credentials saved in the dashboard or by tools; keys from the environment are read at each start and not stored (see [Credentials from the Environment](https://docs.mindroom.chat/oauth-framework/#credentials-from-the-environment))
 - `private_oauth/` - Per-user and per-agent connection credentials, such as OAuth tokens
 - `egress_broker/` - Agent Keys CA, worker token signing key, and request log (see [Resetting broker state](https://docs.mindroom.chat/deployment/egress-broker/#resetting-broker-state))
 - `budgets/` - Per-user caps set on the [Budgets](https://docs.mindroom.chat/budgets/#per-user-caps) page or through the Budget API
@@ -21927,6 +21972,17 @@ Use this page when upgrading an existing deployment across a release that needs 
 Each section names the change, what to do before or after the upgrade, and what does not carry over.
 Always back up configuration and persistent storage before replacing the running version, and never run two backend versions against the same storage at once.
 
+## Upgrading to progress kept in conversation order
+
+This upgrade needs no action: conversation databases convert at the first start without a backup, and memory auto-flush, knowledge-graph ingestion, and the `exploration` automation convert their progress when they next read each conversation.
+
+### Going back from progress kept in conversation order
+
+The release before this one reads the converted databases, but its memory auto-flush and knowledge-graph ingestion then fail on every pass for each agent or graph whose progress converted, logging `Memory auto-flush failed for an agent` or `Knowledge graph ingestion failed for an agent`.
+To go back, stop MindRoom, then restore `tracking/memory_auto_flush.json` and each `knowledge_graph/ingestion/<graph>.json` under the storage root from a backup taken before the upgrade, or delete them.
+Without those files, auto-flush starts again with the turns after the next start, and ingestion reads the conversations active within `knowledge_graph.ingest.backfill_days` again, which pays for that extraction again.
+That release's usage reports also leave out the usage recorded while this release ran.
+
 ## Upgrading to one owner per conversation database
 
 The first start after this upgrade converts every conversation database once more before any agent comes online, as the [conversation storage v2](#upgrading-to-conversation-storage-v2) upgrade did, so that each records the agent, team, or internal usage store it belongs to.
@@ -22131,9 +22187,12 @@ Smaller changes that need operator action:
 - **Mem0 history file**: Mem0 memory keeps its history in `mem0/` in each agent's state root, and stored memories carry over; MindRoom does not read the `history.db` in Mem0's own directory (`~/.mem0/`, or `MEM0_DIR` when set), which can hold the text of deleted memories, so delete that file unless an agent uses the [`mem0` tool](https://docs.mindroom.chat/tools/memory-and-storage/#mem0) without an API key, which keeps its history there.
   `mem0` is now a reserved name, so an agent whose `private.root` starts with `mem0` fails config load until you rename it.
 - **Boolean tool settings**: stored tool config values for boolean fields, including credential seeds read from environment variables or files, must be JSON booleans, JSON `null`, or exactly `true` or `false`; any other value makes the tool fail to load with an error naming the field.
-- **Retired Agno settings and unsupported model keys**: when you upgrade, delete `learning` and `learning_mode` (see [Agno Learning](https://docs.mindroom.chat/memory/#agno-learning)), `compress_tool_results` (see [History Settings](https://docs.mindroom.chat/configuration/history/#history-settings)), and the `website` tool's `knowledge` option (see [`website`](https://docs.mindroom.chat/tools/web-scraping-and-browser/#website)) from `config.yaml`.
+- **Retired Agno settings and unsupported model keys**: when you upgrade, delete `learning` and `learning_mode`, `compress_tool_results`, and the `website` tool's `knowledge` option from `config.yaml`, since each fails config load.
   Configs created by older `mindroom config init` runs set `learning: false` on the `mind` agent.
+  The `learning/<agent>.db` databases that Agno Learning left under agent state roots are unused, and you can delete them.
   Also delete every `extra_kwargs` key a model's provider does not accept, such as the retired Agno setting `retries` or a misspelled key, on every model, including models no agent uses; [Extra Kwargs](https://docs.mindroom.chat/configuration/models/#extra-kwargs) lists the accepted keys.
+- **Tool settings that took Python objects**: delete these settings, which no config value could supply, from every tool entry in `config.yaml`, since each fails config load: `db_engine` and `tables` of `sql`, `connection` of `postgres`, `connection` and `config` of `duckdb`, `duckdb_connection` and `duckdb_kwargs` of `csv`, `obb` of `openbb`, `safe_globals` and `safe_locals` of `python`, `reddit_instance` of `reddit`, `knowledge` of `wikipedia`, `sandbox_options` of `e2b`, and `workspace_config`, `connected_account_ids`, `metadata`, `processors`, and `logging_level` of `composio`.
+  Values saved for them in the dashboard are ignored.
 - **Unknown config keys**: every section of `config.yaml` except free-form maps, such as a plugin's `settings` and `memory.llm.config`, rejects keys MindRoom does not define, so a misspelled or leftover key, such as one under `memory`, `models`, `knowledge_bases`, `voice`, `router`, `plugins`, `authorization`, or an agent's `private` or `compaction`, fails config load with `Unknown key` even when nothing uses it; before upgrading, run the new release's `mindroom config validate` and delete or correct each key it names.
 - **Sandbox runner release**: a `static_runner` sandbox runner from a release with another worker protocol, such as a Compose `sandbox-runner` service that was not pulled again, is refused and the calls routed to it fail, so upgrade it together with the primary (see [Keeping worker versions matched](https://docs.mindroom.chat/deployment/sandbox-proxy/#keeping-worker-versions-matched)).
 - **Model providers**: a model whose `provider` is not one of the [supported providers](https://docs.mindroom.chat/configuration/models/#supported-providers) fails config load, even when no agent uses it, so `mindroom run` and the dashboard do not start until you fix or delete that model in `config.yaml`; this includes models saved earlier with Together, Mistral, Perplexity, Cohere, or xAI.
@@ -22145,6 +22204,8 @@ Smaller changes that need operator action:
 - **Retired prompt overrides**: a [`prompts`](https://docs.mindroom.chat/configuration/#built-in-prompt-overrides) entry for `DEFAULT_UNSEEN_MESSAGES_HEADER`, `INTERRUPTED_PARTIAL_REPLY_HEADER`, `MIXED_PARTIAL_REPLY_HEADER`, or `PREVIOUS_CONVERSATION_THREAD_HEADER` fails validation as an unknown prompt, so delete it from `config.yaml`; no prompt rendered these headers, so removing them changes no text a model reads.
 - **Dedicated workers**: the upgrade replaces every Docker and Kubernetes worker once on its next use, which ends background shell commands running in it.
   Kubernetes background scripts still running during the upgrade are interrupted when MindRoom starts again instead of resuming; start them again.
+- **Credentials from the environment**: the first start, or `mindroom doctor`, deletes the credential files earlier releases copied from provider-key variables, `OLLAMA_HOST`, `GITHUB_TOKEN`, `EMBEDDER_API_KEY`, `GOOGLE_APPLICATION_CREDENTIALS`, and credential seeds; MindRoom now reads those values from the environment at each start (see [Credentials from the Environment](https://docs.mindroom.chat/oauth-framework/#credentials-from-the-environment)).
+  Before upgrading, set again any such variable you removed after MindRoom imported it, or save that credential in the dashboard, or the key stops working; startup logs each removed service whose variable is no longer set.
 - **Docker worker config**: Docker workers get the config MindRoom has applied, and `MINDROOM_DOCKER_WORKER_HOST_CONFIG_PATH` only says where that config's directory is on the Docker host; a separate file at that path is no longer read, so move any worker-only settings into `config.yaml`.
 
 ### Compaction History
@@ -22512,7 +22573,7 @@ It checks, in one pass:
 
 - **Config file**: exists, is valid YAML, and matches the config schema.
 - **Providers**: API keys for each configured provider (Anthropic, OpenAI, Ollama, Vertex AI Claude, and others) are valid.
-  Doctor checks the key the runtime uses, whether it comes from the environment or was saved in the dashboard, and names its source (see [Automatic Credential Import](https://docs.mindroom.chat/oauth-framework/#automatic-credential-import)).
+  Doctor checks the key the runtime uses, whether it comes from the environment or was saved in the dashboard, and names its source (see [Credentials from the Environment](https://docs.mindroom.chat/oauth-framework/#credentials-from-the-environment)).
   Doctor skips the key check and reports it as not checked for a model that uses a custom endpoint, meaning its config sets an endpoint or headers (such as `base_url` or `default_headers`) or its provider's endpoint variable (such as `OPENAI_BASE_URL`) is set.
 - **Memory config**: the memory LLM and embedder are reachable (Ollama, OpenAI embeddings, sentence-transformers).
 - **Matrix homeserver**: the homeserver answers `/_matrix/client/versions`.

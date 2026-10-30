@@ -44,7 +44,7 @@ from mindroom.model_defaults import (
 from mindroom.path_confinement import open_directory_within_root, read_regular_file_within_root
 from mindroom.providers.names import provider_route
 from mindroom.runtime_env_policy import (
-    AWS_BEDROCK_CLAUDE_ENV_BY_KEY,
+    AWS_ENV_BY_KEY,
     AZURE_OPENAI_ENV_BY_KEY,
     ENV_TEMPLATE_PLACEHOLDERS,
     VERTEXAI_CLAUDE_ENV_BY_KEY,
@@ -618,7 +618,7 @@ def _prompt_provider_key(
     interactive: bool,
 ) -> str | None:
     """Ask a terminal for the preset's API key with hidden input; return None when none was typed or none is needed."""
-    from mindroom.credentials.sync import get_secret_from_env  # noqa: PLC0415
+    from mindroom.credentials.environment import get_secret_from_env  # noqa: PLC0415
 
     env_key = _preset_api_key_env(selected_preset)
     if selected_preset not in _API_KEY_PRESETS or env_key is None:
@@ -1018,9 +1018,9 @@ def _variables_a_model_reads(route: str, model: ModelConfig, *, has_key: bool) -
             return []
         return [
             (
-                AWS_BEDROCK_CLAUDE_ENV_BY_KEY["region"],
-                AWS_BEDROCK_CLAUDE_ENV_BY_KEY["default_region"],
-                AWS_BEDROCK_CLAUDE_ENV_BY_KEY["profile"],
+                AWS_ENV_BY_KEY["region"],
+                AWS_ENV_BY_KEY["default_region"],
+                AWS_ENV_BY_KEY["profile"],
             ),
         ]
     if route == "azure":
@@ -1044,7 +1044,7 @@ def _find_missing_env_keys(config: Config, runtime_paths: RuntimePaths) -> list[
 
     A key the credential store holds for the model or its route counts as set, as it does for the runtime.
     """
-    from mindroom.credentials.sync import get_secret_from_env  # noqa: PLC0415
+    from mindroom.credentials.environment import get_secret_from_env  # noqa: PLC0415
 
     with_key = _models_with_a_key(config, runtime_paths)
     missing: dict[tuple[str, str], list[str]] = {}
@@ -1458,9 +1458,9 @@ def worker_dashboard_api_key_needed(runtime_paths: constants.RuntimePaths) -> bo
     Worker shells keep network access to the primary, so an open API would hand them
     MindRoom's configuration. An explicitly empty key keeps open access.
     """
-    from mindroom.workers.runtime import primary_worker_backend_is_dedicated  # noqa: PLC0415
+    from mindroom.workers.backend_kinds import worker_backend_kind  # noqa: PLC0415
 
-    return runtime_paths.env_value("MINDROOM_API_KEY") is None and primary_worker_backend_is_dedicated(runtime_paths)
+    return runtime_paths.env_value("MINDROOM_API_KEY") is None and worker_backend_kind(runtime_paths).dedicated
 
 
 def ensure_worker_dashboard_api_key(runtime_paths: constants.RuntimePaths, *, dashboard_has_credential: bool) -> bool:

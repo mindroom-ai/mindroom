@@ -742,8 +742,17 @@ def test_a_pending_approval_before_the_cut_survives(store: ConversationStore) ->
     assert _keys(store)["p0"] == (1, 0)
 
 
+def _redaction_basis(store: ConversationStore) -> summary_rows.RedactionBasis:
+    with store.transaction(write=False) as connection:
+        return summary_rows.read_redaction_basis(connection, store.names, session_id="s1", scope_key=_AGENT)
+
+
 def test_a_cut_takes_a_run_that_folded_on_both_sides_of_its_pause_whole(store: ConversationStore) -> None:
-    """Redacting a turn the resumed run folded removes that run, its earlier fold, and everything after it."""
+    """Redacting a turn the resumed run folded removes that run, its earlier fold, and everything after it.
+
+    The read-only cut starts where the redaction's cut does; a cut at a fold row keeps the run that row sorts after,
+    and an event no element holds cuts nothing.
+    """
     _save(store, _run("r1"))
     running = _run("approval", RunStatus.running)
     assert _fold(store, running, "S1") is not None
@@ -752,6 +761,10 @@ def test_a_cut_takes_a_run_that_folded_on_both_sides_of_its_pause_whole(store: C
     _save(store, _run("r2"), _run("r3"))
     assert _fold(store, running, "S2") is not None
     assert _keys(store) == {"r1": (1, 0), "S1": (1, 1), "r2": (3, 0), "r3": (4, 0), "S2": (4, 2), "approval": (5, 0)}
+    basis = _redaction_basis(store)
+    assert basis.first_removed_seq(["$r3"]) == 2
+    assert basis.first_removed_seq(["$r1", "$r3"]) == 1
+    assert basis.first_removed_seq(["$unknown"]) is None
 
     assert _redact(store, "$r3")
 
@@ -759,6 +772,23 @@ def test_a_cut_takes_a_run_that_folded_on_both_sides_of_its_pause_whole(store: C
     assert _loaded_ids(store) == ["r1"]
     assert _replayed(store) is None
     assert _removed(store) == {"r2", "r3", "approval"}
+
+
+def test_redaction_candidates_are_every_event_an_element_holds_for_a_cut(store: ConversationStore) -> None:
+    """Runs of every status and fold rows after the latest barrier hold events; what the barrier retired does not."""
+    _save(store, _run("old", seen=["$old-context"]))
+    assert _chunk(store, ["old"], "S0") is not None
+    summary_rows.retire(store, session=_session(), scope_key=_AGENT)
+    _save(store, _run("done"), _run("asks", RunStatus.paused, seen=["$asked"]), _run("failed", RunStatus.error))
+    _save(store, _run("member", parent="done"))
+    assert _fold(store, _run("live", seen=["$context"]), "S") is not None
+    assert delete_runs(store, ["live"], session_id="s1") == {"live"}
+
+    basis = _redaction_basis(store)
+    candidates = basis.candidates()
+
+    assert candidates == {"$done", "$asks", "$asked", "$failed", "$live", "$context"}
+    assert all(basis.first_removed_seq([event]) for event in candidates)
 
 
 def test_editing_a_turn_an_older_resumed_run_folded_removes_that_run(store: ConversationStore) -> None:
@@ -775,16 +805,19 @@ def test_editing_a_turn_an_older_resumed_run_folded_removes_that_run(store: Conv
     assert _replayed(store) == "S0"
 
 
+@pytest.mark.parametrize("later", [True, False], ids=["later-run", "fold-last"])
 @pytest.mark.parametrize("discarded", [False, True], ids=["run-stored", "run-discarded"])
 def test_redacting_an_event_only_the_running_turn_read_cuts_at_its_fold(
     store: ConversationStore,
     discarded: bool,
+    later: bool,
 ) -> None:
     """The fold's provenance holds what its turn read, even once that run's row is discarded, and the cut fences it."""
     _save(store, _run("r1"))
     running = _run("live", seen=["$context"])
     assert _fold(store, running, "S") is not None
-    _save(store, _run("r3"))
+    if later:
+        _save(store, _run("r3"))
     if discarded:
         assert delete_runs(store, ["live"], session_id="s1") == {"live"}
 
@@ -808,17 +841,6 @@ def test_a_fold_row_holds_what_its_turn_answered_for_an_edit_and_what_it_read_fo
     assert not _edit(store, "$context")
     assert _log(store) == ["run:r1", "row:S"]
     assert _edit(store, "$live")
-    assert _log(store) == ["run:r1"]
-
-
-def test_a_redaction_of_what_a_discarded_fold_read_cuts_at_its_row(store: ConversationStore) -> None:
-    """Either provenance set holds an event for a redaction."""
-    _save(store, _run("r1"))
-    assert _fold(store, _run("live", seen=["$context"]), "S") is not None
-    assert delete_runs(store, ["live"], session_id="s1") == {"live"}
-
-    assert _redact(store, "$context")
-
     assert _log(store) == ["run:r1"]
 
 

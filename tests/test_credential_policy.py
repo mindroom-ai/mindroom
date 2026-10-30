@@ -7,117 +7,72 @@ import pytest
 from mindroom.credentials.policy import (
     _UNSUPPORTED_WORKER_GRANTABLE_CREDENTIALS,
     OAUTH_CREDENTIAL_FIELDS,
+    CredentialPlacement,
     credential_service_policy,
     dashboard_may_edit_oauth_service,
     filter_oauth_credential_fields,
     is_egress_broker_service,
+    is_global_credential_service,
     looks_like_oauth_credentials,
 )
 from mindroom.egress_broker.oauth_reuse import OAUTH_REUSE_CREDENTIAL_SERVICE
 
 
 @pytest.mark.parametrize(
-    ("service", "worker_scope", "agent_scoped", "requester_scoped", "local_shared"),
+    ("service", "worker_scope", "primary_built_tool", "placement", "grantable"),
     [
-        ("github", "shared", True, False, False),
-        ("github", "user", False, True, False),
-        ("github", "user_agent", False, True, False),
+        # Regular services live in the worker store, or in the primary's stores for a tool the primary builds.
+        ("openai", "shared", False, CredentialPlacement.WORKER, True),
+        ("openai", "user", False, CredentialPlacement.WORKER, True),
+        ("github", "shared", False, CredentialPlacement.WORKER, True),
+        ("github", "shared", True, CredentialPlacement.AGENT, True),
+        ("github", "user", False, CredentialPlacement.WORKER, True),
+        ("github", "user", True, CredentialPlacement.REQUESTER, True),
+        ("github", "user_agent", False, CredentialPlacement.WORKER, True),
+        ("github", "user_agent", True, CredentialPlacement.REQUESTER, True),
         # A Google Cloud tool's own settings are primary-owned like any other tool's, not installation-wide.
-        ("google_bigquery", "shared", True, False, False),
-        ("google_bigquery", "user_agent", False, True, False),
-        # Local-only and OAuth services keep their own placement.
-        ("google_gmail", "shared", False, False, True),
-        ("github_oauth", "shared", True, False, False),
+        ("google_bigquery", "shared", False, CredentialPlacement.WORKER, True),
+        ("google_bigquery", "shared", True, CredentialPlacement.AGENT, True),
+        ("google_bigquery", "user_agent", False, CredentialPlacement.WORKER, True),
+        ("google_bigquery", "user_agent", True, CredentialPlacement.REQUESTER, True),
+        # Local-only services stay in the primary: shared for a shared scope, the requester's store otherwise.
+        ("gmail", "shared", False, CredentialPlacement.SHARED, True),
+        ("google_gmail", "shared", False, CredentialPlacement.SHARED, True),
+        ("google_gmail", "shared", True, CredentialPlacement.SHARED, True),
+        ("google_drive", "shared", False, CredentialPlacement.SHARED, True),
+        ("google_drive", "user", False, CredentialPlacement.REQUESTER, True),
+        ("homeassistant", "user_agent", False, CredentialPlacement.REQUESTER, True),
+        # OAuth tokens, built-in, plugin, and MCP alike, bind to the agent in a shared scope and are never granted.
+        ("google_drive_oauth", None, False, CredentialPlacement.GLOBAL, False),
+        ("google_drive_oauth", "shared", False, CredentialPlacement.AGENT, False),
+        ("google_drive_oauth", "user", False, CredentialPlacement.REQUESTER, False),
+        ("google_drive_oauth", "user_agent", False, CredentialPlacement.REQUESTER, False),
+        ("github_oauth", "shared", False, CredentialPlacement.AGENT, False),
+        ("github_oauth", "shared", True, CredentialPlacement.AGENT, False),
+        ("acme_oauth", None, False, CredentialPlacement.GLOBAL, False),
+        ("acme_oauth", "shared", False, CredentialPlacement.AGENT, False),
+        ("acme_oauth", "user", False, CredentialPlacement.REQUESTER, False),
+        ("acme_oauth", "user_agent", False, CredentialPlacement.REQUESTER, False),
+        ("mcp_demo_oauth", None, False, CredentialPlacement.GLOBAL, False),
+        ("mcp_demo_oauth", "shared", False, CredentialPlacement.AGENT, False),
+        ("mcp_demo_oauth", "user_agent", False, CredentialPlacement.REQUESTER, False),
+        # OAuth app client configs, built-in and plugin alike, live in one global primary store.
+        ("google_drive_oauth_client", "shared", False, CredentialPlacement.GLOBAL, False),
+        ("google_drive_oauth_client", "user_agent", False, CredentialPlacement.GLOBAL, False),
+        ("acme_oauth_client", "shared", False, CredentialPlacement.GLOBAL, False),
     ],
 )
-def test_primary_built_tool_settings_use_primary_stores(
+def test_credential_service_placement(
     service: str,
-    worker_scope: str,
-    agent_scoped: bool,
-    requester_scoped: bool,
-    local_shared: bool,
+    worker_scope: str | None,
+    primary_built_tool: bool,
+    placement: CredentialPlacement,
+    grantable: bool,
 ) -> None:
-    """Settings of a tool the primary builds stay in primary stores in every worker scope."""
-    policy = credential_service_policy(service, worker_scope, primary_built_tool=True)
-    assert policy.uses_primary_runtime_agent_scoped_credentials is agent_scoped
-    assert policy.uses_primary_runtime_scoped_credentials is requester_scoped
-    assert policy.uses_local_shared_credentials is local_shared
-    assert not credential_service_policy(service, worker_scope).primary_built_tool
+    """Each service's name, worker scope, and primary-built flag decide its store and whether a worker may be granted it."""
+    policy = credential_service_policy(service, worker_scope, primary_built_tool=primary_built_tool)
 
-
-@pytest.mark.parametrize(
-    ("service", "worker_scope", "expected"),
-    [
-        ("google_drive_oauth", "user", True),
-        ("google_drive_oauth", "user_agent", True),
-        ("google_drive_oauth", "shared", False),
-        ("acme_oauth", "user", True),
-        ("acme_oauth", "user_agent", True),
-        ("acme_oauth", "shared", False),
-        ("openai", "user", False),
-        ("homeassistant", "user_agent", True),
-    ],
-)
-def test_primary_runtime_scoped_service_policy(service: str, worker_scope: str, expected: bool) -> None:
-    """Private worker scopes should read local-only services from primary-runtime scoped storage."""
-    assert credential_service_policy(service, worker_scope).uses_primary_runtime_scoped_credentials is expected
-
-
-@pytest.mark.parametrize(
-    ("service", "worker_scope", "expected"),
-    [
-        ("google_drive", "shared", True),
-        ("google_drive_oauth", "shared", False),
-        ("acme_oauth", "shared", False),
-        ("gmail", "shared", True),
-        ("openai", "shared", False),
-        ("google_drive", "user", False),
-    ],
-)
-def test_local_shared_service_policy(service: str, worker_scope: str, expected: bool) -> None:
-    """Shared worker scope should read local-only service credentials from the primary runtime."""
-    assert credential_service_policy(service, worker_scope).uses_local_shared_credentials is expected
-
-
-@pytest.mark.parametrize(
-    ("service", "worker_scope", "expected"),
-    [
-        ("google_drive_oauth", "shared", True),
-        ("acme_oauth", "shared", True),
-        ("mcp_demo_oauth", "shared", True),
-        ("google_drive_oauth", "user", False),
-        ("google_drive_oauth", "user_agent", False),
-        ("google_drive_oauth", None, False),
-        ("acme_oauth", "user", False),
-        ("acme_oauth", None, False),
-        ("mcp_demo_oauth", "user_agent", False),
-        ("mcp_demo_oauth", None, False),
-        ("google_drive", "shared", False),
-        ("google_drive_oauth_client", "shared", False),
-        ("openai", "shared", False),
-    ],
-)
-def test_agent_scoped_service_policy(service: str, worker_scope: str | None, expected: bool) -> None:
-    """Shared worker scope should keep OAuth tokens in per-agent primary-runtime storage."""
-    assert credential_service_policy(service, worker_scope).uses_primary_runtime_agent_scoped_credentials is expected
-
-
-@pytest.mark.parametrize("scope", ["shared", "user", "user_agent"])
-def test_egress_services_are_primary_only_and_not_grantable(scope: str) -> None:
-    """Egress broker services should be primary-only and not worker-grantable in all scopes."""
-    policy = credential_service_policy("egress_github", scope, primary_built_tool=False)
-    assert policy.primary_built_tool
-    assert not policy.worker_grantable_supported
-
-    # Verify primary-only placement for each scope
-    if scope == "shared":
-        assert policy.uses_primary_runtime_agent_scoped_credentials
-        assert not policy.uses_primary_runtime_scoped_credentials
-        assert not policy.uses_local_shared_credentials
-    elif scope in ("user", "user_agent"):
-        assert policy.uses_primary_runtime_scoped_credentials
-        assert not policy.uses_primary_runtime_agent_scoped_credentials
-        assert not policy.uses_local_shared_credentials
+    assert (policy.placement, policy.grantable) == (placement, grantable)
 
 
 @pytest.mark.parametrize("scope", ["shared", "user", "user_agent", None])
@@ -128,21 +83,27 @@ def test_agent_keys_account_opt_ins_stay_primary_only(scope: str | None) -> None
     """
     policy = credential_service_policy(OAUTH_REUSE_CREDENTIAL_SERVICE, scope)
     assert is_egress_broker_service(OAUTH_REUSE_CREDENTIAL_SERVICE)
-    assert policy.primary_built_tool
-    assert not policy.worker_grantable_supported
+    assert not policy.leasable
+    assert not policy.grantable
 
 
-@pytest.mark.parametrize("service", ["egress_x_oauth", "egress_x_oauth_client"])
+_EGRESS_PLACEMENT_BY_SCOPE = {
+    None: CredentialPlacement.GLOBAL,
+    "shared": CredentialPlacement.AGENT,
+    "user": CredentialPlacement.REQUESTER,
+    "user_agent": CredentialPlacement.REQUESTER,
+}
+
+
+@pytest.mark.parametrize("service", ["egress_github", "egress_x_oauth", "egress_x_oauth_client"])
 @pytest.mark.parametrize("scope", ["shared", "user", "user_agent", None])
-def test_egress_services_with_oauth_suffixes_stay_primary_only(service: str, scope: str | None) -> None:
-    """An OAuth-looking suffix never turns an egress service into an OAuth token or client service."""
+def test_egress_services_stay_primary_only(service: str, scope: str | None) -> None:
+    """Egress services are primary-only and never granted, and an OAuth-looking suffix never makes one an OAuth service."""
     policy = credential_service_policy(service, scope)
-    assert policy.primary_built_tool
-    assert not policy.worker_grantable_supported
-    assert not policy.uses_primary_runtime_global_credentials
-    assert not policy.uses_local_shared_credentials
-    assert policy.uses_primary_runtime_agent_scoped_credentials is (scope == "shared")
-    assert policy.uses_primary_runtime_scoped_credentials is (scope in {"user", "user_agent"})
+    assert not policy.leasable
+    assert not policy.grantable
+    assert not is_global_credential_service(service)
+    assert policy.placement is _EGRESS_PLACEMENT_BY_SCOPE[scope]
 
 
 @pytest.mark.parametrize(
@@ -158,71 +119,14 @@ def test_egress_services_with_oauth_suffixes_stay_primary_only(service: str, sco
 )
 def test_worker_grantable_policy_rejects_google_oauth_token_services(service: str) -> None:
     """Google OAuth token services should stay unsupported for worker mirroring."""
-    assert credential_service_policy(service, "shared").worker_grantable_supported is False
+    assert credential_service_policy(service, "shared").grantable is False
 
 
 def test_worker_grantable_policy_rejects_sensitive_google_services() -> None:
     """Machine-local identity services stay unsupported for worker mirroring."""
     assert frozenset({"desktop", "google_vertex_adc", "slack_app"}) == _UNSUPPORTED_WORKER_GRANTABLE_CREDENTIALS
-    assert credential_service_policy("google_vertex_adc", "shared").worker_grantable_supported is False
-    assert credential_service_policy("slack_app", None).worker_grantable_supported is False
-
-
-def test_credential_service_policy_classifies_google_oauth_user_scope() -> None:
-    """Google OAuth token services should use private storage and reject worker grants."""
-    policy = credential_service_policy("google_drive_oauth", "user")
-
-    assert policy.service == "google_drive_oauth"
-    assert policy.worker_scope == "user"
-    assert policy.uses_primary_runtime_scoped_credentials is True
-    assert policy.uses_local_shared_credentials is False
-    assert policy.worker_grantable_supported is False
-
-
-def test_credential_service_policy_classifies_plugin_oauth_token_service() -> None:
-    """Plugin OAuth token services should use primary-runtime storage and reject worker grants."""
-    shared_policy = credential_service_policy("acme_oauth", "shared")
-    user_agent_policy = credential_service_policy("acme_oauth", "user_agent")
-
-    assert shared_policy.uses_local_shared_credentials is False
-    assert shared_policy.uses_primary_runtime_scoped_credentials is False
-    assert shared_policy.uses_primary_runtime_agent_scoped_credentials is True
-    assert shared_policy.worker_grantable_supported is False
-    assert user_agent_policy.uses_local_shared_credentials is False
-    assert user_agent_policy.uses_primary_runtime_scoped_credentials is True
-    assert user_agent_policy.uses_primary_runtime_agent_scoped_credentials is False
-    assert user_agent_policy.worker_grantable_supported is False
-
-
-def test_credential_service_policy_classifies_oauth_client_config_as_global_primary_runtime() -> None:
-    """OAuth app client config should stay in one primary-runtime deployment store."""
-    policy = credential_service_policy("google_drive_oauth_client", "user_agent")
-
-    assert policy.uses_primary_runtime_global_credentials is True
-    assert policy.uses_primary_runtime_scoped_credentials is False
-    assert policy.uses_local_shared_credentials is False
-    assert policy.worker_grantable_supported is False
-
-
-def test_credential_service_policy_classifies_plugin_oauth_client_config_as_global_primary_runtime() -> None:
-    """Plugin OAuth app client config should use the same local-only placement policy."""
-    policy = credential_service_policy("acme_oauth_client", "shared")
-
-    assert policy.uses_primary_runtime_global_credentials is True
-    assert policy.uses_primary_runtime_scoped_credentials is False
-    assert policy.uses_local_shared_credentials is False
-    assert policy.worker_grantable_supported is False
-
-
-def test_credential_service_policy_classifies_regular_shared_service() -> None:
-    """Regular services should remain worker-grantable and avoid local-only storage policy."""
-    policy = credential_service_policy("openai", "shared")
-
-    assert policy.service == "openai"
-    assert policy.worker_scope == "shared"
-    assert policy.uses_primary_runtime_scoped_credentials is False
-    assert policy.uses_local_shared_credentials is False
-    assert policy.worker_grantable_supported is True
+    assert credential_service_policy("google_vertex_adc", "shared").grantable is False
+    assert credential_service_policy("slack_app", None).grantable is False
 
 
 def test_looks_like_oauth_credentials_detects_oauth_documents() -> None:

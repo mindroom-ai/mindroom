@@ -549,23 +549,18 @@ _SEARCH_SCHEMA = {"type": "object", "properties": {"query": {"type": "string"}},
 
 
 @pytest.mark.parametrize(
-    ("function", "closed"),
+    "function",
     [
-        pytest.param(Function(name="add", entrypoint=_add_numbers), True, id="processed-with-arguments"),
-        pytest.param(Function(name="ping", entrypoint=_ping), False, id="processed-without-arguments"),
-        pytest.param(_mcp_function(_SEARCH_SCHEMA), False, id="mcp-schema"),
+        pytest.param(Function(name="add", entrypoint=_add_numbers), id="derived-with-arguments"),
+        pytest.param(Function(name="ping", entrypoint=_ping), id="derived-without-arguments"),
+        pytest.param(_mcp_function(_SEARCH_SCHEMA), id="mcp-schema"),
     ],
 )
-def test_realtime_schemas_match_agnos_second_processing_pass(function: Function, *, closed: bool) -> None:
-    """Agno's second pass closes a schema it produced from an entrypoint; an MCP tool's schema reaches the model as sent."""
-    twice_processed = function.model_copy(deep=True)
-    twice_processed.process_entrypoint()
-    twice_processed.process_entrypoint()
-
+def test_realtime_schemas_are_the_schemas_every_other_model_is_offered(function: Function) -> None:
+    """The realtime model reads a function's parameters schema as text chat offers it, an MCP tool's as sent."""
     parameters = _wrap(function).info.raw_schema["parameters"]
 
-    assert parameters == twice_processed.parameters
-    assert ("additionalProperties" in parameters) is closed
+    assert parameters == offered_agno_function(function).parameters
     if function.skip_entrypoint_processing:
         assert parameters == _SEARCH_SCHEMA
 

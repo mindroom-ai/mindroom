@@ -23,7 +23,7 @@ Missing Python dependencies install automatically on first use (see [Automatic D
 
 | Option | Type | Default | Notes |
 | --- | --- | --- | --- |
-| `key` | `password` | `null` | Google Maps API key; falls back to the `GOOGLE_MAPS_API_KEY` process environment variable. |
+| `key` | `password` | `null` | Google Maps API key; falls back to `GOOGLE_MAPS_API_KEY`. |
 | `search_places` | `boolean` | `true` | Enable `search_places()`. |
 | `get_directions` | `boolean` | `true` | Enable `get_directions()`. |
 | `validate_address` | `boolean` | `true` | Enable `validate_address()`. |
@@ -58,7 +58,7 @@ Weather lookups use the first geocoding match for the location name, so ambiguou
 
 | Option | Type | Default | Notes |
 | --- | --- | --- | --- |
-| `api_key` | `password` | `null` | OpenWeather API key; falls back to the `OPENWEATHER_API_KEY` process environment variable. A key is required for every call. |
+| `api_key` | `password` | `null` | OpenWeather API key; falls back to `OPENWEATHER_API_KEY`. A key is required for every call. |
 | `units` | `text` | `metric` | `standard`, `metric`, or `imperial`. |
 | `enable_current_weather` | `boolean` | `true` | Enable `get_current_weather()`. |
 | `enable_forecast` | `boolean` | `true` | Enable `get_forecast()`. |

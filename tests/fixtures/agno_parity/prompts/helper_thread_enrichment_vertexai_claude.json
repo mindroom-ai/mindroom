@@ -1,5 +1,5 @@
 {
-  "description": "Helper agent run by mindroom.thread_summary._generate_summary on vertexai_claude claude-sonnet-5-5.",
+  "description": "Helper agent run by mindroom.thread_summary.generation.generate_summary on vertexai_claude claude-sonnet-5-5.",
   "input": {
     "config": {
       "agents": {
@@ -43,7 +43,7 @@
       },
       "timezone": "UTC"
     },
-    "entry_point": "mindroom.thread_summary._generate_summary"
+    "entry_point": "mindroom.thread_summary.generation.generate_summary"
   },
   "requests": [
     {
@@ -91,7 +91,7 @@
           "title": "_ThreadEnrichment",
           "type": "object"
         },
-        "model": "mindroom.thread_summary:_ThreadEnrichment"
+        "model": "mindroom.thread_summary.generation:_ThreadEnrichment"
       },
       "deferred_tool_names": []
     }

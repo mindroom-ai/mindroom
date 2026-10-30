@@ -9,7 +9,7 @@ from typing import cast
 
 __all__ = [
     "AGENT_VAULT_ACCESS_ENV_BY_KEY",
-    "AWS_BEDROCK_CLAUDE_ENV_BY_KEY",
+    "AWS_ENV_BY_KEY",
     "AZURE_OPENAI_ENV_BY_KEY",
     "COMPUTER_ALLOWED_ORIGINS_ENV",
     "CONNECTIONS_ALLOWED_ORIGINS_ENV",
@@ -17,10 +17,10 @@ __all__ = [
     "CREDENTIALS_ENCRYPTION_KEY_ENV",
     "CREDENTIAL_SEEDS_FILE_ENV",
     "CREDENTIAL_SEEDS_JSON_ENV",
+    "DOCKER_WORKER_BACKEND_CONFIG_ENV_BY_KEY",
     "EGRESS_BROKER_ENV_BY_KEY",
     "ENV_TEMPLATE_PLACEHOLDERS",
     "KUBERNETES_WORKER_BACKEND_CONFIG_ENV_BY_KEY",
-    "KUBERNETES_WORKER_BACKEND_CONFIG_ENV_NAMES",
     "MATRIX_APPSERVICE_TOKEN_ENV",
     "MATRIX_APPSERVICE_TOKEN_FILE_ENV",
     "MATRIX_MANAGED_ACCOUNT_AUTH_ENV",
@@ -30,6 +30,7 @@ __all__ = [
     "SHARED_CREDENTIALS_PATH_ENV",
     "VENDOR_TELEMETRY_ENV_VALUES",
     "VERTEXAI_CLAUDE_ENV_BY_KEY",
+    "WORKER_BACKEND_ENV",
     "WORKER_COMPUTER_ENABLED_ENV",
     "WORKER_EGRESS_PROXY_ENV_BY_KEY",
     "credentials_encryption_key_value",
@@ -63,7 +64,7 @@ SHARED_CREDENTIALS_PATH_ENV = "MINDROOM_SHARED_CREDENTIALS_PATH"
 MATRIX_MANAGED_ACCOUNT_AUTH_ENV = "MATRIX_MANAGED_ACCOUNT_AUTH"
 MATRIX_APPSERVICE_TOKEN_ENV = "MATRIX_APPSERVICE_TOKEN"  # noqa: S105 - environment variable name
 MATRIX_APPSERVICE_TOKEN_FILE_ENV = "MATRIX_APPSERVICE_TOKEN_FILE"  # noqa: S105 - environment variable name
-AWS_BEDROCK_CLAUDE_ENV_BY_KEY: Mapping[str, str] = MappingProxyType(
+AWS_ENV_BY_KEY: Mapping[str, str] = MappingProxyType(
     {
         "access_key": "AWS_ACCESS_KEY_ID",
         "secret_key": "AWS_SECRET_ACCESS_KEY",
@@ -160,9 +161,11 @@ VENDOR_TELEMETRY_ENV_VALUES: Mapping[str, str] = MappingProxyType(
     },
 )
 
+# Selects the worker backend; every backend's settings below are primary-only, like the selector.
+WORKER_BACKEND_ENV = "MINDROOM_WORKER_BACKEND"
+
 KUBERNETES_WORKER_BACKEND_CONFIG_ENV_BY_KEY: Mapping[str, str] = MappingProxyType(
     {
-        "worker_backend": "MINDROOM_WORKER_BACKEND",
         "namespace": "MINDROOM_KUBERNETES_WORKER_NAMESPACE",
         "image": "MINDROOM_KUBERNETES_WORKER_IMAGE",
         "image_pull_policy": "MINDROOM_KUBERNETES_WORKER_IMAGE_PULL_POLICY",
@@ -206,7 +209,33 @@ KUBERNETES_WORKER_BACKEND_CONFIG_ENV_BY_KEY: Mapping[str, str] = MappingProxyTyp
         "agent_vault_worker_ca_configmap_name": "MINDROOM_KUBERNETES_AGENT_VAULT_WORKER_CA_CONFIGMAP_NAME",
     },
 )
-KUBERNETES_WORKER_BACKEND_CONFIG_ENV_NAMES = frozenset(KUBERNETES_WORKER_BACKEND_CONFIG_ENV_BY_KEY.values())
+
+DOCKER_WORKER_BACKEND_CONFIG_ENV_BY_KEY: Mapping[str, str] = MappingProxyType(
+    {
+        "image": "MINDROOM_DOCKER_WORKER_IMAGE",
+        "port": "MINDROOM_DOCKER_WORKER_PORT",
+        "storage_mount_path": "MINDROOM_DOCKER_WORKER_STORAGE_MOUNT_PATH",
+        "config_path": "MINDROOM_DOCKER_WORKER_CONFIG_PATH",
+        "host_config_path": "MINDROOM_DOCKER_WORKER_HOST_CONFIG_PATH",
+        "idle_timeout": "MINDROOM_DOCKER_WORKER_IDLE_TIMEOUT_SECONDS",
+        "ready_timeout": "MINDROOM_DOCKER_WORKER_READY_TIMEOUT_SECONDS",
+        "name_prefix": "MINDROOM_DOCKER_WORKER_NAME_PREFIX",
+        "publish_host": "MINDROOM_DOCKER_WORKER_PUBLISH_HOST",
+        "endpoint_host": "MINDROOM_DOCKER_WORKER_ENDPOINT_HOST",
+        "user": "MINDROOM_DOCKER_WORKER_USER",
+        "security_policy": "MINDROOM_DOCKER_WORKER_SECURITY_POLICY",
+        "runtime": "MINDROOM_DOCKER_WORKER_RUNTIME",
+        "extra_env_json": "MINDROOM_DOCKER_WORKER_ENV_JSON",
+        "extra_labels_json": "MINDROOM_DOCKER_WORKER_LABELS_JSON",
+    },
+)
+_WORKER_BACKEND_CONFIG_ENV_NAMES = frozenset(
+    {
+        WORKER_BACKEND_ENV,
+        *KUBERNETES_WORKER_BACKEND_CONFIG_ENV_BY_KEY.values(),
+        *DOCKER_WORKER_BACKEND_CONFIG_ENV_BY_KEY.values(),
+    },
+)
 
 SANDBOX_RUNTIME_ENV_BY_KEY: Mapping[str, str] = MappingProxyType(
     {
@@ -239,18 +268,18 @@ _CREDENTIAL_SEED_DECLARATION_ENV_NAMES = frozenset(
 )
 _RUNTIME_STARTUP_ENV_PREFIXES = ("MINDROOM_", "MATRIX_", "BROWSER_")
 _VENDOR_TELEMETRY_ENV_NAMES = frozenset(VENDOR_TELEMETRY_ENV_VALUES)
-_AWS_BEDROCK_CLAUDE_PUBLIC_STARTUP_ENV_NAMES = frozenset(
+_AWS_PUBLIC_STARTUP_ENV_NAMES = frozenset(
     {
-        AWS_BEDROCK_CLAUDE_ENV_BY_KEY["default_region"],
-        AWS_BEDROCK_CLAUDE_ENV_BY_KEY["profile"],
-        AWS_BEDROCK_CLAUDE_ENV_BY_KEY["region"],
+        AWS_ENV_BY_KEY["default_region"],
+        AWS_ENV_BY_KEY["profile"],
+        AWS_ENV_BY_KEY["region"],
     },
 )
 _RUNTIME_STARTUP_ENV_EXTRA_KEYS = frozenset(
     {
         "ACCOUNT_ID",
         "ANTHROPIC_VERTEX_BASE_URL",
-        *_AWS_BEDROCK_CLAUDE_PUBLIC_STARTUP_ENV_NAMES,
+        *_AWS_PUBLIC_STARTUP_ENV_NAMES,
         "CUSTOMER_ID",
         "AZURE_OPENAI_API_VERSION",
         "AZURE_OPENAI_DEPLOYMENT",
@@ -428,7 +457,7 @@ def is_runtime_control_env_name(name: str) -> bool:
 
 def is_worker_backend_config_env_name(name: str) -> bool:
     """Return whether an env var configures a primary-side worker backend."""
-    return name in KUBERNETES_WORKER_BACKEND_CONFIG_ENV_NAMES
+    return name in _WORKER_BACKEND_CONFIG_ENV_NAMES
 
 
 def is_runtime_database_url_env_name(name: str) -> bool:

@@ -14,15 +14,7 @@ from mindroom.constants import RuntimePaths, resolve_runtime_paths
 from mindroom.credentials.manager import get_runtime_credentials_manager
 from mindroom.oauth import microsoft as microsoft_oauth
 from mindroom.oauth.credential_lifecycle import oauth_account_label
-from mindroom.oauth.microsoft import (
-    ACCOUNT_LOOKUP_TIMEOUT_SECONDS,
-    GRAPH_ME_URL,
-    microsoft_files_oauth_provider,
-    microsoft_onenote_oauth_provider,
-    microsoft_people_oauth_provider,
-    microsoft_sharepoint_oauth_provider,
-    microsoft_todo_oauth_provider,
-)
+from mindroom.oauth.microsoft import ACCOUNT_LOOKUP_TIMEOUT_SECONDS, GRAPH_ME_URL, microsoft_oauth_provider
 from mindroom.oauth.providers import OAuthProviderError
 
 if TYPE_CHECKING:
@@ -83,7 +75,7 @@ def _save_shared_client_config(runtime_paths: RuntimePaths) -> None:
 
 
 def _exchange(runtime_paths: RuntimePaths) -> object:
-    provider = microsoft_files_oauth_provider()
+    provider = microsoft_oauth_provider("microsoft_files")
     token_url = asyncio.run(provider.runtime_endpoints(runtime_paths)).token_url
     with patch(
         "authlib.integrations.httpx_client.AsyncOAuth2Client.fetch_token",
@@ -94,63 +86,63 @@ def _exchange(runtime_paths: RuntimePaths) -> object:
         )
 
 
-def test_files_provider_declares_a_requester_scoped_graph_contract() -> None:
-    provider = microsoft_files_oauth_provider()
+@pytest.mark.parametrize(
+    ("provider_id", "display_name", "service_scopes"),
+    [
+        ("microsoft_files", "Microsoft OneDrive and SharePoint", ("Files.ReadWrite.All",)),
+        ("microsoft_sharepoint", "Microsoft SharePoint", ("Sites.ReadWrite.All",)),
+        (
+            "outlook_mail",
+            "Outlook Mail",
+            (
+                "Mail.ReadWrite",
+                "Mail.Send",
+                "Mail.ReadWrite.Shared",
+                "Mail.Send.Shared",
+                "MailboxSettings.ReadWrite",
+            ),
+        ),
+        ("outlook_calendar", "Outlook Calendar", ("Calendars.ReadWrite", "Calendars.ReadWrite.Shared")),
+        ("microsoft_todo", "Microsoft To Do", ("Tasks.ReadWrite",)),
+        (
+            "microsoft_teams",
+            "Microsoft Teams",
+            (
+                "Team.ReadBasic.All",
+                "Channel.ReadBasic.All",
+                "ChannelMessage.Read.All",
+                "ChannelMessage.Send",
+                "Chat.ReadWrite",
+                "ChatMessage.Send",
+                "Presence.Read.All",
+                "User.Read.All",
+            ),
+        ),
+        ("microsoft_meetings", "Microsoft Teams Meetings", ("OnlineMeetings.Read", "OnlineMeetingTranscript.Read.All")),
+        ("microsoft_onenote", "Microsoft OneNote", ("Notes.ReadWrite.All",)),
+        ("microsoft_people", "Microsoft 365 People", ("User.Read.All",)),
+    ],
+)
+def test_each_provider_declares_a_requester_scoped_graph_contract(
+    provider_id: str,
+    display_name: str,
+    service_scopes: tuple[str, ...],
+) -> None:
+    provider = microsoft_oauth_provider(provider_id)
 
-    assert provider.id == "microsoft_files"
-    assert provider.display_name == "Microsoft OneDrive and SharePoint"
-    assert provider.scopes == ("Files.ReadWrite.All", "User.Read", "offline_access")
-    assert provider.credential_service == "microsoft_files_oauth"
-    assert provider.tool_config_service == "microsoft_files"
-    assert provider.client_config_services == ("microsoft_files_oauth_client",)
+    assert (provider.id, provider.display_name) == (provider_id, display_name)
+    assert provider.scopes == (*service_scopes, "User.Read", "offline_access")
+    assert provider.credential_service == f"{provider_id}_oauth"
+    assert provider.tool_config_service == provider_id
+    assert provider.client_config_services == (f"{provider_id}_oauth_client",)
     assert provider.shared_client_config_services == ("microsoft_oauth_client",)
     assert provider.token_endpoint_auth_method == "client_secret_post"
     assert provider.pkce_code_challenge_method == "S256"
     assert provider.requester_scoped_credentials is True
 
 
-def test_sharepoint_provider_requests_only_sites_read_write_all() -> None:
-    provider = microsoft_sharepoint_oauth_provider()
-
-    assert (provider.id, provider.display_name) == ("microsoft_sharepoint", "Microsoft SharePoint")
-    assert provider.scopes == ("Sites.ReadWrite.All", "User.Read", "offline_access")
-    assert provider.credential_service == "microsoft_sharepoint_oauth"
-    assert provider.shared_client_config_services == ("microsoft_oauth_client",)
-    assert provider.requester_scoped_credentials is True
-
-
-def test_todo_provider_requests_only_tasks_read_write() -> None:
-    provider = microsoft_todo_oauth_provider()
-
-    assert (provider.id, provider.display_name) == ("microsoft_todo", "Microsoft To Do")
-    assert provider.scopes == ("Tasks.ReadWrite", "User.Read", "offline_access")
-    assert provider.credential_service == "microsoft_todo_oauth"
-    assert provider.shared_client_config_services == ("microsoft_oauth_client",)
-    assert provider.requester_scoped_credentials is True
-
-
-def test_onenote_provider_requests_only_notes_read_write_all() -> None:
-    provider = microsoft_onenote_oauth_provider()
-
-    assert (provider.id, provider.display_name) == ("microsoft_onenote", "Microsoft OneNote")
-    assert provider.scopes == ("Notes.ReadWrite.All", "User.Read", "offline_access")
-    assert provider.credential_service == "microsoft_onenote_oauth"
-    assert provider.shared_client_config_services == ("microsoft_oauth_client",)
-    assert provider.requester_scoped_credentials is True
-
-
-def test_people_provider_requests_only_user_read_all() -> None:
-    provider = microsoft_people_oauth_provider()
-
-    assert (provider.id, provider.display_name) == ("microsoft_people", "Microsoft 365 People")
-    assert provider.scopes == ("User.Read.All", "User.Read", "offline_access")
-    assert provider.credential_service == "microsoft_people_oauth"
-    assert provider.shared_client_config_services == ("microsoft_oauth_client",)
-    assert provider.requester_scoped_credentials is True
-
-
 def test_endpoints_default_to_the_organizations_tenant(tmp_path: Path) -> None:
-    endpoints = asyncio.run(microsoft_files_oauth_provider().runtime_endpoints(_runtime_paths(tmp_path)))
+    endpoints = asyncio.run(microsoft_oauth_provider("microsoft_files").runtime_endpoints(_runtime_paths(tmp_path)))
 
     assert endpoints.authorization_url == "https://login.microsoftonline.com/organizations/oauth2/v2.0/authorize"
     assert endpoints.token_url == "https://login.microsoftonline.com/organizations/oauth2/v2.0/token"
@@ -159,7 +151,7 @@ def test_endpoints_default_to_the_organizations_tenant(tmp_path: Path) -> None:
 def test_endpoints_use_the_configured_tenant(tmp_path: Path) -> None:
     runtime_paths = _runtime_paths(tmp_path, MICROSOFT_TENANT_ID="contoso.onmicrosoft.com")
 
-    endpoints = asyncio.run(microsoft_files_oauth_provider().runtime_endpoints(runtime_paths))
+    endpoints = asyncio.run(microsoft_oauth_provider("microsoft_files").runtime_endpoints(runtime_paths))
 
     assert (
         endpoints.authorization_url == "https://login.microsoftonline.com/contoso.onmicrosoft.com/oauth2/v2.0/authorize"
@@ -172,14 +164,14 @@ def test_a_tenant_that_is_not_an_id_or_domain_is_refused(tmp_path: Path, tenant:
     runtime_paths = _runtime_paths(tmp_path, MICROSOFT_TENANT_ID=tenant)
 
     with pytest.raises(OAuthProviderError, match="MICROSOFT_TENANT_ID"):
-        asyncio.run(microsoft_files_oauth_provider().runtime_endpoints(runtime_paths))
+        asyncio.run(microsoft_oauth_provider("microsoft_files").runtime_endpoints(runtime_paths))
 
 
 def test_shared_client_config_keeps_the_provider_callback(tmp_path: Path) -> None:
     runtime_paths = _runtime_paths(tmp_path)
     _save_shared_client_config(runtime_paths)
 
-    config = microsoft_files_oauth_provider().client_config(runtime_paths)
+    config = microsoft_oauth_provider("microsoft_files").client_config(runtime_paths)
 
     assert config is not None
     assert config.client_id == "microsoft-client-id"
@@ -220,7 +212,7 @@ def test_exchange_labels_the_account_from_graph(
     [lookup] = account_lookups
     assert lookup.url.copy_with(query=None) == httpx.URL(GRAPH_ME_URL)
     assert lookup.headers["authorization"] == "Bearer graph-access"
-    stored = microsoft_files_oauth_provider().token_result_with_safe_claims(result).token_data
+    stored = microsoft_oauth_provider("microsoft_files").token_result_with_safe_claims(result).token_data
     assert oauth_account_label(stored) == label
 
 
@@ -246,6 +238,6 @@ def test_exchange_without_a_usable_account_still_connects(
 
     result = _exchange(runtime_paths)
 
-    stored = microsoft_files_oauth_provider().token_result_with_safe_claims(result).token_data
+    stored = microsoft_oauth_provider("microsoft_files").token_result_with_safe_claims(result).token_data
     assert stored["token"] == "graph-access"
     assert oauth_account_label(stored) is None

@@ -65,6 +65,7 @@ from tests.conftest import (
 )
 from tests.fakes.scripted_model import ScriptedModel, answer
 from tests.identity_helpers import entity_ids, persist_entity_accounts
+from tests.journal_helpers import membership_position
 from tests.matrix_state_helpers import save_matrix_state
 from tests.response_attempt_helpers import install_direct_response_admission
 from tests.threading_helpers import seed_thread_history
@@ -139,16 +140,13 @@ class TestAgentBot(AgentBotTestBase):
     """Core AgentBot lifecycle and integration behavior."""
 
     @pytest.mark.asyncio
-    @patch("mindroom.config.main.load_config")
     async def test_agent_bot_initialization(
         self,
-        mock_load_config: MagicMock,
         mock_agent_user: AgentMatrixUser,
         tmp_path: Path,
     ) -> None:
         """Test AgentBot initialization."""
-        mock_load_config.return_value = self.create_mock_config(tmp_path)
-        config = mock_load_config.return_value
+        config = self.create_mock_config(tmp_path)
 
         bot = make_test_agent_bot(
             mock_agent_user,
@@ -789,7 +787,7 @@ class TestAgentBot(AgentBotTestBase):
             membership="join",
             previous_epoch=0,
         )
-        assert await principal.membership_position(room_id) == RoomMembershipPosition(
+        assert await membership_position(principal, room_id) == RoomMembershipPosition(
             "join",
             0,
         )
@@ -837,7 +835,7 @@ class TestAgentBot(AgentBotTestBase):
                     current_membership="leave",
                 ),
             ]
-            assert await principal.membership_position(room_id) == RoomMembershipPosition(
+            assert await membership_position(principal, room_id) == RoomMembershipPosition(
                 "leave",
                 2,
             )
@@ -1020,7 +1018,6 @@ class TestAgentBot(AgentBotTestBase):
         mock_fetch_history: AsyncMock,
         mock_stream_agent_response: MagicMock,
         enable_streaming: bool,
-        mock_agent_user: AgentMatrixUser,  # noqa: ARG002
         tmp_path: Path,
     ) -> None:
         """Test agent bot responding to mentions; both delivery modes run the one agent turn stream."""
@@ -1058,28 +1055,17 @@ class TestAgentBot(AgentBotTestBase):
         # so hydration fails and the turn ends silently with no response.
         bot.client = _make_matrix_client_mock()
 
-        # Mock presence check to return user online when streaming is enabled
-        # We need to create a proper mock response that will be returned by get_presence
-        if enable_streaming:
-            # Create a mock that looks like PresenceGetResponse
-            mock_presence_response = MagicMock()
-            mock_presence_response.presence = "online"
-            mock_presence_response.last_active_ago = 1000
+        # Mock presence check to return user online when streaming is enabled, with a mock that looks like
+        # PresenceGetResponse
+        mock_presence_response = MagicMock()
+        mock_presence_response.presence = "online" if enable_streaming else "offline"
+        mock_presence_response.last_active_ago = 1000 if enable_streaming else 3600000
 
-            # Make get_presence return this response (as a coroutine since it's async)
-            async def mock_get_presence(user_id: str) -> MagicMock:  # noqa: ARG001
-                return mock_presence_response
+        # Make get_presence return this response (as a coroutine since it's async)
+        async def mock_get_presence(user_id: str) -> MagicMock:  # noqa: ARG001
+            return mock_presence_response
 
-            bot.client.get_presence = mock_get_presence
-        else:
-            mock_presence_response = MagicMock()
-            mock_presence_response.presence = "offline"
-            mock_presence_response.last_active_ago = 3600000
-
-            async def mock_get_presence(user_id: str) -> MagicMock:  # noqa: ARG001
-                return mock_presence_response
-
-            bot.client.get_presence = mock_get_presence
+        bot.client.get_presence = mock_get_presence
 
         # Each send creates its own event, as a homeserver does.
         unique_room_send_responses(bot.client)
@@ -1567,9 +1553,7 @@ class TestAgentBot(AgentBotTestBase):
             _visible_message(sender="@user:localhost", body="Previous message", timestamp=123, event_id="prev1"),
             _visible_message(sender=mock_agent_user.user_id, body="My response", timestamp=124, event_id="prev2"),
             _visible_message(
-                sender=entity_ids(config, runtime_paths_for(config))["general"].full_id
-                if "general" in entity_ids(config, runtime_paths_for(config))
-                else "@mindroom_general:localhost",
+                sender=entity_ids(config, runtime_paths_for(config))["general"].full_id,
                 body="Another agent response",
                 timestamp=125,
                 event_id="prev3",

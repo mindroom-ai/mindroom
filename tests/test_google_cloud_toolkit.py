@@ -17,7 +17,7 @@ from google.oauth2.credentials import Credentials as GoogleOAuthCredentials
 from mindroom.constants import resolve_runtime_paths
 from mindroom.credentials.manager import get_runtime_credentials_manager
 from mindroom.custom_tools.google_service import GoogleCloudToolkit
-from mindroom.oauth.google_cloud import google_cloud_oauth_provider
+from mindroom.oauth.google import google_cloud_oauth_provider
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity, resolve_worker_target, tool_execution_identity
 from tests.oauth_test_utils import publish_oauth_credentials
 

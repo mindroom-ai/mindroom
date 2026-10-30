@@ -16,7 +16,7 @@ from mindroom.config.main import Config
 from mindroom.constants import resolve_runtime_paths
 from mindroom.llm.messages import Message
 from mindroom.llm.runs import RunRecord, RunStatus
-from mindroom.llm.usage import MessageMetrics, ModelMetrics, RunMetrics, SessionMetrics, TokenCounts
+from mindroom.llm.usage import MessageMetrics, ModelMetrics, RunMetrics, TokenCounts
 from mindroom.session_storage.agent_storage import create_agent_state_storage
 from mindroom.session_storage.legacy_agno3_schema import AgnoTableNames, agno_runs_sql
 from mindroom.session_storage.schema import usage_upsert_sql
@@ -432,15 +432,13 @@ def test_initial_conversion_imports_available_requests_without_reseeding_old_led
     database.parent.mkdir(parents=True)
     run = _run()
     assert run.metrics is not None
-    totals = SessionMetrics()
-    totals.count_run(run.metrics, replacing=None)
     with closing(sqlite3.connect(database)) as connection, connection:
         for statement in agno_runs_sql(names):
             connection.execute(statement)
         connection.execute(
             "INSERT INTO code_sessions (session_id, session_type, agent_id, user_id, session_data, created_at) "
             "VALUES ('session', 'agent', 'code', ?, ?, ?)",
-            (run.user_id, json.dumps({"session_metrics": totals.to_dict()}), run.created_at),
+            (run.user_id, json.dumps({"session_metrics": run.metrics.to_dict()}), run.created_at),
         )
         connection.execute(
             "INSERT INTO code_sessions_runs (run_id, session_id, run_type, agent_id, user_id, status, run_index, "
@@ -458,19 +456,5 @@ def test_initial_conversion_imports_available_requests_without_reseeding_old_led
     report = collect_admin_usage(config=config, runtime_paths=paths, include_requests=True)
     assert report.totals.total_tokens == 250_014
     assert report.request_breakdown == ()
-    assert report.request_coverage is not None
-    assert report.request_coverage.unavailable_sources == 1
-
-
-def test_history_without_retained_requests_marks_request_coverage(
-    request_usage: tuple[Config, RuntimePaths, ConversationStore],
-) -> None:
-    """A readable aggregate cannot claim complete request detail after historical rows are lost."""
-    config, paths, storage = request_usage
-    with sqlite3.connect(storage.path) as connection:
-        connection.execute("DELETE FROM code_sessions_usage")
-    report = collect_admin_usage(config=config, runtime_paths=paths, include_requests=True)
-    assert report.totals.total_tokens == 250_014
-    assert report.to_dict()["request_breakdown"] == []
     assert report.request_coverage is not None
     assert report.request_coverage.unavailable_sources == 1

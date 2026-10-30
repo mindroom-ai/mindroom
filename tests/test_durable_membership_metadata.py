@@ -19,6 +19,7 @@ from mindroom.event_journal import journal as journal_ops
 from mindroom.matrix.durable_ingestion import consume_one_ingestion_batch
 from mindroom.matrix.state import MatrixState
 from tests.conftest import install_call_manager_mock, make_matrix_client_mock
+from tests.journal_helpers import membership_position
 from tests.matrix_state_helpers import save_matrix_state
 from tests.test_bot_ready_hook import _router_bot_with_orchestrator
 
@@ -129,7 +130,7 @@ async def test_real_member_state_and_timeline_preserve_tenure_and_hooks(  # noqa
         await bot._after_ingestion_admission(record, facts, provenance)
         event = record.event
         if event is not None:
-            position = await principal.membership_position(ROOM)
+            position = await membership_position(principal, ROOM)
             allowed = bot._runtime_view.agent_reply_memberships.is_allowed(
                 SENDER,
                 ["grant"],
@@ -151,7 +152,7 @@ async def test_real_member_state_and_timeline_preserve_tenure_and_hooks(  # noqa
                         after_sync=complete,
                     )
                 except DeliveryProjectionPendingError:
-                    position = await principal.membership_position(ROOM)
+                    position = await membership_position(principal, ROOM)
                     assert (position.membership, position.membership_epoch) == ("join", 0)
                     assert await principal.load_event("$leave") is None
                     assert "$before" in [event.event_id for event in await principal.pending()]
@@ -163,7 +164,7 @@ async def test_real_member_state_and_timeline_preserve_tenure_and_hooks(  # noqa
     try:
         await source.put(_response("one", [_member("$own-state", account, "join")], []))
         await drain_until(1)
-        position = await principal.membership_position(ROOM)
+        position = await membership_position(principal, ROOM)
         assert (position.membership, position.membership_epoch) == ("join", 0)
         call_manager.on_sync_room_membership.assert_awaited_once_with(joined_room_ids={ROOM}, left_room_ids=set())
         snapshot = make_matrix_client_mock(user_id=account)
@@ -192,7 +193,7 @@ async def test_real_member_state_and_timeline_preserve_tenure_and_hooks(  # noqa
         assert ("$leave", False, "leave", 1) in observed
         assert ("$fenced", False, "leave", 1) in observed
         assert ("$rejoin", False, "join", 1) in observed
-        position = await principal.membership_position(ROOM)
+        position = await membership_position(principal, ROOM)
         assert (position.membership, position.membership_epoch) == ("join", 1)
         pending = await principal.pending()
         # Rejoining does not authorize the remaining captured history as live.
@@ -243,7 +244,7 @@ async def test_real_local_echoes_do_not_hide_later_departure(  # noqa: C901, PLR
 
     async def after(record: IngestionRecordAdmission, _facts: AdmissionFacts, _provenance: object) -> None:
         if record.membership is not None:
-            position = await principal.membership_position(ROOM)
+            position = await membership_position(principal, ROOM)
             effects.append((position.membership, position.membership_epoch))
 
     session._transport.request = request
@@ -269,7 +270,7 @@ async def test_real_local_echoes_do_not_hide_later_departure(  # noqa: C901, PLR
 
     async def local(target: str) -> None:
         await session.wait_for_membership_idle()
-        position = await principal.membership_position(ROOM)
+        position = await membership_position(principal, ROOM)
         assert await session.change_membership(
             operation_id=uuid4(),
             room_id=ROOM,
@@ -280,7 +281,7 @@ async def test_real_local_echoes_do_not_hide_later_departure(  # noqa: C901, PLR
         await consume()
 
     async def assert_fenced(epoch: int) -> None:
-        position = await principal.membership_position(ROOM)
+        position = await membership_position(principal, ROOM)
         assert (position.membership, position.membership_epoch) == ("leave", epoch)
         assert not await principal.pending()
         page = await principal.read_conversation(room_id=ROOM, thread_id=None, limit=10)

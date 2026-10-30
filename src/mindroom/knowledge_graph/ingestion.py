@@ -17,15 +17,15 @@ from typing import TYPE_CHECKING, TypedDict
 from mindroom.automations.threads import automation_threads
 from mindroom.durable_write import write_json_file_durable
 from mindroom.entity_resolution import prepared_entity_names_by_user_id
-from mindroom.history.session_runs import finished_runs, run_key, session_runs, unredacted_runs, updated_sessions
+from mindroom.history.session_runs import Cursor, back_off, caught_up, due_conversations, start_seq, unredacted
 from mindroom.knowledge_graph.episodes import (
     RUN_DONE,
-    Progress,
     RenderedEpisode,
     classify_thread,
     newest_display_names,
     render_episodes,
 )
+from mindroom.knowledge_graph.legacy_ingestion import released_ingestion_markers
 from mindroom.knowledge_graph.names import entity_names
 from mindroom.knowledge_graph.scope import graph_scopes
 from mindroom.knowledge_graph.store import UnusableExtractionError, record_knowledge_graph_failure
@@ -39,11 +39,11 @@ if TYPE_CHECKING:
 
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
-    from mindroom.history.session_runs import RedactedEventIds
+    from mindroom.history.session_runs import DueConversation, RedactedEventIds
     from mindroom.knowledge_graph.names import EntityNames
     from mindroom.knowledge_graph.scope import GraphScope
     from mindroom.knowledge_graph.store import GraphStore
-    from mindroom.llm.runs import RunRecord
+    from mindroom.session_storage.store import LoggedRun
 
 logger = get_logger(__name__)
 
@@ -66,33 +66,19 @@ _WAKE_EVENTS: set[asyncio.Event] = set()
 _LISTING = ""
 
 
-class _SessionState(TypedDict):
-    updated_at: int
-    # The last run each episode kind has ingested, so a failing kind never repeats the other.
-    markers: dict[str, list[int | str]]
-    # Consecutive failures, which set the backoff.
-    failures: int
+class _SessionState(Cursor):
+    # Where each episode kind has ingested to, as `[seq, lines]`, so a failing kind never repeats the other; empty
+    # until the conversation is first read.
+    markers: dict[str, list[int]]
     # Consecutive failures of the current episode whose model output could not be used, which drop it.
     bad_outputs: int
-    # When the current episode started failing, so one that never succeeds is dropped after a while.
-    failing_since: float
     # The failing episode, as its kind and where that kind stopped, which stays put while it fails; empty when none.
     failing_piece: list[int | str]
-    retry_at: float
-    # When a turn holding the conversation back stops waiting for approval, or 0.
-    recheck_at: float
 
 
 class _GraphState(TypedDict):
     started_at: float
     sessions: dict[str, _SessionState]
-
-
-@dataclass(frozen=True)
-class _DueSession:
-    session_id: str
-    updated_at: int
-    runs: list[RunRecord]
 
 
 def wake_knowledge_graph_ingestion(*, after_seconds: float = 0) -> None:
@@ -114,40 +100,49 @@ def _new_session_state() -> _SessionState:
         "failing_since": 0,
         "failing_piece": [],
         "retry_at": 0,
-        "recheck_at": 0,
     }
 
 
-def _start_after_backfill_window(entry: _SessionState, runs: list[RunRecord], *, cutoff: float) -> None:
-    """Mark the runs before the backfill window as done, so a long conversation adds only its recent turns."""
-    older = [run for run in runs if run.created_at < cutoff]
-    if older:
-        done = [*run_key(older[-1]), RUN_DONE]
-        entry["markers"] = {kind: list(done) for kind in _EPISODE_KINDS}
+def _progress(
+    sessions: dict[str, _SessionState],
+    session_id: str,
+    turns: list[LoggedRun],
+    *,
+    cutoff: float,
+) -> _SessionState:
+    """Return the conversation's progress, with where each kind starts fixed when it is first read."""
+    entry = sessions.setdefault(session_id, _new_session_state())
+    markers = released_ingestion_markers(entry["markers"], turns, kinds=_EPISODE_KINDS, run_done=RUN_DONE)
+    if markers is None:
+        if entry["markers"]:
+            return entry
+        # A conversation nothing was ingested from yet starts after the backfill window, so a long conversation adds
+        # only its recent turns, however it was first recorded.
+        start = start_seq(turns, older=lambda run: run.created_at < cutoff)
+        markers = {kind: [start, RUN_DONE] for kind in _EPISODE_KINDS}
+    # Rebuilt rather than updated, so a released entry's `recheck_at` leaves the file.
+    current: _SessionState = {
+        "updated_at": entry["updated_at"],
+        "markers": markers,
+        "failures": entry["failures"],
+        "bad_outputs": entry["bad_outputs"],
+        "failing_since": entry["failing_since"],
+        "failing_piece": entry["failing_piece"],
+        "retry_at": entry["retry_at"],
+    }
+    sessions[session_id] = current
+    return current
 
 
-def _finish(entry: _SessionState, updated_at: int, recheck_at: float) -> None:
-    """Record every new turn as done, so the conversation waits for news or for ``recheck_at``."""
-    entry.update(
-        updated_at=updated_at,
-        recheck_at=recheck_at,
-        failures=0,
-        bad_outputs=0,
-        failing_since=0,
-        failing_piece=[],
-        retry_at=0,
-    )
+def _finish(entry: _SessionState, updated_at: int) -> None:
+    """Record every new turn as done, so the conversation waits for news."""
+    caught_up(entry, updated_at)
+    entry.update(bad_outputs=0, failing_piece=[])
 
 
 def _back_off(entry: _SessionState, now: float) -> None:
     """Count one more consecutive failure and wait longer before trying the conversation again."""
-    entry["failures"] += 1
-    entry["retry_at"] = now + min(_FIRST_RETRY_SECONDS * 2 ** (entry["failures"] - 1), _MAX_RETRY_SECONDS)
-
-
-def _marker(entry: _SessionState, kind: str) -> Progress | None:
-    marker = entry["markers"].get(kind)
-    return (int(marker[0]), str(marker[1]), int(marker[2])) if marker is not None else None
+    back_off(entry, now, first_seconds=_FIRST_RETRY_SECONDS, max_seconds=_MAX_RETRY_SECONDS)
 
 
 def _report_failure(message: str, exc: Exception, **context: str) -> None:
@@ -311,8 +306,8 @@ class KnowledgeGraphIngestionWorker:
         state: _GraphState,
         now: float,
         limit: int,
-    ) -> tuple[list[_DueSession], bool, list[Exception]]:
-        """Return up to ``limit`` idle conversations with new turns, whether listing changed the state, and read errors.
+    ) -> tuple[list[DueConversation], bool, list[Exception]]:
+        """Return up to ``limit`` idle conversations with news, whether listing changed the state, and read errors.
 
         The caller reports each conversation it could not read on the event loop, where its graph's health is held.
         """
@@ -323,43 +318,32 @@ class KnowledgeGraphIngestionWorker:
             self.runtime_paths,
             execution_identity=scope.execution_identity,
         )
-        since = int(state["started_at"]) - settings.backfill_days * _DAY_SECONDS
-        due: list[_DueSession] = []
-        changed = False
-        unreadable: list[Exception] = []
-        for session_id, updated_at in updated_sessions(storage, since=since):
-            if len(due) >= limit:
-                break
-            entry = state["sessions"].get(session_id)
-            if entry is not None and (
-                entry["retry_at"] > now or (updated_at <= entry["updated_at"] and not 0 < entry["recheck_at"] <= now)
-            ):
-                continue
-            if now - updated_at < settings.idle_seconds:
-                continue
-            try:
-                runs = session_runs(storage, session_id)
-            except Exception as exc:
-                # One conversation that cannot be read must not stop the agent's others.
-                unreadable.append(exc)
-                _back_off(state["sessions"].setdefault(session_id, _new_session_state()), now)
-                changed = True
-                continue
-            if not runs:
-                # A conversation with no Matrix turns, such as one through the OpenAI-compatible API, has nothing to
-                # ingest, so it does not take a place in the pass.
-                _finish(state["sessions"].setdefault(session_id, _new_session_state()), updated_at, 0)
-                changed = True
-                continue
-            due.append(_DueSession(session_id, updated_at, runs))
-        return due, changed, unreadable
+        sessions = state["sessions"]
+        scan = due_conversations(
+            storage,
+            sessions,
+            agent_name=scope.agent_name,
+            since=int(state["started_at"]) - settings.backfill_days * _DAY_SECONDS,
+            now=now,
+            idle_seconds=settings.idle_seconds,
+            limit=limit,
+        )
+        for session_id, updated_at in scan.empty:
+            _finish(sessions.setdefault(session_id, _new_session_state()), updated_at)
+        for unreadable in scan.unreadable:
+            _back_off(sessions.setdefault(unreadable.session_id, _new_session_state()), now)
+        return (
+            scan.due,
+            bool(scan.empty or scan.unreadable),
+            [unreadable.error for unreadable in scan.unreadable],
+        )
 
     async def _ingest(
         self,
         config: Config,
         scope: GraphScope,
         state: _GraphState,
-        session: _DueSession,
+        session: DueConversation,
         automation_thread_ids: set[str],
         names: EntityNames,
         now: float,
@@ -370,38 +354,36 @@ class KnowledgeGraphIngestionWorker:
         first episode failed and waits for its retry, which leaves the conversation for a later pass.
         """
         settings = config.knowledge_graph.ingest
-        finished, blocked_until = finished_runs(session.runs, config, now=now)
         try:
-            finished = await unredacted_runs(finished, scope.agent_name, self.redacted_event_ids)
+            kept = await unredacted(session, scope.agent_name, self.redacted_event_ids)
         except Exception as exc:
             # One conversation whose redactions cannot be checked must not stop the agent's others.
             self._hold_failure(scope, "Knowledge graph ingestion could not check a conversation for redactions", exc)
             _back_off(state["sessions"].setdefault(session.session_id, _new_session_state()), now)
             await self._persist(scope.graph_name, state)
             return None
-        if finished is None:
+        if kept is None:
             return None
-        entry = state["sessions"].setdefault(session.session_id, _new_session_state())
-        # A conversation nothing was ingested from yet starts after the backfill window, however it was first recorded.
-        if not entry["markers"]:
-            _start_after_backfill_window(
-                entry,
-                finished,
-                cutoff=state["started_at"] - settings.backfill_days * _DAY_SECONDS,
-            )
-        thread_kind = classify_thread(session.runs, automation_thread_ids)
+        entry = _progress(
+            state["sessions"],
+            session.session_id,
+            session.turns,
+            cutoff=state["started_at"] - settings.backfill_days * _DAY_SECONDS,
+        )
+        thread_kind = classify_thread(session.turns, automation_thread_ids)
         # From every finished turn, not only the new ones, so a person keeps their name in a turn stored without it.
-        display_names = await asyncio.to_thread(newest_display_names, finished)
+        display_names = await asyncio.to_thread(newest_display_names, kept)
         clean = True
         added = 0
         for kind in _EPISODE_KINDS:
-            marker = _marker(entry, kind)
+            seq, lines = entry["markers"][kind]
+            marker = (seq, lines)
             # A run whose pieces are partly done is rendered again, and its done pieces are skipped below.
-            new_runs = [run for run in finished if marker is None or (*run_key(run), RUN_DONE) > marker]
+            new_turns = [turn for turn in kept if (turn.seq, RUN_DONE) > marker]
             # Rendering redacts every tool result of the backlog, which must not stall the event loop.
             episodes = await asyncio.to_thread(
                 render_episodes,
-                new_runs,
+                new_turns,
                 thread_kind=thread_kind,
                 episode_kind=kind,
                 agent_name=scope.agent_name,
@@ -410,7 +392,7 @@ class KnowledgeGraphIngestionWorker:
                 display_names=display_names,
             )
             for rendered in episodes:
-                if marker is not None and rendered.progress <= marker:
+                if rendered.progress <= marker:
                     continue
                 usage = UsageTarget(
                     scope.agent_name,
@@ -426,10 +408,9 @@ class KnowledgeGraphIngestionWorker:
                 # A long backlog spreads over passes; the conversation stays due because its update time is unchanged.
                 if added >= _MAX_EPISODES_PER_PASS:
                     return clean
-            if new_runs:
-                entry["markers"][kind] = [*run_key(new_runs[-1]), RUN_DONE]
-        # Held back by a turn waiting for approval, it is looked at again when those approvals expire, even without news.
-        _finish(entry, session.updated_at, blocked_until or 0)
+            if new_turns:
+                entry["markers"][kind] = [new_turns[-1].seq, RUN_DONE]
+        _finish(entry, session.updated_at)
         await self._persist(scope.graph_name, state)
         return clean
 
@@ -444,7 +425,7 @@ class KnowledgeGraphIngestionWorker:
         now: float,
     ) -> bool | None:
         """Add one episode; return True when added, False when dropped, and None when it waits for a later pass."""
-        piece = [kind, *entry["markers"].get(kind, [])]
+        piece = [kind, *entry["markers"][kind]]
         try:
             await self.store.add_episode(scope, rendered.episode, usage)
             dropped = False

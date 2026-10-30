@@ -24,7 +24,7 @@ from mindroom.custom_tools.microsoft_graph import (
     page_path,
     path_segment,
 )
-from mindroom.oauth.microsoft import microsoft_sharepoint_oauth_provider
+from mindroom.oauth.microsoft import microsoft_oauth_provider
 from mindroom.tool_system.authoring import Toolkit
 
 if TYPE_CHECKING:
@@ -288,7 +288,7 @@ class MicrosoftSharePointTools(Toolkit):
         if credentials_manager is None:
             msg = "MicrosoftSharePointTools requires an explicit credentials_manager"
             raise RuntimeError(msg)
-        self._provider = microsoft_sharepoint_oauth_provider()
+        self._provider = microsoft_oauth_provider(_TOOL_NAME)
         self._runtime_paths = runtime_paths
         self._credentials_manager = credentials_manager
         self._worker_target = worker_target
@@ -457,9 +457,13 @@ class MicrosoftSharePointTools(Toolkit):
             },
         )
 
-    # `fields` is a bare `dict`, whose values the schema leaves open; `dict[str, Any]` would close them to `{}`, as
-    # tool_system/tool_schema.py renders `Any` (see the TODO(simplify) there).
-    def microsoft_sharepoint_create_item(self, site_id: str, list_id: str, fields: dict, expected_web_url: str) -> str:
+    def microsoft_sharepoint_create_item(
+        self,
+        site_id: str,
+        list_id: str,
+        fields: dict[str, Any],
+        expected_web_url: str,
+    ) -> str:
         """Add one item to a SharePoint list with the given column values.
 
         The write fails with target_mismatch unless expected_web_url is the list's web_url. Read the list's column
@@ -484,14 +488,12 @@ class MicrosoftSharePointTools(Toolkit):
 
         return self._send(build, lambda payload: {"item": _item(payload)})
 
-    # `fields` is a bare `dict`, whose values the schema leaves open; `dict[str, Any]` would close them to `{}`, as
-    # tool_system/tool_schema.py renders `Any` (see the TODO(simplify) there).
     def microsoft_sharepoint_update_item(
         self,
         site_id: str,
         list_id: str,
         item_id: str,
-        fields: dict,
+        fields: dict[str, Any],
         expected_web_url: str,
     ) -> str:
         """Change column values of one SharePoint list item; columns not given stay unchanged.

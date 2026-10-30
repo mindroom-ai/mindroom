@@ -21,8 +21,8 @@ if TYPE_CHECKING:
 
 type UnreadableLayout = Literal["session table unavailable", "session schema unsupported", "usage schema unsupported"]
 
-_SESSION_COLUMNS = frozenset({"session_id", "user_id", "session_data"})
-_OWNER_COLUMNS = frozenset({"owner_kind", "owner_id"})
+_SESSION_COLUMNS = frozenset({"session_id", "user_id"})
+_META_COLUMNS = frozenset({"version", "owner_kind", "owner_id"})
 _USAGE_COLUMNS = frozenset({"id", "session_id", "run_id", "usage_data"})
 # A dated read keeps snapshots last written in range, so a run resumed after ``since`` keeps its new requests.
 # Malformed snapshots stay in a dated read, so the reader reports them instead of SQLite failing the whole store.
@@ -33,11 +33,18 @@ _USAGE_SINCE_CONDITION = (
 
 
 class StoredSession(NamedTuple):
-    """A session row as stored: its id, its requester, and its usage totals, none of them checked."""
+    """A session row as stored: its id and its requester, neither of them checked."""
 
     session_id: object
     user_id: object
-    session_data: object
+
+
+class RecordedMeta(NamedTuple):
+    """What a database's meta row records, unchecked: its owner's kind and id, and its layout version."""
+
+    owner_kind: object
+    owner_id: object
+    version: object
 
 
 @contextmanager
@@ -67,28 +74,28 @@ def unreadable_layout(connection: sqlite3.Connection, names: TableNames) -> Unre
     return None
 
 
-def recorded_owner(connection: sqlite3.Connection, names: TableNames) -> tuple[object, object] | None:
-    """Return the owner kind and id the meta row records, unchecked, or None when the database records no owner."""
+def recorded_meta(connection: sqlite3.Connection, names: TableNames) -> RecordedMeta | None:
+    """Return what the meta row records, or None when the database records no owner."""
     meta = names.log_meta
-    if meta not in table_names(connection) or not _OWNER_COLUMNS.issubset(table_columns(connection, meta)):
+    if meta not in table_names(connection) or not _META_COLUMNS.issubset(table_columns(connection, meta)):
         return None
-    return connection.execute(f"SELECT owner_kind, owner_id FROM {quote_identifier(meta)} WHERE id = 1").fetchone()  # noqa: S608
+    row = connection.execute(
+        f"SELECT owner_kind, owner_id, version FROM {quote_identifier(meta)} WHERE id = 1",  # noqa: S608
+    ).fetchone()
+    return None if row is None else RecordedMeta(*row)
 
 
 def stored_sessions(
     connection: sqlite3.Connection,
     names: TableNames,
     *,
-    with_totals: bool,
     since: float | None,
 ) -> Iterator[StoredSession]:
     """Yield the database's session rows, with ``since`` only those with a usage snapshot last written at or after it.
 
-    A row comes with its ``session_data`` only ``with_totals``; the totals cover the session's whole history. ``since``
-    needs the usage ledger.
+    ``since`` needs the usage ledger.
     """
-    session_data = "session_data" if with_totals else "NULL AS session_data"
-    query = f"SELECT session_id, user_id, {session_data} FROM {quote_identifier(names.sessions)}"  # noqa: S608
+    query = f"SELECT session_id, user_id FROM {quote_identifier(names.sessions)}"  # noqa: S608
     parameters: tuple[object, ...] = ()
     if since is not None:
         query += (
@@ -121,10 +128,11 @@ def stored_usage(
 
 
 __all__ = [
+    "RecordedMeta",
     "StoredSession",
     "UnreadableLayout",
     "read_only_snapshot",
-    "recorded_owner",
+    "recorded_meta",
     "stored_sessions",
     "stored_usage",
     "unreadable_layout",

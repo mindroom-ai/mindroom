@@ -42,10 +42,12 @@
       "app.mindroom.ai/managed-by": "mindroom",
       "app.mindroom.ai/name": "mindroom-docker-worker",
       "mindroom.ai/worker-id": "<CONTAINER_NAME>",
-      "mindroom.ai/launch-config-hash": "<LAUNCH_CONFIG_HASH>",
       "mindroom.ai/runtime-namespace": "<RUNTIME_NAMESPACE>",
       "mindroom.ai/storage-layout": "workspaces",
-      "mindroom.ai/tenant": "test"
+      "mindroom.ai/startup-manifest-hash": "<STARTUP_MANIFEST_HASH>",
+      "mindroom.ai/image-reference": "ghcr.io/mindroom-ai/mindroom:latest",
+      "mindroom.ai/tenant": "test",
+      "mindroom.ai/launch-config-hash": "<LAUNCH_CONFIG_HASH>"
     },
     "user": "1000:1000",
     "read_only": true,

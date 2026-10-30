@@ -25,7 +25,7 @@ from mindroom.custom_tools.config_manager import ConfigManagerTools, _InfoType
 from mindroom.matrix.state import MatrixState
 from mindroom.mcp.config import MCPServerConfig
 from mindroom.message_target import MessageTarget
-from mindroom.oauth.google_drive import google_drive_oauth_provider
+from mindroom.oauth.google import google_oauth_provider
 from mindroom.oauth.service import lookup_oauth_connect_token
 from mindroom.tool_system.agent_tools import resolve_agent_tools
 from mindroom.tool_system.metadata import _AUTHORED_OVERRIDE_INHERIT
@@ -1173,7 +1173,7 @@ class TestConsolidatedConfigManager:
             return
 
         connect_target = lookup_oauth_connect_token(
-            google_drive_oauth_provider(),
+            google_oauth_provider("google_drive"),
             cm.runtime_paths,
             connect_tokens[0],
         )
@@ -1232,7 +1232,7 @@ class TestConsolidatedConfigManager:
         assert query["agent_name"] == ["research"]
         assert query["execution_scope"] == [private_scope]
         connect_target = lookup_oauth_connect_token(
-            google_drive_oauth_provider(),
+            google_oauth_provider("google_drive"),
             cm.runtime_paths,
             query["connect_token"][0],
         )

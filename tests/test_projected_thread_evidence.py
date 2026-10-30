@@ -20,6 +20,7 @@ from mindroom.matrix.thread_membership import (
     thread_messages_thread_membership_access,
 )
 from mindroom.matrix.thread_mutation_impact import event_thread_membership_known, redaction_thread_membership_known
+from tests.journal_helpers import record_room_history_recovery
 from tests.journal_membership_helpers import admit_room_membership
 from tests.test_conversation_hydration import ROOM, FakeClient, encrypted, hydrator, raw
 
@@ -300,7 +301,7 @@ async def test_a_rewalk_asked_for_a_message_s_edits_sees_one_the_recursive_walk_
 
 async def _truncate_room_recovery(principal: PrincipalStore, client: FakeClient, thread_id: str) -> None:
     """Leave the room with a recovery that stopped at its ceiling, and confirm the projection now reports it."""
-    recovery = await principal.record_room_history_recovery(ROOM)
+    recovery = await record_room_history_recovery(principal, ROOM)
     assert recovery is not None
     await principal.settle_room_history_recovery(
         recovery,

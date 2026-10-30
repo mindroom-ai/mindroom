@@ -15,7 +15,8 @@ from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.custom_tools.thread_summary import ThreadSummaryTools
 from mindroom.message_target import MessageTarget
-from mindroom.thread_summary import _THREAD_SUMMARY_MAX_LENGTH, ThreadSummaryWriteError, _ThreadSummaryWriteResult
+from mindroom.thread_summary.notices import ThreadSummaryWriteError, _ThreadSummaryWriteResult
+from mindroom.thread_summary.state import THREAD_SUMMARY_MAX_LENGTH
 from mindroom.tool_system.metadata import TOOL_METADATA, get_tool_by_name
 from mindroom.tool_system.runtime_context import ToolRuntimeContext, tool_runtime_context
 from tests.authorization_helpers import (
@@ -326,15 +327,19 @@ async def test_set_thread_summary_rejects_non_string_summary() -> None:
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    "message",
+    ("summary", "error"),
     [
-        f"summary must be {_THREAD_SUMMARY_MAX_LENGTH} characters or fewer after whitespace normalization.",
-        "Failed to fetch thread history for the target thread.",
-        "Failed to send thread summary event.",
+        (
+            "x" * (THREAD_SUMMARY_MAX_LENGTH + 1),
+            f"summary must be {THREAD_SUMMARY_MAX_LENGTH} characters or fewer after whitespace normalization.",
+        ),
+        ("done", "Failed to fetch thread history for the target thread."),
+        ("failed write", "Failed to send thread summary event."),
     ],
+    ids=["overlong", "fetch-failure", "send-failure"],
 )
-async def test_set_thread_summary_returns_shared_write_helper_errors(message: str) -> None:
-    """Validation, fetch, and send failures of the shared manual-summary write pass through as the tool error."""
+async def test_set_thread_summary_returns_helper_write_error(summary: str, error: str) -> None:
+    """Validation, fetch, and send failures of the shared write helper pass through as the error payload."""
     tool = ThreadSummaryTools()
     context = _make_context(thread_id="$ctx-thread:localhost")
 
@@ -345,16 +350,16 @@ async def test_set_thread_summary_returns_shared_write_helper_errors(message: st
         ),
         patch(
             "mindroom.custom_tools.thread_summary.set_manual_thread_summary",
-            new=AsyncMock(side_effect=ThreadSummaryWriteError(message)),
+            new=AsyncMock(side_effect=ThreadSummaryWriteError(error)),
         ),
         tool_runtime_context(context),
     ):
-        payload = json.loads(await tool.set_thread_summary("done"))
+        payload = json.loads(await tool.set_thread_summary(summary))
 
     assert payload["status"] == "error"
     assert payload["room_id"] == context.room_id
     assert payload["thread_id"] == "$ctx-thread:localhost"
-    assert payload["message"] == message
+    assert payload["message"] == error
 
 
 @pytest.mark.asyncio
@@ -375,30 +380,6 @@ async def test_set_thread_summary_returns_error_when_normalize_raises() -> None:
     assert payload["status"] == "error"
     assert payload["thread_id"] == "$reply-event:localhost"
     assert payload["message"] == "Failed to resolve a canonical thread root for the target event."
-
-
-@pytest.mark.asyncio
-async def test_set_thread_summary_pins_by_default() -> None:
-    """Asking an agent to set a title should make it survive automatic re-summarization."""
-    tool = ThreadSummaryTools()
-    context = _make_context(thread_id="$ctx-thread:localhost")
-
-    with (
-        patch(
-            "mindroom.custom_tools.attachment_helpers.resolve_thread_root_event_id",
-            new=AsyncMock(return_value="$ctx-thread:localhost"),
-        ),
-        patch(
-            "mindroom.custom_tools.thread_summary.set_manual_thread_summary",
-            new=AsyncMock(return_value=_write_result(summary="A fixed title")),
-        ) as mock_set,
-        tool_runtime_context(context),
-    ):
-        payload = json.loads(await tool.set_thread_summary("A fixed title"))
-
-    assert payload["status"] == "ok"
-    assert payload["pinned"] is True
-    assert mock_set.await_args.kwargs["pin"] is True
 
 
 @pytest.mark.asyncio

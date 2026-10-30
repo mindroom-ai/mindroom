@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import copy
 import hashlib
-import json
 import os
 import re
 import shutil
@@ -27,6 +26,7 @@ from mindroom.tool_system.worker_routing import (
     written_by_other_workers,
 )
 from mindroom.workers.backend import WorkerBackendError
+from mindroom.workers.backends._dedicated_worker_common import stable_json_digest
 from mindroom.workers.worker_retirement import open_worker_state_root
 from mindroom.workspaces import (
     iter_local_copy_source_entries,
@@ -323,9 +323,7 @@ class DockerProjectionManager:
                 for asset in assets
             ],
         }
-        projection_hash = hashlib.sha256(
-            json.dumps(projection_manifest, sort_keys=True, separators=(",", ":")).encode("utf-8"),
-        ).hexdigest()[:12]
+        projection_hash = stable_json_digest(projection_manifest)[:12]
         projection_dir = self._worker_projected_configs_root(paths) / f"config-projection-{projection_hash}"
         projection = _DockerProjectedConfig(
             root=projection_dir,

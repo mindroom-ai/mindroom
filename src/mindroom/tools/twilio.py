@@ -24,6 +24,7 @@ if TYPE_CHECKING:
     config_fields=[
         ConfigField(
             name="account_sid",
+            env=("TWILIO_ACCOUNT_SID",),
             label="Account Sid",
             type="text",
             required=False,
@@ -31,6 +32,7 @@ if TYPE_CHECKING:
         ),
         ConfigField(
             name="auth_token",
+            env=("TWILIO_AUTH_TOKEN",),
             label="Auth Token",
             type="password",
             required=False,
@@ -38,6 +40,7 @@ if TYPE_CHECKING:
         ),
         ConfigField(
             name="api_key",
+            env=("TWILIO_API_KEY",),
             label="API Key",
             type="password",
             required=False,
@@ -45,6 +48,7 @@ if TYPE_CHECKING:
         ),
         ConfigField(
             name="api_secret",
+            env=("TWILIO_API_SECRET",),
             label="API Secret",
             type="password",
             required=False,
@@ -52,6 +56,7 @@ if TYPE_CHECKING:
         ),
         ConfigField(
             name="region",
+            env=("TWILIO_REGION",),
             label="Region",
             type="text",
             required=False,
@@ -59,6 +64,7 @@ if TYPE_CHECKING:
         ),
         ConfigField(
             name="edge",
+            env=("TWILIO_EDGE",),
             label="Edge",
             type="text",
             required=False,

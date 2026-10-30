@@ -25,6 +25,7 @@ if TYPE_CHECKING:
         # Authentication credentials
         ConfigField(
             name="username",
+            env=("OXYLABS_USERNAME",),
             label="Username",
             type="text",
             required=False,
@@ -33,6 +34,7 @@ if TYPE_CHECKING:
         ),
         ConfigField(
             name="password",
+            env=("OXYLABS_PASSWORD",),
             label="Password",
             type="password",
             required=False,

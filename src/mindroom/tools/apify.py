@@ -25,6 +25,7 @@ if TYPE_CHECKING:
         # Authentication
         ConfigField(
             name="apify_api_token",
+            env=("APIFY_API_TOKEN",),
             label="API Token",
             type="password",
             required=False,

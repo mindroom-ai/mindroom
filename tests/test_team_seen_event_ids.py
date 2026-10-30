@@ -8,8 +8,8 @@ from typing import TYPE_CHECKING
 import pytest
 
 from mindroom.history.session_context import ScopeSessionContext
-from mindroom.history.storage import _with_scope_state, read_scope_seen_event_ids, read_scope_state
-from mindroom.history.types import HistoryScope, HistoryScopeState
+from mindroom.history.storage import read_scope_seen_event_ids, read_scope_state, with_force_compaction
+from mindroom.history.types import HistoryScope
 from mindroom.session_storage.agent_storage import create_state_storage
 from mindroom.session_storage.types import ConversationSession, session_state_snapshot
 from mindroom.teams.envelope import _persist_bound_seen_event_ids
@@ -38,10 +38,7 @@ async def test_seen_event_ids_are_written_onto_the_stored_row_not_the_pre_run_sn
     stored.session_state = {"phase": "after"}
     seed_session_state(storage, stored, session_state_snapshot(stored.session_state))
     # The user asks for compaction while the run finishes.
-    storage.update_metadata(
-        stored,
-        lambda metadata: _with_scope_state(metadata, scope, HistoryScopeState(force_compact_before_next_run=True)),
-    )
+    storage.update_metadata(stored, with_force_compaction)
 
     await _persist_bound_seen_event_ids(
         scope_context=ScopeSessionContext(

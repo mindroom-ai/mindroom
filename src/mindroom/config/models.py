@@ -610,11 +610,7 @@ class DefaultsConfig(BaseModel):
             return None
         normalized_services = [validate_service_name(service) for service in services]
         unsupported_services = sorted(
-            {
-                service
-                for service in normalized_services
-                if not credential_service_policy(service, None).worker_grantable_supported
-            },
+            {service for service in normalized_services if not credential_service_policy(service, None).grantable},
         )
         if unsupported_services:
             msg = (

@@ -33,6 +33,7 @@ if TYPE_CHECKING:
         ),
         ConfigField(
             name="api_key",
+            env=("ELEVEN_LABS_API_KEY",),
             label="API Key",
             type="password",
             required=False,

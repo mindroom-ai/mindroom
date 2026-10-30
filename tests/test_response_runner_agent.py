@@ -44,8 +44,8 @@ from mindroom.dispatch_source import (
     SILENT_SCHEDULE_SOURCE_KIND,
 )
 from mindroom.final_delivery import FinalDeliveryOutcome, StreamTransportOutcome
-from mindroom.history.storage import _with_scope_state
-from mindroom.history.types import CompactionLifecycleStart, HistoryScope, HistoryScopeState
+from mindroom.history.storage import with_force_compaction
+from mindroom.history.types import CompactionLifecycleStart, HistoryScope
 from mindroom.hooks import (
     EVENT_MESSAGE_AFTER_RESPONSE,
     EVENT_MESSAGE_BEFORE_RESPONSE,
@@ -837,13 +837,7 @@ class TestAgentBot(AgentBotTestBase):
             patch(
                 "mindroom.delivery_gateway.send_streaming_response",
                 new_callable=AsyncMock,
-                side_effect=_consuming_send(
-                    StreamTransportOutcome(
-                        last_physical_stream_event_id="$response",
-                        rendered_body="chunk",
-                        visible_body_state="visible_body",
-                    ),
-                ),
+                side_effect=_consuming_send(stream_transport("$response", "chunk")),
             ) as mock_send_streaming_response,
             patch_response_runner_module(
                 typing_indicator=_noop_typing_indicator,
@@ -928,13 +922,7 @@ class TestAgentBot(AgentBotTestBase):
             patch(
                 "mindroom.delivery_gateway.send_streaming_response",
                 new_callable=AsyncMock,
-                side_effect=_consuming_send(
-                    StreamTransportOutcome(
-                        last_physical_stream_event_id="$response",
-                        rendered_body="hello",
-                        visible_body_state="visible_body",
-                    ),
-                ),
+                side_effect=_consuming_send(stream_transport("$response", "hello")),
             ) as mock_send_streaming_response,
             patch_response_runner_module(
                 typing_indicator=_noop_typing_indicator,
@@ -1785,9 +1773,6 @@ class TestAgentBot(AgentBotTestBase):
 
         scheduled_tasks: list[asyncio.Task[None]] = []
 
-        async def fake_store_conversation_memory(*_args: object, **_kwargs: object) -> None:
-            return None
-
         def schedule_background_task(
             coro: Coroutine[Any, Any, None],
             *,
@@ -1834,7 +1819,8 @@ class TestAgentBot(AgentBotTestBase):
             patch("mindroom.response_runner.create_background_task", side_effect=schedule_background_task),
             patch(
                 "mindroom.response_runner.store_conversation_memory",
-                side_effect=fake_store_conversation_memory,
+                new_callable=AsyncMock,
+                return_value=None,
             ),
             patch.object(
                 bot._conversation_resolver,
@@ -2334,12 +2320,6 @@ class TestAgentBot(AgentBotTestBase):
         bot.client = _make_matrix_client_mock()
         unique_room_send_responses(bot.client, prefix="$response")
 
-        async def cached_history_refresh(
-            _room_id: str,
-            _thread_id: str,
-        ) -> ThreadHistoryResult:
-            return ThreadHistoryResult(fresh_history, is_full_history=True)
-
         answer = AsyncMock(return_value="ok")
         with (
             patch.object(
@@ -2350,7 +2330,7 @@ class TestAgentBot(AgentBotTestBase):
             patch.object(
                 bot._conversation_resolver,
                 "fetch_thread_history",
-                new=AsyncMock(side_effect=cached_history_refresh),
+                new=AsyncMock(return_value=ThreadHistoryResult(fresh_history, is_full_history=True)),
             ) as mock_fetch_thread_history,
             patch_response_runner_module(
                 should_use_streaming=AsyncMock(return_value=False),
@@ -2462,9 +2442,6 @@ class TestAgentBot(AgentBotTestBase):
         scheduled_tasks: list[asyncio.Task[None]] = []
         sent_contents: list[dict[str, object]] = []
 
-        async def fake_store_conversation_memory(*_args: object, **_kwargs: object) -> None:
-            return None
-
         def schedule_background_task(
             coro: Coroutine[Any, Any, None],
             *,
@@ -2525,7 +2502,8 @@ class TestAgentBot(AgentBotTestBase):
             patch("mindroom.response_runner.create_background_task", side_effect=schedule_background_task),
             patch(
                 "mindroom.response_runner.store_conversation_memory",
-                side_effect=fake_store_conversation_memory,
+                new_callable=AsyncMock,
+                return_value=None,
             ),
             patch("mindroom.delivery_gateway.send_message_outcome", new=AsyncMock(side_effect=record_send)),
         ):
@@ -2559,13 +2537,6 @@ class TestAgentBot(AgentBotTestBase):
         tmp_path: Path,
     ) -> None:
         """Threaded agent replies should queue summary generation once the threshold is reached."""
-
-        async def fake_store_conversation_memory(*_args: object, **_kwargs: object) -> None:
-            return None
-
-        async def fake_ai_response(*_args: object, **_kwargs: object) -> str:
-            return "ok"
-
         scheduled_tasks: list[asyncio.Task[None]] = []
         scheduled_names: list[str] = []
 
@@ -2604,7 +2575,7 @@ class TestAgentBot(AgentBotTestBase):
             patch("mindroom.response_runner.should_use_streaming", new_callable=AsyncMock, return_value=False),
             patch(
                 "mindroom.response_runner.stream_agent_response",
-                new=streamed_answer(AsyncMock(side_effect=fake_ai_response)),
+                new=streamed_answer(AsyncMock(return_value="ok")),
             ),
             patch(
                 "mindroom.delivery_gateway.send_message_outcome",
@@ -2623,7 +2594,8 @@ class TestAgentBot(AgentBotTestBase):
             patch("mindroom.post_response_effects.create_background_task", side_effect=schedule_background_task),
             patch(
                 "mindroom.response_runner.store_conversation_memory",
-                side_effect=fake_store_conversation_memory,
+                new_callable=AsyncMock,
+                return_value=None,
             ),
             patch(
                 "mindroom.post_response_effects.maybe_generate_thread_summary",
@@ -2681,9 +2653,6 @@ class TestAgentBot(AgentBotTestBase):
     ) -> None:
         """First-turn threaded replies should keep compaction notices and summaries in the resolved thread."""
 
-        async def fake_store_conversation_memory(*_args: object, **_kwargs: object) -> None:
-            return None
-
         async def fake_ai_response(ctx: ResponseTurnContext, *_args: object, **_kwargs: object) -> str:
             await ctx.compaction_lifecycle.start(
                 CompactionLifecycleStart(
@@ -2730,11 +2699,7 @@ class TestAgentBot(AgentBotTestBase):
         scope = HistoryScope(kind="agent", scope_id=bot.agent_name)
         storage = bot._conversation_state_writer.create_storage(None, scope=scope)
         session = ConversationSession(session_id=resolved_target.session_id, kind="agent", owner_id=bot.agent_name)
-        session.metadata = _with_scope_state(
-            session.metadata,
-            scope,
-            HistoryScopeState(force_compact_before_next_run=True),
-        )
+        session.metadata = with_force_compaction(session.metadata)
         seed_session(storage, session)
         response_envelope = replace(_hook_envelope(source_event_id=root_event_id), target=resolved_target)
 
@@ -2757,7 +2722,8 @@ class TestAgentBot(AgentBotTestBase):
             patch("mindroom.post_response_effects.create_background_task", side_effect=schedule_background_task),
             patch(
                 "mindroom.response_runner.store_conversation_memory",
-                side_effect=fake_store_conversation_memory,
+                new_callable=AsyncMock,
+                return_value=None,
             ),
             patch(
                 "mindroom.post_response_effects.maybe_generate_thread_summary",
@@ -3381,11 +3347,7 @@ class TestAdaptiveResponse(AgentBotTestBase):
     @pytest.mark.asyncio
     @pytest.mark.parametrize(
         ("failure_stage", "streaming"),
-        [
-            *((stage, streaming) for stage in ("history", "payload", "runtime") for streaming in (False, True)),
-            ("knowledge", False),
-            ("knowledge", True),
-        ],
+        [(stage, streaming) for stage in ("history", "payload", "runtime", "knowledge") for streaming in (False, True)],
     )
     async def test_adaptive_setup_failure_settles_quietly(
         self,

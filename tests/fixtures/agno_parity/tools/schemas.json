@@ -2150,11 +2150,7 @@
                   "propertyNames": {
                     "type": "string"
                   },
-                  "additionalProperties": {
-                    "type": "object",
-                    "properties": {},
-                    "additionalProperties": false
-                  }
+                  "additionalProperties": {}
                 },
                 {
                   "type": "null"
@@ -4755,12 +4751,10 @@
               ],
               "default": null,
               "description": "Optional MindRoom-managed workspace-relative path. If set, the full supported tool output is written to this file in your workspace and the tool returns only a compact receipt. Use this for large output you plan to inspect later with file, coding, python, or shell tools."
-            },
-            "kwargs": {}
+            }
           },
           "required": [
-            "task_id",
-            "kwargs"
+            "task_id"
           ]
         },
         "strict": false,
@@ -6013,11 +6007,7 @@
                   "propertyNames": {
                     "type": "string"
                   },
-                  "additionalProperties": {
-                    "type": "object",
-                    "properties": {},
-                    "additionalProperties": false
-                  }
+                  "additionalProperties": {}
                 },
                 {
                   "type": "null"
@@ -6031,11 +6021,7 @@
                   "propertyNames": {
                     "type": "string"
                   },
-                  "additionalProperties": {
-                    "type": "object",
-                    "properties": {},
-                    "additionalProperties": false
-                  }
+                  "additionalProperties": {}
                 },
                 {
                   "type": "null"
@@ -6065,11 +6051,7 @@
                   "propertyNames": {
                     "type": "string"
                   },
-                  "additionalProperties": {
-                    "type": "object",
-                    "properties": {},
-                    "additionalProperties": false
-                  }
+                  "additionalProperties": {}
                 },
                 {
                   "type": "null"
@@ -9505,9 +9487,6 @@
           "type": "object",
           "properties": {
             "command_obj": {
-              "type": "object",
-              "properties": {},
-              "additionalProperties": false,
               "description": "Command object returned from run_background_command"
             },
             "mindroom_output_path": {
@@ -9700,13 +9679,11 @@
               ],
               "default": null,
               "description": "Optional MindRoom-managed workspace-relative path. If set, the full supported tool output is written to this file in your workspace and the tool returns only a compact receipt. Use this for large output you plan to inspect later with file, coding, python, or shell tools."
-            },
-            "kwargs": {}
+            }
           },
           "required": [
             "subject",
-            "body",
-            "kwargs"
+            "body"
           ]
         },
         "strict": false,
@@ -11365,10 +11342,13 @@
     "functions": [
       {
         "name": "generate_image",
-        "description": null,
+        "description": "Generate an image through the Gemini content-generation API.",
         "parameters": {
           "type": "object",
           "properties": {
+            "prompt": {
+              "type": "string"
+            },
             "mindroom_output_path": {
               "anyOf": [
                 {
@@ -11382,7 +11362,9 @@
               "description": "Optional MindRoom-managed workspace-relative path. If set, the full supported tool output is written to this file in your workspace and the tool returns only a compact receipt. Use this for large output you plan to inspect later with file, coding, python, or shell tools."
             }
           },
-          "required": []
+          "required": [
+            "prompt"
+          ]
         },
         "strict": false,
         "requires_confirmation": false,
@@ -15954,11 +15936,7 @@
               "type": "array",
               "items": {
                 "type": "array",
-                "items": {
-                  "type": "object",
-                  "properties": {},
-                  "additionalProperties": false
-                }
+                "items": {}
               },
               "description": "The data to update the sheet with"
             },
@@ -16007,7 +15985,10 @@
               "type": "array",
               "items": {
                 "type": "object",
-                "additionalProperties": true
+                "propertyNames": {
+                  "type": "string"
+                },
+                "additionalProperties": {}
               },
               "description": "Sheets API batchUpdate Request objects."
             },
@@ -17960,11 +17941,7 @@
                   "propertyNames": {
                     "type": "string"
                   },
-                  "additionalProperties": {
-                    "type": "object",
-                    "properties": {},
-                    "additionalProperties": false
-                  }
+                  "additionalProperties": {}
                 },
                 {
                   "type": "null"
@@ -18047,11 +18024,7 @@
                   "propertyNames": {
                     "type": "string"
                   },
-                  "additionalProperties": {
-                    "type": "object",
-                    "properties": {},
-                    "additionalProperties": false
-                  }
+                  "additionalProperties": {}
                 },
                 {
                   "type": "null"
@@ -18065,11 +18038,7 @@
                   "propertyNames": {
                     "type": "string"
                   },
-                  "additionalProperties": {
-                    "type": "object",
-                    "properties": {},
-                    "additionalProperties": false
-                  }
+                  "additionalProperties": {}
                 },
                 {
                   "type": "null"
@@ -20082,7 +20051,10 @@
             },
             "fields": {
               "type": "object",
-              "additionalProperties": true,
+              "propertyNames": {
+                "type": "string"
+              },
+              "additionalProperties": {},
               "description": "Column values keyed by column name from microsoft_sharepoint_get_list, such as\n{\"Title\": \"Widget\", \"Quantity\": 3}. A lookup or person column takes its name plus LookupId and the\nlookup ID. A multi-value column takes a list, with \"<name>@odata.type\" set to\n\"Collection(Edm.String)\" for text or \"Collection(Edm.Int32)\" for lookup IDs."
             },
             "expected_web_url": {
@@ -20135,7 +20107,10 @@
             },
             "fields": {
               "type": "object",
-              "additionalProperties": true,
+              "propertyNames": {
+                "type": "string"
+              },
+              "additionalProperties": {},
               "description": "The new column values keyed by column name, as for microsoft_sharepoint_create_item; null\nclears a value."
             },
             "expected_web_url": {
@@ -23239,11 +23214,7 @@
               "propertyNames": {
                 "type": "string"
               },
-              "additionalProperties": {
-                "type": "object",
-                "properties": {},
-                "additionalProperties": false
-              },
+              "additionalProperties": {},
               "description": "The parameters to pass to the function."
             },
             "mindroom_output_path": {
@@ -23290,11 +23261,7 @@
               "propertyNames": {
                 "type": "string"
               },
-              "additionalProperties": {
-                "type": "object",
-                "properties": {},
-                "additionalProperties": false
-              },
+              "additionalProperties": {},
               "description": "The parameters to pass to the operation."
             },
             "mindroom_output_path": {
@@ -28674,11 +28641,7 @@
                   "propertyNames": {
                     "type": "string"
                   },
-                  "additionalProperties": {
-                    "type": "object",
-                    "properties": {},
-                    "additionalProperties": false
-                  }
+                  "additionalProperties": {}
                 },
                 {
                   "type": "null"
@@ -30213,11 +30176,7 @@
                     "propertyNames": {
                       "type": "string"
                     },
-                    "additionalProperties": {
-                      "type": "object",
-                      "properties": {},
-                      "additionalProperties": false
-                    }
+                    "additionalProperties": {}
                   }
                 },
                 {
@@ -30296,11 +30255,7 @@
                     "propertyNames": {
                       "type": "string"
                     },
-                    "additionalProperties": {
-                      "type": "object",
-                      "properties": {},
-                      "additionalProperties": false
-                    }
+                    "additionalProperties": {}
                   }
                 },
                 {
@@ -30379,11 +30334,7 @@
                     "propertyNames": {
                       "type": "string"
                     },
-                    "additionalProperties": {
-                      "type": "object",
-                      "properties": {},
-                      "additionalProperties": false
-                    }
+                    "additionalProperties": {}
                   }
                 },
                 {
@@ -30850,11 +30801,7 @@
                 "propertyNames": {
                   "type": "string"
                 },
-                "additionalProperties": {
-                  "type": "object",
-                  "properties": {},
-                  "additionalProperties": false
-                }
+                "additionalProperties": {}
               },
               "description": "Optional list of template components (header, body, buttons)."
             },

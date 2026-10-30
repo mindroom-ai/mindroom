@@ -45,6 +45,7 @@ if TYPE_CHECKING:
         ),
         ConfigField(
             name="access_token",
+            env=("WEBEX_ACCESS_TOKEN",),
             label="Access Token",
             type="password",
             required=False,

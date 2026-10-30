@@ -146,9 +146,6 @@ function providerToService(provider: string): string {
 }
 
 function sourceToLabel(source: string | null): string {
-  if (source === "env") {
-    return ".env";
-  }
   if (source === "ui") {
     return "UI";
   }

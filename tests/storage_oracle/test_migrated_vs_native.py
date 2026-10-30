@@ -7,22 +7,23 @@ observables, they take the same further random actions, and both must report the
 observables after each one. A sequence whose native run stored something else, through a deliberate change that
 comparison 1 masks, starts apart: ``_APART`` pins those, and each one's comparison 1 pin names such a change.
 Compaction summary requests compare without the model they name (comparison 1's ``summary_requests_name_their_model``):
-a converted database keeps the untagged requests it stored, which usage reports attribute to the same model.
+a converted database keeps the untagged requests it stored, which usage reports attribute to the same model. Rows
+compare without the usage totals a converted row still holds in ``session_data``, which nothing reads since the ledger
+became the only usage owner.
 """
 
 from __future__ import annotations
 
 import json
-import sqlite3
-from contextlib import closing
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 import pytest
 
+from tests.session_storage.agno_layout import replacing_database
 from tests.storage_oracle.actions import Scenario, draw
 from tests.storage_oracle.determinism import deterministic
-from tests.storage_oracle.masks import untag_summary_requests
+from tests.storage_oracle.masks import drop_inert_session_totals, untag_summary_requests
 from tests.storage_oracle.record import SEQUENCES, decode, first_difference, sequence_id
 from tests.storage_oracle.store_backend import StoreBackend
 
@@ -74,8 +75,7 @@ def _pair(path: Path, root: Path, determinism: Determinism) -> tuple[Scenario, S
     for action in scenario.actions:
         native.apply(action)
         converted.apply(action)
-    converted.database.unlink()
-    with closing(sqlite3.connect(converted.database)) as connection:
+    with replacing_database(converted.database) as connection:
         connection.executescript(path.with_suffix(".sql").read_text(encoding="utf-8"))
     converted.open_store()
     return scenario, native, converted
@@ -88,6 +88,7 @@ def _observed(determinism: Determinism, native: StoreBackend, converted: StoreBa
     shown = _json(converted.observe())
     for observed in (seen, shown):
         untag_summary_requests(observed["ledger"])
+        drop_inert_session_totals(observed)
     return seen, shown
 
 

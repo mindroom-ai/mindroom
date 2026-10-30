@@ -5,22 +5,23 @@ icon: lucide/key-round
 # OAuth Integration Framework
 
 This page covers how MindRoom stores credentials and how users connect OAuth accounts for tools and MCP servers.
-Use it to import or seed credentials, encrypt the credential store, connect or reset an OAuth account, decide who may manage a connection, and build OAuth providers in plugins.
+Use it to supply credentials from the environment or seeds, encrypt the credential store, connect or reset an OAuth account, decide who may manage a connection, and build OAuth providers in plugins.
 
 ## Credential Storage
 
-### Automatic Credential Import
+### Credentials from the Environment
 
-When MindRoom starts or `mindroom doctor` runs, it copies these variables from the process environment or the config-adjacent `.env` into the shared credentials store: `ANTHROPIC_API_KEY`, `AZURE_OPENAI_API_KEY`, `OPENAI_API_KEY`, `GOOGLE_API_KEY`, `OPENROUTER_API_KEY`, `DEEPSEEK_API_KEY`, `CEREBRAS_API_KEY`, `GROQ_API_KEY`, `ZAI_API_KEY`, `OLLAMA_HOST`, `GITHUB_TOKEN` (stored as `github_private`), `EMBEDDER_API_KEY` (stored as `embedder`), and `GOOGLE_APPLICATION_CREDENTIALS` (stored as `google_vertex_adc`).
+MindRoom reads these variables from the process environment or the config-adjacent `.env` as shared credentials: `ANTHROPIC_API_KEY`, `AZURE_OPENAI_API_KEY`, `OPENAI_API_KEY`, `GOOGLE_API_KEY`, `OPENROUTER_API_KEY`, `DEEPSEEK_API_KEY`, `CEREBRAS_API_KEY`, `GROQ_API_KEY`, `ZAI_API_KEY`, `OLLAMA_HOST`, `GITHUB_TOKEN` (as service `github_private`), `EMBEDDER_API_KEY` (as `embedder`), and `GOOGLE_APPLICATION_CREDENTIALS` (as `google_vertex_adc`).
 Every one of these except `GOOGLE_APPLICATION_CREDENTIALS` also accepts a `_FILE` variant, read only when the plain variable is unset or empty.
-Services declared through [Credential Seeds](#credential-seeds) are imported the same way.
-Import never overwrites credentials saved through the dashboard or credentials with no recorded source.
-When an imported value is first stored or changes, MindRoom logs a notice naming the service, the supplying variable, and whether it came from the process environment or `.env`; values are never logged.
-To stop an import, remove the variable and any `_FILE` variant from both the process environment and `.env`, then delete the stored credential in the dashboard or with `DELETE /api/credentials/{service}`.
+Services declared through [Credential Seeds](#credential-seeds) are supplied the same way.
+A credential saved for the same service in the dashboard wins over the variable; deleting that saved credential makes the variable apply again.
+MindRoom stores no copy: changes to these variables, their `_FILE` files, and seed declarations apply when MindRoom restarts, and a removed variable stops supplying its credential, including to workers granted it through `worker_grantable_credentials`.
+Deleting a credential that only the environment supplies changes nothing; remove the variable and restart instead.
+`mindroom doctor` reports which variable supplies each model provider's key.
 
 ### Credential Seeds
 
-Credential seeds create shared credential services at startup for deployment-managed credentials, such as an OAuth app's client ID and secret.
+Credential seeds supply shared credential services for deployment-managed credentials, such as an OAuth app's client ID and secret.
 Set `MINDROOM_CREDENTIAL_SEEDS_FILE` to a JSON file path (relative paths resolve from the config directory), or `MINDROOM_CREDENTIAL_SEEDS_JSON` to the same JSON inline.
 
 ```json
@@ -39,10 +40,10 @@ Set `MINDROOM_CREDENTIAL_SEEDS_FILE` to a JSON file path (relative paths resolve
 - If an env ref such as `EXAMPLE_CLIENT_SECRET` is unset, MindRoom also checks `EXAMPLE_CLIENT_SECRET_FILE` and reads that file.
 - If any declared field is missing or empty, MindRoom skips that seed instead of creating a partial credential.
 - Env and file refs always produce strings, so a tool's boolean field accepts the exact strings `true` and `false` as well as JSON booleans, and any other value makes that tool fail to load.
-- Seeds are reapplied on every startup but never replace credentials saved through the dashboard or with no recorded source.
+- A credential saved for the same service in the dashboard wins over its seed.
 - OAuth token services, whose names end with `_oauth`, cannot be seeded; connect them through OAuth instead.
   OAuth client configuration services, whose names end with `_oauth_client`, can be seeded.
-- To stop seeding one service, remove its entry from each declaration that lists it and delete the stored credential with `DELETE /api/credentials/{service}`.
+- To stop seeding one service, remove its entry from each declaration that lists it and restart.
 
 ### Credential Storage Encryption
 
@@ -155,7 +156,7 @@ These rules apply to built-in providers and to providers that plugins register (
   Only the OAuth callback writes it, and the generic credentials API neither returns OAuth token fields nor accepts direct writes to these services.
 - An optional `tool_config_service` holds the tool's editable dashboard settings separately from the token.
 - `tool_config_oauth_fallback_fields` (tuple of strings, default `()`) names token-like fields, such as `access_token`, that the dashboard may save to and show from `tool_config_service` as manual credentials; otherwise the dashboard strips token fields from that service.
-- `tool_config_oauth_fallback_env_vars` (tuple of strings, default `()`) names environment variables that, when all are set, make the dashboard show the provider's tools as configured without an OAuth connection.
+- The dashboard also shows a provider's tool as configured without an OAuth connection when the environment sets every one of the tool's `oauth_fallback_fields` through the variables those fields declare in `env`.
 - `client_config_services` lists, in lookup order, services holding the OAuth app's `client_id`, `client_secret`, and optional `redirect_uri`; every name must end with `_oauth_client`.
 - `shared_client_config_services` are checked after those and supply one app ID and secret for several providers, such as `google_oauth_client`; they never supply `redirect_uri`, so each provider keeps its own callback URL.
 - Public clients set `token_endpoint_auth_method: none` and need only `client_id`; confidential clients need both `client_id` and `client_secret`.

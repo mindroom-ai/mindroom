@@ -10,13 +10,12 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
-from mindroom.constants import THREAD_SUMMARY_CONTENT_KEY
 from mindroom.custom_tools.attachment_helpers import room_access_allowed
 from mindroom.dispatch_source import hook_source_from_content
 from mindroom.entity_resolution import current_internal_sender_ids
 from mindroom.logging_config import get_logger
 from mindroom.matrix.conversation_reads import complete_thread_history, projected_thread_history
-from mindroom.thread_summary import current_thread_summary_from_history
+from mindroom.thread_summary.state import current_thread_summary_from_history, trusted_summary_metadata
 from mindroom.token_budget import approximate_o200k_tokens
 from mindroom.tool_system.events import body_without_tool_markers
 
@@ -168,7 +167,7 @@ async def resolve_call_origin_context(  # noqa: PLR0911
     trusted_sender_ids = current_internal_sender_ids(context.config, context.runtime_paths)
     messages: list[_CallBriefMessage] = []
     for message in history:
-        if message.sender in trusted_sender_ids and isinstance(message.content.get(THREAD_SUMMARY_CONTENT_KEY), dict):
+        if trusted_summary_metadata(message, trusted_sender_ids=trusted_sender_ids) is not None:
             continue
         body = body_without_tool_markers(message.body, message.content).strip()
         if not body:

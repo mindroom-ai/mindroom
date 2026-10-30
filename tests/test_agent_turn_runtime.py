@@ -25,9 +25,10 @@ from mindroom.agent_loop.output_limit import CUT_OFF_TOOL_CALL_RESULT
 from mindroom.ai import ai_response, stream_agent_response
 from mindroom.ai_runtime import queued_message_signal_context
 from mindroom.approval.receipt_readers import approval_receipt_context
+from mindroom.budgets.pricing import format_cost_usd
 from mindroom.config.approval import ApprovalRuleConfig, ToolApprovalConfig
 from mindroom.config.main import Config
-from mindroom.config.models import CompactionConfig
+from mindroom.config.models import CompactionConfig, ModelConfig, ModelPricing
 from mindroom.config.plugin import PluginEntryConfig
 from mindroom.constants import AI_RUN_METADATA_KEY
 from mindroom.dispatch_source import ScheduledHistoryBudget
@@ -55,6 +56,7 @@ from mindroom.llm.events import RunFinished
 from mindroom.llm.messages import Message, system_text
 from mindroom.llm.provider import (
     Capabilities,
+    ModelIdentity,
     NativeCompactionReplay,
     TextDelta,
     ToolCallReady,
@@ -107,7 +109,7 @@ from tests.scripted_agent_helpers import (
     registered_toolkit,
     streamed_text,
 )
-from tests.usage_helpers import assert_counted_usage
+from tests.usage_helpers import assert_counted_usage, counted_total, counted_usage
 
 if TYPE_CHECKING:
     from collections.abc import Iterator, Mapping, Sequence
@@ -907,7 +909,7 @@ async def test_a_reply_that_is_no_turn_still_counts_toward_usage_and_budgets(
     ending: str,
     run_id: str | None,
 ) -> None:
-    """Its tokens stay in the usage ledger, the session totals, the usage report, and the requester's monthly spend."""
+    """Its tokens stay in the usage ledger, the usage report's session totals, and the requester's monthly spend."""
     if ending == "empty":
         script = [answer("", usage(100, 5)), answer("Recovered.", usage(120, 9))]
         expected_snapshots, stored = [(100, 5), (120, 9)], ["Recovered."]
@@ -1090,6 +1092,136 @@ async def test_only_a_model_switch_that_ran_continues_the_turn(
         ("touch", False),
         ("switch_thread_model", max_tool_calls_per_turn is not None),
     ]
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("probe")
+@pytest.mark.parametrize("collected", [False, True], ids=["streamed", "collected"])
+@pytest.mark.parametrize("ending", ["empty_retry", "model_switch"])
+async def test_a_reply_publishes_the_usage_and_cost_of_every_attempt_its_turn_ran(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    ending: str,
+    collected: bool,
+) -> None:
+    """The reply's usage and cost sum its attempts, an empty one and its retry or a model switch and its continuation.
+
+    They are what the usage ledger counts, each attempt priced at its own model, and the reply's first token is the
+    first attempt's. The model, the run, the status, and the context are those of the attempt that answered.
+    """
+    switch = tool_call("switch_thread_model", "call-switch", model_name="large", when="after-toolcall")
+    first_usage = usage(100, 5, time_to_first_token=0.5)
+    first = answer("", first_usage) if ending == "empty_retry" else calls(switch, metrics=first_usage)
+    final = answer("Answered.", usage(120, 9, time_to_first_token=0.25))
+    reply = _reply(
+        tmp_path,
+        monkeypatch,
+        [first, final] if ending == "empty_retry" else [first],
+        tools=(PROBE_TOOL, "thread_model"),
+    )
+    with_current_room_member_access(reply.config)
+    large = ScriptedModel(
+        [final],
+        identity=ModelIdentity(id="large-model", provider="Synthetic", provider_name="Synthetic"),
+    )
+    install_model_providers(monkeypatch, {"large": large})
+    reply.config.models["default"].pricing = ModelPricing(input=2, output=10)
+    reply.config.models["default"].context_window = 1_000
+    reply.config.models["large"] = ModelConfig(
+        provider="openai",
+        id="large-model",
+        context_window=2_000,
+        pricing=ModelPricing(input=3, output=15),
+    )
+    sinks = TurnSinks(turn_recorder=reply.recorder)
+
+    with tool_runtime_context(reply.runtime):
+        if collected:
+            result = await ai_response(_ctx(reply), reply.runtime_paths, reply.config, sinks=sinks)
+            published = result.run_metadata[AI_RUN_METADATA_KEY]
+        else:
+            run_metadata: dict[str, Any] = {}
+            stream = stream_agent_response(
+                _ctx(reply),
+                reply.runtime_paths,
+                reply.config,
+                sinks=replace(sinks, run_metadata_collector=run_metadata),
+            )
+            assert "".join(streamed_text([chunk async for chunk in stream])) == "Answered."
+            published = run_metadata[AI_RUN_METADATA_KEY]
+
+    assert sorted(counted_usage(reply.storage, SESSION_ID)) == [(100, 5), (120, 9)]
+    usage_published = published["usage"]
+    assert (usage_published["input_tokens"], usage_published["output_tokens"]) == counted_total(
+        reply.storage,
+        SESSION_ID,
+    )
+    assert (usage_published["total_tokens"], usage_published["time_to_first_token"]) == (234, "0.5")
+    # Each attempt is priced at its model's prices: 100/5 and 120/9 tokens at 2/10 or 3/15 dollars per million.
+    cost = 100 * 2 + 5 * 10 + (120 * 2 + 9 * 10 if ending == "empty_retry" else 120 * 3 + 9 * 15)
+    assert published["cost"] == {"usd": format_cost_usd(cost / 1_000_000)}
+    final_model, window = ("default", 1_000) if ending == "empty_retry" else ("large", 2_000)
+    assert published["model"]["config"] == final_model
+    assert published["context"] == {"input_tokens": 120, "window_tokens": window}
+    assert (published["run_id"], published["status"]) == (reply.recorder.run_id, "completed")
+    assert reply.recorder.run_id != "run-1"
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("probe")
+async def test_a_reply_publishes_the_usage_of_each_of_three_attempts(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A model switch whose continuation came back empty and was retried publishes all three attempts' usage."""
+    switch = tool_call("switch_thread_model", "call-switch", model_name="missing", when="next-turn")
+    reply = _reply(
+        tmp_path,
+        monkeypatch,
+        [calls(switch, metrics=usage(100, 5)), answer("", usage(40, 2)), answer("Answered.", usage(120, 9))],
+        tools=(PROBE_TOOL, "thread_model"),
+    )
+    run_metadata: dict[str, Any] = {}
+
+    with tool_runtime_context(reply.runtime):
+        stream = stream_agent_response(
+            _ctx(reply),
+            reply.runtime_paths,
+            reply.config,
+            sinks=TurnSinks(turn_recorder=reply.recorder, run_metadata_collector=run_metadata),
+        )
+        assert "".join(streamed_text([chunk async for chunk in stream])).endswith("Answered.")
+
+    assert len(reply.model.requests) == 3
+    assert sorted(counted_usage(reply.storage, SESSION_ID)) == [(40, 2), (100, 5), (120, 9)]
+    published = run_metadata[AI_RUN_METADATA_KEY]["usage"]
+    assert (published["input_tokens"], published["output_tokens"]) == counted_total(reply.storage, SESSION_ID)
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("probe")
+async def test_a_reply_whose_continuation_failed_publishes_the_usage_of_the_attempt_before_it(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The failed attempt ends the turn, and the reply's usage still holds the switch's attempt, as the ledger does."""
+    switch = tool_call("switch_thread_model", "call-switch", model_name="missing", when="next-turn")
+    reply = _reply(
+        tmp_path,
+        monkeypatch,
+        [calls(switch, metrics=usage(100, 5)), [_raising(RateLimited("slow down", provider="openai"))]],
+        tools=(PROBE_TOOL, "thread_model"),
+    )
+
+    with tool_runtime_context(reply.runtime):
+        result = await ai_response(_ctx(reply), reply.runtime_paths, reply.config, sinks=TurnSinks())
+
+    assert result.failed is not None
+    published = result.run_metadata[AI_RUN_METADATA_KEY]
+    assert published["status"] == "error"
+    assert counted_total(reply.storage, SESSION_ID) == (100, 5)
+    assert (published["usage"]["input_tokens"], published["usage"]["output_tokens"]) == (100, 5)
 
 
 @pytest.mark.asyncio

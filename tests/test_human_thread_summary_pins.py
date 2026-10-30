@@ -2,55 +2,46 @@
 
 from __future__ import annotations
 
+import json
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
-from unittest.mock import AsyncMock, patch
 
 import nio
 import pytest
 
 from mindroom.agent_reply_membership import AgentReplyMembershipIndex
+from mindroom.authorization import ReplyMembershipPendingError
 from mindroom.config.agent import AgentConfig
+from mindroom.constants import THREAD_SUMMARY_CONTENT_KEY
 from mindroom.entity_resolution import current_internal_sender_ids, entity_identity_registry
 from mindroom.matrix.conversation_reads import DeliveredResponse
 from mindroom.matrix.room_membership import ensure_room_membership_synced
-from mindroom.matrix.thread_history_result import thread_history_result
-from mindroom.thread_summary import (
-    ThreadSummaryWriteError,
-    _human_summary_authorizer,
-    _last_summary_counts,
-    _recover_initial_enrichment_complete,
-    _recover_last_summary_count,
-    _recover_pin_state,
-    _summary_delivery_timestamp,
-    _thread_locks,
-    maybe_generate_thread_summary,
-    set_manual_thread_summary,
-)
+from mindroom.thread_summary.automatic import maybe_generate_thread_summary
+from mindroom.thread_summary.notices import ThreadSummaryWriteError, set_manual_thread_summary
+from mindroom.thread_summary.state import SummaryState, current_thread_summary_from_history, human_summary_authorizer
 from tests.access_schema_support import membership_config, membership_index
 from tests.conftest import (
+    fresh_thread_summary_baselines,
+    install_model_providers,
     make_conversation_reader_mock,
     make_matrix_client_mock,
     runtime_paths_for,
     serve_conversation_reader,
 )
+from tests.fakes.scripted_model import ScriptedModel, answer
 from tests.identity_helpers import persist_entity_accounts
-from tests.test_thread_summary import _make_summary_notice_message, _make_thread_history
+from tests.test_thread_summary import _make_summary_notice_message, _make_thread_history, serve_source_thread
 
 if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
     from pathlib import Path
+    from unittest.mock import AsyncMock
 
     from mindroom.config.main import Config
     from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
+    from mindroom.thread_summary.schedule import _ThreadSummaryBaselines
 
-pytestmark = pytest.mark.usefixtures("enforce_turn_authorization")
-
-
-@pytest.fixture(autouse=True)
-def _clear_summary_state() -> None:
-    _last_summary_counts.clear()
-    _thread_locks.clear()
+pytestmark = pytest.mark.usefixtures("enforce_turn_authorization", "thread_summary_baselines")
 
 
 def _config(
@@ -80,76 +71,83 @@ def _human_notice(
     )
 
 
+def _agent(config: Config) -> str:
+    return next(iter(current_internal_sender_ids(config, runtime_paths_for(config))))
+
+
+def _state(config: Config, history: Sequence[ResolvedVisibleMessage]) -> SummaryState:
+    """Classify one history under the config's trusted senders and the responder's human pin authority."""
+    runtime_paths = runtime_paths_for(config)
+    return SummaryState.from_history(
+        history,
+        thread_id="$thread1",
+        trusted_sender_ids=current_internal_sender_ids(config, runtime_paths),
+        authorize_human=human_summary_authorizer(
+            make_matrix_client_mock(),
+            "!room:x",
+            config,
+            runtime_paths,
+            "talent",
+            AgentReplyMembershipIndex(),
+        ),
+    )
+
+
 async def _run_automatic_summary(
     config: Config,
     history: list[ResolvedVisibleMessage],
     source_history: list[ResolvedVisibleMessage],
+    monkeypatch: pytest.MonkeyPatch,
     *,
     client: AsyncMock | None = None,
     entity_name: str = "talent",
-) -> tuple[AsyncMock, AsyncMock]:
+    membership: AgentReplyMembershipIndex | None = None,
+) -> tuple[AsyncMock, ScriptedModel]:
     """Exercise real pin, authorization, vocabulary, and tag reads with empty room state."""
     if client is None:
         client = make_matrix_client_mock()
     client.room_get_state.return_value = nio.RoomGetStateResponse(events=[], room_id="!room:x")
     client.room_send.return_value = nio.RoomSendResponse(event_id="$automatic", room_id="!room:x")
+    model = ScriptedModel([answer('{"summary": "Automatic"}')])
+    install_model_providers(monkeypatch, {"default": model})
     reader = make_conversation_reader_mock()
-    serve_conversation_reader(reader, history, thread_id="$thread1")
-    with (
-        patch("mindroom.thread_summary._generate_summary", new=AsyncMock(return_value="Automatic")) as generate,
-        patch(
-            "mindroom.thread_summary.refetched_thread_history",
-            new=AsyncMock(return_value=thread_history_result(source_history, is_full_history=True)),
-        ),
-    ):
-        await maybe_generate_thread_summary(
-            client,
-            "!room:x",
-            "$thread1",
-            config,
-            runtime_paths_for(config),
-            conversation_reader=reader,
-            delivered_response=DeliveredResponse(event_id="$event0", body="Message 0"),
-            entity_name=entity_name,
-            membership_index=AgentReplyMembershipIndex(),
-        )
-    return client, generate
+    serve_conversation_reader(reader, history, room_id="!room:x", thread_id="$thread1")
+    serve_source_thread(reader, source_history, room_id="!room:x", thread_id="$thread1")
+    await maybe_generate_thread_summary(
+        client,
+        "!room:x",
+        "$thread1",
+        config,
+        runtime_paths_for(config),
+        conversation_reader=reader,
+        delivered_response=DeliveredResponse(event_id="$event0", body="Message 0"),
+        entity_name=entity_name,
+        membership_index=membership or AgentReplyMembershipIndex(),
+    )
+    return client, model
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("sender", ["@owner:example.com", "@bridge-owner:example.com"])
-async def test_authorized_human_pin_survives_restart(tmp_path: Path, sender: str) -> None:
+async def test_authorized_human_pin_survives_restart(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    sender: str,
+) -> None:
     """Recovered human pins stop generation without trusting forged counters."""
     config = _config(tmp_path, access={"users": ["@owner:example.com"]})
     config.authorization.aliases = {"@owner:example.com": ["@bridge-owner:example.com"]}
-    runtime_paths = runtime_paths_for(config)
     history = [*_make_thread_history(12), _human_notice(sender)]
-    client = make_matrix_client_mock()
-    reader = make_conversation_reader_mock()
-    serve_conversation_reader(reader, history, thread_id="$thread1")
-    with (
-        patch("mindroom.thread_summary.maybe_rebuild_tag_vocabulary", new=AsyncMock(return_value=None)),
-        patch("mindroom.thread_summary._generate_summary", new=AsyncMock(return_value="Automatic")) as generate,
-    ):
-        for _ in range(2):
-            _last_summary_counts.clear()
-            await maybe_generate_thread_summary(
-                client,
-                "!room:x",
-                "$thread1",
-                config,
-                runtime_paths,
-                conversation_reader=reader,
-                delivered_response=DeliveredResponse(event_id="$event0", body="Message 0"),
-                entity_name="talent",
-                membership_index=AgentReplyMembershipIndex(),
-            )
-        generate.assert_not_awaited()
+    for _ in range(2):
+        restarted = fresh_thread_summary_baselines(monkeypatch)
+        client, model = await _run_automatic_summary(config, history, [], monkeypatch)
+        assert not model.requests
         client.room_send.assert_not_awaited()
-    trusted = current_internal_sender_ids(config, runtime_paths)
-    assert _recover_last_summary_count(history, trusted_sender_ids=trusted) == 0
-    assert not _recover_initial_enrichment_complete(history, trusted_sender_ids=trusted)
-    assert _last_summary_counts["!room:x:$thread1"] < 999999
+        assert restarted.count("!room:x", "$thread1") == 12
+    state = _state(config, history)
+    assert state.pinned
+    assert state.last_summary_count == 0
+    assert not state.initial_enrichment_complete
 
 
 @pytest.mark.asyncio
@@ -158,6 +156,7 @@ async def test_authorized_human_pin_survives_restart(tmp_path: Path, sender: str
 @pytest.mark.parametrize("configured_room", [False, True])
 async def test_human_pin_uses_responder_authority(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
     authorized: bool,
     pin_source: str,
     configured_room: bool,
@@ -175,9 +174,9 @@ async def test_human_pin_uses_responder_authority(
     history = _make_thread_history(12)
     if pin_source == "history":
         history.append(notice)
-    client, generate = await _run_automatic_summary(config, history, [notice], client=client)
+    client, model = await _run_automatic_summary(config, history, [notice], monkeypatch, client=client)
     assert client.room_send.await_count == (0 if authorized else 1)
-    assert generate.await_count == (0 if authorized and pin_source == "history" else 1)
+    assert len(model.requests) == (0 if authorized and pin_source == "history" else 1)
 
 
 @pytest.mark.asyncio
@@ -185,6 +184,7 @@ async def test_human_pin_uses_responder_authority(
 @pytest.mark.parametrize("edited_pin", [False, True])
 async def test_later_human_pin_overrides_unseen_future_release(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
     pin_source: str,
     edited_pin: bool,
 ) -> None:
@@ -194,7 +194,7 @@ async def test_later_human_pin_overrides_unseen_future_release(
         "$thread1",
         message_count=1,
         event_id="$old-release",
-        sender=next(iter(current_internal_sender_ids(config, runtime_paths_for(config)))),
+        sender=_agent(config),
         pinned=False,
         generated_at="2099-01-01T00:00:00+00:00",
     )
@@ -207,18 +207,20 @@ async def test_later_human_pin_overrides_unseen_future_release(
     history = [*_make_thread_history(12), release]
     if pin_source == "history":
         history.append(notice)
-    # Source reads can have a different order than the projected history.
-    source_history = [notice, release]
     for _ in range(2):
-        _last_summary_counts.clear()
-        client, generate = await _run_automatic_summary(config, history, source_history)
+        fresh_thread_summary_baselines(monkeypatch)
+        client, model = await _run_automatic_summary(config, history, [notice, release], monkeypatch)
         client.room_send.assert_not_awaited()
-        assert generate.await_count == (0 if pin_source == "history" else 1)
+        assert len(model.requests) == (0 if pin_source == "history" else 1)
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("edited_release", [False, True])
-async def test_later_agent_release_overrides_future_human_pin(tmp_path: Path, edited_release: bool) -> None:
+async def test_later_agent_release_overrides_future_human_pin(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    edited_release: bool,
+) -> None:
     """The same event chronology lets an agent intentionally release a skewed human pin."""
     config = _config(tmp_path, access={"users": ["@owner:example.com"]})
     future = datetime(2099, 1, 1, tzinfo=UTC)
@@ -228,7 +230,7 @@ async def test_later_agent_release_overrides_future_human_pin(tmp_path: Path, ed
         "$thread1",
         message_count=1,
         event_id="$later-release",
-        sender=next(iter(current_internal_sender_ids(config, runtime_paths_for(config)))),
+        sender=_agent(config),
         pinned=False,
     )
     release.timestamp = 500 if edited_release else 2000
@@ -236,14 +238,14 @@ async def test_later_agent_release_overrides_future_human_pin(tmp_path: Path, ed
         release.edited_timestamp = 2000
         release.latest_event_id = "$release-edit"
     history = [*_make_thread_history(12), notice, release]
-    client, _ = await _run_automatic_summary(config, history, [release, notice])
+    client, _ = await _run_automatic_summary(config, history, [release, notice], monkeypatch)
     client.room_send.assert_awaited_once()
-    sent = client.room_send.call_args.kwargs["content"]["io.mindroom.thread_summary"]
+    sent = client.room_send.call_args.kwargs["content"][THREAD_SUMMARY_CONTENT_KEY]
     assert datetime.fromisoformat(sent["generated_at"]) > future
 
 
 @pytest.mark.asyncio
-async def test_membership_grant_authorizes_human_pin(tmp_path: Path) -> None:
+async def test_membership_grant_authorizes_human_pin(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """A proven responder membership grant authorizes the same pin as a static user grant."""
     config = _config(
         tmp_path,
@@ -252,24 +254,14 @@ async def test_membership_grant_authorizes_human_pin(tmp_path: Path) -> None:
         access={"members_of_rooms": ["team"]},
     )
     memberships = await membership_index(config, {"team": {"@owner:example.com"}})
-    reader = make_conversation_reader_mock()
-    serve_conversation_reader(reader, [*_make_thread_history(12), _human_notice()], thread_id="$thread1")
-    with (
-        patch("mindroom.thread_summary.maybe_rebuild_tag_vocabulary", new=AsyncMock(return_value=None)),
-        patch("mindroom.thread_summary._generate_summary", new=AsyncMock(return_value="Automatic")) as generate,
-    ):
-        await maybe_generate_thread_summary(
-            make_matrix_client_mock(),
-            "!room:x",
-            "$thread1",
-            config,
-            runtime_paths_for(config),
-            conversation_reader=reader,
-            delivered_response=DeliveredResponse(event_id="$event0", body="Message 0"),
-            entity_name="talent",
-            membership_index=memberships,
-        )
-    generate.assert_not_awaited()
+    _, model = await _run_automatic_summary(
+        config,
+        [*_make_thread_history(12), _human_notice()],
+        [],
+        monkeypatch,
+        membership=memberships,
+    )
+    assert not model.requests
 
 
 @pytest.mark.asyncio
@@ -286,7 +278,7 @@ async def test_explicit_release_advances_past_authorized_future_pin(tmp_path: Pa
         generated_at=future.isoformat(),
     )
     serve_conversation_reader(reader, [*_make_thread_history(3), notice], thread_id="$thread1")
-    await set_manual_thread_summary(
+    result = await set_manual_thread_summary(
         client,
         "!room:x",
         "$thread1",
@@ -298,43 +290,41 @@ async def test_explicit_release_advances_past_authorized_future_pin(tmp_path: Pa
         membership_index=AgentReplyMembershipIndex(),
         pin=False,
     )
-    sent = client.room_send.call_args.kwargs["content"]["io.mindroom.thread_summary"]
+    sent = client.room_send.call_args.kwargs["content"][THREAD_SUMMARY_CONTENT_KEY]
     assert sent["pinned"] is False
     assert (datetime.fromisoformat(sent["generated_at"]) > future) is authorized
+    # An authorized pin is a summary, not a message; an outsider's look-alike is an ordinary message.
+    assert result.message_count == sent["message_count"] == (3 if authorized else 4)
 
 
 @pytest.mark.asyncio
-async def test_pin_authorized_for_another_room_responder_stops_automatic_updates(tmp_path: Path) -> None:
+async def test_pin_authorized_for_another_room_responder_stops_automatic_updates(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """Shared room titles honor an allowed editor even when another responder runs."""
     config = _config(tmp_path, access={"users": ["@owner:example.com"]})
     config.agents["talent"].rooms = ["!room:x"]
     config.agents["other"] = AgentConfig(display_name="Other", rooms=["!room:x"], access={"users": []})
-    runtime_paths = runtime_paths_for(config)
-    persist_entity_accounts(config, runtime_paths)
-    client = make_matrix_client_mock()
-    reader = make_conversation_reader_mock()
-    serve_conversation_reader(reader, [*_make_thread_history(12), _human_notice()], thread_id="$thread1")
-    with (
-        patch("mindroom.thread_summary.maybe_rebuild_tag_vocabulary", new=AsyncMock(return_value=None)),
-        patch("mindroom.thread_summary._generate_summary", new=AsyncMock(return_value="Automatic")) as generate,
-    ):
-        await maybe_generate_thread_summary(
-            client,
-            "!room:x",
-            "$thread1",
-            config,
-            runtime_paths,
-            conversation_reader=reader,
-            delivered_response=DeliveredResponse(event_id="$event0", body="Message 0"),
-            entity_name="other",
-            membership_index=AgentReplyMembershipIndex(),
-        )
-    generate.assert_not_awaited()
+    persist_entity_accounts(config, runtime_paths_for(config))
+    _, model = await _run_automatic_summary(
+        config,
+        [*_make_thread_history(12), _human_notice()],
+        [],
+        monkeypatch,
+        entity_name="other",
+    )
+    assert not model.requests
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("pin_source", ["history", "source"])
-async def test_missing_room_cache_defers_shared_pin_authorization(tmp_path: Path, pin_source: str) -> None:
+async def test_missing_room_cache_defers_shared_pin_authorization(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    thread_summary_baselines: _ThreadSummaryBaselines,
+    pin_source: str,
+) -> None:
     """Incomplete shared-responder discovery cannot turn an allowed pin into a denial."""
     config = _config(tmp_path, access={"users": ["@owner:example.com"]})
     config.agents["talent"].rooms = ["!room:x"]
@@ -348,43 +338,26 @@ async def test_missing_room_cache_defers_shared_pin_authorization(tmp_path: Path
     if pin_source == "history":
         history.append(notice)
 
+    client, model = await _run_automatic_summary(
+        config,
+        history,
+        [notice],
+        monkeypatch,
+        client=client,
+        entity_name="other",
+    )
+
+    client.room_send.assert_not_awaited()
     if pin_source == "history":
-        client, generate = await _run_automatic_summary(
-            config,
-            history,
-            [notice],
-            client=client,
-            entity_name="other",
-        )
-        client.room_send.assert_not_awaited()
-        generate.assert_not_awaited()
-        assert "!room:x:$thread1" not in _last_summary_counts
+        assert not model.requests
+        assert thread_summary_baselines.count("!room:x", "$thread1") == 0
     else:
-        with patch(
-            "mindroom.thread_summary.refetched_thread_history",
-            new=AsyncMock(return_value=thread_history_result([notice], is_full_history=True)),
-        ):
-            assert (
-                await _summary_delivery_timestamp(
-                    make_conversation_reader_mock(),
-                    "!room:x",
-                    "$thread1",
-                    trusted_sender_ids=current_internal_sender_ids(config, runtime_paths),
-                    human_sender_allowed=_human_summary_authorizer(
-                        client,
-                        "!room:x",
-                        config,
-                        runtime_paths,
-                        "other",
-                        AgentReplyMembershipIndex(),
-                    ),
-                    projected_history=history,
-                )
-                is None
-            )
+        # The model ran before the re-check met the pending pin, so the attempt still counts.
+        assert len(model.requests) == 1
+        assert thread_summary_baselines.count("!room:x", "$thread1") == 12
 
     client.rooms["!room:x"] = nio.MatrixRoom("!room:x", client.user_id)
-    assert _human_summary_authorizer(
+    assert human_summary_authorizer(
         client,
         "!room:x",
         config,
@@ -396,7 +369,12 @@ async def test_missing_room_cache_defers_shared_pin_authorization(tmp_path: Path
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("pin_source", ["history", "source"])
-async def test_partial_ad_hoc_room_cache_defers_pin_until_membership_refresh(tmp_path: Path, pin_source: str) -> None:
+async def test_partial_ad_hoc_room_cache_defers_pin_until_membership_refresh(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    thread_summary_baselines: _ThreadSummaryBaselines,
+    pin_source: str,
+) -> None:
     """An unseen joined responder cannot turn a valid human pin into a denial."""
     config = _config(tmp_path, access={"users": ["@owner:example.com"]})
     config.agents["other"] = AgentConfig(display_name="Other", access={"users": []})
@@ -420,34 +398,41 @@ async def test_partial_ad_hoc_room_cache_defers_pin_until_membership_refresh(tmp
     if pin_source == "history":
         history.append(notice)
 
-    client, generate = await _run_automatic_summary(
+    client, model = await _run_automatic_summary(
         config,
         history,
         [notice],
+        monkeypatch,
         client=client,
         entity_name="other",
     )
     client.room_send.assert_not_awaited()
-    assert generate.await_count == (0 if pin_source == "history" else 1)
-    assert _last_summary_counts.get("!room:x:$thread1") == (None if pin_source == "history" else 12)
+    assert len(model.requests) == (0 if pin_source == "history" else 1)
+    assert thread_summary_baselines.count("!room:x", "$thread1") == (0 if pin_source == "history" else 12)
 
     assert await ensure_room_membership_synced(client, room, sender_id=notice.sender)
-    _last_summary_counts.clear()
-    client, generate = await _run_automatic_summary(
+    restarted = fresh_thread_summary_baselines(monkeypatch)
+    client, model = await _run_automatic_summary(
         config,
         [*_make_thread_history(12), notice],
         [notice],
+        monkeypatch,
         client=client,
         entity_name="other",
     )
-    generate.assert_not_awaited()
+    assert not model.requests
     client.room_send.assert_not_awaited()
-    assert _last_summary_counts["!room:x:$thread1"] == 13
+    assert restarted.count("!room:x", "$thread1") == 12
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("configured_room", [False, True])
-async def test_partial_room_cache_preserves_proven_shared_pin_grant(tmp_path: Path, configured_room: bool) -> None:
+async def test_partial_room_cache_preserves_proven_shared_pin_grant(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    thread_summary_baselines: _ThreadSummaryBaselines,
+    configured_room: bool,
+) -> None:
     """A known allowed responder proves a pin despite other uncached members."""
     config = _config(
         tmp_path,
@@ -466,17 +451,18 @@ async def test_partial_room_cache_preserves_proven_shared_pin_grant(tmp_path: Pa
     client.rooms = {room.room_id: room}
     notice = _human_notice()
 
-    client, generate = await _run_automatic_summary(
+    client, model = await _run_automatic_summary(
         config,
         [*_make_thread_history(12), notice],
         [notice],
+        monkeypatch,
         client=client,
         entity_name="other",
     )
 
-    generate.assert_not_awaited()
+    assert not model.requests
     client.room_send.assert_not_awaited()
-    assert _last_summary_counts["!room:x:$thread1"] == 13
+    assert thread_summary_baselines.count("!room:x", "$thread1") == 12
 
 
 @pytest.mark.parametrize(
@@ -494,54 +480,62 @@ async def test_partial_room_cache_preserves_proven_shared_pin_grant(tmp_path: Pa
     ],
 )
 def test_malformed_human_pin_does_not_stop_summaries(tmp_path: Path, field: str, value: object) -> None:
-    """Only the supported explicit manual-pin payload changes automatic behavior."""
+    """Only the supported explicit manual-pin payload changes automatic behavior; anything else is a message."""
     config = _config(tmp_path, access={"users": ["@owner:example.com"]})
-    runtime_paths = runtime_paths_for(config)
     notice = _human_notice()
-    notice.content["io.mindroom.thread_summary"][field] = value
-    assert not _recover_pin_state(
-        [notice],
-        trusted_sender_ids=current_internal_sender_ids(config, runtime_paths),
-        human_sender_allowed=_human_summary_authorizer(
+    notice.content[THREAD_SUMMARY_CONTENT_KEY][field] = value
+
+    state = _state(config, [notice])
+
+    assert not state.pinned
+    assert state.summary is None
+    assert state.ordinary_messages == (notice,)
+
+
+@pytest.mark.asyncio
+async def test_pending_membership_defers_generation_without_advancing_baseline(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    thread_summary_baselines: _ThreadSummaryBaselines,
+) -> None:
+    """Cold authorization state must not overwrite a pin before membership recovers."""
+    config = _config(tmp_path, rooms={"team": {}}, agent_rooms=["team"])
+    _, model = await _run_automatic_summary(config, [*_make_thread_history(12), _human_notice()], [], monkeypatch)
+    assert not model.requests
+    assert thread_summary_baselines.count("!room:x", "$thread1") == 0
+
+
+def test_pending_membership_leaves_the_thread_state_unknown(tmp_path: Path) -> None:
+    """A person's pin whose authority is not known yet makes the whole state unknown rather than guessed."""
+    config = _config(tmp_path, rooms={"team": {}}, agent_rooms=["team"])
+    runtime_paths = runtime_paths_for(config)
+    history = [*_make_thread_history(3), _human_notice()]
+
+    with pytest.raises(ReplyMembershipPendingError):
+        _state(config, history)
+    assert (
+        current_thread_summary_from_history(
             make_matrix_client_mock(),
             "!room:x",
-            config,
-            runtime_paths,
-            "talent",
-            AgentReplyMembershipIndex(),
-        ),
-        thread_id="$thread1",
+            "$thread1",
+            history,
+            config=config,
+            runtime_paths=runtime_paths,
+            entity_name="talent",
+            membership_index=AgentReplyMembershipIndex(),
+            trusted_sender_ids=current_internal_sender_ids(config, runtime_paths),
+        )
+        is None
     )
 
 
 @pytest.mark.asyncio
-async def test_pending_membership_defers_generation_without_advancing_baseline(tmp_path: Path) -> None:
-    """Cold authorization state must not overwrite a pin before membership recovers."""
-    config = _config(tmp_path, rooms={"team": {}}, agent_rooms=["team"])
-    reader = make_conversation_reader_mock()
-    serve_conversation_reader(reader, [*_make_thread_history(12), _human_notice()], thread_id="$thread1")
-    with (
-        patch("mindroom.thread_summary.maybe_rebuild_tag_vocabulary", new=AsyncMock(return_value=None)),
-        patch("mindroom.thread_summary._generate_summary", new=AsyncMock(return_value="Automatic")) as generate,
-    ):
-        await maybe_generate_thread_summary(
-            make_matrix_client_mock(),
-            "!room:x",
-            "$thread1",
-            config,
-            runtime_paths_for(config),
-            conversation_reader=reader,
-            delivered_response=DeliveredResponse(event_id="$event0", body="Message 0"),
-            entity_name="talent",
-            membership_index=AgentReplyMembershipIndex(),
-        )
-    generate.assert_not_awaited()
-    assert "!room:x:$thread1" not in _last_summary_counts
-
-
-@pytest.mark.asyncio
 @pytest.mark.parametrize("pending_membership", [False, True])
-async def test_manual_write_reports_unorderable_predecessor(tmp_path: Path, pending_membership: bool) -> None:
+async def test_manual_write_reports_unorderable_predecessor(
+    tmp_path: Path,
+    thread_summary_baselines: _ThreadSummaryBaselines,
+    pending_membership: bool,
+) -> None:
     """Unresolved authority and exhausted timestamps fail as controlled tool errors."""
     config = _config(
         tmp_path,
@@ -567,29 +561,31 @@ async def test_manual_write_reports_unorderable_predecessor(tmp_path: Path, pend
             pin=False,
         )
     client.room_send.assert_not_awaited()
-    assert "!room:x:$thread1" not in _last_summary_counts
+    assert thread_summary_baselines.count("!room:x", "$thread1") == 0
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("release_source", ["history", "source"])
-async def test_automatic_summary_advances_past_future_explicit_release(tmp_path: Path, release_source: str) -> None:
+async def test_automatic_summary_advances_past_future_explicit_release(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    release_source: str,
+) -> None:
     """An explicit release restores visible automatic updates despite clock skew."""
     config = _config(tmp_path, access={"users": ["@owner:example.com"]})
-    runtime_paths = runtime_paths_for(config)
-    trusted = current_internal_sender_ids(config, runtime_paths)
     future = datetime(2099, 1, 1, tzinfo=UTC)
     release = _make_summary_notice_message(
         "$thread1",
         message_count=1,
-        sender=next(iter(trusted)),
+        sender=_agent(config),
         pinned=False,
         generated_at=future.isoformat(),
     )
     history = _make_thread_history(12)
     if release_source == "history":
         history.append(release)
-    client, _ = await _run_automatic_summary(config, history, [release])
-    sent = client.room_send.call_args.kwargs["content"]["io.mindroom.thread_summary"]
+    client, _ = await _run_automatic_summary(config, history, [release], monkeypatch)
+    sent = client.room_send.call_args.kwargs["content"][THREAD_SUMMARY_CONTENT_KEY]
     assert datetime.fromisoformat(sent["generated_at"]) > future
 
 
@@ -597,17 +593,73 @@ async def test_automatic_summary_advances_past_future_explicit_release(tmp_path:
 def test_out_of_range_utc_human_timestamp_cannot_pin(tmp_path: Path, generated_at: str) -> None:
     """ISO offsets cannot smuggle unsupported UTC dates into persistent pin state."""
     config = _config(tmp_path, access={"users": ["@owner:example.com"]})
-    runtime_paths = runtime_paths_for(config)
-    assert not _recover_pin_state(
-        [_human_notice(generated_at=generated_at)],
-        trusted_sender_ids=current_internal_sender_ids(config, runtime_paths),
-        human_sender_allowed=_human_summary_authorizer(
-            make_matrix_client_mock(),
-            "!room:x",
-            config,
-            runtime_paths,
-            "talent",
-            AgentReplyMembershipIndex(),
-        ),
-        thread_id="$thread1",
+    assert not _state(config, [_human_notice(generated_at=generated_at)]).pinned
+
+
+def test_newest_of_two_racing_pins_titles_the_thread(tmp_path: Path) -> None:
+    """Two people pinning at once leave the later event's title, whatever their clocks wrote."""
+    config = _config(tmp_path, access={"users": ["@owner:example.com", "@editor:example.com"]})
+    first = _human_notice(generated_at="2026-01-01T00:05:00+00:00")
+    first.timestamp = 1000
+    second = _human_notice("@editor:example.com", generated_at="2026-01-01T00:00:00+00:00")
+    second.timestamp = 2000
+    for pin, title in ((first, "First title"), (second, "Second title")):
+        pin.body = title
+        pin.content["body"] = title
+        pin.content[THREAD_SUMMARY_CONTENT_KEY]["summary"] = title
+
+    state = _state(config, [*_make_thread_history(3), second, first])
+
+    assert state.summary == "Second title"
+    assert state.pinned
+    assert state.message_count == 3
+    assert state.newest_generated_at == datetime(2026, 1, 1, 0, 5, tzinfo=UTC)
+
+
+def test_equal_event_times_order_a_pin_and_a_release_by_their_summary_clock(tmp_path: Path) -> None:
+    """A pin and a release in the same millisecond resolve by ``generated_at``, then by position."""
+    config = _config(tmp_path, access={"users": ["@owner:example.com"]})
+    pin = _human_notice(generated_at="2026-01-01T00:05:00+00:00")
+    release = _make_summary_notice_message(
+        "$thread1",
+        message_count=3,
+        event_id="$release",
+        sender=_agent(config),
+        pinned=False,
+        generated_at="2026-01-01T00:00:00+00:00",
     )
+    pin.timestamp = release.timestamp = 1000
+
+    assert _state(config, [pin, release]).pinned
+    release.content[THREAD_SUMMARY_CONTENT_KEY]["generated_at"] = "2026-01-01T00:05:00+00:00"
+    assert not _state(config, [pin, release]).pinned
+    assert _state(config, [release, pin]).pinned
+
+
+@pytest.mark.asyncio
+async def test_a_released_human_pin_is_neither_a_message_nor_conversation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Once an agent releases a person's pinned summary, the next summary neither counts nor reads that pin."""
+    config = _config(tmp_path, access={"users": ["@owner:example.com"]})
+    config.defaults.thread_summary_subsequent_interval = 1
+    pin = _human_notice()
+    pin.timestamp = 1000
+    # One message has arrived since the agent released the pin, so the next summary is due at three messages.
+    release = _make_summary_notice_message(
+        "$thread1",
+        message_count=2,
+        event_id="$release",
+        sender=_agent(config),
+        pinned=False,
+    )
+    release.timestamp = 2000
+    history = [*_make_thread_history(3), pin, release]
+
+    client, model = await _run_automatic_summary(config, history, history, monkeypatch)
+
+    (request,) = model.requests
+    assert "@owner:example.com" not in json.dumps([message.content for message in request.messages], default=str)
+    sent = client.room_send.call_args.kwargs["content"][THREAD_SUMMARY_CONTENT_KEY]
+    assert sent["message_count"] == 3
