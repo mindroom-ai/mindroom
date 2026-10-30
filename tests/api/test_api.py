@@ -1466,26 +1466,6 @@ def test_load_config(test_client: TestClient) -> None:
     assert "test_agent" in config["agents"]
 
 
-def test_get_agents(test_client: TestClient) -> None:
-    """Test getting all agents."""
-    # First load config
-    test_client.post("/api/config/load")
-
-    response = test_client.get("/api/config/agents")
-    assert response.status_code == 200
-
-    agents = response.json()
-    assert isinstance(agents, list)
-    assert len(agents) > 0
-
-    # Check agent structure
-    agent = agents[0]
-    assert "id" in agent
-    assert "display_name" in agent
-    assert "tools" in agent
-    assert "rooms" in agent
-
-
 def test_get_personal_agents_lists_active_pending_and_removed_template_entries(
     test_client: TestClient,
     temp_config_file: Path,
@@ -1576,117 +1556,6 @@ def test_the_dashboard_list_shows_an_edited_personal_name(test_client: TestClien
 
     assert response.status_code == 200
     assert [agent["display_name"] for agent in response.json()] == ["Scout"]
-
-
-def test_create_agent(test_client: TestClient, sample_agent_data: dict[str, Any], temp_config_file: Path) -> None:
-    """Test creating a new agent."""
-    # Load config first
-    test_client.post("/api/config/load")
-
-    response = test_client.post("/api/config/agents", json=sample_agent_data)
-    assert response.status_code == 200
-
-    result = response.json()
-    assert "id" in result
-    assert result["success"] is True
-
-    # Verify it was saved to file
-    with temp_config_file.open() as f:
-        config = yaml.safe_load(f)
-    assert result["id"] in config["agents"]
-    assert config["agents"][result["id"]]["display_name"] == sample_agent_data["display_name"]
-
-
-@pytest.mark.parametrize(
-    ("section", "payload", "expected_id"),
-    [
-        (
-            "agents",
-            {
-                "id": "client_agent_id",
-                "display_name": "Section Entity",
-                "role": "A test agent",
-                "tools": ["calculator"],
-                "instructions": ["Test instruction"],
-                "rooms": ["test_room"],
-            },
-            "section_entity",
-        ),
-        (
-            "teams",
-            {
-                "id": "client_team_id",
-                "display_name": "Section Entity",
-                "role": "A test team",
-                "agents": ["test_agent"],
-                "rooms": ["test_room"],
-                "model": "default",
-                "mode": "coordinate",
-            },
-            "section_entity",
-        ),
-    ],
-)
-def test_config_entity_create_strips_payload_id_and_lists_section_entities(
-    test_client: TestClient,
-    temp_config_file: Path,
-    section: str,
-    payload: dict[str, Any],
-    expected_id: str,
-) -> None:
-    """Agent and team section CRUD should expose IDs from config keys only."""
-    test_client.post("/api/config/load")
-
-    create_response = test_client.post(f"/api/config/{section}", json=payload)
-    assert create_response.status_code == 200
-    assert create_response.json() == {"id": expected_id, "success": True}
-
-    with temp_config_file.open() as f:
-        saved_config = yaml.safe_load(f)
-    assert "id" not in saved_config[section][expected_id]
-
-    list_response = test_client.get(f"/api/config/{section}")
-    assert list_response.status_code == 200
-    created_entity = next(entity for entity in list_response.json() if entity["id"] == expected_id)
-    assert created_entity["display_name"] == "Section Entity"
-
-
-def test_update_agent(test_client: TestClient, temp_config_file: Path) -> None:
-    """Test updating an existing agent."""
-    # Load config first
-    test_client.post("/api/config/load")
-
-    update_data = {"display_name": "Updated Test Agent", "tools": ["calculator", "file"], "rooms": ["updated_room"]}
-
-    response = test_client.put("/api/config/agents/test_agent", json=update_data)
-    assert response.status_code == 200
-
-    result = response.json()
-    assert result["success"] is True
-
-    # Verify file was updated
-    with temp_config_file.open() as f:
-        config = yaml.safe_load(f)
-    assert config["agents"]["test_agent"]["display_name"] == "Updated Test Agent"
-    assert "file" in config["agents"]["test_agent"]["tools"]
-    assert "updated_room" in config["agents"]["test_agent"]["rooms"]
-
-
-def test_delete_agent(test_client: TestClient, temp_config_file: Path) -> None:
-    """Test deleting an agent."""
-    # Load config first
-    test_client.post("/api/config/load")
-
-    response = test_client.delete("/api/config/agents/test_agent")
-    assert response.status_code == 200
-
-    result = response.json()
-    assert result["success"] is True
-
-    # Verify it was removed from file
-    with temp_config_file.open() as f:
-        config = yaml.safe_load(f)
-    assert "test_agent" not in config["agents"]
 
 
 def test_get_tools(test_client: TestClient) -> None:
@@ -3506,19 +3375,6 @@ def test_get_tools_includes_openclaw_compat_metadata(test_client: TestClient) ->
     assert tool["display_name"] == "OpenClaw Compat"
 
 
-def test_get_rooms(test_client: TestClient) -> None:
-    """Test getting all rooms."""
-    # Load config first
-    test_client.post("/api/config/load")
-
-    response = test_client.get("/api/rooms")
-    assert response.status_code == 200
-
-    rooms = response.json()
-    assert isinstance(rooms, list)
-    assert "test_room" in rooms
-
-
 def test_save_config(test_client: TestClient, temp_config_file: Path) -> None:
     """Test saving entire configuration."""
     new_config = {
@@ -3612,9 +3468,9 @@ def test_save_config_persists_unassigned_configured_rooms(
         },
     }
 
-    response = test_client.get("/api/rooms")
+    response = test_client.post("/api/config/load")
     assert response.status_code == 200
-    assert "project_room" in response.json()
+    assert "project_room" in response.json()["rooms"]
 
 
 def test_save_config_preserves_explicit_compaction_model_null_clear(
@@ -4172,20 +4028,9 @@ def test_api_config_load_does_not_serve_stale_cache_after_invalid_reload(temp_co
     assert "test_agent" in main._app_context(main.app).runtime_config.authored_model_dump()["agents"]
 
 
-@pytest.mark.parametrize(
-    "path",
-    [
-        "/api/config/agents",
-        "/api/config/teams",
-        "/api/config/models",
-        "/api/config/room-models",
-        "/api/rooms",
-    ],
-)
 def test_api_cached_read_endpoints_refuse_stale_config_after_invalid_reload(
     api_key_client: TestClient,
     temp_config_file: Path,
-    path: str,
 ) -> None:
     """Config-backed API reads should return the current parse error instead of stale cache."""
     runtime_paths = main._app_runtime_paths(api_key_client.app)
@@ -4193,32 +4038,10 @@ def test_api_cached_read_endpoints_refuse_stale_config_after_invalid_reload(
 
     assert not config_lifecycle.load_config_into_app(runtime_paths, main.app).loaded
 
-    response = api_key_client.get(path, headers={"Authorization": "Bearer test-key"})
+    response = api_key_client.get("/api/config/personal-agents", headers={"Authorization": "Bearer test-key"})
 
     assert response.status_code == 422
     assert "Could not parse configuration YAML" in response.json()["detail"][0]["msg"]
-
-
-def test_api_cached_write_endpoints_refuse_stale_config_after_invalid_reload(
-    api_key_client: TestClient,
-    temp_config_file: Path,
-) -> None:
-    """Config writes should not mutate from stale cache after the current file becomes malformed."""
-    runtime_paths = main._app_runtime_paths(api_key_client.app)
-    invalid_source = "agents:\n  broken: [\n"
-    temp_config_file.write_text(invalid_source, encoding="utf-8")
-
-    assert not config_lifecycle.load_config_into_app(runtime_paths, main.app).loaded
-
-    response = api_key_client.put(
-        "/api/config/models/default",
-        headers={"Authorization": "Bearer test-key"},
-        json={"provider": "openai", "id": "gpt-6-astra"},
-    )
-
-    assert response.status_code == 422
-    assert "Could not parse configuration YAML" in response.json()["detail"][0]["msg"]
-    assert temp_config_file.read_text(encoding="utf-8") == invalid_source
 
 
 def test_api_key_raw_endpoints_recover_from_invalid_reload(
@@ -4280,41 +4103,6 @@ def test_load_config_into_app_omits_legacy_null_optional_sections(tmp_path: Path
     config_data = main._app_context(main.app).runtime_config.authored_model_dump()
     assert "teams" not in config_data
     assert "plugins" not in config_data
-
-
-def test_error_handling_agent_not_found(test_client: TestClient) -> None:
-    """Test error handling for non-existent agent."""
-    test_client.post("/api/config/load")
-
-    # PUT still targets the specific agent ID, but runtime-aware validation now rejects empty payloads.
-    response = test_client.put("/api/config/agents/non_existent", json={})
-    assert response.status_code == 422
-
-    # DELETE should return 404 for non-existent agent
-    response = test_client.delete("/api/config/agents/really_non_existent")
-    assert response.status_code == 404
-
-
-@pytest.mark.parametrize(
-    ("section", "entity_id", "expected_detail"),
-    [
-        ("agents", "missing_agent", "Agent not found"),
-        ("teams", "missing_team", "Team not found"),
-    ],
-)
-def test_config_entity_delete_not_found_preserves_exact_error_text(
-    test_client: TestClient,
-    section: str,
-    entity_id: str,
-    expected_detail: str,
-) -> None:
-    """Missing agent and team deletes should keep their user-facing messages."""
-    test_client.post("/api/config/load")
-
-    response = test_client.delete(f"/api/config/{section}/{entity_id}")
-
-    assert response.status_code == 404
-    assert response.json()["detail"] == expected_detail
 
 
 def test_cors_headers(test_client: TestClient) -> None:
@@ -4762,17 +4550,6 @@ def test_frontend_serves_after_api_key_login(
     assert "MindRoom Dashboard" in response.text
 
 
-def test_get_teams_empty(test_client: TestClient) -> None:
-    """Test getting teams when none exist."""
-    test_client.post("/api/config/load")
-
-    response = test_client.get("/api/config/teams")
-    assert response.status_code == 200
-    teams = response.json()
-    assert isinstance(teams, list)
-    assert len(teams) == 0
-
-
 def test_agent_policies_endpoint_uses_backend_policy(test_client: TestClient) -> None:
     """Draft agent policies should come from the backend delegation/private policy."""
     response = test_client.post(
@@ -4879,228 +4656,6 @@ def test_agent_policies_endpoint_reports_draft_root_scope_and_team_eligibility(t
     assert policies["notes"]["scope_source"] == "defaults.worker_scope"
     assert policies["notes"]["effective_execution_scope"] == "user"
     assert policies["notes"]["private_knowledge_base_id"] == "__agent_private__:notes"
-
-
-def test_create_team(test_client: TestClient, temp_config_file: Path) -> None:
-    """Test creating a new team."""
-    test_client.post("/api/config/load")
-
-    team_data = {
-        "display_name": "Test Team",
-        "role": "Testing team functionality",
-        "agents": ["test_agent"],
-        "rooms": ["test-room"],
-        "model": "default",
-        "mode": "coordinate",
-    }
-
-    response = test_client.post("/api/config/teams", json=team_data)
-    assert response.status_code == 200
-
-    result = response.json()
-    assert "id" in result
-    assert result["id"] == "test_team"
-    assert result["success"] is True
-
-    # Verify file was updated
-    with temp_config_file.open() as f:
-        saved_config = yaml.safe_load(f)
-
-    assert "teams" in saved_config
-    assert "test_team" in saved_config["teams"]
-    assert saved_config["teams"]["test_team"]["display_name"] == "Test Team"
-    assert saved_config["teams"]["test_team"]["agents"] == ["test_agent"]
-
-
-def test_get_teams_with_data(test_client: TestClient) -> None:
-    """Test getting teams after creating one."""
-    test_client.post("/api/config/load")
-
-    # Create a team first
-    team_data = {
-        "display_name": "Test Team",
-        "role": "Testing team functionality",
-        "agents": ["test_agent"],
-        "rooms": ["test-room"],
-        "model": "default",
-        "mode": "coordinate",
-    }
-    test_client.post("/api/config/teams", json=team_data)
-
-    # Now get teams
-    response = test_client.get("/api/config/teams")
-    assert response.status_code == 200
-
-    teams = response.json()
-    assert isinstance(teams, list)
-    assert len(teams) == 1
-
-    team = teams[0]
-    assert team["id"] == "test_team"
-    assert team["display_name"] == "Test Team"
-    assert team["agents"] == ["test_agent"]
-    assert team["mode"] == "coordinate"
-
-
-def test_update_team(test_client: TestClient, temp_config_file: Path) -> None:
-    """Test updating an existing team."""
-    test_client.post("/api/config/load")
-
-    new_agent_data = {
-        "display_name": "New Agent",
-        "role": "Another test agent",
-        "tools": ["calculator"],
-        "instructions": ["Test instruction"],
-        "rooms": ["test_room"],
-    }
-    create_agent_response = test_client.post("/api/config/agents", json=new_agent_data)
-    assert create_agent_response.status_code == 200
-
-    # Create a team first
-    team_data = {
-        "display_name": "Test Team",
-        "role": "Testing team functionality",
-        "agents": ["test_agent"],
-        "rooms": ["test-room"],
-        "model": "default",
-        "mode": "coordinate",
-    }
-    test_client.post("/api/config/teams", json=team_data)
-
-    model_response = test_client.put(
-        "/api/config/models/gpt-6-astra",
-        json={"provider": "openai", "id": "gpt-6-astra"},
-    )
-    assert model_response.status_code == 200
-
-    # Update the team
-    updated_data = {
-        "display_name": "Updated Team",
-        "role": "Updated role",
-        "agents": ["test_agent", "new_agent"],
-        "rooms": ["test-room", "new-room"],
-        "model": "gpt-6-astra",
-        "mode": "collaborate",
-    }
-
-    response = test_client.put("/api/config/teams/test_team", json=updated_data)
-    assert response.status_code == 200
-
-    # Verify file was updated
-    with temp_config_file.open() as f:
-        saved_config = yaml.safe_load(f)
-
-    assert saved_config["teams"]["test_team"]["display_name"] == "Updated Team"
-    assert saved_config["teams"]["test_team"]["agents"] == ["test_agent", "new_agent"]
-    assert saved_config["teams"]["test_team"]["mode"] == "collaborate"
-
-
-def test_delete_team(test_client: TestClient, temp_config_file: Path) -> None:
-    """Test deleting a team."""
-    test_client.post("/api/config/load")
-
-    # Create a team first
-    team_data = {
-        "display_name": "Test Team",
-        "role": "Testing team functionality",
-        "agents": ["test_agent"],
-        "rooms": ["test-room"],
-    }
-    test_client.post("/api/config/teams", json=team_data)
-
-    # Delete the team
-    response = test_client.delete("/api/config/teams/test_team")
-    assert response.status_code == 200
-
-    # Verify it's deleted from file
-    with temp_config_file.open() as f:
-        saved_config = yaml.safe_load(f)
-
-    assert "teams" not in saved_config or "test_team" not in saved_config.get("teams", {})
-
-    # Verify it's not returned in list
-    response = test_client.get("/api/config/teams")
-    teams = response.json()
-    assert len(teams) == 0
-
-
-def test_delete_nonexistent_team(test_client: TestClient) -> None:
-    """Test deleting a team that doesn't exist."""
-    test_client.post("/api/config/load")
-
-    response = test_client.delete("/api/config/teams/nonexistent_team")
-    assert response.status_code == 404
-    assert "not found" in response.json()["detail"].lower()
-
-
-def test_create_team_unique_id(test_client: TestClient) -> None:
-    """Test that creating teams with same display name generates unique IDs."""
-    test_client.post("/api/config/load")
-
-    team_data = {
-        "display_name": "Test Team",
-        "role": "First team",
-        "agents": ["test_agent"],
-        "rooms": ["test-room"],
-    }
-
-    # Create first team
-    response1 = test_client.post("/api/config/teams", json=team_data)
-    assert response1.status_code == 200
-    assert response1.json()["id"] == "test_team"
-
-    # Create second team with same display name
-    team_data["role"] = "Second team"
-    response2 = test_client.post("/api/config/teams", json=team_data)
-    assert response2.status_code == 200
-    assert response2.json()["id"] == "test_team_1"
-
-    # Create third team with same display name
-    team_data["role"] = "Third team"
-    response3 = test_client.post("/api/config/teams", json=team_data)
-    assert response3.status_code == 200
-    assert response3.json()["id"] == "test_team_2"
-
-
-def test_get_room_models(test_client: TestClient) -> None:
-    """Test getting room-specific model overrides."""
-    test_client.post("/api/config/load")
-
-    response = test_client.get("/api/config/room-models")
-    assert response.status_code == 200
-    room_models = response.json()
-    assert isinstance(room_models, dict)
-
-
-def test_update_room_models(test_client: TestClient, temp_config_file: Path) -> None:
-    """Test updating room-specific model overrides."""
-    test_client.post("/api/config/load")
-
-    for model_name, model in {
-        "gpt-6-astra": {"provider": "openai", "id": "gpt-6-astra"},
-        "claude-sonnet-5": {"provider": "anthropic", "id": "claude-sonnet-5-5"},
-    }.items():
-        assert test_client.put(f"/api/config/models/{model_name}", json=model).status_code == 200
-
-    room_models = {"lobby": "gpt-6-astra", "tech-room": "claude-sonnet-5", "general": "default"}
-
-    response = test_client.put("/api/config/room-models", json=room_models)
-    assert response.status_code == 200
-
-    # Verify file was updated
-    with temp_config_file.open() as f:
-        saved_config = yaml.safe_load(f)
-
-    assert "room_models" in saved_config
-    assert saved_config["room_models"]["lobby"] == "gpt-6-astra"
-    assert saved_config["room_models"]["tech-room"] == "claude-sonnet-5"
-
-    # Verify we can retrieve the updated room models
-    response = test_client.get("/api/config/room-models")
-    assert response.status_code == 200
-    retrieved_models = response.json()
-    assert retrieved_models["lobby"] == "gpt-6-astra"
-    assert retrieved_models["tech-room"] == "claude-sonnet-5"
 
 
 # ---------------------------------------------------------------------------
@@ -5322,47 +4877,6 @@ def test_protected_raw_write_rejects_runtime_swap_after_auth(tmp_path: Path) -> 
     assert runtime_b.config_path.read_text(encoding="utf-8") == source_b
 
 
-def test_protected_crud_write_rejects_runtime_swap_after_auth(tmp_path: Path) -> None:
-    """Legacy CRUD writes should fail stale instead of mutating a newer runtime after auth succeeds."""
-    runtime_a = constants.resolve_primary_runtime_paths(
-        config_path=tmp_path / "first.yaml",
-        storage_path=tmp_path / "first-store",
-        process_env={"MINDROOM_API_KEY": "key-a"},
-    )
-    runtime_b = constants.resolve_primary_runtime_paths(
-        config_path=tmp_path / "second.yaml",
-        storage_path=tmp_path / "second-store",
-        process_env={"MINDROOM_API_KEY": "key-b"},
-    )
-    payload_a = _authored_config_payload("old")
-    payload_b = _authored_config_payload("new")
-    runtime_b.config_path.write_text(yaml.safe_dump(payload_b), encoding="utf-8")
-    original_commit = config_lifecycle.commit_dashboard_config
-
-    def _swap_then_commit(*args: object, **kwargs: object) -> object:
-        _publish_committed_runtime_config(main.app, runtime_b, payload_b)
-        return original_commit(*args, **kwargs)
-
-    with (
-        patch.object(config_lifecycle, "commit_dashboard_config", side_effect=_swap_then_commit),
-        TestClient(main.app) as client,
-    ):
-        _publish_committed_runtime_config(main.app, runtime_a, payload_a)
-        response = client.put(
-            "/api/config/agents/assistant",
-            headers={"Authorization": "Bearer key-a"},
-            json={
-                "display_name": "Assistant",
-                "role": "updated",
-                "rooms": ["updated-room"],
-            },
-        )
-
-    assert response.status_code == 409
-    assert Config.validate_with_runtime(yaml.safe_load(runtime_b.config_path.read_text(encoding="utf-8")), runtime_b)
-    assert yaml.safe_load(runtime_b.config_path.read_text(encoding="utf-8"))["agents"] == payload_b["agents"]
-
-
 def test_api_key_missing_header_rejects(api_key_client: TestClient) -> None:
     """Missing Authorization header should return 401 when API key is set."""
     response = api_key_client.post("/api/config/load")
@@ -5376,44 +4890,6 @@ def test_api_key_wrong_key_rejects(api_key_client: TestClient) -> None:
         headers={"Authorization": "Bearer wrong-key"},
     )
     assert response.status_code == 401
-
-
-def test_api_key_protects_teams(api_key_client: TestClient) -> None:
-    """Teams endpoint should reject unauthenticated requests when API key is set."""
-    api_key_client.post("/api/config/load", headers={"Authorization": "Bearer test-key"})
-    response = api_key_client.get("/api/config/teams")
-    assert response.status_code == 401
-
-
-def test_api_key_protects_models(api_key_client: TestClient) -> None:
-    """Models endpoint should reject unauthenticated requests when API key is set."""
-    api_key_client.post("/api/config/load", headers={"Authorization": "Bearer test-key"})
-    response = api_key_client.get("/api/config/models")
-    assert response.status_code == 401
-
-
-def test_api_key_protects_rooms(api_key_client: TestClient) -> None:
-    """Rooms endpoint should reject unauthenticated requests when API key is set."""
-    api_key_client.post("/api/config/load", headers={"Authorization": "Bearer test-key"})
-    response = api_key_client.get("/api/rooms")
-    assert response.status_code == 401
-
-
-def test_api_key_protects_room_models(api_key_client: TestClient) -> None:
-    """Room-models endpoint should reject unauthenticated requests when API key is set."""
-    api_key_client.post("/api/config/load", headers={"Authorization": "Bearer test-key"})
-    response = api_key_client.get("/api/config/room-models")
-    assert response.status_code == 401
-
-
-def test_api_key_authenticated_teams_access(api_key_client: TestClient) -> None:
-    """Teams endpoint should work with valid auth when API key is set."""
-    api_key_client.post("/api/config/load", headers={"Authorization": "Bearer test-key"})
-    response = api_key_client.get(
-        "/api/config/teams",
-        headers={"Authorization": "Bearer test-key"},
-    )
-    assert response.status_code == 200
 
 
 def _trusted_auth_test_app(runtime_paths: constants.RuntimePaths) -> FastAPI:
@@ -5812,7 +5288,7 @@ def test_api_key_login_reaches_oauth_callback_state_checks(
 
     response = api_key_client.get(path)
     assert response.status_code == 400
-    # The generic OAuth callback answers the popup with a page; the older integration callbacks answer JSON.
+    # The generic OAuth callback answers the popup with a page; the Home Assistant callback answers JSON.
     body = response.text if path.startswith("/api/oauth/") else response.json()["detail"]
     assert "OAuth state is invalid or expired" in body
 

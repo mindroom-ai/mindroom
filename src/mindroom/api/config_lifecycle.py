@@ -7,7 +7,7 @@ import weakref
 from contextlib import ExitStack
 from dataclasses import dataclass, field, replace
 from enum import Enum, auto
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
 
 from fastapi import FastAPI, HTTPException, Request
 
@@ -22,7 +22,6 @@ from mindroom.config.load_attempt import (
 from mindroom.config.main import (
     CONFIG_LOAD_USER_ERROR_TYPES,
     Config,
-    ConfigFileChangedError,
     ConfigRuntimeValidationError,
 )
 from mindroom.event_journal.opening import pending_event_journal_restart
@@ -285,13 +284,12 @@ def commit_dashboard_config(
     build: Callable[[constants.RuntimePaths], ConfigCommit],
     *,
     expected_generation: int | None,
-    derived: bool = False,
 ) -> ApiSnapshot:
     """Commit one dashboard save built against the request's snapshot, and return the published snapshot.
 
     Blocking: `build` validates the new config, which loads plugins, so callers run this in a worker thread.
-    A full replacement is exempt from the file check, so a save can repair a broken file no load has read; a
-    `derived` change, built from the pinned config, must find the file that config was loaded from.
+    A save replaces the whole config, so it is exempt from the file check and can repair a broken file no load
+    has read.
     """
     state = require_api_state(request.app)
     pinned = bind_current_request_snapshot(request)
@@ -309,13 +307,11 @@ def commit_dashboard_config(
         published = _commit(
             pinned.runtime_paths,
             commit,
-            loaded=pinned.runtime_config if derived else None,
+            loaded=None,
             writer=_DashboardWriter(state=state, pinned=pinned),
         )
     except HTTPException:
         raise
-    except ConfigFileChangedError as exc:
-        raise _stale_snapshot_error() from exc
     except ConfigComposedFromIncludesError as exc:
         # The code tells this permanent rejection apart from the retryable stale-write 409's plain string detail.
         raise HTTPException(
@@ -486,23 +482,6 @@ def last_good_runtime_config(request: Request) -> Config | None:
     None only before the first load. Routes that must keep working while an operator repairs the file read this.
     """
     return _request_or_current_snapshot(request).runtime_config
-
-
-def write_committed_config[T](
-    request: Request,
-    mutate: Callable[[dict[str, Any]], T],
-) -> T:
-    """Apply one mutation to the request's valid committed config and commit the result. Blocking."""
-    results: list[T] = []
-
-    def build(runtime_paths: constants.RuntimePaths) -> ConfigCommit:
-        config, _ = read_committed_runtime_config(request)
-        payload = config.authored_model_dump()
-        results.append(mutate(payload))
-        return ConfigCommit.from_payload(payload, runtime_paths)
-
-    commit_dashboard_config(request, build, expected_generation=None, derived=True)
-    return results[0]
 
 
 def config_pending_restart(request: Request) -> bool:

@@ -24,7 +24,7 @@ from mindroom.config.main import Config, ConfigRuntimeValidationError, load_conf
 from mindroom.config.personal_agents import read_personal_agent_roster
 from mindroom.event_journal.opening import record_opened_event_journal
 from mindroom.personal_agents import _append_personal_agent_roster_entry
-from tests.api.conftest import commit_tool_change, save_config, save_raw_config
+from tests.api.conftest import commit_tool_change, save_config, save_edited_config, save_raw_config
 from tests.conftest import test_runtime_paths
 from tests.test_generated_agents import BASE as GENERATED_BASE
 from tests.test_generated_agents import _created as created_entry
@@ -328,7 +328,7 @@ class TestGenerationTrackingAndWrites:
 
     def test_committed_write_reload_echo_does_not_bump_generation(self, loaded_app: FastAPI) -> None:
         """The watcher reload triggered by the API's own write is fingerprint-suppressed."""
-        config_lifecycle.write_committed_config(
+        save_edited_config(
             _request_for(loaded_app),
             lambda config: config["agents"]["test_agent"]["instructions"].append("Extra instruction"),
         )
@@ -342,7 +342,7 @@ class TestGenerationTrackingAndWrites:
         """A mutation producing an invalid config raises 422 and leaves the snapshot untouched."""
         before = _snapshot(loaded_app)
         with pytest.raises(HTTPException) as exc_info:
-            config_lifecycle.write_committed_config(
+            save_edited_config(
                 _request_for(loaded_app),
                 lambda config: config.__setitem__("agents", "not-a-mapping"),
             )
@@ -398,7 +398,7 @@ class TestRequestSnapshotLifecycle:
         request = _request_for(loaded_app)
         pinned = config_lifecycle.bind_current_request_snapshot(request)
 
-        config_lifecycle.write_committed_config(
+        save_edited_config(
             _request_for(loaded_app),
             lambda config: config["agents"]["test_agent"].__setitem__("role", "Changed mid-request"),
         )
@@ -417,12 +417,12 @@ class TestRequestSnapshotLifecycle:
         """A write built from a request snapshot that lost the race fails with 409."""
         stale_request = _request_for(loaded_app)
         config_lifecycle.bind_current_request_snapshot(stale_request)
-        config_lifecycle.write_committed_config(
+        save_edited_config(
             _request_for(loaded_app),
             lambda config: config["agents"]["test_agent"]["instructions"].append("Won the race"),
         )
         with pytest.raises(HTTPException) as exc_info:
-            config_lifecycle.write_committed_config(
+            save_edited_config(
                 stale_request,
                 lambda config: config["agents"]["test_agent"]["instructions"].append("Lost the race"),
             )
@@ -517,7 +517,7 @@ class TestCommitRevision:
         assert republished.revision > pinned.revision
 
         with pytest.raises(HTTPException) as exc_info:
-            config_lifecycle.write_committed_config(
+            save_edited_config(
                 request,
                 lambda config: config["defaults"].__setitem__("markdown", False),
             )
@@ -573,7 +573,7 @@ class TestConcurrencySmoke:
             request = _request_for(loaded_app)
             barrier.wait()
             try:
-                config_lifecycle.write_committed_config(
+                save_edited_config(
                     request,
                     lambda config: config["agents"]["test_agent"]["instructions"].append(marker),
                 )
@@ -705,21 +705,3 @@ def test_a_dashboard_save_that_cannot_write_the_file_is_a_server_error(
 
     assert exc_info.value.status_code == 500
     assert exc_info.value.detail == "Failed to save configuration: read-only file system"
-
-
-def test_a_partial_dashboard_change_refuses_a_hand_edit_no_reload_has_read(loaded_app: FastAPI) -> None:
-    """A change derived from the published config cannot overwrite a newer file; only a full replacement may."""
-    runtime_paths = _snapshot(loaded_app).runtime_paths
-    hand_edit = copy.deepcopy(VALID_CONFIG)
-    hand_edit["agents"]["test_agent"]["role"] = "Edited by hand"
-    _write_config(runtime_paths.config_path, hand_edit)
-    hand_source = runtime_paths.config_path.read_text(encoding="utf-8")
-
-    with pytest.raises(HTTPException) as exc_info:
-        config_lifecycle.write_committed_config(
-            _request_for(loaded_app),
-            lambda config: config["agents"]["test_agent"].__setitem__("display_name", "Renamed in the dashboard"),
-        )
-
-    assert exc_info.value.status_code == 409
-    assert runtime_paths.config_path.read_text(encoding="utf-8") == hand_source

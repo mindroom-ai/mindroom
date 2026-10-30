@@ -32,7 +32,7 @@ from mindroom.config.main import ConfigFileChangedError, ConfigRuntimeValidation
 from mindroom.custom_tools.config_manager import ConfigManagerTools
 from mindroom.message_target import MessageTarget
 from mindroom.tool_system.runtime_context import tool_runtime_context
-from tests.api.conftest import commit_tool_change, save_config, save_raw_config
+from tests.api.conftest import commit_tool_change, save_config, save_edited_config, save_raw_config
 from tests.authorization_helpers import make_test_tool_runtime_context
 from tests.conftest import (
     failed_config_load,
@@ -253,30 +253,21 @@ class TestEmptyDirectoryIncludes:
         assert _snapshot(main.app).source_files == frozenset({empty_include_runtime_paths.config_path.resolve()})
         assert config_lifecycle.config_uses_includes(_request_for(main.app)) is True
 
-    @pytest.mark.parametrize("replace", [False, True], ids=["mutation", "replacement"])
     def test_structured_save_preserves_empty_include(
         self,
         empty_include_runtime_paths: constants.RuntimePaths,
-        replace: bool,
     ) -> None:
-        """Both API structured save paths refuse to erase an empty directory tag."""
+        """A structured save refuses to erase an empty directory tag."""
         api_app = _make_api_app(empty_include_runtime_paths)
         assert config_lifecycle.load_config_into_app(empty_include_runtime_paths, api_app).loaded
         before = _snapshot(api_app)
         source = empty_include_runtime_paths.config_path.read_bytes()
 
-        if replace:
-            with pytest.raises(HTTPException) as exc_info:
-                save_config(
-                    _request_for(api_app),
-                    copy.deepcopy(before.runtime_config.authored_model_dump()),
-                )
-        else:
-            with pytest.raises(HTTPException) as exc_info:
-                config_lifecycle.write_committed_config(
-                    _request_for(api_app),
-                    lambda config: config.setdefault("defaults", {}).update({"markdown": False}),
-                )
+        with pytest.raises(HTTPException) as exc_info:
+            save_config(
+                _request_for(api_app),
+                copy.deepcopy(before.runtime_config.authored_model_dump()),
+            )
 
         assert exc_info.value.status_code == 409
         assert exc_info.value.detail["code"] == "config_composed_from_includes"
@@ -455,7 +446,7 @@ class TestEmptyDirectoryIncludes:
         ),
     ],
 )
-@pytest.mark.parametrize("write_kind", ["mutation", "replacement", "external"])
+@pytest.mark.parametrize("write_kind", ["replacement", "external"])
 def test_structured_writes_recheck_includes_before_watcher_reload(
     stale_monolith_app: FastAPI,
     write_kind: str,
@@ -477,10 +468,8 @@ def test_structured_writes_recheck_includes_before_watcher_reload(
         with pytest.raises(ConfigComposedFromIncludesError, match="!include"):
             commit_tool_change(payload, runtime_paths, loaded=before.runtime_config)
     else:
-        writer = config_lifecycle.write_committed_config if write_kind == "mutation" else save_config
-        update = (lambda config: config.update(timezone="Europe/Amsterdam")) if write_kind == "mutation" else payload
         with pytest.raises(HTTPException) as exc_info:
-            writer(_request_for(stale_monolith_app), update)
+            save_config(_request_for(stale_monolith_app), payload)
         assert exc_info.value.status_code == 409
         assert exc_info.value.detail["code"] == "config_composed_from_includes"
 
@@ -499,7 +488,7 @@ def test_structured_writes_recheck_includes_before_watcher_reload(
         pytest.param("role: |\n  !include missing.yaml\nagents: [broken\n", id="block-scalar"),
     ],
 )
-@pytest.mark.parametrize("write_kind", ["mutation", "replacement", "external"])
+@pytest.mark.parametrize("write_kind", ["replacement", "external"])
 def test_structured_writes_recover_broken_monolith_before_watcher_reload(
     stale_monolith_app: FastAPI,
     write_kind: str,
@@ -516,16 +505,6 @@ def test_structured_writes_recover_broken_monolith_before_watcher_reload(
         # A tool's change came from the file it loaded before the break, so it is refused, never a recovery.
         with pytest.raises(ConfigFileChangedError):
             commit_tool_change(payload, runtime_paths, loaded=before.runtime_config)
-        assert runtime_paths.config_path.read_text(encoding="utf-8") == broken_source
-        return
-    if write_kind == "mutation":
-        # A partial change is built from the config the dashboard last loaded, so the broken file refuses it too.
-        with pytest.raises(HTTPException) as exc_info:
-            config_lifecycle.write_committed_config(
-                _request_for(stale_monolith_app),
-                lambda config: config.update(timezone="Europe/Amsterdam"),
-            )
-        assert exc_info.value.status_code == 409
         assert runtime_paths.config_path.read_text(encoding="utf-8") == broken_source
         return
     save_config(_request_for(stale_monolith_app), payload)
@@ -621,7 +600,7 @@ async def test_confirmed_config_change_preserves_new_includes_before_watcher_rel
         pytest.param(b"# \xff\nagents: {}\n", id="unicode-monolith"),
     ],
 )
-@pytest.mark.parametrize("write_kind", ["mutation", "replacement", "external"])
+@pytest.mark.parametrize("write_kind", ["replacement", "external"])
 def test_structured_writes_preserve_unknown_source_topology_before_watcher_reload(
     stale_monolith_app: FastAPI,
     write_kind: str,
@@ -638,10 +617,8 @@ def test_structured_writes_preserve_unknown_source_topology_before_watcher_reloa
         with pytest.raises(ConfigRuntimeValidationError, match="could not determine"):
             commit_tool_change(payload, runtime_paths, loaded=before.runtime_config)
     else:
-        writer = config_lifecycle.write_committed_config if write_kind == "mutation" else save_config
-        update = (lambda config: config.update(timezone="Europe/Amsterdam")) if write_kind == "mutation" else payload
         with pytest.raises(HTTPException) as exc_info:
-            writer(_request_for(stale_monolith_app), update)
+            save_config(_request_for(stale_monolith_app), payload)
         assert exc_info.value.status_code == 422
         assert "could not determine" in str(exc_info.value.detail)
         assert "edit the source files instead" in str(exc_info.value.detail)
@@ -658,7 +635,7 @@ def test_structured_writes_preserve_unknown_source_topology_before_watcher_reloa
     assert _snapshot(stale_monolith_app).uses_includes is False
 
 
-@pytest.mark.parametrize("write_kind", ["mutation", "replacement", "external"])
+@pytest.mark.parametrize("write_kind", ["replacement", "external"])
 def test_structured_writes_preserve_unreadable_existing_source(
     stale_monolith_app: FastAPI,
     monkeypatch: pytest.MonkeyPatch,
@@ -686,12 +663,8 @@ def test_structured_writes_preserve_unreadable_existing_source(
             with pytest.raises(ConfigRuntimeValidationError, match="could not determine"):
                 commit_tool_change(payload, runtime_paths, loaded=before.runtime_config)
         else:
-            writer = config_lifecycle.write_committed_config if write_kind == "mutation" else save_config
-            update = (
-                (lambda config: config.update(timezone="Europe/Amsterdam")) if write_kind == "mutation" else payload
-            )
             with pytest.raises(HTTPException) as exc_info:
-                writer(_request_for(stale_monolith_app), update)
+                save_config(_request_for(stale_monolith_app), payload)
             assert exc_info.value.status_code == 422
             assert "could not determine" in str(exc_info.value.detail)
 
@@ -900,8 +873,8 @@ class TestIncludeAwareSnapshots:
 class TestStructuredWritesRejected:
     """Structured saves must not silently flatten a split config."""
 
-    def test_write_committed_config_is_rejected_with_409(self, split_app: FastAPI) -> None:
-        """Structured mutations return 409 and leave every source file untouched."""
+    def test_dashboard_structured_save_is_rejected_with_409(self, split_app: FastAPI) -> None:
+        """A structured save returns a coded 409 and leaves every source file untouched."""
         runtime_paths = _snapshot(split_app).runtime_paths
         top_before = runtime_paths.config_path.read_text(encoding="utf-8")
 
@@ -909,7 +882,7 @@ class TestStructuredWritesRejected:
             config["agents"]["test_agent"]["role"] = "Flattened"
 
         with pytest.raises(HTTPException) as exc_info:
-            config_lifecycle.write_committed_config(
+            save_edited_config(
                 _request_for(split_app),
                 _mutate,
             )
@@ -921,19 +894,6 @@ class TestStructuredWritesRejected:
         assert "!include" in detail["message"]
         assert runtime_paths.config_path.read_text(encoding="utf-8") == top_before
 
-    def test_dashboard_structured_save_is_rejected_with_409(self, split_app: FastAPI) -> None:
-        """Whole-config structured replacement returns 409 for include-based configs."""
-        replacement = copy.deepcopy(_snapshot(split_app).runtime_config.authored_model_dump())
-        replacement["agents"]["test_agent"]["role"] = "Flattened"
-
-        with pytest.raises(HTTPException) as exc_info:
-            save_config(
-                _request_for(split_app),
-                replacement,
-            )
-
-        assert exc_info.value.status_code == 409
-
     def test_structured_save_rejected_even_when_an_included_file_is_broken(self, split_app: FastAPI) -> None:
         """A broken include file must not let a structured save flatten the split config."""
         runtime_paths = _snapshot(split_app).runtime_paths
@@ -944,7 +904,7 @@ class TestStructuredWritesRejected:
             config["defaults"]["markdown"] = False
 
         with pytest.raises(HTTPException) as exc_info:
-            config_lifecycle.write_committed_config(
+            save_edited_config(
                 _request_for(split_app),
                 _mutate,
             )
@@ -1055,7 +1015,7 @@ class TestRawSourceWithIncludes:
         def _mutate(config: dict[str, Any]) -> None:
             config["agents"]["test_agent"]["role"] = "Structured save works again"
 
-        config_lifecycle.write_committed_config(
+        save_edited_config(
             _request_for(split_app),
             _mutate,
         )

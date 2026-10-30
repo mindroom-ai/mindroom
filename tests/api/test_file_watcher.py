@@ -37,12 +37,9 @@ def test_file_watcher_detects_changes(test_client: TestClient, temp_config_file:
     config_lifecycle.load_config_into_app(main._app_runtime_paths(main.app), main.app)
 
     # Check that the config was reloaded
-    response = test_client.get("/api/config/agents")
+    response = test_client.post("/api/config/load")
     assert response.status_code == 200
-    agents = response.json()
-
-    # Find the externally added agent
-    external_agent = next((a for a in agents if a["id"] == "external_agent"), None)
+    external_agent = response.json()["agents"].get("external_agent")
     assert external_agent is not None
     assert external_agent["display_name"] == "External Agent"
 

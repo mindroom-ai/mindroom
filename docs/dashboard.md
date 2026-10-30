@@ -177,19 +177,7 @@ The dashboard uses the backend REST API under `/api/`, with the same authenticat
 | GET | `/api/config/raw` | Fetch raw `config.yaml` text |
 | PUT | `/api/config/raw` | Replace raw `config.yaml` text |
 | GET | `/api/config/schema` | Configuration JSON schema used by Settings and More settings |
-| GET | `/api/config/agents` | List agents |
 | GET | `/api/config/personal-agents` | List generated personal agents |
-| POST | `/api/config/agents` | Create agent |
-| PUT | `/api/config/agents/{id}` | Update agent |
-| DELETE | `/api/config/agents/{id}` | Delete agent |
-| GET | `/api/config/teams` | List teams |
-| POST | `/api/config/teams` | Create team |
-| PUT | `/api/config/teams/{id}` | Update team |
-| DELETE | `/api/config/teams/{id}` | Delete team |
-| GET | `/api/config/models` | List model configurations |
-| PUT | `/api/config/models/{id}` | Update model configuration |
-| GET | `/api/config/room-models` | Get room model overrides |
-| PUT | `/api/config/room-models` | Update room model overrides |
 | POST | `/api/config/agent-policies` | Derived agent policies for a draft config |
 
 ### Credentials API
@@ -253,7 +241,6 @@ Upload and delete return HTTP 409 for Git-backed bases (see [Sync Behavior](know
 | Method | Endpoint | Description |
 |--------|----------|-------------|
 | GET | `/api/tools` | List available tools |
-| GET | `/api/rooms` | List configured rooms |
 | GET | `/api/matrix/agents/rooms` | All agents' room memberships |
 | GET | `/api/matrix/agents/{id}/rooms` | One agent's rooms |
 | POST | `/api/matrix/rooms/leave` | Leave one room |

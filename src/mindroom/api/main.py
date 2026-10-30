@@ -8,7 +8,7 @@ from dataclasses import asdict, dataclass
 from functools import partial
 from typing import TYPE_CHECKING, Annotated, Any, Literal
 
-from fastapi import Depends, FastAPI, Header, HTTPException, Request
+from fastapi import Depends, FastAPI, Header, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, Response
@@ -621,71 +621,6 @@ app.add_middleware(RequestBodyLimitMiddleware)
 _add_dashboard_cors_middleware(app, _runtime_paths)
 
 
-def _sanitize_entity_payload(entity_data: dict[str, Any]) -> dict[str, Any]:
-    """Return a copy of entity data without API-only ID fields."""
-    payload = entity_data.copy()
-    payload.pop("id", None)
-    return payload
-
-
-def _resolve_unique_entity_id(base_id: str, entities: dict[str, Any]) -> str:
-    """Return a unique ID, appending a numeric suffix when needed."""
-    if base_id not in entities:
-        return base_id
-    counter = 1
-    while f"{base_id}_{counter}" in entities:
-        counter += 1
-    return f"{base_id}_{counter}"
-
-
-def _list_entities(config_data: dict[str, Any], section: str) -> list[dict[str, Any]]:
-    return [{"id": entity_id, **entity_data} for entity_id, entity_data in config_data.get(section, {}).items()]
-
-
-# The entity mutations take the config last, so a route binds the rest with `partial`.
-def _upsert_section_entity(
-    section: str,
-    entity_id: str,
-    entity_data: dict[str, Any],
-    candidate_config: dict[str, Any],
-) -> None:
-    candidate_config.setdefault(section, {})[entity_id] = _sanitize_entity_payload(entity_data)
-
-
-def _create_section_entity(
-    section: str,
-    default_entity_id: str,
-    entity_data: dict[str, Any],
-    candidate_config: dict[str, Any],
-) -> str:
-    base_entity_id = entity_data.get("display_name", default_entity_id).lower().replace(" ", "_")
-    entity_id = _resolve_unique_entity_id(base_entity_id, candidate_config.setdefault(section, {}))
-    _upsert_section_entity(section, entity_id, entity_data, candidate_config)
-    return entity_id
-
-
-def _delete_section_entity(
-    section: str,
-    entity_id: str,
-    not_found_detail: str,
-    candidate_config: dict[str, Any],
-) -> None:
-    if section not in candidate_config or entity_id not in candidate_config[section]:
-        raise HTTPException(status_code=404, detail=not_found_detail)
-    del candidate_config[section][entity_id]
-
-
-async def _write_config[T](request: Request, mutate: Callable[[dict[str, Any]], T]) -> T:
-    """Apply one mutation to the committed config off the event loop."""
-    return await asyncio.to_thread(lambda: config_lifecycle.write_committed_config(request, mutate))
-
-
-def _authored_config(request: Request) -> dict[str, Any]:
-    """Return the request's valid committed config as the authored payload the editor shows and saves."""
-    config, _ = config_lifecycle.read_committed_runtime_config(request)
-    return config.authored_model_dump()
-
-
 def _set_config_generation_header(response: Response, generation: int) -> None:
     """Attach the committed config generation to one API response."""
     response.headers[config_lifecycle.CONFIG_GENERATION_HEADER] = str(generation)
@@ -781,7 +716,7 @@ async def load_config(
 ) -> dict[str, Any]:
     """Load configuration from file."""
     generation = config_lifecycle.committed_generation(request)
-    payload = _authored_config(request)
+    config, _ = config_lifecycle.read_committed_runtime_config(request)
     _set_config_generation_header(response, generation)
     # The payload is the config itself, so the includes flag rides in a header
     # like the generation does, and so does the notice that the saved
@@ -792,7 +727,7 @@ async def load_config(
     response.headers[config_lifecycle.CONFIG_PENDING_RESTART_HEADER] = (
         "true" if config_lifecycle.config_pending_restart(request) else "false"
     )
-    return payload
+    return config.authored_model_dump()
 
 
 @app.put("/api/config/save")
@@ -870,12 +805,6 @@ async def get_agent_policies(
     }
 
 
-@app.get("/api/config/agents")
-async def get_agents(request: Request, _user: Annotated[AuthUser, Depends(verify_user)]) -> list[dict[str, Any]]:
-    """Get all agents."""
-    return _list_entities(_authored_config(request), "agents")
-
-
 @app.get("/api/config/personal-agents")
 async def get_personal_agents(
     request: Request,
@@ -903,149 +832,6 @@ async def get_personal_agents(
         )
         for entry, matrix_user_id in roster
     ]
-
-
-@app.put("/api/config/agents/{agent_id}")
-async def update_agent(
-    request: Request,
-    agent_id: str,
-    agent_data: dict[str, Any],
-    _user: Annotated[AuthUser, Depends(verify_user)],
-) -> dict[str, bool]:
-    """Update a specific agent."""
-    await _write_config(
-        request,
-        partial(_upsert_section_entity, "agents", agent_id, agent_data),
-    )
-    return {"success": True}
-
-
-@app.post("/api/config/agents")
-async def create_agent(
-    request: Request,
-    agent_data: dict[str, Any],
-    _user: Annotated[AuthUser, Depends(verify_user)],
-) -> dict[str, Any]:
-    """Create a new agent."""
-    agent_id = await _write_config(
-        request,
-        partial(_create_section_entity, "agents", "new_agent", agent_data),
-    )
-    return {"id": agent_id, "success": True}
-
-
-@app.delete("/api/config/agents/{agent_id}")
-async def delete_agent(
-    request: Request,
-    agent_id: str,
-    _user: Annotated[AuthUser, Depends(verify_user)],
-) -> dict[str, bool]:
-    """Delete an agent."""
-    await _write_config(
-        request,
-        partial(_delete_section_entity, "agents", agent_id, "Agent not found"),
-    )
-    return {"success": True}
-
-
-@app.get("/api/config/teams")
-async def get_teams(request: Request, _user: Annotated[AuthUser, Depends(verify_user)]) -> list[dict[str, Any]]:
-    """Get all teams."""
-    return _list_entities(_authored_config(request), "teams")
-
-
-@app.put("/api/config/teams/{team_id}")
-async def update_team(
-    request: Request,
-    team_id: str,
-    team_data: dict[str, Any],
-    _user: Annotated[AuthUser, Depends(verify_user)],
-) -> dict[str, bool]:
-    """Update a specific team."""
-    await _write_config(request, partial(_upsert_section_entity, "teams", team_id, team_data))
-    return {"success": True}
-
-
-@app.post("/api/config/teams")
-async def create_team(
-    request: Request,
-    team_data: dict[str, Any],
-    _user: Annotated[AuthUser, Depends(verify_user)],
-) -> dict[str, Any]:
-    """Create a new team."""
-    team_id = await _write_config(
-        request,
-        partial(_create_section_entity, "teams", "new_team", team_data),
-    )
-    return {"id": team_id, "success": True}
-
-
-@app.delete("/api/config/teams/{team_id}")
-async def delete_team(
-    request: Request,
-    team_id: str,
-    _user: Annotated[AuthUser, Depends(verify_user)],
-) -> dict[str, bool]:
-    """Delete a team."""
-    await _write_config(
-        request,
-        partial(_delete_section_entity, "teams", team_id, "Team not found"),
-    )
-    return {"success": True}
-
-
-@app.get("/api/config/models")
-async def get_models(request: Request, _user: Annotated[AuthUser, Depends(verify_user)]) -> dict[str, Any]:
-    """Get all model configurations."""
-    return _authored_config(request).get("models") or {}
-
-
-@app.put("/api/config/models/{model_id}")
-async def update_model(
-    request: Request,
-    model_id: str,
-    model_data: dict[str, Any],
-    _user: Annotated[AuthUser, Depends(verify_user)],
-) -> dict[str, bool]:
-    """Update a model configuration."""
-
-    def mutate(candidate_config: dict[str, Any]) -> None:
-        candidate_config.setdefault("models", {})[model_id] = model_data
-
-    await _write_config(request, mutate)
-    return {"success": True}
-
-
-@app.get("/api/config/room-models")
-async def get_room_models(request: Request, _user: Annotated[AuthUser, Depends(verify_user)]) -> dict[str, Any]:
-    """Get room-specific model overrides."""
-    return _authored_config(request).get("room_models") or {}
-
-
-@app.put("/api/config/room-models")
-async def update_room_models(
-    request: Request,
-    room_models: dict[str, str],
-    _user: Annotated[AuthUser, Depends(verify_user)],
-) -> dict[str, bool]:
-    """Update room-specific model overrides."""
-
-    def mutate(candidate_config: dict[str, Any]) -> None:
-        candidate_config["room_models"] = room_models
-
-    await _write_config(request, mutate)
-    return {"success": True}
-
-
-@app.get("/api/rooms")
-async def get_available_rooms(request: Request, _user: Annotated[AuthUser, Depends(verify_user)]) -> list[str]:
-    """Get list of available rooms."""
-    config_data = _authored_config(request)
-    rooms: set[str] = set(config_data.get("rooms", {}))
-    for section in ("agents", "teams"):
-        for entity_data in config_data.get(section, {}).values():
-            rooms.update(entity_data.get("rooms", []))
-    return sorted(rooms)
 
 
 app.include_router(frontend_router)

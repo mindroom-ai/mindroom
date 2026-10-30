@@ -193,18 +193,6 @@ def test_client(temp_config_file: Path) -> TestClient:
 
 
 @pytest.fixture
-def sample_agent_data() -> dict[str, Any]:
-    """Sample agent data for testing."""
-    return {
-        "display_name": "New Test Agent",
-        "role": "A new test agent for testing",
-        "tools": ["file", "shell"],
-        "instructions": ["Do something", "Do something else"],
-        "rooms": ["lobby", "dev"],
-    }
-
-
-@pytest.fixture
 def calls_on_event_loop(monkeypatch: pytest.MonkeyPatch) -> Callable[[object, str], list[bool]]:
     """Return ``record(module, name)``: wrap ``module.name`` and log, for each call, whether it ran on the event loop."""
 
@@ -238,6 +226,15 @@ def save_config(request: "Request", payload: dict[str, Any], *, expected_generat
     """Commit a dashboard structured save and return its generation."""
     build = partial(ConfigCommit.from_payload, payload)
     return config_lifecycle.commit_dashboard_config(request, build, expected_generation=expected_generation).generation
+
+
+def save_edited_config(request: "Request", edit: Callable[[dict[str, Any]], object]) -> int:
+    """Save the config the request pinned after `edit` changes its authored payload, as the dashboard editor does."""
+    config_lifecycle.bind_current_request_snapshot(request)
+    config, _ = config_lifecycle.read_committed_runtime_config(request)
+    payload = config.authored_model_dump()
+    edit(payload)
+    return save_config(request, payload)
 
 
 def save_raw_config(request: "Request", source: str, *, expected_generation: int | None = None) -> int:
