@@ -101,7 +101,7 @@ def _known_counts(cls: type, data: Mapping[str, Any]) -> dict[str, Any]:
     #   ``traffic_type``, Ollama's timings, and through v2026.10.663 Groq's and Cerebras's timings), and request, run,
     #   and per-model metrics hold a ``cost`` when an OpenAI-compatible server reported ``usage.cost``; no MindRoom code
     #   read them but ``context_usage``.
-    # Last legacy release: v2026.10.729; replacement: v2026.10.730, whose usage records store neither.
+    # Last legacy release: v2026.10.731; replacement: the next release, whose usage records store neither.
     # Handling: the keys are ignored on read and never written again, so a rewritten row drops them; Claude's
     #   ``context_usage`` reads as the request's ``context`` (``MessageMetrics.from_dict``).
     # Coverage: tests/llm/test_codecs.py::test_usage_stored_with_provider_extras_and_a_cost_reads_without_them,
@@ -183,7 +183,7 @@ class MessageMetrics(_Counts):
             # LEGACY_COMPAT: Request usage stored with Claude's context counters under ``provider_metrics``.
             # Legacy format: ``provider_metrics.context_usage`` (``input_tokens``, ``cache_read_tokens``, and
             #   ``cache_write_tokens``) in the metrics of an assistant message a Claude route answered.
-            # Last legacy release: v2026.10.729; replacement: v2026.10.730, which stores them as ``context``.
+            # Last legacy release: v2026.10.731; replacement: the next release, which stores them as ``context``.
             # Handling: read as the request's ``context``, so history sizing and the context a reply reports read an
             #   old Claude response as a new one.
             # Coverage: tests/llm/test_codecs.py::test_claude_context_usage_stored_under_provider_metrics_reads_as_context,

@@ -40,7 +40,7 @@ _SUMMARY_METADATA_OMIT_KEYS = frozenset(
         # LEGACY_COMPAT: Run metadata stored with the route's ``model_params``.
         # Legacy format: the metadata of every Matrix agent and team run holds ``model_params``, the route's
         #   non-secret settings, which nothing read.
-        # Last legacy release: v2026.10.729; replacement: v2026.10.730, whose runs no longer store it.
+        # Last legacy release: v2026.10.731; replacement: the next release, whose runs no longer store it.
         # Handling: left out of the summary input, so the summary input of an earlier run stays as it was; the key is
         #   never written again.
         # Coverage: tests/test_history_summary_call.py::test_build_summary_input_normal_run_omits_non_summary_metadata,
