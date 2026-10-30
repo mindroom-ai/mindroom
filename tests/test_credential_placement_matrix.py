@@ -1,7 +1,6 @@
 """Characterization tables of where scoped credentials are read from and written to.
 
 Each row pins current behavior, so a refactor of the placement decisions can show that it moves no credential.
-Rows marked `Changed:` differ from the placement before the single placement resolver, as that change intended.
 Store labels:
 - `base`: the manager the calls receive, which is also its shared layer.
 - `agent`: the primary-only store of agent `alpha`.
@@ -77,13 +76,11 @@ SCOPED_PLACEMENT: dict[str, dict[tuple[str | None, bool, bool], Placement]] = {
         ("shared", False, True): (("agent",), ("agent", "base"), "agent"),
         ("shared", True, False): (("worker",), ("base", "worker"), "worker"),
         ("shared", True, True): (("agent",), ("agent", "base"), "agent"),
-        # Changed: a user scope without a requester has no worker store, so a save is refused instead of landing in
-        # base.
+        # A user scope without a requester has no worker store, so a save is refused.
         ("user", False, False): ((), ("base",), RAISES),
         ("user", False, True): ((), ("base",), RAISES),
         ("user", True, False): (("worker",), ("base", "worker"), "worker"),
         ("user", True, True): (("requester",), ("base", "requester"), "requester"),
-        # Changed: as for `user`.
         ("user_agent", False, False): ((), ("base",), RAISES),
         ("user_agent", False, True): ((), ("base",), RAISES),
         ("user_agent", True, False): (("worker",), ("base", "worker"), "worker"),
@@ -123,7 +120,7 @@ SCOPED_PLACEMENT: dict[str, dict[tuple[str | None, bool, bool], Placement]] = {
         ("user_agent", True, False): (("requester_agent",), ("requester_agent",), "requester_agent"),
         ("user_agent", True, True): (("requester_agent",), ("requester_agent",), "requester_agent"),
     },
-    # Changed: an OAuth app client config is global, so every scope reads and writes base, never the worker store.
+    # An OAuth app client config is global, so every scope reads and writes base, never the worker store.
     "oauth_client": {
         (None, False, False): (("base",), ("base",), "base"),
         (None, False, True): (("base",), ("base",), "base"),
@@ -165,21 +162,18 @@ SCOPED_PLACEMENT: dict[str, dict[tuple[str | None, bool, bool], Placement]] = {
         ("shared", False, True): (("agent",), ("agent",), "agent"),
         ("shared", True, False): (("worker",), ("worker",), "worker"),
         ("shared", True, True): (("agent",), ("agent",), "agent"),
-        # Changed: a user scope without a requester has no worker store, so a save is refused instead of landing in
-        # base.
+        # A user scope without a requester has no worker store, so a save is refused.
         ("user", False, False): ((), (), RAISES),
         ("user", False, True): ((), (), RAISES),
         ("user", True, False): (("worker",), ("worker",), "worker"),
         ("user", True, True): (("requester",), ("requester",), "requester"),
-        # Changed: as for `user`.
         ("user_agent", False, False): ((), (), RAISES),
         ("user_agent", False, True): ((), (), RAISES),
         ("user_agent", True, False): (("worker",), ("worker",), "worker"),
         ("user_agent", True, True): (("requester_agent",), ("requester_agent",), "requester_agent"),
     },
-    # Changed: a Desktop pairing lives in the requester's store with the agent in every scope, as the Desktop
-    # helpers place it; a target without a requester reads nothing and refuses a save instead of using base or the
-    # requester-wide store.
+    # A Desktop pairing lives in the requester's store with the agent in every scope, as the Desktop helpers place it;
+    # a target without a requester reads nothing and refuses a save.
     "desktop": {
         (None, False, False): ((), (), RAISES),
         (None, False, True): ((), (), RAISES),
@@ -260,8 +254,8 @@ MERGED_READ_WINNER: dict[tuple[str, str, bool, bool], str] = {
 # A granted base document of the regular service reaches a `shared` read only when a worker may inherit its
 # `_source`; None plants no `_source`. Value: (read without primary_built_tool, read with it).
 GRANTED_BASE_BY_SOURCE: dict[str | None, tuple[Read, Read]] = {
-    # Changed: copies earlier releases imported carry `_source: "env"`; the primary deletes them when it opens its store,
-    # and the environment's own declarations carry no source, so that tag is never passed on.
+    # Copies earlier releases imported carry `_source: "env"`; the primary deletes them when it opens its store, and the
+    # environment's own declarations carry no source, so that tag is never passed on.
     "env": (("worker",), ("agent",)),
     "ui": (("base", "worker"), ("agent", "base")),
     None: (("base", "worker"), ("agent", "base")),
@@ -304,8 +298,7 @@ LISTED_SERVICES = (
 DASHBOARD_LISTING: dict[str | None, dict[str, tuple[str, ...]]] = {
     # Everything in the primary store except egress services.
     None: {"base": ("gmail", "google_drive_oauth_client", "homeassistant", "openweather", "postgres", "tavily")},
-    # Changed: a worker-store copy of a local-only service or of the OAuth client config, which reads ignore, is no
-    # longer listed.
+    # A worker-store copy of a local-only service or of the OAuth client config, which reads ignore, is not listed.
     "shared": {
         "agent": ("postgres",),
         "base": ("gmail", "google_drive_oauth_client", "homeassistant", "tavily"),
@@ -313,14 +306,12 @@ DASHBOARD_LISTING: dict[str | None, dict[str, tuple[str, ...]]] = {
         "worker": ("openweather", "tavily"),
     },
     # The requester scopes drop `homeassistant` from every store.
-    # Changed: as for `shared`.
     "user": {
         "base": ("google_drive_oauth_client", "tavily"),
         "requester": ("gmail", "postgres"),
         "requester_agent": ("desktop",),
         "worker": ("openweather", "tavily"),
     },
-    # Changed: as for `shared`.
     "user_agent": {
         "base": ("google_drive_oauth_client", "tavily"),
         "requester_agent": ("desktop", "gmail", "postgres"),
@@ -633,18 +624,18 @@ def test_dashboard_listing(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, scop
     ("service_class", "expected"),
     [
         *((service_class, (("base",), "base")) for service_class in SERVICES if service_class != "desktop"),
-        # Changed: a Desktop pairing needs a requester, and an unscoped dashboard target passes on none, so it reads
-        # nothing and refuses a save instead of using base.
+        # A Desktop pairing needs a requester, and an unscoped dashboard target passes on none, so it reads nothing and
+        # refuses a save.
         ("desktop", ((), RAISES)),
     ],
 )
-def test_unscoped_dashboard_target_with_identity_uses_base(
+def test_unscoped_dashboard_target_with_identity(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     service_class: str,
     expected: tuple[Read, str],
 ) -> None:
-    """An unscoped dashboard target reads and writes base even when it carries a requester identity."""
+    """An unscoped dashboard target reads and writes base even when it carries a requester identity, except Desktop."""
     _primary_owns_only_primary_built_tool_settings(monkeypatch)
     service = SERVICES[service_class]
     stores = _stores(tmp_path / "read", None)
@@ -655,39 +646,6 @@ def test_unscoped_dashboard_target_with_identity_uses_base(
     save = partial(save_credentials_for_target, service, {"api_key": "k"}, target)
     write = _write_then_delete(stores, service, save, partial(delete_credentials_for_target, service, target))
     assert (read, write) == expected
-
-
-@pytest.mark.parametrize("scope", ["shared", "user", "user_agent"])
-def test_oauth_client_config_never_comes_from_the_worker_store(tmp_path: Path, scope: str) -> None:
-    """An OAuth app's client config lives in the primary store for every scope; worker code can write its own store."""
-    service = SERVICES["oauth_client"]
-    target = _target(scope, IDENTITY)
-    stores = _stores(tmp_path, target)
-    stores["base"].save_credentials(service, {"client_id": "primary"})
-    stores["worker"].save_credentials(service, {"client_id": "planted"})
-    scope_args = {"credentials_manager": stores["base"], "worker_target": target}
-
-    assert load_scoped_credentials(service, **scope_args) == {"client_id": "primary"}
-    save_scoped_credentials(service, {"client_id": "saved"}, **scope_args)
-    assert stores["base"].load_credentials(service) == {"client_id": "saved"}
-    assert stores["worker"].load_credentials(service) == {"client_id": "planted"}
-
-
-@pytest.mark.parametrize("scope", ["user", "user_agent"])
-@pytest.mark.parametrize("service_class", ["regular", "ungrantable"])
-def test_a_requester_scope_without_a_requester_refuses_writes(tmp_path: Path, scope: str, service_class: str) -> None:
-    """With no requester there is no scoped store, so a save is refused instead of landing in the global store."""
-    service = SERVICES[service_class]
-    stores = _stores(tmp_path, _target(scope, None))
-
-    with pytest.raises(ValueError, match="requester"):
-        save_scoped_credentials(
-            service,
-            {"api_key": "k"},
-            credentials_manager=stores["base"],
-            worker_target=_target(scope, None),
-        )
-    assert stores["base"].load_credentials(service) is None
 
 
 @pytest.mark.parametrize("scope", [None, "shared"])

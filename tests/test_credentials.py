@@ -24,7 +24,6 @@ from mindroom.api.integrations import _save_spotify_credentials
 from mindroom.credentials.manager import (
     CredentialsManager,
     WorkerCredentialPathError,
-    _merge_credential_layers,
     _reset_credentials_manager_cache,
     delete_scoped_credentials,
     get_runtime_credentials_manager,
@@ -1041,7 +1040,7 @@ class TestCredentialsManager:
 
         assert loaded_credentials is None
 
-    def test_sync_shared_credentials_to_worker_disallows_ui_credentials_for_non_grantable_services(
+    def test_sync_shared_credentials_to_worker_skips_ui_credentials_outside_the_allowlist(
         self,
         temp_credentials_dir: Path,
     ) -> None:
@@ -1087,42 +1086,29 @@ class TestCredentialsManager:
 
         assert worker_shared_manager.load_credentials("google_drive_oauth_client") is None
 
+    @pytest.mark.parametrize(
+        ("worker_key", "source_tag"),
+        [("worker-a", {}), ("v1:tenant-123:unscoped:general", {"_source": "ui"})],
+    )
     def test_sync_shared_credentials_to_worker_default_denies_all_services(
         self,
         temp_credentials_dir: Path,
+        worker_key: str,
+        source_tag: dict[str, str],
     ) -> None:
         """The built-in worker default should not mirror any shared credentials into workers."""
         manager = CredentialsManager(temp_credentials_dir)
-        manager.save_credentials("openai", {"api_key": "openai-key"})
-        manager.save_credentials("github_private", {"token": "github-pat"})
+        manager.save_credentials("openai", {"api_key": "openai-key", **source_tag})
+        manager.save_credentials("github_private", {"token": "github-pat", **source_tag})
 
         sync_shared_credentials_to_worker(
-            "worker-a",
+            worker_key,
             allowed_services=constants_mod.DEFAULT_WORKER_GRANTABLE_CREDENTIALS,
             credentials_manager=manager,
         )
 
-        worker_shared_manager = manager.for_worker("worker-a").shared_manager()
+        worker_shared_manager = manager.for_worker(worker_key).shared_manager()
         assert frozenset() == constants_mod.DEFAULT_WORKER_GRANTABLE_CREDENTIALS
-        assert worker_shared_manager.load_credentials("openai") is None
-        assert worker_shared_manager.load_credentials("github_private") is None
-
-    def test_sync_shared_credentials_to_worker_default_denies_all_services_for_unscoped_workers(
-        self,
-        temp_credentials_dir: Path,
-    ) -> None:
-        """The built-in worker default should not mirror any shared credentials into unscoped workers."""
-        manager = CredentialsManager(temp_credentials_dir)
-        manager.save_credentials("openai", {"api_key": "shared-ui-key", "_source": "ui"})
-        manager.save_credentials("github_private", {"token": "github-ui-pat", "_source": "ui"})
-
-        sync_shared_credentials_to_worker(
-            "v1:tenant-123:unscoped:general",
-            allowed_services=constants_mod.DEFAULT_WORKER_GRANTABLE_CREDENTIALS,
-            credentials_manager=manager,
-        )
-
-        worker_shared_manager = manager.for_worker("v1:tenant-123:unscoped:general").shared_manager()
         assert worker_shared_manager.load_credentials("openai") is None
         assert worker_shared_manager.load_credentials("github_private") is None
 
@@ -1433,20 +1419,6 @@ class TestCredentialsManager:
             .load_credentials("spotify")
         )
         assert shared_worker_credentials == {"access_token": "legacy-token"}
-
-    def test_merge_scoped_credentials_overlays_worker_credentials(
-        self,
-        temp_credentials_dir: Path,
-    ) -> None:
-        """Worker-scoped credentials should overlay shared credentials regardless of source."""
-        manager = CredentialsManager(temp_credentials_dir)
-        manager.save_credentials("google", {"api_key": "shared-ui-key", "_source": "ui", "shared_only": "yes"})
-        worker_manager = manager.for_worker("worker-a")
-        worker_manager.save_credentials("google", {"api_key": "worker-key", "_source": "ui"})
-
-        merged = _merge_credential_layers(manager.load_credentials("google"), worker_manager.load_credentials("google"))
-
-        assert merged == {"api_key": "worker-key", "_source": "ui", "shared_only": "yes"}
 
     def test_complex_credentials_structure(self, credentials_manager: CredentialsManager) -> None:
         """Test saving and loading complex nested credentials."""

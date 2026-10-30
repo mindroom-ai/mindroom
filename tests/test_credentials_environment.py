@@ -26,6 +26,9 @@ from mindroom.runtime_env_policy import (
 )
 from tests.conftest import load_config_yaml
 
+_RUNNER_MODE = SANDBOX_RUNTIME_ENV_BY_KEY["runner_mode"]
+_WORKER_KEY = "v1:test-tenant:shared:alpha"
+
 
 @pytest.fixture(autouse=True)
 def _fresh_credentials_managers() -> Iterator[None]:
@@ -75,23 +78,18 @@ def test_a_key_removed_from_the_environment_stops_resolving_after_restart(tmp_pa
 
 def test_a_granted_worker_loses_a_key_removed_from_the_environment(tmp_path: Path) -> None:
     """The worker mirror follows the environment: a removed variable leaves the granted worker at its next sync."""
-    worker_key = "v1:test-tenant:shared:alpha"
     granted = frozenset({"github_private"})
     runtime_paths = _runtime_paths(tmp_path, {"GITHUB_TOKEN": "ghp-env"})
     manager = get_runtime_credentials_manager(runtime_paths)
-    sync_shared_credentials_to_worker(worker_key, allowed_services=granted, credentials_manager=manager)
-    mirror = manager.for_worker(worker_key).shared_manager()
+    sync_shared_credentials_to_worker(_WORKER_KEY, allowed_services=granted, credentials_manager=manager)
+    mirror = manager.for_worker(_WORKER_KEY).shared_manager()
     assert (mirror.load_credentials("github_private") or {}).get("token") == "ghp-env"
 
     runtime_paths = _restart(tmp_path, {})
     manager = get_runtime_credentials_manager(runtime_paths)
-    sync_shared_credentials_to_worker(worker_key, allowed_services=granted, credentials_manager=manager)
+    sync_shared_credentials_to_worker(_WORKER_KEY, allowed_services=granted, credentials_manager=manager)
 
-    assert manager.for_worker(worker_key).shared_manager().load_credentials("github_private") is None
-
-
-_RUNNER_MODE = SANDBOX_RUNTIME_ENV_BY_KEY["runner_mode"]
-_WORKER_KEY = "v1:test-tenant:shared:alpha"
+    assert manager.for_worker(_WORKER_KEY).shared_manager().load_credentials("github_private") is None
 
 
 def _encryption_key(seed: bytes) -> str:
@@ -190,18 +188,12 @@ def test_unset_name_falls_through_to_name_file_with_the_same_rule(
 
 def test_get_secret_from_env_resolves_relative_file_paths_from_config_dir(tmp_path: Path) -> None:
     """Relative *_FILE secret paths in the runtime `.env` should anchor to the config directory."""
-    config_dir = tmp_path / "cfg"
-    config_dir.mkdir(parents=True, exist_ok=True)
-    config_path = config_dir / "config.yaml"
-    config_path.write_text("agents: {}\nmodels: {}\nrouter:\n  model: default\n", encoding="utf-8")
-    secret_file = config_dir / "secrets" / "openai.key"
-    secret_file.parent.mkdir(parents=True, exist_ok=True)
+    secret_file = tmp_path / "secrets" / "openai.key"
+    secret_file.parent.mkdir()
     secret_file.write_text("sk-relative", encoding="utf-8")
-    (config_dir / ".env").write_text("OPENAI_API_KEY_FILE=secrets/openai.key\n", encoding="utf-8")
+    (tmp_path / ".env").write_text("OPENAI_API_KEY_FILE=secrets/openai.key\n", encoding="utf-8")
 
-    runtime_paths = constants_mod.resolve_runtime_paths(config_path=config_path, process_env={})
-
-    assert get_secret_from_env("OPENAI_API_KEY", runtime_paths) == "sk-relative"
+    assert get_secret_from_env("OPENAI_API_KEY", _runtime_paths(tmp_path, {})) == "sk-relative"
 
 
 def test_a_valid_name_ignores_an_unresolvable_file_variable(tmp_path: Path) -> None:
@@ -414,8 +406,6 @@ def test_an_invalid_seed_entry_does_not_block_a_later_valid_one(tmp_path: Path) 
 
 def test_internal_credential_env_names_stay_out_of_public_and_execution_env_views(tmp_path: Path) -> None:
     """Internal credential env vars must not leak to public manifests or tool execution envs."""
-    config_path = tmp_path / "config.yaml"
-    config_path.write_text("agents: {}\nmodels: {}\nrouter:\n  model: default\n", encoding="utf-8")
     seed_file = tmp_path / "credential-seeds.json"
     seed_file.write_text(_credential_seed_json(), encoding="utf-8")
     seed_json = json.dumps(
@@ -424,10 +414,9 @@ def test_internal_credential_env_names_stay_out_of_public_and_execution_env_view
             "credentials": {"client_secret": {"value": "literal-secret"}},
         },
     )
-    runtime_paths = constants_mod.resolve_runtime_paths(
-        config_path=config_path,
-        storage_path=tmp_path,
-        process_env={
+    runtime_paths = _runtime_paths(
+        tmp_path,
+        {
             CREDENTIALS_ENCRYPTION_KEY_ENV: "encryption-key-material",
             "MINDROOM_CREDENTIAL_SEEDS_JSON": seed_json,
             "MINDROOM_CREDENTIAL_SEEDS_FILE": str(seed_file),

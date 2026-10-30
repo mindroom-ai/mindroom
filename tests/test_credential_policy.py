@@ -75,22 +75,6 @@ def test_credential_service_placement(
     assert (policy.placement, policy.grantable) == (placement, grantable)
 
 
-@pytest.mark.parametrize(
-    ("scope", "placement"),
-    [
-        ("shared", CredentialPlacement.AGENT),
-        ("user", CredentialPlacement.REQUESTER),
-        ("user_agent", CredentialPlacement.REQUESTER),
-    ],
-)
-def test_egress_services_are_primary_only_and_not_grantable(scope: str, placement: CredentialPlacement) -> None:
-    """Egress broker services should be primary-only and not worker-grantable in all scopes."""
-    policy = credential_service_policy("egress_github", scope, primary_built_tool=False)
-    assert not policy.leasable
-    assert not policy.grantable
-    assert policy.placement is placement
-
-
 @pytest.mark.parametrize("scope", ["shared", "user", "user_agent", None])
 def test_agent_keys_account_opt_ins_stay_primary_only(scope: str | None) -> None:
     """Worker code must never read or grant itself an account's opt-in, so its document is an egress document.
@@ -111,10 +95,10 @@ _EGRESS_PLACEMENT_BY_SCOPE = {
 }
 
 
-@pytest.mark.parametrize("service", ["egress_x_oauth", "egress_x_oauth_client"])
+@pytest.mark.parametrize("service", ["egress_github", "egress_x_oauth", "egress_x_oauth_client"])
 @pytest.mark.parametrize("scope", ["shared", "user", "user_agent", None])
-def test_egress_services_with_oauth_suffixes_stay_primary_only(service: str, scope: str | None) -> None:
-    """An OAuth-looking suffix never turns an egress service into an OAuth token or client service."""
+def test_egress_services_stay_primary_only(service: str, scope: str | None) -> None:
+    """Egress services are primary-only and never granted, and an OAuth-looking suffix never makes one an OAuth service."""
     policy = credential_service_policy(service, scope)
     assert not policy.leasable
     assert not policy.grantable

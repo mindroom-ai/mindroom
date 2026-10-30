@@ -121,28 +121,6 @@ def test_get_ollama_host(
     assert reached == reached_host
 
 
-def test_get_embedder_api_key_explicit_wins(
-    credentials_manager: CredentialsManager,
-    runtime_paths: constants_mod.RuntimePaths,
-) -> None:
-    """An explicit config key must beat both credential services."""
-    credentials_manager.save_credentials(EMBEDDER_CREDENTIAL_SERVICE, {"api_key": "embedder-key"})
-    credentials_manager.save_credentials("openai", {"api_key": "openai-key"})
-
-    assert get_embedder_api_key(runtime_paths, explicit_api_key="explicit-key") == "explicit-key"
-
-
-def test_get_embedder_api_key_embedder_service_beats_openai(
-    credentials_manager: CredentialsManager,
-    runtime_paths: constants_mod.RuntimePaths,
-) -> None:
-    """The dedicated embedder credential must beat the shared openai key."""
-    credentials_manager.save_credentials(EMBEDDER_CREDENTIAL_SERVICE, {"api_key": "embedder-key"})
-    credentials_manager.save_credentials("openai", {"api_key": "openai-key"})
-
-    assert get_embedder_api_key(runtime_paths) == "embedder-key"
-
-
 def test_get_embedder_api_key_configured_service_is_a_strict_binding(
     credentials_manager: CredentialsManager,
     runtime_paths: constants_mod.RuntimePaths,
@@ -161,33 +139,6 @@ def test_get_embedder_api_key_configured_service_is_a_strict_binding(
     )
 
 
-def test_get_embedder_api_key_explicit_key_wins_over_configured_service(
-    credentials_manager: CredentialsManager,
-    runtime_paths: constants_mod.RuntimePaths,
-) -> None:
-    """Inline config remains the highest-priority backwards-compatible override."""
-    credentials_manager.save_credentials("embedding-production", {"api_key": "named-key"})
-
-    assert (
-        get_embedder_api_key(
-            runtime_paths,
-            explicit_api_key="inline-key",
-            credentials_service="embedding-production",
-        )
-        == "inline-key"
-    )
-
-
-def test_get_embedder_api_key_falls_back_to_openai(
-    credentials_manager: CredentialsManager,
-    runtime_paths: constants_mod.RuntimePaths,
-) -> None:
-    """Without a dedicated credential the shared openai key keeps working."""
-    credentials_manager.save_credentials("openai", {"api_key": "openai-key"})
-
-    assert get_embedder_api_key(runtime_paths) == "openai-key"
-
-
 def test_get_embedder_api_key_accepts_env_var_named_provider_services(
     credentials_manager: CredentialsManager,
     runtime_paths: constants_mod.RuntimePaths,
@@ -203,13 +154,6 @@ def test_get_embedder_api_key_accepts_env_var_named_provider_services(
     assert get_embedder_api_key(runtime_paths, credentials_service="openrouter") == "canonical-openrouter-key"
 
 
-def test_get_embedder_api_key_returns_placeholder_when_nothing_configured(
-    runtime_paths: constants_mod.RuntimePaths,
-) -> None:
-    """Keyless mode resolves the placeholder so client construction never crashes."""
-    assert get_embedder_api_key(runtime_paths) == _EMBEDDER_KEYLESS_PLACEHOLDER_API_KEY
-
-
 def test_get_embedder_api_key_strips_resolved_values(
     credentials_manager: CredentialsManager,
     runtime_paths: constants_mod.RuntimePaths,
@@ -221,23 +165,61 @@ def test_get_embedder_api_key_strips_resolved_values(
     assert get_embedder_api_key(runtime_paths) == "embedder-key"
 
 
-def test_get_embedder_api_key_ignores_non_string_stored_credential(
+@pytest.mark.parametrize(
+    ("saved", "explicit_api_key", "credentials_service", "expected"),
+    [
+        pytest.param(
+            {EMBEDDER_CREDENTIAL_SERVICE: "embedder-key", "openai": "openai-key"},
+            "explicit-key",
+            None,
+            "explicit-key",
+            id="explicit-key-wins",
+        ),
+        pytest.param(
+            {"embedding-production": "named-key"},
+            "inline-key",
+            "embedding-production",
+            "inline-key",
+            id="explicit-key-beats-configured-service",
+        ),
+        pytest.param(
+            {EMBEDDER_CREDENTIAL_SERVICE: "embedder-key", "openai": "openai-key"},
+            None,
+            None,
+            "embedder-key",
+            id="embedder-service-beats-openai",
+        ),
+        pytest.param({"openai": "openai-key"}, None, None, "openai-key", id="falls-back-to-openai"),
+        pytest.param({}, None, None, _EMBEDDER_KEYLESS_PLACEHOLDER_API_KEY, id="placeholder-when-nothing-configured"),
+        pytest.param(
+            {EMBEDDER_CREDENTIAL_SERVICE: 42, "openai": "openai-key"},
+            None,
+            None,
+            "openai-key",
+            id="non-string-stored-value-is-absent",
+        ),
+        pytest.param(
+            {EMBEDDER_CREDENTIAL_SERVICE: "   ", "openai": "openai-key"},
+            "  ",
+            None,
+            "openai-key",
+            id="blank-values-are-absent",
+        ),
+    ],
+)
+def test_get_embedder_api_key_precedence(
     credentials_manager: CredentialsManager,
     runtime_paths: constants_mod.RuntimePaths,
+    saved: dict[str, object],
+    explicit_api_key: str | None,
+    credentials_service: str | None,
+    expected: str,
 ) -> None:
-    """A malformed stored value resolves as absent instead of crashing resolution."""
-    credentials_manager.save_credentials(EMBEDDER_CREDENTIAL_SERVICE, {"api_key": 42})
-    credentials_manager.save_credentials("openai", {"api_key": "openai-key"})
+    """An explicit key wins, then a configured service, then the embedder service, then openai, then the placeholder."""
+    for service, api_key in saved.items():
+        credentials_manager.save_credentials(service, {"api_key": api_key})
 
-    assert get_embedder_api_key(runtime_paths) == "openai-key"
-
-
-def test_get_embedder_api_key_treats_blank_values_as_absent(
-    credentials_manager: CredentialsManager,
-    runtime_paths: constants_mod.RuntimePaths,
-) -> None:
-    """Blank explicit and blank embedder-service values must not shadow real keys."""
-    credentials_manager.save_credentials(EMBEDDER_CREDENTIAL_SERVICE, {"api_key": "   "})
-    credentials_manager.save_credentials("openai", {"api_key": "openai-key"})
-
-    assert get_embedder_api_key(runtime_paths, explicit_api_key="  ") == "openai-key"
+    assert (
+        get_embedder_api_key(runtime_paths, explicit_api_key=explicit_api_key, credentials_service=credentials_service)
+        == expected
+    )
