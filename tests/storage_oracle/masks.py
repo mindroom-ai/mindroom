@@ -229,8 +229,9 @@ def _old_session_totals(ledger: object) -> dict[str, Any] | None:
         models = details.get("model") if isinstance(details, dict) else None
         if not isinstance(models, list):
             continue
-        entries = (totals.details if totals.details is not None else {}).setdefault("model", [])
-        totals.details = {**(totals.details or {}), "model": entries}
+        if totals.details is None:
+            totals.details = {}
+        entries = totals.details.setdefault("model", [])
         for raw in models:
             if not isinstance(raw, dict):
                 continue
@@ -616,20 +617,19 @@ class MaskedBackend(StoreBackend):
     ) -> object:
         before = self._old_list_entry(run_id)
         covered = self._covered(run_id)
-        row_before = self._query(
+        session_row = partial(
+            self._query,
             f"SELECT updated_at, session_state FROM {quote_identifier(self.names.sessions)} WHERE session_id = ?",  # noqa: S608
             (SESSION_ID,),
         )
+        row_before = session_row()
         retained = {tool.tool_call_id for tool in (*snapshot.completed_tools, *snapshot.interrupted_tools)}
         old_folded = retained & self._old_folded_calls(run_id)
         v2_folded = retained & folded_tool_call_ids(self.store, session_id=session.session_id, run_id=run_id)
         record, outcome = self._save_interrupted(session, run_id, snapshot, state)
         if outcome != "written":
             return None
-        row_after = self._query(
-            f"SELECT updated_at, session_state FROM {quote_identifier(self.names.sessions)} WHERE session_id = ?",  # noqa: S608
-            (SESSION_ID,),
-        )
+        row_after = session_row()
         if row_before and row_after[0][1] == row_before[0][1] and row_after[0][0] != row_before[0][0]:
             # The old store moved the update time only when the record's state changed the row, so it kept the time it
             # had before this save, or before an earlier one this mask already undid.
