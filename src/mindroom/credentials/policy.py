@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from enum import Enum
 from typing import Literal
 
 _WorkerScope = Literal["shared", "user", "user_agent"]
@@ -44,7 +45,6 @@ _EGRESS_BROKER_SERVICE_PREFIX = "egress_"
 
 _LOCAL_ONLY_SHARED_CREDENTIAL_SERVICES = frozenset(
     {
-        "desktop",
         "google_calendar",
         "google_docs",
         "google_drive",
@@ -55,6 +55,8 @@ _LOCAL_ONLY_SHARED_CREDENTIAL_SERVICES = frozenset(
         "homeassistant",
     },
 )
+# A Desktop pairing belongs to one requester with one agent, whatever the agent's worker scope.
+_REQUESTER_AGENT_CREDENTIAL_SERVICES = frozenset({"desktop"})
 
 _UNSUPPORTED_WORKER_GRANTABLE_CREDENTIALS = frozenset(
     {
@@ -81,18 +83,34 @@ def egress_credential_service(name: str) -> str:
     return f"{_EGRESS_BROKER_SERVICE_PREFIX}{name}"
 
 
-@dataclass(frozen=True, slots=True)
-class _CredentialServicePolicy:
-    """Credential placement decisions for one service in one worker scope."""
+class CredentialPlacement(Enum):
+    """The store that holds one service's credentials for one worker scope."""
 
-    service: str
-    worker_scope: _WorkerScope | None
-    primary_built_tool: bool
-    uses_local_shared_credentials: bool
-    uses_primary_runtime_global_credentials: bool
-    uses_primary_runtime_scoped_credentials: bool
-    uses_primary_runtime_agent_scoped_credentials: bool
-    worker_grantable_supported: bool
+    # The runtime's own store; every service when unscoped, and OAuth app client configs in every scope.
+    GLOBAL = "global"
+    # The runtime's shared store; local-only services on shared workers.
+    SHARED = "shared"
+    # The primary's store of one agent; OAuth tokens and primary-owned settings on shared workers.
+    AGENT = "agent"
+    # The primary's store of one requester, of one requester with one agent on `user_agent` workers.
+    REQUESTER = "requester"
+    # The primary's store of one requester with one agent, whatever the worker scope.
+    REQUESTER_AGENT = "requester_agent"
+    # The worker's own store, which worker code can write.
+    WORKER = "worker"
+
+
+@dataclass(frozen=True, slots=True)
+class CredentialServicePolicy:
+    """Where one service's credentials live in one worker scope, and where else they may go."""
+
+    placement: CredentialPlacement
+    # The placement's store is read over the shared layer: a worker's own store, and the settings the primary owns.
+    reads_shared: bool
+    # The service may be mirrored into workers through `worker_grantable_credentials`.
+    grantable: bool
+    # The service may be sent to a worker in a per-call lease.
+    leasable: bool
 
 
 def credential_service_policy(
@@ -100,44 +118,52 @@ def credential_service_policy(
     worker_scope: _WorkerScope | None,
     *,
     primary_built_tool: bool = False,
-) -> _CredentialServicePolicy:
-    """Return credential placement policy for one service in one worker scope.
+) -> CredentialServicePolicy:
+    """Return where one service's credentials live in one worker scope.
 
     ``primary_built_tool`` marks the settings of a tool the primary process builds for this agent.
     Worker code can write the worker store, so those settings never come from it.
     """
-    # Egress broker services are always primary-only and not worker-grantable.
-    # The prefix wins over the OAuth suffixes, so `egress_x_oauth_client` is never
-    # treated as a global OAuth client config that falls back to the worker store.
+    # Egress broker services are primary-only like primary-built tool settings, and never reach a worker.
+    # The prefix wins over the OAuth suffixes, so `egress_x_oauth_client` is never an OAuth client config.
     egress_service = is_egress_broker_service(service)
-
     oauth_token_service = not egress_service and is_oauth_token_service(service)
-    is_primary_runtime_global = not egress_service and is_oauth_client_config_service(service)
+    oauth_client_service = is_global_credential_service(service)
     local_only_service = service in _LOCAL_ONLY_SHARED_CREDENTIAL_SERVICES or oauth_token_service
-    # Local-only and OAuth services keep their own placement outside worker stores.
-    # Egress services also stay primary-only like primary-built tool settings.
-    primary_built_tool_config = (
-        (primary_built_tool or egress_service) and not local_only_service and not is_primary_runtime_global
-    )
-    is_local_only = local_only_service or primary_built_tool_config
-    # Scoped OAuth tokens and primary-built tool settings stay bound to their
-    # agent even when its worker scope is shared.
-    uses_agent_scoped = worker_scope == "shared" and (oauth_token_service or primary_built_tool_config)
-    return _CredentialServicePolicy(
-        service=service,
-        worker_scope=worker_scope,
-        primary_built_tool=primary_built_tool_config,
-        uses_local_shared_credentials=worker_scope == "shared" and is_local_only and not uses_agent_scoped,
-        uses_primary_runtime_global_credentials=is_primary_runtime_global,
-        uses_primary_runtime_scoped_credentials=(
-            worker_scope in {"user", "user_agent"} and is_local_only and not is_primary_runtime_global
+    primary_owned = (primary_built_tool or egress_service) and not local_only_service and not oauth_client_service
+    if service in _REQUESTER_AGENT_CREDENTIAL_SERVICES:
+        placement = CredentialPlacement.REQUESTER_AGENT
+    elif worker_scope is None or oauth_client_service:
+        placement = CredentialPlacement.GLOBAL
+    elif worker_scope == "shared":
+        # Scoped OAuth tokens and primary-owned settings stay bound to their agent even on a shared worker.
+        if oauth_token_service or primary_owned:
+            placement = CredentialPlacement.AGENT
+        elif local_only_service:
+            placement = CredentialPlacement.SHARED
+        else:
+            placement = CredentialPlacement.WORKER
+    elif local_only_service or primary_owned:
+        placement = CredentialPlacement.REQUESTER
+    else:
+        placement = CredentialPlacement.WORKER
+    return CredentialServicePolicy(
+        placement=placement,
+        reads_shared=placement is CredentialPlacement.WORKER
+        or (primary_owned and placement in {CredentialPlacement.AGENT, CredentialPlacement.REQUESTER}),
+        grantable=not (
+            oauth_client_service
+            or oauth_token_service
+            or egress_service
+            or service in _UNSUPPORTED_WORKER_GRANTABLE_CREDENTIALS
         ),
-        uses_primary_runtime_agent_scoped_credentials=uses_agent_scoped,
-        worker_grantable_supported=not is_primary_runtime_global
-        and not oauth_token_service
-        and not egress_service
-        and service not in _UNSUPPORTED_WORKER_GRANTABLE_CREDENTIALS,
+        leasable=not egress_service,
     )
+
+
+def is_global_credential_service(service: str) -> bool:
+    """Return whether a service's credentials live in the global store whatever the worker scope: OAuth app configs."""
+    return not is_egress_broker_service(service) and is_oauth_client_config_service(service)
 
 
 def is_oauth_client_config_service(service: str) -> bool:

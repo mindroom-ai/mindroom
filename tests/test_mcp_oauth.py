@@ -23,6 +23,7 @@ from mindroom.credentials.policy import (
     OAUTH_DYNAMIC_CLIENT_REGISTERED_REDIRECT_URI_KEY,
     OAUTH_DYNAMIC_CLIENT_REGISTERED_TOKEN_URL_KEY,
     RUNTIME_BOOTSTRAPPED_CLIENT_CONFIG_KEY,
+    CredentialPlacement,
     credential_service_policy,
 )
 from mindroom.mcp.config import MCPServerConfig
@@ -299,7 +300,9 @@ def test_custom_mcp_oauth_provider_id_keeps_generated_credential_services_mcp_sc
 
     assert provider.credential_service == "mcp_custom_oauth"
     assert provider.client_config_services == ("mcp_custom_oauth_client",)
-    assert credential_service_policy(provider.credential_service, "user_agent").uses_primary_runtime_scoped_credentials
+    assert (
+        credential_service_policy(provider.credential_service, "user_agent").placement is CredentialPlacement.REQUESTER
+    )
 
 
 def test_load_oauth_providers_includes_mcp_oauth_provider(tmp_path: Path) -> None:

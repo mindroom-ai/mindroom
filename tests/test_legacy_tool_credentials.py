@@ -8,7 +8,6 @@ import importlib
 import os
 import threading
 from typing import TYPE_CHECKING
-from unittest.mock import Mock
 
 import pytest
 
@@ -197,7 +196,6 @@ async def test_both_entry_points_clean_up_before_credentials_are_used(
         raise _CleanupRanError
 
     monkeypatch.setattr(module, "migrate_tool_credential_defaults", cleanup)
-    monkeypatch.setattr(module, "sync_env_to_credentials", Mock(side_effect=AssertionError("credentials started")))
     if entrypoint == "api":
         monkeypatch.setattr(module, "_app_runtime_paths", lambda _app: runtime_paths)
         with pytest.raises(_CleanupRanError):

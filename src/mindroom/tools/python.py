@@ -83,20 +83,6 @@ def _python_tools_runtime() -> tuple[Any, Any, Any, Any]:
             default=None,
             authored_override=False,
         ),
-        ConfigField(
-            name="safe_globals",
-            label="Safe Globals",
-            type="text",
-            required=False,
-            default=None,
-        ),
-        ConfigField(
-            name="safe_locals",
-            label="Safe Locals",
-            type="text",
-            required=False,
-            default=None,
-        ),
     ],
     dependencies=["agno"],
     docs_url="https://docs.mindroom.chat/tools/execution-and-coding/#python",
@@ -117,21 +103,9 @@ def python_tools() -> type[PythonTools]:
     class MindRoomPythonTools(python_tools_class):
         """MindRoom wrapper around Agno's Python tool implementation."""
 
-        def __init__(
-            self,
-            base_dir: Path | None = None,
-            safe_globals: dict | None = None,
-            safe_locals: dict | None = None,
-            **kwargs: object,
-        ) -> None:
+        def __init__(self, base_dir: Path | None = None) -> None:
             # Arbitrary code execution cannot be confined in-process, so the file helpers are not either.
-            super().__init__(
-                base_dir=base_dir,
-                safe_globals=safe_globals,
-                safe_locals=safe_locals,
-                restrict_to_base_dir=False,
-                **kwargs,
-            )
+            super().__init__(base_dir=base_dir, restrict_to_base_dir=False)
 
         def pip_install_package(self, package_name: str) -> str:
             """Install a package into the current interpreter environment."""

@@ -122,7 +122,6 @@ from mindroom.workers.runtime import (
 
 from . import file_watcher
 from .bot import AgentBot, create_bot_for_entity
-from .credentials.sync import sync_env_to_credentials
 from .event_journal.opening import OpenEventJournal, bind_event_journal, open_event_journal
 from .logging_config import get_logger, setup_logging
 from .orchestration.computer_runtime import ComputerRuntimeCoordinator
@@ -2216,13 +2215,6 @@ async def _wait_for_runtime_shutdown_cleanup(
             return
 
 
-def _sync_credentials_and_prepare_storage(runtime_paths: RuntimePaths, storage_path: Path) -> None:
-    """Complete the synchronous startup setup that must precede runtime construction."""
-    logger.info("Syncing API keys from environment to CredentialsManager...")
-    sync_env_to_credentials(runtime_paths=runtime_paths)
-    storage_path.mkdir(parents=True, exist_ok=True)
-
-
 async def _watch_event_journal(
     orchestrator: _MultiAgentOrchestrator,
     shutdown_requested: asyncio.Event,
@@ -2315,7 +2307,6 @@ async def _run_runtime(  # noqa: PLR0915
     await migrate_state_root_records(runtime_paths)
     await migrate_subagent_sessions(runtime_paths)
     await migrate_tool_credential_defaults(runtime_paths)
-    storage_path = runtime_paths.storage_root
     orchestrator: _MultiAgentOrchestrator | None = None
     auxiliary_tasks: list[asyncio.Task] = []
     shutdown_requested = asyncio.Event()
@@ -2338,9 +2329,7 @@ async def _run_runtime(  # noqa: PLR0915
         shorten_gil_switch_interval()
         stall_detector = start_event_loop_stall_detector(runtime_paths)
 
-        # Credential synchronization and storage setup are synchronous. Keep the
-        # ordered unit off-loop while retaining exception propagation to startup.
-        await run_blocking_until_complete(_sync_credentials_and_prepare_storage, runtime_paths, storage_path)
+        await run_blocking_until_complete(partial(runtime_paths.storage_root.mkdir, parents=True, exist_ok=True))
         await run_blocking_until_complete(retire_state_root_worker_mounts, runtime_paths)
         # After the retirement, so no old worker mounting whole state roots can swap a sessions directory as it converts.
         # The first start after an upgrade converts every conversation database before the API binds, which can take

@@ -43,7 +43,7 @@ from mindroom.custom_tools.e2b import MindRoomE2BTools
 from mindroom.custom_tools.google_drive import GoogleDriveTools
 from mindroom.custom_tools.microsoft_files import MicrosoftFilesTools
 from mindroom.custom_tools.outlook_mail import OutlookMailTools
-from mindroom.oauth.microsoft import microsoft_files_oauth_provider, outlook_mail_oauth_provider
+from mindroom.oauth.microsoft import microsoft_oauth_provider
 from mindroom.tool_system.catalog import TOOL_METADATA, ensure_tool_registry_loaded
 from mindroom.tool_system.declarations import ToolFileAccess
 from mindroom.tool_system.runtime_context import tool_runtime_context
@@ -336,7 +336,7 @@ async def _upload_to_microsoft_files(
     )
     paths = microsoft_runtime_paths(tmp_path)
     manager = save_microsoft_client_config(paths)
-    publish_microsoft_grant(microsoft_files_oauth_provider(), manager)
+    publish_microsoft_grant(microsoft_oauth_provider("microsoft_files"), manager)
     tool = MicrosoftFilesTools(
         runtime_paths=paths,
         credentials_manager=manager,
@@ -360,7 +360,7 @@ async def _attach_with_outlook_mail(
     )
     paths = microsoft_runtime_paths(tmp_path)
     manager = save_microsoft_client_config(paths)
-    publish_microsoft_grant(outlook_mail_oauth_provider(), manager)
+    publish_microsoft_grant(microsoft_oauth_provider("outlook_mail"), manager)
     tool = OutlookMailTools(
         runtime_paths=paths,
         credentials_manager=manager,

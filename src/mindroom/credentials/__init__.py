@@ -1,1 +1,1 @@
-"""Credential store, service placement policy, and environment sync."""
+"""Credential stores, service placement policy, and the credentials the environment declares."""

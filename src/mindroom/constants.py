@@ -8,6 +8,7 @@ import shutil
 import sys
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
+from functools import cached_property
 from pathlib import Path
 from types import MappingProxyType
 from typing import TypeGuard, cast
@@ -186,6 +187,16 @@ class RuntimePaths:
         if value is None:
             return default
         return value.strip().lower() in {"1", "true", "yes", "on"}
+
+    @cached_property
+    def env_digest(self) -> str:
+        """Return a digest of every env input this snapshot resolves against, computed once per snapshot."""
+        inputs = {
+            "config_dir": str(self.config_dir),
+            "process_env": sorted(self.process_env.items()),
+            "env_file_values": sorted(self.env_file_values.items()),
+        }
+        return hashlib.sha256(json.dumps(inputs, separators=(",", ":")).encode("utf-8")).hexdigest()
 
 
 def resolve_session_state_root(state_root: Path, runtime_paths: RuntimePaths) -> Path:

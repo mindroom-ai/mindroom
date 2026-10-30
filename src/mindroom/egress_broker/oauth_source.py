@@ -47,7 +47,7 @@ from mindroom.oauth.service import (
     oauth_connection_required,
     oauth_provider_service_account_configured,
 )
-from mindroom.workers.runtime import primary_worker_backend_is_dedicated
+from mindroom.workers.backend_kinds import worker_backend_kind
 
 if TYPE_CHECKING:
     from mindroom.config.egress_broker import EgressReadOnly
@@ -264,7 +264,7 @@ def shared_worker_oauth(
     """
     if not provider.requester_scoped_credentials:
         return None
-    if is_personal_target(worker_target) and primary_worker_backend_is_dedicated(runtime_paths):
+    if is_personal_target(worker_target) and worker_backend_kind(runtime_paths).dedicated:
         return None
     return "allowed" if opted_in else "refused"
 

@@ -163,13 +163,7 @@ class Toolkit:
             self.name = name
         if instructions is not None:
             self.instructions = instructions
-        cls = type(self)
-        attributes = dict.fromkeys(attribute for base in reversed(cls.__mro__) for attribute in vars(base))
-        methods = [
-            getattr(self, attribute)
-            for attribute in attributes
-            if _mark(_function_of(inspect.getattr_static(cls, attribute))) is not None
-        ]
+        methods = [getattr(self, attribute) for attribute in tool_attributes(type(self))]
         self.functions: dict[str, Callable[..., Any]] = {}
         for function in (*methods, *tools):
             _require_tool_shape(self.name, function)
@@ -185,6 +179,14 @@ class Toolkit:
         function that requires confirmation.
         """
         return function
+
+
+def tool_attributes(cls: type[Toolkit]) -> tuple[str, ...]:
+    """Return the attributes of ``cls`` that ``@tool`` marks as its functions, in the order the class defines them."""
+    attributes = dict.fromkeys(attribute for base in reversed(cls.__mro__) for attribute in vars(base))
+    return tuple(
+        attribute for attribute in attributes if _mark(_function_of(inspect.getattr_static(cls, attribute))) is not None
+    )
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -249,5 +251,6 @@ __all__ = [
     "passthrough_parameters",
     "passthrough_tool",
     "tool",
+    "tool_attributes",
     "toolkit_functions",
 ]

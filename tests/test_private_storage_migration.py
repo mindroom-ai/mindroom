@@ -615,7 +615,6 @@ async def test_primary_admission_fails_before_credentials(
     _seed(paths, _OLD, _REQUESTER)
     (paths.storage_root / ".mindroom-storage-upgrade.json").write_text("{}")
     module = importlib.import_module(f"mindroom.{'api.main' if entrypoint == 'api' else 'orchestrator'}")
-    monkeypatch.setattr(module, "sync_env_to_credentials", Mock(side_effect=AssertionError("credentials started")))
     if entrypoint == "api":
         monkeypatch.setattr(module, "_app_runtime_paths", lambda _app: paths)
         with pytest.raises(ValueError, match=r"[Pp]rivate"):

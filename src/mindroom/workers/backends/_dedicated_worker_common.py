@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
@@ -43,6 +44,7 @@ __all__ = [
     "plan_scoped_workspace_mounts",
     "plan_shared_directory_mounts",
     "resolve_state_scope_worker_key",
+    "stable_json_digest",
     "stable_signature_json",
     "validate_dedicated_worker_extra_env",
     "validate_private_user_agent_visibility",
@@ -116,6 +118,11 @@ def validate_private_user_agent_visibility(
 def stable_signature_json(value: object) -> str:
     """Serialize one cache-signature value with stable JSON ordering."""
     return json.dumps(value, sort_keys=True, separators=(",", ":"))
+
+
+def stable_json_digest(value: object) -> str:
+    """Return the SHA-256 hex digest of one value's stable JSON serialization."""
+    return hashlib.sha256(stable_signature_json(value).encode("utf-8")).hexdigest()
 
 
 def validate_dedicated_worker_extra_env(

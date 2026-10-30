@@ -33,8 +33,8 @@ from mindroom.config.main import Config
 from mindroom.config.matrix import MatrixSyncConfig
 from mindroom.config.models import ModelConfig, RouterConfig
 from mindroom.constants import env_key_for_provider, resolve_primary_runtime_paths
-from mindroom.credentials.manager import get_runtime_shared_credentials_manager
-from mindroom.credentials.sync import get_api_key_for_provider, get_embedder_api_key, sync_env_to_credentials
+from mindroom.credentials.manager import CredentialsManager, get_runtime_shared_credentials_manager
+from mindroom.credentials.sync import get_api_key_for_provider, get_embedder_api_key
 from mindroom.llm.errors import ProviderError, ProviderUnavailable
 from mindroom.providers.anthropic import messages as claude_messages
 from tests.providers.anthropic_family_support import ROUTE_CONFIGS, provider_for
@@ -554,17 +554,15 @@ def _runtime_with_env(
     *,
     dashboard: dict[str, str] | None = None,
 ) -> RuntimePaths:
-    """Return runtime paths as doctor's checks see them after its startup import of provider keys into the store.
+    """Return runtime paths whose ``.env`` holds ``env_file`` and whose process exports ``exported``.
 
-    ``.env`` holds ``env_file``, the process exports ``exported``, and the store holds each ``dashboard`` service's key
-    as the dashboard saves it.
+    The store holds each ``dashboard`` service's key as the dashboard saves it.
     """
     (tmp_path / ".env").write_text("".join(f"{name}={value}\n" for name, value in env_file.items()), encoding="utf-8")
     runtime_paths = resolve_primary_runtime_paths(config_path=tmp_path / "config.yaml", process_env=exported or {})
     credentials = get_runtime_shared_credentials_manager(runtime_paths)
     for service, api_key in (dashboard or {}).items():
         credentials.save_credentials(service, {"api_key": api_key, "_source": "ui"})
-    sync_env_to_credentials(runtime_paths)
     return runtime_paths
 
 
@@ -943,7 +941,7 @@ _DASHBOARD = "key saved in the dashboard"
         pytest.param({"openai": "sk-dashboard"}, {}, "sk-dashboard", _DASHBOARD, id="dashboard"),
         pytest.param({"OPENAI_API_KEY": "sk-dashboard"}, {}, "sk-dashboard", _DASHBOARD, id="dashboard-variable-name"),
         pytest.param({}, {"OPENAI_API_KEY": "sk-env"}, "sk-env", "OPENAI_API_KEY", id="environment"),
-        # Import never replaces a key saved in the dashboard, so the runtime uses it over the variable.
+        # A key saved in the dashboard wins over the variable.
         pytest.param(
             {"openai": "sk-dashboard"},
             {"OPENAI_API_KEY": "sk-env"},
@@ -951,7 +949,7 @@ _DASHBOARD = "key saved in the dashboard"
             _DASHBOARD,
             id="dashboard-over-environment",
         ),
-        # The provider's own service, which import fills, wins over a key saved under the variable's name.
+        # The provider's own service, which the variable declares, wins over a key saved under the variable's name.
         pytest.param(
             {"OPENAI_API_KEY": "sk-dashboard"},
             {"OPENAI_API_KEY": "sk-env"},
@@ -994,7 +992,7 @@ def _seeds_file(tmp_path: Path, service: str, api_key: str) -> dict[str, str]:
     ("seeded", "env_file", "used_key", "origin"),
     [
         pytest.param("sk-seed", {}, "sk-seed", "MINDROOM_CREDENTIAL_SEEDS_FILE", id="seed"),
-        # A seed is imported after the provider's variable, so its key replaces the variable's.
+        # A seed is read after the provider's variable, so its key replaces the variable's.
         pytest.param(
             "sk-seed",
             {"OPENAI_API_KEY": "sk-env"},
@@ -1005,7 +1003,7 @@ def _seeds_file(tmp_path: Path, service: str, api_key: str) -> dict[str, str]:
         pytest.param(None, {"OPENAI_API_KEY_FILE": "openai.key"}, "sk-file", "OPENAI_API_KEY_FILE", id="file-variable"),
     ],
 )
-def test_doctor_names_an_imported_key_by_the_variable_that_supplied_it(
+def test_doctor_names_an_environment_key_by_the_variable_that_supplies_it(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
@@ -1027,12 +1025,12 @@ def test_doctor_names_an_imported_key_by_the_variable_that_supplied_it(
     assert f"openai: {origin} valid" in " ".join(capsys.readouterr().out.split())
 
 
-def test_doctor_names_the_seed_declaration_that_supplied_the_stored_key(
+def test_doctor_names_the_seed_declaration_that_supplies_the_key(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    """The inline declaration is imported after the file, so its key is stored and doctor names it."""
+    """The inline declaration is read after the file, so its key wins and doctor names it."""
     file_seeds = [
         {"service": "anthropic", "credentials": {"api_key": "sk-json-seed"}},
         {"service": "openai", "credentials": {"api_key": "sk-file-seed"}},
@@ -1052,23 +1050,24 @@ def test_doctor_names_the_seed_declaration_that_supplied_the_stored_key(
     assert "openai: MINDROOM_CREDENTIAL_SEEDS_JSON valid" in " ".join(capsys.readouterr().out.split())
 
 
-def test_doctor_names_a_key_no_variable_supplies_any_more_as_imported_earlier(
+def test_doctor_does_not_check_a_key_an_earlier_release_copied_from_a_variable_since_removed(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    """Import keeps a key whose variable was removed, and the runtime uses it, so doctor checks it under that name."""
-    runtime_paths = _runtime_with_env(tmp_path, {})
-    get_runtime_shared_credentials_manager(runtime_paths).save_credentials(
+    """The next start no longer uses such a copy, so doctor reports the key as not set instead of checking it."""
+    (tmp_path / ".env").write_text("", encoding="utf-8")
+    runtime_paths = resolve_primary_runtime_paths(config_path=tmp_path / "config.yaml", process_env={})
+    CredentialsManager(runtime_paths.storage_root / "credentials").save_credentials(
         "openai",
         {"api_key": "sk-old", "_source": "env"},
     )
     sent = _record_key_checks(monkeypatch)
     config = Config(models={"default": ModelConfig(provider="openai", id="m")}, router=RouterConfig(model="default"))
 
-    assert _check_providers(config, runtime_paths) == (1, 0, 0)
-    assert sent == [("https://api.openai.com/v1/models", {"Authorization": "Bearer sk-old"})]
-    assert "openai: key imported earlier from the environment valid" in " ".join(capsys.readouterr().out.split())
+    assert _check_providers(config, runtime_paths) == (0, 0, 1)
+    assert sent == []
+    assert "openai: OPENAI_API_KEY not set" in " ".join(capsys.readouterr().out.split())
 
 
 @pytest.mark.parametrize(
@@ -1113,7 +1112,7 @@ def test_doctor_checks_the_environment_variable_when_the_credential_store_is_unr
         msg = "invalid encryption key"
         raise ValueError(msg)
 
-    monkeypatch.setattr("mindroom.cli.doctor.get_stored_provider_key", unreadable)
+    monkeypatch.setattr("mindroom.cli.doctor.provider_key_with_source", unreadable)
     config = Config(models={"default": ModelConfig(provider="openai", id="m")}, router=RouterConfig(model="default"))
 
     assert _check_providers(config, runtime_paths) == (1, 0, 0)
@@ -1173,7 +1172,7 @@ _OPENROUTER_KEY_CHECK = "https://openrouter.ai/api/v1/key"
 @pytest.mark.parametrize(
     ("seeded", "env_file", "exported", "dashboard", "expected", "sent_request", "line"),
     [
-        # The seed's key replaces the imported variable's in the store, but Mem0 sends the exported variable.
+        # The seed's key replaces the variable's, but Mem0 sends the exported variable.
         pytest.param(
             "sk-seed",
             {},
@@ -1184,7 +1183,7 @@ _OPENROUTER_KEY_CHECK = "https://openrouter.ai/api/v1/key"
             "Memory LLM (openrouter/m): MINDROOM_CREDENTIAL_SEEDS_FILE not checked: OPENROUTER_API_KEY may send it",
             id="seed-replaced-by-exported-variable",
         ),
-        # The exported variable is the stored key, so Mem0 sends the key doctor checks.
+        # The exported variable supplies the key, so Mem0 sends the key doctor checks.
         pytest.param(
             None,
             {},
@@ -1220,7 +1219,7 @@ def test_memory_llm_openrouter_key_is_not_checked_only_when_mem0_sends_the_expor
     sent_request: list[tuple[str, dict[str, str]]],
     line: str,
 ) -> None:
-    """Mem0 sends an exported OPENROUTER_API_KEY in place of any other key, whatever name doctor gives the stored key."""
+    """Mem0 sends an exported OPENROUTER_API_KEY in place of any other key, whatever name doctor gives the shared key."""
     seeds = _seeds_file(tmp_path, "openrouter", seeded) if seeded else {}
     runtime_paths = _runtime_with_env(tmp_path, {**env_file, **seeds}, exported, dashboard=dashboard)
     sent = _record_key_checks(monkeypatch)
@@ -1533,22 +1532,27 @@ def test_memory_config_skips_embedder_without_semantic_consumers(
     assert _check_memory_config(config, _doctor_runtime_paths(tmp_path)) == (1, 0, 0)
 
 
-def test_doctor_seeds_env_credentials_like_the_runtime(
+def test_doctor_opens_the_credential_store_like_the_runtime_without_storing_env_keys(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Doctor resolves fresh config-adjacent .env credentials the way `mindroom run` will."""
+    """Doctor removes copies an earlier release imported, as `mindroom run` will, and stores no environment key."""
     monkeypatch.delenv("EMBEDDER_API_KEY", raising=False)
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
     config_dir = tmp_path / "conf"
     config_dir.mkdir()
     (config_dir / ".env").write_text("EMBEDDER_API_KEY=sk-doctor-embedder\n", encoding="utf-8")
+    store = CredentialsManager(tmp_path / "storage" / "credentials")
+    store.save_credentials("openai", {"api_key": "sk-old", "_source": "env"})
     monkeypatch.setattr("mindroom.cli.doctor._check_matrix_homeserver", lambda **_kwargs: (1, 0, 0))
 
     # The config file is intentionally missing: the run still fails loudly on
-    # that check, but the credential sync must already have happened.
+    # that check, but the credential store must already have been opened.
     with pytest.raises(typer.Exit):
         doctor(config_path=config_dir / "config.yaml", storage_path=tmp_path / "storage")
 
+    assert not store.get_credentials_path("openai").exists()
+    assert not store.get_credentials_path("embedder").exists()
     runtime_paths = resolve_primary_runtime_paths(
         config_path=config_dir / "config.yaml",
         storage_path=tmp_path / "storage",
@@ -1556,7 +1560,7 @@ def test_doctor_seeds_env_credentials_like_the_runtime(
     assert get_embedder_api_key(runtime_paths) == "sk-doctor-embedder"
 
 
-def test_doctor_counts_credential_sync_value_error_as_warning(
+def test_doctor_counts_an_unopenable_credential_store_as_warning(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
@@ -1564,21 +1568,18 @@ def test_doctor_counts_credential_sync_value_error_as_warning(
     """Malformed credential encryption config is reported without aborting checks."""
     config_path = tmp_path / "missing" / "config.yaml"
 
-    def fail_credential_sync(**_kwargs: object) -> None:
+    def fail_credential_store(*_args: object) -> None:
         msg = "invalid encryption key"
         raise ValueError(msg)
 
-    monkeypatch.setattr(
-        "mindroom.cli.doctor.sync_env_to_credentials",
-        fail_credential_sync,
-    )
+    monkeypatch.setattr("mindroom.cli.doctor.get_runtime_credentials_manager", fail_credential_store)
     monkeypatch.setattr("mindroom.cli.doctor._check_matrix_homeserver", lambda **_kwargs: (1, 0, 0))
 
     with pytest.raises(typer.Exit):
         doctor(config_path=config_path, storage_path=tmp_path / "storage")
 
     output = capsys.readouterr().out
-    assert "Could not sync env credentials into the store" in output
+    assert "Could not open the credential store (invalid encryption key)" in output
     assert "1 warning" in output
 
 

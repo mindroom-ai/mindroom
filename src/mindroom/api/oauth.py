@@ -282,7 +282,6 @@ def _resolve_oauth_credentials_target(
         return target
     return replace(
         target,
-        target_manager=target.base_manager.for_worker(worker_target.worker_key),
         worker_scope=worker_target.worker_scope,
         agent_name=worker_target.routing_agent_name,
         execution_identity=worker_target.execution_identity,

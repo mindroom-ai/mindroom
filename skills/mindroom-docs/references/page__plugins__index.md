@@ -235,25 +235,34 @@ Pointing `tools_module` and `hooks_module` at the same file is allowed.
 ## Tools module
 
 A tools module registers tool factories with `@register_tool_with_metadata`.
-Each factory returns a **Toolkit class**, not an instance, and MindRoom constructs it when building agents.
+Each factory returns a toolkit class, not an instance, and MindRoom constructs it when building agents.
 
 ### Minimal example
 
 ```python
-from __future__ import annotations
-
-from typing import TYPE_CHECKING
-
 from mindroom.plugin_api import (
     SetupType,
     ToolCategory,
     ToolFileAccess,
+    Toolkit,
     ToolStatus,
     register_tool_with_metadata,
+    tool,
 )
 
-if TYPE_CHECKING:
-    from agno.tools import Toolkit
+
+class GreeterTools(Toolkit):
+    name = "greeter"
+    instructions = "Greet people by the name they gave."
+
+    @tool
+    def greet(self, name: str) -> str:
+        """Greet someone by name.
+
+        Args:
+            name: The person's name.
+        """
+        return f"Hello, {name}!"
 
 
 @register_tool_with_metadata(
@@ -265,21 +274,18 @@ if TYPE_CHECKING:
     status=ToolStatus.AVAILABLE,
     setup_type=SetupType.NONE,
 )
-def greeter_tools() -> type[Toolkit]:
-    from agno.tools import Toolkit
-
-    class GreeterTools(Toolkit):
-        def __init__(self) -> None:
-            super().__init__(name="greeter", tools=[self.greet])
-
-        def greet(self, name: str) -> str:
-            """Greet someone by name."""
-            return f"Hello, {name}!"
-
+def greeter_tools() -> type[GreeterTools]:
     return GreeterTools
 ```
 
-Pass `instructions="..."` to `Toolkit.__init__` for guidance on the toolkit as a whole: it appears in the system prompt of every agent that offers one of the toolkit's functions, while each function's docstring is that function's description.
+Each `@tool` method, synchronous or `async`, is a function the model can call, and `@tool(name="...")` offers it under another name.
+The model reads its docstring as its description, its `Args:` entries as parameter descriptions, and its annotations as parameter types.
+A `@tool` method receives only the model's arguments, so MindRoom refuses one that takes `agent`, `team`, or `run_context`; read the call through `current_call()` instead.
+Annotations are read when an agent is built, so import the types they name at runtime, not only under `TYPE_CHECKING`.
+An agent leaves out a toolkit with a refused parameter or an annotation that does not resolve, and logs `Could not load tool for agent construction`.
+`mindroom plugins check` reports both for the `@tool` methods of a `mindroom.plugin_api.Toolkit` class, naming the tool and function.
+`instructions` is guidance on the toolkit as a whole: it appears in the system prompt of every agent that offers one of the toolkit's functions.
+A factory may also return an Agno toolkit class, for example to offer one of Agno's own toolkits.
 
 A `str` parameter receives the model's string unchanged, and a `Literal[...]` parameter each of its choices, so a choice may be named `none` or `true`.
 A parameter with a default, such as `title: str | None = None`, receives a model's `"none"` or `"null"`, in any case, as `None` unless that exact string is one of its choices.
@@ -342,11 +348,12 @@ See [Security Posture](https://docs.mindroom.chat/architecture/security-posture/
 | `requires_conversation` | bool | `False` | The tool needs the calling agent's conversation but no room, so it is hidden from the MCP gateway |
 | `executes_code` | bool | `False` | The tool runs arbitrary programs; MindRoom warns at startup when such a tool runs in a worker while the same agent keeps unconfined tools in the primary process |
 | `supports_toolkit_filters` | bool | `True` | Accept the [`include_tools` and `exclude_tools`](https://docs.mindroom.chat/tools/#filtering-toolkit-functions) inline overrides |
-| `worker_inert_agent_functions` | tuple of strings | `()` | Functions whose injected `agent` parameter is unused and can receive `None` in a worker |
+| `worker_inert_agent_functions` | tuple of strings | `()` | Agno toolkit functions whose injected `agent` parameter is unused and can receive `None` in a worker |
 
-Set `requires_primary_runtime=True` when the toolkit depends on primary-process services, keeps state or an open resource between calls, or reads or changes an injected `Agent`, `Team`, or `RunContext`.
+Set `requires_primary_runtime=True` when the toolkit depends on primary-process services, keeps state or an open resource between calls, or needs what [`current_call()` or `get_tool_runtime_context()`](#tool-runtime-context) returns, since both return `None` in a worker.
 A worker builds a fresh toolkit for every call and accepts only JSON values and paths as arguments.
-If an SDK function accepts an `agent` parameter but never uses it, list it in `worker_inert_agent_functions` instead; never do this for functions that depend on agent identity, configuration, or session state.
+An Agno toolkit function that reads its injected `agent`, `team`, or `run_context` needs the primary runtime too.
+If it accepts an `agent` parameter but never uses it, list it in `worker_inert_agent_functions` instead; never do this for functions that depend on agent identity, configuration, or session state.
 `requires_room_context` and `requires_primary_runtime` describe where a tool can run; they do not grant or replace tool authorization.
 
 ### Dependencies
@@ -378,14 +385,38 @@ A `ConfigField` `default` only pre-fills the dashboard form and is not passed to
 When no value is stored or configured, the constructor's Python default applies, so give optional parameters matching defaults, such as `units: str = "metric"` below.
 
 ```python
+import httpx
+
 from mindroom.plugin_api import (
     ConfigField,
     SetupType,
     ToolCategory,
     ToolFileAccess,
+    Toolkit,
     ToolStatus,
     register_tool_with_metadata,
+    tool,
 )
+
+
+class WeatherTools(Toolkit):
+    name = "weather"
+
+    def __init__(self, *, api_key: str, units: str = "metric") -> None:
+        super().__init__()
+        self.api_key = api_key
+        self.units = units
+
+    @tool
+    def current_weather(self, city: str) -> str:
+        """Get the current weather in a city."""
+        response = httpx.get(
+            "https://api.openweathermap.org/data/2.5/weather",
+            params={"q": city, "units": self.units, "appid": self.api_key},
+            timeout=10,
+        )
+        return response.text
+
 
 @register_tool_with_metadata(
     name="weather",
@@ -410,8 +441,8 @@ from mindroom.plugin_api import (
         ),
     ],
 )
-def weather_tools() -> type[Toolkit]:
-    ...
+def weather_tools() -> type[WeatherTools]:
+    return WeatherTools
 ```
 
 ### Managed init args
@@ -421,7 +452,7 @@ Only declared values are passed; MindRoom does not detect them from parameter na
 
 | Value | Constructor kwarg | Description |
 | --- | --- | --- |
-| `RUNTIME_PATHS` | `runtime_paths` | Storage paths, environment values, and data directory access |
+| `RUNTIME_PATHS` | `runtime_paths` | Storage paths, environment values, and data directory access; in a worker, the worker's own, so a variable set only for the primary reads as unset |
 | `CREDENTIALS_MANAGER` | `credentials_manager` | Read and write the per-tool credentials store |
 | `RUNTIME_CONFIG` | `runtime_config` | The active MindRoom config, when available |
 | `AGENT_NAME` | `agent_name` | The constructing agent's name, when available |
@@ -433,8 +464,27 @@ Only declared values are passed; MindRoom does not detect them from parameter na
 | `AGENT_STATE_ROOT` | `agent_state_root` | The constructing agent's state root in the primary runtime, requester-scoped for private agents; `None` inside workers |
 
 ```python
-from agno.tools import Toolkit
-from mindroom.plugin_api import ToolCategory, ToolFileAccess, ToolManagedInitArg, register_tool_with_metadata
+from mindroom.plugin_api import (
+    ToolCategory,
+    ToolFileAccess,
+    Toolkit,
+    ToolManagedInitArg,
+    register_tool_with_metadata,
+    tool,
+)
+
+
+class NeedsRuntimeTools(Toolkit):
+    name = "needs_runtime"
+
+    def __init__(self, *, runtime_paths) -> None:
+        super().__init__()
+        self.runtime_paths = runtime_paths
+
+    @tool
+    def greeting(self) -> str:
+        """Return the greeting set in MindRoom's environment."""
+        return self.runtime_paths.env_value("GREETING", default="Hello!")
 
 
 @register_tool_with_metadata(
@@ -445,12 +495,7 @@ from mindroom.plugin_api import ToolCategory, ToolFileAccess, ToolManagedInitArg
     category=ToolCategory.DEVELOPMENT,
     managed_init_args=(ToolManagedInitArg.RUNTIME_PATHS,),
 )
-def needs_runtime_tools() -> type[Toolkit]:
-    class NeedsRuntimeTools(Toolkit):
-        def __init__(self, *, runtime_paths):
-            self.runtime_paths = runtime_paths
-            super().__init__(name="needs_runtime", tools=[])
-
+def needs_runtime_tools() -> type[NeedsRuntimeTools]:
     return NeedsRuntimeTools
 ```
 
@@ -459,6 +504,9 @@ def needs_runtime_tools() -> type[Toolkit]:
 Inside a Matrix-connected agent run, `mindroom.plugin_api.get_tool_runtime_context()` returns the current `ToolRuntimeContext`, or `None` outside one.
 It carries `room_id`, `thread_id`, `resolved_thread_id`, `requester_id`, `agent_name`, the Matrix client, the active config, and runtime paths.
 `thread_id` is the thread the inbound message named, while `resolved_thread_id` is the conversation thread after plain replies are resolved to their thread.
+
+Inside a tool call, `mindroom.plugin_api.current_call()` returns a `CurrentCall`, or `None` outside one, such as when code calls the method directly.
+It carries the provider's `call_id`, the agent's `tools:` entry that offered the function as `toolkit`, the `session_id`, the `session_state` dict the function may change in place and MindRoom stores after the run, the team's stored conversation as `history_scope` in a team run, and the same `ToolRuntimeContext` as `runtime`.
 
 ### Calling a configured model
 

@@ -361,7 +361,7 @@ Runtime `.env` values and provider API keys such as `OPENAI_API_KEY` and `ANTHRO
 Worker-routed `python` receives only allowed runtime names.
 
 To pass more variables to `shell`, set the shell tool's `extra_env_passthrough` to exact names or glob patterns of exported process variables; it does not match config-adjacent `.env` entries.
-Everything that matches passes through, including service tokens and provider credentials, except MindRoom's own control variables such as credential seeds, Kubernetes worker backend settings, `MINDROOM_CREDENTIALS_ENCRYPTION_KEY`, and any name starting with `MINDROOM_SANDBOX_`.
+Everything that matches passes through, including service tokens and provider credentials, except MindRoom's own control variables such as credential seeds, Docker and Kubernetes worker backend settings, `MINDROOM_CREDENTIALS_ENCRYPTION_KEY`, and any name starting with `MINDROOM_SANDBOX_`.
 Use `shell_path_prepend` to add directories, such as wrapper directories, ahead of the existing `PATH`.
 Both options are documented with the [shell tool](../tools/execution-and-coding.md#shell).
 A plugin's [`tool:environment` hook](../hooks.md#shell-command-environment-toolenvironment) can also set, remove, or pass through variables for one call's commands.

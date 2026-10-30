@@ -1,7 +1,6 @@
 """Tests for the credentials API endpoints."""
 
 from collections.abc import Generator
-from dataclasses import replace
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -333,7 +332,6 @@ class TestCredentialsAPI:
         target = credentials_target.RequestCredentialsTarget(
             runtime_paths=runtime_paths,
             base_manager=manager,
-            target_manager=manager,
             worker_scope="user_agent",
             agent_name="general",
             execution_identity=identity,
@@ -357,7 +355,6 @@ class TestCredentialsAPI:
         target = credentials_target.RequestCredentialsTarget(
             runtime_paths=runtime_paths,
             base_manager=manager,
-            target_manager=manager,
             worker_scope=None,
             agent_name="general",
             execution_identity=None,
@@ -1463,32 +1460,6 @@ class TestCredentialsAPI:
         assert response.status_code == 200
         assert response.json() == []
 
-    def test_primary_runtime_scoped_services_for_shared_agent_target(
-        self,
-        tmp_path: Path,
-    ) -> None:
-        """Shared-scope targets should list only agent-store OAuth token services."""
-        runtime_paths = constants.resolve_primary_runtime_paths(
-            config_path=tmp_path / "config.yaml",
-            storage_path=tmp_path / "mindroom_data",
-            process_env={},
-        )
-        manager = get_runtime_credentials_manager(runtime_paths)
-        agent_store = manager.for_primary_runtime_agent_scope("general")
-        agent_store.save_credentials("acme_oauth", {"token": "agent-token", "_source": "oauth"})
-        agent_store.save_credentials("weather", {"api_key": "not-a-token", "_source": "ui"})
-        target = credentials_target.RequestCredentialsTarget(
-            runtime_paths=runtime_paths,
-            base_manager=manager,
-            target_manager=manager,
-            worker_scope="shared",
-            agent_name="general",
-            execution_identity=None,
-        )
-
-        assert credentials_target.primary_runtime_scoped_services_for_target(target) == {"acme_oauth"}
-        assert credentials_target.primary_runtime_scoped_services_for_target(replace(target, agent_name=None)) == set()
-
     def test_non_oauth_tool_settings_still_reject_private_scopes(
         self,
         client: TestClient,
@@ -1961,26 +1932,7 @@ class TestCredentialsAPI:
         response = client.get("/api/credentials/list")
 
         assert response.status_code == 200
-        assert response.json() == ["email", "openai", "github"]
-
-    def test_get_api_key_returns_source_env(
-        self,
-        client: TestClient,
-        mock_credentials_manager: MagicMock,
-    ) -> None:
-        """Test that get_api_key returns source field for env-sourced keys."""
-        mock_credentials_manager.load_credentials.return_value = {
-            "api_key": "sk-test-long-key-value",
-            "_source": "env",
-        }
-
-        response = client.get("/api/credentials/openai/api-key")
-
-        assert response.status_code == 200
-        data = response.json()
-        assert data["has_key"] is True
-        assert data["source"] == "env"
-        assert data["masked_key"] == "sk-t...alue"
+        assert response.json() == ["email", "github", "openai"]
 
     def test_get_api_key_returns_source_ui(
         self,
@@ -2024,7 +1976,7 @@ class TestCredentialsAPI:
         client: TestClient,
         mock_credentials_manager: MagicMock,
     ) -> None:
-        """Test that get_api_key returns null source for legacy credentials."""
+        """Test that get_api_key returns null source for a key saved without one or declared by the environment."""
         mock_credentials_manager.load_credentials.return_value = {
             "api_key": "sk-test-long-key-value",
         }
@@ -2035,6 +1987,7 @@ class TestCredentialsAPI:
         data = response.json()
         assert data["has_key"] is True
         assert data["source"] is None
+        assert data["masked_key"] == "sk-t...alue"
 
     def test_get_credentials_filters_internal_keys(
         self,
@@ -2291,7 +2244,6 @@ def test_credential_target_matches_runtime_storage(
     target = credentials_target.RequestCredentialsTarget(
         runtime_paths=runtime_paths,
         base_manager=manager,
-        target_manager=worker_manager,
         worker_scope=worker_scope,
         agent_name="general",
         execution_identity=identity,
@@ -2344,43 +2296,6 @@ def test_credential_target_matches_runtime_storage(
         assert manager.load_credentials(service) == shared_credentials
 
 
-@pytest.mark.parametrize("worker_scope", [None, "shared", "user", "user_agent"])
-@pytest.mark.parametrize("allow_shared", [False, True])
-def test_credential_target_keeps_authorized_manager_and_shared_visibility(
-    tmp_path: Path,
-    worker_scope: WorkerScope | None,
-    allow_shared: bool,
-) -> None:
-    """Dashboard IO must use its resolved manager and enforce grants on a separate shared layer."""
-    runtime_paths = constants.resolve_primary_runtime_paths(
-        config_path=tmp_path / "config.yaml",
-        storage_path=tmp_path,
-    )
-    manager = credential_runtime.CredentialsManager(tmp_path / "credentials", shared_base_path=tmp_path / "shared")
-    authorized_manager = manager.for_worker("authorized-worker")
-    target = credentials_target.RequestCredentialsTarget(
-        runtime_paths=runtime_paths,
-        base_manager=manager,
-        target_manager=authorized_manager,
-        worker_scope=worker_scope,
-        agent_name="general",
-        execution_identity=ToolExecutionIdentity("matrix", "general", "@alice:example.org", None, None, None, None),
-        allowed_shared_services=frozenset({"weather"}) if allow_shared else None,
-    )
-    manager.shared_manager().save_credentials("weather", {"api_key": "shared-key", "shared_only": True})
-    authorized_manager.save_credentials("weather", {"api_key": "authorized-key"})
-    expected = {"api_key": "authorized-key"}
-    if worker_scope is not None and allow_shared:
-        expected["shared_only"] = True
-    assert credentials_target.load_credentials_for_target("weather", target) == expected
-
-    credentials_target.save_credentials_for_target("weather", {"api_key": "updated-key"}, target)
-    assert authorized_manager.load_credentials("weather") == {"api_key": "updated-key"}
-    credentials_target.delete_credentials_for_target("weather", target)
-    assert authorized_manager.load_credentials("weather") is None
-    assert manager.shared_manager().load_credentials("weather") == {"api_key": "shared-key", "shared_only": True}
-
-
 @pytest.mark.parametrize("worker_scope", [None, "shared"])
 def test_oauth_client_config_keeps_base_store_with_separate_shared_layer(
     tmp_path: Path,
@@ -2392,14 +2307,16 @@ def test_oauth_client_config_keeps_base_store_with_separate_shared_layer(
         storage_path=tmp_path,
     )
     manager = credential_runtime.CredentialsManager(tmp_path / "credentials", shared_base_path=tmp_path / "shared")
-    worker_manager = manager.for_worker("authorized-worker")
+    identity = ToolExecutionIdentity("matrix", "general", "@alice:example.org", None, None, None, None)
+    worker_key = resolve_worker_target("shared", "general", identity).worker_key
+    assert worker_key is not None
+    worker_manager = manager.for_worker(worker_key)
     target = credentials_target.RequestCredentialsTarget(
         runtime_paths=runtime_paths,
         base_manager=manager,
-        target_manager=worker_manager,
         worker_scope=worker_scope,
         agent_name="general",
-        execution_identity=None,
+        execution_identity=identity,
     )
     service = "acme_oauth_client"
     manager.save_credentials(service, {"client_id": "base-client"})

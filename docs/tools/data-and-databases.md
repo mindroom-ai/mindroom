@@ -16,7 +16,7 @@ Use it to pick a tool, configure its connection, and understand why a tool is un
 | [`redshift`](#redshift) | Amazon Redshift inspection, queries, and export | Host, database, user, password |
 | [`neo4j`](#neo4j) | Neo4j labels, relationship types, schema, and Cypher queries | URI, user, password |
 | [`duckdb`](#duckdb) | Local analytical SQL over Parquet, CSV, JSON, and S3 files, with exports and full-text search | None |
-| [`csv`](#csv) | SQL over pre-registered CSV files | Not configurable from `config.yaml`; use `duckdb` |
+| [`csv`](#csv) | Reading and querying a fixed list of CSV files | Paths of the CSV files |
 | [`pandas`](#pandas) | In-memory dataframes and dataframe methods | None |
 | [`google_bigquery`](#google_bigquery) | Tables and SQL in one BigQuery dataset | Project, dataset, location, Google Cloud connection or service account |
 | [`google_drive`](#google_drive) | Listing, searching, reading, downloading, uploading, and organizing Drive files | Google Drive OAuth |
@@ -30,7 +30,6 @@ Use it to pick a tool, configure its connection, and understand why a tool is un
 
 Tools that need a connection or account stay unavailable in the dashboard until their required fields or OAuth connection are stored.
 Options of type `password` in the tables below cannot be set inline in `config.yaml`; see [Security Restrictions](index.md#security-restrictions).
-`db_engine`, `tables`, `connection`, `init_commands`, `config`, `csvs`, `duckdb_connection`, `duckdb_kwargs`, and `obb` expect Python objects, lists, or mappings, so they cannot be set usefully from `config.yaml` or the dashboard.
 `sql`, `postgres`, `redshift`, `duckdb`, `csv`, and `pandas` can read or write local files that the agent's `file_access` setting does not confine, and `sql`, `duckdb`, and `pandas` always run in the primary runtime, so enable them only for agents you trust with what the MindRoom process can reach; see [File access](../architecture/security-posture.md#file-access).
 The Google Drive, Docs, and Sheets tools connect through per-service OAuth, and `google_bigquery` uses the Google Cloud connection; see [Google Services OAuth For Local Installs](../deployment/google-services-user-oauth.md) or [Google Services OAuth](../deployment/google-services-oauth.md) for custom and hosted setups.
 Missing Python dependencies install automatically on first use; see [Automatic Dependency Installation](index.md#automatic-dependency-installation).
@@ -52,8 +51,6 @@ For PostgreSQL or Redshift, the dedicated [`postgres`](#postgres) and [`redshift
 | `host` | `url` | `null` | Host for the assembled URL. |
 | `port` | `number` | `null` | Port for the assembled URL. |
 | `schema` | `text` | `null` | Database name in the assembled URL and schema for inspection. |
-| `db_engine` | `text` | `null` | Programmatic only: a live SQLAlchemy `Engine`. |
-| `tables` | `text` | `null` | Programmatic only: a table mapping that `list_tables()` returns instead of inspecting the database. |
 | `enable_list_tables` | `boolean` | `true` | Enable `list_tables()`. |
 | `enable_describe_table` | `boolean` | `true` | Enable `describe_table()`. |
 | `enable_run_sql_query` | `boolean` | `true` | Enable `run_sql_query()`. |
@@ -74,7 +71,6 @@ The connection is read-only, so queries cannot modify the database.
 | `user` | `text` | yes | `null` | Username. |
 | `password` | `password` | yes | `null` | Password. |
 | `table_schema` | `text` | no | `public` | Schema for table operations and the connection search path. |
-| `connection` | `text` | no | `null` | Programmatic only: an existing Psycopg connection. |
 
 ```yaml
 agents:
@@ -164,9 +160,7 @@ Without `db_path`, the database lives in memory and is not saved.
 | --- | --- | --- | --- |
 | `db_path` | `text` | `null` | Path to a persistent DuckDB database file. |
 | `read_only` | `boolean` | `false` | Open the database read-only. |
-| `connection` | `text` | `null` | Programmatic only: an existing DuckDB connection. |
-| `init_commands` | `text` | `null` | Programmatic only: a list of startup SQL commands. |
-| `config` | `text` | `null` | Programmatic only: a DuckDB config mapping. |
+| `init_commands` | `string[]` | `null` | SQL statements run in order when the tool opens its database, such as `INSTALL httpfs` and `LOAD httpfs`. |
 
 ```yaml
 agents:
@@ -184,16 +178,13 @@ export_table_to_path("orders", format="CSV", path="/tmp")
 
 ## [`csv`]
 
-`csv` provides `list_csv_files()`, `read_csv_file()`, `get_columns()`, and `query_csv_file()` over a pre-registered list of CSV files, each named by its filename stem.
-`config.yaml` and the dashboard accept `csvs` only as a string, so they cannot register a file list and the tool has no files to read; use [`duckdb`](#duckdb) to query CSV files.
+`csv` provides `list_csv_files()`, `read_csv_file()`, `get_columns()`, and `query_csv_file()` over the CSV files listed in `csvs`, each named by its filename stem.
 `query_csv_file()` runs only the first SQL statement it receives.
 
 | Option | Type | Default | Notes |
 | --- | --- | --- | --- |
-| `csvs` | `text` | `null` | Programmatic only: the list of CSV paths. |
+| `csvs` | `string[]` | `null` | Absolute paths of the CSV files the tool reads. |
 | `row_limit` | `number` | `null` | Default row cap for `read_csv_file()`. |
-| `duckdb_connection` | `text` | `null` | Programmatic only: an existing DuckDB connection. |
-| `duckdb_kwargs` | `text` | `null` | Programmatic only: DuckDB connection arguments. |
 | `enable_read_csv_file` | `boolean` | `true` | Enable `read_csv_file()`. |
 | `enable_list_csv_files` | `boolean` | `true` | Enable `list_csv_files()`. |
 | `enable_get_columns` | `boolean` | `true` | Enable `get_columns()`. |
@@ -279,6 +270,7 @@ Uploads and content replacement read local files according to the agent's [`file
 To change the content of a native Google Doc, use [`google_docs`](#google_docs).
 If the account is not connected, the tool returns an `OAuthConnectionRequired` result with a connect link; see [Google Services OAuth For Local Installs](../deployment/google-services-user-oauth.md#connect).
 A connection that granted only read-only Drive access keeps working for reads, while writes ask the user to reconnect; see [Scope Rationale](../deployment/google-services-oauth.md#scope-rationale).
+Set the `GOOGLE_CLOUD_QUOTA_PROJECT_ID` environment variable to charge Drive API quota and billing to that Google Cloud project.
 
 | Option | Type | Default | Notes |
 | --- | --- | --- | --- |
@@ -367,7 +359,6 @@ Choose `openbb` over [`yfinance`](#yfinance) when you need to switch data provid
 | --- | --- | --- | --- |
 | `provider` | `text` | `yfinance` | One of `yfinance`, `benzinga`, `fmp`, `intrinio`, `polygon`, `tiingo`, or `tmx`. |
 | `openbb_pat` | `password` | `null` | OpenBB personal access token for premium providers. |
-| `obb` | `text` | `null` | Programmatic only: a configured OpenBB instance. |
 | `enable_get_stock_price` | `boolean` | `true` | Enable `get_stock_price()`. |
 | `enable_search_company_symbol` | `boolean` | `false` | Enable `search_company_symbol()`. |
 | `enable_get_company_news` | `boolean` | `false` | Enable `get_company_news()`. |

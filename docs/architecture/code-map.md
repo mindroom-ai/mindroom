@@ -363,7 +363,9 @@ Matrix sync callback
 | `delegation/direct.py` | Reserve, run, and settle one child turn inside the caller's tool call, shared by `run_subagent` and Dynamic Workflow subagent participants |
 | `delegation/legacy_records.py` | Delegation records whose working state lived only in their workspace files, left as they were |
 | `delegation/legacy_snapshots.py` | Delegation child snapshots stored without a field a later release added, rewritten once in subagent session files at startup and in runs' metadata as conversation layout version 5 |
-| `credentials/manager.py` | Unified credential management (CredentialsManager) |
+| `credentials/manager.py` | Credential stores (CredentialsManager) and `credential_layers`, the one resolver of where a service's credentials are read and written for a target |
+| `credentials/policy.py` | Each credential service's placement per worker scope, and whether workers may receive it by grant or lease |
+| `credentials/environment.py` | Credentials the environment declares (provider keys, bootstrap values, seeds), read by the primary under its saved ones |
 | `matrix/` | Matrix protocol integration (client, users, rooms, presence, provisioning, message formatting) |
 | `matrix/large_messages.py` | Large-message sidecar storage and retrieval for oversized Matrix payloads |
 | `matrix/segmented_messages.py` | Lossless splitting of oversized text responses into ordered rich-text events (`defaults.large_message_strategy: split`) |
@@ -405,6 +407,8 @@ Matrix sync callback
 | `tool_system/dedicated_threads.py` | One thread per blocking call of a background job or worker proxy call, outside the bounded shared pools |
 | `workers/in_flight.py` | Workers with a call in flight, which idle cleanup refreshes before it runs |
 | `workers/protocol.py` | The typed requests and responses the primary and its sandbox runners exchange, and the worker protocol version both check |
+| `workers/backend_kinds.py` | The worker backends `MINDROOM_WORKER_BACKEND` can select, the one table of its accepted values, and which backends are dedicated |
+| `workers/progress.py` | Warmup progress of the workers a dedicated Docker or Kubernetes backend starts, sent to every caller waiting on the same worker |
 | `workers/backends/dedicated_launch.py` | The runner environment and startup manifest every dedicated Docker or Kubernetes worker starts with, from its backend's container layout |
 | `shell/output_capture.py` | Bounded shell output spools, completion validation, and atomic output-file publication |
 | `shell/execution.py` | Shell command execution core: spawning, output buffering, stopping at a timeout, and the handle registry of Desktop shell and script runs |
@@ -510,7 +514,7 @@ Matrix sync callback
 | `cli/help_format.py` | Help-page panel order, green help theme, and the examples epilog shared by CLI commands |
 | `cli/interactive.py` | Arrow-key prompts and step headers for terminal setup, with line prompts for piped input |
 | `cli/local_stack.py` | Local stack setup command |
-| `credentials/sync.py` | Shared provider/bootstrap env to credentials sync |
+| `credentials/sync.py` | Shared provider keys, the embedder key, and the Ollama host as the runtime resolves them |
 | `logging_config.py` | Structured logging setup |
 | `knowledge/utils.py` | Resolves the knowledge bases an agent searches: published indexes, availability notices, and refresh scheduling |
 | `custom_tools/chat_ui.py` | Runtime-bound MindRoom Chat UI action requests with canonical Matrix conversation and sender identity |
