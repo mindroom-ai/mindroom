@@ -533,6 +533,29 @@ def _silent_schedule(request: ResponseRequest) -> ResponseRequest:
     )
 
 
+def _require_echo_approval(turn: _Turn) -> None:
+    """Make ``echo`` need approval and start the approval runtime whose cards ``turn`` sends."""
+    turn.bot.config.tool_approval = ToolApprovalConfig(
+        rules=[ApprovalRuleConfig(match="echo", action="require_approval")],
+    )
+
+    async def prepare_event(_room: str, _thread: str | None, content: dict) -> dict:
+        return content
+
+    async def send_card(_delivery: MatrixDelivery) -> str:
+        return "$approval-card"
+
+    initialize_approval_store_for_test(
+        turn.bot.runtime_paths,
+        prepare_approval_event=prepare_event,
+        send_approval_delivery=send_card,
+        resolve_approval_delivery=AsyncMock(return_value=None),
+        cards=turn.bot._journal_store.principal("router@shared"),
+        transport_sender_id=lambda: "@router:localhost",
+        transport_device_id=lambda: "DEVICE",
+    )
+
+
 @pytest.mark.usefixtures("echo_tool")
 @pytest.mark.parametrize("show_tool_calls", [True, False], ids=["tools-shown", "tools-hidden"])
 @pytest.mark.parametrize("streaming", [True, False], ids=["streamed", "whole"])
@@ -849,11 +872,10 @@ async def test_a_model_failure(
     show_tool_calls: bool,
 ) -> None:
     """Pins a model that raises mid-turn: the error text becomes the answer of a completed reply."""
-    turn_holder: list[_Turn] = []
 
     async def explode_once_shown() -> None:
         if streaming:
-            await _wait_shown(turn_holder[0], "Partial answer")
+            await _wait_shown(turn, "Partial answer")
         await _explode()
 
     script = [TextDelta("Partial answer"), Await(explode_once_shown)] if text_first else [Await(_explode)]
@@ -864,7 +886,6 @@ async def test_a_model_failure(
         show_tool_calls=show_tool_calls,
         scripts={"default": [script]},
     )
-    turn_holder.append(turn)
 
     assert await turn.runner.generate_response(_plain_request(_target())) == Owned()
     assert (await turn.reply()).event_id == "$sent0"
@@ -1184,25 +1205,7 @@ async def test_an_approval_pause_holds_the_reply(
         tools=[_ECHO_TOOL],
         scripts={"default": [calls(tool_call("echo", "call-1", text="hi"), content="Before approval")]},
     )
-    turn.bot.config.tool_approval = ToolApprovalConfig(
-        rules=[ApprovalRuleConfig(match="echo", action="require_approval")],
-    )
-
-    async def prepare_event(_room: str, _thread: str | None, content: dict) -> dict:
-        return content
-
-    async def send_card(_delivery: MatrixDelivery) -> str:
-        return "$approval-card"
-
-    initialize_approval_store_for_test(
-        turn.bot.runtime_paths,
-        prepare_approval_event=prepare_event,
-        send_approval_delivery=send_card,
-        resolve_approval_delivery=AsyncMock(return_value=None),
-        cards=turn.bot._journal_store.principal("router@shared"),
-        transport_sender_id=lambda: "@router:localhost",
-        transport_device_id=lambda: "DEVICE",
-    )
+    _require_echo_approval(turn)
     try:
         assert await turn.runner.generate_response(_plain_request(_target())) == Owned()
     finally:
@@ -1276,27 +1279,9 @@ async def test_a_pause_whose_progress_edit_fails_ends_the_reply_without_an_inter
         tools=[_ECHO_TOOL],
         scripts={"default": [calls(tool_call("echo", "call-1", text="hi"), content="Before approval")]},
     )
-    turn.bot.config.tool_approval = ToolApprovalConfig(
-        rules=[ApprovalRuleConfig(match="echo", action="require_approval")],
-    )
     # The edit that would show the paused tool call is the one the homeserver refuses.
     turn.homeserver.fail_text = "🔧 `echo` [1]"
-
-    async def prepare_event(_room: str, _thread: str | None, content: dict) -> dict:
-        return content
-
-    async def send_card(_delivery: MatrixDelivery) -> str:
-        return "$approval-card"
-
-    initialize_approval_store_for_test(
-        turn.bot.runtime_paths,
-        prepare_approval_event=prepare_event,
-        send_approval_delivery=send_card,
-        resolve_approval_delivery=AsyncMock(return_value=None),
-        cards=turn.bot._journal_store.principal("router@shared"),
-        transport_sender_id=lambda: "@router:localhost",
-        transport_device_id=lambda: "DEVICE",
-    )
+    _require_echo_approval(turn)
     try:
         await turn.runner.generate_response(_plain_request(_target()))
     finally:

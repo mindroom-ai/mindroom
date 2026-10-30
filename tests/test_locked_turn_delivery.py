@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, cast
+from dataclasses import replace
+from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -39,13 +40,12 @@ from tests.conftest import (
     unwrap_extracted_collaborator,
 )
 from tests.reply_span_helpers import seed_finished_reply
-from tests.response_runner_helpers import _bot, _noop_typing, _plain_request, _target
+from tests.response_runner_helpers import _bot, _noop_typing, _plain_request, _target, attempt_in_place
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Awaitable, Callable
+    from collections.abc import AsyncIterator, Callable
     from pathlib import Path
 
-    from mindroom.reply_turn.request import ResponseRequest
     from mindroom.response_turn import TurnSinks
 
 
@@ -225,7 +225,6 @@ async def test_agent_post_delivery_failure_settles_error_outcome(tmp_path: Path)
     ):
         result = await coordinator.generate_response(_plain_request(_target()))
 
-    # Previously this path tripped `assert final_delivery_outcome is not None`.
     reply = await bot._reply_runtime.store.replies.for_sources(("$event",))
     assert reply is not None
     assert reply.state is ReplyState.FAILED
@@ -257,13 +256,7 @@ async def test_agent_regeneration_pre_delivery_failure_leaves_prior_answer_intac
         effect_outcomes.append(final_outcome)
 
     request = _plain_request(_target())
-    regen_request: ResponseRequest = request.__class__(
-        **{
-            **request.__dict__,
-            "existing_event_id": "$prior_answer",
-            "edit_regeneration": True,
-        },
-    )
+    regen_request = replace(request, existing_event_id="$prior_answer", edit_regeneration=True)
 
     await seed_finished_reply(
         bot.journal_principal(),
@@ -340,7 +333,6 @@ async def test_team_post_delivery_failure_settles_error_outcome_without_finalize
             config=config,
             runtime_paths=runtime_paths,
             storage_path=tmp_path,
-            requester_id="@alice:localhost",
             message_target=MessageTarget.resolve("!test:localhost", "$thread-root", "$user_msg"),
             orchestrator=team_orchestrator(config, runtime_paths),
         )
@@ -355,11 +347,7 @@ async def test_team_post_delivery_failure_settles_error_outcome_without_finalize
             AsyncMock(side_effect=lambda req: finalize_requests.append(req)),
         )
         _set_gateway_method(coordinator.deps.delivery_gateway, "send_text", AsyncMock(return_value="$thinking"))
-        with patch.object(
-            LockedTurns,
-            "_run_cancellable_response",
-            new=AsyncMock(side_effect=_run_response_function_directly),
-        ):
+        with patch.object(LockedTurns, "_run_cancellable_response", new=attempt_in_place()):
             await coordinator.generate_team_response_helper(
                 _response_request(prompt="Hello", user_id="@alice:localhost", thread_id="$thread-root"),
                 member_names=["general"],
@@ -406,7 +394,6 @@ async def test_team_pre_delivery_failure_ends_the_reply_failed(tmp_path: Path) -
             config=config,
             runtime_paths=runtime_paths,
             storage_path=tmp_path,
-            requester_id="@alice:localhost",
             message_target=MessageTarget.resolve("!test:localhost", "$thread-root", "$user_msg"),
             orchestrator=team_orchestrator(config, runtime_paths),
         )
@@ -422,13 +409,7 @@ async def test_team_pre_delivery_failure_ends_the_reply_failed(tmp_path: Path) -
         bot.client.room_get_event = AsyncMock(
             side_effect=lambda _room_id, event_id: _make_room_get_event_response(event_id, sender=bot.client.user_id),
         )
-        with (
-            patch.object(
-                LockedTurns,
-                "_run_cancellable_response",
-                new=AsyncMock(side_effect=_run_response_function_directly),
-            ),
-        ):
+        with patch.object(LockedTurns, "_run_cancellable_response", new=attempt_in_place()):
             await coordinator.generate_team_response_helper(
                 _response_request(prompt="Hello", user_id="@alice:localhost", thread_id="$thread-root"),
                 member_names=["general"],
@@ -445,9 +426,3 @@ async def test_team_pre_delivery_failure_ends_the_reply_failed(tmp_path: Path) -
     assert "team prep exploded" in render_body(decode_presentation(reply.presentation))[0]
     spans = await coordinator.deps.replies.store.replies.spans(reply.reply_id)
     assert spans[-1].outcome is SpanOutcome.FAILED
-
-
-async def _run_response_function_directly(**kwargs: object) -> FinalDeliveryOutcome:
-    """Drive the locked closure like the attempt runner would, without swallowing."""
-    response_function = cast("Callable[[str | None], Awaitable[FinalDeliveryOutcome]]", kwargs["response_function"])
-    return await response_function("$thinking")

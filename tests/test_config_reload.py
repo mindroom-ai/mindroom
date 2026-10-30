@@ -1851,13 +1851,30 @@ async def test_config_update_serializes_manual_plugin_reload_and_mcp_catalog_cha
     reload_plugins_mock.assert_called_once_with(replacement_config, orchestrator.runtime_paths)
 
 
+def _reply_request(agent_name: str) -> ResponseRequest:
+    """Return one request for ``agent_name`` to answer ``$reply`` in ``!room:localhost``."""
+    return ResponseRequest(
+        sources=ResponseSources(
+            pending_event_ids=("$reply",),
+            logical_source_event_ids=("$reply",),
+        ),
+        thread_history=(),
+        prompt="Hello",
+        response_envelope=request_envelope(
+            room_id="!room:localhost",
+            reply_to_event_id="$reply",
+            agent_name=agent_name,
+        ),
+    )
+
+
 @pytest.mark.asyncio
-async def test_queued_config_reload_waits_for_in_flight_response_without_event_id(
+async def test_queued_config_reload_waits_for_in_flight_response(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
     mock_agent_users: dict[str, AgentMatrixUser],
 ) -> None:
-    """Queued reloads should wait for tracked responses even without a Matrix event ID."""
+    """A queued reload applies its update plan only after the in-flight response finishes."""
     monkeypatch.setattr("mindroom.orchestration.config_lifecycle._CONFIG_RELOAD_DEBOUNCE_SECONDS", 0.01)
     monkeypatch.setattr("mindroom.orchestration.config_lifecycle._REPLACEMENT_DRAIN_IDLE_POLL_SECONDS", 0.01)
 
@@ -1875,34 +1892,16 @@ async def test_queued_config_reload_waits_for_in_flight_response_without_event_i
         runtime_paths=runtime_paths_for(config),
     )
     setup_test_bot(bot, AsyncMock())
-    send_response = AsyncMock(return_value=None)
-    install_send_response_mock(bot, send_response)
 
     response_started = asyncio.Event()
     release_response = asyncio.Event()
 
-    async def response_function(message_id: str | None) -> None:
-        assert message_id is None
-        response_started.set()
-        await release_response.wait()
-
     runner = unwrap_extracted_collaborator(bot._response_runner)
-    request = ResponseRequest(
-        sources=ResponseSources(
-            pending_event_ids=("$reply",),
-            logical_source_event_ids=("$reply",),
-        ),
-        thread_history=(),
-        prompt="Hello",
-        response_envelope=request_envelope(
-            room_id="!room:localhost",
-            reply_to_event_id="$reply",
-            agent_name=bot.agent_name,
-        ),
-    )
+    request = _reply_request(bot.agent_name)
 
     async def run_response(_target: MessageTarget) -> SourceFate:
-        await response_function(None)
+        response_started.set()
+        await release_response.wait()
         return Owned()
 
     orchestrator = _MultiAgentOrchestrator(runtime_paths=orchestrator_runtime_paths(tmp_path))
@@ -3053,8 +3052,6 @@ def mock_agent_users() -> dict[str, AgentMatrixUser]:
 
 @pytest.mark.asyncio
 async def test_agent_joins_new_rooms_on_config_reload(  # noqa: C901
-    initial_config: Config,  # noqa: ARG001
-    updated_config: Config,  # noqa: ARG001
     mock_agent_users: dict[str, AgentMatrixUser],
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -3200,8 +3197,6 @@ async def test_router_updates_rooms_on_config_reload(
 
 @pytest.mark.asyncio
 async def test_new_agent_joins_rooms_on_config_reload(
-    initial_config: Config,  # noqa: ARG001
-    updated_config: Config,  # noqa: ARG001
     mock_agent_users: dict[str, AgentMatrixUser],
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -3253,8 +3248,6 @@ async def test_new_agent_joins_rooms_on_config_reload(
 
 @pytest.mark.asyncio
 async def test_team_room_changes_on_config_reload(
-    initial_config: Config,  # noqa: ARG001
-    updated_config: Config,  # noqa: ARG001
     mock_agent_users: dict[str, AgentMatrixUser],
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -3420,8 +3413,6 @@ async def test_orchestrator_handles_config_reload(
 
 @pytest.mark.asyncio
 async def test_room_membership_state_after_config_update(  # noqa: C901
-    initial_config: Config,  # noqa: ARG001
-    updated_config: Config,  # noqa: ARG001
     mock_agent_users: dict[str, AgentMatrixUser],
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -3581,19 +3572,7 @@ async def test_in_flight_response_count_nonzero_during_send_response(
     install_send_response_mock(bot, send_response)
 
     runner = unwrap_extracted_collaborator(bot._response_runner)
-    request = ResponseRequest(
-        sources=ResponseSources(
-            pending_event_ids=("$reply",),
-            logical_source_event_ids=("$reply",),
-        ),
-        thread_history=(),
-        prompt="Hello",
-        response_envelope=request_envelope(
-            room_id="!room:localhost",
-            reply_to_event_id="$reply",
-            agent_name=bot.agent_name,
-        ),
-    )
+    request = _reply_request(bot.agent_name)
 
     async def run_response(target: MessageTarget) -> SourceFate:
         await bot._delivery_gateway.send_text(
@@ -3662,19 +3641,7 @@ async def test_in_flight_response_count_stays_per_entity_across_bots(
     busy_runner = unwrap_extracted_collaborator(busy._response_runner)
     task = asyncio.create_task(
         busy_runner._run_locked_response_lifecycle(
-            ResponseRequest(
-                sources=ResponseSources(
-                    pending_event_ids=("$reply",),
-                    logical_source_event_ids=("$reply",),
-                ),
-                thread_history=(),
-                prompt="Hello",
-                response_envelope=request_envelope(
-                    room_id="!room:localhost",
-                    reply_to_event_id="$reply",
-                    agent_name=busy.agent_name,
-                ),
-            ),
+            _reply_request(busy.agent_name),
             response_kind="ai",
             locked_operation=blocked_response,
         ),
@@ -3726,19 +3693,7 @@ async def test_closed_admission_defers_response_until_gate_reopens(
     assert admission_gate.close_if_idle()
     task = asyncio.create_task(
         runner._run_locked_response_lifecycle(
-            ResponseRequest(
-                sources=ResponseSources(
-                    pending_event_ids=("$reply",),
-                    logical_source_event_ids=("$reply",),
-                ),
-                thread_history=(),
-                prompt="Hello",
-                response_envelope=request_envelope(
-                    room_id="!room:localhost",
-                    reply_to_event_id="$reply",
-                    agent_name=bot.agent_name,
-                ),
-            ),
+            _reply_request(bot.agent_name),
             response_kind="ai",
             locked_operation=run_response,
         ),
@@ -3791,19 +3746,7 @@ async def test_replaced_runtime_refuses_deferred_response_without_matrix_io(
     assert bot.admission_gate is admission_gate
     task = bot._response_runner.inbox.track_inbox_response(
         bot._response_runner.generate_response(
-            ResponseRequest(
-                sources=ResponseSources(
-                    pending_event_ids=("$reply",),
-                    logical_source_event_ids=("$reply",),
-                ),
-                thread_history=(),
-                prompt="Hello",
-                response_envelope=request_envelope(
-                    room_id="!room:localhost",
-                    reply_to_event_id="$reply",
-                    agent_name=bot.agent_name,
-                ),
-            ),
+            _reply_request(bot.agent_name),
         ),
         name="test_reload_admission_race",
         recovery_proof_ready=lambda: False,

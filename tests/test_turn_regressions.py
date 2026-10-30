@@ -11,7 +11,7 @@ import nio
 import pytest
 
 from mindroom import interactive
-from mindroom.coalescing.batch import CoalescingKey, PendingEvent, RequesterCoalescingOwner
+from mindroom.coalescing.batch import CoalescingKey, RequesterCoalescingOwner
 from mindroom.coalescing.gate import CoalescingGate, IngressAdmissionClosedError, LaneSlot, ReadyPendingEvent
 from mindroom.coalescing.ingress_lanes import ReceiptLaneKey
 from mindroom.coalescing.ingress_ticket import IngressTicket
@@ -22,7 +22,6 @@ from mindroom.dispatch_handoff import PreparedIngress
 from mindroom.dispatch_source import INTERACTIVE_SELECTION_SOURCE_KIND, MESSAGE_SOURCE_KIND
 from mindroom.matrix.thread_history_result import thread_history_result
 from mindroom.matrix.users import AgentMatrixUser
-from mindroom.response_sources import Owned
 from mindroom.streaming import send_streaming_response
 from mindroom.turns.dispatch import TurnDispatcher
 from tests.bot_helpers import make_test_agent_bot
@@ -83,20 +82,15 @@ def _text_event(event_id: str, body: str, origin_server_ts: int) -> nio.RoomMess
     )
 
 
-def _pending(event: nio.RoomMessageText) -> PendingEvent:
-    """Wrap one Matrix event as pending user ingress."""
-    return make_pending_event(
-        event,
-        nio.MatrixRoom("!room:localhost", "@mindroom:localhost"),
-        source_kind=MESSAGE_SOURCE_KIND,
-    )
-
-
 @pytest.mark.asyncio
 async def test_rejected_readiness_admission_releases_its_claim_once_readiness_ends() -> None:
     """A readiness task the gate refuses is cancelled, its late result closed, and its claim released only after it ends."""
     result_claim = live_turn_claim("$late:localhost")
-    pending_event = _pending(_text_event("$late:localhost", "late", 1000))
+    pending_event = make_pending_event(
+        _text_event("$late:localhost", "late", 1000),
+        nio.MatrixRoom("!room:localhost", "@mindroom:localhost"),
+        source_kind=MESSAGE_SOURCE_KIND,
+    )
     pending_event.claim = result_claim
     finish = asyncio.Event()
 
@@ -307,72 +301,6 @@ async def _assert_interactive_turn_aliases(
     assert question_record == selection_record
     assert question_record.source_event_ids == (selection_event_id,)
     assert question_record.discovery_event_ids == (selection.question_event_id,)
-
-
-@pytest.mark.asyncio
-async def test_handle_interactive_selection_does_not_mark_handled_when_its_reply_owns_the_selection(
-    tmp_path: Path,
-) -> None:
-    """A selection its reply's records own is left to them: the handler neither settles nor marks the turn handled."""
-    config = bind_runtime_paths(
-        Config(agents={"general": AgentConfig(display_name="General")}),
-        test_runtime_paths(tmp_path),
-    )
-    config.memory.backend = "file"
-
-    agent_user = AgentMatrixUser(
-        agent_name="general",
-        user_id="@mindroom_general:localhost",
-        display_name="GeneralAgent",
-        password="test_password",  # noqa: S106
-    )
-    bot = make_test_agent_bot(
-        agent_user=agent_user,
-        storage_path=tmp_path,
-        config=config,
-        runtime_paths=runtime_paths_for(config),
-        rooms=["!test:localhost"],
-    )
-    bot.client = AsyncMock()
-
-    room = MagicMock()
-    room.room_id = "!test:localhost"
-    selection = interactive.InteractiveSelection(
-        question_event_id="$question:localhost",
-        question_text="Which option should I use?",
-        selection_key="1",
-        selected_label="Option 1",
-        selected_value="Option 1",
-        thread_id="$thread-root:localhost",
-    )
-
-    bot._conversation_resolver.fetch_thread_history = AsyncMock(
-        return_value=thread_history_result([], is_full_history=True),
-    )
-    wrap_extracted_collaborators(bot, "_delivery_gateway")
-    bot._delivery_gateway.send_text = AsyncMock(return_value="$ack:localhost")
-    replace_turn_deps(
-        bot,
-        resolver=bot._conversation_resolver,
-        delivery_gateway=bot._delivery_gateway,
-    )
-    bot._turn_ingress.deps.turn_store.record_turn = AsyncMock()
-    generate_response_mock = AsyncMock(return_value=Owned())
-    install_generate_response_mock(bot, generate_response_mock)
-
-    assert (
-        await bot._interactive_selections._handle_interactive_selection(
-            room,
-            selection=selection,
-            facts=make_ingress_facts("@user:localhost", source_kind=INTERACTIVE_SELECTION_SOURCE_KIND),
-            source_event_id="$selection:localhost",
-            response_target=bot._interactive_selections._interactive_selection_target(room.room_id, selection),
-        )
-        is True
-    )
-
-    generate_response_mock.assert_awaited_once()
-    bot._turn_ingress.deps.turn_store.record_turn.assert_not_called()
 
 
 @pytest.mark.asyncio

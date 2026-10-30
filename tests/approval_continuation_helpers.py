@@ -224,7 +224,7 @@ async def advance_continuation(
     cli_call: dict[str, object] | None = None,
     continuation_count: int | None = None,
 ) -> ApprovalContinuation | None:
-    """Replace one claimed generation with the next exact Agno pause, pausing the resume that ran it."""
+    """Advance one claimed generation to its run's next pause on ``calls``, pausing the resume that ran it."""
     current = await principal.approvals.approval_continuation(approval_id)
     assert current is not None
     assert current.span_id is not None

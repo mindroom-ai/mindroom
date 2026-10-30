@@ -5,7 +5,6 @@ from __future__ import annotations
 import asyncio
 from contextlib import AbstractContextManager, nullcontext
 from dataclasses import replace
-from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any, cast
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -112,34 +111,6 @@ def report_tool() -> Iterator[type[ReportTools]]:
     """Register the ``report`` toolkit, whose ``write_report`` records each run, for the test."""
     with registered_report_tool() as report:
         yield report
-
-
-def _detached_approval_card() -> dict[str, Any]:
-    now = datetime.now(UTC)
-    return {
-        "event_id": "$approval",
-        "room_id": "!test:localhost",
-        "sender": "@mindroom_router:localhost",
-        "type": "io.mindroom.tool_approval",
-        "origin_server_ts": int(now.timestamp() * 1000),
-        "content": {
-            "approval_id": "approval-1",
-            "tool_name": "read_file",
-            "tool_call_id": "call-1",
-            "continuation_id": "continuation-1",
-            "continuation_generation": 0,
-            "arguments": {"path": "notes.txt"},
-            "status": "pending",
-            "requester_id": "@user:localhost",
-            "approver_user_id": "@user:localhost",
-            "requested_at": now.isoformat(),
-            "expires_at": (now + timedelta(minutes=5)).isoformat(),
-        },
-    }
-
-
-async def _cancel_dispatch_retry(bot: AgentBot) -> None:
-    await bot._journal_dispatcher.stop()
 
 
 def _approval_reply_event(
@@ -307,19 +278,6 @@ def _install_text_dispatch_mock(
     return handle_text_event
 
 
-async def _dispatch_message(bot: AgentBot, room: nio.MatrixRoom, event: nio.RoomMessageText) -> None:
-    """Exercise one message through its durable production entrypoint."""
-    source = dict(event.source)
-    source.setdefault("event_id", event.event_id)
-    source.setdefault("sender", event.sender)
-    source.setdefault("origin_server_ts", 1)
-    source.setdefault("type", "m.room.message")
-    event.source = source
-    event.decrypted = False
-    await admit_dispatch_event(bot._journal_dispatcher, room, event, EventKind.MESSAGE, EventClass.ACTIONABLE)
-    await bot._journal_dispatcher.drain_once()
-
-
 def _direct_response_request(target: MessageTarget, prompt: str, source_event_id: str) -> ResponseRequest:
     return ResponseRequest(
         sources=ResponseSources(
@@ -338,7 +296,7 @@ def _direct_response_request(target: MessageTarget, prompt: str, source_event_id
 
 
 class TestAgentBot(AgentBotTestBase):
-    """Bot behavior tests moved verbatim from tests/test_multi_agent_bot.py."""
+    """How one AgentBot handles reactions, interactive selections, and tool approvals."""
 
     @pytest.mark.asyncio
     async def test_recover_approval_final_owns_recovery_client_lifetime(
@@ -474,13 +432,7 @@ class TestAgentBot(AgentBotTestBase):
         denied_config.agents[mock_agent_user.agent_name].access = ResponderAccessConfig(users=[])
         bot = make_test_agent_bot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
         bot.client = MagicMock()
-        seen: list[str] = []
-
-        @hook(EVENT_REACTION_RECEIVED)
-        async def record_reaction(ctx: ReactionReceivedContext) -> None:
-            seen.append(ctx.event_id)
-
-        bot.hook_registry = HookRegistry.from_plugins([_hook_plugin("hooked", [record_reaction])])
+        seen = _install_reaction_recorder(bot)
         room = MagicMock(room_id="!test:localhost", canonical_alias=None)
         event = self._make_handler_event("reaction", sender=sender_id, event_id="$reaction-during-reload")
         event.reacts_to = ""
@@ -654,16 +606,10 @@ class TestAgentBot(AgentBotTestBase):
         tmp_path: Path,
     ) -> None:
         """An interactive consumer claim must not replay through generic reaction hooks."""
-        seen: list[str] = []
-
-        @hook(EVENT_REACTION_RECEIVED)
-        async def record_reaction(ctx: ReactionReceivedContext) -> None:
-            seen.append(ctx.event_id)
-
         config = self._config_for_storage(tmp_path)
         bot = make_test_agent_bot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
         bot.client = MagicMock()
-        bot.hook_registry = HookRegistry.from_plugins([_hook_plugin("hooked", [record_reaction])])
+        seen = _install_reaction_recorder(bot)
         room = MagicMock(room_id="!test:localhost")
         event = self._make_handler_event("reaction", sender="@user:localhost", event_id="$reaction")
         event.key = "✅"
@@ -688,12 +634,6 @@ class TestAgentBot(AgentBotTestBase):
         tmp_path: Path,
     ) -> None:
         """A config consumer claim must not replay through generic reaction hooks."""
-        seen: list[str] = []
-
-        @hook(EVENT_REACTION_RECEIVED)
-        async def record_reaction(ctx: ReactionReceivedContext) -> None:
-            seen.append(ctx.event_id)
-
         config = self._config_for_storage(tmp_path)
         router_user = replace(
             mock_agent_user,
@@ -703,7 +643,7 @@ class TestAgentBot(AgentBotTestBase):
         )
         bot = make_test_agent_bot(router_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
         bot.client = MagicMock()
-        bot.hook_registry = HookRegistry.from_plugins([_hook_plugin("hooked", [record_reaction])])
+        seen = _install_reaction_recorder(bot)
         room = MagicMock(room_id="!test:localhost")
         event = _reaction_event("✅", "$reaction")
 
@@ -2183,7 +2123,7 @@ class TestAgentBot(AgentBotTestBase):
                 await bot._journal_dispatcher.drain_once()
         finally:
             try:
-                await _cancel_dispatch_retry(bot)
+                await bot._journal_dispatcher.stop()
             finally:
                 await shutdown_approval_runtime()
 
@@ -2244,7 +2184,7 @@ class TestAgentBot(AgentBotTestBase):
                 EventClass.ACTIONABLE,
             )
             await bot._journal_dispatcher.drain_once()
-        await _cancel_dispatch_retry(bot)
+        await bot._journal_dispatcher.stop()
 
         # The crash leaves the event pending, but its consumer claim is durable,
         # so the replay cannot route the reply anywhere else.
@@ -2331,7 +2271,7 @@ class TestAgentBot(AgentBotTestBase):
             ),
         ):
             await _dispatch_reaction(bot, room, event)
-        await _cancel_dispatch_retry(bot)
+        await bot._journal_dispatcher.stop()
         assert (await bot._journal_dispatcher.store.pending())[
             0
         ].semantic_consumer is SemanticConsumer.TOOL_APPROVAL_REACTION
@@ -2404,7 +2344,7 @@ class TestAgentBot(AgentBotTestBase):
                 EventClass.ACTIONABLE,
             )
             await bot._journal_dispatcher.drain_once()
-        await _cancel_dispatch_retry(bot)
+        await bot._journal_dispatcher.stop()
         pending = await bot._journal_dispatcher.store.pending()
         assert pending[0].semantic_consumer is SemanticConsumer.STOP_REACTION
 
@@ -2458,7 +2398,7 @@ class TestAgentBot(AgentBotTestBase):
                 EventClass.ACTIONABLE,
             )
             await bot._journal_dispatcher.drain_once()
-        await _cancel_dispatch_retry(bot)
+        await bot._journal_dispatcher.stop()
         assert (await bot._journal_dispatcher.store.pending())[
             0
         ].semantic_consumer is SemanticConsumer.CONFIG_CONFIRMATION
@@ -2524,7 +2464,7 @@ class TestAgentBot(AgentBotTestBase):
             EventClass.ACTIONABLE,
         )
         await bot._journal_dispatcher.drain_once()
-        await _cancel_dispatch_retry(bot)
+        await bot._journal_dispatcher.stop()
         assert (await bot._journal_dispatcher.store.pending())[
             0
         ].semantic_consumer is SemanticConsumer.INTERACTIVE_REACTION
@@ -2636,13 +2576,7 @@ class TestAgentBot(AgentBotTestBase):
             runtime_paths=runtime_paths,
         )
         restarted.client = make_matrix_client_mock()
-        replays: list[str] = []
-
-        @hook(EVENT_REACTION_RECEIVED)
-        async def record_replay(ctx: ReactionReceivedContext) -> None:
-            replays.append(ctx.event_id)
-
-        restarted.hook_registry = HookRegistry.from_plugins([_hook_plugin("hooked", [record_replay])])
+        replays = _install_reaction_recorder(restarted)
         gate = restarted._runtime_view.response_admission_gate
         ingress = restarted._reaction_dispatcher.deps.ingress
         settled_inside_fence: list[tuple[tuple[str, ...], int]] = []

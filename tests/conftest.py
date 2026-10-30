@@ -107,10 +107,8 @@ from mindroom.event_journal import (
     EventKind,
     FinalAnswerEnqueue,
     InboundEvent,
-    JournalEvent,
     MatrixDelivery,
     MatrixDeliveryView,
-    PendingTurnView,
     PermanentDeliveryFailure,
     PrincipalStore,
     ProjectedEvent,
@@ -2167,34 +2165,6 @@ async def ignore_delivered_projection(
 
 
 @dataclass
-class FakePendingTurnStore:
-    """A journal holding no unfinished work, for tests that are not about the replay guard.
-
-    The empty answer is the one that changes nothing: the degraded replay
-    guard acts only on positive proof, so a store with nothing pending never
-    suppresses a turn. Tests that are about the guard admit into a real journal
-    instead, because the filtering they exercise happens in SQL.
-    """
-
-    async def pending_thread_events_after(
-        self,
-        *,
-        room_id: str,  # noqa: ARG002 - part of the view's shape
-        thread_id: str,  # noqa: ARG002 - part of the view's shape
-        after_origin_server_ts: int,  # noqa: ARG002 - part of the view's shape
-        excluding_event_id: str,  # noqa: ARG002 - part of the view's shape
-        limit: int = 256,  # noqa: ARG002 - part of the view's shape
-    ) -> tuple[JournalEvent, ...]:
-        """Return no unsettled events in this thread."""
-        return ()
-
-
-def make_pending_turn_view() -> PendingTurnView:
-    """Return a journal view that reports no unfinished work in any conversation."""
-    return cast("PendingTurnView", FakePendingTurnStore())
-
-
-@dataclass
 class FakeRelationStore:
     """The journal's answer about which events it admitted, and their threads."""
 
@@ -3207,7 +3177,7 @@ def replace_turn_deps(bot: RuntimeBot, **changes: object) -> None:
 
 @contextmanager
 def patch_response_runner_module(**changes: object) -> Generator[None, None, None]:
-    """Patch module-level response coordinator seams on the real current owners.
+    """Patch module-level response runner seams on the real current owners.
 
     A seam is patched in every reply module that imports it, so a resumed approval sees the replacement too.
     """

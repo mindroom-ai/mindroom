@@ -10,6 +10,7 @@ import nio
 import pytest
 
 from mindroom.bot import AgentBot
+from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.delivery_gateway import DeliveryGateway
 from mindroom.matrix.presence import is_user_online, should_use_streaming
@@ -34,34 +35,101 @@ if TYPE_CHECKING:
     from pathlib import Path
 
 
-def _mock_client() -> AsyncMock:
-    """Return an AsyncClient mock with safe thread-history defaults."""
-    return make_matrix_client_mock()
+def _presence_bot(tmp_path: Path) -> AgentBot:
+    """Return a streaming-enabled agent bot whose reply delivery runs through the real gateway."""
+    config = bind_runtime_paths(
+        with_current_room_member_access(
+            Config(
+                agents={
+                    "test_agent": AgentConfig(
+                        display_name="Test Agent",
+                        model="gpt-6-astra",
+                        rooms=["#test:localhost"],
+                    ),
+                },
+                models={
+                    "default": {"provider": "openai", "id": "test-model"},
+                    "gpt-6-astra": {"provider": "openai", "id": "gpt-6-astra"},
+                },
+            ),
+        ),
+        test_runtime_paths(tmp_path),
+    )
+    agent_user = AgentMatrixUser(
+        agent_name="test_agent",
+        display_name="Test Agent",
+        password="test_password",  # noqa: S106
+        user_id="@mindroom_test_agent:localhost",
+        access_token="test_token",  # noqa: S106
+    )
+    bot = make_test_bot_for_entity("test_agent", agent_user, config, runtime_paths_for(config), tmp_path)
+    assert isinstance(bot, AgentBot)
+    bot.client = make_matrix_client_mock()
+    bot.client.user_id = "@mindroom_test_agent:localhost"
+    bot.client.room_send = AsyncMock()
+    bot.client.room_put_state = AsyncMock()
+    install_runtime_journal_support(bot)
+    return bot
+
+
+def _hello_request() -> ResponseRequest:
+    """Return a user's message asking the agent to reply in its thread."""
+    return ResponseRequest(
+        sources=ResponseSources(
+            pending_event_ids=("$msg123",),
+            logical_source_event_ids=("$msg123",),
+        ),
+        prompt="Hello bot",
+        thread_history=[],
+        user_id="@user:localhost",
+        response_envelope=request_envelope(
+            room_id="!test:localhost",
+            reply_to_event_id="$msg123",
+            thread_id="$thread123",
+            prompt="Hello bot",
+            user_id="@user:localhost",
+            agent_name="test_agent",
+        ),
+    )
 
 
 class TestPresenceDetection:
     """Test presence detection functionality."""
 
     @pytest.mark.asyncio
-    async def test_is_user_online_when_online(self) -> None:
-        """Test that is_user_online returns True when user is online."""
-        mock_client = _mock_client()
-
-        # Mock successful presence response - user is online
+    @pytest.mark.parametrize(
+        ("presence", "last_active_ago", "expected"),
+        [
+            # Active 1 second ago.
+            pytest.param("online", 1000, True, id="online"),
+            # Idle for 5 minutes, but the client is open.
+            pytest.param("unavailable", 300000, True, id="unavailable"),
+            # Last active 1 hour ago.
+            pytest.param("offline", 3600000, False, id="offline"),
+        ],
+    )
+    async def test_is_user_online_follows_the_reported_presence(
+        self,
+        presence: str,
+        last_active_ago: int,
+        expected: bool,
+    ) -> None:
+        """An online or unavailable user counts as online; an offline user does not."""
+        mock_client = make_matrix_client_mock()
         mock_response = Mock(spec=nio.PresenceGetResponse)
-        mock_response.presence = "online"
-        mock_response.last_active_ago = 1000  # 1 second ago
+        mock_response.presence = presence
+        mock_response.last_active_ago = last_active_ago
         mock_client.get_presence.return_value = mock_response
 
         result = await is_user_online(mock_client, "@user:example.com")
 
-        assert result is True
+        assert result is expected
         mock_client.get_presence.assert_called_once_with("@user:example.com")
 
     @pytest.mark.asyncio
     async def test_is_user_online_prefers_cached_room_user_presence(self) -> None:
         """Cached room membership presence should avoid an extra `/presence` lookup."""
-        mock_client = _mock_client()
+        mock_client = make_matrix_client_mock()
         mock_client.rooms = {
             "!room:example.com": Mock(
                 users={
@@ -81,7 +149,7 @@ class TestPresenceDetection:
     @pytest.mark.asyncio
     async def test_is_user_online_falls_back_when_cached_room_user_presence_is_offline_default(self) -> None:
         """A cached room user with nio's offline default should still fall back to `/presence`."""
-        mock_client = _mock_client()
+        mock_client = make_matrix_client_mock()
         mock_client.rooms = {
             "!room:example.com": Mock(
                 users={
@@ -103,41 +171,9 @@ class TestPresenceDetection:
         mock_client.get_presence.assert_called_once_with("@user:example.com")
 
     @pytest.mark.asyncio
-    async def test_is_user_online_when_unavailable(self) -> None:
-        """Test that is_user_online returns True when user is unavailable (idle but client open)."""
-        mock_client = _mock_client()
-
-        # Mock successful presence response - user is unavailable (idle)
-        mock_response = Mock(spec=nio.PresenceGetResponse)
-        mock_response.presence = "unavailable"
-        mock_response.last_active_ago = 300000  # 5 minutes ago
-        mock_client.get_presence.return_value = mock_response
-
-        result = await is_user_online(mock_client, "@user:example.com")
-
-        assert result is True
-        mock_client.get_presence.assert_called_once_with("@user:example.com")
-
-    @pytest.mark.asyncio
-    async def test_is_user_online_when_offline(self) -> None:
-        """Test that is_user_online returns False when user is offline."""
-        mock_client = _mock_client()
-
-        # Mock successful presence response - user is offline
-        mock_response = Mock(spec=nio.PresenceGetResponse)
-        mock_response.presence = "offline"
-        mock_response.last_active_ago = 3600000  # 1 hour ago
-        mock_client.get_presence.return_value = mock_response
-
-        result = await is_user_online(mock_client, "@user:example.com")
-
-        assert result is False
-        mock_client.get_presence.assert_called_once_with("@user:example.com")
-
-    @pytest.mark.asyncio
     async def test_is_user_online_on_error(self) -> None:
         """Test that is_user_online returns False on presence check error."""
-        mock_client = _mock_client()
+        mock_client = make_matrix_client_mock()
 
         # Mock error response - create instance properly
         mock_error = nio.PresenceGetError.from_dict({"errcode": "M_FORBIDDEN", "error": "Forbidden"})
@@ -150,7 +186,7 @@ class TestPresenceDetection:
     @pytest.mark.asyncio
     async def test_is_user_online_on_exception(self) -> None:
         """Test that is_user_online returns False when exception is raised."""
-        mock_client = _mock_client()
+        mock_client = make_matrix_client_mock()
 
         # Mock exception
         mock_client.get_presence.side_effect = Exception("Network error")
@@ -272,45 +308,7 @@ class TestBotIntegration:
             yield " response"
 
         mock_stream_agent_response.return_value = mock_streaming_response()
-
-        # Create bot with streaming enabled
-        from mindroom.config.agent import AgentConfig  # noqa: PLC0415
-
-        config = bind_runtime_paths(
-            with_current_room_member_access(
-                Config(
-                    agents={
-                        "test_agent": AgentConfig(
-                            display_name="Test Agent",
-                            model="gpt-6-astra",
-                            rooms=["#test:localhost"],
-                        ),
-                    },
-                    models={
-                        "default": {"provider": "openai", "id": "test-model"},
-                        "gpt-6-astra": {"provider": "openai", "id": "gpt-6-astra"},
-                    },
-                ),
-            ),
-            test_runtime_paths(tmp_path),
-        )
-
-        agent_user = AgentMatrixUser(
-            agent_name="test_agent",
-            display_name="Test Agent",
-            password="test_password",  # noqa: S106
-            user_id="@mindroom_test_agent:localhost",
-            access_token="test_token",  # noqa: S106
-        )
-
-        bot = make_test_bot_for_entity("test_agent", agent_user, config, runtime_paths_for(config), tmp_path)
-        assert isinstance(bot, AgentBot)
-        bot.client = _mock_client()
-        bot.client.user_id = "@mindroom_test_agent:localhost"
-        bot.client.room_send = AsyncMock()
-        bot.client.room_put_state = AsyncMock()
-        install_runtime_journal_support(bot)
-        expected_config = config
+        bot = _presence_bot(tmp_path)
 
         async def mock_edit_message_result(
             _client: object,
@@ -319,7 +317,6 @@ class TestBotIntegration:
             content: dict,
             _display_text: str,
         ) -> object:
-            assert config is expected_config
             return delivered_matrix_event("$edit", content)
 
         # Simulate a message from a user
@@ -338,25 +335,7 @@ class TestBotIntegration:
                 side_effect=DeliveryGateway.deliver_final,
             ) as deliver_final,
         ):
-            await bot._response_runner.generate_response(
-                ResponseRequest(
-                    sources=ResponseSources(
-                        pending_event_ids=("$msg123",),
-                        logical_source_event_ids=("$msg123",),
-                    ),
-                    prompt="Hello bot",
-                    thread_history=[],
-                    user_id="@user:localhost",
-                    response_envelope=request_envelope(
-                        room_id="!test:localhost",
-                        reply_to_event_id="$msg123",
-                        thread_id="$thread123",
-                        prompt="Hello bot",
-                        user_id="@user:localhost",
-                        agent_name="test_agent",
-                    ),
-                ),
-            )
+            await bot._response_runner.generate_response(_hello_request())
 
         # Should have streamed the reply since user is online
         mock_stream_agent_response.assert_called_once()
@@ -380,44 +359,7 @@ class TestBotIntegration:
             yield "Test response"
 
         mock_stream_agent_response.return_value = mock_streaming_response()
-
-        # Create bot with streaming enabled
-        from mindroom.config.agent import AgentConfig  # noqa: PLC0415
-
-        config = bind_runtime_paths(
-            with_current_room_member_access(
-                Config(
-                    agents={
-                        "test_agent": AgentConfig(
-                            display_name="Test Agent",
-                            model="gpt-6-astra",
-                            rooms=["#test:localhost"],
-                        ),
-                    },
-                    models={
-                        "default": {"provider": "openai", "id": "test-model"},
-                        "gpt-6-astra": {"provider": "openai", "id": "gpt-6-astra"},
-                    },
-                ),
-            ),
-            test_runtime_paths(tmp_path),
-        )
-
-        agent_user = AgentMatrixUser(
-            agent_name="test_agent",
-            display_name="Test Agent",
-            password="test_password",  # noqa: S106
-            user_id="@mindroom_test_agent:localhost",
-            access_token="test_token",  # noqa: S106
-        )
-
-        bot = make_test_bot_for_entity("test_agent", agent_user, config, runtime_paths_for(config), tmp_path)
-        assert isinstance(bot, AgentBot)
-        bot.client = _mock_client()
-        bot.client.user_id = "@mindroom_test_agent:localhost"
-        bot.client.room_send = AsyncMock()
-        bot.client.room_put_state = AsyncMock()
-        install_runtime_journal_support(bot)
+        bot = _presence_bot(tmp_path)
 
         # Simulate a message from a user
         with (
@@ -434,25 +376,7 @@ class TestBotIntegration:
                 side_effect=DeliveryGateway.deliver_final,
             ) as deliver_final,
         ):
-            await bot._response_runner.generate_response(
-                ResponseRequest(
-                    sources=ResponseSources(
-                        pending_event_ids=("$msg123",),
-                        logical_source_event_ids=("$msg123",),
-                    ),
-                    prompt="Hello bot",
-                    thread_history=[],
-                    user_id="@user:localhost",
-                    response_envelope=request_envelope(
-                        room_id="!test:localhost",
-                        reply_to_event_id="$msg123",
-                        thread_id="$thread123",
-                        prompt="Hello bot",
-                        user_id="@user:localhost",
-                        agent_name="test_agent",
-                    ),
-                ),
-            )
+            await bot._response_runner.generate_response(_hello_request())
 
         # Should have delivered the collected reply whole since user is offline
         mock_stream_agent_response.assert_called_once()

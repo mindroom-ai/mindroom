@@ -1,4 +1,4 @@
-"""Agent response lifecycle through the ResponseRunner seam: process_and_respond, delivery, and generate_response."""
+"""Agent response lifecycle through the ResponseRunner seam: generate_response, its delivery, and its locked turn."""
 
 from __future__ import annotations
 
@@ -102,7 +102,6 @@ from tests.bot_helpers import (
     _hook_plugin,
     _make_matrix_client_mock,
     _noop_typing_indicator,
-    _outcome,
     _response_request,
     _runtime_bound_config,
     _set_knowledge_for_agent,
@@ -129,7 +128,13 @@ from tests.fakes.scripted_model import Await, ScriptedModel, ScriptStep, answer
 from tests.journal_membership_helpers import admit_room_membership
 from tests.reply_span_helpers import reply_span, response_span
 from tests.response_attempt_helpers import install_direct_response_admission
-from tests.response_runner_helpers import delivered_turn, stream_transport, streamed_answer
+from tests.response_runner_helpers import (
+    attempt_in_place,
+    delivered_turn,
+    recorded_reply_event,
+    stream_transport,
+    streamed_answer,
+)
 
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator, AsyncIterator, Awaitable, Callable, Coroutine, Sequence
@@ -159,13 +164,6 @@ async def _respond(bot: AgentBot, request: ResponseRequest, *, streaming: bool =
         await runner.generate_response(request)
     [delivery] = ended
     return delivery
-
-
-async def _reply_event_id(bot: AgentBot, source_event_id: str) -> str | None:
-    """Return the event the reply answering ``source_event_id`` shows, from its durable record."""
-    reply = await bot._reply_runtime.store.replies.for_sources((source_event_id,))
-    assert reply is not None
-    return reply.event_id
 
 
 def _consuming_send(transport: StreamTransportOutcome) -> Callable[..., Awaitable[StreamTransportOutcome]]:
@@ -209,7 +207,7 @@ def test_cached_room_display_name_uses_synced_matrix_room() -> None:
 
 
 class TestAgentBot(AgentBotTestBase):
-    """Bot behavior tests moved verbatim from tests/test_multi_agent_bot.py."""
+    """Agent replies through the bot's response runner: preparation, delivery, hooks, and settlement."""
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize(
@@ -1245,11 +1243,6 @@ class TestAgentBot(AgentBotTestBase):
         tmp_path: Path,
     ) -> None:
         """Non-streaming AI calls should receive the events of the room's replies whose span runs here."""
-
-        @asynccontextmanager
-        async def noop_typing_indicator(*_args: object, **_kwargs: object) -> AsyncGenerator[None]:
-            yield
-
         config = self._config_for_storage(tmp_path)
         bot = make_test_agent_bot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
         install_direct_response_admission(bot)
@@ -1263,7 +1256,7 @@ class TestAgentBot(AgentBotTestBase):
         with patch.object(ReplyRuntime, "live_event_ids", new=live_event_ids):
             mock_ai_response = AsyncMock(return_value="Handled")
             with patch_response_runner_module(
-                typing_indicator=noop_typing_indicator,
+                typing_indicator=_noop_typing_indicator,
                 stream_agent_response=streamed_answer(mock_ai_response),
             ):
                 await _respond(
@@ -1367,10 +1360,6 @@ class TestAgentBot(AgentBotTestBase):
     ) -> None:
         """Streaming AI calls should receive the events of the room's replies whose span runs here."""
 
-        @asynccontextmanager
-        async def noop_typing_indicator(*_args: object, **_kwargs: object) -> AsyncGenerator[None]:
-            yield
-
         async def mock_streaming_response() -> AsyncGenerator[str, None]:
             yield "chunk"
 
@@ -1390,7 +1379,7 @@ class TestAgentBot(AgentBotTestBase):
             ) as mock_send_streaming_response:
                 mock_send_streaming_response.side_effect = _consuming_send(stream_transport("$response", "chunk"))
                 with patch_response_runner_module(
-                    typing_indicator=noop_typing_indicator,
+                    typing_indicator=_noop_typing_indicator,
                     stream_agent_response=mock_stream,
                 ):
                     await _respond(
@@ -1666,11 +1655,10 @@ class TestAgentBot(AgentBotTestBase):
         """Pipeline outcome summaries must not report cancelled or error states as plain send/edit success."""
         assert (
             outcome_label(
-                _outcome(
-                    Cancelled("user_stop"),
-                    final_visible_event_id="$cancelled",
-                    visible_response_event_id="$cancelled",
-                    turn_completion_event_id="$cancelled",
+                FinalDeliveryOutcome(
+                    ending=Cancelled("user_stop"),
+                    event_id="$cancelled",
+                    is_visible_response=True,
                     final_visible_body="Cancelled.",
                     delivery_kind="edited",
                 ),
@@ -1679,10 +1667,10 @@ class TestAgentBot(AgentBotTestBase):
         )
         assert (
             outcome_label(
-                _outcome(
-                    Failed(FailureCause.ERROR, "boom"),
-                    final_visible_event_id="$error",
-                    visible_response_event_id="$error",
+                FinalDeliveryOutcome(
+                    ending=Failed(FailureCause.ERROR, "boom"),
+                    event_id="$error",
+                    is_visible_response=True,
                     final_visible_body="boom",
                 ),
             )
@@ -1696,11 +1684,6 @@ class TestAgentBot(AgentBotTestBase):
         tmp_path: Path,
     ) -> None:
         """Hidden tool calls should not propagate structured tool metadata."""
-
-        @asynccontextmanager
-        async def noop_typing_indicator(*_args: object, **_kwargs: object) -> AsyncGenerator[None]:
-            yield
-
         config = _runtime_bound_config(
             Config(
                 agents={
@@ -1730,7 +1713,7 @@ class TestAgentBot(AgentBotTestBase):
             yield "Hidden tool call output"
 
         with patch_response_runner_module(
-            typing_indicator=noop_typing_indicator,
+            typing_indicator=_noop_typing_indicator,
             stream_agent_response=fake_stream_agent_response,
         ):
             delivery = await _respond(
@@ -1763,11 +1746,6 @@ class TestAgentBot(AgentBotTestBase):
         tmp_path: Path,
     ) -> None:
         """A reply delivered without streaming that shows its tool calls sends the trace ``ai_response`` collected."""
-
-        @asynccontextmanager
-        async def noop_typing_indicator(*_args: object, **_kwargs: object) -> AsyncGenerator[None]:
-            yield
-
         config = _runtime_bound_config(
             Config(
                 agents={
@@ -1800,7 +1778,7 @@ class TestAgentBot(AgentBotTestBase):
             yield "Final answer"
 
         with patch_response_runner_module(
-            typing_indicator=noop_typing_indicator,
+            typing_indicator=_noop_typing_indicator,
             stream_agent_response=fake_stream_agent_response,
         ):
             delivery = await _respond(
@@ -1839,12 +1817,6 @@ class TestAgentBot(AgentBotTestBase):
         tmp_path: Path,
     ) -> None:
         """Top-level response generation should preserve current-turn time as request data."""
-
-        async def run_cancellable_response(*_args: object, **kwargs: object) -> FinalDeliveryOutcome:
-            response_kwargs = cast("dict[str, Callable[[str | None], Awaitable[FinalDeliveryOutcome]]]", kwargs)
-            response_function = response_kwargs["response_function"]
-            return await response_function(None)
-
         scheduled_tasks: list[asyncio.Task[None]] = []
 
         async def fake_store_conversation_memory(*_args: object, **_kwargs: object) -> None:
@@ -1886,11 +1858,7 @@ class TestAgentBot(AgentBotTestBase):
 
         answer = AsyncMock(return_value="ok")
         with (
-            patch.object(
-                LockedTurns,
-                "_run_cancellable_response",
-                new=AsyncMock(side_effect=run_cancellable_response),
-            ),
+            patch.object(LockedTurns, "_run_cancellable_response", new=attempt_in_place()),
             patch("mindroom.response_runner.should_use_streaming", new_callable=AsyncMock, return_value=False),
             patch("mindroom.response_runner.stream_agent_response", new=streamed_answer(answer)),
             patch("mindroom.reply_turn.locked_turn.create_background_task", side_effect=schedule_background_task),
@@ -1942,12 +1910,6 @@ class TestAgentBot(AgentBotTestBase):
         tmp_path: Path,
     ) -> None:
         """Memory storage should receive the raw conversation, not the model-prefixed version."""
-
-        async def run_cancellable_response(*_args: object, **kwargs: object) -> FinalDeliveryOutcome:
-            response_kwargs = cast("dict[str, Callable[[str | None], Awaitable[FinalDeliveryOutcome]]]", kwargs)
-            response_function = response_kwargs["response_function"]
-            return await response_function(None)
-
         scheduled_tasks: list[asyncio.Task[None]] = []
         stored_calls: list[tuple[tuple[object, ...], dict[str, object]]] = []
 
@@ -1998,11 +1960,7 @@ class TestAgentBot(AgentBotTestBase):
 
         answer = AsyncMock(return_value="ok")
         with (
-            patch.object(
-                LockedTurns,
-                "_run_cancellable_response",
-                new=AsyncMock(side_effect=run_cancellable_response),
-            ),
+            patch.object(LockedTurns, "_run_cancellable_response", new=attempt_in_place()),
             patch_response_runner_module(
                 should_use_streaming=AsyncMock(return_value=False),
                 stream_agent_response=streamed_answer(answer),
@@ -2367,13 +2325,6 @@ class TestAgentBot(AgentBotTestBase):
     ) -> None:
         """Queued turns should replace stale pending history with a fresh post-lock snapshot."""
 
-        async def run_cancellable_response(*_args: object, **kwargs: object) -> FinalDeliveryOutcome:
-            response_function = cast(
-                "Callable[[str | None], Awaitable[FinalDeliveryOutcome]]",
-                kwargs["response_function"],
-            )
-            return await response_function(None)
-
         def passthrough_prepare_context(
             prompt: str,
             thread_history: Sequence[ResolvedVisibleMessage],
@@ -2418,11 +2369,7 @@ class TestAgentBot(AgentBotTestBase):
 
         answer = AsyncMock(return_value="ok")
         with (
-            patch.object(
-                LockedTurns,
-                "_run_cancellable_response",
-                new=AsyncMock(side_effect=run_cancellable_response),
-            ),
+            patch.object(LockedTurns, "_run_cancellable_response", new=attempt_in_place()),
             patch.object(
                 bot._conversation_resolver,
                 "fetch_thread_history",
@@ -2457,7 +2404,7 @@ class TestAgentBot(AgentBotTestBase):
                 )
 
         assert resolution == Owned()
-        assert await _reply_event_id(bot, "$event") == "$response1"
+        assert await recorded_reply_event(bot, "$event") == "$response1"
         mock_fetch_thread_history.assert_awaited_once_with(
             "!test:localhost",
             "$thread",
@@ -2473,14 +2420,6 @@ class TestAgentBot(AgentBotTestBase):
         tmp_path: Path,
     ) -> None:
         """An agent with its own timezone sees the thread's user messages timed in that zone, not the global one."""
-
-        async def run_cancellable_response(*_args: object, **kwargs: object) -> FinalDeliveryOutcome:
-            response_function = cast(
-                "Callable[[str | None], Awaitable[FinalDeliveryOutcome]]",
-                kwargs["response_function"],
-            )
-            return await response_function(None)
-
         config = self._config_for_storage(tmp_path)
         config.timezone = "UTC"
         config.agents[mock_agent_user.agent_name].timezone = "America/Los_Angeles"
@@ -2491,11 +2430,7 @@ class TestAgentBot(AgentBotTestBase):
 
         answer = AsyncMock(return_value="ok")
         with (
-            patch.object(
-                LockedTurns,
-                "_run_cancellable_response",
-                new=AsyncMock(side_effect=run_cancellable_response),
-            ),
+            patch.object(LockedTurns, "_run_cancellable_response", new=attempt_in_place()),
             patch.object(
                 bot._conversation_resolver,
                 "fetch_thread_history",
@@ -3007,14 +2942,6 @@ class TestAgentBot(AgentBotTestBase):
         tmp_path: Path,
     ) -> None:
         """Late cancellation should not skip agent post-response cleanup after delivery."""
-
-        async def run_cancellable_response(*_args: object, **kwargs: object) -> FinalDeliveryOutcome:
-            response_function = cast(
-                "Callable[[str | None], Awaitable[FinalDeliveryOutcome]]",
-                kwargs["response_function"],
-            )
-            return await response_function(None)
-
         started = asyncio.Event()
         release = asyncio.Event()
         effects: list[FinalDeliveryOutcome] = []
@@ -3041,11 +2968,7 @@ class TestAgentBot(AgentBotTestBase):
                     ),
                 ),
             ),
-            patch.object(
-                LockedTurns,
-                "_run_cancellable_response",
-                new=AsyncMock(side_effect=run_cancellable_response),
-            ),
+            patch.object(LockedTurns, "_run_cancellable_response", new=attempt_in_place()),
             patch("mindroom.response_runner.should_use_streaming", new_callable=AsyncMock, return_value=False),
             patch(
                 "mindroom.response_lifecycle.apply_post_response_effects",

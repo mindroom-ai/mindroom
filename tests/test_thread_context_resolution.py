@@ -208,7 +208,7 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
 
     @pytest.mark.asyncio
     async def test_extract_context_edit_of_plain_root_message_stays_room_level(self, bot: AgentBot) -> None:
-        """Edits of plain room-root messages should not be promoted into thread context."""
+        """An edit of a plain room-root message stays room-level when its thread history holds only the root."""
         room = _matrix_room(name="Test Room")
 
         event = nio.RoomMessageText.from_dict(
@@ -666,65 +666,6 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
             "$plain-reply:localhost",
             "$thread-reply:localhost",
         }
-
-    @pytest.mark.asyncio
-    async def test_extract_context_edit_of_plain_root_message_stays_room_level_when_history_has_only_root(
-        self,
-        bot: AgentBot,
-    ) -> None:
-        """Root-edit fallback should require child events before treating a message as threaded."""
-        room = _matrix_room(name="Test Room")
-
-        event = nio.RoomMessageText.from_dict(
-            {
-                "content": {
-                    "body": "* updated room message",
-                    "msgtype": "m.text",
-                    "m.new_content": {
-                        "body": "updated room message",
-                        "msgtype": "m.text",
-                    },
-                    "m.relates_to": {"rel_type": "m.replace", "event_id": "$room_root:localhost"},
-                },
-                "event_id": "$edit_event:localhost",
-                "sender": "@user:localhost",
-                "origin_server_ts": 1234567897,
-                "room_id": room.room_id,
-                "type": "m.room.message",
-            },
-        )
-
-        bot.client.room_get_event = AsyncMock(
-            return_value=nio.RoomGetEventResponse.from_dict(
-                {
-                    "content": {
-                        "body": "Room root",
-                        "msgtype": "m.text",
-                    },
-                    "event_id": "$room_root:localhost",
-                    "sender": "@user:localhost",
-                    "origin_server_ts": 1234567895,
-                    "room_id": room.room_id,
-                    "type": "m.room.message",
-                },
-            ),
-        )
-
-        root_only = [
-            _message(event_id="$room_root:localhost", body="Room root", thread_id="$room_root:localhost"),
-        ]
-        await seed_thread_history(
-            bot,
-            room_id=room.room_id,
-            thread_id="$room_root:localhost",
-            messages=root_only,
-        )
-        context = await bot._conversation_resolver.extract_message_context(room, event)
-
-        assert context.is_thread is False
-        assert context.thread_id is None
-        assert context.thread_history == []
-        bot.client.room_get_event.assert_awaited_once_with(room.room_id, "$room_root:localhost")
 
     @pytest.mark.asyncio
     async def test_extract_context_edit_of_plain_root_message_degrades_when_thread_lookup_fails(

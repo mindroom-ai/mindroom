@@ -3,9 +3,7 @@
 from __future__ import annotations
 
 import asyncio
-from contextlib import asynccontextmanager
 from dataclasses import replace
-from types import SimpleNamespace
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -15,7 +13,6 @@ from mindroom.ai import ai_response
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
-from mindroom.config.plugin import PluginEntryConfig
 from mindroom.delivery_gateway import DeliveryGateway
 from mindroom.dispatch_source import MESSAGE_SOURCE_KIND
 from mindroom.final_delivery import Completed, FinalDeliveryOutcome, StreamTransportOutcome
@@ -45,7 +42,7 @@ from mindroom.teams.members import BuiltTeam, ResolvedExactTeamMembers, build_te
 from mindroom.teams.spec import TeamMode
 from mindroom.turn_model import ModelScope, resolve_turn_model
 from tests.access_schema_support import with_current_room_member_access
-from tests.bot_helpers import make_test_agent_bot
+from tests.bot_helpers import _hook_plugin, make_test_agent_bot
 from tests.conftest import (
     TEST_PASSWORD,
     bind_runtime_paths,
@@ -60,7 +57,7 @@ from tests.conftest import (
     unwrap_extracted_collaborator,
 )
 from tests.fakes.scripted_model import ScriptedModel, answer
-from tests.response_runner_helpers import stream_transport
+from tests.response_runner_helpers import _noop_typing, stream_transport
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
@@ -87,16 +84,6 @@ def _config(tmp_path: Path) -> Config:
             ),
         ),
         runtime_paths,
-    )
-
-
-def _plugin(name: str, callbacks: list[object]) -> SimpleNamespace:
-    return SimpleNamespace(
-        name=name,
-        discovered_hooks=tuple(callbacks),
-        discovered_automations=(),
-        entry_config=PluginEntryConfig(path=f"./plugins/{name}"),
-        plugin_order=0,
     )
 
 
@@ -156,11 +143,6 @@ def _make_bot(tmp_path: Path) -> AgentBot:
     bot.client.user_id = agent_user.user_id
     bot._knowledge_access_support.for_agent = MagicMock(return_value=None)
     return bot
-
-
-@asynccontextmanager
-async def _noop_typing_indicator(*_args: object, **_kwargs: object) -> AsyncIterator[None]:
-    yield
 
 
 def test_system_enrich_event_and_context_helpers(tmp_path: Path) -> None:
@@ -238,7 +220,7 @@ async def test_emit_collect_system_enrich_merges_in_order_and_respects_scope(tmp
         ctx.add_instruction("second", "fast")
 
     registry = HookRegistry.from_plugins(
-        [_plugin("system-enrich", [slow_valid, wrong_agent, wrong_room, fast_valid])],
+        [_hook_plugin("system-enrich", [slow_valid, wrong_agent, wrong_room, fast_valid])],
     )
     context = _system_context(tmp_path)
 
@@ -264,7 +246,7 @@ async def test_emit_collect_system_enrich_rendered_output_is_deterministic(tmp_p
         ctx.add_instruction("volatile-a", "early volatile", cache_policy="volatile")
         ctx.add_instruction("stable-a", "early stable", cache_policy="stable")
 
-    registry = HookRegistry.from_plugins([_plugin("system-enrich", [slow_hook, fast_hook])])
+    registry = HookRegistry.from_plugins([_hook_plugin("system-enrich", [slow_hook, fast_hook])])
     items = await emit_collect(registry, EVENT_SYSTEM_ENRICH, _system_context(tmp_path))
 
     assert render_system_enrichment_block(items) == (
@@ -505,40 +487,23 @@ async def test_agent_delivery_threads_system_enrichment_items(tmp_path: Path, st
     )
     runner = unwrap_extracted_collaborator(bot._response_runner)
     effects = AsyncMock()
+    delivered = FinalDeliveryOutcome(
+        ending=Completed(),
+        event_id="$response",
+        is_visible_response=True,
+        final_visible_body="handled",
+        delivery_kind="sent",
+    )
     with (
         patch.object(DeliveryGateway, "send_text", new=AsyncMock(return_value="$placeholder")),
-        patch.object(
-            DeliveryGateway,
-            "deliver_final",
-            new=AsyncMock(
-                return_value=FinalDeliveryOutcome(
-                    ending=Completed(),
-                    event_id="$response",
-                    is_visible_response=True,
-                    final_visible_body="handled",
-                    delivery_kind="sent",
-                ),
-            ),
-        ),
+        patch.object(DeliveryGateway, "deliver_final", new=AsyncMock(return_value=delivered)),
         patch(
             "mindroom.delivery_gateway.send_streaming_response",
             new=AsyncMock(side_effect=fake_send_streaming_response),
         ),
-        patch.object(
-            DeliveryGateway,
-            "finalize_streamed_response",
-            new=AsyncMock(
-                return_value=FinalDeliveryOutcome(
-                    ending=Completed(),
-                    event_id="$response",
-                    is_visible_response=True,
-                    final_visible_body="handled",
-                    delivery_kind="sent",
-                ),
-            ),
-        ),
+        patch.object(DeliveryGateway, "finalize_streamed_response", new=AsyncMock(return_value=delivered)),
         patch_response_runner_module(
-            typing_indicator=_noop_typing_indicator,
+            typing_indicator=_noop_typing,
             stream_agent_response=fake_stream_agent_response,
             should_use_streaming=AsyncMock(return_value=streaming),
             apply_post_response_effects=effects,

@@ -62,7 +62,6 @@ def _runner_on(
     The runner's gateway runs its replies' effects, as the bot wires them.
     """
     deps = unwrap_extracted_collaborator(bot._response_runner).deps
-    assert deps.replies is not None
     replies = replace(deps.replies, store=principal)
     return runner_for(
         replace(

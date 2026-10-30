@@ -77,6 +77,7 @@ from tests.conftest import (
 from tests.identity_helpers import entity_ids, persist_entity_accounts
 from tests.reply_span_helpers import seed_finished_reply
 from tests.response_attempt_helpers import install_direct_response_admission
+from tests.response_runner_helpers import recorded_reply_event
 from tests.team_turn_helpers import scripted_team_stream
 
 if TYPE_CHECKING:
@@ -153,15 +154,8 @@ def mock_agent_user() -> AgentMatrixUser:
     return make_mock_agent_user()
 
 
-async def _reply_event_id(bot: AgentBot, source_event_id: str) -> str | None:
-    """Return the event the reply answering ``source_event_id`` shows, from its durable record."""
-    reply = await bot._reply_runtime.store.replies.for_sources((source_event_id,))
-    assert reply is not None
-    return reply.event_id
-
-
 class TestAgentBot(AgentBotTestBase):
-    """Bot behavior tests moved verbatim from tests/test_multi_agent_bot.py."""
+    """Team replies through the bot's response runner: preparation, delivery, hooks, and settlement."""
 
     @pytest.mark.asyncio
     async def test_team_model_snapshot_precedes_locked_turn_preparation(
@@ -595,7 +589,7 @@ class TestAgentBot(AgentBotTestBase):
             )
 
         assert resolution == Owned()
-        assert await _reply_event_id(bot, "$team-root") == "$team"
+        assert await recorded_reply_event(bot, "$team-root") == "$team"
         # Both the placeholder and its edit go out through the outbox now, so
         # they are the two calls on one mock: the first is the placeholder, the
         # second the frozen replace envelope.
@@ -714,7 +708,7 @@ class TestAgentBot(AgentBotTestBase):
             )
 
         assert resolution == Owned()
-        assert await _reply_event_id(bot, "$team-root") == "$team"
+        assert await recorded_reply_event(bot, "$team-root") == "$team"
 
     @pytest.mark.asyncio
     async def test_generate_team_response_helper_merges_raw_prompt_with_model_prompt(
@@ -771,7 +765,7 @@ class TestAgentBot(AgentBotTestBase):
             )
 
         assert resolution == Owned()
-        assert await _reply_event_id(bot, "$team-root") == "$team"
+        assert await recorded_reply_event(bot, "$team-root") == "$team"
         _spec, ctx = team_stream.call_args.args
         prepared_message = ctx.prompt
         assert "Summarize the latest invoice." in prepared_message
@@ -836,7 +830,7 @@ class TestAgentBot(AgentBotTestBase):
             )
 
         assert resolution == Owned()
-        assert await _reply_event_id(bot, "$team-root") == "$team"
+        assert await recorded_reply_event(bot, "$team-root") == "$team"
         _spec, ctx = team_stream.call_args.args
         prepared_message = ctx.prompt
         assert prepared_message == timestamped_prompt
@@ -975,7 +969,7 @@ class TestAgentBot(AgentBotTestBase):
             )
 
         assert resolution == Owned()
-        assert await _reply_event_id(bot, envelope.source_event_id) == "$team"
+        assert await recorded_reply_event(bot, envelope.source_event_id) == "$team"
         # Two sends now: the placeholder, then its frozen replace envelope.
         assert len(sent_contents) == 2
         content, edit = sent_contents
@@ -1293,7 +1287,7 @@ class TestAgentBot(AgentBotTestBase):
 
         # The stream filled the reply's placeholder, and the answer stands as a delivered reply.
         assert resolution == Owned()
-        assert await _reply_event_id(bot, "$event") == "$team-response1"
+        assert await recorded_reply_event(bot, "$event") == "$team-response1"
         final_edit = bot.client.room_send.await_args_list[-1].kwargs["content"]
         assert final_edit["m.relates_to"] == {"rel_type": "m.replace", "event_id": "$team-response1"}
         assert final_edit["m.new_content"]["body"] == "Team reply"
@@ -1346,11 +1340,6 @@ class TestAgentBot(AgentBotTestBase):
         tmp_path: Path,
     ) -> None:
         """Team streaming should stay enabled when reusing the startup placeholder."""
-
-        @asynccontextmanager
-        async def noop_typing_indicator(*_args: object, **_kwargs: object) -> AsyncGenerator[None]:
-            yield
-
         delivered: list[FinalDeliveryOutcome] = []
 
         async def run_cancellable_response(*_args: object, **kwargs: object) -> FinalDeliveryOutcome:
@@ -1372,7 +1361,7 @@ class TestAgentBot(AgentBotTestBase):
         with (
             patch_response_runner_module(
                 should_use_streaming=AsyncMock(return_value=True),
-                typing_indicator=noop_typing_indicator,
+                typing_indicator=_noop_typing_indicator,
                 team_response_stream=fake_team_response_stream,
             ),
             patch.object(
@@ -1614,12 +1603,12 @@ class TestAgentBot(AgentBotTestBase):
         bot.client.room_redact.assert_not_awaited()
 
     @pytest.mark.asyncio
-    async def test_generate_team_response_helper_returns_none_when_suppressed_placeholder_is_redacted(
+    async def test_generate_team_response_helper_suppression_ends_with_no_visible_event(
         self,
         mock_agent_user: AgentMatrixUser,
         tmp_path: Path,
     ) -> None:
-        """A suppressed team answer leaves no reply event behind and reports none."""
+        """A suppressed team answer leaves no reply event behind, so nothing is redacted."""
 
         @hook(EVENT_MESSAGE_BEFORE_RESPONSE)
         async def before_hook(ctx: BeforeResponseContext) -> None:

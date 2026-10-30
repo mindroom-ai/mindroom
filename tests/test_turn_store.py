@@ -1598,20 +1598,7 @@ async def test_active_ad_hoc_team_redaction_uses_pending_response_scope(
         ],
     )
     storage = _seeded_storage_with_runs(tmp_path, session, name="team_private")
-    state_writer = MagicMock()
-    state_writer.create_storage.return_value = storage
-    state_writer.history_scope.return_value = HistoryScope(kind="agent", scope_id="agent")
-    store = TurnStore(
-        TurnStoreDeps(
-            turn_records=journal_store.turn_records("agent"),
-            legacy_responses_file=None,
-            state_writer=state_writer,
-            tool_runtime=MagicMock(),
-            response_recovery_state=AsyncMock(),
-            retry_dispatch_sources=MagicMock(),
-        ),
-    )
-    await store.warm()
+    store = await _store_with_storage(journal_store, storage)
     response_record = TurnRecord.create(
         ["$user_msg"],
         requester_id="@user:example.org",
@@ -2801,17 +2788,21 @@ async def test_prepared_voice_checkpoint_retention_follows_unsettled_sources(
     assert (await restored.get_turn_record("$voice") is not None) == (state != "settled")
 
 
-async def _edited(store: TurnStore, revision: tuple[int, str], text: str) -> tuple[TurnRecord, int, str, str]:
+async def _edited(
+    store: TurnStore,
+    revision: tuple[int, str],
+    text: str,
+) -> tuple[TurnRecord, tuple[int, str], str]:
     """Register an edit of ``$source`` and return what its regeneration commits: the turn, revision, and text."""
     loaded = await store.get_turn_record_after_writes("$source")
     assert loaded is not None
     assert await store.register_edit_revision(loaded, "$source", revision) is not None
-    return loaded, revision[0], revision[1], text
+    return loaded, revision, text
 
 
-async def _commit(store: TurnStore, edited: tuple[TurnRecord, int, str, str]) -> None:
-    loaded, timestamp_ms, revision_id, text = edited
-    await store.record_edit(loaded, edited_event_id="$source", prompt=text, revision=(timestamp_ms, revision_id))
+async def _commit(store: TurnStore, edited: tuple[TurnRecord, tuple[int, str], str]) -> None:
+    loaded, revision, text = edited
+    await store.record_edit(loaded, edited_event_id="$source", prompt=text, revision=revision)
 
 
 @pytest.mark.asyncio

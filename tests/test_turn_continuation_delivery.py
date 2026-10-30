@@ -25,7 +25,6 @@ from mindroom.delivery_gateway import (
     FinalizeStreamedResponseRequest,
     StreamingDeliveryRequest,
 )
-from mindroom.final_delivery import Completed, FinalDeliveryOutcome, StreamTransportOutcome
 from mindroom.history.session_context import ScopeSessionContext
 from mindroom.history.types import HistoryScope
 from mindroom.llm.runs import ToolExecution
@@ -41,11 +40,20 @@ from mindroom.response_turn import (
     stream_response_turn,
 )
 from tests.conftest import patch_response_runner_module, unwrap_extracted_collaborator
-from tests.response_runner_helpers import _bot, _noop_typing, _plain_request, _target, stream_transport
+from tests.response_runner_helpers import (
+    _bot,
+    _noop_typing,
+    _plain_request,
+    _target,
+    completed_outcome,
+    stream_transport,
+)
 
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator, AsyncIterator, Callable
     from pathlib import Path
+
+    from mindroom.final_delivery import FinalDeliveryOutcome, StreamTransportOutcome
 
 
 def _continuing_tool_execution() -> ToolExecution:
@@ -58,16 +66,6 @@ def _continuing_tool_execution() -> ToolExecution:
             {"action": "switch", "model": "large", "status": "ok", "tool": "thread_model", "when": "next-turn"},
         ),
         stop_after_call=True,
-    )
-
-
-def _completed_outcome(event_id: str, body: str) -> FinalDeliveryOutcome:
-    return FinalDeliveryOutcome(
-        ending=Completed(),
-        event_id=event_id,
-        is_visible_response=True,
-        final_visible_body=body,
-        delivery_kind="sent",
     )
 
 
@@ -126,7 +124,7 @@ async def test_non_streaming_continuation_delivers_final_exactly_once_after_last
     async def spy_deliver_final(_self: DeliveryGateway, request: FinalDeliveryRequest) -> FinalDeliveryOutcome:
         events.append("deliver_final")
         delivered.append(request)
-        return _completed_outcome("$response", body=request.response_text)
+        return completed_outcome("$response", body=request.response_text)
 
     async def run_attempt(
         _run: TurnRunState,
@@ -209,7 +207,7 @@ async def test_streaming_continuation_finalizes_exactly_once_after_last_attempt(
     ) -> FinalDeliveryOutcome:
         events.append("finalize")
         finalize_requests.append(request)
-        return _completed_outcome("$stream", body=request.stream_transport_outcome.visible_body_text)
+        return completed_outcome("$stream", body=request.stream_transport_outcome.visible_body_text)
 
     async def run_attempt(
         _run: TurnRunState,

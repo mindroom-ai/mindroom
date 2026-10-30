@@ -1496,7 +1496,7 @@ def load_golden(name: str) -> dict[str, Any]:
 
 @dataclass(frozen=True)
 class RecordedScenario:
-    """What one scenario ran and handed out, and every request it sent, grouped by model in build order."""
+    """What one scenario ran and handed out, and every request it sent, grouped by model and ordered by ``Recorder.ordered_calls``."""
 
     output: ScenarioOutput
     calls: list[ModelCall]

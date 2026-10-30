@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Literal
 from unittest.mock import Mock
 
 import pytest
@@ -31,7 +31,7 @@ from mindroom.session_storage.store import ConversationStore
 from mindroom.tool_system.events import ToolTraceEntry
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncGenerator
+    from collections.abc import AsyncGenerator, AsyncIterator, Callable
 
     from mindroom.history.interrupted_replay import InterruptedReplaySnapshot
     from mindroom.session_storage.types import ConversationSession
@@ -66,7 +66,6 @@ def _continuation() -> TurnContinuationRunState:
     )
 
 
-@dataclass(frozen=True)
 class _Partial:
     """A running attempt that has shown some text and finished one call."""
 
@@ -104,10 +103,14 @@ def stored(monkeypatch: pytest.MonkeyPatch) -> _Stored:
     return result
 
 
-def _adapter(run_attempt: Any, *, kind: str = "agent") -> TurnAdapter[str]:  # noqa: ANN401
+def _adapter(
+    run_attempt: Callable[[TurnRunState, TurnContinuationRunState], AsyncIterator[str | AttemptResolved]],
+    *,
+    kind: Literal["agent", "team"] = "agent",
+) -> TurnAdapter[str]:
     def _load() -> ScopeSessionContext:
         return ScopeSessionContext(
-            scope=HistoryScope(kind=kind, scope_id="helper"),  # type: ignore[arg-type]
+            scope=HistoryScope(kind=kind, scope_id="helper"),
             storage=Mock(spec=ConversationStore),
             session=None,
             session_id="session-1",

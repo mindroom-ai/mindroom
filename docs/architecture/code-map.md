@@ -22,6 +22,7 @@ Matrix sync callback
   -> turns/dispatch.py (owns one turn from gate exit: prepare -> decide -> execute -> record)
        -> turn_policy.py + command_turn_executor.py              (ignore / route / respond decision, command execution)
        -> response_runner.py -> ai.py / teams/envelope.py        (lifecycle lock, entity envelopes)
+       -> reply_turn/locked_turn.py                              (one settlement for agent, team, and approval turns)
             -> response_turn.py                                  (shared streaming turn driver; blocking replies collect it)
        -> streaming.py + delivery_gateway.py                     (progressive edits, Matrix send)
        -> turn_store.py / event_journal/turn_rows.py             (durable dedup so restarts don't double-reply)

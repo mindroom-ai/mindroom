@@ -7,7 +7,7 @@ step runs exactly once while the lifecycle lock is held.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import nio
@@ -40,9 +40,10 @@ from tests.conftest import (
     unwrap_extracted_collaborator,
     wrap_extracted_collaborators,
 )
+from tests.response_runner_helpers import attempt_in_place
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable, Sequence
+    from collections.abc import Sequence
     from pathlib import Path
 
     from mindroom.bot import AgentBot
@@ -320,13 +321,6 @@ async def test_generate_response_invokes_preparer_exactly_once_under_lock(tmp_pa
         lock_held_at_prepare.append(coordinator.has_active_response_for_target(target))
         return await real_prepare(request)
 
-    async def fake_run_cancellable_response(**kwargs: object) -> FinalDeliveryOutcome:
-        response_function = cast(
-            "Callable[[object | None], Awaitable[FinalDeliveryOutcome]]",
-            kwargs["response_function"],
-        )
-        return await response_function(None)
-
     delivered = FinalDeliveryOutcome(
         ending=Completed(),
         event_id="$response",
@@ -342,11 +336,7 @@ async def test_generate_response_invokes_preparer_exactly_once_under_lock(tmp_pa
             "build_dispatch_payload_with_attachments",
             new=AsyncMock(return_value=DispatchPayload(prompt="built")),
         ),
-        patch.object(
-            LockedTurns,
-            "_run_cancellable_response",
-            new=AsyncMock(side_effect=fake_run_cancellable_response),
-        ),
+        patch.object(LockedTurns, "_run_cancellable_response", new=attempt_in_place()),
         patch.object(coordinator, "_deliver_turn", new=AsyncMock(return_value=delivered)),
         patch("mindroom.response_runner.should_use_streaming", AsyncMock(return_value=False)),
     ):

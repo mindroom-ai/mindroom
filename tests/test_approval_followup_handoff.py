@@ -25,7 +25,6 @@ from mindroom.llm.runs import ToolExecution
 from mindroom.reply_turn.request import ResponseRequest
 from mindroom.response_sources import Owned
 from mindroom.response_turn import CompletedApprovalRun, PausedAttempt
-from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 from tests.approval_continuation_helpers import approval_continuation, dispatch_approval, resumed_approval
 from tests.conftest import unwrap_extracted_collaborator
 from tests.reply_span_helpers import paused_for_approval
@@ -103,24 +102,14 @@ def _ready_continuation() -> ApprovalContinuation:
             ),
         ),
         show_tool_calls=False,
-        execution_identity=ToolExecutionIdentity(
-            channel="matrix",
-            agent_name="general",
-            requester_id="@user:localhost",
-            room_id="!room:localhost",
-            thread_id="$thread",
-            resolved_thread_id="$thread",
-            session_id="session-1",
-        ),
     )
 
 
-async def _seed_ready_continuation(bot: AgentBot) -> ApprovalContinuation:
+async def _seed_ready_continuation(bot: AgentBot) -> None:
     """Pause a reply for a ready continuation, then start the bot that resumes it."""
     continuation = _ready_continuation()
     assert await paused_for_approval(bot.journal_principal(), continuation) == continuation
     await bot._take_over_replies()
-    return continuation
 
 
 @pytest.mark.asyncio

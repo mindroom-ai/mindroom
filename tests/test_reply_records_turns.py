@@ -134,11 +134,8 @@ def _sent_bodies(bot: AgentBot) -> list[str]:
 def _model_stream(model: AsyncMock) -> Callable[..., AsyncIterator[str]]:
     """Return a turn stream that awaits ``model`` with the turn's inputs, then yields the answer it returns."""
 
-    def stream(*args: object, **kwargs: object) -> AsyncIterator[str]:
-        async def answer() -> AsyncIterator[str]:
-            yield await model(*args, **kwargs)
-
-        return answer()
+    async def stream(*args: object, **kwargs: object) -> AsyncIterator[str]:
+        yield await model(*args, **kwargs)
 
     return stream
 
@@ -753,7 +750,7 @@ async def test_regeneration_failing_before_its_first_write_keeps_the_old_answer(
 async def test_an_edit_regenerates_in_place_the_streaming_answer_it_stopped(tmp_path: Path) -> None:
     """An edit stops a still-streaming answer as a Stop does, and its regeneration then rewrites that answer."""
     bot = await _streaming_bot(tmp_path)
-    response, _streaming = await _blocked_stream(bot)
+    response = await _blocked_stream(bot)
     streamed = await _reply(bot)
     assert streamed.event_id is not None
     await _pending_turn(bot)
@@ -1240,7 +1237,7 @@ async def _blocked_stream(
     bot: AgentBot,
     first_chunk: str | None = "Partial",
     request: ResponseRequest | None = None,
-) -> tuple[asyncio.Task[str | None], asyncio.Event]:
+) -> asyncio.Task[SourceFate]:
     """Start a streamed answer to ``request`` that shows ``first_chunk``, if any, and then waits until cancelled."""
     runner = unwrap_extracted_collaborator(bot._response_runner)
     streaming = asyncio.Event()
@@ -1259,13 +1256,13 @@ async def _blocked_stream(
     ):
         response = asyncio.create_task(runner.generate_response(request or _plain_request(_target())))
         await asyncio.wait_for(streaming.wait(), timeout=5)
-    return response, streaming
+    return response
 
 
 async def test_a_stop_on_a_running_reply_does_not_wait_for_its_conversation(tmp_path: Path) -> None:
     """The reply's records take the Stop at once, without waiting for the conversation or naming it on the turn."""
     bot = await _streaming_bot(tmp_path)
-    response, _streaming = await _blocked_stream(bot)
+    response = await _blocked_stream(bot)
     reply = await _reply(bot)
     assert reply.event_id is not None
     await _pending_turn(bot)
@@ -1286,7 +1283,7 @@ def _stop_reaction(reacts_to: str) -> MagicMock:
 async def test_a_stop_reaction_reaches_a_running_reply_only_in_its_room(tmp_path: Path) -> None:
     """A running reply's records accept its Stop reaction; the same event named from another room is left alone."""
     bot = await _streaming_bot(tmp_path)
-    response, _streaming = await _blocked_stream(bot)
+    response = await _blocked_stream(bot)
     reply = await _reply(bot)
     assert reply.event_id is not None
     await _pending_turn(bot)
@@ -1324,7 +1321,7 @@ async def test_a_stop_before_the_create_is_acknowledged_applies_when_it_is(tmp_p
     with patch("mindroom.delivery_gateway.send_message_outcome", new=flaky.send):
         # The answer shows nothing yet: its first text would be a create this
         # homeserver refuses, which fails the stream before the Stop arrives.
-        response, _streaming = await _blocked_stream(bot, first_chunk=None)
+        response = await _blocked_stream(bot, first_chunk=None)
         await asyncio.wait_for(flaky.refused.wait(), timeout=5)
         reply = await _reply(bot)
         assert reply.event_id is None
@@ -1359,7 +1356,7 @@ async def test_a_stop_reaches_a_reply_whose_attempt_created_its_event(tmp_path: 
     # The placeholder's send fails, so the attempt starts without an event.
     flaky = _FlakyHomeserver(failures=1)
     with patch("mindroom.delivery_gateway.send_message_outcome", new=flaky.send):
-        response, _streaming = await _blocked_stream(bot)
+        response = await _blocked_stream(bot)
         reply = await asyncio.wait_for(created(), timeout=5)
         assert reply.event_id is not None
         stop = await _stop(bot, reply.event_id, 7)
@@ -1405,7 +1402,7 @@ async def test_a_stop_after_a_restart_cancels_the_reply_the_old_instance_left(tm
         return reply
 
     with patch("mindroom.response_attempt.is_user_online", new=AsyncMock(return_value=True)):
-        response, _streaming = await _blocked_stream(old)
+        response = await _blocked_stream(old)
         left = await asyncio.wait_for(shown_with_button(), timeout=5)
     assert left.event_id is not None
 
@@ -1439,10 +1436,10 @@ async def test_a_stop_after_a_restart_cancels_the_reply_the_old_instance_left(tm
 async def _restarted_after_partial(
     tmp_path: Path,
     shown_text: str | None = "Partial",
-) -> tuple[AgentBot, asyncio.Task[str | None]]:
+) -> tuple[AgentBot, asyncio.Task[SourceFate]]:
     """Stop an instance while its reply shows ``shown_text``, or only its placeholder; return the one that took over."""
     old = await _streaming_bot(tmp_path)
-    response, _streaming = await _blocked_stream(old, shown_text)
+    response = await _blocked_stream(old, shown_text)
 
     async def shown() -> None:
         while (shown_text or "Thinking") not in "".join(_sent_bodies(old)):  # noqa: ASYNC110
@@ -1701,7 +1698,7 @@ async def test_a_regeneration_rerun_after_a_restart_keeps_what_its_first_attempt
     old = await _streaming_bot(tmp_path)
     await _answer(old, _plain_request(_target()), AsyncMock(return_value="First answer."))
     await _admit_edit(old)
-    response, _streaming = await _blocked_stream(old, "New partial", _regeneration(answer_event_id="$sent1"))
+    response = await _blocked_stream(old, "New partial", _regeneration(answer_event_id="$sent1"))
 
     async def shown() -> None:
         while "New partial" not in _sent_bodies(old):  # noqa: ASYNC110
@@ -1747,7 +1744,7 @@ async def test_a_replay_ingress_will_not_answer_ends_the_reply_a_restart_left(tm
         return reply
 
     with patch("mindroom.response_attempt.is_user_online", new=AsyncMock(return_value=True)):
-        response, _streaming = await _blocked_stream(old)
+        response = await _blocked_stream(old)
         left = await asyncio.wait_for(shown_with_button(), timeout=5)
 
     restarted = _bot(tmp_path)
@@ -1779,7 +1776,7 @@ async def test_a_replay_ingress_will_not_answer_ends_the_reply_a_restart_left(tm
 async def test_leaving_the_room_mid_stream_ends_the_reply_without_writing_to_it(tmp_path: Path) -> None:
     """The departure ends the reply gone and releases its span; the cancelled stream writes nothing more."""
     bot = await _streaming_bot(tmp_path)
-    response, _streaming = await _blocked_stream(bot)
+    response = await _blocked_stream(bot)
 
     async def partial_shown() -> None:
         while "Partial" not in _sent_bodies(bot):  # noqa: ASYNC110
@@ -1852,7 +1849,7 @@ async def test_a_prompt_deleted_before_the_model_runs_removes_its_placeholder(tm
 async def test_deleting_the_prompt_mid_stream_removes_its_reply(tmp_path: Path) -> None:
     """The tombstone ends the reply gone: its running span is cancelled and the event it showed is redacted."""
     bot = await _streaming_bot(tmp_path)
-    response, _streaming = await _blocked_stream(bot)
+    response = await _blocked_stream(bot)
 
     async def partial_shown() -> None:
         while "Partial" not in _sent_bodies(bot):  # noqa: ASYNC110
@@ -1970,7 +1967,7 @@ async def test_a_stopped_regeneration_that_wrote_nothing_removes_its_button_as_i
     bot = await _streaming_bot(tmp_path)
     await _answer(bot, _plain_request(_target()), AsyncMock(return_value="First answer."))
     with patch("mindroom.response_attempt.is_user_online", new=AsyncMock(return_value=True)):
-        response, _streaming = await _blocked_stream(
+        response = await _blocked_stream(
             bot,
             first_chunk=None,
             request=_regeneration(answer_event_id="$sent1"),
@@ -2002,7 +1999,7 @@ async def test_history_counts_a_reply_in_progress_only_while_its_span_runs(tmp_p
     """A reply whose span runs here is in progress; once it ends, it is not."""
     bot = await _streaming_bot(tmp_path)
     runner = unwrap_extracted_collaborator(bot._response_runner)
-    response, _streaming = await _blocked_stream(bot)
+    response = await _blocked_stream(bot)
     reply = await _reply(bot)
     assert await runner._active_response_event_ids(_target().room_id) == {reply.event_id}
     assert await runner._active_response_event_ids("!elsewhere:localhost") == set()

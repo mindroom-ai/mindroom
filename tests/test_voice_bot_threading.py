@@ -59,19 +59,6 @@ if TYPE_CHECKING:
     from mindroom.turn_record import TurnRecord
 
 
-def _agent_bot(*, agent_user: AgentMatrixUser, storage_path: Path, config: Config, rooms: list[str]) -> AgentBot:
-    """Construct an agent bot with the explicit runtime bound to the test config."""
-    return install_runtime_journal_support(
-        make_test_agent_bot(
-            agent_user=agent_user,
-            storage_path=storage_path,
-            config=config,
-            runtime_paths=runtime_paths_for(config),
-            rooms=rooms,
-        ),
-    )
-
-
 @pytest.fixture
 def generate_response_mock() -> AsyncMock:
     """Generation seam mock installed on mock_home_bot."""
@@ -97,7 +84,15 @@ def mock_home_bot(generate_response_mock: AsyncMock) -> AgentBot:
         ),
     )
     config = bind_runtime_paths(config, test_runtime_paths(tmpdir))
-    bot = _agent_bot(agent_user=agent_user, storage_path=tmpdir, config=config, rooms=["!test:server"])
+    bot = install_runtime_journal_support(
+        make_test_agent_bot(
+            agent_user=agent_user,
+            storage_path=tmpdir,
+            config=config,
+            runtime_paths=runtime_paths_for(config),
+            rooms=["!test:server"],
+        ),
+    )
     wrap_extracted_collaborators(bot)
     bot.client = AsyncMock()
     bot.client.rooms = {}

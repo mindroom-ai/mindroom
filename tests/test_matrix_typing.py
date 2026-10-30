@@ -13,9 +13,9 @@ import pytest_asyncio
 from mindroom.matrix import typing as typing_module
 from mindroom.matrix.client_session import MindRoomAsyncClient
 from mindroom.matrix.typing import typing_indicator
+from mindroom.reply_turn.inbox import InboxResponses
 from mindroom.runtime_shutdown import ORDERLY_SHUTDOWN
 from tests.conftest import TEST_ACCESS_TOKEN
-from tests.reply_turn_helpers import runner_for
 
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator
@@ -106,8 +106,8 @@ async def test_process_shutdown_releases_typing_without_new_matrix_request() -> 
             entered.set()
             await asyncio.Event().wait()
 
-    runner = runner_for(AsyncMock())
-    task = runner.inbox.track_inbox_response(
+    inbox = InboxResponses(logger=MagicMock(), replies=MagicMock(), retry_approval_sources=MagicMock())
+    task = inbox.track_inbox_response(
         hold_typing(),
         name="test_process_shutdown_typing",
         recovery_proof_ready=lambda: False,
@@ -115,7 +115,7 @@ async def test_process_shutdown_releases_typing_without_new_matrix_request() -> 
     )
     await asyncio.wait_for(entered.wait(), timeout=1.0)
 
-    completed = await runner.inbox.drain_inbox_responses(
+    completed = await inbox.drain_inbox_responses(
         cancel_after_seconds=0.1,
         shutdown_intent=ORDERLY_SHUTDOWN,
     )

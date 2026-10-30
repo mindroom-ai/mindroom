@@ -511,7 +511,6 @@ async def test_a_follow_up_waits_for_the_running_reply_and_skips_what_it_collect
         collected = await runtime.wait("work", owner=owner, depth=0, timeout=0)
         await runtime.acknowledge_wait("work", collected.claim)
         request = runner._job_follow_up_request(key, "job-follow-up:1")
-        assert not await runner._follow_up_due(request)
         # Nothing claimed a reply for it, so its source settles.
         assert await runner._generate_job_follow_up(request) == Unclaimed(UnclaimedReason.NOT_DUE)
         await runner._run_job_follow_up(event)

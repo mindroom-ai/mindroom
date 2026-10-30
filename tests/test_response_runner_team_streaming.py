@@ -14,7 +14,6 @@ import pytest
 from mindroom import response_lifecycle
 from mindroom.bot import AgentBot
 from mindroom.cancellation import (
-    classify_cancel_source,
     current_task_is_process_shutdown,
     request_task_cancel,
 )
@@ -49,7 +48,6 @@ from mindroom.llm.messages import Message
 from mindroom.llm.runs import RunStatus, TeamRunRecord
 from mindroom.message_target import MessageTarget
 from mindroom.prompt_message_tags import render_msg_tag
-from mindroom.reply_lifecycle import SpanOutcome
 from mindroom.reply_turn.locked_turn import LockedTurns
 from mindroom.response_sources import Owned
 from mindroom.response_turn import (
@@ -82,13 +80,17 @@ from tests.ai_user_id_helpers import (
     bind_runtime_paths,
     team_orchestrator,
 )
-from tests.bot_helpers import (
-    _handled_response_event_id,
-    unique_room_send_responses,
-)
+from tests.bot_helpers import unique_room_send_responses
 from tests.conftest import install_model_providers, seed_session
 from tests.fakes.scripted_model import Await, ScriptedModel, answer
 from tests.reply_turn_helpers import runner_for
+from tests.response_runner_helpers import (
+    answering_event,
+    assert_interrupted_messages,
+    attempt_in_place,
+    stream_transport,
+    turn_left_to_replay,
+)
 from tests.team_turn_helpers import scripted_team_stream
 
 if TYPE_CHECKING:
@@ -97,7 +99,6 @@ if TYPE_CHECKING:
 
     from mindroom.constants import RuntimePaths
     from mindroom.delivery_gateway import StreamingDeliveryRequest
-    from mindroom.response_runner import ResponseRunner
     from mindroom.response_turn import ResponseTurnContext, TurnRunState, TurnSinks
     from mindroom.session_storage.store import ConversationStore
     from mindroom.teams.envelope import TeamTurnSpec
@@ -143,30 +144,6 @@ def _persisted_runs(store: ConversationStore) -> list[TeamRunRecord]:
     return [run for run in session.runs if isinstance(run, TeamRunRecord)]
 
 
-def _assert_interrupted_messages(
-    run: TeamRunRecord,
-    *,
-    response_event_id: str,
-    assistant_body: str,
-) -> None:
-    assert run.messages is not None
-    assert [message.role for message in run.messages] == ["user", "assistant"]
-    assert 'event_id="$user_msg"' in cast("str", run.messages[0].content)
-    assert "Hello" in cast("str", run.messages[0].content)
-    assert run.metadata is not None
-    assert run.metadata["matrix_response_event_id"] == response_event_id
-    assert run.messages[1].content == assistant_body
-
-
-def _streamed(event_id: str | None, body: str) -> StreamTransportOutcome:
-    """Return what a stream that ran to its end left: ``body``, shown in ``event_id``."""
-    return StreamTransportOutcome(
-        last_physical_stream_event_id=event_id,
-        rendered_body=body,
-        visible_body_state="visible_body",
-    )
-
-
 @dataclass(frozen=True)
 class _Shown:
     """A running attempt that has shown ``text``, as an interruption records it."""
@@ -178,20 +155,6 @@ class _Shown:
 
 
 type _Attempt = Callable[[TurnRunState], AsyncIterator[str | AttemptResolved]]
-
-
-def _answering_event(effects: AsyncMock) -> str | None:
-    """Return the event that answers the turn, from the one ending its post-response effects received."""
-    [call] = effects.await_args_list
-    return _handled_response_event_id(call.args[0])
-
-
-async def _left_to_replay(coordinator: ResponseRunner, source_event_id: str = "$user_msg") -> bool:
-    """Return whether the turn's span ended without its interruption note, which leaves its sources for a replay."""
-    reply = await coordinator.deps.replies.store.replies.for_sources((source_event_id,))
-    assert reply is not None
-    spans = await coordinator.deps.replies.store.replies.spans(reply.reply_id)
-    return spans[-1].outcome not in {SpanOutcome.FAILED, SpanOutcome.CANCELLED}
 
 
 def _driven_team_stream(
@@ -283,7 +246,6 @@ async def test_generate_team_response_helper_preserves_raw_prompt_when_model_pro
             config=config,
             runtime_paths=runtime_paths,
             storage_path=tmp_path,
-            requester_id="@alice:localhost",
             message_target=MessageTarget.resolve("!test:localhost", "$thread-root", "$user_msg"),
             orchestrator=team_orchestrator(config, runtime_paths),
         )
@@ -323,7 +285,6 @@ async def test_generate_team_response_helper_runs_the_team_in_its_mode(tmp_path:
             config=config,
             runtime_paths=runtime_paths,
             storage_path=tmp_path,
-            requester_id="@alice:localhost",
             message_target=MessageTarget.resolve("!test:localhost", "$thread-root", "$user_msg"),
             orchestrator=team_orchestrator(config, runtime_paths),
         )
@@ -366,7 +327,6 @@ async def test_process_shutdown_blocks_team_terminal_delivery_after_generation_c
             config=config,
             runtime_paths=runtime_paths,
             storage_path=tmp_path,
-            requester_id="@alice:localhost",
             message_target=MessageTarget.resolve("!test:localhost", "$thread-root", "$user_msg"),
             orchestrator=team_orchestrator(config, runtime_paths),
         )
@@ -411,7 +371,6 @@ async def test_team_delivery_exposes_fixed_shutdown_phase(
         config=config,
         runtime_paths=runtime_paths,
         storage_path=tmp_path,
-        requester_id="@alice:localhost",
         message_target=MessageTarget.resolve("!test:localhost", "$thread-root", "$user_msg"),
         orchestrator=team_orchestrator(config, runtime_paths),
     )
@@ -441,7 +400,7 @@ async def test_team_delivery_exposes_fixed_shutdown_phase(
         _set_gateway_method(
             gateway,
             "deliver_stream",
-            AsyncMock(return_value=_streamed("$team-stream", "Team answer")),
+            AsyncMock(return_value=stream_transport("$team-stream", "Team answer")),
         )
         _set_gateway_method(gateway, "_finalize_streamed_response", AsyncMock(side_effect=retained_boundary))
 
@@ -511,7 +470,6 @@ async def test_generate_team_response_appends_matrix_tool_prompt_context(tmp_pat
             config=config,
             runtime_paths=runtime_paths,
             storage_path=tmp_path,
-            requester_id="@alice:localhost",
             message_target=MessageTarget.resolve("!test:localhost", "$thread-root", "$user_msg"),
             orchestrator=team_orchestrator(config, runtime_paths),
         )
@@ -561,7 +519,6 @@ async def test_team_turn_checks_its_own_room_for_redacted_history(tmp_path: Path
             config=config,
             runtime_paths=runtime_paths,
             storage_path=tmp_path,
-            requester_id="@alice:localhost",
             message_target=MessageTarget.resolve("!test:localhost", "$thread-root", "$user_msg"),
             orchestrator=team_orchestrator(config, runtime_paths),
         )
@@ -617,7 +574,6 @@ async def test_generate_team_response_allows_explicit_private_ad_hoc_member(tmp_
             config=config,
             runtime_paths=runtime_paths,
             storage_path=tmp_path,
-            requester_id="@alice:localhost",
             message_target=MessageTarget.resolve("!test:localhost", "$thread-root", "$user_msg"),
             orchestrator=team_orchestrator(config, runtime_paths),
         )
@@ -666,7 +622,6 @@ async def test_generate_team_response_passes_resolved_correlation_id_to_the_team
             config=config,
             runtime_paths=runtime_paths,
             storage_path=tmp_path,
-            requester_id="@alice:localhost",
             message_target=MessageTarget.resolve("!test:localhost", "$thread-root", "$original"),
             orchestrator=team_orchestrator(config, runtime_paths),
         )
@@ -748,7 +703,6 @@ async def test_generate_team_response_preserves_model_prompt_in_persisted_sessio
             config=config,
             runtime_paths=runtime_paths,
             storage_path=tmp_path,
-            requester_id="@alice:localhost",
             team_history_storage=store,
             message_target=MessageTarget.resolve("!test:localhost", "$thread-root", "$user_msg"),
             orchestrator=team_orchestrator(config, runtime_paths),
@@ -823,7 +777,6 @@ async def test_generate_team_response_preserves_model_prompt(tmp_path: Path) -> 
             config=config,
             runtime_paths=runtime_paths,
             storage_path=tmp_path,
-            requester_id="@alice:localhost",
             team_history_storage=store,
             message_target=MessageTarget.resolve("!test:localhost", "$thread-root", "$user_msg"),
             orchestrator=team_orchestrator(config, runtime_paths),
@@ -882,7 +835,6 @@ async def test_team_session_started_fires_once_for_the_reply_that_creates_its_se
             config=config,
             runtime_paths=runtime_paths,
             storage_path=tmp_path,
-            requester_id="@alice:localhost",
             hook_registry=HookRegistry.from_plugins([_plugin("session-hooks", [started, after])]),
             team_history_storage=store,
             message_target=MessageTarget.resolve("!test:localhost", "$thread-root", "$user_msg"),
@@ -895,7 +847,7 @@ async def test_team_session_started_fires_once_for_the_reply_that_creates_its_se
             rendered = "".join([str(chunk) async for chunk in request.response_stream])
             event_id = f"$streamed{next(streamed)}"
             request.visible_event_id_callback(event_id)
-            return _streamed(event_id, rendered)
+            return stream_transport(event_id, rendered)
 
         coordinator.deps.delivery_gateway.deliver_stream.side_effect = consume_delivery
 
@@ -973,7 +925,6 @@ async def test_generate_team_response_helper_streaming_emits_session_started_aft
             config=config,
             runtime_paths=runtime_paths,
             storage_path=tmp_path,
-            requester_id="@alice:localhost",
             hook_registry=registry,
             team_history_storage=store,
             message_target=MessageTarget.resolve("!test:localhost", "$thread-root", "$user_msg"),
@@ -998,7 +949,7 @@ async def test_generate_team_response_helper_streaming_emits_session_started_aft
 
     # The reply's own event: the placeholder its stream and notes write into.
     assert resolution == Owned()
-    assert _answering_event(effects) == "$thinking"
+    assert answering_event(effects) == "$thinking"
     assert sequence == [
         "deliver",
         "stream",
@@ -1040,7 +991,6 @@ async def test_generate_team_response_helper_streaming_delivery_carries_live_met
             config=config,
             runtime_paths=runtime_paths,
             storage_path=tmp_path,
-            requester_id="@alice:localhost",
             message_target=MessageTarget.resolve("!test:localhost", "$thread-root", "$user_msg"),
             orchestrator=team_orchestrator(config, runtime_paths),
         )
@@ -1050,7 +1000,7 @@ async def test_generate_team_response_helper_streaming_delivery_carries_live_met
                 pass
             # Snapshot after stream exhaustion, like the real final edit.
             captured_extra_content.append(request.extra_content)
-            return _streamed("$team-final", "Team hello")
+            return stream_transport("$team-final", "Team hello")
 
         coordinator.deps.delivery_gateway.deliver_stream.side_effect = consume_delivery
 
@@ -1109,7 +1059,6 @@ async def test_generate_team_response_helper_persists_interrupted_history_when_s
             config=config,
             runtime_paths=runtime_paths,
             storage_path=tmp_path,
-            requester_id="@alice:localhost",
             hook_registry=HookRegistry.empty(),
             team_history_storage=store,
             message_target=MessageTarget.resolve("!test:localhost", "$thread-root", "$user_msg"),
@@ -1126,9 +1075,9 @@ async def test_generate_team_response_helper_persists_interrupted_history_when_s
 
     # The reply's own event: the placeholder its stream and notes write into.
     assert resolution == Owned()
-    assert _answering_event(effects) == "$thinking"
+    assert answering_event(effects) == "$thinking"
     [persisted_run] = _persisted_runs(store)
-    _assert_interrupted_messages(
+    assert_interrupted_messages(
         persisted_run,
         response_event_id="$thinking",
         assistant_body="Team hello\n\n(turn stopped before completion)",
@@ -1159,23 +1108,8 @@ async def test_generate_team_response_helper_persists_minimal_interrupted_histor
         await asyncio.Event().wait()
         yield AttemptResolved(CompletedAttempt())
 
-    async def fake_run_cancellable_response(**kwargs: object) -> FinalDeliveryOutcome | Cancelled:
-        response_function = cast("Callable[[str | None], Awaitable[FinalDeliveryOutcome]]", kwargs["response_function"])
-        task = asyncio.create_task(response_function("$thinking"))
-        await started.wait()
-        task.cancel()
-        try:
-            return await task
-        except asyncio.CancelledError as cancelled:
-            # The attempt runner reports how its attempt was cancelled, as a Stop's reaction or a restart does.
-            return Cancelled(classify_cancel_source(cancelled))
-
     with (
-        patch.object(
-            LockedTurns,
-            "_run_cancellable_response",
-            new=AsyncMock(side_effect=fake_run_cancellable_response),
-        ),
+        patch.object(LockedTurns, "_run_cancellable_response", new=attempt_in_place(cancel_after=started)),
         patch("mindroom.response_runner.should_use_streaming", new=AsyncMock(return_value=False)),
         patch("mindroom.response_lifecycle.apply_post_response_effects", new=AsyncMock(return_value=None)),
         patch(
@@ -1188,7 +1122,6 @@ async def test_generate_team_response_helper_persists_minimal_interrupted_histor
             config=config,
             runtime_paths=runtime_paths,
             storage_path=tmp_path,
-            requester_id="@alice:localhost",
             team_history_storage=store,
             message_target=MessageTarget.resolve("!test:localhost", "$thread-root", "$user_msg"),
             orchestrator=team_orchestrator(config, runtime_paths),
@@ -1203,11 +1136,11 @@ async def test_generate_team_response_helper_persists_minimal_interrupted_histor
 
     # An interruption whose note did not land leaves its turn to replay.
     assert resolution == Owned()
-    assert await _left_to_replay(coordinator)
+    assert await turn_left_to_replay(coordinator)
     [persisted_run] = _persisted_runs(store)
     # The interrupted run belongs to the team whose history scope stored it.
     assert persisted_run.team_id == "ultimate"
-    _assert_interrupted_messages(
+    assert_interrupted_messages(
         persisted_run,
         response_event_id="$thinking",
         assistant_body="(turn stopped before completion)",
@@ -1237,7 +1170,6 @@ async def test_generate_team_response_helper_persists_interrupted_history_when_f
             config=config,
             runtime_paths=runtime_paths,
             storage_path=tmp_path,
-            requester_id="@alice:localhost",
             team_history_storage=store,
             message_target=MessageTarget.resolve("!test:localhost", "$thread-root", "$user_msg"),
             orchestrator=team_orchestrator(config, runtime_paths),
@@ -1256,7 +1188,7 @@ async def test_generate_team_response_helper_persists_interrupted_history_when_f
 
     # An interruption whose note did not land leaves its turn to replay.
     assert resolution == Owned()
-    assert await _left_to_replay(coordinator)
+    assert await turn_left_to_replay(coordinator)
     assert store.load_session(TEAM_SESSION_ID) is None
 
 
@@ -1283,7 +1215,6 @@ async def test_generate_team_response_helper_preserves_visible_stream_when_final
             config=config,
             runtime_paths=runtime_paths,
             storage_path=tmp_path,
-            requester_id="@alice:localhost",
             team_history_storage=store,
             message_target=MessageTarget.resolve("!test:localhost", "$thread-root", "$user_msg"),
             orchestrator=team_orchestrator(config, runtime_paths),
@@ -1306,7 +1237,7 @@ async def test_generate_team_response_helper_preserves_visible_stream_when_final
             accumulated = ""
             async for chunk in request.response_stream:
                 accumulated += str(chunk)
-            return _streamed("$team-msg", accumulated)
+            return stream_transport("$team-msg", accumulated)
 
         _set_gateway_method(
             coordinator.deps.delivery_gateway,
@@ -1322,7 +1253,7 @@ async def test_generate_team_response_helper_preserves_visible_stream_when_final
 
     # An interruption whose note did not land leaves its turn to replay.
     assert resolution == Owned()
-    assert await _left_to_replay(coordinator)
+    assert await turn_left_to_replay(coordinator)
     assert store.load_session(TEAM_SESSION_ID) is None
 
 
@@ -1367,7 +1298,6 @@ async def test_generate_team_response_helper_stores_a_structured_prompt_as_writt
             config=config,
             runtime_paths=runtime_paths,
             storage_path=tmp_path,
-            requester_id="@alice:localhost",
             team_history_storage=store,
             message_target=MessageTarget.resolve("!test:localhost", "$thread-root", "$user_msg"),
             orchestrator=team_orchestrator(config, runtime_paths),
@@ -1386,7 +1316,7 @@ async def test_generate_team_response_helper_stores_a_structured_prompt_as_writt
 
     # The reply's own event: the placeholder its stream and notes write into.
     assert resolution == Owned()
-    assert _answering_event(effects) == "$thinking"
+    assert answering_event(effects) == "$thinking"
     [persisted_run] = _persisted_runs(store)
     assert persisted_run.messages is not None
     assert [message.role for message in persisted_run.messages] == ["user", "assistant"]
@@ -1416,7 +1346,6 @@ async def test_generate_team_response_helper_preserves_visible_stream_on_late_fi
             config=config,
             runtime_paths=runtime_paths,
             storage_path=tmp_path,
-            requester_id="@alice:localhost",
             team_history_storage=store,
             message_target=MessageTarget.resolve("!test:localhost", "$thread-root", "$user_msg"),
             orchestrator=team_orchestrator(config, runtime_paths),
@@ -1439,7 +1368,7 @@ async def test_generate_team_response_helper_preserves_visible_stream_on_late_fi
             accumulated = ""
             async for chunk in request.response_stream:
                 accumulated += str(chunk)
-            return _streamed("$team-msg", accumulated)
+            return stream_transport("$team-msg", accumulated)
 
         _set_gateway_method(
             coordinator.deps.delivery_gateway,
@@ -1455,7 +1384,7 @@ async def test_generate_team_response_helper_preserves_visible_stream_on_late_fi
 
     # The reply's own event: the placeholder its stream and notes write into.
     assert resolution == Owned()
-    assert _answering_event(effects) == "$thinking"
+    assert answering_event(effects) == "$thinking"
 
 
 @pytest.mark.asyncio
@@ -1482,7 +1411,6 @@ async def test_generate_team_response_helper_settles_late_failure_without_finali
             config=config,
             runtime_paths=runtime_paths,
             storage_path=tmp_path,
-            requester_id="@alice:localhost",
             message_target=MessageTarget.resolve("!test:localhost", "$thread-root", "$user_msg"),
             orchestrator=team_orchestrator(config, runtime_paths),
         )
@@ -1507,7 +1435,7 @@ async def test_generate_team_response_helper_settles_late_failure_without_finali
 
     # The reply's own event: the placeholder its stream and notes write into.
     assert resolution == Owned()
-    assert _answering_event(effects) == "$thinking"
+    assert answering_event(effects) == "$thinking"
     coordinator.deps.delivery_gateway.finalize_streamed_response.assert_not_awaited()
     coordinator.deps.delivery_gateway.deps.response_hooks._emit_cancelled_response.assert_awaited_once()
 
@@ -1531,19 +1459,8 @@ async def test_generate_team_response_helper_persists_original_user_message_for_
     leader = ScriptedModel([[Await(stopped)]])
     install_model_providers(monkeypatch, {"default": leader})
 
-    async def fake_run_cancellable_response(**kwargs: object) -> FinalDeliveryOutcome | Cancelled:
-        response_function = cast("Callable[[str | None], Awaitable[FinalDeliveryOutcome]]", kwargs["response_function"])
-        try:
-            return await response_function("$thinking")
-        except asyncio.CancelledError:
-            return Cancelled("user_stop")
-
     with (
-        patch.object(
-            LockedTurns,
-            "_run_cancellable_response",
-            new=AsyncMock(side_effect=fake_run_cancellable_response),
-        ),
+        patch.object(LockedTurns, "_run_cancellable_response", new=attempt_in_place()),
         patch("mindroom.response_runner.should_use_streaming", new=AsyncMock(return_value=False)),
         patch("mindroom.response_lifecycle.apply_post_response_effects", new=AsyncMock(return_value=None)) as effects,
     ):
@@ -1554,7 +1471,6 @@ async def test_generate_team_response_helper_persists_original_user_message_for_
             config=config,
             runtime_paths=runtime_paths,
             storage_path=tmp_path,
-            requester_id="@alice:localhost",
             team_history_storage=store,
             message_target=MessageTarget.resolve("!test:localhost", "$thread-root", "$user_msg"),
             orchestrator=orchestrator,
@@ -1568,7 +1484,7 @@ async def test_generate_team_response_helper_persists_original_user_message_for_
 
     # The reply's own event: the placeholder its stream and notes write into.
     assert resolution == Owned()
-    assert _answering_event(effects) == "$thinking"
+    assert answering_event(effects) == "$thinking"
     [request] = leader.requests
     model_prompt = request.messages[-1].content
     assert isinstance(model_prompt, str)
@@ -1576,7 +1492,7 @@ async def test_generate_team_response_helper_persists_original_user_message_for_
     assert 'Current message:\n<msg event_id="$user_msg" from="@alice:localhost">' in model_prompt
     assert "Hello" in model_prompt
     [persisted_run] = _persisted_runs(store)
-    _assert_interrupted_messages(
+    assert_interrupted_messages(
         persisted_run,
         response_event_id="$thinking",
         assistant_body="(turn stopped before completion)",
@@ -1622,20 +1538,8 @@ async def test_generate_team_response_helper_emits_session_started_after_persist
         raise asyncio.CancelledError(cancel_message)
         yield
 
-    async def fake_run_cancellable_response(**kwargs: object) -> FinalDeliveryOutcome | Cancelled:
-        response_function = cast("Callable[[str | None], Awaitable[FinalDeliveryOutcome]]", kwargs["response_function"])
-        try:
-            return await response_function("$thinking")
-        except asyncio.CancelledError as cancelled:
-            # The attempt runner reports how its attempt was cancelled, as a Stop's reaction or a restart does.
-            return Cancelled(classify_cancel_source(cancelled))
-
     with (
-        patch.object(
-            LockedTurns,
-            "_run_cancellable_response",
-            new=AsyncMock(side_effect=fake_run_cancellable_response),
-        ),
+        patch.object(LockedTurns, "_run_cancellable_response", new=attempt_in_place()),
         patch("mindroom.response_runner.should_use_streaming", new=AsyncMock(return_value=False)),
         patch("mindroom.response_lifecycle.apply_post_response_effects", new=AsyncMock(return_value=None)),
         patch("mindroom.response_runner.team_response_stream", new=fake_team_response_stream),
@@ -1645,7 +1549,6 @@ async def test_generate_team_response_helper_emits_session_started_after_persist
             config=config,
             runtime_paths=runtime_paths,
             storage_path=tmp_path,
-            requester_id="@alice:localhost",
             hook_registry=registry,
             team_history_storage=store,
             message_target=MessageTarget.resolve("!test:localhost", "$thread-root", "$user_msg"),
@@ -1661,7 +1564,7 @@ async def test_generate_team_response_helper_emits_session_started_after_persist
 
     # An interruption whose note did not land leaves its turn to replay.
     assert resolution == Owned()
-    assert await _left_to_replay(coordinator)
+    assert await turn_left_to_replay(coordinator)
     assert sequence == [
         "team",
         "started:team:ultimate:!test:localhost:$thread-root:$thread-root",
@@ -1718,7 +1621,6 @@ async def test_generate_team_response_helper_streaming_emits_session_started_aft
             config=config,
             runtime_paths=runtime_paths,
             storage_path=tmp_path,
-            requester_id="@alice:localhost",
             hook_registry=registry,
             team_history_storage=store,
             message_target=MessageTarget.resolve("!test:localhost", "$thread-root", "$user_msg"),
@@ -1730,7 +1632,7 @@ async def test_generate_team_response_helper_streaming_emits_session_started_aft
             async for chunk in request.response_stream:
                 accumulated += str(chunk)
                 sequence.append(f"deliver:{accumulated}")
-            return _streamed("$team-msg", accumulated)
+            return stream_transport("$team-msg", accumulated)
 
         coordinator.deps.delivery_gateway.deliver_stream.side_effect = consume_delivery_and_cancel
 
@@ -1761,7 +1663,7 @@ async def test_generate_team_response_helper_streaming_emits_session_started_aft
 
     # The reply's own event: the placeholder its stream and notes write into.
     assert resolution == Owned()
-    assert _answering_event(effects) == "$thinking"
+    assert answering_event(effects) == "$thinking"
     assert sequence == [
         "stream",
         "deliver:Team hello",
@@ -1804,7 +1706,6 @@ async def test_generate_team_response_helper_uses_persisted_team_scope_for_sessi
             config=config,
             runtime_paths=runtime_paths,
             storage_path=tmp_path,
-            requester_id="@alice:localhost",
             hook_registry=registry,
             team_history_storage=store,
             message_target=MessageTarget.resolve("!test:localhost", "$thread-root", "$user_msg"),
@@ -1881,7 +1782,6 @@ async def test_generate_team_response_helper_links_its_reply_event_to_the_report
             config=config,
             runtime_paths=runtime_paths,
             storage_path=tmp_path,
-            requester_id="@alice:localhost",
             team_history_storage=store,
             message_target=MessageTarget.resolve("!test:localhost", "$thread-root", "$user_msg"),
             orchestrator=team_orchestrator(config, runtime_paths),
@@ -1890,7 +1790,7 @@ async def test_generate_team_response_helper_links_its_reply_event_to_the_report
         async def consume_delivery(request: StreamingDeliveryRequest) -> StreamTransportOutcome:
             async for _chunk in request.response_stream:
                 pass
-            return _streamed("$team-final", "Team hello")
+            return stream_transport("$team-final", "Team hello")
 
         coordinator.deps.delivery_gateway.deliver_stream.side_effect = consume_delivery
         # The runner's state writer is a test double; its linkage writes through the real writer.
@@ -1938,7 +1838,6 @@ async def test_generate_team_response_helper_merges_raw_prompt_into_model_prompt
             config=config,
             runtime_paths=runtime_paths,
             storage_path=tmp_path,
-            requester_id="@alice:localhost",
             message_target=MessageTarget.resolve("!test:localhost", "$thread-root", "$user_msg"),
             orchestrator=team_orchestrator(config, runtime_paths),
         )
@@ -1955,7 +1854,7 @@ async def test_generate_team_response_helper_merges_raw_prompt_into_model_prompt
         )
 
     assert resolution == Owned()
-    assert _answering_event(effects) == "$thinking"
+    assert answering_event(effects) == "$thinking"
     _spec, ctx = team_stream.call_args.args
     message = ctx.prompt
     assert "What is in the image?" in message
@@ -1983,7 +1882,6 @@ async def test_generate_team_response_helper_uses_delivery_result_ending_for_fai
             config=config,
             runtime_paths=runtime_paths,
             storage_path=tmp_path,
-            requester_id="@alice:localhost",
             hook_registry=HookRegistry.empty(),
             team_history_storage=store,
             message_target=MessageTarget.resolve("!test:localhost", "$thread-root", "$user_msg"),
@@ -1993,7 +1891,7 @@ async def test_generate_team_response_helper_uses_delivery_result_ending_for_fai
             coordinator.deps.delivery_gateway,
             "deliver_stream",
             AsyncMock(
-                return_value=_streamed("$team-msg", "Team hello"),
+                return_value=stream_transport("$team-msg", "Team hello"),
             ),
         )
         _set_gateway_method(
@@ -2028,7 +1926,7 @@ async def test_generate_team_response_helper_uses_delivery_result_ending_for_fai
 
     # The reply's own event: the placeholder its stream and notes write into.
     assert resolution == Owned()
-    assert _answering_event(effects) == "$thinking"
+    assert answering_event(effects) == "$thinking"
 
 
 @pytest.mark.asyncio
@@ -2062,7 +1960,6 @@ async def test_generate_team_response_helper_persists_interrupted_history_after_
             config=config,
             runtime_paths=runtime_paths,
             storage_path=tmp_path,
-            requester_id="@alice:localhost",
             hook_registry=HookRegistry.empty(),
             team_history_storage=store,
             message_target=MessageTarget.resolve("!test:localhost", "$thread-root", "$user_msg"),
@@ -2072,7 +1969,7 @@ async def test_generate_team_response_helper_persists_interrupted_history_after_
 
         async def consume_delivery(request: StreamingDeliveryRequest) -> StreamTransportOutcome:
             rendered = "".join([str(chunk) async for chunk in request.response_stream])
-            return _streamed("$team-final", rendered)
+            return stream_transport("$team-final", rendered)
 
         coordinator.deps.delivery_gateway.deliver_stream.side_effect = consume_delivery
 
@@ -2083,7 +1980,7 @@ async def test_generate_team_response_helper_persists_interrupted_history_after_
         )
 
     [persisted_run] = _persisted_runs(store)
-    _assert_interrupted_messages(
+    assert_interrupted_messages(
         persisted_run,
         response_event_id="$thinking",
         assistant_body="Team partial\n\n(turn failed before completion)",

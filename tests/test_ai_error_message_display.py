@@ -219,20 +219,6 @@ class TestAIErrorDisplay:
         """Test that when streaming AI fails, the message is updated with the error."""
         bot = _mock_bot(tmp_path)
 
-        # Mock the _edit_message method to track what gets edited
-        edited_messages = []
-
-        async def mock_edit_message(
-            room_id: str,  # noqa: ARG001
-            event_id: str,
-            text: str,
-            thread_id: str | None,  # noqa: ARG001
-            extra_content: object | None = None,  # noqa: ARG001
-        ) -> None:
-            edited_messages.append((event_id, text))
-
-        bot._edit_message = mock_edit_message
-
         error_text = "[test_agent] 🔴 Rate limited. Please wait before trying again."
         edited_messages: list[tuple[str, dict[str, object]]] = []
         with (
@@ -340,15 +326,15 @@ class TestAIErrorDisplay:
         # One homeserver for every turn, so each placeholder is its own event.
         send_message_outcome = _record_reply_edits(edited_messages)
 
-        error_messages = [
-            "[test_agent] 🔴 Authentication failed. Please check your API key configuration.",
-            "[test_agent] 🔴 Rate limited. Please wait before trying again.",
-            "[test_agent] 🔴 Request timed out. Please try again.",
-            "[test_agent] 🔴 Service temporarily unavailable. Please try again later.",
-            "[test_agent] 🔴 Error: Invalid model specified. Please check your configuration.",
+        error_cases = [
+            ("[test_agent] 🔴 Authentication failed. Please check your API key configuration.", "Authentication"),
+            ("[test_agent] 🔴 Rate limited. Please wait before trying again.", "Rate limited"),
+            ("[test_agent] 🔴 Request timed out. Please try again.", "timed out"),
+            ("[test_agent] 🔴 Service temporarily unavailable. Please try again later.", "unavailable"),
+            ("[test_agent] 🔴 Error: Invalid model specified. Please check your configuration.", "Invalid model"),
         ]
 
-        for error_msg in error_messages:
+        for index, (error_msg, expected_fragment) in enumerate(error_cases):
             edited_messages.clear()
 
             with (
@@ -362,25 +348,13 @@ class TestAIErrorDisplay:
                 # Each iteration is a separate turn, so it needs a separate
                 # causing event. Sharing one would make the outbox treat the
                 # later answers as resends of the first and replay it.
-                index = error_messages.index(error_msg)
                 await _respond(
                     bot,
                     _response_request(prompt="Help me", reply_to_event_id=f"$user_msg_{index}"),
                 )
 
                 assert len(edited_messages) == 1
-                displayed_msg = str(edited_messages[0][1]["body"])
-
-                if "Authentication" in error_msg:
-                    assert "Authentication" in displayed_msg
-                elif "Rate limited" in error_msg:
-                    assert "Rate limited" in displayed_msg
-                elif "timed out" in error_msg:
-                    assert "timed out" in displayed_msg
-                elif "unavailable" in error_msg:
-                    assert "unavailable" in displayed_msg
-                elif "Invalid model" in error_msg:
-                    assert "Invalid model" in displayed_msg
+                assert expected_fragment in str(edited_messages[0][1]["body"])
 
     @pytest.mark.asyncio
     async def test_non_streaming_sync_restart_edits_thinking_message_with_restart_status(

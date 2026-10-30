@@ -33,9 +33,7 @@ from mindroom.final_delivery import (
     AwaitingApproval,
     FinalDeliveryOutcome,
     Owed,
-    StreamTransportOutcome,
     Suppressed,
-    TurnEnding,
 )
 from mindroom.history.types import HistoryScope
 from mindroom.hooks import (
@@ -45,7 +43,6 @@ from mindroom.hooks import (
 from mindroom.knowledge.indexing_config import IndexingSettings
 from mindroom.knowledge.utils import _KnowledgeResolution
 from mindroom.matrix.client import ResolvedVisibleMessage
-from mindroom.matrix.thread_history_result import ThreadHistoryResult
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.message_target import MessageTarget
 from mindroom.reply_turn.request import ResponseRequest
@@ -71,7 +68,7 @@ from tests.identity_helpers import entity_ids, persist_entity_accounts
 from tests.journal_helpers import admit_dispatch_event
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncGenerator, Awaitable, Callable, Sequence
+    from collections.abc import AsyncGenerator, Sequence
 
     from mindroom.bot import AgentBot
     from mindroom.coalescing.gate import ReadyPendingEvent
@@ -99,61 +96,7 @@ def make_test_agent_bot(*args: Any, **kwargs: Any) -> AgentBot:  # noqa: ANN401
     return RuntimeAgentBot(*args, **kwargs)
 
 
-def _stream_outcome(
-    event_id: str | None,
-    body: str,
-    *,
-    visible_body_state: str = "visible_body",
-    failed: bool = False,
-) -> StreamTransportOutcome:
-    return StreamTransportOutcome(
-        last_physical_stream_event_id=event_id,
-        rendered_body=body,
-        visible_body_state=visible_body_state,
-        failed=failed,
-    )
-
-
-def _outcome(
-    ending: TurnEnding,
-    final_visible_event_id: str | None = None,
-    visible_response_event_id: str | None = None,
-    response_identity_event_id: str | None = None,
-    turn_completion_event_id: str | None = None,
-    last_physical_stream_event_id: str | None = None,
-    final_visible_body: str | None = None,
-    delivery_kind: str | None = None,
-    extra_content: dict[str, object] | None = None,
-) -> FinalDeliveryOutcome:
-    event_id = (
-        response_identity_event_id
-        or visible_response_event_id
-        or final_visible_event_id
-        or turn_completion_event_id
-        or last_physical_stream_event_id
-    )
-    is_visible_response = any(
-        value is not None
-        for value in (
-            final_visible_event_id,
-            visible_response_event_id,
-            response_identity_event_id,
-            last_physical_stream_event_id,
-        )
-    )
-    return FinalDeliveryOutcome(
-        ending=ending,
-        event_id=event_id,
-        is_visible_response=is_visible_response,
-        final_visible_body=final_visible_body,
-        delivery_kind=delivery_kind,
-        extra_content=extra_content,
-    )
-
-
-def _visible_response_event_id(outcome: FinalDeliveryOutcome | str | None) -> str | None:
-    if isinstance(outcome, str) or outcome is None:
-        return outcome
+def _visible_response_event_id(outcome: FinalDeliveryOutcome) -> str | None:
     return outcome.final_visible_event_id
 
 
@@ -178,9 +121,7 @@ async def dispatch_reaction_durably(
     await bot._journal_dispatcher.drain_once()
 
 
-def _handled_response_event_id(outcome: FinalDeliveryOutcome | str | None) -> str | None:
-    if isinstance(outcome, str) or outcome is None:
-        return outcome
+def _handled_response_event_id(outcome: FinalDeliveryOutcome) -> str | None:
     answered = not isinstance(outcome.ending, AwaitingApproval | Owed | Suppressed)
     return outcome.final_visible_event_id if answered else None
 
@@ -261,11 +202,6 @@ def _wrap_extracted_collaborators(bot: AgentBot) -> AgentBot:
         state_writer=wrapped_bot._conversation_state_writer,
     )
     return wrapped_bot
-
-
-def _empty_full_thread_history() -> ThreadHistoryResult:
-    """Return a fully hydrated empty thread history for tests that bypass Matrix fetches."""
-    return ThreadHistoryResult([], is_full_history=True)
 
 
 def _replace_turn_policy_deps(bot: AgentBot, **changes: object) -> TurnPolicy:
@@ -548,41 +484,6 @@ def _mock_managed_bot(config: Config) -> MagicMock:
     return bot
 
 
-def _approval_reload_config(tmp_path: Path, *, include_code: bool) -> Config:
-    """Return one minimal config for approval reload tests."""
-    agents: dict[str, dict[str, object]] = {
-        "general": {
-            "display_name": "GeneralAgent",
-            "role": "General assistant",
-            "model": "default",
-            "rooms": ["lobby"],
-        },
-    }
-    if include_code:
-        agents["code"] = {
-            "display_name": "CodeAgent",
-            "role": "Writes code",
-            "model": "default",
-            "rooms": ["lobby"],
-        }
-    return _runtime_bound_config(
-        Config(
-            agents=agents,
-            models={"default": {"provider": "openai", "id": "test-model"}},
-        ),
-        tmp_path,
-    )
-
-
-def _cleanup_recorder(event_order: list[str]) -> Callable[[], Awaitable[None]]:
-    """Return one async cleanup side effect that records teardown ordering."""
-
-    async def _cleanup() -> None:
-        event_order.append("cleanup")
-
-    return _cleanup
-
-
 def _hook_plugin(name: str, callbacks: list[object]) -> SimpleNamespace:
     """Create a minimal plugin stub for hook registry tests."""
     return SimpleNamespace(
@@ -808,21 +709,6 @@ def _room_file_event(
 @asynccontextmanager
 async def _noop_typing_indicator(*_args: object, **_kwargs: object) -> AsyncGenerator[None]:
     yield
-
-
-@dataclass
-class MockConfig:
-    """Mock configuration for testing."""
-
-    agents: dict[str, Any] = None
-
-    def __post_init__(self) -> None:
-        """Initialize agents dictionary if not provided."""
-        if self.agents is None:
-            self.agents = {
-                "calculator": MagicMock(rooms=["lobby", "science", "analysis"]),
-                "general": MagicMock(rooms=["lobby", "help"]),
-            }
 
 
 def make_mock_agent_user() -> AgentMatrixUser:

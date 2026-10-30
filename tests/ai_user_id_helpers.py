@@ -16,12 +16,11 @@ from mindroom.budgets.monitor import BudgetMonitor
 from mindroom.config.agent import AgentConfig, TeamConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
-from mindroom.config.plugin import PluginEntryConfig
 from mindroom.constants import (
     RuntimePaths,
     resolve_runtime_paths,
 )
-from mindroom.delivery_gateway import DeliveryGateway, DeliveryGatewayDeps
+from mindroom.delivery_gateway import DeliveryGateway, DeliveryGatewayDeps, SendTextRequest
 from mindroom.event_journal import EventJournalStore
 from mindroom.event_journal.approval_store import ApprovalStore
 from mindroom.event_journal.identity import journal_principal_id
@@ -47,6 +46,7 @@ from mindroom.tool_system.runtime_context import (
     ToolRuntimeSupport,
 )
 from tests.access_schema_support import with_current_room_member_access
+from tests.bot_helpers import _hook_plugin
 from tests.conftest import bind_runtime_paths as _bind_runtime_paths
 from tests.conftest import (
     ignore_final_delivery_handoff,
@@ -159,14 +159,7 @@ def _metadata_config(provider: str, model_id: str) -> Config:
     )
 
 
-def _plugin(name: str, callbacks: list[object]) -> SimpleNamespace:
-    return SimpleNamespace(
-        name=name,
-        discovered_hooks=tuple(callbacks),
-        discovered_automations=(),
-        entry_config=PluginEntryConfig(path=f"./plugins/{name}"),
-        plugin_order=0,
-    )
+_plugin = _hook_plugin
 
 
 def _mark_requester_online(client: AsyncMock, user_id: str, room_id: str = "!test:localhost") -> None:
@@ -258,13 +251,11 @@ def _build_response_runner(
     config: Config,
     runtime_paths: RuntimePaths,
     storage_path: Path,
-    requester_id: str,  # noqa: ARG001
     hook_registry: HookRegistry | None = None,
     history_storage: object | None = None,
     team_history_storage: object | None = None,
     message_target: MessageTarget | None = None,
     orchestrator: object | None = None,
-    knowledge_access_support: SimpleNamespace | None = None,
 ) -> ResponseRunner:
     """Build a real response runner for one bot-shaped test double."""
 
@@ -333,7 +324,6 @@ def _build_response_runner(
     )
     response_hook_service = ResponseHookService(hook_context=hook_context)
     response_hook_service._emit_cancelled_response = AsyncMock(wraps=response_hook_service._emit_cancelled_response)
-    response_hook_service._emit_after_response = AsyncMock(wraps=response_hook_service._emit_after_response)
     # One principal's records, as a bot's gateway and reply runtime share them.
     principal = EventJournalStore.open_sqlite(storage_path / "reply_records.db").principal(
         journal_principal_id(bot.agent_name, bot.matrix_id.full_id),
@@ -370,9 +360,9 @@ def _build_response_runner(
     bot.client.rooms.setdefault("!test:localhost", nio.MatrixRoom("!test:localhost", "@mindroom_general:localhost"))
     record_send_text = delivery_gateway.send_text
 
-    async def send_text(request: object) -> str | None:
-        if getattr(request, "reply_write", None) is not None:
-            return await record_send_text(request)  # type: ignore[arg-type]
+    async def send_text(request: SendTextRequest) -> str | None:
+        if request.reply_write is not None:
+            return await record_send_text(request)
         return "$thinking"
 
     _set_gateway_method(delivery_gateway, "send_text", AsyncMock(side_effect=send_text))
@@ -397,7 +387,7 @@ def _build_response_runner(
         membership=membership,
         agent_name=bot.agent_name,
     )
-    bot._knowledge_access_support = knowledge_access_support or _knowledge_access_support()
+    bot._knowledge_access_support = _knowledge_access_support()
     approval_store = MagicMock(spec=ApprovalStore)
     approval_store.approval_continuation_for_source = AsyncMock(return_value=None)
 
@@ -435,15 +425,6 @@ def _build_response_runner(
             ),
         ),
     )
-
-
-@asynccontextmanager
-async def _claimed_reply_span(runner: ResponseRunner, request: ResponseRequest) -> AsyncIterator[ResponseRequest]:
-    """Claim the reply span the locked generation claims for ``request``, for calls made below that claim."""
-    async with runner.deps.replies.span_scope():
-        claimed = await runner._claim_reply_span(request, history_scope=runner.deps.state_writer.history_scope())
-        assert isinstance(claimed, ResponseRequest), claimed
-        yield claimed
 
 
 def _response_request(

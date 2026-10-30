@@ -2,14 +2,13 @@
 
 The seam is ``run_agent`` fed by a scripted provider behind a real ``create_agent`` build: what a reply streams,
 what it stores, which tool-call policy runs around every call, and how it ends when it is paused, cancelled,
-failed, empty, or silent. The last tests drive the same turns through ``ResponseRunner``, the lifecycle owner that
-writes the interrupted-turn record after the loop stored its own terminal record.
+failed, empty, or silent. The last tests drive the same turns through ``ResponseRunner``, the lifecycle owner, under
+which the turn driver writes the interrupted-turn record after the loop stored its own terminal record.
 """
 
 from __future__ import annotations
 
 import asyncio
-import json
 from dataclasses import dataclass, replace
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, ClassVar
@@ -71,7 +70,6 @@ from mindroom.reply_turn.request import ResponseRequest
 from mindroom.response_sources import ResponseSources
 from mindroom.response_turn import ResponsePausedForApproval, TurnSinks
 from mindroom.session_storage.agent_storage import create_session_storage
-from mindroom.session_storage.schema import quote_identifier
 from mindroom.session_storage.types import ConversationSession
 from mindroom.skill_learning.capture import SkillReviewCapture
 from mindroom.tool_system.call_record import recording_tool_calls
@@ -107,7 +105,7 @@ from tests.scripted_agent_helpers import (
     registered_toolkit,
     streamed_text,
 )
-from tests.usage_helpers import assert_counted_usage
+from tests.usage_helpers import assert_counted_usage, usage_rows
 
 if TYPE_CHECKING:
     from collections.abc import Iterator, Mapping, Sequence
@@ -319,16 +317,6 @@ def _assert_counted_usage(reply: _Reply, expected: Sequence[tuple[int, int]]) ->
         model=reply.model.identity,
         requester_id=REQUESTER_ID,
     )
-
-
-def _usage_rows(storage: ConversationStore, run_id: str) -> list[dict[str, Any]]:
-    """Return the usage ledger rows of one run."""
-    with storage.transaction(write=False) as connection:
-        rows = connection.execute(
-            f"SELECT usage_data FROM {quote_identifier(storage.names.usage)} WHERE run_id = ?",  # noqa: S608
-            (run_id,),
-        ).fetchall()
-    return [json.loads(row[0]) for row in rows]
 
 
 def _contents(messages: Sequence[Message]) -> list[tuple[str, object]]:
@@ -587,7 +575,7 @@ async def test_a_stop_mid_stream_stores_the_cancelled_run_once_before_the_interr
         assert reply.recorder.outcome == "interrupted"
         assert reply.recorder.original_status is RunStatus.cancelled
         assert reply.recorder.assistant_text == "Partial "
-    [row] = _usage_rows(reply.storage, "run-1")
+    [row] = usage_rows(reply.storage, "run-1")
     assert row["metrics"]["input_tokens"] == 10
 
 
@@ -747,8 +735,8 @@ async def test_an_empty_reply_is_left_out_of_history_and_retried_once_under_a_ru
     assert started == ["run-1", record.run_id]
     assert (reply.recorder.outcome, reply.recorder.run_id) == ("completed", record.run_id)
     assert run_metadata[AI_RUN_METADATA_KEY]["run_id"] == record.run_id
-    assert [row["metrics"]["input_tokens"] for row in _usage_rows(reply.storage, "run-1")] == [100]
-    assert [row["metrics"]["input_tokens"] for row in _usage_rows(reply.storage, record.run_id)] == [120]
+    assert [row["metrics"]["input_tokens"] for row in usage_rows(reply.storage, "run-1")] == [100]
+    assert [row["metrics"]["input_tokens"] for row in usage_rows(reply.storage, record.run_id)] == [120]
 
 
 @pytest.mark.asyncio
@@ -1502,7 +1490,7 @@ async def test_the_runner_writes_the_interrupted_record_after_the_loop_stored_th
     assert record is not None
     assert record.metadata is not None
     assert record.metadata["mindroom_original_status"] == "cancelled"
-    [row] = _usage_rows(reply.storage, run_id)
+    [row] = usage_rows(reply.storage, run_id)
     assert row["metrics"]["input_tokens"] == 10
 
 
@@ -1541,7 +1529,7 @@ async def test_the_runner_leaves_a_paused_run_as_the_loop_stored_it(
     assert record is not None
     assert record.status is RunStatus.paused
     assert [requirement.needs_confirmation for requirement in record.requirements or []] == [True]
-    [row] = _usage_rows(reply.storage, paused.run_id)
+    [row] = usage_rows(reply.storage, paused.run_id)
     assert row["metrics"]["input_tokens"] == 7
 
 

@@ -56,7 +56,6 @@ if TYPE_CHECKING:
     from mindroom.bot import AgentBot
     from mindroom.conversation_resolver import ConversationResolver
     from mindroom.delivery_gateway import DeliveryGateway
-    from mindroom.edit_regenerator import EditRegenerator
     from mindroom.event_journal import ApprovalContinuation, EventJournalStore, MatrixDelivery, PrincipalStore
     from mindroom.response_runner import ResponseRunner
     from mindroom.turn_store import TurnStore
@@ -71,7 +70,6 @@ class _ApprovalCase:
     principal: PrincipalStore
     gateway: DeliveryGateway
     runner: ResponseRunner
-    regenerator: EditRegenerator
     ingress: TurnIngress
     resolver: ConversationResolver
     manager: ApprovalManager
@@ -222,12 +220,7 @@ class _ApprovalCase:
 
     async def restart(self) -> None:
         self.store = await _store(self.journal_store, agent_name="general")
-        self.gateway = replace(
-            self.gateway,
-            deps=replace(
-                self.gateway.deps,
-            ),
-        )
+        self.gateway = replace(self.gateway)
         self.runner = runner_for(
             deps=replace(self.runner.deps, delivery_gateway=self.gateway, approval_runtime_generation="restarted"),
         )
@@ -308,7 +301,6 @@ async def _paused_case(  # noqa: PLR0915
         # would after a crash cut its background cleanup short.
         replies=replace(replies, store=principal),
     )
-    runner.inbox.replies = runner.deps.replies
     await runner.deps.replies.start()
     regenerator = unwrap_extracted_collaborator(bot._edit_regenerator)
     regenerator.deps = replace(
@@ -410,7 +402,6 @@ async def _paused_case(  # noqa: PLR0915
             principal,
             gateway,
             runner,
-            regenerator,
             ingress,
             resolver,
             manager,
@@ -484,7 +475,7 @@ class TestEditApprovalOwnership:
         assert await case.principal.approvals.approval_continuation_for_source("$newer-edit") is None
         assert not await case.runner.approvals._settle(
             claimed,
-            "Paused run is no longer available",
+            ApprovalFailure(ApprovalFailureKind.ERROR, "Paused run is no longer available"),
         )
         final = await case.principal.load_matrix_delivery(delivery_id="$edit", stage=DeliveryStage.FINAL)
         assert final is not None
@@ -594,7 +585,6 @@ async def test_failed_pause_handoff_keeps_the_regenerated_answer(
         delivery_gateway=gateway,
         replies=replace(runner.deps.replies, store=principal),
     )
-    runner.inbox.replies = runner.deps.replies
     request = replace(
         _plain_request(_target(), source_event_id="$edit"),
         existing_event_id="$waiting",

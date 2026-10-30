@@ -69,7 +69,6 @@ if TYPE_CHECKING:
     from mindroom.bot import AgentBot
     from mindroom.event_journal import MatrixDelivery
     from mindroom.message_target import MessageTarget
-    from mindroom.response_sources import SourceFate
 
 pytestmark = pytest.mark.asyncio
 _YES_OPTION = '{"emoji":"✅","label":"Yes","value":"yes"}'
@@ -151,7 +150,7 @@ async def _respond(
     *,
     resume: AsyncMock | None = None,
     target: MessageTarget | None = None,
-) -> SourceFate:
+) -> None:
     runner = unwrap_extracted_collaborator(bot._response_runner)
     target = target or _target()
     with (
@@ -162,7 +161,18 @@ async def _respond(
         ),
         patch.object(type(runner.approvals), "_continue_entity_call", resume or AsyncMock()),
     ):
-        return await runner.generate_response(_plain_request(target))
+        await runner.generate_response(_plain_request(target))
+
+
+def _resume_until_cancelled(resuming: asyncio.Event) -> AsyncMock:
+    """Return an approval resume that sets ``resuming``, then runs until it is cancelled."""
+
+    async def resume(*_args: object, **_kwargs: object) -> CompletedApprovalRun:
+        resuming.set()
+        await asyncio.Event().wait()
+        return CompletedApprovalRun("Never answered.", {})
+
+    return AsyncMock(side_effect=resume)
 
 
 @contextmanager
@@ -608,13 +618,7 @@ async def test_stop_during_an_approval_resume_cancels_it_through_its_approval(tm
     """A Stop on a resuming reply cancels the resume span; the approval's settlement shows the note."""
     async with _approval_bot(tmp_path, requires_human=False) as bot:
         resuming = asyncio.Event()
-
-        async def resume_until_cancelled(*_args: object, **_kwargs: object) -> CompletedApprovalRun:
-            resuming.set()
-            await asyncio.Event().wait()
-            return CompletedApprovalRun("Never answered.", {})
-
-        response = asyncio.create_task(_respond(bot, resume=AsyncMock(side_effect=resume_until_cancelled)))
+        response = asyncio.create_task(_respond(bot, resume=_resume_until_cancelled(resuming)))
         await asyncio.wait_for(resuming.wait(), timeout=5)
         with _journal_wakes(bot) as wakes:
             stop = await _stop(bot, "$sent1", 5)
@@ -642,13 +646,7 @@ async def test_a_shutdown_during_an_approval_resume_leaves_it_for_replay(tmp_pat
     """A process stop leaves the resume span as a crash would; recovery hands it back to replay, which may claim it."""
     async with _approval_bot(tmp_path, requires_human=False) as bot:
         resuming = asyncio.Event()
-
-        async def resume_until_cancelled(*_args: object, **_kwargs: object) -> CompletedApprovalRun:
-            resuming.set()
-            await asyncio.Event().wait()
-            return CompletedApprovalRun("Never answered.", {})
-
-        response = asyncio.create_task(_respond(bot, resume=AsyncMock(side_effect=resume_until_cancelled)))
+        response = asyncio.create_task(_respond(bot, resume=_resume_until_cancelled(resuming)))
         await asyncio.wait_for(resuming.wait(), timeout=5)
         request_task_cancel(response, process_shutdown=True)
         with pytest.raises(asyncio.CancelledError):

@@ -557,13 +557,13 @@ async def test_a_repeated_cancel_while_the_attempt_unwinds_propagates_once_it_ex
         ((), "interrupted", "warning", "Response interrupted — traceback for diagnosis"),
     ],
 )
-async def test_response_attempt_cancellation_records_reason_and_logs_provenance(
+async def test_response_attempt_cancellation_returns_its_cancellation_and_logs_provenance(
     cancel_args: tuple[str, ...],
     expected_source: str,
     log_method: str,
     log_message: str,
 ) -> None:
-    """Cancelled attempts should classify and log their cancellation provenance."""
+    """A cancelled attempt returns its classified cancellation and logs its provenance."""
     target = MessageTarget.resolve("!room:localhost", "$thread", "$reply")
     runner, span = _runner()
 

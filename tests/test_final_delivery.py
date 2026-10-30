@@ -100,20 +100,6 @@ def test_final_delivery_outcome_identifies_substantive_delivery(
     assert outcome.delivered_substantive_content is expected
 
 
-def test_stream_transport_outcome_accepts_placeholder_only_visible_state() -> None:
-    """Placeholder-only visibility must remain distinct from visible body."""
-    outcome = StreamTransportOutcome(
-        last_physical_stream_event_id="$thinking",
-        rendered_body="Thinking...",
-        visible_body_state="placeholder_only",
-        failed=True,
-    )
-
-    assert outcome.last_physical_stream_event_id == "$thinking"
-    assert outcome.visible_body_state == "placeholder_only"
-    assert outcome.visible_event_id is None
-
-
 @pytest.mark.parametrize(
     ("ending", "expected"),
     [
@@ -173,7 +159,16 @@ def test_an_ending_fails_its_approval_without_internal_codes(
     [
         pytest.param(None, "no_visible_response", id="none"),
         pytest.param(FinalDeliveryOutcome(ending=Suppressed(Suppression.HOOK)), "suppressed", id="suppressed"),
-        pytest.param(FinalDeliveryOutcome(ending=Cancelled("user_stop")), "cancelled", id="cancelled"),
+        pytest.param(
+            FinalDeliveryOutcome(
+                ending=Cancelled("user_stop"),
+                event_id="$e",
+                is_visible_response=True,
+                delivery_kind="edited",
+            ),
+            "cancelled",
+            id="cancelled-beats-delivery-kind",
+        ),
         pytest.param(FinalDeliveryOutcome(ending=Failed(FailureCause.ERROR)), "error", id="failed"),
         pytest.param(FinalDeliveryOutcome(ending=AwaitingApproval()), "suspended", id="awaiting"),
         pytest.param(FinalDeliveryOutcome(ending=Owed()), "suspended", id="owed"),
