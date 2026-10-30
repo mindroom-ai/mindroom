@@ -288,15 +288,7 @@ async def test_cancelling_history_sizing_preserves_durable_state(  # noqa: PLR09
     storage = create_agent_state_storage("test_agent", tmp_path)
     seed_session(storage, session)
     original = deepcopy(session)
-    resolved = resolve_entity_preparation_inputs(
-        config=config,
-        runtime_paths=paths,
-        entity_name="test_agent",
-        history_settings=config.resolve_scope("test_agent").history_settings,
-        static_prompt_tokens=100,
-        active_model_name=None,
-        active_context_window=None,
-    )
+    resolved = _agent_inputs(config)
     loop = asyncio.get_running_loop()
     entered = asyncio.Event()
     release = threading.Event()
