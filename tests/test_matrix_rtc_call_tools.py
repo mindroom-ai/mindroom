@@ -30,11 +30,12 @@ from mindroom.config.main import Config
 from mindroom.config.models import BackgroundToolJobsConfig, ModelConfig, ModelPricing
 from mindroom.helper_usage import HelperUsageOwner, get_helper_usage_owner, record_helper_usage
 from mindroom.history.interrupted_replay import is_interrupted
+from mindroom.history.request_messages import replayable_messages
 from mindroom.hooks import EnrichmentItem
 from mindroom.knowledge.availability import KnowledgeAvailability
 from mindroom.knowledge.search import AgentKnowledge, KnowledgeSource, KnowledgeSourceDescription
 from mindroom.knowledge.utils import KnowledgeAvailabilityDetail
-from mindroom.llm.messages import Message, system_text
+from mindroom.llm.messages import MODEL_PROVENANCE_KEY, Message, system_text
 from mindroom.llm.provider import ModelIdentity, ModelRequest
 from mindroom.llm.runs import RunRecord, RunStatus
 from mindroom.llm.usage import HelperUsage, ModelMetrics, RunMetrics, TokenCounts
@@ -53,6 +54,7 @@ from mindroom.matrix_rtc.call_tools import (
 )
 from mindroom.matrix_rtc.voice_agent import CallAgentResponse
 from mindroom.memory import MemoryPromptParts
+from mindroom.providers.anthropic.wire import format_claude_messages
 from mindroom.response_turn import HandledAttempt
 from mindroom.runtime_resolution import resolve_agent_runtime
 from mindroom.session_storage.agent_storage import create_agent_state_storage
@@ -2279,3 +2281,52 @@ def test_a_spoken_record_keeps_the_runs_calls_and_only_the_text_the_call_spoke()
     ]
     assert spoken.messages[1].tool_calls == [call]
     assert record.status is RunStatus.completed
+
+
+def test_an_unspoken_reply_replays_to_claude_as_its_calls_and_results_only() -> None:
+    """A reply playout never started keeps no text in its replay, the text its Claude blocks stored included."""
+    call = {"id": "c1", "type": "function", "function": {"name": "weather", "arguments": "{}"}}
+
+    def claude_reply(text: str, *blocks: dict[str, object], **fields: object) -> Message:
+        stored = [{"type": "text", "text": text}, *blocks]
+        provider_data = {"claude_blocks": stored, MODEL_PROVENANCE_KEY: {"id": "claude", "provider": "anthropic"}}
+        return Message(role="assistant", content=text, provider_data=provider_data, **fields)
+
+    record = RunRecord(
+        run_id="run",
+        agent_id=AGENT,
+        session_id="session",
+        status=RunStatus.completed,
+        messages=[
+            Message(role="user", content="Weather?"),
+            claude_reply(
+                "Let me check.",
+                {"type": "tool_use", "id": "c1", "name": "weather", "input": {}},
+                tool_calls=[call],
+            ),
+            Message(role="tool", tool_call_id="c1", tool_name="weather", content="sunny"),
+            claude_reply("It is sunny today."),
+        ],
+    )
+
+    spoken = _spoken_record(record, "", error=None)
+
+    conversation = format_claude_messages(
+        [*replayable_messages([spoken]), Message(role="user", content="And tomorrow?")],
+        append_trailing_user_message=False,
+        earlier_thinking=False,
+        provider="anthropic",
+    )
+    sent = [block for message in conversation.messages for block in message["content"]]
+    assert [block.get("text") for block in sent if block["type"] == "text"] == [
+        "Weather?",
+        "(turn stopped before completion)",
+        "And tomorrow?",
+    ]
+    assert [block["id"] for block in sent if block["type"] == "tool_use"] == ["c1"]
+    assert [block["tool_use_id"] for block in sent if block["type"] == "tool_result"] == ["c1"]
+    # The usage each reply's request billed still names its model.
+    assert [message.provider_data for message in spoken.messages if message.role == "assistant"] == [
+        {MODEL_PROVENANCE_KEY: {"id": "claude", "provider": "anthropic"}},
+        {MODEL_PROVENANCE_KEY: {"id": "claude", "provider": "anthropic"}},
+    ]

@@ -41,7 +41,13 @@ from mindroom.history.turn_recorder import TurnRecorder
 from mindroom.history.types import HistoryScope
 from mindroom.hooks import EnrichmentItem
 from mindroom.knowledge.utils import knowledge_runtime_identity, resolve_agent_knowledge_access_async
-from mindroom.llm.messages import Message, ModelProvenance, system_text
+from mindroom.llm.messages import (
+    AGGREGATE_USAGE_KEY,
+    MODEL_PROVENANCE_KEY,
+    Message,
+    ModelProvenance,
+    system_text,
+)
 from mindroom.llm.runs import RunRecord
 from mindroom.llm.usage import HelperUsage, MessageMetrics, ModelMetrics, RequestUsage, RunMetrics, VoiceDuration
 from mindroom.logging_config import get_logger
@@ -346,14 +352,23 @@ def _spoken_record(record: RunRecord, spoken_text: str, *, error: str | None) ->
     Its calls and their results stay; its text becomes one assistant message of ``spoken_text`` after them. It is the
     record of a turn cut short (``mark_interrupted``), failed when it or ``error``, the turn's failure, says why.
     """
-    messages = [
-        replace(message, content=None) if message.role == "assistant" else message for message in record.messages
-    ]
+    messages = [_unspoken(message) if message.role == "assistant" else message for message in record.messages]
     if spoken_text:
         messages.append(Message(role="assistant", content=spoken_text))
     spoken = replace(record, messages=messages, content=spoken_text or None)
     mark_interrupted(spoken, error=error)
     return spoken
+
+
+def _unspoken(message: Message) -> Message:
+    """Return an assistant ``message`` without its text, which playout never spoke; its calls and usage stay.
+
+    The replay data its provider stored goes too, since a provider would replay the text from it; the message replays
+    from its calls alone.
+    """
+    data = message.provider_data or {}
+    usage = {key: data[key] for key in (MODEL_PROVENANCE_KEY, AGGREGATE_USAGE_KEY) if key in data}
+    return replace(message, content=None, provider_data=usage or None)
 
 
 @dataclass
