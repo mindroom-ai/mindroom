@@ -212,10 +212,8 @@ _ENDING_LABELS: dict[type, str] = {
 }
 
 
-def outcome_label(outcome: FinalDeliveryOutcome | None) -> str:
+def outcome_label(outcome: FinalDeliveryOutcome) -> str:
     """Return the pipeline-timing label of how a turn ended."""
-    if outcome is None:
-        return "no_visible_response"
     label = _ENDING_LABELS.get(type(outcome.ending))
     if label is not None:
         return label

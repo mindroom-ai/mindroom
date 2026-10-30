@@ -157,7 +157,6 @@ def test_an_ending_fails_its_approval_without_internal_codes(
 @pytest.mark.parametrize(
     ("outcome", "expected"),
     [
-        pytest.param(None, "no_visible_response", id="none"),
         pytest.param(FinalDeliveryOutcome(ending=Suppressed(Suppression.HOOK)), "suppressed", id="suppressed"),
         pytest.param(
             FinalDeliveryOutcome(
@@ -185,7 +184,7 @@ def test_an_ending_fails_its_approval_without_internal_codes(
         pytest.param(FinalDeliveryOutcome(ending=Completed()), "no_visible_response", id="completed-nothing"),
     ],
 )
-def test_outcome_label(outcome: FinalDeliveryOutcome | None, expected: str) -> None:
+def test_outcome_label(outcome: FinalDeliveryOutcome, expected: str) -> None:
     """Pipeline timing labels each ending once."""
     assert outcome_label(outcome) == expected
 
