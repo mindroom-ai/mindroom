@@ -10444,14 +10444,18 @@ async def test_a_queued_forced_reindex_keeps_its_force_and_its_waiter_when_a_ref
 
 
 @pytest.mark.asyncio
-async def test_a_shut_down_runtime_scheduler_is_replaced(tmp_path: Path) -> None:
-    """Shutting the process scheduler down releases its slot, so the next runtime gets a fresh one."""
-    runtime_paths = test_runtime_paths(tmp_path)
-    first = runtime_refresh_scheduler(runtime_paths)
-    await first.shutdown()
-    second = runtime_refresh_scheduler(runtime_paths)
-    assert second is not first
-    await second.shutdown()
+async def test_a_refresh_requested_after_the_runtime_shut_down_starts_nothing(tmp_path: Path) -> None:
+    """A late request, such as a file-memory search while the bots stop, reaches the shut-down scheduler and is skipped."""
+    config = _config(tmp_path, bases={"docs": tmp_path / "docs"}, agent_bases=["docs"])
+    runtime_paths = runtime_paths_for(config)
+    scheduler = runtime_refresh_scheduler(runtime_paths)
+    await scheduler.shutdown()
+
+    late = runtime_refresh_scheduler(runtime_paths)
+    late.schedule_refresh("docs", config=config, runtime_paths=runtime_paths)
+
+    assert late is scheduler
+    assert not late._tasks
 
 
 def test_a_source_change_supersedes_the_last_failure() -> None:

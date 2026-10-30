@@ -149,11 +149,8 @@ class KnowledgeRefreshScheduler:
         return await waiter
 
     async def shutdown(self) -> None:
-        """Cancel in-flight background refresh tasks and release this process's scheduler."""
-        global _runtime_scheduler
+        """Cancel in-flight background refresh tasks; requests made after it, as during the runtime's exit, are skipped."""
         self._shutting_down = True
-        if _runtime_scheduler is self:
-            _runtime_scheduler = None
         tasks = list(self._tasks.values())
         self._tasks.clear()
         for request in self._pending.values():
