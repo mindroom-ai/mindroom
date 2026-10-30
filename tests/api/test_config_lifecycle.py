@@ -608,3 +608,67 @@ def test_reads_require_an_initialized_app() -> None:
 
     with pytest.raises(TypeError, match="MindRoom app state is not initialized"):
         config_lifecycle.read_committed_runtime_config(request)
+
+
+@pytest.mark.parametrize("writer", ["tool", "dashboard", "reload"])
+def test_every_publication_reconciles_knowledge_modes_against_the_config_it_replaced(
+    loaded_app: FastAPI,
+    monkeypatch: pytest.MonkeyPatch,
+    writer: str,
+) -> None:
+    """A tool commit, a dashboard save, and a file reload each compare the replaced and the new config once."""
+    before = _snapshot(loaded_app)
+    payload = copy.deepcopy(VALID_CONFIG)
+    payload["agents"]["test_agent"]["role"] = "Changed"
+    pairs: list[tuple[Config, Config]] = []
+    monkeypatch.setattr(
+        config_lifecycle,
+        "reconcile_knowledge_mode_transition_states",
+        lambda previous, current, _paths: pairs.append((previous, current)),
+    )
+
+    if writer == "tool":
+        commit_tool_change(payload, before.runtime_paths)
+    elif writer == "dashboard":
+        save_config(_request_for(loaded_app), payload)
+    else:
+        _write_config(before.runtime_paths.config_path, payload)
+        assert config_lifecycle.load_config_into_app(before.runtime_paths, loaded_app).loaded
+
+    assert pairs == [(before.runtime_config, _snapshot(loaded_app).runtime_config)]
+
+
+def test_a_request_never_rebinds_onto_another_runtime(loaded_app: FastAPI, tmp_path: Path) -> None:
+    """A request's auth and config stay on the runtime it authenticated against; a swap mid-request is stale."""
+    request = _request_for(loaded_app)
+    pinned = config_lifecycle.bind_current_request_snapshot(request)
+    assert config_lifecycle.rebind_current_request_snapshot(request).runtime_paths == pinned.runtime_paths
+
+    other = constants.resolve_primary_runtime_paths(config_path=tmp_path / "other.yaml", process_env={})
+    config_lifecycle.require_api_state(loaded_app).snapshot = config_lifecycle.ApiSnapshot(
+        generation=pinned.generation + 1,
+        runtime_paths=other,
+    )
+
+    with pytest.raises(HTTPException) as exc_info:
+        config_lifecycle.rebind_current_request_snapshot(request)
+    assert exc_info.value.status_code == 409
+
+
+def test_a_dashboard_save_that_cannot_write_the_file_is_a_server_error(
+    loaded_app: FastAPI,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A valid save whose file write fails is not reported as an invalid config."""
+
+    def fail_replace(_tmp: Path, _target: Path) -> None:
+        message = "read-only file system"
+        raise PermissionError(message)
+
+    monkeypatch.setattr(constants, "safe_replace", fail_replace)
+
+    with pytest.raises(HTTPException) as exc_info:
+        save_config(_request_for(loaded_app), copy.deepcopy(VALID_CONFIG))
+
+    assert exc_info.value.status_code == 500
+    assert exc_info.value.detail == "Failed to save configuration: read-only file system"

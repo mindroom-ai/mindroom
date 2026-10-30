@@ -403,6 +403,7 @@ class TestUpdateOwnConfig:
 
             assert "configuration file changed" in result
             assert "NOT applied" in result
+            assert "Invalid configuration" not in result
             assert config_path.read_text(encoding="utf-8") == concurrent_source
         finally:
             config_path.unlink(missing_ok=True)

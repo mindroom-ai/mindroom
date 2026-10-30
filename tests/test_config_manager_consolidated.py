@@ -2369,4 +2369,5 @@ def test_config_write_refuses_a_file_edited_while_it_validated(
 
     assert "configuration file changed" in result
     assert "NOT applied" in result
+    assert "Invalid configuration" not in result
     assert config_path.read_text(encoding="utf-8") == concurrent_source

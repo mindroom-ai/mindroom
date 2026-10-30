@@ -7098,3 +7098,23 @@ def test_oauth_routes_never_take_another_credential_service() -> None:
     for action in ("connect", "disconnect", "status"):
         route = routes[f"/api/oauth/{{provider_id}}/{action}"]
         assert {param.name for param in route.dependant.query_params} == {"agent_name"}
+
+
+@pytest.mark.parametrize(
+    ("method", "path"),
+    [
+        ("POST", "/api/oauth/google_drive/connect?agent_name=general"),
+        ("GET", "/api/oauth/google_drive/status?agent_name=general"),
+        ("POST", "/api/oauth/google_drive/disconnect?agent_name=general"),
+        ("GET", "/api/oauth/google_drive/success"),
+    ],
+)
+def test_dashboard_oauth_routes_refuse_an_unauthenticated_request(tmp_path: Path, method: str, path: str) -> None:
+    """The routes authenticate through their dependency; the operations they call authenticate nothing."""
+    runtime_paths = _runtime_paths(tmp_path)
+    api_app = _make_test_app(runtime_paths, _config_payload())
+
+    with TestClient(api_app) as client:
+        response = client.request(method, path, headers={"Origin": str(client.base_url).rstrip("/")})
+
+    assert response.status_code == 401

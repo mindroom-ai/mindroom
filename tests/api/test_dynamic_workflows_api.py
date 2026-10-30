@@ -293,6 +293,27 @@ def test_private_dynamic_workflow_report_rejects_access_token_for_other_hosted_u
     assert response.status_code == 403
 
 
+def test_private_dynamic_workflow_report_accepts_gateway_user_id_that_is_the_matrix_id(
+    test_client: TestClient,
+) -> None:
+    """A gateway may sign the Matrix ID as its user-ID claim without a Matrix claim; that login still opens its report."""
+    runtime_paths = main._app_runtime_paths(test_client.app)
+    gateway_runtime_paths = constants.resolve_primary_runtime_paths(
+        config_path=runtime_paths.config_path,
+        storage_path=runtime_paths.storage_root,
+        process_env=trusted_upstream_env(matrix_user_id_claim=None),
+    )
+    main.initialize_api_app(test_client.app, gateway_runtime_paths)
+    run = _completed_run(gateway_runtime_paths, requested_by="@alice:example.org")
+
+    response = test_client.get(
+        f"/reports/private/agent/general/competitor-research-report/{run.run_id}",
+        headers=trusted_upstream_headers(user_id="@alice:example.org"),
+    )
+
+    assert response.status_code == 200, response.text
+
+
 def test_private_dynamic_workflow_report_accepts_matching_trusted_upstream_user(test_client: TestClient) -> None:
     """Private report auth should allow the Matrix requester that started the run."""
     runtime_paths = use_trusted_upstream_runtime(test_client.app)
