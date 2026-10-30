@@ -327,6 +327,32 @@ def test_the_dashboard_provider_fixture_lists_exactly_the_values_config_load_acc
 
 
 @pytest.mark.parametrize(
+    ("configured_id", "endpoint_id"),
+    [
+        ("gpt-6-astra", "gpt-6-astra"),
+        ("openai-codex/gpt-6-astra", "gpt-6-astra"),
+        ("gpt-5.6", "gpt-5.6-sol"),
+        ("openai-codex/gpt-5.6", "gpt-5.6-sol"),
+        ("gpt-5.6-sol", "gpt-5.6-sol"),
+        ("openai-codex/gpt-5.6-terra", "gpt-5.6-terra"),
+        ("gpt-5.4", "gpt-5.4"),
+    ],
+)
+def test_codex_model_ids_resolve_to_the_endpoint_slug(configured_id: str, endpoint_id: str) -> None:
+    """The plugin-style prefix is dropped and the public GPT-5.6 alias resolves to the slug Codex accepts."""
+    assert model_identity(ModelConfig(provider="codex", id=configured_id)).id == endpoint_id
+
+
+@pytest.mark.parametrize(
+    ("configured_id", "endpoint_id"),
+    [("k3", "k3"), ("kimi-code/k3", "k3"), ("k3-256k", "k3-256k"), ("kimi-code/kimi-for-coding", "kimi-for-coding")],
+)
+def test_kimi_model_ids_drop_the_cli_prefix(configured_id: str, endpoint_id: str) -> None:
+    """The kimi-code/ prefix from CLI config model names resolves to the bare slug."""
+    assert model_identity(ModelConfig(provider="kimi", id=configured_id)).id == endpoint_id
+
+
+@pytest.mark.parametrize(
     ("provider", "configured_id", "endpoint_id"),
     [("codex", "openai-codex/gpt-6.1-sol", "gpt-6.1-sol"), ("kimi", "kimi-code/k3", "k3")],
 )
