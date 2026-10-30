@@ -449,6 +449,20 @@ class TestCrashMatrix:
         assert runtime.model_runs == 1
 
 
+async def enqueue_more_than_one_batch(runtime: TurnRuntime) -> int:
+    """Enqueue one final answer more than a recovery batch holds, and return how many."""
+    count = _UNACKNOWLEDGED_BATCH + 1
+    for index in range(count):
+        await runtime.store.enqueue_matrix_delivery(
+            delivery_id=f"turn-{index:04d}",
+            stage=DeliveryStage.FINAL,
+            room_id=ROOM,
+            thread_id=None,
+            payload={"msgtype": "m.text", "body": f"answer {index}"},
+        )
+    return count
+
+
 class TestRecoveryIsComplete:
     """Startup recovery either sends everything it owes, or is not recovery."""
 
@@ -457,15 +471,7 @@ class TestRecoveryIsComplete:
         runtime: TurnRuntime,
     ) -> None:
         """A bound that stops at one page leaves answers permanently unsent."""
-        count = _UNACKNOWLEDGED_BATCH + 1
-        for index in range(count):
-            await runtime.store.enqueue_matrix_delivery(
-                delivery_id=f"turn-{index:04d}",
-                stage=DeliveryStage.FINAL,
-                room_id=ROOM,
-                thread_id=None,
-                payload={"msgtype": "m.text", "body": f"answer {index}"},
-            )
+        count = await enqueue_more_than_one_batch(runtime)
 
         recovered = (await runtime.delivery.recover()).recovered
 
@@ -483,15 +489,7 @@ class TestRecoveryIsComplete:
         pins the window, and every delivery behind it is never attempted. The
         page here fails entirely, and the row after it still has to be sent.
         """
-        count = _UNACKNOWLEDGED_BATCH + 1
-        for index in range(count):
-            await runtime.store.enqueue_matrix_delivery(
-                delivery_id=f"turn-{index:04d}",
-                stage=DeliveryStage.FINAL,
-                room_id=ROOM,
-                thread_id=None,
-                payload={"msgtype": "m.text", "body": f"answer {index}"},
-            )
+        await enqueue_more_than_one_batch(runtime)
         runtime.homeserver.fail_sends_until = _UNACKNOWLEDGED_BATCH
 
         recovered = (await runtime.delivery.recover()).recovered
@@ -554,7 +552,7 @@ class TestRecoveryIsComplete:
 
 
 class TestModelIsNotRerun:
-    """Boundaries five through nine must not spend the model again."""
+    """Boundaries six through nine must not spend the model again."""
 
     async def test_a_regenerated_answer_cannot_replace_an_accepted_one(
         self,
@@ -1315,8 +1313,8 @@ class TestARelogInCannotDuplicateTheAnswer:
         room pagination on that schedule would be a real cost, and a send that
         keeps failing keeps the row in the set.
 
-        What bounds it is where the device is written: the claim records the
-        device about to send, not the one that succeeded. The first pass after
+        What bounds it is where the device is written: the row records the
+        device about to send, before the send, not the one that succeeded. The first pass after
         a re-login sees a mismatch and scans; it also leaves the row naming the
         current device, so every pass after that is an ordinary resend even
         though the send is still failing.
