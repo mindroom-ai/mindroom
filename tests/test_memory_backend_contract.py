@@ -118,26 +118,6 @@ async def test_agent_scope_memories_invisible_to_other_agents(backend_env: Backe
 
 
 @pytest.mark.asyncio
-async def test_team_conversation_memory_visible_to_members_but_not_member_scoped(backend_env: BackendEnv) -> None:
-    backend, config = backend_env.backend, backend_env.config
-
-    await backend.store_conversation(
-        "Quarterly metrics reviewed by the pair team",
-        ["alpha", "beta"],
-        "session-team",
-        config,
-    )
-
-    for member in ("alpha", "beta"):
-        results = (await backend.search("Quarterly metrics", member, config, limit=5)).results
-        assert [result["user_id"] for result in results] == ["team_alpha+beta"]
-        assert results[0]["memory"] == "Quarterly metrics reviewed by the pair team"
-
-    for member in ("alpha", "beta"):
-        assert await backend.list_all(member, config, limit=10) == []
-
-
-@pytest.mark.asyncio
 async def test_single_agent_conversation_memory_stays_member_scoped(backend_env: BackendEnv) -> None:
     backend, config = backend_env.backend, backend_env.config
 
@@ -169,6 +149,7 @@ async def test_a_team_turn_writes_once_to_the_one_store_every_member_reads_and_e
             "Quarterly metrics reviewed twice",
         ]
         assert {result["user_id"] for result in results} == {"team_alpha+beta"}
+        assert await backend.list_all(member, config, limit=10) == []
     team_root = storage_path / "team_memory" / "team_alpha+beta"
     assert team_root.is_dir()
     assert not any((storage_path / "agents").glob("*/memory_files"))
@@ -208,8 +189,6 @@ def test_resolve_memory_backend_maps_scopes_to_adapters(tmp_path: Path) -> None:
     assert isinstance(resolve_memory_backend("alpha", config, runtime_paths), FileMemoryBackend)
     assert isinstance(resolve_memory_backend("beta", config, runtime_paths), Mem0MemoryBackend)
     assert isinstance(resolve_memory_backend(["alpha", "alpha"], config, runtime_paths), FileMemoryBackend)
-    # Mixed teams currently resolve to mem0; PR #798's partitioned-team fix
-    # slots in here as a new ResolvedMemoryBackend implementation.
     assert isinstance(resolve_memory_backend(["alpha", "beta"], config, runtime_paths), Mem0MemoryBackend)
 
     config.agents["alpha"].memory_backend = "none"

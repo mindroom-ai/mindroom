@@ -33,7 +33,6 @@ from mindroom.memory import store_conversation_memory as public_store_conversati
 from mindroom.memory import update_agent_memory as public_update_agent_memory
 from mindroom.memory._shared import MemoryNotFoundError
 from mindroom.prompts import PROMPT_DEFAULTS
-from mindroom.runtime_resolution import resolve_agent_runtime
 from mindroom.timing import timing_scope
 from mindroom.tool_system.worker_routing import (
     ToolExecutionIdentity,
@@ -56,14 +55,12 @@ async def add_agent_memory(
     content: str,
     agent_name: str,
     config: Config,
-    metadata: dict | None = None,
 ) -> None:
     await public_add_agent_memory(
         content,
         agent_name,
         config,
         runtime_paths_for(config),
-        metadata,
         execution_identity=get_tool_execution_identity(),
     )
 
@@ -177,7 +174,6 @@ async def store_conversation_memory(
     agent_name: str | list[str],
     session_id: str,
     config: Config,
-    **kwargs: object,
 ) -> None:
     await public_store_conversation_memory(
         prompt,
@@ -186,38 +182,23 @@ async def store_conversation_memory(
         config,
         runtime_paths_for(config),
         execution_identity=get_tool_execution_identity(),
-        **kwargs,
-    )
-
-
-def _test_config(storage_path: Path) -> Config:
-    runtime_paths = resolve_runtime_paths(
-        config_path=storage_path / "config.yaml",
-        storage_path=storage_path,
-        process_env={
-            "MATRIX_HOMESERVER": "http://localhost:8008",
-            "MINDROOM_NAMESPACE": "",
-        },
-    )
-    return bind_runtime_paths(
-        Config(
-            agents={
-                "general": AgentConfig(display_name="General"),
-                "calculator": AgentConfig(display_name="Calculator"),
-                "helper": AgentConfig(display_name="Helper"),
-                "test_agent": AgentConfig(display_name="Test Agent"),
-                "a_b": AgentConfig(display_name="A B"),
-                "c": AgentConfig(display_name="C"),
-                "a": AgentConfig(display_name="A"),
-                "b_c": AgentConfig(display_name="B C"),
-            },
-        ),
-        runtime_paths,
     )
 
 
 def _team_memory_file(storage_path: Path, team_scope_id: str) -> Path:
     return storage_path / "team_memory" / team_scope_id / "MEMORY.md"
+
+
+def _identity(name: str, agent_name: str = "general") -> ToolExecutionIdentity:
+    return ToolExecutionIdentity(
+        channel="matrix",
+        agent_name=agent_name,
+        requester_id=f"@{name}:example.org",
+        room_id="!room:example.org",
+        thread_id=None,
+        resolved_thread_id=None,
+        session_id=f"session-{name}",
+    )
 
 
 @pytest.fixture
@@ -227,7 +208,46 @@ def storage_path(tmp_path: Path) -> Path:
 
 @pytest.fixture
 def config(storage_path: Path) -> Config:
-    return _test_config(storage_path)
+    runtime_paths = resolve_runtime_paths(
+        config_path=storage_path / "config.yaml",
+        storage_path=storage_path,
+        process_env={
+            "MATRIX_HOMESERVER": "http://localhost:8008",
+            "MINDROOM_NAMESPACE": "",
+        },
+    )
+    config = bind_runtime_paths(
+        Config(
+            agents={
+                "general": AgentConfig(display_name="General"),
+                "calculator": AgentConfig(display_name="Calculator"),
+                "a_b": AgentConfig(display_name="A B"),
+                "c": AgentConfig(display_name="C"),
+                "a": AgentConfig(display_name="A"),
+                "b_c": AgentConfig(display_name="B C"),
+            },
+        ),
+        runtime_paths,
+    )
+    config.memory.backend = "file"
+    return config
+
+
+class _RecordingScheduler:
+    """Records each semantic refresh scheduled for file memory."""
+
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, dict[str, object]]] = []
+
+    def schedule_refresh(self, base_id: str, **kwargs: object) -> None:
+        self.calls.append((base_id, kwargs))
+
+
+@pytest.fixture
+def refresh_scheduler(monkeypatch: pytest.MonkeyPatch) -> _RecordingScheduler:
+    scheduler = _RecordingScheduler()
+    monkeypatch.setattr(semantic_file_search, "_memory_refresh_scheduler", scheduler)
+    return scheduler
 
 
 def test_semantic_memory_index_is_a_runtime_config_overlay(storage_path: Path, config: Config) -> None:
@@ -272,6 +292,7 @@ async def test_semantic_memory_search_uses_ready_published_index_without_refresh
     storage_path: Path,
     config: Config,
     monkeypatch: pytest.MonkeyPatch,
+    refresh_scheduler: _RecordingScheduler,
 ) -> None:
     root = storage_path / "memory-root"
     memory_file = root / "memory" / "2026-06-02.md"
@@ -308,18 +329,11 @@ async def test_semantic_memory_search_uses_ready_published_index_without_refresh
         assert base_config.include_extensions == [".md"]
         return SimpleNamespace(knowledge=FakeKnowledge(), availability=KnowledgeAvailability.READY)
 
-    scheduled_base_ids: list[str] = []
-
-    class FakeScheduler:
-        def schedule_refresh(self, base_id: str, **_kwargs: object) -> None:
-            scheduled_base_ids.append(base_id)
-
     def list_files(*_args: object, **_kwargs: object) -> list[Path]:
         return [memory_file.resolve()]
 
     monkeypatch.setattr(semantic_file_search, "list_knowledge_files", list_files)
     monkeypatch.setattr(semantic_file_search, "resolve_knowledge_base_access_async", resolve_access)
-    monkeypatch.setattr(semantic_file_search, "_memory_refresh_scheduler", FakeScheduler(), raising=False)
 
     results = await semantic_file_search.search_semantic_file_memories(
         "semantic memory",
@@ -333,7 +347,7 @@ async def test_semantic_memory_search_uses_ready_published_index_without_refresh
 
     assert results[0]["memory"] == "Published semantic memory."
     assert access_base_ids
-    assert scheduled_base_ids == []
+    assert refresh_scheduler.calls == []
 
 
 @pytest.mark.asyncio
@@ -489,17 +503,12 @@ async def test_semantic_memory_missing_knowledge_index_schedules_refresh_and_rai
     storage_path: Path,
     config: Config,
     monkeypatch: pytest.MonkeyPatch,
+    refresh_scheduler: _RecordingScheduler,
 ) -> None:
     root = storage_path / "memory-root"
     memory_file = root / "memory" / "2026-06-02.md"
     memory_file.parent.mkdir(parents=True)
     memory_file.write_text("Serialized semantic memory.\n", encoding="utf-8")
-
-    scheduled_base_ids: list[str] = []
-
-    class FakeScheduler:
-        def schedule_refresh(self, base_id: str, **_kwargs: object) -> None:
-            scheduled_base_ids.append(base_id)
 
     def list_files(*_args: object, **_kwargs: object) -> list[Path]:
         return [memory_file.resolve()]
@@ -509,7 +518,6 @@ async def test_semantic_memory_missing_knowledge_index_schedules_refresh_and_rai
 
     monkeypatch.setattr(semantic_file_search, "list_knowledge_files", list_files)
     monkeypatch.setattr(semantic_file_search, "resolve_knowledge_base_access_async", resolve_access)
-    monkeypatch.setattr(semantic_file_search, "_memory_refresh_scheduler", FakeScheduler())
 
     with pytest.raises(semantic_file_search.SemanticFileMemoryIndexUnavailableError) as excinfo:
         await semantic_file_search.search_semantic_file_memories(
@@ -522,12 +530,13 @@ async def test_semantic_memory_missing_knowledge_index_schedules_refresh_and_rai
             limit=5,
         )
 
-    assert scheduled_base_ids
+    assert refresh_scheduler.calls
     # Plain warm-up carries no degradation cause.
     assert excinfo.value.degraded_reason is None
 
 
 @pytest.mark.asyncio
+@pytest.mark.usefixtures("refresh_scheduler")
 async def test_semantic_memory_cold_failed_index_carries_classified_cause(
     storage_path: Path,
     config: Config,
@@ -538,10 +547,6 @@ async def test_semantic_memory_cold_failed_index_carries_classified_cause(
     memory_file = root / "memory" / "2026-06-02.md"
     memory_file.parent.mkdir(parents=True)
     memory_file.write_text("Serialized semantic memory.\n", encoding="utf-8")
-
-    class FakeScheduler:
-        def schedule_refresh(self, base_id: str, **_kwargs: object) -> None:
-            del base_id
 
     def list_files(*_args: object, **_kwargs: object) -> list[Path]:
         return [memory_file.resolve()]
@@ -557,7 +562,6 @@ async def test_semantic_memory_cold_failed_index_carries_classified_cause(
 
     monkeypatch.setattr(semantic_file_search, "list_knowledge_files", list_files)
     monkeypatch.setattr(semantic_file_search, "resolve_knowledge_base_access_async", resolve_access)
-    monkeypatch.setattr(semantic_file_search, "_memory_refresh_scheduler", FakeScheduler())
 
     with pytest.raises(semantic_file_search.SemanticFileMemoryIndexUnavailableError) as excinfo:
         await semantic_file_search.search_semantic_file_memories(
@@ -575,7 +579,6 @@ async def test_semantic_memory_cold_failed_index_carries_classified_cause(
 
 @pytest.mark.asyncio
 async def test_file_backend_add_and_list_memories(storage_path: Path, config: Config) -> None:
-    config.memory.backend = "file"
 
     await add_agent_memory("User prefers concise responses", "general", config)
 
@@ -591,8 +594,6 @@ async def test_file_backend_add_and_list_memories(storage_path: Path, config: Co
 
 @pytest.mark.asyncio
 async def test_file_backend_lists_unstructured_daily_memory_lines(storage_path: Path, config: Config) -> None:
-    config.memory.backend = "file"
-    config.agents["general"].memory_backend = "file"
 
     workspace = agent_workspace_root_path(storage_path, "general")
     daily_file = workspace / "memory" / "2026-06-13.md"
@@ -619,8 +620,6 @@ async def test_file_backend_deduplicates_unstructured_lines_with_internal_whites
     storage_path: Path,
     config: Config,
 ) -> None:
-    config.memory.backend = "file"
-    config.agents["general"].memory_backend = "file"
 
     await add_agent_memory("Bas prefers repo-grounded answers.", "general", config)
 
@@ -645,8 +644,6 @@ async def test_file_backend_list_all_skips_unstructured_entrypoint_lines(
     storage_path: Path,
     config: Config,
 ) -> None:
-    config.memory.backend = "file"
-    config.agents["general"].memory_backend = "file"
 
     workspace = agent_workspace_root_path(storage_path, "general")
     memory_file = workspace / "MEMORY.md"
@@ -673,28 +670,10 @@ async def test_file_backend_user_scoped_workers_share_agent_memory_across_reques
     config: Config,
 ) -> None:
     """Requester-scoped workers still share one durable agent memory root."""
-    config.memory.backend = "file"
-    config.agents["general"].memory_backend = "file"
     config.agents["general"].worker_scope = "user"
 
-    alice_identity = ToolExecutionIdentity(
-        channel="matrix",
-        agent_name="general",
-        requester_id="@alice:example.org",
-        room_id="!room:example.org",
-        thread_id=None,
-        resolved_thread_id=None,
-        session_id="session-alice",
-    )
-    bob_identity = ToolExecutionIdentity(
-        channel="matrix",
-        agent_name="general",
-        requester_id="@bob:example.org",
-        room_id="!room:example.org",
-        thread_id=None,
-        resolved_thread_id=None,
-        session_id="session-bob",
-    )
+    alice_identity = _identity("alice")
+    bob_identity = _identity("bob")
 
     with tool_execution_identity(alice_identity):
         await add_agent_memory("Alice-authored shared agent memory", "general", config)
@@ -715,23 +694,13 @@ async def test_file_backend_user_scoped_workers_share_agent_memory_across_reques
 
 
 @pytest.mark.asyncio
-async def test_file_backend_worker_scope_prompt_reads_daily_memory_from_base_storage_path(
+async def test_user_scoped_worker_prompt_reads_daily_memory(
     config: Config,
 ) -> None:
-    config.memory.backend = "file"
-    config.agents["general"].memory_backend = "file"
     config.agents["general"].worker_scope = "user"
     config.memory.file.max_entrypoint_lines = 0
 
-    alice_identity = ToolExecutionIdentity(
-        channel="matrix",
-        agent_name="general",
-        requester_id="@alice:example.org",
-        room_id="!room:example.org",
-        thread_id=None,
-        resolved_thread_id=None,
-        session_id="session-alice",
-    )
+    alice_identity = _identity("alice")
 
     with tool_execution_identity(alice_identity):
         append_agent_daily_memory("Worker daily note", "general", config)
@@ -753,8 +722,6 @@ async def test_file_backend_worker_scope_workspace_file_memory_uses_workspace_ro
             "memory/notes.md": "Private note.\n",
         },
     )
-    config.memory.backend = "file"
-    config.agents["general"].memory_backend = "file"
     config.agents["general"].private = AgentPrivateConfig(
         per="user",
         root="mind_data",
@@ -762,24 +729,8 @@ async def test_file_backend_worker_scope_workspace_file_memory_uses_workspace_ro
         context_files=["SOUL.md"],
     )
 
-    alice_identity = ToolExecutionIdentity(
-        channel="matrix",
-        agent_name="general",
-        requester_id="@alice:example.org",
-        room_id="!room:example.org",
-        thread_id=None,
-        resolved_thread_id=None,
-        session_id="session-alice",
-    )
-    bob_identity = ToolExecutionIdentity(
-        channel="matrix",
-        agent_name="general",
-        requester_id="@bob:example.org",
-        room_id="!room:example.org",
-        thread_id=None,
-        resolved_thread_id=None,
-        session_id="session-bob",
-    )
+    alice_identity = _identity("alice")
+    bob_identity = _identity("bob")
 
     with tool_execution_identity(alice_identity):
         await add_agent_memory("Alice workspace memory", "general", config)
@@ -802,9 +753,7 @@ async def test_file_backend_worker_scope_workspace_file_memory_uses_workspace_ro
 
 @pytest.mark.asyncio
 async def test_file_backend_semantic_search_reads_daily_memory_root(storage_path: Path, config: Config) -> None:
-    config.memory.backend = "file"
     config.memory.search.mode = "semantic"
-    config.agents["general"].memory_backend = "file"
 
     workspace = agent_workspace_root_path(storage_path, "general")
     (workspace / "memory").mkdir(parents=True)
@@ -833,9 +782,7 @@ async def test_file_backend_semantic_search_reads_daily_memory_root(storage_path
 @pytest.mark.asyncio
 async def test_semantic_search_ids_are_read_only_crud_locators(config: Config) -> None:
     """A semantic result ID must not be advertised as a round-trippable CRUD ID."""
-    config.memory.backend = "file"
     config.memory.search.mode = "semantic"
-    config.agents["general"].memory_backend = "file"
     semantic_id = "semantic:memory/notes.md:1"
 
     with patch(
@@ -866,10 +813,8 @@ async def test_keyword_search_uses_fixed_memory_corpus_not_semantic_include_patt
     config: Config,
 ) -> None:
     """Keyword mode searches MEMORY.md and memory/**/*.md regardless of semantic includes."""
-    config.memory.backend = "file"
     config.memory.search.mode = "keyword"
     config.memory.search.include = ["notes/**/*.md"]
-    config.agents["general"].memory_backend = "file"
     workspace = agent_workspace_root_path(storage_path, "general")
     notes_file = workspace / "notes" / "custom.md"
     memory_file = workspace / "memory" / "daily.md"
@@ -889,9 +834,7 @@ async def test_keyword_search_uses_fixed_memory_corpus_not_semantic_include_patt
 async def test_file_backend_semantic_search_falls_back_to_keyword_on_index_error(
     config: Config,
 ) -> None:
-    config.memory.backend = "file"
     config.memory.search.mode = "semantic"
-    config.agents["general"].memory_backend = "file"
 
     await add_agent_memory("Keyword fallback memory", "general", config)
 
@@ -919,10 +862,8 @@ async def test_file_backend_cold_failed_index_degrades_instead_of_healthy_fallba
     config: Config,
 ) -> None:
     """A never-built index kept down by an auth failure is not a healthy keyword fallback."""
-    config.memory.backend = "file"
     config.memory.search.mode = "semantic"
     config.memory.search.include = ["notes/**/*.md"]
-    config.agents["general"].memory_backend = "file"
 
     await add_agent_memory("Keyword fallback memory", "general", config)
     custom_note = agent_workspace_root_path(storage_path, "general") / "notes" / "custom.md"
@@ -955,9 +896,7 @@ async def test_prompt_parts_carry_degradation_notice_with_keyword_matches(
     config: Config,
 ) -> None:
     """Automatic prompt assembly keeps both the notice and the keyword fallback context."""
-    config.memory.backend = "file"
     config.memory.search.mode = "semantic"
-    config.agents["general"].memory_backend = "file"
 
     await add_agent_memory("Keyword fallback memory", "general", config)
 
@@ -980,38 +919,20 @@ async def test_prompt_parts_carry_degradation_notice_with_keyword_matches(
 @pytest.mark.asyncio
 async def test_file_backend_add_schedules_semantic_refresh_when_semantic_search_enabled(
     config: Config,
-    monkeypatch: pytest.MonkeyPatch,
+    refresh_scheduler: _RecordingScheduler,
 ) -> None:
-    config.memory.backend = "file"
     config.memory.search.mode = "semantic"
-    config.agents["general"].memory_backend = "file"
     config.agents["general"].private = AgentPrivateConfig(per="user", root="mind_data")
-    identity = ToolExecutionIdentity(
-        channel="matrix",
-        agent_name="general",
-        requester_id="@alice:example.org",
-        room_id="!room:example.org",
-        thread_id=None,
-        resolved_thread_id=None,
-        session_id="session-alice",
-    )
-
-    scheduled: list[tuple[str, Config, object, object]] = []
-
-    class FakeScheduler:
-        def schedule_refresh(self, base_id: str, **kwargs: object) -> None:
-            scheduled.append((base_id, kwargs["config"], kwargs["runtime_paths"], kwargs["execution_identity"]))
-
-    monkeypatch.setattr(semantic_file_search, "_memory_refresh_scheduler", FakeScheduler())
+    identity = _identity("alice")
 
     with tool_execution_identity(identity):
         await add_agent_memory("Semantic refresh memory", "general", config)
 
-    assert len(scheduled) == 1
-    base_id, scheduled_config, scheduled_runtime_paths, scheduled_identity = scheduled[0]
-    assert scheduled_runtime_paths == runtime_paths_for(config)
-    assert scheduled_identity == identity
-    scheduled_path = scheduled_config.knowledge_bases[base_id].path
+    assert len(refresh_scheduler.calls) == 1
+    base_id, scheduled = refresh_scheduler.calls[0]
+    assert scheduled["runtime_paths"] == runtime_paths_for(config)
+    assert scheduled["execution_identity"] == identity
+    scheduled_path = scheduled["config"].knowledge_bases[base_id].path
     assert "private_instances" in scheduled_path
     assert scheduled_path.endswith("mind_data")
 
@@ -1019,49 +940,29 @@ async def test_file_backend_add_schedules_semantic_refresh_when_semantic_search_
 @pytest.mark.asyncio
 async def test_file_backend_update_and_delete_schedule_semantic_refresh_when_semantic_search_enabled(
     config: Config,
-    monkeypatch: pytest.MonkeyPatch,
+    refresh_scheduler: _RecordingScheduler,
 ) -> None:
-    config.memory.backend = "file"
     config.memory.search.mode = "semantic"
-    config.agents["general"].memory_backend = "file"
-
-    scheduled: list[str] = []
-
-    class FakeScheduler:
-        def schedule_refresh(self, base_id: str, **_kwargs: object) -> None:
-            scheduled.append(base_id)
-
-    monkeypatch.setattr(semantic_file_search, "_memory_refresh_scheduler", FakeScheduler())
 
     await add_agent_memory("Original semantic memory", "general", config)
     memory_id = (await list_all_agent_memories("general", config))[0]["id"]
 
-    scheduled.clear()
+    refresh_scheduler.calls.clear()
     await update_agent_memory(memory_id, "Updated semantic memory", "general", config)
-    assert len(scheduled) == 1
+    assert len(refresh_scheduler.calls) == 1
 
-    scheduled.clear()
+    refresh_scheduler.calls.clear()
     await delete_agent_memory(memory_id, "general", config)
-    assert len(scheduled) == 1
+    assert len(refresh_scheduler.calls) == 1
 
 
 @pytest.mark.asyncio
 async def test_file_backend_store_conversation_memory_schedules_semantic_refresh_when_semantic_search_enabled(
     storage_path: Path,
     config: Config,
-    monkeypatch: pytest.MonkeyPatch,
+    refresh_scheduler: _RecordingScheduler,
 ) -> None:
-    config.memory.backend = "file"
     config.memory.search.mode = "semantic"
-    config.agents["general"].memory_backend = "file"
-
-    scheduled: list[tuple[str, Config]] = []
-
-    class FakeScheduler:
-        def schedule_refresh(self, base_id: str, **kwargs: object) -> None:
-            scheduled.append((base_id, kwargs["config"]))
-
-    monkeypatch.setattr(semantic_file_search, "_memory_refresh_scheduler", FakeScheduler())
 
     await store_conversation_memory(
         "Conversation semantic memory",
@@ -1071,31 +972,21 @@ async def test_file_backend_store_conversation_memory_schedules_semantic_refresh
     )
 
     workspace = agent_workspace_root_path(storage_path, "general")
-    assert len(scheduled) == 1
-    base_id, scheduled_config = scheduled[0]
-    assert scheduled_config.knowledge_bases[base_id].path == str(workspace.resolve())
+    assert len(refresh_scheduler.calls) == 1
+    base_id, scheduled = refresh_scheduler.calls[0]
+    assert scheduled["config"].knowledge_bases[base_id].path == str(workspace.resolve())
 
 
 @pytest.mark.asyncio
 async def test_file_backend_add_skips_semantic_refresh_when_search_mode_is_keyword(
     config: Config,
-    monkeypatch: pytest.MonkeyPatch,
+    refresh_scheduler: _RecordingScheduler,
 ) -> None:
-    config.memory.backend = "file"
     config.memory.search.mode = "keyword"
-    config.agents["general"].memory_backend = "file"
-
-    scheduled: list[str] = []
-
-    class FakeScheduler:
-        def schedule_refresh(self, base_id: str, **_kwargs: object) -> None:
-            scheduled.append(base_id)
-
-    monkeypatch.setattr(semantic_file_search, "_memory_refresh_scheduler", FakeScheduler())
 
     await add_agent_memory("Keyword mode memory", "general", config)
 
-    assert scheduled == []
+    assert refresh_scheduler.calls == []
 
 
 @pytest.mark.asyncio
@@ -1106,23 +997,13 @@ async def test_file_backend_private_semantic_search_uses_requester_root(
     template_dir = build_private_template_dir(
         files={"MEMORY.md": "# Memory\n", "memory/notes.md": "Alice private semantic note.\n"},
     )
-    config.memory.backend = "file"
     config.memory.search.mode = "semantic"
-    config.agents["general"].memory_backend = "file"
     config.agents["general"].private = AgentPrivateConfig(
         per="user",
         root="mind_data",
         template_dir=str(template_dir),
     )
-    identity = ToolExecutionIdentity(
-        channel="matrix",
-        agent_name="general",
-        requester_id="@alice:example.org",
-        room_id="!room:example.org",
-        thread_id=None,
-        resolved_thread_id=None,
-        session_id="session-alice",
-    )
+    identity = _identity("alice")
 
     with (
         tool_execution_identity(identity),
@@ -1160,23 +1041,13 @@ async def test_private_template_file_memory_is_visible_on_first_prompt(
             "memory/notes.md": "Private note.\n",
         },
     )
-    config.memory.backend = "file"
-    config.agents["general"].memory_backend = "file"
     config.agents["general"].private = AgentPrivateConfig(
         per="user",
         root="mind_data",
         template_dir=str(template_dir),
     )
 
-    identity = ToolExecutionIdentity(
-        channel="matrix",
-        agent_name="general",
-        requester_id="@alice:example.org",
-        room_id="!room:example.org",
-        thread_id=None,
-        resolved_thread_id=None,
-        session_id="session-alice",
-    )
+    identity = _identity("alice")
 
     with tool_execution_identity(identity):
         prompt_parts = await build_memory_prompt_parts(
@@ -1207,8 +1078,6 @@ async def test_private_file_memory_only_reads_memory_files(
             "memory/notes.md": "Private note.\n",
         },
     )
-    config.memory.backend = "file"
-    config.agents["general"].memory_backend = "file"
     config.agents["general"].private = AgentPrivateConfig(
         per="user",
         root="mind_data",
@@ -1216,18 +1085,9 @@ async def test_private_file_memory_only_reads_memory_files(
         context_files=["SOUL.md"],
     )
 
-    identity = ToolExecutionIdentity(
-        channel="matrix",
-        agent_name="general",
-        requester_id="@alice:example.org",
-        room_id="!room:example.org",
-        thread_id=None,
-        resolved_thread_id=None,
-        session_id="session-alice",
-    )
+    identity = _identity("alice")
 
     with tool_execution_identity(identity):
-        resolve_agent_runtime("general", config, runtime_paths_for(config), execution_identity=identity, create=True)
         soul_results = await search_agent_memories("Template soul", "general", config, limit=5)
         runbook_results = await search_agent_memories("Runbook secret", "general", config, limit=5)
         note_results = await search_agent_memories("Private note", "general", config, limit=5)
@@ -1258,23 +1118,13 @@ async def test_private_file_memory_crud_uses_canonical_private_instance_root(
             "memory/notes.md": "Private note.\n",
         },
     )
-    config.memory.backend = "file"
-    config.agents["general"].memory_backend = "file"
     config.agents["general"].private = AgentPrivateConfig(
         per="user",
         root="mind_data",
         template_dir=str(template_dir),
     )
 
-    identity = ToolExecutionIdentity(
-        channel="matrix",
-        agent_name="general",
-        requester_id="@alice:example.org",
-        room_id="!room:example.org",
-        thread_id=None,
-        resolved_thread_id=None,
-        session_id="session-alice",
-    )
+    identity = _identity("alice")
 
     with tool_execution_identity(identity):
         await add_agent_memory("Private CRUD memory", "general", config)
@@ -1305,31 +1155,12 @@ async def test_file_backend_team_conversation_memory_lives_once_in_the_team_stor
     config: Config,
 ) -> None:
     """A team turn appends one entry to the team's own MEMORY.md, shared by every requester and member."""
-    config.memory.backend = "file"
-    config.agents["general"].memory_backend = "file"
-    config.agents["calculator"].memory_backend = "file"
     config.agents["general"].worker_scope = "user"
     config.agents["calculator"].worker_scope = "user"
     config.teams = {"shared_team": MockTeamConfig(agents=["general", "calculator"])}
 
-    alice_identity = ToolExecutionIdentity(
-        channel="matrix",
-        agent_name="team",
-        requester_id="@alice:example.org",
-        room_id="!room:example.org",
-        thread_id=None,
-        resolved_thread_id=None,
-        session_id="session-alice",
-    )
-    bob_identity = ToolExecutionIdentity(
-        channel="matrix",
-        agent_name="team",
-        requester_id="@bob:example.org",
-        room_id="!room:example.org",
-        thread_id=None,
-        resolved_thread_id=None,
-        session_id="session-bob",
-    )
+    alice_identity = _identity("alice", agent_name="team")
+    bob_identity = _identity("bob", agent_name="team")
 
     with tool_execution_identity(alice_identity):
         await store_conversation_memory(
@@ -1358,9 +1189,6 @@ async def test_file_backend_team_conversation_memory_removes_credentials(
     config: Config,
 ) -> None:
     """A team keeps each message it answers in MEMORY.md, so credential-like values are removed first."""
-    config.memory.backend = "file"
-    config.agents["general"].memory_backend = "file"
-    config.agents["calculator"].memory_backend = "file"
     config.teams = {"shared_team": MockTeamConfig(agents=["general", "calculator"])}
     token = "ghp_" + "A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6Q7r8"
 
@@ -1382,9 +1210,6 @@ async def test_file_backend_mixed_private_team_conversation_memory_is_rejected(
     config: Config,
 ) -> None:
     """File-backed team memory should reject private team members outright."""
-    config.memory.backend = "file"
-    config.agents["general"].memory_backend = "file"
-    config.agents["calculator"].memory_backend = "file"
     config.agents["general"].private = AgentPrivateConfig(per="user", root="mind_data")
     config.teams = {"mixed_team": MockTeamConfig(agents=["general", "calculator"])}
 
@@ -1406,9 +1231,6 @@ async def test_file_backend_team_search_reuses_shared_team_scope(
     config: Config,
 ) -> None:
     """Every member finds the team's one memory, and a read never creates the team store."""
-    config.memory.backend = "file"
-    config.agents["general"].memory_backend = "file"
-    config.agents["calculator"].memory_backend = "file"
     config.teams = {"shared_team": MockTeamConfig(agents=["general", "calculator"])}
 
     assert await search_agent_memories("Team note remains shared", "general", config, limit=5) == []
@@ -1440,9 +1262,6 @@ async def test_file_backend_mixed_private_team_member_crud_is_rejected(
     workspace.mkdir(parents=True, exist_ok=True)
     (workspace / "MEMORY.md").write_text("# Memory\n\nCalculator note.\n", encoding="utf-8")
 
-    config.memory.backend = "file"
-    config.agents["general"].memory_backend = "file"
-    config.agents["calculator"].memory_backend = "file"
     config.agents["general"].private = AgentPrivateConfig(per="user", root="mind_data")
     config.teams = {"mixed_team": MockTeamConfig(agents=["general", "calculator"])}
 
@@ -1463,24 +1282,10 @@ async def test_file_backend_mixed_private_team_member_crud_is_rejected(
 
 
 @pytest.mark.asyncio
-async def test_file_backend_prompt_parts_include_entrypoint(storage_path: Path, config: Config) -> None:
-    config.memory.backend = "file"
-
-    workspace = agent_workspace_root_path(storage_path, "general")
-    workspace.mkdir(parents=True, exist_ok=True)
-    (workspace / "MEMORY.md").write_text("# Memory\n\nKey facts:\n- Project uses FastAPI.\n", encoding="utf-8")
-
-    prompt_parts = await build_memory_prompt_parts("How do we build the API?", "general", config)
-    assert "[File memory entrypoint (agent)]" in prompt_parts.session_preamble
-    assert "Project uses FastAPI." in prompt_parts.session_preamble
-
-
-@pytest.mark.asyncio
 async def test_file_backend_build_memory_prompt_parts_splits_entrypoint_from_turn_context(
     storage_path: Path,
     config: Config,
 ) -> None:
-    config.memory.backend = "file"
 
     workspace = agent_workspace_root_path(storage_path, "general")
     workspace.mkdir(parents=True, exist_ok=True)
@@ -1500,7 +1305,6 @@ async def test_file_backend_prompt_preserves_curated_entrypoint_lines_with_struc
     storage_path: Path,
     config: Config,
 ) -> None:
-    config.memory.backend = "file"
     config.memory.file.max_entrypoint_lines = 10
 
     workspace = agent_workspace_root_path(storage_path, "general")
@@ -1514,7 +1318,6 @@ async def test_file_backend_prompt_preserves_curated_entrypoint_lines_with_struc
 
 @pytest.mark.asyncio
 async def test_file_backend_prompt_respects_max_entrypoint_lines(storage_path: Path, config: Config) -> None:
-    config.memory.backend = "file"
     config.memory.file.max_entrypoint_lines = 2
 
     workspace = agent_workspace_root_path(storage_path, "general")
@@ -1538,7 +1341,6 @@ async def test_file_backend_capped_entrypoint_withholds_the_oldest_entries(
     cap: str,
 ) -> None:
     """add_memory appends, so a capped preload keeps the curated head and the newest entries, not the oldest."""
-    config.memory.backend = "file"
     if cap == "lines":
         config.memory.file.max_entrypoint_lines = 3
     else:
@@ -1565,7 +1367,6 @@ async def test_file_backend_oversized_oldest_entry_does_not_withhold_newer_entri
     config: Config,
 ) -> None:
     """An oldest entry too long for the token cap is withheld alone, not with every newer entry."""
-    config.memory.backend = "file"
     config.memory.file.max_entrypoint_tokens = 15
 
     workspace = agent_workspace_root_path(storage_path, "general")
@@ -1587,8 +1388,6 @@ async def test_file_backend_entrypoint_preamble_announces_automatic_preload(
     config: Config,
 ) -> None:
     """The preamble must tell the agent its MEMORY.md is already inlined, and where it lives."""
-    config.memory.backend = "file"
-
     workspace = agent_workspace_root_path(storage_path, "general")
     workspace.mkdir(parents=True, exist_ok=True)
     memory_path = workspace / "MEMORY.md"
@@ -1614,7 +1413,6 @@ async def test_file_backend_conversation_keeps_its_entrypoint_after_a_memory_is_
 
     Only a kept copy tells the agent that newer entries may be missing, and an edited header loads again.
     """
-    config.memory.backend = "file"
     workspace = agent_workspace_root_path(storage_path, "general")
     workspace.mkdir(parents=True, exist_ok=True)
     (workspace / "MEMORY.md").write_text("# Memory\nCurated fact.\n", encoding="utf-8")
@@ -1655,7 +1453,6 @@ async def test_file_backend_entrypoint_preamble_reports_truncated_lines(
     config: Config,
 ) -> None:
     """A capped MEMORY.md preload must say how much was withheld and where to read it."""
-    config.memory.backend = "file"
     config.memory.file.max_entrypoint_lines = 2
 
     workspace = agent_workspace_root_path(storage_path, "general")
@@ -1680,7 +1477,6 @@ async def test_file_backend_entrypoint_reports_truncation_when_preloaded_head_is
     config: Config,
 ) -> None:
     """Truncation must be reported even when the preloaded lines carry no text."""
-    config.memory.backend = "file"
     config.memory.file.max_entrypoint_lines = 2
 
     workspace = agent_workspace_root_path(storage_path, "general")
@@ -1704,7 +1500,6 @@ async def test_file_backend_entrypoint_token_cap_keeps_whole_lines(
     config: Config,
 ) -> None:
     """A few very long lines must not slip past the line cap: the token cap bounds the preload size."""
-    config.memory.backend = "file"
     config.memory.file.max_entrypoint_tokens = 250
 
     workspace = agent_workspace_root_path(storage_path, "general")
@@ -1728,7 +1523,6 @@ async def test_file_backend_entrypoint_token_cap_counts_newlines_across_many_sho
     config: Config,
 ) -> None:
     """The cap measures the joined text, so many short lines cannot each round down past it."""
-    config.memory.backend = "file"
     config.memory.file.max_entrypoint_lines = 500
     config.memory.file.max_entrypoint_tokens = 200
 
@@ -1748,7 +1542,6 @@ async def test_file_backend_entrypoint_token_cap_reports_an_oversized_first_line
     config: Config,
 ) -> None:
     """A first line larger than the token cap is withheld and still reported, never silently cut."""
-    config.memory.backend = "file"
     config.memory.file.max_entrypoint_tokens = 10
 
     workspace = agent_workspace_root_path(storage_path, "general")
@@ -1763,7 +1556,6 @@ async def test_file_backend_entrypoint_token_cap_reports_an_oversized_first_line
 
 @pytest.mark.asyncio
 async def test_file_backend_search_skips_structured_line_duplicates(storage_path: Path, config: Config) -> None:
-    config.memory.backend = "file"
 
     await add_agent_memory("Project owner is Bas", "general", config)
     memories = await list_all_agent_memories("general", config)
@@ -1780,7 +1572,6 @@ async def test_file_backend_search_skips_structured_line_duplicates(storage_path
 
 @pytest.mark.asyncio
 async def test_file_backend_memory_crud_and_scope(config: Config) -> None:
-    config.memory.backend = "file"
 
     await add_agent_memory("Original memory", "general", config)
     listed = await list_all_agent_memories("general", config)
@@ -1810,8 +1601,6 @@ async def test_file_backend_can_update_and_delete_unstructured_file_memory_line(
     storage_path: Path,
     config: Config,
 ) -> None:
-    config.memory.backend = "file"
-    config.agents["general"].memory_backend = "file"
 
     workspace = agent_workspace_root_path(storage_path, "general")
     daily_file = workspace / "memory" / "2026-06-13.md"
@@ -1836,8 +1625,6 @@ async def test_file_backend_whitespace_only_update_deletes_unstructured_file_mem
     storage_path: Path,
     config: Config,
 ) -> None:
-    config.memory.backend = "file"
-    config.agents["general"].memory_backend = "file"
 
     workspace = agent_workspace_root_path(storage_path, "general")
     daily_file = workspace / "memory" / "2026-06-13.md"
@@ -1856,8 +1643,6 @@ async def test_file_backend_rejects_path_ids_outside_memory_files(
     storage_path: Path,
     config: Config,
 ) -> None:
-    config.memory.backend = "file"
-    config.agents["general"].memory_backend = "file"
 
     workspace = agent_workspace_root_path(storage_path, "general")
     docs_file = workspace / "docs" / "runbook.md"
@@ -1883,8 +1668,6 @@ async def test_file_backend_rejects_unstructured_entrypoint_path_ids(
     storage_path: Path,
     config: Config,
 ) -> None:
-    config.memory.backend = "file"
-    config.agents["general"].memory_backend = "file"
 
     workspace = agent_workspace_root_path(storage_path, "general")
     memory_file = workspace / "MEMORY.md"
@@ -1912,7 +1695,6 @@ async def test_file_backend_rejects_unstructured_entrypoint_path_ids(
 async def test_file_backend_store_conversation_memory_uses_agent_scope_only(
     config: Config,
 ) -> None:
-    config.memory.backend = "file"
 
     await store_conversation_memory(
         "Remember this requirement",
@@ -1927,7 +1709,6 @@ async def test_file_backend_store_conversation_memory_uses_agent_scope_only(
 
 @pytest.mark.asyncio
 async def test_file_backend_team_scopes_do_not_collide(storage_path: Path, config: Config) -> None:
-    config.memory.backend = "file"
 
     await store_conversation_memory("Team one memory", ["a_b", "c"], "session-one", config)
     await store_conversation_memory("Team two memory", ["a", "b_c"], "session-two", config)
@@ -1946,7 +1727,6 @@ async def test_worker_scoped_team_file_memory_can_be_read_updated_and_deleted(
     config: Config,
 ) -> None:
     """An edit through one member changes only that team record, and every other member sees it."""
-    config.memory.backend = "file"
     config.agents["general"].worker_scope = "user_agent"
     config.agents["calculator"].worker_scope = "user_agent"
     config.teams = {"gc": MockTeamConfig(agents=["general", "calculator"])}
@@ -1995,7 +1775,6 @@ async def test_worker_scoped_team_file_memory_can_be_read_updated_and_deleted(
 
 @pytest.mark.asyncio
 async def test_file_backend_rejects_path_traversal_memory_id(storage_path: Path, config: Config) -> None:
-    config.memory.backend = "file"
 
     await add_agent_memory("Safe memory", "general", config)
     secret_file = storage_path / "secret.md"
@@ -2009,23 +1788,13 @@ async def test_worker_scoped_file_memory_uses_canonical_agent_workspace(
     storage_path: Path,
     config: Config,
 ) -> None:
-    config.memory.backend = "file"
-    config.agents["general"].memory_backend = "file"
     config.agents["general"].worker_scope = "user"
 
     canonical_workspace = agent_workspace_root_path(storage_path, "general")
     canonical_workspace.mkdir(parents=True, exist_ok=True)
     (canonical_workspace / "MEMORY.md").write_text("# Memory\n\nExisting worker memory.\n", encoding="utf-8")
 
-    alice_identity = ToolExecutionIdentity(
-        channel="matrix",
-        agent_name="general",
-        requester_id="@alice:example.org",
-        room_id="!room:example.org",
-        thread_id=None,
-        resolved_thread_id=None,
-        session_id="session-alice",
-    )
+    alice_identity = _identity("alice")
 
     with tool_execution_identity(alice_identity):
         await add_agent_memory("New worker memory", "general", config)
@@ -2044,9 +1813,6 @@ async def test_workspace_entrypoint_loaded_in_prompt(storage_path: Path, config:
     workspace.mkdir(parents=True)
     (workspace / "MEMORY.md").write_text("# Memory\n\nI prefer Python over JavaScript.\n", encoding="utf-8")
 
-    config.memory.backend = "file"
-    config.agents["general"].memory_backend = "file"
-
     prompt_parts = await build_memory_prompt_parts("What language?", "general", config)
     assert "I prefer Python over JavaScript." in prompt_parts.session_preamble
     assert (workspace / "MEMORY.md").read_text(encoding="utf-8").startswith("# Memory")
@@ -2056,9 +1822,6 @@ async def test_workspace_entrypoint_loaded_in_prompt(storage_path: Path, config:
 async def test_workspace_daily_files_live_in_canonical_scope(storage_path: Path, config: Config) -> None:
     workspace = agent_workspace_root_path(storage_path, "general")
     workspace.mkdir(parents=True)
-
-    config.memory.backend = "file"
-    config.agents["general"].memory_backend = "file"
 
     result = append_agent_daily_memory("Daily note", "general", config)
     assert result["memory"] == "Daily note"
@@ -2081,8 +1844,6 @@ def test_daily_file_date_follows_the_agent_timezone(
     """The daily file is named by the agent's own date, or by the global timezone's date when it has none."""
     workspace = agent_workspace_root_path(storage_path, "general")
     workspace.mkdir(parents=True)
-    config.memory.backend = "file"
-    config.agents["general"].memory_backend = "file"
     config.timezone = "America/Los_Angeles"
     config.agents["general"].timezone = agent_timezone
     instant = datetime(2026, 3, 20, 23, 30, tzinfo=UTC)
@@ -2095,39 +1856,12 @@ def test_daily_file_date_follows_the_agent_timezone(
 
 
 @pytest.mark.asyncio
-async def test_shared_file_memory_uses_workspace_root_without_affecting_other_agents(
-    storage_path: Path,
-    config: Config,
-) -> None:
-    workspace = agent_workspace_root_path(storage_path, "general")
-    workspace.mkdir(parents=True)
-
-    config.memory.backend = "file"
-    config.agents["general"].memory_backend = "file"
-
-    await add_agent_memory("Custom workspace memory", "general", config)
-    await add_agent_memory("Default scope memory", "calculator", config)
-
-    general_memories = await list_all_agent_memories("general", config)
-    assert any(memory["memory"] == "Custom workspace memory" for memory in general_memories)
-
-    calc_memories = await list_all_agent_memories("calculator", config)
-    assert any(memory["memory"] == "Default scope memory" for memory in calc_memories)
-    assert (workspace / "MEMORY.md").exists()
-    assert (agent_workspace_root_path(storage_path, "calculator") / "MEMORY.md").exists()
-
-
-@pytest.mark.asyncio
 async def test_file_backend_ignores_symlinked_memory_entries(
     storage_path: Path,
     config: Config,
-    tmp_path: Path,
 ) -> None:
     """Links planted in the tool workspace must never be read by the primary process."""
-    config.memory.backend = "file"
-    config.agents["general"].memory_backend = "file"
-
-    outside_dir = tmp_path / "outside"
+    outside_dir = storage_path / "outside"
     outside_dir.mkdir()
     secret = outside_dir / "environ.md"
     secret.write_text("ANTHROPIC_API_KEY=super-secret-value\n", encoding="utf-8")
@@ -2151,13 +1885,9 @@ async def test_file_backend_ignores_symlinked_memory_entries(
 async def test_file_backend_add_refuses_to_write_through_a_symlinked_entrypoint(
     storage_path: Path,
     config: Config,
-    tmp_path: Path,
 ) -> None:
     """A planted link must not redirect a memory write outside the scope."""
-    config.memory.backend = "file"
-    config.agents["general"].memory_backend = "file"
-
-    target = tmp_path / "outside.md"
+    target = storage_path / "outside.md"
     target.write_text("Untouched target.\n", encoding="utf-8")
 
     workspace = agent_workspace_root_path(storage_path, "general")
@@ -2175,9 +1905,6 @@ async def test_file_backend_add_refuses_to_write_through_a_symlinked_entrypoint(
 @pytest.mark.timeout(10, method="thread")
 async def test_file_backend_skips_non_regular_memory_entries(storage_path: Path, config: Config) -> None:
     """A FIFO entrypoint must not block the per-turn prompt build."""
-    config.memory.backend = "file"
-    config.agents["general"].memory_backend = "file"
-
     workspace = agent_workspace_root_path(storage_path, "general")
     (workspace / "memory").mkdir(parents=True, exist_ok=True)
     os.mkfifo(workspace / "MEMORY.md")
@@ -2192,9 +1919,6 @@ async def test_file_backend_skips_non_regular_memory_entries(storage_path: Path,
 @pytest.mark.asyncio
 async def test_file_backend_caps_oversized_memory_files(storage_path: Path, config: Config) -> None:
     """An oversized memory file is read up to its cap instead of unbounded."""
-    config.memory.backend = "file"
-    config.agents["general"].memory_backend = "file"
-
     workspace = agent_workspace_root_path(storage_path, "general")
     daily_file = workspace / "memory" / "big.md"
     daily_file.parent.mkdir(parents=True, exist_ok=True)
@@ -2214,13 +1938,9 @@ async def test_file_backend_caps_oversized_memory_files(storage_path: Path, conf
 async def test_file_backend_lists_nested_memory_files_and_skips_bad_siblings(
     storage_path: Path,
     config: Config,
-    tmp_path: Path,
 ) -> None:
     """The no-follow walk finds nested notes while a planted sibling is skipped."""
-    config.memory.backend = "file"
-    config.agents["general"].memory_backend = "file"
-
-    outside = tmp_path / "outside.md"
+    outside = storage_path / "outside.md"
     outside.write_text("Outside secret note.\n", encoding="utf-8")
 
     workspace = agent_workspace_root_path(storage_path, "general")
@@ -2243,8 +1963,6 @@ async def test_file_backend_lists_nested_memory_files_and_skips_bad_siblings(
 
 @pytest.mark.asyncio
 async def test_file_backend_limits_memory_directory_depth(storage_path: Path, config: Config) -> None:
-    config.memory.backend = "file"
-    config.agents["general"].memory_backend = "file"
 
     workspace = agent_workspace_root_path(storage_path, "general")
     directory = workspace / "memory"
@@ -2260,8 +1978,6 @@ async def test_file_backend_limits_memory_directory_depth(storage_path: Path, co
 
 @pytest.mark.asyncio
 async def test_file_backend_append_writes_header_and_separator(storage_path: Path, config: Config) -> None:
-    config.memory.backend = "file"
-    config.agents["general"].memory_backend = "file"
 
     workspace = agent_workspace_root_path(storage_path, "general")
     entrypoint = workspace / "MEMORY.md"
@@ -2280,8 +1996,6 @@ async def test_file_backend_append_writes_header_and_separator(storage_path: Pat
 
 @pytest.mark.asyncio
 async def test_file_backend_rewrite_keeps_file_permissions(storage_path: Path, config: Config) -> None:
-    config.memory.backend = "file"
-    config.agents["general"].memory_backend = "file"
 
     workspace = agent_workspace_root_path(storage_path, "general")
     daily_file = workspace / "memory" / "2026-06-13.md"
@@ -2298,9 +2012,6 @@ async def test_file_backend_rewrite_keeps_file_permissions(storage_path: Path, c
 @pytest.mark.asyncio
 async def test_file_backend_refuses_to_rewrite_undecodable_memory_file(storage_path: Path, config: Config) -> None:
     """A lossy decode must fail loudly instead of writing replacement characters back."""
-    config.memory.backend = "file"
-    config.agents["general"].memory_backend = "file"
-
     workspace = agent_workspace_root_path(storage_path, "general")
     daily_file = workspace / "memory" / "2026-06-13.md"
     daily_file.parent.mkdir(parents=True, exist_ok=True)
@@ -2338,7 +2049,6 @@ async def test_only_edits_of_the_agents_own_memory_refresh_its_semantic_index(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Semantic search indexes the agent's own scope, so editing a team memory schedules no re-index."""
-    config.memory.backend = "file"
     config.memory.search.mode = "semantic"
     config.teams = {"pair": MockTeamConfig(agents=["general", "calculator"])}
     refreshed: list[str] = []
@@ -2374,7 +2084,6 @@ async def test_only_edits_of_the_agents_own_memory_refresh_its_semantic_index(
 @pytest.mark.asyncio
 async def test_agent_and_team_matches_rank_together_within_the_limit(config: Config) -> None:
     """A full team match outranks the agent's partial matches, and the limit cuts across both scopes."""
-    config.memory.backend = "file"
     config.teams = {"pair": MockTeamConfig(agents=["general", "calculator"])}
     await add_agent_memory("Quarterly notes kept", "general", config)
     await add_agent_memory("Budget notes kept", "general", config)

@@ -35,7 +35,7 @@ from mindroom.orchestrator import main
 from tests.conftest import bind_runtime_paths, runtime_paths_for
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
+    from collections.abc import Callable, Sequence
 
     from mindroom.embeddings.base import EmbeddingPurpose
 
@@ -57,17 +57,43 @@ def _recorded(member: str, text: str) -> dict:
     return next(row for row in _RECORDED[member][_COLLECTION] if row["metadata"]["data"] == text)
 
 
-@pytest.fixture
-def storage(tmp_path: Path) -> Path:
-    """Return a storage root holding the recorded member copies."""
-    for member, collections in _RECORDED.items():
-        client = _client(tmp_path / "agents" / member / "chroma")
+def _load_recorded(storage: Path, recorded: dict) -> None:
+    """Store recorded member Mem0 records in their members' stores below ``storage``."""
+    for member, collections in recorded.items():
+        client = _client(storage / "agents" / member / "chroma")
         for name, rows in collections.items():
             client.get_or_create_collection(name, embedding_function=None).add(
                 ids=[row["id"] for row in rows],
                 embeddings=[row["embedding"] for row in rows],
                 metadatas=[row["metadata"] for row in rows],
             )
+
+
+def _plant(storage: Path, member: str, rows: list[tuple[str, str, str]], team: str = _TEAM) -> None:
+    """Store team records ``(id, turn, text)`` in a member's store the way Mem0 does, its hash of the text included."""
+    collection = _client(storage / "agents" / member / "chroma").get_or_create_collection(
+        _COLLECTION,
+        embedding_function=None,
+    )
+    collection.add(
+        ids=[record_id for record_id, _turn, _text in rows],
+        embeddings=[[1.0, 0.0, 0.0, 0.0] for _row in rows],
+        metadatas=[
+            {
+                "user_id": team,
+                "data": text,
+                "hash": hashlib.md5(text.encode(), usedforsecurity=False).hexdigest(),
+                "mindroom_replica_key": turn,
+            }
+            for _id, turn, text in rows
+        ],
+    )
+
+
+@pytest.fixture
+def storage(tmp_path: Path) -> Path:
+    """Return a storage root holding the recorded member copies."""
+    _load_recorded(tmp_path, _RECORDED)
     shutil.copytree(_FIXTURES / "agents", tmp_path / "agents", dirs_exist_ok=True)
     return tmp_path
 
@@ -91,6 +117,37 @@ def _config(storage: Path, backend: str, *more_agents: str) -> Config:
     }
     teams = {"pair": TeamConfig(display_name="Pair", role="Pair", agents=["general", "calculator"])}
     return bind_runtime_paths(Config(agents=agents, teams=teams, memory=memory), runtime_paths)
+
+
+def _receipt(storage: Path) -> Path:
+    return tracking_dir(runtime_paths_for(_config(storage, "mem0"))) / "team_memory_merged.json"
+
+
+def _delete_refused_in(member: str) -> Callable[..., None]:
+    """Return a Chroma delete that a member's store refuses, as a read-only database does."""
+    delete = Collection.delete
+
+    def refusing_delete(collection: Collection, *args: object, **kwargs: object) -> None:
+        if member in str(collection._client.get_settings().persist_directory):
+            msg = "attempt to write a readonly database"
+            raise RuntimeError(msg)
+        delete(collection, *args, **kwargs)
+
+    return refusing_delete
+
+
+def _delete_stopping_after(count: int) -> Callable[..., None]:
+    """Return a Chroma delete that lets ``count`` deletes through and then stops the start."""
+    delete = Collection.delete
+    deletions: list[Collection] = []
+
+    def interrupted_delete(collection: Collection, *args: object, **kwargs: object) -> None:
+        if len(deletions) == count:
+            raise _StartStoppedError
+        deletions.append(collection)
+        delete(collection, *args, **kwargs)
+
+    return interrupted_delete
 
 
 def _stored(path: Path) -> dict[str, dict]:
@@ -154,27 +211,24 @@ async def test_member_copies_merge_into_one_store_per_team_once(storage: Path) -
     await _migrate(storage)
 
     _assert_merged(storage)
-    receipt = tracking_dir(runtime_paths_for(_config(storage, "mem0"))) / "team_memory_merged.json"
-    assert receipt.exists()
-    with patch.object(legacy_team_memory, "_merge_file_copies") as merge:
-        await _migrate(storage)
-    merge.assert_not_called()
+    assert _receipt(storage).exists()
+    team_file = storage / "team_memory" / _TEAM / "MEMORY.md"
+    merged = team_file.read_text()
+    late_copy = storage / "agents" / "general" / "memory_files" / _TEAM
+    late_copy.mkdir(parents=True)
+    (late_copy / "MEMORY.md").write_text("# Memory\n\n- [id=m_late] Late note.\n")
+
+    await _migrate(storage)
+
+    assert team_file.read_text() == merged
+    assert (late_copy / "MEMORY.md").exists()
 
 
 @pytest.mark.asyncio
 async def test_a_start_interrupted_while_removing_copies_merges_no_turn_twice(storage: Path) -> None:
     """A start that stopped after merging but before every copy left the members finishes on the next start."""
-    delete = Collection.delete
-    deletions: list[object] = []
-
-    def interrupted_delete(collection: Collection, *args: object, **kwargs: object) -> None:
-        # The first member's copies leave; the start stops before the second member's do.
-        if deletions:
-            raise _StartStoppedError
-        deletions.append(collection)
-        delete(collection, *args, **kwargs)
-
-    with patch.object(Collection, "delete", interrupted_delete), pytest.raises(_StartStoppedError):
+    # The first member's copies leave; the start stops before the second member's do.
+    with patch.object(Collection, "delete", _delete_stopping_after(1)), pytest.raises(_StartStoppedError):
         await _migrate(storage)
 
     await _migrate(storage)
@@ -338,12 +392,10 @@ async def test_a_team_whose_store_rejects_its_records_keeps_its_copies_and_is_no
             embeddings=[embedding],
             metadatas=[{"user_id": pair, "data": f"{record_id} fact", "mindroom_replica_key": f"{record_id}-turn"}],
         )
-    runtime_paths = runtime_paths_for(_config(storage, "mem0"))
-
     await _migrate(storage, "planter")
 
     # No later start writes them again, so none undoes an edit made to a merged fact since.
-    assert (tracking_dir(runtime_paths) / "team_memory_merged.json").exists()
+    assert _receipt(storage).exists()
     assert _stored(storage / "team_memory" / _TEAM / "chroma") == _expected_team_records()
     assert "paired" in _stored(storage / "agents" / "general" / "chroma")
     assert set(_stored(storage / "agents" / "planter" / "chroma")) == {"planted"}
@@ -356,7 +408,7 @@ async def test_a_record_chroma_rejects_as_malformed_leaves_its_team_unmerged(sto
     with patch.object(Collection, "upsert", side_effect=malformed):
         await _migrate(storage)
 
-    assert (tracking_dir(runtime_paths_for(_config(storage, "mem0"))) / "team_memory_merged.json").exists()
+    assert _receipt(storage).exists()
     for member in ("calculator", "general"):
         assert set(_stored(storage / "agents" / member / "chroma")) == {
             row["id"] for row in _RECORDED[member][_COLLECTION]
@@ -366,20 +418,11 @@ async def test_a_record_chroma_rejects_as_malformed_leaves_its_team_unmerged(sto
 @pytest.mark.asyncio
 async def test_a_storage_error_writing_a_team_store_stops_the_start_and_the_next_one_merges(storage: Path) -> None:
     """A failure that is not a rejected record leaves every copy and no receipt, so a later start merges everything."""
-    upsert = Collection.upsert
-    upserts: list[object] = []
-
-    def failing_upsert(collection: Collection, *args: object, **kwargs: object) -> None:
-        if not upserts:
-            upserts.append(collection)
-            msg = "disk I/O error"
-            raise RuntimeError(msg)
-        upsert(collection, *args, **kwargs)
-
-    with patch.object(Collection, "upsert", failing_upsert), pytest.raises(RuntimeError, match="disk I/O error"):
+    storage_error = RuntimeError("disk I/O error")
+    with patch.object(Collection, "upsert", side_effect=storage_error), pytest.raises(RuntimeError, match="disk I/O"):
         await _migrate(storage)
 
-    assert not (tracking_dir(runtime_paths_for(_config(storage, "mem0"))) / "team_memory_merged.json").exists()
+    assert not _receipt(storage).exists()
     await _migrate(storage)
 
     _assert_merged(storage)
@@ -388,37 +431,21 @@ async def test_a_storage_error_writing_a_team_store_stops_the_start_and_the_next
 @pytest.mark.asyncio
 async def test_a_copy_a_member_store_refuses_to_delete_stays_and_the_merge_finishes(storage: Path) -> None:
     """A store that reads but refuses writes keeps its now unread copies instead of stopping startup."""
-    delete = Collection.delete
-
-    def refusing_delete(collection: Collection, *args: object, **kwargs: object) -> None:
-        if "calculator" in str(collection._client.get_settings().persist_directory):
-            msg = "attempt to write a readonly database"
-            raise RuntimeError(msg)
-        delete(collection, *args, **kwargs)
-
-    with patch.object(Collection, "delete", refusing_delete):
+    with patch.object(Collection, "delete", _delete_refused_in("calculator")):
         await _migrate(storage)
 
     assert _stored(storage / "team_memory" / _TEAM / "chroma") == _expected_team_records()
     assert set(_stored(storage / "agents" / "calculator" / "chroma")) == {
         row["id"] for row in _RECORDED["calculator"][_COLLECTION]
     }
-    assert (tracking_dir(runtime_paths_for(_config(storage, "mem0"))) / "team_memory_merged.json").exists()
+    assert _receipt(storage).exists()
 
 
 @pytest.mark.asyncio
 async def test_a_start_stopped_after_a_refused_delete_keeps_the_same_extraction(storage: Path) -> None:
     """A dropped extraction that stays keeps the kept one beside it, so a start stopped before the receipt keeps it."""
-    delete = Collection.delete
-
-    def refusing_delete(collection: Collection, *args: object, **kwargs: object) -> None:
-        if "general" in str(collection._client.get_settings().persist_directory):
-            msg = "attempt to write a readonly database"
-            raise RuntimeError(msg)
-        delete(collection, *args, **kwargs)
-
     with (
-        patch.object(Collection, "delete", refusing_delete),
+        patch.object(Collection, "delete", _delete_refused_in("general")),
         patch.object(legacy_team_memory, "write_json_file_durable", side_effect=_StartStoppedError),
         pytest.raises(_StartStoppedError),
     ):
@@ -441,7 +468,7 @@ async def test_a_file_copy_that_cannot_be_removed_stays_and_the_merge_finishes(s
 
     assert (storage / "team_memory" / _TEAM / "MEMORY.md").read_text().count("[id=") == 3
     assert (copy / "MEMORY.md").exists()
-    assert (tracking_dir(runtime_paths_for(_config(storage, "mem0"))) / "team_memory_merged.json").exists()
+    assert _receipt(storage).exists()
 
 
 @pytest.mark.asyncio
@@ -457,7 +484,7 @@ async def test_without_chroma_or_config_only_file_copies_merge_and_the_rest_wait
 
     assert (storage / "team_memory" / _TEAM / "MEMORY.md").exists()
     assert not (storage / "team_memory" / _TEAM / "chroma").exists()
-    assert not (tracking_dir(runtime_paths) / "team_memory_merged.json").exists()
+    assert not _receipt(storage).exists()
 
     await _migrate(storage)
 
@@ -581,15 +608,7 @@ async def test_the_runtime_merges_team_memory_with_its_loaded_config_before_it_s
 async def test_only_the_mem0_stores_the_runtime_opens_merge(storage: Path) -> None:
     """A store of an agent no longer configured, private, or on file memory was never read for team memory."""
     for name in ("removed", "filer", "secret"):
-        store = _client(storage / "agents" / name / "chroma").get_or_create_collection(
-            _COLLECTION,
-            embedding_function=None,
-        )
-        store.add(
-            ids=[f"{name}-copy"],
-            embeddings=[[1.0, 0.0, 0.0, 0.0]],
-            metadatas=[{"user_id": _TEAM, "data": f"{name} fact", "mindroom_replica_key": f"{name}-turn"}],
-        )
+        _plant(storage, name, [(f"{name}-copy", f"{name}-turn", f"{name} fact")])
     config = _config(storage, "mem0", "filer", "secret")
     config.agents["filer"].memory_backend = "file"
     config.agents["secret"].private = AgentPrivateConfig(per="user")
@@ -661,14 +680,7 @@ async def test_a_turn_keeps_the_copy_main_s_edit_bug_left_whole(tmp_path: Path) 
     text, so each turn keeps general's extraction, which holds the most distinct facts, and no fact is lost or doubled.
     """
     recorded = json.loads((_FIXTURES / "mem0_member_stores_after_edits.json").read_text())
-    for member, collections in recorded.items():
-        client = _client(tmp_path / "agents" / member / "chroma")
-        for name, rows in collections.items():
-            client.get_or_create_collection(name, embedding_function=None).add(
-                ids=[row["id"] for row in rows],
-                embeddings=[row["embedding"] for row in rows],
-                metadatas=[row["metadata"] for row in rows],
-            )
+    _load_recorded(tmp_path, recorded)
 
     await _migrate(tmp_path)
 
@@ -682,27 +694,6 @@ async def test_a_turn_keeps_the_copy_main_s_edit_bug_left_whole(tmp_path: Path) 
     assert set(merged) == {row["id"] for row in recorded["general"][_COLLECTION]}
 
 
-def _plant(storage: Path, member: str, rows: list[tuple[str, str, str]], team: str = _TEAM) -> None:
-    """Store team records ``(id, turn, text)`` in a member's store the way Mem0 does, its hash of the text included."""
-    collection = _client(storage / "agents" / member / "chroma").get_or_create_collection(
-        _COLLECTION,
-        embedding_function=None,
-    )
-    collection.add(
-        ids=[record_id for record_id, _turn, _text in rows],
-        embeddings=[[1.0, 0.0, 0.0, 0.0] for _row in rows],
-        metadatas=[
-            {
-                "user_id": team,
-                "data": text,
-                "hash": hashlib.md5(text.encode(), usedforsecurity=False).hexdigest(),
-                "mindroom_replica_key": turn,
-            }
-            for _id, turn, text in rows
-        ],
-    )
-
-
 @pytest.mark.asyncio
 @pytest.mark.parametrize("interrupted", [False, True], ids=["one start", "interrupted"])
 async def test_a_fact_two_kept_extractions_share_is_stored_once(tmp_path: Path, interrupted: bool) -> None:
@@ -714,17 +705,8 @@ async def test_a_fact_two_kept_extractions_share_is_stored_once(tmp_path: Path, 
     _plant(tmp_path, "calculator", [("c1", "t1", "Fact A"), ("c2", "t1", "Fact B"), ("c3", "t2", "Fact C")])
     _plant(tmp_path, "general", [("g1", "t1", "Fact B"), ("g2", "t2", "Fact A"), ("g3", "t2", "Fact C")])
     if interrupted:
-        delete = Collection.delete
-        deletions: list[object] = []
-
-        def interrupted_delete(collection: Collection, *args: object, **kwargs: object) -> None:
-            # Each member's dropped turn goes first, then calculator's kept one; general's kept one would be next.
-            if len(deletions) == 3:
-                raise _StartStoppedError
-            deletions.append(collection)
-            delete(collection, *args, **kwargs)
-
-        with patch.object(Collection, "delete", interrupted_delete), pytest.raises(_StartStoppedError):
+        # Each member's dropped turn goes first, then calculator's kept one; general's kept one would be next.
+        with patch.object(Collection, "delete", _delete_stopping_after(3)), pytest.raises(_StartStoppedError):
             await _migrate(tmp_path)
 
     await _migrate(tmp_path)

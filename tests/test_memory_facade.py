@@ -26,7 +26,7 @@ from mindroom.memory import search_agent_memories as public_search_agent_memorie
 from mindroom.memory import store_conversation_memory as public_store_conversation_memory
 from mindroom.memory import update_agent_memory as public_update_agent_memory
 from mindroom.memory._prompting import format_memories_as_context
-from mindroom.memory.config import _Mem0Embedder, _Mem0StrictOpenAIEmbedder
+from mindroom.memory.config import _Mem0Embedder, _Mem0StrictOpenAIEmbedder, mem0_chroma_path
 from mindroom.prompts import MEMORY_CONTEXT_PROMPT_TEMPLATE
 from mindroom.tool_system.worker_routing import agent_state_root_path, agent_workspace_root_path
 from tests.conftest import bind_runtime_paths, make_visible_message, runtime_paths_for
@@ -139,14 +139,14 @@ async def build_memory_prompt_parts(
 
 async def store_conversation_memory(
     prompt: str,
-    agent_name: str | list[str],
+    caller: str | list[str],
     session_id: str,
     config: Config,
     **kwargs: object,
 ) -> None:
     await public_store_conversation_memory(
         prompt,
-        agent_name,
+        caller,
         session_id,
         config,
         runtime_paths_for(config),
@@ -186,7 +186,14 @@ def _team_store_root(config: Config, scope_user_id: str) -> Path:
 def _create_team_stores(config: Config, *scope_user_ids: str) -> None:
     """Create the Mem0 team stores a team turn would have written, since reads never create one."""
     for scope_user_id in scope_user_ids:
-        (_team_store_root(config, scope_user_id) / "chroma").mkdir(parents=True)
+        mem0_chroma_path(_team_store_root(config, scope_user_id)).mkdir(parents=True)
+
+
+def _embedder_auth_error() -> EmbedderRequestError:
+    """Return the classified error of an embedder rejecting its API key."""
+    request = httpx.Request("POST", "http://embeddings.local/v1/embeddings")
+    response = httpx.Response(401, request=request, json={"error": {"message": "bad key"}})
+    return openai_embedder_error(AuthenticationError("Error code: 401", response=response, body=None))
 
 
 class TestMemoryFacade:
@@ -310,18 +317,6 @@ class TestMemoryFacade:
             assert results == mock_results
 
     @pytest.mark.asyncio
-    async def test_search_agent_memories_handles_dict_response(
-        self,
-        mock_memory: AsyncMock,
-        config: Config,
-    ) -> None:
-        mock_memory.search.return_value = {"results": [{"memory": "test"}]}
-
-        with patch("mindroom.memory._backend.create_memory_instance", return_value=mock_memory):
-            results = await search_agent_memories("query", "agent", config)
-            assert results == [{"memory": "test"}]
-
-    @pytest.mark.asyncio
     async def test_search_agent_memories_handles_list_response(
         self,
         mock_memory: AsyncMock,
@@ -339,11 +334,7 @@ class TestMemoryFacade:
         mock_memory: AsyncMock,
         config: Config,
     ) -> None:
-        request = httpx.Request("POST", "http://embeddings.local/v1/embeddings")
-        response = httpx.Response(401, request=request, json={"error": {"message": "bad key"}})
-        mock_memory.search.side_effect = openai_embedder_error(
-            AuthenticationError("Error code: 401", response=response, body=None),
-        )
+        mock_memory.search.side_effect = _embedder_auth_error()
 
         try:
             with patch("mindroom.memory._backend.create_memory_instance", return_value=mock_memory):
@@ -368,11 +359,7 @@ class TestMemoryFacade:
         config: Config,
     ) -> None:
         """An embedder failure while Mem0 is built, which the build raises typed, degrades instead of aborting the turn."""
-        request = httpx.Request("POST", "http://embeddings.local/v1/embeddings")
-        response = httpx.Response(401, request=request, json={"error": {"message": "bad key"}})
-        error = openai_embedder_error(AuthenticationError("Error code: 401", response=response, body=None))
-
-        with patch("mindroom.memory._backend.create_memory_instance", side_effect=error):
+        with patch("mindroom.memory._backend.create_memory_instance", side_effect=_embedder_auth_error()):
             outcome = await public_search_agent_memories(
                 "query",
                 "agent",
@@ -405,8 +392,6 @@ class TestMemoryFacade:
             "second": MockTeamConfig(agents=["agent", "finance"]),
         }
         _create_team_stores(config, "team_agent+calculator", "team_agent+finance")
-        request = httpx.Request("POST", "http://embeddings.local/v1/embeddings")
-        response = httpx.Response(401, request=request, json={"error": {"message": "bad key"}})
         hits = {
             "agent_agent": {"id": "personal", "memory": "personal", "score": 0.9},
             "team_agent+calculator": {"id": "first team", "memory": "first team", "score": 0.8},
@@ -417,7 +402,7 @@ class TestMemoryFacade:
         async def search(_query: str, *, filters: dict[str, str], **_kwargs: object) -> dict[str, list[dict]]:
             searched.append(filters["user_id"])
             if filters["user_id"] == failing_scope:
-                raise openai_embedder_error(AuthenticationError("Error code: 401", response=response, body=None))
+                raise _embedder_auth_error()
             return {"results": [hits[filters["user_id"]]]}
 
         mock_memory.search.side_effect = search
@@ -643,11 +628,7 @@ class TestMemoryFacade:
         config: Config,
     ) -> None:
         """The automatic per-turn path carries the degradation notice, not silence."""
-        request = httpx.Request("POST", "http://embeddings.local/v1/embeddings")
-        response = httpx.Response(401, request=request, json={"error": {"message": "bad key"}})
-        mock_memory.search.side_effect = openai_embedder_error(
-            AuthenticationError("Error code: 401", response=response, body=None),
-        )
+        mock_memory.search.side_effect = _embedder_auth_error()
 
         try:
             with patch("mindroom.memory._backend.create_memory_instance", return_value=mock_memory):
@@ -724,19 +705,6 @@ class TestMemoryFacade:
 
         mock_create.assert_not_called()
         assert not any(storage_path.rglob("MEMORY.md"))
-
-    @pytest.mark.asyncio
-    async def test_store_conversation_memory_with_empty_response(
-        self,
-        mock_memory: AsyncMock,
-        config: Config,
-    ) -> None:
-        with patch("mindroom.memory._backend.create_memory_instance", return_value=mock_memory):
-            await store_conversation_memory("What is 2+2?", "calculator", "session123", config)
-
-        assert mock_memory.add.call_count == 1
-        agent_call = mock_memory.add.call_args_list[0]
-        assert agent_call[0][0] == [{"role": "user", "content": "What is 2+2?"}]
 
     @pytest.mark.asyncio
     async def test_store_conversation_memory_with_thread_history(
@@ -968,14 +936,3 @@ class TestMemoryFacade:
         assert "Quarterly numbers are due Friday" in team_file.read_text(encoding="utf-8")
         assert from_general is not None
         assert from_general["memory"] == "Quarterly numbers are due Friday"
-
-    def test_memory_result_typed_dict(self) -> None:
-        result: MemoryResult = {
-            "id": "123",
-            "memory": "Test memory",
-            "score": 0.95,
-            "metadata": {"key": "value"},
-        }
-
-        assert result["id"] == "123"
-        assert result["memory"] == "Test memory"

@@ -434,8 +434,6 @@ knowledge_bases:
     path: ./knowledge_alpha
   b:
     path: ./knowledge_beta
-memory:
-  backend: file
 agents:
   alpha:
     display_name: Alpha
@@ -532,8 +530,6 @@ knowledge_bases:
     path: ./knowledge_collision_a
   "docs+a":
     path: ./knowledge_collision_b
-memory:
-  backend: file
 agents:
   alpha:
     display_name: Alpha

@@ -10,9 +10,8 @@ import pytest
 from mindroom.config.agent import AgentConfig, AgentPrivateConfig
 from mindroom.config.main import Config
 from mindroom.constants import resolve_runtime_paths
-from mindroom.memory._policy import MemoryScope, caller_memory_backend, team_scope, team_scopes, team_user_id
+from mindroom.memory._policy import caller_memory_backend, team_scope, team_scopes, team_user_id
 from mindroom.memory_scope_ids import agent_scope_user_id
-from mindroom.tool_system.worker_routing import ToolExecutionIdentity, tool_execution_identity
 from tests.conftest import bind_runtime_paths, runtime_paths_for
 from tests.memory_test_support import MockTeamConfig
 
@@ -37,18 +36,6 @@ def config(tmp_path: Path) -> Config:
     )
 
 
-def _identity(requester_id: str) -> ToolExecutionIdentity:
-    return ToolExecutionIdentity(
-        channel="matrix",
-        agent_name="general",
-        requester_id=requester_id,
-        room_id="!room:example.org",
-        thread_id=None,
-        resolved_thread_id=None,
-        session_id=f"session-{requester_id}",
-    )
-
-
 def test_scope_user_id_helpers() -> None:
     """Agent scope IDs are normalized consistently."""
     assert agent_scope_user_id("general") == "agent_general"
@@ -58,21 +45,6 @@ def test_team_user_id_is_the_same_for_every_member_order() -> None:
     """A team scope is named by its member set, so member order never splits it."""
     assert team_user_id(["general", "calculator"]) == "team_calculator+general"
     assert team_user_id(["calculator", "general"]) == "team_calculator+general"
-
-
-def test_team_scope_root_is_one_store_no_requester_or_worker_scope_partitions(tmp_path: Path, config: Config) -> None:
-    """Every requester and member reaches a team's one store under the team memory root."""
-    config.agents["general"].worker_scope = "user"
-    config.agents["calculator"].worker_scope = "user_agent"
-    config.teams = {"pair": MockTeamConfig(agents=["general", "calculator"])}
-    runtime_paths = runtime_paths_for(config)
-    expected = MemoryScope("team_calculator+general", tmp_path / "team_memory" / "team_calculator+general")
-
-    assert team_scope("team_calculator+general", runtime_paths) == expected
-    for requester_id in ("@alice:example.org", "@bob:example.org"):
-        with tool_execution_identity(_identity(requester_id)):
-            assert team_scopes("general", config, runtime_paths) == [expected]
-            assert team_scopes("calculator", config, runtime_paths) == [expected]
 
 
 def test_team_scope_directories_keep_earlier_names_within_the_name_limit(tmp_path: Path, config: Config) -> None:
@@ -97,12 +69,15 @@ def test_team_scopes_lists_each_member_set_of_the_agent_s_teams_once_whatever_th
     tmp_path: Path,
     config: Config,
 ) -> None:
-    """An agent reads every configured team it belongs to, one scope per member set, in config order."""
+    """An agent reads every configured team it belongs to, one store per member set, in config order.
+
+    Neither the members' backends nor their worker scopes partition a team's store.
+    """
     config.agents = {
-        "calculator": AgentConfig(display_name="Calculator", memory_backend="file"),
+        "calculator": AgentConfig(display_name="Calculator", memory_backend="file", worker_scope="user"),
         "data_analyst": AgentConfig(display_name="Data Analyst", memory_backend="mem0"),
         "finance": AgentConfig(display_name="Finance"),
-        "researcher": AgentConfig(display_name="Researcher", memory_backend="none"),
+        "researcher": AgentConfig(display_name="Researcher", memory_backend="none", worker_scope="user_agent"),
         "general": AgentConfig(display_name="General"),
         "assistant": AgentConfig(display_name="Assistant"),
     }

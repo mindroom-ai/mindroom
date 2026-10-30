@@ -44,7 +44,7 @@ from mindroom.memory import (
 from mindroom.memory._mem0_backend import Mem0MemoryBackend
 from mindroom.memory._mem0_usage import counted_mem0_usage, install_mem0_usage_capture, mem0_usage
 from mindroom.memory._shared import MemoryNotFoundError
-from mindroom.memory.config import _Mem0Embedder, _Mem0StrictOpenAIEmbedder
+from mindroom.memory.config import _Mem0Embedder, _Mem0StrictOpenAIEmbedder, mem0_chroma_path
 from mindroom.redaction import REDACTED, REDACTION_FAILED
 from mindroom.tool_system.worker_routing import (
     ToolExecutionIdentity,
@@ -148,12 +148,9 @@ async def test_store_conversation_memory_redacts_embedder_provider_error(
             # Mem0's embedder is MindRoom's, which raises the classified error at its boundary.
             raise openai_embedder_error(error) from error
 
-    async def create_failing_memory(*_args: object, **_kwargs: object) -> FailingMemory:
-        return FailingMemory()
-
     try:
         with (
-            patch("mindroom.memory._backend.create_memory_instance", side_effect=create_failing_memory),
+            patch("mindroom.memory._backend.create_memory_instance", return_value=FailingMemory()),
             capture_logs() as logs,
         ):
             await store_conversation_memory(
@@ -202,12 +199,9 @@ async def test_store_conversation_memory_detects_embedding_failure_swallowed_by_
                 return {"results": []}
             return {"results": []}
 
-    async def create_swallowing_memory(*_args: object, **_kwargs: object) -> SwallowingMemory:
-        return SwallowingMemory()
-
     try:
         with (
-            patch("mindroom.memory._backend.create_memory_instance", side_effect=create_swallowing_memory),
+            patch("mindroom.memory._backend.create_memory_instance", return_value=SwallowingMemory()),
             capture_logs() as logs,
         ):
             await store_conversation_memory(
@@ -292,12 +286,9 @@ async def test_a_failure_of_mem0_s_memory_model_is_not_an_embedder_failure(confi
             # Mem0's own model calls raise the raw SDK error.
             raise rejected
 
-    async def create_failing_memory(*_args: object, **_kwargs: object) -> FailingMemory:
-        return FailingMemory()
-
     capture_embedder_health_recorder().record(None)
     with (
-        patch("mindroom.memory._backend.create_memory_instance", side_effect=create_failing_memory),
+        patch("mindroom.memory._backend.create_memory_instance", return_value=FailingMemory()),
         pytest.raises(AuthenticationError),
     ):
         await add_agent_memory("Atlas ships Friday.", "general", config, runtime_paths_for(config))
@@ -317,12 +308,9 @@ async def test_mem0_write_failure_keeps_the_embedder_retry_judgment(config: Conf
         async def add(self, *_args: object, **_kwargs: object) -> None:
             raise openai_embedder_error(raw_error) from raw_error
 
-    async def create_failing_memory(*_args: object, **_kwargs: object) -> FailingMemory:
-        return FailingMemory()
-
     try:
         with (
-            patch("mindroom.memory._backend.create_memory_instance", side_effect=create_failing_memory),
+            patch("mindroom.memory._backend.create_memory_instance", return_value=FailingMemory()),
             pytest.raises(EmbedderRequestError) as excinfo,
         ):
             await add_agent_memory("Atlas ships Friday.", "general", config, runtime_paths_for(config))
@@ -511,26 +499,6 @@ async def test_mem0_team_conversation_memory_is_one_store_every_requester_and_me
     assert {root: entries for root, entries in team_entries.items() if entries} == {
         team_root: ["Alice-authored shared team memory"],
     }
-
-
-@pytest.mark.asyncio
-async def test_mixed_private_team_mem0_conversation_memory_is_rejected(config: Config) -> None:
-    """Mem0 team memory should reject private team members outright."""
-    config.memory.backend = "mem0"
-    config.agents["general"].private = AgentPrivateConfig(per="user", root="mind_data")
-    config.teams = {"mixed_team": MockTeamConfig(agents=["general", "calculator"])}
-
-    with pytest.raises(
-        ValueError,
-        match="private agents are only supported in explicit Matrix ad hoc teams with requester identity",
-    ):
-        await store_conversation_memory(
-            "Alice-authored private team memory",
-            ["general", "calculator"],
-            "session-alice",
-            config,
-            runtime_paths_for(config),
-        )
 
 
 @pytest.mark.asyncio
@@ -1025,10 +993,7 @@ async def test_conversation_memory_removes_credentials_before_mem0(
         async def add(self, messages: list[dict], **_: object) -> None:
             sent.append(messages)
 
-    async def create_fake_memory_instance(*_args: object, **_kwargs: object) -> FakeScopedMemory:
-        return FakeScopedMemory()
-
-    with patch("mindroom.memory._backend.create_memory_instance", side_effect=create_fake_memory_instance):
+    with patch("mindroom.memory._backend.create_memory_instance", return_value=FakeScopedMemory()):
         await store_conversation_memory(
             # A line redaction cannot read safely, such as an unclosed quote, is dropped without the rest.
             f'The staging token is {token}.\nenv:\n  password:\nSet the DB password: "correct horse\n{oversized}\n'
@@ -1071,7 +1036,7 @@ async def test_a_memory_both_scopes_return_appears_once_per_scope_ranked_within_
 ) -> None:
     """Agent and team hits rank together by score, and a text both scopes hold is two memories with their own IDs."""
     config.teams = {"pair": MockTeamConfig(agents=["general", "calculator"])}
-    (storage_path / "team_memory" / _TEAM_ID / "chroma").mkdir(parents=True)
+    mem0_chroma_path(storage_path / "team_memory" / _TEAM_ID).mkdir(parents=True)
     hits_by_scope: dict[str, list[dict[str, object]]] = {
         "agent_general": [
             {"id": "agent-shared", "memory": "Shared fact", "score": 0.5},
@@ -1118,15 +1083,12 @@ async def test_a_team_store_s_embedder_failure_degrades_search_but_keeps_the_age
 ) -> None:
     """Stores are built and searched one at a time, and a team store's embedder failure keeps the agent store's hits."""
     config.teams = {"pair": MockTeamConfig(agents=["general", "calculator"])}
-    (storage_path / "team_memory" / _TEAM_ID / "chroma").mkdir(parents=True)
+    mem0_chroma_path(storage_path / "team_memory" / _TEAM_ID).mkdir(parents=True)
     failure_detail = "embedder authentication failed (HTTP 401)"
     events: list[str] = []
     agent_hit: dict[str, object] = {"id": "agent-a", "memory": "Agent fact", "score": 0.6}
 
     class StoreSearch:
-        def __init__(self, store_root: Path) -> None:
-            self.store_root = store_root
-
         async def search(
             self,
             query: str,
@@ -1147,7 +1109,7 @@ async def test_a_team_store_s_embedder_failure_degrades_search_but_keeps_the_age
 
     async def create_memory(store_root: Path, _config: Config) -> StoreSearch:
         events.append(f"build {store_root.name}")
-        return StoreSearch(store_root)
+        return StoreSearch()
 
     backend = Mem0MemoryBackend(runtime_paths=runtime_paths_for(config), create_memory=create_memory)
 
@@ -1191,7 +1153,7 @@ async def test_a_record_of_another_scope_in_an_agents_store_is_not_that_agents_m
 async def test_each_store_is_released_before_the_next_one_is_built(storage_path: Path, config: Config) -> None:
     """Every Mem0 store builds its own embedder, a full copy of a local model, so one search holds one store at a time."""
     config.teams = {"pair": MockTeamConfig(agents=["general", "calculator"])}
-    (storage_path / "team_memory" / _TEAM_ID / "chroma").mkdir(parents=True)
+    mem0_chroma_path(storage_path / "team_memory" / _TEAM_ID).mkdir(parents=True)
     built: list[weakref.ref[FakeMem0ScopedMemory]] = []
     alive_at_build: list[int] = []
 

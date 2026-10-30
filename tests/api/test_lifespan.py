@@ -12,6 +12,7 @@ from fastapi import FastAPI
 
 from mindroom import constants
 from mindroom.api import config_lifecycle, main
+from mindroom.config.main import Config
 from mindroom.knowledge.refresh_scheduler import KnowledgeRefreshScheduler
 from mindroom.workers.backends import docker as docker_backend_module
 from mindroom.workers.backends.docker import DockerWorkerBackend
@@ -21,6 +22,7 @@ from mindroom.workers.runtime import (
     lease_primary_worker_manager,
     shutdown_primary_worker_manager,
 )
+from tests.conftest import failed_config_load, published_config_load
 from tests.test_docker_worker_backend import _FakeDockerClient, _FakeDockerError, _FakeImage, _FakeNotFoundError
 
 if TYPE_CHECKING:
@@ -59,7 +61,11 @@ async def test_api_lifespan_syncs_credentials_off_event_loop(
     for migration in (*_STARTUP_MIGRATIONS, "migrate_team_memory"):
         monkeypatch.setattr(main, migration, _no_op_async)
     monkeypatch.setattr(constants, "ensure_writable_config_path", lambda **_kwargs: None)
-    monkeypatch.setattr(config_lifecycle, "load_config_into_app", lambda *_args: SimpleNamespace(config=None))
+    monkeypatch.setattr(
+        config_lifecycle,
+        "load_config_into_app",
+        lambda *_args: failed_config_load(OSError("this test only records the load")),
+    )
     monkeypatch.setattr(main, "sync_env_to_credentials", _sync_credentials)
     monkeypatch.setattr(main, "_sync_standalone_knowledge_watchers", _no_op_async)
     monkeypatch.setattr(main, "_watch_config", _no_op_async)
@@ -109,7 +115,7 @@ async def test_only_a_standalone_api_migrates_syncs_credentials_and_loads_config
     for migration in _STARTUP_MIGRATIONS:
         monkeypatch.setattr(main, migration, _record(migration))
     monkeypatch.setattr(constants, "ensure_writable_config_path", lambda **_kwargs: ran.append("ensure_config"))
-    loaded = SimpleNamespace(config=object())
+    loaded = published_config_load(Config())
     monkeypatch.setattr(
         config_lifecycle,
         "load_config_into_app",
