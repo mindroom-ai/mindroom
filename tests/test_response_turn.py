@@ -18,6 +18,7 @@ from mindroom.constants import (
     MATRIX_EVENT_ID_METADATA_KEY,
     MATRIX_RESPONSE_EVENT_ID_METADATA_KEY,
     MATRIX_SEEN_EVENT_IDS_METADATA_KEY,
+    PRIOR_USAGE_RUN_METADATA_KEY,
 )
 from mindroom.delegation.state import DELEGATION_STATE_KEY, DelegationChild, DelegationPendingTool, DelegationState
 from mindroom.helper_usage import get_helper_usage_owner
@@ -828,6 +829,25 @@ def test_external_cancel_before_prepare_builds_fallback_metadata(
     assert run_metadata["room_id"] == "!room"
     assert run_metadata["correlation_id"] == "corr-1"
     assert run_metadata["reply_to_event_id"] == "$reply"
+
+
+def test_fallback_metadata_keeps_none_of_the_usage_another_run_recorded(
+    marked: list[tuple[str, str | None]],
+) -> None:
+    """A resumed turn stopped before prepare seeds its metadata from the paused run's, without that run's usage."""
+    recorder = _FakeTurnRecorder()
+    seeded = {"correlation_id": "corr-1", PRIOR_USAGE_RUN_METADATA_KEY: [{"input_tokens": 100}]}
+
+    async def _attempt(_run: TurnRunState, _c: TurnContinuationRunState) -> CompletedAttempt:
+        raise asyncio.CancelledError
+
+    with pytest.raises(asyncio.CancelledError):
+        _run_turn(_streamed(_attempt), ctx=_ctx(matrix_run_metadata=seeded), sinks=TurnSinks(turn_recorder=recorder))
+
+    assert marked == [("run-1", None)]
+    [interrupted] = recorder.interrupted_calls
+    assert PRIOR_USAGE_RUN_METADATA_KEY not in interrupted["run_metadata"]
+    assert interrupted["run_metadata"]["correlation_id"] == "corr-1"
 
 
 def test_a_cancel_after_the_turn_completed_keeps_its_completed_record(
