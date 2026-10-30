@@ -16,14 +16,13 @@ import pytest
 from agno.tools import Toolkit
 from agno.tools.function import Function
 
-from mindroom import helper_usage
 from mindroom.agent_loop.model_loop import LoopHooks, SendRequest
 from mindroom.agent_loop.run import run_agent
 from mindroom.agent_loop.spec import AgentSpec, RunContext, UnstoredSession
 from mindroom.agent_reply_membership import AgentReplyMembershipIndex
 from mindroom.config.models import CompactionConfig, ModelConfig
 from mindroom.constants import MATRIX_SOURCE_EVENT_PROMPTS_METADATA_KEY
-from mindroom.helper_usage import HelperUsageOwner
+from mindroom.helper_usage import HelperUsageOwner, helper_usage_owner_context
 from mindroom.history import compaction, mid_turn_compaction
 from mindroom.history.mid_turn_compaction import mid_turn_compaction_hook
 from mindroom.history.prompt_tokens import build_static_token_estimator
@@ -187,10 +186,6 @@ class _Agent:
         )
 
 
-def _agent(model: ToolLoopModel, config: Config, runtime_paths: RuntimePaths, **kwargs: Any) -> _Agent:  # noqa: ANN401
-    return _Agent(model, config, runtime_paths, **kwargs)
-
-
 def _scoped_agent(
     model: ToolLoopModel,
     config: Config,
@@ -333,7 +328,7 @@ async def test_run_local_tool_loop_compacts_and_finishes(
     config, paths = _config(tmp_path)
     model = ToolLoopModel(tool_rounds=5)
 
-    output = await _run(_agent(model, config, paths), [Message(role="user", content="Do the task")])
+    output = await _run(_Agent(model, config, paths), [Message(role="user", content="Do the task")])
 
     assert str(output.content).endswith("done")
     assert summary_calls.inputs
@@ -356,7 +351,7 @@ async def test_repeated_run_local_compaction_keeps_a_string_prompt(
     config, paths = _config(tmp_path)
     model = ToolLoopModel(tool_rounds=12)
 
-    output = await _run(_agent(model, config, paths), "Do the task")
+    output = await _run(_Agent(model, config, paths), "Do the task")
 
     assert str(output.content).endswith("done")
     assert len(summary_calls.inputs) >= 2
@@ -382,7 +377,7 @@ async def test_mid_turn_compaction_skips_when_disabled_or_unavailable(
     config, paths = _config(tmp_path, enabled=enabled, context_window=context_window)
     model = ToolLoopModel(tool_rounds=5)
 
-    output = await _run(_agent(model, config, paths), "Do the task")
+    output = await _run(_Agent(model, config, paths), "Do the task")
 
     assert str(output.content).endswith("done")
     assert summary_calls.inputs == []
@@ -398,7 +393,7 @@ async def test_failed_mid_turn_compaction_does_not_retry_in_the_same_run(
     summary_calls.fail = True
     model = ToolLoopModel(tool_rounds=6)
 
-    output = await _run(_agent(model, config, paths), "Do the task")
+    output = await _run(_Agent(model, config, paths), "Do the task")
 
     assert str(output.content).endswith("done")
     assert len(summary_calls.inputs) == 1
@@ -413,7 +408,7 @@ async def test_failed_mid_turn_compaction_does_not_carry_into_the_next_run(
     config, paths = _config(tmp_path)
     summary_calls.fail = True
     model = ToolLoopModel(tool_rounds=6)
-    agent = _agent(model, config, paths)
+    agent = _Agent(model, config, paths)
     await _run(agent, "Do the task")
     summary_calls.fail = False
     model.requests.clear()
@@ -434,7 +429,7 @@ async def test_request_sizing_uses_the_latest_response_usage(tmp_path: Path, sum
         usage=lambda number: MessageMetrics(tokens=TokenCounts(input_tokens=999_000 * number)),
     )
 
-    await _run(_agent(model, config, paths), "Do the task")
+    await _run(_Agent(model, config, paths), "Do the task")
 
     # The estimate alone stays far below the window; only the reported usage triggers compaction.
     assert summary_calls.inputs
@@ -456,7 +451,7 @@ async def test_request_sizing_counts_the_turns_thinking(
         reasoning="t" * 100_000,
     )
 
-    await _run(_agent(model, config, paths), "Do the task")
+    await _run(_Agent(model, config, paths), "Do the task")
 
     assert summary_calls.inputs
     assert any(is_compaction_summary(message) for message in model.requests[1].messages)
@@ -479,7 +474,7 @@ async def test_request_sizing_runs_off_the_event_loop(
 
     monkeypatch.setattr(mid_turn_compaction, "estimate_request_messages_tokens", recording)
 
-    await _run(_agent(ToolLoopModel(tool_rounds=5), config, paths), "Do the task")
+    await _run(_Agent(ToolLoopModel(tool_rounds=5), config, paths), "Do the task")
 
     assert sizing_threads
     assert loop_thread not in sizing_threads
@@ -611,7 +606,7 @@ async def test_usage_less_server_never_anchors_sizing(tmp_path: Path, summary_ca
     config, paths = _config(tmp_path)
     model = ToolLoopModel(tool_rounds=5, usage=lambda _number: MessageMetrics())
 
-    await _run(_agent(model, config, paths), "Do the task")
+    await _run(_Agent(model, config, paths), "Do the task")
 
     assert summary_calls.inputs
     assert max(request.roles.count("tool") for request in model.requests) < 5
@@ -628,7 +623,7 @@ async def test_unseen_thread_context_is_folded_and_transient_context_kept(
     transient = Message(role="user", content="transient turn context", add_to_agent_memory=False)
     prompt = Message(role="user", content="Do the task")
 
-    await _run(_agent(model, config, paths), [unseen, transient, prompt])
+    await _run(_Agent(model, config, paths), [unseen, transient, prompt])
 
     compacted = _first_compacted(model)
     assert "u" * 6000 not in compacted.contents
@@ -649,7 +644,7 @@ async def test_rewritten_request_carries_no_response_chain(tmp_path: Path, summa
             if message.role == "assistant":
                 message.provider_data = {**(message.provider_data or {}), "response_id": "resp"}
 
-    await _run(_agent(model, config, paths, before_request=(_before_each_request(chain),)), "Do the task")
+    await _run(_Agent(model, config, paths, before_request=(_before_each_request(chain),)), "Do the task")
 
     assert summary_calls.inputs
     compacted = _first_compacted(model)
@@ -667,7 +662,7 @@ async def test_snapshot_summary_keeps_current_turn_tool_results_despite_history_
     config.agents["test_agent"].max_tool_calls_from_history = limit
     model = ToolLoopModel(tool_rounds=5)
 
-    await _run(_agent(model, config, paths), "Do the task")
+    await _run(_Agent(model, config, paths), "Do the task")
 
     assert summary_calls.inputs
     assert summary_calls.inputs[0].count(TOOL_RESULT[:200]) >= 2
@@ -684,7 +679,7 @@ async def test_rewritten_request_over_the_limit_raises_the_summary_budget_error(
     config, paths = _config(tmp_path)
     model = ToolLoopModel(tool_rounds=5)
     agent = (
-        _scoped_agent(model, config, paths, seeded_storage(config, paths)) if scoped else _agent(model, config, paths)
+        _scoped_agent(model, config, paths, seeded_storage(config, paths)) if scoped else _Agent(model, config, paths)
     )
 
     with pytest.raises(
@@ -708,7 +703,7 @@ async def test_rewritten_request_within_the_model_window_is_sent(
     config, paths = _config(tmp_path, context_window=100_000, replay_window_tokens=4000)
     model = ToolLoopModel(tool_rounds=5)
     agent = (
-        _scoped_agent(model, config, paths, seeded_storage(config, paths)) if scoped else _agent(model, config, paths)
+        _scoped_agent(model, config, paths, seeded_storage(config, paths)) if scoped else _Agent(model, config, paths)
     )
 
     output = await _run(agent, [Message(role="user", content="p" * 16_000)])
@@ -734,7 +729,7 @@ async def test_turn_larger_than_one_summary_input_folds_whole_in_chunks(
         """Return one tool result carrying a distinct fact."""
         return f"FACT-{next(facts):02d} " + "r" * 4_000
 
-    output = await _run(_agent(model, config, paths, tools=[probe]), "Do the task")
+    output = await _run(_Agent(model, config, paths, tools=[probe]), "Do the task")
 
     assert str(output.content).endswith("done")
     compacted = _first_compacted(model)
@@ -780,7 +775,7 @@ async def test_a_parallel_tool_batch_larger_than_one_summary_input_folds_without
         fact_paths[fact] = path
         return "r" * 4_000 + f" {fact}"
 
-    output = await _run(_agent(model, config, paths, tools=[probe]), "Do the task")
+    output = await _run(_Agent(model, config, paths, tools=[probe]), "Do the task")
 
     assert str(output.content).endswith("done")
     summary_inputs = "\n".join(summary_calls.inputs)
@@ -812,7 +807,7 @@ async def test_a_prompt_larger_than_the_summary_input_keeps_the_first_exchange_i
         seed_session(storage, _session("session-1"))
         agent = _scoped_agent(model, config, paths, storage, tools=[probe])
     else:
-        agent = _agent(model, config, paths, tools=[probe])
+        agent = _Agent(model, config, paths, tools=[probe])
     # The prompt fits the model's window but not one summary input.
     prompt = "Do the task. " + "p" * 40_000
     # A Matrix turn also records its source prompts in the run's metadata.
@@ -838,7 +833,7 @@ async def test_an_exchange_larger_than_the_summary_input_still_folds(
         """Return one tool result whose size varies by call."""
         return "r" * next(sizes)
 
-    output = await _run(_agent(model, config, paths, tools=[probe]), "Do the task")
+    output = await _run(_Agent(model, config, paths, tools=[probe]), "Do the task")
 
     assert str(output.content).endswith("done")
     assert summary_calls.inputs
@@ -856,7 +851,7 @@ async def test_request_sizing_counts_thinking_the_response_did_not_show(
         usage=lambda _number: MessageMetrics(tokens=TokenCounts(input_tokens=10, output_tokens=30_000)),
     )
 
-    await _run(_agent(model, config, paths), "Do the task")
+    await _run(_Agent(model, config, paths), "Do the task")
 
     assert summary_calls.inputs
     assert any(is_compaction_summary(message) for message in model.requests[1].messages)
@@ -873,7 +868,7 @@ async def test_folded_request_usage_stays_in_the_usage_projection(
         usage=lambda number: MessageMetrics(tokens=TokenCounts(input_tokens=1001 * number, output_tokens=1)),
     )
 
-    output = await _run(_agent(model, config, paths), "Do the task")
+    output = await _run(_Agent(model, config, paths), "Do the task")
 
     assert len(summary_calls.inputs) >= 2
     projected = run_usage_snapshot(output)
@@ -914,7 +909,7 @@ async def test_queued_notice_survives_mid_turn_compaction(tmp_path: Path, summar
         if len(model.requests) == 2 and notice not in state.messages:
             state.messages.append(notice)
 
-    await _run(_agent(model, config, paths, before_request=(_before_each_request(add_notice),)), "Do the task")
+    await _run(_Agent(model, config, paths, before_request=(_before_each_request(add_notice),)), "Do the task")
 
     assert summary_calls.inputs
     compacted = _first_compacted(model)
@@ -968,7 +963,7 @@ async def test_parallel_tool_batch_is_folded_whole(tmp_path: Path, summary_calls
     config, paths = _config(tmp_path)
     model = ToolLoopModel(tool_rounds=3, calls_per_round=2)
 
-    await _run(_agent(model, config, paths), "Do the task")
+    await _run(_Agent(model, config, paths), "Do the task")
 
     compacted = _first_compacted(model)
     assert "tool" not in compacted.roles
@@ -990,7 +985,7 @@ async def test_folded_tool_media_is_summarized_not_kept(tmp_path: Path, summary_
         if len(model.requests) == 1 and media not in state.messages:
             state.messages.append(media)
 
-    await _run(_agent(model, config, paths, before_request=(_before_each_request(add_media),)), "Do the task")
+    await _run(_Agent(model, config, paths, before_request=(_before_each_request(add_media),)), "Do the task")
 
     compacted = _first_compacted(model)
     assert not any(message.images for message in compacted.messages)
@@ -1006,7 +1001,7 @@ async def test_unscoped_first_request_without_foldable_messages_is_sent_as_is(
     config, paths = _config(tmp_path)
     model = ToolLoopModel(tool_rounds=0)
 
-    output = await _run(_agent(model, config, paths), [Message(role="user", content="p" * 16_000)])
+    output = await _run(_Agent(model, config, paths), [Message(role="user", content="p" * 16_000)])
 
     assert str(output.content) == "done"
     assert summary_calls.inputs == []
@@ -1020,7 +1015,7 @@ async def test_run_local_summary_usage_is_recorded(tmp_path: Path, summary_calls
     storage = create_session_storage("test_agent", config, paths, execution_identity=None)
 
     with watch_session_row(TEST_AGENT_SCOPE, "session-1") as watch:
-        await _run(_agent(ToolLoopModel(tool_rounds=5), config, paths, store=storage), "Do the task")
+        await _run(_Agent(ToolLoopModel(tool_rounds=5), config, paths, store=storage), "Do the task")
 
     assert watch.created
     summaries = _summary_usage(storage)
@@ -1035,7 +1030,7 @@ async def test_run_local_summary_usage_counts_toward_the_requester(tmp_path: Pat
     storage = create_session_storage("test_agent", config, paths, execution_identity=None)
 
     with detached_requester_context(_api_requester(config, paths)):
-        agent = _agent(ToolLoopModel(tool_rounds=5), config, paths, store=storage)
+        agent = _Agent(ToolLoopModel(tool_rounds=5), config, paths, store=storage)
         await _run(agent, "Do the task", user_id="@api:localhost")
 
     summaries = _summary_usage(storage)
@@ -1068,13 +1063,9 @@ async def test_run_local_summary_usage_goes_to_the_replys_usage_owner(
         session_id="owner-session",
         initial_session=new_scope_session(session_id="owner-session", scope=HistoryScope(kind="team", scope_id="crew")),
     )
-    token = helper_usage._HELPER_USAGE_OWNER.set(owner)
-    try:
-        # A team member keeps no storage of its own; the reply's owner records its summary usage.
-        with detached_requester_context(_api_requester(config, paths)):
-            await _run(_agent(ToolLoopModel(tool_rounds=5), config, paths), "Do the task", user_id="@api:localhost")
-    finally:
-        helper_usage._HELPER_USAGE_OWNER.reset(token)
+    # A team member keeps no storage of its own; the reply's owner records its summary usage.
+    with helper_usage_owner_context(owner), detached_requester_context(_api_requester(config, paths)):
+        await _run(_Agent(ToolLoopModel(tool_rounds=5), config, paths), "Do the task", user_id="@api:localhost")
 
     summaries = _summary_usage(owner_storage)
     assert len(summaries) == len(summary_calls.inputs) >= 1
@@ -1093,7 +1084,7 @@ async def test_the_loop_caps_a_request_before_compacting_it(tmp_path: Path, summ
     )
 
     # The cap allows the limit plus two requests, so it refuses the fifth.
-    await _run(_agent(model, config, paths, max_tool_calls_per_turn=2), "Do the task")
+    await _run(_Agent(model, config, paths, max_tool_calls_per_turn=2), "Do the task")
 
     assert len(model.requests) == 4
     assert summary_calls.inputs == []
@@ -1802,7 +1793,7 @@ async def test_native_request_under_the_limit_never_text_compacts(
         usage=lambda number: MessageMetrics(tokens=TokenCounts(input_tokens=999_900 * number)),
     )
 
-    await _run(_agent(model, config, paths, native_compaction=_native(500_000)), "Do the task")
+    await _run(_Agent(model, config, paths, native_compaction=_native(500_000)), "Do the task")
 
     assert summary_calls.inputs == []
     assert model.requests[-1].request.native_compaction == _native(500_000)
@@ -1816,7 +1807,7 @@ async def test_oversized_native_request_turns_native_off_and_compacts_as_text(
     config, paths = _config(tmp_path)
     model = ToolLoopModel(tool_rounds=5)
 
-    await _run(_agent(model, config, paths, native_compaction=_native(2000)), "Do the task")
+    await _run(_Agent(model, config, paths, native_compaction=_native(2000)), "Do the task")
 
     assert summary_calls.inputs
     assert model.requests[-1].request.native_compaction is None
@@ -1857,7 +1848,7 @@ async def test_failed_text_fallback_keeps_native_compaction(tmp_path: Path, summ
     summary_calls.fail = True
     model = ToolLoopModel(tool_rounds=5)
 
-    await _run(_agent(model, config, paths, native_compaction=_native(2000)), "Do the task")
+    await _run(_Agent(model, config, paths, native_compaction=_native(2000)), "Do the task")
 
     assert summary_calls.inputs
     assert model.requests[-1].request.native_compaction == _native(2000)
@@ -1887,7 +1878,7 @@ async def test_thinking_a_native_checkpoint_replaced_never_triggers_text_compact
         ),
     )
 
-    await _run(_agent(model, config, paths, native_compaction=_native(20_000)), "Do the task")
+    await _run(_Agent(model, config, paths, native_compaction=_native(20_000)), "Do the task")
 
     assert summary_calls.inputs == []
     assert model.requests[-1].request.native_compaction == _native(20_000)
