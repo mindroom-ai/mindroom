@@ -206,6 +206,48 @@ describe("serializing a service", () => {
     expect(serialize(service, personal)).toEqual({ preset: "github" });
   });
 
+  it("keeps an operator's admin key and agent list, and never sends them from the personal page", () => {
+    const service = {
+      preset: "openai",
+      admin_key: true,
+      agents: ["code", "research"],
+    } satisfies AuthoredEgressService;
+    expect(serialize(service, operator)).toEqual(service);
+    expect(serialize(service, personal)).toEqual({ preset: "openai" });
+  });
+
+  it("writes an admin key and agent list the operator chose, and no account login with an admin key", () => {
+    const custom: AuthoredEgressService = {
+      rules: [bearerRule],
+      oauth_provider: "github",
+      oauth_on_shared_workers: true,
+    };
+    const form = {
+      ...formFromService("svc", custom),
+      adminKey: true,
+      agents: ["code"],
+    };
+    expect(serializeService(form, operator, custom)).toEqual({
+      rules: [bearerRule],
+      admin_key: true,
+      agents: ["code"],
+    });
+    const github = { preset: "github", oauth_provider: null };
+    const presetForm = { ...formFromService("svc", github), adminKey: true };
+    expect(serializeService(presetForm, operator, github)).toEqual({
+      preset: "github",
+      admin_key: true,
+    });
+  });
+
+  it("writes no agent list while every agent is served", () => {
+    const limited = { rules: [bearerRule], agents: ["code"] };
+    const form = { ...formFromService("svc", limited), agents: [] };
+    expect(serializeService(form, operator, limited)).toEqual({
+      rules: [bearerRule],
+    });
+  });
+
   it("round-trips an authored service through the form", () => {
     const service: AuthoredEgressService = {
       preset: "github",

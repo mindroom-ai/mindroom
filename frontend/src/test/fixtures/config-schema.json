@@ -1961,6 +1961,28 @@
           "description": "Only limit paths, for a service a user adds; a config service is refused with it and uses restrict_to_rules. The rules take part in the path check like restrict_to_rules (which this implies), but never choose a credential, so an allowed path still uses the credential of the most specific other service on the host. Such a service has no key, OAuth login, or placeholders, its rules need no auth, and a preset contributes only its display_name, description, and rules. Presets never set this",
           "title": "Restrict Only",
           "type": "boolean"
+        },
+        "admin_key": {
+          "default": false,
+          "description": "Use one key for every agent the service serves, which only an administrator sets, on the dashboard; users and credential managers see that it is set but cannot set, replace, or remove it. Such a service uses no connected account, so a preset's oauth_provider and read_only are left out. Only config.yaml may set it, and presets never do",
+          "title": "Admin Key",
+          "type": "boolean"
+        },
+        "agents": {
+          "anyOf": [
+            {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Agents whose requests get the service's credential; requests it matches from any other agent are refused (403 agent_not_allowed), and it is not offered to them. Omit to serve every agent that uses Agent Keys. Only config.yaml may set it, and presets never do",
+          "title": "Agents"
         }
       },
       "title": "EgressService",

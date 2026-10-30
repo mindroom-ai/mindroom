@@ -136,7 +136,8 @@ export function EgressServiceRows({
             errorMessages={errorMessages}
             serviceEditing={serviceEditing}
             agent={agent}
-            hideKeyActions={hideKeyActions}
+            // An administrator's key serves every scope, so the dashboard sets it whichever one is selected.
+            hideKeyActions={hideKeyActions && !service.admin_key}
           />
         ),
       )}

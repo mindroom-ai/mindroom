@@ -491,3 +491,26 @@ def test_unknown_code_or_missing_value_is_a_programming_error() -> None:
         refusal_body("no_such_code")
     with pytest.raises(KeyError, match="host"):
         refusal_body("upstream_unreachable")
+
+
+@pytest.mark.parametrize("values", [{}, {"shared": True, "managers": ["@alice:example.org"]}, {"personal_page": False}])
+def test_an_unset_administrator_key_names_only_an_administrator(values: dict[str, object]) -> None:
+    """Nobody but an administrator sets such a key, and only on the dashboard, so no scope's page is linked."""
+    body = refusal_body("credential_not_configured", service="search", admin_key=True, manage_url=MANAGE_URL, **values)
+
+    assert body == {
+        "error": "credential_not_configured",
+        "service": "search",
+        "message": "No search key is set. Only an administrator can set it, on the dashboard.",
+    }
+
+
+def test_a_service_limited_to_other_agents_says_who_can_change_that() -> None:
+    """Another agent's request is refused with a sentence naming the service and who decides which agents use it."""
+    body = refusal_body("agent_not_allowed", service="search", service_label="Search API", manage_url=MANAGE_URL)
+
+    assert body == {
+        "error": "agent_not_allowed",
+        "service": "search",
+        "message": "This agent may not use Search API. Only an administrator can change which agents may use it.",
+    }
