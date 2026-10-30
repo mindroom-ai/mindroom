@@ -43,9 +43,9 @@ from mindroom.memory.config import (
     _get_memory_config,
     _Mem0Embedder,
     _Mem0StrictOpenAIEmbedder,
-    _memory_collection_name,
     _ollama_embedder_error,
     create_memory_instance,
+    mem0_collection_name,
     recorded_embedder_failures,
 )
 from mindroom.model_defaults import (
@@ -124,7 +124,7 @@ class TestMemoryConfig:
 
         # Verify vector store config
         assert result["vector_store"]["provider"] == "chroma"
-        assert result["vector_store"]["config"]["collection_name"] == _memory_collection_name(config)
+        assert result["vector_store"]["config"]["collection_name"] == mem0_collection_name(config)
         assert str(storage_path / "chroma") in result["vector_store"]["config"]["path"]
 
     def test_get_memory_config_with_openai(
@@ -457,7 +457,7 @@ class TestMemoryConfig:
         openai_config = Config(memory=openai_memory, router=RouterConfig(model="default"))
         local_config = Config(memory=local_memory, router=RouterConfig(model="default"))
 
-        assert _memory_collection_name(openai_config) != _memory_collection_name(local_config)
+        assert mem0_collection_name(openai_config) != mem0_collection_name(local_config)
 
     def test_memory_collection_name_changes_when_embedder_prefixes_change(self) -> None:
         """Memories embedded with prefixes are isolated from unprefixed ones."""
@@ -467,7 +467,7 @@ class TestMemoryConfig:
                 provider="openai",
                 config=EmbedderConfig(model="embeddinggemma-2", **prefixes),
             )
-            return _memory_collection_name(
+            return mem0_collection_name(
                 Config(memory=MemoryConfig(embedder=embedder, llm=None), router=RouterConfig(model="default")),
             )
 
@@ -969,7 +969,7 @@ class TestMemoryConfig:
         implicit_config = Config(memory=implicit_default, router=RouterConfig(model="default"))
         explicit_config = Config(memory=explicit_default, router=RouterConfig(model="default"))
 
-        assert _memory_collection_name(implicit_config) == _memory_collection_name(explicit_config)
+        assert mem0_collection_name(implicit_config) == mem0_collection_name(explicit_config)
 
     def test_custom_openai_compatible_memory_collection_name_tracks_explicit_dimensions(self) -> None:
         """Custom OpenAI-compatible embedders must not treat omitted dimensions as explicit 1536."""
@@ -997,7 +997,7 @@ class TestMemoryConfig:
         implicit_config = Config(memory=implicit_dimensions, router=RouterConfig(model="default"))
         explicit_config = Config(memory=explicit_dimensions, router=RouterConfig(model="default"))
 
-        assert _memory_collection_name(implicit_config) != _memory_collection_name(explicit_config)
+        assert mem0_collection_name(implicit_config) != mem0_collection_name(explicit_config)
 
     def test_get_memory_config_no_model_fallback(
         self,

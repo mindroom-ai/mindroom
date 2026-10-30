@@ -461,7 +461,7 @@ async def test_mem0_team_conversation_memory_is_one_store_every_requester_and_me
         resolved_thread_id=None,
         session_id="session-bob",
     )
-    team_root = storage_path / "team_memory" / _TEAM_ID
+    team_root = storage_path / "team_memory"
     stores, create_memory = fake_mem0_stores()
 
     with patch("mindroom.memory._backend.create_memory_instance", side_effect=create_memory):
@@ -560,7 +560,7 @@ async def test_a_team_memory_is_one_record_every_member_edits_alone(storage_path
     config.agents["calculator"].worker_scope = "user_agent"
     config.teams = {"gc": MockTeamConfig(agents=["general", "calculator"])}
     runtime_paths = runtime_paths_for(config)
-    team_root = storage_path / "team_memory" / _TEAM_ID
+    team_root = storage_path / "team_memory"
     stores, create_memory = fake_mem0_stores()
 
     execution_identity = ToolExecutionIdentity(
@@ -1036,7 +1036,7 @@ async def test_a_memory_both_scopes_return_appears_once_per_scope_ranked_within_
 ) -> None:
     """Agent and team hits rank together by score, and a text both scopes hold is two memories with their own IDs."""
     config.teams = {"pair": MockTeamConfig(agents=["general", "calculator"])}
-    mem0_chroma_path(storage_path / "team_memory" / _TEAM_ID).mkdir(parents=True)
+    mem0_chroma_path(storage_path / "team_memory").mkdir(parents=True)
     hits_by_scope: dict[str, list[dict[str, object]]] = {
         "agent_general": [
             {"id": "agent-shared", "memory": "Shared fact", "score": 0.5},
@@ -1083,7 +1083,7 @@ async def test_a_team_store_s_embedder_failure_degrades_search_but_keeps_the_age
 ) -> None:
     """Stores are built and searched one at a time, and a team store's embedder failure keeps the agent store's hits."""
     config.teams = {"pair": MockTeamConfig(agents=["general", "calculator"])}
-    mem0_chroma_path(storage_path / "team_memory" / _TEAM_ID).mkdir(parents=True)
+    mem0_chroma_path(storage_path / "team_memory").mkdir(parents=True)
     failure_detail = "embedder authentication failed (HTTP 401)"
     events: list[str] = []
     agent_hit: dict[str, object] = {"id": "agent-a", "memory": "Agent fact", "score": 0.6}
@@ -1123,7 +1123,7 @@ async def test_a_team_store_s_embedder_failure_degrades_search_but_keeps_the_age
         "build general",
         "search agent_general",
         "done agent_general",
-        f"build {_TEAM_ID}",
+        "build team_memory",
         f"search {_TEAM_ID}",
         f"done {_TEAM_ID}",
     ]
@@ -1153,7 +1153,7 @@ async def test_a_record_of_another_scope_in_an_agents_store_is_not_that_agents_m
 async def test_each_store_is_released_before_the_next_one_is_built(storage_path: Path, config: Config) -> None:
     """Every Mem0 store builds its own embedder, a full copy of a local model, so one search holds one store at a time."""
     config.teams = {"pair": MockTeamConfig(agents=["general", "calculator"])}
-    mem0_chroma_path(storage_path / "team_memory" / _TEAM_ID).mkdir(parents=True)
+    mem0_chroma_path(storage_path / "team_memory").mkdir(parents=True)
     built: list[weakref.ref[FakeMem0ScopedMemory]] = []
     alive_at_build: list[int] = []
 

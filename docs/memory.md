@@ -67,7 +67,7 @@ A `file` member of a team that uses Mem0 does not see that team's Mem0 memories 
 ## Backend: `mem0`
 
 Before each reply, Mem0 retrieves memories relevant to the message and adds them to the prompt.
-After each turn, the [memory LLM](#memory-llm) extracts durable facts into a Chroma vector store under the agent's storage directory, or, for a team's turn, once into the team's store under `team_memory/team_<sorted_members>/`.
+After each turn, the [memory LLM](#memory-llm) extracts durable facts into a Chroma vector store under the agent's storage directory, or, for a team's turn, once into the one Mem0 store under `team_memory/` that holds every team's memories, each team's apart.
 The `mem0` and `chromadb` extras install on first use unless `MINDROOM_NO_AUTO_INSTALL_TOOLS=1` is set; otherwise install `mindroom[mem0,chromadb]`.
 
 ### Embedder

@@ -228,8 +228,8 @@ Matrix sync callback
 | `agent_cli/cli_approval_waits.py` | Response-owned CLI approval waits, exact journal claims, and the end of each scope, which it reports to the approval runner |
 | `tool_system/agent_tool_calls.py` | The live turn's catalog of qualified tools and their serialized execution through the build's tool policy |
 | `tool_system/tool_access.py` | Shared qualified tool identities, discovery, schemas, and local argument validation |
-| `memory/` | Agent and team memory over Mem0 or Markdown files; each scope lives in one store, an agent's at its state root or workspace and a team's at `team_memory/<team scope>/` |
-| `memory/_policy.py` | Memory scopes: the team scope ID and root, the team scopes an agent reads, and the backend an agent or team uses |
+| `memory/` | Agent and team memory over Mem0 or Markdown files; an agent's lives at its state root or workspace, every team's Mem0 memory in one store at `team_memory/`, and each team's file memory at `team_memory/<team scope>/` |
+| `memory/_policy.py` | Memory scopes: the team scope ID, the team memory root and each team's file directory, the team scopes an agent reads, and the backend an agent or team uses |
 | `memory/legacy_team_memory.py` | One-time startup merge of the team memory copies earlier releases kept in every member's storage |
 | `memory/_entrypoint_snapshots.py` | In-process copy of each conversation's inlined `MEMORY.md`, reused while that copy only gains lines (not when a capped file drops its oldest kept entry) and that conversation's prompt cache may still be warm |
 | `memory/auto_flush.py` | Background passes that turn file-memory agents' new finished turns into daily notes, with per-conversation progress below `tracking/`, and the service that runs them while auto-flush is enabled |

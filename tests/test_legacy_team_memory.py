@@ -27,6 +27,7 @@ from mindroom.config.main import Config
 from mindroom.config.memory import MemoryConfig, _MemoryEmbedderConfig
 from mindroom.config.models import EmbedderConfig
 from mindroom.constants import resolve_runtime_paths, tracking_dir
+from mindroom.embeddings.errors import EmbedderRequestError
 from mindroom.memory import legacy_team_memory
 from mindroom.memory._file_backend import FileMemoryBackend
 from mindroom.memory._mem0_backend import Mem0MemoryBackend
@@ -36,7 +37,7 @@ from mindroom.orchestrator import main
 from tests.conftest import bind_runtime_paths, runtime_paths_for
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Sequence
+    from collections.abc import Callable, Iterator, Sequence
 
     from mindroom.embeddings.base import EmbeddingPurpose
 
@@ -97,6 +98,22 @@ def storage(tmp_path: Path) -> Path:
     _load_recorded(tmp_path, _RECORDED)
     shutil.copytree(_FIXTURES / "agents", tmp_path / "agents", dirs_exist_ok=True)
     return tmp_path
+
+
+@pytest.fixture(autouse=True)
+def _recorded_embedder() -> Iterator[None]:
+    """The merge asks the configured embedder for the size of its embeddings, here the recording's offline embedder."""
+    with patch("mindroom.embeddings.factory.create_configured_embedder", return_value=_RecordedEmbedder()):
+        yield
+
+
+def _team_records(storage: Path, team: str = _TEAM) -> dict[str, dict]:
+    """Return one team's records in the team store, which holds every team's."""
+    return {
+        record_id: record
+        for record_id, record in _stored(storage / "team_memory" / "chroma").items()
+        if record["metadata"]["user_id"] == team
+    }
 
 
 def _config(storage: Path, backend: str, *more_agents: str) -> Config:
@@ -189,7 +206,7 @@ async def _migrate(storage: Path, *more_agents: str) -> None:
 
 def _assert_merged(storage: Path) -> None:
     team_root = storage / "team_memory" / _TEAM
-    assert _stored(team_root / "chroma") == _expected_team_records()
+    assert _team_records(storage) == _expected_team_records()
     assert _stored(storage / "agents" / "general" / "chroma") == _as_stored(_recorded("general", "General likes tea"))
     assert _stored(storage / "agents" / "calculator" / "chroma") == {}
     assert (team_root / "MEMORY.md").read_text() == (
@@ -341,7 +358,7 @@ async def test_a_member_store_holding_a_link_is_left_unopened(storage: Path) -> 
     expected = _as_stored(
         *(row for row in _RECORDED["general"][_COLLECTION] if row["metadata"]["data"] in general_turns),
     )
-    assert _stored(storage / "team_memory" / _TEAM / "chroma") == expected
+    assert _team_records(storage) == expected
     calculator = {row["id"] for row in _RECORDED["calculator"][_COLLECTION]}
     assert set(_stored(storage / "agents" / "calculator" / "chroma")) == calculator
     assert outside.read_bytes() == b""
@@ -372,34 +389,80 @@ async def test_a_record_whose_replica_key_is_not_text_counts_as_a_turn_of_its_ow
 
     await _migrate(storage)
 
-    merged = _stored(storage / "team_memory" / _TEAM / "chroma")
+    merged = _team_records(storage)
     assert merged.pop("planted")["metadata"]["data"] == "Planted fact"
     assert merged == _expected_team_records()
 
 
 @pytest.mark.asyncio
-async def test_a_team_whose_store_rejects_its_records_keeps_its_copies_and_is_not_merged_again(storage: Path) -> None:
-    """A planted record of another dimension makes the team's store reject the batch; the copies stay, unmerged."""
-    pair = "team_general+planter"
-    for member, record_id, embedding in (
-        ("general", "paired", [1.0, 0.0, 0.0, 0.0]),
-        ("planter", "planted", [1.0, 0.0]),
-    ):
-        _client(storage / "agents" / member / "chroma").get_or_create_collection(
-            _COLLECTION,
-            embedding_function=None,
-        ).add(
-            ids=[record_id],
-            embeddings=[embedding],
-            metadatas=[{"user_id": pair, "data": f"{record_id} fact", "mindroom_replica_key": f"{record_id}-turn"}],
-        )
+async def test_a_record_of_another_embedding_size_stays_and_every_team_still_merges(storage: Path) -> None:
+    """The team store holds every team's records, so a planted record of another size, written first, would bind it."""
+    # Planted under a scope naming its holder, so it merges from that store, and sorting before every real team.
+    planted = "team_aaaa+planter"
+    _client(storage / "agents" / "planter" / "chroma").get_or_create_collection(
+        _COLLECTION,
+        embedding_function=None,
+    ).add(
+        ids=["planted"],
+        embeddings=[[1.0, 0.0]],
+        metadatas=[{"user_id": planted, "data": "Planted fact", "mindroom_replica_key": "planted-turn"}],
+    )
+
     await _migrate(storage, "planter")
 
-    # No later start writes them again, so none undoes an edit made to a merged fact since.
     assert _receipt(storage).exists()
-    assert _stored(storage / "team_memory" / _TEAM / "chroma") == _expected_team_records()
-    assert "paired" in _stored(storage / "agents" / "general" / "chroma")
+    assert _team_records(storage) == _expected_team_records()
+    assert _team_records(storage, planted) == {}
     assert set(_stored(storage / "agents" / "planter" / "chroma")) == {"planted"}
+
+
+@pytest.mark.asyncio
+async def test_records_the_team_store_holds_set_the_size_without_asking_the_embedder(storage: Path) -> None:
+    """The primary-owned team store vouches for its embedder's size, so a merge it already began needs no embedder."""
+    _client(storage / "team_memory" / "chroma").get_or_create_collection(_COLLECTION, embedding_function=None).add(
+        ids=["held"],
+        embeddings=[[0.0, 0.0, 0.0, 1.0]],
+        metadatas=[{"user_id": _TEAM, "data": "Held team fact", "hash": "held"}],
+    )
+    unreachable = EmbedderRequestError("embedder endpoint unreachable")
+
+    with patch("mindroom.embeddings.factory.create_configured_embedder", side_effect=unreachable):
+        await _migrate(storage)
+
+    assert set(_team_records(storage)) == {"held", *_expected_team_records()}
+    assert _receipt(storage).exists()
+
+
+@pytest.mark.asyncio
+async def test_a_storage_root_without_mem0_copies_never_asks_the_embedder(tmp_path: Path) -> None:
+    """Only Mem0 copies need an embedding size, so file copies alone merge without the embedder."""
+    shutil.copytree(_FIXTURES / "agents", tmp_path / "agents")
+    unreachable = EmbedderRequestError("embedder endpoint unreachable")
+
+    with patch("mindroom.embeddings.factory.create_configured_embedder", side_effect=unreachable):
+        await _migrate(tmp_path)
+
+    assert (tmp_path / "team_memory" / _TEAM / "MEMORY.md").exists()
+    assert _receipt(tmp_path).exists()
+
+
+@pytest.mark.asyncio
+async def test_while_the_embedder_cannot_answer_the_mem0_copies_wait(storage: Path) -> None:
+    """Without a size the team store or the embedder vouches for, no Mem0 copy moves and the receipt waits."""
+    unreachable = EmbedderRequestError("embedder endpoint unreachable")
+    with patch("mindroom.embeddings.factory.create_configured_embedder", side_effect=unreachable):
+        await _migrate(storage)
+
+    assert _team_records(storage) == {}
+    for member in ("calculator", "general"):
+        assert set(_stored(storage / "agents" / member / "chroma")) == {
+            row["id"] for row in _RECORDED[member][_COLLECTION]
+        }
+    assert not _receipt(storage).exists()
+
+    await _migrate(storage)
+
+    _assert_merged(storage)
 
 
 @pytest.mark.asyncio
@@ -435,7 +498,7 @@ async def test_a_copy_a_member_store_refuses_to_delete_stays_and_the_merge_finis
     with patch.object(Collection, "delete", _delete_refused_in("calculator")):
         await _migrate(storage)
 
-    assert _stored(storage / "team_memory" / _TEAM / "chroma") == _expected_team_records()
+    assert _team_records(storage) == _expected_team_records()
     assert set(_stored(storage / "agents" / "calculator" / "chroma")) == {
         row["id"] for row in _RECORDED["calculator"][_COLLECTION]
     }
@@ -485,7 +548,7 @@ async def test_without_chroma_or_config_only_file_copies_merge_and_the_rest_wait
         await legacy_team_memory.migrate_team_memory(runtime_paths, None)
 
     assert (storage / "team_memory" / _TEAM / "MEMORY.md").exists()
-    assert not (storage / "team_memory" / _TEAM / "chroma").exists()
+    assert not (storage / "team_memory" / "chroma").exists()
     assert not _receipt(storage).exists()
 
     await _migrate(storage)
@@ -494,13 +557,14 @@ async def test_without_chroma_or_config_only_file_copies_merge_and_the_rest_wait
 
 
 @pytest.mark.asyncio
-async def test_each_embedder_collection_merges_on_its_own_and_entity_rows_stay(storage: Path) -> None:
-    """Team records of another embedder's collection move to that collection; Mem0's entity rows are not facts."""
+async def test_copies_of_another_embedder_and_entity_rows_stay(storage: Path) -> None:
+    """Only the configured embedder's records merge, the ones the runtime read; Mem0's entity rows are not facts."""
     member_store = _client(storage / "agents" / "general" / "chroma")
     other = member_store.get_or_create_collection("mindroom_memories_0ther000", embedding_function=None)
+    # Another embedder of the same size, so only the collection tells its records apart.
     other.add(
         ids=["older-embedder"],
-        embeddings=[[0.0, 1.0]],
+        embeddings=[[0.0, 1.0, 0.0, 0.0]],
         metadatas=[{"user_id": _TEAM, "data": "Older embedder fact", "hash": "h"}],
     )
     entities = member_store.get_or_create_collection(f"{_COLLECTION}_entities", embedding_function=None)
@@ -512,10 +576,10 @@ async def test_each_embedder_collection_merges_on_its_own_and_entity_rows_stay(s
 
     await _migrate(storage)
 
-    team_store = _client(storage / "team_memory" / _TEAM / "chroma")
-    moved = team_store.get_collection("mindroom_memories_0ther000").get()
-    assert moved["ids"] == ["older-embedder"]
-    assert f"{_COLLECTION}_entities" not in {collection.name for collection in team_store.list_collections()}
+    _assert_merged(storage)
+    team_store = _client(storage / "team_memory" / "chroma")
+    assert {collection.name for collection in team_store.list_collections()} == {_COLLECTION}
+    assert other.get()["ids"] == ["older-embedder"]
     assert entities.get()["ids"] == ["entity"]
 
 
@@ -670,7 +734,7 @@ async def test_two_scopes_sharing_a_directory_each_keep_a_fact_they_share(tmp_pa
 
     await _migrate(tmp_path)
 
-    merged = _stored(tmp_path / "team_memory" / _TEAM / "chroma")
+    merged = _stored(tmp_path / "team_memory" / "chroma")
     assert sorted(record["metadata"]["user_id"] for record in merged.values()) == [_TEAM, "team_calculator+general_"]
 
 
@@ -686,7 +750,7 @@ async def test_a_turn_keeps_the_copy_main_s_edit_bug_left_whole(tmp_path: Path) 
 
     await _migrate(tmp_path)
 
-    merged = _stored(tmp_path / "team_memory" / _TEAM / "chroma")
+    merged = _team_records(tmp_path)
     assert sorted(record["metadata"]["data"] for record in merged.values()) == [
         "Team fact five",
         "Team fact four, revised",
@@ -713,7 +777,7 @@ async def test_a_fact_two_kept_extractions_share_is_stored_once(tmp_path: Path, 
 
     await _migrate(tmp_path)
 
-    merged = _stored(tmp_path / "team_memory" / _TEAM / "chroma")
+    merged = _team_records(tmp_path)
     assert sorted(record["metadata"]["data"] for record in merged.values()) == ["Fact A", "Fact B", "Fact C"]
 
 
@@ -725,7 +789,7 @@ async def test_a_turn_whose_extractions_tie_keeps_the_first_member_s_by_name(tmp
 
     await _migrate(tmp_path)
 
-    merged = _stored(tmp_path / "team_memory" / _TEAM / "chroma")
+    merged = _team_records(tmp_path)
     assert {record_id: record["metadata"]["data"] for record_id, record in merged.items()} == {"c1": "Fact X"}
     assert _stored(tmp_path / "agents" / "general" / "chroma") == {}
 
@@ -745,7 +809,7 @@ async def test_records_planted_under_one_id_in_two_members_stores_never_stop_the
 
     await _migrate(tmp_path)
 
-    merged = _stored(tmp_path / "team_memory" / _TEAM / "chroma")
+    merged = _team_records(tmp_path)
     assert {record_id: record["metadata"]["data"] for record_id, record in merged.items()} == {"planted": "Fact B"}
     assert _receipt(tmp_path).exists()
 
@@ -758,5 +822,5 @@ async def test_a_tied_copy_main_s_edit_bug_rewrote_is_stored_once(tmp_path: Path
 
     await _migrate(tmp_path)
 
-    merged = _stored(tmp_path / "team_memory" / _TEAM / "chroma")
+    merged = _team_records(tmp_path)
     assert [record["metadata"]["data"] for record in merged.values()] == ["Fact A, edited"]

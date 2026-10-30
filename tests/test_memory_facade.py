@@ -179,14 +179,17 @@ def _test_config(storage_path: Path) -> Config:
     )
 
 
-def _team_store_root(config: Config, scope_user_id: str) -> Path:
+def _mem0_team_store_root(config: Config) -> Path:
+    return runtime_paths_for(config).storage_root / "team_memory"
+
+
+def _team_file_dir(config: Config, scope_user_id: str) -> Path:
     return runtime_paths_for(config).storage_root / "team_memory" / scope_user_id
 
 
-def _create_team_stores(config: Config, *scope_user_ids: str) -> None:
-    """Create the Mem0 team stores a team turn would have written, since reads never create one."""
-    for scope_user_id in scope_user_ids:
-        mem0_chroma_path(_team_store_root(config, scope_user_id)).mkdir(parents=True)
+def _create_team_store(config: Config) -> None:
+    """Create the Mem0 team store a team turn would have written, since reads never create it."""
+    mem0_chroma_path(_mem0_team_store_root(config)).mkdir(parents=True)
 
 
 def _embedder_auth_error() -> EmbedderRequestError:
@@ -391,7 +394,7 @@ class TestMemoryFacade:
             "first": MockTeamConfig(agents=["agent", "calculator"]),
             "second": MockTeamConfig(agents=["agent", "finance"]),
         }
-        _create_team_stores(config, "team_agent+calculator", "team_agent+finance")
+        _create_team_store(config)
         hits = {
             "agent_agent": {"id": "personal", "memory": "personal", "score": 0.9},
             "team_agent+calculator": {"id": "first team", "memory": "first team", "score": 0.8},
@@ -501,7 +504,7 @@ class TestMemoryFacade:
         config: Config,
     ) -> None:
         config.teams = {"test_team": MockTeamConfig(agents=["helper", "test_agent"])}
-        _create_team_stores(config, "team_helper+test_agent")
+        _create_team_store(config)
         mock_memory.get.return_value = {"id": "mem-team", "memory": "Team memory", "user_id": "team_helper+test_agent"}
 
         with patch("mindroom.memory._backend.create_memory_instance", return_value=mock_memory) as mock_create:
@@ -512,7 +515,7 @@ class TestMemoryFacade:
         # The agent's own store holds no such scope, so the team's one store answers.
         assert [call.args[0] for call in mock_create.call_args_list] == [
             agent_state_root_path(storage_path, "test_agent"),
-            _team_store_root(config, "team_helper+test_agent"),
+            _mem0_team_store_root(config),
         ]
 
     @pytest.mark.asyncio
@@ -523,7 +526,7 @@ class TestMemoryFacade:
     ) -> None:
         """A shared team never exposes one member's own memories to another member."""
         config.teams = {"test_team": MockTeamConfig(agents=["helper", "test_agent"])}
-        _create_team_stores(config, "team_helper+test_agent")
+        _create_team_store(config)
         mock_memory.get.return_value = {"id": "mem-member", "memory": "Member memory", "user_id": "agent_helper"}
 
         with patch("mindroom.memory._backend.create_memory_instance", return_value=mock_memory):
@@ -754,7 +757,7 @@ class TestMemoryFacade:
 
         # A team turn runs one extraction into the team's one store, not one per member.
         mock_create.assert_called_once_with(
-            _team_store_root(config, "team_calculator+data_analyst+finance"),
+            _mem0_team_store_root(config),
             config,
             runtime_paths=runtime_paths_for(config),
         )
@@ -805,10 +808,13 @@ class TestMemoryFacade:
                 config,
             )
 
-        team_root = _team_store_root(config, "team_calculator+finance")
-        mock_create.assert_called_once_with(team_root, config, runtime_paths=runtime_paths_for(config))
+        mock_create.assert_called_once_with(
+            _mem0_team_store_root(config),
+            config,
+            runtime_paths=runtime_paths_for(config),
+        )
         mock_memory.add.assert_called_once()
-        assert not (team_root / "MEMORY.md").exists()
+        assert not (_team_file_dir(config, "team_calculator+finance") / "MEMORY.md").exists()
 
     @pytest.mark.asyncio
     async def test_disabled_backend_crud_facade_does_not_fall_through_to_mem0(
@@ -842,7 +848,7 @@ class TestMemoryFacade:
         config: Config,
     ) -> None:
         config.teams = {"finance_team": MockTeamConfig(agents=["calculator", "data_analyst", "finance"])}
-        _create_team_stores(config, "team_calculator+data_analyst+finance")
+        _create_team_store(config)
         thresholds: dict[str, float] = {}
 
         def search_side_effect(query: str, *, filters: dict[str, str], top_k: int, threshold: float) -> dict:  # noqa: ARG001
@@ -932,7 +938,7 @@ class TestMemoryFacade:
             [team_memory] = await search_agent_memories("Quarterly", "calculator", config)
             from_general = await get_agent_memory(team_memory["id"], "general", config)
 
-        team_file = _team_store_root(config, "team_calculator+general") / "MEMORY.md"
+        team_file = _team_file_dir(config, "team_calculator+general") / "MEMORY.md"
         assert "Quarterly numbers are due Friday" in team_file.read_text(encoding="utf-8")
         assert from_general is not None
         assert from_general["memory"] == "Quarterly numbers are due Friday"

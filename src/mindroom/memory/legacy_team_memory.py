@@ -1,4 +1,4 @@
-"""One-time merge of the team memory copies kept in every member's storage into one store per team."""
+"""One-time merge of the team memory copies kept in every member's storage into team memory."""
 
 # LEGACY_COMPAT: Team memory copied into every member's storage root.
 # Legacy format: each team turn's memories in every member's `agents/<member>/chroma` Mem0 store, one Mem0 extraction
@@ -6,31 +6,25 @@
 #   member's `agents/<member>/memory_files/team_<sorted members>/MEMORY.md`, each entry under one shared `[id=...]`.
 #   v2026.3.72 started both the copies and the replica key, so every native copy carries the key; only a planted
 #   record lacks one, and it counts as a turn of its own.
-# Last legacy release: v2026.10.711; replacement: unreleased; writes each team scope once, to
-#   `team_memory/<team scope>/`.
-# Handling: before serving, once per storage root, the copies merge into their team's store and leave the members.
-#   File entries union by id; a copy holding anything MindRoom did not write stays where it was. Mem0 copies merge
-#   from the stores the runtime opens, those of configured shared agents on Mem0, since no copy elsewhere was read,
-#   and a team's copies of either kind merge only from its members, the only ones each member read.
-#   Each member's extraction of a turn shares the turn's replica key, so a turn keeps the extraction with the most
-#   distinct facts, the first member's by name among equals; an edit or delete through another member had rewritten
-#   or removed the turn in the other copies. Records move with their ids, embeddings, and metadata, so nothing is
-#   embedded or extracted again. A member store holding links or special files, or that Chroma cannot read, and a
-#   team whose store rejects a record as invalid stay as they are, with a warning starting with "Left", and no later
-#   start merges them, so none undoes an edit made since; any other write failure stops the start before a Mem0 copy
-#   goes. Every step is idempotent, so a start interrupted anywhere finishes on the next; a receipt stops later starts
-#   from opening every store, and waits while Chroma cannot be installed or no config loaded.
+# Last legacy release: v2026.10.711; replacement: unreleased; writes each team scope once, below `team_memory/`: every
+#   team's Mem0 records in one store, each team's file entries in its own directory.
+# Handling: before serving, once per storage root, each member's copies merge into team memory and leave the member:
+#   file entries by id, Mem0 copies as one extraction per turn, moved with their ids and embeddings. A copy the
+#   merge cannot safely read, or whose embedding size nothing trusted vouches for, stays, with a warning starting with
+#   "Left"; a start interrupted anywhere finishes on the next. docs/dev/2026-10-29-team-memory-store.md records each
+#   rule's reason.
 # Coverage: tests/test_legacy_team_memory.py.
 
 from __future__ import annotations
 
+import asyncio
 import os
 import stat
 from contextlib import suppress
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from itertools import batched
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 from mindroom.background_tasks import run_blocking_until_complete
 from mindroom.config.resolution import memory_backend
@@ -42,9 +36,15 @@ from mindroom.tool_system.dependencies import ensure_optional_deps, optional_dep
 from mindroom.tool_system.worker_routing import agent_state_root_path
 
 from ._file_backend import write_scope_markdown_file
-from ._policy import TEAM_SCOPE_PREFIX, team_scope
+from ._policy import TEAM_SCOPE_PREFIX, team_memory_root, team_scope
 from ._shared import FILE_MEMORY_ENTRY_PATTERN, FILE_MEMORY_ENTRYPOINT, FILE_MEMORY_ENTRYPOINT_HEADER
-from .config import MEM0_COLLECTION_PREFIX, mem0_chroma_path
+from .config import (
+    MEM0_COLLECTION_PREFIX,
+    create_memory_instance,
+    mem0_chroma_path,
+    mem0_collection_name,
+    mem0_store_exists,
+)
 
 if TYPE_CHECKING:
     from mindroom.config.main import Config
@@ -61,19 +61,44 @@ _MAX_COPY_BYTES = 64 << 20
 async def migrate_team_memory(runtime_paths: RuntimePaths, config: Config | None) -> None:
     """Finish the one-time merge before any reply reads or writes team memory.
 
-    ``config`` names the agents whose Mem0 stores hold copies anyone read; without one, the Mem0 copies wait for a
-    start that loads one.
+    ``config`` names the agents whose Mem0 stores hold copies anyone read and the embedder that wrote them; without
+    one, the Mem0 copies wait for a start that loads one.
     """
-    await run_blocking_until_complete(_migrate, runtime_paths, config)
-
-
-def _migrate(runtime_paths: RuntimePaths, config: Config | None) -> None:
-    receipt = tracking_dir(runtime_paths) / _RECEIPT
-    if receipt.exists():
+    if not await run_blocking_until_complete(_merge_file_copies_unless_done, runtime_paths) or config is None:
         return
+    if (copies := await run_blocking_until_complete(_read_mem0_copies, runtime_paths, config)) is None:
+        return
+    size = await _trusted_embedding_size(runtime_paths, config) if copies else 0
+    if size is not None:
+        await run_blocking_until_complete(_merge_mem0_copies, runtime_paths, config, copies, size)
+
+
+def _merge_file_copies_unless_done(runtime_paths: RuntimePaths) -> bool:
+    """Merge the file copies unless the receipt says the whole merge is done; return whether the Mem0 part remains."""
+    if (tracking_dir(runtime_paths) / _RECEIPT).exists():
+        return False
     _merge_file_copies(runtime_paths, _subdirectories(runtime_paths.storage_root, Path("agents")))
-    if config is not None and _merge_mem0_copies(runtime_paths, _mem0_member_stores(config, runtime_paths)):
-        write_json_file_durable(receipt, {"version": 1}, strict_atomic_replace=True)
+    return True
+
+
+def _read_mem0_copies(runtime_paths: RuntimePaths, config: Config) -> list[_MemberCopy] | None:
+    """Return the Mem0 copies to merge; None while Chroma cannot be installed."""
+    storage_root = runtime_paths.storage_root
+    stores = [
+        storage_root / store
+        for store in _mem0_member_stores(config, runtime_paths)
+        if _holds_only_plain_files(storage_root, store)
+    ]
+    if not stores:
+        return []
+    try:
+        # Mem0's first use would install it too; installing now keeps old team memories visible from the first reply.
+        ensure_optional_deps(["chromadb"], "chromadb", runtime_paths)
+    except ImportError as error:
+        logger.warning("Left Mem0 team memory in member stores until Chroma is installed", error=str(error))
+        return None
+    collection_name = mem0_collection_name(config)
+    return [copy for store in stores if (copy := _member_copy(storage_root, store, collection_name)) is not None]
 
 
 def _subdirectories(storage_root: Path, relative: Path) -> list[str]:
@@ -242,41 +267,64 @@ def _names_member(storage_root: Path, scope_user_id: object, agent_dir: str) -> 
     return agent_dir in {agent_state_root_path(storage_root, member).name for member in members}
 
 
-def _merge_mem0_copies(runtime_paths: RuntimePaths, member_stores: list[Path]) -> bool:
-    """Merge the member stores' Mem0 team records into their teams' stores; False while Chroma cannot be installed."""
-    storage_root = runtime_paths.storage_root
-    stores = [storage_root / store for store in member_stores if _holds_only_plain_files(storage_root, store)]
-    if not stores:
-        return True
+async def _trusted_embedding_size(runtime_paths: RuntimePaths, config: Config) -> int | None:
+    """Return the size the configured embedder gives its embeddings; None, with a warning, while it cannot answer.
+
+    Every team's records share the one team store, so a record of another size would make it refuse the rest. Member
+    stores are worker-writable, so the size comes from records the team store already holds, else from the embedder.
+    """
+    team_root = team_memory_root(runtime_paths)
+    if (held := await asyncio.to_thread(_held_embedding_size, team_root, mem0_collection_name(config))) is not None:
+        return held
     try:
-        # Mem0's first use would install it too; installing now keeps old team memories visible from the first reply.
-        ensure_optional_deps(["chromadb"], "chromadb", runtime_paths)
-    except ImportError as error:
-        logger.warning("Left Mem0 team memory in member stores until Chroma is installed", error=str(error))
-        return False
-    copies = [copy for store in stores for copy in _member_copies(storage_root, store)]
+        memory = await create_memory_instance(team_root, config, runtime_paths)
+        embedding = await asyncio.to_thread(cast("Any", memory).embedding_model.embed, "team memory", "search")
+    except Exception as error:
+        logger.warning(
+            "Left Mem0 team memory in member stores until the configured embedder answers",
+            error_type=type(error).__name__,
+            error=str(error),
+        )
+        return None
+    return len(embedding)
+
+
+def _held_embedding_size(team_root: Path, collection_name: str) -> int | None:
+    """Return the size of the embeddings the team store holds for the configured embedder, if it holds any."""
+    if not mem0_store_exists(team_root):
+        return None
+    client = _chroma_client(mem0_chroma_path(team_root))
+    if collection_name not in {collection.name for collection in client.list_collections()}:
+        return None
+    payload = client.get_collection(collection_name, embedding_function=None).get(limit=1, include=["embeddings"])
+    return len(payload["embeddings"][0]) if payload["ids"] else None
+
+
+def _merge_mem0_copies(runtime_paths: RuntimePaths, config: Config, copies: list[_MemberCopy], size: int) -> None:
+    """Merge the member stores' Mem0 team records of the trusted size into the team store, then write the receipt."""
+    copies = [_sized(copy, size) for copy in copies]
     kept = _kept_records(copies)
-    rejected: set[tuple[str, str]] = set()
-    for (scope, collection_name), records in sorted(kept.items()):
+    target = mem0_chroma_path(team_memory_root(runtime_paths))
+    collection_name = mem0_collection_name(config)
+    rejected: set[str] = set()
+    for scope, records in sorted(kept.items()):
         try:
-            _write_team_records(mem0_chroma_path(team_scope(scope, runtime_paths).root), collection_name, records)
+            _write_team_records(target, collection_name, records)
         except _rejected_record_errors() as error:
-            # A planted record can make the team's store reject a batch, such as one of another dimension. The copies
+            # A planted record can make the team store reject a batch, such as one with malformed metadata. The copies
             # stay, and no later start writes them again, so none undoes an edit made since. Any other failure, such as
             # a storage error, stops the start before a Mem0 copy goes, and the next start merges again.
             logger.warning("Left a team's Mem0 copies its store rejected", team=scope, error=str(error))
-            rejected.add((scope, collection_name))
-    # Only after every team's store holds its records do the member copies go, the dropped extractions first, and the
+            rejected.add(scope)
+    # Only after the team store holds every team's records do the member copies go, the dropped extractions first, and the
     # kept ones only once every dropped one went: a start interrupted meanwhile still finds each kept extraction beside
     # any dropped one, so it keeps the same one.
-    kept_ids = {record.id for key, records in kept.items() if key not in rejected for record in records}
+    kept_ids = {record.id for scope, records in kept.items() if scope not in rejected for record in records}
     for keep in (False, True):
         all_removed = True
         for copy in copies:
             removed = [
-                record.id
-                for record in copy.records
-                if (record.id in kept_ids) is keep and (record.team, copy.collection.name) not in rejected
+                record.id for record in copy.records if (record.id in kept_ids) is keep and record.team not in rejected
             ]
             try:
                 for batch in batched(removed, copy.client.get_max_batch_size()):
@@ -291,7 +339,19 @@ def _merge_mem0_copies(runtime_paths: RuntimePaths, member_stores: list[Path]) -
                 all_removed = False
         if not all_removed:
             break
-    return True
+    write_json_file_durable(tracking_dir(runtime_paths) / _RECEIPT, {"version": 1}, strict_atomic_replace=True)
+
+
+def _sized(copy: _MemberCopy, size: int) -> _MemberCopy:
+    """Return a copy without its records of another embedding size, which stay where they are."""
+    sized = [record for record in copy.records if len(record.embedding) == size]
+    if len(sized) < len(copy.records):
+        logger.warning(
+            "Left Mem0 team copies of another embedding size",
+            path=str(copy.store),
+            count=len(copy.records) - len(sized),
+        )
+    return replace(copy, records=sized)
 
 
 def _rejected_record_errors() -> tuple[type[Exception], ...]:
@@ -303,10 +363,10 @@ def _rejected_record_errors() -> tuple[type[Exception], ...]:
 
 
 def _write_team_records(chroma_path: Path, collection_name: str, records: list[_Record]) -> None:
-    """Write the records whose ID and fact the team's store does not hold yet.
+    """Write the records whose ID and fact the team store does not hold yet.
 
     Mem0 keeps one record per fact in a scope, so a fact two turns' kept extractions share, or one an interrupted
-    earlier start already wrote, is written once per scope; two scopes sharing a directory keep their own. Only planted
+    earlier start already wrote, is written once per scope; every scope in the team store keeps its own. Only planted
     records share an ID, which Chroma refuses within one write, so the first of them is kept.
     """
     target = _chroma_client(chroma_path)
@@ -366,58 +426,57 @@ def _plain_tree(directory: int) -> bool:
     return True
 
 
-def _member_copies(storage_root: Path, store: Path) -> list[_MemberCopy]:
-    """Return each Mem0 fact collection of an agent's store with its teams' records; none when Chroma cannot read it.
+def _member_copy(storage_root: Path, store: Path, collection_name: str) -> _MemberCopy | None:
+    """Return an agent store's records of its teams written by the configured embedder; none when Chroma cannot read it.
 
     The store is worker-writable in some deployments, so one Chroma cannot open leaves its copies where they are
-    instead of stopping startup.
+    instead of stopping startup. Copies of another embedder stay too: nothing read them, and nothing vouches for their
+    size.
     """
     try:
         client = _chroma_client(store)
-        copies = []
+        copy = None
         for collection in client.list_collections():
             if not collection.name.startswith(f"{MEM0_COLLECTION_PREFIX}_") or collection.name.endswith(
                 _MEM0_ENTITY_SUFFIX,
             ):
                 continue
-            payload = collection.get(include=["embeddings", "metadatas"])
+            current = collection.name == collection_name
+            payload = collection.get(include=["embeddings", "metadatas"] if current else ["metadatas"])
             records = [
-                _Record(record_id, metadata or {}, embedding)
-                for record_id, metadata, embedding in zip(
-                    payload["ids"],
-                    payload["metadatas"],
-                    payload["embeddings"],
-                    strict=True,
-                )
+                _Record(record_id, metadata or {}, payload["embeddings"][index] if current else None)
+                for index, (record_id, metadata) in enumerate(zip(payload["ids"], payload["metadatas"], strict=True))
                 if _names_member(storage_root, (metadata or {}).get("user_id"), store.parent.name)
             ]
-            if records:
-                copies.append(_MemberCopy(store, client, collection, records))
+            if current and records:
+                copy = _MemberCopy(store, client, collection, records)
+            elif records:
+                logger.warning("Left Mem0 team copies of another embedder", path=str(store), count=len(records))
     except Exception as error:
         logger.warning("Left a Mem0 store Chroma cannot read", path=str(store), error=str(error))
-        return []
-    return copies
+        return None
+    return copy
 
 
-def _kept_records(copies: list[_MemberCopy]) -> dict[tuple[str, str], list[_Record]]:
-    """Return the records each team keeps, by team scope and collection.
+def _kept_records(copies: list[_MemberCopy]) -> dict[str, list[_Record]]:
+    """Return the records each team keeps, by team scope.
 
     Each member extracted a team turn on its own, so a turn several members hold keeps one extraction, as if the team
     had extracted it once, as it now does: the one holding the most distinct facts, the first member's by name among
     equals. An edit or delete through another member rewrote or removed every fact of that turn in the other copies,
     so a copy it damaged holds fewer.
     """
-    extractions: dict[tuple[str, str, str], list[list[_Record]]] = {}
+    extractions: dict[tuple[str, str], list[list[_Record]]] = {}
     for copy in copies:
-        by_turn: dict[tuple[str, str, str], list[_Record]] = {}
+        by_turn: dict[tuple[str, str], list[_Record]] = {}
         for record in copy.records:
-            by_turn.setdefault((record.team, copy.collection.name, record.turn), []).append(record)
+            by_turn.setdefault((record.team, record.turn), []).append(record)
         for key, records in by_turn.items():
             extractions.setdefault(key, []).append(records)
-    kept: dict[tuple[str, str], list[_Record]] = {}
-    for (scope, collection_name, _turn), candidates in extractions.items():
+    kept: dict[str, list[_Record]] = {}
+    for (scope, _turn), candidates in extractions.items():
         best = max(candidates, key=lambda records: len({record.fact for record in records}))
-        kept.setdefault((scope, collection_name), []).extend(best)
+        kept.setdefault(scope, []).extend(best)
     return kept
 
 

@@ -41,6 +41,7 @@ def _contract_config(tmp_path: Path, memory_backend: str) -> Config:
             agents={
                 "alpha": AgentConfig(display_name="Alpha", role="First assistant"),
                 "beta": AgentConfig(display_name="Beta", role="Second assistant"),
+                "gamma": AgentConfig(display_name="Gamma", role="Third assistant"),
             },
         ),
         runtime_paths,
@@ -150,11 +151,37 @@ async def test_a_team_turn_writes_once_to_the_one_store_every_member_reads_and_e
         ]
         assert {result["user_id"] for result in results} == {"team_alpha+beta"}
         assert await backend.list_all(member, config, limit=10) == []
-    team_root = storage_path / "team_memory" / "team_alpha+beta"
-    assert team_root.is_dir()
+    # Mem0 keeps every team's scope in one store; file memory gives each team its own directory.
+    is_mem0 = isinstance(backend, Mem0MemoryBackend)
+    team_store = storage_path / "team_memory" if is_mem0 else storage_path / "team_memory" / "team_alpha+beta"
+    assert team_store.is_dir()
     assert not any((storage_path / "agents").glob("*/memory_files"))
     holding = {root for root, store in backend_env.stores.items() if (await store.get_all())["results"]}
-    assert holding == ({team_root} if isinstance(backend, Mem0MemoryBackend) else set())
+    assert holding == ({team_store} if is_mem0 else set())
+
+
+@pytest.mark.asyncio
+async def test_a_member_never_sees_edits_or_deletes_another_teams_memories(backend_env: BackendEnv) -> None:
+    """Each member reaches only its own teams' scopes, though Mem0 keeps every team's scope in one store."""
+    backend, config = backend_env.backend, backend_env.config
+    config.teams["other"] = MockTeamConfig(agents=["beta", "gamma"])
+    await backend.store_conversation("Pair roadmap drafted", ["alpha", "beta"], "session-pair", config)
+    await backend.store_conversation("Other roadmap drafted", ["beta", "gamma"], "session-other", config)
+    (other,) = (await backend.search("roadmap", "gamma", config, limit=5)).results
+
+    alpha_results = (await backend.search("roadmap", "alpha", config, limit=5)).results
+    assert [result["memory"] for result in alpha_results] == ["Pair roadmap drafted"]
+    assert await backend.get(other["id"], "alpha", config) is None
+    with pytest.raises(MemoryNotFoundError):
+        await backend.update(other["id"], "Other roadmap rewritten", "alpha", config)
+    with pytest.raises(MemoryNotFoundError):
+        await backend.delete(other["id"], "alpha", config)
+
+    beta_results = (await backend.search("roadmap", "beta", config, limit=5)).results
+    assert sorted(result["memory"] for result in beta_results) == ["Other roadmap drafted", "Pair roadmap drafted"]
+    assert [result["memory"] for result in (await backend.search("roadmap", "gamma", config, limit=5)).results] == [
+        "Other roadmap drafted",
+    ]
 
 
 @pytest.mark.asyncio

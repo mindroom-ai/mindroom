@@ -1,4 +1,4 @@
-"""Memory scopes: which scopes an agent reads and a turn writes, and the one store root of each team scope."""
+"""Memory scopes: which scopes an agent reads and a turn writes, and where team scopes are stored."""
 
 from __future__ import annotations
 
@@ -25,7 +25,7 @@ _MAX_SCOPE_DIR_NAME = 255
 
 @dataclass(frozen=True)
 class MemoryScope:
-    """One memory scope: its scoped user ID and the root of the one store that holds it."""
+    """One memory scope: its scoped user ID and the root of the store that holds it."""
 
     user_id: str
     root: Path
@@ -49,7 +49,7 @@ def _scope_dir_name(scope_user_id: str) -> str:
     #   that name.
     # Handling: team directories keep the copies' name, shortened with a hash only past 255 bytes, so the startup merge
     #   moves each copy to the directory its team reads; scopes differing only in a trailing underscore share one
-    #   directory, as their copies did, and Mem0 keeps their records apart by scope ID.
+    #   directory, as their copies did.
     # Coverage:
     #   tests/test_legacy_team_memory.py::test_file_copies_of_members_with_edge_underscores_merge_where_the_team_reads,
     #   tests/test_legacy_team_memory.py::test_two_scopes_sharing_a_directory_each_keep_a_fact_they_share,
@@ -61,12 +61,14 @@ def _scope_dir_name(scope_user_id: str) -> str:
     return f"{name[: _MAX_SCOPE_DIR_NAME - len(digest) - 1]}-{digest}"
 
 
+def team_memory_root(runtime_paths: RuntimePaths) -> Path:
+    """Return the team memory root: the one Mem0 store every team scope shares, beside each team's file directory."""
+    return runtime_paths.storage_root / _TEAM_MEMORY_DIRNAME
+
+
 def team_scope(scope_user_id: str, runtime_paths: RuntimePaths) -> MemoryScope:
-    """Return one team scope with its own store root, which no requester or member partitions."""
-    return MemoryScope(
-        scope_user_id,
-        runtime_paths.storage_root / _TEAM_MEMORY_DIRNAME / _scope_dir_name(scope_user_id),
-    )
+    """Return one team scope with its own file-memory directory, which no requester or member partitions."""
+    return MemoryScope(scope_user_id, team_memory_root(runtime_paths) / _scope_dir_name(scope_user_id))
 
 
 def caller_memory_backend(config: Config, caller: str | Sequence[str]) -> MemoryBackend:
@@ -78,10 +80,10 @@ def caller_memory_backend(config: Config, caller: str | Sequence[str]) -> Memory
     return backends.pop() if len(backends) == 1 else "mem0"
 
 
-def team_scopes(agent_name: str, config: Config, runtime_paths: RuntimePaths) -> list[MemoryScope]:
-    """Return the scopes of the configured teams an agent belongs to, one per member set, which it reads too.
+def team_user_ids(agent_name: str, config: Config) -> list[str]:
+    """Return the scope IDs of the configured teams an agent belongs to, one per member set, which it reads too.
 
-    A member reads every team's store through its own backend, so a team's older store stays readable after a
+    A member reads every team's memory through its own backend, so a team's older memories stay readable after a
     teammate's backend change sends the team's new memories to another backend.
     """
     scope_user_ids: dict[str, None] = {}
@@ -89,4 +91,9 @@ def team_scopes(agent_name: str, config: Config, runtime_paths: RuntimePaths) ->
         if agent_name in team_config.agents:
             config.assert_team_agents_supported(team_config.agents, team_name=team_name)
             scope_user_ids[team_user_id(team_config.agents)] = None
-    return [team_scope(scope_user_id, runtime_paths) for scope_user_id in scope_user_ids]
+    return list(scope_user_ids)
+
+
+def team_scopes(agent_name: str, config: Config, runtime_paths: RuntimePaths) -> list[MemoryScope]:
+    """Return the team scopes an agent reads, each with its file-memory directory."""
+    return [team_scope(scope_user_id, runtime_paths) for scope_user_id in team_user_ids(agent_name, config)]

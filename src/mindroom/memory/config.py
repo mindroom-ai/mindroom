@@ -158,7 +158,7 @@ def _hold_store_lock(vector_store: Any, lock: threading.Lock) -> None:  # noqa: 
     vector_store.list = locked(vector_store.list)
 
 
-def _memory_collection_name(config: Config) -> str:
+def mem0_collection_name(config: Config) -> str:
     """Return a stable Chroma collection name for the active embedder settings."""
     embedder = config.memory.embedder
     embedder_config = embedder.config
@@ -247,7 +247,7 @@ def _get_memory_config(store_root: Path, config: Config, runtime_paths: RuntimeP
     """Get Mem0 configuration with a ChromaDB backend and history database under ``store_root``.
 
     Args:
-        store_root: The root of one memory scope's store: an agent's state root or a team's memory root
+        store_root: The root of one Mem0 store: an agent's state root or the team memory root
         config: Application configuration
         runtime_paths: Explicit runtime context for credential-backed provider settings.
 
@@ -294,7 +294,7 @@ def _get_memory_config(store_root: Path, config: Config, runtime_paths: RuntimeP
         "vector_store": {
             "provider": "chroma",
             "config": {
-                "collection_name": _memory_collection_name(config),
+                "collection_name": mem0_collection_name(config),
                 "path": str(chroma_path),
             },
         },
@@ -311,7 +311,7 @@ async def create_memory_instance(
     """Create a Mem0 memory instance with ChromaDB backend.
 
     Args:
-        store_root: The root of one memory scope's store: an agent's state root or a team's memory root
+        store_root: The root of one Mem0 store: an agent's state root or the team memory root
         config: Application configuration
         runtime_paths: Explicit runtime context for credential-backed provider settings.
 
