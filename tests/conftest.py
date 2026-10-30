@@ -1605,19 +1605,12 @@ def serve_conversation_reader(
                 room_id=room_id,
                 thread_id=thread_id,
                 sender=message.sender,
-                # `or ordinal` would rewrite a real timestamp of 0.
-                created_ts=ordinal if message.timestamp is None else message.timestamp,
+                created_ts=message.timestamp,
                 revision_event_id=message.latest_event_id,
-                revision_ts=(
-                    message.edited_timestamp
-                    if message.edited_timestamp is not None
-                    else ordinal
-                    if message.timestamp is None
-                    else message.timestamp
-                ),
+                revision_ts=message.edited_timestamp if message.edited_timestamp is not None else message.timestamp,
                 content=dict(message.content),
             )
-            for ordinal, message in enumerate(messages, start=1)
+            for message in messages
         ),
         refresh_pending=(),
         next_cursor=None,
@@ -1654,7 +1647,6 @@ class FakeOutbox:
     def __init__(self) -> None:
         self.rows: dict[tuple[str, str], MatrixDelivery] = {}
         self.acknowledged_projections: list[tuple[ProjectedEvent, ...]] = []
-        self.attempted: set[tuple[str, str]] = set()
         # Turns whose membership has ended, as the journal would report it.
         self.ended_membership_turn_ids: set[str] = set()
         # The journal sources each FINAL enqueue handed over, in order.
@@ -1725,7 +1717,7 @@ class FakeOutbox:
         key = (delivery_id, stage.value)
         existing = self.rows.get(key)
         if existing is not None:
-            if key in self.attempted or existing.permanently_failed:
+            if existing.attempted or existing.permanently_failed:
                 return existing.transaction_id
             self.rows[key] = replace(
                 existing,
@@ -1789,7 +1781,6 @@ class FakeOutbox:
             and initial.acknowledged_event_id is None
         ):
             return None
-        self.attempted.add(key)
         claimed = replace(
             row,
             attempted=True,
