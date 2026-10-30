@@ -203,7 +203,6 @@ Not captured:
 
 Agno behavior the golden pins as it is:
 
-- `gemini`'s `generate_image` has no description and exposes only `mindroom_output_path`, because Agno cannot resolve its `Agent` annotation and falls back to an empty schema.
 - `openclaw_compat` builds a toolkit without functions.
 
 ### `tools/schemas_all_enabled.json`
