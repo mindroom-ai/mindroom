@@ -378,7 +378,7 @@ def agent_run_metadata_content(
     )
 
 
-def _attempt_run_metadata(
+def _attempt_run_metadata_builder(
     run_context: _AgentRunContext,
     record: AnyRunRecord | None,
     status: RunStatus,
@@ -1314,7 +1314,7 @@ async def stream_agent_response(  # noqa: C901, PLR0915
                 yield AttemptResolved(
                     HandledAttempt(
                         append_stream_text(shown, error_text, separate=True)[len(shown) :],
-                        build_run_metadata=_attempt_run_metadata(
+                        build_run_metadata=_attempt_run_metadata_builder(
                             run_context,
                             record,
                             RunStatus.error,
@@ -1376,7 +1376,7 @@ async def stream_agent_response(  # noqa: C901, PLR0915
                 tool_executions=tuple(record.tools or ()),
                 control_calls=cli_control_calls(attempt.run_id),
                 completed_tools=tuple(state.completed_tools),
-                build_run_metadata=_attempt_run_metadata(
+                build_run_metadata=_attempt_run_metadata_builder(
                     run_context,
                     record,
                     final_status,
