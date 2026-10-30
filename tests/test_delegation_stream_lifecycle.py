@@ -62,9 +62,10 @@ class _UnusedContinuation:
         return _paused_run()
 
 
-def _stream(**options: object) -> AsyncIterator[RunEvent]:
+def _stream(events: AsyncIterator[RunEvent] | None = None, **options: object) -> AsyncIterator[RunEvent]:
+    """Drive ``events``, by default a run paused on delegations, under a continuation that never resumes it."""
     return execution.drive_delegation_stream(
-        _paused_run(),
+        _paused_run() if events is None else events,
         record_type=RunRecord,
         continue_parent=_UnusedContinuation(
             RunStorage(
@@ -118,22 +119,7 @@ async def test_the_driver_passes_a_failed_runs_record_on_before_its_failure() ->
         message = "provider down"
         raise RuntimeError(message)
 
-    stream = execution.drive_delegation_stream(
-        failing_run(),
-        record_type=RunRecord,
-        continue_parent=_UnusedContinuation(
-            RunStorage(
-                None,
-                new_scope_session(session_id="session-1", scope=HistoryScope(kind="agent", scope_id="leader")),
-                None,
-            ),
-        ),
-        agent_name="leader",
-        run_child=cast("Callable", None),
-        config=cast("Callable", None),  # type: ignore[arg-type]
-        runtime_paths=cast("Callable", None),  # type: ignore[arg-type]
-        execution_identity=None,
-    )
+    stream = _stream(failing_run())
     seen: list[RunEvent] = []
 
     async def consume() -> None:
