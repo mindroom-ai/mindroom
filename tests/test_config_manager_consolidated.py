@@ -2179,6 +2179,11 @@ class TestConsolidatedConfigManager:
         result = cm.get_info(info_type="agent_template", name="researcher")
         assert "Template for 'researcher' agent" in result
         assert "Research specialist" in result
+        assert "**Available tools in research category:**" in result
+
+        result = cm.get_info(info_type="tool_details", name="calculator")
+        assert result.startswith("## Tool: calculator\n")
+        assert "**Category**: development" in result
 
         # Test invalid template type
         result = cm.get_info(info_type="agent_template", name="invalid_type")

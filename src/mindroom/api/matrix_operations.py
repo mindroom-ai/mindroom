@@ -13,14 +13,11 @@ from pydantic import BaseModel, Field
 from mindroom.api.config_lifecycle import app_state, read_committed_runtime_config
 from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.entity_rooms import get_rooms_for_entity
-from mindroom.logging_config import get_logger
 from mindroom.matrix.client_room_admin import get_joined_rooms, get_room_name
 from mindroom.matrix.media import MatrixMediaUpstreamError, fetch_matrix_thumbnail, matrix_profile_avatar_uri
 from mindroom.matrix.rooms import filter_non_dm_rooms
 from mindroom.matrix.state import resolve_room_aliases
 from mindroom.matrix.users import create_agent_http_client
-
-logger = get_logger(__name__)
 
 router = APIRouter(prefix="/api/matrix", tags=["matrix"])
 _AVATAR_HEADERS = {"Cache-Control": "private, no-store", "X-Content-Type-Options": "nosniff"}

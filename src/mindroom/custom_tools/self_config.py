@@ -17,13 +17,11 @@ from mindroom.custom_tools.config_manager import (
     redaction_marker_error,
     validate_knowledge_bases,
 )
-from mindroom.logging_config import get_logger
 from mindroom.tool_system.catalog import resolved_tool_metadata_for_runtime
 
 if TYPE_CHECKING:
     from mindroom.constants import RuntimePaths
 
-logger = get_logger(__name__)
 
 _SELF_CONFIG_BLOCKED_TOOLS = {"config_manager"}
 _CONFIG_CHANGE_REJECTED_MESSAGE = "Changes were NOT applied."
@@ -200,9 +198,7 @@ class SelfConfigTools(Toolkit):
         current_values = agent.model_dump()
         validated_values = validated_agent.model_dump()
         updates: dict[str, str] = {}
-        for field_name, new_value in requested_updates:
-            if new_value is None:
-                continue
+        for field_name in non_null_updates:
             current_value = current_values[field_name]
             validated_value = validated_values[field_name]
             if validated_value == current_value:

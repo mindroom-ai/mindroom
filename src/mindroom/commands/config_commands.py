@@ -58,7 +58,7 @@ def _parse_config_args(args_text: str) -> tuple[str, list[str]]:
         return "show", []
 
     operation = parts[0].lower()
-    args = parts[1:] if len(parts) > 1 else []
+    args = parts[1:]
     return operation, args
 
 
@@ -261,22 +261,19 @@ async def handle_config_command(  # noqa: C901, PLR0911, PLR0912
         except (KeyError, IndexError, TypeError):
             old_value = None  # Path doesn't exist yet
 
-        # Create a copy to test the change
-        test_config_dict = config_dict.copy()
-
         try:
             # Verify the path exists or can be created
-            _set_nested_value(test_config_dict, config_path_str, value)
+            _set_nested_value(config_dict, config_path_str, value)
         except (KeyError, IndexError, TypeError) as e:
             return f"❌ Configuration path error: `{config_path_str}`\nError: {e}", None
 
         try:
-            await asyncio.to_thread(Config.validate_with_runtime, test_config_dict, runtime_paths)
+            await asyncio.to_thread(Config.validate_with_runtime, config_dict, runtime_paths)
         except (ValidationError, ConfigRuntimeValidationError) as e:
             return format_invalid_config_message(e, footer=_CONFIG_CHANGE_REJECTED_MESSAGE), None
         else:
             # Redact the exact payload that confirmation applies, not a normalized model of it.
-            redacted_value = _get_nested_value(redact_authored_config(test_config_dict), config_path_str)
+            redacted_value = _get_nested_value(redact_authored_config(config_dict), config_path_str)
             formatted_old = "Not set" if old_value is None else _format_value(old_value)
             formatted_new = _format_value(redacted_value)
 

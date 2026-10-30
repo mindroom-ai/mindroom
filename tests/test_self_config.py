@@ -707,6 +707,7 @@ class TestUpdateOwnConfig:
                     markdown=False,
                 )
             assert "Successfully" in result
+            assert all(field in result for field in ("Display Name", "Role", "Markdown"))
 
             reloaded = load_config_yaml(config_path)
             assert reloaded.agents["coder"].display_name == "Super Coder"

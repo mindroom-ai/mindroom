@@ -1971,7 +1971,6 @@ path = "mindroom.api.matrix_operations"
 depends_on = [
     "mindroom.api.config_lifecycle",
     "mindroom.constants",
-    "mindroom.logging_config",
     "mindroom.matrix.client_room_admin",
     "mindroom.matrix.media",
     "mindroom.matrix.rooms",

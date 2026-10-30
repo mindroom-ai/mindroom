@@ -316,11 +316,6 @@ def _apply_config_patch(
     return candidate, [change.path for change in changes]
 
 
-def _is_known_tool_entry(tool_name: str, tool_metadata: dict[str, ToolMetadata]) -> bool:
-    """Return whether a tool entry is a known registered tool."""
-    return tool_name in tool_metadata
-
-
 def preserve_tool_overrides(
     existing_entries: list[ToolConfigEntry],
     updated_tool_names: list[str],
@@ -499,6 +494,17 @@ class _InfoType(str, Enum):
     TOOL_DETAILS = "tool_details"
     AGENT_CONFIG = "agent_config"
     AGENT_TEMPLATE = "agent_template"
+
+
+# Each agent template's tool category and role.
+_AGENT_TEMPLATES: dict[str, tuple[ToolCategory, str]] = {
+    "researcher": (ToolCategory.RESEARCH, "Research specialist focused on finding and analyzing information"),
+    "developer": (ToolCategory.DEVELOPMENT, "Software development expert for coding and technical tasks"),
+    "social": (ToolCategory.SOCIAL, "Social interaction specialist for community engagement"),
+    "communicator": (ToolCategory.COMMUNICATION, "Communication expert for messaging and collaboration"),
+    "analyst": (ToolCategory.INFORMATION, "Information analyst for data processing and insights"),
+    "productivity": (ToolCategory.PRODUCTIVITY, "Productivity specialist for task and workflow management"),
+}
 
 
 def commit_authored_config(config: Config, runtime_paths: RuntimePaths) -> Config:
@@ -1162,31 +1168,29 @@ class ConfigManagerTools(Toolkit):
             available = ", ".join(sorted(tool_metadata.keys()))
             return f"Unknown tool: {tool_name}\n\nAvailable tools: {available}"
 
-        output = [f"## Tool: {tool_name}\n"]
+        metadata = tool_metadata[tool_name]
+        output = [
+            f"## Tool: {tool_name}\n",
+            f"**Display Name**: {metadata.display_name}",
+            f"**Description**: {metadata.description}",
+            f"**Category**: {metadata.category.value}",
+            f"**Status**: {metadata.status.value}",
+            f"**Setup Type**: {metadata.setup_type.value}",
+        ]
 
-        if tool_name in tool_metadata:
-            metadata = tool_metadata[tool_name]
-            output.append(f"**Display Name**: {metadata.display_name}")
-            output.append(f"**Description**: {metadata.description}")
-            output.append(f"**Category**: {metadata.category.value}")
-            output.append(f"**Status**: {metadata.status.value}")
-            output.append(f"**Setup Type**: {metadata.setup_type.value}")
+        if metadata.config_fields:
+            output.append("\n**Configuration Fields**:")
+            for field in metadata.config_fields:
+                required = "Required" if field.required else "Optional"
+                output.append(f"- **{field.name}** ({field.type}, {required}): {field.description}")
+                if field.default is not None:
+                    output.append(f"  Default: {field.default}")
 
-            if metadata.config_fields:
-                output.append("\n**Configuration Fields**:")
-                for field in metadata.config_fields:
-                    required = "Required" if field.required else "Optional"
-                    output.append(f"- **{field.name}** ({field.type}, {required}): {field.description}")
-                    if field.default is not None:
-                        output.append(f"  Default: {field.default}")
+        if metadata.dependencies:
+            output.append(f"\n**Dependencies**: {', '.join(metadata.dependencies)}")
 
-            if metadata.dependencies:
-                output.append(f"\n**Dependencies**: {', '.join(metadata.dependencies)}")
-
-            if metadata.docs_url:
-                output.append(f"\n**Documentation**: {metadata.docs_url}")
-        else:
-            output.append("No metadata available for this tool.")
+        if metadata.docs_url:
+            output.append(f"\n**Documentation**: {metadata.docs_url}")
 
         return "\n".join(output)
 
@@ -1210,7 +1214,7 @@ class ConfigManagerTools(Toolkit):
         if not re.match(r"^[a-z0-9_]+$", agent_name):
             return "Error: Agent name must be lowercase alphanumeric with underscores only"
 
-        invalid_tools = [t for t in tools if not _is_known_tool_entry(t, tool_metadata)]
+        invalid_tools = [t for t in tools if t not in tool_metadata]
         if invalid_tools:
             return f"Error: Unknown tools: {', '.join(invalid_tools)}\n\nUse get_info with info_type='available_tools' to see valid tools."
 
@@ -1294,7 +1298,7 @@ class ConfigManagerTools(Toolkit):
 
             # Validate tools if provided
             if tools is not None:
-                invalid_tools = [t for t in tools if not _is_known_tool_entry(t, tool_metadata)]
+                invalid_tools = [t for t in tools if t not in tool_metadata]
                 if invalid_tools:
                     return f"Error: Unknown tools: {', '.join(invalid_tools)}"
 
@@ -1446,7 +1450,7 @@ class ConfigManagerTools(Toolkit):
         if not agent.tools:
             warnings.append("No tools configured")
         else:
-            invalid_tools = [t for t in agent.tool_names if not _is_known_tool_entry(t, tool_metadata)]
+            invalid_tools = [t for t in agent.tool_names if t not in tool_metadata]
             if invalid_tools:
                 issues.append(f"Invalid tools: {', '.join(invalid_tools)}")
 
@@ -1502,21 +1506,11 @@ class ConfigManagerTools(Toolkit):
             return load_error
         assert tool_metadata is not None
 
-        # Map agent types to tool categories
-        type_to_category = {
-            "researcher": ToolCategory.RESEARCH,
-            "developer": ToolCategory.DEVELOPMENT,
-            "social": ToolCategory.SOCIAL,
-            "communicator": ToolCategory.COMMUNICATION,
-            "analyst": ToolCategory.INFORMATION,
-            "productivity": ToolCategory.PRODUCTIVITY,
-        }
-
-        if agent_type not in type_to_category:
-            available = ", ".join(type_to_category.keys())
+        if agent_type not in _AGENT_TEMPLATES:
+            available = ", ".join(_AGENT_TEMPLATES)
             return f"Unknown template type: {agent_type}\n\nAvailable templates: {available}"
 
-        category = type_to_category[agent_type]
+        category, role = _AGENT_TEMPLATES[agent_type]
 
         # Get tools from this category that are available
         tools = [
@@ -1524,18 +1518,6 @@ class ConfigManagerTools(Toolkit):
             for name, metadata in tool_metadata.items()
             if metadata.category == category and metadata.status == ToolStatus.AVAILABLE
         ][:5]  # Limit to 5 tools
-
-        # Generate role based on category
-        role_descriptions = {
-            ToolCategory.RESEARCH: "Research specialist focused on finding and analyzing information",
-            ToolCategory.DEVELOPMENT: "Software development expert for coding and technical tasks",
-            ToolCategory.SOCIAL: "Social interaction specialist for community engagement",
-            ToolCategory.COMMUNICATION: "Communication expert for messaging and collaboration",
-            ToolCategory.INFORMATION: "Information analyst for data processing and insights",
-            ToolCategory.PRODUCTIVITY: "Productivity specialist for task and workflow management",
-        }
-
-        role = role_descriptions.get(category, f"Specialist in {category.value} tasks")
 
         # Generic instructions
         instructions = [
