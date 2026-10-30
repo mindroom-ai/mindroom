@@ -14,7 +14,7 @@ from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig, RouterConfig
 from mindroom.constants import STREAM_STATUS_ERROR, STREAM_STATUS_KEY
 from mindroom.dispatch_source import MESSAGE_SOURCE_KIND
-from mindroom.final_delivery import StreamTransportOutcome
+from mindroom.final_delivery import FinalDeliveryOutcome, StreamTransportOutcome
 from mindroom.hooks import MessageEnvelope
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.message_target import MessageTarget
@@ -122,9 +122,9 @@ async def test_team_non_streaming_has_scheduler_context(tmp_path: Path) -> None:
     """Team non-streaming flow should expose scheduler context to tool calls."""
     bot = _make_bot(tmp_path)
 
-    async def fake_run_cancellable_response(**kwargs: object) -> None:
+    async def fake_run_cancellable_response(**kwargs: object) -> FinalDeliveryOutcome:
         response_function = kwargs["response_function"]
-        await response_function(None)
+        return await response_function(None)
 
     turns: list[tuple[bool, ResponseTurnContext]] = []
 
@@ -253,9 +253,9 @@ async def test_team_streaming_has_scheduler_context(tmp_path: Path) -> None:
     """Team streaming flow should expose scheduler context to tool calls."""
     bot = _make_bot(tmp_path)
 
-    async def fake_run_cancellable_response(**kwargs: object) -> None:
+    async def fake_run_cancellable_response(**kwargs: object) -> FinalDeliveryOutcome:
         response_function = kwargs["response_function"]
-        await response_function(None)
+        return await response_function(None)
 
     async def fake_send_streaming_response(*args: object, **_kwargs: object) -> StreamTransportOutcome:
         response_stream = args[4]
@@ -320,10 +320,9 @@ async def test_team_late_cancellation_after_its_answer_is_visible_lets_post_effe
     started = asyncio.Event()
     release = asyncio.Event()
 
-    async def fake_run_cancellable_response(**kwargs: object) -> str:
+    async def fake_run_cancellable_response(**kwargs: object) -> FinalDeliveryOutcome:
         response_function = kwargs["response_function"]
-        await response_function(None)
-        return "$team_response"
+        return await response_function(None)
 
     async def fake_post_effects(*_args: object, **_kwargs: object) -> None:
         started.set()

@@ -32,7 +32,19 @@ from mindroom.conversation_state_writer import ReplySession, session_started_on_
 from mindroom.dispatch_source import is_automation_source_kind
 from mindroom.entity_resolution import current_internal_sender_ids
 from mindroom.error_handling import get_user_friendly_error_message
-from mindroom.final_delivery import FinalDeliveryOutcome
+from mindroom.failure_text import failure_text
+from mindroom.final_delivery import (
+    AwaitingApproval,
+    Cancelled,
+    Completed,
+    Failed,
+    FailureCause,
+    FinalDeliveryOutcome,
+    Owed,
+    Suppressed,
+    Suppression,
+    TurnProgress,
+)
 from mindroom.history.storage import has_queued_force_compaction
 from mindroom.history.turn_recorder import TurnRecorder
 from mindroom.judgment.cold_cache import idle_seconds_before_turn, select_cold_cache_model
@@ -41,7 +53,6 @@ from mindroom.matrix.presence import should_use_streaming
 from mindroom.memory import store_conversation_memory
 from mindroom.mid_turn_judgment import create_mid_turn_gate
 from mindroom.orchestration.runtime import (
-    cancel_failure_reason,
     classify_cancel_source,
     current_task_is_process_shutdown,
     log_cancelled_response,
@@ -225,6 +236,20 @@ def _interruption_note_landed(handle: SpanHandle | None) -> bool:
     return handle is not None and handle.span.outcome in {rl.SpanOutcome.FAILED, rl.SpanOutcome.CANCELLED}
 
 
+def _answered_event(outcome: FinalDeliveryOutcome) -> str | None:
+    """Return the event that now answers the turn, if its ending answered it.
+
+    A paused, owed, or suppressed turn has none yet; an interruption other than a Stop answers only once its note
+    landed, since nothing resumes it then.
+    """
+    ending = outcome.ending
+    if isinstance(ending, AwaitingApproval | Owed | Suppressed):
+        return None
+    if isinstance(ending, Cancelled) and ending.source != "user_stop" and not _interruption_note_landed(current_span()):
+        return None
+    return outcome.final_visible_event_id
+
+
 def _resumed_reply() -> UnfinishedStreamedReply | None:
     """Return what the stopped attempt at the current span's reply showed, which this attempt streams below."""
     handle = current_span()
@@ -359,21 +384,14 @@ def _approve_continued_reply(participation: ParticipationGate | None, request: R
         participation.approve_existing_response()
 
 
-def _skipped_participation_outcome() -> FinalDeliveryOutcome:
-    """Describe quiet completion without claiming successful response generation."""
-    return FinalDeliveryOutcome(
-        terminal_status="completed",
-        event_id=None,
-        suppressed=True,
-        failure_reason="participation_declined",
-    )
+_DECLINED = FinalDeliveryOutcome(ending=Suppressed(Suppression.PARTICIPATION_DECLINED))
 
 
 def _skip_unapproved_response(participation: ParticipationGate | None) -> FinalDeliveryOutcome | None:
-    """Settle a pre-approval failure before delivery."""
+    """A failure before the participation decision stays quiet: it declines the turn."""
     if participation is None or not participation.decline("run_failed_before_decision"):
         return None
-    return _skipped_participation_outcome()
+    return _DECLINED
 
 
 def _response_thread_id(request: ResponseRequest, resolved_target: MessageTarget) -> str | None:
@@ -399,32 +417,6 @@ class _EarlyPlaceholderState:
 
     placeholder_sent: bool = False
     settlement_started: bool = False
-
-
-@dataclass
-class DeliveryProgress:
-    """Mutable pre/post-delivery state for one locked response turn."""
-
-    stage_started: bool = False
-    failure_reason: str | None = None
-    cancelled: bool = False
-    delivery_outcome: FinalDeliveryOutcome | None = None
-
-    def note_delivery_started(self, _event_id: str | None = None) -> None:
-        """Mark visible delivery as begun; the span's reply names the event carrying it."""
-        self.stage_started = True
-
-    def note_task_cancelled(self, failure_reason: str) -> None:
-        """Record that the response task was cancelled before delivery settled."""
-        self.failure_reason = failure_reason
-        self.cancelled = True
-
-    def settle(self, delivery_outcome: FinalDeliveryOutcome) -> None:
-        """Record the turn's one canonical terminal delivery outcome."""
-        if self.delivery_outcome is not None:
-            msg = "Response delivery already settled"
-            raise RuntimeError(msg)
-        self.delivery_outcome = delivery_outcome
 
 
 def _raise_if_process_shutdown() -> None:
@@ -1029,8 +1021,7 @@ class ResponseRunner:
             await gateway.end_interrupted_span(
                 handle,
                 target,
-                cancel_source=classify_cancel_source(error),
-                failure_reason=None,
+                ending=Cancelled(classify_cancel_source(error)),
                 delivery_started=False,
             )
             return
@@ -1692,50 +1683,29 @@ class ResponseRunner:
             early_placeholder_state=early_placeholder_state,
         )
 
-    def _settle_missing_delivery_outcome(
-        self,
-        progress: DeliveryProgress,
-        *,
-        terminal_status: Literal["cancelled", "error"],
-        failure_reason: str,
-    ) -> None:
-        """Settle a turn that ended before a delivery outcome; its span's exit decides the reply."""
-        if progress.delivery_outcome is not None:
-            return
-        progress.settle(
-            self.deps.delivery_gateway.terminal_outcome_without_visible_event(
-                terminal_status=terminal_status,
-                failure_reason=failure_reason,
-            ),
-        )
-
     async def _finalize_failed_approval_handoff(
         self,
         *,
         target: MessageTarget,
         request: ResponseRequest,
-        failure_reason: str,
     ) -> FinalDeliveryOutcome:
         """Replace an unowned pause with durable failure, even after streaming began."""
         handle = current_span()
         assert handle is not None, "an approval handoff runs in its reply's span"
         if not handle.exited:
-            # The pause never took: the span ends failed with the note below what it showed.
-            noted = await self.deps.delivery_gateway.end_reply_span_with_note(
+            # The pause never took: the span ends failed with the note below what it showed, or cancelled after a Stop.
+            return await self.deps.delivery_gateway.end_reply_span_with_note(
                 handle,
                 target,
                 state=rl.ReplyState.FAILED,
                 note=note_segment(NoteKind.APPROVAL_FAILED),
+                ending=Failed(FailureCause.APPROVAL_NOT_STARTED),
             )
-            # A Stop recorded meanwhile ends it cancelled instead.
-            return noted if noted.terminal_status == "cancelled" else replace(noted, failure_reason=failure_reason)
         # The pause committed: the reply is its approval's, whose failure
         # settlement writes what it shows.
         return FinalDeliveryOutcome(
-            terminal_status="error",
+            ending=Failed(FailureCause.APPROVAL_NOT_STARTED),
             event_id=_existing_event_id(request),
-            is_visible_response=False,
-            failure_reason=failure_reason,
         )
 
     async def _finalize_locked_outcome(
@@ -1746,7 +1716,7 @@ class ResponseRunner:
         post_response_outcome: ResponseOutcome,
         post_response_deps: PostResponseEffectsDeps | Callable[[], PostResponseEffectsDeps],
     ) -> FinalDeliveryOutcome:
-        """Finalize the lifecycle, converting a late cancel into a terminal note first."""
+        """Finalize the lifecycle, reporting a cancellation that lands during finalization as the turn's ending."""
         try:
             return await lifecycle.finalize(
                 final_delivery_outcome,
@@ -1756,26 +1726,71 @@ class ResponseRunner:
         except asyncio.CancelledError as exc:
             if current_task_is_process_shutdown():
                 raise
-            failure_reason = cancel_failure_reason(classify_cancel_source(exc))
-            cancelled_outcome = self.deps.delivery_gateway.cancelled_terminal_outcome(
-                final_delivery_outcome,
-                failure_reason=failure_reason,
-            )
             await lifecycle.finalize(
-                cancelled_outcome,  # lifecycle.finalize cancelled terminal outcome before re-raising
+                replace(
+                    final_delivery_outcome,
+                    ending=Cancelled(classify_cancel_source(exc)),
+                    event_id=final_delivery_outcome.final_visible_event_id,
+                    is_visible_response=final_delivery_outcome.final_visible_event_id is not None,
+                    delivery_kind=None,
+                    interactive_metadata=None,
+                ),
                 build_post_response_outcome=lambda _final_outcome: post_response_outcome,
                 post_response_deps=post_response_deps,
             )
             raise
 
-    async def run_and_settle_locked_response(  # noqa: C901, PLR0912, PLR0915
+    async def _attempt_outcome(
+        self,
+        request: ResponseRequest,
+        *,
+        target: MessageTarget,
+        response_function: Callable[[str | None], Coroutine[Any, Any, FinalDeliveryOutcome]],
+        user_id: str | None,
+        approval_suspension_handler: Callable[[ResponsePausedForApproval], Awaitable[FinalDeliveryOutcome]] | None,
+        participation: ParticipationGate | None,
+        response_kind: str,
+    ) -> FinalDeliveryOutcome:
+        """Run the turn's attempt and return how it ended: what it delivered, its pause, its cancellation, or its failure.
+
+        A process shutdown raises, and so does a cancellation of this task, after which the caller still settles the
+        turn as cancelled.
+        """
+        try:
+            # The attempt runs against the event the turn already adopted.
+            attempt = await self._run_cancellable_response(
+                target=target,
+                response_function=response_function,
+                existing_event_id=_existing_event_id(request),
+                user_id=user_id,
+                show_stop_button=not is_silent_schedule_response(request),
+            )
+        except ResponsePausedForApproval as error:
+            if approval_suspension_handler is None:
+                raise
+            try:
+                return await approval_suspension_handler(error)
+            except Exception as suspension_error:
+                self.deps.logger.exception("approval_suspension_failed", error=str(suspension_error))
+                return await self._finalize_failed_approval_handoff(target=target, request=request)
+        except Exception as error:
+            if current_task_is_process_shutdown():
+                raise
+            if (skipped := _skip_unapproved_response(participation)) is not None:
+                self.deps.logger.exception("Response skipped before participation", error=str(error))
+                return skipped
+            self._log_delivery_failure(response_kind=response_kind, error=error)
+            return FinalDeliveryOutcome(ending=Failed(FailureCause.ERROR, failure_text(error)))
+        return FinalDeliveryOutcome(ending=attempt) if isinstance(attempt, Cancelled) else attempt
+
+    async def run_and_settle_locked_response(
         self,
         request: ResponseRequest,
         *,
         target: MessageTarget,
         lifecycle: ResponseLifecycle,
-        progress: DeliveryProgress,
-        response_function: Callable[[str | None], Coroutine[Any, Any, None]],
+        progress: TurnProgress,
+        response_function: Callable[[str | None], Coroutine[Any, Any, FinalDeliveryOutcome]],
         user_id: str | None,
         build_post_response_outcome: Callable[[FinalDeliveryOutcome], ResponseOutcome],
         post_response_deps: PostResponseEffectsDeps | Callable[[], PostResponseEffectsDeps],
@@ -1784,112 +1799,52 @@ class ResponseRunner:
         participation: ParticipationGate | None = None,
         reply_session: ReplySession | None = None,
     ) -> str | None:
-        """Run generation and settle its terminal lifecycle exactly once.
+        """Run generation and settle its terminal lifecycle exactly once: the one place a locked turn's ending is decided.
 
         ``reply_session`` names the stored session the reply writes; when one of its writes creates that session's
         row, ``session:started`` fires once the attempt settles, before the lifecycle's finalization.
         """
-        deferred_error: BaseException | None = None
+        cancelled: asyncio.CancelledError | None = None
         async with session_started_on_creation(
             reply_session,
             correlation_id=lifecycle.identity.correlation_id,
         ):
             try:
-                # The attempt runs against the event the turn already adopted, which
-                # `progress` was seeded with, so it has no new event to report back.
-                await self._run_cancellable_response(
+                outcome = await self._attempt_outcome(
+                    request,
                     target=target,
                     response_function=response_function,
-                    existing_event_id=_existing_event_id(request),
                     user_id=user_id,
-                    on_cancelled=progress.note_task_cancelled,
-                    show_stop_button=not is_silent_schedule_response(request),
+                    approval_suspension_handler=approval_suspension_handler,
+                    participation=participation,
+                    response_kind=lifecycle.identity.response_kind,
                 )
-            except ResponsePausedForApproval as error:
-                if approval_suspension_handler is None:
-                    raise
-                try:
-                    progress.settle(await approval_suspension_handler(error))
-                except Exception as suspension_error:
-                    self.deps.logger.exception("approval_suspension_failed", error=str(suspension_error))
-                    progress.failure_reason = str(suspension_error) or "approval_suspension_failed"
-                    progress.settle(
-                        await self._finalize_failed_approval_handoff(
-                            target=target,
-                            request=request,
-                            failure_reason=progress.failure_reason,
-                        ),
-                    )
             except asyncio.CancelledError as error:
                 if current_task_is_process_shutdown():
                     raise
-                progress.note_task_cancelled(cancel_failure_reason(classify_cancel_source(error)))
-                self._settle_missing_delivery_outcome(
-                    progress,
-                    terminal_status="cancelled",
-                    failure_reason=progress.failure_reason or "interrupted",
-                )
-                deferred_error = error
-            except Exception as error:
-                if current_task_is_process_shutdown():
-                    raise
-                if (
-                    not progress.stage_started
-                    and progress.delivery_outcome is None
-                    and (skipped := _skip_unapproved_response(participation)) is not None
-                ):
-                    self.deps.logger.exception("Response skipped before participation", error=str(error))
-                    progress.settle(skipped)
-                elif progress.stage_started or progress.delivery_outcome is not None:
-                    # Do not touch a tracked event after delivery starts: an adopted
-                    # thinking-message stream can already hold the full reply.
-                    self._log_delivery_failure(response_kind=lifecycle.identity.response_kind, error=error)
-                    if progress.delivery_outcome is None:
-                        progress.failure_reason = progress.failure_reason or str(error) or "late_delivery_failure"
-                else:
-                    progress.failure_reason = str(error) or "delivery_failed_before_start"
-                    progress.settle(
-                        self.deps.delivery_gateway.terminal_outcome_without_visible_event(
-                            terminal_status="error",
-                            failure_reason=progress.failure_reason,
-                        ),
-                    )
-                    deferred_error = error
-
-        if progress.delivery_outcome is None and (progress.cancelled or progress.failure_reason is not None):
-            self._settle_missing_delivery_outcome(
-                progress,
-                terminal_status="cancelled" if progress.cancelled else "error",
-                failure_reason=progress.failure_reason or "interrupted",
-            )
-
-        final_delivery_outcome = progress.delivery_outcome
-        if final_delivery_outcome is None:
-            msg = "Response generation did not settle a delivery outcome"
-            raise RuntimeError(msg)
+                # The turn still settles as cancelled; the cancellation then propagates.
+                cancelled = error
+                outcome = FinalDeliveryOutcome(ending=Cancelled(classify_cancel_source(error)))
         handle = current_span()
         if handle is not None and not handle.exited:
-            final_delivery_outcome = await self._end_span_after_outcome(
+            outcome = await self._end_span_after_outcome(
                 handle,
-                final_delivery_outcome,
+                outcome,
                 target=target,
-                delivery_started=progress.stage_started,
+                delivery_started=progress.delivery_started,
             )
+        progress.ending = outcome.ending
         final_outcome = await self._finalize_locked_outcome(
             lifecycle,
-            final_delivery_outcome,
-            post_response_outcome=build_post_response_outcome(final_delivery_outcome),
+            outcome,
+            post_response_outcome=build_post_response_outcome(outcome),
             post_response_deps=post_response_deps,
         )
-        if final_outcome.terminal_status == "suspended" and request.source_handoff is not None:
+        if isinstance(final_outcome.ending, AwaitingApproval | Owed) and request.source_handoff is not None:
             request.source_handoff.set()
-        if deferred_error is not None:
-            raise deferred_error
-        cancel_source = final_outcome.resolved_cancel_source
-        source_handled = final_outcome.mark_handled and (
-            cancel_source is None or cancel_source == "user_stop" or _interruption_note_landed(current_span())
-        )
-        return final_outcome.final_visible_event_id if source_handled else None
+        if cancelled is not None:
+            raise cancelled
+        return _answered_event(final_outcome)
 
     async def _end_span_after_outcome(
         self,
@@ -1899,31 +1854,25 @@ class ResponseRunner:
         target: MessageTarget,
         delivery_started: bool,
     ) -> FinalDeliveryOutcome:
-        """End a span whose settled outcome wrote no terminal row."""
+        """End a span whose settled outcome wrote no terminal row; return the ending its records committed."""
         gateway = self.deps.delivery_gateway
-        if outcome.terminal_status == "suspended":
-            # The approval continuation owns the sources until its resume claims the reply.
-            await gateway.end_reply_span(handle, release_decision(handle))
-            return outcome
-        if outcome.terminal_status == "completed" or outcome.suppressed:
-            # Nothing was answered: a placeholder goes, substantive content stays.
-            await gateway.end_reply_span(handle, suppress_decision(handle))
-            return outcome
-        noted = await gateway.end_interrupted_span(
-            handle,
-            target,
-            cancel_source=outcome.resolved_cancel_source if outcome.terminal_status == "cancelled" else None,
-            failure_reason=outcome.failure_reason,
-            delivery_started=delivery_started,
-        )
-        if noted is None:
-            return outcome
-        return replace(
-            noted,
-            terminal_status=outcome.terminal_status,
-            cancel_source=outcome.cancel_source,
-            failure_reason=outcome.failure_reason,
-        )
+        match outcome.ending:
+            case AwaitingApproval() | Owed():
+                # The approval continuation, or the outbox, owns the sources from here.
+                await gateway.end_reply_span(handle, release_decision(handle))
+                return outcome
+            case Completed() | Suppressed():
+                # Nothing was answered: a placeholder goes, substantive content stays.
+                await gateway.end_reply_span(handle, suppress_decision(handle))
+                return outcome
+            case Cancelled() | Failed() as ending:
+                noted = await gateway.end_interrupted_span(
+                    handle,
+                    target,
+                    ending=ending,
+                    delivery_started=delivery_started,
+                )
+                return outcome if noted is None else noted
 
     def build_lifecycle(
         self,
@@ -1976,12 +1925,12 @@ class ResponseRunner:
             identity=self.response_identity(request, response_kind=response_kind),
             request=request,
         )
-        final_outcome = await lifecycle.finalize(
-            FinalDeliveryOutcome.cancelled_for_empty_prompt(),
+        await lifecycle.finalize(
+            FinalDeliveryOutcome(ending=Suppressed(Suppression.EMPTY_PROMPT)),
             build_post_response_outcome=lambda _final_outcome: ResponseOutcome(),
             post_response_deps=lambda: self._post_response_deps(request),
         )
-        return final_outcome.final_visible_event_id if final_outcome.mark_handled else None
+        return None
 
     async def generate_team_response_helper(
         self,
@@ -2174,19 +2123,17 @@ class ResponseRunner:
         """Answer a team turn with why it cannot run, as one final delivery."""
         response_identity = self.response_identity(request, response_kind="team")
         lifecycle = self.build_lifecycle(identity=response_identity, request=request)
-        progress = DeliveryProgress()
+        progress = TurnProgress()
 
-        async def deliver_rejection(message_id: str | None) -> None:
-            progress.settle(
-                await self.deps.delivery_gateway.deliver_final(
-                    FinalDeliveryRequest(
-                        target=resolved_target,
-                        existing_event_id=message_id,
-                        response_text=reason,
-                        identity=response_identity,
-                        tool_trace=None,
-                        extra_content=None,
-                    ),
+        async def deliver_rejection(message_id: str | None) -> FinalDeliveryOutcome:
+            return await self.deps.delivery_gateway.deliver_final(
+                FinalDeliveryRequest(
+                    target=resolved_target,
+                    existing_event_id=message_id,
+                    response_text=reason,
+                    identity=response_identity,
+                    tool_trace=None,
+                    extra_content=None,
                 ),
             )
 
@@ -2382,7 +2329,7 @@ class ResponseRunner:
             )
         # The turn driver writes the turn's record; this runner reads how it ended.
         recorder = TurnRecorder()
-        progress = DeliveryProgress()
+        progress = TurnProgress()
         response_identity = self.response_identity(request, response_kind=turn.response_kind)
         lifecycle = self.build_lifecycle(identity=response_identity, request=request)
 
@@ -2402,7 +2349,7 @@ class ResponseRunner:
 
         async with self._turn_dispatch_scope(turn, progress=progress) as dispatched:
 
-            async def generate(_message_id: str | None) -> None:
+            async def generate(_message_id: str | None) -> FinalDeliveryOutcome:
                 delivery = await self._deliver_turn(
                     dispatched,
                     use_streaming=use_streaming,
@@ -2416,7 +2363,7 @@ class ResponseRunner:
                     and participation.is_declined
                     and request.participation is not None
                     and request.participation.decline_reaction is not None
-                    and delivery.failure_reason == "participation_declined"
+                    and delivery.ending == _DECLINED.ending
                 ):
                     await self.deps.delivery_gateway.send_judgment_reaction(
                         turn_id=response_identity.response_envelope.source_event_id,
@@ -2426,7 +2373,7 @@ class ResponseRunner:
                         kind="participation_decline",
                     )
                 generated.append(delivery)
-                progress.settle(delivery)
+                return delivery
 
             return await self.run_and_settle_locked_response(
                 request,
@@ -2457,7 +2404,7 @@ class ResponseRunner:
         self,
         turn: _LockedTurn,
         *,
-        progress: DeliveryProgress,
+        progress: TurnProgress,
     ) -> AsyncIterator[_LockedTurn]:
         """Bind an agent turn's CLI approval publication to its reply; a team turn's members ask through its leader."""
         if turn.response_kind != "ai":
@@ -2478,7 +2425,7 @@ class ResponseRunner:
         use_streaming: bool,
         recorder: TurnRecorder,
         response_identity: ResponseIdentity,
-        progress: DeliveryProgress,
+        progress: TurnProgress,
     ) -> FinalDeliveryOutcome:
         """Run the turn's stream into its reply: streamed as it grows, or collected and delivered whole."""
         request = turn.delivery_request
@@ -2529,7 +2476,7 @@ class ResponseRunner:
         run_metadata_content: dict[str, Any],
         tool_trace: list[ToolTraceEntry],
         final_extra_content: Callable[[], dict[str, Any] | None],
-        progress: DeliveryProgress,
+        progress: TurnProgress,
     ) -> FinalDeliveryOutcome:
         """Stream the turn into its reply and finalize what the stream left."""
         request = turn.delivery_request
@@ -2585,22 +2532,15 @@ class ResponseRunner:
                 interrupted_message=f"{label} streaming response interrupted — traceback for diagnosis",
             )
             raise
-        except Exception as raised:
-            if current_task_is_process_shutdown():
-                raise
-            failed = raised if isinstance(raised, StreamingDeliveryError) else StreamingDeliveryError(raised)
-            self.deps.logger.exception(f"Error in {label.lower()} streaming response", error=str(failed.error))
-            # A failure before the participation decision stays quiet, wherever the stream failed.
-            if skipped := _skip_unapproved_response(participation):
-                return skipped
-            # The span's exit notes the failure below what the reply shows.
-            return self.deps.delivery_gateway.terminal_outcome_without_visible_event(
-                terminal_status="error",
-                failure_reason=failed.failure_reason,
-            )
+        except Exception as error:
+            if not current_task_is_process_shutdown():
+                failed = error.error if isinstance(error, StreamingDeliveryError) else error
+                self.deps.logger.exception(f"Error in {label.lower()} streaming response", error=str(failed))
+            # The turn's settlement decides how the failure ends the reply.
+            raise
 
         if participation is not None and participation.is_silent:
-            return _skipped_participation_outcome()
+            return _DECLINED
         progress.note_delivery_started()
         delivery = await self.deps.delivery_gateway.finalize_streamed_response(
             FinalizeStreamedResponseRequest(
@@ -2626,7 +2566,7 @@ class ResponseRunner:
         response_identity: ResponseIdentity,
         tool_trace: list[ToolTraceEntry],
         final_extra_content: Callable[[], dict[str, Any] | None],
-        progress: DeliveryProgress,
+        progress: TurnProgress,
     ) -> FinalDeliveryOutcome:
         """Collect the turn's stream into one reply, then deliver it whole."""
         request = turn.delivery_request
@@ -2669,12 +2609,11 @@ class ResponseRunner:
             raise
         except Exception as error:
             self.deps.logger.exception(f"Error in {label.lower()} response", error=str(error))
-            if skipped := _skip_unapproved_response(runtime.participation):
-                return skipped
+            # The turn's settlement decides how the failure ends the reply.
             raise
 
         if runtime.participation is not None and runtime.participation.is_silent:
-            return _skipped_participation_outcome()
+            return _DECLINED
         progress.note_delivery_started()
         delivery = await self.deps.delivery_gateway.deliver_final(
             FinalDeliveryRequest(
@@ -2693,26 +2632,24 @@ class ResponseRunner:
         self,
         *,
         target: MessageTarget,
-        response_function: Callable[[str | None], Coroutine[Any, Any, None]],
+        response_function: Callable[[str | None], Coroutine[Any, Any, FinalDeliveryOutcome]],
         existing_event_id: str | None,
         user_id: str | None,
-        on_cancelled: Callable[[str], None],
         show_stop_button: bool,
-    ) -> None:
-        """Run one response-generation attempt with cancellation support."""
-        await ResponseAttemptRunner(
+    ) -> FinalDeliveryOutcome | Cancelled:
+        """Run one response-generation attempt with cancellation support; return what it delivered, or its cancellation."""
+        return await ResponseAttemptRunner(
             ResponseAttemptDeps(
                 client=self.client(),
                 logger=self.deps.logger,
                 show_stop_button=lambda: show_stop_button and self.deps.runtime.config.defaults.show_stop_button,
             ),
         ).run(
-            ResponseAttemptRequest(
+            ResponseAttemptRequest[FinalDeliveryOutcome](
                 target=target,
                 response_function=response_function,
                 existing_event_id=existing_event_id,
                 user_id=user_id,
-                on_cancelled=on_cancelled,
                 span=self._span_attempt(),
             ),
         )
@@ -2831,7 +2768,7 @@ class ResponseRunner:
                 request=request,
             )
             await lifecycle.finalize(
-                _skipped_participation_outcome(),
+                _DECLINED,
                 build_post_response_outcome=lambda _outcome: ResponseOutcome(run_succeeded=False),
                 post_response_deps=lambda: self._post_response_deps(request),
             )

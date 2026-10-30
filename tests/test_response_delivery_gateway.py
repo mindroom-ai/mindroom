@@ -48,6 +48,7 @@ from mindroom.event_journal.matrix_delivery import (
     RecoveryOutcome,
 )
 from mindroom.event_journal.sqlite_backend import SqliteBackend
+from mindroom.final_delivery import Completed, Failed, FailureCause, Suppressed, Suppression
 from mindroom.history.types import CompactionLifecycleFailure
 from mindroom.hooks.context import ResponseDraft
 from mindroom.matrix.client_delivery import DeliveredMatrixEvent, MatrixDeliveryFailure, MatrixDeliveryFailureKind
@@ -401,10 +402,8 @@ class TestTurnDeliveryGoesThroughTheOutbox:
                 self._final_request(text, source_kind=SILENT_SCHEDULE_SOURCE_KIND),
             )
 
-        assert outcome.terminal_status == "cancelled"
-        assert outcome.suppressed is True
+        assert outcome.ending == Suppressed(Suppression.SILENT_NO_REPORT)
         assert outcome.event_id is None
-        assert outcome.failure_reason == "silent_no_report"
         assert not await _turn_rows(alice)
         send.assert_not_awaited()
 
@@ -453,7 +452,7 @@ class TestTurnDeliveryGoesThroughTheOutbox:
 
         outcome = await final_in_span(gateway, alice, request)
 
-        assert outcome.failure_reason == "silent_no_report"
+        assert outcome.ending == Suppressed(Suppression.SILENT_NO_REPORT)
         receipt_path = (
             tmp_path
             / "mindroom_data"
@@ -504,7 +503,7 @@ class TestTurnDeliveryGoesThroughTheOutbox:
             self._final_request(SILENT_SCHEDULE_NO_REPLY_TOKEN, source_kind=SILENT_SCHEDULE_SOURCE_KIND),
         )
 
-        assert outcome.failure_reason == "silent_no_report"
+        assert outcome.ending == Suppressed(Suppression.SILENT_NO_REPORT)
         receipt_directory = (
             tmp_path / "mindroom_data" / "agents" / "agent" / "workspace" / ".mindroom" / "scheduled_runs"
         )
@@ -562,7 +561,7 @@ class TestTurnDeliveryGoesThroughTheOutbox:
             self._final_request(SILENT_SCHEDULE_NO_REPLY_TOKEN, source_kind=SILENT_SCHEDULE_SOURCE_KIND),
         )
 
-        assert outcome.failure_reason == "silent_no_report"
+        assert outcome.ending == Suppressed(Suppression.SILENT_NO_REPORT)
         receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
         assert receipt["source_event_id"] == "$cause"
         assert receipt["status"] == "completed"
@@ -617,10 +616,8 @@ class TestTurnDeliveryGoesThroughTheOutbox:
         with patch("mindroom.delivery_gateway.send_message_outcome", send):
             outcome = await final_in_span(gateway, alice, request)
 
-        assert outcome.terminal_status == "cancelled"
-        assert outcome.suppressed is True
+        assert outcome.ending == Suppressed(Suppression.SILENT_NO_REPORT)
         assert outcome.event_id is None
-        assert outcome.failure_reason == "silent_no_report"
         assert not await _turn_rows(alice)
         send.assert_not_awaited()
 
@@ -648,8 +645,7 @@ class TestTurnDeliveryGoesThroughTheOutbox:
         with patch("mindroom.delivery_gateway.send_message_outcome", send):
             outcome = await final_in_span(gateway, alice, request)
 
-        assert outcome.suppressed is True
-        assert outcome.failure_reason == "silent_no_report"
+        assert outcome.ending == Suppressed(Suppression.SILENT_NO_REPORT)
         send.assert_not_awaited()
 
     async def test_silent_schedule_unmatched_tool_marker_no_reply_remains_visible(
@@ -677,8 +673,7 @@ class TestTurnDeliveryGoesThroughTheOutbox:
         with patch("mindroom.delivery_gateway.send_message_outcome", send):
             outcome = await final_in_span(gateway, alice, request)
 
-        assert outcome.terminal_status == "completed"
-        assert outcome.suppressed is False
+        assert outcome.ending == Completed()
         assert outcome.event_id == "$sent"
         send.assert_awaited_once()
 
@@ -706,9 +701,8 @@ class TestTurnDeliveryGoesThroughTheOutbox:
         with patch("mindroom.delivery_gateway.send_message_outcome", send):
             outcome = await final_in_span(gateway, alice, self._final_request(text, source_kind=source_kind))
 
-        assert outcome.terminal_status == "completed"
+        assert outcome.ending == Completed()
         assert outcome.event_id == "$sent"
-        assert outcome.suppressed is False
         send.assert_awaited_once()
 
     async def test_an_ordinary_response_with_nothing_to_show_ends_without_an_answer(
@@ -724,10 +718,8 @@ class TestTurnDeliveryGoesThroughTheOutbox:
         with patch("mindroom.delivery_gateway.send_message_outcome", send):
             outcome = await final_in_span(gateway, alice, self._final_request("", source_kind=MESSAGE_SOURCE_KIND))
 
-        assert outcome.terminal_status == "error"
-        assert outcome.failure_reason == "stream_completed_without_visible_body"
+        assert outcome.ending == Failed(FailureCause.NOTHING_TO_SHOW)
         assert outcome.event_id is None
-        assert outcome.suppressed is False
         send.assert_not_awaited()
 
     @pytest.mark.parametrize("generated_text", ["", SILENT_SCHEDULE_NO_REPLY_TOKEN])
@@ -756,7 +748,7 @@ class TestTurnDeliveryGoesThroughTheOutbox:
                 self._final_request(generated_text, source_kind=SILENT_SCHEDULE_SOURCE_KIND),
             )
 
-        assert outcome.terminal_status == "completed"
+        assert outcome.ending == Completed()
         assert outcome.event_id == "$sent"
         assert send.await_args.args[2]["body"] == "Finding from hook"
 
@@ -836,8 +828,7 @@ class TestTurnDeliveryGoesThroughTheOutbox:
                 self._final_request("Finding", source_kind=SILENT_SCHEDULE_SOURCE_KIND),
             )
 
-        assert outcome.terminal_status == "cancelled"
-        assert outcome.suppressed is True
+        assert outcome.ending == Suppressed(Suppression.SILENT_NO_REPORT)
         assert outcome.event_id is None
         assert not await _turn_rows(alice)
         send.assert_not_awaited()
@@ -867,9 +858,7 @@ class TestTurnDeliveryGoesThroughTheOutbox:
                 self._final_request("", source_kind=SILENT_SCHEDULE_SOURCE_KIND),
             )
 
-        assert outcome.terminal_status == "cancelled"
-        assert outcome.suppressed is True
-        assert outcome.failure_reason == "suppressed_by_hook"
+        assert outcome.ending == Suppressed(Suppression.HOOK)
         send.assert_not_awaited()
 
     async def test_ordinary_before_hook_failure_keeps_existing_eventless_behavior(
@@ -885,7 +874,7 @@ class TestTurnDeliveryGoesThroughTheOutbox:
         with patch.object(DeliveryGateway, "send_text", new=send_text):
             outcome = await final_in_span(gateway, alice, self._final_request("answer"))
 
-        assert outcome.terminal_status == "error"
+        assert outcome.ending == Failed(FailureCause.HOOK_FAILED)
         assert outcome.event_id is None
         send_text.assert_not_awaited()
 
@@ -1310,7 +1299,7 @@ class TestTurnDeliveryGoesThroughTheOutbox:
             ),
         )
 
-        assert outcome.terminal_status == "completed"
+        assert outcome.ending == Completed()
         delivery = await _turn_row(alice, DeliveryStage.FINAL)
         frozen = delivery.payload
         assert calculate_event_size(frozen) <= _MATRIX_EVENT_HARD_LIMIT
@@ -1355,7 +1344,7 @@ class TestTurnDeliveryGoesThroughTheOutbox:
             self._final_request("x" * 100_000),
         )
 
-        assert outcome.terminal_status == "completed"
+        assert outcome.ending == Completed()
         delivery = await _turn_row(alice, DeliveryStage.FINAL)
         frozen = delivery.payload
         assert frozen["msgtype"] == "m.file"
@@ -1457,7 +1446,7 @@ class TestTurnDeliveryGoesThroughTheOutbox:
 
         outcome = await final_in_span(gateway, alice, request)
 
-        assert outcome.terminal_status == "completed"
+        assert outcome.ending == Completed()
         frozen = (await _turn_row(alice, DeliveryStage.FINAL)).payload
         assert calculate_event_size(frozen) <= _MATRIX_EVENT_HARD_LIMIT
         assert client.room_send.await_args.kwargs["content"] == frozen
@@ -1537,7 +1526,7 @@ class TestTurnDeliveryGoesThroughTheOutbox:
             ),
         )
 
-        assert outcome.terminal_status == "completed"
+        assert outcome.ending == Completed()
         delivery = await _turn_row(alice, DeliveryStage.FINAL)
         frozen = delivery.payload
         assert frozen["msgtype"] == "m.text"
@@ -1577,7 +1566,7 @@ class TestTurnDeliveryGoesThroughTheOutbox:
 
         outcome = await final_in_span(gateway, alice, self._final_request("answer"))
 
-        assert outcome.terminal_status == "error"
+        assert outcome.ending == Failed(FailureCause.DELIVERY_FAILED)
         assert await _turn_rows(alice) == []
         client.upload.assert_not_awaited()
         client.room_send.assert_not_awaited()
@@ -1758,7 +1747,7 @@ class TestAnEndedMembershipStopsTheAnswer:
 
         send.assert_not_awaited()
         assert outcome.event_id is None
-        assert outcome.terminal_status == "error"
+        assert outcome.ending == Failed(FailureCause.WRITE_REFUSED)
         assert await _turn_rows(alice) == []
 
     async def test_a_stream_is_given_the_gate_that_stops_its_progressive_edits(

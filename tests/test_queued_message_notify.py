@@ -7,7 +7,7 @@ import threading
 from copy import deepcopy
 from dataclasses import dataclass, field, replace
 from types import SimpleNamespace
-from typing import TYPE_CHECKING, Any, Literal, Self, cast
+from typing import TYPE_CHECKING, Any, Self, cast
 from unittest.mock import ANY, AsyncMock, MagicMock, patch
 
 import nio
@@ -49,7 +49,16 @@ from mindroom.dispatch_source import (
     VOICE_SOURCE_KIND,
 )
 from mindroom.entity_resolution import current_internal_sender_ids
-from mindroom.final_delivery import FinalDeliveryOutcome
+from mindroom.final_delivery import (
+    Cancelled,
+    Completed,
+    Failed,
+    FailureCause,
+    FinalDeliveryOutcome,
+    Suppressed,
+    Suppression,
+    TurnEnding,
+)
 from mindroom.history.request_messages import TurnMessages, build_request, scope_history_messages
 from mindroom.history.session_context import ScopeSessionContext
 from mindroom.history.types import HistoryScope
@@ -658,9 +667,8 @@ async def test_post_response_effects_skip_thread_summary_for_suppressed_delivery
 
     await apply_post_response_effects(
         FinalDeliveryOutcome(
-            terminal_status="cancelled",
+            ending=Suppressed(Suppression.HOOK),
             event_id=None,
-            suppressed=True,
         ),
         ResponseOutcome(
             response_target=MessageTarget.resolve(
@@ -686,7 +694,7 @@ async def test_post_response_effects_report_once_whether_a_question_reply_lost_i
 
     await apply_post_response_effects(
         FinalDeliveryOutcome(
-            terminal_status="completed",
+            ending=Completed(),
             event_id="$response",
             is_visible_response=True,
             final_visible_body="Pick one.\n\nReact with an emoji or type the number to respond.",
@@ -699,24 +707,24 @@ async def test_post_response_effects_report_once_whether_a_question_reply_lost_i
         "Interactive question buttons skipped",
         response_event_id="$response",
         add_interactive_buttons_is_none=False,
-        terminal_status="completed",
+        ending="Completed",
         final_visible_body_is_none=False,
-        suppressed=False,
         interactive_metadata_is_none=True,
     )
 
 
 @pytest.mark.parametrize(
-    ("terminal_status", "run_succeeded"),
+    ("ending", "run_succeeded"),
     [
-        ("error", False),
-        ("cancelled", False),
-        ("completed", False),
+        (Failed(FailureCause.ERROR, "boom"), False),
+        (Cancelled("user_stop"), False),
+        (Completed(), False),
     ],
+    ids=["error", "cancelled", "completed"],
 )
 @pytest.mark.asyncio
 async def test_post_response_effects_skip_thread_summary_for_unsuccessful_turn(
-    terminal_status: Literal["error", "cancelled", "completed"],
+    ending: TurnEnding,
     run_succeeded: bool,
 ) -> None:
     """Visible failed or cancelled turns must not enqueue thread enrichment."""
@@ -725,7 +733,7 @@ async def test_post_response_effects_skip_thread_summary_for_unsuccessful_turn(
 
     await apply_post_response_effects(
         FinalDeliveryOutcome(
-            terminal_status=terminal_status,
+            ending=ending,
             event_id="$response",
             is_visible_response=True,
             final_visible_body="Turn did not complete",
@@ -757,7 +765,7 @@ async def test_post_response_effects_skip_memory_persistence_for_failed_run() ->
 
     await apply_post_response_effects(
         FinalDeliveryOutcome(
-            terminal_status="error",
+            ending=Failed(FailureCause.ERROR, "Provider failed"),
             event_id="$response",
             is_visible_response=True,
             final_visible_body="Provider failed",
@@ -789,7 +797,7 @@ async def test_post_response_effects_add_buttons_for_preserved_stream_success() 
 
     await apply_post_response_effects(
         FinalDeliveryOutcome(
-            terminal_status="completed",
+            ending=Completed(),
             event_id="$stream",
             is_visible_response=True,
             final_visible_body="Choose",
@@ -828,7 +836,7 @@ async def test_post_response_effects_skip_buttons_for_preserved_stream_error() -
 
     await apply_post_response_effects(
         FinalDeliveryOutcome(
-            terminal_status="error",
+            ending=Failed(FailureCause.ERROR),
             event_id="$stream",
             is_visible_response=True,
             final_visible_body="Choose",
@@ -878,7 +886,7 @@ async def test_post_response_effects_skip_buttons_when_prompt_membership_ended(t
 
     await apply_post_response_effects(
         FinalDeliveryOutcome(
-            terminal_status="completed",
+            ending=Completed(),
             event_id="$response",
             is_visible_response=True,
             final_visible_body="Choose",
@@ -983,7 +991,7 @@ async def test_post_response_effects_queues_summary_with_stale_hint_inside_margi
     ):
         await apply_post_response_effects(
             FinalDeliveryOutcome(
-                terminal_status="completed",
+                ending=Completed(),
                 event_id="$response",
                 is_visible_response=True,
                 final_visible_body="response",
@@ -1094,7 +1102,7 @@ async def test_post_response_effects_queues_summary_with_entity_model_for_adhoc_
     ):
         await apply_post_response_effects(
             FinalDeliveryOutcome(
-                terminal_status="completed",
+                ending=Completed(),
                 event_id="$response",
                 is_visible_response=True,
                 final_visible_body="response",
@@ -1442,11 +1450,10 @@ async def test_generate_response_waits_for_lock_before_starting_placeholder_life
 
     lifecycle_lock.acquire = announce_lock_wait  # type: ignore[method-assign]
 
-    async def fake_run_cancellable_response(*_args: object, **kwargs: object) -> str:
+    async def fake_run_cancellable_response(*_args: object, **kwargs: object) -> FinalDeliveryOutcome:
         lifecycle_started.set()
         response_function = kwargs["response_function"]
-        await response_function(None)
-        return "$response"
+        return await response_function(None)
 
     try:
         with (
@@ -1455,7 +1462,7 @@ async def test_generate_response_waits_for_lock_before_starting_placeholder_life
                 "_deliver_turn",
                 new=AsyncMock(
                     return_value=FinalDeliveryOutcome(
-                        terminal_status="completed",
+                        ending=Completed(),
                         event_id="$response",
                         is_visible_response=True,
                         final_visible_body="ok",
@@ -1590,21 +1597,20 @@ async def test_generate_response_uses_post_lock_reproof_target(tmp_path: Path) -
     observed_run_targets: list[MessageTarget] = []
     observed_delivery_targets: list[MessageTarget | None] = []
 
-    async def fake_run_cancellable_response(**kwargs: object) -> str:
+    async def fake_run_cancellable_response(**kwargs: object) -> FinalDeliveryOutcome:
         target = kwargs["target"]
         assert isinstance(target, MessageTarget)
         observed_run_targets.append(target)
         response_function = cast(
-            "Callable[[object | None], Awaitable[object]]",
+            "Callable[[object | None], Awaitable[FinalDeliveryOutcome]]",
             kwargs["response_function"],
         )
-        await response_function(None)
-        return "$response"
+        return await response_function(None)
 
     async def fake_deliver_turn(turn: object, **_kwargs: object) -> FinalDeliveryOutcome:
         observed_delivery_targets.append(cast("Any", turn).delivery_request.response_envelope.target)
         return FinalDeliveryOutcome(
-            terminal_status="completed",
+            ending=Completed(),
             event_id="$response",
             is_visible_response=True,
             final_visible_body="ok",
@@ -1660,21 +1666,20 @@ async def test_generate_response_keeps_locked_target_when_payload_preparation_re
             payload_preparation=None,
         )
 
-    async def fake_run_cancellable_response(**kwargs: object) -> str:
+    async def fake_run_cancellable_response(**kwargs: object) -> FinalDeliveryOutcome:
         target = kwargs["target"]
         assert isinstance(target, MessageTarget)
         observed_run_targets.append(target)
         response_function = cast(
-            "Callable[[object | None], Awaitable[object]]",
+            "Callable[[object | None], Awaitable[FinalDeliveryOutcome]]",
             kwargs["response_function"],
         )
-        await response_function(None)
-        return "$response"
+        return await response_function(None)
 
     async def fake_deliver_turn(turn: object, **_kwargs: object) -> FinalDeliveryOutcome:
         observed_delivery_targets.append(cast("Any", turn).delivery_request.response_envelope.target)
         return FinalDeliveryOutcome(
-            terminal_status="completed",
+            ending=Completed(),
             event_id="$response",
             is_visible_response=True,
             final_visible_body="ok",
@@ -1741,21 +1746,20 @@ async def test_generate_team_response_uses_post_lock_reproof_target(tmp_path: Pa
     observed_run_targets: list[MessageTarget] = []
     observed_delivery_targets: list[MessageTarget] = []
 
-    async def fake_run_cancellable_response(**kwargs: object) -> str:
+    async def fake_run_cancellable_response(**kwargs: object) -> FinalDeliveryOutcome:
         target = kwargs["target"]
         assert isinstance(target, MessageTarget)
         observed_run_targets.append(target)
         response_function = cast(
-            "Callable[[object | None], Awaitable[object]]",
+            "Callable[[object | None], Awaitable[FinalDeliveryOutcome]]",
             kwargs["response_function"],
         )
-        await response_function(None)
-        return "$response"
+        return await response_function(None)
 
     async def fake_deliver_final(request: FinalDeliveryRequest) -> FinalDeliveryOutcome:
         observed_delivery_targets.append(request.target)
         return FinalDeliveryOutcome(
-            terminal_status="completed",
+            ending=Completed(),
             event_id="$response",
             is_visible_response=True,
             final_visible_body=request.response_text,
@@ -1823,21 +1827,20 @@ async def test_generate_team_response_keeps_locked_target_when_payload_preparati
             payload_preparation=None,
         )
 
-    async def fake_run_cancellable_response(**kwargs: object) -> str:
+    async def fake_run_cancellable_response(**kwargs: object) -> FinalDeliveryOutcome:
         target = kwargs["target"]
         assert isinstance(target, MessageTarget)
         observed_run_targets.append(target)
         response_function = cast(
-            "Callable[[object | None], Awaitable[object]]",
+            "Callable[[object | None], Awaitable[FinalDeliveryOutcome]]",
             kwargs["response_function"],
         )
-        await response_function(None)
-        return "$response"
+        return await response_function(None)
 
     async def fake_deliver_final(request: FinalDeliveryRequest) -> FinalDeliveryOutcome:
         observed_delivery_targets.append(request.target)
         return FinalDeliveryOutcome(
-            terminal_status="completed",
+            ending=Completed(),
             event_id="$response",
             is_visible_response=True,
             final_visible_body=request.response_text,

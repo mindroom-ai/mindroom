@@ -29,7 +29,9 @@ from mindroom.event_journal.replies import (
     ReplyCreation,
     WakeApproval,
 )
+from mindroom.final_delivery import Cancelled, Failed, FailureCause
 from mindroom.logging_config import get_logger
+from mindroom.redaction import redact_sensitive_text
 from mindroom.reply_presentation import (
     AGENT_PLACEHOLDER,
     NoteKind,
@@ -935,29 +937,28 @@ def _interruption_note(cancel_source: CancelSource) -> NoteKind:
 
 def interrupted_end(
     reply: rl.Reply,
+    ending: Cancelled | Failed,
     *,
-    cancel_source: CancelSource | None,
-    failure_reason: str | None,
     delivery_started: bool,
 ) -> _NotedEnd | None:
     """Return the noted end of a span whose response was cancelled or failed with a settled outcome.
 
-    ``None`` means the span is released, so its sources retry. ``cancel_source``
-    is ``None`` for a failure. A recorded Stop ends the reply cancelled, as the
-    rules decide for every exit. A failure ends the reply failed with its error
-    note, and its turn is not retried. An interruption of a reply with no event
-    yet leaves Matrix untouched and its sources retry; before delivery starts,
-    the reply shows the interruption's note while its sources retry, and once
-    delivery started, it ends failed with that note.
+    ``None`` means the span is released, so its sources retry. A recorded Stop
+    ends the reply cancelled, as the rules decide for every exit. A failure ends
+    the reply failed with its note, and its turn is not retried; an error's note
+    shows its detail redacted, and never an internal code. An interruption of a
+    reply with no event yet leaves Matrix untouched and its sources retry;
+    before delivery starts, the reply shows the interruption's note while its
+    sources retry, and once delivery started, it ends failed with that note.
     """
     if reply.unapplied_stop:
         return _NotedEnd(rl.ReplyState.CANCELLED, note_segment(NoteKind.CANCELLED))
-    if cancel_source is None:
-        return _NotedEnd(
-            rl.ReplyState.FAILED,
-            note_segment(NoteKind.ERROR, format_error_note(failure_reason or "interrupted")),
-        )
+    if isinstance(ending, Failed):
+        if ending.cause is FailureCause.APPROVAL_NOT_STARTED:
+            return _NotedEnd(rl.ReplyState.FAILED, note_segment(NoteKind.APPROVAL_FAILED))
+        detail = "" if ending.detail is None else redact_sensitive_text(ending.detail)
+        return _NotedEnd(rl.ReplyState.FAILED, note_segment(NoteKind.ERROR, format_error_note(detail)))
     if reply.event_id is None:
         return None
-    note = note_segment(_interruption_note(cancel_source))
+    note = note_segment(_interruption_note(ending.source))
     return _NotedEnd(rl.ReplyState.FAILED if delivery_started else rl.ReplyState.ACTIVE, note)

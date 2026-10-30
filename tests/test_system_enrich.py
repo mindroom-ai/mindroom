@@ -18,7 +18,7 @@ from mindroom.config.models import ModelConfig
 from mindroom.config.plugin import PluginEntryConfig
 from mindroom.delivery_gateway import DeliveryGateway
 from mindroom.dispatch_source import MESSAGE_SOURCE_KIND
-from mindroom.final_delivery import FinalDeliveryOutcome, StreamTransportOutcome
+from mindroom.final_delivery import Completed, FinalDeliveryOutcome, StreamTransportOutcome
 from mindroom.hooks import (
     BUILTIN_EVENT_NAMES,
     EVENT_SYSTEM_ENRICH,
@@ -511,7 +511,7 @@ async def test_agent_delivery_threads_system_enrichment_items(tmp_path: Path, st
             "deliver_final",
             new=AsyncMock(
                 return_value=FinalDeliveryOutcome(
-                    terminal_status="completed",
+                    ending=Completed(),
                     event_id="$response",
                     is_visible_response=True,
                     final_visible_body="handled",
@@ -528,7 +528,7 @@ async def test_agent_delivery_threads_system_enrichment_items(tmp_path: Path, st
             "finalize_streamed_response",
             new=AsyncMock(
                 return_value=FinalDeliveryOutcome(
-                    terminal_status="completed",
+                    ending=Completed(),
                     event_id="$response",
                     is_visible_response=True,
                     final_visible_body="handled",

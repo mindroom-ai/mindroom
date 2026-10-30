@@ -17,7 +17,6 @@ __all__ = [
     "TaskCancelSource",
     "cancel_failure_reason",
     "cancel_message_for_source",
-    "cancel_source_from_failure_reason",
     "classify_cancel_source",
     "current_task_is_process_shutdown",
     "request_task_cancel",
@@ -93,15 +92,6 @@ def _cancel_failure_reason(cancel_source: CancelSource) -> str:
         return "sync_restart_cancelled"
     if cancel_source == "user_stop":
         return "cancelled_by_user"
-    return "interrupted"
-
-
-def cancel_source_from_failure_reason(failure_reason: str | None) -> CancelSource:
-    """Return cancellation provenance from one canonical failure reason."""
-    if failure_reason == "sync_restart_cancelled":
-        return "sync_restart"
-    if failure_reason == "cancelled_by_user":
-        return "user_stop"
     return "interrupted"
 
 

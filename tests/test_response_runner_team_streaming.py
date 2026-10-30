@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-from contextlib import suppress
 from dataclasses import dataclass, replace
 from functools import partial
 from types import SimpleNamespace
@@ -14,7 +13,6 @@ import pytest
 
 from mindroom.bot import AgentBot
 from mindroom.cancellation import (
-    cancel_failure_reason,
     classify_cancel_source,
     current_task_is_process_shutdown,
     request_task_cancel,
@@ -28,7 +26,14 @@ from mindroom.constants import (
 )
 from mindroom.conversation_state_writer import ConversationStateWriter, ConversationStateWriterDeps
 from mindroom.delivery_gateway import DeliveryGateway
-from mindroom.final_delivery import FinalDeliveryOutcome, StreamTransportOutcome
+from mindroom.final_delivery import (
+    Cancelled,
+    Completed,
+    Failed,
+    FailureCause,
+    FinalDeliveryOutcome,
+    StreamTransportOutcome,
+)
 from mindroom.history.session_context import create_scope_session_storage, load_scope_session
 from mindroom.history.types import HistoryScope
 from mindroom.hooks import (
@@ -348,10 +353,7 @@ async def test_process_shutdown_blocks_team_terminal_delivery_after_generation_c
             orchestrator=team_orchestrator(config, runtime_paths),
         )
         deliver_final = AsyncMock(
-            return_value=FinalDeliveryOutcome(
-                terminal_status="completed",
-                event_id="$team-response",
-            ),
+            return_value=FinalDeliveryOutcome(ending=Completed(), event_id="$team-response"),
         )
         _set_gateway_method(coordinator.deps.delivery_gateway, "deliver_final", deliver_final)
         task = asyncio.create_task(
@@ -1129,18 +1131,16 @@ async def test_generate_team_response_helper_persists_minimal_interrupted_histor
         await asyncio.Event().wait()
         yield AttemptResolved(CompletedAttempt())
 
-    async def fake_run_cancellable_response(**kwargs: object) -> str:
-        response_function = cast("Callable[[str | None], Awaitable[object]]", kwargs["response_function"])
-        on_cancelled = cast("Callable[[str], None]", kwargs["on_cancelled"])
+    async def fake_run_cancellable_response(**kwargs: object) -> FinalDeliveryOutcome | Cancelled:
+        response_function = cast("Callable[[str | None], Awaitable[FinalDeliveryOutcome]]", kwargs["response_function"])
         task = asyncio.create_task(response_function("$thinking"))
         await started.wait()
         task.cancel()
         try:
-            await task
+            return await task
         except asyncio.CancelledError as cancelled:
             # The attempt runner reports how its attempt was cancelled, as a Stop's reaction or a restart does.
-            on_cancelled(cancel_failure_reason(classify_cancel_source(cancelled)))
-        return "$thinking"
+            return Cancelled(classify_cancel_source(cancelled))
 
     with (
         patch.object(
@@ -1264,12 +1264,11 @@ async def test_generate_team_response_helper_preserves_visible_stream_when_final
             "finalize_streamed_response",
             AsyncMock(
                 return_value=FinalDeliveryOutcome(
-                    terminal_status="cancelled",
+                    ending=Cancelled("interrupted"),
                     event_id="$team-msg",
                     is_visible_response=True,
                     final_visible_body="Team hello",
                     delivery_kind="sent",
-                    failure_reason="delivery_cancelled",
                 ),
             ),
         )
@@ -1397,12 +1396,11 @@ async def test_generate_team_response_helper_preserves_visible_stream_on_late_fi
             "finalize_streamed_response",
             AsyncMock(
                 return_value=FinalDeliveryOutcome(
-                    terminal_status="error",
+                    ending=Failed(FailureCause.ERROR, "delivery crash"),
                     event_id="$team-msg",
                     is_visible_response=True,
                     final_visible_body="Team hello",
                     delivery_kind="sent",
-                    failure_reason="delivery crash",
                 ),
             ),
         )
@@ -1466,11 +1464,7 @@ async def test_generate_team_response_helper_settles_late_failure_without_finali
             coordinator.deps.delivery_gateway,
             "finalize_streamed_response",
             AsyncMock(
-                return_value=FinalDeliveryOutcome(
-                    terminal_status="error",
-                    event_id=None,
-                    failure_reason="stream boom",
-                ),
+                return_value=FinalDeliveryOutcome(ending=Failed(FailureCause.ERROR, "stream boom")),
             ),
         )
 
@@ -1505,14 +1499,12 @@ async def test_generate_team_response_helper_persists_original_user_message_for_
     leader = ScriptedModel([[Await(stopped)]])
     install_model_providers(monkeypatch, {"default": leader})
 
-    async def fake_run_cancellable_response(**kwargs: object) -> str:
-        response_function = cast("Callable[[str | None], Awaitable[object]]", kwargs["response_function"])
-        on_cancelled = cast("Callable[[str], None] | None", kwargs.get("on_cancelled"))
-        with suppress(asyncio.CancelledError):
-            await response_function("$thinking")
-        if on_cancelled is not None:
-            on_cancelled("cancelled_by_user")
-        return "$thinking"
+    async def fake_run_cancellable_response(**kwargs: object) -> FinalDeliveryOutcome | Cancelled:
+        response_function = cast("Callable[[str | None], Awaitable[FinalDeliveryOutcome]]", kwargs["response_function"])
+        try:
+            return await response_function("$thinking")
+        except asyncio.CancelledError:
+            return Cancelled("user_stop")
 
     with (
         patch.object(
@@ -1597,15 +1589,13 @@ async def test_generate_team_response_helper_emits_session_started_after_persist
         raise asyncio.CancelledError(cancel_message)
         yield
 
-    async def fake_run_cancellable_response(**kwargs: object) -> str:
-        response_function = cast("Callable[[str | None], Awaitable[object]]", kwargs["response_function"])
-        on_cancelled = cast("Callable[[str], None]", kwargs["on_cancelled"])
+    async def fake_run_cancellable_response(**kwargs: object) -> FinalDeliveryOutcome | Cancelled:
+        response_function = cast("Callable[[str | None], Awaitable[FinalDeliveryOutcome]]", kwargs["response_function"])
         try:
-            await response_function("$thinking")
+            return await response_function("$thinking")
         except asyncio.CancelledError as cancelled:
             # The attempt runner reports how its attempt was cancelled, as a Stop's reaction or a restart does.
-            on_cancelled(cancel_failure_reason(classify_cancel_source(cancelled)))
-        return "$thinking"
+            return Cancelled(classify_cancel_source(cancelled))
 
     with (
         patch.object(
@@ -1669,14 +1659,12 @@ async def test_generate_team_response_helper_streaming_emits_session_started_aft
 
     registry = HookRegistry.from_plugins([_plugin("session-hooks", [started])])
 
-    async def fake_run_cancellable_response(**kwargs: object) -> str:
-        response_function = cast("Callable[[str | None], Awaitable[object]]", kwargs["response_function"])
-        on_cancelled = cast("Callable[[str], None] | None", kwargs.get("on_cancelled"))
-        with suppress(asyncio.CancelledError):
-            await response_function("$thinking")
-        if on_cancelled is not None:
-            on_cancelled("cancelled_by_user")
-        return "$thinking"
+    async def fake_run_cancellable_response(**kwargs: object) -> FinalDeliveryOutcome | Cancelled:
+        response_function = cast("Callable[[str | None], Awaitable[FinalDeliveryOutcome]]", kwargs["response_function"])
+        try:
+            return await response_function("$thinking")
+        except asyncio.CancelledError:
+            return Cancelled("user_stop")
 
     with (
         patch.object(
@@ -1935,10 +1923,10 @@ async def test_generate_team_response_helper_merges_raw_prompt_into_model_prompt
 
 
 @pytest.mark.asyncio
-async def test_generate_team_response_helper_uses_delivery_result_failure_reason_for_cancelled_stream(
+async def test_generate_team_response_helper_uses_delivery_result_ending_for_failed_stream(
     tmp_path: Path,
 ) -> None:
-    """Typed gateway outcomes should preserve their canonical failure_reason."""
+    """A typed gateway outcome's ending ends the team reply."""
     runtime_paths = _runtime_paths(tmp_path)
     config = bind_runtime_paths(_config_with_team(), runtime_paths)
     bot = _make_bot(tmp_path, config=config, runtime_paths=runtime_paths, agent_name="ultimate")
@@ -1972,11 +1960,7 @@ async def test_generate_team_response_helper_uses_delivery_result_failure_reason
             coordinator.deps.delivery_gateway,
             "finalize_streamed_response",
             AsyncMock(
-                return_value=FinalDeliveryOutcome(
-                    terminal_status="error",
-                    event_id=None,
-                    failure_reason="stream failure",
-                ),
+                return_value=FinalDeliveryOutcome(ending=Failed(FailureCause.ERROR, "stream failure")),
             ),
         )
 

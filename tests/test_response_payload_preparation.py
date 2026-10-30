@@ -17,7 +17,7 @@ from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
 from mindroom.conversation_resolver import MessageContext
-from mindroom.final_delivery import FinalDeliveryOutcome
+from mindroom.final_delivery import Completed, FinalDeliveryOutcome
 from mindroom.hooks import MessageEnvelope
 from mindroom.inbound_turn_normalizer import DispatchPayload
 from mindroom.matrix.thread_history_result import ThreadHistoryResult
@@ -319,13 +319,15 @@ async def test_generate_response_invokes_preparer_exactly_once_under_lock(tmp_pa
         lock_held_at_prepare.append(coordinator.has_active_response_for_target(target))
         return await real_prepare(request)
 
-    async def fake_run_cancellable_response(**kwargs: object) -> str:
-        response_function = cast("Callable[[object | None], Awaitable[object]]", kwargs["response_function"])
-        await response_function(None)
-        return "$response"
+    async def fake_run_cancellable_response(**kwargs: object) -> FinalDeliveryOutcome:
+        response_function = cast(
+            "Callable[[object | None], Awaitable[FinalDeliveryOutcome]]",
+            kwargs["response_function"],
+        )
+        return await response_function(None)
 
     delivered = FinalDeliveryOutcome(
-        terminal_status="completed",
+        ending=Completed(),
         event_id="$response",
         is_visible_response=True,
         final_visible_body="ok",

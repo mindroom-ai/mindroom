@@ -10,6 +10,7 @@ import pytest
 from mindroom.bot import AgentBot
 from mindroom.constants import STREAM_STATUS_KEY, STREAM_STATUS_PENDING
 from mindroom.delivery_gateway import DeliveryGateway
+from mindroom.final_delivery import Failed, FailureCause, FinalDeliveryOutcome, TurnProgress
 from mindroom.matrix.client_delivery import (
     DeliveredMatrixEvent,
     MatrixDeliveryFailure,
@@ -19,7 +20,7 @@ from mindroom.matrix.client_delivery import (
 from mindroom.message_target import MessageTarget
 from mindroom.reply_lifecycle import ReplyState, SpanOutcome
 from mindroom.reply_presentation import decode_presentation, render_body
-from mindroom.response_runner import DeliveryProgress, ResponseRunner
+from mindroom.response_runner import ResponseRunner
 from mindroom.response_sources import ResponseSources
 from tests.ai_user_id_helpers import (
     _build_response_runner,
@@ -167,8 +168,7 @@ async def test_one_turn_never_shows_two_placeholders(
             apply_post_response_effects=AsyncMock(),
         ),
     ):
-        with pytest.raises(RuntimeError, match="process died before the answer"):
-            await coordinator.generate_response(_plain_request(_target()))
+        await coordinator.generate_response(_plain_request(_target()))
         assert len(homeserver.placeholders()) <= 1, "the turn itself put two placeholders in the room"
 
         # The turn died before enqueueing FINAL, so nothing supersedes the
@@ -187,16 +187,13 @@ async def test_one_turn_never_shows_two_placeholders(
     assert {status for _, status in homeserver.placeholder_sends} == {STREAM_STATUS_PENDING}
 
 
-def test_delivery_progress_transitions() -> None:
-    """The delivery-progress state machine tracks delivery start and terminal reasons."""
-    progress = DeliveryProgress()
+def test_turn_progress_transitions() -> None:
+    """The turn progress tracks delivery start and leaves the ending to the turn's settlement."""
+    progress = TurnProgress()
 
     progress.note_delivery_started(None)
-    assert progress.stage_started is True
-
-    progress.note_task_cancelled("cancelled_by_user")
-    assert progress.cancelled is True
-    assert progress.failure_reason == "cancelled_by_user"
+    assert progress.delivery_started is True
+    assert progress.ending is None
 
 
 @pytest.mark.asyncio
@@ -237,8 +234,7 @@ async def test_agent_post_delivery_failure_settles_error_outcome(tmp_path: Path)
     assert final == "**[Response interrupted by an error: delivery pipe burst]**"
     mock_finalize.assert_not_awaited()
     assert len(effect_outcomes) == 1
-    assert effect_outcomes[0].terminal_status == "error"
-    assert effect_outcomes[0].failure_reason == "delivery pipe burst"
+    assert effect_outcomes[0].ending == Failed(FailureCause.ERROR, "delivery pipe burst")
     # The turn's record keeps the real attempt id on raising paths.
     assert effect_response_outcomes[0].response_run_id == "run-attempt-1"
 
@@ -284,14 +280,13 @@ async def test_agent_regeneration_pre_delivery_failure_leaves_prior_answer_intac
             typing_indicator=_noop_typing,
             apply_post_response_effects=AsyncMock(side_effect=fake_post_effects),
         ),
-        pytest.raises(RuntimeError, match="regen prep exploded"),
     ):
         await coordinator.generate_response(regen_request)
 
     # The regeneration ended before its first write, so the old answer stays
     # shown and the edit is done: nothing is redacted or edited.
     assert len(effect_outcomes) == 1
-    assert effect_outcomes[0].terminal_status == "error"
+    assert effect_outcomes[0].ending == Failed(FailureCause.ERROR, "regen prep exploded")
     reply = await bot._reply_runtime.store.replies.for_event("$prior_answer")
     assert reply is not None
     assert reply.state is ReplyState.COMPLETED
@@ -373,13 +368,12 @@ async def test_team_post_delivery_failure_settles_error_outcome_without_finalize
     # Post-start failures settle bare: no finalize call, terminal error effects.
     assert finalize_requests == []
     assert len(effect_outcomes) == 1
-    assert effect_outcomes[0].terminal_status == "error"
-    assert "delivery pipe burst" in str(effect_outcomes[0].failure_reason)
+    assert effect_outcomes[0].ending == Failed(FailureCause.ERROR, "delivery pipe burst")
 
 
 @pytest.mark.asyncio
-async def test_team_pre_delivery_failure_ends_the_reply_failed_and_reraises(tmp_path: Path) -> None:
-    """A team failure before delivery shows its error on the placeholder, settles the turn, and re-raises."""
+async def test_team_pre_delivery_failure_ends_the_reply_failed(tmp_path: Path) -> None:
+    """A team failure before delivery shows its error on the placeholder and settles the turn without raising."""
     runtime_paths = _runtime_paths(tmp_path)
     config = bind_runtime_paths(_config_with_team(), runtime_paths)
     bot = MagicMock(spec=AgentBot)
@@ -395,11 +389,7 @@ async def test_team_pre_delivery_failure_ends_the_reply_failed_and_reraises(tmp_
 
     async def fake_finalize(finalize_request: object) -> object:
         finalize_requests.append(finalize_request)
-        outcome = MagicMock()
-        outcome.terminal_status = "error"
-        outcome.final_visible_event_id = "$thinking"
-        outcome.mark_handled = True
-        return outcome
+        return FinalDeliveryOutcome(ending=Failed(FailureCause.ERROR), event_id="$thinking", is_visible_response=True)
 
     with (
         patch("mindroom.response_runner.should_use_streaming", new=AsyncMock(return_value=False)),
@@ -437,7 +427,6 @@ async def test_team_pre_delivery_failure_ends_the_reply_failed_and_reraises(tmp_
                 "_run_cancellable_response",
                 new=AsyncMock(side_effect=_run_response_function_directly),
             ),
-            pytest.raises(RuntimeError, match="team prep exploded"),
         ):
             await coordinator.generate_team_response_helper(
                 _response_request(prompt="Hello", user_id="@alice:localhost", thread_id="$thread-root"),
@@ -457,8 +446,7 @@ async def test_team_pre_delivery_failure_ends_the_reply_failed_and_reraises(tmp_
     assert spans[-1].outcome is SpanOutcome.FAILED
 
 
-async def _run_response_function_directly(**kwargs: object) -> str:
+async def _run_response_function_directly(**kwargs: object) -> FinalDeliveryOutcome:
     """Drive the locked closure like the attempt runner would, without swallowing."""
-    response_function = cast("Callable[[str | None], Awaitable[None]]", kwargs["response_function"])
-    await response_function("$thinking")
-    return "$thinking"
+    response_function = cast("Callable[[str | None], Awaitable[FinalDeliveryOutcome]]", kwargs["response_function"])
+    return await response_function("$thinking")

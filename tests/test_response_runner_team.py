@@ -20,7 +20,7 @@ from mindroom.dispatch_source import (
     MESSAGE_SOURCE_KIND,
     SILENT_SCHEDULE_SOURCE_KIND,
 )
-from mindroom.final_delivery import StreamTransportOutcome
+from mindroom.final_delivery import FinalDeliveryOutcome, StreamTransportOutcome
 from mindroom.hooks import (
     EVENT_MESSAGE_AFTER_RESPONSE,
     EVENT_MESSAGE_BEFORE_RESPONSE,
@@ -1221,11 +1221,10 @@ class TestAgentBot(AgentBotTestBase):
         async def noop_typing_indicator(*_args: object, **_kwargs: object) -> AsyncGenerator[None]:
             yield
 
-        async def run_cancellable_response(*_args: object, **kwargs: object) -> str:
-            response_kwargs = cast("dict[str, Callable[[str | None], Awaitable[None]]]", kwargs)
+        async def run_cancellable_response(*_args: object, **kwargs: object) -> FinalDeliveryOutcome:
+            response_kwargs = cast("dict[str, Callable[[str | None], Awaitable[FinalDeliveryOutcome]]]", kwargs)
             response_function = response_kwargs["response_function"]
-            await response_function("$placeholder")
-            return "$placeholder"
+            return await response_function("$placeholder")
 
         async def fake_team_response_stream(*_args: object, **_kwargs: object) -> AsyncGenerator[str, None]:
             yield "stream chunk"

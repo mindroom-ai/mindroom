@@ -25,7 +25,7 @@ from mindroom.constants import (
 from mindroom.delivery_gateway import FinalDeliveryRequest, ResponseIdentity
 from mindroom.dispatch_source import EDIT_SOURCE_KIND
 from mindroom.event_journal import DeliveryStage, EventClass, EventKind, InboundEvent
-from mindroom.final_delivery import FinalDeliveryOutcome
+from mindroom.final_delivery import Completed, FinalDeliveryOutcome, Owed, TurnEnding
 from mindroom.history.types import HistoryScope
 from mindroom.llm.media import Audio
 from mindroom.llm.runs import RunRecord
@@ -246,28 +246,20 @@ def _team_test_config(tmp_path: Path) -> Config:
 def _outcome(
     _state: str,
     *,
-    terminal_status: str,
+    ending: TurnEnding,
     final_visible_event_id: str | None = None,
     last_physical_stream_event_id: str | None = None,
     final_visible_body: str | None = None,
     delivery_kind: str | None = None,
-    failure_reason: str | None = None,
 ) -> FinalDeliveryOutcome:
     visible_event_id = final_visible_event_id or last_physical_stream_event_id
     return FinalDeliveryOutcome(
-        terminal_status=terminal_status,
+        ending=ending,
         event_id=visible_event_id,
         is_visible_response=visible_event_id is not None,
         final_visible_body=final_visible_body,
         delivery_kind=delivery_kind,
-        failure_reason=failure_reason,
     )
-
-
-def _handled_response_event_id(outcome: FinalDeliveryOutcome | str | None) -> str | None:
-    if isinstance(outcome, str) or outcome is None:
-        return outcome
-    return outcome.event_id if outcome.mark_handled and outcome.is_visible_response and not outcome.suppressed else None
 
 
 def _generate_response_with_locked_callback(
@@ -932,7 +924,7 @@ async def test_team_bot_regenerates_edits_against_team_history_storage(tmp_path:
             new=AsyncMock(
                 return_value=_outcome(
                     "final_visible_delivery",
-                    terminal_status="completed",
+                    ending=Completed(),
                     final_visible_event_id=response_event_id,
                     final_visible_body="team response",
                     delivery_kind="edited",
@@ -1915,7 +1907,7 @@ async def test_handle_message_edit_does_not_mark_regeneration_success_when_exist
             regenerates=request.edit_regeneration,
         )
         # The failed edit stays owed to recovery instead of ending the reply.
-        assert outcome.terminal_status == "suspended"
+        assert outcome.ending == Owed()
         return outcome.event_id
 
     mock_generate_response = AsyncMock(side_effect=fail_visible_update)

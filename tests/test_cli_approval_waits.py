@@ -8,8 +8,8 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from mindroom.agent_cli.cli_approval_waits import CliApprovalWaits
-from mindroom.final_delivery import FinalDeliveryOutcome
-from mindroom.response_runner import DeliveryProgress
+from mindroom.final_delivery import AwaitingApproval, Cancelled, Completed, Owed, TurnProgress
+from mindroom.reply_lifecycle import ApprovalFailureKind
 
 if TYPE_CHECKING:
     from mindroom.approval.continuation_rules import CliExit
@@ -20,7 +20,7 @@ if TYPE_CHECKING:
 pytestmark = pytest.mark.asyncio
 
 
-async def _exit_after_an_approved_cli_call(progress: DeliveryProgress) -> CliExit:
+async def _exit_after_an_approved_cli_call(progress: TurnProgress) -> CliExit:
     """Run a live scope whose CLI call paused and was approved in place, then end it with ``progress``."""
     exits: list[CliExit] = []
 
@@ -47,18 +47,36 @@ async def _exit_after_an_approved_cli_call(progress: DeliveryProgress) -> CliExi
     return trigger
 
 
-@pytest.mark.xfail(strict=True, reason="bug: an owed answer reads as an approval suspension")
-async def test_an_owed_answer_does_not_read_as_an_approval_suspension() -> None:
-    """A whole answer recorded but not yet acknowledged ends the scope unsuspended, so its approval finishes.
+async def test_an_owed_answer_ends_the_scope_suspended() -> None:
+    """A whole answer recorded but not yet acknowledged leaves its claimed continuation to dispatch.
 
-    Read as suspended, the rules wait on a continuation this response already claimed, which then holds the
-    conversation until a restart.
+    The continuation can only finish through an acknowledged or refused FINAL, so the scope reports the response
+    suspended and dispatch finishes it once the outbox has delivered the answer.
     """
-    progress = DeliveryProgress()
-    # The outcome the gateway reports for an answer whose FINAL is recorded but not yet in the room.
-    progress.settle(FinalDeliveryOutcome(terminal_status="suspended", event_id=None, failure_reason="delivery_failed"))
+    trigger = await _exit_after_an_approved_cli_call(TurnProgress(ending=Owed()))
 
-    trigger = await _exit_after_an_approved_cli_call(progress)
+    assert trigger.suspended is True
+    assert trigger.live is True
+
+
+async def test_a_later_pause_ends_the_scope_suspended() -> None:
+    """A response that paused again after its CLI call was approved leaves that pause's continuation waiting."""
+    trigger = await _exit_after_an_approved_cli_call(TurnProgress(ending=AwaitingApproval()))
+
+    assert trigger.suspended is True
+
+
+async def test_a_completed_answer_ends_the_scope_unsuspended() -> None:
+    """A delivered answer lets the rules finish the approval the response claimed."""
+    trigger = await _exit_after_an_approved_cli_call(TurnProgress(ending=Completed()))
 
     assert trigger.suspended is False
-    assert trigger.live is True
+
+
+async def test_a_stopped_response_fails_its_cli_call_as_stopped() -> None:
+    """A Stop fails the paused call with the Stop's kind, never a reason code."""
+    trigger = await _exit_after_an_approved_cli_call(TurnProgress(ending=Cancelled("user_stop")))
+
+    assert trigger.suspended is False
+    assert trigger.failure.kind is ApprovalFailureKind.USER_STOP
+    assert trigger.failure.detail is None

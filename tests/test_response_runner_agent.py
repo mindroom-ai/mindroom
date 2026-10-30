@@ -43,7 +43,19 @@ from mindroom.dispatch_source import (
     SCHEDULED_SOURCE_KIND,
     SILENT_SCHEDULE_SOURCE_KIND,
 )
-from mindroom.final_delivery import FinalDeliveryOutcome, StreamTransportOutcome
+from mindroom.final_delivery import (
+    AwaitingApproval,
+    Cancelled,
+    Completed,
+    Failed,
+    FailureCause,
+    FinalDeliveryOutcome,
+    StreamTransportOutcome,
+    Suppressed,
+    Suppression,
+    TurnProgress,
+    outcome_label,
+)
 from mindroom.history.storage import _with_scope_state
 from mindroom.history.types import CompactionLifecycleStart, HistoryScope, HistoryScopeState
 from mindroom.hooks import (
@@ -68,13 +80,12 @@ from mindroom.message_target import MessageTarget
 from mindroom.reply_scope import ReplyRuntime
 from mindroom.reply_turn.enrichment import _cached_room_display_name, with_matrix_message_target
 from mindroom.reply_turn.request import ResponseRequest, merge_response_extra_content
-from mindroom.response_lifecycle import _response_outcome_label
 from mindroom.response_payload_preparation import (
     DispatchPayloadInputs,
     ResponsePayloadPreparation,
     ResponsePayloadPreparer,
 )
-from mindroom.response_runner import DeliveryProgress, ResponseRunner
+from mindroom.response_runner import ResponseRunner
 from mindroom.response_sources import ResponseSources
 from mindroom.response_turn import PausedAttempt, ResponsePausedForApproval
 from mindroom.session_storage.types import ConversationSession
@@ -1037,7 +1048,7 @@ class TestAgentBot(AgentBotTestBase):
                 streaming=True,
             )
 
-        assert delivery.terminal_status == "cancelled"
+        assert isinstance(delivery.ending, Cancelled)
         # The extra_content dict (mutable reference) was populated during iteration
         extra = captured_extra_content_ref[0]
         assert extra is not None
@@ -1091,19 +1102,18 @@ class TestAgentBot(AgentBotTestBase):
                 streaming=True,
             )
 
-        assert delivery.terminal_status == "error"
-        assert delivery.failure_reason == "boom"
+        assert delivery.ending == Failed(FailureCause.ERROR, "boom")
         assert _visible_response_event_id(delivery) == "$terminal1"
         note = bot.client.room_send.await_args.kwargs["content"]["m.new_content"]["body"]
         assert note.endswith("**[Response interrupted by an error: boom]**")
 
     @pytest.mark.asyncio
-    async def test_a_stream_failure_with_a_stable_name_reports_that_name(
+    async def test_a_named_stream_failure_ends_the_reply_with_its_error_text(
         self,
         mock_agent_user: AgentMatrixUser,
         tmp_path: Path,
     ) -> None:
-        """A stream failure the streamer names, such as a refused flush before an approval pause, reports that name."""
+        """A stream failure the streamer names, such as a refused flush before an approval pause, ends with its error."""
 
         async def mock_streaming_response() -> AsyncGenerator[str, None]:
             yield "chunk"
@@ -1147,8 +1157,10 @@ class TestAgentBot(AgentBotTestBase):
                 streaming=True,
             )
 
-        assert delivery.terminal_status == "error"
-        assert delivery.failure_reason == "suspension_presentation_delivery_failed"
+        assert delivery.ending == Failed(
+            FailureCause.ERROR,
+            "Stream suspension presentation delivery failed: refused",
+        )
         # The span exit wrote the note over the placeholder.
         assert delivery.delivery_kind == "edited"
         assert "Response interrupted by an error" in delivery.response_text
@@ -1450,7 +1462,7 @@ class TestAgentBot(AgentBotTestBase):
                 ),
             )
 
-        assert delivery.suppressed is True
+        assert delivery.ending == Suppressed(Suppression.HOOK)
         assert delivery.event_id is None
         redact_message_event.assert_awaited_once_with(
             room_id="!test:localhost",
@@ -1521,7 +1533,7 @@ class TestAgentBot(AgentBotTestBase):
                 ),
             )
 
-        assert delivery.suppressed is True
+        assert delivery.ending == Suppressed(Suppression.HOOK)
         assert delivery.event_id == "$existing"
         redact_message_event.assert_not_awaited()
         assert _handled_response_event_id(delivery) is None
@@ -1552,7 +1564,7 @@ class TestAgentBot(AgentBotTestBase):
         gateway = replace_delivery_gateway_deps(bot, redact_message_event=redact_message_event)
         mock_deliver_final = AsyncMock(
             return_value=FinalDeliveryOutcome(
-                terminal_status="completed",
+                ending=Completed(),
                 event_id="$streaming",
                 is_visible_response=True,
                 final_visible_body="updated text",
@@ -1577,7 +1589,7 @@ class TestAgentBot(AgentBotTestBase):
             ),
         )
 
-        assert outcome.terminal_status == "completed"
+        assert outcome.ending == Completed()
         assert outcome.final_visible_event_id == "$streaming"
         assert outcome.final_visible_body == "chunk"
         mock_deliver_final.assert_not_awaited()
@@ -1632,17 +1644,16 @@ class TestAgentBot(AgentBotTestBase):
                 ),
             )
 
-        assert delivery.terminal_status == "completed"
+        assert delivery.ending == Completed()
         assert _visible_response_event_id(delivery) == "$existing"
         assert _handled_response_event_id(delivery) == "$existing"
-        assert delivery.mark_handled is True
 
-    def test_response_outcome_prefers_terminal_status_over_delivery_kind(self) -> None:
+    def test_response_outcome_prefers_ending_over_delivery_kind(self) -> None:
         """Pipeline outcome summaries must not report cancelled or error states as plain send/edit success."""
         assert (
-            _response_outcome_label(
+            outcome_label(
                 _outcome(
-                    terminal_status="cancelled",
+                    Cancelled("user_stop"),
                     final_visible_event_id="$cancelled",
                     visible_response_event_id="$cancelled",
                     turn_completion_event_id="$cancelled",
@@ -1653,9 +1664,9 @@ class TestAgentBot(AgentBotTestBase):
             == "cancelled"
         )
         assert (
-            _response_outcome_label(
+            outcome_label(
                 _outcome(
-                    terminal_status="error",
+                    Failed(FailureCause.ERROR, "boom"),
                     final_visible_event_id="$error",
                     visible_response_event_id="$error",
                     final_visible_body="boom",
@@ -1815,11 +1826,10 @@ class TestAgentBot(AgentBotTestBase):
     ) -> None:
         """Top-level response generation should preserve current-turn time as request data."""
 
-        async def run_cancellable_response(*_args: object, **kwargs: object) -> str:
-            response_kwargs = cast("dict[str, Callable[[str | None], Awaitable[None]]]", kwargs)
+        async def run_cancellable_response(*_args: object, **kwargs: object) -> FinalDeliveryOutcome:
+            response_kwargs = cast("dict[str, Callable[[str | None], Awaitable[FinalDeliveryOutcome]]]", kwargs)
             response_function = response_kwargs["response_function"]
-            await response_function(None)
-            return "$response"
+            return await response_function(None)
 
         scheduled_tasks: list[asyncio.Task[None]] = []
 
@@ -1919,11 +1929,10 @@ class TestAgentBot(AgentBotTestBase):
     ) -> None:
         """Memory storage should receive the raw conversation, not the model-prefixed version."""
 
-        async def run_cancellable_response(*_args: object, **kwargs: object) -> str:
-            response_kwargs = cast("dict[str, Callable[[str | None], Awaitable[None]]]", kwargs)
+        async def run_cancellable_response(*_args: object, **kwargs: object) -> FinalDeliveryOutcome:
+            response_kwargs = cast("dict[str, Callable[[str | None], Awaitable[FinalDeliveryOutcome]]]", kwargs)
             response_function = response_kwargs["response_function"]
-            await response_function(None)
-            return "$response"
+            return await response_function(None)
 
         scheduled_tasks: list[asyncio.Task[None]] = []
         stored_calls: list[tuple[tuple[object, ...], dict[str, object]]] = []
@@ -2047,11 +2056,13 @@ class TestAgentBot(AgentBotTestBase):
     ) -> None:
         """Silent scheduled turns override an enabled room without changing ordinary schedules."""
 
-        async def run_cancellable_response(*_args: object, **kwargs: object) -> str | None:
-            response_function = cast("Callable[[str | None], Awaitable[None]]", kwargs["response_function"])
+        async def run_cancellable_response(*_args: object, **kwargs: object) -> FinalDeliveryOutcome:
+            response_function = cast(
+                "Callable[[str | None], Awaitable[FinalDeliveryOutcome]]",
+                kwargs["response_function"],
+            )
             existing_event_id = cast("str | None", kwargs["existing_event_id"])
-            await response_function(existing_event_id)
-            return existing_event_id
+            return await response_function(existing_event_id)
 
         config = self._config_for_storage(tmp_path)
         bot = make_test_agent_bot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
@@ -2059,7 +2070,7 @@ class TestAgentBot(AgentBotTestBase):
         _set_knowledge_for_agent(bot, MagicMock(return_value=None))
         deliver = delivered_turn(
             FinalDeliveryOutcome(
-                terminal_status="completed",
+                ending=Completed(),
                 event_id="$response",
                 is_visible_response=True,
                 final_visible_body="Handled",
@@ -2331,10 +2342,12 @@ class TestAgentBot(AgentBotTestBase):
     ) -> None:
         """Queued turns should replace stale pending history with a fresh post-lock snapshot."""
 
-        async def run_cancellable_response(*_args: object, **kwargs: object) -> str:
-            response_function = cast("Callable[[str | None], Awaitable[None]]", kwargs["response_function"])
-            await response_function(None)
-            return "$response"
+        async def run_cancellable_response(*_args: object, **kwargs: object) -> FinalDeliveryOutcome:
+            response_function = cast(
+                "Callable[[str | None], Awaitable[FinalDeliveryOutcome]]",
+                kwargs["response_function"],
+            )
+            return await response_function(None)
 
         def passthrough_prepare_context(
             prompt: str,
@@ -2435,10 +2448,12 @@ class TestAgentBot(AgentBotTestBase):
     ) -> None:
         """An agent with its own timezone sees the thread's user messages timed in that zone, not the global one."""
 
-        async def run_cancellable_response(*_args: object, **kwargs: object) -> str:
-            response_function = cast("Callable[[str | None], Awaitable[None]]", kwargs["response_function"])
-            await response_function(None)
-            return "$response"
+        async def run_cancellable_response(*_args: object, **kwargs: object) -> FinalDeliveryOutcome:
+            response_function = cast(
+                "Callable[[str | None], Awaitable[FinalDeliveryOutcome]]",
+                kwargs["response_function"],
+            )
+            return await response_function(None)
 
         config = self._config_for_storage(tmp_path)
         config.timezone = "UTC"
@@ -2551,7 +2566,7 @@ class TestAgentBot(AgentBotTestBase):
                 "_deliver_turn",
                 new=delivered_turn(
                     FinalDeliveryOutcome(
-                        terminal_status="completed",
+                        ending=Completed(),
                         event_id="$thinking",
                         is_visible_response=True,
                         final_visible_body="ok",
@@ -2967,10 +2982,12 @@ class TestAgentBot(AgentBotTestBase):
     ) -> None:
         """Late cancellation should not skip agent post-response cleanup after delivery."""
 
-        async def run_cancellable_response(*_args: object, **kwargs: object) -> str:
-            response_function = cast("Callable[[str | None], Awaitable[None]]", kwargs["response_function"])
-            await response_function(None)
-            return "$response"
+        async def run_cancellable_response(*_args: object, **kwargs: object) -> FinalDeliveryOutcome:
+            response_function = cast(
+                "Callable[[str | None], Awaitable[FinalDeliveryOutcome]]",
+                kwargs["response_function"],
+            )
+            return await response_function(None)
 
         started = asyncio.Event()
         release = asyncio.Event()
@@ -2989,7 +3006,7 @@ class TestAgentBot(AgentBotTestBase):
                 "_deliver_turn",
                 new=delivered_turn(
                     FinalDeliveryOutcome(
-                        terminal_status="completed",
+                        ending=Completed(),
                         event_id="$response",
                         is_visible_response=True,
                         final_visible_body="ok",
@@ -3069,16 +3086,11 @@ class TestAgentBot(AgentBotTestBase):
             ),
             on_no_response_handled=record_no_response,
         )
-        progress = DeliveryProgress()
-        suppressed = FinalDeliveryOutcome(
-            terminal_status="cancelled",
-            event_id=None,
-            failure_reason="suppressed_by_hook",
-            suppressed=True,
-        )
+        progress = TurnProgress()
+        suppressed = FinalDeliveryOutcome(ending=Suppressed(Suppression.HOOK))
 
-        async def generate(_message_id: str | None) -> None:
-            progress.settle(suppressed)
+        async def generate(_message_id: str | None) -> FinalDeliveryOutcome:
+            return suppressed
 
         runner = unwrap_extracted_collaborator(bot._response_runner)
         identity = runner.response_identity(request, response_kind="ai")
@@ -3146,7 +3158,7 @@ class TestAgentBot(AgentBotTestBase):
             ),
         )
         waiting = FinalDeliveryOutcome(
-            terminal_status="suspended",
+            ending=AwaitingApproval(),
             event_id="$waiting",
             is_visible_response=True,
             final_visible_body="Waiting for approval",

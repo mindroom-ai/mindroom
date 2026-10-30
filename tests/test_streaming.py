@@ -350,7 +350,7 @@ async def test_placeholder_progressive_edits_and_final_tool_trace(config: Config
     assert final.content[STREAM_STATUS_KEY] == STREAM_STATUS_COMPLETED
     assert final.content[_TOOL_TRACE_KEY]["events"] == completed_trace
 
-    assert outcome.failure_reason is None
+    assert outcome.failed is False
     assert outcome.visible_body_state == "visible_body"
     assert outcome.visible_event_id == "$stream_1"
     assert outcome.visible_body_text == final.display_text
@@ -597,7 +597,7 @@ async def test_stream_reuses_markdown_without_reusing_delivery_metadata(config: 
                 await streaming._send_or_edit_message(client)
                 outcome = await streaming.finalize(client)
 
-            assert outcome.failure_reason is None
+            assert outcome.failed is False
             assert [op.content[STREAM_STATUS_KEY] for op in gateway.ops] == ["pending", "streaming", "completed"]
             assert [op.content["msgtype"] for op in gateway.ops] == ["m.notice", "m.notice", "m.text"]
             assert all(op.content["formatted_body"] == "<p>Hello <strong>world</strong></p>\n" for op in gateway.ops)

@@ -12,33 +12,50 @@ from typing import TYPE_CHECKING, Protocol
 from mindroom.agent_cli.events import emit_cli_suspension
 from mindroom.agent_cli.lifetime import current_cli_lifetime
 from mindroom.approval.continuation_rules import CliExit
-from mindroom.approval.failure import response_failure
-from mindroom.event_journal import ApprovalDecision
-from mindroom.orchestration.runtime import (
-    cancel_failure_reason,
-    cancel_source_from_failure_reason,
-    classify_cancel_source,
-    current_task_is_process_shutdown,
+from mindroom.approval.failure import cancelled_failure
+from mindroom.event_journal import ApprovalDecision, ApprovalFailure
+from mindroom.final_delivery import (
+    AwaitingApproval,
+    Cancelled,
+    Failed,
+    FailureCause,
+    Owed,
+    Suppressed,
+    TurnEnding,
+    approval_failure,
 )
+from mindroom.orchestration.runtime import classify_cancel_source, current_task_is_process_shutdown
 from mindroom.response_turn import ResponsePausedForApproval, apply_exact_approval_decisions
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Awaitable, Callable
 
+    from mindroom.cancellation import CancelSource
     from mindroom.event_journal import ApprovalContinuation
     from mindroom.event_journal.approval_store import ApprovalStore
-    from mindroom.final_delivery import FinalDeliveryOutcome
     from mindroom.llm.runs import RunRequirement
     from mindroom.message_target import MessageTarget
     from mindroom.response_turn import PausedAttempt
 
 
 class _ApprovalProgress(Protocol):
-    failure_reason: str | None
-    cancelled: bool
-    delivery_outcome: FinalDeliveryOutcome | None
+    # How the response ended, once its settlement decided it.
+    ending: TurnEnding | None
 
-    def note_task_cancelled(self, failure_reason: str) -> None: ...
+
+# What a response that ended without saying how leaves its paused CLI call to fail with.
+_ENDED_BEFORE_FINAL = approval_failure(
+    Failed(FailureCause.ERROR, "CLI approval response ended before final delivery."),
+)
+
+
+def _exit_failure(ending: TurnEnding | None, cancelled: CancelSource | None) -> ApprovalFailure:
+    """Return how a response that ended without an answer fails its paused CLI call."""
+    if isinstance(ending, Cancelled | Failed | Suppressed):
+        return approval_failure(ending)
+    if cancelled is not None:
+        return cancelled_failure(cancelled)
+    return _ENDED_BEFORE_FINAL
 
 
 @dataclass
@@ -149,6 +166,7 @@ class CliApprovalWaits:
         lock = asyncio.Lock()
         source = source_event_ids[0]
         used = suspended = False
+        cancelled: CancelSource | None = None
 
         async def pause(paused: PausedAttempt) -> tuple[RunRequirement, ...]:
             nonlocal used, suspended
@@ -173,7 +191,7 @@ class CliApprovalWaits:
         try:
             yield pause
         except asyncio.CancelledError as error:
-            progress.note_task_cancelled(cancel_failure_reason(classify_cancel_source(error)))
+            cancelled = classify_cancel_source(error)
             raise
         finally:
             for event_id in source_event_ids:
@@ -181,37 +199,14 @@ class CliApprovalWaits:
                     self.waiters.pop(event_id)
             # Responses that never paused a CLI call, including every standard one, own no CLI state.
             if used:
-                await self._settle(
+                await self.exit(
                     source,
-                    suspended=suspended
-                    or (
-                        progress.delivery_outcome is not None
-                        and progress.delivery_outcome.terminal_status == "suspended"
+                    CliExit(
+                        # A pause, or an answer the outbox still owes: the continuation finishes through its
+                        # acknowledged FINAL, which dispatch reads.
+                        suspended=suspended or isinstance(progress.ending, AwaitingApproval | Owed),
+                        live=settle_terminal,
+                        shutting_down=current_task_is_process_shutdown(),
+                        failure=_exit_failure(progress.ending, cancelled),
                     ),
-                    progress=progress,
-                    settle_terminal=settle_terminal,
                 )
-
-    async def _settle(
-        self,
-        source: str,
-        *,
-        suspended: bool,
-        progress: _ApprovalProgress,
-        settle_terminal: bool,
-    ) -> None:
-        await self.exit(
-            source,
-            CliExit(
-                suspended=suspended,
-                live=settle_terminal,
-                shutting_down=current_task_is_process_shutdown(),
-                failure=response_failure(
-                    # The response's progress records a cancellation as its canonical failure reason.
-                    cancel_source=cancel_source_from_failure_reason(progress.failure_reason)
-                    if progress.cancelled
-                    else None,
-                    reason=progress.failure_reason or "CLI approval response ended before final delivery.",
-                ),
-            ),
-        )

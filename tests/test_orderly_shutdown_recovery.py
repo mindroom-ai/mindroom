@@ -18,6 +18,7 @@ from mindroom.dispatch_callback_outcome import TurnDispatchOutcome
 from mindroom.dispatch_source import EDIT_SOURCE_KIND
 from mindroom.event_journal import EventClass, EventKind, InboundEvent
 from mindroom.event_journal.opening import OpenEventJournal
+from mindroom.final_delivery import Cancelled
 from mindroom.history.types import HistoryScope
 from mindroom.journal_dispatch import JournalCallbacks, JournalDispatcher
 from mindroom.matrix.client_session import MindRoomAsyncClient
@@ -114,11 +115,10 @@ async def test_orderly_shutdown_preserves_edit_callback_and_revision(
     )
 
     async def generate(request: ResponseRequest) -> str | None:
-        cancelled: list[str] = []
-
-        async def model(_event_id: str | None) -> None:
+        async def model(_event_id: str | None) -> str | None:
             started.set()
             await asyncio.Event().wait()
+            return None
 
         result = await attempt.run(
             ResponseAttemptRequest(
@@ -126,10 +126,9 @@ async def test_orderly_shutdown_preserves_edit_callback_and_revision(
                 existing_event_id=request.existing_event_id,
                 response_function=model,
                 span=_Span().attempt(),
-                on_cancelled=cancelled.append,
             ),
         )
-        return None if cancelled else result
+        return None if isinstance(result, Cancelled) else result
 
     harness.regenerator.deps = replace(harness.regenerator.deps, turn_store=store)
     harness.generate_response.side_effect = generate

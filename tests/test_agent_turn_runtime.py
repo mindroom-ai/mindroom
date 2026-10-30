@@ -13,9 +13,8 @@ import json
 from dataclasses import dataclass, replace
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, ClassVar
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, patch
 
-import nio
 import pytest
 from agno.tools import Toolkit
 from structlog.testing import capture_logs
@@ -31,7 +30,7 @@ from mindroom.config.models import CompactionConfig
 from mindroom.config.plugin import PluginEntryConfig
 from mindroom.dispatch_source import ScheduledHistoryBudget
 from mindroom.entity_resolution import entity_identity_registry
-from mindroom.final_delivery import FinalDeliveryOutcome
+from mindroom.final_delivery import AwaitingApproval, Cancelled, Failed, FailureCause, FinalDeliveryOutcome
 from mindroom.history.interrupted_replay import is_interrupted_replay_run
 from mindroom.history.run_visibility import (
     QUEUED_MESSAGE_NOTICE_MARKER_KEY,
@@ -1350,7 +1349,7 @@ async def test_the_runner_writes_the_interrupted_record_after_the_loop_stored_th
 
     assert not isinstance(result, BaseException), result
     delivery, outcome = result
-    assert delivery.terminal_status == "cancelled"
+    assert delivery.ending == Cancelled("interrupted")
     assert outcome.run_succeeded is False
     run_id = outcome.response_run_id
     assert run_id is not None
@@ -1382,7 +1381,7 @@ async def test_the_runner_leaves_a_paused_run_as_the_loop_stored_it(
     runner = unwrap_extracted_collaborator(_runner(reply, tmp_path))
     replaced = _runs_under_interrupted_records(monkeypatch, reply.storage)
     suspend = AsyncMock(
-        return_value=FinalDeliveryOutcome(terminal_status="suspended", event_id=None, is_visible_response=False),
+        return_value=FinalDeliveryOutcome(ending=AwaitingApproval(), event_id=None, is_visible_response=False),
     )
 
     with (
@@ -1413,8 +1412,8 @@ async def test_the_runner_records_the_failure_over_a_pause_with_no_approval_to_a
     """Through ``ResponseRunner``, a pause nothing can resume fails the reply, and the failure lands over the ``PAUSED`` row.
 
     The loop stores the pause; the lifecycle owner then records the failure over the row as its interrupted-turn
-    record, so it no longer waits for an approval that never comes. A reply delivered without streaming also raises
-    the failure through the runner.
+    record, so it no longer waits for an approval that never comes. Streamed or not, the reply ends failed with
+    that error.
     """
     reply = _reply(
         tmp_path,
@@ -1423,16 +1422,12 @@ async def test_the_runner_records_the_failure_over_a_pause_with_no_approval_to_a
         tools=(EXTERNAL_PROBE_TOOL,),
     )
     runner = _runner(reply, tmp_path)
-    presence = MagicMock(spec=nio.PresenceGetResponse)
-    presence.presence = "online" if streaming else "offline"
-    presence.last_active_ago = 0
-    runner.deps.runtime.client.get_presence = AsyncMock(return_value=presence)
 
-    if streaming:
-        await runner.generate_response(_request())
-    else:
-        with pytest.raises(RuntimeError, match="without an approval to ask for"):
-            await runner.generate_response(_request())
+    delivery, _outcome = await _respond_through_runner(runner, _request(), streaming=streaming)
+
+    assert isinstance(delivery.ending, Failed)
+    assert delivery.ending.cause is FailureCause.ERROR
+    assert "without an approval to ask for" in (delivery.ending.detail or "")
 
     assert probe.calls == []
     session = reply.storage.load_session(SESSION_ID)

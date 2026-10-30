@@ -20,7 +20,7 @@ import nio
 from mindroom import constants, interactive
 from mindroom import reply_lifecycle as rl
 from mindroom.background_tasks import create_background_task
-from mindroom.cancellation import cancel_failure_reason, classify_cancel_source
+from mindroom.cancellation import classify_cancel_source
 from mindroom.constants import ACTING_REQUESTER_KEY, SKIP_MENTIONS_KEY
 from mindroom.dispatch_source import SILENT_SCHEDULE_SOURCE_KIND
 from mindroom.event_journal import (
@@ -48,7 +48,18 @@ from mindroom.event_journal.replies import (
     ReplyRowRequest,
     edit_delivery_id,
 )
-from mindroom.final_delivery import FinalDeliveryOutcome, StreamTransportOutcome
+from mindroom.failure_text import failure_text
+from mindroom.final_delivery import (
+    Cancelled,
+    Completed,
+    Failed,
+    FailureCause,
+    FinalDeliveryOutcome,
+    Owed,
+    StreamTransportOutcome,
+    Suppressed,
+    Suppression,
+)
 from mindroom.hooks import (
     EVENT_MESSAGE_AFTER_RESPONSE,
     EVENT_MESSAGE_BEFORE_RESPONSE,
@@ -152,7 +163,6 @@ if TYPE_CHECKING:
     from mindroom.hooks import MessageEnvelope
     from mindroom.response_sources import ResponseSources
     from mindroom.streaming import (
-        CancelSource,
         ProgressDelivered,
         ProgressPublisher,
         ProgressWriteAhead,
@@ -221,11 +231,9 @@ def _refused_reply_outcome(
     """Report an answer the reply's rules refused, or whose span already ended: a Stop to apply first, or a span that no longer owns it."""
     stopped = refused is not None and refused.transition.outcome is ReplyOutcome.RECOMPUTE
     return FinalDeliveryOutcome(
-        terminal_status="cancelled" if stopped else "error",
+        ending=Cancelled("user_stop") if stopped else Failed(FailureCause.WRITE_REFUSED),
         event_id=request.existing_event_id,
         is_visible_response=request.existing_event_id is not None,
-        cancel_source="user_stop" if stopped else None,
-        failure_reason=cancel_failure_reason("user_stop") if stopped else "reply_write_refused",
         tool_trace=tuple(tool_trace or ()),
         extra_content=extra_content,
     )
@@ -293,10 +301,7 @@ async def _whole_reply_progress(
 
 def _unfinished_stream_outcome(
     request: FinalizeStreamedResponseRequest,
-    *,
-    terminal_status: Literal["cancelled", "error"],
-    failure_reason: str,
-    cancel_source: CancelSource | None = None,
+    ending: Cancelled | Failed,
 ) -> FinalDeliveryOutcome:
     """Report a streamed reply whose finalization a cancellation or failure cut short, with the event that stays.
 
@@ -307,12 +312,10 @@ def _unfinished_stream_outcome(
     if event_id is None and request.existing_event_id is not None and not request.existing_event_is_placeholder:
         event_id = request.existing_event_id
     return FinalDeliveryOutcome(
-        terminal_status=terminal_status,
+        ending=ending,
         event_id=event_id,
         is_visible_response=event_id is not None,
         final_visible_body=stream_outcome.visible_body_text if stream_outcome.visible_event_id is not None else None,
-        cancel_source=cancel_source,
-        failure_reason=failure_reason,
         tool_trace=tuple(request.tool_trace or ()),
         extra_content=request.extra_content,
     )
@@ -322,9 +325,9 @@ def _owed_answer_outcome() -> FinalDeliveryOutcome:
     """Return the outcome of an answer whose row is recorded but not yet in the room.
 
     Its sources were handed over with the row, recovery sends it, and only a
-    permanent refusal changes the reply, as an owed ``FINAL`` reports ``suspended``.
+    permanent refusal changes the reply.
     """
-    return FinalDeliveryOutcome(terminal_status="suspended", event_id=None, failure_reason="delivery_failed")
+    return FinalDeliveryOutcome(ending=Owed())
 
 
 def _with_note(shown: Presentation, note: Segment) -> Presentation:
@@ -731,40 +734,10 @@ class DeliveryGateway:
         if not isinstance(result, nio.RoomSendResponse):
             self.deps.logger.warning("Judgment reaction failed", kind=kind, room_id=room_id, event_id=event_id)
 
-    def terminal_outcome_without_visible_event(
-        self,
-        *,
-        terminal_status: Literal["cancelled", "error"],
-        failure_reason: str,
-    ) -> FinalDeliveryOutcome:
-        """Return the terminal outcome for one turn with no visible event to finalize."""
-        return FinalDeliveryOutcome(
-            terminal_status=terminal_status,
-            event_id=None,
-            failure_reason=failure_reason,
-        )
-
-    def cancelled_terminal_outcome(
-        self,
-        outcome: FinalDeliveryOutcome,
-        *,
-        failure_reason: str,
-    ) -> FinalDeliveryOutcome:
-        """Return the cancelled derivative of one delivery outcome, preserving visible facts."""
-        return FinalDeliveryOutcome(
-            terminal_status="cancelled",
-            event_id=outcome.final_visible_event_id,
-            is_visible_response=outcome.final_visible_event_id is not None,
-            final_visible_body=outcome.final_visible_body,
-            failure_reason=failure_reason,
-            tool_trace=outcome.tool_trace,
-            extra_content=outcome.extra_content,
-        )
-
     async def _end_without_answer(
         self,
         *,
-        failure_reason: str,
+        cause: FailureCause,
         tool_trace: list[ToolTraceEntry] | None,
         extra_content: dict[str, Any] | None,
     ) -> FinalDeliveryOutcome:
@@ -773,9 +746,7 @@ class DeliveryGateway:
         if handle is not None:
             await self.end_reply_span(handle, suppress_decision(handle))
         return FinalDeliveryOutcome(
-            terminal_status="error",
-            event_id=None,
-            failure_reason=failure_reason,
+            ending=Failed(cause),
             tool_trace=tuple(tool_trace or ()),
             extra_content=extra_content,
         )
@@ -1278,8 +1249,7 @@ class DeliveryGateway:
         handle: SpanHandle,
         target: MessageTarget,
         *,
-        cancel_source: CancelSource | None,
-        failure_reason: str | None,
+        ending: Cancelled | Failed,
         delivery_started: bool,
     ) -> FinalDeliveryOutcome | None:
         """End a span whose response was stopped, interrupted, or failed, as ``interrupted_end`` decides.
@@ -1288,14 +1258,9 @@ class DeliveryGateway:
         """
         reply = await self.deps.outbox.replies.load(handle.reply_id)
         assert reply is not None, "a span's reply exists while the span ends"
-        end = interrupted_end(
-            reply,
-            cancel_source=cancel_source,
-            failure_reason=failure_reason,
-            delivery_started=delivery_started,
-        )
+        end = interrupted_end(reply, ending, delivery_started=delivery_started)
         if end is not None:
-            return await self.end_reply_span_with_note(handle, target, state=end.state, note=end.note)
+            return await self.end_reply_span_with_note(handle, target, state=end.state, note=end.note, ending=ending)
         await self.end_reply_span(handle, release_decision(handle))
         return None
 
@@ -1306,15 +1271,19 @@ class DeliveryGateway:
         *,
         state: ReplyState,
         note: Segment,
+        ending: Cancelled | Failed,
     ) -> FinalDeliveryOutcome:
-        """End a span with its terminal row: what the reply may show, plus one note."""
+        """End a span with its terminal row: what the reply may show, plus one note.
+
+        A Stop recorded meanwhile turns the note into the cancellation, and the returned ending with it.
+        """
         while True:
             reply = await self.deps.outbox.replies.load(handle.reply_id)
             assert reply is not None, "a span's reply exists while the span ends"
             handle.note_reply(reply)
             if reply.unapplied_stop and handle.span.kind is not rl.SpanKind.APPROVAL_RESUME:
                 # A Stop committed before this span ended; its note is the cancellation.
-                state, note = ReplyState.CANCELLED, note_segment(NoteKind.CANCELLED)
+                state, note, ending = ReplyState.CANCELLED, note_segment(NoteKind.CANCELLED), Cancelled("user_stop")
             shown = _with_note(_shown_before(reply, handle), note)
             write = terminal_write(handle, shown, state=state)
             # An interruption's note keeps its sources pending, yet shows as a failure.
@@ -1330,12 +1299,11 @@ class DeliveryGateway:
         # A transition that wrote no row, such as a restore, may still leave a button or a note owed.
         await self.settle_reply_debt(handle.reply_id)
         return FinalDeliveryOutcome(
-            terminal_status=rendered.stream_status,
+            ending=ending,
             event_id=reply.event_id or delivered,
             is_visible_response=(reply.event_id or delivered) is not None,
             final_visible_body=rendered.body if delivered is not None else None,
             delivery_kind=None if delivered is None else ("edited" if reply.event_id else "sent"),
-            failure_reason=None if state is ReplyState.COMPLETED else note.note.value if note.note else None,
             tool_trace=rendered.tool_trace,
         )
 
@@ -1811,22 +1779,26 @@ class DeliveryGateway:
         except asyncio.CancelledError:
             # The span's exit writes the cancellation through the reply's records.
             raise
-        except Exception as error:
-            return await self._reply_hook_failed(request, handle, failure_reason=str(error) or "hook_failed")
-        suppression_reason = "suppressed_by_hook" if draft.suppress else None
+        except Exception:
+            self.deps.logger.exception(
+                "message:before_response hook failed",
+                correlation_id=request.identity.correlation_id,
+            )
+            return await self._reply_hook_failed(request, handle)
+        suppression_reason = Suppression.HOOK if draft.suppress else None
         if suppression_reason is None and draft.envelope.source_kind == SILENT_SCHEDULE_SOURCE_KIND:
             no_report_text = draft.response_text
             if draft.tool_trace:
                 no_report_text = strip_matching_visible_tool_markers(no_report_text, draft.tool_trace)
             if constants.is_silent_schedule_no_report_response(no_report_text):
-                suppression_reason = "silent_no_report"
+                suppression_reason = Suppression.SILENT_NO_REPORT
         await record_silent_schedule_result_if_needed(
             entity_name=self.deps.agent_name,
             agent_names=request.identity.participating_agent_names or (self.deps.agent_name,),
             envelope=request.identity.response_envelope,
             config=self.deps.runtime.config,
             runtime_paths=self.deps.runtime_paths,
-            suppression_reason=suppression_reason,
+            suppression_reason=None if suppression_reason is None else suppression_reason.value,
             response_text=draft.response_text,
         )
         if suppression_reason is not None:
@@ -1835,9 +1807,9 @@ class DeliveryGateway:
                 response_kind=request.identity.response_kind,
                 source_event_id=request.identity.response_envelope.source_event_id,
                 correlation_id=request.identity.correlation_id,
-                suppression_reason=suppression_reason,
+                suppression_reason=suppression_reason.value,
             )
-            return await self._reply_suppressed(handle, draft, suppression_reason=suppression_reason)
+            return await self._reply_suppressed(handle, draft, reason=suppression_reason)
 
         interactive_response = interactive.parse_and_format_interactive(draft.response_text, extract_mapping=True)
         display_text = interactive_response.formatted_text
@@ -1858,7 +1830,7 @@ class DeliveryGateway:
         if reply_write.placeholder_only:
             # A reply with nothing to show ends as a stream that showed only its placeholder: the placeholder goes.
             return await self._end_without_answer(
-                failure_reason="stream_completed_without_visible_body",
+                cause=FailureCause.NOTHING_TO_SHOW,
                 tool_trace=draft.tool_trace,
                 extra_content=draft.extra_content,
             )
@@ -1891,16 +1863,15 @@ class DeliveryGateway:
             if handle.exited:
                 return _owed_answer_outcome()
             return FinalDeliveryOutcome(
-                terminal_status="error",
+                ending=Failed(FailureCause.DELIVERY_FAILED),
                 # A failed edit leaves the earlier message visible.
                 event_id=edited_event_id,
                 is_visible_response=edited_event_id is not None,
-                failure_reason="delivery_failed",
                 tool_trace=tuple(draft.tool_trace or ()),
                 extra_content=delivery_extra_content,
             )
         return FinalDeliveryOutcome(
-            terminal_status="completed",
+            ending=Completed(),
             event_id=event_id,
             is_visible_response=True,
             final_visible_body=display_text if edited_event_id is None else shown_text,
@@ -1914,8 +1885,6 @@ class DeliveryGateway:
         self,
         request: FinalDeliveryRequest,
         handle: SpanHandle,
-        *,
-        failure_reason: str,
     ) -> FinalDeliveryOutcome:
         """A before-response hook raised for a reply span."""
         reply = await self.deps.outbox.replies.load(handle.reply_id)
@@ -1923,20 +1892,19 @@ class DeliveryGateway:
         if silent and reply is not None and (reply.event_id is None or reply.placeholder_only):
             # A silent schedule reports its failure durably.
             note = note_segment(NoteKind.ERROR, _BEFORE_RESPONSE_HOOK_FAILURE_TEXT)
-            outcome = await self.end_reply_span_with_note(
+            return await self.end_reply_span_with_note(
                 handle,
                 request.target,
                 state=ReplyState.FAILED,
                 note=note,
+                ending=Failed(FailureCause.HOOK_FAILED),
             )
-            return replace(outcome, failure_reason=failure_reason)
         await self.end_reply_span(handle, suppress_decision(handle, reason="hook_failed"))
         event_id = None if reply is None or reply.placeholder_only else reply.event_id
         return FinalDeliveryOutcome(
-            terminal_status="error",
+            ending=Failed(FailureCause.HOOK_FAILED),
             event_id=event_id,
             is_visible_response=event_id is not None,
-            failure_reason=failure_reason,
             tool_trace=tuple(request.tool_trace or ()),
             extra_content=request.extra_content,
         )
@@ -1946,18 +1914,16 @@ class DeliveryGateway:
         handle: SpanHandle,
         draft: ResponseDraft,
         *,
-        suppression_reason: str,
+        reason: Suppression,
     ) -> FinalDeliveryOutcome:
         """A hook suppressed a reply span's answer."""
         reply = await self.deps.outbox.replies.load(handle.reply_id)
         await self.end_reply_span(handle, suppress_decision(handle))
         event_id = None if reply is None or reply.placeholder_only else reply.event_id
         return FinalDeliveryOutcome(
-            terminal_status="cancelled",
+            ending=Suppressed(reason),
             event_id=event_id,
             is_visible_response=event_id is not None,
-            failure_reason=suppression_reason,
-            suppressed=True,
             tool_trace=tuple(draft.tool_trace or ()),
             extra_content=draft.extra_content,
         )
@@ -2480,21 +2446,21 @@ class DeliveryGateway:
 
             if stream_outcome.visible_body_state == "placeholder_only":
                 return await self._end_without_answer(
-                    failure_reason=stream_outcome.failure_reason or "stream_completed_without_visible_body",
+                    cause=FailureCause.DELIVERY_FAILED if stream_outcome.failed else FailureCause.NOTHING_TO_SHOW,
                     tool_trace=request.tool_trace,
                     extra_content=request.extra_content,
                 )
 
             if (
                 stream_outcome.visible_body_state == "none"
-                and stream_outcome.failure_reason is None
+                and not stream_outcome.failed
                 and request.initial_delivery_kind == "edited"
                 and not request.existing_event_is_placeholder
             ):
                 existing_visible_event_id = request.existing_event_id or streamed_event_id
                 if existing_visible_event_id is not None:
                     return FinalDeliveryOutcome(
-                        terminal_status="completed",
+                        ending=Completed(),
                         event_id=existing_visible_event_id,
                         is_visible_response=True,
                         final_visible_body=streamed_text or None,
@@ -2503,21 +2469,12 @@ class DeliveryGateway:
                         extra_content=request.extra_content,
                     )
 
-            if stream_outcome.failure_reason is not None and stream_outcome.visible_body_state != "visible_body":
-                failure_reason = stream_outcome.failure_reason
-                if request.initial_delivery_kind == "edited" and streamed_event_id is not None:
-                    return FinalDeliveryOutcome(
-                        terminal_status="error",
-                        event_id=streamed_event_id,
-                        is_visible_response=True,
-                        failure_reason=failure_reason,
-                        tool_trace=tuple(request.tool_trace or ()),
-                        extra_content=request.extra_content,
-                    )
+            if stream_outcome.failed and stream_outcome.visible_body_state != "visible_body":
+                shown = request.initial_delivery_kind == "edited" and streamed_event_id is not None
                 return FinalDeliveryOutcome(
-                    terminal_status="error",
-                    event_id=None,
-                    failure_reason=failure_reason,
+                    ending=Failed(FailureCause.DELIVERY_FAILED),
+                    event_id=streamed_event_id if shown else None,
+                    is_visible_response=shown,
                     tool_trace=tuple(request.tool_trace or ()),
                     extra_content=request.extra_content,
                 )
@@ -2525,19 +2482,16 @@ class DeliveryGateway:
             if stream_outcome.visible_body_state != "visible_body":
                 # An edited stream that showed nothing below an answer already returned above.
                 return FinalDeliveryOutcome(
-                    terminal_status="error",
-                    event_id=None,
-                    failure_reason="stream_completed_without_visible_body",
+                    ending=Failed(FailureCause.NOTHING_TO_SHOW),
                     tool_trace=tuple(request.tool_trace or ()),
                     extra_content=request.extra_content,
                 )
-            if stream_outcome.failure_reason is not None:
+            if stream_outcome.failed:
                 return FinalDeliveryOutcome(
-                    terminal_status="error",
+                    ending=Failed(FailureCause.DELIVERY_FAILED),
                     event_id=visible_stream_event_id,
                     is_visible_response=True,
                     final_visible_body=streamed_text,
-                    failure_reason=stream_outcome.failure_reason,
                     tool_trace=tuple(request.tool_trace or ()),
                     extra_content=request.extra_content,
                 )
@@ -2552,7 +2506,7 @@ class DeliveryGateway:
                 stream_interactive_metadata=stream_outcome.interactive_metadata,
             )
             return FinalDeliveryOutcome(
-                terminal_status="completed",
+                ending=Completed(),
                 event_id=streamed_event_id,
                 is_visible_response=True,
                 final_visible_body=streamed_text or interactive_response.formatted_text,
@@ -2562,16 +2516,10 @@ class DeliveryGateway:
                 interactive_metadata=interactive_response.interactive_metadata,
             )
         except asyncio.CancelledError as error:
-            cancel_source = classify_cancel_source(error)
-            return _unfinished_stream_outcome(
-                request,
-                terminal_status="cancelled",
-                failure_reason=cancel_failure_reason(cancel_source),
-                cancel_source=cancel_source,
-            )
-        except Exception:
+            return _unfinished_stream_outcome(request, Cancelled(classify_cancel_source(error)))
+        except Exception as error:
             self.deps.logger.exception(
                 "Unexpected error in finalize_streamed_response",
                 correlation_id=request.identity.correlation_id,
             )
-            return _unfinished_stream_outcome(request, terminal_status="error", failure_reason="stream_finalize_failed")
+            return _unfinished_stream_outcome(request, Failed(FailureCause.ERROR, failure_text(error)))

@@ -143,14 +143,14 @@ def stream_transport(
     body: str = "streamed body",
     *,
     visible_body_state: _VisibleBodyState = "visible_body",
-    failure_reason: str | None = None,
+    failed: bool = False,
 ) -> StreamTransportOutcome:
     """Return what a stream that ran to its end left in Matrix: its last event and the body it showed."""
     return StreamTransportOutcome(
         last_physical_stream_event_id=event_id,
         rendered_body=body,
         visible_body_state=visible_body_state,
-        failure_reason=failure_reason,
+        failed=failed,
     )
 
 

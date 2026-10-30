@@ -14,13 +14,13 @@ import nio
 import pytest
 
 from mindroom.budgets.monitor import BudgetMonitor
-from mindroom.cancellation import USER_STOP_CANCEL_MSG, cancel_failure_reason, classify_cancel_source
+from mindroom.cancellation import USER_STOP_CANCEL_MSG, classify_cancel_source
 from mindroom.config.agent import AgentConfig, AgentPrivateConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
 from mindroom.config.participation import ParticipationConfig
 from mindroom.dispatch_source import MESSAGE_SOURCE_KIND
-from mindroom.final_delivery import FinalDeliveryOutcome, StreamTransportOutcome
+from mindroom.final_delivery import Cancelled, Failed, FailureCause, FinalDeliveryOutcome, StreamTransportOutcome
 from mindroom.history.types import HistoryScope
 from mindroom.hooks import (
     BUILTIN_EVENT_NAMES,
@@ -547,11 +547,10 @@ async def test_session_started_fires_for_the_record_of_a_failed_first_turn(
     with (
         # The attempt fails after its turn loaded the scope, before its run saved anything.
         patch("mindroom.ai._begin_attempt", side_effect=RuntimeError("model down")),
-        pytest.raises(RuntimeError, match="model down"),
     ):
         await coordinator.generate_response(_thread_request())
 
-    assert sequence == [f"started:{THREAD_SESSION_ID}", "cancelled:model down"]
+    assert sequence == [f"started:{THREAD_SESSION_ID}", "cancelled:error"]
     assert _persisted_run(storage).messages[-1].content == "(turn failed before completion)"
 
 
@@ -804,18 +803,16 @@ async def _cancel_while_the_model_runs(
     started = asyncio.Event()
     install_model_providers(monkeypatch, {"default": _blocked_model(started)})
 
-    async def fake_run_cancellable_response(**kwargs: object) -> str:
-        response_function = cast("Callable[[str | None], Awaitable[object]]", kwargs["response_function"])
-        on_cancelled = cast("Callable[[str], None]", kwargs["on_cancelled"])
+    async def fake_run_cancellable_response(**kwargs: object) -> FinalDeliveryOutcome | Cancelled:
+        response_function = cast("Callable[[str | None], Awaitable[FinalDeliveryOutcome]]", kwargs["response_function"])
         task = asyncio.create_task(response_function("$thinking"))
         await started.wait()
         task.cancel()
         try:
-            await task
+            return await task
         except asyncio.CancelledError as cancelled:
             # The attempt runner reports how its attempt was cancelled, as a Stop's reaction or a restart does.
-            on_cancelled(cancel_failure_reason(classify_cancel_source(cancelled)))
-        return "$thinking"
+            return Cancelled(classify_cancel_source(cancelled))
 
     with (
         patch.object(
@@ -989,10 +986,8 @@ async def test_generate_response_locked_finalizes_cancelled_task_before_delivery
 
     registry = HookRegistry.from_plugins([_plugin("cancelled-hooks", [on_cancelled])])
 
-    async def fake_run_cancellable_response(**kwargs: object) -> str | None:
-        on_task_cancelled = cast("Callable[[str], None]", kwargs["on_cancelled"])
-        on_task_cancelled("sync_restart_cancelled")
-        return None
+    async def fake_run_cancellable_response(**_kwargs: object) -> Cancelled:
+        return Cancelled("sync_restart")
 
     with (
         patch.object(
@@ -1056,11 +1051,7 @@ async def test_generate_response_locked_returns_none_when_final_delivery_is_unha
             coordinator.deps.delivery_gateway,
             "deliver_final",
             AsyncMock(
-                return_value=FinalDeliveryOutcome(
-                    terminal_status="cancelled",
-                    event_id=None,
-                    failure_reason="delivery_cancelled",
-                ),
+                return_value=FinalDeliveryOutcome(ending=Cancelled("interrupted")),
             ),
         )
 
@@ -1109,11 +1100,7 @@ async def test_generate_response_locked_unhandled_delivery_outcome_does_not_pers
             coordinator.deps.delivery_gateway,
             "deliver_final",
             AsyncMock(
-                return_value=FinalDeliveryOutcome(
-                    terminal_status="cancelled",
-                    event_id=None,
-                    failure_reason="delivery_cancelled",
-                ),
+                return_value=FinalDeliveryOutcome(ending=Cancelled("interrupted")),
             ),
         )
 
@@ -1184,12 +1171,11 @@ async def test_generate_response_locked_preserves_visible_stream_when_finalize_r
             "finalize_streamed_response",
             AsyncMock(
                 return_value=FinalDeliveryOutcome(
-                    terminal_status="cancelled",
+                    ending=Cancelled("interrupted"),
                     event_id="$thinking",
                     is_visible_response=True,
                     final_visible_body="Hello!",
                     delivery_kind="sent",
-                    failure_reason="delivery_cancelled",
                 ),
             ),
         )
@@ -1263,12 +1249,11 @@ async def test_generate_response_locked_preserves_visible_stream_on_late_finaliz
             "finalize_streamed_response",
             AsyncMock(
                 return_value=FinalDeliveryOutcome(
-                    terminal_status="error",
+                    ending=Failed(FailureCause.ERROR, "delivery crash"),
                     event_id="$thinking",
                     is_visible_response=True,
                     final_visible_body="Hello!",
                     delivery_kind="sent",
-                    failure_reason="delivery crash",
                 ),
             ),
         )
@@ -1355,10 +1340,10 @@ async def test_a_turn_passes_its_current_and_model_prompt_to_ai(tmp_path: Path, 
 
 
 @pytest.mark.asyncio
-async def test_generate_response_locked_sets_failure_reason_for_plain_streaming_exception(
+async def test_generate_response_locked_reports_plain_streaming_exception_as_error(
     tmp_path: Path,
 ) -> None:
-    """Plain streaming exceptions should propagate their text to the typed error outcome."""
+    """A plain streaming exception ends the reply with its text in the error note and reports an error."""
     runtime_paths = _runtime_paths(tmp_path)
     config = bind_runtime_paths(_config(), runtime_paths)
     bot = _make_bot(tmp_path, config=config, runtime_paths=runtime_paths)
@@ -1399,8 +1384,12 @@ async def test_generate_response_locked_sets_failure_reason_for_plain_streaming_
         coordinator.deps.delivery_gateway.deps.response_hooks.emit_cancelled_response.await_args.kwargs[
             "failure_reason"
         ]
-        == "plain boom"
+        == "error"
     )
+    # The exception's text reaches the reply's error note instead of the hook.
+    note_edit = coordinator.deps.delivery_gateway.edit_text.await_args.args[0]
+    assert note_edit.event_id == "$thinking"
+    assert note_edit.new_text == "**[Response interrupted by an error: plain boom]**"
 
 
 @pytest.mark.asyncio

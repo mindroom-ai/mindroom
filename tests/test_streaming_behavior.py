@@ -28,7 +28,7 @@ from mindroom.constants import (
     STREAM_VISIBLE_BODY_KEY,
 )
 from mindroom.dispatch_source import MESSAGE_SOURCE_KIND
-from mindroom.final_delivery import FinalDeliveryOutcome, StreamTransportOutcome
+from mindroom.final_delivery import Completed, FinalDeliveryOutcome, StreamTransportOutcome
 from mindroom.history.interrupted_replay import (
     InterruptedReplaySnapshot,
     _render_interrupted_replay_content,
@@ -2516,7 +2516,7 @@ class TestStreamingBehavior:
                 "mindroom.delivery_gateway.DeliveryGateway.deliver_final",
                 new=AsyncMock(
                     return_value=FinalDeliveryOutcome(
-                        terminal_status="completed",
+                        ending=Completed(),
                         event_id="$response",
                         final_visible_body="handled",
                         is_visible_response=True,
@@ -2943,7 +2943,7 @@ class TestStreamingBehavior:
             )
 
         assert outcome.last_physical_stream_event_id == "$event123"
-        assert outcome.failure_reason is None
+        assert outcome.failed is False
         assert outcome.rendered_body == "hello"
 
     @pytest.mark.asyncio

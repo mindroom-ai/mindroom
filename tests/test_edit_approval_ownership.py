@@ -18,6 +18,7 @@ from mindroom.conversation_resolver import MessageContext
 from mindroom.dispatch_callback_outcome import TurnDispatchOutcome
 from mindroom.event_journal import ApprovalFailure, DeliveryStage, EventClass, EventKind
 from mindroom.event_journal.replies import PreparedReplyRow, ReplyRowRequest
+from mindroom.final_delivery import Failed, FailureCause, TurnProgress
 from mindroom.history.types import HistoryScope
 from mindroom.journal_dispatch import JournalDispatcher
 from mindroom.llm.runs import ToolExecution
@@ -27,7 +28,7 @@ from mindroom.message_target import MessageTarget
 from mindroom.post_response_effects import PostResponseEffectsDeps, ResponseOutcome
 from mindroom.reply_lifecycle import ApprovalFailureKind
 from mindroom.reply_scope import ReplyRuntime
-from mindroom.response_runner import DeliveryProgress, ResponseRunner
+from mindroom.response_runner import ResponseRunner
 from mindroom.response_sources import ResponseSources
 from mindroom.response_turn import CompletedApprovalRun, PausedAttempt, ResponsePausedForApproval
 from mindroom.turn_record import TurnRecord
@@ -617,7 +618,7 @@ async def test_failed_pause_handoff_keeps_the_regenerated_answer(
         identity=runner.response_identity(request, response_kind="ai"),
         request=request,
     )
-    progress = DeliveryProgress()
+    progress = TurnProgress()
     pause = ResponsePausedForApproval(PausedAttempt(session_id="session", run_id="run", tools=(), toolkit_owners={}))
 
     async def fail_handoff(_pause: ResponsePausedForApproval) -> None:
@@ -634,7 +635,7 @@ async def test_failed_pause_handoff_keeps_the_regenerated_answer(
             logical_source_event_ids=("$source",),
             regenerated_event_id="$waiting",
         ):
-            await runner.run_and_settle_locked_response(
+            answered = await runner.run_and_settle_locked_response(
                 request,
                 target=request.response_envelope.target,
                 lifecycle=lifecycle,
@@ -645,9 +646,8 @@ async def test_failed_pause_handoff_keeps_the_regenerated_answer(
                 post_response_deps=PostResponseEffectsDeps(logger=runner.deps.logger),
                 approval_suspension_handler=fail_handoff,
             )
-    assert progress.delivery_outcome is not None
-    assert progress.delivery_outcome.terminal_status == "error"
-    assert progress.delivery_outcome.event_id == "$waiting"
+    assert progress.ending == Failed(FailureCause.APPROVAL_NOT_STARTED)
+    assert answered == "$waiting"
     # The regeneration wrote nothing, so its reply shows the answer it regenerated.
     assert await principal.load_matrix_delivery(delivery_id="$edit", stage=DeliveryStage.FINAL) is None
     bot.client.room_send.assert_not_awaited()
@@ -674,9 +674,7 @@ async def test_failed_pause_without_visible_response_shows_the_approval_failure(
             outcome = await runner._finalize_failed_approval_handoff(
                 target=request.response_envelope.target,
                 request=request,
-                failure_reason="failed",
             )
-    assert outcome.terminal_status == "error"
+    assert outcome.ending == Failed(FailureCause.APPROVAL_NOT_STARTED)
     assert outcome.event_id == "$note"
-    assert outcome.failure_reason == "failed"
     assert [content["body"] for content in sent] == ["Tool approval could not be started. Please try again."]

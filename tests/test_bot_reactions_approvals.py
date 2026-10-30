@@ -42,6 +42,7 @@ from mindroom.event_journal import (
     ProjectedEvent,
     SemanticConsumer,
 )
+from mindroom.final_delivery import AwaitingApproval
 from mindroom.hooks import (
     EVENT_REACTION_RECEIVED,
     HookRegistry,
@@ -1614,7 +1615,7 @@ class TestAgentBot(AgentBotTestBase):
                     show_tool_calls=True,
                 )
 
-        assert suspended.terminal_status == "suspended"
+        assert suspended.ending == AwaitingApproval()
         assert report_tool.written == []
         persisted = await first.approval_store.approvals.approval_continuation_for_source("$source")
         if requires_human:

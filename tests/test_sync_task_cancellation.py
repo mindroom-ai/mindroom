@@ -57,7 +57,6 @@ from mindroom.orchestration.entity_fleet import EntityFleet, EntityFleetHooks, E
 from mindroom.orchestration.runtime import (
     _MatrixSyncStalledError,
     _SyncIteration,
-    cancel_source_from_failure_reason,
     classify_cancel_source,
     is_sync_restart_cancel,
     log_cancelled_response,
@@ -1219,24 +1218,6 @@ def test_cancel_message_for_source() -> None:
     assert cancel_message_for_source("sync_restart") == SYNC_RESTART_CANCEL_MSG
     assert cancel_message_for_source("user_stop") == USER_STOP_CANCEL_MSG
     assert cancel_message_for_source(None) is None
-
-
-@pytest.mark.parametrize(
-    ("failure_reason", "expected_cancel_source"),
-    [
-        ("cancelled_by_user", "user_stop"),
-        ("sync_restart_cancelled", "sync_restart"),
-        ("interrupted", "interrupted"),
-        ("other", "interrupted"),
-        (None, "interrupted"),
-    ],
-)
-def test_cancel_source_from_failure_reason_matches_canonical_reasons(
-    failure_reason: str | None,
-    expected_cancel_source: str,
-) -> None:
-    """Canonical terminal failure reasons should map back to cancellation provenance."""
-    assert cancel_source_from_failure_reason(failure_reason) == expected_cancel_source
 
 
 def test_restart_shutdown_carries_sync_restart_provenance() -> None:

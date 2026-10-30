@@ -16,6 +16,7 @@ from mindroom.cancellation import SYNC_RESTART_CANCEL_MSG, USER_STOP_CANCEL_MSG
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.constants import STREAM_STATUS_ERROR, STREAM_STATUS_KEY
+from mindroom.final_delivery import Cancelled
 from mindroom.history.types import HistoryScope
 from mindroom.hooks import HookRegistry
 from mindroom.knowledge.utils import _KnowledgeResolution
@@ -288,8 +289,7 @@ class TestAIErrorDisplay:
             _build_response_runner(bot)
             outcome = await _respond(bot, _response_request())
 
-        assert outcome.terminal_status == "cancelled"
-        assert outcome.failure_reason == "cancelled_by_user"
+        assert outcome.ending == Cancelled("user_stop")
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize("show_tool_calls", [False, True])
@@ -309,8 +309,7 @@ class TestAIErrorDisplay:
 
         outcome = await _respond(bot, _response_request())
 
-        assert outcome.terminal_status == "cancelled"
-        assert outcome.failure_reason == "cancelled_by_user"
+        assert outcome.ending == Cancelled("user_stop")
 
     @pytest.mark.asyncio
     async def test_a_user_stop_mid_stream_keeps_the_streamed_text_and_the_user_stop_outcome(
@@ -330,8 +329,7 @@ class TestAIErrorDisplay:
         # The stopped stream's message keeps what it showed, with the interruption noted below it.
         final_content = bot.client.room_send.await_args.kwargs["content"]["m.new_content"]
         assert final_content["body"] == f"Partial answer\n\n{_INTERRUPTED_RESPONSE_NOTE}"
-        assert outcome.terminal_status == "cancelled"
-        assert outcome.failure_reason == "cancelled_by_user"
+        assert outcome.ending == Cancelled("user_stop")
 
     @pytest.mark.asyncio
     async def test_various_error_messages_are_user_friendly(self, tmp_path: Path) -> None:

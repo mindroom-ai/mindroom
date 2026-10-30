@@ -15,6 +15,7 @@ from mindroom.cancellation import (
     current_task_is_process_shutdown,
     request_task_cancel,
 )
+from mindroom.final_delivery import Cancelled
 from mindroom.message_target import MessageTarget
 from mindroom.response_attempt import ResponseAttemptDeps, ResponseAttemptRequest, ResponseAttemptRunner, SpanAttempt
 
@@ -253,7 +254,6 @@ async def test_outer_cancellation_is_forwarded_to_attempt_task(existing_event_id
         span.show(existing_event_id)
     inner_started = asyncio.Event()
     inner_cancel_args: list[tuple[object, ...]] = []
-    cancellation_reasons: list[str] = []
 
     async def response_function(_message_id: str | None) -> None:
         inner_started.set()
@@ -270,15 +270,13 @@ async def test_outer_cancellation_is_forwarded_to_attempt_task(existing_event_id
                 response_function=response_function,
                 span=span.attempt(),
                 existing_event_id=existing_event_id,
-                on_cancelled=cancellation_reasons.append,
             ),
         ),
     )
     await inner_started.wait()
     outer.cancel(msg=SYNC_RESTART_CANCEL_MSG)
-    await outer
 
-    assert cancellation_reasons == ["sync_restart_cancelled"]
+    assert await outer == Cancelled("sync_restart")
     assert inner_cancel_args == [(SYNC_RESTART_CANCEL_MSG,)]
     assert span.waiting == 0
 
@@ -475,10 +473,13 @@ async def test_attempt_task_error_during_forwarded_cancellation_is_logged() -> N
 
 
 @pytest.mark.asyncio
-async def test_timed_out_attempt_task_failure_is_logged_when_it_finishes(
+async def test_a_straggling_attempt_is_waited_out_after_a_forwarded_cancel(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A straggler outliving the forwarded-cancel wait must still report its eventual failure."""
+    """An attempt that outlives the forwarded-cancel wait is still owned until it exits.
+
+    Its reply's span ends only after the attempt returns, so a late progress write can never follow the span's note.
+    """
     monkeypatch.setattr(response_attempt_module, "_FORWARDED_CANCEL_WAIT_SECONDS", 0.01)
     runner, _span = _runner()
     inner_started = asyncio.Event()
@@ -489,23 +490,25 @@ async def test_timed_out_attempt_task_failure_is_logged_when_it_finishes(
         try:
             await asyncio.Event().wait()
         except asyncio.CancelledError:
-            # Resist the forwarded cancel past the wait timeout, then fail.
+            # Resist the forwarded cancel past the wait, then fail.
             await release.wait()
             msg = "late cleanup failure"
             raise RuntimeError(msg) from None
 
     task = asyncio.create_task(stubborn_attempt())
     await inner_started.wait()
-    await runner._forward_cancel_to_attempt_task(task, asyncio.CancelledError(SYNC_RESTART_CANCEL_MSG))
-
-    runner.deps.logger.warning.assert_called_once()
-    runner.deps.logger.error.assert_not_called()
+    forward = asyncio.create_task(
+        runner._forward_cancel_to_attempt_task(task, asyncio.CancelledError(SYNC_RESTART_CANCEL_MSG)),
+    )
+    while not runner.deps.logger.warning.called:  # noqa: ASYNC110
+        await asyncio.sleep(0.005)
+    assert not forward.done()
 
     release.set()
-    with pytest.raises(RuntimeError, match="late cleanup failure"):
-        await task
-    await asyncio.sleep(0)  # Let the done callback run.
+    await forward
 
+    assert task.done()
+    runner.deps.logger.warning.assert_called_once()
     error_calls = runner.deps.logger.error.call_args_list
     assert len(error_calls) == 1
     assert error_calls[0].args == ("Response attempt task failed while unwinding forwarded cancellation",)
@@ -513,39 +516,70 @@ async def test_timed_out_attempt_task_failure_is_logged_when_it_finishes(
 
 
 @pytest.mark.asyncio
+async def test_a_repeated_cancel_while_the_attempt_unwinds_propagates_once_it_exited() -> None:
+    """A second cancellation of the owner is forwarded too, and raised only after the attempt exited."""
+    runner, _span = _runner()
+    inner_started = asyncio.Event()
+    cancels = 0
+    release = asyncio.Event()
+
+    async def attempt() -> None:
+        nonlocal cancels
+        inner_started.set()
+        while cancels < 2:
+            try:
+                await release.wait()
+            except asyncio.CancelledError:
+                cancels += 1
+        raise asyncio.CancelledError
+
+    task = asyncio.create_task(attempt())
+    await inner_started.wait()
+    forward = asyncio.create_task(
+        runner._forward_cancel_to_attempt_task(task, asyncio.CancelledError(SYNC_RESTART_CANCEL_MSG)),
+    )
+    while cancels < 1:  # noqa: ASYNC110
+        await asyncio.sleep(0)
+    forward.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await forward
+
+    assert task.done()
+    assert cancels == 2
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ("cancel_args", "expected_reason", "log_method", "log_message"),
+    ("cancel_args", "expected_source", "log_method", "log_message"),
     [
-        ((USER_STOP_CANCEL_MSG,), "cancelled_by_user", "info", "Response cancelled by user"),
-        ((SYNC_RESTART_CANCEL_MSG,), "sync_restart_cancelled", "info", "Response interrupted by sync restart"),
+        ((USER_STOP_CANCEL_MSG,), "user_stop", "info", "Response cancelled by user"),
+        ((SYNC_RESTART_CANCEL_MSG,), "sync_restart", "info", "Response interrupted by sync restart"),
         ((), "interrupted", "warning", "Response interrupted — traceback for diagnosis"),
     ],
 )
 async def test_response_attempt_cancellation_records_reason_and_logs_provenance(
     cancel_args: tuple[str, ...],
-    expected_reason: str,
+    expected_source: str,
     log_method: str,
     log_message: str,
 ) -> None:
     """Cancelled attempts should classify and log their cancellation provenance."""
     target = MessageTarget.resolve("!room:localhost", "$thread", "$reply")
     runner, span = _runner()
-    cancellation_reasons: list[str] = []
 
     async def response_function(_message_id: str | None) -> None:
         raise asyncio.CancelledError(*cancel_args)
 
-    await runner.run(
+    ended = await runner.run(
         ResponseAttemptRequest(
             target=target,
             response_function=response_function,
             span=span.attempt(),
             existing_event_id="$existing",
-            on_cancelled=cancellation_reasons.append,
         ),
     )
 
-    assert cancellation_reasons == [expected_reason]
+    assert ended == Cancelled(expected_source)
     getattr(runner.deps.logger, log_method).assert_called_once()
     log_call = getattr(runner.deps.logger, log_method).call_args
     assert log_call.args[0] == log_message

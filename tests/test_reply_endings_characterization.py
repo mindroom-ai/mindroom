@@ -39,6 +39,7 @@ from mindroom.config.plugin import PluginEntryConfig
 from mindroom.constants import STREAM_STATUS_KEY
 from mindroom.dispatch_source import SILENT_SCHEDULE_SOURCE_KIND
 from mindroom.event_journal import DeliveryStage, EventClass, EventKind, InboundEvent
+from mindroom.final_delivery import Owed, Suppressed, Suppression
 from mindroom.history.interrupted_replay import is_interrupted_replay_run, persist_interrupted_replay_snapshot
 from mindroom.history.session_context import create_scope_session_storage, resolve_bound_team_scope
 from mindroom.hooks import (
@@ -930,7 +931,7 @@ async def test_a_run_whose_reply_a_hook_suppressed_still_counts_as_succeeded(
 
     effects.assert_awaited_once()
     final, outcome, _deps = effects.await_args.args
-    assert final.suppressed
+    assert final.ending == Suppressed(Suppression.HOOK)
     assert outcome.run_succeeded is True
 
 
@@ -952,7 +953,7 @@ async def test_an_answer_the_homeserver_did_not_take_yet_applies_its_run_s_effec
 
     effects.assert_awaited_once()
     final, outcome, _deps = effects.await_args.args
-    assert (final.terminal_status, outcome.run_succeeded) == ("suspended", True)
+    assert (final.ending, outcome.run_succeeded) == (Owed(), True)
     assert turn.hooks.names == ["before"]
     assert request.source_handoff is not None
     assert request.source_handoff.is_set()

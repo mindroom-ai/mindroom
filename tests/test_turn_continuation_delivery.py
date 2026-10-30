@@ -25,7 +25,7 @@ from mindroom.delivery_gateway import (
     FinalizeStreamedResponseRequest,
     StreamingDeliveryRequest,
 )
-from mindroom.final_delivery import FinalDeliveryOutcome, StreamTransportOutcome
+from mindroom.final_delivery import Completed, FinalDeliveryOutcome, StreamTransportOutcome
 from mindroom.history.session_context import ScopeSessionContext
 from mindroom.history.types import HistoryScope
 from mindroom.llm.runs import ToolExecution
@@ -62,7 +62,7 @@ def _continuing_tool_execution() -> ToolExecution:
 
 def _completed_outcome(event_id: str, body: str) -> FinalDeliveryOutcome:
     return FinalDeliveryOutcome(
-        terminal_status="completed",
+        ending=Completed(),
         event_id=event_id,
         is_visible_response=True,
         final_visible_body=body,

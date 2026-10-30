@@ -9,6 +9,7 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, TypeVar, cast
 
 from mindroom.ai_runtime import finalize_queued_notice_response_turn_async, queued_message_signal_context
+from mindroom.final_delivery import AwaitingApproval, Owed, hook_failure_reason, outcome_label
 from mindroom.message_target import ResponseLifecycleKey
 from mindroom.mid_turn import QueuedMessage, message_text_for_judgment
 from mindroom.post_response_effects import apply_post_response_effects
@@ -608,27 +609,6 @@ class ResponseLifecycleDeps:
     process_shutdown_requested: Callable[[], bool]
 
 
-def _response_outcome_label(final_delivery_outcome: FinalDeliveryOutcome | None) -> str:
-    """Return one pipeline outcome label for the canonical final delivery outcome."""
-    if final_delivery_outcome is not None and final_delivery_outcome.suppressed:
-        return "suppressed"
-    if final_delivery_outcome is not None and final_delivery_outcome.terminal_status in {
-        "cancelled",
-        "error",
-        "suspended",
-    }:
-        return final_delivery_outcome.terminal_status
-    if final_delivery_outcome is not None and final_delivery_outcome.delivery_kind is not None:
-        return final_delivery_outcome.delivery_kind
-    if (
-        final_delivery_outcome is not None
-        and final_delivery_outcome.event_id is not None
-        and final_delivery_outcome.is_visible_response
-    ):
-        return "visible_response_preserved"
-    return "no_visible_response"
-
-
 class ResponseLifecycle:
     """Consolidate lifecycle helpers shared across response paths."""
 
@@ -671,7 +651,7 @@ class ResponseLifecycle:
         post_response_deps: PostResponseEffectsDeps | Callable[[], PostResponseEffectsDeps],
     ) -> FinalDeliveryOutcome:
         """Run outer lifecycle finalization and return the canonical terminal outcome."""
-        if final_delivery_outcome.terminal_status == "suspended":
+        if isinstance(final_delivery_outcome.ending, AwaitingApproval | Owed):
             await self._finalize_suspended(
                 final_delivery_outcome,
                 post_response_outcome=build_post_response_outcome(final_delivery_outcome),
@@ -681,7 +661,7 @@ class ResponseLifecycle:
         self._raise_if_process_shutdown()
         response_event_id = final_delivery_outcome.final_visible_event_id
         try:
-            if final_delivery_outcome.terminal_status == "completed":
+            if final_delivery_outcome.completed:
                 if (
                     response_event_id is not None
                     and final_delivery_outcome.final_visible_body is not None
@@ -694,11 +674,11 @@ class ResponseLifecycle:
                         delivery_kind=final_delivery_outcome.delivery_kind,
                         continue_on_cancelled=True,
                     )
-            else:
+            elif (failure_reason := hook_failure_reason(final_delivery_outcome.ending)) is not None:
                 await self.deps.response_hooks.emit_cancelled_response(
                     identity=self.identity,
                     visible_response_event_id=response_event_id,
-                    failure_reason=final_delivery_outcome.failure_reason,
+                    failure_reason=failure_reason,
                 )
             self._raise_if_process_shutdown()
         except asyncio.CancelledError as error:
@@ -721,7 +701,7 @@ class ResponseLifecycle:
             post_response_deps=post_response_deps,
         )
         if self.pipeline_timing is not None:
-            self.pipeline_timing.emit_summary(self.deps.logger, outcome=_response_outcome_label(final_delivery_outcome))
+            self.pipeline_timing.emit_summary(self.deps.logger, outcome=outcome_label(final_delivery_outcome))
         return final_delivery_outcome
 
     async def _finalize_suspended(

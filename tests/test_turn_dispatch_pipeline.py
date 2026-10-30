@@ -41,7 +41,7 @@ from mindroom.dispatch_source import (
     VOICE_SOURCE_KIND,
 )
 from mindroom.event_journal import ConversationPage
-from mindroom.final_delivery import FinalDeliveryOutcome
+from mindroom.final_delivery import Completed, Failed, FailureCause, FinalDeliveryOutcome, Suppressed, Suppression
 from mindroom.hooks import (
     MessageEnvelope,
 )
@@ -644,7 +644,7 @@ class TestAgentBot(AgentBotTestBase):
                 "_deliver_turn",
                 new=AsyncMock(
                     return_value=FinalDeliveryOutcome(
-                        terminal_status="completed",
+                        ending=Completed(),
                         event_id="$response",
                         is_visible_response=True,
                         final_visible_body="ok",
@@ -2726,11 +2726,9 @@ class TestAgentBot(AgentBotTestBase):
                 ),
             )
 
-        assert outcome.terminal_status == "cancelled"
-        assert outcome.suppressed is True
+        assert outcome.ending == Suppressed(Suppression.HOOK)
         assert _visible_response_event_id(outcome) == "$existing"
         assert _handled_response_event_id(outcome) is None
-        assert outcome.mark_handled is False
         gateway.deps.response_hooks.emit_cancelled_response.assert_not_awaited()
 
     @pytest.mark.asyncio
@@ -2782,10 +2780,10 @@ class TestAgentBot(AgentBotTestBase):
                 ),
             )
 
-        assert outcome.terminal_status == "error"
+        # Outside a reply span the edit is a write no span owns, refused before it reaches Matrix.
+        assert outcome.ending == Failed(FailureCause.WRITE_REFUSED)
         assert _visible_response_event_id(outcome) == "$existing"
         assert _handled_response_event_id(outcome) == "$existing"
-        assert outcome.mark_handled is True
         gateway.deps.response_hooks.emit_cancelled_response.assert_not_awaited()
 
     @pytest.mark.asyncio
@@ -2827,7 +2825,7 @@ class TestAgentBot(AgentBotTestBase):
             ),
         )
 
-        assert outcome.terminal_status == "error"
+        assert outcome.ending == Failed(FailureCause.HOOK_FAILED)
         assert outcome.event_id is None
         gateway.deps.redact_message_event.assert_awaited_once_with(
             room_id="!test:localhost",

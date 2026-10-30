@@ -2719,6 +2719,7 @@ depends_on = [
 path = "mindroom.delivery_gateway"
 depends_on = [
     "mindroom.cancellation",
+    "mindroom.failure_text",
     "mindroom.response_sources",
     "mindroom.constants",
     "mindroom.event_journal",
@@ -3445,6 +3446,7 @@ depends_on = [
     "mindroom.delivery_gateway",
     "mindroom.entity_resolution",
     "mindroom.error_handling",
+    "mindroom.failure_text",
     "mindroom.history.runtime",
     "mindroom.history.storage",
     "mindroom.history.turn_recorder",

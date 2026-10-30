@@ -119,7 +119,7 @@ from mindroom.event_journal import (
 from mindroom.event_journal import reads as journal_reads
 from mindroom.event_journal.outbox import matrix_delivery_payload
 from mindroom.execution_preparation import _build_unseen_context_messages
-from mindroom.final_delivery import FinalDeliveryOutcome
+from mindroom.final_delivery import Completed, Failed, FailureCause, FinalDeliveryOutcome, TurnEnding
 from mindroom.history.prompt_tokens import build_static_token_estimator
 from mindroom.history.runtime import (
     finalize_history_preparation,
@@ -1377,28 +1377,23 @@ def _make_room_get_event_response(
 
 
 def _outcome(
-    terminal_status: str,
+    ending: TurnEnding,
     event_id: str | None = None,
     is_visible_response: bool = False,
     final_visible_body: str | None = None,
     delivery_kind: str | None = None,
-    failure_reason: str | None = None,
-    suppressed: bool = False,
     tool_trace: tuple[object, ...] = (),
     extra_content: Mapping[str, object] | None = None,
     option_map: dict[str, str] | None = None,
     options_list: tuple[dict[str, str], ...] | None = None,
 ) -> FinalDeliveryOutcome:
     """Build one compact terminal outcome for tests."""
-    resolved_suppressed = suppressed or (failure_reason == "suppressed_by_hook" and not is_visible_response)
     return FinalDeliveryOutcome(
-        terminal_status=terminal_status,
+        ending=ending,
         event_id=event_id,
         is_visible_response=is_visible_response,
         final_visible_body=final_visible_body,
         delivery_kind=delivery_kind,
-        failure_reason=failure_reason,
-        suppressed=resolved_suppressed,
         tool_trace=tool_trace,
         extra_content=dict(extra_content or {}),
         interactive_metadata=InteractiveMetadata._from_parts(option_map, options_list),
@@ -3269,19 +3264,15 @@ def install_send_response_mock(bot: RuntimeBot, send_response: AsyncMock) -> Non
         if event_id is None:
             if request.existing_event_id is not None:
                 return _outcome(
-                    terminal_status="error",
+                    Failed(FailureCause.DELIVERY_FAILED),
                     event_id=request.existing_event_id,
                     is_visible_response=True,
                     final_visible_body=request.response_text,
-                    failure_reason="test_mock_no_visible_response",
                     extra_content=request.extra_content,
                 )
-            return _outcome(
-                terminal_status="error",
-                failure_reason="test_mock_no_visible_response",
-            )
+            return _outcome(Failed(FailureCause.DELIVERY_FAILED))
         return _outcome(
-            terminal_status="completed",
+            Completed(),
             event_id=event_id,
             is_visible_response=True,
             final_visible_body=request.response_text,

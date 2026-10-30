@@ -394,9 +394,9 @@ async def test_an_error_before_delivery_ends_the_reply_failed_without_a_retry(tm
             should_use_streaming=AsyncMock(return_value=False),
             typing_indicator=_noop_typing,
         ),
-        pytest.raises(RuntimeError, match="model down"),
     ):
-        await runner.generate_response(_plain_request(_target()))
+        # The error ends the reply; the turn returns the reply its note answered with.
+        assert await runner.generate_response(_plain_request(_target())) == "$sent1"
 
     reply = await _reply(bot)
     assert reply.state is rl.ReplyState.FAILED
@@ -727,8 +727,13 @@ async def test_regeneration_failing_before_its_first_write_keeps_the_old_answer(
     before = await _reply(bot)
     await _admit_edit(bot)
 
-    with pytest.raises(RuntimeError, match="model down"):
-        await _answer(bot, _regeneration(answer_event_id="$sent1"), AsyncMock(side_effect=RuntimeError("model down")))
+    # The error ends the regeneration without a raise; the old answer still answers the edit.
+    answered = await _answer(
+        bot,
+        _regeneration(answer_event_id="$sent1"),
+        AsyncMock(side_effect=RuntimeError("model down")),
+    )
+    assert answered == "$sent1"
 
     reply = await _reply(bot)
     assert reply.state is rl.ReplyState.COMPLETED
@@ -1692,12 +1697,12 @@ async def test_a_regeneration_rerun_after_a_restart_keeps_what_its_first_attempt
     unique_room_send_responses(restarted.client)
     await restarted._take_over_replies()
     try:
-        with pytest.raises(RuntimeError, match="model down"):
-            await _answer(
-                restarted,
-                _regeneration(answer_event_id="$sent1"),
-                AsyncMock(side_effect=RuntimeError("model down")),
-            )
+        answered = await _answer(
+            restarted,
+            _regeneration(answer_event_id="$sent1"),
+            AsyncMock(side_effect=RuntimeError("model down")),
+        )
+        assert answered == "$sent1"
 
         reply = await _reply(restarted)
         assert reply.state is rl.ReplyState.FAILED

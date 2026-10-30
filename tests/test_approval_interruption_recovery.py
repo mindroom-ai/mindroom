@@ -8,9 +8,11 @@ from unittest.mock import AsyncMock, patch
 import pytest
 import pytest_asyncio
 
+from mindroom.approval.continuation_rules import Resumed, next_step
+from mindroom.approval.response import continuation_target
 from mindroom.constants import STREAM_STATUS_ERROR, STREAM_STATUS_KEY
 from mindroom.event_journal import ApprovalFailure
-from mindroom.final_delivery import FinalDeliveryOutcome
+from mindroom.final_delivery import Cancelled, approval_failure
 from mindroom.reply_lifecycle import ApprovalFailureKind
 from mindroom.runtime_shutdown import ENTITY_REMOVED_SHUTDOWN
 from mindroom.streaming import RESTART_INTERRUPTED_RESPONSE_NOTE
@@ -65,16 +67,11 @@ def _sent_bodies(bot: AgentBot) -> list[dict[str, object]]:
 
 async def _settle(bot: AgentBot, claimed: ApprovalContinuation) -> None:
     """Settle an active restart cancellation of the claimed approval."""
-    runner = unwrap_extracted_collaborator(bot._response_runner)
-    await runner._approvals._settle_failed_approval_outcome(
-        claimed,
-        FinalDeliveryOutcome(
-            terminal_status="cancelled",
-            event_id="$waiting",
-            is_visible_response=True,
-            failure_reason="sync_restart_cancelled",
-        ),
-    )
+    approvals = unwrap_extracted_collaborator(bot._response_runner)._approvals
+    # A resume a restart cancelled settles its approval as failed, as the resume lifecycle does.
+    trigger = Resumed("failed", approval_failure(Cancelled("sync_restart")))
+    step = next_step(await approvals._facts(claimed, recover=True), trigger)
+    await approvals._run_step(claimed, step, target=continuation_target(claimed))
 
 
 async def _assert_settled_with_interruption_note(bot: AgentBot, claimed: ApprovalContinuation, shown: str) -> None:

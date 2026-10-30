@@ -26,7 +26,17 @@ from mindroom.delivery_gateway import (
     ResponseIdentity,
 )
 from mindroom.dispatch_source import EDIT_SOURCE_KIND, MESSAGE_SOURCE_KIND
-from mindroom.final_delivery import FinalDeliveryOutcome, StreamTransportOutcome
+from mindroom.final_delivery import (
+    AwaitingApproval,
+    Completed,
+    Failed,
+    FailureCause,
+    FinalDeliveryOutcome,
+    Owed,
+    StreamTransportOutcome,
+    Suppressed,
+    Suppression,
+)
 from mindroom.history.types import HistoryScope
 from mindroom.hooks import (
     EVENT_MESSAGE_AFTER_RESPONSE,
@@ -754,8 +764,8 @@ async def test_suppressed_final_delivery_emits_cancelled_hook(
         post_response_deps=PostResponseEffectsDeps(logger=get_logger("tests.post_response")),
     )
 
-    assert finalized.suppressed is True
-    assert result.suppressed is True
+    assert finalized.ending == Suppressed(Suppression.HOOK)
+    assert result.ending == Suppressed(Suppression.HOOK)
     assert after_seen == []
     assert len(cancelled_seen) == 1
     assert cancelled_seen[0].failure_reason == "suppressed_by_hook"
@@ -808,7 +818,7 @@ async def test_late_after_response_cancellation_preserves_delivery_result(
         event_id = "$response" if mode == "final" else "$stream"
         delivery_result = await lifecycle.finalize(
             FinalDeliveryOutcome(
-                terminal_status="completed",
+                ending=Completed(),
                 event_id=tracked_event_id or event_id,
                 is_visible_response=True,
                 final_visible_body="visible response",
@@ -867,7 +877,7 @@ async def test_process_shutdown_escapes_real_best_effort_after_response_hook(
         task = asyncio.create_task(
             lifecycle.finalize(
                 FinalDeliveryOutcome(
-                    terminal_status="completed",
+                    ending=Completed(),
                     event_id="$response",
                     is_visible_response=True,
                     final_visible_body="visible response",
@@ -988,8 +998,8 @@ async def test_deliver_final_delivery_failure_emits_cancelled_hook(
         post_response_deps=PostResponseEffectsDeps(logger=get_logger("tests.post_response")),
     )
 
-    assert finalized.terminal_status == "error"
-    assert outcome.terminal_status == "error"
+    assert finalized.ending == Failed(FailureCause.DELIVERY_FAILED)
+    assert outcome.ending == Failed(FailureCause.DELIVERY_FAILED)
     assert outcome.final_visible_event_id == expected_visible_event_id
     assert len(cancelled_seen) == 1
     assert cancelled_seen[0].failure_reason == "delivery_failed"
@@ -1141,8 +1151,7 @@ async def test_suppressed_placeholder_cleanup_failure_returns_typed_outcome_afte
         )
 
     # The placeholder stays owed for removal, and the suppressed answer reports no visible reply.
-    assert outcome.terminal_status == "cancelled"
-    assert outcome.suppressed is True
+    assert outcome.ending == Suppressed(Suppression.HOOK)
     assert outcome.final_visible_event_id is None
     reply = await principal.replies.load(handle.reply_id)
     assert reply is not None
@@ -1160,7 +1169,7 @@ async def test_suppressed_placeholder_cleanup_failure_returns_typed_outcome_afte
 
     assert len(cancelled_seen) == 1
     assert cancelled_seen[0].visible_response_event_id is None
-    assert cancelled_seen[0].failure_reason == outcome.failure_reason
+    assert cancelled_seen[0].failure_reason == "suppressed_by_hook"
 
 
 @pytest.mark.asyncio
@@ -1223,8 +1232,7 @@ async def test_suppressed_placeholder_cleanup_exception_returns_typed_outcome_af
         )
 
     # The placeholder stays owed for removal, and the suppressed answer reports no visible reply.
-    assert outcome.terminal_status == "cancelled"
-    assert outcome.suppressed is True
+    assert outcome.ending == Suppressed(Suppression.HOOK)
     assert outcome.final_visible_event_id is None
     reply = await principal.replies.load(handle.reply_id)
     assert reply is not None
@@ -1242,13 +1250,18 @@ async def test_suppressed_placeholder_cleanup_exception_returns_typed_outcome_af
 
     assert len(cancelled_seen) == 1
     assert cancelled_seen[0].visible_response_event_id is None
-    assert cancelled_seen[0].failure_reason == outcome.failure_reason
+    assert cancelled_seen[0].failure_reason == "suppressed_by_hook"
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(("run_succeeded", "applied"), [(True, 1), (False, 0)], ids=["owed-answer", "approval-pause"])
+@pytest.mark.parametrize(
+    ("ending", "run_succeeded", "applied"),
+    [(Owed(), True, 1), (AwaitingApproval(), False, 0)],
+    ids=["owed-answer", "approval-pause"],
+)
 async def test_a_suspended_reply_applies_its_run_effects_only_once_its_run_finished(
     tmp_path: Path,
+    ending: Owed | AwaitingApproval,
     run_succeeded: bool,
     applied: int,
 ) -> None:
@@ -1269,12 +1282,12 @@ async def test_a_suspended_reply_applies_its_run_effects_only_once_its_run_finis
         patch.object(response_hooks, "emit_cancelled_response", new=cancelled),
     ):
         outcome = await lifecycle.finalize(
-            FinalDeliveryOutcome(terminal_status="suspended", event_id=None, failure_reason="delivery_failed"),
+            FinalDeliveryOutcome(ending=ending, event_id=None),
             build_post_response_outcome=lambda _outcome: ResponseOutcome(run_succeeded=run_succeeded),
             post_response_deps=PostResponseEffectsDeps(logger=get_logger("tests.post_response")),
         )
 
-    assert outcome.terminal_status == "suspended"
+    assert outcome.ending == ending
     assert post_effects.await_count == applied
     after_response.assert_not_awaited()
     cancelled.assert_not_awaited()
@@ -1297,7 +1310,7 @@ async def test_an_owed_answer_hands_a_shutdown_during_its_effects_back_to_the_pr
         pytest.raises(asyncio.CancelledError),
     ):
         await lifecycle.finalize(
-            FinalDeliveryOutcome(terminal_status="suspended", event_id=None),
+            FinalDeliveryOutcome(ending=Owed(), event_id=None),
             build_post_response_outcome=lambda _outcome: ResponseOutcome(),
             post_response_deps=PostResponseEffectsDeps(logger=get_logger("tests.post_response")),
         )

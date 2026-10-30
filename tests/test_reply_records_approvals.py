@@ -585,11 +585,8 @@ async def test_a_turn_approved_in_place_settles_through_its_approval(tmp_path: P
             should_use_streaming=AsyncMock(return_value=False),
             typing_indicator=_noop_typing,
         ):
-            if answers:
-                await runner.generate_response(_plain_request(_target()))
-            else:
-                with pytest.raises(RuntimeError, match="model down"):
-                    await runner.generate_response(_plain_request(_target()))
+            # A model error ends the reply rather than raising out of the turn.
+            await runner.generate_response(_plain_request(_target()))
         if await bot.journal_principal().approvals.approval_continuation_for_source("$event") is not None:
             # A failure settles from the source worker the fence woke.
             await _run_approval_wakes(bot, [("$event",)])

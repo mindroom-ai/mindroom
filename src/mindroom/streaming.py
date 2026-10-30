@@ -828,13 +828,10 @@ class StreamingResponse:
                 reason=str(exc),
                 exc_info=True,
             )
-            return self._committed_outcome(
-                canonical_final_body_candidate,
-                failure_reason=f"terminal_update_exception:{exc.__class__.__name__}",
-            )
+            return self._committed_outcome(canonical_final_body_candidate, failed=True)
         if not send_succeeded:
             logger.warning("Failed to persist terminal stream status", event_id=self.event_id, room_id=self.room_id)
-            return self._committed_outcome(canonical_final_body_candidate, failure_reason="terminal_update_failed")
+            return self._committed_outcome(canonical_final_body_candidate, failed=True)
         # What the room shows is the payload that landed, which the final text transform may have reshaped.
         shown = final_delivery.committed_state
         return StreamTransportOutcome(
@@ -1072,7 +1069,7 @@ class StreamingResponse:
         self,
         canonical_final_body_candidate: str | None,
         *,
-        failure_reason: str | None = None,
+        failed: bool = False,
     ) -> StreamTransportOutcome:
         """Report what definitely reached Matrix, for a terminal update that was skipped or did not land."""
         rendered_body: str | None = None
@@ -1087,7 +1084,7 @@ class StreamingResponse:
             rendered_body=rendered_body,
             visible_body_state=visible_body_state,
             canonical_final_body_candidate=canonical_final_body_candidate,
-            failure_reason=failure_reason,
+            failed=failed,
             interactive_metadata=self._last_committed_interactive_metadata,
         )
 

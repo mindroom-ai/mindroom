@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING
 import pytest
 
 from mindroom import reply_lifecycle as rl
+from mindroom.final_delivery import Cancelled, Failed, FailureCause
 from mindroom.reply_lifecycle import (
     ApprovalFailureKind,
     CancelSpan,
@@ -2204,7 +2205,9 @@ def test_an_interrupted_response_ends_its_span_by_one_table(
     """Stop, restart, interruption, and failure map to one span end, before or after delivery started."""
     reply, _span = _turn()
     reply = replace(reply, event_id=event_id, stop_receipt_order=1 if stopped else None)
-    end = interrupted_end(reply, cancel_source=cancel_source, failure_reason="boom", delivery_started=delivery_started)
+    # No cancellation source means the response failed with an error.
+    ending = Failed(FailureCause.ERROR, "boom") if cancel_source is None else Cancelled(cancel_source)
+    end = interrupted_end(reply, ending, delivery_started=delivery_started)
     if expected is None:
         # The span is released, so its sources retry.
         assert end is None
