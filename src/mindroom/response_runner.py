@@ -1519,23 +1519,24 @@ class ResponseRunner:
                     execution_identity=execution_identity,
                     participation=participation,
                 )
-            if team.rejection_message is not None:
-                await self._deliver_team_rejection(prepared, resolved_target, team.rejection_message)
-                return Owned()
-            assert team_models is not None
-            return await self._prepare_team_turn(
-                prepared,
-                team=team,
-                team_models=team_models,
-                resolved_target=resolved_target,
-                history_scope=history_scope,
-            )
+            if team.rejection_message is None:
+                assert team_models is not None
+                return await self._prepare_team_turn(
+                    prepared,
+                    team=team,
+                    team_models=team_models,
+                    resolved_target=resolved_target,
+                    history_scope=history_scope,
+                )
         except (ReplyMembershipPendingError, RevisionSnapshotChangedError, _PostLockRequestPreparationError):
             raise
         except Exception as error:
             if placeholder_event_id is None:
                 raise
             raise _PostLockRequestPreparationError from error
+        # A rejection is the turn's settlement, not its preparation: its failure is no dispatch failure.
+        await self._deliver_team_rejection(prepared, resolved_target, team.rejection_message)
+        return Owned()
 
     async def _deliver_team_rejection(
         self,

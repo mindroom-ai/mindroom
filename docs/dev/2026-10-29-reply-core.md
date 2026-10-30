@@ -40,7 +40,7 @@ The code shows what each owner does; this record keeps why, what was rejected, a
 
 ### Notes, Stop, and hooks
 
-- A span's note, an approval's failure note, and an owed note go through one loop that composes the row from the reply as it stands and composes it again when the reply changed first.
+- The three note writers (a span's, an approval failure's, and an owed note's) share one recompose-on-change loop because each had its own copy of the rule for a reply that changed after the note was rendered, and the copies had drifted apart on Stop.
 - A Stop the reply has not applied decides every span note, also on the exit of a span resuming an approval.
   The exit already applied such a Stop when it saw the Stop on its first read, and the rules end a resume span the same way whichever note it renders, so skipping the Stop only for a Stop that landed mid-write made one exit report two endings; an approval's own failure note always shows the Stop, as `approval_failure_note` requires.
 - The response hooks and the silent-schedule result record belong to the response lifecycle; the gateway calls `message:before_response` and `message:final_response_transform` at its write points.
@@ -50,11 +50,6 @@ The code shows what each owner does; this record keeps why, what was rejected, a
 
 - One stop routine joins every progress writer and returns their failures, and each caller keeps its own policy for them.
   Abandoning a stuck writer after a timeout was rejected, because its edit could land after the reply's terminal write.
-
-### Turn context
-
-- Agent and team turns build their shared context fields in one place; the team's requester fallback to the identity it runs as stays an explicit argument.
-- Once a turn holds its conversation's lock, its request names the target its reply answers in, so no separate thread-root override or re-locked copy of the request remains.
 
 ## Rejected alternatives
 
