@@ -85,6 +85,8 @@ _EVENT_JOURNAL_COLUMNS = """
 # Successful repair is hidden from callers but retained as the revision carrier,
 # so a later gap cannot reuse the identity of an old in-flight walk.
 _REPAIRED_RECOVERY_STATE = "repaired"
+_TURN_BACKED_KIND_VALUES = tuple(sorted(kind.value for kind in TURN_BACKED_KINDS))
+_TURN_BACKED_KIND_PLACEHOLDERS = ", ".join("?" for _ in _TURN_BACKED_KIND_VALUES)
 _MATRIX_MEMBERSHIPS = frozenset({"ban", "invite", "join", "knock", "leave"})
 
 
@@ -235,12 +237,8 @@ def _admit_suppressed_semantic_identity(
         replace(event, event_class=EventClass.CONTEXT_ONLY),
         None,
     )
-    if result is AdmissionResult.ADMITTED:
-        return
     if result is AdmissionResult.DUPLICATE:
         _require_matching_semantic_event(transaction, principal_id, event)
-        return
-    raise IngestionBatchIntegrityError
 
 
 def _apply_semantic_ingestion_disposition(
@@ -266,8 +264,6 @@ def _apply_semantic_ingestion_disposition(
                 membership_epoch=state.membership_epoch,
                 settle_redacted_arrival=True,
             )
-    elif semantic_result is not AdmissionResult.ADMITTED:
-        raise IngestionBatchIntegrityError
     if event.kind is EventKind.ROOM_LIFECYCLE and event.event_class is EventClass.CONTEXT_ONLY:
         content = cast("Mapping[str, object]", event.source["content"])
         if content.get("membership") == "join":
@@ -666,7 +662,7 @@ def _advance_membership_epoch(
     transaction: Transaction,
     principal_id: str,
     room_id: str,
-) -> int:
+) -> None:
     """Invalidate everything derived for a room the bot has left and rejoined.
 
     Rejoining can expose a different slice of history than the bot saw before,
@@ -788,15 +784,13 @@ def _advance_membership_epoch(
     # the redacted request from durable turn and session state -- and sweeping
     # it up here would drop that work silently and let the redacted content
     # survive in later context.
-    turn_backed = tuple(sorted(kind.value for kind in TURN_BACKED_KINDS))
-    kind_placeholders = ", ".join("?" for _ in turn_backed)
     transaction.execute(
         f"""
         UPDATE journal_events
         SET state = ?, source_json = '', semantic_consumer = NULL
         WHERE principal_id = ? AND room_id = ? AND state = 'pending'
           AND (
-            kind IN ({kind_placeholders})
+            kind IN ({_TURN_BACKED_KIND_PLACEHOLDERS})
             OR (kind = ? AND semantic_consumer = ?)
           )
         """,  # noqa: S608 - placeholders are generated, values are still bound
@@ -804,12 +798,11 @@ def _advance_membership_epoch(
             SETTLED_STATE,
             principal_id,
             room_id,
-            *turn_backed,
+            *_TURN_BACKED_KIND_VALUES,
             EventKind.REACTION.value,
             SemanticConsumer.INTERACTIVE_REACTION.value,
         ),
     )
-    return epoch
 
 
 @dataclass(frozen=True, slots=True)
@@ -1061,20 +1054,27 @@ def _settle_redacted_turn_source(
     Approval continuations dispatch before event-kind ingress, so preserving
     one cannot replay its source through a message or media callback.
     """
-    kinds = tuple(sorted(kind.value for kind in TURN_BACKED_KINDS))
-    kind_placeholders = ", ".join("?" for _ in kinds)
     transaction.execute(
         f"""
         UPDATE journal_events
         SET state = ?, source_json = '', semantic_consumer = NULL
         WHERE principal_id = ? AND room_id = ? AND event_id = ? AND state = ?
-          AND kind IN ({kind_placeholders})
+          AND kind IN ({_TURN_BACKED_KIND_PLACEHOLDERS})
           AND NOT EXISTS (
               SELECT 1 FROM {approval_continuations.HELD_SOURCES}
               WHERE held_source.principal_id = ? AND held_source.event_id = ?
           )
         """,  # noqa: S608 - placeholders are generated, values are still bound
-        (SETTLED_STATE, principal_id, room_id, event_id, PENDING_STATE, *kinds, principal_id, event_id),
+        (
+            SETTLED_STATE,
+            principal_id,
+            room_id,
+            event_id,
+            PENDING_STATE,
+            *_TURN_BACKED_KIND_VALUES,
+            principal_id,
+            event_id,
+        ),
     )
 
 
@@ -1276,14 +1276,12 @@ def pending_thread_events_after(
     by their timestamps, and treating either as proof that the other is stale
     would drop a message on a coin flip.
     """
-    kinds = tuple(sorted(kind.value for kind in TURN_BACKED_KINDS))
-    kind_placeholders = ", ".join("?" for _ in kinds)
     rows = transaction.fetchall(
         f"""
         SELECT {_JOURNAL_COLUMNS} FROM journal_events
         WHERE principal_id = ? AND state = 'pending'
           AND room_id = ? AND thread_id = ?
-          AND kind IN ({kind_placeholders})
+          AND kind IN ({_TURN_BACKED_KIND_PLACEHOLDERS})
           AND origin_server_ts > ? AND event_id <> ?
         ORDER BY origin_server_ts, receipt_order
         LIMIT ?
@@ -1292,7 +1290,7 @@ def pending_thread_events_after(
             principal_id,
             room_id,
             encode_thread_id(thread_id),
-            *kinds,
+            *_TURN_BACKED_KIND_VALUES,
             after_origin_server_ts,
             excluding_event_id,
             limit,
