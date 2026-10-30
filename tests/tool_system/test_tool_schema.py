@@ -3,7 +3,9 @@
 Every MindRoom-authored function whose schema Agno derives from its signature runs through both generators, for each
 registered tool as the goldens build it, and the two outputs must serialize to the same bytes. The annotation-kind
 cases do the same for each kind of annotation and docstring a tool may use, and every argument golden whose probe
-takes no framework object runs through owned toolkit functions.
+takes no framework object runs through owned toolkit functions. Values annotated ``Any`` or ``object`` are where the
+two differ on purpose: the owned generator leaves them unconstrained, and the comparison renders them as Agno's open fix
+does (``support.agno_derivation``).
 """
 
 # The annotation-kind probes exist for their signatures, which no body reads.
@@ -30,9 +32,13 @@ from typing import (  # noqa: UP035 - The bare typing aliases are annotation-kin
 import pytest
 from pydantic import BaseModel
 
+from mindroom.custom_tools.matrix_api import MatrixApiTools
+from mindroom.custom_tools.thread_tags import ThreadTagsTools
 from mindroom.tool_system.agno_toolkits import AGNO_EMPTY_PARAMETERS, adapt_toolkit
 from mindroom.tool_system.authoring import Toolkit, passthrough_parameters
+from mindroom.tool_system.tool_access import validate_tool_arguments
 from mindroom.tool_system.tool_schema import tool_description, tool_parameters, validated_entrypoint
+from tests.agent_tool_helpers import toolkit_offers
 from tests.agno_parity import tool_argument_probes as probes
 from tests.tool_system import agno_parity_support as support
 
@@ -256,6 +262,43 @@ def models(outer: Outer, tree: TreeNode, many: list[Inner] | None = None) -> str
 def untyped(value, anything: Any, thing: object) -> str:  # noqa: ANN001, ANN401
     """Take values of any type."""
     return ""
+
+
+def test_values_annotated_any_or_object_take_any_json_value() -> None:
+    """``Any`` and ``object`` are unconstrained wherever they appear, where Agno 3.0.9 admits only an empty object."""
+
+    def open_values(
+        anything: Any,  # noqa: ANN401
+        thing: object,
+        mapping: dict[str, Any],
+        objects: dict[str, object] | None,
+        rows: list[list[Any]],
+    ) -> str:
+        return ""
+
+    mapping = {"type": "object", "propertyNames": {"type": "string"}, "additionalProperties": {}}
+    assert tool_parameters(open_values)["properties"] == {
+        "anything": {},
+        "thing": {},
+        "mapping": mapping,
+        "objects": {"anyOf": [mapping, {"type": "null"}]},
+        "rows": {"type": "array", "items": {"type": "array", "items": {}}},
+    }
+
+
+def test_owned_tools_taking_any_values_accept_real_arguments() -> None:
+    """A thread tag's data and a Matrix event's content pass the argument validation agent CLI calls run.
+
+    A value that is not an object is still refused there, so a tool body never receives one.
+    """
+    tag_thread = toolkit_offers(ThreadTagsTools(), "tag_thread")
+    matrix_api = toolkit_offers(MatrixApiTools(), "matrix_api")
+    event = {"action": "send_event", "event_type": "m.room.message", "content": {"msgtype": "m.text", "body": "Hi"}}
+
+    validate_tool_arguments(dict(tag_thread.parameters), {"tag": "blocked", "data": {"priority": "high"}})
+    validate_tool_arguments(dict(matrix_api.parameters), event)
+    with pytest.raises(ValueError, match="Invalid tool arguments"):
+        validate_tool_arguments(dict(matrix_api.parameters), {**event, "content": "Hi"})
 
 
 def no_docstring(value: str) -> str:  # noqa: D103 - The case is a function without one.

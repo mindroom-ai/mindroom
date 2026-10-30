@@ -2,8 +2,9 @@
 
 ``tool_description`` and ``tool_parameters`` give the schema Agno 3.0.9's entrypoint processing derives for the
 annotations MindRoom's tools and its plugins use, byte for byte (``tests/tool_system/test_tool_schema.py`` runs every
-MindRoom-authored function through both), and ``validated_entrypoint`` coerces a call's arguments to the annotations
-the same way. The module imports no Agno code.
+MindRoom-authored function through both), except that a value annotated ``Any`` or ``object`` takes any JSON value,
+where Agno renders an object that admits only ``{}``. ``validated_entrypoint`` validates a call's arguments against
+the annotations, coercing what pydantic can. The module imports no Agno code.
 Every parameter belongs to the model except ``*args`` and ``**kwargs``, which the schema leaves out; refusing
 parameters a framework would fill is the adapter's job.
 """
@@ -140,7 +141,13 @@ def _parameter_schema(hint: object) -> dict[str, Any]:
 
 
 def _schema(hint: Any) -> dict[str, Any]:  # noqa: ANN401, PLR0911 - One branch per kind of annotation.
-    """Return the JSON schema of one annotation; a bare ``typing.List`` or ``typing.Dict`` holds strings."""
+    """Return the JSON schema of one annotation; a bare ``typing.List`` or ``typing.Dict`` holds strings.
+
+    ``Any`` and ``object`` take any JSON value; any other class without a JSON type renders, as Agno renders it, as an
+    object that admits no property.
+    """
+    if hint is Any or hint is object:
+        return {}
     origin = get_origin(hint)
     arguments = get_args(hint)
     if origin is Literal:
@@ -164,11 +171,6 @@ def _schema(hint: Any) -> dict[str, Any]:  # noqa: ANN401, PLR0911 - One branch 
     json_type = _JSON_TYPES.get(hint.__name__, "object")
     if json_type != "object":
         return {"type": json_type}
-    # TODO(simplify): ``Any``, ``object``, and any class without a JSON type render as an object that admits no
-    # property, so the local argument validation the agent tool calls run (``validate_tool_arguments``) rejects any
-    # real value there. custom_tools/microsoft_sharepoint.py annotates a bare ``dict`` to avoid it; the browser, Matrix
-    # API, and thread-tags tools are still affected, and the AGNO_COMPAT marker in custom_tools/google_sheets.py works
-    # around Agno's identical rendering. Rendering ``Any`` unconstrained changes those tools' schemas.
     return {"type": "object", "properties": {}, "additionalProperties": False}
 
 

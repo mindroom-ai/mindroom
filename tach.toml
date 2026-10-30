@@ -921,7 +921,6 @@ depends_on = [
     "mindroom.path_confinement",
     "mindroom.tool_system.agent_tool_calls",
     "mindroom.agent_descriptions",
-    "mindroom.session_storage.agent_storage",
     "mindroom.constants",
     "mindroom.credentials.manager",
     "mindroom.custom_tools.computer_announcement",
@@ -1004,7 +1003,6 @@ depends_on = [
 ]
 visibility = [
     "mindroom.helper_usage",
-    "mindroom.agents",
     "mindroom.approval.execution",
     "mindroom.conversation_state_writer",
     "mindroom.history.interrupted_replay",
@@ -1245,6 +1243,8 @@ path = "mindroom.ai_runtime"
 depends_on = [
     "mindroom.history.run_visibility",
     "mindroom.llm",
+    "mindroom.background_tasks",
+    "mindroom.session_storage.lanes",
 ]
 visibility = [
     "mindroom.tool_jobs.runtime",
@@ -1393,6 +1393,7 @@ depends_on = [
     "mindroom.tool_system.worker_routing",
     "mindroom.agent_cli.approval",
     "mindroom.turn_model",
+    "mindroom.session_storage.lanes",
 ]
 visibility = ["mindroom.approval.continuation_runner"]
 
@@ -4854,7 +4855,6 @@ depends_on = [
     "mindroom.ai",
     "mindroom.helper_usage",
     "mindroom.history.interrupted_replay",
-    "mindroom.history.session_context",
     "mindroom.history.turn_recorder",
     "mindroom.history.types",
     "mindroom.hooks",
@@ -4876,6 +4876,8 @@ depends_on = [
     "mindroom.tool_jobs.execution",
     "mindroom.tool_system.agent_tools",
     "mindroom.turn_model",
+    "mindroom.history.storage",
+    "mindroom.session_storage.lanes",
 ]
 
 [[modules]]
@@ -5690,6 +5692,7 @@ depends_on = [
     "mindroom.constants",
     "mindroom.file_access",
     "mindroom.hooks",
+    "mindroom.llm",
     "mindroom.path_confinement",
     "mindroom.providers.registry",
     "mindroom.tool_system.atlassian_connections",
@@ -5701,6 +5704,7 @@ depends_on = [
     "mindroom.tool_system.runtime_context",
     "mindroom.tool_system.tool_function",
     "mindroom.tool_system.worker_routing",
+    "mindroom.turn_model",
 ]
 visibility = []
 
@@ -8398,7 +8402,6 @@ visibility = [
     "mindroom.history.interrupted_replay",
     "mindroom.history.manual",
     "mindroom.history.runtime",
-    "mindroom.matrix_rtc.call_tools",
     "mindroom.pre_model_preparation",
     "mindroom.response_turn",
     "mindroom.teams",
@@ -8625,6 +8628,7 @@ depends_on = [
     "mindroom.history.types",
     "mindroom.llm",
     "mindroom.history.storage",
+    "mindroom.session_storage.lanes",
 ]
 visibility = [
     "mindroom.orchestration.tool_job_runtime",

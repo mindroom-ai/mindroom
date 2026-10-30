@@ -67,6 +67,7 @@ from mindroom.hooks import (
     TurnTrust,
     hook,
 )
+from mindroom.llm.provider import ModelProvider
 from mindroom.logging_config import get_logger
 from mindroom.message_target import MessageTarget
 from mindroom.oauth import OAuthDiscoveryConfig, OAuthProvider, oauth_runtime_bootstrapper
@@ -106,6 +107,7 @@ from mindroom.tool_system.runtime_context import (
 )
 from mindroom.tool_system.tool_function import ToolValue
 from mindroom.tool_system.worker_routing import ResolvedWorkerTarget
+from mindroom.turn_model import ModelScope, resolve_turn_model
 
 __all__ = [
     "ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND",
@@ -155,6 +157,8 @@ __all__ = [
     "MessageEnvelope",
     "MessageReceivedContext",
     "MessageTarget",
+    "ModelProvider",
+    "ModelScope",
     "OAuthDiscoveryConfig",
     "OAuthProvider",
     "ReactionReceivedContext",
@@ -209,6 +213,7 @@ __all__ = [
     "resolve_agent_file",
     "resolve_config_relative_path",
     "resolve_tool_runtime_hook_bindings",
+    "resolve_turn_model",
     "tool",
     "toolkit_functions",
     "write_file_within_root",

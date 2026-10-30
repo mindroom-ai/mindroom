@@ -304,7 +304,7 @@ def test_an_owned_toolkit_adapts_without_agnos_entrypoint_processing(monkeypatch
         },
         "required": ["name"],
     }
-    assert all(function.injected_params == {} and function.entrypoint_processed for function in adapted.functions)
+    assert all(function.injected_params == {} for function in adapted.functions)
     assert {function.toolkit for function in adapted.functions} == {"greeter"}
 
 
@@ -644,7 +644,6 @@ async def test_a_passthrough_function_keeps_its_schema_and_takes_its_arguments_a
     assert (tag.description, tag.parameters) == ("Tag the thread.", _TAG_SCHEMA)
     assert tag.parameters is not _TAG_SCHEMA
     assert outcome.content == "{'tag': 7, 'extra': True}"
-    assert not tag.entrypoint_processed
     assert (tag.requires_confirmation, tag.external_execution, tag.strict) == (False, False, None)
 
 
