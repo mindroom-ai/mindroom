@@ -15,7 +15,7 @@ from typing import TYPE_CHECKING, Any
 
 from mindroom.constants import STREAM_VISIBLE_BODY_KEY, TOOL_TRACE_CONTENT_KEY
 from mindroom.matrix.large_messages import calculate_event_size, is_edit_message
-from mindroom.matrix.message_builder import markdown_to_html
+from mindroom.matrix.message_builder import build_thread_relation, markdown_to_html
 from mindroom.tool_system.events import (
     ToolTraceEntry,
     build_tool_trace_content,
@@ -189,14 +189,7 @@ def _continuation_content(
     no relation outside threads), which recovery explicitly excludes.
     """
     relation = (
-        {
-            "rel_type": "m.thread",
-            "event_id": thread_id,
-            "is_falling_back": True,
-            "m.in_reply_to": {"event_id": reply_to_event_id or thread_id},
-        }
-        if thread_id
-        else None
+        build_thread_relation(thread_id, latest_thread_event_id=reply_to_event_id or thread_id) if thread_id else None
     )
     return _rich_text_content(source, body, relation=relation)
 

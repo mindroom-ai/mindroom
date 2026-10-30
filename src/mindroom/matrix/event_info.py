@@ -92,17 +92,6 @@ class EventInfo:
     relates_to_event_id: str | None
     """The primary event ID this event relates to (if any)."""
 
-    thread_id_from_edit: str | None = None
-    """For edit events: the thread root event ID found in ``m.new_content``.
-
-    A claim, never a placement, and never evidence of membership. Matrix applies ``m.new_content``
-    by keeping the original event's relation and ignoring every ``m.relates_to`` written inside the
-    replacement, so this value is whatever the edit's author decided to type and no rule turns it
-    into a fact. An edit is placed by the event it replaces; resolve that original through
-    ``mindroom.matrix.thread_membership`` instead of reading this. The one use left in the repo is
-    a search hint that widens a durable lookup whose result is validated on its own terms.
-    """
-
     event_type: str | None = None
     """The Matrix event type carrying these relations, when known."""
 
@@ -131,22 +120,6 @@ class EventInfo:
         return None
 
 
-def is_thread_affecting_relation(
-    event_info: EventInfo,
-    *,
-    event_type: str | None,
-) -> bool:
-    """Return whether one event relation can affect visible thread-scoped cache state.
-
-    Relation names are reused by non-message event families.
-    Only relations carried by plaintext or encrypted room messages can add visible
-    conversation history, so every non-message relation stays room-level.
-    """
-    return event_type_supports_thread_relations(event_type) and (
-        event_info.is_thread or event_info.is_edit or event_info.is_reply or event_info.relation_type == "m.reference"
-    )
-
-
 def _analyze_event_relations(event_source: dict | None) -> EventInfo:
     """Analyze complete relation information for a Matrix event.
 
@@ -167,24 +140,7 @@ def _analyze_event_relations(event_source: dict | None) -> EventInfo:
         EventInfo object with complete relation analysis
 
     """
-    if not event_source:
-        return EventInfo(
-            is_thread=False,
-            thread_id=None,
-            can_be_thread_root=True,
-            is_edit=False,
-            original_event_id=None,
-            is_reply=False,
-            reply_to_event_id=None,
-            is_reaction=False,
-            reaction_key=None,
-            reaction_target_event_id=None,
-            has_relations=False,
-            relation_type=None,
-            relates_to_event_id=None,
-            thread_id_from_edit=None,
-        )
-
+    event_source = event_source or {}
     raw_event_type = event_source.get("type")
     event_type = raw_event_type if isinstance(raw_event_type, str) else None
     content = event_source.get("content", {})
@@ -207,7 +163,6 @@ def _analyze_event_relations(event_source: dict | None) -> EventInfo:
     # Edit analysis
     is_edit = relation_type == "m.replace"
     original_event_id = relates_to_event_id if is_edit else None
-    thread_id_from_edit = _extract_thread_id_from_new_content(content) if is_edit else None
 
     # Reaction analysis
     is_reaction = relation_type == "m.annotation"
@@ -242,7 +197,6 @@ def _analyze_event_relations(event_source: dict | None) -> EventInfo:
         has_relations=has_relations,
         relation_type=relation_type,
         relates_to_event_id=relates_to_event_id,
-        thread_id_from_edit=thread_id_from_edit,
         is_thread_fallback=is_thread_fallback,
     )
 
@@ -263,19 +217,3 @@ def _relation_target_event_id(relates_to: dict) -> str | None:
     """
     target = relates_to.get("event_id")
     return target if isinstance(target, str) and target else None
-
-
-def _extract_thread_id_from_new_content(content: dict) -> str | None:
-    """Extract thread root event ID from edit ``m.new_content`` relation data."""
-    new_content = content.get("m.new_content", {})
-    if not isinstance(new_content, dict):
-        return None
-
-    new_relates_to = new_content.get("m.relates_to", {})
-    if not isinstance(new_relates_to, dict):
-        return None
-
-    if new_relates_to.get("rel_type") != "m.thread":
-        return None
-
-    return _relation_target_event_id(new_relates_to)

@@ -72,6 +72,8 @@ from mindroom.tool_system.plugins import config_plugins
 from mindroom.tool_system.runtime_context import ToolRuntimeSupport
 
 from . import constants
+from .agent_cli.cli_approval_waits import CliWaiters
+from .approval.continuation_runner import ApprovalContinuationRunner
 from .background_tasks import create_background_task, wait_for_background_tasks
 from .coalescing.gate import CoalescingGate
 from .command_turn_executor import CommandTurnExecutor, CommandTurnExecutorDeps
@@ -82,7 +84,6 @@ from .conversation_state_writer import ConversationStateWriter, ConversationStat
 from .delivery_gateway import (
     DeliveryGateway,
     DeliveryGatewayDeps,
-    ResponseHookService,
     SendTextRequest,
 )
 from .edit_regenerator import EditRegenerator, EditRegeneratorDeps
@@ -109,8 +110,11 @@ from .matrix.conversation_reads import ConversationReader, latest_agent_message_
 from .matrix.relation_lookup import RelationLookup
 from .reaction_dispatch import ReactionDispatcher, ReactionDispatcherDeps
 from .reply_scope import ReplyRuntime
+from .reply_turn.inbox import InboxResponses
+from .reply_turn.locked_turn import LockedTurns, ReplyTurnDeps
+from .response_lifecycle import ResponseHookService, ResponseLifecycleCoordinator
 from .response_payload_preparation import ResponsePayloadPreparer
-from .response_runner import ResponseRunner, ResponseRunnerDeps
+from .response_runner import ResponseRunner
 from .response_shutdown_diagnostics import DeferredStopPhase
 from .router.duties import RouterDuties, RouterDutiesDeps
 from .tool_jobs.client_cancel import cancel_room_jobs, handle_job_cancel_event, person_may_cancel
@@ -588,28 +592,28 @@ class AgentBot:
             agent_name=self.agent_name,
             logger=self.logger,
         )
-        self._response_runner = ResponseRunner(
-            ResponseRunnerDeps(
-                runtime=self._runtime_view,
-                logger=self.logger,
-                runtime_paths=self.runtime_paths,
-                storage_path=self.storage_path,
-                agent_name=self.agent_name,
-                matrix_full_id=runtime_matrix_id.full_id,
-                resolver=self._conversation_resolver,
-                tool_runtime=self._tool_runtime_support,
-                knowledge_access=self._knowledge_access_support,
-                delivery_gateway=self._delivery_gateway,
-                post_response_effects=self._post_response_effects_support,
-                state_writer=self._conversation_state_writer,
-                request_preparer=self._request_payload_preparer,
-                approval_store=principal.approvals,
-                retry_approval_sources=self.retry_approval_sources,
-                approval_runtime_generation=self._approval_runtime_generation,
-                redacted_history_events=self._turn_store.redacted_history_events,
-                replies=self._reply_runtime,
-            ),
+        reply_turn_deps = ReplyTurnDeps(
+            runtime=self._runtime_view,
+            logger=self.logger,
+            runtime_paths=self.runtime_paths,
+            storage_path=self.storage_path,
+            agent_name=self.agent_name,
+            matrix_full_id=runtime_matrix_id.full_id,
+            resolver=self._conversation_resolver,
+            tool_runtime=self._tool_runtime_support,
+            knowledge_access=self._knowledge_access_support,
+            delivery_gateway=self._delivery_gateway,
+            post_response_effects=self._post_response_effects_support,
+            state_writer=self._conversation_state_writer,
+            request_preparer=self._request_payload_preparer,
+            approval_store=principal.approvals,
+            retry_approval_sources=self.retry_approval_sources,
+            settle_ignored_sources=self._journal_dispatcher.settle_intentionally_ignored_turn_sources,
+            approval_runtime_generation=self._approval_runtime_generation,
+            redacted_history_events=self._turn_store.redacted_history_events,
+            replies=self._reply_runtime,
         )
+        self._build_reply_turn_owners(reply_turn_deps)
         self._decryption_diagnostics = DecryptionDiagnostics(
             agent_name=self.agent_name,
             runtime=self._runtime_view,
@@ -994,9 +998,37 @@ class AgentBot:
         )
         self._journal_dispatcher.wake()
 
+    def _build_reply_turn_owners(self, deps: ReplyTurnDeps) -> None:
+        """Build one reply turn's owners so the dependency between them runs one way.
+
+        The response runner hands paused turns to the approval runner, and both settle through the locked turns, which
+        know neither.
+        """
+        self._cli_waiters = CliWaiters()
+        lifecycle_coordinator = ResponseLifecycleCoordinator()
+        inbox = InboxResponses(
+            logger=self.logger,
+            replies=deps.replies,
+            retry_approval_sources=self.retry_approval_sources,
+            runtime=deps.runtime,
+        )
+        locked_turns = LockedTurns(deps)
+        self._approval_runner = ApprovalContinuationRunner(
+            locked=locked_turns,
+            lifecycle_coordinator=lifecycle_coordinator,
+            cli_waiters=self._cli_waiters,
+        )
+        self._response_runner = ResponseRunner(
+            locked=locked_turns,
+            approvals=self._approval_runner,
+            inbox=inbox,
+            lifecycle_coordinator=lifecycle_coordinator,
+            cli_waiters=self._cli_waiters,
+        )
+
     def retry_approval_sources(self, room_id: str, source_event_ids: tuple[str, ...]) -> None:
         """Wake response-local CLI waits, then release unowned sources to the journal."""
-        journal_sources = self._response_runner.wake_cli_approval_sources(source_event_ids)
+        journal_sources = self._cli_waiters.wake(source_event_ids)
         if journal_sources:
             self._journal_dispatcher.retry_turn_sources(room_id, journal_sources)
 
@@ -1647,7 +1679,7 @@ class AgentBot:
                 await self._open_approval_recovery_client()
                 # A recovery-only bot is its own instance for the replies it finishes.
                 await self._reply_runtime.take_ownership()
-            return await self._response_runner.recover_approval_final(approval_id)
+            return await self._approval_runner.recover_approval_final(approval_id)
         finally:
             if opened_recovery_client:
                 await self._close_approval_recovery_client()

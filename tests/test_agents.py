@@ -104,6 +104,7 @@ from mindroom.workspaces import _copy_workspace_template, validate_workspace_tem
 from tests.agent_tool_helpers import toolkit_offers
 from tests.conftest import publish_hook_plugin, register_test_tool, runtime_paths_for
 from tests.identity_helpers import persist_entity_accounts
+from tests.matrix_state_helpers import save_matrix_state
 from tests.tool_approval_helpers import gated_functions
 from tests.turn_model_helpers import turn_model
 
@@ -366,7 +367,7 @@ def test_agent_identity_prompt_uses_persisted_current_matrix_id(tmp_path: Path) 
     )
     state = MatrixState.load(runtime_paths=runtime_paths)
     state.add_account("agent_general", "mindroom_general_oldns", "pw", domain="localhost")
-    state.save(runtime_paths=runtime_paths)
+    save_matrix_state(state, runtime_paths)
 
     agent = _create_agent_for_test("general", config)
 
@@ -456,12 +457,21 @@ def test_config_round_trips_structured_agent_tool_entries() -> None:
     }
 
 
-def test_get_agent_calculator() -> None:
-    """Tests that the calculator agent is created correctly."""
+@pytest.mark.parametrize(
+    ("agent_name", "display_name"),
+    [
+        ("calculator", "CalculatorAgent"),
+        ("code", "CodeAgent"),
+        ("shell", "ShellAgent"),
+        ("summary", "SummaryAgent"),
+    ],
+)
+def test_get_agent_builds_configured_agent(agent_name: str, display_name: str) -> None:
+    """Each configured agent builds under its display name."""
     config = _test_config()
-    agent = _create_agent_for_test("calculator", config=config)
+    agent = _create_agent_for_test(agent_name, config=config)
     assert isinstance(agent, AgentBuild)
-    assert agent.spec.name == "CalculatorAgent"
+    assert agent.spec.name == display_name
 
 
 def test_get_agent_general() -> None:
@@ -2549,30 +2559,6 @@ def test_matrix_message_implied_attachments_does_not_duplicate() -> None:
 
     effective_tools = config.resolve_agent("summary").tools.tool_names
     assert effective_tools.count("attachments") == 1
-
-
-def test_get_agent_code() -> None:
-    """Tests that the code agent is created correctly."""
-    config = _test_config()
-    agent = _create_agent_for_test("code", config=config)
-    assert isinstance(agent, AgentBuild)
-    assert agent.spec.name == "CodeAgent"
-
-
-def test_get_agent_shell() -> None:
-    """Tests that the shell agent is created correctly."""
-    config = _test_config()
-    agent = _create_agent_for_test("shell", config=config)
-    assert isinstance(agent, AgentBuild)
-    assert agent.spec.name == "ShellAgent"
-
-
-def test_get_agent_summary() -> None:
-    """Tests that the summary agent is created correctly."""
-    config = _test_config()
-    agent = _create_agent_for_test("summary", config=config)
-    assert isinstance(agent, AgentBuild)
-    assert agent.spec.name == "SummaryAgent"
 
 
 def test_get_agent_unknown() -> None:

@@ -16,13 +16,14 @@ from mindroom.cancellation import SYNC_RESTART_CANCEL_MSG, USER_STOP_CANCEL_MSG
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.constants import STREAM_STATUS_ERROR, STREAM_STATUS_KEY
+from mindroom.final_delivery import Cancelled
 from mindroom.history.types import HistoryScope
 from mindroom.knowledge.utils import _KnowledgeResolution
 from mindroom.llm.provider import TextDelta
-from mindroom.matrix.client import DeliveredMatrixEvent
+from mindroom.matrix.client_delivery import DeliveredMatrixEvent
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.message_target import MessageTarget
-from mindroom.response_runner import ResponseRequest
+from mindroom.reply_turn.request import ResponseRequest
 from mindroom.response_sources import ResponseSources
 from mindroom.streaming import _INTERRUPTED_RESPONSE_NOTE, build_restart_interrupted_body
 from tests.bot_helpers import make_test_agent_bot, unique_room_send_responses
@@ -267,8 +268,7 @@ class TestAIErrorDisplay:
             _build_response_runner(bot)
             outcome = await _respond(bot, _response_request())
 
-        assert outcome.terminal_status == "cancelled"
-        assert outcome.failure_reason == "cancelled_by_user"
+        assert outcome.ending == Cancelled("user_stop")
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize("show_tool_calls", [False, True])
@@ -287,8 +287,7 @@ class TestAIErrorDisplay:
 
         outcome = await _respond(bot, _response_request())
 
-        assert outcome.terminal_status == "cancelled"
-        assert outcome.failure_reason == "cancelled_by_user"
+        assert outcome.ending == Cancelled("user_stop")
 
     @pytest.mark.asyncio
     async def test_a_user_stop_mid_stream_keeps_the_streamed_text_and_the_user_stop_outcome(
@@ -307,8 +306,7 @@ class TestAIErrorDisplay:
         # The stopped stream's message keeps what it showed, with the interruption noted below it.
         final_content = bot.client.room_send.await_args.kwargs["content"]["m.new_content"]
         assert final_content["body"] == f"Partial answer\n\n{_INTERRUPTED_RESPONSE_NOTE}"
-        assert outcome.terminal_status == "cancelled"
-        assert outcome.failure_reason == "cancelled_by_user"
+        assert outcome.ending == Cancelled("user_stop")
 
     @pytest.mark.asyncio
     async def test_various_error_messages_are_user_friendly(self) -> None:
@@ -319,15 +317,15 @@ class TestAIErrorDisplay:
         # One homeserver for every turn, so each placeholder is its own event.
         send_message_outcome = _record_reply_edits(edited_messages)
 
-        error_messages = [
-            "[test_agent] 🔴 Authentication failed. Please check your API key configuration.",
-            "[test_agent] 🔴 Rate limited. Please wait before trying again.",
-            "[test_agent] 🔴 Request timed out. Please try again.",
-            "[test_agent] 🔴 Service temporarily unavailable. Please try again later.",
-            "[test_agent] 🔴 Error: Invalid model specified. Please check your configuration.",
+        error_cases = [
+            ("[test_agent] 🔴 Authentication failed. Please check your API key configuration.", "Authentication"),
+            ("[test_agent] 🔴 Rate limited. Please wait before trying again.", "Rate limited"),
+            ("[test_agent] 🔴 Request timed out. Please try again.", "timed out"),
+            ("[test_agent] 🔴 Service temporarily unavailable. Please try again later.", "unavailable"),
+            ("[test_agent] 🔴 Error: Invalid model specified. Please check your configuration.", "Invalid model"),
         ]
 
-        for error_msg in error_messages:
+        for index, (error_msg, expected_fragment) in enumerate(error_cases):
             edited_messages.clear()
 
             with (
@@ -341,25 +339,13 @@ class TestAIErrorDisplay:
                 # Each iteration is a separate turn, so it needs a separate
                 # causing event. Sharing one would make the outbox treat the
                 # later answers as resends of the first and replay it.
-                index = error_messages.index(error_msg)
                 await _respond(
                     bot,
                     _response_request(prompt="Help me", reply_to_event_id=f"$user_msg_{index}"),
                 )
 
                 assert len(edited_messages) == 1
-                displayed_msg = str(edited_messages[0][1]["body"])
-
-                if "Authentication" in error_msg:
-                    assert "Authentication" in displayed_msg
-                elif "Rate limited" in error_msg:
-                    assert "Rate limited" in displayed_msg
-                elif "timed out" in error_msg:
-                    assert "timed out" in displayed_msg
-                elif "unavailable" in error_msg:
-                    assert "unavailable" in displayed_msg
-                elif "Invalid model" in error_msg:
-                    assert "Invalid model" in displayed_msg
+                assert expected_fragment in str(edited_messages[0][1]["body"])
 
     @pytest.mark.asyncio
     async def test_non_streaming_sync_restart_edits_thinking_message_with_restart_status(

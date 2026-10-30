@@ -17,7 +17,9 @@ sys.path.insert(0, str(Path(__file__).parent.parent.parent / "src"))
 
 from mindroom.config.matrix import MindRoomUserConfig
 from mindroom.constants import resolve_primary_runtime_paths
-from mindroom.matrix.client import get_joined_rooms, get_room_name, matrix_client, send_message_result
+from mindroom.matrix.client_delivery import send_message_result
+from mindroom.matrix.client_room_admin import get_joined_rooms, get_room_name
+from mindroom.matrix.client_session import matrix_client
 
 DEFAULT_INTERNAL_USERNAME = MindRoomUserConfig().username
 pytestmark = pytest.mark.skip(reason="manual script; run this file directly instead of under pytest")

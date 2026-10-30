@@ -2,14 +2,13 @@
 
 The seam is ``run_agent`` fed by a scripted provider behind a real ``create_agent`` build: what a reply streams,
 what it stores, which tool-call policy runs around every call, and how it ends when it is paused, cancelled,
-failed, empty, or silent. The last tests drive the same turns through ``ResponseRunner``, the lifecycle owner that
-writes the interrupted-turn record after the loop stored its own terminal record.
+failed, empty, or silent. The last tests drive the same turns through ``ResponseRunner``, the lifecycle owner, under
+which the turn driver writes the interrupted-turn record after the loop stored its own terminal record.
 """
 
 from __future__ import annotations
 
 import asyncio
-import json
 from dataclasses import dataclass, replace
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, ClassVar
@@ -32,7 +31,7 @@ from mindroom.config.models import CompactionConfig, ModelConfig, ModelPricing
 from mindroom.constants import AI_RUN_METADATA_KEY
 from mindroom.dispatch_source import ScheduledHistoryBudget
 from mindroom.entity_resolution import entity_identity_registry
-from mindroom.final_delivery import FinalDeliveryOutcome
+from mindroom.final_delivery import AwaitingApproval, Cancelled, Completed, FinalDeliveryOutcome
 from mindroom.history.interrupted_replay import is_interrupted_replay_run
 from mindroom.history.run_visibility import (
     QUEUED_MESSAGE_NOTICE_MARKER_KEY,
@@ -70,11 +69,10 @@ from mindroom.matrix.users import AgentMatrixUser
 from mindroom.message_target import MessageTarget
 from mindroom.native_compaction import replay_basis
 from mindroom.participation import ParticipationGate
-from mindroom.response_runner import ResponseRequest
+from mindroom.reply_turn.request import ResponseRequest
 from mindroom.response_sources import ResponseSources
 from mindroom.response_turn import ResponsePausedForApproval, TurnSinks
 from mindroom.session_storage.agent_storage import create_session_storage
-from mindroom.session_storage.schema import quote_identifier
 from mindroom.session_storage.types import ConversationSession
 from mindroom.skill_learning.capture import SkillReviewCapture
 from mindroom.tool_system.call_record import recording_tool_calls
@@ -110,7 +108,7 @@ from tests.scripted_agent_helpers import (
     registered_toolkit,
     streamed_text,
 )
-from tests.usage_helpers import assert_counted_usage, counted_total, counted_usage
+from tests.usage_helpers import assert_counted_usage, counted_total, counted_usage, usage_rows
 
 if TYPE_CHECKING:
     from collections.abc import Iterator, Mapping, Sequence
@@ -324,16 +322,6 @@ def _assert_counted_usage(reply: _Reply, expected: Sequence[tuple[int, int]]) ->
     )
 
 
-def _usage_rows(storage: ConversationStore, run_id: str) -> list[dict[str, Any]]:
-    """Return the usage ledger rows of one run."""
-    with storage.transaction(write=False) as connection:
-        rows = connection.execute(
-            f"SELECT usage_data FROM {quote_identifier(storage.names.usage)} WHERE run_id = ?",  # noqa: S608
-            (run_id,),
-        ).fetchall()
-    return [json.loads(row[0]) for row in rows]
-
-
 def _contents(messages: Sequence[Message]) -> list[tuple[str, object]]:
     return [(message.role, message.content) for message in messages]
 
@@ -464,7 +452,7 @@ async def test_a_pause_with_no_approval_to_ask_for_fails_the_reply(
     """A run paused on an externally executed call that is not a delegation has nothing to resume it, so the reply fails.
 
     The loop stores the ``PAUSED`` row; the turn driver records the failure on the turn recorder as an error and
-    writes it over the row, so the row no longer waits for an approval that never comes.
+    writes it over the row, so the row no longer waits for an approval that never comes. The reply says why.
     """
     reply = _reply(
         tmp_path,
@@ -474,9 +462,13 @@ async def test_a_pause_with_no_approval_to_ask_for_fails_the_reply(
     )
     replaced = _runs_under_interrupted_records(monkeypatch, reply.storage)
 
-    with pytest.raises(RuntimeError, match="without an approval to ask for"):
-        await _respond(reply)
+    text = await _respond(reply)
 
+    # Below the call it had shown, the reply ends with the failure's own paragraph.
+    assert text.split("\n\n")[-2:] == [
+        "🔧 `touch` [1] ⏳",
+        "[assistant] ⚠️ Error: agent run 'run-1' paused on ['touch'] without an approval to ask for",
+    ]
     assert probe.calls == []
     [paused] = replaced
     assert paused.status is RunStatus.paused
@@ -576,7 +568,7 @@ async def test_a_stop_mid_stream_stores_the_cancelled_run_once_before_the_interr
         assert reply.recorder.outcome == "interrupted"
         assert reply.recorder.original_status is RunStatus.cancelled
         assert reply.recorder.assistant_text == "Partial "
-    [row] = _usage_rows(reply.storage, "run-1")
+    [row] = usage_rows(reply.storage, "run-1")
     assert row["metrics"]["input_tokens"] == 10
 
 
@@ -736,8 +728,8 @@ async def test_an_empty_reply_is_left_out_of_history_and_retried_once_under_a_ru
     assert started == ["run-1", record.run_id]
     assert (reply.recorder.outcome, reply.recorder.run_id) == ("completed", record.run_id)
     assert run_metadata[AI_RUN_METADATA_KEY]["run_id"] == record.run_id
-    assert [row["metrics"]["input_tokens"] for row in _usage_rows(reply.storage, "run-1")] == [100]
-    assert [row["metrics"]["input_tokens"] for row in _usage_rows(reply.storage, record.run_id)] == [120]
+    assert [row["metrics"]["input_tokens"] for row in usage_rows(reply.storage, "run-1")] == [100]
+    assert [row["metrics"]["input_tokens"] for row in usage_rows(reply.storage, record.run_id)] == [120]
 
 
 @pytest.mark.asyncio
@@ -839,6 +831,29 @@ async def test_a_reply_persists_a_notice_an_earlier_crashed_reply_left_live(
     assert [_notice_markers([message]) for message in reply.model.requests[0].messages if message.from_history] == [
         ["persisted"],
     ]
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("probe")
+async def test_only_a_reply_whose_attempt_started_hands_its_session_to_queued_notice_finalization(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A reply that fails while preparing its first attempt ran nothing in the agent session, so it registers none."""
+    reply = _reply(tmp_path, monkeypatch, [answer("Done.")])
+
+    with queued_message_signal_context(None) as notices:
+        assert await _respond(reply) == "Done."
+    assert list(notices.storage_targets) == [("assistant", SESSION_ID, "agent")]
+
+    async def history_unavailable(*_args: object, **_kwargs: object) -> None:
+        msg = "history unavailable"
+        raise RuntimeError(msg)
+
+    monkeypatch.setattr(ai, "_prepare_agent_run_context", history_unavailable)
+    with queued_message_signal_context(None) as notices:
+        assert await _respond(reply, run_id="run-2") == "[assistant] ⚠️ Error: history unavailable"
+    assert notices.storage_targets == {}
 
 
 @pytest.mark.asyncio
@@ -1556,11 +1571,7 @@ async def test_the_runner_delivers_an_empty_attempt_s_retry_as_the_turn_s_final_
 
     delivery, outcome = await _respond_through_runner(runner, _request(), streaming=streaming)
 
-    assert (delivery.terminal_status, delivery.final_visible_body, outcome.run_succeeded) == (
-        "completed",
-        "Recovered.",
-        True,
-    )
+    assert (delivery.ending, delivery.final_visible_body, outcome.run_succeeded) == (Completed(), "Recovered.", True)
     [record] = reply.storage.list_runs(SESSION_ID)
     assert record.content == "Recovered."
     assert delivery.response_run_id == outcome.response_run_id == record.run_id
@@ -1593,7 +1604,7 @@ async def test_the_runner_writes_the_interrupted_record_after_the_loop_stored_th
 
     assert not isinstance(result, BaseException), result
     delivery, outcome = result
-    assert delivery.terminal_status == "cancelled"
+    assert delivery.ending == Cancelled("interrupted")
     assert outcome.run_succeeded is False
     run_id = outcome.response_run_id
     assert run_id is not None
@@ -1602,7 +1613,7 @@ async def test_the_runner_writes_the_interrupted_record_after_the_loop_stored_th
     assert record is not None
     assert record.metadata is not None
     assert record.metadata["mindroom_original_status"] == "cancelled"
-    [row] = _usage_rows(reply.storage, run_id)
+    [row] = usage_rows(reply.storage, run_id)
     assert row["metrics"]["input_tokens"] == 10
 
 
@@ -1625,11 +1636,11 @@ async def test_the_runner_leaves_a_paused_run_as_the_loop_stored_it(
     runner = unwrap_extracted_collaborator(_runner(reply))
     replaced = _runs_under_interrupted_records(monkeypatch, reply.storage)
     suspend = AsyncMock(
-        return_value=FinalDeliveryOutcome(terminal_status="suspended", event_id=None, is_visible_response=False),
+        return_value=FinalDeliveryOutcome(ending=AwaitingApproval(), event_id=None, is_visible_response=False),
     )
 
     with (
-        patch.object(runner._approvals, "suspend_for_approval", new=suspend),
+        patch.object(runner.approvals, "suspend_for_approval", new=suspend),
         patch_response_runner_module(should_use_streaming=AsyncMock(return_value=False)),
     ):
         await runner.generate_response(_request())
@@ -1641,7 +1652,7 @@ async def test_the_runner_leaves_a_paused_run_as_the_loop_stored_it(
     assert record is not None
     assert record.status is RunStatus.paused
     assert [requirement.needs_confirmation for requirement in record.requirements or []] == [True]
-    [row] = _usage_rows(reply.storage, paused.run_id)
+    [row] = usage_rows(reply.storage, paused.run_id)
     assert row["metrics"]["input_tokens"] == 7
 
 
@@ -1656,8 +1667,7 @@ async def test_the_runner_records_the_failure_over_a_pause_with_no_approval_to_a
     """Through ``ResponseRunner``, a pause nothing can resume fails the reply, and the failure lands over the ``PAUSED`` row.
 
     The loop stores the pause; the lifecycle owner then records the failure over the row as its interrupted-turn
-    record, so it no longer waits for an approval that never comes. A reply delivered without streaming also raises
-    the failure through the runner.
+    record, so it no longer waits for an approval that never comes. The reply says why, streamed or delivered whole.
     """
     reply = _reply(
         tmp_path,
@@ -1671,12 +1681,11 @@ async def test_the_runner_records_the_failure_over_a_pause_with_no_approval_to_a
     presence.last_active_ago = 0
     runner.deps.runtime.client.get_presence = AsyncMock(return_value=presence)
 
-    if streaming:
-        await runner.generate_response(_request())
-    else:
-        with pytest.raises(RuntimeError, match="without an approval to ask for"):
-            await runner.generate_response(_request())
+    await runner.generate_response(_request())
 
+    body = runner.deps.runtime.client.room_send.await_args.kwargs["content"]["body"]
+    assert body.split("\n\n")[-1].startswith("[assistant] ⚠️ Error: agent run ")
+    assert body.endswith(" paused on ['touch'] without an approval to ask for")
     assert probe.calls == []
     session = reply.storage.load_session(SESSION_ID)
     assert session is not None

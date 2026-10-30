@@ -15,11 +15,11 @@ from mindroom.custom_tools.attachment_helpers import room_access_allowed
 from mindroom.custom_tools.matrix_helpers import check_rate_limit
 from mindroom.custom_tools.tool_payloads import custom_tool_payload, tool_context_or_error
 from mindroom.logging_config import get_logger
-from mindroom.matrix.client import room_admin_power_user, send_room_event_result
+from mindroom.matrix.client_delivery import send_room_event_result
+from mindroom.matrix.client_room_admin import room_admin_power_user
 from mindroom.matrix.thread_mutation_impact import (
-    MutationThreadImpactState,
-    resolve_event_thread_impact_for_client,
-    resolve_redaction_thread_impact_for_client,
+    event_thread_membership_known,
+    redaction_thread_membership_known,
 )
 from mindroom.requester_identity import (
     equivalent_requester_ids,
@@ -757,13 +757,13 @@ class MatrixApiTools(Toolkit):
         room_id: str,
         event_id: str,
     ) -> str | None:
-        """Return a fail-closed error when redaction thread impact cannot be resolved."""
+        """Return a fail-closed error when the redaction target's thread membership is unknown."""
         try:
-            thread_impact = await resolve_redaction_thread_impact_for_client(
-                context.client,
-                room_id=room_id,
+            thread_membership_known = await redaction_thread_membership_known(
+                context.conversation_reader,
+                context.relations,
+                room_id,
                 event_id=event_id,
-                relations=context.relations,
             )
         except Exception as exc:
             logger.warning(
@@ -774,12 +774,12 @@ class MatrixApiTools(Toolkit):
             )
             return "Failed to resolve redaction target thread mapping."
 
-        if thread_impact is MutationThreadImpactState.UNKNOWN:
+        if not thread_membership_known:
             logger.warning(
                 "Failed to resolve redaction target thread mapping for matrix_api redact",
                 room_id=room_id,
                 target_event_id=event_id,
-                error="thread impact unknown",
+                error="thread membership unknown",
             )
             return "Failed to resolve redaction target thread mapping."
 
@@ -836,28 +836,13 @@ class MatrixApiTools(Toolkit):
         ) is not None:
             return policy_error
 
-        try:
-            thread_impact = await resolve_event_thread_impact_for_client(
-                context.client,
-                room_id=room_id,
-                event_type=normalized_event_type,
-                content=normalized_content,
-                relations=context.relations,
-            )
-            if thread_impact is MutationThreadImpactState.UNKNOWN:
-                return self._error_payload(
-                    action="send_event",
-                    room_id=room_id,
-                    event_type=normalized_event_type,
-                    message="Failed to resolve threaded Matrix message send target.",
-                )
-        except Exception as exc:
-            logger.warning(
-                "Failed to resolve threaded send_event target for matrix_api",
-                room_id=room_id,
-                event_type=normalized_event_type,
-                error=str(exc),
-            )
+        if not await event_thread_membership_known(
+            context.conversation_reader,
+            context.relations,
+            room_id,
+            event_type=normalized_event_type,
+            content=normalized_content,
+        ):
             return self._error_payload(
                 action="send_event",
                 room_id=room_id,

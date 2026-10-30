@@ -24,6 +24,7 @@ from mindroom.matrix import state as matrix_state
 from mindroom.matrix.identity import MatrixID, managed_account_key
 from mindroom.matrix.state import MatrixState
 from tests.conftest import bind_runtime_paths, runtime_paths_for
+from tests.matrix_state_helpers import save_matrix_state
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -90,7 +91,7 @@ def test_configured_bot_user_ids_for_room_includes_agents_teams_and_router(tmp_p
     state.add_account("agent_general", "mindroom_general", "pw", domain="localhost")
     state.add_account("agent_other", "mindroom_other", "pw", domain="localhost")
     state.add_account("agent_team", "mindroom_team", "pw", domain="localhost")
-    state.save(runtime_paths=runtime_paths)
+    save_matrix_state(state, runtime_paths)
 
     user_ids = configured_bot_user_ids_for_room(config, "!room:server", runtime_paths)
 
@@ -128,7 +129,7 @@ def test_configured_bot_user_ids_for_room_uses_persisted_current_user_ids(tmp_pa
     state.add_account(f"agent_{ROUTER_AGENT_NAME}", "actual_router", "pw", domain="matrix.example")
     state.add_account("agent_general", "actual_general", "pw", domain="matrix.example")
     state.add_account("agent_team", "actual_team", "pw", domain="matrix.example")
-    state.save(runtime_paths=runtime_paths)
+    save_matrix_state(state, runtime_paths)
 
     user_ids = configured_bot_user_ids_for_room(config, "!room:server", runtime_paths)
 
@@ -252,7 +253,7 @@ def test_entity_identity_registry_uses_only_persisted_current_ids(tmp_path: Path
     state = MatrixState()
     state.add_account(f"agent_{ROUTER_AGENT_NAME}", "mindroom_router_oldns", "pw", domain="localhost")
     state.add_account("agent_general", "mindroom_general_oldns", "pw", domain="localhost")
-    state.save(runtime_paths=runtime_paths)
+    save_matrix_state(state, runtime_paths)
 
     identity = entity_identity_registry(config, runtime_paths)
 
@@ -295,7 +296,7 @@ def test_persisted_bot_user_ids_keep_removed_entities_and_skip_internal_user(tmp
     state.add_account("agent_retired", "mindroom_retired", "pw", domain="server")
     state.add_account("agent_legacy", "mindroom_legacy", "pw")
     state.add_account("agent_user", "mindroom_user", "pw", domain="server")
-    state.save(runtime_paths=runtime_paths)
+    save_matrix_state(state, runtime_paths)
 
     assert persisted_bot_user_ids(runtime_paths) == frozenset(
         {"@mindroom_router:server", "@mindroom_retired:server", "@mindroom_legacy:mindroom.chat"},
@@ -322,7 +323,7 @@ def test_entity_identity_registry_rejects_duplicate_persisted_entity_ids(tmp_pat
     state.add_account(f"agent_{ROUTER_AGENT_NAME}", "mindroom_router", "pw", domain="localhost")
     state.add_account("agent_general", "shared_bot", "pw", domain="localhost")
     state.add_account("agent_writer", "shared_bot", "pw", domain="localhost")
-    state.save(runtime_paths=runtime_paths)
+    save_matrix_state(state, runtime_paths)
 
     with pytest.raises(DuplicateManagedEntityIdentityError, match="shared_bot"):
         entity_identity_registry(config, runtime_paths)
@@ -335,7 +336,7 @@ def test_prepared_entity_names_skip_entities_without_accounts(tmp_path: Path) ->
     domain = config.get_domain(runtime_paths)
     state = MatrixState.load(runtime_paths=runtime_paths)
     state.add_account(managed_account_key("mind"), "mindroom_mind", "pw", domain=domain)
-    state.save(runtime_paths=runtime_paths)
+    save_matrix_state(state, runtime_paths)
 
     assert prepared_entity_names_by_user_id(config, runtime_paths) == {f"@mindroom_mind:{domain}": "mind"}
 
@@ -362,7 +363,7 @@ def test_resolving_every_entity_reads_matrix_state_once(
     state = MatrixState()
     for entity_name in (ROUTER_AGENT_NAME, *config.agents):
         state.add_account(managed_account_key(entity_name), f"mindroom_{entity_name}", "pw", domain="localhost")
-    state.save(runtime_paths=runtime_paths)
+    save_matrix_state(state, runtime_paths)
     reads = 0
     cache_key = matrix_state._matrix_state_cache_key
 

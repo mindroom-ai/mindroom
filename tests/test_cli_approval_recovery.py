@@ -203,7 +203,7 @@ def _knowledge(searches: list[str]) -> AgentKnowledge:
 def _approval_execution(tmp_path: Path, runtime: ToolRuntimeContext, monkeypatch, knowledge: AgentKnowledge | None):
     runner = unwrap_extracted_collaborator(_bot(tmp_path / "runner")._response_runner)
     execution = replace(
-        runner._approvals._approval_execution,
+        runner.approvals._approval_execution,
         config=lambda: runtime.config,
         runtime_paths=runtime.runtime_paths,
     )

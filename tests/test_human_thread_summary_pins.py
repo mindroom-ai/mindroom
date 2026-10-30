@@ -108,11 +108,11 @@ async def _run_automatic_summary(
         client = make_matrix_client_mock()
     client.room_get_state.return_value = nio.RoomGetStateResponse(events=[], room_id="!room:x")
     client.room_send.return_value = nio.RoomSendResponse(event_id="$automatic", room_id="!room:x")
-    serve_source_thread(client, source_history)
     model = ScriptedModel([answer('{"summary": "Automatic"}')])
     install_model_providers(monkeypatch, {"default": model})
     reader = make_conversation_reader_mock()
     serve_conversation_reader(reader, history, room_id="!room:x", thread_id="$thread1")
+    serve_source_thread(reader, source_history, room_id="!room:x", thread_id="$thread1")
     await maybe_generate_thread_summary(
         client,
         "!room:x",

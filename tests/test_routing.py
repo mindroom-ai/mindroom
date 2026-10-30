@@ -41,7 +41,7 @@ from tests.identity_helpers import persist_entity_accounts
 if TYPE_CHECKING:
     from collections.abc import Sequence
 
-    from mindroom.matrix.client import ResolvedVisibleMessage
+    from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
 
 
 def _runtime_bound_config(config: Config, runtime_root: Path | None = None) -> Config:

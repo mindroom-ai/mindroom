@@ -23,7 +23,6 @@ from mindroom.delivery_gateway import (
     DeliveryGateway,
     DeliveryGatewayDeps,
     FinalDeliveryRequest,
-    ResponseHookService,
     ResponseIdentity,
 )
 from mindroom.hooks import (
@@ -47,6 +46,7 @@ from mindroom.hooks.execution import emit, emit_collect
 from mindroom.hooks.registry import HookRegistryState
 from mindroom.logging_config import get_logger
 from mindroom.message_target import MessageTarget
+from mindroom.response_lifecycle import ResponseHookService
 from mindroom.response_sources import ResponseSources
 from mindroom.scheduling.tasks import ScheduledWorkflow
 from mindroom.session_ids import create_session_id
@@ -56,7 +56,7 @@ from mindroom.tool_system.runtime_context import ToolRuntimeContext, tool_runtim
 from tests.authorization_helpers import (
     make_test_tool_runtime_context,
 )
-from tests.bot_helpers import _hook_plugin as _plugin
+from tests.bot_helpers import _hook_plugin
 from tests.conftest import (
     bind_runtime_paths,
     ignore_final_delivery_handoff,
@@ -369,10 +369,10 @@ async def test_enrichment_uses_resolved_thread_scope_and_clears_busy_state(
 
 
 @pytest.mark.asyncio
-async def test_schedule_fired_auto_poke_uses_thread_from_stored_state(
+async def test_schedule_fired_auto_poke_is_suppressed_without_sending(
     loaded_workloop: _LoadedWorkloop,
 ) -> None:
-    """Auto-poke should send back into the stored thread scope."""
+    """A scheduled auto-poke tick for a stored thread task is suppressed and sends nothing."""
     tool = get_tool_by_name(
         "workloop_todo_manager",
         loaded_workloop.runtime_paths,
@@ -713,8 +713,8 @@ async def test_late_after_response_cancellation_still_runs_workloop_cleanup(
 
     registry = HookRegistry.from_plugins(
         [
-            _plugin("slow-after", [slow_after_response]),
-            _plugin("workloop", _registry_callbacks(loaded_workloop.registry)),
+            _hook_plugin("slow-after", [slow_after_response]),
+            _hook_plugin("workloop", _registry_callbacks(loaded_workloop.registry)),
         ],
     )
     hook_context = HookContextSupport(
@@ -746,36 +746,34 @@ async def test_late_after_response_cancellation_still_runs_workloop_cleanup(
     parsed.formatted_text = "visible response"
     parsed.interactive_metadata = None
 
-    delivery_result = None
-
-    async def deliver_response() -> None:
-        nonlocal delivery_result
-        delivery_result = await gateway.deliver_final(
-            FinalDeliveryRequest(
-                target=response_envelope.target,
-                existing_event_id=None,
-                response_text="visible response",
-                identity=ResponseIdentity(
-                    response_kind="ai",
-                    response_envelope=response_envelope,
-                    correlation_id="corr-late-workloop-cleanup",
-                    sources=ResponseSources((response_envelope.source_event_id,), (response_envelope.source_event_id,)),
-                ),
-                tool_trace=None,
-                extra_content=None,
-            ),
-        )
-
     with (
         patch("mindroom.delivery_gateway.interactive.parse_and_format_interactive", return_value=parsed),
         patch.object(DeliveryGateway, "send_text", new=AsyncMock(return_value="$response")),
     ):
-        task = asyncio.create_task(deliver_response())
+        task = asyncio.create_task(
+            gateway.deliver_final(
+                FinalDeliveryRequest(
+                    target=response_envelope.target,
+                    existing_event_id=None,
+                    response_text="visible response",
+                    identity=ResponseIdentity(
+                        response_kind="ai",
+                        response_envelope=response_envelope,
+                        correlation_id="corr-late-workloop-cleanup",
+                        sources=ResponseSources(
+                            (response_envelope.source_event_id,),
+                            (response_envelope.source_event_id,),
+                        ),
+                    ),
+                    tool_trace=None,
+                    extra_content=None,
+                ),
+            ),
+        )
         await asyncio.wait_for(after_started.wait(), timeout=1)
         task.cancel()
-        await task
+        delivery_result = await task
 
-    assert delivery_result is not None
     assert delivery_result.event_id == "$response"
     assert delivery_result.delivery_kind == "sent"
 

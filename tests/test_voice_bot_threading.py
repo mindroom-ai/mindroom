@@ -38,7 +38,6 @@ from tests.conftest import (
     TEST_ACCESS_TOKEN,
     TEST_PASSWORD,
     bind_runtime_paths,
-    dispatch_context_result,
     drain_coalescing,
     install_edit_message_mock,
     install_generate_response_mock,
@@ -353,7 +352,7 @@ async def test_voice_message_in_main_room_creates_thread(
         requires_model_history_refresh=False,
     )
     bot._conversation_resolver.extract_dispatch_context = AsyncMock(
-        return_value=dispatch_context_result(mock_context),
+        return_value=mock_context,
     )
 
     room = MagicMock(spec=nio.MatrixRoom)
@@ -401,7 +400,7 @@ async def test_voice_message_in_thread_continues_thread(
         requires_model_history_refresh=False,
     )
     bot._conversation_resolver.extract_dispatch_context = AsyncMock(
-        return_value=dispatch_context_result(mock_context),
+        return_value=mock_context,
     )
 
     room = MagicMock(spec=nio.MatrixRoom)
@@ -472,7 +471,7 @@ async def test_voice_plain_reply_to_thread_message_stays_threaded_transitively(
         requires_model_history_refresh=False,
     )
     bot._conversation_resolver.extract_dispatch_context = AsyncMock(
-        return_value=dispatch_context_result(mock_context),
+        return_value=mock_context,
     )
 
     with (
@@ -529,7 +528,6 @@ async def test_voice_plain_reply_unproven_thread_candidate_is_not_admitted(
             new=AsyncMock(
                 return_value=ThreadResolution._indeterminate(
                     RuntimeError("proof unavailable"),
-                    candidate_thread_root_id="$maybe-thread-root",
                 ),
             ),
         ),
@@ -565,7 +563,7 @@ async def test_voice_message_signals_active_turn_before_stt(mock_home_bot: Agent
         reply_to_event_id=voice_event.event_id,
         event_source=voice_event.source,
     )
-    lifecycle = unwrap_extracted_collaborator(bot._response_runner)._lifecycle_coordinator
+    lifecycle = unwrap_extracted_collaborator(bot._response_runner).lifecycle_coordinator
     queued_signal = lifecycle._get_or_create_queued_signal(target)
     prepare_started = asyncio.Event()
     allow_prepare = asyncio.Event()
@@ -647,7 +645,7 @@ async def test_voice_message_clears_active_turn_signal_when_post_stt_echo_fails(
         reply_to_event_id=voice_event.event_id,
         event_source=voice_event.source,
     )
-    lifecycle = unwrap_extracted_collaborator(bot._response_runner)._lifecycle_coordinator
+    lifecycle = unwrap_extracted_collaborator(bot._response_runner).lifecycle_coordinator
     queued_signal = lifecycle._get_or_create_queued_signal(target)
     normalized_voice = inbound_turn_normalizer._VoiceNormalizationResult(
         event=PreparedIngress(
@@ -706,16 +704,14 @@ async def test_non_router_skips_visible_echo_and_dispatches_canonical_voice(
         thread_id="$thread_root",
     )
     bot._conversation_resolver.extract_dispatch_context = AsyncMock(
-        return_value=dispatch_context_result(
-            MessageContext(
-                am_i_mentioned=True,
-                is_thread=True,
-                thread_id="$thread_root",
-                thread_history=[],
-                mentioned_agents=[bot.matrix_id],
-                has_non_agent_mentions=False,
-                requires_model_history_refresh=False,
-            ),
+        return_value=MessageContext(
+            am_i_mentioned=True,
+            is_thread=True,
+            thread_id="$thread_root",
+            thread_history=[],
+            mentioned_agents=[bot.matrix_id],
+            has_non_agent_mentions=False,
+            requires_model_history_refresh=False,
         ),
     )
 
@@ -781,7 +777,7 @@ async def test_voice_message_uses_canonical_target_for_queued_notice_before_stt(
         reply_to_event_id=normalized_event.event_id,
         event_source=normalized_event.source,
     )
-    lifecycle = unwrap_extracted_collaborator(bot._response_runner)._lifecycle_coordinator
+    lifecycle = unwrap_extracted_collaborator(bot._response_runner).lifecycle_coordinator
     pre_stt_signal = lifecycle._get_or_create_queued_signal(pre_stt_target)
     alternate_signal = lifecycle._get_or_create_queued_signal(alternate_target)
     dispatch_count = 0
@@ -874,7 +870,7 @@ async def test_room_mode_voice_notice_survives_until_queued_dispatch_owns_it(
         reply_to_event_id=voice_event.event_id,
         event_source=voice_event.source,
     )
-    lifecycle = unwrap_extracted_collaborator(bot._response_runner)._lifecycle_coordinator
+    lifecycle = unwrap_extracted_collaborator(bot._response_runner).lifecycle_coordinator
     queued_signal = lifecycle._get_or_create_queued_signal(target)
     dispatch_count = 0
     prepare_started = asyncio.Event()

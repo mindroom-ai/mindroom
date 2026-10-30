@@ -49,6 +49,4 @@ A non-success reply ending was decided by the streamer (a terminal row with the 
 
 ## Open
 
-- `ResponseRunner` still builds `InboxResponses`, which `bot.py`, `turn_controller.py`, and `text_ingress_dispatch.py` reach through it; building it in `bot.py` belongs with the refactors that own that wiring.
-- The agent and team preparation steps still build the shared Matrix part of `ResponseTurnContext` separately, and give the requester differently (the team falls back to the execution identity's requester); one builder both narrow would make them one owner.
-- An interrupted turn's record still comes from the running attempt's partial output and is stored as an interrupted replay row, not as an "interrupted" run status (#3108); a typed `TurnFailed` ending stays with #3119.
+- An interrupted turn's record still comes from the running attempt's partial output and is stored as an interrupted replay row, not as an "interrupted" run status (#3108).

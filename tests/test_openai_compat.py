@@ -79,7 +79,7 @@ from mindroom.llm.provider import ModelIdentity, ModelRequest, StreamEvent, Text
 from mindroom.llm.request_context import current_llm_request_log_context
 from mindroom.llm.runs import RunRecord, RunStatus, TeamRunRecord, ToolExecution
 from mindroom.llm.usage import RunMetrics, TokenCounts
-from mindroom.matrix.client import ResolvedVisibleMessage
+from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
 from mindroom.memory import MemoryPromptParts
 from mindroom.prompt_message_tags import render_msg_tag
 from mindroom.prompts import QUEUED_MESSAGE_NOTICE_TEXT
@@ -2222,19 +2222,7 @@ class TestStreamingCompletion:
             )
 
         assert response.status_code == 200
-        # Collect all content from chunks
-        lines = response.text.strip().split("\n\n")
-        contents = []
-        for line in lines:
-            text = line.removeprefix("data: ")
-            if text == "[DONE]":
-                continue
-            chunk = json.loads(text)
-            delta = chunk["choices"][0]["delta"]
-            if "content" in delta:
-                contents.append(delta["content"])
-
-        full_content = "".join(contents)
+        full_content = "".join(_sse_contents(response.text))
         assert "Let me search. " in full_content
         assert '<tool id="1" state="start">search(query=X)</tool>' in full_content
         assert '<tool id="1" state="done">search(query=X)\n3 results</tool>' in full_content
@@ -2269,18 +2257,7 @@ class TestStreamingCompletion:
             )
 
         assert response.status_code == 200
-        lines = response.text.strip().split("\n\n")
-        contents: list[str] = []
-        for line in lines:
-            text = line.removeprefix("data: ")
-            if text == "[DONE]":
-                continue
-            chunk = json.loads(text)
-            delta = chunk["choices"][0]["delta"]
-            if "content" in delta:
-                contents.append(delta["content"])
-
-        full_content = "".join(contents)
+        full_content = "".join(_sse_contents(response.text))
         assert full_content.count('<tool id="1" state="start">') == 1
         assert full_content.count('<tool id="1" state="done">') == 1
         assert "query=&lt;/tool&gt;&lt;b&gt;pwn&lt;/b&gt;" in full_content
@@ -2334,18 +2311,7 @@ class TestStreamingCompletion:
             )
 
         assert response.status_code == 200
-        lines = response.text.strip().split("\n\n")
-        contents: list[str] = []
-        for line in lines:
-            text = line.removeprefix("data: ")
-            if text == "[DONE]":
-                continue
-            chunk = json.loads(text)
-            delta = chunk["choices"][0]["delta"]
-            if "content" in delta:
-                contents.append(delta["content"])
-
-        full_content = "".join(contents)
+        full_content = "".join(_sse_contents(response.text))
         assert '<tool id="1" state="start">search(query=one)</tool>' in full_content
         assert '<tool id="1" state="done">search(query=one)\none-result</tool>' in full_content
         assert '<tool id="2" state="start">search(query=two)</tool>' in full_content

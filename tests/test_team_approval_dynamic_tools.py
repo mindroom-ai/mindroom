@@ -100,10 +100,10 @@ async def test_team_approval_forwards_frozen_invoking_member_functions(tmp_path:
             return_value=turn_tool_context(runner.deps.runtime.config, runner.deps.runtime_paths, identity),
         ),
         patch("mindroom.approval.continuation_runner.continue_paused_team_run", new=continued),
-        patch("mindroom.response_runner.typing_indicator", _noop_typing),
+        patch("mindroom.reply_turn.request.typing_indicator", _noop_typing),
     ):
         async with resumed_approval(bot, continuation) as claimed:
-            result = await runner._approvals._continue_entity_call(
+            result = await runner.approvals._continue_entity_call(
                 claimed,
                 request=_plain_request(target, source_event_id="$source"),
                 target=target,

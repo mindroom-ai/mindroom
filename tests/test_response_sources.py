@@ -84,7 +84,7 @@ async def test_explicit_edit_sources_ignore_unrelated_model_metadata(tmp_path: P
         patch("mindroom.approval.response.evaluate_tool_approval", new=AsyncMock(return_value=(True, 60.0))),
     ):
         async with _in_reply_span(runner, request, placeholder_event_id=None):
-            await runner._approvals.suspend_for_approval(
+            await runner.approvals.suspend_for_approval(
                 paused,
                 request=request,
                 target=request.response_envelope.target,
@@ -98,7 +98,7 @@ async def test_explicit_edit_sources_ignore_unrelated_model_metadata(tmp_path: P
     assert continuation is not None
     assert continuation.source_event_ids == ("$edit",)
     assert continuation.sources == request.sources
-    resumed = runner._approvals._approval_response_request(
+    resumed = runner.approvals.approval_response_request(
         continuation,
         target=request.response_envelope.target,
     )

@@ -41,6 +41,7 @@ from mindroom.event_journal import (
     ProjectedEvent,
     SemanticConsumer,
 )
+from mindroom.final_delivery import AwaitingApproval
 from mindroom.hooks import (
     EVENT_REACTION_RECEIVED,
     HookRegistry,
@@ -50,8 +51,9 @@ from mindroom.hooks import (
 from mindroom.ingress_validation import IngressValidator
 from mindroom.matrix.thread_history_result import thread_history_result
 from mindroom.message_target import MessageTarget
-from mindroom.response_runner import ResponseRequest, ResponseRunner
-from mindroom.response_sources import ResponseSources
+from mindroom.reply_turn.request import ResponseRequest
+from mindroom.response_runner import ResponseRunner
+from mindroom.response_sources import Owned, ResponseSources
 from mindroom.response_turn import PausedAttempt
 from mindroom.room_thread_modes import set_room_thread_mode_override
 from mindroom.runtime_shutdown import SYNC_RESTART_SHUTDOWN, RuntimeShutdownIntent
@@ -95,6 +97,7 @@ if TYPE_CHECKING:
 
     from mindroom.bot import AgentBot
     from mindroom.matrix.users import AgentMatrixUser
+    from mindroom.response_sources import SourceFate
 
 
 @pytest.fixture
@@ -108,10 +111,6 @@ def report_tool() -> Iterator[type[ReportTools]]:
     """Register the ``report`` toolkit, whose ``write_report`` records each run, for the test."""
     with registered_report_tool() as report:
         yield report
-
-
-async def _cancel_dispatch_retry(bot: AgentBot) -> None:
-    await bot._journal_dispatcher.stop()
 
 
 def _approval_reply_event(
@@ -314,7 +313,7 @@ def _observed_admission_wait(bot: AgentBot) -> Iterator[asyncio.Event]:
 
 
 class TestAgentBot(AgentBotTestBase):
-    """Bot behavior tests moved verbatim from tests/test_multi_agent_bot.py."""
+    """How one AgentBot handles reactions, interactive selections, and tool approvals."""
 
     @pytest.mark.asyncio
     async def test_recover_approval_final_owns_recovery_client_lifetime(
@@ -334,7 +333,7 @@ class TestAgentBot(AgentBotTestBase):
         with (
             patch.object(bot, "_open_approval_recovery_client", new=AsyncMock()) as open_client,
             patch.object(
-                bot._response_runner,
+                bot._approval_runner,
                 "recover_approval_final",
                 new=AsyncMock(side_effect=recover_as_owner),
             ) as recover,
@@ -452,15 +451,7 @@ class TestAgentBot(AgentBotTestBase):
         denied_config.agents[mock_agent_user.agent_name].access = ResponderAccessConfig(users=[])
         bot = make_test_agent_bot(mock_agent_user, config=config, runtime_paths=runtime_paths_for(config))
         bot.client = MagicMock()
-        seen: list[str] = []
-
-        @hook(EVENT_REACTION_RECEIVED)
-        async def record_reaction(ctx: ReactionReceivedContext) -> None:
-            seen.append(ctx.event_id)
-
-        bot.orchestrator.hook_registry_state.registry = HookRegistry.from_plugins(
-            [_hook_plugin("hooked", [record_reaction])],
-        )
+        seen = _install_reaction_recorder(bot)
         room = MagicMock(room_id="!test:localhost", canonical_alias=None)
         event = self._make_handler_event("reaction", sender=sender_id, event_id="$reaction-during-reload")
         event.reacts_to = ""
@@ -613,18 +604,10 @@ class TestAgentBot(AgentBotTestBase):
         tmp_path: Path,
     ) -> None:
         """An interactive consumer claim must not replay through generic reaction hooks."""
-        seen: list[str] = []
-
-        @hook(EVENT_REACTION_RECEIVED)
-        async def record_reaction(ctx: ReactionReceivedContext) -> None:
-            seen.append(ctx.event_id)
-
         config = self._config_for_storage(tmp_path)
         bot = make_test_agent_bot(mock_agent_user, config=config, runtime_paths=runtime_paths_for(config))
         bot.client = MagicMock()
-        bot.orchestrator.hook_registry_state.registry = HookRegistry.from_plugins(
-            [_hook_plugin("hooked", [record_reaction])],
-        )
+        seen = _install_reaction_recorder(bot)
         room = MagicMock(room_id="!test:localhost")
         event = self._make_handler_event("reaction", sender="@user:localhost", event_id="$reaction")
         event.key = "✅"
@@ -649,12 +632,6 @@ class TestAgentBot(AgentBotTestBase):
         tmp_path: Path,
     ) -> None:
         """A config consumer claim must not replay through generic reaction hooks."""
-        seen: list[str] = []
-
-        @hook(EVENT_REACTION_RECEIVED)
-        async def record_reaction(ctx: ReactionReceivedContext) -> None:
-            seen.append(ctx.event_id)
-
         config = self._config_for_storage(tmp_path)
         router_user = replace(
             mock_agent_user,
@@ -664,9 +641,7 @@ class TestAgentBot(AgentBotTestBase):
         )
         bot = make_test_agent_bot(router_user, config=config, runtime_paths=runtime_paths_for(config))
         bot.client = MagicMock()
-        bot.orchestrator.hook_registry_state.registry = HookRegistry.from_plugins(
-            [_hook_plugin("hooked", [record_reaction])],
-        )
+        seen = _install_reaction_recorder(bot)
         room = MagicMock(room_id="!test:localhost")
         event = _reaction_event("✅", "$reaction")
 
@@ -1099,23 +1074,24 @@ class TestAgentBot(AgentBotTestBase):
             _self: ResponseRunner,
             _request: ResponseRequest,
             *,
+            team: object,
             resolved_target: MessageTarget,
-            early_placeholder_state: object,
-        ) -> str:
-            del resolved_target, early_placeholder_state
+            participation: object,
+        ) -> SourceFate:
+            del team, resolved_target, participation
             older_entered.set()
             await release_older.wait()
-            return "$older-response"
+            return Owned()
 
         async def handle_selection(*_args: object, **_kwargs: object) -> bool:
             preparation_started.set()
             return False
 
         replace_interactive_selection_handlers(bot, handle=handle_selection)
-        older: asyncio.Task[str | None] | None = None
+        older: asyncio.Task[SourceFate] | None = None
         try:
             with (
-                patch.object(ResponseRunner, "_generate_response_locked", new=generate_locked),
+                patch.object(ResponseRunner, "_run_locked_turn", new=generate_locked),
                 _mock_interactive_claim(bot, selection),
             ):
                 older = asyncio.create_task(
@@ -1130,7 +1106,7 @@ class TestAgentBot(AgentBotTestBase):
                 assert bot._journal_dispatcher.callbacks.source_has_live_owner(reaction.event_id)
 
                 release_older.set()
-                assert await older == "$older-response"
+                assert await older == Owned()
                 await preparation_started.wait()
                 await bot._response_runner.inbox.drain_inbox_responses()
         finally:
@@ -1193,13 +1169,15 @@ class TestAgentBot(AgentBotTestBase):
             thread_id="$thread-a",
             reply_to_event_id="$question",
         )
-        await _start_selection_response(bot, response, target=target)
-        await bot._response_runner.inbox.drain_inbox_responses()
+        with patch.object(bot._journal_dispatcher, "retry_turn_sources") as retry_turn_sources:
+            await _start_selection_response(bot, response, target=target)
+            await bot._response_runner.inbox.drain_inbox_responses()
 
         assert response_completed.is_set()
         settle_dispatch_sources.assert_awaited_once_with(("$reaction",))
-        # The failed settlement must hand the exact journal source back for retry.
-        retry_dispatch_sources.assert_called_once_with(target.room_id, ("$reaction",))
+        retry_dispatch_sources.assert_not_called()
+        # The inbox's finish hands the exact journal source back for retry.
+        retry_turn_sources.assert_called_once_with(target.room_id, ("$reaction",))
 
     @pytest.mark.asyncio
     async def test_interactive_approval_handoff_skips_fallback_source_settlement(
@@ -1433,12 +1411,11 @@ class TestAgentBot(AgentBotTestBase):
         resume_started = asyncio.Event()
         release_resume = asyncio.Event()
 
-        async def resume(_source_event_id: str) -> bool:
+        async def resume(_source_event_id: str) -> None:
             resume_started.set()
             await release_resume.wait()
-            return False
 
-        with patch.object(bot._response_runner._approvals, "_resume_approval_source", new=resume):
+        with patch.object(unwrap_extracted_collaborator(bot._response_runner), "_resume_approval_source", new=resume):
             handoff = asyncio.create_task(
                 bot._journal_dispatcher.callbacks.on_approval_continuation("$source"),
             )
@@ -1568,7 +1545,7 @@ class TestAgentBot(AgentBotTestBase):
             async with first_runner.deps.replies.span_scope():
                 claimed_request = await first_runner._claim_reply_span(request, history_scope=history_scope)
                 assert claimed_request is not None
-                suspended = await first_runner._approvals.suspend_for_approval(
+                suspended = await first_runner.approvals.suspend_for_approval(
                     paused,
                     request=claimed_request,
                     target=target,
@@ -1578,7 +1555,7 @@ class TestAgentBot(AgentBotTestBase):
                     show_tool_calls=True,
                 )
 
-        assert suspended.terminal_status == "suspended"
+        assert suspended.ending == AwaitingApproval()
         assert report_tool.written == []
         persisted = await first.approval_store.approvals.approval_continuation_for_source("$source")
         if requires_human:
@@ -1711,7 +1688,7 @@ class TestAgentBot(AgentBotTestBase):
 
         lifecycle_lock = unwrap_extracted_collaborator(
             bot._response_runner,
-        )._lifecycle_coordinator._response_lifecycle_lock(target)
+        ).lifecycle_coordinator._response_lifecycle_lock(target)
         lock_owned_by_test = False
         if failure_stage == "acquire":
             acquisition_error = RuntimeError("simulated lifecycle acquisition failure")
@@ -1777,7 +1754,7 @@ class TestAgentBot(AgentBotTestBase):
         ) = (asyncio.Event() for _ in range(6))
         lifecycle_lock = unwrap_extracted_collaborator(
             bot._response_runner,
-        )._lifecycle_coordinator._response_lifecycle_lock(target)
+        ).lifecycle_coordinator._response_lifecycle_lock(target)
         acquire_lifecycle_lock = lifecycle_lock.acquire
 
         async def tracked_acquire() -> bool:
@@ -1800,23 +1777,24 @@ class TestAgentBot(AgentBotTestBase):
             _self: ResponseRunner,
             request: ResponseRequest,
             *,
+            team: object,
             resolved_target: MessageTarget,
-            early_placeholder_state: object,
-        ) -> str:
-            del resolved_target, early_placeholder_state
+            participation: object,
+        ) -> SourceFate:
+            del team, resolved_target, participation
             if request.prompt == "interactive":
                 interactive_entered.set()
                 await release_interactive.wait()
-                return "$interactive-response"
+                return Owned()
             newer_entered.set()
-            return "$newer-response"
+            return Owned()
 
         replace_interactive_selection_handlers(bot, handle=handle_selection)
-        newer_task: asyncio.Task[str | None] | None = None
+        newer_task: asyncio.Task[SourceFate] | None = None
         try:
             with (
                 _mock_interactive_claim(bot, selection),
-                patch.object(ResponseRunner, "_generate_response_locked", new=generate_locked),
+                patch.object(ResponseRunner, "_run_locked_turn", new=generate_locked),
             ):
                 await _dispatch_reaction(bot, room, reaction)
                 await asyncio.wait_for(preparation_started.wait(), timeout=1.0)
@@ -1837,7 +1815,7 @@ class TestAgentBot(AgentBotTestBase):
 
                 release_interactive.set()
                 await asyncio.wait_for(newer_entered.wait(), timeout=1.0)
-                assert await newer_task == "$newer-response"
+                assert await newer_task == Owned()
                 await bot._response_runner.inbox.drain_inbox_responses()
         finally:
             release_preparation.set()
@@ -1878,13 +1856,14 @@ class TestAgentBot(AgentBotTestBase):
             _self: ResponseRunner,
             request: ResponseRequest,
             *,
+            team: object,
             resolved_target: MessageTarget,
-            early_placeholder_state: object,
-        ) -> str:
-            del early_placeholder_state
+            participation: object,
+        ) -> SourceFate:
+            del team, participation
             resolved_targets.append(resolved_target)
             await record_turn_answered(bot, request)
-            return "$response"
+            return Owned()
 
         bot._conversation_resolver.fetch_thread_history = AsyncMock(
             return_value=thread_history_result([], is_full_history=True),
@@ -1894,7 +1873,7 @@ class TestAgentBot(AgentBotTestBase):
         try:
             with (
                 _mock_interactive_claim(bot, selection),
-                patch.object(ResponseRunner, "_generate_response_locked", new=generate_locked),
+                patch.object(ResponseRunner, "_run_locked_turn", new=generate_locked),
             ):
                 await _dispatch_reaction(bot, room, reaction)
                 await bot._response_runner.inbox.drain_inbox_responses()
@@ -1935,12 +1914,13 @@ class TestAgentBot(AgentBotTestBase):
             _self: ResponseRunner,
             request: ResponseRequest,
             *,
+            team: object,
             resolved_target: MessageTarget,
-            early_placeholder_state: object,
-        ) -> str:
-            del resolved_target, early_placeholder_state
+            participation: object,
+        ) -> SourceFate:
+            del team, resolved_target, participation
             captured_requests.append(request)
-            return "$response"
+            return Owned()
 
         bot._conversation_resolver.fetch_thread_history = AsyncMock(
             return_value=thread_history_result([], is_full_history=True),
@@ -1950,7 +1930,7 @@ class TestAgentBot(AgentBotTestBase):
         try:
             with (
                 _mock_interactive_claim(bot, selection),
-                patch.object(ResponseRunner, "_generate_response_locked", new=generate_locked),
+                patch.object(ResponseRunner, "_run_locked_turn", new=generate_locked),
             ):
                 await _dispatch_reaction(bot, room, reaction)
                 await bot._response_runner.inbox.drain_inbox_responses()
@@ -2139,7 +2119,7 @@ class TestAgentBot(AgentBotTestBase):
                 await bot._journal_dispatcher.drain_once()
         finally:
             try:
-                await _cancel_dispatch_retry(bot)
+                await bot._journal_dispatcher.stop()
             finally:
                 await shutdown_approval_runtime()
 
@@ -2200,7 +2180,7 @@ class TestAgentBot(AgentBotTestBase):
                 EventClass.ACTIONABLE,
             )
             await bot._journal_dispatcher.drain_once()
-        await _cancel_dispatch_retry(bot)
+        await bot._journal_dispatcher.stop()
 
         # The crash leaves the event pending, but its consumer claim is durable,
         # so the replay cannot route the reply anywhere else.
@@ -2286,7 +2266,7 @@ class TestAgentBot(AgentBotTestBase):
             ),
         ):
             await _dispatch_reaction(bot, room, event)
-        await _cancel_dispatch_retry(bot)
+        await bot._journal_dispatcher.stop()
         assert (await bot._journal_dispatcher.store.pending())[
             0
         ].semantic_consumer is SemanticConsumer.TOOL_APPROVAL_REACTION
@@ -2359,7 +2339,7 @@ class TestAgentBot(AgentBotTestBase):
                 EventClass.ACTIONABLE,
             )
             await bot._journal_dispatcher.drain_once()
-        await _cancel_dispatch_retry(bot)
+        await bot._journal_dispatcher.stop()
         pending = await bot._journal_dispatcher.store.pending()
         assert pending[0].semantic_consumer is SemanticConsumer.STOP_REACTION
 
@@ -2413,7 +2393,7 @@ class TestAgentBot(AgentBotTestBase):
                 EventClass.ACTIONABLE,
             )
             await bot._journal_dispatcher.drain_once()
-        await _cancel_dispatch_retry(bot)
+        await bot._journal_dispatcher.stop()
         assert (await bot._journal_dispatcher.store.pending())[
             0
         ].semantic_consumer is SemanticConsumer.CONFIG_CONFIRMATION
@@ -2479,7 +2459,7 @@ class TestAgentBot(AgentBotTestBase):
             EventClass.ACTIONABLE,
         )
         await bot._journal_dispatcher.drain_once()
-        await _cancel_dispatch_retry(bot)
+        await bot._journal_dispatcher.stop()
         assert (await bot._journal_dispatcher.store.pending())[
             0
         ].semantic_consumer is SemanticConsumer.INTERACTIVE_REACTION
@@ -2596,15 +2576,7 @@ class TestAgentBot(AgentBotTestBase):
             runtime_paths=runtime_paths,
         )
         restarted.client = make_matrix_client_mock()
-        replays: list[str] = []
-
-        @hook(EVENT_REACTION_RECEIVED)
-        async def record_replay(ctx: ReactionReceivedContext) -> None:
-            replays.append(ctx.event_id)
-
-        restarted.orchestrator.hook_registry_state.registry = HookRegistry.from_plugins(
-            [_hook_plugin("hooked", [record_replay])],
-        )
+        replays = _install_reaction_recorder(restarted)
         gate = restarted._runtime_view.response_admission_gate
         ingress = restarted._reaction_dispatcher.deps.ingress
         settled_inside_fence: list[tuple[tuple[str, ...], int]] = []

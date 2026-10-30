@@ -23,7 +23,8 @@ if TYPE_CHECKING:
     from mindroom.delivery_gateway import DeliveryGateway, FinalDeliveryRequest
     from mindroom.event_journal import PrincipalStore
     from mindroom.final_delivery import FinalDeliveryOutcome
-    from mindroom.response_runner import ResponseRequest, ResponseRunner
+    from mindroom.reply_turn.request import ResponseRequest
+    from mindroom.response_runner import ResponseRunner
 
 
 def _runtime(
@@ -109,14 +110,15 @@ async def reply_span(
     if runtime is None:
         runtime = _runtime(principal, entity_name=entity_name)
     await runtime.take_ownership()
+    sources = ResponseSources(
+        pending_event_ids=(source_event_id,),
+        logical_source_event_ids=logical_source_event_ids or (source_event_id,),
+    )
     if regenerated_event_id is not None and await principal.replies.for_event(regenerated_event_id) is None:
         await seed_finished_reply(
             principal,
             regenerated_event_id,
-            sources=ResponseSources(
-                pending_event_ids=(source_event_id,),
-                logical_source_event_ids=logical_source_event_ids or (source_event_id,),
-            ),
+            sources=sources,
             room_id=room_id,
             thread_id=thread_id,
             entity_name=entity_name,
@@ -124,10 +126,7 @@ async def reply_span(
     async with runtime.span_scope() as slot:
         handle = await runtime.claim(
             delivery_id=source_event_id,
-            sources=ResponseSources(
-                pending_event_ids=(source_event_id,),
-                logical_source_event_ids=logical_source_event_ids or (source_event_id,),
-            ),
+            sources=sources,
             room_id=room_id,
             thread_id=thread_id,
             placeholder=placeholder,

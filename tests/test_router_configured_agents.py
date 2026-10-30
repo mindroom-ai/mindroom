@@ -21,6 +21,7 @@ from mindroom.matrix.identity import MatrixID
 from mindroom.matrix.state import MatrixState
 from tests.conftest import bind_runtime_paths, orchestrator_runtime_paths, runtime_paths_for
 from tests.identity_helpers import entity_names_for_ids, persist_entity_accounts
+from tests.matrix_state_helpers import save_matrix_state
 
 
 class TestResponderCandidateSelection:
@@ -197,7 +198,7 @@ class TestResponderCandidateSelection:
         runtime_paths = runtime_paths_for(self.config)
         state = MatrixState.load(runtime_paths=runtime_paths)
         state.add_account("agent_calculator", "mindroom_calculator_oldns", "pw", domain="localhost")
-        state.save(runtime_paths=runtime_paths)
+        save_matrix_state(state, runtime_paths)
         room = MagicMock()
         room.room_id = "#math:localhost"
         room.members_synced = True
@@ -227,7 +228,7 @@ class TestResponderCandidateSelection:
         runtime_paths = runtime_paths_for(self.config)
         state = MatrixState.load(runtime_paths=runtime_paths)
         state.add_account("agent_calculator", "actual_calculator", "pw", domain="localhost")
-        state.save(runtime_paths=runtime_paths)
+        save_matrix_state(state, runtime_paths)
         room = MagicMock()
         room.room_id = "#math:localhost"
         room.members_synced = True
@@ -335,7 +336,7 @@ class TestResponderCandidateSelection:
         runtime_paths = runtime_paths_for(self.config)
         state = MatrixState.load(runtime_paths=runtime_paths)
         state.add_account("agent_writer", "actual_writer", "pw", domain="localhost")
-        state.save(runtime_paths=runtime_paths)
+        save_matrix_state(state, runtime_paths)
         room = MagicMock()
         room.room_id = "!adhoc:localhost"
         room.members_synced = True
@@ -410,7 +411,7 @@ class TestResponderCandidateSelection:
         grant_room_id = "!project:localhost"
         state = MatrixState.load(runtime_paths=runtime_paths)
         state.add_room("project", grant_room_id, "#project:localhost", "Project")
-        state.save(runtime_paths=runtime_paths)
+        save_matrix_state(state, runtime_paths)
         client = AsyncMock(spec=nio.AsyncClient)
         client.joined_rooms.return_value = nio.JoinedRoomsResponse(rooms=[grant_room_id])
         client.joined_members.return_value = nio.JoinedMembersResponse(

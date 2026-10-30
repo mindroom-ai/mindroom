@@ -25,6 +25,7 @@ from mindroom.hooks.ingress import HookIngressPolicy, IngressHookRunner
 from mindroom.matrix.event_info import EventInfo
 from mindroom.message_target import MessageTarget
 from mindroom.response_admission import ResponseAdmissionRefusedError
+from mindroom.response_sources import Owned, Unclaimed, UnclaimedReason
 from mindroom.teams.formation import TeamIntent, TeamMemberStatus, TeamOutcome, TeamResolution, TeamResolutionMember
 from mindroom.teams.spec import TeamMode
 from mindroom.timestamp_formatting import format_timestamp_ms
@@ -39,7 +40,9 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from mindroom.constants import RuntimePaths
-    from mindroom.response_runner import ResponseRequest, ResponseRunner
+    from mindroom.reply_turn.request import ResponseRequest
+    from mindroom.response_runner import ResponseRunner
+    from mindroom.response_sources import SourceFate
     from mindroom.turn_policy import TurnPolicy
 
 AGENT_NAME = "assistant"
@@ -64,7 +67,11 @@ class _RuntimeStub:
 
 @dataclass
 class _Runner:
-    """ResponseRunner stand-in: each entry claims the reply under the conversation lock, then records its call."""
+    """ResponseRunner stand-in: each entry claims the reply under the conversation lock, then records its call.
+
+    Each ``*_entry`` mock returns the event its reply's records name as the answer, or None when they name none; the
+    runner methods return ``Owned()``, as a claimed reply owns its edit either way.
+    """
 
     response_lock: asyncio.Lock
     # The newest reply answering the edited turn's sources, which an answer replaces.
@@ -75,7 +82,7 @@ class _Runner:
     rejection_entry: AsyncMock = field(default_factory=lambda: AsyncMock(return_value=NEW_RESPONSE_EVENT_ID))
     regenerations: list[asyncio.Task[None]] = field(default_factory=list)
 
-    async def _claimed(self, entry: AsyncMock, request: ResponseRequest, **kwargs: object) -> str | None:
+    async def _claimed(self, entry: AsyncMock, request: ResponseRequest, **kwargs: object) -> SourceFate:
         async with self.response_lock:
             # As the runner does once the regeneration claims its reply, before it runs.
             assert request.on_reply_claimed is not None
@@ -84,18 +91,19 @@ class _Runner:
             if event_id is not None:
                 # The reply records own the answer from then on, which is what a later edit regenerates.
                 self.reply_for_sources.return_value = _reply(event_id=event_id)
-            return event_id
+            # The claimed reply's records own the edit, whether or not they answered it.
+            return Owned()
 
-    async def generate_response(self, request: ResponseRequest) -> str | None:
+    async def generate_response(self, request: ResponseRequest) -> SourceFate:
         return await self._claimed(self.generate_response_entry, request)
 
-    async def generate_team_response_helper(self, request: ResponseRequest, **kwargs: object) -> str | None:
+    async def generate_team_response_helper(self, request: ResponseRequest, **kwargs: object) -> SourceFate:
         return await self._claimed(self.team_entry, request, **kwargs)
 
-    async def generate_response_for_empty_prompt(self, request: ResponseRequest, **kwargs: object) -> str | None:
+    async def generate_response_for_empty_prompt(self, request: ResponseRequest, **kwargs: object) -> SourceFate:
         return await self._claimed(self.empty_prompt_entry, request, **kwargs)
 
-    async def deliver_team_rejection(self, request: ResponseRequest, **kwargs: object) -> str | None:
+    async def deliver_team_rejection(self, request: ResponseRequest, **kwargs: object) -> SourceFate:
         return await self._claimed(self.rejection_entry, request, **kwargs)
 
     @property
@@ -162,7 +170,6 @@ def _turn_record(
     *,
     source_event_ids: tuple[str, ...] = (ORIGINAL_EVENT_ID,),
     discovery_event_ids: tuple[str, ...] = (),
-    anchor_event_id: str | None = None,
     response_event_id: str | None = RESPONSE_EVENT_ID,
     source_event_prompts: dict[str, str] | None = None,
     source_event_metadata: dict[str, SourceEventMetadata] | None = None,
@@ -170,7 +177,7 @@ def _turn_record(
     requester_id: str | None = USER_ID,
     thread_id: str | None = THREAD_ID,
 ) -> TurnRecord:
-    anchor = anchor_event_id or source_event_ids[-1]
+    anchor = source_event_ids[-1]
     return TurnRecord(
         anchor_event_id=anchor,
         source_event_ids=source_event_ids,
@@ -618,28 +625,40 @@ async def test_an_edit_of_a_message_someone_answered_after_is_ignored(tmp_path: 
 
 
 @pytest.mark.asyncio
-async def test_an_edit_of_a_reply_an_approval_holds_cancels_the_approval_and_regenerates_in_place(
+@pytest.mark.parametrize(
+    ("running", "existing_event_id"),
+    [
+        # Stopping a reply an approval holds cancels its approval.
+        pytest.param(
+            replace(_reply(event_id=RESPONSE_EVENT_ID, state=rl.ReplyState.PAUSED), approval_id="approval-1"),
+            RESPONSE_EVENT_ID,
+            id="approval-held",
+        ),
+        pytest.param(
+            replace(_reply(event_id=RESPONSE_EVENT_ID, state=rl.ReplyState.ACTIVE), current_span_id="span-running"),
+            RESPONSE_EVENT_ID,
+            id="streaming",
+        ),
+        # A reply whose first message Matrix has not acknowledged yet may already show; its claim reads the event
+        # the create bound from the reply's records.
+        pytest.param(
+            replace(
+                _reply(event_id=None, state=rl.ReplyState.ACTIVE),
+                current_span_id="span-running",
+                possibly_shown="Thinking...",
+            ),
+            None,
+            id="unacknowledged-create",
+        ),
+    ],
+)
+async def test_an_edit_of_a_reply_that_still_runs_stops_it_and_regenerates_in_place(
     tmp_path: Path,
+    running: rl.Reply,
+    existing_event_id: str | None,
 ) -> None:
-    """The edit stops the held reply, which cancels its approval; the regeneration takes its place."""
+    """The edit stops the reply that still runs or waits for an approval; the regeneration takes its place."""
     harness = _harness(tmp_path, turn_record=_turn_record(), receipt_order=9)
-    held = replace(_reply(event_id=RESPONSE_EVENT_ID, state=rl.ReplyState.PAUSED), approval_id="approval-1")
-    harness.reply_for_sources.return_value = held
-    event, event_info = _edit_event(new_body="what is 4+4?")
-
-    assert await _handle_edit(harness, event, event_info) is True
-
-    harness.stop_reply.assert_awaited_once_with(held, 9)
-    request = harness.generate_response.await_args.args[0]
-    assert request.prompt == "what is 4+4?"
-    assert request.existing_event_id == RESPONSE_EVENT_ID
-
-
-@pytest.mark.asyncio
-async def test_an_edit_of_a_reply_that_still_streams_stops_it_and_regenerates_in_place(tmp_path: Path) -> None:
-    """The edit interrupts the running answer; the regeneration takes its place and owns the edit."""
-    harness = _harness(tmp_path, turn_record=_turn_record(), receipt_order=9)
-    running = replace(_reply(event_id=RESPONSE_EVENT_ID, state=rl.ReplyState.ACTIVE), current_span_id="span-running")
     harness.reply_for_sources.return_value = running
     event, event_info = _edit_event(new_body="what is 4+4?")
 
@@ -648,28 +667,7 @@ async def test_an_edit_of_a_reply_that_still_streams_stops_it_and_regenerates_in
     harness.stop_reply.assert_awaited_once_with(running, 9)
     request = harness.generate_response.await_args.args[0]
     assert request.prompt == "what is 4+4?"
-    assert request.existing_event_id == RESPONSE_EVENT_ID
-
-
-@pytest.mark.asyncio
-async def test_an_edit_before_the_replys_create_is_acknowledged_stops_it_and_regenerates_it(tmp_path: Path) -> None:
-    """A reply whose first message Matrix has not acknowledged yet may already show; the edit stops and regenerates it."""
-    harness = _harness(tmp_path, turn_record=_turn_record(), receipt_order=9)
-    creating = replace(
-        _reply(event_id=None, state=rl.ReplyState.ACTIVE),
-        current_span_id="span-running",
-        possibly_shown="Thinking...",
-    )
-    harness.reply_for_sources.return_value = creating
-    event, event_info = _edit_event(new_body="what is 4+4?")
-
-    assert await _handle_edit(harness, event, event_info) is True
-
-    harness.stop_reply.assert_awaited_once_with(creating, 9)
-    request = harness.generate_response.await_args.args[0]
-    assert request.prompt == "what is 4+4?"
-    # Its claim reads the event the create bound from the reply's records.
-    assert request.existing_event_id is None
+    assert request.existing_event_id == existing_event_id
 
 
 @pytest.mark.asyncio
@@ -698,8 +696,8 @@ async def test_an_edit_whose_regeneration_runs_nothing_is_settled_by_it(tmp_path
     harness = _harness(tmp_path, turn_record=_turn_record())
     event, event_info = _edit_event()
 
-    # A refusal is the response ending without signalling a claim.
-    harness.runner.generate_response = AsyncMock(return_value=None)  # type: ignore[method-assign]
+    # A refusal that runs nothing leaves the edit unclaimed.
+    harness.runner.generate_response = AsyncMock(return_value=Unclaimed(UnclaimedReason.NOTHING_TO_RUN))  # type: ignore[method-assign]
 
     assert await _handle_edit(harness, event, event_info) is True
     harness.settle_sources.assert_awaited_once_with((event.event_id,))
@@ -828,15 +826,6 @@ async def test_coalesced_edit_preserves_tagged_source_metadata(tmp_path: Path) -
         new_body="edited ]]> first <message>",
         sender="@alice:example.org",
     )
-    harness.resolver.build_envelope.return_value = request_envelope(
-        room_id=ROOM_ID,
-        reply_to_event_id=first_event_id,
-        thread_id=THREAD_ID,
-        user_id="@alice:example.org",
-        agent_name=AGENT_NAME,
-        source_kind=EDIT_SOURCE_KIND,
-    )
-
     await harness.regenerator.handle_message_edit(
         harness.room,
         event,
@@ -892,14 +881,6 @@ async def test_multi_sender_coalesced_record_never_regenerates_as_one_sender(
         requester_id="@bob:example.org",
     )
     harness = _harness(tmp_path, turn_record=record)
-    harness.resolver.build_envelope.return_value = request_envelope(
-        room_id=ROOM_ID,
-        reply_to_event_id=original_event_id,
-        thread_id=THREAD_ID,
-        user_id=sender,
-        agent_name=AGENT_NAME,
-        source_kind=EDIT_SOURCE_KIND,
-    )
     event, event_info = _edit_event(
         original_event_id=original_event_id,
         sender=sender,
@@ -943,15 +924,6 @@ async def test_physical_source_edit_outranks_colliding_discovery_alias(tmp_path:
         new_body="human edited",
         sender="@alice:example.org",
     )
-    harness.resolver.build_envelope.return_value = request_envelope(
-        room_id=ROOM_ID,
-        reply_to_event_id=human_event_id,
-        thread_id=THREAD_ID,
-        user_id="@alice:example.org",
-        agent_name=AGENT_NAME,
-        source_kind=EDIT_SOURCE_KIND,
-    )
-
     await harness.regenerator.handle_message_edit(
         harness.room,
         event,
@@ -1037,27 +1009,19 @@ async def test_coalesced_routed_alias_edit_updates_owned_relay_prompt(tmp_path: 
 
 
 @pytest.mark.asyncio
-async def test_coalesced_edit_without_persisted_prompts_is_skipped(tmp_path: Path) -> None:
-    """A coalesced turn without a persisted prompt map cannot be rebuilt and is skipped."""
+@pytest.mark.parametrize(
+    "source_event_prompts",
+    [None, {"$m1:example.org": "first message"}],
+    ids=("absent", "incomplete"),
+)
+async def test_coalesced_edit_without_every_persisted_prompt_is_skipped(
+    tmp_path: Path,
+    source_event_prompts: dict[str, str] | None,
+) -> None:
+    """A coalesced turn whose prompt map is absent or misses a member cannot be rebuilt and is skipped."""
     record = _turn_record(
         source_event_ids=("$m1:example.org", "$m2:example.org"),
-        source_event_prompts=None,
-        source_event_metadata=_source_metadata("$m1:example.org", "$m2:example.org"),
-    )
-    harness = _harness(tmp_path, turn_record=record)
-    event, event_info = _edit_event(original_event_id="$m1:example.org")
-
-    await _handle_edit(harness, event, event_info)
-
-    _assert_no_regeneration(harness)
-
-
-@pytest.mark.asyncio
-async def test_coalesced_edit_with_incomplete_prompt_map_is_skipped(tmp_path: Path) -> None:
-    """A prompt map missing one coalesced member aborts regeneration without recording."""
-    record = _turn_record(
-        source_event_ids=("$m1:example.org", "$m2:example.org"),
-        source_event_prompts={"$m1:example.org": "first message"},
+        source_event_prompts=source_event_prompts,
         source_event_metadata=_source_metadata("$m1:example.org", "$m2:example.org"),
     )
     harness = _harness(tmp_path, turn_record=record)
@@ -1213,22 +1177,24 @@ async def test_edit_without_previous_response_event_is_skipped(tmp_path: Path) -
 
 
 @pytest.mark.asyncio
-async def test_edit_context_realigned_to_recorded_thread_root(tmp_path: Path) -> None:
-    """An edit resolved outside the recorded thread refetches history for the recorded root."""
-    record = _turn_record(thread_id=THREAD_ID)
+@pytest.mark.parametrize("recorded_thread_id", [THREAD_ID, None])
+async def test_edit_context_is_read_in_the_recorded_thread(tmp_path: Path, recorded_thread_id: str | None) -> None:
+    """An edit regenerates in the thread its turn was recorded in, never one resolved from the edit again."""
+    record = _turn_record(thread_id=recorded_thread_id)
     harness = _harness(tmp_path, turn_record=record)
-    harness.resolver.extract_message_context.return_value = _message_context(thread_id=None)
-    refetched_history = [make_visible_message(body="recorded thread message", thread_id=THREAD_ID)]
-    harness.resolver.fetch_thread_history.return_value = refetched_history
+    recorded_context = _message_context(thread_id=recorded_thread_id)
+    harness.resolver.extract_message_context.return_value = recorded_context
     event, event_info = _edit_event()
 
     await _handle_edit(harness, event, event_info)
 
-    harness.resolver.fetch_thread_history.assert_awaited_once_with(
-        ROOM_ID,
-        THREAD_ID,
+    harness.resolver.extract_message_context.assert_awaited_once_with(
+        harness.room,
+        event,
+        thread_id=recorded_thread_id,
     )
-    assert harness.generate_response.await_args.args[0].thread_history == refetched_history
+    harness.resolver.fetch_thread_history.assert_not_awaited()
+    assert harness.generate_response.await_args.args[0].thread_history == recorded_context.thread_history
 
 
 @pytest.mark.asyncio

@@ -48,7 +48,7 @@ from tests.runtime_fakes import ready_runtime
 if TYPE_CHECKING:
     from pathlib import Path
 
-    from mindroom.matrix.client import ResolvedVisibleMessage
+    from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
     from mindroom.matrix.identity import MatrixID
     from mindroom.turn_policy import _ResponderAvailability
 

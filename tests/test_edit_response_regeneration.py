@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-from contextlib import asynccontextmanager
 from dataclasses import replace
 from pathlib import Path  # noqa: TC003
 from typing import TYPE_CHECKING
@@ -25,7 +24,7 @@ from mindroom.constants import (
 from mindroom.delivery_gateway import FinalDeliveryRequest, ResponseIdentity
 from mindroom.dispatch_source import EDIT_SOURCE_KIND
 from mindroom.event_journal import DeliveryStage, EventClass, EventKind, InboundEvent
-from mindroom.final_delivery import FinalDeliveryOutcome
+from mindroom.final_delivery import Completed, FinalDeliveryOutcome, Owed
 from mindroom.history.types import HistoryScope
 from mindroom.llm.media import Audio
 from mindroom.llm.runs import RunRecord
@@ -35,18 +34,19 @@ from mindroom.matrix.state import MatrixState
 from mindroom.matrix.thread_history_result import thread_history_result
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.message_target import MessageTarget
-from mindroom.response_runner import ResponseRequest
-from mindroom.response_sources import ResponseSources
+from mindroom.reply_turn.request import ResponseRequest
+from mindroom.response_sources import Owned, ResponseSources, SourceFate, Unclaimed, UnclaimedReason
 from mindroom.session_ids import create_session_id
 from mindroom.session_storage.store import ConversationStore
 from mindroom.session_storage.types import ConversationSession
 from mindroom.teams.formation import TeamIntent, TeamOutcome, TeamResolution
 from mindroom.teams.spec import TeamMode
+from mindroom.turn_policy import TurnPolicy
 from mindroom.turn_record import SourceEventMetadata, TurnRecord
 from mindroom.turn_store import TurnStore
 from mindroom.turns.dispatch import TurnDispatcher
 from tests.access_schema_support import with_current_room_member_access
-from tests.bot_helpers import _room_send_response, _turn_store, dispatch_reaction_durably, make_test_agent_bot
+from tests.bot_helpers import _turn_store, dispatch_reaction_durably, make_test_agent_bot
 from tests.conftest import (
     bind_runtime_paths,
     delivered_matrix_side_effect,
@@ -67,12 +67,13 @@ from tests.conftest import (
     wrap_extracted_collaborators,
 )
 from tests.identity_helpers import fixture_entity_matrix_id, persist_entity_accounts
+from tests.matrix_state_helpers import save_matrix_state
 from tests.reply_span_helpers import final_in_span, seed_finished_reply
 from tests.response_attempt_helpers import install_direct_response_admission
-from tests.response_runner_helpers import streamed_answer
+from tests.response_runner_helpers import _noop_typing, streamed_answer
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Awaitable, Callable
+    from collections.abc import Awaitable, Callable
 
     from mindroom.bot import AgentBot
     from mindroom.event_journal import EventJournalStore
@@ -226,33 +227,31 @@ def _team_test_config(tmp_path: Path) -> Config:
     return _bind_runtime_paths(config, tmp_path)
 
 
-def _generate_response_with_locked_callback(
-    response_event_id: str | None,
-) -> Callable[[ResponseRequest], Awaitable[str | None]]:
+def _generate_response_with_locked_callback() -> Callable[[ResponseRequest], Awaitable[SourceFate]]:
     """Execute locked edit cleanup in mocked response generation paths."""
 
-    async def _generate_response(request: ResponseRequest) -> str | None:
+    async def _generate_response(request: ResponseRequest) -> SourceFate:
         if request.on_lifecycle_lock_acquired is not None:
             request.on_lifecycle_lock_acquired()
         if (
             request.prepare_source_turn is not None
             and (await request.prepare_source_turn(request.thread_history)).invalid
         ):
-            return None
+            return Unclaimed(UnclaimedReason.TERMINAL_SOURCES)
         # The claim of the reply succeeded, as the runner's admission would run its hook.
         if request.on_reply_claimed is not None:
             await request.on_reply_claimed()
-        return response_event_id
+        return Owned()
 
     return _generate_response
 
 
-def _answering(bot: AgentBot, event_id: str) -> Callable[[ResponseRequest], Awaitable[str]]:
+def _answering(bot: AgentBot) -> Callable[[ResponseRequest], Awaitable[SourceFate]]:
     """Return a response stand-in whose answer records its turn answered, as its reply's records do."""
 
-    async def answer(request: ResponseRequest) -> str:
+    async def answer(request: ResponseRequest) -> SourceFate:
         await record_turn_answered(bot, request)
-        return event_id
+        return Owned()
 
     return answer
 
@@ -644,22 +643,23 @@ async def test_bot_edit_regeneration_does_not_rerun_response_gating_after_hydrat
         },
     )
 
+    mock_generate_response = AsyncMock(side_effect=_generate_response_with_locked_callback())
+    install_edit_regeneration_mock(bot, mock_generate_response)
     with (
         patch.object(
             bot._ingress_hook_runner,
             "emit_message_received_hooks",
             new_callable=AsyncMock,
-        ) as mock_emit_hooks,
-        patch("mindroom.turn_policy.decide_agent_response") as decide_agent_response,
+            return_value=False,
+        ),
+        patch.object(TurnPolicy, "plan_turn", new_callable=AsyncMock) as mock_plan_turn,
     ):
-        mock_emit_hooks.return_value = False
-
         await bot._on_message(room, edit_event)
         await finish_edit_regenerations(bot)
 
-    # The hydrated edit regenerates without asking whether the agent should respond.
-    assert mock_emit_hooks.await_args.kwargs["envelope"].body == "@test_agent what is 99+1?"
-    decide_agent_response.assert_not_called()
+    mock_plan_turn.assert_not_awaited()
+    mock_generate_response.assert_awaited_once()
+    assert mock_generate_response.await_args.args[0].prompt == "@test_agent what is 99+1?"
 
 
 @pytest.mark.asyncio
@@ -738,16 +738,10 @@ async def test_handle_message_edit_reuses_persisted_target_and_thread_scope(
         "sender": "@user:example.com",
     }
 
-    mock_generate_response = AsyncMock(side_effect=_generate_response_with_locked_callback("$response:example.com"))
+    mock_generate_response = AsyncMock(side_effect=_generate_response_with_locked_callback())
     install_edit_regeneration_mock(bot, mock_generate_response)
     with (
         patch.object(bot._conversation_resolver, "extract_message_context", new_callable=AsyncMock) as mock_context,
-        patch.object(
-            bot._conversation_resolver,
-            "fetch_thread_history",
-            new_callable=AsyncMock,
-            return_value=thread_history_result([], is_full_history=True),
-        ) as mock_fetch_history,
         patch.object(
             bot._turn_store,
             "remove_stale_runs_for_edit",
@@ -756,9 +750,9 @@ async def test_handle_message_edit_reuses_persisted_target_and_thread_scope(
     ):
         mock_context.return_value = MagicMock(
             am_i_mentioned=False,
-            is_thread=False,
-            thread_id=None,
-            thread_history=[],
+            is_thread=True,
+            thread_id=stored_target.resolved_thread_id,
+            thread_history=thread_history_result([], is_full_history=True),
             mentioned_agents=[],
             has_non_agent_mentions=False,
         )
@@ -771,10 +765,7 @@ async def test_handle_message_edit_reuses_persisted_target_and_thread_scope(
         )
         await finish_edit_regenerations(bot)
 
-    mock_fetch_history.assert_awaited_once_with(
-        room.room_id,
-        stored_target.resolved_thread_id,
-    )
+    mock_context.assert_awaited_once_with(room, edit_event, thread_id=stored_target.resolved_thread_id)
     mock_remove_stale_runs.assert_called_once()
     request = mock_generate_response.call_args.args[0]
     response_target = request.response_envelope.target
@@ -858,11 +849,6 @@ async def test_team_bot_regenerates_edits_against_team_history_storage(tmp_path:
     }
 
     storage = _store_without_sessions()
-
-    @asynccontextmanager
-    async def noop_typing_indicator(*_args: object, **_kwargs: object) -> AsyncIterator[None]:
-        yield
-
     mock_team_response = AsyncMock(return_value="team response")
 
     with (
@@ -870,17 +856,17 @@ async def test_team_bot_regenerates_edits_against_team_history_storage(tmp_path:
         patch_response_runner_module(
             team_response_stream=streamed_answer(mock_team_response),
             should_use_streaming=AsyncMock(return_value=False),
-            typing_indicator=noop_typing_indicator,
+            typing_indicator=_noop_typing,
         ),
         patch(
             "mindroom.response_lifecycle.apply_post_response_effects",
             new=AsyncMock(),
         ),
         patch(
-            "mindroom.response_runner.DeliveryGateway.deliver_final",
+            "mindroom.delivery_gateway.DeliveryGateway.deliver_final",
             new=AsyncMock(
                 return_value=FinalDeliveryOutcome(
-                    terminal_status="completed",
+                    ending=Completed(),
                     event_id=response_event_id,
                     is_visible_response=True,
                     final_visible_body="team response",
@@ -1209,7 +1195,7 @@ async def test_bot_ignores_agent_edits_from_actual_persisted_id_after_drift(tmp_
     runtime_paths = runtime_paths_for(config)
     state = MatrixState.load(runtime_paths=runtime_paths)
     state.add_account("agent_helper_agent", "actual_helper_agent", "pw", domain="example.com")
-    state.save(runtime_paths=runtime_paths)
+    save_matrix_state(state, runtime_paths)
 
     bot = make_test_agent_bot(
         agent_user=agent_user,
@@ -1419,7 +1405,7 @@ async def test_handle_message_edit_rebuilds_coalesced_prompt_for_non_primary_edi
         "sender": "@user:example.com",
     }
 
-    mock_generate_response = AsyncMock(side_effect=_generate_response_with_locked_callback("$response:example.com"))
+    mock_generate_response = AsyncMock(side_effect=_generate_response_with_locked_callback())
     install_edit_regeneration_mock(bot, mock_generate_response)
     with (
         patch.object(bot._conversation_resolver, "extract_message_context", new_callable=AsyncMock) as mock_context,
@@ -1509,7 +1495,6 @@ async def test_handle_message_edit_reuses_existing_response_without_placeholder_
         rooms=["!test:example.com"],
     )
     bot.client = make_matrix_client_mock(user_id="@mindroom_test_agent:example.com")
-    bot.client.room_send.return_value = _room_send_response("$thinking:example.com")
     replace_edit_regenerator_deps(bot)
     bot.logger = MagicMock()
 
@@ -1566,7 +1551,7 @@ async def test_handle_message_edit_reuses_existing_response_without_placeholder_
         "sender": "@user:example.com",
     }
 
-    mock_generate_response = AsyncMock(side_effect=_generate_response_with_locked_callback("$response:example.com"))
+    mock_generate_response = AsyncMock(side_effect=_generate_response_with_locked_callback())
     install_edit_regeneration_mock(bot, mock_generate_response)
     with (
         patch.object(bot._conversation_resolver, "extract_message_context", new_callable=AsyncMock) as mock_context,
@@ -1682,7 +1667,7 @@ async def test_handle_message_edit_does_not_remark_response_when_regeneration_is
         "sender": "@user:example.com",
     }
 
-    mock_generate_response = AsyncMock(side_effect=_generate_response_with_locked_callback(None))
+    mock_generate_response = AsyncMock(side_effect=_generate_response_with_locked_callback())
     install_edit_regeneration_mock(bot, mock_generate_response)
     with (
         patch.object(bot._conversation_resolver, "extract_message_context", new_callable=AsyncMock) as mock_context,
@@ -1848,7 +1833,7 @@ async def test_handle_message_edit_does_not_mark_regeneration_success_when_exist
             regenerates=request.edit_regeneration,
         )
         # The failed edit stays owed to recovery instead of ending the reply.
-        assert outcome.terminal_status == "suspended"
+        assert outcome.ending == Owed()
         return outcome.event_id
 
     mock_generate_response = AsyncMock(side_effect=fail_visible_update)
@@ -1997,15 +1982,10 @@ async def test_handle_message_edit_does_not_backfill_existing_coalesced_prompt_f
         ],
     )
 
-    mock_generate_response = AsyncMock(side_effect=_generate_response_with_locked_callback("$response:example.com"))
+    mock_generate_response = AsyncMock(side_effect=_generate_response_with_locked_callback())
     install_edit_regeneration_mock(bot, mock_generate_response)
     with (
         patch.object(bot._conversation_resolver, "extract_message_context", new_callable=AsyncMock) as mock_context,
-        patch.object(
-            bot._conversation_resolver,
-            "fetch_thread_history",
-            new=AsyncMock(return_value=thread_history_result([], is_full_history=True)),
-        ),
         patch.object(
             bot._conversation_state_writer,
             "create_storage",
@@ -2106,7 +2086,7 @@ async def test_edit_regenerator_preserves_interactive_selection_run_metadata(tmp
             ),
         ],
     )
-    generate_response = AsyncMock(return_value="$response-new:example.com")
+    generate_response = AsyncMock(return_value=Owned())
     install_edit_regeneration_mock(bot, generate_response)
 
     with (
@@ -2225,7 +2205,7 @@ async def test_suppressed_interactive_regeneration_keeps_ledger_anchor(
             ),
         ],
     )
-    generate_response = AsyncMock(return_value=None)
+    generate_response = AsyncMock(return_value=Owned())
     install_edit_regeneration_mock(bot, generate_response)
 
     with (
@@ -2335,16 +2315,7 @@ async def test_handle_message_edit_skips_when_turn_context_was_not_recorded(
         "event_id": "$edit:example.com",
         "sender": "@user:example.com",
     }
-    cleanup_called = False
-
-    async def generate_response_with_locked_cleanup(request: ResponseRequest) -> str | None:
-        nonlocal cleanup_called
-        assert request.on_lifecycle_lock_acquired is not None
-        request.on_lifecycle_lock_acquired()
-        cleanup_called = True
-        return "$response:example.com"
-
-    mock_generate_response = AsyncMock(side_effect=generate_response_with_locked_cleanup)
+    mock_generate_response = AsyncMock(return_value=Owned())
     install_edit_regeneration_mock(bot, mock_generate_response)
     with (
         patch.object(bot._conversation_resolver, "extract_message_context", new_callable=AsyncMock) as mock_context,
@@ -2370,7 +2341,6 @@ async def test_handle_message_edit_skips_when_turn_context_was_not_recorded(
         )
         await finish_edit_regenerations(bot)
 
-    assert cleanup_called is False
     mock_recorded_cleanup.assert_not_called()
     mock_generate_response.assert_not_awaited()
 
@@ -2453,7 +2423,7 @@ async def test_on_reaction_tracks_response_event_id(tmp_path: Path) -> None:
         patch.object(bot._conversation_resolver, "fetch_thread_history", new_callable=AsyncMock) as mock_fetch_history,
     ):
         mock_send_text.return_value = "$ack_event:example.com"
-        mock_generate_response.side_effect = _answering(bot, "$response_event:example.com")
+        mock_generate_response.side_effect = _answering(bot)
         mock_fetch_history.return_value = thread_history_result([], is_full_history=True)
 
         # Process the reaction event
@@ -2548,11 +2518,11 @@ async def test_on_reaction_leaves_question_retryable_when_ack_response_is_suppre
         patch.object(bot._conversation_resolver, "fetch_thread_history", new_callable=AsyncMock) as mock_fetch_history,
     ):
         mock_send_text.return_value = "$ack_event:example.com"
-        mock_generate_response.return_value = None
+        # The suppressed reply's records own the selection, so its handler
+        # leaves the reaction to them and never marks the question answered.
+        mock_generate_response.return_value = Owned()
         mock_fetch_history.return_value = thread_history_result([], is_full_history=True)
 
-        # The worker records the failure and leaves the event pending rather
-        # than propagating it, so the question stays retryable.
         await dispatch_reaction_durably(bot, room, reaction_event)
         await bot._response_runner.inbox.drain_inbox_responses()
 
@@ -2628,7 +2598,7 @@ async def test_on_message_routes_interactive_text_selection_through_turn_ingress
             bot._response_runner,
             "generate_response",
             new_callable=AsyncMock,
-            side_effect=_answering(bot, "$response:example.com"),
+            side_effect=_answering(bot),
         ) as mock_generate_response,
         patch.object(
             bot._conversation_resolver,
@@ -2755,7 +2725,7 @@ async def test_on_reaction_respects_responder_access(tmp_path: Path) -> None:
         patch.object(bot._response_runner, "generate_response", new_callable=AsyncMock) as mock_generate_response,
     ):
         mock_send_text.return_value = "$ack_event:example.com"
-        mock_generate_response.return_value = "$response_event:example.com"
+        mock_generate_response.return_value = Owned()
 
         await dispatch_reaction_durably(bot, room, disallowed_reaction)
         claim_interactive.assert_not_awaited()

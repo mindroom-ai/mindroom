@@ -17,7 +17,6 @@ from mindroom.event_journal import DeliveryStage, EventClass, EventKind
 from mindroom.matrix.thread_history_result import ThreadHistoryResult
 from mindroom.message_target import MessageTarget
 from mindroom.response_payload_preparation import DispatchPayloadInputs
-from mindroom.response_runner import ResponseRunner
 from mindroom.turn_policy import PreparedDispatch, ResponseAction
 from mindroom.turn_record import RevisionSnapshotChangedError, TurnRecord
 from mindroom.visible_response_reconciliation import VisibleResponseReconciler
@@ -31,6 +30,7 @@ from tests.journal_helpers import admit_dispatch_event
 from tests.matrix_room_events import (
     BOT_USER_ID,
 )
+from tests.reply_turn_helpers import runner_for
 from tests.response_runner_helpers import _bot, _envelope, _noop_typing
 from tests.test_orderly_shutdown_recovery import _dispatcher
 from tests.test_response_delivery_gateway import TestTurnDeliveryGoesThroughTheOutbox as _DeliveryTestHooks
@@ -45,6 +45,7 @@ if TYPE_CHECKING:
     from mindroom.bot import AgentBot
     from mindroom.delivery_gateway import DeliveryGateway
     from mindroom.event_journal import EventJournalStore, PrincipalStore
+    from mindroom.response_runner import ResponseRunner
 
 pytestmark = pytest.mark.asyncio
 SOURCE = "$deleted"
@@ -61,9 +62,8 @@ def _runner_on(
     The runner's gateway runs its replies' effects, as the bot wires them.
     """
     deps = unwrap_extracted_collaborator(bot._response_runner).deps
-    assert deps.replies is not None
     replies = replace(deps.replies, store=principal)
-    return ResponseRunner(
+    return runner_for(
         replace(
             deps,
             delivery_gateway=replace(gateway, deps=replace(gateway.deps, reply_effects=replies.run_effects)),
@@ -99,7 +99,7 @@ async def test_preparation_outcomes_reach_dispatch_and_journal_owners(  # noqa: 
     )
     runner = _runner_on(bot, gateway, principal)
     turn_dispatcher = bot._turn_dispatcher
-    gateway.deps.response_hooks.emit_cancelled_response = AsyncMock()
+    gateway.deps.response_hooks._emit_cancelled_response = AsyncMock()
 
     async def settle_ignored(sources: tuple[str, ...]) -> None:
         for source in sources:
@@ -204,7 +204,6 @@ async def test_preparation_outcomes_reach_dispatch_and_journal_owners(  # noqa: 
             ),
             name="inbox_response:preparation",
             recovery_proof_ready=lambda: True,
-            on_failure=lambda: dispatcher.retry_turn_sources(callback_room.room_id, (SOURCE,)),
             source_event_ids=(SOURCE,),
             room_id=callback_room.room_id,
         )
@@ -213,6 +212,8 @@ async def test_preparation_outcomes_reach_dispatch_and_journal_owners(  # noqa: 
         return TurnDispatchOutcome.DEFERRED
 
     dispatcher = _dispatcher(principal, callback)
+    # A finished inbox task hands its sources back to this test's journal dispatcher.
+    runner.inbox.retry_approval_sources = dispatcher.retry_turn_sources
     model_requests = []
 
     def model(*args: object, **kwargs: object) -> AsyncIterator[str]:

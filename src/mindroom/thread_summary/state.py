@@ -48,6 +48,7 @@ class SummaryState:
 
     Only ordinary messages count toward the thread's size and reach the summarizer.
     Scheduling fields come from trusted notices alone, so a person's pin never moves a baseline.
+    ``summary_event_ids`` names every message carrying summary metadata, accepted or not, because any of them can be edited into a pin.
     """
 
     ordinary_messages: tuple[ResolvedVisibleMessage, ...]
@@ -56,6 +57,7 @@ class SummaryState:
     summary: str | None
     pinned: bool
     newest_generated_at: datetime | None
+    summary_event_ids: tuple[str, ...]
 
     @property
     def message_count(self) -> int:
@@ -133,6 +135,9 @@ class SummaryState:
             summary=summary,
             pinned=pinned,
             newest_generated_at=newest_generated_at,
+            summary_event_ids=tuple(
+                message.event_id for message in history if THREAD_SUMMARY_CONTENT_KEY in message.content
+            ),
         )
 
 

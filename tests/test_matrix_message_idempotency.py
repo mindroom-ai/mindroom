@@ -18,6 +18,7 @@ from mindroom.matrix.state import MatrixState
 from mindroom.tool_system.runtime_context import tool_runtime_context
 from tests.conftest import make_latest_thread_event_id_mock
 from tests.identity_helpers import entity_ids
+from tests.matrix_state_helpers import save_matrix_state
 from tests.test_matrix_agent_discovery import context as context  # noqa: PLC0414
 
 if TYPE_CHECKING:
@@ -352,7 +353,7 @@ async def test_room_alias_reuses_receipt(context: ToolRuntimeContext, transport:
     """Room names and resolved IDs must address the same receipt scope."""
     state = MatrixState()
     state.add_room("lobby", room_id=context.room_id, alias="#lobby:localhost", name="Lobby")
-    state.save(runtime_paths=context.runtime_paths)
+    save_matrix_state(state, context.runtime_paths)
     with tool_runtime_context(context):
         first = await MatrixMessageTools().matrix_message(message="first", room_id="lobby", idempotency_key="room")
         second = await MatrixMessageTools().matrix_message(

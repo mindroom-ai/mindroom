@@ -25,7 +25,7 @@ from mindroom.dispatch_source import (
 from mindroom.hooks import (
     MessageEnvelope,
 )
-from mindroom.matrix.client import ResolvedVisibleMessage
+from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
 from mindroom.matrix.thread_diagnostics import THREAD_HISTORY_DEGRADED_DIAGNOSTIC
 from mindroom.matrix.thread_history_result import ThreadHistoryResult, thread_history_result
 from mindroom.matrix.users import AgentMatrixUser
@@ -971,6 +971,7 @@ class TestAgentBot(AgentBotTestBase):
             agent_name=bot.agent_name,
             origin=message_origin(sender_id="@user:localhost", requester_id="@user:localhost", source_kind="live"),
         )
+        has_active_response = MagicMock(return_value=True)
 
         with (
             patch(
@@ -981,11 +982,6 @@ class TestAgentBot(AgentBotTestBase):
                 "mindroom.turn_policy.decide_agent_response",
                 return_value=AgentResponseDecision(False),
             ) as mock_decide_agent_response,
-            patch.object(
-                bot._response_runner,
-                "has_active_response_for_target",
-                return_value=True,
-            ) as mock_has_active_response,
         ):
             action = await bot._turn_policy._resolve_response_action(
                 PreparedDispatch(
@@ -996,12 +992,12 @@ class TestAgentBot(AgentBotTestBase):
                     envelope=envelope,
                 ),
                 room,
-                has_active_response_for_target=bot._response_runner.has_active_response_for_target,
+                has_active_response_for_target=has_active_response,
             )
 
         assert action.kind == "individual"
         mock_decide_agent_response.assert_called_once()
-        mock_has_active_response.assert_called_once_with(target)
+        has_active_response.assert_called_once_with(target)
 
     @pytest.mark.asyncio
     async def test_resolve_response_action_keeps_active_follow_up_inside_responder_boundary(
@@ -1064,10 +1060,7 @@ class TestAgentBot(AgentBotTestBase):
             origin=message_origin(sender_id="@user:localhost", requester_id="@user:localhost", source_kind="live"),
         )
 
-        with (
-            patch("mindroom.turn_policy.decide_team_formation", new=MagicMock(return_value=TeamResolution.none())),
-            patch.object(bot._response_runner, "has_active_response_for_target", return_value=True),
-        ):
+        with patch("mindroom.turn_policy.decide_team_formation", new=MagicMock(return_value=TeamResolution.none())):
             action = await bot._turn_policy._resolve_response_action(
                 PreparedDispatch(
                     requester_user_id="@user:localhost",
@@ -1077,7 +1070,7 @@ class TestAgentBot(AgentBotTestBase):
                     envelope=envelope,
                 ),
                 room,
-                has_active_response_for_target=bot._response_runner.has_active_response_for_target,
+                has_active_response_for_target=MagicMock(return_value=True),
             )
 
         assert action.kind == "skip"
@@ -1130,28 +1123,29 @@ class TestAgentBot(AgentBotTestBase):
             origin=message_origin(sender_id="@user:localhost", requester_id="@user:localhost", source_kind="live"),
         )
 
-        with patch.object(bot._response_runner, "has_active_response_for_target", return_value=True):
-            action = await bot._turn_policy._resolve_response_action(
-                PreparedDispatch(
-                    requester_user_id="@user:localhost",
-                    context=context,
-                    target=target,
-                    correlation_id="$followup",
-                    envelope=envelope,
-                ),
-                room,
-                has_active_response_for_target=bot._response_runner.has_active_response_for_target,
-            )
+        action = await bot._turn_policy._resolve_response_action(
+            PreparedDispatch(
+                requester_user_id="@user:localhost",
+                context=context,
+                target=target,
+                correlation_id="$followup",
+                envelope=envelope,
+            ),
+            room,
+            has_active_response_for_target=MagicMock(return_value=True),
+        )
 
         assert action.kind == "skip"
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize("source_kind", [MESSAGE_SOURCE_KIND, VOICE_SOURCE_KIND])
     async def test_resolve_response_action_keeps_gate_owned_active_thread_follow_up(
         self,
         mock_agent_user: AgentMatrixUser,
         tmp_path: Path,
+        source_kind: str,
     ) -> None:
-        """Gate-owned active follow-ups should keep active-response treatment after the active turn ends."""
+        """Gate-owned follow-ups keep active-response treatment and their source kind after the active turn ends."""
         config = _runtime_bound_config(
             Config(
                 agents={
@@ -1192,9 +1186,10 @@ class TestAgentBot(AgentBotTestBase):
             origin=message_origin(
                 sender_id="@user:localhost",
                 requester_id="@user:localhost",
-                source_kind=MESSAGE_SOURCE_KIND,
+                source_kind=source_kind,
             ),
         )
+        has_active_response = MagicMock(return_value=False)
 
         with (
             patch(
@@ -1205,11 +1200,6 @@ class TestAgentBot(AgentBotTestBase):
                 "mindroom.turn_policy.decide_agent_response",
                 return_value=AgentResponseDecision(False),
             ) as mock_decide_agent_response,
-            patch.object(
-                bot._response_runner,
-                "has_active_response_for_target",
-                return_value=False,
-            ) as mock_has_active_response,
         ):
             action = await bot._turn_policy._resolve_response_action(
                 PreparedDispatch(
@@ -1220,95 +1210,13 @@ class TestAgentBot(AgentBotTestBase):
                     envelope=envelope,
                 ),
                 room,
-                has_active_response_for_target=bot._response_runner.has_active_response_for_target,
+                has_active_response_for_target=has_active_response,
             )
 
         assert action.kind == "individual"
+        assert envelope.source_kind == source_kind
         mock_decide_agent_response.assert_called_once()
-        mock_has_active_response.assert_not_called()
-
-    @pytest.mark.asyncio
-    async def test_resolve_response_action_uses_active_follow_up_policy_without_erasing_voice(
-        self,
-        mock_agent_user: AgentMatrixUser,
-        tmp_path: Path,
-    ) -> None:
-        """Gate-owned voice follow-ups should keep voice source kind and active-response policy."""
-        config = _runtime_bound_config(
-            Config(
-                agents={
-                    "calculator": AgentConfig(display_name="CalculatorAgent", rooms=["!room:localhost"]),
-                    "general": AgentConfig(display_name="GeneralAgent", rooms=["!room:localhost"]),
-                },
-            ),
-            tmp_path,
-        )
-        runtime_paths = runtime_paths_for(config)
-        bot = make_test_agent_bot(mock_agent_user, config=config, runtime_paths=runtime_paths)
-        ids = entity_ids(config, runtime_paths)
-        room = _matrix_room(
-            own_user_id=bot.matrix_id.full_id,
-            user_ids=[
-                bot.matrix_id.full_id,
-                ids[ROUTER_AGENT_NAME].full_id,
-                ids["general"].full_id,
-            ],
-        )
-        target = MessageTarget.resolve(room.room_id, "$thread", "$event")
-        context = MessageContext(
-            am_i_mentioned=False,
-            is_thread=True,
-            thread_id="$thread",
-            thread_history=[],
-            mentioned_agents=[],
-            has_non_agent_mentions=False,
-        )
-        envelope = MessageEnvelope(
-            source_event_id="$followup",
-            target=target,
-            body="stop if you see this",
-            attachment_ids=(),
-            mentioned_agents=(),
-            agent_name=bot.agent_name,
-            dispatch_policy_source_kind=ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND,
-            origin=message_origin(
-                sender_id="@user:localhost",
-                requester_id="@user:localhost",
-                source_kind=VOICE_SOURCE_KIND,
-            ),
-        )
-
-        with (
-            patch(
-                "mindroom.turn_policy.decide_team_formation",
-                new=MagicMock(return_value=TeamResolution.none()),
-            ),
-            patch(
-                "mindroom.turn_policy.decide_agent_response",
-                return_value=AgentResponseDecision(False),
-            ) as mock_decide_agent_response,
-            patch.object(
-                bot._response_runner,
-                "has_active_response_for_target",
-                return_value=False,
-            ) as mock_has_active_response,
-        ):
-            action = await bot._turn_policy._resolve_response_action(
-                PreparedDispatch(
-                    requester_user_id="@user:localhost",
-                    context=context,
-                    target=target,
-                    correlation_id="$followup",
-                    envelope=envelope,
-                ),
-                room,
-                has_active_response_for_target=bot._response_runner.has_active_response_for_target,
-            )
-
-        assert action.kind == "individual"
-        assert envelope.source_kind == VOICE_SOURCE_KIND
-        mock_decide_agent_response.assert_called_once()
-        mock_has_active_response.assert_not_called()
+        has_active_response.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_router_plan_ignores_stale_thread_owner_outside_responder_boundary(self, tmp_path: Path) -> None:
@@ -1761,11 +1669,19 @@ class TestAgentBot(AgentBotTestBase):
         mock_decide_agent_response.assert_not_called()
 
     @pytest.mark.asyncio
-    async def test_router_skips_unmentioned_thread_when_policy_history_degraded(
+    @pytest.mark.parametrize(
+        ("diagnostics", "requires_model_history_refresh"),
+        [({THREAD_HISTORY_DEGRADED_DIAGNOSTIC: True}, False), (None, True)],
+        ids=("degraded", "partial"),
+    )
+    async def test_router_skips_unmentioned_thread_when_policy_history_incomplete(
         self,
         tmp_path: Path,
+        diagnostics: dict[str, bool] | None,
+        *,
+        requires_model_history_refresh: bool,
     ) -> None:
-        """Unavailable policy history should not let the router claim a thread."""
+        """Degraded or partial policy history should not let the router claim a thread."""
         config = _runtime_bound_config(
             Config(
                 agents={
@@ -1813,86 +1729,17 @@ class TestAgentBot(AgentBotTestBase):
                     ),
                 ],
                 is_full_history=False,
-                diagnostics={THREAD_HISTORY_DEGRADED_DIAGNOSTIC: True},
+                diagnostics=diagnostics,
             ),
             mentioned_agents=[],
             has_non_agent_mentions=False,
+            requires_model_history_refresh=requires_model_history_refresh,
         )
         dispatch = PreparedDispatch(
             requester_user_id="@bas:localhost",
             context=context,
             target=(dispatch_target := MessageTarget.resolve(room.room_id, "$thread", event.event_id)),
-            correlation_id="corr-degraded-router-policy",
-            envelope=_hook_envelope(body="Follow-up", source_event_id=event.event_id, target=dispatch_target),
-        )
-
-        plan = await bot._turn_policy._plan_router_dispatch(room, event, dispatch)
-
-        assert plan == DispatchPlan(kind="ignore", ignore_reason="router")
-
-    @pytest.mark.asyncio
-    async def test_router_skips_unmentioned_thread_when_policy_history_partial(
-        self,
-        tmp_path: Path,
-    ) -> None:
-        """Partial policy history should not let the router claim a thread."""
-        config = _runtime_bound_config(
-            Config(
-                agents={
-                    "calculator": AgentConfig(display_name="CalculatorAgent", rooms=["!room:localhost"]),
-                    "general": AgentConfig(display_name="GeneralAgent", rooms=["!room:localhost"]),
-                },
-                router=RouterConfig(model="default"),
-            ),
-            tmp_path,
-        )
-        router_user = AgentMatrixUser(
-            agent_name=ROUTER_AGENT_NAME,
-            user_id="@mindroom_router:localhost",
-            display_name="Router",
-            password=TEST_PASSWORD,
-        )
-        bot = make_test_agent_bot(router_user, config=config, runtime_paths=runtime_paths_for(config))
-        ids = entity_ids(config, runtime_paths_for(config))
-        room = _matrix_room(
-            own_user_id=bot.matrix_id.full_id,
-            user_ids=[
-                ids["calculator"].full_id,
-                ids["general"].full_id,
-                ids[ROUTER_AGENT_NAME].full_id,
-                "@bas:localhost",
-            ],
-        )
-        event = MagicMock(spec=nio.RoomMessageText)
-        event.event_id = "$event"
-        event.body = "Follow-up"
-        context = MessageContext(
-            am_i_mentioned=False,
-            is_thread=True,
-            thread_id="$thread",
-            thread_history=thread_history_result(
-                [
-                    ResolvedVisibleMessage(
-                        sender="@bas:localhost",
-                        body="Follow-up",
-                        timestamp=1,
-                        event_id="$m1",
-                        content={"body": "Follow-up"},
-                        thread_id="$thread",
-                        latest_event_id="$m1",
-                    ),
-                ],
-                is_full_history=False,
-            ),
-            mentioned_agents=[],
-            has_non_agent_mentions=False,
-            requires_model_history_refresh=True,
-        )
-        dispatch = PreparedDispatch(
-            requester_user_id="@bas:localhost",
-            context=context,
-            target=(dispatch_target := MessageTarget.resolve(room.room_id, "$thread", event.event_id)),
-            correlation_id="corr-partial-router-policy",
+            correlation_id="corr-incomplete-router-policy",
             envelope=_hook_envelope(body="Follow-up", source_event_id=event.event_id, target=dispatch_target),
         )
 

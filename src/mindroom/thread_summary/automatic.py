@@ -7,8 +7,7 @@ from typing import TYPE_CHECKING
 
 from mindroom.entity_resolution import current_internal_sender_ids
 from mindroom.logging_config import get_logger
-from mindroom.matrix.conversation_reads import with_delivered_response
-from mindroom.matrix.room_history_reads import fetch_thread_messages_from_source
+from mindroom.matrix.conversation_reads import refetched_thread_history, with_delivered_response
 from mindroom.thread_summary import schedule
 from mindroom.thread_summary.generation import GeneratedSummary, generate_summary, resolve_thread_summary_model_name
 from mindroom.thread_summary.notices import (
@@ -75,7 +74,7 @@ async def _thread_is_resolved(
 
 
 async def _summary_delivery_timestamp(
-    client: nio.AsyncClient,
+    conversation_reader: ConversationReader,
     room_id: str,
     thread_id: str,
     *,
@@ -90,26 +89,42 @@ async def _summary_delivery_timestamp(
     while this process is waiting on the model, and the finished automatic
     summary would then land on top of a title the user just fixed.
 
-    Reads from source rather than through the projection. A projected read is
-    strict about staleness but still answers from local state, so it cannot
+    Walks the thread on the server again before reading the projection. A
+    projected read alone answers from what sync has delivered, so it cannot
     observe a pin another runtime just wrote — which is the only case this
-    guard exists for. Costs one homeserver read per generated summary, so once
-    per interval rather than per turn.
+    guard exists for. Costs one thread walk per generated summary, so once per
+    interval rather than per turn.
 
-    A failed re-read suppresses delivery because a pin may have landed while
-    the model ran. The caller records the completed generation attempt so the
-    next eligible pass retries at the normal interval without a retry storm.
+    A failed re-read, or one a bound stopped before the end of the thread,
+    suppresses delivery because a pin may have landed while the model ran. The
+    caller records the completed generation attempt so the next eligible pass
+    retries at the normal interval without a retry storm. An event this bot
+    cannot decrypt is read as absent, as the gate before generation reads it:
+    counting it as missing would discard the summary after the model ran, and
+    again on every later pass, because that gate keeps letting the thread through.
     """
     try:
-        source_history = await fetch_thread_messages_from_source(
-            client,
+        source_history = await refetched_thread_history(
+            conversation_reader,
             room_id,
             thread_id,
-            trusted_sender_ids=trusted_sender_ids,
+            # A pin can be an edit of any earlier summary, and a recursive walk
+            # may page a reply's edits out, so each summary's edits are asked for.
+            edits_of=projected_state.summary_event_ids,
+            unreadable_is_missing=False,
         )
     except Exception:
         logger.exception(
             "Pin re-check before summary delivery failed; discarding automatic summary",
+            room_id=room_id,
+            thread_id=thread_id,
+        )
+        return None
+    if not source_history.is_full_history:
+        # A pin can be an edit of any earlier summary, so a walk that stopped
+        # before the end of the thread cannot rule one out.
+        logger.info(
+            "Pin re-check before summary delivery could not read the whole thread; discarding automatic summary",
             room_id=room_id,
             thread_id=thread_id,
         )
@@ -228,7 +243,7 @@ async def _deliver_generated_summary(
     """
     try:
         generated_at = await _summary_delivery_timestamp(
-            client,
+            conversation_reader,
             room_id,
             thread_id,
             trusted_sender_ids=trusted_sender_ids,

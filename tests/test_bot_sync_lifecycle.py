@@ -1,10 +1,4 @@
-"""Bot sync lifecycle: startup cleanup, checkpoint certification, and background drains.
-
-What is left here after the advisory event cache was deleted. Everything this
-file used to assert about cached sync timelines went with the writer that
-produced them; these tests are about the bot's own lifecycle, which the cache
-only ever happened to share a sync callback with.
-"""
+"""Bot lifecycle: startup ordering and hooks, journal ownership across logins and rebuilds, handled-turn cleanup, and background-task drains."""
 
 from __future__ import annotations
 
@@ -222,7 +216,7 @@ class TestBotSyncLifecycle(ThreadingBehaviorTestBase):
                 "mindroom.bot.login_agent_owned_session",
                 AsyncMock(return_value=SimpleNamespace(client=client, session=session)),
             ),
-            patch.object(bot._response_runner, "recover_approval_final", AsyncMock(side_effect=recover)),
+            patch.object(bot._approval_runner, "recover_approval_final", AsyncMock(side_effect=recover)),
         ):
             assert await bot.recover_approval_final("approval")
 

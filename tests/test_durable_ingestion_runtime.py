@@ -28,7 +28,6 @@ from mindroom.config.personal_rooms import PersonalRoomsConfig
 from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.event_journal import DeliveryStage, RoomMembershipPosition
 from mindroom.matrix._owned_session import MatrixCredentials, open_owned_matrix_session
-from mindroom.matrix.client_session import create_authenticated_client
 from mindroom.matrix.durable_ingestion import consume_one_ingestion_batch
 from mindroom.matrix.personal_rooms import PersonalRoomService
 from mindroom.matrix.state import MatrixState
@@ -37,8 +36,9 @@ from mindroom.personal_room_lifecycle import PersonalRoomTarget
 from mindroom.runtime_shutdown import ShutdownBudget
 from mindroom.scheduling.runtime import ScheduledTaskRuntime
 from tests.bot_helpers import make_matrix_client_mock
-from tests.conftest import SETTLE_TIMEOUT_SECONDS
+from tests.conftest import SETTLE_TIMEOUT_SECONDS, legacy_default_store_client
 from tests.journal_helpers import membership_position
+from tests.matrix_state_helpers import save_matrix_state
 from tests.test_bot_ready_hook import _agent_bot
 from tests.test_durable_ingestion_admission import ROOM, Session
 from tests.test_event_journal_store import admit, interactive_edit, interactive_prompt, projection
@@ -300,7 +300,7 @@ async def test_repaired_gap_fences_grants_until_authoritative_refresh(
     bot.config.router.access = ResponderAccessConfig(members_of_rooms=["grant"])
     state = MatrixState.load(runtime_paths=bot.runtime_paths)
     state.add_room("grant", ROOM, "#grant:localhost", "Grant")
-    state.save(runtime_paths=bot.runtime_paths)
+    save_matrix_state(state, bot.runtime_paths)
     sender = "@alice:localhost"
     join = {
         "type": "m.room.member",
@@ -692,7 +692,7 @@ async def test_upgrade_keeps_old_history_silent_and_preserves_crypto(
         )
     bot = _agent_bot(tmp_path)
     principal = bot.journal_principal()
-    legacy = create_authenticated_client(
+    legacy = legacy_default_store_client(
         "https://localhost",
         bot.agent_user.user_id,
         "DEVICE",

@@ -20,9 +20,7 @@ import mindroom.custom_tools.chat_ui as chat_ui_module
 import mindroom.tools  # noqa: F401
 from mindroom.custom_tools.chat_ui import ChatUITools, show_computer_once
 from mindroom.event_journal import EventClass, EventKind
-from mindroom.matrix.client_visible_messages import extract_visible_message, is_visible_room_message
 from mindroom.matrix.journal_ingress import ingestion_timeline_views
-from mindroom.matrix.room_history_reads import parse_room_message_event
 from mindroom.message_target import MessageTarget
 from mindroom.tool_system.agno_toolkits import toolkit_function_names
 from mindroom.tool_system.metadata import get_tool_by_name
@@ -193,17 +191,6 @@ async def test_ui_notice_survives_live_ingress_and_history_projection(
     assert inbound.event_class is EventClass.CONTEXT_ONLY
     assert projected is not None
     assert projected.content["io.mindroom.ui_action"] == content["io.mindroom.ui_action"]
-
-    parsed = parse_room_message_event(source)
-    assert is_visible_room_message(parsed)
-    history_message = await extract_visible_message(
-        parsed,
-        config=context.config,
-        runtime_paths=context.runtime_paths,
-        trusted_sender_ids={context.client.user_id},
-    )
-    assert history_message["content"]["io.mindroom.ui_action"] == content["io.mindroom.ui_action"]
-    assert history_message["content"]["m.relates_to"] == content["m.relates_to"]
 
 
 @pytest.mark.asyncio

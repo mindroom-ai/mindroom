@@ -19,7 +19,6 @@ from mindroom.llm.messages import Message
 from mindroom.llm.runs import RunRecord
 from mindroom.message_target import MessageTarget
 from mindroom.reply_scope import ReplyRuntime
-from mindroom.response_runner import ResponseRunner
 from mindroom.session_storage.agent_storage import create_agent_state_storage
 from mindroom.session_storage.types import ConversationSession
 from mindroom.turn_record import TurnRecord
@@ -27,6 +26,7 @@ from mindroom.turn_store import TurnClaim, TurnStore
 from tests.conftest import seed_session
 from tests.journal_helpers import admit_dispatch_event
 from tests.redaction_helpers import remove_redacted_history_like_next_response
+from tests.reply_turn_helpers import runner_for
 from tests.test_orderly_shutdown_recovery import _dispatcher
 from tests.test_turn_store import _in_room, _next_request, _seeded_storage, _store, _store_with_storage
 
@@ -128,7 +128,7 @@ async def test_a_redaction_admitted_during_an_interrupted_reply_releases_its_sou
         started.set()
         await asyncio.Event().wait()
 
-    runner = ResponseRunner(deps=MagicMock())
+    runner = runner_for(MagicMock())
     response = runner.inbox.track_inbox_response(
         generate(),
         name="inbox_response:deleted",

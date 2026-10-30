@@ -22,7 +22,7 @@ if TYPE_CHECKING:
 
     import nio
 
-    from mindroom.matrix.client import DeliveredMatrixEvent
+    from mindroom.matrix.client_delivery import DeliveredMatrixEvent
     from mindroom.streaming import ProgressDelivered, ProgressState, ProgressWriteAhead, TerminalEdit, TerminalSend
 
 type SendTransport = Callable[[nio.AsyncClient, str, dict[str, Any]], Awaitable[DeliveredMatrixEvent | None]]

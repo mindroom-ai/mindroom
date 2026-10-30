@@ -63,6 +63,7 @@ from tests.conftest import (
 )
 from tests.fakes.scripted_model import Await, ScriptedModel, answer
 from tests.identity_helpers import persist_entity_accounts
+from tests.matrix_state_helpers import save_matrix_state
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterator
@@ -1943,7 +1944,7 @@ def test_room_agent_participant_runs_as_that_agent_without_durable_state(
     runtime_paths = runtime_paths_for(config)
     state = MatrixState.load(runtime_paths=runtime_paths)
     state.add_room("lobby", room_id="!room:localhost", alias="#lobby:localhost", name="Lobby")
-    state.save(runtime_paths=runtime_paths)
+    save_matrix_state(state, runtime_paths)
     persist_entity_accounts(config, runtime_paths)
     context = replace(context, config=config, runtime_paths=runtime_paths)
     parent_loop = asyncio.new_event_loop()

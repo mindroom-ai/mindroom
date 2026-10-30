@@ -22,6 +22,7 @@ Matrix sync callback
   -> turns/dispatch.py (owns one turn from gate exit: prepare -> decide -> execute -> record)
        -> turn_policy.py + command_turn_executor.py              (ignore / route / respond decision, command execution)
        -> response_runner.py -> ai.py / teams/envelope.py        (lifecycle lock, entity envelopes)
+       -> reply_turn/locked_turn.py                              (one settlement for agent, team, and approval turns)
             -> response_turn.py                                  (shared streaming turn driver; blocking replies collect it)
        -> streaming.py + delivery_gateway.py                     (progressive edits, Matrix send)
        -> turn_store.py / event_journal/turn_rows.py             (durable dedup so restarts don't double-reply)
@@ -66,7 +67,7 @@ Matrix sync callback
 | `ingress_validation.py` | Ingress boundary validation: classify each event's provenance once against the entity registry, handled-id dedup, reply access at the first gate and again under the admission fence |
 | `turns/facts.py` | One inbound event's classified provenance (`IngressFacts`), the turn origin derived from it, and the one command rule |
 | `inbound_turn_normalizer.py` | Raw input shaping (text, voice, sidecars, media) into canonical turn inputs |
-| `conversation_resolver.py` | Conversation identity, thread history, and envelope assembly from classified provenance |
+| `conversation_resolver.py` | A turn's thread decided once at ingress, the context read in that thread, and envelope assembly from classified provenance |
 | `coalescing/ingress_ticket.py` | `IngressTicket`: one ingress item's lane slot, turn claim, and queued notice until gate admission moves them, released by one idempotent `close` |
 | `coalescing/ingress_lanes.py` | Per-(room, sender) receipt-order FIFO delivering resolving ingress (voice/STT readiness) to conversations |
 | `coalescing/gate.py` | Live message coalescing gate; ordinary text dispatches immediately, adaptive text waits for its quiet window, and media waits for attachments and a trailing caption |
@@ -88,7 +89,7 @@ Matrix sync callback
 | `event_journal/` | Durable ownership of admitted Matrix events, conversation projection, and delivery outbox |
 | `event_journal/upgrades.py` | The ordered schema upgrades both backends run inside their schema transaction, against one schema inspector, then the current schema and the conversions that fill it |
 | `event_journal/write_queue.py` | The one writer task each backend's writes queue for, from any event loop; the writes queued at once commit in one transaction |
-| `response_sources.py` | Immutable response-attempt source identity shared by runtime and persistence boundaries |
+| `response_sources.py` | Immutable response-attempt source identity shared by runtime and persistence boundaries, and the `SourceFate` a response returns for them |
 | `reply_lifecycle.py` | Pure rules for durable reply records: every event that changes a reply, its spans, rows, and effects (see [Reply Messages](reply-messages.md)) |
 | `reply_presentation.py` | Reply presentation model, its JSON codec, and rendering into a body, trace, and terminal wire status |
 | `reply_scope.py` | `ReplyRuntime` and `SpanHandle`: reply claims, span exits, write-ahead, owed writes, and runtime ownership |
@@ -113,16 +114,19 @@ Matrix sync callback
 | `command_turn_executor.py` | Command execution and durable command/config mutation journals |
 | `reaction_dispatch.py` | Durable semantic routing for Matrix reactions |
 | `user_stop_reconciliation.py` | Records a Stop reaction on the reply it stops |
-| `visible_response_reconciliation.py` | Visible Matrix response recovery, adoption, and replay reconciliation |
+| `visible_response_reconciliation.py` | Visible Matrix response recovery, adoption, and replay reconciliation, and the settlement of the sources a turn's response left unclaimed |
 | `turn_store.py` | One agent's turn state for the runtime: awaited reads and writes over `event_journal/turn_rows.py`, the in-process claim registry, and locked source and edit-snapshot preparation |
-| `response_runner.py` | Response lifecycle execution: the one locked turn agents and teams share, streamed or collected delivery, how a reply's span ends, and cancellation; it delegates a reply's approval lifecycle to `approval/continuation_runner.py` |
+| `response_runner.py` | Response lifecycle execution: admission, the conversation lock, claiming the reply, preparing the agent or team turn, and streamed or collected delivery; it returns what the turn did with its sources and hands a paused turn to `approval/continuation_runner.py` |
 | `reply_turn/inbox.py` | `InboxResponses`: owns detached inbox response tasks, and the turn claim each holds, until they finish, and proves their journal recovery when a shutdown drain cancels them |
 | `reply_turn/enrichment.py` | Request enrichment for one reply turn: Matrix targeting context, silent-schedule guidance, timestamped model context, and the account of an interrupted attempt |
+| `reply_turn/locked_turn.py` | `LockedTurns`: the settlement every locked reply turn shares (its ending, span exit, and lifecycle finalization), its effects and identity, and `ReplyTurnDeps`, which the response runner and the approval runner both settle through |
+| `reply_turn/request.py` | `ResponseRequest`, the values one reply turn runs with, and the helpers every owner of its locked lifecycle shares (correlation, typing, reply authorization) |
 | `response_turn.py` | The streaming response-turn driver behind agent and team turns and the collector blocking callers read it with (attempt loop, model-switch continuation, empty-run retry, the turn record and its interrupted row), `ResponseTurnContext` with a turn's inputs, and the run metadata and request-log context a turn binds around its model requests and stream pulls |
 | `loop_hooks.py` | The hooks every run or resume installs on the agent loop, composed once in the order the turn applies them; `agent_loop_hooks` and `leader_loop_hooks` name what an agent's and a team leader's run differ by, and `HookTurn` holds what every run takes from its turn |
 | `run_storage.py` | Where an agent or team run stores (`RunStorage`, taken from a scope context or bound to a turn), the terminal record it hands over and the error when it hands none, and the persist callback that keeps and stores it |
 | `response_attempt.py` | Runs one visible response attempt as its reply span's cancellable task |
-| `response_lifecycle.py` | Shared response lifecycle helpers, queued-notice state, and the approval holds it follows from `ApprovalSignals` |
+| `final_delivery.py` | `TurnEnding`, the one typed value of how a reply turn ended, the delivery outcome that carries it, and the views derived from it: an approval's failure, the `message:cancelled` reason, and the timing label |
+| `response_lifecycle.py` | Shared response lifecycle helpers, the response hooks and silent-schedule result record, queued-notice state, and the approval holds it follows from `ApprovalSignals` |
 | `execution_preparation.py` | Request-scoped execution preparation for prompts and persisted replay |
 | `response_payload_preparation.py` | Execution-side, under-lock assembly of one response's payload from immutable ingress inputs |
 | `delivery_gateway.py` | Visible Matrix delivery for already-generated responses (send, edit, finalize) |
@@ -145,7 +149,7 @@ Matrix sync callback
 | `approval/tool_owners.py` | Recorded toolkit restoration and exact owner validation for saved approvals |
 | `approval/response.py` | Which calls of a paused run need a person: the approval plan of a paused generation and the publication of its cards |
 | `approval/continuation_rules.py` | Pure rules for what a paused reply does next: `next_step` over its continuation's state, lease or claim holder, failure kind, claim outcome, and final answer, for each trigger (dispatch, a resume's end, an unavailable owner, a minimal-mode exit) |
-| `approval/continuation_runner.py` | `ApprovalContinuationRunner`: a reply's approval lifecycle that `ResponseRunner` delegates to: pausing for approval, resuming the approved run in its reply, minimal-mode CLI waits, and running the steps `continuation_rules` decides, including failure settlement |
+| `approval/continuation_runner.py` | `ApprovalContinuationRunner`: a reply's approval lifecycle that `ResponseRunner` hands paused turns to: pausing for approval, resuming the approved run in its reply, minimal-mode CLI waits, and running the steps `continuation_rules` decides, including failure settlement; it settles through `reply_turn/locked_turn.py` and knows nothing of the response runner |
 | `approval/manager.py` | Matrix-backed tool approval runtime state: card publication, clicks, deadlines, and recovery over typed card reads |
 | `approval/auto_approve_windows.py` | Durable per-conversation `!auto_approve` windows that approve one requester's gated calls without cards |
 | `oauth/credential_binding.py` | Canonical OAuth provider and worker-target bindings for browser workflows |
@@ -380,6 +384,7 @@ Matrix sync callback
 | `credentials/policy.py` | Each credential service's placement per worker scope, and whether workers may receive it by grant or lease |
 | `credentials/environment.py` | Credentials the environment declares (provider keys, bootstrap values, seeds), read by the primary under its saved ones |
 | `matrix/` | Matrix protocol integration (client, users, rooms, presence, provisioning, message formatting) |
+| `matrix/state.py` | `matrix_state.yaml` accounts, rooms, and space, changed only through `update_matrix_state` |
 | `matrix/large_messages.py` | Large-message sidecar storage and retrieval for oversized Matrix payloads |
 | `matrix/segmented_messages.py` | Lossless splitting of oversized text responses into ordered rich-text events (`defaults.large_message_strategy: split`) |
 | `matrix/durable_ingestion.py` | Owned Nio batch validation, journal admission, and acknowledgement |
@@ -398,6 +403,7 @@ Matrix sync callback
 | `matrix/personal_room_store.py` | Durable per-requester room ownership, operator adoption attestations, welcome receipts, and cleanup retention |
 | `matrix/event_info.py` | Event metadata parsing |
 | `matrix/thread_membership.py` | Canonical Matrix thread identity and transitive relation membership |
+| `matrix/projected_thread_membership.py` | Thread-root proofs for tools and outbound mutations, read from the conversation projection like turns |
 | `matrix/identity.py` | Matrix ID parsing and utilities |
 | `matrix/mentions.py` | Matrix mention formatting |
 | `matrix/member_display_names.py` | Current member display names snapshotted from the synced nio room cache for model-facing `<msg>` tags |

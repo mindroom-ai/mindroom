@@ -33,13 +33,14 @@ from mindroom.logging_config import bound_log_context
 from mindroom.matrix.event_info import EventInfo
 from mindroom.matrix.media import is_matrix_media_dispatch_event
 from mindroom.matrix.member_display_names import room_member_display_names
+from mindroom.matrix.thread_diagnostics import is_thread_history_degraded
 from mindroom.matrix.thread_history_result import ThreadHistoryResult
+from mindroom.reply_turn.request import ResponseRequest
 from mindroom.response_admission import ResponseAdmissionRefusedError
 from mindroom.response_payload_preparation import (
     DispatchPayloadInputs,
     ResponsePayloadPreparation,
 )
-from mindroom.response_runner import PostLockRequestPreparationError, ResponseRequest
 from mindroom.response_sources import ResponseSources
 from mindroom.router.relay import execute_router_relay
 from mindroom.teams.formation import TeamIntent, select_ad_hoc_team_mode
@@ -73,6 +74,7 @@ if TYPE_CHECKING:
     from mindroom.ingress_validation import IngressValidator
     from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
     from mindroom.response_runner import ResponseRunner
+    from mindroom.response_sources import SourceFate
     from mindroom.teams.spec import TeamMode
     from mindroom.turn_policy import DispatchPlan, TurnPolicy
     from mindroom.turn_store import TurnClaim, TurnStore
@@ -81,9 +83,7 @@ if TYPE_CHECKING:
 
 
 def _room_level_context_event(event: PreparedIngress) -> PreparedIngress:
-    """Return an event view that cannot pull dispatch context through Matrix relations."""
-    if not isinstance(event.source, dict):
-        return event
+    """Return an event view without its Matrix relation, so a turn decided room-level is targeted like a plain message."""
     content = event.source.get("content")
     if not isinstance(content, dict) or "m.relates_to" not in content:
         return event
@@ -134,28 +134,10 @@ def _scheduled_history_budget_for_dispatch(
 
 
 @dataclass(frozen=True)
-class _ReplayGuardContext:
-    """Dispatch-local evidence for deciding whether an older turn should still run."""
-
-    history: Sequence[ResolvedVisibleMessage]
-    degraded: bool
-    thread_id: str | None
-
-
-@dataclass(frozen=True)
-class _DispatchPreparation:
-    """Prepared dispatch plus evidence that must stay out of policy-visible context."""
-
-    dispatch: PreparedDispatch
-    replay_guard: _ReplayGuardContext
-
-
-@dataclass(frozen=True)
 class _PreparedTextDispatch:
     turn: PreparedTurn
     handled_turn: TurnRecord
     dispatch: PreparedDispatch
-    replay_guard: _ReplayGuardContext
     dispatch_started_at: float
 
 
@@ -212,18 +194,17 @@ async def run_response_action(
     action: ResponseAction,
     *,
     team_mode: TeamMode | None = None,
-) -> None:
+) -> SourceFate:
     """Run one prepared request through the runner entry its team or individual response action names.
 
     ``team_mode`` replaces the team's resolved mode, as the mode chosen for an ad hoc team does.
     """
     if action.kind != "team":
-        await runner.generate_response(request)
-        return
+        return await runner.generate_response(request)
     assert action.form_team is not None
     mode = action.form_team.mode if team_mode is None else team_mode
     assert mode is not None
-    await runner.generate_team_response_helper(
+    return await runner.generate_team_response_helper(
         request,
         member_names=action.form_team.eligible_member_names,
         team_mode=mode.value,
@@ -389,10 +370,9 @@ class TurnDispatcher:
             # relayed, so edits and redactions of that message reach this responder's persisted runs.
             handled_turn=canonicalize_turn_record(
                 turn.handled_turn,
-                requester_id=prepared.dispatch.requester_user_id,
+                requester_id=prepared.requester_user_id,
             ),
-            dispatch=prepared.dispatch,
-            replay_guard=prepared.replay_guard,
+            dispatch=prepared,
             dispatch_started_at=dispatch_started_at,
         )
 
@@ -428,13 +408,15 @@ class TurnDispatcher:
             # letting it absorb this turn would answer out of receipt order or not at all.
             and not prepared.turn.queues_other_run(requester_user_id)
         )
-        if prepared.replay_guard.degraded:
+        thread_history = prepared.dispatch.context.thread_history
+        thread_id = prepared.dispatch.target.resolved_thread_id
+        if is_thread_history_degraded(thread_history):
             # Thread history degraded, so only pending journal events can prove a newer message.
             skips_turn = await has_newer_unresponded_journal_thread_event(
                 room_id=room.room_id,
                 event=event,
                 requester_user_id=requester_user_id,
-                thread_id=prepared.replay_guard.thread_id,
+                thread_id=thread_id,
                 may_be_superseded_by_newer_requester_turn=may_be_superseded,
                 pending_turns=self.deps.pending_turns,
                 classify=self.deps.ingress.classify_source,
@@ -446,7 +428,7 @@ class TurnDispatcher:
                     "Thread replay guard degraded; proceeding without negative newer-message proof",
                     event_id=event.event_id,
                     room_id=room.room_id,
-                    thread_id=prepared.replay_guard.thread_id,
+                    thread_id=thread_id,
                     thread_read_degraded=True,
                 )
         else:
@@ -454,12 +436,12 @@ class TurnDispatcher:
                 room.room_id,
                 event,
                 requester_user_id,
-                prepared.replay_guard.history,
+                thread_history,
                 may_be_superseded_by_newer_requester_turn=may_be_superseded,
             )
         if skips_turn:
             return await visible_responses.settle_superseded_turn(prepared.handled_turn)
-        return skips_turn
+        return False
 
     async def _apply_turn_plan(
         self,
@@ -537,11 +519,6 @@ class TurnDispatcher:
             name=f"inbox_response:{prepared.turn.event.event_id}",
             room_id=room.room_id,
             recovery_proof_ready=lambda: self.deps.turn_store.response_recovery_ready(handled_turn),
-            on_failure=lambda: (
-                self.deps.retry_dispatch_sources(room.room_id, handled_turn.source_event_ids)
-                if response_started.is_set()
-                else None
-            ),
             # The claim moves to the response task, which releases it when it ends. If this dispatch is
             # cancelled while waiting for the lifecycle lock, it must not reopen the source meanwhile.
             claim=take_claim(),
@@ -729,47 +706,18 @@ class TurnDispatcher:
         await self.deps.visible_responses.settle_source_events_ignored(handled_turn)
         return True
 
-    async def _prepare_dispatch(self, turn: PreparedTurn) -> _DispatchPreparation | None:
+    async def _prepare_dispatch(self, turn: PreparedTurn) -> PreparedDispatch | None:
         """Build the shared dispatch context for one prepared inbound turn."""
-        extract_context_start = time.monotonic()
         room, event, facts, handled_turn = turn.room, turn.event, turn.facts, turn.handled_turn
         requester_user_id = facts.run_requester_id
         thread_id = turn.coalescing_key.thread_id
         context_event = _room_level_context_event(event) if thread_id is None else event
         if await self._settle_unmentioned_managed_sender_before_hydration(turn, context_event):
             return None
-        # A router relay of a human's message reads only the context the relay names.
-        if turn.command is None and facts.router_relay and facts.original_sender_is_human:
-            dispatch_context_result = await self.deps.resolver.extract_trusted_router_relay_context(
-                room,
-                context_event,
-                payload_metadata=turn.payload,
-            )
-            context_path = "trusted_router_relay"
-        else:
-            dispatch_context_result = await self.deps.resolver.extract_dispatch_context(
-                room,
-                context_event,
-                payload_metadata=turn.payload,
-            )
-            context_path = "normal" if turn.command is None else "command"
-        emit_elapsed_timing(
-            "dispatch_handoff.prepare_dispatch.extract_context",
-            extract_context_start,
-            path=context_path,
-        )
-        context = dispatch_context_result.context
-        thread_context = dispatch_context_result.thread_context
         target_start = time.monotonic()
-        if context.thread_id != thread_id:
-            context = replace(
-                context,
-                is_thread=thread_id is not None,
-                thread_id=thread_id,
-                thread_history=[],
-                replay_guard_history=[],
-                requires_model_history_refresh=False,
-            )
+        # The thread ingress decided, under the room's current thread mode. The
+        # context reads the thread the target says the source is in, so the
+        # two cannot disagree about which conversation this turn belongs to.
         target = self.deps.resolver.build_message_target(
             room_id=room.room_id,
             thread_id=thread_id,
@@ -781,6 +729,29 @@ class TurnDispatcher:
             "dispatch_handoff.prepare_dispatch.build_message_target",
             target_start,
             resolved_thread_id=target.resolved_thread_id,
+        )
+        extract_context_start = time.monotonic()
+        # A router relay of a human's message reads only the context the relay names.
+        if turn.command is None and facts.router_relay and facts.original_sender_is_human:
+            context = await self.deps.resolver.extract_trusted_router_relay_context(
+                room,
+                context_event,
+                thread_id=target.source_thread_id,
+                payload_metadata=turn.payload,
+            )
+            context_path = "trusted_router_relay"
+        else:
+            context = await self.deps.resolver.extract_dispatch_context(
+                room,
+                context_event,
+                thread_id=target.source_thread_id,
+                payload_metadata=turn.payload,
+            )
+            context_path = "normal" if turn.command is None else "command"
+        emit_elapsed_timing(
+            "dispatch_handoff.prepare_dispatch.extract_context",
+            extract_context_start,
+            path=context_path,
         )
         envelope_start = time.monotonic()
         envelope = self.deps.resolver.build_envelope(
@@ -823,32 +794,15 @@ class TurnDispatcher:
             await self.deps.visible_responses.settle_source_events_ignored(handled_turn)
             return None
 
-        replay_guard = (
-            _ReplayGuardContext(
-                history=thread_context.replay_guard_history,
-                degraded=thread_context.replay_guard_degraded,
-                thread_id=target.resolved_thread_id or thread_context.candidate_thread_root_id,
-            )
-            if thread_context is not None
-            else _ReplayGuardContext(
-                history=context.replay_guard_history,
-                degraded=False,
-                thread_id=target.resolved_thread_id,
-            )
-        )
-
-        return _DispatchPreparation(
-            dispatch=PreparedDispatch(
-                requester_user_id=requester_user_id,
-                context=context,
-                target=target,
-                correlation_id=event.event_id,
-                envelope=envelope,
-                current_prompt_is_structured=turn.current_prompt_is_structured,
-                scheduled_history_budget=_scheduled_history_budget_for_dispatch(event, origin.intent),
-                scheduled_model=_scheduled_model_for_dispatch(event, origin.intent),
-            ),
-            replay_guard=replay_guard,
+        return PreparedDispatch(
+            requester_user_id=requester_user_id,
+            context=context,
+            target=target,
+            correlation_id=event.event_id,
+            envelope=envelope,
+            current_prompt_is_structured=turn.current_prompt_is_structured,
+            scheduled_history_budget=_scheduled_history_budget_for_dispatch(event, origin.intent),
+            scheduled_model=_scheduled_model_for_dispatch(event, origin.intent),
         )
 
     async def _router_handled_turn_outcome(
@@ -958,53 +912,37 @@ class TurnDispatcher:
                 context_ready_monotonic=context_ready_monotonic,
             )
 
-            async def record_no_response() -> None:
-                await self.deps.turn_store.record_turn(handled_turn)
-                await self.deps.visible_responses.settle_source_events_ignored(handled_turn)
-
-            try:
-                response_request = ResponseRequest(
-                    thread_history=dispatch.context.thread_history,
-                    member_display_names=room_member_display_names(room),
-                    prompt=event.body,
-                    sources=ResponseSources(
-                        pending_event_ids=tuple(
-                            dict.fromkeys((event.event_id, *handled_turn.source_event_ids)),
-                        ),
-                        logical_source_event_ids=handled_turn.source_event_ids,
-                        discovery_event_ids=handled_turn.discovery_event_ids,
+            response_request = ResponseRequest(
+                thread_history=dispatch.context.thread_history,
+                member_display_names=room_member_display_names(room),
+                prompt=event.body,
+                sources=ResponseSources(
+                    pending_event_ids=tuple(
+                        dict.fromkeys((event.event_id, *handled_turn.source_event_ids)),
                     ),
-                    user_id=dispatch.requester_user_id,
-                    # A replay finds the reply its earlier attempt left through the reply's records.
-                    response_envelope=dispatch.envelope,
-                    correlation_id=dispatch.correlation_id,
-                    matrix_run_metadata=matrix_run_metadata,
-                    requires_model_history_refresh=dispatch.context.requires_model_history_refresh,
-                    scheduled_history_budget=dispatch.scheduled_history_budget,
-                    scheduled_model=dispatch.scheduled_model,
-                    participation=action.participation,
-                    payload_preparation=payload_preparation,
-                    current_timestamp_ms=current_timestamp_ms,
-                    current_prompt_is_structured=dispatch.current_prompt_is_structured,
-                    pipeline_timing=dispatch_timing,
-                    on_lifecycle_lock_acquired=on_lifecycle_lock_acquired,
-                    prepare_source_turn=lambda history: self.deps.turn_store.prepare_pending_response_source(
-                        target=dispatch.target,
-                        source_event_ids=handled_turn.source_event_ids,
-                        thread_history=history,
-                    ),
-                    on_source_turn_suppressed=partial(
-                        self.deps.visible_responses.settle_source_events_ignored,
-                        handled_turn,
-                    ),
-                    on_sources_invalidated=partial(
-                        self.deps.visible_responses.answer_surviving_sources,
-                        dispatch.target.room_id,
-                    ),
-                    on_no_response_handled=record_no_response,
-                )
-                # The reply's records settle the sources and record the turn answered.
-                await run_response_action(self.deps.response_runner, response_request, action, team_mode=team_mode)
-            except PostLockRequestPreparationError:
-                # The reply's records settled the sources, recorded the turn answered, and owe the notice.
-                return
+                    logical_source_event_ids=handled_turn.source_event_ids,
+                    discovery_event_ids=handled_turn.discovery_event_ids,
+                ),
+                user_id=dispatch.requester_user_id,
+                # A replay finds the reply its earlier attempt left through the reply's records.
+                response_envelope=dispatch.envelope,
+                correlation_id=dispatch.correlation_id,
+                matrix_run_metadata=matrix_run_metadata,
+                requires_model_history_refresh=dispatch.context.requires_model_history_refresh,
+                scheduled_history_budget=dispatch.scheduled_history_budget,
+                scheduled_model=dispatch.scheduled_model,
+                participation=action.participation,
+                payload_preparation=payload_preparation,
+                current_timestamp_ms=current_timestamp_ms,
+                current_prompt_is_structured=dispatch.current_prompt_is_structured,
+                pipeline_timing=dispatch_timing,
+                on_lifecycle_lock_acquired=on_lifecycle_lock_acquired,
+                prepare_source_turn=lambda history: self.deps.turn_store.prepare_pending_response_source(
+                    target=dispatch.target,
+                    source_event_ids=handled_turn.source_event_ids,
+                    thread_history=history,
+                ),
+            )
+            fate = await run_response_action(self.deps.response_runner, response_request, action, team_mode=team_mode)
+            # A reply's records settle the sources it took and record the turn answered; the rest settle here.
+            await self.deps.visible_responses.settle_turn_fate(fate, handled_turn, room_id=dispatch.target.room_id)

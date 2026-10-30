@@ -445,13 +445,6 @@ class MatrixRoomTools(Toolkit):
             if exc.retry_after_ms is not None:
                 error_payload["retry_after_ms"] = exc.retry_after_ms
             return self._payload("error", **error_payload)
-        except (ClientError, TimeoutError) as exc:
-            return self._payload(
-                "error",
-                action="threads",
-                room_id=room_id,
-                message=self._transport_error_message(exc),
-            )
 
         threads_list: list[dict[str, object]] = []
         trusted_sender_ids = trusted_visible_sender_ids(context.config, context.runtime_paths)

@@ -17,8 +17,7 @@ from mindroom.event_journal import (
     InboundEvent,
     ProjectedEvent,
 )
-from mindroom.matrix.client import ResolvedVisibleMessage
-from mindroom.matrix.thread_history_result import thread_history_result as _thread_history_result_impl
+from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
 from mindroom.matrix.users import AgentMatrixUser
 from tests.access_schema_support import with_current_room_member_access
 from tests.bot_helpers import make_test_agent_bot
@@ -36,7 +35,6 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from mindroom.bot import AgentBot
-    from mindroom.matrix.thread_history_result import ThreadHistoryResult
 
 
 def _runtime_bound_config(config: Config, runtime_root: Path) -> Config:
@@ -192,20 +190,6 @@ async def seed_unhydrated_room_event(
             source={"event_id": event_id, "content": {"body": body, "msgtype": "m.text"}},
         ),
         None,
-    )
-
-
-def thread_history_result(
-    history: list[ResolvedVisibleMessage],
-    *,
-    is_full_history: bool,
-    diagnostics: dict[str, str | int | float | bool] | None = None,
-) -> ThreadHistoryResult:
-    """Wrap history with hydration metadata for thread tests."""
-    return _thread_history_result_impl(
-        history,
-        is_full_history=is_full_history,
-        diagnostics=diagnostics,
     )
 
 

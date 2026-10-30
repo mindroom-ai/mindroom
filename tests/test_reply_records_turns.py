@@ -29,13 +29,8 @@ from mindroom.matrix.client_delivery import MatrixDeliveryFailure, MatrixDeliver
 from mindroom.matrix.journal_ingress import _inbound_event, _projected_event
 from mindroom.mid_turn import MidTurnGate
 from mindroom.reply_presentation import TEAM_PLACEHOLDER, decode_presentation, render_body
-from mindroom.response_runner import (
-    PostLockRequestPreparationError,
-    ResponseRequest,
-    ResponseRunner,
-    _mid_turn_for_request,
-)
-from mindroom.response_sources import ResponseSources
+from mindroom.response_runner import ResponseRunner, _mid_turn_for_request
+from mindroom.response_sources import Owned, ResponseSources, SourceFate, Unclaimed, UnclaimedReason
 from mindroom.streaming import RESTART_INTERRUPTED_RESPONSE_NOTE, format_stream_error_note
 from mindroom.tool_system.events import ToolTraceEntry
 from mindroom.tool_system.tool_function import ToolOutcome, ToolValue
@@ -59,6 +54,7 @@ if TYPE_CHECKING:
 
     from mindroom.bot import AgentBot
     from mindroom.delivery_gateway import ResponseIdentity
+    from mindroom.reply_turn.request import ResponseRequest
     from mindroom.response_turn import ResponseTurnContext
 
 pytestmark = pytest.mark.asyncio
@@ -144,11 +140,8 @@ async def _wait_until_sent(bot: AgentBot, body: str) -> None:
 def _model_stream(model: AsyncMock) -> Callable[..., AsyncIterator[str]]:
     """Return a turn stream that awaits ``model`` with the turn's inputs, then yields the answer it returns."""
 
-    def stream(*args: object, **kwargs: object) -> AsyncIterator[str]:
-        async def answer() -> AsyncIterator[str]:
-            yield await model(*args, **kwargs)
-
-        return answer()
+    async def stream(*args: object, **kwargs: object) -> AsyncIterator[str]:
+        yield await model(*args, **kwargs)
 
     return stream
 
@@ -168,11 +161,12 @@ async def test_streamed_answer_completes_its_reply(tmp_path: Path) -> None:
         should_use_streaming=AsyncMock(return_value=True),
         typing_indicator=_noop_typing,
     ):
-        event_id = await runner.generate_response(_plain_request(_target()))
+        fate = await runner.generate_response(_plain_request(_target()))
 
+    assert fate == Owned()
     reply = await _reply(bot)
     assert reply.state is rl.ReplyState.COMPLETED
-    assert reply.event_id == event_id == "$sent1"
+    assert reply.event_id == "$sent1"
     assert await _span_outcomes(bot, reply) == [rl.SpanOutcome.COMPLETED]
     assert render_body(decode_presentation(reply.presentation))[0] == "Hello there, friend."
     # Every write took the reply's sequence, and Matrix acknowledged the last one.
@@ -207,10 +201,11 @@ async def test_a_streamed_answer_that_fails_after_showing_content_reports_it(tmp
         should_use_streaming=AsyncMock(return_value=True),
         typing_indicator=_noop_typing,
     ):
-        event_id = await runner.generate_response(_plain_request(_target()))
+        fate = await runner.generate_response(_plain_request(_target()))
 
+    assert fate == Owned()
     reply = await _reply(bot)
-    assert event_id == reply.event_id is not None
+    assert reply.event_id is not None
     assert "Hello there, friend." in render_body(decode_presentation(reply.presentation))[0]
 
 
@@ -324,7 +319,7 @@ async def test_setup_failure_after_the_placeholder_shows_the_dispatch_error(tmp_
     """
     bot = await _streaming_bot(tmp_path)
     runner = unwrap_extracted_collaborator(bot._response_runner)
-    conversation = runner._lifecycle_coordinator._response_lifecycle_lock(_target())
+    conversation = runner.lifecycle_coordinator._response_lifecycle_lock(_target())
     held_at_exit: list[bool] = []
     exit_span = runner._exit_span_on_error
 
@@ -339,9 +334,9 @@ async def test_setup_failure_after_the_placeholder_shows_the_dispatch_error(tmp_
             should_use_streaming=AsyncMock(return_value=True),
             typing_indicator=_noop_typing,
         ),
-        pytest.raises(PostLockRequestPreparationError),
     ):
-        await runner.generate_response(_plain_request(_target()))
+        # The failed reply's records own the sources, so the response returns instead of raising.
+        assert await runner.generate_response(_plain_request(_target())) == Owned()
 
     reply = await _reply(bot)
     assert reply.event_id == "$sent1"
@@ -365,7 +360,8 @@ async def test_a_participation_turn_whose_preparation_fails_leaves_nothing_behin
             typing_indicator=_noop_typing,
         ),
     ):
-        assert await runner.generate_response(request) is None
+        # The declined reply's records own the sources.
+        assert await runner.generate_response(request) == Owned()
 
     reply = await _reply(bot)
     assert reply.state is rl.ReplyState.GONE
@@ -382,8 +378,8 @@ async def test_a_participation_turn_whose_preparation_fails_leaves_nothing_behin
 async def test_an_error_before_delivery_ends_the_reply_failed_without_a_retry(tmp_path: Path) -> None:
     """A failure before anything streamed shows its error and ends the turn, as a failure during delivery does."""
     bot = await _streaming_bot(tmp_path)
-    with pytest.raises(RuntimeError, match="model down"):
-        await _answer(bot, _plain_request(_target()), AsyncMock(side_effect=RuntimeError("model down")))
+    # The error ends the reply, whose note answers the turn and whose records own its sources.
+    assert await _answer(bot, _plain_request(_target()), AsyncMock(side_effect=RuntimeError("model down"))) == Owned()
 
     reply = await _reply(bot)
     assert reply.state is rl.ReplyState.FAILED
@@ -402,7 +398,9 @@ async def test_sources_that_reach_an_ended_reply_again_run_nothing(tmp_path: Pat
     await _answer(bot, _plain_request(_target()), AsyncMock(return_value="A complete answer."))
     completed = await _reply(bot)
     sends = len(_sent_bodies(bot))
-    assert await _answer(bot, _plain_request(_target()), AsyncMock(return_value="A complete answer.")) is None
+    assert await _answer(bot, _plain_request(_target()), AsyncMock(return_value="A complete answer.")) == Unclaimed(
+        UnclaimedReason.NOTHING_TO_RUN,
+    )
 
     assert await _reply(bot) == completed
     assert len(_sent_bodies(bot)) == sends
@@ -417,15 +415,16 @@ async def test_team_answer_completes_its_reply(tmp_path: Path) -> None:
         should_use_streaming=AsyncMock(return_value=False),
         typing_indicator=_noop_typing,
     ):
-        event_id = await runner.generate_team_response_helper(
+        fate = await runner.generate_team_response_helper(
             _plain_request(_target()),
             member_names=[bot.agent_name],
             team_mode="coordinate",
         )
 
+    assert fate == Owned()
     reply = await _reply(bot)
     assert reply.state is rl.ReplyState.COMPLETED
-    assert reply.event_id == event_id == "$sent1"
+    assert reply.event_id == "$sent1"
     assert decode_presentation(reply.presentation).placeholder == TEAM_PLACEHOLDER
     assert await _span_outcomes(bot, reply) == [rl.SpanOutcome.COMPLETED]
     assert _sent_bodies(bot) == [TEAM_PLACEHOLDER, "Team answer."]
@@ -474,7 +473,7 @@ def _regeneration(*, answer_event_id: str | None, edit_event_id: str = "$edit") 
     )
 
 
-async def _answer(bot: AgentBot, request: ResponseRequest, answer: AsyncMock) -> str | None:
+async def _answer(bot: AgentBot, request: ResponseRequest, answer: AsyncMock) -> SourceFate:
     runner = unwrap_extracted_collaborator(bot._response_runner)
     with patch_response_runner_module(
         stream_agent_response=_model_stream(answer),
@@ -622,11 +621,12 @@ async def test_regeneration_replaces_the_answer_of_the_same_reply(tmp_path: Path
     await _answer(bot, _plain_request(_target()), AsyncMock(return_value="First answer."))
 
     assert await _answer(bot, _regeneration(answer_event_id="$sent1"), AsyncMock(return_value="Second answer.")) == (
-        "$sent1"
+        Owned()
     )
 
     reply = await _reply(bot)
     assert reply.state is rl.ReplyState.COMPLETED
+    assert reply.event_id == "$sent1"
     assert render_body(decode_presentation(reply.presentation))[0] == "Second answer."
     spans = await bot._reply_runtime.store.replies.spans(reply.reply_id)
     assert [(span.kind, span.outcome) for span in spans] == [
@@ -670,9 +670,10 @@ async def test_a_team_regeneration_streams_into_the_answer_it_replaces(tmp_path:
                 member_names=[bot.agent_name],
                 team_mode="coordinate",
             )
-            == "$sent1"
+            == Owned()
         )
 
+    assert (await _reply(bot)).event_id == "$sent1"
     statuses = [
         call.kwargs["content"].get("m.new_content", call.kwargs["content"]).get(STREAM_STATUS_KEY)
         for call in bot.client.room_send.await_args_list[sends:]
@@ -705,11 +706,17 @@ async def test_regeneration_failing_before_its_first_write_keeps_the_old_answer(
     before = await _reply(bot)
     await _admit_edit(bot)
 
-    with pytest.raises(RuntimeError, match="model down"):
-        await _answer(bot, _regeneration(answer_event_id="$sent1"), AsyncMock(side_effect=RuntimeError("model down")))
+    # The error ends the regeneration without a raise; the old answer still answers the edit.
+    answered = await _answer(
+        bot,
+        _regeneration(answer_event_id="$sent1"),
+        AsyncMock(side_effect=RuntimeError("model down")),
+    )
+    assert answered == Owned()
 
     reply = await _reply(bot)
     assert reply.state is rl.ReplyState.COMPLETED
+    assert reply.event_id == "$sent1"
     assert reply.presentation == before.presentation
     assert await _span_outcomes(bot, reply) == [rl.SpanOutcome.COMPLETED, rl.SpanOutcome.RESTORED]
     assert not await bot._reply_runtime.store.is_pending("$edit")
@@ -719,7 +726,7 @@ async def test_regeneration_failing_before_its_first_write_keeps_the_old_answer(
 async def test_an_edit_regenerates_in_place_the_streaming_answer_it_stopped(tmp_path: Path) -> None:
     """An edit stops a still-streaming answer as a Stop does, and its regeneration then rewrites that answer."""
     bot = await _streaming_bot(tmp_path)
-    response, _streaming = await _blocked_stream(bot)
+    response = await _blocked_stream(bot)
     streamed = await _reply(bot)
     assert streamed.event_id is not None
     await _pending_turn(bot)
@@ -729,11 +736,12 @@ async def test_an_edit_regenerates_in_place_the_streaming_answer_it_stopped(tmp_
     prune = AsyncMock()
     regeneration = replace(_regeneration(answer_event_id=streamed.event_id), on_reply_claimed=prune)
 
-    assert await _answer(bot, regeneration, AsyncMock(return_value="Edited answer.")) == streamed.event_id
+    assert await _answer(bot, regeneration, AsyncMock(return_value="Edited answer.")) == Owned()
 
     prune.assert_awaited_once()
     reply = await _reply(bot)
     assert reply.reply_id == streamed.reply_id
+    assert reply.event_id == streamed.event_id
     assert reply.state is rl.ReplyState.COMPLETED
     assert _sent_bodies(bot)[-1] == "Edited answer."
     assert not await bot._reply_runtime.store.is_pending("$edit")
@@ -775,10 +783,11 @@ async def test_an_edit_before_the_create_is_acknowledged_regenerates_the_event_i
         await asyncio.wait_for(response, timeout=5)
     await _admit_edit(bot)
 
-    assert await _answer(bot, _regeneration(answer_event_id=None), AsyncMock(return_value="Edited answer.")) == "$sent1"
+    assert await _answer(bot, _regeneration(answer_event_id=None), AsyncMock(return_value="Edited answer.")) == Owned()
 
     reply = await _reply(bot)
     assert reply.reply_id == creating.reply_id
+    assert reply.event_id == "$sent1"
     assert reply.state is rl.ReplyState.COMPLETED
     spans = await bot._reply_runtime.store.replies.spans(reply.reply_id)
     assert [(span.kind, span.outcome) for span in spans] == [
@@ -801,7 +810,8 @@ async def test_an_eventless_regeneration_tells_the_mid_turn_judge_its_answer_may
 async def test_an_interrupted_regeneration_leaves_the_answer_it_replaced_shown(tmp_path: Path) -> None:
     """A regeneration cancelled before it wrote anything writes no note over the answer it was replacing."""
     bot = await _streaming_bot(tmp_path)
-    assert await _answer(bot, _plain_request(_target()), AsyncMock(return_value="First answer.")) == "$sent1"
+    assert await _answer(bot, _plain_request(_target()), AsyncMock(return_value="First answer.")) == Owned()
+    assert (await _reply(bot)).event_id == "$sent1"
     await _admit_edit(bot)
     sends = len(_sent_bodies(bot))
     preparing = asyncio.Event()
@@ -855,10 +865,11 @@ async def test_selection_answer_adopts_the_span_its_acknowledgement_created(tmp_
         existing_event_id=ack_event_id,
         interactive_span_id=span_id,
     )
-    assert await _answer(bot, request, AsyncMock(return_value="Selected answer.")) == ack_event_id
+    assert await _answer(bot, request, AsyncMock(return_value="Selected answer.")) == Owned()
 
     reply = await _reply(bot)
     assert reply.state is rl.ReplyState.COMPLETED
+    assert reply.event_id == ack_event_id
     spans = await bot._reply_runtime.store.replies.spans(reply.reply_id)
     assert [(span.span_id, span.outcome) for span in spans] == [(span_id, rl.SpanOutcome.COMPLETED)]
     assert _sent_bodies(bot) == ["You selected: 1 Yes\n\nProcessing your response...", "Selected answer."]
@@ -966,7 +977,8 @@ async def test_a_retry_whose_source_ended_settles_the_reply_its_earlier_attempt_
         existing_event_id="$sent1",
         prepare_source_turn=AsyncMock(return_value=SourcePreparation(invalid=("$event",))),
     )
-    assert await _answer(bot, retry, AsyncMock(return_value="Never.")) is None
+    # The earlier reply ends through its records; no reply took this request's sources.
+    assert await _answer(bot, retry, AsyncMock(return_value="Never.")) == Unclaimed(UnclaimedReason.TERMINAL_SOURCES)
 
     reply = await _reply(bot)
     assert reply.state is rl.ReplyState.FAILED
@@ -989,7 +1001,9 @@ async def test_a_selection_whose_source_ended_before_its_claim_removes_the_ackno
         interactive_span_id=span_id,
         prepare_source_turn=AsyncMock(return_value=SourcePreparation(invalid=("$event",))),
     )
-    assert await _answer(bot, selection, AsyncMock(return_value="Never.")) is None
+    assert await _answer(bot, selection, AsyncMock(return_value="Never.")) == Unclaimed(
+        UnclaimedReason.TERMINAL_SOURCES,
+    )
 
     reply = await _reply(bot)
     assert reply.state is rl.ReplyState.GONE
@@ -1017,7 +1031,7 @@ async def test_a_final_transform_is_what_the_reply_shows_from_then_on(tmp_path: 
         )
 
     with (
-        patch.object(hooks, "_apply_final_response_transform", new=shout),
+        patch.object(hooks, "apply_final_response_transform", new=shout),
         patch_response_runner_module(
             stream_agent_response=stream,
             should_use_streaming=AsyncMock(return_value=True),
@@ -1038,15 +1052,15 @@ async def test_a_suppressed_answer_removes_the_placeholder_its_reply_showed(tmp_
     """A before-response hook that suppresses the answer ends the reply gone, its placeholder redacted."""
     bot = await _streaming_bot(tmp_path)
     hooks = unwrap_extracted_collaborator(bot._delivery_gateway).deps.response_hooks
-    apply = hooks._apply_before_response
+    apply = hooks.apply_before_response
 
     async def suppressed(**kwargs: object) -> ResponseDraft:
         draft = await apply(**kwargs)  # type: ignore[arg-type]
         draft.suppress = True
         return draft
 
-    with patch.object(hooks, "_apply_before_response", new=suppressed):
-        assert await _answer(bot, _plain_request(_target()), AsyncMock(return_value="Hidden.")) is None
+    with patch.object(hooks, "apply_before_response", new=suppressed):
+        assert await _answer(bot, _plain_request(_target()), AsyncMock(return_value="Hidden.")) == Owned()
 
     reply = await _reply(bot)
     assert reply.state is rl.ReplyState.GONE
@@ -1058,23 +1072,20 @@ async def test_a_suppressed_answer_removes_the_placeholder_its_reply_showed(tmp_
 
 
 async def test_a_suppressed_reply_settles_its_sources_through_its_records_alone(tmp_path: Path) -> None:
-    """The reply's suppression settles its sources; the no-reply callback is for turns no reply span ran."""
+    """The reply's suppression settles its sources; its response leaves its caller nothing to settle."""
     bot = await _streaming_bot(tmp_path)
     await _pending_turn(bot)
     hooks = unwrap_extracted_collaborator(bot._delivery_gateway).deps.response_hooks
-    apply = hooks._apply_before_response
+    apply = hooks.apply_before_response
 
     async def suppressed(**kwargs: object) -> ResponseDraft:
         draft = await apply(**kwargs)  # type: ignore[arg-type]
         draft.suppress = True
         return draft
 
-    no_reply = AsyncMock()
-    request = replace(_plain_request(_target()), on_no_response_handled=no_reply)
-    with patch.object(hooks, "_apply_before_response", new=suppressed):
-        assert await _answer(bot, request, AsyncMock(return_value="Hidden.")) is None
+    with patch.object(hooks, "apply_before_response", new=suppressed):
+        assert await _answer(bot, _plain_request(_target()), AsyncMock(return_value="Hidden.")) == Owned()
 
-    no_reply.assert_not_awaited()
     assert not await bot._reply_runtime.store.is_pending("$event")
     assert await bot._turn_store.is_handled(_target().room_id, "$event")
 
@@ -1096,7 +1107,7 @@ async def test_a_silent_schedule_whose_hook_fails_reports_the_failure(tmp_path: 
         ),
     )
 
-    with patch.object(hooks, "_apply_before_response", new=AsyncMock(side_effect=RuntimeError("hook down"))):
+    with patch.object(hooks, "apply_before_response", new=AsyncMock(side_effect=RuntimeError("hook down"))):
         await _answer(bot, silent, AsyncMock(return_value="Hidden."))
 
     reply = await _reply(bot)
@@ -1127,7 +1138,7 @@ async def test_an_answer_is_recorded_before_an_earlier_row_that_cannot_be_sent_y
     bot = await _streaming_bot(tmp_path)
     flaky = _FlakyHomeserver(failures=2)
     with patch("mindroom.delivery_gateway.send_message_outcome", new=flaky.send):
-        assert await _answer(bot, _plain_request(_target()), AsyncMock(return_value="A complete answer.")) is None
+        assert await _answer(bot, _plain_request(_target()), AsyncMock(return_value="A complete answer.")) == Owned()
 
     reply = await _reply(bot)
     assert reply.state is rl.ReplyState.COMPLETED
@@ -1188,7 +1199,7 @@ async def _blocked_stream(
     bot: AgentBot,
     first_chunk: str | None = "Partial",
     request: ResponseRequest | None = None,
-) -> tuple[asyncio.Task[str | None], asyncio.Event]:
+) -> asyncio.Task[SourceFate]:
     """Start a streamed answer to ``request`` that shows ``first_chunk``, if any, and then waits until cancelled."""
     runner = unwrap_extracted_collaborator(bot._response_runner)
     streaming = asyncio.Event()
@@ -1207,13 +1218,13 @@ async def _blocked_stream(
     ):
         response = asyncio.create_task(runner.generate_response(request or _plain_request(_target())))
         await asyncio.wait_for(streaming.wait(), timeout=5)
-    return response, streaming
+    return response
 
 
 async def test_a_stop_on_a_running_reply_does_not_wait_for_its_conversation(tmp_path: Path) -> None:
     """The reply's records take the Stop at once, without waiting for the conversation or naming it on the turn."""
     bot = await _streaming_bot(tmp_path)
-    response, _streaming = await _blocked_stream(bot)
+    response = await _blocked_stream(bot)
     reply = await _reply(bot)
     assert reply.event_id is not None
     await _pending_turn(bot)
@@ -1234,7 +1245,7 @@ def _stop_reaction(reacts_to: str) -> MagicMock:
 async def test_a_stop_reaction_reaches_a_running_reply_only_in_its_room(tmp_path: Path) -> None:
     """A running reply's records accept its Stop reaction; the same event named from another room is left alone."""
     bot = await _streaming_bot(tmp_path)
-    response, _streaming = await _blocked_stream(bot)
+    response = await _blocked_stream(bot)
     reply = await _reply(bot)
     assert reply.event_id is not None
     await _pending_turn(bot)
@@ -1272,7 +1283,7 @@ async def test_a_stop_before_the_create_is_acknowledged_applies_when_it_is(tmp_p
     with patch("mindroom.delivery_gateway.send_message_outcome", new=flaky.send):
         # The answer shows nothing yet: its first text would be a create this
         # homeserver refuses, which fails the stream before the Stop arrives.
-        response, _streaming = await _blocked_stream(bot, first_chunk=None)
+        response = await _blocked_stream(bot, first_chunk=None)
         await asyncio.wait_for(flaky.refused.wait(), timeout=5)
         reply = await _reply(bot)
         assert reply.event_id is None
@@ -1307,7 +1318,7 @@ async def test_a_stop_reaches_a_reply_whose_attempt_created_its_event(tmp_path: 
     # The placeholder's send fails, so the attempt starts without an event.
     flaky = _FlakyHomeserver(failures=1)
     with patch("mindroom.delivery_gateway.send_message_outcome", new=flaky.send):
-        response, _streaming = await _blocked_stream(bot)
+        response = await _blocked_stream(bot)
         reply = await asyncio.wait_for(created(), timeout=5)
         assert reply.event_id is not None
         stop = await _stop(bot, reply.event_id, 7)
@@ -1353,7 +1364,7 @@ async def test_a_stop_after_a_restart_cancels_the_reply_the_old_instance_left(tm
         return reply
 
     with patch("mindroom.response_attempt.is_user_online", new=AsyncMock(return_value=True)):
-        response, _streaming = await _blocked_stream(old)
+        response = await _blocked_stream(old)
         left = await asyncio.wait_for(shown_with_button(), timeout=5)
     assert left.event_id is not None
 
@@ -1387,10 +1398,10 @@ async def test_a_stop_after_a_restart_cancels_the_reply_the_old_instance_left(tm
 async def _restarted_after_partial(
     tmp_path: Path,
     shown_text: str | None = "Partial",
-) -> tuple[AgentBot, asyncio.Task[str | None]]:
+) -> tuple[AgentBot, asyncio.Task[SourceFate]]:
     """Stop an instance while its reply shows ``shown_text``, or only its placeholder; return the one that took over."""
     old = await _streaming_bot(tmp_path)
-    response, _streaming = await _blocked_stream(old, shown_text)
+    response = await _blocked_stream(old, shown_text)
 
     async def shown() -> None:
         while (shown_text or "Thinking") not in "".join(_sent_bodies(old)):  # noqa: ASYNC110
@@ -1475,9 +1486,10 @@ async def test_each_tool_call_of_a_reply_is_recorded_on_its_span_before_it_runs(
         await bridge("counter", counter, {})
         return "Counted."
 
-    assert await _answer(bot, _plain_request(_target()), AsyncMock(side_effect=answer)) == "$sent1"
+    assert await _answer(bot, _plain_request(_target()), AsyncMock(side_effect=answer)) == Owned()
 
     reply = await _reply(bot)
+    assert reply.event_id == "$sent1"
     ((started,),) = seen_before_run
     assert (started.type, started.tool_name) == ("tool_call_started", "counter")
     (finished,) = await bot._reply_runtime._span_tool_calls((reply.last_span_id,))
@@ -1502,9 +1514,10 @@ async def test_a_failed_tool_call_is_recorded_failed_whether_it_raised_or_answer
         await bridge("schedule", schedule, {})
         return "Tried."
 
-    assert await _answer(bot, _plain_request(_target()), AsyncMock(side_effect=answer)) == "$sent1"
+    assert await _answer(bot, _plain_request(_target()), AsyncMock(side_effect=answer)) == Owned()
 
     reply = await _reply(bot)
+    assert reply.event_id == "$sent1"
     recorded = await bot._reply_runtime._span_tool_calls((reply.last_span_id,))
     account = render_stopped_attempt(partial_text="", completed_tools=recorded, interrupted_tools=())
     assert account.splitlines()[0] == "(turn stopped before completion; 2 tool call(s) had failed)"
@@ -1528,9 +1541,10 @@ async def test_a_tool_call_that_returned_media_is_recorded_as_the_text_it_answer
         await bridge("draw", draw, {"prompt": "cat"})
         return "Drawn."
 
-    assert await _answer(bot, _plain_request(_target()), AsyncMock(side_effect=answer)) == "$sent1"
+    assert await _answer(bot, _plain_request(_target()), AsyncMock(side_effect=answer)) == Owned()
 
     reply = await _reply(bot)
+    assert reply.event_id == "$sent1"
     recorded = await bot._reply_runtime._span_tool_calls((reply.last_span_id,))
     account = render_stopped_attempt(partial_text="", completed_tools=recorded, interrupted_tools=())
     assert account.splitlines()[-1] == (
@@ -1558,10 +1572,11 @@ async def test_a_tool_result_stands_when_recording_its_finish_fails(
         results.append(await bridge("counter", AsyncMock(return_value="1"), {}))
         return "Counted."
 
-    assert await _answer(bot, _plain_request(_target()), AsyncMock(side_effect=answer)) == "$sent1"
+    assert await _answer(bot, _plain_request(_target()), AsyncMock(side_effect=answer)) == Owned()
 
     assert results == ["1"]
     reply = await _reply(bot)
+    assert reply.event_id == "$sent1"
     (recorded,) = await runtime._span_tool_calls((reply.last_span_id,))
     assert (recorded.type, recorded.tool_name) == ("tool_call_started", "counter")
 
@@ -1633,7 +1648,7 @@ async def test_a_regeneration_rerun_after_a_restart_keeps_what_its_first_attempt
     old = await _streaming_bot(tmp_path)
     await _answer(old, _plain_request(_target()), AsyncMock(return_value="First answer."))
     await _admit_edit(old)
-    response, _streaming = await _blocked_stream(old, "New partial", _regeneration(answer_event_id="$sent1"))
+    response = await _blocked_stream(old, "New partial", _regeneration(answer_event_id="$sent1"))
 
     async def shown() -> None:
         while "New partial" not in _sent_bodies(old):  # noqa: ASYNC110
@@ -1644,15 +1659,16 @@ async def test_a_regeneration_rerun_after_a_restart_keeps_what_its_first_attempt
     unique_room_send_responses(restarted.client)
     await restarted._take_over_replies()
     try:
-        with pytest.raises(RuntimeError, match="model down"):
-            await _answer(
-                restarted,
-                _regeneration(answer_event_id="$sent1"),
-                AsyncMock(side_effect=RuntimeError("model down")),
-            )
+        answered = await _answer(
+            restarted,
+            _regeneration(answer_event_id="$sent1"),
+            AsyncMock(side_effect=RuntimeError("model down")),
+        )
+        assert answered == Owned()
 
         reply = await _reply(restarted)
         assert reply.state is rl.ReplyState.FAILED
+        assert reply.event_id == "$sent1"
         assert not await restarted._reply_runtime.store.is_pending("$edit")
         assert "New partial" in render_body(decode_presentation(reply.presentation))[0]
         assert "First answer." not in render_body(decode_presentation(reply.presentation))[0]
@@ -1678,7 +1694,7 @@ async def test_a_replay_ingress_will_not_answer_ends_the_reply_a_restart_left(tm
         return reply
 
     with patch("mindroom.response_attempt.is_user_online", new=AsyncMock(return_value=True)):
-        response, _streaming = await _blocked_stream(old)
+        response = await _blocked_stream(old)
         left = await asyncio.wait_for(shown_with_button(), timeout=5)
 
     restarted = _bot(tmp_path)
@@ -1710,7 +1726,7 @@ async def test_a_replay_ingress_will_not_answer_ends_the_reply_a_restart_left(tm
 async def test_leaving_the_room_mid_stream_ends_the_reply_without_writing_to_it(tmp_path: Path) -> None:
     """The departure ends the reply gone and releases its span; the cancelled stream writes nothing more."""
     bot = await _streaming_bot(tmp_path)
-    response, _streaming = await _blocked_stream(bot)
+    response = await _blocked_stream(bot)
 
     await asyncio.wait_for(_wait_until_sent(bot, "Partial"), timeout=5)
     reply = await _reply(bot)
@@ -1779,7 +1795,7 @@ async def test_a_prompt_deleted_before_the_model_runs_removes_its_placeholder(tm
 async def test_deleting_the_prompt_mid_stream_removes_its_reply(tmp_path: Path) -> None:
     """The tombstone ends the reply gone: its running span is cancelled and the event it showed is redacted."""
     bot = await _streaming_bot(tmp_path)
-    response, _streaming = await _blocked_stream(bot)
+    response = await _blocked_stream(bot)
 
     await asyncio.wait_for(_wait_until_sent(bot, "Partial"), timeout=5)
     shown = await _reply(bot)
@@ -1876,7 +1892,7 @@ async def test_a_stopped_regeneration_that_wrote_nothing_removes_its_button_as_i
     bot = await _streaming_bot(tmp_path)
     await _answer(bot, _plain_request(_target()), AsyncMock(return_value="First answer."))
     with patch("mindroom.response_attempt.is_user_online", new=AsyncMock(return_value=True)):
-        response, _streaming = await _blocked_stream(
+        response = await _blocked_stream(
             bot,
             first_chunk=None,
             request=_regeneration(answer_event_id="$sent1"),
@@ -1908,7 +1924,7 @@ async def test_history_counts_a_reply_in_progress_only_while_its_span_runs(tmp_p
     """A reply whose span runs here is in progress; once it ends, it is not."""
     bot = await _streaming_bot(tmp_path)
     runner = unwrap_extracted_collaborator(bot._response_runner)
-    response, _streaming = await _blocked_stream(bot)
+    response = await _blocked_stream(bot)
     reply = await _reply(bot)
     assert await runner._active_response_event_ids(_target().room_id) == {reply.event_id}
     assert await runner._active_response_event_ids("!elsewhere:localhost") == set()
@@ -1936,11 +1952,8 @@ async def test_a_regeneration_that_waits_for_earlier_writes_keeps_its_edit(tmp_p
     assert reply.event_id == "$sent1"
     assert await bot._reply_runtime.store.replies.has_unresolved_rows(reply.reply_id)
 
-    request = replace(_regeneration(answer_event_id="$sent1"), source_handoff=asyncio.Event())
     model = AsyncMock(return_value="A fresh answer.")
-    assert await _answer(bot, request, model) is None
+    # The deferred claim owns the edit, so the edit regenerator leaves it pending for the retry.
+    assert await _answer(bot, _regeneration(answer_event_id="$sent1"), model) == Owned()
     model.assert_not_awaited()
-    # The edit regenerator reports the edit owned, so the journal keeps it for the retry.
-    assert request.source_handoff is not None
-    assert request.source_handoff.is_set()
     assert await _span_outcomes(bot, await _reply(bot)) == [rl.SpanOutcome.COMPLETED]

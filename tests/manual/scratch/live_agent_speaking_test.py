@@ -54,6 +54,7 @@ from tests.authorization_helpers import (
     make_test_tool_runtime_context,
 )
 from tests.conftest import make_conversation_reader_mock, make_relation_lookup
+from tests.matrix_state_helpers import save_matrix_state
 
 SRC = str(Path(__file__).resolve().parents[3] / "src")
 sys.path.insert(0, SRC)
@@ -130,38 +131,32 @@ def log(m: str) -> None:
 
 def call_config(openai_key: str) -> CallsConfig:
     """Build the selected real call backend for this live harness."""
-    if CALL_BACKEND == "realtime":
-        return CallsConfig(
-            enabled=True,
-            profiles={
-                "voice": RealtimeCallProfile(
-                    backend="realtime",
-                    model="gpt-realtime-2.1",
-                    credentials_service="openai",
-                    voice="marin",
-                ),
-            },
-            agents={AGENT: "voice"},
-            livekit_service_url=SERVICE_URL,
+    profile = (
+        RealtimeCallProfile(
+            backend="realtime",
+            model="gpt-realtime-2.1",
+            credentials_service="openai",
+            voice="marin",
         )
+        if CALL_BACKEND == "realtime"
+        else CascadedCallProfile(
+            backend="cascaded",
+            stt=SpeechServiceConfig(
+                provider="openai",
+                model="gpt-transcribe",
+                api_key=openai_key,
+            ),
+            tts=SpeechServiceConfig(
+                provider="openai",
+                model="tts-1",
+                api_key=openai_key,
+                extra_kwargs={"voice": "alloy"},
+            ),
+        )
+    )
     return CallsConfig(
         enabled=True,
-        profiles={
-            "voice": CascadedCallProfile(
-                backend="cascaded",
-                stt=SpeechServiceConfig(
-                    provider="openai",
-                    model="gpt-transcribe",
-                    api_key=openai_key,
-                ),
-                tts=SpeechServiceConfig(
-                    provider="openai",
-                    model="tts-1",
-                    api_key=openai_key,
-                    extra_kwargs={"voice": "alloy"},
-                ),
-            ),
-        },
+        profiles={"voice": profile},
         agents={AGENT: "voice"},
         livekit_service_url=SERVICE_URL,
     )
@@ -522,7 +517,7 @@ async def main() -> int:  # noqa: C901, PLR0915
                 domain="mindroom.chat",
                 device_id=bot.device_id,
             )
-            state.save(paths)
+            save_matrix_state(state, paths)
 
             config = Config(
                 agents={
@@ -597,7 +592,11 @@ async def main() -> int:  # noqa: C901, PLR0915
             )
             await manager.on_room_event(room_obj, event)
             # The manager joins in a background reconcile, so wait for the session it starts.
-            if await wait_for(lambda: room_id in manager._sessions, 120, "agent call session"):
+            if await wait_for(
+                lambda: room_id in manager._rooms and manager._rooms[room_id].session is not None,
+                120,
+                "agent call session",
+            ):
                 log("  [bot] call join path completed (agent session started)")
 
             log("== leg 1: greeting audio from the agent ==")

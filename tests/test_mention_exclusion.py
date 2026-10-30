@@ -17,7 +17,6 @@ from tests.bot_helpers import make_test_agent_bot
 from tests.conftest import (
     TEST_PASSWORD,
     bind_runtime_paths,
-    dispatch_context_result,
     install_generate_response_mock,
     install_runtime_journal_support,
     install_send_response_mock,
@@ -103,13 +102,12 @@ async def test_agent_ignores_user_message_mentioning_other_agents(tmp_path) -> N
         is_thread=True,
         thread_id="$thread_root",
         thread_history=[],
-        replay_guard_history=[],
         mentioned_agents=[entity_ids(config, runtime_paths_for(config))["research"]],
         has_non_agent_mentions=False,
         requires_model_history_refresh=False,
     )
     unwrap_extracted_collaborator(general_bot._conversation_resolver).extract_dispatch_context = AsyncMock(
-        return_value=dispatch_context_result(mock_context),
+        return_value=mock_context,
     )
 
     await general_bot._on_message(room, event)
@@ -195,7 +193,6 @@ async def test_agent_responds_when_mentioned_along_with_others(tmp_path) -> None
         is_thread=True,
         thread_id="$thread_root",
         thread_history=[],
-        replay_guard_history=[],
         mentioned_agents=[
             entity_ids(config, runtime_paths_for(config))["general"],
             entity_ids(config, runtime_paths_for(config))["research"],
@@ -204,7 +201,7 @@ async def test_agent_responds_when_mentioned_along_with_others(tmp_path) -> None
         requires_model_history_refresh=False,
     )
     unwrap_extracted_collaborator(general_bot._conversation_resolver).extract_dispatch_context = AsyncMock(
-        return_value=dispatch_context_result(mock_context),
+        return_value=mock_context,
     )
 
     with patch("mindroom.turn_policy.decide_team_formation", return_value=TeamResolution.none()):

@@ -33,8 +33,8 @@ from mindroom.matrix.client_room_admin import (
     leave_room,
 )
 from mindroom.matrix.room_reconciliation import RoomStateSnapshot, read_room_state
-from mindroom.matrix.state import MatrixState
-from mindroom.matrix.users import INTERNAL_USER_ACCOUNT_KEY, INTERNAL_USER_AGENT_NAME, AgentMatrixUser, login_agent_user
+from mindroom.matrix.state import update_matrix_state
+from mindroom.matrix.users import INTERNAL_USER_AGENT_NAME, load_agent_user, login_agent_http_client
 from mindroom.matrix_identifiers import (
     extract_server_name_from_homeserver,
     managed_room_alias_localpart,
@@ -148,11 +148,6 @@ async def _configure_managed_room_access(
     return False
 
 
-def _managed_room_should_be_encrypted(room_policy: EffectiveRoomPolicy) -> bool:
-    """Return whether one managed room is configured for Matrix encryption."""
-    return room_policy.encrypted
-
-
 def _room_admin_user_ids(
     room_policy: EffectiveRoomPolicy,
 ) -> list[str]:
@@ -176,29 +171,6 @@ def _room_key_to_name(room_key: str) -> str:
     return room_key.replace("_", " ").title()
 
 
-def _add_room(
-    room_key: str,
-    room_id: str,
-    alias: str,
-    name: str,
-    runtime_paths: RuntimePaths,
-) -> None:
-    """Add a new room to the state."""
-    state = MatrixState.load(runtime_paths=runtime_paths)
-    state.add_room(room_key, room_id, alias, name)
-    state.save(runtime_paths=runtime_paths)
-
-
-def _remove_room(room_key: str, runtime_paths: RuntimePaths) -> bool:
-    """Remove a room from the state."""
-    state = MatrixState.load(runtime_paths=runtime_paths)
-    if room_key in state.rooms:
-        del state.rooms[room_key]
-        state.save(runtime_paths=runtime_paths)
-        return True
-    return False
-
-
 async def _reconcile_joined_existing_room(
     client: nio.AsyncClient,
     room_key: str,
@@ -217,7 +189,7 @@ async def _reconcile_joined_existing_room(
         await ensure_room_name(client, room_id, explicit_room_name, snapshot=snapshot)
     await ensure_room_has_topic(client, room_id, room_key, topic_room_name, config, runtime_paths, snapshot=snapshot)
     await ensure_managed_room_power_levels(client, room_id, admin_user_ids, snapshot=snapshot)
-    if _managed_room_should_be_encrypted(room_policy):
+    if room_policy.encrypted:
         await ensure_room_encryption_enabled(client, room_id, snapshot=snapshot)
     await _configure_managed_room_access(
         client=client,
@@ -389,7 +361,10 @@ async def _ensure_room_exists(
         return None
     if isinstance(resolution, str):
         if existing_room is None:
-            _add_room(room_key, resolution, full_alias, room_name, runtime_paths)
+            update_matrix_state(
+                runtime_paths,
+                lambda state: state.add_room(room_key, resolution, full_alias, room_name),
+            )
             logger.info("managed_room_state_updated", room_key=room_key, room_id=resolution, room_alias=full_alias)
         return resolution
 
@@ -397,7 +372,7 @@ async def _ensure_room_exists(
     if existing_room is not None:
         # Remove stale entry from state
         logger.debug("managed_room_state_entry_removed", room_key=room_key)
-        _remove_room(room_key, runtime_paths=runtime_paths)
+        update_matrix_state(runtime_paths, lambda state: state.rooms.pop(room_key, None))
 
     topic = configured_room_topic(room_key, config) or await generate_room_topic_ai(
         room_key,
@@ -414,13 +389,16 @@ async def _ensure_room_exists(
         topic=topic,
         power_users=power_users or [],
         admin_users=list(admin_user_ids),
-        encrypted=_managed_room_should_be_encrypted(room_policy),
+        encrypted=room_policy.encrypted,
     )
 
     if created_room_id:
         # Record the managed alias even when another account holds it, so local lookups never resolve elsewhere.
         # An alias-less room lost before this record is saved stays untracked, and the next pass creates another.
-        _add_room(room_key, created_room_id, full_alias, room_name, runtime_paths)
+        update_matrix_state(
+            runtime_paths,
+            lambda state: state.add_room(room_key, created_room_id, full_alias, room_name),
+        )
         logger.info("managed_room_created", room_key=room_key, room_id=created_room_id, room_alias=full_alias)
 
         await _configure_managed_room_access(
@@ -556,18 +534,15 @@ async def _ensure_root_space_exists(
     runtime_paths: RuntimePaths,
 ) -> str | None:
     """Ensure the configured root Matrix Space exists and return its room ID."""
-    if not config.matrix_space.enabled:
-        return None
-
-    state = MatrixState.load(runtime_paths=runtime_paths)
+    known_space_room_id = matrix_state.matrix_state_for_runtime(runtime_paths).space_room_id
     joined_room_ids = await get_joined_rooms(client) or []
-    if state.space_room_id and state.space_room_id in joined_room_ids:
-        return state.space_room_id
+    if known_space_room_id and known_space_room_id in joined_room_ids:
+        return known_space_room_id
 
     server_name = extract_server_name_from_homeserver(client.homeserver, runtime_paths=runtime_paths)
     alias_localpart = managed_space_alias_localpart(runtime_paths=runtime_paths)
     full_alias = f"#{alias_localpart}:{server_name}"
-    resolution = await _resolve_managed_alias(client, full_alias, state.space_room_id or None)
+    resolution = await _resolve_managed_alias(client, full_alias, known_space_room_id or None)
     if resolution is _AliasResolution.RETRY_LATER:
         return None
     if isinstance(resolution, str):
@@ -580,9 +555,8 @@ async def _ensure_root_space_exists(
                 space_alias=full_alias,
             )
             return None
-        if state.space_room_id != space_room_id:
-            state.set_space_room_id(space_room_id)
-            state.save(runtime_paths=runtime_paths)
+        if known_space_room_id != space_room_id:
+            update_matrix_state(runtime_paths, lambda state: state.set_space_room_id(space_room_id))
         return space_room_id
 
     space_room_id = await create_space(
@@ -592,8 +566,7 @@ async def _ensure_root_space_exists(
         topic=_ROOT_SPACE_TOPIC,
     )
     if space_room_id is not None:
-        state.set_space_room_id(space_room_id)
-        state.save(runtime_paths=runtime_paths)
+        update_matrix_state(runtime_paths, lambda state: state.set_space_room_id(space_room_id))
     return space_room_id
 
 
@@ -650,35 +623,25 @@ async def ensure_user_in_rooms(
     homeserver: str,
     room_ids: dict[str, str],
     runtime_paths: RuntimePaths,
+    *,
+    display_name: str,
 ) -> None:
-    """Ensure the user account is a member of all specified rooms.
+    """Join the internal user account to every given room through an HTTP-only client.
 
     Args:
         homeserver: Matrix homeserver URL
         room_ids: Dict mapping room keys to room IDs
-        runtime_paths: Explicit runtime context for server-name resolution.
+        runtime_paths: Explicit runtime context holding the saved account.
+        display_name: The account's configured display name.
 
     """
-    state = matrix_state.matrix_state_for_runtime(runtime_paths)
-    user_account = state.get_account(INTERNAL_USER_ACCOUNT_KEY)
-    if not user_account:
+    user = load_agent_user(INTERNAL_USER_AGENT_NAME, runtime_paths)
+    if user is None:
         logger.warning("No user account found, skipping user room membership")
         return
 
-    server_name = user_account.domain or extract_server_name_from_homeserver(homeserver, runtime_paths=runtime_paths)
-    user_id = f"@{user_account.username}:{server_name}"
-    user_client = await login_agent_user(
-        homeserver,
-        AgentMatrixUser(
-            agent_name=INTERNAL_USER_AGENT_NAME,
-            user_id=user_id,
-            display_name=INTERNAL_USER_AGENT_NAME,
-            password=user_account.password,
-            device_id=user_account.device_id,
-            access_token=user_account.access_token,
-        ),
-        runtime_paths,
-    )
+    user.display_name = display_name
+    user_client = await login_agent_http_client(homeserver, user, runtime_paths)
     try:
         logger.info("matrix_user_logged_in", user_id=user_client.user_id)
         joined_room_ids = set(await get_joined_rooms(user_client) or ())
