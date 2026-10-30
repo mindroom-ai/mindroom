@@ -195,6 +195,18 @@ class SqliteBackend:
         return backend
 
     def _connect_writer(self) -> sqlite3.Connection:
+        upgrading = self._writer_connection()
+        try:
+            upgrading.execute("BEGIN IMMEDIATE")
+            upgrade_schema(_SqliteTransaction(upgrading), _SqliteSchemaInspector(upgrading))
+            upgrading.execute("COMMIT")
+        finally:
+            upgrading.close()
+        # An upgrade can leave planner state on its connection, such as the row counts a conversion's statistics
+        # recorded, so the runtime writes through a connection that loads the committed schema afresh.
+        return self._writer_connection()
+
+    def _writer_connection(self) -> sqlite3.Connection:
         # The writer runs on whichever owned-pool thread is free, so the
         # connection has to outlive its creating thread. Only ever one write is
         # in flight, because a single task drains the queue.
@@ -209,13 +221,6 @@ class SqliteBackend:
         # FULL makes the application commit durable before acknowledgement.
         # Readers commit nothing, so this is the writer's cost alone.
         _configure(connection, synchronous="FULL")
-        connection.execute("BEGIN IMMEDIATE")
-        try:
-            upgrade_schema(_SqliteTransaction(connection), _SqliteSchemaInspector(connection))
-            connection.execute("COMMIT")
-        except BaseException:
-            connection.close()
-            raise
         return connection
 
     def _reader(self) -> sqlite3.Connection:

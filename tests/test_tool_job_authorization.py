@@ -24,7 +24,7 @@ from mindroom.tool_jobs.authorization import (
 )
 from mindroom.tool_jobs.provenance import function_provenance
 from mindroom.tool_system.agent_tools import resolve_agent_tools
-from mindroom.tool_system.agno_toolkits import Function, Toolkit
+from mindroom.tool_system.agno_toolkits import Function, Toolkit, toolkit_function_names
 from mindroom.tool_system.construction import ToolConstruction, bind_toolkit_construction, tool_config_signature
 from mindroom.tool_system.metadata import get_tool_by_name
 from mindroom.tool_system.registry_state import TOOL_REGISTRY
@@ -55,7 +55,7 @@ def test_direct_toolkit_retains_authored_configuration_grant(tmp_path: Path) -> 
         execution_identity=_OWNER,
     )
     assert toolkit is not None
-    assert "list_workflows" in toolkit.get_async_functions()
+    assert "list_workflows" in toolkit_function_names(toolkit)
     authority = toolkit_authority(authority_snapshot(config, "lead"), toolkit)
 
     def allowed() -> bool:
@@ -131,7 +131,7 @@ def test_disabling_graph_edits_revokes_a_retained_graph_edit(tmp_path: Path) -> 
         execution_identity=_OWNER,
     )
     assert toolkit is not None
-    assert "delete_graph_fact" in toolkit.get_async_functions()
+    assert "delete_graph_fact" in toolkit_function_names(toolkit)
     authority = toolkit_authority(authority_snapshot(config, "lead"), toolkit)
 
     def allowed(tool_name: str) -> bool:
@@ -214,7 +214,7 @@ def test_authored_include_policy_matches_real_toolkit_surface(
         worker_target=None,
     )
 
-    assert ("add" in toolkit.functions) is expected_allowed
+    assert ("add" in toolkit_function_names(toolkit)) is expected_allowed
     assert _calculator_allowed(config, _calculator_authority(config)) is expected_allowed
 
 
@@ -251,7 +251,7 @@ def test_nullable_authored_exclusion_matches_inherited_toolkit_surface(
         worker_target=None,
     )
 
-    assert ("add" in toolkit.functions) is expected_allowed
+    assert ("add" in toolkit_function_names(toolkit)) is expected_allowed
     assert _calculator_allowed(config, _calculator_authority(config)) is expected_allowed
 
 
@@ -379,7 +379,7 @@ async def test_mcp_cross_owner_exclusion_wins_for_construction_and_retained_auth
     monkeypatch.setitem(TOOL_REGISTRY, "mcp_demo", registry["mcp_demo"])
     construction_origin = authorization_module.tool_registry_origin("mcp_demo")
 
-    assert "demo_read" not in toolkit.async_functions
+    assert "demo_read" not in toolkit.functions
     assert not _configured_tool_allowed(
         config,
         entry,
@@ -428,7 +428,7 @@ def test_mcp_oauth_helpers_bypass_remote_tool_filters(monkeypatch: pytest.Monkey
     monkeypatch.setitem(TOOL_REGISTRY, "mcp_demo", registry["mcp_demo"])
     construction_origin = authorization_module.tool_registry_origin("mcp_demo")
 
-    assert "demo_connection_status" in toolkit.async_functions
+    assert "demo_connection_status" in toolkit.functions
     assert _configured_tool_allowed(
         config,
         entry,

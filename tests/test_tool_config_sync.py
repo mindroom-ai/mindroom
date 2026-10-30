@@ -18,12 +18,13 @@ import mindroom.tools  # noqa: F401
 from mindroom.config.models import FileAccess
 from mindroom.constants import RuntimePaths
 from mindroom.shared_directories.tool_roots import SharedDirectoryRoot
-from mindroom.tool_system.agno_toolkits import adapt_function
+from mindroom.tool_system.authoring import Toolkit as OwnedToolkit
 from mindroom.tool_system.declarations import ToolManagedInitArg, ToolStatus
 from mindroom.tool_system.invocation import parse_tool_arguments
 from mindroom.tool_system.metadata import TOOL_METADATA, TOOL_REGISTRY, validate_authored_tool_entry_overrides
 from mindroom.tool_system.tool_function import ToolFunction
 from mindroom.tool_system.worker_routing import ResolvedWorkerTarget
+from tests.agent_tool_helpers import offered_agno_function
 
 SKIP_CONFIG_FIELD_VALIDATION = {
     "agent_vault_access",
@@ -330,7 +331,7 @@ def test_registered_tool_contract(tool_name: str) -> None:
 
     assert isinstance(tool_class, type)
     if metadata.status != ToolStatus.REQUIRES_CONFIG:
-        assert issubclass(tool_class, Toolkit)
+        assert issubclass(tool_class, (Toolkit, OwnedToolkit))
 
     init_signature = inspect.signature(tool_class.__init__)
     verify_managed_init_args(tool_name, init_signature)
@@ -359,7 +360,7 @@ def verify_string_arguments_reach_the_tool(tool_name: str, tool_class: type) -> 
         if method is None:
             # The toolkit builds this function per instance, for example from an MCP server's tool list.
             continue
-        function = adapt_function(Function.from_callable(method))
+        function = offered_agno_function(Function.from_callable(method))
         signature = inspect.signature(method).parameters
         choices = {
             name: string_choices

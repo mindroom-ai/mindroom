@@ -7,10 +7,9 @@ import os
 import re
 import shlex
 import subprocess
+from dataclasses import replace
 from pathlib import Path
-from typing import cast
-
-from agno.tools.toolkit import Toolkit
+from typing import TYPE_CHECKING, cast
 
 from mindroom.constants import (
     WORKSPACE_HOME_CONTRACT_ENV_NAMES,
@@ -22,6 +21,7 @@ from mindroom.constants import (
 from mindroom.shell.execution import run_command, shell_call_timeout
 from mindroom.shell.output_capture import ShellOutputDestination
 from mindroom.shell.supervisor import SHELL_SUPERVISOR_SOCKET_ENV, run_command_via_supervisor
+from mindroom.tool_system.authoring import Toolkit
 from mindroom.tool_system.declarations import (
     ConfigField,
     SetupType,
@@ -35,7 +35,13 @@ from mindroom.tool_system.output_files import ToolOutputFileHandled, current_too
 from mindroom.tool_system.progress import report_tool_progress
 from mindroom.tool_system.registration import register_tool_with_metadata
 from mindroom.tool_system.tool_environment import ToolEnvironment, current_tool_environment
+from mindroom.tool_system.tool_schema import closed_parameters
 from mindroom.vendor_telemetry import vendor_telemetry_env_values
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
+
+    from mindroom.tool_system.tool_function import ToolFunction
 
 _LOCAL_SHELL_PASSTHROUGH_ENV_KEYS = frozenset(
     {
@@ -339,7 +345,7 @@ def _shell_subprocess_args(args: list[str], env: dict[str, str]) -> list[str]:
     docs_url="https://docs.mindroom.chat/tools/execution-and-coding/#shell",
     function_names=("run_shell_command",),
 )
-def shell_tools() -> type[Toolkit]:  # noqa: C901
+def shell_tools() -> type[Toolkit]:
     """Return shell tools for command execution."""
 
     class MindRoomShellTools(Toolkit):
@@ -354,21 +360,14 @@ def shell_tools() -> type[Toolkit]:  # noqa: C901
             shell_path_prepend: str | None = None,
             *,
             runtime_paths: RuntimePaths,
-            **kwargs: object,
         ) -> None:
             self.base_dir: Path | None = Path(base_dir) if isinstance(base_dir, str) else base_dir
 
-            tools: list[object] = []
+            tools: list[Callable[..., object]] = []
             if all or enable_run_shell_command:
                 tools.append(self.run_shell_command)
 
-            super().__init__(name="shell_tools", tools=tools, **kwargs)  # ty: ignore[invalid-argument-type]
-            run_shell_command_function = self.async_functions.get("run_shell_command")
-            if run_shell_command_function is not None:
-                effective_strict = (
-                    False if run_shell_command_function.strict is None else run_shell_command_function.strict
-                )
-                run_shell_command_function.process_entrypoint(strict=effective_strict)
+            super().__init__(name="shell_tools", tools=tools)
 
             self._runtime_env = dict(
                 shell_execution_runtime_env_values(
@@ -378,19 +377,21 @@ def shell_tools() -> type[Toolkit]:  # noqa: C901
                 ),
             )
             self._base_process_env = dict(runtime_paths.process_env)
-            if run_shell_command_function is not None:
-                notes = (
-                    (_WORKSPACE_CWD_NOTE, _WORKING_METHOD_NOTE)
-                    if self.base_dir is not None
-                    else (_WORKING_METHOD_NOTE,)
-                )
-                run_shell_command_function.description = "\n\n".join(
-                    (run_shell_command_function.description or "", *notes),
-                ).strip()
             self._shell_path_prepend = shell_path_prepend
             # Sandbox tool subprocesses delegate execution to the runner's long-lived shell supervisor,
             # which stops the command when the per-request process dies.
             self._supervisor_socket = os.environ.get(SHELL_SUPERVISOR_SOCKET_ENV) or None
+
+        def offered_function(self, function: ToolFunction) -> ToolFunction:
+            """Describe ``run_shell_command`` with the working directory and the working method it runs under."""
+            notes = (
+                (_WORKSPACE_CWD_NOTE, _WORKING_METHOD_NOTE) if self.base_dir is not None else (_WORKING_METHOD_NOTE,)
+            )
+            return replace(
+                function,
+                description="\n\n".join((function.description or "", *notes)).strip(),
+                parameters=closed_parameters(self.run_shell_command, function.parameters),
+            )
 
         async def run_shell_command(
             self,

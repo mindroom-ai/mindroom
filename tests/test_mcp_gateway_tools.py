@@ -34,7 +34,6 @@ from mindroom.mcp_gateway.oauth import GatewayOAuthProvider
 from mindroom.mcp_gateway.selection import GatewaySelections
 from mindroom.mcp_gateway.types import GatewayErrorCode, GatewayOwner
 from mindroom.oauth.providers import OAuthConnectionRequired
-from mindroom.tool_system.agno_toolkits import adapt_function
 from mindroom.tool_system.catalog import TOOL_METADATA, ConfigField, ensure_tool_registry_loaded
 from mindroom.tool_system.invocation import DETACHED_SESSION_ID
 from mindroom.tool_system.registry_state import BUILTIN_TOOL_METADATA, BUILTIN_TOOL_REGISTRY, TOOL_REGISTRY
@@ -43,6 +42,7 @@ from mindroom.tool_system.runtime_context import (
     tool_runtime_context,
 )
 from mindroom.tool_system.worker_routing import get_tool_execution_identity, tool_execution_identity
+from tests.agent_tool_helpers import offered_agno_function
 from tests.oauth_test_utils import publish_oauth_credentials
 from tests.test_mcp_manager import _FakeClientSession, _patch_manager, _tool
 from tests.test_tool_hooks import _tool_runtime_context
@@ -580,7 +580,7 @@ def test_schema_preparation_rebuilds_an_unusable_required_list() -> None:
         parameters={"type": "object", "properties": {"text": {"type": "string"}}, "required": required},
     )
 
-    payload = gateway._schema_payload("helper", "example", adapt_function(function))
+    payload = gateway._schema_payload("helper", "example", offered_agno_function(function))
 
     assert payload["inputSchema"]["required"] == ["text"]
     assert function.parameters["required"][0] is function.parameters["required"]

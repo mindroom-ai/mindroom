@@ -8,10 +8,11 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, ClassVar
 
 import pytest
-from agno.run.base import RunContext
 from claude_agent_sdk import AssistantMessage, ClaudeSDKError, ResultMessage, TextBlock
 
 from mindroom.custom_tools import claude_agent as claude_agent_module
+from mindroom.tool_system.invocation import ToolCallContext, run_tool_call
+from mindroom.tool_system.tool_function import ToolFunction
 
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator
@@ -106,94 +107,95 @@ async def test_claude_agent_nightly_soak_loop(monkeypatch: pytest.MonkeyPatch) -
         max_sessions=12,
         session_ttl_minutes=5,
     )
-    run_context = RunContext(run_id="run-soak", session_id="soak-session")
 
-    session_labels = [f"seq-{i}" for i in range(6)]
-    parallel_labels = [f"par-{i}" for i in range(4)]
+    # The tool reads its session from the call it runs for, which every turn below shares.
+    async def soak() -> None:
 
-    expected_failure_count = 0
-    for turn in range(120):
-        label = session_labels[turn % len(session_labels)]
+        session_labels = [f"seq-{i}" for i in range(6)]
+        parallel_labels = [f"par-{i}" for i in range(4)]
 
-        if turn % 24 == 0:
-            expected_failure_count += 1
-            failure = await asyncio.wait_for(
+        expected_failure_count = 0
+        for turn in range(120):
+            label = session_labels[turn % len(session_labels)]
+
+            if turn % 24 == 0:
+                expected_failure_count += 1
+                failure = await asyncio.wait_for(
+                    tools.claude_send(
+                        f"fail:turn-{turn}",
+                        session_label=label,
+                    ),
+                    timeout=3,
+                )
+                assert "Claude session error:" in failure
+
+                recovery = await asyncio.wait_for(
+                    tools.claude_send(
+                        f"recover-{turn}",
+                        session_label=label,
+                    ),
+                    timeout=3,
+                )
+                assert f"ok:recover-{turn}" in recovery
+                continue
+
+            if turn % 10 == 0:
+                write = await asyncio.wait_for(
+                    tools.claude_send(
+                        f"write:file-{turn % 3}:line-{turn}",
+                        session_label=label,
+                    ),
+                    timeout=3,
+                )
+                assert "wrote:file-" in write
+
+                read = await asyncio.wait_for(
+                    tools.claude_send(
+                        f"read:file-{turn % 3}",
+                        session_label=label,
+                    ),
+                    timeout=3,
+                )
+                assert f"line-{turn}" in read
+                continue
+
+            if turn % 15 == 0:
+                burst_results = await asyncio.wait_for(
+                    asyncio.gather(
+                        *[
+                            tools.claude_send(
+                                f"parallel-{turn}-{idx}",
+                                session_label=parallel_labels[idx],
+                            )
+                            for idx in range(len(parallel_labels))
+                        ],
+                    ),
+                    timeout=5,
+                )
+                for idx, result in enumerate(burst_results):
+                    assert f"ok:parallel-{turn}-{idx}" in result
+                continue
+
+            result = await asyncio.wait_for(
                 tools.claude_send(
-                    f"fail:turn-{turn}",
+                    f"turn-{turn}",
                     session_label=label,
-                    run_context=run_context,
                 ),
                 timeout=3,
             )
-            assert "Claude session error:" in failure
+            assert f"ok:turn-{turn}" in result
+            assert "missing 1 required positional argument" not in result
 
-            recovery = await asyncio.wait_for(
-                tools.claude_send(
-                    f"recover-{turn}",
-                    session_label=label,
-                    run_context=run_context,
-                ),
-                timeout=3,
-            )
-            assert f"ok:recover-{turn}" in recovery
-            continue
+        assert _NightlySoakSDKClient.forced_failures == expected_failure_count
+        assert _NightlySoakSDKClient.max_concurrent_queries >= 2
 
-        if turn % 10 == 0:
-            write = await asyncio.wait_for(
-                tools.claude_send(
-                    f"write:file-{turn % 3}:line-{turn}",
-                    session_label=label,
-                    run_context=run_context,
-                ),
-                timeout=3,
-            )
-            assert "wrote:file-" in write
+        for label in session_labels + parallel_labels:
+            await tools.claude_end_session(session_label=label)
 
-            read = await asyncio.wait_for(
-                tools.claude_send(
-                    f"read:file-{turn % 3}",
-                    session_label=label,
-                    run_context=run_context,
-                ),
-                timeout=3,
-            )
-            assert f"line-{turn}" in read
-            continue
-
-        if turn % 15 == 0:
-            burst_results = await asyncio.wait_for(
-                asyncio.gather(
-                    *[
-                        tools.claude_send(
-                            f"parallel-{turn}-{idx}",
-                            session_label=parallel_labels[idx],
-                            run_context=run_context,
-                        )
-                        for idx in range(len(parallel_labels))
-                    ],
-                ),
-                timeout=5,
-            )
-            for idx, result in enumerate(burst_results):
-                assert f"ok:parallel-{turn}-{idx}" in result
-            continue
-
-        result = await asyncio.wait_for(
-            tools.claude_send(
-                f"turn-{turn}",
-                session_label=label,
-                run_context=run_context,
-            ),
-            timeout=3,
-        )
-        assert f"ok:turn-{turn}" in result
-        assert "missing 1 required positional argument" not in result
-        assert "RunContext is not defined" not in result
-
-    assert _NightlySoakSDKClient.forced_failures == expected_failure_count
-    assert _NightlySoakSDKClient.max_concurrent_queries >= 2
-
-    for label in session_labels + parallel_labels:
-        await tools.claude_end_session(session_label=label, run_context=run_context)
-
+    await run_tool_call(
+        ToolFunction(name="soak", description=None, parameters={"type": "object", "properties": {}}, entrypoint=soak),
+        {},
+        ToolCallContext(run_id="run-soak", session_id="soak-session", user_id=None),
+        middleware=(),
+    )
     assert not manager._sessions

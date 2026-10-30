@@ -2,9 +2,8 @@
 
 from __future__ import annotations
 
-from typing import Literal
-
-from agno.tools import Toolkit
+from dataclasses import replace
+from typing import TYPE_CHECKING, Literal
 
 from mindroom.authorization import addressable_responder_names
 from mindroom.custom_tools.tool_payloads import custom_tool_payload
@@ -13,8 +12,12 @@ from mindroom.thread_models import (
     resolve_thread_model_override,
     set_thread_model_override,
 )
+from mindroom.tool_system.authoring import Toolkit
 from mindroom.tool_system.runtime_context import ToolRuntimeContext, get_tool_runtime_context
 from mindroom.turn_model import ModelScope, TurnBudget, resolve_turn_model
+
+if TYPE_CHECKING:
+    from mindroom.tool_system.tool_function import ToolFunction
 
 _MODEL_SWITCH_WHENS = ("after-toolcall", "next-turn")
 
@@ -27,9 +30,12 @@ class ThreadModelTools(Toolkit):
             name="thread_model",
             tools=[self.list_models, self.get_thread_model, self.switch_thread_model, self.reset_thread_model],
         )
-        # Toolkit's stop-after list also exposes the raw result as assistant text.
-        # The continuation owns final delivery, so only enable the control boundary.
-        self.async_functions["switch_thread_model"].stop_after_tool_call = True
+
+    def offered_function(self, function: ToolFunction) -> ToolFunction:
+        """Stop the run after a model switch: the continuation on the new model owns the reply."""
+        if function.name == "switch_thread_model":
+            return replace(function, stop_after_call=True)
+        return function
 
     @staticmethod
     def _payload(status: str, **kwargs: object) -> str:

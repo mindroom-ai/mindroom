@@ -1277,13 +1277,13 @@ def test_slack_tools_require_a_credentials_manager(paths: RuntimePaths) -> None:
 
 
 def _write_names(tools: SlackTools) -> set[str]:
-    return set(tools.get_async_functions()) & slack_toolkit._WRITE_FUNCTIONS
+    return set(tools.functions) & slack_toolkit._WRITE_FUNCTIONS
 
 
 def test_write_false_hides_write_functions(paths: RuntimePaths) -> None:
     assert _write_names(_tools(paths)) == {"slack_post", "slack_react", "slack_edit", "slack_delete", "slack_upload"}
     assert _write_names(_tools(paths, write=False)) == set()
-    assert set(_tools(paths, write=False).get_async_functions()) == {
+    assert set(_tools(paths, write=False).functions) == {
         "slack_search",
         "slack_recent",
         "slack_read",
@@ -1885,17 +1885,17 @@ LATER_JOINERS = "paused: people who join this room later could read earlier mess
 
 
 def test_watch_is_registered_only_in_personal_mode_with_a_room(paths: RuntimePaths) -> None:
-    assert "slack_watch" in _watch_tools(paths).get_async_functions()
-    assert "slack_watch" not in _tools(paths).get_async_functions()
-    assert "slack_watch" not in _tools(paths, current_room_id=None).get_async_functions()
+    assert "slack_watch" in _watch_tools(paths).functions
+    assert "slack_watch" not in _tools(paths).functions
+    assert "slack_watch" not in _tools(paths, current_room_id=None).functions
     # A watch never writes to Slack, so turning writes off keeps it.
-    assert "slack_watch" in _tools(paths, current_room_id=ROOM, write=False).get_async_functions()
+    assert "slack_watch" in _tools(paths, current_room_id=ROOM, write=False).functions
 
 
 def test_watch_not_in_project_mode(paths: RuntimePaths) -> None:
     project = _tools(paths, channels=[CHANNEL], room="lobby", current_room_id=ROOM)
 
-    assert "slack_watch" not in project.get_async_functions()
+    assert "slack_watch" not in project.functions
 
 
 @pytest.mark.asyncio

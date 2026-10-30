@@ -35,6 +35,7 @@ from mindroom.tool_system.runtime_context import (
     tool_runtime_context,
 )
 from mindroom.tool_system.worker_routing import build_agent_toolkit_worker_target
+from tests.agent_tool_helpers import toolkit_offers
 from tests.authorization_helpers import isolated_membership_index
 from tests.conftest import make_conversation_reader_mock, make_relation_lookup, write_config_yaml
 from tests.oauth_test_utils import corrupt_oauth_credential_payload, publish_oauth_credentials
@@ -137,10 +138,10 @@ def test_oauth_connections_exposes_only_browser_reset() -> None:
     """The toolkit should expose one non-destructive browser action."""
     tool = OAuthConnectionTools(MagicMock(), worker_target=None)
 
-    assert list(tool.async_functions) == ["reset_oauth_connection"]
-    function = tool.async_functions["reset_oauth_connection"]
+    assert list(tool.functions) == ["reset_oauth_connection"]
+    function = toolkit_offers(tool, "reset_oauth_connection")
     assert function.requires_confirmation is False
-    assert function.stop_after_tool_call is False
+    assert function.stop_after_call is False
 
 
 @pytest.mark.asyncio

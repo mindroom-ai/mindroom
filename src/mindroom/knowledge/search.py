@@ -3,18 +3,21 @@
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from itertools import zip_longest
 from typing import TYPE_CHECKING, Protocol
 
 from mindroom.logging_config import get_logger
-from mindroom.tool_system.agno_toolkits import Function
+from mindroom.tool_system.agno_toolkits import adapt_callable
+from mindroom.tool_system.authoring import tool
+from mindroom.tool_system.tool_schema import closed_parameters
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
 
     from mindroom.knowledge.read_protocol import SearchHit
     from mindroom.knowledge.rerank import Reranker
+    from mindroom.tool_system.tool_function import ToolFunction
 
 logger = get_logger(__name__)
 
@@ -157,11 +160,8 @@ class AgentKnowledge:
             return f"Error searching knowledge base: {type(exc).__name__}"
         return _format_search_hits(hits)
 
-    def search_function(self, *, memory_search_available: bool) -> Function:
-        """Return the ``search_knowledge_base`` tool, authored as an Agno function so Agno generates its schema.
-
-        ``adapt_function`` turns it into the ``ToolFunction`` an agent offers.
-        """
+    def search_function(self, *, memory_search_available: bool) -> ToolFunction:
+        """Return the ``search_knowledge_base`` tool an agent offers, described by the sources it searches."""
 
         async def search_knowledge_base(query: str) -> str:
             """Use this function to search the knowledge base for information about a query.
@@ -175,12 +175,13 @@ class AgentKnowledge:
             """
             return await self._search_tool_result(query)
 
-        function = Function.from_callable(search_knowledge_base, name=KNOWLEDGE_SEARCH_TOOL_NAME)
-        function.description = _knowledge_search_tool_description(
+        description = _knowledge_search_tool_description(
             tuple(source.description for source in self.sources),
             memory_search_available=memory_search_available,
         )
-        return function
+        function = adapt_callable(tool(name=KNOWLEDGE_SEARCH_TOOL_NAME, description=description)(search_knowledge_base))
+        # TODO(simplify): closed to other properties as Agno closed a schema it derived ahead of processing.
+        return replace(function, parameters=closed_parameters(search_knowledge_base, function.parameters))
 
     def prompt_block(self) -> str:
         """Return the system-prompt block that tells the model to search before answering."""

@@ -34,7 +34,7 @@ from mindroom.script_runs.store import (
     ScriptRunNotFoundError,
     ScriptRunStore,
 )
-from mindroom.tool_system.agno_toolkits import adapt_function
+from mindroom.tool_system.agno_toolkits import requires_connect, toolkit_function
 from mindroom.tool_system.automation_approval import NEVER_PREAPPROVE_TOOLKITS, build_automation_approval_config
 from mindroom.tool_system.invocation import (
     DETACHED_SESSION_ID,
@@ -69,7 +69,7 @@ if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Mapping, Sequence
 
     from mindroom.config.main import Config
-    from mindroom.tool_system.agno_toolkits import Function, Toolkit
+    from mindroom.tool_system.agno_toolkits import AnyToolkit
     from mindroom.tool_system.tool_function import ToolFunction
 
 __all__ = [
@@ -192,7 +192,7 @@ class _PreparedExecution:
     correlation_id: str
     source_config: Config
     execution_identity: ToolExecutionIdentity
-    toolkit: Toolkit
+    toolkit: AnyToolkit
     function: ToolFunction
     approval_config: Config
 
@@ -571,15 +571,15 @@ class ScriptToolBroker:
             )
             return await self._publish_async(call, state=state, error=error)
 
-    async def _connect_toolkit(self, toolkit: Toolkit) -> None:
-        if not toolkit.requires_connect:
+    async def _connect_toolkit(self, toolkit: AnyToolkit) -> None:
+        if not requires_connect(toolkit):
             return
         await shielded_lifecycle(
             run_toolkit_lifecycle(toolkit.connect),
             retain=lambda connecting: self._retain_toolkit_cleanup([connecting], toolkit),
         )
 
-    async def _connect_toolkit_owned(self, toolkit: Toolkit) -> None:
+    async def _connect_toolkit_owned(self, toolkit: AnyToolkit) -> None:
         """Connect one toolkit and close it if normal connection fails."""
         try:
             await self._connect_toolkit(toolkit)
@@ -735,7 +735,7 @@ class ScriptToolBroker:
         )
         _validate_resolved_authority(durable_run, current_context, worker_authority)
 
-    async def _close_toolkit_owned(self, toolkit: Toolkit) -> None:
+    async def _close_toolkit_owned(self, toolkit: AnyToolkit) -> None:
         """Close one toolkit or transfer its exact close task on cancellation."""
 
         def retain(close_task: asyncio.Task[None]) -> None:
@@ -744,14 +744,14 @@ class ScriptToolBroker:
 
         await shielded_lifecycle(_close_toolkit(toolkit), retain=retain)
 
-    def _retain_toolkit_close(self, toolkit: Toolkit) -> None:
+    def _retain_toolkit_close(self, toolkit: AnyToolkit) -> None:
         close_task = asyncio.create_task(_close_toolkit(toolkit), name="script-toolkit-close")
         self._retain_cleanup_task(close_task)
 
     def _retain_toolkit_cleanup(
         self,
         completion_tasks: Sequence[asyncio.Task[object]],
-        toolkit: Toolkit,
+        toolkit: AnyToolkit,
     ) -> None:
         async def finish_lifecycle() -> None:
             completion_failure: BaseException | None = None
@@ -818,11 +818,11 @@ class ScriptToolBroker:
             source_config=source_config,
             execution_identity=execution_identity,
             toolkit=toolkit,
-            function=replace(adapt_function(function), registered_toolkit=call.grant.toolkit_name),
+            function=replace(function, registered_toolkit=call.grant.toolkit_name),
             approval_config=_background_approval_config(context, run),
         )
 
-    def _close_rejected_toolkit(self, toolkit: Toolkit) -> None:
+    def _close_rejected_toolkit(self, toolkit: AnyToolkit) -> None:
         """Finish a rejected toolkit's lifecycle from the preparation worker thread."""
         asyncio.run(_close_toolkit(toolkit))
 
@@ -1043,16 +1043,16 @@ def _launch_function_owners(run: ScriptRunRecord) -> dict[str, frozenset[str]]:
     return {function_name: frozenset(toolkit_owners) for function_name, toolkit_owners in owners.items()}
 
 
-def _toolkit_function(toolkit: Toolkit, function_name: str) -> Function:
-    function = toolkit.get_async_functions().get(function_name)
+def _toolkit_function(toolkit: AnyToolkit, function_name: str) -> ToolFunction:
+    function = toolkit_function(toolkit, function_name)
     if function is None:
         msg = "The requested tool is no longer available to this script run."
         raise ScriptCapabilityError(msg)
     return function
 
 
-async def _close_toolkit(toolkit: Toolkit) -> None:
-    if toolkit.requires_connect:
+async def _close_toolkit(toolkit: AnyToolkit) -> None:
+    if requires_connect(toolkit):
         await run_toolkit_lifecycle(toolkit.close)
 
 

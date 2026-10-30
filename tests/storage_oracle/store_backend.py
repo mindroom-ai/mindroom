@@ -43,7 +43,7 @@ from mindroom.session_storage.schema import quote_identifier, usage_table_sql
 from mindroom.session_storage.store import connect_conversation_database
 from mindroom.session_storage.summary_rows import Fold, latest_row
 from mindroom.session_storage.types import session_state_snapshot
-from tests.conftest import seed_session_state
+from tests.conftest import delete_runs, seed_session_state
 from tests.storage_oracle.backend import (
     REQUESTER_ID,
     SESSION_ID,
@@ -349,7 +349,7 @@ class StoreBackend(Driver):
 
     @override
     def discard_run(self, session: ConversationSession, run_id: str) -> object:
-        return sorted(self.store.delete_runs([run_id], session_id=session.session_id, session=session))
+        return sorted(delete_runs(self.store, [run_id], session_id=session.session_id, session=session))
 
     @override
     def chunk_basis(self, session: ConversationSession, run_ids: Sequence[str], previous_summary: str | None) -> object:

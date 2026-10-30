@@ -18,7 +18,7 @@ from tests.api.test_usage_service_auth import (
     _service_assertion,
     usage_service_auth,  # noqa: F401
 )
-from tests.conftest import persist_runs
+from tests.conftest import delete_runs, persist_runs
 from tests.test_request_usage import _run
 
 if TYPE_CHECKING:
@@ -63,7 +63,7 @@ def test_live_voice_duration_exports_separately_from_delegate_tokens(
                 created_at=1_700_000_000,
             ),
         )
-    storage.delete_runs(["run-1"], session_id="session")
+    delete_runs(storage, ["run-1"], session_id="session")
     runner, workers = _install_manual_export_runner(client)
     try:
         assert client.get(route).status_code == 401

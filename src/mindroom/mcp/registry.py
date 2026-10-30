@@ -25,8 +25,6 @@ from mindroom.tool_system.registry_state import MCP_TOOL_FACTORY_MARKER, TOOL_RE
 if TYPE_CHECKING:
     from collections.abc import Callable
 
-    from agno.tools import Toolkit
-
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
     from mindroom.credentials.manager import CredentialsManager
@@ -181,8 +179,8 @@ def _available_catalog(
         return None
 
 
-def _tool_factory(server_id: str, server_config: MCPServerConfig) -> Callable[[], type[Toolkit]]:
-    def factory() -> type[Toolkit]:
+def _tool_factory(server_id: str, server_config: MCPServerConfig) -> Callable[[], type[MindRoomMCPToolkit]]:
+    def factory() -> type[MindRoomMCPToolkit]:
         class BoundMindRoomMCPToolkit(MindRoomMCPToolkit):
             def __init__(
                 self,
@@ -247,9 +245,9 @@ def sync_mcp_tool_registry(config: Config | None) -> None:
 
 def resolved_mcp_tool_state(
     config: Config | None,
-) -> tuple[dict[str, Callable[[], type[Toolkit]]], dict[str, ToolMetadata]]:
+) -> tuple[dict[str, Callable[[], type[MindRoomMCPToolkit]]], dict[str, ToolMetadata]]:
     """Return the MCP tool registry entries implied by one config without mutating globals."""
-    registry: dict[str, Callable[[], type[Toolkit]]] = {}
+    registry: dict[str, Callable[[], type[MindRoomMCPToolkit]]] = {}
     metadata: dict[str, ToolMetadata] = {}
     for server_id, server_config in _desired_server_entries(config).items():
         tool_name = mcp_tool_name(server_id)

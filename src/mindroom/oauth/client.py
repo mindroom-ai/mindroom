@@ -10,13 +10,13 @@ from copy import deepcopy
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from enum import Enum, auto
-from functools import partial
+from functools import partial, wraps
+from types import MethodType
 from typing import TYPE_CHECKING, Any, NoReturn
 
 from google.auth.exceptions import GoogleAuthError, RefreshError
 from google.auth.transport import requests as google_requests
 
-from mindroom.oauth.agno_compat_google_auth import AgnoGoogleAuthBindingMixin
 from mindroom.oauth.credential_lifecycle import (
     OAuthCredentialConflictError,
     OAuthCredentialContext,
@@ -141,7 +141,7 @@ class _OAuthClientThreadState(threading.local):
         self.entrypoint_depth = 0
 
 
-class ScopedOAuthClientMixin(AgnoGoogleAuthBindingMixin):
+class ScopedOAuthClientMixin:
     """Shared scoped credential loading and refresh logic for OAuth-backed tools."""
 
     _oauth_provider: OAuthProvider
@@ -208,6 +208,19 @@ class ScopedOAuthClientMixin(AgnoGoogleAuthBindingMixin):
         if defer_to_original_auth:
             return None
         return self._load_stored_credentials()
+
+    def _set_original_auth(self, auth_method: Callable[[Any], Any]) -> None:
+        """Keep ``auth_method``, an authentication method of the toolkit's class, bound to it as its fallback."""
+        self._original_auth = MethodType(auth_method, self)
+
+    def _oauth_entrypoint(self, entrypoint: Callable[..., object]) -> Callable[..., object]:
+        """Return ``entrypoint`` called through the OAuth call policy, with its signature for schema derivation."""
+
+        @wraps(entrypoint)
+        def oauth_entrypoint(*args: object, **kwargs: object) -> object:
+            return self._run_oauth_entrypoint(entrypoint, args, kwargs)
+
+        return oauth_entrypoint
 
     def _run_oauth_entrypoint(
         self,

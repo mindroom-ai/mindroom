@@ -1,6 +1,6 @@
 # Agno compatibility boundaries
 
-MindRoom uses Agno only as its tool library, through the toolkit adapter in `tool_system/agno_toolkits.py`, and for the knowledge readers and chunkers in `knowledge/readers.py`.
+MindRoom uses Agno only for its vendor toolkits and the plugins written against Agno's toolkit API, through the toolkit adapter in `tool_system/agno_toolkits.py`, and for the knowledge readers and chunkers in `knowledge/readers.py`.
 This page maps each known weakness of that library to its upstream tracking and to the MindRoom boundary that works around it, so the weakness can be fixed upstream and the workaround removed.
 The policy lives in the Agno Compatibility Policy in `AGENTS.md`.
 Each `# AGNO_COMPAT:` source comment owns its workaround's reason, exact upstream links, removal condition, and test coverage; `rg -n -F 'AGNO_COMPAT:' src/mindroom` lists them.
@@ -15,7 +15,7 @@ Issue and PR states were checked on September 24, 2026, unless a row gives anoth
 
 | Agno weakness | Upstream issue / PR | Boundary |
 | --- | --- | --- |
-| Tool schemas render `Any`, such as the values of `dict[str, Any]`, as an object that only accepts `{}`. | [Issue #10422](https://github.com/agno-agi/agno/issues/10422), [PR #10423](https://github.com/agno-agi/agno/pull/10423), both open (checked October 21, 2026). | `custom_tools/google_sheets.py` (`batch_update_sheet`), `custom_tools/microsoft_sharepoint.py` (`microsoft_sharepoint_create_item`, `microsoft_sharepoint_update_item`) |
+| Tool schemas render `Any`, such as the values of `dict[str, Any]`, as an object that only accepts `{}`. | [Issue #10422](https://github.com/agno-agi/agno/issues/10422), [PR #10423](https://github.com/agno-agi/agno/pull/10423), both open (checked October 21, 2026). | `custom_tools/google_sheets.py` (`batch_update_sheet`) |
 | Library loggers install their own stdout handler at INFO with propagation disabled, so their records bypass the host's level, format, redaction, and stream. | [Issue #4097](https://github.com/agno-agi/agno/issues/4097), closed (checked October 10, 2026) after Agno 2.0 added `configure_agno_logging`, which swaps module globals but leaves the default handlers on the loggers that modules imported directly. | `logging_config.py` |
 | Mem0Tools passes its user to Mem0 2 search and listing as a top-level `user_id`, which Mem0 rejects, so `search_memory` and `get_all_memories` return Mem0's error instead of memories. | [Issue #11340](https://github.com/agno-agi/agno/issues/11340), open with no fix PR (checked October 27, 2026). | `tools/agno_compat_mem0.py` |
 
@@ -26,6 +26,7 @@ Rows name related upstream work where any is known; each source comment records 
 
 | Observed gap or required extension point | Next upstream work | Boundary |
 | --- | --- | --- |
+| OpenAITools sends every text-to-speech model to `/v1/audio/speech`, where OpenAI's speech models shut down on January 6, 2027, while their replacement `gpt-realtime-2.1-mini` is served only over the Realtime API. | Synthesize `gpt-realtime` models through the Realtime API, reading the text verbatim. | `tools/agno_compat_openai.py` |
 | ModelsLab polls a local artifact UUID and discards completed URLs and wait outcomes. | Poll the provider job ID, accept numeric ETAs, retain completed outputs, and distinguish retryable status failures from terminal rejection. | `tools/agno_compat_modelslabs.py` |
 | MoviePy caption rendering assumes an Arial font file, ignores advertised styles, clips glyph bounds, overlaps wrapped words, leaves temporary audio after encoding failures, names the default output from the last dot anywhere in the video path, and rasterizes every caption line before encoding starts. | Fix each listed defect. | `custom_tools/agno_compat_moviepy.py` |
 | MoviePyVideoTools hands model-chosen video, caption, and output paths to `open()`, `os.replace`, and FFmpeg by name, and FFmpeg follows the paths and URLs listed in HLS playlists and DASH manifests. | Accept caller-supplied input readers and output writers. | `custom_tools/agno_compat_moviepy.py` |

@@ -129,7 +129,6 @@ async def test_with_the_response_cli_bound_the_shell_command_runs_in_its_own_win
         return f"ran {args}"
 
     shell, owner = await _windowed_shell(tmp_path, run_shell_command)
-    assert shell.entrypoint is not None
     async with response_cli_lifetime() as lifetime:
         lifetime.register(owner, TurnToolRegistry())
         async with asyncio.timeout(SETTLE_TIMEOUT_SECONDS):
@@ -166,7 +165,6 @@ async def test_a_shell_command_the_cli_dispatches_keeps_its_parent_command_s_win
         return f"ran {args}"
 
     shell, owner = await _windowed_shell(tmp_path, run_shell_command)
-    assert shell.entrypoint is not None
     async with response_cli_lifetime() as lifetime:
         lifetime.register(owner, TurnToolRegistry())
         async with asyncio.timeout(SETTLE_TIMEOUT_SECONDS):

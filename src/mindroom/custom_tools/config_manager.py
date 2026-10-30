@@ -10,7 +10,6 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal
 
 import yaml
-from agno.tools import Toolkit
 from pydantic import BaseModel, ConfigDict, JsonValue, ValidationError, model_validator
 
 from mindroom.api.config_lifecycle import commit_config
@@ -38,6 +37,7 @@ from mindroom.oauth.registry import load_oauth_providers
 from mindroom.oauth.service import oauth_connect_url
 from mindroom.redaction import REDACTED, redact_sensitive_text
 from mindroom.runtime_resolution import resolve_agent_execution
+from mindroom.tool_system.authoring import Toolkit
 from mindroom.tool_system.catalog import (
     ToolCategory,
     ToolStatus,

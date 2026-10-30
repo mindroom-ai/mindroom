@@ -25,7 +25,7 @@ from mindroom.llm.events import RunFinished, TextDelta, ToolStarted
 from mindroom.llm.messages import Message
 from mindroom.llm.runs import RunRecord, RunStatus, ToolExecution
 from mindroom.redaction import redact_sensitive_text
-from mindroom.tool_system.agno_toolkits import adapt_function, adapt_toolkit
+from mindroom.tool_system.agno_toolkits import adapt_toolkit
 from mindroom.tool_system.invocation import ToolCall, ToolCallContext, ToolNext, execute_tool_call, run_tool_call
 from mindroom.tool_system.progress import tool_progress_reporter
 from mindroom.tool_system.runtime_context import tool_runtime_context
@@ -37,6 +37,7 @@ from mindroom.tool_system.worker_routing import (
 )
 from tests.access_schema_support import with_responder_access
 from tests.agent_loop.helpers import collect, toolkit
+from tests.agent_tool_helpers import toolkit_offers
 from tests.delegation_helpers import _delegate_runtime_context, _runtime_paths
 from tests.fakes.scripted_model import Await, ScriptedModel, answer, calls
 from tests.fakes.scripted_model import tool_call as scripted_call
@@ -189,7 +190,7 @@ async def test_real_parent_tool_call_records_direct_provenance_without_schema_fi
     tools, config, runtime_paths = _tools(tmp_path)
     config = with_responder_access(config, "child", users=[_identity().requester_id])
     context = _delegate_runtime_context(config, runtime_paths, execution_identity=_identity())
-    function = adapt_function(tools.async_functions["run_subagent"])
+    function = toolkit_offers(tools, "run_subagent")
     # Minimal mode is hidden here because no allowed subagent can run it.
     assert set(function.parameters["properties"]) == {"agent_name", "task", "model"}
 

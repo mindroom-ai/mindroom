@@ -31,8 +31,7 @@ import pytest
 from pydantic import BaseModel
 
 from mindroom.tool_system.agno_toolkits import AGNO_EMPTY_PARAMETERS, adapt_toolkit
-from mindroom.tool_system.authoring import Toolkit
-from mindroom.tool_system.declarations import tool_schema_source
+from mindroom.tool_system.authoring import Toolkit, passthrough_parameters
 from mindroom.tool_system.tool_schema import tool_description, tool_parameters, validated_entrypoint
 from tests.agno_parity import tool_argument_probes as probes
 from tests.tool_system import agno_parity_support as support
@@ -57,19 +56,13 @@ _BUILDS = [
     *((tool_name, True) for tool_name in sorted(ALL_ENABLED_SCHEMAS)),
 ]
 # MindRoom-authored functions Agno hands an agent or run context, which an owned function reads through current_call().
-# The claude_agent ones move to current_call() when MindRoom's tools move to the owned API; the others override vendor
-# toolkits' methods and stay Agno functions.
+# They override vendor toolkits' methods and stay Agno functions.
 _FRAMEWORK_OBJECT_PARAMETERS = frozenset(
     {"agent", "team", "run_context", "_agno_agent", "_agno_team", "_agno_run_context"},
 )
+# Functions whose toolkit offers an authored schema in place of the one their signature derives.
+_AUTHORED_SCHEMAS = {"dynamic_tools": {"call_tool"}}
 _TAKE_FRAMEWORK_OBJECTS = {
-    "claude_agent": {
-        "claude_end_session",
-        "claude_interrupt",
-        "claude_send",
-        "claude_session_status",
-        "claude_start_session",
-    },
     "e2b": {"download_chart_data", "download_png_result"},
     "fal": {"generate_media", "image_to_image"},
     "gemini": {"generate_image"},
@@ -97,7 +90,7 @@ def golden_runtime(tmp_path_factory: pytest.TempPathFactory) -> tuple[Path, Conf
 
 
 def _mindroom_authored(entrypoint: Callable[..., Any]) -> bool:
-    source = inspect.unwrap(tool_schema_source(inspect.unwrap(entrypoint)))
+    source = inspect.unwrap(entrypoint)
     return source.__module__.startswith("mindroom.")
 
 
@@ -114,13 +107,22 @@ def test_every_mindroom_authored_function_derives_agnos_schema(
             pytest.skip(f"{tool_name} needs {missing}")
         overrides = support.all_enabled_overrides(tool_name) if all_enabled else None
         toolkit = support.build_toolkit(tool_name, config, runtime_paths, overrides)
+    if isinstance(toolkit, Toolkit):
+        entrypoints = {
+            name: function for name, function in toolkit.functions.items() if passthrough_parameters(function) is None
+        }
+    else:
+        entrypoints = {
+            name: function.entrypoint
+            for name, function in toolkit.get_async_functions().items()
+            if function.entrypoint is not None
+            and not function.skip_entrypoint_processing
+            and function.parameters == AGNO_EMPTY_PARAMETERS
+        }
     derived = {
-        name: function.entrypoint
-        for name, function in toolkit.get_async_functions().items()
-        if function.entrypoint is not None
-        and _mindroom_authored(function.entrypoint)
-        and not function.skip_entrypoint_processing
-        and function.parameters == AGNO_EMPTY_PARAMETERS
+        name: entrypoint
+        for name, entrypoint in entrypoints.items()
+        if _mindroom_authored(entrypoint) and name not in _AUTHORED_SCHEMAS.get(tool_name, set())
     }
     taking = {
         name

@@ -18,7 +18,7 @@ from mindroom.tool_system.runtime_context import get_tool_runtime_context
 if TYPE_CHECKING:
     from collections.abc import Iterator, Mapping
 
-    from mindroom.tool_system.agno_toolkits import Toolkit
+    from mindroom.tool_system.agno_toolkits import AnyToolkit
     from mindroom.tool_system.invocation import ToolCallContext
     from mindroom.tool_system.tool_function import ToolFunction
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
@@ -35,7 +35,7 @@ class JobTool:
     """
 
     function: ToolFunction
-    toolkit: Toolkit
+    toolkit: AnyToolkit
     authority: Mapping[str, Any]
 
     @property
