@@ -407,7 +407,7 @@ async def test_trigger_support_only_reload_rebinds_external_trigger_runtime(tmp_
         patch.object(orchestrator._startup_maintenance, "cancel", new=AsyncMock(return_value=False)),
         patch.object(orchestrator.plugin_watch, "sync_roots"),
         patch.object(orchestrator, "_sync_mcp_manager", new=AsyncMock(return_value=set())),
-        patch.object(orchestrator, "_apply_published_config_to_running_bots", new=AsyncMock()),
+        patch.object(orchestrator, "_refresh_running_bots_presence", new=AsyncMock()),
         patch.object(orchestrator, "_sync_runtime_support_services", new=AsyncMock()),
         patch.object(orchestrator._approval_recovery, "mark_startup_runtime_support_ready", new=AsyncMock()),
         patch.object(orchestrator, "_emit_config_reloaded", new=AsyncMock()),
@@ -767,7 +767,7 @@ async def test_apply_config_update_plan_rebinds_trigger_runtime_after_support_se
         patch.object(orchestrator._startup_maintenance, "cancel", new=AsyncMock(return_value=False)),
         patch.object(orchestrator.plugin_watch, "sync_roots"),
         patch.object(orchestrator, "_sync_mcp_manager", new=AsyncMock(return_value=set())),
-        patch.object(orchestrator, "_apply_published_config_to_running_bots", new=AsyncMock()),
+        patch.object(orchestrator, "_refresh_running_bots_presence", new=AsyncMock()),
         patch.object(orchestrator._external_trigger_runtime, "unbind"),
         patch.object(orchestrator.fleet, "stop", new=AsyncMock()),
         patch.object(orchestrator.fleet, "start", new=AsyncMock(return_value=EntityStartResults())),
@@ -1077,10 +1077,10 @@ async def test_reload_restarts_refreshed_mcp_dependents_inline_only_after_a_drai
     ):
         await orchestrator._apply_config_update_plan(current_config, plan)
 
-    # Kept bots adopt the new config; a dependent being replaced is stopped before it could.
+    # Every running bot adopts the new config as it is published, including a dependent replaced afterwards.
     assert orchestrator.config is new_config
     plain_bot.apply_published_config.assert_called_once_with()
-    assert code_bot.apply_published_config.called is not plan_requires_drain
+    code_bot.apply_published_config.assert_called_once_with()
     if plan_requires_drain:
         mock_notify.assert_not_awaited()
         assert mock_stop.await_args.args[0] == {"code", "dev_team"}

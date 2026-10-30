@@ -420,7 +420,7 @@ async def _turn(
     presence.last_active_ago = 0
     bot.client.get_presence = AsyncMock(return_value=presence)
     hooks = _Hooks()
-    bot.orchestrator.hook_registry = _hook_registry(hooks)
+    bot.orchestrator.hook_registry_state.registry = _hook_registry(hooks)
     return _Turn(
         bot=bot,
         runner=unwrap_extracted_collaborator(bot._response_runner),
@@ -681,7 +681,7 @@ async def test_a_stopped_turn_holds_its_conversation_until_its_interrupted_recor
     """
     preparing = asyncio.Event()
     turn = await _turn(tmp_path, monkeypatch, streaming=True, scripts={"default": [answer("Never sent.")]})
-    turn.bot.orchestrator.hook_registry = _hook_registry(turn.hooks, session_started=True)
+    turn.bot.orchestrator.hook_registry_state.registry = _hook_registry(turn.hooks, session_started=True)
 
     async def prepare_until_stopped(*_args: object, **_kwargs: object) -> None:
         preparing.set()

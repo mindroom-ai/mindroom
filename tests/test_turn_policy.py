@@ -42,6 +42,7 @@ from tests.conftest import (
     runtime_paths_for,
     test_runtime_paths,
 )
+from tests.runtime_fakes import ReadyRuntime, ready_runtime
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -57,11 +58,11 @@ _EVENT_ID = "$event:localhost"
 
 @dataclass(frozen=True)
 class _RuntimeStub:
-    """Minimal SupportsClientConfigOrchestrator stand-in for pure policy tests."""
+    """Minimal SupportsClientConfigOrchestrator stand-in for pure policy tests, in a ready runtime."""
 
     client: nio.AsyncClient | None
     config: Config
-    orchestrator: None = None
+    orchestrator: ReadyRuntime
     runtime_started_at: float = 0.0
 
 
@@ -84,7 +85,11 @@ def _policy_for(config: Config, agent_name: str) -> TurnPolicy:
     registry = entity_identity_registry(config, runtime_paths)
     return TurnPolicy(
         make_test_turn_policy_deps(
-            runtime=_RuntimeStub(client=make_matrix_client_mock(), config=config),
+            runtime=_RuntimeStub(
+                client=make_matrix_client_mock(),
+                config=config,
+                orchestrator=ready_runtime(config, runtime_paths),
+            ),
             logger=get_logger("test_turn_policy"),
             runtime_paths=runtime_paths,
             agent_name=agent_name,

@@ -477,11 +477,6 @@ class _MultiAgentOrchestrator:
         """Return the active hook registry for the runtime's own hooks, which hold none once it stops."""
         return self._hook_lifetime.registry
 
-    @hook_registry.setter
-    def hook_registry(self, value: HookRegistry) -> None:
-        """Publish one hook-registry snapshot to the runtime and every live lifetime that reads it."""
-        self.hook_registry_state.registry = value
-
     @property
     def script_runtime(self) -> ScriptRuntimeLifecycle:
         """Return the process-local background-script lifecycle collaborator."""
@@ -988,12 +983,12 @@ class _MultiAgentOrchestrator:
                         config,
                         self.runtime_paths,
                     )
-                    self.hook_registry = recovery_result.hook_registry
+                    self.hook_registry_state.registry = recovery_result.hook_registry
                     clear_worker_validation_snapshot_cache()
                     self.plugin_watch.replace_snapshots(watch_roots, watch_root_snapshots)
                     logger.warning(warning_message, source=source, **warning_kwargs)
                     raise
-                self.hook_registry = result.hook_registry
+                self.hook_registry_state.registry = result.hook_registry
                 clear_worker_validation_snapshot_cache()
                 self.plugin_watch.replace_snapshots(watch_roots, watch_root_snapshots)
                 logger.info(
@@ -1007,7 +1002,7 @@ class _MultiAgentOrchestrator:
                 await self._script_runtime.finish_reload()
 
     def _publish_config(self, plan: ConfigUpdatePlan, commit_plugins: Callable[[], HookRegistry] | None) -> None:
-        """Make the new config, its plugins, and its hook registry live in one step."""
+        """Make the new config, its plugins, and its hook registry live in one step, with what running bots derive."""
         new_config = plan.new_config
         self.config = new_config
         if plan.reply_membership_policy_changed:
@@ -1015,8 +1010,10 @@ class _MultiAgentOrchestrator:
         if commit_plugins is None:
             self.plugin_watch.sync_roots(new_config)
         else:
-            self.hook_registry = commit_plugins()
+            self.hook_registry_state.registry = commit_plugins()
         clear_worker_validation_snapshot_cache()
+        for bot in self.agent_bots.values():
+            bot.apply_published_config()
 
     def _prepare_plugins(self, plan: ConfigUpdatePlan) -> Callable[[], HookRegistry] | None:
         """Stage changed plugins before anything stops, so a plugin reload that fails to stage fails the reload with every bot intact.
@@ -1052,7 +1049,7 @@ class _MultiAgentOrchestrator:
         self.agent_reply_memberships.invalidate(config, reason="initial_config")
         await self._bind_event_journal()
         await self._tool_job_runtime.initialize()
-        self.hook_registry = hook_registry
+        self.hook_registry_state.registry = hook_registry
         await self._sync_mcp_manager(config)
         self._configure_approval_store_transport()
         for entity_name in entity_names:
@@ -1337,13 +1334,8 @@ class _MultiAgentOrchestrator:
                     task.cancel()
             await asyncio.gather(ready_wait, shutdown_wait, return_exceptions=True)
 
-    async def _apply_published_config_to_running_bots(self) -> None:
-        """Let the bots this reload keeps running refresh what they derive from the published config.
-
-        Every bot adopts it before any presence update awaits, so no bot's call authorization lags behind another's.
-        """
-        for bot in self.agent_bots.values():
-            bot.apply_published_config()
+    async def _refresh_running_bots_presence(self) -> None:
+        """Let each bot this reload keeps running show its presence under the published config."""
         for entity_name, bot in self.agent_bots.items():
             try:
                 await bot.refresh_presence()
@@ -1513,7 +1505,7 @@ class _MultiAgentOrchestrator:
                     # Replies may still be running, so these dependents restart behind their own drain.
                     await self._notify_mcp_catalog_change(deferred_server_id)
                 await self.fleet.stop(catalog_restarts)
-                await self._apply_published_config_to_running_bots()
+                await self._refresh_running_bots_presence()
                 if plan.router_invite_policy_changed and ROUTER_AGENT_NAME not in plan.restart:
                     router_bot = self.agent_bots.get(ROUTER_AGENT_NAME)
                     if router_bot is not None:

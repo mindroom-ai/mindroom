@@ -115,7 +115,7 @@ class TestBotSyncLifecycle(ThreadingBehaviorTestBase):
         start_client.close.side_effect = close_http
         hook_registry = MagicMock()
         hook_registry.has_hooks.side_effect = lambda event_name: event_name == EVENT_AGENT_STARTED
-        bot.orchestrator.hook_registry = hook_registry
+        bot.orchestrator.hook_registry_state.registry = hook_registry
 
         with (
             patch.object(bot, "ensure_user_account", AsyncMock()),
@@ -160,7 +160,7 @@ class TestBotSyncLifecycle(ThreadingBehaviorTestBase):
         async def backfill(_ctx: object) -> None:
             await later_hook()
 
-        bot.orchestrator.hook_registry = HookRegistry.from_plugins(
+        bot.orchestrator.hook_registry_state.registry = HookRegistry.from_plugins(
             [
                 SimpleNamespace(
                     name="room-owner",

@@ -286,7 +286,9 @@ def _install_reaction_recorder(bot: AgentBot) -> list[str]:
     async def record_reaction(ctx: ReactionReceivedContext) -> None:
         seen.append(ctx.event_id)
 
-    bot.orchestrator.hook_registry = HookRegistry.from_plugins([_hook_plugin("hooked", [record_reaction])])
+    bot.orchestrator.hook_registry_state.registry = HookRegistry.from_plugins(
+        [_hook_plugin("hooked", [record_reaction])],
+    )
     return seen
 
 
@@ -451,7 +453,9 @@ class TestAgentBot(AgentBotTestBase):
                 ),
             ],
         )
-        bot.orchestrator.hook_registry = HookRegistry.from_plugins([_hook_plugin("hooked", [record_reaction])])
+        bot.orchestrator.hook_registry_state.registry = HookRegistry.from_plugins(
+            [_hook_plugin("hooked", [record_reaction])],
+        )
         room = MagicMock()
         room.room_id = "!test:localhost"
         room.canonical_alias = None
@@ -492,7 +496,9 @@ class TestAgentBot(AgentBotTestBase):
         async def record_reaction(ctx: ReactionReceivedContext) -> None:
             seen.append(ctx.event_id)
 
-        bot.orchestrator.hook_registry = HookRegistry.from_plugins([_hook_plugin("hooked", [record_reaction])])
+        bot.orchestrator.hook_registry_state.registry = HookRegistry.from_plugins(
+            [_hook_plugin("hooked", [record_reaction])],
+        )
         room = MagicMock(room_id="!test:localhost", canonical_alias=None)
         event = self._make_handler_event("reaction", sender=sender_id, event_id="$reaction-during-reload")
         event.reacts_to = ""
@@ -544,7 +550,9 @@ class TestAgentBot(AgentBotTestBase):
             hook_started.set()
             await release_hook.wait()
 
-        bot.orchestrator.hook_registry = HookRegistry.from_plugins([_hook_plugin("hooked", [hold_reaction])])
+        bot.orchestrator.hook_registry_state.registry = HookRegistry.from_plugins(
+            [_hook_plugin("hooked", [hold_reaction])],
+        )
         room = MagicMock(room_id="!test:localhost", canonical_alias=None)
         event = self._make_handler_event("reaction", sender=sender_id, event_id="$admitted-reaction-hook")
         event.reacts_to = ""
@@ -611,7 +619,9 @@ class TestAgentBot(AgentBotTestBase):
         config = self._config_for_storage(tmp_path)
         bot = make_test_agent_bot(mock_agent_user, config=config, runtime_paths=runtime_paths_for(config))
         bot.client = MagicMock()
-        bot.orchestrator.hook_registry = HookRegistry.from_plugins([_hook_plugin("hooked", [record_reaction])])
+        bot.orchestrator.hook_registry_state.registry = HookRegistry.from_plugins(
+            [_hook_plugin("hooked", [record_reaction])],
+        )
         room = MagicMock()
         room.room_id = "!test:localhost"
         room.canonical_alias = None
@@ -650,7 +660,9 @@ class TestAgentBot(AgentBotTestBase):
         config = self._config_for_storage(tmp_path)
         bot = make_test_agent_bot(mock_agent_user, config=config, runtime_paths=runtime_paths_for(config))
         bot.client = MagicMock()
-        bot.orchestrator.hook_registry = HookRegistry.from_plugins([_hook_plugin("hooked", [record_reaction])])
+        bot.orchestrator.hook_registry_state.registry = HookRegistry.from_plugins(
+            [_hook_plugin("hooked", [record_reaction])],
+        )
         room = MagicMock(room_id="!test:localhost")
         event = self._make_handler_event("reaction", sender="@user:localhost", event_id="$reaction")
         event.key = "✅"
@@ -690,7 +702,9 @@ class TestAgentBot(AgentBotTestBase):
         )
         bot = make_test_agent_bot(router_user, config=config, runtime_paths=runtime_paths_for(config))
         bot.client = MagicMock()
-        bot.orchestrator.hook_registry = HookRegistry.from_plugins([_hook_plugin("hooked", [record_reaction])])
+        bot.orchestrator.hook_registry_state.registry = HookRegistry.from_plugins(
+            [_hook_plugin("hooked", [record_reaction])],
+        )
         room = MagicMock(room_id="!test:localhost")
         event = _reaction_event("✅", "$reaction")
 
@@ -2539,7 +2553,9 @@ class TestAgentBot(AgentBotTestBase):
             message = "cancel after reaction hook side effect"
             raise asyncio.CancelledError(message)
 
-        bot.orchestrator.hook_registry = HookRegistry.from_plugins([_hook_plugin("hooked", [emit_then_crash])])
+        bot.orchestrator.hook_registry_state.registry = HookRegistry.from_plugins(
+            [_hook_plugin("hooked", [emit_then_crash])],
+        )
         with _mock_interactive_claim(bot, None):
             await admit_dispatch_event(
                 bot._journal_dispatcher,
@@ -2562,7 +2578,9 @@ class TestAgentBot(AgentBotTestBase):
         async def emit_replay(ctx: ReactionReceivedContext) -> None:
             emissions.append(ctx.event_id)
 
-        restarted.orchestrator.hook_registry = HookRegistry.from_plugins([_hook_plugin("hooked", [emit_replay])])
+        restarted.orchestrator.hook_registry_state.registry = HookRegistry.from_plugins(
+            [_hook_plugin("hooked", [emit_replay])],
+        )
         with _mock_interactive_claim(restarted, None) as interactive_handler:
             await restarted._journal_dispatcher.drain_once()
 
@@ -2592,7 +2610,9 @@ class TestAgentBot(AgentBotTestBase):
             message = "crash after hook claim"
             raise asyncio.CancelledError(message)
 
-        bot.orchestrator.hook_registry = HookRegistry.from_plugins([_hook_plugin("hooked", [crash_after_claim])])
+        bot.orchestrator.hook_registry_state.registry = HookRegistry.from_plugins(
+            [_hook_plugin("hooked", [crash_after_claim])],
+        )
         with _mock_interactive_claim(bot, None):
             await admit_dispatch_event(
                 bot._journal_dispatcher,
@@ -2620,7 +2640,9 @@ class TestAgentBot(AgentBotTestBase):
         async def record_replay(ctx: ReactionReceivedContext) -> None:
             replays.append(ctx.event_id)
 
-        restarted.orchestrator.hook_registry = HookRegistry.from_plugins([_hook_plugin("hooked", [record_replay])])
+        restarted.orchestrator.hook_registry_state.registry = HookRegistry.from_plugins(
+            [_hook_plugin("hooked", [record_replay])],
+        )
         gate = restarted._runtime_view.response_admission_gate
         ingress = restarted._reaction_dispatcher.deps.ingress
         settled_inside_fence: list[tuple[tuple[str, ...], int]] = []
@@ -2782,7 +2804,9 @@ class TestAgentBot(AgentBotTestBase):
                 },
             ),
         )
-        bot.orchestrator.hook_registry = HookRegistry.from_plugins([_hook_plugin("hooked", [record_reaction])])
+        bot.orchestrator.hook_registry_state.registry = HookRegistry.from_plugins(
+            [_hook_plugin("hooked", [record_reaction])],
+        )
         room = MagicMock()
         room.room_id = "!test:localhost"
         room.canonical_alias = None
@@ -2823,7 +2847,9 @@ class TestAgentBot(AgentBotTestBase):
         resolve_related_event_thread_id = AsyncMock(
             return_value="$thread-root",
         )
-        bot.orchestrator.hook_registry = HookRegistry.from_plugins([_hook_plugin("hooked", [record_reaction])])
+        bot.orchestrator.hook_registry_state.registry = HookRegistry.from_plugins(
+            [_hook_plugin("hooked", [record_reaction])],
+        )
         room = MagicMock()
         room.room_id = "!test:localhost"
         room.canonical_alias = None
@@ -2910,7 +2936,9 @@ class TestAgentBot(AgentBotTestBase):
             raise AssertionError(msg)
 
         bot.client.room_get_event = AsyncMock(side_effect=fetch_related_event)
-        bot.orchestrator.hook_registry = HookRegistry.from_plugins([_hook_plugin("hooked", [record_reaction])])
+        bot.orchestrator.hook_registry_state.registry = HookRegistry.from_plugins(
+            [_hook_plugin("hooked", [record_reaction])],
+        )
         room = MagicMock()
         room.room_id = "!test:localhost"
         room.canonical_alias = None

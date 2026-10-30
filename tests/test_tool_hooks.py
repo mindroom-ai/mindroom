@@ -1948,7 +1948,7 @@ async def test_agent_bot_tool_runtime_context_routes_custom_events_from_tool_hoo
     with registered_toolkit(tool_name, DemoToolkit):
         config = _config(tmp_path, tools=[tool_name], plugins=["./plugins/tool-policy"])
         bot = _agent_bot(config=config)
-        bot.orchestrator.hook_registry = HookRegistry.from_plugins(plugins)
+        bot.orchestrator.hook_registry_state.registry = HookRegistry.from_plugins(plugins)
 
         install_model_providers(monkeypatch, {"default": ScriptedModel([])})
         target = MessageTarget.resolve(

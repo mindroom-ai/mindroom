@@ -1192,7 +1192,9 @@ class TestAgentBot(AgentBotTestBase):
         # The placeholder is the first event the reply sends, and the answer edits it.
         unique_room_send_responses(bot.client, prefix="$response")
         _set_knowledge_for_agent(bot, MagicMock(return_value=None))
-        bot.orchestrator.hook_registry = HookRegistry.from_plugins([_hook_plugin("hooked", [before_hook, after_hook])])
+        bot.orchestrator.hook_registry_state.registry = HookRegistry.from_plugins(
+            [_hook_plugin("hooked", [before_hook, after_hook])],
+        )
         mock_ai = AsyncMock(return_value="Handled")
         with patch_response_runner_module(
             typing_indicator=_noop_typing_indicator,
@@ -1301,7 +1303,9 @@ class TestAgentBot(AgentBotTestBase):
         bot.client = _make_matrix_client_mock()
         bot.client.rooms = {}
         _set_knowledge_for_agent(bot, MagicMock(return_value=None))
-        bot.orchestrator.hook_registry = HookRegistry.from_plugins([_hook_plugin("hooked", [before_hook, after_hook])])
+        bot.orchestrator.hook_registry_state.registry = HookRegistry.from_plugins(
+            [_hook_plugin("hooked", [before_hook, after_hook])],
+        )
         mock_stream_agent_response = MagicMock(return_value=mock_streaming_response())
         with (
             patch(
@@ -1550,7 +1554,9 @@ class TestAgentBot(AgentBotTestBase):
         config = self._config_for_storage(tmp_path)
         bot = make_test_agent_bot(mock_agent_user, config=config, runtime_paths=runtime_paths_for(config))
         bot.client = MagicMock()
-        bot.orchestrator.hook_registry = HookRegistry.from_plugins([_hook_plugin("hooked", [before_hook])])
+        bot.orchestrator.hook_registry_state.registry = HookRegistry.from_plugins(
+            [_hook_plugin("hooked", [before_hook])],
+        )
         response_envelope = _hook_envelope(body="hello", source_event_id="$event123")
         redact_message_event = AsyncMock(return_value=True)
         gateway = replace_delivery_gateway_deps(bot, redact_message_event=redact_message_event)

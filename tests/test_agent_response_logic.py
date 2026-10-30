@@ -45,6 +45,7 @@ from tests.conftest import (
     test_runtime_paths,
 )
 from tests.identity_helpers import entity_ids, persist_entity_accounts
+from tests.runtime_fakes import ready_runtime
 
 
 def _bind_runtime_config(config: Config, runtime_root: Path | None = None) -> Config:
@@ -170,7 +171,7 @@ class TestAgentResponseLogic:
         team_id = entity_ids(config, runtime_paths)["ops"]
         runtime = MagicMock()
         runtime.config = config
-        runtime.orchestrator = None
+        runtime.orchestrator = ready_runtime(runtime.config, runtime_paths_for(runtime.config))
         policy = TurnPolicy(
             make_test_turn_policy_deps(
                 runtime=runtime,
@@ -224,7 +225,7 @@ class TestAgentResponseLogic:
         ids = entity_ids(config, runtime_paths)
         runtime = MagicMock()
         runtime.config = config
-        runtime.orchestrator = None
+        runtime.orchestrator = ready_runtime(runtime.config, runtime_paths_for(runtime.config))
         policy = TurnPolicy(
             make_test_turn_policy_deps(
                 runtime=runtime,
@@ -287,7 +288,7 @@ class TestAgentResponseLogic:
         ids = entity_ids(config, runtime_paths)
         runtime = MagicMock()
         runtime.config = config
-        runtime.orchestrator = None
+        runtime.orchestrator = ready_runtime(runtime.config, runtime_paths_for(runtime.config))
         policy = TurnPolicy(
             make_test_turn_policy_deps(
                 runtime=runtime,
@@ -329,7 +330,7 @@ class TestAgentResponseLogic:
         runtime = MagicMock()
         runtime.client = None
         runtime.config = self.config
-        runtime.orchestrator = None
+        runtime.orchestrator = ready_runtime(runtime.config, runtime_paths_for(runtime.config))
         policy = TurnPolicy(
             make_test_turn_policy_deps(
                 runtime=runtime,
@@ -405,7 +406,7 @@ class TestAgentResponseLogic:
         runtime = MagicMock()
         runtime.client = None
         runtime.config = self.config
-        runtime.orchestrator = None
+        runtime.orchestrator = ready_runtime(runtime.config, runtime_paths_for(runtime.config))
         logger = MagicMock()
         policy = TurnPolicy(
             make_test_turn_policy_deps(
@@ -491,7 +492,7 @@ class TestAgentResponseLogic:
         runtime = MagicMock()
         runtime.client = None
         runtime.config = self.config
-        runtime.orchestrator = None
+        runtime.orchestrator = ready_runtime(runtime.config, runtime_paths_for(runtime.config))
         logger = MagicMock()
         policy = TurnPolicy(
             make_test_turn_policy_deps(
@@ -563,7 +564,7 @@ class TestAgentResponseLogic:
         runtime = MagicMock()
         runtime.client = None
         runtime.config = self.config
-        runtime.orchestrator = None
+        runtime.orchestrator = ready_runtime(runtime.config, runtime_paths_for(runtime.config))
         policy = TurnPolicy(
             make_test_turn_policy_deps(
                 runtime=runtime,
@@ -657,7 +658,7 @@ class TestAgentResponseLogic:
         team_id = entity_ids(config, runtime_paths)["ops"]
         runtime = MagicMock()
         runtime.config = config
-        runtime.orchestrator = None
+        runtime.orchestrator = ready_runtime(runtime.config, runtime_paths_for(runtime.config))
         policy = TurnPolicy(
             make_test_turn_policy_deps(
                 runtime=runtime,

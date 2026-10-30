@@ -388,7 +388,7 @@ async def test_bot_ready_fires_on_first_sync_response(tmp_path: Path) -> None:
     async def on_ready(ctx: AgentLifecycleContext) -> None:
         fired_events.append(ctx.event_name)
 
-    bot.orchestrator.hook_registry = HookRegistry.from_plugins([_plugin("test-plugin", [on_ready])])
+    bot.orchestrator.hook_registry_state.registry = HookRegistry.from_plugins([_plugin("test-plugin", [on_ready])])
 
     with patch("mindroom.bot.mark_matrix_sync_success", return_value=datetime.now(UTC)):
         await _complete_frame(bot)
@@ -1311,7 +1311,7 @@ async def test_bot_ready_fires_only_once(tmp_path: Path) -> None:
         nonlocal fired_count
         fired_count += 1
 
-    bot.orchestrator.hook_registry = HookRegistry.from_plugins([_plugin("test-plugin", [on_ready])])
+    bot.orchestrator.hook_registry_state.registry = HookRegistry.from_plugins([_plugin("test-plugin", [on_ready])])
 
     with patch("mindroom.bot.mark_matrix_sync_success", return_value=datetime.now(UTC)):
         await _complete_frame(bot)
@@ -1358,7 +1358,9 @@ async def test_bot_ready_fires_after_agent_started(tmp_path: Path) -> None:
     async def on_ready(_ctx: AgentLifecycleContext) -> None:
         event_order.append("bot:ready")
 
-    bot.orchestrator.hook_registry = HookRegistry.from_plugins([_plugin("test-plugin", [on_started, on_ready])])
+    bot.orchestrator.hook_registry_state.registry = HookRegistry.from_plugins(
+        [_plugin("test-plugin", [on_started, on_ready])],
+    )
 
     # agent:started fires during start() setup
     await bot._emit_agent_lifecycle_event(EVENT_AGENT_STARTED)
@@ -1386,7 +1388,7 @@ async def test_bot_ready_hook_can_send_messages(tmp_path: Path) -> None:
     async def on_ready(ctx: AgentLifecycleContext) -> None:
         await ctx.send_message("!room:localhost", "I'm ready!")
 
-    bot.orchestrator.hook_registry = HookRegistry.from_plugins([_plugin("test-plugin", [on_ready])])
+    bot.orchestrator.hook_registry_state.registry = HookRegistry.from_plugins([_plugin("test-plugin", [on_ready])])
 
     with (
         patch("mindroom.bot.mark_matrix_sync_success", return_value=datetime.now(UTC)),
@@ -1427,7 +1429,7 @@ async def test_lifecycle_hooks_prefer_bot_room_state_helpers_before_router_fallb
         )
         results.append((query_result, put_result))
 
-    bot.orchestrator.hook_registry = HookRegistry.from_plugins([_plugin("test-plugin", [on_lifecycle])])
+    bot.orchestrator.hook_registry_state.registry = HookRegistry.from_plugins([_plugin("test-plugin", [on_lifecycle])])
 
     await bot._emit_agent_lifecycle_event(event_name)
 
@@ -1472,7 +1474,7 @@ async def test_lifecycle_hooks_fallback_to_router_room_state_helpers_when_bot_ca
         )
         results.append((query_result, put_result))
 
-    bot.orchestrator.hook_registry = HookRegistry.from_plugins([_plugin("test-plugin", [on_lifecycle])])
+    bot.orchestrator.hook_registry_state.registry = HookRegistry.from_plugins([_plugin("test-plugin", [on_lifecycle])])
 
     await bot._emit_agent_lifecycle_event(event_name)
 
@@ -1506,7 +1508,7 @@ async def test_bot_ready_does_not_fire_during_sync_shutdown(tmp_path: Path) -> N
         nonlocal fired
         fired = True
 
-    bot.orchestrator.hook_registry = HookRegistry.from_plugins([_plugin("test-plugin", [on_ready])])
+    bot.orchestrator.hook_registry_state.registry = HookRegistry.from_plugins([_plugin("test-plugin", [on_ready])])
     bot._runtime_view.begin_draining()
 
     with patch("mindroom.bot.mark_matrix_sync_success", return_value=datetime.now(UTC)):
@@ -1528,7 +1530,7 @@ async def test_bot_ready_fires_after_shutdown_clears(tmp_path: Path) -> None:
         nonlocal fired_count
         fired_count += 1
 
-    bot.orchestrator.hook_registry = HookRegistry.from_plugins([_plugin("test-plugin", [on_ready])])
+    bot.orchestrator.hook_registry_state.registry = HookRegistry.from_plugins([_plugin("test-plugin", [on_ready])])
 
     with patch("mindroom.bot.mark_matrix_sync_success", return_value=datetime.now(UTC)):
         # First sync arrives during shutdown — bot:ready suppressed
@@ -1560,7 +1562,7 @@ async def test_bot_ready_context_has_correct_entity_info(tmp_path: Path) -> None
     async def on_ready(ctx: AgentLifecycleContext) -> None:
         captured_ctx.append(ctx)
 
-    bot.orchestrator.hook_registry = HookRegistry.from_plugins([_plugin("test-plugin", [on_ready])])
+    bot.orchestrator.hook_registry_state.registry = HookRegistry.from_plugins([_plugin("test-plugin", [on_ready])])
 
     with patch("mindroom.bot.mark_matrix_sync_success", return_value=datetime.now(UTC)):
         await _complete_frame(bot)
@@ -1587,7 +1589,7 @@ async def test_lifecycle_context_preserves_configured_rooms_and_exposes_joined_r
     async def on_started(ctx: AgentLifecycleContext) -> None:
         captured_ctx.append(ctx)
 
-    bot.orchestrator.hook_registry = HookRegistry.from_plugins([_plugin("test-plugin", [on_started])])
+    bot.orchestrator.hook_registry_state.registry = HookRegistry.from_plugins([_plugin("test-plugin", [on_started])])
 
     await bot._emit_agent_lifecycle_event(EVENT_AGENT_STARTED)
 
@@ -1609,7 +1611,7 @@ async def test_bot_ready_context_includes_joined_rooms_from_first_sync(tmp_path:
     async def on_ready(ctx: AgentLifecycleContext) -> None:
         captured_ctx.append(ctx)
 
-    bot.orchestrator.hook_registry = HookRegistry.from_plugins([_plugin("test-plugin", [on_ready])])
+    bot.orchestrator.hook_registry_state.registry = HookRegistry.from_plugins([_plugin("test-plugin", [on_ready])])
 
     with patch("mindroom.bot.mark_matrix_sync_success", return_value=datetime.now(UTC)):
         await _complete_frame(bot)

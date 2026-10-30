@@ -759,7 +759,7 @@ async def test_emit_config_reloaded_context_includes_matrix_admin(tmp_path: Path
         runtime_paths,
     )
     orchestrator = _MultiAgentOrchestrator(runtime_paths=runtime_paths, config=config)
-    orchestrator.hook_registry = MagicMock()
+    orchestrator.hook_registry_state.registry = MagicMock()
     orchestrator.hook_registry.has_hooks.return_value = True
     router_client = AsyncMock(spec=nio.AsyncClient)
     router_client.homeserver = "http://localhost:8008"

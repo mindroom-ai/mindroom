@@ -1237,7 +1237,7 @@ class TestAgentBot(AgentBotTestBase):
         )
         registry_stub = MagicMock()
         registry_stub.has_hooks.return_value = True
-        bot.orchestrator.hook_registry = registry_stub
+        bot.orchestrator.hook_registry_state.registry = registry_stub
 
         with patch(
             "mindroom.hooks.ingress.emit_collect",

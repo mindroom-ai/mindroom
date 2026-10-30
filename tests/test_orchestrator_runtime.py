@@ -2883,7 +2883,7 @@ class TestMultiAgentOrchestrator:
         config = _runtime_bound_config(Config(), tmp_path)
         orchestrator = _MultiAgentOrchestrator(runtime_paths=runtime_paths_for(config), config=config)
         registry = HookRegistry.from_plugins([])
-        orchestrator.hook_registry = registry
+        orchestrator.hook_registry_state.registry = registry
         bot_hooks = orchestrator.hook_registry_state.lifetime()
         orchestrator._hook_lifetime.end()
 
@@ -4697,7 +4697,7 @@ class TestMultiAgentOrchestrator:
             config=Config(),
         )
         active_registry = HookRegistry.empty()
-        orchestrator.hook_registry = active_registry
+        orchestrator.hook_registry_state.registry = active_registry
         context = ConfigReloadedContext(
             event_name="config:reloaded",
             plugin_name="test",
@@ -4968,28 +4968,26 @@ class TestMultiAgentOrchestrator:
         reset_runtime_state()
 
     @pytest.mark.asyncio
-    async def test_apply_published_config_binds_all_before_best_effort_presence(self, tmp_path: Path) -> None:
-        """Presence failures must not expose mixed config or block later unchanged bots."""
+    async def test_publishing_a_reload_refreshes_every_bots_derived_state_before_any_presence_update(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """Publication itself refreshes what every running bot derives, and a presence failure blocks no other bot."""
         new_config = Config(defaults={"enable_streaming": False})
-        orchestrator = _MultiAgentOrchestrator(runtime_paths=TestAgentBot._runtime_paths(tmp_path), config=new_config)
+        orchestrator = _MultiAgentOrchestrator(runtime_paths=TestAgentBot._runtime_paths(tmp_path), config=Config())
         first_bot = _mock_managed_bot()
         second_bot = _mock_managed_bot()
         install_bots(orchestrator, {"first": first_bot, "second": second_bot})
-        second_bot_adopted_at_first_await: list[bool] = []
 
-        async def fail_first_presence_update() -> None:
-            second_bot_adopted_at_first_await.append(second_bot.apply_published_config.called)
-            msg = "presence unavailable"
-            raise RuntimeError(msg)
+        orchestrator._publish_config(ConfigUpdatePlan(new_config=new_config), None)
 
-        first_bot.refresh_presence.side_effect = fail_first_presence_update
-
-        with patch("mindroom.orchestrator.logger.exception") as mock_log_exception:
-            await orchestrator._apply_published_config_to_running_bots()
-
+        assert orchestrator.config is new_config
         first_bot.apply_published_config.assert_called_once_with()
         second_bot.apply_published_config.assert_called_once_with()
-        assert second_bot_adopted_at_first_await == [True]
+        first_bot.refresh_presence.side_effect = RuntimeError("presence unavailable")
+        with patch("mindroom.orchestrator.logger.exception") as mock_log_exception:
+            await orchestrator._refresh_running_bots_presence()
+
         first_bot.refresh_presence.assert_awaited_once_with()
         second_bot.refresh_presence.assert_awaited_once_with()
         mock_log_exception.assert_called_once_with("bot_presence_update_failed", agent="first")
@@ -5233,7 +5231,7 @@ class TestMultiAgentOrchestrator:
             runtime_paths=TestAgentBot._runtime_paths(tmp_path),
             config=current_config,
         )
-        orchestrator.hook_registry = old_hook_registry
+        orchestrator.hook_registry_state.registry = old_hook_registry
         plan = ConfigUpdatePlan(new_config=new_config, mindroom_user_changed=True, reply_authorization_changed=True)
 
         with (
@@ -5376,7 +5374,7 @@ class TestMultiAgentOrchestrator:
             config=current_config,
         )
         old_hook_registry = HookRegistry.empty()
-        orchestrator.hook_registry = old_hook_registry
+        orchestrator.hook_registry_state.registry = old_hook_registry
         plan = ConfigUpdatePlan(
             new_config=new_config,
             restart=set(),
@@ -5449,7 +5447,7 @@ class TestMultiAgentOrchestrator:
             runtime_paths=TestAgentBot._runtime_paths(tmp_path),
             config=current_config,
         )
-        orchestrator.hook_registry = HookRegistry.empty()
+        orchestrator.hook_registry_state.registry = HookRegistry.empty()
         plan = ConfigUpdatePlan(
             new_config=new_config,
             restart=set(),

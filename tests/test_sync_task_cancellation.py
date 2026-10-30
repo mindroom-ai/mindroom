@@ -2711,7 +2711,7 @@ async def test_update_config_replays_cancelled_startup_maintenance_and_runs_appr
             patch("mindroom.orchestration.config_lifecycle.build_config_update_plan", return_value=plan),
             patch.object(orchestrator, "_sync_mcp_manager", new=AsyncMock(return_value=set())),
             patch.object(orchestrator, "_sync_runtime_support_services", new=AsyncMock()),
-            patch.object(orchestrator, "_apply_published_config_to_running_bots", new=AsyncMock()),
+            patch.object(orchestrator, "_refresh_running_bots_presence", new=AsyncMock()),
             patch.object(orchestrator, "_emit_config_reloaded", new=AsyncMock()),
             patch.object(orchestrator._startup_maintenance, "start", side_effect=replay_startup_maintenance),
             patch.object(
@@ -2775,7 +2775,7 @@ async def test_config_reload_during_post_readiness_room_setup_replays_it_with_li
         patch("mindroom.orchestration.config_lifecycle.build_config_update_plan", return_value=plan),
         patch.object(orchestrator, "_sync_mcp_manager", new=AsyncMock(return_value=set())),
         patch.object(orchestrator, "_sync_runtime_support_services", new=AsyncMock()),
-        patch.object(orchestrator, "_apply_published_config_to_running_bots", side_effect=replace_general_bot),
+        patch.object(orchestrator, "_refresh_running_bots_presence", side_effect=replace_general_bot),
         patch.object(orchestrator, "_emit_config_reloaded", new=AsyncMock()),
         patch.object(orchestrator._rooms, "setup", side_effect=setup_rooms),
         patch.object(orchestrator._external_trigger_runtime, "bind_if_ready"),

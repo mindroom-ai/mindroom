@@ -29,6 +29,13 @@ if TYPE_CHECKING:
 _PROMPT_ONLY_AGENT_FIELDS = frozenset(
     {"display_name", "role", "instructions", "minimal_instructions", "model", "cheap_model", "markdown"},
 )
+# Private config state that records where the config came from or how agents were generated, never what they hold;
+# every other private field, such as the tools a failed plugin load made unavailable, counts as authority.
+_PROVENANCE_PRIVATE_FIELDS = frozenset(
+    {"_source_files", "_source_fingerprint", "_uses_includes", "_generated_agent_dumps"},
+)
+# Private config state kept per agent, of which only the catalog's own agent's entry counts.
+_PER_AGENT_PRIVATE_FIELDS = frozenset({"_personal_agent_instances", "_generated_agents"})
 
 
 def validate_approval_tool_owners(
@@ -168,9 +175,15 @@ def _catalog_authority(config: Config, agent_name: str) -> dict[str, Any] | None
     agent = config.agents.get(agent_name)
     if agent is None:
         return None
+    private = config.__pydantic_private__ or {}
     return {
         **config.model_dump(exclude={"agents", "teams"}),
         "agent": agent.model_dump(exclude=set(_PROMPT_ONLY_AGENT_FIELDS)),
+        "private": {
+            name: value.get(agent_name) if name in _PER_AGENT_PRIVATE_FIELDS else value
+            for name, value in private.items()
+            if name not in _PROVENANCE_PRIVATE_FIELDS
+        },
     }
 
 

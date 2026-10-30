@@ -22,6 +22,7 @@ from mindroom.agent_loop.tools import offered_toolkits
 from mindroom.approval import tool_owners as approval_tools
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
+from mindroom.config.personal_agents import PersonalAgentInstance
 from mindroom.message_target import MessageTarget
 from mindroom.session_storage.types import ConversationSession
 from mindroom.tool_jobs.control import JobControl, job_control_context
@@ -874,25 +875,49 @@ async def test_shared_cli_authorizer_rejects_revoked_prepared_call(
     assert effects == []
 
 
+def _remove_helper(config: Config) -> None:
+    del config.agents["helper"]
+
+
+def _personal_instance(user_id: str) -> PersonalAgentInstance:
+    return PersonalAgentInstance(template="assistant", user_id=user_id, matrix_username=None)
+
+
+# Each live config edit, and whether a prepared CLI call of `helper` stays permitted after it.
+_CONFIG_EDITS: dict[str, tuple[Callable[[Config], object], bool]] = {
+    "other_agent_instructions": (
+        lambda config: setattr(config.agents["other"], "instructions", ["Be thorough and kind."]),
+        True,
+    ),
+    "own_instructions": (lambda config: setattr(config.agents["helper"], "instructions", ["Be very brief."]), True),
+    "own_model": (lambda config: setattr(config.agents["helper"], "model", "other-model"), True),
+    "config_file_edited": (lambda config: setattr(config, "_source_fingerprint", "edited"), True),
+    "own_tools": (lambda config: setattr(config.agents["helper"], "tools", []), False),
+    "own_access": (lambda config: setattr(config.agents["helper"], "allow_self_config", True), False),
+    "own_graph_edits": (lambda config: setattr(config.agents["helper"], "knowledge_graph_edits", True), False),
+    "approval_default": (lambda config: setattr(config.tool_approval, "default", "require_approval"), False),
+    "tools_unavailable_after_plugin_failure": (
+        lambda config: setattr(config, "_unavailable_tool_names", {"shell"}),
+        False,
+    ),
+    "other_personal_agent_instance": (
+        lambda config: setattr(config, "_personal_agent_instances", {"other": _personal_instance("@bob:test")}),
+        True,
+    ),
+    "own_personal_agent_instance": (
+        lambda config: setattr(config, "_personal_agent_instances", {"helper": _personal_instance("@bob:test")}),
+        False,
+    ),
+    "own_removal": (_remove_helper, False),
+}
+
+
 @pytest.mark.asyncio
-@pytest.mark.parametrize(
-    ("edit", "still_permitted"),
-    [
-        ("other_agent_instructions", True),
-        ("own_instructions", True),
-        ("own_model", True),
-        ("own_tools", False),
-        ("own_access", False),
-        ("own_graph_edits", False),
-        ("approval_default", False),
-        ("own_removal", False),
-    ],
-)
+@pytest.mark.parametrize("edit", _CONFIG_EDITS)
 async def test_a_prepared_cli_call_survives_config_edits_that_leave_its_agent_unchanged(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     edit: str,
-    still_permitted: bool,
 ) -> None:
     """A live reload refuses a prepared CLI call only when it changed what its own agent is given."""
     effects = []
@@ -909,22 +934,8 @@ async def test_a_prepared_cli_call_survives_config_edits_that_leave_its_agent_un
         },
     )
     current = config.model_copy(deep=True)
-    if edit == "other_agent_instructions":
-        current.agents["other"].instructions = ["Be thorough and kind."]
-    elif edit == "own_instructions":
-        current.agents["helper"].instructions = ["Be very brief."]
-    elif edit == "own_model":
-        current.agents["helper"].model = "other-model"
-    elif edit == "own_tools":
-        current.agents["helper"].tools = []
-    elif edit == "own_access":
-        current.agents["helper"].allow_self_config = True
-    elif edit == "own_graph_edits":
-        current.agents["helper"].knowledge_graph_edits = True
-    elif edit == "approval_default":
-        current.tool_approval.default = "require_approval"
-    else:
-        del current.agents["helper"]
+    apply_edit, still_permitted = _CONFIG_EDITS[edit]
+    apply_edit(current)
     runtime = replace(catalog.runtime_context, config=config, config_provider=lambda: current)
     catalog.runtime_context = runtime
     binding = await catalog.bind(ToolKey("actions", "action"))

@@ -425,7 +425,9 @@ class TestAgentBot(AgentBotTestBase):
         bot = make_test_agent_bot(mock_agent_user, config=config, runtime_paths=runtime_paths_for(config))
         install_direct_response_admission(bot)
         bot.client = _make_matrix_client_mock()
-        bot.orchestrator.hook_registry = HookRegistry.from_plugins([_hook_plugin("hooked", [before_hook, after_hook])])
+        bot.orchestrator.hook_registry_state.registry = HookRegistry.from_plugins(
+            [_hook_plugin("hooked", [before_hook, after_hook])],
+        )
         with (
             patch(
                 "mindroom.delivery_gateway.send_message_outcome",
@@ -1072,7 +1074,9 @@ class TestAgentBot(AgentBotTestBase):
         )
         bot.client = _make_matrix_client_mock()
         unique_room_send_responses(bot.client, prefix="$team-response")
-        bot.orchestrator.hook_registry = HookRegistry.from_plugins([_hook_plugin("hooked", [suppressing_hook])])
+        bot.orchestrator.hook_registry_state.registry = HookRegistry.from_plugins(
+            [_hook_plugin("hooked", [suppressing_hook])],
+        )
         effects = _record_post_response_effects(bot)
 
         with patch_response_runner_module(
@@ -1376,7 +1380,9 @@ class TestAgentBot(AgentBotTestBase):
         bot = make_test_agent_bot(mock_agent_user, config=config, runtime_paths=runtime_paths_for(config))
         bot.client = _make_matrix_client_mock()
         unique_room_send_responses(bot.client, prefix="$stream")
-        bot.orchestrator.hook_registry = HookRegistry.from_plugins([_hook_plugin("hooked", [before_hook])])
+        bot.orchestrator.hook_registry_state.registry = HookRegistry.from_plugins(
+            [_hook_plugin("hooked", [before_hook])],
+        )
 
         with patch_response_runner_module(
             should_use_streaming=AsyncMock(return_value=True),
@@ -1429,7 +1435,9 @@ class TestAgentBot(AgentBotTestBase):
         bot = make_test_agent_bot(mock_agent_user, config=config, runtime_paths=runtime_paths_for(config))
         bot.client = _make_matrix_client_mock()
         bot._redact_message_event = AsyncMock(return_value=True)
-        bot.orchestrator.hook_registry = HookRegistry.from_plugins([_hook_plugin("hooked", [before_hook])])
+        bot.orchestrator.hook_registry_state.registry = HookRegistry.from_plugins(
+            [_hook_plugin("hooked", [before_hook])],
+        )
         replace_delivery_gateway_deps(bot, redact_message_event=bot._redact_message_event)
 
         with (

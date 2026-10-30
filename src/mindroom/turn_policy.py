@@ -18,10 +18,7 @@ from mindroom.dispatch_source import ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND, Schedu
 from mindroom.entity_resolution import entity_identity_registry
 from mindroom.managed_room_notice import managed_room_notice, responder_display_names
 from mindroom.matrix.rooms import is_dm_room
-from mindroom.responder_availability import (
-    filter_materializable_responders,
-    materializable_agent_names_for_orchestrator,
-)
+from mindroom.responder_availability import filter_materializable_responders
 from mindroom.runtime_protocols import SupportsClientConfigOrchestrator  # noqa: TC001
 from mindroom.teams.formation import (
     TeamIntent,
@@ -30,6 +27,7 @@ from mindroom.teams.formation import (
     TeamResolution,
     decide_team_formation,
     resolve_configured_team,
+    resolve_live_shared_agent_names,
 )
 from mindroom.teams.spec import TeamMode
 from mindroom.thread_utils import (
@@ -130,14 +128,10 @@ class TurnPolicyDeps:
 
 @dataclass(frozen=True)
 class _ResponderAvailability:
-    """Point-in-time responder availability threaded through one decision flow.
+    """Point-in-time responder availability threaded through one decision flow."""
 
-    ``None`` values mean live runtime state is unknown, so availability
-    filtering must not narrow responder candidates.
-    """
-
-    materializable_agent_names: set[str] | None
-    live_entity_names: frozenset[str] | None
+    materializable_agent_names: set[str]
+    live_entity_names: frozenset[str]
 
 
 @dataclass(frozen=True)
@@ -236,18 +230,14 @@ class TurnPolicy:
         instead of recomputing; snapshots are deliberately not cached on this
         long-lived policy object because liveness changes between turns.
         """
-        materializable_agent_names = materializable_agent_names_for_orchestrator(
-            self.deps.runtime.orchestrator,
-            self.deps.runtime.config,
-        )
-        if materializable_agent_names is not None and self.deps.agent_name in self.deps.runtime.config.agents:
-            materializable_agent_names = materializable_agent_names | {self.deps.agent_name}
-        live_entity_names = (
-            self.deps.runtime.orchestrator.running_entity_names() if materializable_agent_names is not None else None
-        )
+        config = self.deps.runtime.config
+        orchestrator = self.deps.runtime.orchestrator
+        materializable_agent_names = resolve_live_shared_agent_names(orchestrator, config=config)
+        if self.deps.agent_name in config.agents:
+            materializable_agent_names.add(self.deps.agent_name)
         return _ResponderAvailability(
             materializable_agent_names=materializable_agent_names,
-            live_entity_names=live_entity_names,
+            live_entity_names=orchestrator.running_entity_names(),
         )
 
     def _filter_materializable_responders(
@@ -255,7 +245,7 @@ class TurnPolicy:
         responder_ids: list[MatrixID],
         availability: _ResponderAvailability,
     ) -> list[MatrixID]:
-        """Keep only materializable responder candidates when live state is known."""
+        """Keep only the responder candidates that can answer now."""
         return filter_materializable_responders(
             responder_ids,
             self.deps.runtime.config,
@@ -452,7 +442,7 @@ class TurnPolicy:
             return None
         if not context.am_i_mentioned:
             return None
-        if availability.live_entity_names is not None and self.deps.agent_name not in availability.live_entity_names:
+        if self.deps.agent_name not in availability.live_entity_names:
             return None
 
         registry = entity_identity_registry(self.deps.runtime.config, self.deps.runtime_paths)
