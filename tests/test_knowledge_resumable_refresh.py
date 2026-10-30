@@ -1488,6 +1488,18 @@ def test_a_too_large_batch_keeps_batching_for_the_next_one() -> None:
     assert inner.single_requests == ["one", "two"]
 
 
+def test_a_batch_answered_with_the_wrong_vector_count_retires_batching() -> None:
+    """A backend that answers an array with the wrong count does not batch, so the refresh embeds one text at a time."""
+    inner = _RecordingEmbedder()
+    inner.batch_error = EmbedderRequestError("embedder returned 1 embeddings for 2 inputs", kind="cardinality")
+    embedder = RefreshEmbedder(inner)
+
+    assert sorted(embedder.embed_texts(["one", "two"])) == ["one", "two"]
+
+    assert embedder.batches() is False
+    assert inner.single_requests == ["one", "two"]
+
+
 class _QueryPromptedEmbedder(_RecordingEmbedder):
     """Embedder whose query vectors differ from its document vectors, like a prompted local model."""
 
