@@ -886,6 +886,59 @@ async def test_a_fresh_child_s_provider_failure_reaches_its_parent_as_the_redact
 
 
 @pytest.mark.asyncio
+async def test_a_child_that_fails_continuing_after_its_own_child_hands_its_parent_the_run_s_reason(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A child whose continuation after a grandchild fails settles from that run's record, as a failed first run does."""
+    paths = _runtime_paths(tmp_path)
+    config = _config(paths, child_tools=())
+    identity = _leader_identity()
+    failure = "provider connection lost: api_key=example-secret"
+    leader = ScriptedModel(
+        [
+            calls(tool_call("run_subagent", "delegate-0", agent_name="code", task="Write report")),
+            answer("parent result"),
+        ],
+    )
+    # The child delegates, the grandchild answers, and the child's continuation fails.
+    code = ScriptedModel(
+        [
+            calls(tool_call("run_subagent", "nested-0", agent_name="code", task="Nested report")),
+            answer("grandchild result"),
+            [_provider_failure(failure)],
+        ],
+    )
+    ScriptedAgents({"leader": leader, "code": code}).install(monkeypatch)
+
+    await respond("leader", "delegate", config=config, runtime_paths=paths, identity=identity, run_id="parent-run")
+
+    parent = _parent_record(config, paths, identity, "parent-run")
+    result = next(message.content for message in parent.messages if message.tool_call_id == "delegate-0")
+    assert isinstance(result, str)
+    assert result.startswith("Delegation to 'code' failed: provider connection lost: api_key=")
+    assert "example-secret" not in result
+    [child] = DelegationState.from_metadata(parent.metadata).children
+    stored = _child_record(child, config, paths)
+    # The loop's own record stands: nothing rewrote the failed run's row after it was stored.
+    assert stored.status is RunStatus.error
+    assert stored.error is not None
+    assert stored.error.startswith("provider connection lost: api_key=")
+    assert [requirement.tool_execution.tool_call_id for requirement in stored.requirements or ()] == ["nested-0"]
+    [record_dir] = (
+        path.parent
+        for path in tmp_path.glob("agents/*/workspace/.mindroom/delegations/*/*/run.json")
+        if json.loads(path.read_text(encoding="utf-8"))["task"] == "Write report"
+    )
+    record = json.loads((record_dir / "run.json").read_text(encoding="utf-8"))
+    assert (record["status"], record["error"]) == ("failed", stored.error)
+    assert record["usage"] is not None
+    events = [json.loads(line) for line in (record_dir / "events.jsonl").read_text(encoding="utf-8").splitlines()]
+    *_, output = (event for event in events if event["kind"] == "output")
+    assert output["data"] == {"content": stored.error}
+
+
+@pytest.mark.asyncio
 async def test_failed_nested_resume_settles_descendants_and_visible_tools(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
