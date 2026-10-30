@@ -4813,11 +4813,10 @@ depends_on = []
 path = "mindroom.matrix_rtc.call_manager"
 depends_on = [
     "mindroom.matrix_rtc.audio_process",
+    "mindroom.matrix_rtc.call_backends",
     "mindroom.matrix.room_membership",
     "mindroom.matrix.olm_to_device",
     "mindroom.authorization",
-    "mindroom.config.voice",
-    "mindroom.credentials.sync",
     "mindroom.custom_tools.attachment_helpers",
     "mindroom.entity_resolution",
     "mindroom.logging_config",
@@ -4827,14 +4826,25 @@ depends_on = [
     "mindroom.matrix_rtc.call_tools",
     "mindroom.matrix_rtc.call_writeback",
     "mindroom.matrix_rtc.events",
-    "mindroom.matrix_rtc.focus",
     "mindroom.matrix_rtc.key_transport",
     "mindroom.matrix_rtc.transcript",
     "mindroom.matrix_rtc.voice_agent",
-    "mindroom.model_defaults",
     "mindroom.response_admission",
     "mindroom.session_ids",
     "mindroom.tool_system.dependencies",
+]
+
+[[modules]]
+path = "mindroom.matrix_rtc.call_backends"
+depends_on = [
+    "mindroom.config.voice",
+    "mindroom.credentials.sync",
+    "mindroom.logging_config",
+    "mindroom.matrix.identity",
+    "mindroom.matrix_rtc.call_session",
+    "mindroom.matrix_rtc.focus",
+    "mindroom.matrix_rtc.voice_agent",
+    "mindroom.model_defaults",
 ]
 
 [[modules]]

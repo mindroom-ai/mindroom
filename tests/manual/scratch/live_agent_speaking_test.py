@@ -629,7 +629,11 @@ async def main() -> int:  # noqa: C901, PLR0915
             )
             await manager.on_room_event(room_obj, event)
             # The manager joins in a background reconcile, so wait for the session it starts.
-            if await wait_for(lambda: room_id in manager._sessions, 120, "agent call session"):
+            if await wait_for(
+                lambda: room_id in manager._rooms and manager._rooms[room_id].session is not None,
+                120,
+                "agent call session",
+            ):
                 log("  [bot] call join path completed (agent session started)")
 
             log("== leg 1: greeting audio from the agent ==")
