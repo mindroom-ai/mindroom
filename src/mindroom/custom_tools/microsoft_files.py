@@ -16,6 +16,7 @@ from mindroom.custom_tools.microsoft_graph import (
     GraphSession,
     MicrosoftGraphError,
     graph_error_payload,
+    graph_int,
     graph_session,
     graph_tool_result,
     graph_upload_errors,
@@ -163,13 +164,6 @@ def _checked_target(metadata: Mapping[str, Any], expected_web_url: object) -> di
         msg = "The target is not at expected_web_url; tell the requester its real web_url before trying again."
         raise MicrosoftGraphError(code="target_mismatch", message=msg, web_url=summary["web_url"])
     return summary
-
-
-def _limit(value: object, maximum: int) -> int:
-    if isinstance(value, bool) or not isinstance(value, int) or not 1 <= value <= maximum:
-        msg = f"limit must be an integer from 1 to {maximum}."
-        raise MicrosoftGraphError(code="invalid_argument", message=msg)
-    return value
 
 
 def _upload_name_error(name: str) -> str | None:
@@ -359,7 +353,7 @@ class MicrosoftFilesTools(Toolkit):
                 "entityTypes": ["driveItem"],
                 "query": {"queryString": query},
                 "from": offset,
-                "size": _limit(limit, 50),
+                "size": graph_int(limit, "limit", maximum=50),
             }
             payload = session.json("POST", "/search/query", json={"requests": [request]})
             containers = [
@@ -401,7 +395,7 @@ class MicrosoftFilesTools(Toolkit):
                 payload = session.json("GET", page_path(page_token, _CHILDREN_PAGES))
             else:
                 parent = "/me/drive/root" if folder is None else _resolve(folder, session, "folder").path
-                params = {"$top": str(_limit(limit, 200)), "$select": _ITEM_SELECT}
+                params = {"$top": str(graph_int(limit, "limit", maximum=200)), "$select": _ITEM_SELECT}
                 payload = session.json("GET", f"{parent}/children", params=params)
             entries = [_summary(entry) for entry in payload.get("value") or [] if isinstance(entry, dict)]
             return {"files": entries, "next_page_token": next_page_token(payload)}

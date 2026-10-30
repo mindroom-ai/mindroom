@@ -19,6 +19,7 @@ from mindroom.custom_tools.microsoft_graph import (
     GraphSession,
     MicrosoftGraphError,
     graph_error_payload,
+    graph_int,
     graph_session,
     graph_time,
     graph_upload_errors,
@@ -250,13 +251,6 @@ def _automatic_replies(setting: object) -> dict[str, Any]:
         "internal_message": message("internalReplyMessage"),
         "external_message": message("externalReplyMessage"),
     }
-
-
-def _limit(value: object) -> int:
-    if isinstance(value, bool) or not isinstance(value, int) or not 1 <= value <= 50:
-        msg = "limit must be an integer from 1 to 50."
-        raise _invalid(msg)
-    return value
 
 
 def _search(query: object) -> str:
@@ -498,7 +492,7 @@ class OutlookMailTools(Toolkit):
                     if folder is None
                     else f"{base}/mailFolders/{path_segment(folder, 'folder')}/messages"
                 )
-                params = {"$top": str(_limit(limit)), "$select": _LIST_SELECT}
+                params = {"$top": str(graph_int(limit, "limit", maximum=50)), "$select": _LIST_SELECT}
                 # Graph refuses $orderby with $search; search results already come newest first.
                 if query is None:
                     params["$orderby"] = "receivedDateTime desc"
@@ -516,7 +510,7 @@ class OutlookMailTools(Toolkit):
             if page_token is not None:
                 mailbox_page_path(page_token, _MESSAGE_PAGES, _mailbox_path(mailbox), "mailbox")
                 return
-            _limit(limit)
+            graph_int(limit, "limit", maximum=50)
             if folder is not None:
                 path_segment(folder, "folder")
             if query is not None:

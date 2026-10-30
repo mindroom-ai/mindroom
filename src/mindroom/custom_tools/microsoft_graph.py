@@ -110,6 +110,14 @@ def path_segment(value: object, field_name: str) -> str:
     return quote(value, safe="!:@=")
 
 
+def graph_int(value: object, field_name: str, *, maximum: int, minimum: int = 1) -> int:
+    """Return a model-supplied integer argument within [minimum, maximum]; booleans are refused."""
+    if isinstance(value, bool) or not isinstance(value, int) or not minimum <= value <= maximum:
+        msg = f"{field_name} must be an integer from {minimum} to {maximum}."
+        raise MicrosoftGraphError(code="invalid_argument", message=msg)
+    return value
+
+
 def time_zone_name(value: object) -> str:
     """Return a model-supplied Windows or IANA time zone name for a Graph `dateTimeTimeZone`."""
     if not isinstance(value, str) or not _TIME_ZONE.fullmatch(value) or value != value.strip():

@@ -14,6 +14,7 @@ import pytest
 from mindroom.custom_tools.microsoft_graph import (
     GRAPH_URL,
     MicrosoftGraphError,
+    graph_int,
     graph_session,
     graph_time,
     graph_tool_result,
@@ -431,6 +432,16 @@ def test_path_segments_refuse_anything_that_changes_the_path(value: object) -> N
         path_segment(value, "id")
 
     assert excinfo.value.code == "invalid_argument"
+
+
+@pytest.mark.parametrize("value", [0, 51, True, "5", 5.0, None])
+def test_graph_int_refuses_values_outside_the_range_and_non_integers(value: object) -> None:
+    assert graph_int(50, "limit", maximum=50) == 50
+    with pytest.raises(MicrosoftGraphError) as excinfo:
+        graph_int(value, "limit", maximum=50)
+
+    assert excinfo.value.code == "invalid_argument"
+    assert excinfo.value.message == "limit must be an integer from 1 to 50."
 
 
 @pytest.mark.parametrize(

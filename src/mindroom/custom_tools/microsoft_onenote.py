@@ -14,6 +14,7 @@ from mindroom.credentials.manager import CredentialsManager  # noqa: TC001  # re
 from mindroom.custom_tools.microsoft_graph import (
     MicrosoftGraphError,
     graph_error_payload,
+    graph_int,
     graph_session,
     graph_tool_result,
     html_to_text,
@@ -140,13 +141,6 @@ def _listing(path: str, select: str, limit: int, page_token: object) -> _Request
     offset = page_offset(page_token, _MAX_OFFSET)
     params = {"$select": select, "$top": str(limit + 1), "$skip": str(offset)}
     return _Request("GET", path, params, offset=offset, limit=limit)
-
-
-def _limit(value: object) -> int:
-    if isinstance(value, bool) or not isinstance(value, int) or not 1 <= value <= _MAX_LISTING:
-        msg = f"limit must be an integer from 1 to {_MAX_LISTING}."
-        raise MicrosoftGraphError(code="invalid_argument", message=msg)
-    return value
 
 
 def _paragraph(text: str) -> str:
@@ -353,7 +347,7 @@ class MicrosoftOneNoteTools(Toolkit):
             lambda: _listing(
                 f"{_section_path(_root(container), section_id)}/pages",
                 _PAGE_SELECT,
-                _limit(limit),
+                graph_int(limit, "limit", maximum=_MAX_LISTING),
                 page_token,
             ),
             lambda request, payload: _listed("pages", request, payload, _page),

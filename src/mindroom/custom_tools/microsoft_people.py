@@ -11,6 +11,7 @@ from mindroom.credentials.manager import CredentialsManager  # noqa: TC001  # re
 from mindroom.custom_tools.microsoft_graph import (
     MicrosoftGraphError,
     graph_error_payload,
+    graph_int,
     graph_session,
     graph_tool_result,
     next_page_token,
@@ -50,10 +51,7 @@ def _search(query: object) -> str:
 
 
 def _top(limit: object) -> str:
-    if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= _MAX_LIMIT:
-        msg = f"limit must be an integer from 1 to {_MAX_LIMIT}."
-        raise MicrosoftGraphError(code="invalid_argument", message=msg)
-    return str(limit)
+    return str(graph_int(limit, "limit", maximum=_MAX_LIMIT))
 
 
 def _is_me(person: object) -> bool:

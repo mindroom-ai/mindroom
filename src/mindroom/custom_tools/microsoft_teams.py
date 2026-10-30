@@ -16,6 +16,7 @@ from mindroom.custom_tools.microsoft_graph import (
     GRAPH_URL,
     MicrosoftGraphError,
     graph_error_payload,
+    graph_int,
     graph_session,
     graph_tool_result,
     html_to_text,
@@ -98,10 +99,7 @@ def _listing(page_token: object, collection: str, first_page: Callable[[], _Requ
 
 
 def _top(limit: object) -> str:
-    if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= _MAX_LIMIT:
-        msg = f"limit must be an integer from 1 to {_MAX_LIMIT}."
-        raise MicrosoftGraphError(code="invalid_argument", message=msg)
-    return str(limit)
+    return str(graph_int(limit, "limit", maximum=_MAX_LIMIT))
 
 
 def _text_body(text: object, field_name: str = "text") -> dict[str, object]:

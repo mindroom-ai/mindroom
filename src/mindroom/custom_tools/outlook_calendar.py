@@ -14,6 +14,7 @@ from mindroom.credentials.manager import CredentialsManager  # noqa: TC001  # re
 from mindroom.custom_tools.microsoft_graph import (
     GraphSession,
     MicrosoftGraphError,
+    graph_int,
     graph_session,
     graph_time,
     mailbox_next_page_token,
@@ -85,13 +86,6 @@ class _GraphRequest:
 
 def _invalid(message: str) -> MicrosoftGraphError:
     return MicrosoftGraphError(code="invalid_argument", message=message)
-
-
-def _limit(value: object) -> int:
-    if isinstance(value, bool) or not isinstance(value, int) or not 1 <= value <= _MAX_EVENTS:
-        msg = f"limit must be an integer from 1 to {_MAX_EVENTS}."
-        raise _invalid(msg)
-    return value
 
 
 def _parse_time(value: object, field_name: str) -> datetime:
@@ -212,17 +206,6 @@ def _schedule_window(start: object, end: object, zone: str) -> dict[str, dict[st
         msg = f"The window must be shorter than {_SCHEDULE_WINDOW.days} days."
         raise _invalid(msg)
     return {"startTime": _zoned(begins, zone), "endTime": _zoned(ends, zone)}
-
-
-def _interval(value: object) -> int:
-    if (
-        isinstance(value, bool)
-        or not isinstance(value, int)
-        or not _MIN_INTERVAL_MINUTES <= value <= _MAX_INTERVAL_MINUTES
-    ):
-        msg = f"interval_minutes must be an integer from {_MIN_INTERVAL_MINUTES} to {_MAX_INTERVAL_MINUTES}."
-        raise _invalid(msg)
-    return value
 
 
 def _mailbox(owner: object) -> str:
@@ -549,7 +532,7 @@ class OutlookCalendarTools(Toolkit):
                     "endDateTime": window_end,
                     "$select": _EVENT_SELECT,
                     "$orderby": "start/dateTime",
-                    "$top": str(_limit(limit)),
+                    "$top": str(graph_int(limit, "limit", maximum=_MAX_EVENTS)),
                 },
             )
 
@@ -623,7 +606,12 @@ class OutlookCalendarTools(Toolkit):
             payload = {
                 "schedules": addresses,
                 **_schedule_window(start, end, zone),
-                "availabilityViewInterval": _interval(interval_minutes),
+                "availabilityViewInterval": graph_int(
+                    interval_minutes,
+                    "interval_minutes",
+                    minimum=_MIN_INTERVAL_MINUTES,
+                    maximum=_MAX_INTERVAL_MINUTES,
+                ),
             }
             return _GraphRequest(
                 "POST",
