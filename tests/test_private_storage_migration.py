@@ -25,6 +25,7 @@ from mindroom.config.agent import AgentConfig, AgentPrivateConfig, AgentThreadEx
 from mindroom.config.main import Config
 from mindroom.constants import RuntimePaths, resolve_runtime_paths, resolve_session_state_root
 from mindroom.file_locks import file_lock_is_held
+from mindroom.orchestration import storage_preparation
 from mindroom.private_storage.private_instance_identity_store import (
     ensure_private_instance_identity,
     load_private_instance_identity,
@@ -615,7 +616,11 @@ async def test_primary_admission_fails_before_credentials(
     _seed(paths, _OLD, _REQUESTER)
     (paths.storage_root / ".mindroom-storage-upgrade.json").write_text("{}")
     module = importlib.import_module(f"mindroom.{'api.main' if entrypoint == 'api' else 'orchestrator'}")
-    monkeypatch.setattr(module, "sync_env_to_credentials", Mock(side_effect=AssertionError("credentials started")))
+    monkeypatch.setattr(
+        storage_preparation,
+        "sync_env_to_credentials",
+        Mock(side_effect=AssertionError("credentials started")),
+    )
     if entrypoint == "api":
         monkeypatch.setattr(module, "_app_runtime_paths", lambda _app: paths)
         with pytest.raises(ValueError, match=r"[Pp]rivate"):

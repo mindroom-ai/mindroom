@@ -18,6 +18,7 @@ from mindroom.api.usage_export import (
     UsageExportStatus,
     usage_export_runner,
 )
+from mindroom.orchestration import storage_preparation
 
 if TYPE_CHECKING:
     import asyncio
@@ -390,7 +391,7 @@ def test_api_lifespan_shutdown_retires_export_runner(
     async def idle_until_shutdown(stop_event: asyncio.Event, _app: FastAPI) -> None:
         await stop_event.wait()
 
-    monkeypatch.setattr(main, "sync_env_to_credentials", lambda _runtime_paths: None)
+    monkeypatch.setattr(storage_preparation, "sync_env_to_credentials", lambda **_kwargs: None)
     monkeypatch.setattr(main, "_watch_config", idle_until_shutdown)
     monkeypatch.setattr(main, "_worker_cleanup_loop", idle_until_shutdown)
 

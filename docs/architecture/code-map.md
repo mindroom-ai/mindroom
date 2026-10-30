@@ -45,6 +45,7 @@ Matrix sync callback
 | `orchestration/config_updates.py` | The config update plan: the one decision of what a reload restarts, starts, removes, and re-authorizes |
 | `orchestration/entity_fleet.py` | The one owner of every managed bot's lifecycle: start, background retry, restart stop, removal, and process shutdown |
 | `orchestration/rooms.py` | Managed room setup through the router: room creation, policy, invitations, root Space, and bot memberships |
+| `orchestration/storage_preparation.py` | Every startup migration and the credential sync, in the one order they depend on, before anything reads the storage root |
 | `orchestration/turn_recovery.py` | When each bot replays the turn-journal work it left pending: once the bots its turns need completed their first sync |
 | `config/bundle.py` | Native staged bundle validation, drift protection, directory publication, and recovery journals |
 | `cli/config_bundle.py` | Bundle install, change-classification, and runtime-confirmed apply/rollback command adapters, plus initialize-only runtime bootstrap |

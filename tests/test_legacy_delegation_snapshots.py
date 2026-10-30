@@ -24,6 +24,7 @@ from mindroom.delegation.legacy_snapshots import migrate_subagent_sessions
 from mindroom.delegation.sessions import update_subagent_turn_sync
 from mindroom.delegation.state import DELEGATION_STATE_KEY, DelegationChild, DelegationState, SubagentPersona
 from mindroom.history.types import HistoryScope
+from mindroom.orchestration import storage_preparation
 from mindroom.session_storage.agent_storage import create_session_storage, create_state_storage
 from mindroom.session_storage.legacy_agno3_conversion import migrate_conversation_storage
 from mindroom.session_storage.schema import LOG_VERSION, TableNames
@@ -420,7 +421,7 @@ async def test_both_entry_points_rewrite_session_files_before_serving(
         assert runtime_paths == paths
         raise _RewriteRanError
 
-    monkeypatch.setattr(module, "migrate_subagent_sessions", rewrite)
+    monkeypatch.setattr(storage_preparation, "migrate_subagent_sessions", rewrite)
     if entrypoint == "api":
         monkeypatch.setattr(module, "_app_runtime_paths", lambda _app: paths)
         with pytest.raises(_RewriteRanError):

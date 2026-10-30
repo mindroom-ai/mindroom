@@ -30,13 +30,10 @@ from mindroom.automations.runner import AutomationRunner
 from mindroom.background_tasks import (
     SupervisedLoop,
     create_background_task,
-    run_blocking_until_complete,
     wait_for_background_tasks,
 )
 from mindroom.budgets.monitor import BudgetMonitor
 from mindroom.constants import ROUTER_AGENT_NAME, ROUTER_DISPLAY_NAME, tracking_dir
-from mindroom.credentials.legacy_tool_credentials import migrate_tool_credential_defaults
-from mindroom.delegation.legacy_snapshots import migrate_subagent_sessions
 from mindroom.delegation.recovery import cancel_approval_delegations
 from mindroom.desktop.identity import controller_identity_for_live_bot
 from mindroom.egress_broker.env import egress_broker_enabled
@@ -69,7 +66,6 @@ from mindroom.knowledge.refresh_scheduler import KnowledgeRefreshScheduler
 from mindroom.knowledge.status import reconcile_knowledge_mode_transition_states
 from mindroom.knowledge.watch import KnowledgeSourceWatcher
 from mindroom.knowledge_graph.runtime import KnowledgeGraphRuntime
-from mindroom.legacy_state_root_records import migrate_state_root_records
 from mindroom.matrix.health import reset_matrix_sync_health
 from mindroom.matrix.provisioning_heartbeat import run_provisioning_heartbeat
 from mindroom.matrix.users import (
@@ -84,7 +80,6 @@ from mindroom.matrix_rtc.call_manager import preload_matrix_call_dependencies
 from mindroom.mcp.manager import MCPServerManager
 from mindroom.mcp.toolkit import bind_mcp_server_manager
 from mindroom.memory import MemoryAutoFlushService
-from mindroom.private_storage.legacy_private_storage import migrate_private_storage
 from mindroom.providers.model_http_client import aclose_model_http_client
 from mindroom.response_activity import ActiveResponseIdentity
 from mindroom.response_admission import ResponseAdmissionGate
@@ -98,7 +93,6 @@ from mindroom.runtime_state import (
     set_runtime_starting,
 )
 from mindroom.scheduling.runtime import ScheduledTaskRuntime
-from mindroom.session_storage.legacy_agno3_conversion import migrate_conversation_storage
 from mindroom.skill_learning.runner import SkillReviewRunner
 from mindroom.startup_errors import EventJournalLostError, PermanentStartupError
 from mindroom.startup_maintenance import StartupMaintenanceController
@@ -111,7 +105,6 @@ from mindroom.tool_system.plugins import (
     reload_plugins,
 )
 from mindroom.tool_system.skills import clear_skill_cache, get_skill_snapshot
-from mindroom.workers.backends.legacy_state_root_mounts import retire_state_root_worker_mounts
 from mindroom.workers.runtime import (
     bind_worker_launch_config_source,
     clear_worker_validation_snapshot_cache,
@@ -122,7 +115,6 @@ from mindroom.workers.runtime import (
 
 from . import file_watcher
 from .bot import AgentBot, create_bot_for_entity
-from .credentials.sync import sync_env_to_credentials
 from .event_journal.opening import OpenEventJournal, bind_event_journal, open_event_journal
 from .logging_config import get_logger, setup_logging
 from .orchestration.computer_runtime import ComputerRuntimeCoordinator
@@ -147,6 +139,7 @@ from .orchestration.runtime import (
     wait_for_matrix_homeserver,
 )
 from .orchestration.script_runtime import ScriptRuntimeLifecycle, build_script_runtime, optional_script_gateway_url
+from .orchestration.storage_preparation import prepare_runtime_storage
 from .orchestration.todo_poke_runtime import TodoPokeRuntimeCoordinator
 from .orchestration.tool_job_runtime import ToolJobRuntimeCoordinator
 from .orchestration.turn_recovery import TurnJournalRecovery
@@ -2083,13 +2076,6 @@ async def _wait_for_runtime_shutdown_cleanup(
             return
 
 
-def _sync_credentials_and_prepare_storage(runtime_paths: RuntimePaths, storage_path: Path) -> None:
-    """Complete the synchronous startup setup that must precede runtime construction."""
-    logger.info("Syncing API keys from environment to CredentialsManager...")
-    sync_env_to_credentials(runtime_paths=runtime_paths)
-    storage_path.mkdir(parents=True, exist_ok=True)
-
-
 async def _watch_event_journal(
     orchestrator: _MultiAgentOrchestrator,
     shutdown_requested: asyncio.Event,
@@ -2178,11 +2164,6 @@ async def _run_runtime(  # noqa: PLR0915
     api_host: str,
 ) -> None:
     """Run the multi-agent bot system until it stops."""
-    await migrate_private_storage(runtime_paths)
-    await migrate_state_root_records(runtime_paths)
-    await migrate_subagent_sessions(runtime_paths)
-    await migrate_tool_credential_defaults(runtime_paths)
-    storage_path = runtime_paths.storage_root
     orchestrator: _MultiAgentOrchestrator | None = None
     auxiliary_tasks: list[asyncio.Task] = []
     shutdown_requested = asyncio.Event()
@@ -2205,16 +2186,11 @@ async def _run_runtime(  # noqa: PLR0915
         shorten_gil_switch_interval()
         stall_detector = start_event_loop_stall_detector(runtime_paths)
 
-        # Credential synchronization and storage setup are synchronous. Keep the
-        # ordered unit off-loop while retaining exception propagation to startup.
-        await run_blocking_until_complete(_sync_credentials_and_prepare_storage, runtime_paths, storage_path)
-        await run_blocking_until_complete(retire_state_root_worker_mounts, runtime_paths)
-        # After the retirement, so no old worker mounting whole state roots can swap a sessions directory as it converts.
         # The first start after an upgrade converts every conversation database before the API binds, which can take
         # minutes, so probes meanwhile see a live process that is not ready yet instead of a closed port.
         probes = serve_startup_probes(api_host, api_port, detail="Converting conversation storage") if api else None
         with probes or nullcontext():
-            await migrate_conversation_storage(runtime_paths)
+            await prepare_runtime_storage(runtime_paths)
             # Before the API serves and before the homeserver answers, so the dashboard has this one load meanwhile.
             startup_config = await load_startup_config(runtime_paths, api_enabled=api)
 

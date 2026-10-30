@@ -46,6 +46,7 @@ from mindroom.oauth.credential_lifecycle import resolve_oauth_credential_context
 from mindroom.oauth.credential_store import oauth_credential_transaction
 from mindroom.oauth.github import github_oauth_provider
 from mindroom.oauth.google_drive import google_drive_oauth_provider
+from mindroom.orchestration import storage_preparation
 from mindroom.personal_agents import _append_personal_agent_roster_entry
 from mindroom.runtime_state import reset_runtime_state, set_runtime_ready, set_runtime_starting
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity, resolve_worker_key, resolve_worker_target
@@ -578,7 +579,7 @@ def test_api_lifespan_syncs_env_credentials_on_startup(
         await stop_event.wait()
 
     monkeypatch.setattr(
-        main,
+        storage_preparation,
         "sync_env_to_credentials",
         lambda runtime_paths: sync_calls.append(str(runtime_paths.config_path)),
     )
@@ -863,7 +864,7 @@ def test_api_lifespan_loads_config_from_injected_runtime(
     async def _idle_worker_cleanup(stop_event: asyncio.Event, _app: FastAPI) -> None:
         await stop_event.wait()
 
-    monkeypatch.setattr(main, "sync_env_to_credentials", lambda runtime_paths: None)  # noqa: ARG005
+    monkeypatch.setattr(storage_preparation, "sync_env_to_credentials", lambda runtime_paths: None)  # noqa: ARG005
     monkeypatch.setattr(main, "_watch_config", _idle_watch_config)
     monkeypatch.setattr(main, "_worker_cleanup_loop", _idle_worker_cleanup)
 
@@ -3655,7 +3656,7 @@ def test_save_config_rejects_runtime_sensitive_invalid_payload(
     async def _idle_worker_cleanup(stop_event: asyncio.Event, _app: FastAPI) -> None:
         await stop_event.wait()
 
-    monkeypatch.setattr(main, "sync_env_to_credentials", lambda runtime_paths: None)  # noqa: ARG005
+    monkeypatch.setattr(storage_preparation, "sync_env_to_credentials", lambda runtime_paths: None)  # noqa: ARG005
     monkeypatch.setattr(main, "_watch_config", _idle_watch_config)
     monkeypatch.setattr(main, "_worker_cleanup_loop", _idle_worker_cleanup)
 

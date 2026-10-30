@@ -25,6 +25,7 @@ from mindroom.matrix.personal_room_store import (
     personal_room_record_path,
     read_personal_room,
 )
+from mindroom.orchestration import storage_preparation
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -127,7 +128,7 @@ async def test_both_entry_points_move_records_before_serving(
         assert runtime_paths == paths
         raise _MigrationRanError
 
-    monkeypatch.setattr(module, "migrate_state_root_records", migration)
+    monkeypatch.setattr(storage_preparation, "migrate_state_root_records", migration)
     if entrypoint == "api":
         monkeypatch.setattr(module, "_app_runtime_paths", lambda _app: paths)
         with pytest.raises(_MigrationRanError):

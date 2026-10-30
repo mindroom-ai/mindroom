@@ -15,6 +15,7 @@ from unittest.mock import Mock
 import pytest
 from structlog.testing import capture_logs
 
+from mindroom import constants
 from mindroom.constants import resolve_runtime_paths
 from mindroom.history.types import HistoryScope
 from mindroom.session_storage import legacy_usage_ledger
@@ -244,7 +245,8 @@ async def test_unreadable_session_database_does_not_stop_startup(
     healthy = create_agno_2_sessions_db(paths.storage_root / "agents/code/sessions/code.db")
     module = importlib.import_module(f"mindroom.{'api.main' if entrypoint == 'api' else 'orchestrator'}")
     if entrypoint == "api":
-        monkeypatch.setattr(module, "migrate_tool_credential_defaults", Mock(side_effect=_NextStartupStepError))
+        # Storage preparation ends with the conversion; the standalone API then makes sure a config file exists.
+        monkeypatch.setattr(constants, "ensure_writable_config_path", Mock(side_effect=_NextStartupStepError))
     else:
         # The orchestrator converts after it sets up logging and retires old workers, right before it loads its config.
         monkeypatch.setattr(module, "setup_logging", Mock())

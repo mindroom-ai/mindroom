@@ -16,6 +16,7 @@ from mindroom.constants import resolve_runtime_paths
 from mindroom.credentials.legacy_tool_credentials import migrate_tool_credential_defaults
 from mindroom.credentials.manager import _reset_credentials_manager_cache, get_runtime_credentials_manager
 from mindroom.file_locks import advisory_file_lock
+from mindroom.orchestration import storage_preparation
 from mindroom.runtime_env_policy import CREDENTIALS_ENCRYPTION_KEY_ENV
 
 if TYPE_CHECKING:
@@ -196,8 +197,12 @@ async def test_both_entry_points_clean_up_before_credentials_are_used(
         assert paths == runtime_paths
         raise _CleanupRanError
 
-    monkeypatch.setattr(module, "migrate_tool_credential_defaults", cleanup)
-    monkeypatch.setattr(module, "sync_env_to_credentials", Mock(side_effect=AssertionError("credentials started")))
+    monkeypatch.setattr(storage_preparation, "migrate_tool_credential_defaults", cleanup)
+    monkeypatch.setattr(
+        storage_preparation,
+        "sync_env_to_credentials",
+        Mock(side_effect=AssertionError("credentials started")),
+    )
     if entrypoint == "api":
         monkeypatch.setattr(module, "_app_runtime_paths", lambda _app: runtime_paths)
         with pytest.raises(_CleanupRanError):

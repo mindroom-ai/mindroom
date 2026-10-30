@@ -60,26 +60,21 @@ from mindroom.api.validation_errors import validation_error_response
 from mindroom.api.workers import router as workers_router
 from mindroom.background_tasks import run_blocking_until_complete
 from mindroom.config.personal_agents import personal_agent_data
-from mindroom.credentials.legacy_tool_credentials import migrate_tool_credential_defaults
-from mindroom.credentials.sync import sync_env_to_credentials
-from mindroom.delegation.legacy_snapshots import migrate_subagent_sessions
 from mindroom.embeddings.embedder_health import get_embedder_failure
 from mindroom.integrations import integration_routers
 from mindroom.knowledge.refresh_scheduler import KnowledgeRefreshScheduler
 from mindroom.knowledge.status import reconcile_knowledge_mode_transition_states
 from mindroom.knowledge.watch import KnowledgeSourceWatcher
 from mindroom.knowledge_graph.store import knowledge_graph_failure
-from mindroom.legacy_state_root_records import migrate_state_root_records
 from mindroom.logging_config import get_logger
 from mindroom.matrix.decrypt_failure import e2ee_stats
 from mindroom.matrix.health import get_matrix_sync_health_snapshot
 from mindroom.orchestration.runtime import matrix_ingestion_grace_seconds, matrix_sync_startup_timeout_seconds
+from mindroom.orchestration.storage_preparation import prepare_runtime_storage
 from mindroom.origins import allowed_client_origins
 from mindroom.personal_agents import read_personal_agent_user_ids
-from mindroom.private_storage.legacy_private_storage import migrate_private_storage
 from mindroom.runtime_env_policy import COMPUTER_ALLOWED_ORIGINS_ENV
 from mindroom.runtime_state import get_runtime_state
-from mindroom.session_storage.legacy_agno3_conversion import migrate_conversation_storage
 from mindroom.workers.backend import maintain_workers
 from mindroom.workers.in_flight import touch_workers_in_flight
 from mindroom.workers.runtime import (
@@ -508,11 +503,7 @@ async def _lifespan(_app: FastAPI) -> AsyncIterator[None]:
     )
     with worker_launch_binding:
         if standalone:
-            await migrate_private_storage(runtime_paths)
-            await migrate_state_root_records(runtime_paths)
-            await migrate_subagent_sessions(runtime_paths)
-            await migrate_conversation_storage(runtime_paths)
-            await migrate_tool_credential_defaults(runtime_paths)
+            await prepare_runtime_storage(runtime_paths)
             await asyncio.to_thread(
                 constants.ensure_writable_config_path,
                 create_minimal=True,
@@ -524,10 +515,6 @@ async def _lifespan(_app: FastAPI) -> AsyncIterator[None]:
                 config_path=str(runtime_paths.config_path),
                 config_exists=runtime_paths.config_path.exists(),
             )
-
-            # Sync API keys from environment to CredentialsManager
-            logger.info("Syncing API credentials from runtime env")
-            await run_blocking_until_complete(sync_env_to_credentials, runtime_paths)
 
             api_owned_knowledge_refresh_scheduler = KnowledgeRefreshScheduler.from_runtime(runtime_paths)
             knowledge_refresh_scheduler = api_owned_knowledge_refresh_scheduler

@@ -13,6 +13,7 @@ from fastapi import FastAPI
 from mindroom import constants
 from mindroom.api import config_lifecycle, main
 from mindroom.knowledge.refresh_scheduler import KnowledgeRefreshScheduler
+from mindroom.orchestration import storage_preparation
 from mindroom.workers.backends import docker as docker_backend_module
 from mindroom.workers.backends.docker import DockerWorkerBackend
 from mindroom.workers.models import WorkerSpec
@@ -56,11 +57,18 @@ async def test_api_lifespan_syncs_credentials_off_event_loop(
     async def _no_op_async(*_args: object, **_kwargs: object) -> None:
         return None
 
-    for migration in _STARTUP_MIGRATIONS:
-        monkeypatch.setattr(main, migration, _no_op_async)
+    for migration in (
+        "migrate_private_storage",
+        "migrate_state_root_records",
+        "migrate_subagent_sessions",
+        "migrate_tool_credential_defaults",
+        "migrate_conversation_storage",
+    ):
+        monkeypatch.setattr(storage_preparation, migration, _no_op_async)
+    monkeypatch.setattr(storage_preparation, "retire_state_root_worker_mounts", lambda _runtime_paths: None)
     monkeypatch.setattr(constants, "ensure_writable_config_path", lambda **_kwargs: None)
     monkeypatch.setattr(config_lifecycle, "load_config_into_app", lambda *_args: None)
-    monkeypatch.setattr(main, "sync_env_to_credentials", _sync_credentials)
+    monkeypatch.setattr(storage_preparation, "sync_env_to_credentials", _sync_credentials)
     monkeypatch.setattr(main, "_sync_standalone_knowledge_watchers", _no_op_async)
     monkeypatch.setattr(main, "_watch_config", _no_op_async)
     monkeypatch.setattr(main, "_worker_cleanup_loop", _no_op_async)
@@ -70,14 +78,6 @@ async def test_api_lifespan_syncs_credentials_off_event_loop(
 
     assert credential_sync_thread is not None
     assert credential_sync_thread != event_loop_thread
-
-
-_STARTUP_MIGRATIONS = (
-    "migrate_private_storage",
-    "migrate_state_root_records",
-    "migrate_conversation_storage",
-    "migrate_tool_credential_defaults",
-)
 
 
 @pytest.mark.asyncio
@@ -106,30 +106,22 @@ async def test_only_a_standalone_api_migrates_syncs_credentials_and_loads_config
 
         return record
 
-    for migration in _STARTUP_MIGRATIONS:
-        monkeypatch.setattr(main, migration, _record(migration))
+    monkeypatch.setattr(main, "prepare_runtime_storage", _record("prepare_storage"))
     monkeypatch.setattr(constants, "ensure_writable_config_path", lambda **_kwargs: ran.append("ensure_config"))
     monkeypatch.setattr(config_lifecycle, "load_config_into_app", lambda *_args: ran.append("load_config"))
-    monkeypatch.setattr(main, "sync_env_to_credentials", lambda *_args: ran.append("sync_credentials"))
     monkeypatch.setattr(main, "_watch_config", _record("watch_config"))
     monkeypatch.setattr(main, "_worker_cleanup_loop", _record("worker_cleanup"))
 
     async with main._lifespan(api_app):
         await asyncio.sleep(0)
 
-    standalone_work = [
-        *_STARTUP_MIGRATIONS,
-        "ensure_config",
-        "load_config",
-        "sync_credentials",
-        "watch_config",
-    ]
+    standalone_work = ["prepare_storage", "ensure_config", "load_config", "watch_config"]
     if bound:
         assert ran == ["worker_cleanup"]
         assert main._app_context(api_app) is snapshot_before
     else:
         assert sorted(ran) == sorted([*standalone_work, "worker_cleanup"])
-        assert ran[: len(_STARTUP_MIGRATIONS)] == list(_STARTUP_MIGRATIONS)
+        assert ran[0] == "prepare_storage"
 
 
 def _docker_worker_api_app(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> tuple[FastAPI, _FakeDockerClient]:
