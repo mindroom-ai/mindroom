@@ -88,11 +88,11 @@ class OllamaProvider:
             await _format_message(message, self.identity.provider_name)
             for message in with_joined_system(request.messages)
         ]
-        # MindRoom's own fields win over authored ``request_params``, as on the other routes.
+        # Authored ``request_params`` merge over MindRoom's fields, as on the other routes; the adapter needs streaming.
         call: dict[str, Any] = {
-            **self._chat_kwargs(request),
             "model": self.identity.id.strip(),
             "messages": messages,
+            **self._chat_kwargs(request),
             "stream": True,
         }
         reply = _OllamaReply()
