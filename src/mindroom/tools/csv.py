@@ -38,20 +38,6 @@ if TYPE_CHECKING:
             default=None,
         ),
         ConfigField(
-            name="duckdb_connection",
-            label="Duckdb Connection",
-            type="text",
-            required=False,
-            default=None,
-        ),
-        ConfigField(
-            name="duckdb_kwargs",
-            label="Duckdb Kwargs",
-            type="text",
-            required=False,
-            default=None,
-        ),
-        ConfigField(
             name="enable_read_csv_file",
             label="Enable Read Csv File",
             type="boolean",

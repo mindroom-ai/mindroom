@@ -31,13 +31,6 @@ if TYPE_CHECKING:
             default=None,
         ),
         ConfigField(
-            name="connection",
-            label="Connection",
-            type="text",
-            required=False,
-            default=None,
-        ),
-        ConfigField(
             name="init_commands",
             label="Init Commands",
             type="string[]",
@@ -51,13 +44,6 @@ if TYPE_CHECKING:
             type="boolean",
             required=False,
             default=False,
-        ),
-        ConfigField(
-            name="config",
-            label="Config",
-            type="text",
-            required=False,
-            default=None,
         ),
     ],
     dependencies=["duckdb"],

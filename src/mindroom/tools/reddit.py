@@ -23,13 +23,6 @@ if TYPE_CHECKING:
     icon_color="text-orange-500",  # Reddit's signature orange color
     config_fields=[
         ConfigField(
-            name="reddit_instance",
-            label="Reddit Instance",
-            type="text",
-            required=False,
-            default=None,
-        ),
-        ConfigField(
             name="client_id",
             env=("REDDIT_CLIENT_ID",),
             label="Client ID",

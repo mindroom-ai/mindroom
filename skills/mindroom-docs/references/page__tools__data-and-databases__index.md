@@ -26,7 +26,7 @@ Use it to pick a tool, configure its connection, and understand why a tool is un
 
 Tools that need a connection or account stay unavailable in the dashboard until their required fields or OAuth connection are stored.
 Options of type `password` in the tables below cannot be set inline in `config.yaml`; see [Security Restrictions](https://docs.mindroom.chat/tools/#security-restrictions).
-`db_engine`, `tables`, `connection`, `config`, `duckdb_connection`, `duckdb_kwargs`, and `obb` expect Python objects or mappings, so they cannot be set usefully from `config.yaml` or the dashboard.
+A `sql`, `postgres`, `duckdb`, `csv`, or `openbb` entry that still sets a retired setting that took a Python object, `db_engine`, `tables`, `connection`, `config`, `duckdb_connection`, `duckdb_kwargs`, or `obb`, fails config load until you remove it.
 `sql`, `postgres`, `redshift`, `duckdb`, `csv`, and `pandas` can read or write local files that the agent's `file_access` setting does not confine, and `sql`, `duckdb`, and `pandas` always run in the primary runtime, so enable them only for agents you trust with what the MindRoom process can reach; see [File access](https://docs.mindroom.chat/architecture/security-posture/#file-access).
 The Google Drive, Docs, and Sheets tools connect through per-service OAuth, and `google_bigquery` uses the Google Cloud connection; see [Google Services OAuth For Local Installs](https://docs.mindroom.chat/deployment/google-services-user-oauth/) or [Google Services OAuth](https://docs.mindroom.chat/deployment/google-services-oauth/) for custom and hosted setups.
 Missing Python dependencies install automatically on first use; see [Automatic Dependency Installation](https://docs.mindroom.chat/tools/#automatic-dependency-installation).
@@ -48,8 +48,6 @@ For PostgreSQL or Redshift, the dedicated [`postgres`](#postgres) and [`redshift
 | `host` | `url` | `null` | Host for the assembled URL. |
 | `port` | `number` | `null` | Port for the assembled URL. |
 | `schema` | `text` | `null` | Database name in the assembled URL and schema for inspection. |
-| `db_engine` | `text` | `null` | Programmatic only: a live SQLAlchemy `Engine`. |
-| `tables` | `text` | `null` | Programmatic only: a table mapping that `list_tables()` returns instead of inspecting the database. |
 | `enable_list_tables` | `boolean` | `true` | Enable `list_tables()`. |
 | `enable_describe_table` | `boolean` | `true` | Enable `describe_table()`. |
 | `enable_run_sql_query` | `boolean` | `true` | Enable `run_sql_query()`. |
@@ -70,7 +68,6 @@ The connection is read-only, so queries cannot modify the database.
 | `user` | `text` | yes | `null` | Username. |
 | `password` | `password` | yes | `null` | Password. |
 | `table_schema` | `text` | no | `public` | Schema for table operations and the connection search path. |
-| `connection` | `text` | no | `null` | Programmatic only: an existing Psycopg connection. |
 
 ```yaml
 agents:
@@ -160,9 +157,7 @@ Without `db_path`, the database lives in memory and is not saved.
 | --- | --- | --- | --- |
 | `db_path` | `text` | `null` | Path to a persistent DuckDB database file. |
 | `read_only` | `boolean` | `false` | Open the database read-only. |
-| `connection` | `text` | `null` | Programmatic only: an existing DuckDB connection. |
 | `init_commands` | `string[]` | `null` | SQL statements run in order when the tool opens its database, such as `INSTALL httpfs` and `LOAD httpfs`. |
-| `config` | `text` | `null` | Programmatic only: a DuckDB config mapping. |
 
 ```yaml
 agents:
@@ -187,8 +182,6 @@ export_table_to_path("orders", format="CSV", path="/tmp")
 | --- | --- | --- | --- |
 | `csvs` | `string[]` | `null` | Absolute paths of the CSV files the tool reads. |
 | `row_limit` | `number` | `null` | Default row cap for `read_csv_file()`. |
-| `duckdb_connection` | `text` | `null` | Programmatic only: an existing DuckDB connection. |
-| `duckdb_kwargs` | `text` | `null` | Programmatic only: DuckDB connection arguments. |
 | `enable_read_csv_file` | `boolean` | `true` | Enable `read_csv_file()`. |
 | `enable_list_csv_files` | `boolean` | `true` | Enable `list_csv_files()`. |
 | `enable_get_columns` | `boolean` | `true` | Enable `get_columns()`. |
@@ -362,7 +355,6 @@ Choose `openbb` over [`yfinance`](#yfinance) when you need to switch data provid
 | --- | --- | --- | --- |
 | `provider` | `text` | `yfinance` | One of `yfinance`, `benzinga`, `fmp`, `intrinio`, `polygon`, `tiingo`, or `tmx`. |
 | `openbb_pat` | `password` | `null` | OpenBB personal access token for premium providers. |
-| `obb` | `text` | `null` | Programmatic only: a configured OpenBB instance. |
 | `enable_get_stock_price` | `boolean` | `true` | Enable `get_stock_price()`. |
 | `enable_search_company_symbol` | `boolean` | `false` | Enable `search_company_symbol()`. |
 | `enable_get_company_news` | `boolean` | `false` | Enable `get_company_news()`. |

@@ -46,13 +46,6 @@ if TYPE_CHECKING:
             required=False,
             default=300,
         ),
-        ConfigField(
-            name="sandbox_options",
-            label="Sandbox Options",
-            type="text",
-            required=False,
-            default=None,
-        ),
     ],
     managed_init_args=(ToolManagedInitArg.TOOL_OUTPUT_WORKSPACE_ROOT, ToolManagedInitArg.FILE_ACCESS),
     dependencies=["e2b_code_interpreter"],

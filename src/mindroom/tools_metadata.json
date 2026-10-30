@@ -3104,19 +3104,6 @@
           "required": false,
           "type": "number",
           "validation": null
-        },
-        {
-          "authored_override": true,
-          "default": null,
-          "description": null,
-          "env": [],
-          "label": "Sandbox Options",
-          "name": "sandbox_options",
-          "options": null,
-          "placeholder": null,
-          "required": false,
-          "type": "text",
-          "validation": null
         }
       ],
       "consumes_workspace_paths": true,
@@ -5849,19 +5836,6 @@
         {
           "authored_override": true,
           "default": null,
-          "description": "Programmatic only: pass an existing psycopg connection object (not usable from UI).",
-          "env": [],
-          "label": "Connection",
-          "name": "connection",
-          "options": null,
-          "placeholder": null,
-          "required": false,
-          "type": "text",
-          "validation": null
-        },
-        {
-          "authored_override": true,
-          "default": null,
           "description": "PostgreSQL server hostname",
           "env": [],
           "label": "Host",
@@ -5977,32 +5951,6 @@
           "env": [],
           "label": "Base Dir",
           "name": "base_dir",
-          "options": null,
-          "placeholder": null,
-          "required": false,
-          "type": "text",
-          "validation": null
-        },
-        {
-          "authored_override": true,
-          "default": null,
-          "description": null,
-          "env": [],
-          "label": "Safe Globals",
-          "name": "safe_globals",
-          "options": null,
-          "placeholder": null,
-          "required": false,
-          "type": "text",
-          "validation": null
-        },
-        {
-          "authored_override": true,
-          "default": null,
-          "description": null,
-          "env": [],
-          "label": "Safe Locals",
-          "name": "safe_locals",
           "options": null,
           "placeholder": null,
           "required": false,
@@ -8114,58 +8062,6 @@
         {
           "authored_override": true,
           "default": null,
-          "description": "JSON configuration for workspace settings",
-          "env": [],
-          "label": "Workspace Config",
-          "name": "workspace_config",
-          "options": null,
-          "placeholder": "{\"type\": \"local\"}",
-          "required": false,
-          "type": "text",
-          "validation": null
-        },
-        {
-          "authored_override": true,
-          "default": null,
-          "description": "JSON mapping of app names to connected account IDs",
-          "env": [],
-          "label": "Connected Account IDs",
-          "name": "connected_account_ids",
-          "options": null,
-          "placeholder": "{\"github\": \"account_123\"}",
-          "required": false,
-          "type": "text",
-          "validation": null
-        },
-        {
-          "authored_override": true,
-          "default": null,
-          "description": "JSON metadata for tools and actions configuration",
-          "env": [],
-          "label": "Metadata",
-          "name": "metadata",
-          "options": null,
-          "placeholder": "{\"key\": \"value\"}",
-          "required": false,
-          "type": "text",
-          "validation": null
-        },
-        {
-          "authored_override": true,
-          "default": null,
-          "description": "Custom processors configuration (JSON format)",
-          "env": [],
-          "label": "Processors",
-          "name": "processors",
-          "options": null,
-          "placeholder": null,
-          "required": false,
-          "type": "text",
-          "validation": null
-        },
-        {
-          "authored_override": true,
-          "default": null,
           "description": "Directory path for output files",
           "env": [],
           "label": "Output Directory",
@@ -8252,19 +8148,6 @@
           "placeholder": null,
           "required": false,
           "type": "boolean",
-          "validation": null
-        },
-        {
-          "authored_override": true,
-          "default": "INFO",
-          "description": "Logging level (DEBUG, INFO, WARNING, ERROR, CRITICAL)",
-          "env": [],
-          "label": "Logging Level",
-          "name": "logging_level",
-          "options": null,
-          "placeholder": "INFO",
-          "required": false,
-          "type": "text",
           "validation": null
         }
       ],
@@ -8697,32 +8580,6 @@
         },
         {
           "authored_override": true,
-          "default": null,
-          "description": null,
-          "env": [],
-          "label": "Duckdb Connection",
-          "name": "duckdb_connection",
-          "options": null,
-          "placeholder": null,
-          "required": false,
-          "type": "text",
-          "validation": null
-        },
-        {
-          "authored_override": true,
-          "default": null,
-          "description": null,
-          "env": [],
-          "label": "Duckdb Kwargs",
-          "name": "duckdb_kwargs",
-          "options": null,
-          "placeholder": null,
-          "required": false,
-          "type": "text",
-          "validation": null
-        },
-        {
-          "authored_override": true,
           "default": true,
           "description": null,
           "env": [],
@@ -8899,19 +8756,6 @@
         {
           "authored_override": true,
           "default": null,
-          "description": null,
-          "env": [],
-          "label": "Connection",
-          "name": "connection",
-          "options": null,
-          "placeholder": null,
-          "required": false,
-          "type": "text",
-          "validation": null
-        },
-        {
-          "authored_override": true,
-          "default": null,
           "description": "SQL statements run, in order, when the tool opens its database connection.",
           "env": [],
           "label": "Init Commands",
@@ -8933,19 +8777,6 @@
           "placeholder": null,
           "required": false,
           "type": "boolean",
-          "validation": null
-        },
-        {
-          "authored_override": true,
-          "default": null,
-          "description": null,
-          "env": [],
-          "label": "Config",
-          "name": "config",
-          "options": null,
-          "placeholder": null,
-          "required": false,
-          "type": "text",
           "validation": null
         }
       ],
@@ -9963,19 +9794,6 @@
         {
           "authored_override": true,
           "default": null,
-          "description": "Optional pre-configured OpenBB instance (advanced usage)",
-          "env": [],
-          "label": "OpenBB Instance",
-          "name": "obb",
-          "options": null,
-          "placeholder": null,
-          "required": false,
-          "type": "text",
-          "validation": null
-        },
-        {
-          "authored_override": true,
-          "default": null,
           "description": "OpenBB PAT for premium data providers. Optional - works without it using yfinance.",
           "env": [
             "OPENBB_PAT"
@@ -10360,19 +10178,6 @@
           "default": null,
           "description": null,
           "env": [],
-          "label": "Db Engine",
-          "name": "db_engine",
-          "options": null,
-          "placeholder": null,
-          "required": false,
-          "type": "text",
-          "validation": null
-        },
-        {
-          "authored_override": true,
-          "default": null,
-          "description": null,
-          "env": [],
           "label": "User",
           "name": "user",
           "options": null,
@@ -10440,19 +10245,6 @@
           "env": [],
           "label": "Dialect",
           "name": "dialect",
-          "options": null,
-          "placeholder": null,
-          "required": false,
-          "type": "text",
-          "validation": null
-        },
-        {
-          "authored_override": true,
-          "default": null,
-          "description": null,
-          "env": [],
-          "label": "Tables",
-          "name": "tables",
           "options": null,
           "placeholder": null,
           "required": false,
@@ -14936,19 +14728,6 @@
       "config_fields": [
         {
           "authored_override": true,
-          "default": null,
-          "description": null,
-          "env": [],
-          "label": "Knowledge",
-          "name": "knowledge",
-          "options": null,
-          "placeholder": null,
-          "required": false,
-          "type": "text",
-          "validation": null
-        },
-        {
-          "authored_override": true,
           "default": true,
           "description": null,
           "env": [],
@@ -15080,19 +14859,6 @@
       "auth_provider": null,
       "category": "social",
       "config_fields": [
-        {
-          "authored_override": true,
-          "default": null,
-          "description": null,
-          "env": [],
-          "label": "Reddit Instance",
-          "name": "reddit_instance",
-          "options": null,
-          "placeholder": null,
-          "required": false,
-          "type": "text",
-          "validation": null
-        },
         {
           "authored_override": true,
           "default": null,

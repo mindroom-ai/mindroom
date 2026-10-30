@@ -127,7 +127,6 @@ class MindRoomE2BTools(E2BTools):
         self,
         api_key: str | None = None,
         timeout: int = 300,
-        sandbox_options: dict[str, Any] | None = None,
         *,
         tool_output_workspace_root: Path | None = None,
         file_access: FileAccess = "workspace",
@@ -135,7 +134,7 @@ class MindRoomE2BTools(E2BTools):
     ) -> None:
         self._workspace_root = tool_output_workspace_root
         self._file_access = file_access
-        super().__init__(api_key=api_key, timeout=timeout, sandbox_options=sandbox_options, **kwargs)
+        super().__init__(api_key=api_key, timeout=timeout, **kwargs)
 
     def _workspace_location(self, path: str) -> tuple[Path, Path]:
         """Return the workspace root as spelled, so a replaced workspace is refused, and the canonical path below it."""

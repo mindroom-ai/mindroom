@@ -121,12 +121,12 @@ It provides:
 `download_file_from_sandbox()` and `read_file_content()` refuse sandbox files larger than 64 MiB, and a refused download leaves no partial file.
 `run_python_code()` and `run_command()` refuse output larger than 64 MiB with a tool error, and `stream_command()` returns only its first 64 MiB, so write larger output to a sandbox file instead.
 Downloads always land inside the agent workspace at workspace-relative paths; absolute paths, `..`, and links leaving the workspace are refused.
+An entry that still sets the retired `sandbox_options` setting fails config load until you remove it.
 
 | Option | Type | Default | Notes |
 | --- | --- | --- | --- |
 | `api_key` | `password` | `null` | E2B API key. |
 | `timeout` | `number` | `300` | Sandbox timeout in seconds. |
-| `sandbox_options` | `text` | `null` | Extra E2B sandbox-creation options; the SDK expects a mapping that tool config cannot express, so leave it unset. |
 
 ```yaml
 agents:
@@ -186,6 +186,7 @@ Before loading the tool, configure the API key and connect the apps' accounts fo
 A missing or empty `actions` list fails with `Composio requires a nonempty actions list.`
 `composio` does not accept `include_tools` or `exclude_tools`; choose its functions with `actions`.
 It is not confined by `file_access` and cannot run in a worker, so enable it only for agents trusted with the primary runtime (see [File access](../architecture/security-posture.md#file-access)).
+An entry that still sets one of the retired settings `workspace_config`, `connected_account_ids`, `metadata`, `processors`, or `logging_level` fails config load until you remove it.
 
 | Option | Type | Default | Notes |
 | --- | --- | --- | --- |
@@ -194,10 +195,6 @@ It is not confined by `file_access` and cannot run in a worker, so enable it onl
 | `base_url` | `url` | `null` | Composio API base URL. |
 | `entity_id` | `text` | `default` | Composio entity whose connected accounts run the actions. |
 | `workspace_id` | `text` | `null` | Composio workspace ID. |
-| `workspace_config` | `text` | `null` | Composio workspace configuration object; tool config cannot express it, so leave it unset. |
-| `connected_account_ids` | `text` | `null` | Mapping of apps to connected account IDs; tool config cannot express it, so leave it unset. |
-| `metadata` | `text` | `null` | Action metadata mapping; tool config cannot express it, so leave it unset. |
-| `processors` | `text` | `null` | Request, response, and schema processor mapping; tool config cannot express it, so leave it unset. |
 | `output_dir` | `text` | `null` | Directory for file-based results. |
 | `output_in_file` | `boolean` | `false` | Write action output to files. |
 | `lockfile` | `text` | `null` | Lockfile path for action-version locking. |
@@ -205,7 +202,6 @@ It is not confined by `file_access` and cannot run in a worker, so enable it onl
 | `max_retries` | `number` | `3` | Retries for failed Composio operations. |
 | `verbosity_level` | `number` | `null` | Verbosity from `0` to `3`. |
 | `allow_tracing` | `boolean` | `false` | Enable Composio tracing. |
-| `logging_level` | `text` | `INFO` | `DEBUG`, `INFO`, `WARNING`, `ERROR`, or `CRITICAL`. |
 
 ```yaml
 agents:

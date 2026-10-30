@@ -2,10 +2,12 @@
 
 import inspect
 import json
-from collections.abc import Callable
+import sqlite3
+from collections.abc import Callable, Iterable, Sequence
+from contextlib import closing
 from pathlib import Path
 from types import UnionType
-from typing import Any, Union, cast, get_args, get_origin, get_type_hints
+from typing import Any, Literal, Union, cast, get_args, get_origin, get_type_hints
 
 import pytest
 from agno.tools import Toolkit
@@ -15,8 +17,10 @@ from agno.tools.function import Function
 # tool-argument repair as it does for every agent MindRoom builds.
 import mindroom.tool_system.tool_hooks
 import mindroom.tools  # noqa: F401
+from mindroom.config.main import Config, ConfigRuntimeValidationError
 from mindroom.config.models import FileAccess
 from mindroom.constants import RuntimePaths, resolve_runtime_paths
+from mindroom.credentials.manager import get_runtime_credentials_manager
 from mindroom.shared_directories.tool_roots import SharedDirectoryRoot
 from mindroom.tool_system.agno_toolkits import adapt_callable
 from mindroom.tool_system.authoring import Toolkit as OwnedToolkit
@@ -25,6 +29,7 @@ from mindroom.tool_system.invocation import parse_tool_arguments
 from mindroom.tool_system.metadata import (
     TOOL_METADATA,
     TOOL_REGISTRY,
+    ToolConfigOverrideError,
     get_tool_by_name,
     validate_authored_tool_entry_overrides,
 )
@@ -61,7 +66,31 @@ IGNORED_AGNO_PARAMS = {
     # The prompt shows every toolkit's instructions, so Agno's switch for showing them has no effect.
     "reasoning": {"add_instructions"},
     "zep": {"add_instructions"},
+    # Live clients, connections, and mappings, which no text, number, boolean, or string-list setting can supply.
+    "csv": {"duckdb_connection", "duckdb_kwargs"},
+    "duckdb": {"config", "connection"},
+    "openbb": {"obb"},
+    "postgres": {"connection"},
+    "reddit": {"reddit_instance"},
+    "sql": {"db_engine", "tables"},
+    "wikipedia": {"knowledge"},
 }
+# Settings removed because they took a Python object, which config can supply only as text that never worked.
+REMOVED_OBJECT_SETTINGS = (
+    *(
+        (tool_name, name)
+        for tool_name in ("csv", "duckdb", "openbb", "postgres", "reddit", "sql", "wikipedia")
+        for name in sorted(IGNORED_AGNO_PARAMS[tool_name])
+    ),
+    ("python", "safe_globals"),
+    ("python", "safe_locals"),
+    ("composio", "connected_account_ids"),
+    ("composio", "logging_level"),
+    ("composio", "metadata"),
+    ("composio", "processors"),
+    ("composio", "workspace_config"),
+    ("e2b", "sandbox_options"),
+)
 # Words tool-call parsing reads as None or a boolean; a string parameter keeps them, except that one with a default
 # reads the null words as left out.
 BOOLEAN_WORDS = ("true", "False")
@@ -95,6 +124,54 @@ def test_mapping_only_upstream_fields_are_not_authored(tool_name: str, mapping_f
     authored_names = {field.name for field in TOOL_METADATA[tool_name].config_fields or []}
 
     assert mapping_field not in authored_names
+
+
+@pytest.mark.parametrize(("tool_name", "field_name"), REMOVED_OBJECT_SETTINGS)
+def test_a_tool_entry_naming_an_object_valued_setting_is_told_to_remove_it(tool_name: str, field_name: str) -> None:
+    """No setting can supply a Python object, so a tool entry naming one fails with the key and the fix."""
+    assert field_name not in {field.name for field in TOOL_METADATA[tool_name].config_fields or ()}
+    expected = (
+        f"agents.a.tools.{tool_name}.{field_name}: unknown authored override field(s): {field_name}; "
+        "remove or correct them."
+    )
+    with pytest.raises(ToolConfigOverrideError) as exc_info:
+        validate_authored_tool_entry_overrides(tool_name, {field_name: "value"}, config_path_prefix="agents.a.tools")
+
+    assert str(exc_info.value).startswith(expected)
+
+
+def test_config_load_fails_on_an_object_valued_setting_and_says_to_remove_it(tmp_path: Path) -> None:
+    """An old ``config.yaml`` that still sets ``sql.tables`` fails to load, naming the key and saying to remove it."""
+    runtime_paths = resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path / "storage")
+
+    with pytest.raises(ConfigRuntimeValidationError) as exc_info:
+        Config.validate_with_runtime(
+            {
+                "models": {"default": {"provider": "openai", "id": "test-model"}},
+                "agents": {"analyst": {"display_name": "Analyst", "tools": [{"sql": {"tables": "orders"}}]}},
+            },
+            runtime_paths,
+        )
+
+    expected = "agents.analyst.tools[0].sql.tables: unknown authored override field(s): tables; remove or correct them."
+    assert expected in str(exc_info.value)
+
+
+def test_a_saved_value_for_an_object_valued_setting_is_ignored(tmp_path: Path) -> None:
+    """A dashboard save that still holds ``db_engine`` no longer replaces the engine ``db_url`` opens."""
+    database = tmp_path / "shop.sqlite"
+    with closing(sqlite3.connect(database)) as connection:
+        connection.execute("CREATE TABLE orders (id INTEGER)")
+    runtime_paths = resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path / "storage")
+    get_runtime_credentials_manager(runtime_paths).save_credentials(
+        "sql",
+        {"db_url": f"sqlite:///{database}", "db_engine": f"sqlite:///{tmp_path / 'elsewhere.sqlite'}"},
+    )
+
+    tool = get_tool_by_name("sql", runtime_paths, runs_in_worker=False, worker_target=None)
+
+    assert json.loads(blocking_entrypoint(tool, "list_tables")()) == ["orders"]
+    tool.db_engine.dispose()
 
 
 def test_authored_csv_paths_register_each_file(tmp_path: Path) -> None:
@@ -446,6 +523,23 @@ def verify_managed_init_args(tool_name: str, init_signature: inspect.Signature) 
     )
 
 
+def _setting_can_supply(param_type: object, field_type: str) -> bool:
+    """Return whether a ``field_type`` setting, which gives text, a number, a boolean, or a string list, fits ``param_type``.
+
+    An unannotated or ``Any`` parameter cannot tell, so it passes.
+    """
+    if param_type in (None, Any, object):
+        return True
+    origin = get_origin(param_type)
+    if origin in {Union, UnionType}:
+        return any(_setting_can_supply(arg, field_type) for arg in get_args(param_type) if arg is not type(None))
+    if origin is Literal:
+        return all(isinstance(value, str) for value in get_args(param_type))
+    if (origin or param_type) in {list, tuple, set, frozenset, Sequence, Iterable}:
+        return field_type == "string[]"
+    return isinstance(param_type, type) and issubclass(param_type, (str, int, float, Path))
+
+
 def verify_tool_configfields(  # noqa: C901, PLR0912, PLR0915
     tool_name: str,
     tool_class: type,
@@ -522,6 +616,12 @@ def verify_tool_configfields(  # noqa: C901, PLR0912, PLR0915
 
         field = config_field_map[param_name]
         param_type = param_info["type"]
+        if not _setting_can_supply(param_type, field.type):
+            type_mismatches.append(
+                f"{param_name}: takes {param_type}, which a '{field.type}' setting cannot supply; "
+                "drop the ConfigField and list the parameter in IGNORED_AGNO_PARAMS",
+            )
+            continue
 
         # Handle Optional types
         actual_type = param_type

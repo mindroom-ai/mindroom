@@ -23,13 +23,6 @@ if TYPE_CHECKING:
     icon_color="text-gray-700",
     config_fields=[
         ConfigField(
-            name="knowledge",
-            label="Knowledge",
-            type="text",
-            required=False,
-            default=None,
-        ),
-        ConfigField(
             name="auto_suggest",
             label="Auto Suggest",
             type="boolean",
