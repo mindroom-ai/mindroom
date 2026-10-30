@@ -68,7 +68,7 @@ def legacy_docker_worker_keys(workers_root: Path, *, control_root: Path) -> list
 # Legacy format: `workers/.mindroom-worker-control/<worker_dir>/metadata/worker.json` holding any of `endpoint`,
 # `backend_name`, `host_port`, `container_id`, `image`, `publish_host`, `worker_port`, `launch_config_hash`, or
 # `startup_manifest_hash` beside the worker's identity and lifecycle keys.
-# Last legacy release: v2026.10.703; replacement: the next release, whose records keep only `worker_id`,
+# Last legacy release: v2026.10.710; replacement: the next release, whose records keep only `worker_id`,
 # `worker_key`, `container_name`, and the lifecycle keys, and whose containers carry their launch hash as labels.
 # Handling: When the Docker backend starts, before anything reads a record as its current type (which rejects
 # unknown keys), each record holding a retired key is rewritten without it, keeping its identity and lifecycle
