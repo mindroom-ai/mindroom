@@ -94,8 +94,6 @@ class TurnJournalRecovery:
             return None
         try:
             await bot.recover_pending_turn_journal_events()
-        except asyncio.CancelledError:
-            raise
         except Exception as error:
             logger.exception("turn_dispatch_recovery_failed", agent_name=entity_name)
             return error
