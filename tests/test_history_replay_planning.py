@@ -262,47 +262,21 @@ def test_small_replay_window_does_not_cap_compaction_model_input(tmp_path: Path)
 
 
 @pytest.mark.asyncio
-async def test_prepare_history_for_run_without_authored_compaction_and_no_window_skips_warning(tmp_path: Path) -> None:
-    config, runtime_paths = _make_config(tmp_path, context_window=None)
-    config.defaults.compaction = None
-    storage = create_session_storage("test_agent", config, runtime_paths, execution_identity=None)
-    session = _session(
-        "session-1",
-        runs=[
-            _completed_run("run-1"),
-            _completed_run("run-2"),
-        ],
-    )
-    seed_session(storage, session)
-
-    with patch("mindroom.history.runtime.logger.warning") as mock_warning:
-        prepared = await prepare_history_for_run_for_test(
-            agent_name="test_agent",
-            full_prompt="Current prompt",
-            session_id="session-1",
-            runtime_paths=runtime_paths,
-            config=config,
-            execution_identity=None,
-            storage=storage,
-            session=session,
+@pytest.mark.parametrize("compaction_disabled", [False, True], ids=["unauthored", "disabled"])
+async def test_prepare_history_for_run_without_active_compaction_and_no_window_skips_warning(
+    tmp_path: Path,
+    *,
+    compaction_disabled: bool,
+) -> None:
+    if compaction_disabled:
+        config, runtime_paths = _make_config(
+            tmp_path,
+            compaction=CompactionOverrideConfig(enabled=False),
+            context_window=None,
         )
-
-    persisted = storage.load_session("session-1")
-    assert persisted is not None
-    assert persisted.summary is None
-    assert [run.run_id for run in persisted.runs] == ["run-1", "run-2"]
-    assert prepared.compaction_reply_outcome == "none"
-    assert prepared.replays_persisted_history is True
-    assert mock_warning.call_args_list == []
-
-
-@pytest.mark.asyncio
-async def test_prepare_history_for_run_with_disabled_compaction_and_no_window_skips_warning(tmp_path: Path) -> None:
-    config, runtime_paths = _make_config(
-        tmp_path,
-        compaction=CompactionOverrideConfig(enabled=False),
-        context_window=None,
-    )
+    else:
+        config, runtime_paths = _make_config(tmp_path, context_window=None)
+        config.defaults.compaction = None
     storage = create_session_storage("test_agent", config, runtime_paths, execution_identity=None)
     session = _session(
         "session-1",
@@ -1217,8 +1191,7 @@ def test_classify_compaction_decision_compacts_at_trigger_only_without_native_co
     assert decision.fitted_replay_tokens == expected_fitted
 
 
-def test_plan_replay_that_fits_reduces_replay_for_non_authored_scope(tmp_path: Path) -> None:
-    _config, _runtime_paths_value = _make_config(tmp_path)
+def test_plan_replay_that_fits_reduces_replay_for_non_authored_scope() -> None:
     session = _session(
         "session-1",
         runs=[
