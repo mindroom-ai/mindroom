@@ -822,16 +822,19 @@ def test_editing_a_turn_an_older_resumed_run_folded_removes_that_run(store: Conv
     assert _replayed(store) == "S0"
 
 
+@pytest.mark.parametrize("later", [True, False], ids=["later-run", "fold-last"])
 @pytest.mark.parametrize("discarded", [False, True], ids=["run-stored", "run-discarded"])
 def test_redacting_an_event_only_the_running_turn_read_cuts_at_its_fold(
     store: ConversationStore,
     discarded: bool,
+    later: bool,
 ) -> None:
     """The fold's provenance holds what its turn read, even once that run's row is discarded, and the cut fences it."""
     _save(store, _run("r1"))
     running = _run("live", seen=["$context"])
     assert _fold(store, running, "S") is not None
-    _save(store, _run("r3"))
+    if later:
+        _save(store, _run("r3"))
     if discarded:
         assert delete_runs(store, ["live"], session_id="s1") == {"live"}
 
@@ -855,17 +858,6 @@ def test_a_fold_row_holds_what_its_turn_answered_for_an_edit_and_what_it_read_fo
     assert not _edit(store, "$context")
     assert _log(store) == ["run:r1", "row:S"]
     assert _edit(store, "$live")
-    assert _log(store) == ["run:r1"]
-
-
-def test_a_redaction_of_what_a_discarded_fold_read_cuts_at_its_row(store: ConversationStore) -> None:
-    """Either provenance set holds an event for a redaction."""
-    _save(store, _run("r1"))
-    assert _fold(store, _run("live", seen=["$context"]), "S") is not None
-    assert delete_runs(store, ["live"], session_id="s1") == {"live"}
-
-    assert _redact(store, "$context")
-
     assert _log(store) == ["run:r1"]
 
 
