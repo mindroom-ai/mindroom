@@ -24,7 +24,7 @@ _VERSIONS = {LEGACY_COMPACTION_METADATA_KEY: 2, LEGACY_MATRIX_HISTORY_METADATA_K
 # Legacy format: A session row's metadata held ``mindroom_compaction`` ``{"version": 2, "states": {scope_key:
 # {"force_compact_before_next_run": true}}}`` and ``mindroom_matrix_history`` ``{"version": 1, "states": {scope_key:
 # {"seen_event_ids": [...]}}}``, keyed by scope, although every reader read only the database owner's entry.
-# Last legacy release: v2026.10.714; replacement: the next release, one ``mindroom_history`` value holding the owner's
+# Last legacy release: v2026.10.725; replacement: the next release, one ``mindroom_history`` value holding the owner's
 # ``force_compact_before_next_run`` and ``seen_event_ids``.
 # Handling: ``flatten_history_metadata`` runs in the step to layout version 7, after every older step, so the
 # Agno conversion's adoption of other scopes' tombstones has already read them. The owner's force flag and seen ids move
