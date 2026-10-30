@@ -788,7 +788,6 @@ depends_on = [
     "mindroom.delegation.lifecycle",
     "mindroom.delegation.state",
     "mindroom.execution_preparation",
-    "mindroom.history.interrupted_replay",
     "mindroom.history.mid_turn_compaction",
     "mindroom.history.native",
     "mindroom.history.replay",
@@ -835,15 +834,17 @@ path = "mindroom.response_turn"
 depends_on = [
     "mindroom.ai_runtime",
     "mindroom.agent_cli.lifetime",
+    "mindroom.agent_loop",
     "mindroom.background_tasks",
     "mindroom.cancellation",
     "mindroom.constants",
     "mindroom.delegation.state",
+    "mindroom.failure_text",
     "mindroom.helper_usage",
-    "mindroom.history.interrupted_replay",
     "mindroom.history.storage",
     "mindroom.history.turn_recorder",
     "mindroom.llm",
+    "mindroom.redaction",
     "mindroom.streaming",
     "mindroom.tool_jobs.consumption",
     "mindroom.tool_jobs.execution_scope",
@@ -1008,7 +1009,6 @@ visibility = [
     "mindroom.helper_usage",
     "mindroom.approval.execution",
     "mindroom.conversation_state_writer",
-    "mindroom.history.interrupted_replay",
     "mindroom.history.session_context",
     "mindroom.history.storage",
     "mindroom.matrix_rtc.call_tools",
@@ -3102,31 +3102,13 @@ path = "mindroom.history.types"
 depends_on = []
 
 [[modules]]
-path = "mindroom.history.interrupted_replay"
-depends_on = [
-    "mindroom.constants",
-    "mindroom.history.storage",
-    "mindroom.prompt_message_tags",
-    "mindroom.tool_system.events",
-    "mindroom.llm",
-]
-visibility = [
-    "mindroom.agent_cli.cli_approval_recovery",
-    "mindroom.ai",
-    "mindroom.history.turn_recorder",
-    "mindroom.matrix_rtc.call_tools",
-    "mindroom.reply_turn.enrichment",
-    "mindroom.teams",
-    "mindroom.history.conversation_text",
-    "mindroom.response_turn",
-]
+path = "mindroom.history.legacy_interrupted_replay"
+depends_on = []
+visibility = ["mindroom.history.conversation_text"]
 
 [[modules]]
 path = "mindroom.history.turn_recorder"
-depends_on = [
-    "mindroom.history.interrupted_replay",
-    "mindroom.llm",
-]
+depends_on = []
 visibility = [
     "mindroom.ai",
     "mindroom.matrix_rtc.call_tools",
@@ -3441,10 +3423,10 @@ path = "mindroom.reply_turn.enrichment"
 depends_on = [
     "mindroom.constants",
     "mindroom.entity_resolution",
-    "mindroom.history.interrupted_replay",
     "mindroom.hooks",
     "mindroom.matrix.client_visible_messages",
     "mindroom.memory",
+    "mindroom.redaction",
     "mindroom.reply_lifecycle",
     "mindroom.teams",
     "mindroom.user_turn_time",
@@ -3845,7 +3827,6 @@ visibility = [
     "mindroom.coalescing.batch",
     "mindroom.conversation_state_writer",
     "mindroom.execution_preparation",
-    "mindroom.history.interrupted_replay",
     "mindroom.history.conversation_text",
 ]
 
@@ -4912,7 +4893,6 @@ depends_on = [
     "mindroom.agents",
     "mindroom.ai",
     "mindroom.helper_usage",
-    "mindroom.history.interrupted_replay",
     "mindroom.history.turn_recorder",
     "mindroom.history.types",
     "mindroom.hooks",
@@ -7664,18 +7644,6 @@ expose = [
 from = ["mindroom.oauth.credential_lifecycle"]
 
 [[interfaces]]
-expose = [
-    "InterruptedReplaySnapshot",
-    "build_interrupted_replay_snapshot",
-    "is_interrupted_replay_run",
-    "persist_interrupted_replay",
-    "persist_interrupted_replay_snapshot",
-    "render_stopped_attempt",
-    "split_interrupted_tool_trace",
-]
-from = ["mindroom.history.interrupted_replay"]
-
-[[interfaces]]
 expose = ["TurnRecorder"]
 from = ["mindroom.history.turn_recorder"]
 
@@ -8380,7 +8348,6 @@ visibility = [
     "mindroom.approval.execution",
     "mindroom.conversation_state_writer",
     "mindroom.execution_preparation",
-    "mindroom.history.interrupted_replay",
     "mindroom.history.manual",
     "mindroom.history.runtime",
     "mindroom.pre_model_preparation",
@@ -8396,7 +8363,7 @@ depends_on = [
     "mindroom.agent_loop",
     "mindroom.automations.steps",
     "mindroom.constants",
-    "mindroom.history.interrupted_replay",
+    "mindroom.history.legacy_interrupted_replay",
     "mindroom.history.run_visibility",
     "mindroom.history.summary_message",
     "mindroom.hooks.enrichment",
@@ -9291,7 +9258,6 @@ depends_on = [
     "mindroom.approval.tool_owners",
     "mindroom.delegation.state",
     "mindroom.turn_continuation",
-    "mindroom.history.interrupted_replay",
     "mindroom.hooks",
     "mindroom.response_turn",
     "mindroom.tool_system.agent_tool_calls",

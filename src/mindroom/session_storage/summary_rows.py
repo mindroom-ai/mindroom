@@ -18,7 +18,7 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass
 from time import time
-from typing import TYPE_CHECKING, Any, Literal
+from typing import TYPE_CHECKING, Literal
 
 from mindroom.session_storage.schema import NON_VISIBLE_RUN_STATUS_SQL, NON_VISIBLE_RUN_STATUS_VALUES, quote_identifier
 from mindroom.session_storage.store import (
@@ -35,7 +35,7 @@ from mindroom.session_storage.store import (
 
 if TYPE_CHECKING:
     import sqlite3
-    from collections.abc import Collection, Iterable, Mapping, Sequence
+    from collections.abc import Collection, Iterable, Sequence
 
     from mindroom.llm.messages import Message
     from mindroom.llm.runs import AnyRunRecord
@@ -181,47 +181,6 @@ def append_summary(
     if created is not None:
         report_created_row(created)
     return row_id
-
-
-def folded_tool_call_ids(storage: ConversationStore, *, session_id: str, run_id: str) -> set[str]:
-    """Return the tool calls the mid-turn folds of ``run_id`` summarized, from the rows they flagged.
-
-    They are the calls and results of the run's folded messages and the calls of its folded member runs, since the
-    whole delegation folds with each member run that ended before the fold.
-    """
-    names = storage.names
-    runs = quote_identifier(names.log_runs)
-    with storage.transaction(write=False) as connection:
-        messages = connection.execute(
-            f"SELECT data FROM {quote_identifier(names.log_messages)} WHERE folded_by IS NOT NULL AND run_id = "  # noqa: S608
-            f"(SELECT run_id FROM {runs} WHERE session_id = ? AND run_id = ?)",
-            (session_id, run_id),
-        ).fetchall()
-        member_tools = connection.execute(
-            f"SELECT tool.data FROM {quote_identifier(names.log_tools)} AS tool JOIN {runs} AS run "  # noqa: S608
-            "ON run.run_id = tool.run_id "
-            "WHERE run.session_id = ? AND run.parent_run_id = ? AND run.folded_by IS NOT NULL",
-            (session_id, run_id),
-        ).fetchall()
-    return summarized_tool_call_ids(
-        [json.loads(data) for (data,) in messages],
-        [json.loads(data) for (data,) in member_tools],
-    )
-
-
-def summarized_tool_call_ids(
-    messages: Iterable[Mapping[str, Any]],
-    member_tools: Iterable[Mapping[str, Any]],
-) -> set[str]:
-    """Return the tool calls a fold summarized, from the stored dicts of its messages and its members' tool executions.
-
-    They are the messages' calls and results and the members' calls. The turn recorder reads a live fold through it
-    and ``folded_tool_call_ids`` the rows folds flagged, so an interrupted record leaves out the same calls either way.
-    """
-    call_ids = {call.get("id") for message in messages for call in message.get("tool_calls") or []}
-    call_ids |= {message.get("tool_call_id") for message in messages}
-    call_ids |= {tool.get("tool_call_id") for tool in member_tools}
-    return {call_id for call_id in call_ids if isinstance(call_id, str)}
 
 
 def history_event_ids(

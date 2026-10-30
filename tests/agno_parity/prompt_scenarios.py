@@ -446,7 +446,7 @@ async def _agent_turn(
         skill_review_capture=skill_review_capture,
         participation=participation,
     )
-    recorder = TurnRecorder(user_message=turn.prompt)
+    recorder = TurnRecorder()
     with reply_runtime(turn) as runtime:
         execution_identity = build_execution_identity_from_runtime_context(runtime)
         async for _chunk in ai.stream_agent_response(
@@ -490,10 +490,7 @@ def _knowledge(base_id: str, description: str) -> AgentKnowledge:
 
 def _assert_answered(recorder: TurnRecorder) -> None:
     """Fail the scenario when a reply ended early, because its requests would not be the ones production sends."""
-    assert (recorder.outcome, recorder.assistant_text) == ("completed", "ok"), (
-        recorder.outcome,
-        recorder.assistant_text,
-    )
+    assert recorder.outcome == "completed", recorder.outcome
 
 
 def _write_workspace_files(runtime_paths: RuntimePaths, agent_name: str) -> None:
@@ -695,7 +692,7 @@ async def _run_team(root: Path, mode: TeamMode) -> ScenarioOutput:
         configured_team_name="launch",
         response_sender_id=member_ids["launch"].full_id,
     )
-    recorder = TurnRecorder(user_message=prompt)
+    recorder = TurnRecorder()
     with _api_server(), tool_runtime_context(runtime):
         async for _chunk in team_response_stream(spec, ctx, sinks=TurnSinks(turn_recorder=recorder)):
             pass

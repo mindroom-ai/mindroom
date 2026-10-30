@@ -1,7 +1,6 @@
 """One attempt of a team run, a turn's or a resumed run's: the reply document its events build and what it produced.
 
-An attempt records its document's text without tool markers, however it ends, and shows that document when it pauses;
-the records the run hands over give its run metadata.
+An attempt shows its document when it pauses, and the records the run hands over give its run metadata.
 """
 
 from __future__ import annotations
@@ -14,7 +13,6 @@ from mindroom.ai_run_metadata import build_ai_run_metadata_content
 from mindroom.budgets.pricing import model_prices
 from mindroom.llm.events import TextDelta, ToolCompleted, ToolStarted
 from mindroom.llm.runs import RunStatus, TeamRunRecord
-from mindroom.response_turn import TurnPartialSnapshot
 from mindroom.run_storage import TerminalRecord
 from mindroom.teams.presentation import apply_team_event
 from mindroom.teams.runtime import MemberEvent, team_usage
@@ -82,28 +80,6 @@ class TeamAttempt:
     def terminal_record(self) -> TeamRunRecord:
         """Return the team run's terminal record, which the run hands over before its events end."""
         return self.records.terminal(self.team_name)
-
-    def partial_snapshot(self) -> TurnPartialSnapshot:
-        """Return the live partial-output view of this attempt: what a stopped or failed turn records."""
-        tracker = self.presentation.tool_tracker
-        return TurnPartialSnapshot(
-            assistant_text=self.interrupted_text(),
-            completed_tools=tuple(tracker.completed_tools),
-            interrupted_tools=tuple(pending.trace_entry for pending in tracker.pending_tools),
-            attempt_run_id=self.run_id,
-        )
-
-    def interrupted_text(self) -> str:
-        """Return the text the turn records when this attempt is stopped or fails: its document without tool markers.
-
-        A stopped leader that wrote nothing contributes nothing; a failed one contributes the reason its run recorded,
-        credentials redacted. The text ends with the no-consensus note only once the team run completed, so it matches
-        the message a stopped reply shows.
-        """
-        record = self.records.record
-        return self.presentation.text_without_tool_markers(
-            finished=record is not None and record.status is RunStatus.completed,
-        )
 
     def apply(self, event: TeamRunEvent) -> bool:
         """Fold one run event into the attempt; return whether the document changed."""

@@ -17,6 +17,7 @@ from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
 from mindroom.llm.errors import ProviderUnavailable
 from mindroom.llm.provider import TextDelta
+from mindroom.llm.runs import RunStatus
 from mindroom.providers.pipeline import wrapped as provider_attempts
 from tests.conftest import (
     bind_runtime_paths,
@@ -151,8 +152,7 @@ async def test_post_tool_backoff_preserves_turn_history_and_followup(
             runs = stored_runs(config, runtime_paths_for(config), SESSION_ID, agent_name="worker")
             assert len(runs) == 1
             if finish != "recover":
-                assert runs[0].metadata is not None
-                assert runs[0].metadata["mindroom_original_status"] == "cancelled"
+                assert runs[0].status is RunStatus.interrupted
             saved = " ".join(str(message.content) for message in runs[0].messages)
             assert "step-1-done" in saved
             assert "step-2-done" in saved
@@ -187,6 +187,6 @@ async def test_partial_stream_failure_stays_one_durable_turn(
     assert "".join(streamed_text(chunks)).count("Partial") == 1
     runs = stored_runs(config, runtime_paths_for(config), SESSION_ID, agent_name="worker")
     assert len(runs) == 1
-    assert runs[0].metadata is not None
-    assert runs[0].metadata["mindroom_original_status"] == "error"
-    assert "Partial" in str(runs[0].content)
+    assert runs[0].status is RunStatus.interrupted
+    assert runs[0].error
+    assert [message.content for message in runs[0].messages if message.role == "assistant"] == ["Partial"]

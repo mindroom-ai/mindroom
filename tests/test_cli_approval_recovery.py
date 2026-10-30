@@ -38,6 +38,7 @@ from mindroom.approval.receipt_readers import approval_receipt_context
 from mindroom.config.agent import AgentConfig
 from mindroom.config.approval import ApprovalRuleConfig, ToolApprovalConfig
 from mindroom.event_journal import ApprovalCall, ApprovalDecision, approval_arguments_digest
+from mindroom.history.request_messages import replayable_messages
 from mindroom.history.types import HistoryScope
 from mindroom.knowledge.read_protocol import SearchHit
 from mindroom.knowledge.search import AgentKnowledge, KnowledgeSource, KnowledgeSourceDescription
@@ -523,9 +524,11 @@ async def test_restart_resolves_hidden_call_and_never_replays_parent(
     assert ((control_result if control else "action result") if approved else denial) in notice
     saved = store.get_run("run")
     assert saved is not None
-    assert saved.metadata["mindroom_replay_state"] == "interrupted"
-    assert all(not message.tool_calls for message in saved.messages)
-    assert "turn stopped before completion" in saved.messages[-1].get_content_string()
+    # The paused run ends stopped, as its turn's interrupted record: its unanswered Bash call does not replay.
+    assert saved.status is RunStatus.interrupted
+    replayed = replayable_messages([saved])
+    assert all(not message.tool_calls for message in replayed)
+    assert "turn stopped before completion" in replayed[-1].get_content_string()
 
 
 @pytest.mark.asyncio
@@ -794,8 +797,7 @@ async def test_a_recovered_approval_saves_no_tool_call_its_fold_already_summariz
     saved = "\n".join(
         message.get_content_string() for run in stored.runs if run.run_id == "run" for message in run.messages
     )
-    # The denied call is recorded, and no folded result returns beside the summary that holds it.
-    assert "Denied" in saved
+    # No folded result returns beside the summary that holds it; the follow-up turn reports the denial.
     assert "folded shell output" not in saved
     assert "nested tool output" not in saved
 
@@ -1164,9 +1166,14 @@ async def test_minimal_recovery_keeps_mode_media_and_uses_fresh_shell_grant(  # 
     assert len(approvals) == (2 if nested == "approval" else 0)
     saved = store.get_run("saved-run")
     assert saved is not None
-    assert saved.metadata["mindroom_replay_state"] == "interrupted"
-    assert all(not message.tool_calls for message in saved.messages)
-    assert "turn stopped before completion" in saved.messages[-1].get_content_string()
+    # The paused run ends stopped, as its turn's interrupted record: its finished sibling Bash replays with its result,
+    # and the unanswered outer one does not.
+    assert saved.status is RunStatus.interrupted
+    replayed = replayable_messages([saved])
+    assert [call["id"] for message in replayed for call in message.tool_calls or ()] == ["call_completed"]
+    assert "completed sibling result" in str(replayed)
+    assert "never replay outer" not in str(replayed)
+    assert "turn stopped before completion" in replayed[-1].get_content_string()
 
 
 @pytest.mark.asyncio

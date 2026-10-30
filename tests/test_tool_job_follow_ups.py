@@ -95,7 +95,6 @@ async def _drive_jobs_turn(
         load_scope=load_scope,
         run_attempt=attempt,
         make_text_chunk=str,
-        user_message=prompt,
         unexpected_error_text=str,
         entity_name="test_agent",
     )

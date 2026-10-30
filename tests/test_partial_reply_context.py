@@ -31,13 +31,10 @@ from mindroom.execution_preparation import (
     _sanitize_thread_history_for_replay,
 )
 from mindroom.history.conversation_text import utterances
-from mindroom.history.interrupted_replay import (
-    InterruptedReplaySnapshot,
-    _render_interrupted_replay_content,
-)
 from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage, _stream_status_from_content
 from mindroom.message_target import MessageTarget
 from mindroom.prompt_message_tags import render_msg_tag
+from mindroom.reply_turn.enrichment import _render_stopped_attempt
 from mindroom.streaming import (
     _INTERRUPTED_RESPONSE_NOTE,
     _PROGRESS_PLACEHOLDER,
@@ -95,14 +92,11 @@ def _get_unseen_messages(
 
 
 def _render_normalized_interrupted_replay(body: str) -> str:
-    return _render_interrupted_replay_content(
-        InterruptedReplaySnapshot(
-            user_message="",
-            partial_text=clean_partial_reply_text(body),
-            completed_tools=(),
-            interrupted_tools=(),
-            run_metadata={},
-        ),
+    """Render the account a restarted reply gives of its stopped attempt, which showed ``body``."""
+    return _render_stopped_attempt(
+        partial_text=clean_partial_reply_text(body),
+        completed_tools=(),
+        interrupted_tools=(),
     )
 
 

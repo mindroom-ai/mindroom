@@ -48,8 +48,8 @@ class ToolTraceEntry:
     member_id: str | None = field(default=None, compare=False)
     parent_bash_call_id: str | None = field(default=None, compare=False)
     toolkit_name: str | None = field(default=None, compare=False)
-    # Whether the completed call failed, as its run recorded it, so an interrupted replay can say so. Internal like
-    # the identity above: the reply's records keep it, and public Matrix metadata omits it.
+    # Whether the completed call failed, as its run recorded it, so a restarted reply's account of it can say so.
+    # Internal like the identity above: the reply's records keep it, and public Matrix metadata omits it.
     is_error: bool = field(default=False, compare=False)
 
 

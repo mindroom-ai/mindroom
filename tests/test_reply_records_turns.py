@@ -22,13 +22,13 @@ from mindroom.delivery_gateway import DeliveryGateway
 from mindroom.dispatch_source import SILENT_SCHEDULE_SOURCE_KIND
 from mindroom.event_journal import DeliveryStage, DepartureSource, EventClass, EventKind, InboundEvent
 from mindroom.event_journal.replies import ReplyStore
-from mindroom.history.interrupted_replay import render_stopped_attempt
 from mindroom.hooks import FinalResponseDraft, HookRegistry, ResponseDraft
 from mindroom.llm.media import Image
 from mindroom.matrix.client_delivery import MatrixDeliveryFailure, MatrixDeliveryFailureKind, send_message_outcome
 from mindroom.matrix.journal_ingress import _inbound_event, _projected_event
 from mindroom.mid_turn import MidTurnGate
 from mindroom.reply_presentation import TEAM_PLACEHOLDER, decode_presentation, render_body
+from mindroom.reply_turn.enrichment import _render_stopped_attempt
 from mindroom.response_runner import ResponseRunner, _mid_turn_for_request
 from mindroom.response_sources import Owned, ResponseSources, SourceFate, Unclaimed, UnclaimedReason
 from mindroom.streaming import RESTART_INTERRUPTED_RESPONSE_NOTE, format_stream_error_note
@@ -1519,7 +1519,7 @@ async def test_a_failed_tool_call_is_recorded_failed_whether_it_raised_or_answer
     reply = await _reply(bot)
     assert reply.event_id == "$sent1"
     recorded = await bot._reply_runtime._span_tool_calls((reply.last_span_id,))
-    account = render_stopped_attempt(partial_text="", completed_tools=recorded, interrupted_tools=())
+    account = _render_stopped_attempt(partial_text="", completed_tools=recorded, interrupted_tools=())
     assert account.splitlines()[0] == "(turn stopped before completion; 2 tool call(s) had failed)"
     assert account.splitlines()[-2:] == [
         '- The `fetch` tool failed with input preview "url=https://example.com" '
@@ -1546,7 +1546,7 @@ async def test_a_tool_call_that_returned_media_is_recorded_as_the_text_it_answer
     reply = await _reply(bot)
     assert reply.event_id == "$sent1"
     recorded = await bot._reply_runtime._span_tool_calls((reply.last_span_id,))
-    account = render_stopped_attempt(partial_text="", completed_tools=recorded, interrupted_tools=())
+    account = _render_stopped_attempt(partial_text="", completed_tools=recorded, interrupted_tools=())
     assert account.splitlines()[-1] == (
         '- The `draw` tool finished with input preview "prompt=cat" and output preview "Drew a cat.".'
     )

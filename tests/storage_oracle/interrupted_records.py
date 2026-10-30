@@ -1,4 +1,9 @@
-"""Canonical interrupted-turn replay helpers."""
+"""The interrupted-turn record v2026.10.729's turn driver saved over a stopped, failed, or unspoken run.
+
+The recordings hold the runs the Agno-layout store kept of it, so the oracle's ``interrupted`` action saves the same
+record through ``ConversationStore.save_interrupted_record``, whose storage rules voice playout and CLI approval
+recovery still use when they rewrite a run its loop stored. This is a frozen copy of that release's builder.
+"""
 
 from __future__ import annotations
 
@@ -8,23 +13,19 @@ from itertools import chain
 from typing import TYPE_CHECKING, Any
 
 from mindroom.constants import MATRIX_EVENT_ID_METADATA_KEY, MATRIX_RESPONSE_EVENT_ID_METADATA_KEY
-from mindroom.history.storage import run_folded_tool_call_ids
 from mindroom.llm.messages import Message
 from mindroom.llm.runs import RunRecord, RunStatus, TeamRunRecord
 from mindroom.prompt_message_tags import render_msg_tag
 from mindroom.redaction import redact_sensitive_text
-from mindroom.tool_system.events import (
-    ToolTraceEntry,
-    format_tool_completed_event,
-    format_tool_started_event,
-)
+from tests.history_helpers import folded_tool_call_ids
 
 if TYPE_CHECKING:
     from collections.abc import Collection, Mapping, Sequence
 
-    from mindroom.llm.runs import AnyRunRecord, ToolExecution
+    from mindroom.llm.runs import AnyRunRecord
     from mindroom.session_storage.store import ConversationStore
     from mindroom.session_storage.types import ConversationSession
+    from mindroom.tool_system.events import ToolTraceEntry
 
 _INTERRUPTED_REPLAY_STATE_KEY = "mindroom_replay_state"
 _ORIGINAL_STATUS_KEY = "mindroom_original_status"
@@ -51,28 +52,6 @@ class InterruptedReplaySnapshot:
     run_metadata: dict[str, Any] = field(default_factory=dict)
     user_message_is_structured: bool = False
     original_status: RunStatus = RunStatus.cancelled
-
-
-def is_interrupted_replay_run(run: AnyRunRecord) -> bool:
-    """Return whether a stored run replays a stopped or failed turn, whose answer is a rendered summary of it."""
-    return (run.metadata or {}).get(_INTERRUPTED_REPLAY_STATE_KEY) == _INTERRUPTED_REPLAY_STATE
-
-
-def split_interrupted_tool_trace(
-    tools: Sequence[ToolExecution] | None,
-) -> tuple[list[ToolTraceEntry], list[ToolTraceEntry]]:
-    """Split cancelled-run tools into completed and still-interrupted traces.
-
-    A tool is still interrupted when it holds neither a result nor an explicit success/failure marker.
-    """
-    completed: list[ToolTraceEntry] = []
-    interrupted: list[ToolTraceEntry] = []
-    for tool in tools or ():
-        if tool.result is None and tool.is_error is None:
-            interrupted.append(format_tool_started_event(tool.call)[1])
-        else:
-            completed.append(format_tool_completed_event(tool.call))
-    return completed, interrupted
 
 
 def _render_interruption_summary(snapshot: InterruptedReplaySnapshot) -> str:
@@ -162,25 +141,6 @@ def _render_interrupted_replay_content(snapshot: InterruptedReplaySnapshot) -> s
     """Render one interrupted snapshot into canonical assistant replay text."""
     parts = (snapshot.partial_text, _render_interruption_summary(snapshot), _render_retained_tool_context(snapshot))
     return "\n\n".join(part for part in parts if part)
-
-
-def render_stopped_attempt(
-    *,
-    partial_text: str,
-    completed_tools: Sequence[ToolTraceEntry],
-    interrupted_tools: Sequence[ToolTraceEntry],
-) -> str:
-    """Render what one stopped attempt showed, worded as its interrupted replay record would be."""
-    return _render_interrupted_replay_content(
-        build_interrupted_replay_snapshot(
-            user_message=None,
-            user_message_is_structured=False,
-            partial_text=partial_text,
-            completed_tools=completed_tools,
-            interrupted_tools=interrupted_tools,
-            run_metadata=None,
-        ),
-    )
 
 
 def _build_interrupted_replay_run(
@@ -293,7 +253,7 @@ def persist_interrupted_replay_snapshot(
     ``session_state_snapshot`` of the state ``session`` ran with, the session state commits in the same transaction
     as the replay run.
     """
-    folded = run_folded_tool_call_ids(storage, session_id=session.session_id, run_id=run_id)
+    folded = folded_tool_call_ids(storage, session_id=session.session_id, run_id=run_id)
     snapshot = replace(
         snapshot,
         completed_tools=_unfolded(snapshot.completed_tools, folded),
@@ -301,33 +261,3 @@ def persist_interrupted_replay_snapshot(
     )
     persisted_run = _build_interrupted_replay_run(snapshot=snapshot, run_id=run_id, session=session)
     storage.save_interrupted_record(session, persisted_run, state=state)
-
-
-def persist_interrupted_replay(
-    *,
-    storage: ConversationStore,
-    session: ConversationSession,
-    run_id: str,
-    user_message: str | None,
-    user_message_is_structured: bool,
-    partial_text: str | None,
-    completed_tools: Sequence[ToolTraceEntry],
-    interrupted_tools: Sequence[ToolTraceEntry],
-    run_metadata: Mapping[str, object] | None,
-    original_status: RunStatus = RunStatus.cancelled,
-) -> None:
-    """Persist one interrupted top-level turn from trusted runtime state into ``session``'s history."""
-    persist_interrupted_replay_snapshot(
-        storage=storage,
-        session=session,
-        run_id=run_id,
-        snapshot=build_interrupted_replay_snapshot(
-            user_message=user_message,
-            user_message_is_structured=user_message_is_structured,
-            partial_text=partial_text,
-            completed_tools=completed_tools,
-            interrupted_tools=interrupted_tools,
-            run_metadata=run_metadata,
-            original_status=original_status,
-        ),
-    )

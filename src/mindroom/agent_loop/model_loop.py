@@ -404,21 +404,25 @@ async def _stream_turn(
 ) -> AsyncIterator[TextDelta | ReasoningDelta | TurnCompleted]:
     """Stream one request, yielding its deltas and then its finished turn.
 
-    When the stream is cut off by cancellation, a provider error, or a consumer that stops reading, the usage it
-    already reported is kept on an assistant message appended to ``messages`` and counted once in ``metrics``,
-    before whatever ended the stream reaches the run's terminal handling. A turn that completed but was never taken
-    by the consumer, such as one cancelled while a pipeline stage finishes the stream, is cut off the same way with
-    the turn's own usage; once the consumer takes it, ``_accept_turn`` counts that usage instead.
+    When the stream is cut off by cancellation, a provider error, or a consumer that stops reading, the text it
+    already streamed and the usage it already reported are kept on an assistant message appended to ``messages``, the
+    usage counted once in ``metrics``, before whatever ended the stream reaches the run's terminal handling. A turn
+    that completed but was never taken by the consumer, such as one cancelled while a pipeline stage finishes the
+    stream, is cut off the same way with the turn's own usage; once the consumer takes it, ``_accept_turn`` counts that
+    usage instead.
     """
     identity = model.identity
     turn: TurnCompleted | None = None
     handed_off = False
     reported = ReportedUsage()
+    streamed: list[str] = []
     try:
         stream = model.stream(request)
         async with closing_async_stream(stream):
             async for event in stream:
                 if isinstance(event, TextDelta | ReasoningDelta):
+                    if isinstance(event, TextDelta):
+                        streamed.append(event.text)
                     yield event
                 elif isinstance(event, UsageReported):
                     reported.observe(event)
@@ -431,20 +435,37 @@ async def _stream_turn(
         handed_off = True
     finally:
         if not handed_off:
-            # A cut-off request settles exactly what was billed: the completed turn's usage, else the final reports
-            # plus a partial none replaced.
-            billed = turn.message.metrics if turn is not None else reported.received
-            if billed is not None and billed.to_dict():
-                provider_data = model_provenance(identity.id, identity.provider_name)
-                # The retrying stage marks usage that sums attempts on the finished turn and on the reports alike.
-                sums_attempts = (
-                    usage_sums_attempts(turn.message.provider_data) if turn is not None else reported.sums_attempts
-                )
-                if sums_attempts:
-                    # Usage that sums retried attempts must not read as one request's.
-                    provider_data = {AGGREGATE_USAGE_KEY: True, **provider_data}
-                messages.append(Message(role="assistant", metrics=billed, provider_data=provider_data))
-                _count_request(metrics, billed, identity)
+            _keep_cut_off(messages, metrics, identity, turn, reported, "".join(streamed))
+
+
+def _keep_cut_off(
+    messages: list[Message],
+    metrics: RunMetrics,
+    identity: ModelIdentity,
+    turn: TurnCompleted | None,
+    reported: ReportedUsage,
+    text: str,
+) -> None:
+    """Append what a cut-off request produced, the ``text`` it streamed and what it billed, as one assistant message.
+
+    It settles exactly what was billed: the completed turn's usage, else the final reports plus a partial none
+    replaced, counted once in ``metrics``. A request that streamed and billed nothing appends nothing.
+    """
+    billed = turn.message.metrics if turn is not None else reported.received
+    billed = billed if billed is not None and billed.to_dict() else None
+    if billed is None and not text:
+        return
+    provider_data = model_provenance(identity.id, identity.provider_name)
+    # The retrying stage marks usage that sums attempts on the finished turn and on the reports alike.
+    sums_attempts = usage_sums_attempts(turn.message.provider_data) if turn is not None else reported.sums_attempts
+    if billed is not None and sums_attempts:
+        # Usage that sums retried attempts must not read as one request's.
+        provider_data = {AGGREGATE_USAGE_KEY: True, **provider_data}
+    message = Message(role="assistant", content=text or None, provider_data=provider_data)
+    if billed is not None:
+        message.metrics = billed
+        _count_request(metrics, billed, identity)
+    messages.append(message)
 
 
 def _count_request(metrics: RunMetrics, usage: MessageMetrics, identity: ModelIdentity) -> None:

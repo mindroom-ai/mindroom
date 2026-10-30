@@ -785,3 +785,30 @@ def unreadable_conversations(unreadable: Callable[[str], bool]) -> Callable[...,
         return real(storage, session_id, agent_name=agent_name, updated_at=updated_at)
 
     return read_conversation
+
+
+def folded_tool_call_ids(storage: ConversationStore, *, session_id: str, run_id: str) -> set[str]:
+    """Return the tool calls the mid-turn folds of ``run_id`` summarized, from the rows they flagged.
+
+    They are the calls and results of the run's folded messages and the calls of its folded member runs, since the
+    whole delegation folds with each member run that ended before the fold.
+    """
+    names = storage.names
+    runs = quote_identifier(names.log_runs)
+    with storage.transaction(write=False) as connection:
+        messages = connection.execute(
+            f"SELECT data FROM {quote_identifier(names.log_messages)} WHERE folded_by IS NOT NULL AND run_id = "  # noqa: S608
+            f"(SELECT run_id FROM {runs} WHERE session_id = ? AND run_id = ?)",
+            (session_id, run_id),
+        ).fetchall()
+        member_tools = connection.execute(
+            f"SELECT tool.data FROM {quote_identifier(names.log_tools)} AS tool JOIN {runs} AS run "  # noqa: S608
+            "ON run.run_id = tool.run_id "
+            "WHERE run.session_id = ? AND run.parent_run_id = ? AND run.folded_by IS NOT NULL",
+            (session_id, run_id),
+        ).fetchall()
+    folded = [json.loads(data) for (data,) in messages]
+    call_ids = {call.get("id") for message in folded for call in message.get("tool_calls") or []}
+    call_ids |= {message.get("tool_call_id") for message in folded}
+    call_ids |= {json.loads(data).get("tool_call_id") for (data,) in member_tools}
+    return {call_id for call_id in call_ids if isinstance(call_id, str)}

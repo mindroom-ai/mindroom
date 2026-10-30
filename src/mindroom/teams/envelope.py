@@ -90,7 +90,6 @@ if TYPE_CHECKING:
     from mindroom.constants import RuntimePaths
     from mindroom.history.request_messages import TurnMessages
     from mindroom.history.session_context import ScopeSessionContext
-    from mindroom.history.turn_recorder import TurnRecorder
     from mindroom.history.types import CompactionLifecycle, PreparedHistoryState, ScopeSummary
     from mindroom.knowledge.utils import KnowledgeAvailabilityDetail
     from mindroom.llm.runs import AnyRunRecord, TeamRunRecord
@@ -254,7 +253,6 @@ def _leader_run(
     storage: RunStorage,
     configured_team_name: str | None,
     compaction_lifecycle: CompactionLifecycle | None,
-    turn_recorder: TurnRecorder | None,
 ) -> LeaderRun:
     """Return how the leader of one prepared turn runs; a fold lands in the scope only when this request replays it."""
     history = prepared.prepared_history
@@ -271,7 +269,6 @@ def _leader_run(
                 replay_plan=history.replay_plan,
                 prompt_id=prepared.turn.prompt.id,
                 lifecycle=compaction_lifecycle,
-                turn_recorder=turn_recorder,
             ),
             entity_name=configured_team_name,
         ),
@@ -303,7 +300,6 @@ def run_prepared_team(
         storage=storage,
         configured_team_name=team_name,
         compaction_lifecycle=None,
-        turn_recorder=None,
     )
     return leader.start(
         prepared.run_input(MediaInputs()),
@@ -522,7 +518,6 @@ class _TeamTurn:
             storage=storage,
             configured_team_name=self.configured_team_name,
             compaction_lifecycle=self.ctx.compaction_lifecycle,
-            turn_recorder=run.record,
         )
         request_context = self.request_log_context(
             prompt=continuation_state.active_prompt,
@@ -675,7 +670,7 @@ class _TeamTurn:
         # The text records the document the attempt's events built and its failed runs' reasons, in the configured
         # member order, without tool markers: the chunks show the trace. The "No team response generated." fallback is
         # display chrome, not replayable assistant text. A quiet scheduled reply records the bare token.
-        body_text = attempt.presentation.text_without_tool_markers(finished=True)
+        body_text = attempt.presentation.text_without_tool_markers()
         has_visible_output = bool(body_text)
         is_empty = is_empty_reply(record)
         if not is_empty and self.ctx.reply_to_event_id:
@@ -815,7 +810,6 @@ async def team_response_stream(
         load_scope=turn.load_scope,
         run_attempt=turn.run_attempt,
         make_text_chunk=lambda text: text,
-        user_message=ctx.prompt,
         unexpected_error_text=turn.error_text,
         entity_name=turn.entity_name,
     )

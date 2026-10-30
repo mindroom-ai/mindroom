@@ -11,7 +11,9 @@ from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
 from mindroom.final_delivery import Cancelled, Completed, FinalDeliveryOutcome, StreamTransportOutcome
+from mindroom.history.request_messages import replayable_messages
 from mindroom.hooks import MessageEnvelope
+from mindroom.llm.runs import RunStatus
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.message_target import MessageTarget
 from mindroom.reply_lifecycle import SpanOutcome
@@ -32,7 +34,7 @@ from tests.conftest import (
 from tests.response_attempt_helpers import install_direct_response_admission
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Awaitable, Callable, Coroutine
+    from collections.abc import AsyncIterator, Awaitable, Callable, Coroutine, Sequence
     from pathlib import Path
 
     from mindroom.bot import AgentBot
@@ -127,7 +129,6 @@ def streamed_answer(answer: Callable[..., Awaitable[str]]) -> Callable[..., Asyn
             sinks.turn_recorder.record_completed(
                 run_id=None,
                 run_metadata=None,
-                assistant_text=text,
                 completed_tools=(),
             )
         yield text
@@ -161,7 +162,6 @@ def delivered_turn(delivery: FinalDeliveryOutcome) -> AsyncMock:
         recorder.record_completed(
             run_id=None,
             run_metadata=None,
-            assistant_text=delivery.final_visible_body or "",
             completed_tools=(),
         )
         return delivery
@@ -228,12 +228,15 @@ async def turn_left_to_replay(coordinator: ResponseRunner, source_event_id: str 
     return spans[-1].outcome not in {SpanOutcome.FAILED, SpanOutcome.CANCELLED}
 
 
-def assert_interrupted_messages(run: AnyRunRecord, *, response_event_id: str, assistant_body: str) -> None:
-    """Assert ``run`` stored the user's ``Hello`` from ``$user_msg`` and the ``assistant_body`` its reply showed."""
-    assert run.messages is not None
-    assert [message.role for message in run.messages] == ["user", "assistant"]
-    assert 'event_id="$user_msg"' in cast("str", run.messages[0].content)
-    assert "Hello" in cast("str", run.messages[0].content)
-    assert run.metadata is not None
-    assert run.metadata["matrix_response_event_id"] == response_event_id
-    assert run.messages[1].content == assistant_body
+def assert_interrupted_messages(run: AnyRunRecord, *, replayed: Sequence[tuple[str, object]]) -> None:
+    """Assert ``run`` is its interrupted turn's own record: the user's ``Hello`` from ``$user_msg``, then ``replayed``.
+
+    ``replayed`` holds the role and content of each message history replays of the run after that prompt.
+    """
+    assert run.status is RunStatus.interrupted
+    prompt, *rest = replayable_messages([run])
+    assert prompt.role == "user"
+    assert 'event_id="$user_msg"' in cast("str", prompt.content)
+    assert "Hello" in cast("str", prompt.content)
+    shown = [(message.role, message.content) for message in rest]
+    assert shown == list(replayed), shown

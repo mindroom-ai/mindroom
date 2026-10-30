@@ -267,7 +267,6 @@ async def _team_memory_saves(
             sinks.turn_recorder.record_completed(
                 run_id=None,
                 run_metadata=None,
-                assistant_text="team response",
                 completed_tools=(),
             )
         yield "team response"

@@ -437,11 +437,6 @@ def append_fold(
     return row_id is not None
 
 
-def run_folded_tool_call_ids(storage: ConversationStore, *, session_id: str, run_id: str) -> set[str]:
-    """Return the tool calls the run's mid-turn folds summarized, from the rows they flagged."""
-    return summary_rows.folded_tool_call_ids(storage, session_id=session_id, run_id=run_id)
-
-
 def _preserved_seen_event_ids(metadata: dict[str, Any] | None) -> set[str]:
     raw_seen_ids = _history_state(metadata).get(_SEEN_EVENT_IDS)
     if not isinstance(raw_seen_ids, list):

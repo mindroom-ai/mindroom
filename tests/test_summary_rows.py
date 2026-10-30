@@ -10,7 +10,6 @@ from typing import TYPE_CHECKING, Any
 import pytest
 
 from mindroom import constants
-from mindroom.history.mid_turn_compaction import _folded_calls
 from mindroom.history.storage import read_chunk_basis
 from mindroom.history.types import HistoryScope
 from mindroom.llm.messages import Message
@@ -21,6 +20,7 @@ from mindroom.session_storage.store import watch_session_row
 from mindroom.session_storage.summary_rows import CoveredRun, Fold
 from mindroom.session_storage.types import ConversationSession
 from tests.conftest import delete_runs, seed_session_row
+from tests.history_helpers import folded_tool_call_ids
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -681,10 +681,7 @@ def test_a_fold_keeps_what_its_turn_read_seen_after_the_turn_stops(store: Conver
 
 
 def test_folded_tool_call_ids_are_the_folded_messages_and_members_calls(team_store: ConversationStore) -> None:
-    """Interrupted records leave out every call a fold summarized: folded calls, results, and folded members' tools.
-
-    The turn recorder's set from the live folds and the store's from the flagged rows are the same.
-    """
+    """The calls a fold summarized are its folded calls, its results, and its folded members' tools, as flagged."""
     team_run = _team_run("team-run", RunStatus.running)
     folded_member = _run("m1", parent="team-run", agent_id="helper")
     folded_member.tools = [ToolExecution(tool_call_id="member-call", tool_name="probe")]
@@ -702,14 +699,11 @@ def test_folded_tool_call_ids_are_the_folded_messages_and_members_calls(team_sto
     team_run.status = RunStatus.completed
     assert _save(team_store, team_run, kind="team") == ["written"]
 
-    calls = summary_rows.folded_tool_call_ids(team_store, session_id="s1", run_id="team-run")
+    calls = folded_tool_call_ids(team_store, session_id="s1", run_id="team-run")
 
     assert calls == {"c1", "c2", "orphan-result", "member-call"}
-    recorded = _folded_calls(Fold(run=team_run, messages=tuple(folded), member_run_ids=frozenset({"m1", "m0"})))
-    recorded |= _folded_calls(Fold(run=team_run, messages=(_call("c2"), orphan_result), member_run_ids=frozenset()))
-    assert recorded == calls
-    assert summary_rows.folded_tool_call_ids(team_store, session_id="s1", run_id="m1") == set()
-    assert summary_rows.folded_tool_call_ids(team_store, session_id="s2", run_id="team-run") == set()
+    assert folded_tool_call_ids(team_store, session_id="s1", run_id="m1") == set()
+    assert folded_tool_call_ids(team_store, session_id="s2", run_id="team-run") == set()
 
 
 # --- Cuts -----------------------------------------------------------------------------------------

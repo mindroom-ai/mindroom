@@ -20,7 +20,7 @@ from mindroom.agents import create_agent
 from mindroom.config.approval import ApprovalRuleConfig, ToolApprovalConfig
 from mindroom.llm.provider import TextDelta
 from mindroom.llm.request_context import current_llm_request_log_context
-from mindroom.llm.runs import RunRecord, TeamRunRecord
+from mindroom.llm.runs import RunRecord, RunStatus, TeamRunRecord
 from mindroom.room_model_overrides import set_room_model_override
 from mindroom.teams.members import resolve_exact_team_members
 from mindroom.turn_continuation import TURN_CONTINUATION_LIMIT
@@ -131,7 +131,6 @@ async def test_a_member_s_next_turn_switch_runs_the_turn_again_building_only_the
     # The recorder holds the run id of the attempt that answered.
     assert team.recorder.run_id == run_ids[1]
     assert team.recorder.outcome == "completed"
-    assert team.recorder.assistant_text.endswith("Finished the task.")
     # The turn's trace still carries the first attempt's model switch.
     assert "switch_thread_model" in _completed_tool_names(team)
 
@@ -339,7 +338,6 @@ async def test_repeated_switches_without_an_answer_end_with_the_limit_message(
     assert len(team.models["default"].requests) == 2 * attempts
     assert "did not produce a final answer" in text
     assert team.recorder.outcome == "completed"
-    assert "did not produce a final answer" in team.recorder.assistant_text
 
 
 @pytest.mark.asyncio
@@ -347,7 +345,7 @@ async def test_a_stop_during_the_continuation_records_only_its_text_and_the_firs
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The spent attempt's text is gone from the interrupted turn; its finished calls are kept, once."""
+    """The stopped attempt's run is the interrupted turn's record; the spent attempt keeps its own completed run."""
     streaming = asyncio.Event()
 
     async def wait_to_be_stopped() -> None:
@@ -370,10 +368,14 @@ async def test_a_stop_during_the_continuation_records_only_its_text_and_the_firs
     with pytest.raises(asyncio.CancelledError):
         await task
 
-    snapshot = team.recorder.interrupted_snapshot()
-    assert "Switching." not in snapshot.partial_text
-    assert snapshot.partial_text.endswith("Half")
-    assert [tool.tool_name for tool in snapshot.completed_tools] == ["switch_thread_model", "delegate_task_to_member"]
+    stopped, _members = team.stored_runs(run_id=team.recorder.run_id)
+    assert stopped.status is RunStatus.interrupted
+    assert [message.content for message in stopped.messages if message.role == "assistant"] == ["Half"]
+    session = team.storage.load_session(SESSION_ID)
+    assert session is not None
+    [spent] = [run for run in session.runs if isinstance(run, TeamRunRecord) and run.run_id != stopped.run_id]
+    assert spent.status is RunStatus.completed
+    assert spent.content == "Switching."
 
 
 @pytest.mark.asyncio

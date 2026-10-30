@@ -13,16 +13,13 @@ from mindroom.agent_cli.lifetime import response_cli_lifetime
 from mindroom.agent_cli.minimal_agent import bind_minimal_owner, minimal_context_documents, prepare_minimal_catalog
 from mindroom.agent_cli.projection import register_cli_media
 from mindroom.agent_loop.build import tool_owners_by_agent
+from mindroom.agent_loop.run import end_paused
 from mindroom.agent_loop.spec import RunContext
 from mindroom.approval.tool_owners import validate_approval_tool_owners
 from mindroom.delegation.state import DelegationState
-from mindroom.history.interrupted_replay import (
-    build_interrupted_replay_snapshot,
-    persist_interrupted_replay_snapshot,
-    split_interrupted_tool_trace,
-)
 from mindroom.hooks import EnrichmentItem
 from mindroom.llm.events import ToolCallOrigin, ToolCompleted, ToolStarted
+from mindroom.llm.runs import RunStatus
 from mindroom.media_inputs import MediaInputs
 from mindroom.response_turn import (
     CompletedApprovalRun,
@@ -294,31 +291,16 @@ async def continue_cli_approval(  # noqa: C901, PLR0912, PLR0915 - one claimed r
                 await catalog.close()
         finally:
             await resources.aclose()
-    completed_trace, interrupted_trace = split_interrupted_tool_trace(persisted.tools)
-    known_ids = {entry.tool_call_id for entry in (*completed_trace, *interrupted_trace)}
-    for entry in presentation.tool_trace:
-        if entry.tool_call_id not in known_ids:
-            (completed_trace if entry.type == "tool_call_completed" else interrupted_trace).append(entry)
-    snapshot = build_interrupted_replay_snapshot(
-        user_message=continuation.request_body,
-        user_message_is_structured=False,
-        partial_text=paused_answer.text,
-        completed_tools=completed_trace,
-        interrupted_tools=interrupted_trace,
-        run_metadata=persisted.metadata,
-        response_event_id=continuation.response_event_id,
-    )
-    # The replay run and the state the recovered call left commit together.
+    # The paused run never resumes: it ends stopped, as a cancelled run does, and is its turn's interrupted record,
+    # which history replays; the follow-up turn reports the recovered call.
+    ended = deepcopy(persisted)
+    end_paused(ended)
+    ended.status = RunStatus.interrupted
+    # The ended run and the state the recovered call left commit together.
     await write_with_session_state(
         store,
         session,
-        lambda opened, state: persist_interrupted_replay_snapshot(
-            storage=opened,
-            session=session,
-            run_id=continuation.run_id,
-            snapshot=snapshot,
-            state=state,
-        ),
+        lambda opened, state: opened.save_interrupted_record(session, ended, state=state),
     )
     decision = continuation_decision_from_tools(
         controls,

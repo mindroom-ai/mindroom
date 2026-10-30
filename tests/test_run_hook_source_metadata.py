@@ -2,10 +2,9 @@
 
 from __future__ import annotations
 
-import asyncio
 from dataclasses import replace
 from typing import TYPE_CHECKING
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock
 
 import pytest
 
@@ -103,34 +102,3 @@ async def test_team_turn_records_its_origin_in_run_metadata(
     metadata = ctx.matrix_run_metadata or {}
     assert metadata.get(HOOK_SOURCE_RUN_METADATA_KEY) == hook_source
     assert metadata[TURN_INTENT_RUN_METADATA_KEY] == intent
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("streaming", [False, True])
-async def test_a_turn_stopped_before_its_run_starts_keeps_its_origin_and_room(
-    tmp_path: Path,
-    *,
-    streaming: bool,
-) -> None:
-    """A turn stopped before its run starts records the turn's origin, room, and thread for its replay."""
-    bot = _bot(tmp_path)
-    unique_room_send_responses(bot.client)
-    runner = unwrap_extracted_collaborator(bot._response_runner)
-    persist = MagicMock()
-
-    with (
-        patch("mindroom.ai._prepare_agent_run_context", new=AsyncMock(side_effect=asyncio.CancelledError)),
-        patch("mindroom.response_turn.persist_interrupted_replay_snapshot", new=persist),
-        patch_response_runner_module(
-            should_use_streaming=AsyncMock(return_value=streaming),
-            typing_indicator=_noop_typing,
-            apply_post_response_effects=AsyncMock(),
-        ),
-    ):
-        await runner.generate_response(_request("automation/exploration", TurnIntent.JOB_FOLLOW_UP))
-
-    persist.assert_called_once()
-    metadata = persist.call_args.kwargs["snapshot"].run_metadata
-    assert metadata[TURN_INTENT_RUN_METADATA_KEY] == TurnIntent.JOB_FOLLOW_UP
-    assert metadata[HOOK_SOURCE_RUN_METADATA_KEY] == "automation/exploration"
-    assert (metadata["room_id"], metadata["thread_id"]) == ("!room:localhost", "$thread")

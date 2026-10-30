@@ -122,13 +122,12 @@ async def test_ai_response_fallback_notice_stays_out_of_the_turn_recorder(
     """The delivery-only notice must never be recorded as model text it could replay from history."""
     config = _config(tmp_path)
     install_model_providers(monkeypatch, {"default": ScriptedModel([answer(""), answer("")])})
-    recorder = TurnRecorder(user_message="test")
+    recorder = TurnRecorder()
 
     result = await _respond(config, sinks=TurnSinks(turn_recorder=recorder))
 
     assert result.text == EMPTY_RESPONSE_NOTICE
     assert recorder.outcome == "completed"
-    assert recorder.assistant_text == ""
 
 
 @pytest.mark.asyncio
@@ -139,7 +138,7 @@ async def test_the_turn_recorder_holds_the_run_id_of_the_attempt_that_answered(
     """After an empty attempt's retry, the recorder names the retry's stored run, which an interruption would record."""
     config = _config(tmp_path)
     install_model_providers(monkeypatch, {"default": ScriptedModel([answer(""), answer("Recovered")])})
-    recorder = TurnRecorder(user_message="test")
+    recorder = TurnRecorder()
 
     await _stream(config, sinks=TurnSinks(turn_recorder=recorder))
 
@@ -191,10 +190,9 @@ async def test_stream_agent_response_fallback_notice_stays_out_of_the_turn_recor
     """The streamed delivery-only notice must never be recorded as model text either."""
     config = _config(tmp_path)
     install_model_providers(monkeypatch, {"default": ScriptedModel([answer(""), answer("")])})
-    recorder = TurnRecorder(user_message="test")
+    recorder = TurnRecorder()
 
     chunks = await _stream(config, sinks=TurnSinks(turn_recorder=recorder))
 
     assert streamed_text(chunks) == [EMPTY_RESPONSE_NOTICE]
     assert recorder.outcome == "completed"
-    assert recorder.assistant_text == ""

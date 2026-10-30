@@ -29,10 +29,6 @@ from mindroom.constants import (
 )
 from mindroom.dispatch_source import MESSAGE_SOURCE_KIND
 from mindroom.final_delivery import Completed, FinalDeliveryOutcome, StreamTransportOutcome
-from mindroom.history.interrupted_replay import (
-    InterruptedReplaySnapshot,
-    _render_interrupted_replay_content,
-)
 from mindroom.hooks import MessageEnvelope
 from mindroom.llm.events import ToolCompleted, ToolStarted
 from mindroom.llm.runs import ToolExecution
@@ -41,6 +37,7 @@ from mindroom.matrix.identity import MatrixID
 from mindroom.matrix.large_messages import calculate_event_size
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.message_target import MessageTarget
+from mindroom.reply_turn.enrichment import _render_stopped_attempt
 from mindroom.reply_turn.inbox import InboxResponses
 from mindroom.reply_turn.request import ResponseRequest
 from mindroom.response_sources import Owned, ResponseSources
@@ -114,14 +111,11 @@ def _answer_stream(text: str) -> Callable[..., AsyncIterator[str]]:
 
 
 def _render_cleaned_interrupted_replay(body: str) -> str:
-    return _render_interrupted_replay_content(
-        InterruptedReplaySnapshot(
-            user_message="",
-            partial_text=clean_partial_reply_text(body),
-            completed_tools=(),
-            interrupted_tools=(),
-            run_metadata={},
-        ),
+    """Render the account a restarted reply gives of its stopped attempt, which showed ``body``."""
+    return _render_stopped_attempt(
+        partial_text=clean_partial_reply_text(body),
+        completed_tools=(),
+        interrupted_tools=(),
     )
 
 

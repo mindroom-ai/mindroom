@@ -137,7 +137,7 @@ async def _run_silent_turn(
         prompt="Silent check",
         execution_identity=owner,
     )
-    recorder = TurnRecorder(user_message="Silent check") if record_turn else None
+    recorder = TurnRecorder() if record_turn else None
     try:
         with tool_runtime_context(context), _registered_probe(hold=hold_probe):
             answer_text, trace = await collect_streamed_response_content(
@@ -175,7 +175,6 @@ async def test_enabled_silent_turn_without_jobs_matches_a_disabled_turn(
                 turn.answer,
                 [(tool.tool_name, tool.result_preview) for tool in turn.trace],
                 turn.recorder.outcome,
-                turn.recorder.assistant_text,
                 [(tool.tool_name, tool.result_preview) for tool in turn.recorder.completed_tools],
             ),
         )

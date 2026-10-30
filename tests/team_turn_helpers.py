@@ -176,7 +176,6 @@ def scripted_team_stream(*chunks: str, completes: bool = False) -> MagicMock:
             sinks.turn_recorder.record_completed(
                 run_id=None,
                 run_metadata=None,
-                assistant_text="".join(chunks),
                 completed_tools=(),
             )
         for chunk in chunks:
@@ -283,7 +282,7 @@ class TeamTurn:
 
         ``user_id`` names the requester; every option that names neither the team nor a sink is a turn input.
         """
-        self.recorder = TurnRecorder(user_message=message)
+        self.recorder = TurnRecorder()
         spec_options = {name: options.pop(name) for name in _SPEC_OPTIONS & options.keys()}
         sinks = TurnSinks(
             turn_recorder=self.recorder,

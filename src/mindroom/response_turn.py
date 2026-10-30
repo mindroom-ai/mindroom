@@ -2,8 +2,8 @@
 
 One reply turn has the same lifecycle whichever entity answers it: load the
 scope session, run prepared attempts, decide whether the turn continues after a
-model switch or an empty reply, and settle the turn's record, storing an
-interrupted turn once in the scope its runs are stored in. Which of its runs are
+model switch or an empty reply, and settle the turn's record, marking an
+interrupted turn's run, which its loop stored, as that record. Which of its runs are
 stored as turns that later prompts replay is the driver's rule too
 (``replays_as_turn``), which each attempt's storage applies to the records its
 runs hand over.
@@ -29,6 +29,7 @@ from uuid import uuid4
 
 from mindroom import ai_runtime
 from mindroom.agent_cli.lifetime import CliTurnLifetime
+from mindroom.agent_loop.run import end_paused
 from mindroom.background_tasks import run_blocking_until_complete
 from mindroom.cancellation import current_task_is_process_shutdown
 from mindroom.constants import (
@@ -39,14 +40,15 @@ from mindroom.constants import (
     MATRIX_TURN_DISCOVERY_EVENT_IDS_METADATA_KEY,
 )
 from mindroom.delegation.state import DelegationState
+from mindroom.failure_text import failure_text
 from mindroom.helper_usage import helper_usage_context
-from mindroom.history.interrupted_replay import persist_interrupted_replay_snapshot
 from mindroom.history.storage import remove_history_of_redacted_events
 from mindroom.history.turn_recorder import TurnRecorder
 from mindroom.llm.events import RunFinished, TextDelta, ToolStarted
 from mindroom.llm.request_context import bind_llm_request_log_context
 from mindroom.llm.runs import RunRequirement, RunStatus, ToolExecution
 from mindroom.logging_config import get_logger
+from mindroom.redaction import redact_sensitive_text
 from mindroom.streaming import StreamingLifecycleSuspensionError, StreamingPresentation, StreamInputChunk
 from mindroom.tool_jobs.consumption import finalize_consumption, set_consumption_storage
 from mindroom.tool_jobs.execution_scope import owned_tool_execution
@@ -95,7 +97,6 @@ __all__ = [
     "StreamAttemptResolution",
     "TurnAdapter",
     "TurnContinuationRunState",
-    "TurnPartialSnapshot",
     "TurnResume",
     "TurnRunState",
     "TurnSinks",
@@ -404,7 +405,7 @@ class ResponseTurnContext:
 
 @dataclass(frozen=True)
 class TurnSinks:
-    """What a turn reports back to its caller, and whether and where it stores an interruption."""
+    """What a turn reports back to its caller, and whether it marks an interrupted turn's run as its record."""
 
     # The turn's record, which the driver writes and the caller reads once the turn ended; a turn whose caller passes
     # none keeps its own.
@@ -415,11 +416,9 @@ class TurnSinks:
     on_failed: Callable[[HandledAttempt], None] | None = None
     # Receives each attempt's run id and configured model name before the attempt starts.
     on_attempt_start: Callable[[str, str], None] | None = None
-    # Whether the driver stores an interrupted turn in its scope's history; a delegated child's interruption belongs
-    # to delegation recovery, and a voice call stores what it spoke.
+    # Whether the driver marks an interrupted turn's run ``INTERRUPTED``, which history replays; a delegated child's
+    # interruption belongs to delegation recovery, and a voice call keeps in its run what it spoke.
     persist_interrupted: bool = True
-    # The event the turn's Matrix reply shows, which an interrupted record names.
-    response_event_id: Callable[[], str | None] | None = None
 
 
 @dataclass(frozen=True)
@@ -430,21 +429,12 @@ class TurnResume:
     continuation_count: int = 0
 
 
-@dataclass(frozen=True)
-class TurnPartialSnapshot:
-    """Live partial-output view used when a turn is cancelled from outside."""
-
-    assistant_text: str = ""
-    completed_tools: tuple[ToolTraceEntry, ...] = ()
-    interrupted_tools: tuple[ToolTraceEntry, ...] = ()
-    attempt_run_id: str | None = None
-
-
 class _LiveAttempt(Protocol):
-    """The attempt a turn is running, as an interruption records it."""
+    """The attempt a turn is running, which names the turn an interruption records."""
 
-    def partial_snapshot(self) -> TurnPartialSnapshot:
-        """Return the attempt's partial output and run id."""
+    @property
+    def run_id(self) -> str:
+        """The attempt's run id."""
         ...
 
 
@@ -456,12 +446,10 @@ class TurnRunState:
     recording falls back to rebuilt metadata while it is unset. They set
     ``attempt`` once their attempt starts, which tells the driver the attempt ran
     in the turn's scope; the driver drops it when the attempt is spent, so an
-    interruption before the next attempt starts records none of the spent
-    attempt's partial output, whose finished calls ``prior_completed_tools``
-    already carries.
+    interruption before the next attempt starts names that attempt's run instead.
     """
 
-    # The turn's record; its run's hooks note the calls a mid-turn fold summarized into it.
+    # The turn's record.
     record: TurnRecorder
     # None until the driver loads the turn's scope, which it does before the turn's first attempt.
     scope_context: ScopeSessionContext | None = None
@@ -471,10 +459,6 @@ class TurnRunState:
     prior_usage: tuple[RunMetrics, ...] = ()
     empty_response_retried: bool = False
     attempt: _LiveAttempt | None = None
-
-    def partial_snapshot(self) -> TurnPartialSnapshot:
-        """Return the running attempt's partial output, empty while no attempt runs."""
-        return self.attempt.partial_snapshot() if self.attempt is not None else TurnPartialSnapshot()
 
     @property
     def scope(self) -> ScopeSessionContext:
@@ -603,8 +587,7 @@ def pause_without_approval_error(record: AnyRunRecord, *, entity_label: str) -> 
     """Return the error for a pause with no approval to ask for and no delegation to drive.
 
     Only the delegate tools run outside the loop, and the delegation driver resumes a run paused on them; a run
-    paused on any other externally executed call has nothing that can resume it, so the reply fails loudly. The
-    loop stored the ``PAUSED`` row; the reply's lifecycle owner then records the failure over it.
+    paused on any other externally executed call has nothing that can resume it, so the reply fails loudly.
     """
     pending = [
         requirement.tool_execution.tool_name
@@ -764,8 +747,6 @@ class TurnAdapter[ChunkT]:
         AsyncIterator[ChunkT | AttemptResolved],
     ]
     make_text_chunk: Callable[[str], ChunkT]
-    # The current-turn user message the turn's record keeps, which an interrupted row stores.
-    user_message: str
     # The reply to an error no attempt handled, its credentials redacted.
     unexpected_error_text: Callable[[Exception], str]
     # The entity the turn's queued notices name: a configured team's own name, which the label of its members the turn
@@ -804,66 +785,66 @@ def _interrupted_run_metadata(ctx: ResponseTurnContext, run: TurnRunState) -> di
     )
 
 
-# TODO(simplify): a stopped turn records the running attempt's partial output. Build an interrupted turn's record from
-# the loop's terminal record instead (#3108). Models would notice previews in replayed stopped turns.
 async def _record_interrupted(
     ctx: ResponseTurnContext,
-    adapter: TurnAdapter[Any],
     sinks: TurnSinks,
     run: TurnRunState,
     continuation: TurnContinuationRunState,
-    status: RunStatus,
+    failure: Exception | None,
 ) -> None:
-    """Record the turn cut short with its running attempt's partial output, and store it once in the turn's scope.
+    """Record the turn a cancellation (``failure`` None) or a failure cut short, and mark its run as its record.
 
-    A process shutdown records nothing: the turn stays pending, and the successor's replay continues its reply. A turn
-    that already settled (completed, skipped, paused, or interrupted) is never recorded again.
+    The run's loop stored the run first, stopped, failed, completed, or paused; marking it ``INTERRUPTED`` makes it the
+    turn's record, which history replays, with the failure's text. A process shutdown records nothing: the turn stays
+    pending, and the successor's replay continues its reply. A turn that already settled (completed, skipped, paused,
+    or interrupted) is never recorded again.
     """
     if run.record.outcome != "pending" or current_task_is_process_shutdown():
         return
-    snapshot = run.partial_snapshot()
     run.record.record_interrupted(
         # Between two attempts, such as a continuation's or an empty run's retry, the attempt about to start names the
-        # turn, so the record does not replace a run an earlier attempt stored.
-        run_id=snapshot.attempt_run_id or continuation.active_run_id or ctx.run_id,
+        # turn, which stored no run yet.
+        run_id=run.attempt.run_id if run.attempt is not None else continuation.active_run_id or ctx.run_id,
         run_metadata=_interrupted_run_metadata(ctx, run),
-        assistant_text=snapshot.assistant_text,
-        completed_tools=(*run.prior_completed_tools, *snapshot.completed_tools),
-        interrupted_tools=snapshot.interrupted_tools,
-        original_status=status,
     )
-    if not sinks.persist_interrupted:
+    # A turn whose scope never loaded ran nothing there.
+    scope_context, run_id = run.scope_context, run.record.run_id
+    if not sinks.persist_interrupted or scope_context is None or run_id is None:
         return
-    response_event_id = sinks.response_event_id() if sinks.response_event_id is not None else None
-    # A further cancellation, such as the one the streamer sends 0.5 s after a Stop, waits for the record too, so the
+    error = None if failure is None else redact_sensitive_text(failure_text(failure))
+    # A further cancellation, such as the one the streamer sends 0.5 s after a Stop, waits for the mark too, so the
     # reply settles, and the conversation's next turn reads history, only once it is stored.
-    await run_blocking_until_complete(_persist_interrupted, ctx, adapter, run, response_event_id)
+    await run_blocking_until_complete(_mark_interrupted, ctx, scope_context, run_id, error)
 
 
-def _persist_interrupted(
+def _mark_interrupted(
     ctx: ResponseTurnContext,
-    adapter: TurnAdapter[Any],
-    run: TurnRunState,
-    response_event_id: str | None,
+    scope_context: ScopeSessionContext,
+    run_id: str,
+    error: str | None,
 ) -> None:
-    """Store the turn's interrupted record into the scope its runs are stored in, loading it when the turn had not."""
-    record = run.record
+    """Make the run the turn's loop stored, in the turn's scope, the turn's ``INTERRUPTED`` record.
+
+    The run keeps what it stored, and ``error``, when given, is its failure's text. A run its loop left paused, which
+    nothing resumes now, first ends as a run cut short does (``end_paused``). A run no save stored is left unrecorded.
+    """
+    storage = scope_context.storage
     try:
-        scope_context = run.scope_context or adapter.load_scope()
-        persist_interrupted_replay_snapshot(
-            storage=scope_context.storage,
-            session=scope_context.stored_or_first_session(),
-            run_id=record.run_id or str(uuid4()),
-            snapshot=record.interrupted_snapshot(response_event_id=response_event_id),
-        )
+        record = storage.get_run(run_id)
+        if record is None:
+            return
+        if record.status is RunStatus.paused:
+            end_paused(record, error=error)
+        record.status = RunStatus.interrupted
+        record.error = error or record.error
+        storage.save_interrupted_record(scope_context.stored_or_first_session(), record)
     except Exception:
-        # A lost replay row is the lesser harm; the turn's own exit must still run.
-        logger.exception("Failed to persist interrupted replay state", entity=ctx.entity_label)
+        # A run left unmarked is the lesser harm; the turn's own exit must still run.
+        logger.exception("Failed to mark the interrupted run", entity=ctx.entity_label, run_id=run_id)
 
 
 async def _settle_failure(
     ctx: ResponseTurnContext,
-    adapter: TurnAdapter[Any],
     sinks: TurnSinks,
     run: TurnRunState,
     continuation: TurnContinuationRunState,
@@ -871,7 +852,7 @@ async def _settle_failure(
 ) -> str:
     """Record a failed turn as interrupted and report its failure to the caller; return its error reply."""
     _publish_run_metadata(sinks, failure.build_run_metadata)
-    await _record_interrupted(ctx, adapter, sinks, run, continuation, RunStatus.error)
+    await _record_interrupted(ctx, sinks, run, continuation, failure.error)
     if sinks.on_failed is not None:
         sinks.on_failed(failure)
     return failure.text
@@ -1029,7 +1010,6 @@ def _record_completed_turn(
     run.record.record_completed(
         run_id=resolution.attempt_run_id or resolution.run_id,
         run_metadata=run.run_metadata,
-        assistant_text=settle.recorded_text,
         completed_tools=(*run.prior_completed_tools, *settle.recorded_tools),
     )
     if sinks.on_completed is not None:
@@ -1042,9 +1022,7 @@ class _CompletionSettle:
 
     keep_going: bool
     continuation: TurnContinuationRunState
-    # What the recorder persists as the turn's replayable assistant text; it
-    # can differ from response_text (e.g. tool-rendered visible output).
-    recorded_text: str = ""
+    # The calls the turn's record keeps.
     recorded_tools: tuple[ToolTraceEntry, ...] = ()
     # Final text the turn's chunks did not stream: the empty-reply notice, a
     # continuation limit message, or an approval resume's restored text; the
@@ -1100,11 +1078,9 @@ def _settle_completed_attempt(
                 apply_model_to_team_members=decision.model_switch_when == "after-toolcall",
             ),
         )
-    recorded_text = resolution.replayable_text
     response_text = resolution.response_text
     if decision.limit_message is not None:
         if not resolution.has_visible_content:
-            recorded_text = decision.limit_message
             response_text = decision.limit_message
     elif ctx.allow_no_report_response and not resolution.replayable_text.strip():
         # An approval resume hands its final text over here, where a live attempt
@@ -1114,14 +1090,12 @@ def _settle_completed_attempt(
         return _CompletionSettle(
             keep_going=False,
             continuation=continuation,
-            recorded_text=recorded_text,
             recorded_tools=resolution.completed_tools,
             reports_nothing=True,
         )
     return _CompletionSettle(
         keep_going=False,
         continuation=continuation,
-        recorded_text=recorded_text,
         recorded_tools=resolution.completed_tools,
         response_text=response_text,
     )
@@ -1177,11 +1151,7 @@ async def _stream_response_turn[ChunkT](  # noqa: C901, PLR0912, PLR0915
     earlier (a Stop that lands in the streamer, a delivery failure) leaves the turn recorded as stopped.
     """
     run = TurnRunState(record=sinks.turn_recorder or TurnRecorder())
-    run.record.start(
-        user_message=adapter.user_message,
-        user_message_is_structured=ctx.current_prompt_is_structured,
-        run_metadata=_interrupted_run_metadata(ctx, run),
-    )
+    run.record.start(run_metadata=_interrupted_run_metadata(ctx, run))
     resumed_attempt = resume.attempt
     try:
         scope_context = await _load_scope_session(ctx, adapter, run)
@@ -1219,7 +1189,7 @@ async def _stream_response_turn[ChunkT](  # noqa: C901, PLR0912, PLR0915
                     run.record.mark_suspended()
                     raise ResponsePausedForApproval(replace(resolution, continuation_count=continuation_count))
                 if isinstance(resolution, HandledAttempt):
-                    yield await _settle_failure(ctx, adapter, sinks, run, continuation, resolution)
+                    yield await _settle_failure(ctx, sinks, run, continuation, resolution)
                     return
                 settle = _settle_completed_attempt(
                     ctx,
@@ -1241,7 +1211,7 @@ async def _stream_response_turn[ChunkT](  # noqa: C901, PLR0912, PLR0915
                 return
         _raise_continuation_budget_exhausted()
     except (asyncio.CancelledError, GeneratorExit):
-        await _record_interrupted(ctx, adapter, sinks, run, continuation, RunStatus.cancelled)
+        await _record_interrupted(ctx, sinks, run, continuation, None)
         raise
     except ResponsePausedForApproval:
         raise
@@ -1252,6 +1222,6 @@ async def _stream_response_turn[ChunkT](  # noqa: C901, PLR0912, PLR0915
             logger.exception("Response turn skipped before participation", entity=ctx.entity_label)
             return
         failure = HandledAttempt(adapter.unexpected_error_text(e), error=e)
-        text = await _settle_failure(ctx, adapter, sinks, run, continuation, failure)
+        text = await _settle_failure(ctx, sinks, run, continuation, failure)
         logger.exception("Response turn failed", entity=ctx.entity_label)
         yield text

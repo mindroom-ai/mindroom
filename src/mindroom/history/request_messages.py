@@ -14,15 +14,21 @@ from typing import TYPE_CHECKING
 from mindroom.history.message_content import project_history_media_for_replay, with_tool_calls
 from mindroom.history.run_visibility import replays_in_scope
 from mindroom.history.summary_message import compaction_summary_message, is_scope_summary, summary_follows
+from mindroom.llm.messages import Message
+from mindroom.llm.runs import RunStatus
 
 if TYPE_CHECKING:
     from collections.abc import Iterable, Sequence
 
     from mindroom.history.types import HistoryScope, ResolvedHistorySettings, ResolvedReplayPlan, ScopeSummary
-    from mindroom.llm.messages import Message
     from mindroom.llm.runs import AnyRunRecord
     from mindroom.media_inputs import MediaInputs
     from mindroom.session_storage.types import ConversationSession
+
+
+# How an interrupted run's replay tells the model its turn did not finish; the replay closes the parenthesis.
+_STOPPED_NOTE = "(turn stopped before completion"
+_FAILED_NOTE = "(turn failed before completion"
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -100,12 +106,48 @@ def replayed_history(
 
 
 def replayable_messages(runs: Iterable[AnyRunRecord]) -> list[Message]:
-    """Return the stored messages of ``runs``, oldest first; a visible stored run holds no prompt message to leave out.
+    """Return the messages ``runs`` replay, oldest first; a visible stored run holds no prompt message to leave out.
 
-    The messages are the stored ones, never copies. A request's history and a compaction's input both select their
+    A completed run replays its stored messages, never copies; an interrupted one what it did before a stop or a
+    failure cut it short (``_interrupted_replay``). A request's history and a compaction's input both select their
     messages here, so each counts the same messages against its limits.
     """
-    return [message for run in runs for message in run.messages]
+    return [
+        message
+        for run in runs
+        for message in (_interrupted_replay(run) if run.status is RunStatus.interrupted else run.messages)
+    ]
+
+
+def _interrupted_replay(run: AnyRunRecord) -> list[Message]:
+    """Return what an interrupted ``run`` replays: its messages without the calls it left unanswered, then a note.
+
+    A call no stored result answers did not finish, and a request answers every call it replays, so the call leaves its
+    assistant message as the tool-call window drops a call (``with_tool_calls``); an assistant message left with no
+    call and no content goes too, as the one holding only a cut-off request's usage does. The note, which joins the
+    run's final text or follows its last message, tells the model the turn failed, when the run holds a failure's text,
+    or stopped, and how many calls did not finish. Changed messages are copies, so stored runs never change.
+    """
+    answered = {message.tool_call_id for message in run.messages if message.role == "tool"}
+    replayed: list[Message] = []
+    unfinished = 0
+    for message in run.messages:
+        if message.role == "assistant" and message.tool_calls:
+            calls = [call for call in message.tool_calls if call.get("id") in answered]
+            unfinished += len(message.tool_calls) - len(calls)
+            kept = message if len(calls) == len(message.tool_calls) else with_tool_calls(message, calls)
+        else:
+            kept = None if message.role == "assistant" and not message.content else message
+        if kept is not None:
+            replayed.append(kept)
+    note = _FAILED_NOTE if run.error else _STOPPED_NOTE
+    if unfinished:
+        note += f"; {unfinished} tool call(s) had not finished"
+    note += ")"
+    last = replayed[-1] if replayed else None
+    if last is not None and last.role == "assistant" and not last.tool_calls and isinstance(last.content, str):
+        return [*replayed[:-1], replace(last, content=f"{last.content}\n\n{note}")]
+    return [*replayed, Message(role="assistant", content=note)]
 
 
 def _history_copy(message: Message) -> Message:

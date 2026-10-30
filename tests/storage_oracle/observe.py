@@ -18,14 +18,13 @@ from mindroom.history.storage import (
     _read_scope_history_event_ids,
     has_queued_force_compaction,
     read_scope_seen_event_ids,
-    run_folded_tool_call_ids,
 )
 from mindroom.history.types import ResolvedReplayPlan
 from mindroom.llm.messages import Message
 from mindroom.llm.runs import RunStatus, TeamRunRecord
 from mindroom.media_inputs import MediaInputs
 from mindroom.session_storage.schema import quote_identifier
-from tests.history_helpers import replay_settings
+from tests.history_helpers import folded_tool_call_ids, replay_settings
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Sequence
@@ -184,7 +183,5 @@ def _attempt[Result](read: Callable[[], Result]) -> tuple[Result | None, dict[st
 
 def _folded_tool_call_ids(store: ConversationStore, session_id: str, run_ids: Sequence[str]) -> dict[str, list[str]]:
     """Return the tool calls each run's mid-turn folds summarized, for the runs that have any."""
-    folded = {
-        run_id: sorted(run_folded_tool_call_ids(store, session_id=session_id, run_id=run_id)) for run_id in run_ids
-    }
+    folded = {run_id: sorted(folded_tool_call_ids(store, session_id=session_id, run_id=run_id)) for run_id in run_ids}
     return {run_id: call_ids for run_id, call_ids in folded.items() if call_ids}

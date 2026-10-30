@@ -747,9 +747,9 @@ class TestAgentBot(AgentBotTestBase):
         bot._knowledge_access_support.resolve_for_agent_async = AsyncMock(
             side_effect=asyncio.CancelledError("cancelled"),
         )
-        persist_interrupted = MagicMock()
+        mark_interrupted = MagicMock()
 
-        with patch("mindroom.response_turn.persist_interrupted_replay_snapshot", new=persist_interrupted):
+        with patch("mindroom.response_turn._mark_interrupted", new=mark_interrupted):
             await _respond(
                 bot,
                 _response_request(
@@ -768,9 +768,9 @@ class TestAgentBot(AgentBotTestBase):
                 streaming=True,
             )
 
-        # Knowledge resolves before the turn driver starts, so nothing ran that the turn's record would keep; the
+        # Knowledge resolves before the turn driver starts, so no run was stored for the turn driver to mark; the
         # stopped message reaches the next turn through the thread.
-        persist_interrupted.assert_not_called()
+        mark_interrupted.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_agent_reply_includes_attachment_ids_in_response_metadata(

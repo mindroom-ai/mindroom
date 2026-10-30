@@ -37,7 +37,6 @@ from mindroom.response_turn import (
     StreamAttemptResolution,
     TurnAdapter,
     TurnContinuationRunState,
-    TurnPartialSnapshot,
     TurnResume,
     TurnRunState,
     TurnSinks,
@@ -56,8 +55,6 @@ if TYPE_CHECKING:
     from collections.abc import AsyncGenerator, AsyncIterator, Awaitable, Callable, Mapping, Sequence
     from pathlib import Path
 
-    from mindroom.history.interrupted_replay import InterruptedReplaySnapshot
-
 
 @dataclass
 class _FakeTurnRecorder(TurnRecorder):
@@ -71,61 +68,26 @@ class _FakeTurnRecorder(TurnRecorder):
         *,
         run_id: str | None,
         run_metadata: Mapping[str, Any] | None,
-        assistant_text: str,
         completed_tools: Sequence[ToolTraceEntry],
     ) -> None:
-        self.completed_calls.append(
-            {
-                "run_metadata": run_metadata,
-                "assistant_text": assistant_text,
-                "completed_tools": list(completed_tools),
-            },
-        )
-        super().record_completed(
-            run_id=run_id,
-            run_metadata=run_metadata,
-            assistant_text=assistant_text,
-            completed_tools=completed_tools,
-        )
+        self.completed_calls.append({"run_metadata": run_metadata, "completed_tools": list(completed_tools)})
+        super().record_completed(run_id=run_id, run_metadata=run_metadata, completed_tools=completed_tools)
 
-    def record_interrupted(
-        self,
-        *,
-        run_id: str | None,
-        run_metadata: Mapping[str, Any] | None,
-        assistant_text: str,
-        completed_tools: Sequence[ToolTraceEntry],
-        interrupted_tools: Sequence[ToolTraceEntry],
-        original_status: RunStatus,
-    ) -> None:
-        self.interrupted_calls.append(
-            {
-                "run_metadata": run_metadata,
-                "assistant_text": assistant_text,
-                "completed_tools": list(completed_tools),
-                "interrupted_tools": list(interrupted_tools),
-            },
-        )
-        super().record_interrupted(
-            run_id=run_id,
-            run_metadata=run_metadata,
-            assistant_text=assistant_text,
-            completed_tools=completed_tools,
-            interrupted_tools=interrupted_tools,
-            original_status=original_status,
-        )
+    def record_interrupted(self, *, run_id: str | None, run_metadata: Mapping[str, Any] | None) -> None:
+        self.interrupted_calls.append({"run_id": run_id, "run_metadata": run_metadata})
+        super().record_interrupted(run_id=run_id, run_metadata=run_metadata)
 
 
 @pytest.fixture(autouse=True)
-def persisted(monkeypatch: pytest.MonkeyPatch) -> list[tuple[str, InterruptedReplaySnapshot]]:
-    """Capture each interrupted record the driver stores into its turn's scope, with the run id it stores it under."""
-    snapshots: list[tuple[str, InterruptedReplaySnapshot]] = []
+def marked(monkeypatch: pytest.MonkeyPatch) -> list[tuple[str, str | None]]:
+    """Capture each run the driver marks as its interrupted turn's record, with the failure's text it records."""
+    marks: list[tuple[str, str | None]] = []
 
-    def _persist(*, run_id: str, snapshot: InterruptedReplaySnapshot, **_kwargs: object) -> None:
-        snapshots.append((run_id, snapshot))
+    def _mark(_ctx: object, _scope_context: object, run_id: str, error: str | None) -> None:
+        marks.append((run_id, error))
 
-    monkeypatch.setattr(response_turn_module, "persist_interrupted_replay_snapshot", _persist)
-    return snapshots
+    monkeypatch.setattr(response_turn_module, "_mark_interrupted", _mark)
+    return marks
 
 
 def _trace(tool_name: str) -> ToolTraceEntry:
@@ -186,12 +148,9 @@ type _RunAttempt = Callable[[TurnRunState, TurnContinuationRunState], AsyncGener
 
 @dataclass(frozen=True)
 class _FixedAttempt:
-    """A running attempt whose partial output is fixed."""
+    """A running attempt, which names the turn an interruption records."""
 
-    snapshot: TurnPartialSnapshot = field(default_factory=TurnPartialSnapshot)
-
-    def partial_snapshot(self) -> TurnPartialSnapshot:
-        return self.snapshot
+    run_id: str = "run-1"
 
 
 def _scope() -> ScopeSessionContext:
@@ -349,7 +308,7 @@ def test_paused_attempt_rejects_duplicate_requirement_call_ids() -> None:
 
 @pytest.mark.asyncio
 async def test_streaming_paused_attempt_escapes_without_recording_terminal_interruption(
-    persisted: list[tuple[str, InterruptedReplaySnapshot]],
+    marked: list[tuple[str, str | None]],
 ) -> None:
     """Streaming must release the response lifecycle at the same persisted pause boundary."""
     recorder = _FakeTurnRecorder()
@@ -377,8 +336,8 @@ async def test_streaming_paused_attempt_escapes_without_recording_terminal_inter
 
     assert raised.value.paused.run_id == "run-stream"
     assert recorder.outcome == "suspended"
-    # The paused run owns the turn; no interrupted record overwrites it.
-    assert persisted == []
+    # The paused run owns the turn; the driver marks no run interrupted.
+    assert marked == []
 
 
 def _streaming_adapter(
@@ -391,7 +350,6 @@ def _streaming_adapter(
         load_scope=load_scope or _scope,
         run_attempt=run_attempt,
         make_text_chunk=lambda text: f"notice:{text}",
-        user_message="hello",
         unexpected_error_text=unexpected_error_text,
         entity_name=_ENTITY_NAME,
     )
@@ -702,11 +660,7 @@ def test_completion_records_and_updates_collector() -> None:
     assert chunks == ["notice:visible"]
     assert collector == {"io.mindroom.ai_run": {"usage": 1}}
     assert recorder.completed_calls == [
-        {
-            "run_metadata": {"room_id": "!room"},
-            "assistant_text": "replayable",
-            "completed_tools": [trace],
-        },
+        {"run_metadata": {"room_id": "!room"}, "completed_tools": [trace]},
     ]
 
 
@@ -771,7 +725,6 @@ def test_tool_only_agent_and_team_presentations_respect_quiet_delivery(
     assert recorder.completed_calls == [
         {
             "run_metadata": {"tool_count": 1},
-            "assistant_text": "",
             "completed_tools": [trace],
         },
     ]
@@ -833,53 +786,42 @@ def test_handled_attempt_preserves_seeded_turn_metadata() -> None:
     }
 
 
-def test_handled_attempt_persists_its_interrupted_record(
-    persisted: list[tuple[str, InterruptedReplaySnapshot]],
+def test_handled_attempt_marks_its_run_interrupted_with_the_failure(
+    marked: list[tuple[str, str | None]],
 ) -> None:
-    """A handled error stores one interrupted record of the attempt's partial output, with no caller recorder."""
+    """A handled error marks the running attempt's run, which its loop stored, as the turn's record, failed."""
 
     async def _attempt(
         run: TurnRunState,
         _c: TurnContinuationRunState,
     ) -> AsyncGenerator[str | AttemptResolved, None]:
         run.run_metadata = {"room_id": "!room"}
-        run.attempt = _FixedAttempt(
-            TurnPartialSnapshot(
-                assistant_text="partial",
-                completed_tools=(_trace("search"),),
-                interrupted_tools=(_trace("browse"),),
-                attempt_run_id="run-live",
-            ),
-        )
-        yield AttemptResolved(HandledAttempt("friendly error", error=RuntimeError("friendly error")))
+        run.attempt = _FixedAttempt("run-live")
+        yield AttemptResolved(HandledAttempt("friendly error", error=RuntimeError("model down")))
 
     chunks = _run_turn(_attempt)
 
     assert chunks == ["friendly error"]
-    [(run_id, snapshot)] = persisted
-    assert run_id == "run-live"
-    assert snapshot.partial_text == "partial"
-    assert snapshot.completed_tools == (_trace("search"),)
-    assert snapshot.interrupted_tools == (_trace("browse"),)
-    assert snapshot.run_metadata == {"room_id": "!room"}
-    assert snapshot.original_status is RunStatus.error
+    # The failure's text, as the loop records it on a failed run.
+    assert marked == [("run-live", "model down")]
 
 
 def test_external_cancel_before_prepare_builds_fallback_metadata(
-    persisted: list[tuple[str, InterruptedReplaySnapshot]],
+    marked: list[tuple[str, str | None]],
 ) -> None:
-    """An external cancel before prepare persists a replay with rebuilt run metadata."""
+    """An external cancel before prepare records the turn with rebuilt run metadata and marks the run it names."""
+    recorder = _FakeTurnRecorder()
 
     async def _attempt(_run: TurnRunState, _c: TurnContinuationRunState) -> CompletedAttempt:
         raise asyncio.CancelledError
 
     with pytest.raises(asyncio.CancelledError):
-        _run_turn(_streamed(_attempt))
+        _run_turn(_streamed(_attempt), sinks=TurnSinks(turn_recorder=recorder))
 
-    [(run_id, snapshot)] = persisted
-    assert run_id == "run-1"
-    assert snapshot.partial_text == ""
-    run_metadata = snapshot.run_metadata
+    assert marked == [("run-1", None)]
+    [interrupted] = recorder.interrupted_calls
+    assert interrupted["run_id"] == "run-1"
+    run_metadata = interrupted["run_metadata"]
     assert run_metadata is not None
     assert run_metadata["room_id"] == "!room"
     assert run_metadata["correlation_id"] == "corr-1"
@@ -887,7 +829,7 @@ def test_external_cancel_before_prepare_builds_fallback_metadata(
 
 
 def test_a_cancel_after_the_turn_completed_keeps_its_completed_record(
-    persisted: list[tuple[str, InterruptedReplaySnapshot]],
+    marked: list[tuple[str, str | None]],
 ) -> None:
     """A stop that lands while a completed turn finishes its attempt leaves the turn's completed record as it is."""
     recorder = _FakeTurnRecorder()
@@ -903,13 +845,13 @@ def test_a_cancel_after_the_turn_completed_keeps_its_completed_record(
 
     assert recorder.outcome == "completed"
     assert recorder.interrupted_calls == []
-    assert persisted == []
+    assert marked == []
 
 
-def test_external_cancel_skips_persist_after_handled_attempt_persisted(
-    persisted: list[tuple[str, InterruptedReplaySnapshot]],
+def test_external_cancel_skips_the_mark_after_a_handled_attempt_marked_its_run(
+    marked: list[tuple[str, str | None]],
 ) -> None:
-    """A cancel after a handled error persisted its replay does not persist a second one."""
+    """A cancel after a handled error marked its run does not mark it again."""
 
     async def _attempt(
         run: TurnRunState,
@@ -924,19 +866,19 @@ def test_external_cancel_skips_persist_after_handled_attempt_persisted(
     with pytest.raises(asyncio.CancelledError):
         _run_turn(_attempt, sinks=TurnSinks(on_failed=_cancel_once_failed))
 
-    assert len(persisted) == 1
+    assert [run_id for run_id, _error in marked] == ["run-1"]
 
 
 @pytest.mark.asyncio
-async def test_interrupted_record_is_stored_off_the_event_loop(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Storing a stopped turn's record is blocking storage work, so it runs through the thread offload boundary."""
+async def test_the_interrupted_mark_is_stored_off_the_event_loop(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Marking a stopped turn's run is blocking storage work, so it runs through the thread offload boundary."""
     in_worker = False
     stored_in_worker: list[bool] = []
     original_to_thread = asyncio.to_thread
 
     async def fake_to_thread(function: Callable[..., object], *args: object, **kwargs: object) -> object:
         nonlocal in_worker
-        if function is not response_turn_module._persist_interrupted:
+        if function is not response_turn_module._mark_interrupted:
             return await original_to_thread(function, *args, **kwargs)
         in_worker = True
         try:
@@ -944,14 +886,14 @@ async def test_interrupted_record_is_stored_off_the_event_loop(monkeypatch: pyte
         finally:
             in_worker = False
 
-    def _persist(**_kwargs: object) -> None:
+    def _mark(*_args: object) -> None:
         stored_in_worker.append(in_worker)
 
     async def _attempt(_run: TurnRunState, _c: TurnContinuationRunState) -> CompletedAttempt:
         raise asyncio.CancelledError
 
     monkeypatch.setattr(response_turn_module.asyncio, "to_thread", fake_to_thread)
-    monkeypatch.setattr(response_turn_module, "persist_interrupted_replay_snapshot", _persist)
+    monkeypatch.setattr(response_turn_module, "_mark_interrupted", _mark)
     with pytest.raises(asyncio.CancelledError):
         await _collect_turn(_streamed(_attempt))
 
@@ -959,8 +901,8 @@ async def test_interrupted_record_is_stored_off_the_event_loop(monkeypatch: pyte
 
 
 @pytest.mark.asyncio
-async def test_a_second_cancel_waits_for_the_interrupted_record_store(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A cancellation that lands while the stopped turn's record is stored ends the turn only once the record is stored.
+async def test_a_second_cancel_waits_for_the_interrupted_mark(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A cancellation that lands while the stopped turn's run is marked ends the turn only once the mark is stored.
 
     The reply settles and the conversation's next turn reads history once the turn ends.
     """
@@ -968,7 +910,7 @@ async def test_a_second_cancel_waits_for_the_interrupted_record_store(monkeypatc
     release_store = threading.Event()
     stored: list[str] = []
 
-    def _persist(*, run_id: str, **_kwargs: object) -> None:
+    def _mark(_ctx: object, _scope_context: object, run_id: str, _error: str | None) -> None:
         store_started.set()
         assert release_store.wait(timeout=5)
         stored.append(run_id)
@@ -976,7 +918,7 @@ async def test_a_second_cancel_waits_for_the_interrupted_record_store(monkeypatc
     async def _attempt(_run: TurnRunState, _c: TurnContinuationRunState) -> CompletedAttempt:
         raise asyncio.CancelledError
 
-    monkeypatch.setattr(response_turn_module, "persist_interrupted_replay_snapshot", _persist)
+    monkeypatch.setattr(response_turn_module, "_mark_interrupted", _mark)
     turn = asyncio.create_task(
         _collect(
             stream_response_turn(
@@ -1045,18 +987,13 @@ def test_continuation_advances_and_resets_turn_state() -> None:
 
 
 def test_a_stop_between_continuation_attempts_records_the_turn_under_the_attempt_it_was_starting(
-    monkeypatch: pytest.MonkeyPatch,
+    marked: list[tuple[str, str | None]],
 ) -> None:
-    """A Stop while a continuation prepares its next attempt stores the turn as a new run, after the spent attempts.
+    """A Stop while a continuation prepares its next attempt names the attempt it was starting, which stored no run.
 
-    Recording it under the turn's first run id would replace that attempt's stored run and put the stopped turn
-    before the second attempt's work in replayed history.
+    Naming the turn's first run id would mark that completed attempt as the stopped turn's record.
     """
     run_ids: list[str | None] = []
-    stored: list[str] = []
-
-    def _persist(*, run_id: str, **_kwargs: object) -> None:
-        stored.append(run_id)
 
     async def _attempt(run: TurnRunState, continuation: TurnContinuationRunState) -> CompletedAttempt:
         run_ids.append(continuation.active_run_id)
@@ -1069,14 +1006,13 @@ def test_a_stop_between_continuation_attempts_records_the_turn_under_the_attempt
             tool_executions=(_model_switch_execution("next-turn"),),
         )
 
-    monkeypatch.setattr(response_turn_module, "persist_interrupted_replay_snapshot", _persist)
     with pytest.raises(asyncio.CancelledError):
         _run_turn(_streamed(_attempt), continuation=_continuation("original ask"))
 
     first, second, starting = run_ids
     assert first == "run-1"
     assert len({first, second, starting}) == 3
-    assert stored == [starting]
+    assert marked == [(starting, None)]
 
 
 def test_an_empty_run_s_retry_runs_under_a_run_id_of_its_own() -> None:
@@ -1179,9 +1115,7 @@ def test_empty_run_grants_one_retry_then_notice() -> None:
     ] == [("run-1", 1), ("run-2", 2)]
     assert live_at_start == [None, None]
     # The notice-only turn still records an empty completion.
-    assert recorder.completed_calls == [
-        {"run_metadata": None, "assistant_text": "", "completed_tools": []},
-    ]
+    assert recorder.completed_calls == [{"run_metadata": None, "completed_tools": []}]
 
 
 def test_empty_retry_borrows_continuation_slot_within_shared_budget() -> None:
@@ -1286,7 +1220,7 @@ def test_streaming_turn_yields_chunks_and_filters_sentinel() -> None:
     chunks = _run_turn(_attempt, sinks=TurnSinks(turn_recorder=recorder))
 
     assert chunks == ["hello ", "world"]
-    assert recorder.completed_calls[-1]["assistant_text"] == "hello world"
+    assert recorder.outcome == "completed"
 
 
 def test_streaming_handled_attempt_records_and_publishes_its_metadata() -> None:
@@ -1315,24 +1249,17 @@ def test_streaming_handled_attempt_records_and_publishes_its_metadata() -> None:
     assert len(recorder.interrupted_calls) == 1
 
 
-def test_streaming_external_cancel_records_snapshot_partials(
-    persisted: list[tuple[str, InterruptedReplaySnapshot]],
+def test_streaming_external_cancel_marks_the_running_attempts_run_once(
+    marked: list[tuple[str, str | None]],
 ) -> None:
-    """An external cancel records the running attempt's partial output and stores that record once."""
+    """An external cancel records the turn under the running attempt's run and marks that run interrupted once."""
     recorder = _FakeTurnRecorder()
 
     async def _attempt(
         run: TurnRunState,
         _c: TurnContinuationRunState,
     ) -> AsyncGenerator[str | AttemptResolved, None]:
-        run.attempt = _FixedAttempt(
-            TurnPartialSnapshot(
-                assistant_text="live partial",
-                completed_tools=(_trace("search"),),
-                interrupted_tools=(_trace("browse"),),
-                attempt_run_id="run-live",
-            ),
-        )
+        run.attempt = _FixedAttempt("run-live")
         yield "chunk"
         raise asyncio.CancelledError
 
@@ -1352,32 +1279,27 @@ def test_streaming_external_cancel_records_snapshot_partials(
         asyncio.run(_run())
 
     assert collected == ["chunk"]
-    assert len(recorder.interrupted_calls) == 1
-    assert recorder.interrupted_calls[0]["assistant_text"] == "live partial"
-    assert recorder.interrupted_calls[0]["completed_tools"] == [_trace("search")]
-    assert recorder.interrupted_calls[0]["interrupted_tools"] == [_trace("browse")]
-    assert [(run_id, snapshot.partial_text) for run_id, snapshot in persisted] == [("run-live", "live partial")]
+    assert [call["run_id"] for call in recorder.interrupted_calls] == ["run-live"]
+    assert marked == [("run-live", None)]
 
 
-def test_streaming_external_cancel_without_recorder_persists_snapshot(
-    persisted: list[tuple[str, InterruptedReplaySnapshot]],
+def test_streaming_external_cancel_without_recorder_marks_the_run(
+    marked: list[tuple[str, str | None]],
 ) -> None:
-    """A recorder-less external cancel persists the interrupted record from the running attempt's partial output."""
+    """A recorder-less external cancel still marks the running attempt's run interrupted."""
 
     async def _attempt(
         run: TurnRunState,
         _c: TurnContinuationRunState,
     ) -> AsyncGenerator[str | AttemptResolved, None]:
-        run.attempt = _FixedAttempt(TurnPartialSnapshot(assistant_text="live partial", attempt_run_id="run-live"))
+        run.attempt = _FixedAttempt("run-live")
         yield "chunk"
         raise asyncio.CancelledError
 
     with pytest.raises(asyncio.CancelledError):
         _run_turn(_attempt)
 
-    [(run_id, snapshot)] = persisted
-    assert snapshot.partial_text == "live partial"
-    assert run_id == "run-live"
+    assert marked == [("run-live", None)]
 
 
 def test_streaming_no_report_empty_run_completes_without_retry_or_notice() -> None:
@@ -1401,9 +1323,7 @@ def test_streaming_no_report_empty_run_completes_without_retry_or_notice() -> No
     assert chunks == []
     assert attempts == 1
     assert runs[0].attempt is not None
-    assert recorder.completed_calls == [
-        {"run_metadata": None, "assistant_text": "", "completed_tools": []},
-    ]
+    assert recorder.completed_calls == [{"run_metadata": None, "completed_tools": []}]
 
 
 @pytest.mark.parametrize("hidden", [False, True])
@@ -1440,11 +1360,10 @@ def test_streaming_continuation_advances_then_finishes(hidden: bool) -> None:
     assert live_at_start == [None, None]
 
 
-def test_a_stop_before_the_next_attempt_starts_records_none_of_the_spent_attempt() -> None:
-    """A stop between a dropped attempt and the next one records no text or calls of the dropped attempt.
-
-    Its finished calls already carried over through the turn state, so keeping them here would count them twice.
-    """
+def test_a_stop_before_the_next_attempt_starts_marks_none_of_the_spent_attempt(
+    marked: list[tuple[str, str | None]],
+) -> None:
+    """A stop between a dropped attempt and the next one names the next attempt, so the spent one keeps its record."""
     recorder = _FakeTurnRecorder()
     switch = _trace("switch_thread_model")
     attempts = 0
@@ -1457,14 +1376,7 @@ def test_a_stop_before_the_next_attempt_starts_records_none_of_the_spent_attempt
         attempts += 1
         if attempts == 2:
             raise asyncio.CancelledError
-        run.attempt = _FixedAttempt(
-            TurnPartialSnapshot(
-                assistant_text="stale partial",
-                completed_tools=(switch,),
-                interrupted_tools=(_trace("browse"),),
-                attempt_run_id="run-1",
-            ),
-        )
+        run.attempt = _FixedAttempt("run-1")
         yield "stale partial"
         yield AttemptResolved(
             CompletedAttempt(
@@ -1479,9 +1391,8 @@ def test_a_stop_before_the_next_attempt_starts_records_none_of_the_spent_attempt
 
     assert attempts == 2
     [interrupted] = recorder.interrupted_calls
-    assert interrupted["assistant_text"] == ""
-    assert interrupted["completed_tools"] == [switch]
-    assert interrupted["interrupted_tools"] == []
+    assert interrupted["run_id"] != "run-1"
+    assert marked == [(interrupted["run_id"], None)]
 
 
 def test_streaming_continuation_limit_yields_limit_message() -> None:
@@ -1763,7 +1674,7 @@ def test_streaming_continuation_does_not_emit_first_attempt_terminal_text() -> N
     assert chunks == ["notice:final"]
 
 
-def test_streaming_attempt_without_sentinel_fails_the_turn() -> None:
+def test_streaming_attempt_without_sentinel_fails_the_turn(marked: list[tuple[str, str | None]]) -> None:
     """A streaming attempt that never yields its sentinel fails the turn instead of ending it silently."""
     recorder = _FakeTurnRecorder()
 
@@ -1778,11 +1689,14 @@ def test_streaming_attempt_without_sentinel_fails_the_turn() -> None:
     assert chunks[0] == "chunk"
     assert "AttemptResolved sentinel" in chunks[1]
     assert recorder.completed_calls == []
-    assert recorder.original_status is RunStatus.error
+    assert recorder.outcome == "interrupted"
+    [(_run_id, error)] = marked
+    assert error is not None
+    assert "AttemptResolved sentinel" in error
 
 
 def test_streaming_aclose_runs_cleanup_and_records_the_stopped_turn(
-    persisted: list[tuple[str, InterruptedReplaySnapshot]],
+    marked: list[tuple[str, str | None]],
 ) -> None:
     """A consumer that stops reading mid-stream cleans the attempt up and leaves the turn recorded as stopped, once.
 
@@ -1825,8 +1739,7 @@ def test_streaming_aclose_runs_cleanup_and_records_the_stopped_turn(
     assert list(notices.storage_targets) == [(_ENTITY_NAME, "session-1", "agent")]
     assert recorder.completed_calls == []
     assert len(recorder.interrupted_calls) == 1
-    assert recorder.original_status is RunStatus.cancelled
-    assert [snapshot.original_status for _run_id, snapshot in persisted] == [RunStatus.cancelled]
+    assert marked == [("run-1", None)]
 
 
 def test_turn_adapter_callback_surface_stays_within_baseline() -> None:
@@ -1942,7 +1855,7 @@ def test_an_empty_reply_is_no_turn_outside_a_quiet_turn(*, record: RunRecord, qu
 @pytest.mark.parametrize("gate_state", ["absent", "pending", "silent", "approved"])
 async def test_outer_turn_failure_is_quiet_until_participation_approves(
     gate_state: str,
-    persisted: list[tuple[str, InterruptedReplaySnapshot]],
+    marked: list[tuple[str, str | None]],
 ) -> None:
     """Scope preparation failure cannot emit error text before primary approval."""
     recorder = _FakeTurnRecorder()
@@ -1980,4 +1893,4 @@ async def test_outer_turn_failure_is_quiet_until_participation_approves(
         assert gate.decision.reason == ("already_answered" if gate_state == "silent" else "run_failed_before_decision")
         assert recorder.outcome == "skipped"
         assert recorder.interrupted_calls == []
-        assert persisted == []
+        assert marked == []

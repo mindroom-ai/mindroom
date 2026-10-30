@@ -28,34 +28,35 @@ from mindroom.config.approval import ApprovalRuleConfig, ToolApprovalConfig
 from mindroom.config.budgets import BudgetsConfig
 from mindroom.config.main import Config
 from mindroom.config.models import BackgroundToolJobsConfig, ModelConfig, ModelPricing
-from mindroom.constants import AI_RUN_METADATA_KEY
 from mindroom.helper_usage import HelperUsageOwner, get_helper_usage_owner, record_helper_usage
-from mindroom.history.turn_recorder import TurnRecorder
 from mindroom.hooks import EnrichmentItem
 from mindroom.knowledge.availability import KnowledgeAvailability
 from mindroom.knowledge.search import AgentKnowledge, KnowledgeSource, KnowledgeSourceDescription
 from mindroom.knowledge.utils import KnowledgeAvailabilityDetail
-from mindroom.llm.messages import system_text
+from mindroom.llm.messages import Message, system_text
 from mindroom.llm.provider import ModelIdentity, ModelRequest
-from mindroom.llm.runs import RunStatus
+from mindroom.llm.runs import RunRecord, RunStatus
 from mindroom.llm.usage import HelperUsage, ModelMetrics, RunMetrics, TokenCounts
 from mindroom.matrix_rtc.call_tools import (
     _TEXT_CHAT_REQUIRED_MESSAGE,
     CallAgentTooling,
-    _call_agent_run_state,
     _call_instructions,
     _CallAgentCache,
     _CallAgentRunState,
     _CallResponseTracker,
     _spoken,
+    _spoken_record,
     _wrap_tool_function,
     build_call_tools,
     matrix_message_available_during_call,
 )
 from mindroom.matrix_rtc.voice_agent import CallAgentResponse
 from mindroom.memory import MemoryPromptParts
+from mindroom.response_turn import HandledAttempt
 from mindroom.runtime_resolution import resolve_agent_runtime
+from mindroom.session_storage.agent_storage import create_agent_state_storage
 from mindroom.session_storage.store import ConversationStore
+from mindroom.session_storage.types import ConversationSession
 from mindroom.tool_jobs.execution import agent_tool_middleware
 from mindroom.tool_system.agno_toolkits import adapt_toolkit
 from mindroom.tool_system.call_record import recording_tool_calls
@@ -85,7 +86,6 @@ if TYPE_CHECKING:
     from mindroom.constants import RuntimePaths
     from mindroom.message_target import MessageTarget
     from mindroom.response_turn import ResponseTurnContext, TurnSinks
-    from mindroom.session_storage.types import ConversationSession
     from mindroom.tool_system.invocation import ToolCall, ToolMiddleware, ToolNext
     from mindroom.tool_system.tool_function import AdaptedToolkit, ToolFunction
 
@@ -862,12 +862,23 @@ async def test_call_responder_uses_normal_agent_turn_and_refuses_unsafe_function
         calls.append((turn, config))
         recorder = sinks.turn_recorder
         assert recorder is not None
-        # The turn driver starts the turn's record with its user message.
-        recorder.start(user_message=turn.prompt, user_message_is_structured=False, run_metadata={})
+        recorder.start(run_metadata={})
+        # The turn's loop stores its completed run, which an interrupted playout rewrites to what it spoke.
+        call_store.save_run(
+            ConversationSession(kind="agent", session_id=turn.session_id or "", owner_id=AGENT),
+            RunRecord(
+                run_id="call-run-1",
+                agent_id=AGENT,
+                session_id=turn.session_id,
+                status=RunStatus.completed,
+                content="It is sunny.",
+                messages=[Message(role="user", content=turn.prompt), Message(role="assistant", content="It is sunny.")],
+            ),
+            record_usage=False,
+        )
         recorder.record_completed(
             run_id="call-run-1",
             run_metadata={"model": "same-chat-model"},
-            assistant_text="It is sunny.",
             completed_tools=completed_tools,
         )
         return TurnResult("It is sunny.")
@@ -889,16 +900,19 @@ async def test_call_responder_uses_normal_agent_turn_and_refuses_unsafe_function
         AsyncMock(return_value=SimpleNamespace(knowledge=knowledge, unavailable=())),
     )
     monkeypatch.setattr("mindroom.ai.ai_response", fake_ai_response)
-    call_store = ConversationStore(tmp_path / "call.db")
+    call_store = create_agent_state_storage(AGENT, tmp_path / "call")
     monkeypatch.setattr("mindroom.matrix_rtc.call_tools.create_session_storage", lambda *_args: call_store)
 
-    def record_interruption(*, storage: ConversationStore, session: ConversationSession, **kwargs: object) -> None:
-        assert storage is call_store
+    save_interrupted_record = ConversationStore.save_interrupted_record
+
+    def record_interruption(store: ConversationStore, session: ConversationSession, record: RunRecord) -> object:
+        assert store is call_store
         # The interrupted run is written in the database's lane, behind the conversation's other storage work.
         assert threading.current_thread().name.startswith("conversation-store")
-        persisted_interruptions.append({"session": (session.session_id, session.kind, session.owner_id), **kwargs})
+        persisted_interruptions.append(((session.session_id, session.kind, session.owner_id), record))
+        return save_interrupted_record(store, session, record)
 
-    monkeypatch.setattr("mindroom.matrix_rtc.call_tools.persist_interrupted_replay", record_interruption)
+    monkeypatch.setattr(ConversationStore, "save_interrupted_record", record_interruption)
     if not reconcile_spoken_response:
         monkeypatch.setattr(
             "mindroom.matrix_rtc.call_tools._CallResponseTracker.register",
@@ -979,60 +993,42 @@ async def test_call_responder_uses_normal_agent_turn_and_refuses_unsafe_function
         await finalize
     else:
         assert tooling.finalize_spoken_response is None
-    assert persisted_interruptions == (
-        [
-            {
-                "session": ("!room:example.org:call:one", "agent", AGENT),
-                "run_id": "call-run-1",
-                "user_message": "What is the weather?",
-                "user_message_is_structured": False,
-                "partial_text": "It is",
-                "completed_tools": tuple(completed_tools),
-                "interrupted_tools": (),
-                "run_metadata": {"model": "same-chat-model"},
-                "original_status": RunStatus.cancelled,
-            },
+    if reconcile_spoken_response:
+        [(session, spoken)] = persisted_interruptions
+        assert session == ("!room:example.org:call:one", "agent", AGENT)
+        # The run the turn stored keeps, of its answer, only what playout spoke.
+        assert (spoken.run_id, spoken.status, spoken.error) == ("call-run-1", RunStatus.interrupted, None)
+        assert [(message.role, message.content) for message in spoken.messages] == [
+            ("user", "What is the weather?"),
+            ("assistant", None),
+            ("assistant", "It is"),
         ]
-        if reconcile_spoken_response
-        else []
-    )
+    else:
+        assert persisted_interruptions == []
 
-    async def cancel_before_playout(turn: ResponseTurnContext, *_args: object, sinks: TurnSinks) -> TurnResult:
+    async def cancel_before_playout(_turn: ResponseTurnContext, *_args: object, sinks: TurnSinks) -> TurnResult:
         recorder = sinks.turn_recorder
         assert recorder is not None
-        recorder.start(user_message=turn.prompt, user_message_is_structured=False, run_metadata={})
-        recorder.record_interrupted(
-            run_id="call-run-2",
-            run_metadata={"model": "same-chat-model"},
-            assistant_text="generated but never spoken",
-            completed_tools=(ToolTraceEntry(type="tool_call_completed", tool_name="calendar"),),
-            interrupted_tools=(),
-            original_status=RunStatus.cancelled,
-        )
+        recorder.start(run_metadata={})
+        recorder.record_interrupted(run_id="call-run-2", run_metadata={"model": "same-chat-model"})
         raise asyncio.CancelledError
 
     monkeypatch.setattr("mindroom.ai.ai_response", cancel_before_playout)
     with pytest.raises(asyncio.CancelledError):
         await tooling.responder("Never speak this", recorded_tool_uses.append)
-    assert persisted_interruptions[-1]["run_id"] == "call-run-2"
-    assert persisted_interruptions[-1]["user_message"] == "Never speak this"
-    assert persisted_interruptions[-1]["partial_text"] == ""
-    assert persisted_interruptions[-1]["original_status"] is RunStatus.cancelled
-    assert recorded_tool_uses[-1] == ["calendar"]
+    # No run was stored, so the call stores the transcript it answered, stopped, with nothing spoken.
+    _session, unspoken = persisted_interruptions[-1]
+    assert (unspoken.run_id, unspoken.status, unspoken.error) == ("call-run-2", RunStatus.interrupted, None)
+    assert [(message.role, message.content) for message in unspoken.messages] == [("user", "Never speak this")]
+    assert unspoken.metadata == {"model": "same-chat-model"}
 
-    async def return_error_without_run_id(turn: ResponseTurnContext, *_args: object, sinks: TurnSinks) -> TurnResult:
+    async def return_error_without_run_id(_turn: ResponseTurnContext, *_args: object, sinks: TurnSinks) -> TurnResult:
         recorder = sinks.turn_recorder
         assert recorder is not None
-        recorder.start(user_message=turn.prompt, user_message_is_structured=False, run_metadata={})
-        recorder.record_interrupted(
-            run_id=None,
-            run_metadata={"model": "same-chat-model"},
-            assistant_text="provider failed",
-            completed_tools=(),
-            interrupted_tools=(),
-            original_status=RunStatus.error,
-        )
-        return TurnResult("provider failed")
+        recorder.start(run_metadata={})
+        recorder.record_interrupted(run_id=None, run_metadata={"model": "same-chat-model"})
+        failure = HandledAttempt("provider failed", error=RuntimeError("provider failed"))
+        return TurnResult("provider failed", failed=failure)
 
     monkeypatch.setattr("mindroom.ai.ai_response", return_error_without_run_id)
     error_response = await tooling.responder("Trigger an error", recorded_tool_uses.append)
@@ -1044,9 +1040,12 @@ async def test_call_responder_uses_normal_agent_turn_and_refuses_unsafe_function
         await persist_error
     else:
         assert error_response.turn_id is None
-    assert str(persisted_interruptions[-1]["run_id"]).startswith("!room:example.org:call:one:turn:")
-    assert persisted_interruptions[-1]["partial_text"] == ("provider failed" if reconcile_spoken_response else "")
-    assert persisted_interruptions[-1]["original_status"] is RunStatus.error
+    _session, failed = persisted_interruptions[-1]
+    assert failed.run_id.startswith("!room:example.org:call:one:turn:")
+    assert (failed.status, failed.error) == (RunStatus.interrupted, "provider failed")
+    assert [message.content for message in failed.messages if message.role == "assistant"] == (
+        ["provider failed"] if reconcile_spoken_response else []
+    )
 
     # Delegated children and script runs still hide these functions through the turn's runtime context.
     tool_filter = cast("Callable[[Function], bool]", turn_contexts[0].tool_function_filter)
@@ -1063,11 +1062,8 @@ async def test_call_responder_uses_normal_agent_turn_and_refuses_unsafe_function
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ("active_model_name", "expected_model_name", "expected_model_id", "expected_context_window"),
-    [
-        ("call_fast", "call_fast", "fast-model", 16_000),
-        (None, "large", "large-model", 48_000),
-    ],
+    ("active_model_name", "expected_model_name", "expected_model_id"),
+    [("call_fast", "call_fast", "fast-model"), (None, "large", "large-model")],
 )
 async def test_cascaded_responder_records_effective_selected_model_metadata(
     tmp_path: Path,
@@ -1075,9 +1071,8 @@ async def test_cascaded_responder_records_effective_selected_model_metadata(
     active_model_name: str | None,
     expected_model_name: str,
     expected_model_id: str,
-    expected_context_window: int,
 ) -> None:
-    """Call and room model selection drive both the call's build and the turn's metadata."""
+    """Call and room model selection drive both the call's build and the run the call keeps of the turn."""
     runtime_paths = test_runtime_paths(tmp_path)
     config = bind_runtime_paths(
         Config(
@@ -1101,7 +1096,6 @@ async def test_cascaded_responder_records_effective_selected_model_metadata(
         resolved_thread_id=None,
         session_id="!room:example.org:call:metadata",
     )
-    persisted_interruptions: list[dict[str, object]] = []
 
     class StrictToolSupport:
         def build_context(
@@ -1154,10 +1148,7 @@ async def test_cascaded_responder_records_effective_selected_model_metadata(
         "mindroom.matrix_rtc.call_tools.resolve_agent_knowledge_access_async",
         AsyncMock(return_value=SimpleNamespace(knowledge=None, unavailable=())),
     )
-    monkeypatch.setattr(
-        "mindroom.matrix_rtc.call_tools.persist_interrupted_replay",
-        lambda **kwargs: persisted_interruptions.append(kwargs),
-    )
+    saved = _saved_interrupted_records(monkeypatch)
 
     tooling = await build_call_tools(
         agent_name=AGENT,
@@ -1182,12 +1173,10 @@ async def test_cascaded_responder_records_effective_selected_model_metadata(
     await finalize
 
     assert create_agent_mock.call_args.kwargs["model"].model_name == expected_model_name
-    run_metadata = persisted_interruptions[0]["run_metadata"]
-    assert isinstance(run_metadata, dict)
-    payload = run_metadata[AI_RUN_METADATA_KEY]
-    assert payload["model"]["config"] == expected_model_name
-    assert payload["model"]["id"] == expected_model_id
-    assert payload["context"]["window_tokens"] == expected_context_window
+    # The run the selected model answered is the one playout rewrites to what it spoke.
+    [spoken] = saved
+    assert (spoken.model, spoken.status) == (expected_model_id, RunStatus.interrupted)
+    assert [(message.role, message.content) for message in spoken.messages][-1] == ("assistant", "It is")
 
 
 def test_call_response_tracker_keeps_fifo_without_retaining_settled_tokens(tmp_path: Path) -> None:
@@ -1201,12 +1190,9 @@ def test_call_response_tracker_keeps_fifo_without_retaining_settled_tokens(tmp_p
     state = _CallAgentRunState(
         session_id="call-session",
         run_id="run",
-        user_message="hello",
-        completed_tools=(),
-        interrupted_tools=(),
+        transcript="hello",
         run_metadata={},
         outcome="completed",
-        original_status=None,
     )
     first = tracker.register(state)
     second = tracker.register(state)
@@ -1247,15 +1233,11 @@ async def test_cascaded_cancellation_during_knowledge_resolution_persists_transc
         msg = "blocked resolution unexpectedly resumed"
         raise AssertionError(msg)
 
-    persisted_interruptions: list[dict[str, object]] = []
     monkeypatch.setattr(
         "mindroom.matrix_rtc.call_tools.resolve_agent_knowledge_access_async",
         blocked_resolution,
     )
-    monkeypatch.setattr(
-        "mindroom.matrix_rtc.call_tools.persist_interrupted_replay",
-        lambda **kwargs: persisted_interruptions.append(kwargs),
-    )
+    saved = _saved_interrupted_records(monkeypatch)
     tooling = await build_call_tools(
         agent_name=AGENT,
         config=config,
@@ -1282,12 +1264,9 @@ async def test_cascaded_cancellation_during_knowledge_resolution_persists_transc
     with pytest.raises(asyncio.CancelledError):
         await response_task
 
-    assert len(persisted_interruptions) == 1
-    persisted = persisted_interruptions[0]
-    assert persisted["session"].session_id == "call-session"
-    assert persisted["user_message"] == "Never speak this"
-    assert persisted["partial_text"] == ""
-    assert persisted["original_status"] is RunStatus.cancelled
+    [persisted] = saved
+    assert (persisted.session_id, persisted.status, persisted.error) == ("call-session", RunStatus.interrupted, None)
+    assert [(message.role, message.content) for message in persisted.messages] == [("user", "Never speak this")]
 
 
 @pytest.mark.asyncio
@@ -1305,12 +1284,9 @@ async def test_call_response_tracker_failed_settlement_does_not_abort_next_turn(
     state = _CallAgentRunState(
         session_id="call-session",
         run_id="failed-run",
-        user_message="hello",
-        completed_tools=(),
-        interrupted_tools=(),
+        transcript="hello",
         run_metadata={},
         outcome="completed",
-        original_status=None,
     )
     started = Event()
     release = Event()
@@ -1949,18 +1925,13 @@ async def test_cascaded_responder_waits_for_interrupted_playout_settlement(
         ai_prompts.append(prompt)
         recorder = sinks.turn_recorder
         assert recorder is not None
-        recorder.record_completed(
-            run_id=None,
-            run_metadata={},
-            assistant_text=f"answer to {prompt}",
-            completed_tools=(),
-        )
+        recorder.record_completed(run_id=None, run_metadata={}, completed_tools=())
         return TurnResult(f"answer to {prompt}")
 
-    def persist_interrupted(**kwargs: object) -> None:
+    def persist_interrupted(_self: ConversationStore, _session: ConversationSession, record: RunRecord) -> None:
         started.set()
         assert release.wait(timeout=5)
-        persisted.append(cast("str", kwargs["run_id"]))
+        persisted.append(record.run_id)
 
     monkeypatch.setattr(
         "mindroom.matrix_rtc.call_tools.resolve_agent_knowledge_access_async",
@@ -1968,7 +1939,7 @@ async def test_cascaded_responder_waits_for_interrupted_playout_settlement(
     )
     monkeypatch.setattr("mindroom.matrix_rtc.call_tools.create_agent", MagicMock(return_value=_build()))
     monkeypatch.setattr("mindroom.ai.ai_response", fake_ai_response)
-    monkeypatch.setattr("mindroom.matrix_rtc.call_tools.persist_interrupted_replay", persist_interrupted)
+    monkeypatch.setattr(ConversationStore, "save_interrupted_record", persist_interrupted)
     tooling = await build_call_tools(
         agent_name=AGENT,
         config=config,
@@ -2185,24 +2156,45 @@ def test_matrix_message_available_during_call_needs_the_tool_without_approval() 
     assert not matrix_message_available_during_call(config, AGENT)
 
 
-def test_an_interrupted_voice_reply_drops_the_tools_its_fold_summarized() -> None:
-    """A voice reply that compacted mid-turn is saved without the calls the summary holds."""
-    recorder = TurnRecorder()
-    recorder.start(user_message="question", user_message_is_structured=False, run_metadata={"source": "voice"})
-    recorder.record_folded_tool_calls({"folded"})
-    recorder.record_interrupted(
-        run_id=None,
-        run_metadata=None,
-        assistant_text="",
-        completed_tools=[
-            ToolTraceEntry(type="tool_call_completed", tool_name="search", tool_call_id="folded"),
-            ToolTraceEntry(type="tool_call_completed", tool_name="search", tool_call_id="after"),
+def _saved_interrupted_records(monkeypatch: pytest.MonkeyPatch) -> list[RunRecord]:
+    """Record each run a call rewrites to what it spoke, as any conversation store saves it."""
+    saved: list[RunRecord] = []
+    save = ConversationStore.save_interrupted_record
+
+    def capture(self: ConversationStore, session: ConversationSession, record: RunRecord) -> object:
+        saved.append(record)
+        return save(self, session, record)
+
+    monkeypatch.setattr(ConversationStore, "save_interrupted_record", capture)
+    return saved
+
+
+def test_a_spoken_record_keeps_the_runs_calls_and_only_the_text_the_call_spoke() -> None:
+    """Playout that cut a reply short keeps the run's calls and results, and of its text only what was heard."""
+    call = {"id": "c1", "type": "function", "function": {"name": "weather", "arguments": "{}"}}
+    record = RunRecord(
+        run_id="run",
+        agent_id=AGENT,
+        session_id="session",
+        status=RunStatus.completed,
+        content="Checking.\n\nIt is sunny today.",
+        messages=[
+            Message(role="user", content="Weather?"),
+            Message(role="assistant", content="Checking.", tool_calls=[call]),
+            Message(role="tool", tool_call_id="c1", tool_name="weather", content="sunny"),
+            Message(role="assistant", content="It is sunny today."),
         ],
-        interrupted_tools=(),
-        original_status=RunStatus.cancelled,
     )
 
-    state = _call_agent_run_state(recorder, {}, session_id="session", fallback_run_id="run")
+    spoken = _spoken_record(record, "Checking. It is", error=None)
 
-    assert state.run_metadata["source"] == "voice"
-    assert [tool.tool_call_id for tool in state.completed_tools] == ["after"]
+    assert (spoken.status, spoken.content, spoken.error) == (RunStatus.interrupted, "Checking. It is", None)
+    assert [(message.role, message.content) for message in spoken.messages] == [
+        ("user", "Weather?"),
+        ("assistant", None),
+        ("tool", "sunny"),
+        ("assistant", None),
+        ("assistant", "Checking. It is"),
+    ]
+    assert spoken.messages[1].tool_calls == [call]
+    assert record.status is RunStatus.completed

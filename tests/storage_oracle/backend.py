@@ -21,7 +21,6 @@ from mindroom.constants import (
     MATRIX_SEEN_EVENT_IDS_METADATA_KEY,
 )
 from mindroom.delegation.state import DelegationState
-from mindroom.history.interrupted_replay import build_interrupted_replay_snapshot
 from mindroom.history.mid_turn_compaction import _carry_request_usage
 from mindroom.history.replay import current_summary_text
 from mindroom.history.request_messages import scope_history_messages
@@ -37,16 +36,17 @@ from mindroom.session_storage.schema import TableNames
 from mindroom.session_storage.types import session_state_snapshot
 from mindroom.tool_system.events import ToolTraceEntry
 from tests.storage_oracle.actions import Action
+from tests.storage_oracle.interrupted_records import build_interrupted_replay_snapshot
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Sequence
     from pathlib import Path
 
-    from mindroom.history.interrupted_replay import InterruptedReplaySnapshot
     from mindroom.llm.runs import AnyRunRecord
     from mindroom.session_storage.types import ConversationSession
     from tests.storage_oracle.actions import ScenarioKind
     from tests.storage_oracle.determinism import Determinism
+    from tests.storage_oracle.interrupted_records import InterruptedReplaySnapshot
 
 SESSION_ID = "!room:example.org:$thread"
 ROOM_ID = "!room:example.org"

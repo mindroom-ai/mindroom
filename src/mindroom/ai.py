@@ -71,7 +71,6 @@ from mindroom.response_turn import (
     ResponseTurnContext,
     TurnAdapter,
     TurnContinuationRunState,
-    TurnPartialSnapshot,
     TurnResume,
     TurnSinks,
     build_llm_request_log_context,
@@ -116,7 +115,6 @@ if TYPE_CHECKING:
     from mindroom.constants import RuntimePaths
     from mindroom.delegation.state import DelegationChild
     from mindroom.history.request_messages import TurnMessages
-    from mindroom.history.turn_recorder import TurnRecorder
     from mindroom.history.types import PreparedHistoryState, ScopeSummary
     from mindroom.knowledge.refresh_scheduler import KnowledgeRefreshScheduler
     from mindroom.llm.events import RunEvent
@@ -221,21 +219,10 @@ class _PreparedAgentRun:
 
 @dataclass(frozen=True)
 class _AgentAttempt:
-    """Inputs and identity for one agent run attempt, and the partial output it has shown."""
+    """Inputs and identity for one agent run attempt."""
 
     run_input: list[Message]
     run_id: str
-    stream_state: _StreamingAttemptState
-
-    def partial_snapshot(self) -> TurnPartialSnapshot:
-        """Return what an interruption records of this attempt: its partial output, and its run id."""
-        state = self.stream_state
-        return TurnPartialSnapshot(
-            assistant_text=state.assistant_text,
-            completed_tools=tuple(state.completed_tools),
-            interrupted_tools=tuple(pending.trace_entry for pending in state.pending_tools),
-            attempt_run_id=self.run_id,
-        )
 
 
 _render_system_enrichment_context = timed("system_prompt_assembly.system_enrichment_render")(
@@ -265,7 +252,6 @@ class _StreamingAttemptState:
 def _agent_turn_adapter(
     *,
     agent_name: str,
-    user_message: str,
     session_id: str,
     runtime_paths: RuntimePaths,
     config: Config,
@@ -298,7 +284,6 @@ def _agent_turn_adapter(
         run_attempt=run_attempt,
         on_scope_loaded=_on_scope_loaded,
         make_text_chunk=TextDelta,
-        user_message=user_message,
         unexpected_error_text=error_text,
         entity_name=agent_name,
     )
@@ -319,8 +304,6 @@ class _AgentRunContext:
     request_template: ModelRequest
     config: Config
     runtime_paths: RuntimePaths
-    # The turn's record, where the run's mid-turn compaction notes the calls a fold summarized.
-    turn_recorder: TurnRecorder
 
     @property
     def agent_name(self) -> str:
@@ -467,7 +450,6 @@ def _begin_attempt(
     attempt = run.attempt = _AgentAttempt(
         run_input=prepared_run.run_input(media),
         run_id=continuation.active_run_id or str(uuid4()),
-        stream_state=stream_state,
     )
     return storage, attempt
 
@@ -493,7 +475,6 @@ def _agent_loop_hooks(
             replay_plan=prepared.prepared_history.replay_plan,
             prompt_id=prepared.turn.prompt.id,
             lifecycle=ctx.compaction_lifecycle,
-            turn_recorder=run_context.turn_recorder,
         ),
         participation=ctx.participation,
         skill_review_capture=ctx.skill_review_capture,
@@ -916,7 +897,6 @@ async def _prepare_agent_run_context(
     runtime_paths: RuntimePaths,
     config: Config,
     scope_context: ScopeSessionContext | None,
-    turn_recorder: TurnRecorder,
 ) -> _AgentRunContext:
     """Prepare one attempt of an agent response, as its ``continuation`` state asks, through metadata assembly."""
     ctx = replace(
@@ -968,7 +948,6 @@ async def _prepare_agent_run_context(
         request_template=request_template,
         config=config,
         runtime_paths=runtime_paths,
-        turn_recorder=turn_recorder,
     )
 
 
@@ -1269,7 +1248,6 @@ async def stream_agent_response(  # noqa: C901, PLR0915
                 runtime_paths=runtime_paths,
                 config=config,
                 scope_context=run.scope_context,
-                turn_recorder=run.record,
             )
         except Exception as e:
             logger.exception("Error preparing agent", agent=agent_name)
@@ -1373,7 +1351,6 @@ async def stream_agent_response(  # noqa: C901, PLR0915
 
     adapter = _agent_turn_adapter(
         agent_name=agent_name,
-        user_message=_compose_current_turn_prompt(raw_prompt=ctx.prompt, model_prompt=ctx.model_prompt),
         session_id=session_id,
         runtime_paths=runtime_paths,
         config=config,

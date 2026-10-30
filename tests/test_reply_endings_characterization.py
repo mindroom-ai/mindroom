@@ -29,6 +29,7 @@ import pytest
 from structlog.testing import capture_logs
 
 from mindroom import reply_lifecycle as rl
+from mindroom import response_turn
 from mindroom.approval.tool_approval import shutdown_approval_runtime
 from mindroom.cancellation import request_task_cancel
 from mindroom.config.agent import AgentConfig
@@ -40,7 +41,7 @@ from mindroom.constants import STREAM_STATUS_KEY
 from mindroom.dispatch_source import SILENT_SCHEDULE_SOURCE_KIND
 from mindroom.event_journal import DeliveryStage, EventClass, EventKind, InboundEvent
 from mindroom.final_delivery import Owed, Suppressed, Suppression
-from mindroom.history.interrupted_replay import is_interrupted_replay_run, persist_interrupted_replay_snapshot
+from mindroom.history.request_messages import replayable_messages
 from mindroom.history.session_context import create_scope_session_storage, resolve_bound_team_scope
 from mindroom.hooks import (
     EVENT_MESSAGE_AFTER_RESPONSE,
@@ -107,6 +108,8 @@ _MODEL_ERROR = "[general] ⚠️ Error: model exploded"
 # What a stored run of this turn holds as its user message: the model prompt, and the bare message tag.
 _MODEL_PROMPT = f'Current message:\n<msg event_id="{_SOURCE}" from="{_REQUESTER}"><![CDATA[hello]]></msg>'
 _BARE_PROMPT = f'<msg event_id="{_SOURCE}" from="{_REQUESTER}"><![CDATA[hello]]></msg>'
+# The prompt a turn's request sends, which its run stores.
+_PROMPT = f"Current message:\n{_BARE_PROMPT}"
 _TEAM_HEADER = "🤝 **Team Response** (Writer, Checker):\n\n"
 _EDIT_INTERVAL = 0.0
 _TEAM_MEMBERS = "**Writer**: Writer fact.\n\n**Checker**: Checker fact."
@@ -501,13 +504,14 @@ async def _explode() -> None:
 
 
 def _interrupted(runs: Sequence[AnyRunRecord]) -> AnyRunRecord:
-    """Return the one interrupted-replay row among ``runs``."""
-    [run] = [run for run in runs if is_interrupted_replay_run(run)]
+    """Return the one run among ``runs`` its turn driver marked as an interrupted turn's record."""
+    [run] = [run for run in runs if run.status is RunStatus.interrupted]
     return run
 
 
-def _original_status(run: AnyRunRecord) -> str:
-    return (run.metadata or {})["mindroom_original_status"]
+def _replayed(run: AnyRunRecord) -> list[tuple[str, object]]:
+    """Return the role and content of each message history replays of ``run``."""
+    return [(message.role, message.content) for message in replayable_messages([run])]
 
 
 def _messages(run: AnyRunRecord) -> list[tuple[str, object]]:
@@ -600,7 +604,6 @@ async def test_a_completed_agent_reply(
     [run] = turn.agent_runs()
     assert isinstance(run, RunRecord)
     assert run.status is RunStatus.completed
-    assert not is_interrupted_replay_run(run)
     assert run.content == "Looking.\n\nThe answer."
     assert not await turn.pending()
 
@@ -689,12 +692,13 @@ async def test_a_user_stop_mid_stream_cancels_the_streamed_reply(
     assert turn.hooks.fired == [
         ("cancelled", {"event_id": "$sent0", "failure_reason": "cancelled_by_user", "kind": "ai"}),
     ]
-    [run] = turn.agent_runs()
-    assert is_interrupted_replay_run(run)
-    assert _original_status(run) == "cancelled"
-    assert run.content == "Partial answer\n\n(turn stopped before completion)"
-    # CHARACTERIZATION: current behavior; an interrupted row stores the bare message tag, not the model prompt.
-    assert _messages(run) == [("user", _BARE_PROMPT), ("assistant", run.content)]
+    run = _interrupted(turn.agent_runs())
+    assert run.error is None
+    # The run keeps the prompt its request sent and the text it streamed; its replay ends with the stop note.
+    assert _replayed(run) == [
+        ("user", _PROMPT),
+        ("assistant", "Partial answer\n\n(turn stopped before completion)"),
+    ]
     assert not await turn.pending()
 
 
@@ -702,11 +706,10 @@ async def test_a_stopped_turn_holds_its_conversation_until_its_interrupted_recor
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A stopped turn's record can take longer to store than the streamer waits before cancelling its stream again.
+    """Marking a stopped turn's run can take longer than the streamer waits before cancelling its stream again.
 
     The conversation's next turn reads history once this turn ends, so it must find the stopped turn there. Stopped
-    while it prepared its prompt, before its run stored anything, the record is its session's first row, which starts
-    the session.
+    while it prepared its prompt, before its run stored anything, the turn stores nothing, so no session starts.
     """
     preparing = asyncio.Event()
     turn = await _turn(tmp_path, monkeypatch, streaming=True, scripts={"default": [answer("Never sent.")]})
@@ -719,14 +722,14 @@ async def test_a_stopped_turn_holds_its_conversation_until_its_interrupted_recor
     monkeypatch.setattr("mindroom.ai._prepare_agent_run_context", prepare_until_stopped)
     storing = threading.Event()
     release = threading.Event()
-    store = persist_interrupted_replay_snapshot
+    mark = response_turn._mark_interrupted
 
-    def slow_store(**kwargs: Any) -> None:  # noqa: ANN401
+    def slow_store(*args: Any) -> None:  # noqa: ANN401
         storing.set()
         release.wait(timeout=30)
-        store(**kwargs)
+        mark(*args)
 
-    monkeypatch.setattr("mindroom.response_turn.persist_interrupted_replay_snapshot", slow_store)
+    monkeypatch.setattr(response_turn, "_mark_interrupted", slow_store)
     response = asyncio.create_task(turn.runner.generate_response(_plain_request(_target())))
     try:
         await asyncio.wait_for(preparing.wait(), timeout=10)
@@ -742,9 +745,8 @@ async def test_a_stopped_turn_holds_its_conversation_until_its_interrupted_recor
 
     assert await asyncio.wait_for(response, timeout=10) == Owned()
     assert (await turn.reply()).event_id == "$sent0"
-    [run] = turn.agent_runs()
-    assert is_interrupted_replay_run(run)
-    assert turn.hooks.names == ["session_started", "cancelled"]
+    assert turn.agent_runs() == []
+    assert turn.hooks.names == ["cancelled"]
 
 
 async def test_a_user_stop_while_a_whole_delivery_runs_the_model(
@@ -786,10 +788,12 @@ async def test_a_user_stop_while_a_whole_delivery_runs_the_model(
         ("cancelled", {"event_id": "$sent0", "failure_reason": "cancelled_by_user", "kind": "ai"}),
     ]
     run = _interrupted(turn.agent_runs())
-    assert _original_status(run) == "cancelled"
+    assert run.error is None
     # CHARACTERIZATION: current behavior; history keeps model text the room never showed.
-    assert run.content == "Partial answer\n\n(turn stopped before completion)"
-    assert _messages(run) == [("user", _BARE_PROMPT), ("assistant", run.content)]
+    assert _replayed(run) == [
+        ("user", _PROMPT),
+        ("assistant", "Partial answer\n\n(turn stopped before completion)"),
+    ]
     assert not await turn.pending()
 
 
@@ -844,9 +848,11 @@ async def test_a_stop_while_the_stream_waits_for_matrix_records_the_turn_stopped
     )
     run = _interrupted(turn.agent_runs())
     # The Stop lands while the consumer writes, outside the model's await, and the turn is still recorded stopped.
-    assert _original_status(run) == "cancelled"
-    assert run.content.startswith(
-        "Partial answer\n\n(turn stopped before completion; 1 tool call(s) were still running)",
+    assert run.error is None
+    # The request's message holds the text the scripted model finished it with.
+    assert _replayed(run)[-1] == (
+        "assistant",
+        "answer\n\n(turn stopped before completion; 1 tool call(s) had not finished)",
     )
 
 
@@ -904,11 +910,12 @@ async def test_a_model_failure(
     # CHARACTERIZATION: current behavior; after_response, not message:cancelled, reports the failed reply.
     assert turn.hooks.names == (["transform", "after"] if streaming else ["before", "after"])
     assert turn.hooks.payload("after")["text"] == shown
-    [run] = turn.agent_runs()
-    assert is_interrupted_replay_run(run)
-    assert _original_status(run) == "error"
-    assert run.content == (f"{partial}\n\n" if partial else "") + "(turn failed before completion)"
-    assert _messages(run) == [("user", _BARE_PROMPT), ("assistant", run.content)]
+    run = _interrupted(turn.agent_runs())
+    assert run.error is not None
+    assert _replayed(run) == [
+        ("user", _PROMPT),
+        ("assistant", (f"{partial}\n\n" if partial else "") + "(turn failed before completion)"),
+    ]
     assert not await turn.pending()
 
 
@@ -936,7 +943,6 @@ async def test_a_silent_schedule_that_reports_nothing_shows_nothing(
     ]
     [run] = turn.agent_runs()
     assert run.status is RunStatus.completed
-    assert not is_interrupted_replay_run(run)
     assert run.content == "NO_REPLY"
     assert not await turn.pending()
 
@@ -1057,12 +1063,12 @@ async def test_a_process_shutdown_mid_stream_leaves_the_reply_for_replay(
     assert await turn.final() is None
     assert turn.hooks.fired == []
     runs = turn.agent_runs()
-    assert not any(is_interrupted_replay_run(run) for run in runs)
-    # CHARACTERIZATION: current behavior; the agent loop still stores its own cancelled run, holding only the prompt.
+    assert not any(run.status is RunStatus.interrupted for run in runs)
+    # The agent loop stores its own cancelled run, with the text it streamed, which no history replays.
     [run] = runs
     assert run.status is RunStatus.cancelled
     assert run.content is None
-    assert _messages(run) == [("user", _MODEL_PROMPT)]
+    assert _messages(run) == [("user", _MODEL_PROMPT), ("assistant", "Partial answer")]
     assert await turn.pending()
 
 
@@ -1128,8 +1134,7 @@ async def test_a_team_leader_failure_shows_the_error_in_place_of_the_document(
     assert "model exploded" in body
     assert "Writer fact." not in body
     [team_run] = [run for run in turn.team_runs() if isinstance(run, TeamRunRecord)]
-    assert is_interrupted_replay_run(team_run)
-    assert _original_status(team_run) == "error"
+    assert (team_run.status, team_run.error) == (RunStatus.interrupted, "model exploded")
 
 
 async def test_a_user_stop_mid_stream_cancels_the_team_reply(
@@ -1173,12 +1178,10 @@ async def test_a_user_stop_mid_stream_cancels_the_team_reply(
     ]
     run = _interrupted(turn.team_runs())
     assert isinstance(run, TeamRunRecord)
-    assert _original_status(run) == "cancelled"
-    assert run.content.startswith(
-        f"{_TEAM_MEMBERS}\n\n\n**Team Consensus**:\n\nPartial consensus\n\n"
-        "(turn stopped before completion; 1 tool call(s) had finished)",
-    )
-    assert _messages(run)[0] == ("user", _BARE_PROMPT)
+    assert run.error is None
+    replayed = _replayed(run)
+    assert replayed[0] == ("user", _PROMPT)
+    assert replayed[-1] == ("assistant", "Partial consensus\n\n(turn stopped before completion)")
     errors = [entry["event"] for entry in logs if entry["log_level"] == "error"]
     # A team Stop is a cancellation, as an agent's is, not an error.
     assert errors == []
@@ -1222,7 +1225,6 @@ async def test_an_approval_pause_holds_the_reply(
     assert turn.hooks.fired == []
     [run] = turn.agent_runs()
     assert run.status is RunStatus.paused
-    assert not is_interrupted_replay_run(run)
     assert run.content == "Before approval"
     assert await turn.pending()
 

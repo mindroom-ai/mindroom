@@ -184,7 +184,7 @@ def _serialize_run_excerpt(
 
 
 def _compaction_replay_messages(run: AnyRunRecord, history_settings: ResolvedHistorySettings) -> list[Message]:
-    """Return the run's messages a summary reads, windowed as replay windows them; the stored objects, not copies."""
+    """Return the run's messages a summary reads, windowed as replay windows them; the stored objects where unchanged."""
     messages = replayable_messages([run])
     if history_settings.max_tool_calls_from_history is not None:
         messages = filter_tool_calls(messages, history_settings.max_tool_calls_from_history)

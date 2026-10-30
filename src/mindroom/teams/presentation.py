@@ -317,12 +317,11 @@ class TeamStreamPresentation:
             self._set_slot_text(member_id, updated_text)
         self.tool_tracker.update_visible_trace_entry(self.tool_trace, pending_tool, completed_trace)
 
-    def text_without_tool_markers(self, *, finished: bool) -> str:
-        """Return the document's slots without its header and tool markers: the text a streamed reply records.
+    def text_without_tool_markers(self) -> str:
+        """Return the finished document's slots without its header and tool markers: the text a completed reply records.
 
         With tool calls hidden the slots hold no markers; with them shown, each marker line goes and the text around it
-        stays a blank line apart, as hidden tool calls leave it. Only a ``finished`` reply, one whose team run
-        completed, ends with the no-consensus note.
+        stays a blank line apart, as hidden tool calls leave it. It ends with the no-consensus note.
         """
         per_member, consensus = self.per_member, self.consensus
         if self.show_tool_calls:
@@ -334,7 +333,7 @@ class TeamStreamPresentation:
                 display_names_by_id=self.display_names_by_id,
                 per_member=per_member,
                 consensus=consensus,
-                finished=finished,
+                finished=True,
             ),
         )
 

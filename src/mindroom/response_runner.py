@@ -201,12 +201,6 @@ def _resumed_reply() -> UnfinishedStreamedReply | None:
     return None if handle is None else handle.resumed
 
 
-def _reply_event_id() -> str | None:
-    """Return the event the current span's reply shows, if any."""
-    handle = current_span()
-    return None if handle is None else handle.reply.event_id
-
-
 def _shows_placeholder(request: ResponseRequest) -> bool:
     """Return whether the event this response writes over is a placeholder rather than an answer."""
     return existing_event(request)[1]
@@ -1788,11 +1782,7 @@ class ResponseRunner:
         # The caller-owned collectors stay live: the gateway snapshots the run metadata as the stream ends.
         run_metadata_content: dict[str, Any] = {}
         tool_trace: list[ToolTraceEntry] = []
-        sinks = TurnSinks(
-            turn_recorder=recorder,
-            run_metadata_collector=run_metadata_content,
-            response_event_id=_reply_event_id,
-        )
+        sinks = TurnSinks(turn_recorder=recorder, run_metadata_collector=run_metadata_content)
 
         def response_stream() -> AsyncIterator[StreamInputChunk]:
             return turn.stream(turn.runtime, active_event_ids, compaction_lifecycle, sinks)

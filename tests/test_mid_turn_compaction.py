@@ -104,7 +104,6 @@ if TYPE_CHECKING:
     from mindroom.agent_loop.model_loop import BeforeRequestHook, LoopState, RequestDecision
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
-    from mindroom.history.turn_recorder import TurnRecorder
     from mindroom.history.types import CompactionLifecycle
     from mindroom.session_storage.store import ConversationStore
 
@@ -169,7 +168,6 @@ class _Agent:
     replays_history: bool = False
     folds_into_scope: bool = False
     lifecycle: CompactionLifecycle | None = None
-    turn_recorder: TurnRecorder | None = None
     native_compaction: NativeCompactionReplay | None = None
     max_tool_calls_per_turn: int | None = None
     before_request: tuple[BeforeRequestHook, ...] = ()
@@ -245,7 +243,6 @@ async def _run(
         else None,
         prompt_id=turn.prompt.id,
         lifecycle=agent.lifecycle,
-        turn_recorder=agent.turn_recorder,
     )
     store_persist = persist_to(store, session) if store is not None else None
 

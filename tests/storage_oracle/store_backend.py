@@ -19,7 +19,6 @@ from typing import TYPE_CHECKING, Any, Literal, cast, override
 from mindroom.ai_runtime import _finalize_queued_notice_in_runs, _recover_prior_queued_notices
 from mindroom.constants import MATRIX_RESPONSE_EVENT_ID_METADATA_KEY
 from mindroom.delegation.execution import persist_delegation_state
-from mindroom.history.interrupted_replay import persist_interrupted_replay_snapshot
 from mindroom.history.storage import (
     append_compaction_chunk,
     append_fold,
@@ -52,6 +51,7 @@ from tests.storage_oracle.backend import (
     Driver,
     FoldBasisView,
 )
+from tests.storage_oracle.interrupted_records import persist_interrupted_replay_snapshot
 from tests.storage_oracle.observe import observe
 
 if TYPE_CHECKING:
@@ -60,7 +60,6 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from mindroom.delegation.state import DelegationState
-    from mindroom.history.interrupted_replay import InterruptedReplaySnapshot
     from mindroom.history.storage import FoldBasis, _ChunkBasis
     from mindroom.history.types import HistoryScope
     from mindroom.llm.runs import AnyRunRecord
@@ -69,6 +68,7 @@ if TYPE_CHECKING:
     from tests.storage_oracle.actions import Action, ScenarioKind
     from tests.storage_oracle.backend import FoldInput
     from tests.storage_oracle.determinism import Determinism
+    from tests.storage_oracle.interrupted_records import InterruptedReplaySnapshot
 
 # The compaction archive every release from #2351 until the summary rows created beside the sessions table.
 _ARCHIVE_DDL = (

@@ -22,7 +22,7 @@ from mindroom.config.models import ModelPricing
 from mindroom.constants import AI_RUN_METADATA_KEY, SILENT_SCHEDULE_NO_REPLY_TOKEN
 from mindroom.llm.errors import ProviderError
 from mindroom.llm.messages import Message
-from mindroom.llm.runs import TeamRunRecord
+from mindroom.llm.runs import RunStatus, TeamRunRecord
 from mindroom.timing import DispatchPipelineTiming
 from mindroom.turn_continuation import TURN_CONTINUATION_LIMIT
 from tests.conftest import seed_session
@@ -286,7 +286,6 @@ async def test_a_second_empty_attempt_answers_with_the_shared_notice_and_records
     assert timing.marks["first_model_request_sent"] <= request_times[0]
     assert timing.marks["model_request_sent"] <= request_times[1]
     assert team.recorder.outcome == "completed"
-    assert team.recorder.assistant_text == ""
 
 
 @pytest.mark.asyncio
@@ -402,7 +401,6 @@ async def test_a_tool_only_team_reply_shows_the_fallback_document_but_records_no
         assert text == HEADER + "No team response generated."
     assert len(team.models["default"].requests) == 2
     assert team.recorder.outcome == "completed"
-    assert team.recorder.assistant_text == ""
 
 
 @pytest.mark.asyncio
@@ -438,7 +436,6 @@ async def test_a_quiet_scheduled_team_reply_that_only_ran_tools_reports_nothing(
         ["touch", "delegate_task_to_member"] if show_tool_calls else []
     )
     assert team.recorder.outcome == "completed"
-    assert team.recorder.assistant_text == ""
 
 
 @pytest.mark.asyncio
@@ -468,8 +465,6 @@ async def test_a_quiet_scheduled_team_reply_is_the_no_reply_token_unless_a_membe
         assert text == SILENT_SCHEDULE_NO_REPLY_TOKEN
     else:
         assert text == f"{HEADER}**GeneralAgent**: {member_finding}\n\n\n**Team Consensus**:\n\nNO_REPLY"
-    # The turn records what it delivered: the bare token, or the document that carries the finding.
-    assert team.recorder.assistant_text == text
 
 
 @pytest.mark.asyncio
@@ -488,7 +483,6 @@ async def test_a_member_reply_split_by_a_hidden_tool_call_keeps_two_paragraphs(
     text = await team.respond(message="Check.", show_tool_calls=False)
 
     assert text == f"{HEADER}**GeneralAgent**: Let me check.\n\nDone.\n\n\n**Team Consensus**:\n\nChecked."
-    assert team.recorder.assistant_text == text
 
 
 @pytest.mark.asyncio
@@ -516,7 +510,11 @@ async def test_a_team_turn_failing_after_a_member_answered_records_the_answer_in
 
     assert str(error) in text
     assert team.recorder.outcome == "interrupted"
-    assert "Member answer" in team.recorder.assistant_text
+    # The team run's own record keeps the member's answer, as the result of the delegation that produced it.
+    record, _members = team.stored_runs()
+    assert record.status is RunStatus.interrupted
+    assert record.error == str(error)
+    assert [message.content for message in record.messages if message.role == "tool"] == ["Member answer"]
 
 
 @pytest.mark.asyncio

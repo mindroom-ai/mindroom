@@ -233,7 +233,7 @@ async def test_approval_resumed_helpers_keep_caller_usage_and_reset_context(  # 
                         configured_team_name="reviewers",
                     ),
                     turn,
-                    sinks=TurnSinks(turn_recorder=TurnRecorder(user_message="Add 2 and 3")),
+                    sinks=TurnSinks(turn_recorder=TurnRecorder()),
                 )
             else:
                 await ai_response(replace(turn, supports_native_tool_approval=True), paths, config)

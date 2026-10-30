@@ -5335,9 +5335,9 @@ async def test_process_shutdown_skips_interrupted_replay_persistence(
         await asyncio.Event().wait()
 
     install_model_providers(monkeypatch, {"default": ScriptedModel([[Await(blocked_generation)]])})
-    persist = MagicMock()
+    mark = MagicMock()
     with (
-        patch("mindroom.response_turn.persist_interrupted_replay_snapshot", new=persist),
+        patch("mindroom.response_turn._mark_interrupted", new=mark),
         patch.object(DeliveryGateway, "send_text", new=AsyncMock(return_value="$placeholder")),
         patch_response_runner_module(
             should_use_streaming=AsyncMock(return_value=streaming),
@@ -5351,7 +5351,7 @@ async def test_process_shutdown_skips_interrupted_replay_persistence(
         with pytest.raises(asyncio.CancelledError):
             await task
 
-    persist.assert_not_called()
+    mark.assert_not_called()
 
 
 @pytest.mark.asyncio
@@ -5703,11 +5703,11 @@ async def test_process_shutdown_unwinds_a_cancelled_stream_without_finalizing_it
         await asyncio.Event().wait()
         yield "unreachable"
 
-    persist = MagicMock()
+    mark = MagicMock()
     finalize = AsyncMock(return_value=completed_outcome("$stream"))
 
     with (
-        patch("mindroom.response_turn.persist_interrupted_replay_snapshot", new=persist),
+        patch("mindroom.response_turn._mark_interrupted", new=mark),
         patch.object(DeliveryGateway, "deliver_stream", new=_consuming_delivery(stream_transport())),
         patch.object(DeliveryGateway, "finalize_streamed_response", new=finalize),
         _agent_turn(blocked_stream, streaming=True),
@@ -5718,7 +5718,7 @@ async def test_process_shutdown_unwinds_a_cancelled_stream_without_finalizing_it
         with pytest.raises(asyncio.CancelledError):
             await task
 
-    persist.assert_not_called()
+    mark.assert_not_called()
     finalize.assert_not_awaited()
 
 
@@ -5950,7 +5950,7 @@ async def test_streaming_midstream_failure_records_the_stopped_turn_and_leaves_i
         raise StreamingDeliveryError(RuntimeError("boom"))
 
     finalize = AsyncMock()
-    persist = MagicMock()
+    mark = MagicMock()
     request = replace(
         _plain_request(_target()),
         model_prompt="hello\n\n<mindroom_message_context>persist me</mindroom_message_context>",
@@ -5958,7 +5958,7 @@ async def test_streaming_midstream_failure_records_the_stopped_turn_and_leaves_i
     with (
         patch.object(DeliveryGateway, "deliver_stream", new=AsyncMock(side_effect=failing_delivery)),
         patch.object(DeliveryGateway, "finalize_streamed_response", new=finalize),
-        patch("mindroom.response_turn.persist_interrupted_replay_snapshot", new=persist),
+        patch("mindroom.response_turn._mark_interrupted", new=mark),
         _agent_turn(None, streaming=True),
     ):
         await coordinator.generate_response(request)
@@ -5966,13 +5966,16 @@ async def test_streaming_midstream_failure_records_the_stopped_turn_and_leaves_i
     # The failure does not propagate: it is logged, and the reply's span exit writes the error.
     coordinator.deps.logger.exception.assert_any_call("Error during response generation", error="boom")
     finalize.assert_not_awaited()
-    # The partial reply was recorded as one interrupted-replay snapshot of the agent's session.
-    persist.assert_called_once()
-    snapshot = persist.call_args.kwargs["snapshot"]
-    assert "<mindroom_message_context>persist me</mindroom_message_context>" in snapshot.user_message
-    assert snapshot.partial_text == "partial"
-    assert snapshot.original_status is RunStatus.cancelled
-    assert persist.call_args.kwargs["session"].kind == "agent"
+    # The run the loop stored, with its prompt and the text it streamed, is marked once as the stopped turn's record.
+    mark.assert_called_once()
+    _ctx, scope_context, run_id, error = mark.call_args.args
+    assert (scope_context.scope.kind, error) == ("agent", None)
+    record = scope_context.storage.get_run(run_id)
+    assert record is not None
+    assert record.status is RunStatus.cancelled
+    contents = [str(message.content) for message in record.messages]
+    assert any("<mindroom_message_context>persist me</mindroom_message_context>" in content for content in contents)
+    assert contents[-1] == "partial "
 
 
 # ---------------------------------------------------------------------------

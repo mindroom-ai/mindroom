@@ -33,13 +33,13 @@ from tests.storage_oracle.store_backend import StoreBackend
 
 if TYPE_CHECKING:
     from mindroom.delegation.state import DelegationState
-    from mindroom.history.interrupted_replay import InterruptedReplaySnapshot
     from mindroom.llm.runs import AnyRunRecord
     from mindroom.session_storage.store import SaveOutcome
     from mindroom.session_storage.types import ConversationSession
     from tests.storage_oracle.actions import ScenarioKind
     from tests.storage_oracle.backend import FoldBasisView, FoldInput
     from tests.storage_oracle.determinism import Determinism
+    from tests.storage_oracle.interrupted_records import InterruptedReplaySnapshot
 
 _NON_VISIBLE = frozenset(NON_VISIBLE_RUN_STATUS_VALUES)
 

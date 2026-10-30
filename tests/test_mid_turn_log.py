@@ -19,7 +19,6 @@ from mindroom.history.storage import (
     read_fold_basis,
     read_scope_seen_event_ids,
     remove_runs_answering,
-    run_folded_tool_call_ids,
 )
 from mindroom.history.summary_message import is_scope_summary, mark_summary_follows
 from mindroom.history.types import HistoryScope
@@ -32,7 +31,7 @@ from mindroom.session_storage.store import watch_session_row
 from mindroom.session_storage.summary_rows import Fold
 from mindroom.session_storage.types import ConversationSession
 from tests.conftest import seed_session
-from tests.history_helpers import compact_runs, log_of, replay_settings, stored_run_ids
+from tests.history_helpers import compact_runs, folded_tool_call_ids, log_of, replay_settings, stored_run_ids
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -463,8 +462,8 @@ def test_a_runs_folds_name_every_tool_call_they_summarized(storage: Conversation
     assert _fold(storage, running, "S1", folded=[first])
     assert _fold(storage, running, "S2", folded=[second])
 
-    assert run_folded_tool_call_ids(storage, session_id="session", run_id="live") == {"c1", "c2"}
-    assert run_folded_tool_call_ids(storage, session_id="session", run_id="other") == set()
+    assert folded_tool_call_ids(storage, session_id="session", run_id="live") == {"c1", "c2"}
+    assert folded_tool_call_ids(storage, session_id="session", run_id="other") == set()
 
 
 def test_a_fold_completed_after_a_later_turn_replays_its_summary_first(storage: ConversationStore) -> None:

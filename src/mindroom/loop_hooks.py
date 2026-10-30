@@ -37,7 +37,6 @@ if TYPE_CHECKING:
     from mindroom.agent_loop.model_loop import BeforeRequestHook
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
-    from mindroom.history.turn_recorder import TurnRecorder
     from mindroom.history.types import CompactionLifecycle, ResolvedHistorySettings, ResolvedReplayPlan
     from mindroom.llm.provider import ModelProvider
     from mindroom.participation import ParticipationGate
@@ -55,8 +54,7 @@ class HookTurn:
     ``storage`` is where the run stores, and ``replay_plan`` is the plan the run's requests replay the scope's stored
     history under, so a fold lands in the scope when they replay some; a run without a scope or a plan compacts within
     itself. ``model_name`` is the configured name of the model the run resolved, and ``prompt_id`` the turn's prompt;
-    ``lifecycle`` and ``turn_recorder`` are the turn's compaction lifecycle and recorder, which a resume and a team
-    member lack.
+    ``lifecycle`` is the turn's compaction lifecycle, which a resume and a team member lack.
     """
 
     config: Config
@@ -66,7 +64,6 @@ class HookTurn:
     replay_plan: ResolvedReplayPlan | None
     prompt_id: str | None
     lifecycle: CompactionLifecycle | None = None
-    turn_recorder: TurnRecorder | None = None
 
 
 def agent_loop_hooks(
@@ -175,7 +172,6 @@ def _loop_hooks(
             replay_plan=turn.replay_plan,
             prompt_id=turn.prompt_id,
             lifecycle=turn.lifecycle,
-            turn_recorder=turn.turn_recorder,
         ),
     )
     before_request.append(approval_receipt_hook)

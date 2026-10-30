@@ -20,7 +20,7 @@ from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Any, Protocol, TypedDict
 
 from mindroom.agent_loop.model_loop import NO_HOOKS, LoopEnded, LoopHooks, run_model_loop
-from mindroom.agent_loop.tools import PreparedTools
+from mindroom.agent_loop.tools import PreparedTools, tool_result_message
 from mindroom.background_tasks import run_coroutine_until_complete
 from mindroom.failure_text import failure_text
 from mindroom.llm.events import RunFinished
@@ -154,7 +154,7 @@ async def fail_unbuilt_run(
         agent_id=agent_id,
         agent_display_name=agent_display_name,
     )
-    await _store_interrupted(record, run_input, time.monotonic(), persist, error=error)
+    await _store_interrupted(record, list(run_input), time.monotonic(), persist, error=error)
     return record
 
 
@@ -401,7 +401,7 @@ async def drive_run[R: AnyRunRecord](
 
 async def _store_interrupted[R: AnyRunRecord](
     record: R,
-    messages: Sequence[Message],
+    messages: list[Message],
     started: float,
     persist: Persist[R] | None,
     *,
@@ -409,19 +409,16 @@ async def _store_interrupted[R: AnyRunRecord](
 ) -> None:
     """End a cancelled (``error`` None) or failed run and store it before its ending propagates.
 
-    Cancellation wins over a pause: unresolved requirements leave and paused tool entries stop waiting. A failed
-    run records its ``failure_text`` in ``error``, redacted, which is what its caller reports, and keeps in its content
-    what its model wrote. The store finishes even if the waiter is cancelled again, so a record the caller writes for
-    the same run afterwards is never overwritten by this one.
+    Cancellation wins over a pause (``_stop_waiting``). The calls that finished before the run ended keep their
+    results (``_answer_finished_calls``). A failed run records its ``failure_text`` in ``error``, redacted, which is
+    what its caller reports, and keeps in its content what its model wrote. The store finishes even if the waiter is
+    cancelled again, so what the caller writes of the same run afterwards, such as marking its turn interrupted, always
+    lands after it.
     """
+    _answer_finished_calls(record, messages)
     if error is None:
         _end(record, messages, started, RunStatus.cancelled)
-        if record.requirements:
-            record.requirements = [requirement for requirement in record.requirements if requirement.is_resolved()]
-        for tool in record.tools or ():
-            if tool.is_paused:
-                tool.requires_confirmation = False
-                tool.external_execution_required = False
+        _stop_waiting(record)
     else:
         _end(record, messages, started, RunStatus.error)
         record.error = redact_sensitive_text(failure_text(error))
@@ -430,6 +427,44 @@ async def _store_interrupted[R: AnyRunRecord](
     # waiting for approval, and approving it again would rerun a call this record shows already ran.
     if persist is not None:
         await run_coroutine_until_complete(_persist_quietly(persist, record))
+
+
+def _answer_finished_calls(record: AnyRunRecord, messages: list[Message]) -> None:
+    """Append the result of each call of the last batch that finished, but whose result the run had not appended yet.
+
+    A run stopped while it reports its batch's finished calls ends before the loop appends their results, which its
+    record's executions already hold; a call still running when the run ended holds none and stays unanswered.
+    """
+    answered = {message.tool_call_id for message in messages if message.role == "tool"}
+    requested = {
+        call.get("id") for message in messages if message.role == "assistant" for call in message.tool_calls or ()
+    }
+    messages.extend(
+        tool_result_message(tool)
+        for tool in record.tools or ()
+        if tool.result is not None and tool.tool_call_id in requested - answered
+    )
+
+
+def _stop_waiting(record: AnyRunRecord) -> None:
+    """Stop ``record`` waiting for decisions: its unresolved requirements leave and its paused tool entries stop."""
+    if record.requirements:
+        record.requirements = [requirement for requirement in record.requirements if requirement.is_resolved()]
+    for tool in record.tools or ():
+        if tool.is_paused:
+            tool.requires_confirmation = False
+            tool.external_execution_required = False
+
+
+def end_paused(record: AnyRunRecord, *, error: str | None = None) -> None:
+    """End a paused ``record`` that will never resume, cancelled or failed with ``error``, as the loop ends a run.
+
+    The context its requests sent but no history holds leaves with its waits, as when a running run ends that way.
+    """
+    record.status = RunStatus.cancelled if error is None else RunStatus.error
+    record.error = error
+    record.messages = [message for message in record.messages if message.add_to_agent_memory]
+    _stop_waiting(record)
 
 
 def _end(record: AnyRunRecord, messages: Sequence[Message], started: float, status: RunStatus) -> None:
@@ -471,6 +506,7 @@ __all__ = [
     "check_approved_tools_offered",
     "decide_requirements",
     "drive_run",
+    "end_paused",
     "fail_unbuilt_run",
     "own_model_messages",
     "plan_resume",

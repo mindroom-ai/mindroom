@@ -161,7 +161,7 @@ def test_a_failed_member_shows_its_redacted_reason_in_the_team_document(source: 
     attempt.show_failure_reasons(
         TeamRunRecord(run_id="team-run", content="Unchecked.", ended_member_runs=[checker], team_id=None),
     )
-    document = presentation.text_without_tool_markers(finished=True)
+    document = presentation.text_without_tool_markers()
     assert document == f"**Checker**: {reason}\n\n\n**Team Consensus**:\n\nUnchecked."
     assert "example-secret" not in document
 
@@ -495,7 +495,7 @@ def test_the_recorded_text_is_the_document_without_tool_markers(show_tool_calls:
     ):
         apply_team_event(presentation, event)
 
-    assert presentation.text_without_tool_markers(finished=True) == (
+    assert presentation.text_without_tool_markers() == (
         "**GeneralAgent**: Looking.\n\nFour seats.\n\nFive now.\n\n\n**Team Consensus**:\n\nChecking.\n\nDone."
     )
     assert ("🔧" in presentation.render_body(finished=True)) is show_tool_calls

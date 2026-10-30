@@ -372,7 +372,7 @@ async def smoke(image, evidence_dir) -> None:  # noqa: C901, PLR0912, PLR0915 - 
         async def response_with_capture(ctx, runtime_paths, config, *, sinks=None):
             # The turn's recorder holds the tool calls it completed, which the trace keeps.
             sinks = sinks or TurnSinks()
-            recorder = sinks.turn_recorder or TurnRecorder(user_message=ctx.prompt)
+            recorder = sinks.turn_recorder or TurnRecorder()
             result = await original_response(ctx, runtime_paths, config, sinks=replace(sinks, turn_recorder=recorder))
             audit.capture_response(
                 ctx.agent_mode,

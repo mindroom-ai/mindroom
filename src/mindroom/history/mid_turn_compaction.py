@@ -43,7 +43,7 @@ from mindroom.native_compaction import checkpoint_items, native_replay_messages
 from mindroom.providers.anthropic.prompt_cache import claude_loaded_tool_names
 from mindroom.session_storage.agent_storage import save_compaction_usage
 from mindroom.session_storage.lanes import run_session_storage_operation
-from mindroom.session_storage.summary_rows import Fold, summarized_tool_call_ids
+from mindroom.session_storage.summary_rows import Fold
 from mindroom.token_budget import estimate_text_tokens
 from mindroom.tool_system.runtime_context import current_requester_id
 from mindroom.usage.storage import COMPACTED_REQUESTS_METADATA_KEY, message_request_snapshot
@@ -56,7 +56,6 @@ if TYPE_CHECKING:
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
     from mindroom.history.runtime import HistoryPreparationInputs
-    from mindroom.history.turn_recorder import TurnRecorder
     from mindroom.history.types import (
         CompactionLifecycle,
         HistoryScope,
@@ -97,7 +96,6 @@ class _MidTurnCompaction:
     replay_plan: ResolvedReplayPlan | None
     prompt_id: str | None
     lifecycle: CompactionLifecycle | None
-    turn_recorder: TurnRecorder | None
     # Set when compaction failed or cannot bring the request under the limit; this run is not compacted again. An
     # approval resume builds a new hook, so it may try once more.
     stopped: bool = False
@@ -142,13 +140,11 @@ def mid_turn_compaction_hook(
     replay_plan: ResolvedReplayPlan | None,
     prompt_id: str | None,
     lifecycle: CompactionLifecycle | None,
-    turn_recorder: TurnRecorder | None,
 ) -> BeforeRequestHook:
     """Return the pre-request hook that compacts one run's long turn before a request that would exceed its window.
 
     A fold lands in the scope of ``storage`` when the run's requests replay its stored history under ``replay_plan``;
-    ``lifecycle`` shows the fold through the reply's notices and ``turn_recorder`` records the folded calls for an
-    interrupted record.
+    ``lifecycle`` shows the fold through the reply's notices.
     """
     compaction = _MidTurnCompaction(
         config=config,
@@ -162,7 +158,6 @@ def mid_turn_compaction_hook(
         replay_plan=replay_plan,
         prompt_id=prompt_id,
         lifecycle=lifecycle,
-        turn_recorder=turn_recorder,
     )
 
     async def hook(state: LoopState) -> RequestDecision:
@@ -326,15 +321,12 @@ async def _compact_scope(
         logger.warning("Mid-turn compaction skipped because the conversation changed", run_id=record.run_id)
         return None
     fold = _fold(record, layout)
-    folded_calls = _folded_calls(fold)
     summary_messages: list[Message] = []
 
     def on_commit(summary: str) -> None:
-        # Runs together with the row's commit, so a stopped or failed reply's record leaves the folded calls out.
+        # Runs together with the row's commit, so a stopped or failed reply's record holds the summary, not what it folded.
         summary_message = compaction_summary_message(summary, run_local=False)
         summary_messages.append(summary_message)
-        if compaction.turn_recorder is not None:
-            compaction.turn_recorder.record_folded_tool_calls(folded_calls)
         _finish(messages, layout, summary_message, record)
 
     outcome = await compact_scope_mid_turn(
@@ -366,15 +358,6 @@ def _fold(record: AnyRunRecord, layout: _Layout) -> Fold:
     """
     members = record.ended_member_runs if isinstance(record, TeamRunRecord) else []
     return Fold(run=record, messages=layout.folded, member_run_ids=frozenset(member.run_id for member in members))
-
-
-def _folded_calls(fold: Fold) -> set[str]:
-    """Return the tool calls ``fold`` summarizes, as the store reads them back from the rows the fold flags."""
-    members = fold.run.ended_member_runs if isinstance(fold.run, TeamRunRecord) else []
-    return summarized_tool_call_ids(
-        [message.to_dict() for message in fold.messages],
-        [tool.to_dict() for member in members if member.run_id in fold.member_run_ids for tool in member.tools or []],
-    )
 
 
 def _policy(compaction: _MidTurnCompaction, state: LoopState) -> _Policy | None:

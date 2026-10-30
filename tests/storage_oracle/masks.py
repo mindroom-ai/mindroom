@@ -37,7 +37,8 @@ from mindroom.session_storage.legacy_scope_metadata import (
 )
 from mindroom.session_storage.schema import NON_VISIBLE_RUN_STATUS_VALUES, quote_identifier
 from mindroom.session_storage.store import ConversationStore
-from mindroom.session_storage.summary_rows import folded_tool_call_ids, history_event_ids, latest_row
+from mindroom.session_storage.summary_rows import history_event_ids, latest_row
+from tests.history_helpers import folded_tool_call_ids
 from tests.storage_oracle.backend import SESSION_ID
 from tests.storage_oracle.store_backend import (
     StoreBackend,
@@ -50,12 +51,12 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from mindroom.delegation.state import DelegationState
-    from mindroom.history.interrupted_replay import InterruptedReplaySnapshot
     from mindroom.llm.runs import AnyRunRecord
     from mindroom.session_storage.types import ConversationSession
     from tests.storage_oracle.actions import Action, ScenarioKind
     from tests.storage_oracle.backend import FoldBasisView, FoldInput
     from tests.storage_oracle.determinism import Determinism
+    from tests.storage_oracle.interrupted_records import InterruptedReplaySnapshot
 
 
 # Each deliberate difference, by name, and where the design decides it.

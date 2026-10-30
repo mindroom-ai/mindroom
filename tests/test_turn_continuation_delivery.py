@@ -95,7 +95,6 @@ def _stream_turn(
             load_scope=_load_scope,
             run_attempt=run_attempt,
             make_text_chunk=lambda text: text,
-            user_message=ctx.prompt,
             unexpected_error_text=str,
             entity_name=ctx.entity_label,
         ),

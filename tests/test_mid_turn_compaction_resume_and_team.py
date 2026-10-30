@@ -41,7 +41,6 @@ from mindroom.response_turn import CompletedApprovalRun, ResponsePausedForApprov
 from mindroom.run_storage import RunStorage
 from mindroom.session_storage.agent_storage import create_session_storage
 from mindroom.session_storage.store import persist_to
-from mindroom.session_storage.summary_rows import folded_tool_call_ids
 from mindroom.usage.stats import collect_admin_usage
 from mindroom.usage.storage import COMPACTED_REQUESTS_METADATA_KEY, run_usage_snapshot
 from tests.conftest import bind_runtime_paths, install_model_providers, seed_session, test_runtime_paths
@@ -55,6 +54,7 @@ from tests.history_helpers import (
     ToolLoopModel,
     _completed_team_run,
     _team_session,
+    folded_tool_call_ids,
     folds_of,
     log_of,
     seeded_storage,
@@ -602,7 +602,7 @@ async def test_prepared_team_reply_posts_mid_turn_compaction_notices(
 
     assert summary_calls.inputs
     assert any(isinstance(event, CompactionOutcome) for event in lifecycle.events)
-    assert "call-1" in team.recorder.folded_tool_call_ids
+    assert "call-1" in folded_tool_call_ids(team.storage, session_id=SESSION_ID, run_id=team.recorder.run_id or "")
     record, _members = team.stored_runs()
     assert record.metadata is not None
     assert record.metadata["room_topic"] == "kept"
@@ -662,9 +662,6 @@ async def test_each_team_fold_carries_the_members_that_ended_since_and_a_stop_dr
     assert [contents[member_id] for member_id in second.member_run_ids] == ["Part 4 done", "Part 5 done", "Part 6 done"]
     member_calls = {f"touch-{n}" for n in range(1, 7)}
     assert member_calls <= folded_tool_call_ids(team.storage, session_id=SESSION_ID, run_id=record.run_id)
-    assert member_calls <= team.recorder.folded_tool_call_ids
-    snapshot = team.recorder.interrupted_snapshot()
-    assert [tool.tool_name for tool in [*snapshot.completed_tools, *snapshot.interrupted_tools]] == []
 
 
 @pytest.mark.asyncio

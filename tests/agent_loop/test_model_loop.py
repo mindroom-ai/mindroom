@@ -632,7 +632,7 @@ async def test_a_tool_exception_is_an_error_result_not_a_failed_loop() -> None:
 # --- interrupted requests --------------------------------------------------------------------------------------------
 
 
-async def test_cancellation_mid_stream_settles_the_received_usage_once() -> None:
+async def test_cancellation_mid_stream_keeps_the_streamed_text_and_settles_the_received_usage_once() -> None:
     streaming = asyncio.Event()
     hold = asyncio.Event()
 
@@ -655,7 +655,7 @@ async def test_cancellation_mid_stream_settles_the_received_usage_once() -> None
 
     settled = messages[-1]
     assert [message.role for message in messages] == ["system", "user", "assistant"]
-    assert (settled.content, settled.metrics) == (None, usage(50, 2))
+    assert (settled.content, settled.metrics) == ("Par", usage(50, 2))
     assert settled.provider_data == {"mindroom_model": {"id": "scripted-model", "provider": "Synthetic"}}
     assert record.metrics is not None
     assert (
@@ -714,8 +714,8 @@ async def test_a_turn_interrupted_after_it_completed_and_before_the_loop_took_it
     if ending == "completes":
         assert (messages[-1].content, record.content) == ("done", "done")
     else:
-        # The loop never took the turn, so only its usage is kept, on a message of its own.
-        assert (messages[-1].content, messages[-1].tool_calls, record.content) == (None, None, None)
+        # The loop never took the turn, so only what it streamed and its usage are kept, on a message of its own.
+        assert (messages[-1].content, messages[-1].tool_calls, record.content) == ("done", None, None)
     assert messages[-1].metrics == usage(50, 2)
     # Kept or cut off, the usage reads as one request only when it was one.
     assert messages[-1].provider_data == {
@@ -755,18 +755,25 @@ async def test_a_provider_error_mid_stream_keeps_the_received_usage_and_propagat
     assert record.metrics.tokens.input_tokens == 7
 
 
-async def test_a_cut_off_request_without_usage_leaves_no_message_behind() -> None:
+@pytest.mark.parametrize("streamed", [["Par", "tial"], []], ids=["streamed", "silent"])
+async def test_a_cut_off_request_without_usage_keeps_only_the_text_it_streamed(streamed: list[str]) -> None:
     async def fail() -> None:
         msg = "slow down"
         raise RateLimited(msg, provider="Synthetic")
 
-    model = ScriptedModel([[TextDelta("Par"), Await(fail)]])
+    model = ScriptedModel([[*(TextDelta(text) for text in streamed), Await(fail)]])
     messages = _prompt()
 
     with pytest.raises(RateLimited):
         await _run(spec(model), messages)
 
-    assert [message.role for message in messages] == ["system", "user"]
+    if not streamed:
+        assert [message.role for message in messages] == ["system", "user"]
+        return
+    cut_off = messages[-1]
+    assert [message.role for message in messages] == ["system", "user", "assistant"]
+    assert (cut_off.content, cut_off.metrics.to_dict()) == ("Partial", {})
+    assert cut_off.provider_data == {"mindroom_model": {"id": "scripted-model", "provider": "Synthetic"}}
 
 
 async def test_metrics_time_to_first_token_comes_from_the_first_request_that_reports_one() -> None:

@@ -38,8 +38,9 @@ def _now() -> int:
 class RunStatus(StrEnum):
     """Lifecycle state of a run; the values are the stored ``status`` strings.
 
-    The members have lower-case names because ``.name`` is persisted too (``mindroom_original_status`` in run metadata
-    holds ``"cancelled"``, not ``"CANCELLED"``).
+    The loop ends a run a stop cut short ``CANCELLED`` and one a failure cut short ``ERROR``, which history skips; the
+    owner of a top-level turn that ended there marks its run ``INTERRUPTED``, which history replays, the failure's text
+    in ``error`` when a failure ended it.
     """
 
     running = "RUNNING"
@@ -47,6 +48,7 @@ class RunStatus(StrEnum):
     paused = "PAUSED"
     cancelled = "CANCELLED"
     error = "ERROR"
+    interrupted = "INTERRUPTED"
 
 
 # LEGACY_COMPAT: Run rows stored with Agno's PENDING or REGENERATED status.
@@ -349,7 +351,7 @@ class _RunRecordCommon:
 
     # ``tools``, ``requirements``, and ``metrics`` are written exactly when set, ``[]`` and ``{}`` included, so a
     # stored row writes back as it reads: older rows hold ``tools = []`` on runs without tool calls, and
-    # interrupted-turn records carry no ``metrics`` at all.
+    # earlier releases' rendered summaries of interrupted turns carry no ``metrics`` at all.
     def _metrics_dict(self) -> dict[str, Any]:
         return {} if self.metrics is None else {"metrics": self.metrics.to_dict()}
 

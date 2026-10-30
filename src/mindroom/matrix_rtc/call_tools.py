@@ -33,19 +33,20 @@ from mindroom.agent_run_context import append_knowledge_availability_enrichment
 from mindroom.agents import create_agent
 from mindroom.approval.tool_approval import tool_may_require_approval
 from mindroom.background_tasks import wait_for_future_until_complete
+from mindroom.failure_text import failure_text
 from mindroom.helper_usage import HelperUsageOwner, helper_usage_owner_context, record_helper_usage
-from mindroom.history.interrupted_replay import persist_interrupted_replay
 from mindroom.history.storage import new_scope_session
 from mindroom.history.turn_recorder import TurnRecorder
 from mindroom.history.types import HistoryScope
 from mindroom.hooks import EnrichmentItem
 from mindroom.knowledge.utils import knowledge_runtime_identity, resolve_agent_knowledge_access_async
-from mindroom.llm.messages import ModelProvenance, system_text
-from mindroom.llm.runs import RunStatus
+from mindroom.llm.messages import Message, ModelProvenance, system_text
+from mindroom.llm.runs import RunRecord, RunStatus
 from mindroom.llm.usage import HelperUsage, MessageMetrics, ModelMetrics, RequestUsage, RunMetrics, VoiceDuration
 from mindroom.logging_config import get_logger
 from mindroom.matrix_rtc.voice_agent import CallAgentResponse
 from mindroom.message_target import MessageTarget
+from mindroom.redaction import redact_sensitive_text
 from mindroom.session_ids import create_session_id
 from mindroom.session_storage.agent_storage import create_session_storage
 from mindroom.session_storage.lanes import run_session_storage_operation
@@ -75,7 +76,6 @@ if TYPE_CHECKING:
     from mindroom.knowledge.search import AgentKnowledge
     from mindroom.matrix_rtc.voice_agent import LiveVoiceUsage, RealtimeCallUsage
     from mindroom.session_storage.store import ConversationStore
-    from mindroom.tool_system.events import ToolTraceEntry
     from mindroom.tool_system.invocation import ToolCall, ToolMiddleware, ToolNext
     from mindroom.tool_system.runtime_context import ToolRuntimeContext, ToolRuntimeSupport
     from mindroom.tool_system.tool_function import AdaptedToolkit, ToolFunction, ToolkitClose
@@ -255,12 +255,11 @@ class _CallAgentRunState:
 
     session_id: str
     run_id: str
-    user_message: str
-    completed_tools: tuple[ToolTraceEntry, ...]
-    interrupted_tools: tuple[ToolTraceEntry, ...]
+    transcript: str
     run_metadata: dict[str, Any]
     outcome: str
-    original_status: RunStatus | None
+    # Why the turn failed, which a run it stored nothing of keeps.
+    error: str | None = None
 
 
 @dataclass
@@ -282,17 +281,12 @@ class _CallResponseTracker:
         return correlation_id
 
     def finalize(self, token: str | None, spoken_text: str, interrupted: bool) -> Awaitable[None] | None:
-        """Claim one response and reconcile playout or an underlying excluded run."""
+        """Claim one response and keep in its run only what playout spoke of it, when playout or the turn cut it short."""
         state = self._pop(token)
         if state is None or (not interrupted and state.outcome != "interrupted"):
             return None
-        original_status = (
-            state.original_status
-            if state.outcome == "interrupted" and state.original_status is not None
-            else RunStatus.cancelled
-        )
         settlement = asyncio.create_task(
-            self._persist_serialized(state, spoken_text, original_status),
+            self._persist_serialized(state, spoken_text),
             name=f"settle_call_response:{state.run_id}",
         )
         self.settlements.add(settlement)
@@ -307,17 +301,11 @@ class _CallResponseTracker:
                 return_exceptions=True,
             )
 
-    async def persist_unspoken(self, state: _CallAgentRunState, *, default_status: RunStatus) -> None:
-        """Persist a terminal generation before LiveKit received any text."""
-        original_status = state.original_status or default_status
-        await asyncio.shield(self._persist_serialized(state, "", original_status))
+    async def persist_unspoken(self, state: _CallAgentRunState) -> None:
+        """Keep in a run that ended before LiveKit received any text none of its text; see ``_spoken_record``."""
+        await asyncio.shield(self._persist_serialized(state, ""))
 
-    async def _persist_serialized(
-        self,
-        state: _CallAgentRunState,
-        spoken_text: str,
-        original_status: RunStatus,
-    ) -> None:
+    async def _persist_serialized(self, state: _CallAgentRunState, spoken_text: str) -> None:
         async with self.settlement_lock:
             await run_session_storage_operation(
                 functools.partial(
@@ -327,7 +315,7 @@ class _CallResponseTracker:
                     self.runtime_paths,
                     self.execution_identity,
                 ),
-                functools.partial(self._persist, state, spoken_text, original_status),
+                functools.partial(self._persist, state, spoken_text),
             )
 
     def _pop(self, token: str | None) -> _CallAgentRunState | None:
@@ -335,29 +323,43 @@ class _CallResponseTracker:
             return self.pending.pop(token, None)
         return self.pending.pop(next(iter(self.pending))) if self.pending else None
 
-    def _persist(
-        self,
-        state: _CallAgentRunState,
-        spoken_text: str,
-        original_status: RunStatus,
-        storage: ConversationStore,
-    ) -> None:
-        persist_interrupted_replay(
-            storage=storage,
-            # The session only names the run's row, which the save creates when the call's conversation has none yet.
-            session=new_scope_session(
+    def _persist(self, state: _CallAgentRunState, spoken_text: str, storage: ConversationStore) -> None:
+        stored = storage.get_run(state.run_id)
+        if not isinstance(stored, RunRecord):
+            # A turn stopped before its run stored anything keeps the transcript it answered.
+            stored = RunRecord(
+                run_id=state.run_id,
+                agent_id=self.agent_name,
                 session_id=state.session_id,
-                scope=HistoryScope(kind="agent", scope_id=self.agent_name),
-            ),
-            run_id=state.run_id,
-            user_message=state.user_message,
-            user_message_is_structured=False,
-            partial_text=spoken_text,
-            completed_tools=state.completed_tools,
-            interrupted_tools=state.interrupted_tools,
-            run_metadata=state.run_metadata,
-            original_status=original_status,
+                messages=[Message(role="user", content=state.transcript)],
+                metadata=state.run_metadata,
+            )
+        # The session only names the run's row, which the save creates when the call's conversation has none yet.
+        session = new_scope_session(
+            session_id=state.session_id,
+            scope=HistoryScope(kind="agent", scope_id=self.agent_name),
         )
+        storage.save_interrupted_record(session, _spoken_record(stored, spoken_text, error=state.error))
+
+
+def _spoken_record(record: RunRecord, spoken_text: str, *, error: str | None) -> RunRecord:
+    """Return ``record`` holding, of its answer, only ``spoken_text``: what the call spoke of it.
+
+    Its calls and their results stay; its text becomes one assistant message of ``spoken_text`` after them. It is the
+    record of a turn cut short (``INTERRUPTED``), failed when it or ``error``, the turn's failure, says why.
+    """
+    messages = [
+        replace(message, content=None) if message.role == "assistant" else message for message in record.messages
+    ]
+    if spoken_text:
+        messages.append(Message(role="assistant", content=spoken_text))
+    return replace(
+        record,
+        messages=messages,
+        content=spoken_text or None,
+        status=RunStatus.interrupted,
+        error=record.error or error,
+    )
 
 
 @dataclass
@@ -741,8 +743,8 @@ async def _run_authorized_call_agent(
             TurnBudget(monitor=context.budget_monitor, requester_id=requester_id),
         ).model_name
         context = replace(context, active_model_name=active_model_name)
-    # Seeded here too: a cancellation before the turn driver starts still stores the transcript it answered.
-    recorder = TurnRecorder(user_message=transcript)
+    recorder = TurnRecorder()
+    # The run a cancellation before the turn's first attempt stores the transcript in.
     fallback_run_id = f"{session_id}:turn:{uuid4().hex}"
     try:
         refresh_scheduler = (
@@ -786,7 +788,7 @@ async def _run_authorized_call_agent(
                 replace(turn, reusable_build=build),
                 runtime_paths,
                 config,
-                # The call stores what it spoke of an interrupted reply itself.
+                # The call marks an interrupted reply's run itself, keeping in it only what it spoke.
                 sinks=TurnSinks(turn_recorder=recorder, persist_interrupted=False),
             )
 
@@ -804,12 +806,19 @@ async def _run_authorized_call_agent(
         )
     except asyncio.CancelledError:
         # A turn that raises returns no result, so its row has no run metadata of an attempt that ended the turn.
-        state = _call_agent_run_state(recorder, {}, session_id=session_id, fallback_run_id=fallback_run_id)
-        await response_tracker.persist_unspoken(state, default_status=RunStatus.cancelled)
+        state = _call_agent_run_state(recorder, {}, transcript, session_id=session_id, fallback_run_id=fallback_run_id)
+        await response_tracker.persist_unspoken(state)
         raise
-    except Exception:
-        state = _call_agent_run_state(recorder, {}, session_id=session_id, fallback_run_id=fallback_run_id)
-        await response_tracker.persist_unspoken(state, default_status=RunStatus.error)
+    except Exception as error:
+        state = _call_agent_run_state(
+            recorder,
+            {},
+            transcript,
+            session_id=session_id,
+            fallback_run_id=fallback_run_id,
+            failure=error,
+        )
+        await response_tracker.persist_unspoken(state)
         raise
     finally:
         tool_names = tuple(dict.fromkeys(entry.tool_name for entry in recorder.completed_tools))
@@ -818,39 +827,40 @@ async def _run_authorized_call_agent(
     state = _call_agent_run_state(
         recorder,
         result.run_metadata,
+        transcript,
         session_id=session_id,
         fallback_run_id=fallback_run_id,
+        failure=result.failed.error if result.failed is not None else None,
     )
     response = result.text
     # Live commentary can be paraphrased or omitted; only cascaded TTS owns a
     # one-to-one mapping between this answer and the eventual spoken turn.
     turn_id = response_tracker.register(state) if response and reconcile_spoken_response else None
     if (not response or not reconcile_spoken_response) and state.outcome == "interrupted":
-        await response_tracker.persist_unspoken(state, default_status=RunStatus.cancelled)
+        await response_tracker.persist_unspoken(state)
     return CallAgentResponse(text=response, tool_names=tool_names, turn_id=turn_id)
 
 
 def _call_agent_run_state(
     recorder: TurnRecorder,
     published_metadata: Mapping[str, Any],
+    transcript: str,
     *,
     session_id: str,
     fallback_run_id: str,
+    failure: Exception | None = None,
 ) -> _CallAgentRunState:
-    """Snapshot one real agent run, with the run metadata its reply published, for later spoken-text reconciliation.
+    """Name one agent turn's run, with the run metadata its reply published, for later spoken-text reconciliation.
 
-    The recorder's snapshot leaves out the calls a mid-turn fold summarized, as any interrupted record does.
+    ``failure`` is what failed the turn, if anything did.
     """
-    snapshot = recorder.interrupted_snapshot()
     return _CallAgentRunState(
         session_id=session_id,
         run_id=recorder.run_id or fallback_run_id,
-        user_message=recorder.user_message,
-        completed_tools=snapshot.completed_tools,
-        interrupted_tools=snapshot.interrupted_tools,
+        transcript=transcript,
         run_metadata={**(recorder.run_metadata or {}), **published_metadata},
         outcome=recorder.outcome,
-        original_status=recorder.original_status,
+        error=None if failure is None else redact_sensitive_text(failure_text(failure)),
     )
 
 

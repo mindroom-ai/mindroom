@@ -66,7 +66,6 @@ def _turn_stream(
                 sinks.turn_recorder.record_completed(
                     run_id=run_id,
                     run_metadata=None,
-                    assistant_text="".join(chunks),
                     completed_tools=(),
                 )
 

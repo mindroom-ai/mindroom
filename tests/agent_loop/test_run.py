@@ -437,7 +437,7 @@ async def test_cancellation_mid_stream_stores_a_cancelled_record_once_before_the
             ):
                 pass
         except asyncio.CancelledError:
-            writes.append("caller")  # MindRoom's interrupted-turn record for the same run goes here.
+            writes.append("caller")  # MindRoom marks the same run as its interrupted turn's record here.
             raise
 
     task = asyncio.create_task(consume())
@@ -458,6 +458,68 @@ async def test_cancellation_mid_stream_stores_a_cancelled_record_once_before_the
         "total_tokens": 54,
     }
     assert [(tool["tool_call_id"], tool["result"]) for tool in stored["tools"]] == [("c1", '{"sum": 13}')]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("reported", [True, False])
+async def test_a_stopped_run_stores_the_text_it_streamed_as_its_last_assistant_message(*, reported: bool) -> None:
+    """The text a cut-off request streamed is the run's own record of it, with the usage it reported, if any."""
+    streaming = asyncio.Event()
+
+    async def wait_to_be_cancelled() -> None:
+        streaming.set()
+        await asyncio.Event().wait()
+
+    events = [TextDelta("Hal"), TextDelta("f an answer")]
+    if reported:
+        events.append(UsageReported(usage(50, 2), final=False))
+    model = ScriptedModel([[*events, Await(wait_to_be_cancelled)]])
+    store = _Store()
+
+    async def consume() -> None:
+        async for _ in run_agent(spec(model), _prompt(), ctx=context(), persist=store, request_template=EMPTY_REQUEST):
+            pass
+
+    task = asyncio.create_task(consume())
+    await asyncio.wait_for(streaming.wait(), timeout=5)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    [stored] = store.saved
+    assert stored["status"] == "CANCELLED"
+    last = Message.from_dict(stored["messages"][-1])
+    assert (last.role, last.content, last.tool_calls) == ("assistant", "Half an answer", None)
+    assert bool(last.metrics.to_dict()) is reported
+    # The run's content still holds only what its finished requests wrote.
+    assert "content" not in stored
+
+
+@pytest.mark.asyncio
+async def test_a_run_stopped_while_it_reports_finished_calls_keeps_their_results() -> None:
+    """A stop that lands as the run reports a finished call keeps that call's result, which its record holds."""
+    model = ScriptedModel([calls(tool_call("add", "c1", a=6, b=7), tool_call("add", "c2", a=1, b=1)), answer("done")])
+    store = _Store()
+
+    stream = run_agent(
+        spec(model, toolkit(add)),
+        _prompt(),
+        ctx=context(),
+        persist=store,
+        request_template=EMPTY_REQUEST,
+    )
+    async for event in stream:
+        if isinstance(event, ToolCompleted):
+            break  # The consumer stops reading as the first finished call is reported.
+    await stream.aclose()
+
+    [stored] = store.saved
+    assert stored["status"] == "CANCELLED"
+    results = [Message.from_dict(message) for message in stored["messages"] if message["role"] == "tool"]
+    assert [(result.tool_call_id, result.content) for result in results] == [
+        ("c1", '{"sum": 13}'),
+        ("c2", '{"sum": 2}'),
+    ]
 
 
 @pytest.mark.asyncio

@@ -514,7 +514,7 @@ async def respond_team(
     )
     with tool_runtime_context(runtime):
         try:
-            return await collect_team_reply(spec, ctx, sinks=TurnSinks(turn_recorder=TurnRecorder(user_message=prompt)))
+            return await collect_team_reply(spec, ctx, sinks=TurnSinks(turn_recorder=TurnRecorder()))
         except ResponsePausedForApproval as suspended:
             return _paused_with_committed_presentation(suspended, show_tool_calls=ctx.show_tool_calls)
 

@@ -56,7 +56,6 @@ from mindroom.response_turn import (
     HandledAttempt,
     TurnAdapter,
     TurnContinuationRunState,
-    TurnPartialSnapshot,
     stream_response_turn,
 )
 from mindroom.runtime_shutdown import ORDERLY_SHUTDOWN
@@ -144,13 +143,30 @@ def _persisted_runs(store: ConversationStore) -> list[TeamRunRecord]:
 
 
 @dataclass(frozen=True)
-class _Shown:
-    """A running attempt that has shown ``text``, as an interruption records it."""
+class _Running:
+    """A running attempt, which names the run an interruption marks."""
 
-    text: str
+    run_id: str = "team-attempt"
 
-    def partial_snapshot(self) -> TurnPartialSnapshot:
-        return TurnPartialSnapshot(assistant_text=self.text)
+
+def _stored_by_its_loop(run: TurnRunState, status: RunStatus, shown: str = "", *, error: str | None = None) -> None:
+    """Store the running attempt's team run as its loop ends one that a stop or a failure cut short."""
+    assert run.attempt is not None
+    session = run.scope.stored_or_first_session()
+    messages = [
+        Message(role="user", content=render_msg_tag(sender="@alice:localhost", body="Hello", event_id="$user_msg")),
+    ]
+    if shown:
+        messages.append(Message(role="assistant", content=shown))
+    record = TeamRunRecord(
+        run_id=run.attempt.run_id,
+        team_id="ultimate",
+        session_id=session.session_id,
+        status=status,
+        messages=messages,
+        error=error,
+    )
+    run.scope.storage.save_run(session, record, record_usage=False)
 
 
 type _Attempt = Callable[[TurnRunState], AsyncIterator[str | AttemptResolved]]
@@ -181,7 +197,6 @@ def _driven_team_stream(
             ),
             run_attempt=lambda run, _continuation: attempt(run),
             make_text_chunk=lambda text: text,
-            user_message=ctx.prompt,
             unexpected_error_text=str,
             entity_name=scope_id,
         )
@@ -209,9 +224,13 @@ def _shows_then_waits(text: str = "Team hello", *, before: Callable[[], None] | 
     async def attempt(run: TurnRunState) -> AsyncIterator[str | AttemptResolved]:
         if before is not None:
             before()
-        run.attempt = _Shown(text)
-        yield text
-        await asyncio.Event().wait()
+        run.attempt = _Running()
+        try:
+            yield text
+            await asyncio.Event().wait()
+        except (asyncio.CancelledError, GeneratorExit):
+            _stored_by_its_loop(run, RunStatus.cancelled, text)
+            raise
         yield AttemptResolved(CompletedAttempt())
 
     return attempt
@@ -670,7 +689,6 @@ async def test_generate_team_response_preserves_model_prompt_in_persisted_sessio
         sinks.turn_recorder.record_completed(
             run_id=run_id,
             run_metadata=None,
-            assistant_text="Team answer",
             completed_tools=(),
         )
         seed_session(
@@ -746,7 +764,6 @@ async def test_generate_team_response_preserves_model_prompt(tmp_path: Path) -> 
         sinks.turn_recorder.record_completed(
             run_id=run_id,
             run_metadata=None,
-            assistant_text="Team answer",
             completed_tools=(),
         )
         seed_session(
@@ -1077,8 +1094,7 @@ async def test_generate_team_response_helper_persists_interrupted_history_when_s
     [persisted_run] = _persisted_runs(store)
     assert_interrupted_messages(
         persisted_run,
-        response_event_id="$thinking",
-        assistant_body="Team hello\n\n(turn stopped before completion)",
+        replayed=[("assistant", "Team hello\n\n(turn stopped before completion)")],
     )
 
 
@@ -1101,9 +1117,14 @@ async def test_generate_team_response_helper_persists_minimal_interrupted_histor
     store = _team_store(config, runtime_paths)
     started = asyncio.Event()
 
-    async def waits_until_cancelled(_run: TurnRunState) -> AsyncIterator[str | AttemptResolved]:
+    async def waits_until_cancelled(run: TurnRunState) -> AsyncIterator[str | AttemptResolved]:
+        run.attempt = _Running()
         started.set()
-        await asyncio.Event().wait()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            _stored_by_its_loop(run, RunStatus.cancelled)
+            raise
         yield AttemptResolved(CompletedAttempt())
 
     with (
@@ -1138,11 +1159,7 @@ async def test_generate_team_response_helper_persists_minimal_interrupted_histor
     [persisted_run] = _persisted_runs(store)
     # The interrupted run belongs to the team whose history scope stored it.
     assert persisted_run.team_id == "ultimate"
-    assert_interrupted_messages(
-        persisted_run,
-        response_event_id="$thinking",
-        assistant_body="(turn stopped before completion)",
-    )
+    assert_interrupted_messages(persisted_run, replayed=[("assistant", "(turn stopped before completion)")])
 
 
 @pytest.mark.asyncio
@@ -1253,75 +1270,6 @@ async def test_generate_team_response_helper_preserves_visible_stream_when_final
     assert resolution == Owned()
     assert await turn_left_to_replay(coordinator)
     assert store.load_session(TEAM_SESSION_ID) is None
-
-
-@pytest.mark.asyncio
-async def test_generate_team_response_helper_stores_a_structured_prompt_as_written_when_its_stream_is_closed(
-    tmp_path: Path,
-) -> None:
-    """A structured team prompt is stored as the model read it when a closed stream leaves its turn interrupted."""
-    runtime_paths = _runtime_paths(tmp_path)
-    config = bind_runtime_paths(_config_with_team(), runtime_paths)
-    bot = _make_bot(tmp_path, config=config, runtime_paths=runtime_paths, agent_name="ultimate")
-    store = _team_store(config, runtime_paths)
-    structured_prompt = "\n".join(
-        (
-            "<messages>",
-            render_msg_tag(sender="@alice:localhost", body="First", event_id="$first"),
-            render_msg_tag(sender="@alice:localhost", body="Hello", event_id="$user_msg"),
-            "</messages>",
-        ),
-    )
-    persisted_prompt = f"{structured_prompt}\n\n<mindroom_message_context>persist me</mindroom_message_context>"
-    request = replace(
-        _response_request(
-            prompt=structured_prompt,
-            model_prompt=persisted_prompt,
-            user_id="@alice:localhost",
-            thread_id="$thread-root",
-        ),
-        current_prompt_is_structured=True,
-    )
-
-    with (
-        patch("mindroom.response_runner.should_use_streaming", new=AsyncMock(return_value=True)),
-        patch("mindroom.response_lifecycle.apply_post_response_effects", new=AsyncMock(return_value=None)) as effects,
-        patch(
-            "mindroom.response_runner.team_response_stream",
-            new=_driven_team_stream(config, runtime_paths, _shows_then_waits()),
-        ),
-    ):
-        coordinator = _build_response_runner(
-            bot,
-            config=config,
-            runtime_paths=runtime_paths,
-            storage_path=tmp_path,
-            team_history_storage=store,
-            message_target=MessageTarget.resolve("!test:localhost", "$thread-root", "$user_msg"),
-            orchestrator=team_orchestrator(config, runtime_paths),
-        )
-        _set_gateway_method(
-            coordinator.deps.delivery_gateway,
-            "deliver_stream",
-            AsyncMock(side_effect=_fail_after_the_first_chunk),
-        )
-
-        resolution = await coordinator.generate_team_response_helper(
-            request,
-            member_names=["general"],
-            team_mode="coordinate",
-        )
-
-    # The reply's own event: the placeholder its stream and notes write into.
-    assert resolution == Owned()
-    assert answering_event(effects) == "$thinking"
-    [persisted_run] = _persisted_runs(store)
-    assert persisted_run.messages is not None
-    assert [message.role for message in persisted_run.messages] == ["user", "assistant"]
-    assert persisted_run.messages[0].content == persisted_prompt
-    assert persisted_run.metadata is not None
-    assert persisted_run.metadata["matrix_response_event_id"] == "$thinking"
-    assert persisted_run.messages[1].content == "Team hello\n\n(turn stopped before completion)"
 
 
 @pytest.mark.asyncio
@@ -1443,7 +1391,7 @@ async def test_generate_team_response_helper_persists_original_user_message_for_
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Cancelled team replay should store the raw user turn, not the shaped model prompt."""
+    """A cancelled team run keeps the prompt its leader was sent, as a completed one does, and replays as stopped."""
     runtime_paths = _runtime_paths(tmp_path)
     config = bind_runtime_paths(_config_with_team(), runtime_paths)
     bot = _make_bot(tmp_path, config=config, runtime_paths=runtime_paths, agent_name="ultimate")
@@ -1489,11 +1437,7 @@ async def test_generate_team_response_helper_persists_original_user_message_for_
     assert 'Current message:\n<msg event_id="$user_msg" from="@alice:localhost">' in model_prompt
     assert "Hello" in model_prompt
     [persisted_run] = _persisted_runs(store)
-    assert_interrupted_messages(
-        persisted_run,
-        response_event_id="$thinking",
-        assistant_body="(turn stopped before completion)",
-    )
+    assert_interrupted_messages(persisted_run, replayed=[("assistant", "(turn stopped before completion)")])
 
 
 @pytest.mark.asyncio
@@ -1686,8 +1630,10 @@ async def test_generate_team_response_helper_uses_persisted_team_scope_for_sessi
 
     registry = HookRegistry.from_plugins([_hook_plugin("session-hooks", [started])])
 
-    async def fails(_run: TurnRunState) -> AsyncIterator[str | AttemptResolved]:
-        # The turn driver stores the failed turn's record, which creates the team's session.
+    async def fails(run: TurnRunState) -> AsyncIterator[str | AttemptResolved]:
+        # The team run's loop stores the failed run, which creates the team's session.
+        run.attempt = _Running()
+        _stored_by_its_loop(run, RunStatus.error, error="Team hello")
         yield AttemptResolved(HandledAttempt("Team hello", error=RuntimeError("Team hello")))
 
     with (
@@ -1750,7 +1696,6 @@ async def test_generate_team_response_helper_links_its_reply_event_to_the_report
         sinks.turn_recorder.record_completed(
             run_id="team-run",
             run_metadata=None,
-            assistant_text="Team hello",
             completed_tools=(),
         )
 
@@ -1930,10 +1875,10 @@ async def test_generate_team_response_helper_uses_delivery_result_ending_for_fai
 async def test_generate_team_response_helper_persists_interrupted_history_after_errored_stream(
     tmp_path: Path,
 ) -> None:
-    """A team stream whose run failed after showing text ends normally and stores the failed turn's replay.
+    """A team stream whose run failed after showing text ends normally, its failed run marked as the turn's record.
 
-    The turn driver records the failure and stores it before it yields the failure text, so the stream's delivery
-    completes and the stored record names the reply's event.
+    The turn driver records the failure and marks the run before it yields the failure text, so the stream's delivery
+    completes.
     """
     runtime_paths = _runtime_paths(tmp_path)
     config = bind_runtime_paths(_config_with_team(), runtime_paths)
@@ -1941,8 +1886,9 @@ async def test_generate_team_response_helper_persists_interrupted_history_after_
     store = _team_store(config, runtime_paths)
 
     async def fails_after_partial_text(run: TurnRunState) -> AsyncIterator[str | AttemptResolved]:
-        run.attempt = _Shown("Team partial")
+        run.attempt = _Running()
         yield "Team partial"
+        _stored_by_its_loop(run, RunStatus.error, "Team partial", error="Team run failed")
         yield AttemptResolved(HandledAttempt("Team run failed", error=RuntimeError("Team run failed")))
 
     with (
@@ -1979,6 +1925,5 @@ async def test_generate_team_response_helper_persists_interrupted_history_after_
     [persisted_run] = _persisted_runs(store)
     assert_interrupted_messages(
         persisted_run,
-        response_event_id="$thinking",
-        assistant_body="Team partial\n\n(turn failed before completion)",
+        replayed=[("assistant", "Team partial\n\n(turn failed before completion)")],
     )

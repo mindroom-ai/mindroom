@@ -23,7 +23,8 @@ from mindroom.constants import AI_RUN_METADATA_KEY, resolve_runtime_paths
 from mindroom.custom_tools.calculator import CalculatorTools
 from mindroom.custom_tools.sleep import SleepTools
 from mindroom.event_journal import ApprovalCall, ApprovalDecision, approval_arguments_digest
-from mindroom.history.interrupted_replay import is_interrupted_replay_run
+from mindroom.history.request_messages import replayable_messages
+from mindroom.history.run_visibility import is_model_history_visible_run
 from mindroom.llm.errors import ProviderError
 from mindroom.llm.events import RunFinished, TextDelta, ToolCompleted, ToolStarted
 from mindroom.llm.provider import ToolCallReady
@@ -1092,7 +1093,7 @@ async def test_a_call_that_failed_before_an_approval_replays_as_failed_when_the_
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The reply's saved trace keeps which call failed before the pause, so a stop after the approval says so."""
+    """The run that paused keeps which call failed before the pause, so a stop after the approval still replays it."""
     paths = resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path / "storage")
     config = bind_runtime_paths(
         Config.model_validate(
@@ -1167,9 +1168,9 @@ async def test_a_call_that_failed_before_an_approval_replays_as_failed_when_the_
             progress=None,
         )
 
-    [replay] = [run for run in stored_runs(config, paths, identity.session_id) if is_interrupted_replay_run(run)]
-    content = replay.messages[-1].content
-    assert isinstance(content, str)
-    assert (
-        '- The `subtract` tool failed with input preview "a=5, b=1" and error preview "subtract is unavailable".'
-    ) in content
+    runs = stored_runs(config, paths, identity.session_id)
+    assert [run.status for run in runs].count(RunStatus.interrupted) == 1
+    replayed = replayable_messages([run for run in runs if is_model_history_visible_run(run)])
+    [failed] = [message for message in replayed if message.role == "tool" and message.tool_call_id == "failed"]
+    assert failed.tool_call_error is True
+    assert "subtract is unavailable" in str(failed.content)
