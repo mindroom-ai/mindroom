@@ -16,6 +16,7 @@ import {
   removeLimitWarning,
 } from "./accountCopy";
 import {
+  type AgentOption,
   type EditorContext,
   type EditorOptions,
   type EgressServiceForm,
@@ -105,6 +106,8 @@ export interface EgressServiceEditorProps {
   context: EditorContext;
   /** Shared and unscoped agents cannot use personal accounts. */
   sharedTarget?: boolean;
+  /** The agents a service can be limited to, on the dashboard; the personal page offers no such choice. */
+  agentOptions?: readonly AgentOption[];
   /** Names a new service cannot take. */
   takenNames?: readonly string[];
   /**
@@ -170,6 +173,7 @@ export function EgressServiceEditor({
   initialRestrictOnly = false,
   context,
   sharedTarget = false,
+  agentOptions = [],
   takenNames = [],
   configPlaceholders = {},
   agentServices = [],
@@ -790,6 +794,7 @@ export function EgressServiceEditor({
               context={context}
               scope={scope}
               sharedTarget={sharedTarget}
+              agentOptions={agentOptions}
               validation={validation}
               preset={preset}
               providers={providers}

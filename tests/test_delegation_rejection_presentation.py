@@ -24,6 +24,7 @@ from mindroom.llm.runs import RunRecord, RunStatus
 from mindroom.private_storage.private_instance_identity import private_instances_for_agent
 from mindroom.tool_system.events import CollectedStreamPresentation
 from mindroom.tool_system.runtime_context import tool_runtime_context
+from tests.approval_continuation_helpers import answered_calls
 from tests.delegation_helpers import ScriptedAgents, _delegate_runtime_context, _runtime_paths, pause_parent
 from tests.fakes.scripted_model import ScriptedModel, answer, calls, tool_call
 from tests.identity_helpers import entity_ids, fixture_entity_matrix_id
@@ -114,12 +115,12 @@ async def test_rejected_subagent_closes_streaming_tool_trace(  # noqa: C901, PLR
             response.requirements[0].tool_execution.tool_args = {"agent_name": "child", "task": 1}
         elif rejection == "authorization":
             config.agents["leader"].delegate_to = []
-        decisions = None
+        approval_calls = None
         if rejection == "policy":
             response = await _drive_delegations(response, **options)
             assert response.status is RunStatus.paused
             state = DelegationState.from_metadata(response.metadata)
-            decisions = {str(tool["tool_call_id"]): False for tool in state.pending_tools}
+            approval_calls = answered_calls((str(tool["tool_call_id"]) for tool in state.pending_tools), approved=False)
 
         async def stored_run() -> AsyncIterator[RunEvent]:
             yield RunFinished(response)
@@ -129,8 +130,7 @@ async def test_rejected_subagent_closes_streaming_tool_trace(  # noqa: C901, PLR
             stored_run(),
             record_type=RunRecord,
             **options,
-            decisions=decisions,
-            denial_reasons=dict.fromkeys(decisions or {}),
+            approval_calls=approval_calls,
         ):
             if isinstance(event, ToolStarted):
                 presentation.start_tool(event.call)
@@ -234,11 +234,11 @@ async def test_a_refused_subagent_call_answers_with_its_refusal_instead_of_its_o
             "runtime_paths": paths,
             "execution_identity": identity,
         }
-        decisions = None
+        approval_calls = None
         if rejection == "policy":
             response = await _drive_delegations(response, **options)
             state = DelegationState.from_metadata(response.metadata)
-            decisions = {str(tool["tool_call_id"]): False for tool in state.pending_tools}
+            approval_calls = answered_calls((str(tool["tool_call_id"]) for tool in state.pending_tools), approved=False)
 
         async def stored_run() -> AsyncIterator[RunEvent]:
             yield RunFinished(response)
@@ -247,8 +247,7 @@ async def test_a_refused_subagent_call_answers_with_its_refusal_instead_of_its_o
             stored_run(),
             record_type=RunRecord,
             **options,
-            decisions=decisions,
-            denial_reasons=dict.fromkeys(decisions or {}),
+            approval_calls=approval_calls,
         ):
             pass
 

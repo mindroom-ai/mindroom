@@ -21,6 +21,7 @@ from mindroom.agent_loop.prompt import MARKDOWN_OUTPUT_FORMAT, PromptSpec
 from mindroom.agent_loop.spec import AgentSpec
 from mindroom.agent_loop.tools import offered_toolkits
 from mindroom.agents import create_agent
+from mindroom.ai import TurnResult
 from mindroom.approval.tool_approval import JOB_APPROVAL_TYPE, POLICY_CONFIRMATION_APPROVAL_TYPE
 from mindroom.config.agent import AgentConfig, AgentPrivateConfig
 from mindroom.config.approval import ApprovalRuleConfig, ToolApprovalConfig
@@ -595,9 +596,9 @@ async def test_call_responder_prepares_full_requester_prompt_before_first_turn(
         runtime_paths,
     )
 
-    async def respond(turn: ResponseTurnContext, *_args: object, **_kwargs: object) -> str:
+    async def respond(turn: ResponseTurnContext, *_args: object, **_kwargs: object) -> TurnResult:
         assert turn.reusable_build is not None
-        return system_text(prompt_for_turn(turn.reusable_build))
+        return TurnResult(system_text(prompt_for_turn(turn.reusable_build)))
 
     monkeypatch.setattr("mindroom.ai.ai_response", respond)
     for requester, name, other in (("@alice:example.org", "Alice", "Bob"), ("@bob:example.org", "Bob", "Alice")):
@@ -862,7 +863,7 @@ async def test_call_responder_uses_normal_agent_turn_and_refuses_unsafe_function
         config: Config,
         *,
         sinks: TurnSinks,
-    ) -> str:
+    ) -> TurnResult:
         calls.append((turn, config))
         recorder = sinks.turn_recorder
         assert recorder is not None
@@ -874,7 +875,7 @@ async def test_call_responder_uses_normal_agent_turn_and_refuses_unsafe_function
             assistant_text="It is sunny.",
             completed_tools=completed_tools,
         )
-        return "It is sunny."
+        return TurnResult("It is sunny.")
 
     confirm = _function(lambda: "confirm", _EMPTY_SCHEMA, name="confirm")
     confirm.requires_confirmation = True
@@ -1012,7 +1013,7 @@ async def test_call_responder_uses_normal_agent_turn_and_refuses_unsafe_function
         else []
     )
 
-    async def cancel_before_playout(turn: ResponseTurnContext, *_args: object, sinks: TurnSinks) -> str:
+    async def cancel_before_playout(turn: ResponseTurnContext, *_args: object, sinks: TurnSinks) -> TurnResult:
         recorder = sinks.turn_recorder
         assert recorder is not None
         recorder.start(user_message=turn.prompt, user_message_is_structured=False, run_metadata={})
@@ -1035,7 +1036,7 @@ async def test_call_responder_uses_normal_agent_turn_and_refuses_unsafe_function
     assert persisted_interruptions[-1]["original_status"] is RunStatus.cancelled
     assert recorded_tool_uses[-1] == ["calendar"]
 
-    async def return_error_without_run_id(turn: ResponseTurnContext, *_args: object, sinks: TurnSinks) -> str:
+    async def return_error_without_run_id(turn: ResponseTurnContext, *_args: object, sinks: TurnSinks) -> TurnResult:
         recorder = sinks.turn_recorder
         assert recorder is not None
         recorder.start(user_message=turn.prompt, user_message_is_structured=False, run_metadata={})
@@ -1047,7 +1048,7 @@ async def test_call_responder_uses_normal_agent_turn_and_refuses_unsafe_function
             interrupted_tools=(),
             original_status=RunStatus.error,
         )
-        return "provider failed"
+        return TurnResult("provider failed")
 
     monkeypatch.setattr("mindroom.ai.ai_response", return_error_without_run_id)
     error_response = await tooling.responder("Trigger an error", recorded_tool_uses.append)
@@ -1398,9 +1399,9 @@ async def test_cascaded_responder_uses_the_fallback_for_an_over_budget_caller(
     async def resolve_knowledge(*_args: object, **_kwargs: object) -> SimpleNamespace:
         return SimpleNamespace(knowledge=None, unavailable={})
 
-    async def fake_ai_response(turn: ResponseTurnContext, *_args: object, **_kwargs: object) -> str:
+    async def fake_ai_response(turn: ResponseTurnContext, *_args: object, **_kwargs: object) -> TurnResult:
         ai_calls.append(turn)
-        return "answer"
+        return TurnResult("answer")
 
     monkeypatch.setattr("mindroom.matrix_rtc.call_tools.resolve_agent_knowledge_access_async", resolve_knowledge)
     monkeypatch.setattr("mindroom.matrix_rtc.call_tools.create_agent", MagicMock(return_value=_build()))
@@ -1470,9 +1471,9 @@ async def test_cascaded_responder_switches_to_the_fallback_when_the_caller_cross
 
     ai_models: list[str | None] = []
 
-    async def fake_ai_response(turn: ResponseTurnContext, *_args: object, **_kwargs: object) -> str:
+    async def fake_ai_response(turn: ResponseTurnContext, *_args: object, **_kwargs: object) -> TurnResult:
         ai_models.append(turn.active_model_name)
-        return "answer"
+        return TurnResult("answer")
 
     create_agent_mock = MagicMock(side_effect=lambda *_args, **_kwargs: _build())
     monkeypatch.setattr("mindroom.matrix_rtc.call_tools.resolve_agent_knowledge_access_async", resolve_knowledge)
@@ -1827,9 +1828,9 @@ async def test_cascaded_responder_refreshes_knowledge_and_availability_each_turn
         resolver_calls.append(kwargs)
         return next(resolutions)
 
-    async def fake_ai_response(turn: ResponseTurnContext, *_args: object, **_kwargs: object) -> str:
+    async def fake_ai_response(turn: ResponseTurnContext, *_args: object, **_kwargs: object) -> TurnResult:
         ai_calls.append(turn)
-        return f"answer-{len(ai_calls)}"
+        return TurnResult(f"answer-{len(ai_calls)}")
 
     first_build = _build(role="first base")
     second_build = _build(role="second base")
@@ -1898,9 +1899,9 @@ async def test_call_responder_adds_origin_brief_enrichment(
     runtime_paths = test_runtime_paths(tmp_path)
     turns: list[ResponseTurnContext] = []
 
-    async def fake_ai_response(turn: ResponseTurnContext, *_args: object, **_kwargs: object) -> str:
+    async def fake_ai_response(turn: ResponseTurnContext, *_args: object, **_kwargs: object) -> TurnResult:
         turns.append(turn)
-        return "answer"
+        return TurnResult("answer")
 
     monkeypatch.setattr(
         "mindroom.matrix_rtc.call_tools.resolve_agent_knowledge_access_async",
@@ -1967,7 +1968,7 @@ async def test_cascaded_responder_waits_for_interrupted_playout_settlement(
             assert tool_context.tool_function_filter is not None
             return await operation()
 
-    async def fake_ai_response(turn: ResponseTurnContext, *_args: object, sinks: TurnSinks) -> str:
+    async def fake_ai_response(turn: ResponseTurnContext, *_args: object, sinks: TurnSinks) -> TurnResult:
         prompt = turn.prompt
         ai_prompts.append(prompt)
         recorder = sinks.turn_recorder
@@ -1978,7 +1979,7 @@ async def test_cascaded_responder_waits_for_interrupted_playout_settlement(
             assistant_text=f"answer to {prompt}",
             completed_tools=(),
         )
-        return f"answer to {prompt}"
+        return TurnResult(f"answer to {prompt}")
 
     def persist_interrupted(**kwargs: object) -> None:
         started.set()

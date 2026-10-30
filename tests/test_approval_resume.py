@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from copy import deepcopy
 from dataclasses import replace
+from functools import partial
 from typing import TYPE_CHECKING
 
 import pytest
@@ -180,6 +181,90 @@ async def test_a_paused_delegation_resumes_its_child_and_then_the_parent(
     assert str(request.messages[-2].content).startswith("42")
     # The parent holds no such call, so it reads the card's id for the child's approved call.
     assert receipt_call_ids(request) == [call.tool_call_id for call in run.calls()]
+
+
+_RECEIPT = (
+    "[SYSTEM NOTICE — TOOL APPROVAL RECEIPT] This trusted MindRoom runtime receipt records how paused tool calls "
+    "were authorized. Do not infer approval policy from tool success alone.\n- `multiply` (tool call id `{call_id}`): "
+    "{outcome}"
+)
+_GRANTED = "approval was granted, but its approval provenance is unavailable."
+_PRODUCT_RESULT = '{"operation": "multiplication", "result": 42.0}'
+
+
+@pytest.mark.parametrize("run_id", sorted(AGENT_RESUMES))
+async def test_a_resume_sends_each_model_its_stored_request_then_its_decided_results_and_the_receipt(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    run_id: str,
+) -> None:
+    """Each model a resume reaches gets its paused run's stored messages, each decided call's result, then the receipt.
+
+    An approved call answers with what it returned and a denied one with the requester's reason; the receipt names
+    each decision under the id its reader knows the call by, and a delegated child's answer reaches the parent as the
+    delegation's result.
+    """
+    case = AGENT_RESUMES[run_id]
+    run = await setup_case(case, tmp_path, monkeypatch)
+    stored = {"code-model": run.paused.messages}
+    children = DelegationState.from_metadata(run.paused.metadata).children
+    for child in children:
+        child_store = create_session_storage("helper", run.config, run.paths, child_execution_identity(child))
+        paused_child = child_store.get_run(child.run_id)
+        assert isinstance(paused_child, RunRecord)
+        stored["helper-model"] = paused_child.messages
+
+    await resume_case(case, run)
+
+    sent = {}
+    for model in (run.code, run.helper):
+        for request in model.requests:
+            prefix = stored[model.identity.id]
+            assert list(request.messages[: len(prefix)]) == prefix
+            sent[model.identity.id] = [
+                (message.role, message.tool_call_id, str(message.content), message.tool_call_error)
+                for message in request.messages[len(prefix) :]
+            ]
+    receipt = partial(_RECEIPT.format, outcome=_GRANTED)
+    if run_id == "run-approved":
+        expected = {
+            "code-model": [
+                ("tool", "call-run-approved", _PRODUCT_RESULT, False),
+                ("user", None, receipt(call_id="call-run-approved"), None),
+            ],
+        }
+    elif run_id == "run-rejected":
+        expected = {
+            "code-model": [
+                ("tool", "call-run-rejected", "Alice declined the multiplication.", True),
+                (
+                    "user",
+                    None,
+                    _RECEIPT.format(
+                        call_id="call-run-rejected",
+                        outcome="approval was denied; the tool was not executed.",
+                    ),
+                    None,
+                ),
+            ],
+        }
+    else:
+        [child] = children
+        handed_over = (
+            f"42\n\nDelegation {child.delegation_id} record: helper:.mindroom/delegations/2027-01-15/"
+            f"{child.delegation_id}\nSubagent ID: {child.subagent_id}"
+        )
+        expected = {
+            "helper-model": [
+                ("tool", "call-helper-multiply-approved", _PRODUCT_RESULT, False),
+                ("user", None, receipt(call_id="call-helper-multiply-approved"), None),
+            ],
+            "code-model": [
+                ("tool", "call-delegate-approved", handed_over, None),
+                ("user", None, receipt(call_id=f"{child.delegation_id}:call-helper-multiply-approved"), None),
+            ],
+        }
+    assert sent == expected
 
 
 def _save(run: CodeResume, record: RunRecord) -> None:

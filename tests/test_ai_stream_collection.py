@@ -259,7 +259,7 @@ async def test_ai_response_collects_the_stream_without_tool_markers_when_tool_ca
         Config(),
     )
 
-    assert body == "Before.\n\n After."
+    assert body.text == "Before.\n\n After."
     assert seen_show_tool_calls == [False]
 
 

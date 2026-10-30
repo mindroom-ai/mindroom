@@ -224,7 +224,7 @@ async def test_cross_sink_correlation_invariant_for_matrix_turn_processing_log(
             runtime_paths,
             config,
         )
-        assert response == "Done"
+        assert response.text == "Done"
         return "$response:localhost"
 
     response_runner = SimpleNamespace(
@@ -418,7 +418,7 @@ async def test_non_matrix_request_mints_uuid_correlation_id_across_sinks(
         config,
     )
 
-    assert response == "Done"
+    assert response.text == "Done"
     llm_entry = _read_llm_entries(llm_log_dir)[0]
     tool_entry = _read_jsonl(_tool_calls_path(runtime_paths))[0]
     metadata = _stored_metadata(config, runtime_paths, "openai-session")

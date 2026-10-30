@@ -21,7 +21,7 @@ from mindroom.approval.tool_approval import (
     resolve_tool_approval_approver,
 )
 from mindroom.background_tasks import run_coroutine_until_complete
-from mindroom.event_journal import ApprovalDecision, tool_job_run_id
+from mindroom.event_journal import tool_job_run_id
 from mindroom.llm.runs import ToolExecution
 from mindroom.tool_jobs.control import job_stopped_by_shutdown
 from mindroom.tool_jobs.runtime import BackgroundOutcome
@@ -127,7 +127,7 @@ async def _decide(
 ) -> tuple[bool, str | None]:
     """Return a policy decision as is, or post one card into the thread and wait for the requester's decision."""
     if call.decision is not None:
-        return call.decision is ApprovalDecision.APPROVED, call.reason
+        return call.approved, call.reason
     manager = approval_manager.get_approval_store()
     approver = resolve_tool_approval_approver(config, runtime_paths, owner.requester_id)
     if manager is None or approver is None or owner.room_id is None or owner.requester_id is None:
