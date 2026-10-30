@@ -123,7 +123,7 @@ def test_golden_sessions_load_as_agno_loaded_them(store: GoldenStore, session_id
     ) == (
         agno["session_id"],
         agno["team_id"] if session.kind == "team" else agno["agent_id"],
-        # Layout version 6 moved the owner's per-scope history state into one value.
+        # Layout version 7 moved the owner's per-scope history state into one value.
         _flattened_history_metadata(agno["metadata"], owner_scope(session).key)
         if agno["metadata"]
         else agno["metadata"],
