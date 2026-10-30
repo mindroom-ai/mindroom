@@ -29,7 +29,7 @@ def _full_arguments_available(content: dict[str, Any]) -> bool:
         return True
     # LEGACY_COMPAT: Approval cards whose oversized arguments sit in a plaintext sidecar.
     # Legacy format: `full_arguments_url` plus `full_arguments_info`, written for cards in unencrypted rooms.
-    # Last legacy release: v2026.10.726; replacement: the next release always writes an encrypted `full_arguments_file`.
+    # Last legacy release: v2026.10.727; replacement: the next release always writes an encrypted `full_arguments_file`.
     # Handling: such a card stays approvable when its plaintext sidecar is usable, as when it was sent.
     # Coverage: tests/test_tool_approval.py::test_card_approvable_reads_sidecar_full_arguments_availability.
     url = content.get("full_arguments_url")
