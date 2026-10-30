@@ -11,6 +11,7 @@ from typing import TYPE_CHECKING
 import pytest
 
 from mindroom.knowledge import collections, index_reader, registry
+from mindroom.knowledge.availability import KnowledgeAvailability
 from mindroom.knowledge.collections import (
     CollectionSpace,
     candidate_collection_name,
@@ -18,29 +19,22 @@ from mindroom.knowledge.collections import (
     open_collection,
 )
 from mindroom.knowledge.index_metadata import (
-    load_published_index_state,
-    save_published_index_state,
-    state_for_publication,
+    load_publication,
+    new_publication,
+    publication_path,
+    save_publication,
+    write_json_atomic,
 )
-from mindroom.knowledge.index_reader import PublishedIndexReader
 from mindroom.knowledge.search import AgentKnowledge, KnowledgeSource, KnowledgeSourceDescription
 from tests.conftest import runtime_paths_for
-from tests.knowledge_test_support import _config, seed_collection
+from tests.knowledge_test_support import _config, _FakeEmbedder, publish, seed_collection
 
 if TYPE_CHECKING:
-    from collections.abc import Iterator, Mapping
+    from collections.abc import Iterator
     from pathlib import Path
 
-
-class _Embedder:
-    sends_batches = False
-
-    def embed(self, texts: list[str], *, purpose: str) -> list[list[float]]:
-        del purpose
-        return [[1.0] for _text in texts]
-
-    async def aembed(self, texts: list[str], *, purpose: str) -> list[list[float]]:
-        return self.embed(texts, purpose=purpose)
+    from mindroom.knowledge.index_reader import PublishedIndexReader
+    from mindroom.knowledge.indexing_config import IndexingSettings
 
 
 @pytest.fixture
@@ -53,35 +47,33 @@ def publication(
     paths = runtime_paths_for(config)
     key = registry.resolve_published_index_key("docs", config=config, runtime_paths=paths)
     space = CollectionSpace("docs", tmp_path / "docs", registry.published_index_storage_path(key))
-    collection = _publish(space, key, "original")
-    state = state_for_publication(
-        settings=key.indexing_settings,
-        collection=collection,
-        indexed_count=1,
-        source_signature="original",
-        published_revision=None,
-    )
-    monkeypatch.setattr(registry, "create_configured_embedder", lambda *_args: _Embedder())
-    reader = registry._build_published_index_reader(key, state, config=config, runtime_paths=paths)
-    assert isinstance(reader, PublishedIndexReader)
+    _publish(space, key, "original")
+    monkeypatch.setattr(registry, "create_configured_embedder", lambda *_args: _FakeEmbedder())
+    monkeypatch.setattr(registry, "_published_indexes", {})
+    reader = registry._build_published_index_reader(key, config=config, runtime_paths=paths)
     return space, key, reader
 
 
 def _publish(space: CollectionSpace, key: registry.PublishedIndexKey, content: str) -> str:
+    """Publish a new collection holding ``content`` and delete every other one, as a forced rebuild does."""
     name = candidate_collection_name(space)
     seed_collection(open_collection(space, name), [{"id": content, "content": content}])
-    save_published_index_state(
-        registry.published_index_metadata_path(key),
-        state_for_publication(
-            settings=key.indexing_settings,
-            collection=name,
-            indexed_count=1,
-            source_signature=content,
-            published_revision=None,
-        ),
-    )
+    publish(key, collection=name, source_signature=content)
     cleanup_superseded_collections(space, preserved=frozenset({name}))
     return name
+
+
+def _published_collection(space: CollectionSpace) -> str:
+    current = load_publication(space.storage_path)
+    assert current is not None
+    assert current.collection is not None
+    return current.collection
+
+
+def _delete_directly(space: CollectionSpace, name: str) -> None:
+    """Delete one collection the way a refresh's cleanup does, under the exclusive lifetime lock."""
+    with collections.collection_lifetime_lock(space.storage_path, exclusive=True):
+        open_collection(space, name).delete()
 
 
 @pytest.mark.asyncio
@@ -109,9 +101,9 @@ async def test_retained_reader_rejects_changed_scope_or_embeddings(
     space, key, reader = publication
     name = _publish(space, key, "replacement")
     settings = replace(key.indexing_settings, **{field: "changed"})
-    save_published_index_state(
-        registry.published_index_metadata_path(key),
-        state_for_publication(
+    save_publication(
+        space.storage_path,
+        new_publication(
             settings=settings,
             collection=name,
             indexed_count=1,
@@ -134,22 +126,24 @@ async def test_retained_reader_accepts_new_chunk_settings(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("metadata", [None, "corrupt", "indexing"])
+@pytest.mark.parametrize("publication_file", ["missing", "corrupt", "incomplete"])
 async def test_retained_reader_does_not_hide_unavailable_publication(
     publication: tuple[CollectionSpace, registry.PublishedIndexKey, PublishedIndexReader],
-    metadata: str | None,
+    publication_file: str,
 ) -> None:
     """Loss of the authoritative publication fails explicitly, even if old vectors exist."""
-    _space, key, reader = publication
-    path = registry.published_index_metadata_path(key)
-    if metadata is None:
+    space, _key, reader = publication
+    original = _published_collection(space)
+    path = publication_path(space.storage_path)
+    if publication_file == "missing":
         path.unlink()
-    elif metadata == "corrupt":
+    elif publication_file == "corrupt":
         path.write_text("invalid", encoding="utf-8")
     else:
-        state = load_published_index_state(path)
-        assert state is not None
-        save_published_index_state(path, replace(state, status="indexing"))
+        current = load_publication(space.storage_path)
+        assert current is not None
+        write_json_atomic(path, {"settings": current.settings.to_metadata(), "collection": current.collection})
+    assert open_collection(space, original).exists()
     with pytest.raises(ValueError, match="unavailable or incompatible"):
         await reader.asearch("alpha", limit=5)
 
@@ -163,14 +157,15 @@ async def test_cleanup_waits_for_selected_reader_and_releases_after_read(
 ) -> None:
     """A read's selection is leased across publication and deletion until the search finishes."""
     space, key, reader = publication
+    original = _published_collection(space)
     selected: list[str] = []
     selection_made = Event()
     release = Event()
     original_read_collection = index_reader.read_collection
 
     @contextmanager
-    def gated_read_collection(path: str, collection: str, settings: Mapping[str, str] | None) -> Iterator[str]:
-        with original_read_collection(path, collection, settings) as selection:
+    def gated_read_collection(storage_path: Path, settings: IndexingSettings) -> Iterator[str]:
+        with original_read_collection(storage_path, settings) as selection:
             selected.append(selection)
             selection_made.set()
             release.wait()
@@ -191,19 +186,19 @@ async def test_cleanup_waits_for_selected_reader_and_releases_after_read(
     refresh_task = None
     try:
         assert await asyncio.to_thread(selection_made.wait, 10)
-        assert selected == [reader.collection_name]
+        assert selected == [original]
         refresh_task = asyncio.create_task(
-            asyncio.to_thread(collections._delete_collection_sync, space, reader.collection_name)
+            asyncio.to_thread(_delete_directly, space, original)
             if direct_delete
             else asyncio.to_thread(_publish, space, key, "replacement"),
         )
         assert await asyncio.to_thread(cleanup_started.wait, 10)
         assert not refresh_task.done()
-        assert open_collection(space, reader.collection_name).exists()
+        assert open_collection(space, original).exists()
         release.set()
         assert [document.content for document in await read_task] == ["original"]
         await asyncio.wait_for(refresh_task, 10)
-        assert not open_collection(space, reader.collection_name).exists()
+        assert not open_collection(space, original).exists()
         if direct_delete:
             await asyncio.to_thread(_publish, space, key, "replacement")
         monkeypatch.setattr(index_reader, "read_collection", original_read_collection)
@@ -247,21 +242,26 @@ async def test_knowledge_initialization_follows_refresh(
 
 
 @pytest.mark.asyncio
-async def test_registry_initialization_accepts_superseded_state_snapshot(
+async def test_a_lookup_that_read_the_publication_before_a_refresh_still_serves(
     publication: tuple[CollectionSpace, registry.PublishedIndexKey, PublishedIndexReader],
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A refresh between metadata loading and handle construction cannot hide memory."""
+    """A refresh between a lookup's publication read and its handle check cannot hide the index."""
     space, key, _reader = publication
-    state = load_published_index_state(registry.published_index_metadata_path(key))
-    assert state is not None
-    _publish(space, key, "replacement")
     config = _config(tmp_path, bases={"docs": tmp_path / "docs"}, agent_bases=["docs"])
-    reader = registry._load_queryable_index_from_state(
-        key,
-        state,
-        config=config,
-        runtime_paths=runtime_paths_for(config),
-    )
-    assert reader is not None
-    assert [hit.content for hit in await reader.asearch("alpha", limit=5)] == ["replacement"]
+    real_load = registry.load_publication
+
+    def load_then_refresh(storage_path: Path) -> object:
+        snapshot = real_load(storage_path)
+        monkeypatch.setattr(registry, "load_publication", real_load)
+        _publish(space, key, "replacement")
+        return snapshot
+
+    monkeypatch.setattr(registry, "load_publication", load_then_refresh)
+
+    lookup = registry.get_published_index("docs", config=config, runtime_paths=runtime_paths_for(config))
+
+    assert lookup.availability is KnowledgeAvailability.READY
+    assert lookup.reader is not None
+    assert [hit.content for hit in await lookup.reader.asearch("alpha", limit=5)] == ["replacement"]

@@ -8,12 +8,14 @@ file-watcher reload effects, and the concurrent-writer commit protocol.
 import copy
 import hashlib
 import threading
+from functools import partial
 from pathlib import Path
 from typing import Any
 
 import pytest
 import yaml
 from fastapi import FastAPI, HTTPException
+from starlette.requests import Request
 
 from mindroom import constants
 from mindroom.api import config_lifecycle
@@ -22,7 +24,15 @@ from mindroom.config.main import Config, ConfigRuntimeValidationError, load_conf
 from mindroom.config.personal_agents import read_personal_agent_roster
 from mindroom.event_journal.opening import record_opened_event_journal
 from mindroom.personal_agents import _append_personal_agent_roster_entry
-from tests.api.conftest import api_snapshot, make_api_app, request_for
+from tests.api.conftest import (
+    api_snapshot,
+    commit_tool_change,
+    make_api_app,
+    request_for,
+    save_config,
+    save_edited_config,
+    save_raw_config,
+)
 from tests.conftest import test_runtime_paths
 from tests.test_generated_agents import BASE as GENERATED_BASE
 from tests.test_generated_agents import _created as created_entry
@@ -69,7 +79,7 @@ def loaded_app(runtime_paths: constants.RuntimePaths) -> FastAPI:
     return api_app
 
 
-@pytest.mark.parametrize("writer", ["persist", "api"])
+@pytest.mark.parametrize("writer", ["tool", "api"])
 @pytest.mark.parametrize("enabled", [False, True])
 @pytest.mark.parametrize(
     "defaults",
@@ -97,12 +107,12 @@ def test_approved_egress_structured_save_preserves_authored_tool_defaults(
         process_env={"MINDROOM_APPROVED_EGRESS_ENABLED": str(enabled).lower()},
     )
 
-    if writer == "persist":
-        config_lifecycle.validate_and_persist_config_payload(payload, paths)
+    if writer == "tool":
+        commit_tool_change(payload, paths)
     else:
         api_app = make_api_app(paths)
         assert config_lifecycle.load_config_into_app(paths, api_app).loaded
-        config_lifecycle.replace_committed_config(request_for(api_app), payload, error_prefix="Save failed")
+        save_config(request_for(api_app), payload)
 
     saved = yaml.safe_load(config_path.read_text())
     assert saved.get("defaults", {}) == defaults
@@ -116,7 +126,7 @@ def test_approved_egress_structured_save_preserves_authored_tool_defaults(
     assert reloaded.resolve_agent("research").tools.tool_names == tuple(defaults.get("tools", ["scheduler"]))
 
 
-@pytest.mark.parametrize("writer", ["persist", "structured", "raw"])
+@pytest.mark.parametrize("writer", ["tool", "structured", "raw"])
 def test_save_refuses_a_name_a_personal_agent_reserved_after_validation(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -142,9 +152,9 @@ def test_save_refuses_a_name_a_personal_agent_reserved_after_validation(
     monkeypatch.setattr(Config, "validate_with_runtime", staticmethod(validate_then_reserve))
     request = request_for(api_app)
     writers = {
-        "persist": lambda: config_lifecycle.validate_and_persist_config_payload(payload, paths),
-        "structured": lambda: config_lifecycle.replace_committed_config(request, payload, error_prefix="Save failed"),
-        "raw": lambda: config_lifecycle.replace_raw_config_source(request, yaml.dump(payload), error_prefix="Save"),
+        "tool": lambda: commit_tool_change(payload, paths),
+        "structured": lambda: save_config(request, payload),
+        "raw": lambda: save_raw_config(request, yaml.dump(payload)),
     }
     with pytest.raises((ConfigRuntimeValidationError, HTTPException), match=r"agents\.mind_alice_smith collides"):
         writers[writer]()
@@ -166,7 +176,7 @@ def test_save_refuses_a_created_agent_name(tmp_path: Path, section: str) -> None
     )
 
     with pytest.raises(ConfigRuntimeValidationError, match=rf"{section}\.creator_research collides"):
-        config_lifecycle.validate_and_persist_config_payload(payload, paths)
+        commit_tool_change(payload, paths)
 
     assert paths.config_path.read_bytes() == saved
 
@@ -175,13 +185,12 @@ class TestLoadAndValidationFailure:
     """Loading and validation-failure behavior of the committed config cache."""
 
     def test_initial_load_publishes_committed_snapshot(self, runtime_paths: constants.RuntimePaths) -> None:
-        """A successful first load publishes data, runtime config, and generation 1."""
+        """A successful first load publishes the runtime config and generation 1."""
         api_app = make_api_app(runtime_paths)
         assert config_lifecycle.load_config_into_app(runtime_paths, api_app).loaded
         snapshot = api_snapshot(api_app)
         assert snapshot.generation == 1
-        assert snapshot.config_data["agents"]["test_agent"]["display_name"] == "Test Agent"
-        assert snapshot.runtime_config is not None
+        assert snapshot.runtime_config.agents["test_agent"].display_name == "Test Agent"
         assert snapshot.config_load_result == config_lifecycle.ConfigLoadResult(success=True)
         assert snapshot.source_fingerprint is not None
 
@@ -201,7 +210,7 @@ class TestLoadAndValidationFailure:
 
         snapshot = api_snapshot(api_app)
         rewritten = config_path.read_bytes()
-        assert snapshot.config_data["administrators"] == ["@owner:example.com"]
+        assert snapshot.runtime_config.authored_model_dump()["administrators"] == ["@owner:example.com"]
         assert snapshot.source_fingerprint == hashlib.sha256(rewritten).hexdigest()
         assert b"global_users" not in rewritten
         backup_path = config_path.with_name(f"{config_path.name}.pre-membership-access")
@@ -217,7 +226,7 @@ class TestLoadAndValidationFailure:
         """Reads against a never-loaded app surface the shared missing-config error."""
         api_app = make_api_app(runtime_paths)
         with pytest.raises(HTTPException) as exc_info:
-            config_lifecycle.read_committed_config(request_for(api_app), lambda config: config)
+            config_lifecycle.read_committed_runtime_config(request_for(api_app))
         assert exc_info.value.status_code == 500
 
     def test_validation_failure_keeps_last_good_committed_config(self, loaded_app: FastAPI) -> None:
@@ -234,13 +243,12 @@ class TestLoadAndValidationFailure:
         assert failed.config_load_result is not None
         assert failed.config_load_result.success is False
         assert failed.config_load_result.error_status_code == 422
-        # Last good committed payload and runtime config are preserved, not clobbered.
-        assert failed.config_data == snapshot.config_data
+        # The last good runtime config is preserved, not clobbered.
         assert failed.runtime_config is snapshot.runtime_config
 
         # But reads surface the load failure instead of silently serving stale data.
         with pytest.raises(HTTPException) as exc_info:
-            config_lifecycle.read_committed_config(request_for(loaded_app), lambda config: config)
+            config_lifecycle.read_committed_runtime_config(request_for(loaded_app))
         assert exc_info.value.status_code == 422
 
     def test_malformed_yaml_then_good_edit_recovers(self, loaded_app: FastAPI) -> None:
@@ -248,13 +256,13 @@ class TestLoadAndValidationFailure:
         runtime_paths = api_snapshot(loaded_app).runtime_paths
         runtime_paths.config_path.write_text("agents: [unclosed\n", encoding="utf-8")
         assert not config_lifecycle.load_config_into_app(runtime_paths, loaded_app).loaded
-        assert api_snapshot(loaded_app).config_data["agents"]["test_agent"]["role"] == "A test agent"
+        assert api_snapshot(loaded_app).runtime_config.agents["test_agent"].role == "A test agent"
 
         _write_config(runtime_paths.config_path, VALID_CONFIG)
         assert config_lifecycle.load_config_into_app(runtime_paths, loaded_app).loaded
         recovered = api_snapshot(loaded_app)
         assert recovered.config_load_result == config_lifecycle.ConfigLoadResult(success=True)
-        result = config_lifecycle.read_committed_config(request_for(loaded_app), lambda config: dict(config))
+        result = config_lifecycle.read_committed_runtime_config(request_for(loaded_app))[0].authored_model_dump()
         assert result["agents"]["test_agent"]["display_name"] == "Test Agent"
 
 
@@ -265,10 +273,9 @@ class TestGenerationTrackingAndWrites:
         """A write carrying a stale client generation is rejected with 409."""
         current_generation = api_snapshot(loaded_app).generation
         with pytest.raises(HTTPException) as exc_info:
-            config_lifecycle.replace_committed_config(
+            save_config(
                 request_for(loaded_app),
                 copy.deepcopy(VALID_CONFIG),
-                error_prefix="test replace",
                 expected_generation=current_generation - 1,
             )
         assert exc_info.value.status_code == 409
@@ -279,26 +286,24 @@ class TestGenerationTrackingAndWrites:
         new_config = copy.deepcopy(VALID_CONFIG)
         new_config["agents"]["test_agent"]["role"] = "An updated test agent"
 
-        new_generation = config_lifecycle.replace_committed_config(
+        new_generation = save_config(
             request_for(loaded_app),
             new_config,
-            error_prefix="test replace",
             expected_generation=before.generation,
         )
 
         after = api_snapshot(loaded_app)
         assert new_generation == before.generation + 1
         assert after.generation == new_generation
-        assert after.config_data["agents"]["test_agent"]["role"] == "An updated test agent"
+        assert after.runtime_config.agents["test_agent"].role == "An updated test agent"
         on_disk = yaml.safe_load(before.runtime_paths.config_path.read_text(encoding="utf-8"))
         assert on_disk["agents"]["test_agent"]["role"] == "An updated test agent"
 
     def test_committed_write_reload_echo_does_not_bump_generation(self, loaded_app: FastAPI) -> None:
         """The watcher reload triggered by the API's own write is fingerprint-suppressed."""
-        config_lifecycle.write_committed_config(
+        save_edited_config(
             request_for(loaded_app),
             lambda config: config["agents"]["test_agent"]["instructions"].append("Extra instruction"),
-            error_prefix="test write",
         )
         committed = api_snapshot(loaded_app)
         # The file watcher reloads after every write; the matching source fingerprint
@@ -306,14 +311,13 @@ class TestGenerationTrackingAndWrites:
         assert config_lifecycle.load_config_into_app(committed.runtime_paths, loaded_app).loaded
         assert api_snapshot(loaded_app).generation == committed.generation
 
-    def test_invalid_mutation_is_rejected_without_commit(self, loaded_app: FastAPI) -> None:
-        """A mutation producing an invalid config raises 422 and leaves the snapshot untouched."""
+    def test_invalid_save_is_rejected_without_commit(self, loaded_app: FastAPI) -> None:
+        """A save of an invalid config raises 422 and leaves the snapshot untouched."""
         before = api_snapshot(loaded_app)
         with pytest.raises(HTTPException) as exc_info:
-            config_lifecycle.write_committed_config(
+            save_edited_config(
                 request_for(loaded_app),
                 lambda config: config.__setitem__("agents", "not-a-mapping"),
-                error_prefix="test write",
             )
         assert exc_info.value.status_code == 422
         assert api_snapshot(loaded_app) is before
@@ -324,18 +328,16 @@ class TestGenerationTrackingAndWrites:
         raw_source = "# keep this comment\n" + yaml.dump(VALID_CONFIG)
 
         with pytest.raises(HTTPException) as exc_info:
-            config_lifecycle.replace_raw_config_source(
+            save_raw_config(
                 request_for(loaded_app),
                 raw_source,
-                error_prefix="test raw replace",
                 expected_generation=before.generation - 1,
             )
         assert exc_info.value.status_code == 409
 
-        new_generation = config_lifecycle.replace_raw_config_source(
+        new_generation = save_raw_config(
             request_for(loaded_app),
             raw_source,
-            error_prefix="test raw replace",
             expected_generation=before.generation,
         )
         assert new_generation == before.generation + 1
@@ -347,16 +349,17 @@ class TestGenerationTrackingAndWrites:
         runtime_paths.config_path.write_text("agents: [unclosed\n", encoding="utf-8")
         assert not config_lifecycle.load_config_into_app(runtime_paths, loaded_app).loaded
 
-        # Unlike mutations, full replacement skips the failed-load gate so the
-        # raw editor can repair a broken config through the API.
-        config_lifecycle.replace_committed_config(
+        # A save replaces the whole config, so it may repair a broken file through the API.
+        save_config(
             request_for(loaded_app),
             copy.deepcopy(VALID_CONFIG),
-            error_prefix="test replace",
         )
         recovered = api_snapshot(loaded_app)
         assert recovered.config_load_result == config_lifecycle.ConfigLoadResult(success=True)
-        assert yaml.safe_load(runtime_paths.config_path.read_text(encoding="utf-8")) == recovered.config_data
+        assert (
+            yaml.safe_load(runtime_paths.config_path.read_text(encoding="utf-8"))
+            == recovered.runtime_config.authored_model_dump()
+        )
 
 
 class TestRequestSnapshotLifecycle:
@@ -367,17 +370,14 @@ class TestRequestSnapshotLifecycle:
         request = request_for(loaded_app)
         pinned = config_lifecycle.bind_current_request_snapshot(request)
 
-        config_lifecycle.write_committed_config(
+        save_edited_config(
             request_for(loaded_app),
             lambda config: config["agents"]["test_agent"].__setitem__("role", "Changed mid-request"),
-            error_prefix="test write",
         )
         assert api_snapshot(loaded_app).generation == pinned.generation + 1
 
         # The pinned request keeps reading its original coherent snapshot.
         assert config_lifecycle.committed_generation(request) == pinned.generation
-        role = config_lifecycle.read_committed_config(request, lambda config: config["agents"]["test_agent"]["role"])
-        assert role == "A test agent"
         runtime_config, _ = config_lifecycle.read_committed_runtime_config(request)
         assert runtime_config is pinned.runtime_config
         # Re-binding returns the already pinned snapshot, never a newer one.
@@ -387,19 +387,17 @@ class TestRequestSnapshotLifecycle:
         """A write built from a request snapshot that lost the race fails with 409."""
         stale_request = request_for(loaded_app)
         config_lifecycle.bind_current_request_snapshot(stale_request)
-        config_lifecycle.write_committed_config(
+        save_edited_config(
             request_for(loaded_app),
             lambda config: config["agents"]["test_agent"]["instructions"].append("Won the race"),
-            error_prefix="test write",
         )
         with pytest.raises(HTTPException) as exc_info:
-            config_lifecycle.write_committed_config(
+            save_edited_config(
                 stale_request,
                 lambda config: config["agents"]["test_agent"]["instructions"].append("Lost the race"),
-                error_prefix="test write",
             )
         assert exc_info.value.status_code == 409
-        instructions = api_snapshot(loaded_app).config_data["agents"]["test_agent"]["instructions"]
+        instructions = api_snapshot(loaded_app).runtime_config.agents["test_agent"].instructions
         assert instructions == ["Test instruction", "Won the race"]
 
 
@@ -416,7 +414,7 @@ class TestFileWatcherReload:
         assert config_lifecycle.load_config_into_app(before.runtime_paths, loaded_app).loaded
         after = api_snapshot(loaded_app)
         assert after.generation == before.generation + 1
-        assert after.config_data["agents"]["test_agent"]["role"] == "Edited outside the API"
+        assert after.runtime_config.agents["test_agent"].role == "Edited outside the API"
 
     def test_stale_load_is_discarded_after_concurrent_commit(
         self,
@@ -446,19 +444,19 @@ class TestFileWatcherReload:
 class TestExternalWriterPublishing:
     """External config writers publishing into registered API apps."""
 
-    def test_validate_and_persist_publishes_to_registered_apps(self, loaded_app: FastAPI) -> None:
-        """validate_and_persist_config_payload advances every matching registered app snapshot."""
+    def test_tool_commit_publishes_to_registered_apps(self, loaded_app: FastAPI) -> None:
+        """A tool's commit advances every matching registered app snapshot."""
         before = api_snapshot(loaded_app)
         payload = copy.deepcopy(VALID_CONFIG)
         payload["agents"]["test_agent"]["role"] = "Updated by an external writer"
 
-        config_lifecycle.validate_and_persist_config_payload(payload, before.runtime_paths)
+        commit_tool_change(payload, before.runtime_paths)
 
         after = api_snapshot(loaded_app)
         assert after.generation == before.generation + 1
-        assert after.config_data["agents"]["test_agent"]["role"] == "Updated by an external writer"
+        assert after.runtime_config.agents["test_agent"].role == "Updated by an external writer"
         on_disk = yaml.safe_load(before.runtime_paths.config_path.read_text(encoding="utf-8"))
-        assert on_disk == after.config_data
+        assert on_disk == after.runtime_config.authored_model_dump()
 
 
 class TestCommitRevision:
@@ -484,10 +482,9 @@ class TestCommitRevision:
         assert republished.revision > pinned.revision
 
         with pytest.raises(HTTPException) as exc_info:
-            config_lifecycle.write_committed_config(
+            save_edited_config(
                 request,
                 lambda config: config["defaults"].__setitem__("markdown", False),
-                error_prefix="test write",
             )
 
         assert exc_info.value.status_code == 409
@@ -514,10 +511,9 @@ class TestEventJournalPendingRestart:
 
         moved = copy.deepcopy(VALID_CONFIG)
         moved["event_journal"] = {"backend": "postgres", "database_url": "postgresql://journal.invalid/moved"}
-        config_lifecycle.replace_committed_config(
+        save_config(
             request_for(loaded_app),
             moved,
-            error_prefix="test replace",
         )
 
         on_disk = yaml.safe_load(before.runtime_paths.config_path.read_text(encoding="utf-8"))
@@ -542,10 +538,9 @@ class TestConcurrencySmoke:
             request = request_for(loaded_app)
             barrier.wait()
             try:
-                config_lifecycle.write_committed_config(
+                save_edited_config(
                     request,
                     lambda config: config["agents"]["test_agent"]["instructions"].append(marker),
-                    error_prefix="test write",
                 )
                 outcomes[marker] = "ok"
             except HTTPException as exc:
@@ -564,10 +559,96 @@ class TestConcurrencySmoke:
         after = api_snapshot(loaded_app)
         # Exactly one writer wins each generation; losers see the stale-write conflict.
         assert after.generation == before.generation + len(winners)
-        instructions = after.config_data["agents"]["test_agent"]["instructions"]
+        instructions = after.runtime_config.agents["test_agent"].instructions
         assert instructions[0] == "Test instruction"
         assert set(instructions[1:]) == winners
         # No torn state: the on-disk file matches the committed snapshot exactly.
         on_disk = yaml.safe_load(after.runtime_paths.config_path.read_text(encoding="utf-8"))
-        assert on_disk == after.config_data
+        assert on_disk == after.runtime_config.authored_model_dump()
         assert after.config_load_result == config_lifecycle.ConfigLoadResult(success=True)
+
+
+def test_reads_require_an_initialized_app() -> None:
+    """A committed-config read fails fast on an app MindRoom never initialized."""
+    request = Request({"type": "http", "app": type("_App", (), {"state": type("_State", (), {})()})()})
+
+    with pytest.raises(TypeError, match="MindRoom app state is not initialized"):
+        config_lifecycle.read_committed_runtime_config(request)
+
+
+@pytest.mark.parametrize(
+    ("writer", "reconciles"),
+    [("dashboard", True), ("tool", False), ("runtime", False)],
+)
+def test_the_api_reconciles_knowledge_modes_only_for_what_it_publishes_on_its_own(
+    loaded_app: FastAPI,
+    monkeypatch: pytest.MonkeyPatch,
+    writer: str,
+    reconciles: bool,
+) -> None:
+    """The API reconciles a dashboard save once, against the config it replaced.
+
+    Tool commits and the runtime's own load leave it to the runtime, which reconciles each config it applies.
+    """
+    before = api_snapshot(loaded_app)
+    payload = copy.deepcopy(VALID_CONFIG)
+    payload["agents"]["test_agent"]["role"] = "Changed"
+    pairs: list[tuple[Config, Config]] = []
+    monkeypatch.setattr(
+        config_lifecycle,
+        "reconcile_knowledge_mode_transition_states",
+        lambda previous, current, _paths: pairs.append((previous, current)),
+    )
+
+    if writer == "tool":
+        commit_tool_change(payload, before.runtime_paths)
+    elif writer == "dashboard":
+        save_config(request_for(loaded_app), payload)
+    else:
+        _write_config(before.runtime_paths.config_path, payload)
+        assert config_lifecycle.load_config_into_app(before.runtime_paths, loaded_app).loaded
+
+    assert pairs == ([(before.runtime_config, api_snapshot(loaded_app).runtime_config)] if reconciles else [])
+
+
+def test_a_request_never_rebinds_onto_another_runtime(loaded_app: FastAPI, tmp_path: Path) -> None:
+    """A request's auth and config stay on the runtime it authenticated against; a swap mid-request is stale."""
+    request = request_for(loaded_app)
+    pinned = config_lifecycle.bind_current_request_snapshot(request)
+    assert config_lifecycle.rebind_current_request_snapshot(request).runtime_paths == pinned.runtime_paths
+
+    other = constants.resolve_primary_runtime_paths(config_path=tmp_path / "other.yaml", process_env={})
+    config_lifecycle.require_api_state(loaded_app).snapshot = config_lifecycle.ApiSnapshot(
+        generation=pinned.generation + 1,
+        runtime_paths=other,
+    )
+
+    with pytest.raises(HTTPException) as exc_info:
+        config_lifecycle.rebind_current_request_snapshot(request)
+    assert exc_info.value.status_code == 409
+
+
+@pytest.mark.parametrize("writer", ["structured", "raw"])
+def test_a_dashboard_save_that_cannot_write_the_file_is_a_server_error(
+    loaded_app: FastAPI,
+    monkeypatch: pytest.MonkeyPatch,
+    writer: str,
+) -> None:
+    """A valid save whose file write fails is not reported as an invalid config."""
+
+    def fail_replace(_tmp: Path, _target: Path) -> None:
+        message = "read-only file system"
+        raise PermissionError(message)
+
+    monkeypatch.setattr(constants, "safe_replace", fail_replace)
+
+    save = (
+        partial(save_config, request_for(loaded_app), copy.deepcopy(VALID_CONFIG))
+        if writer == "structured"
+        else partial(save_raw_config, request_for(loaded_app), yaml.dump(VALID_CONFIG))
+    )
+    with pytest.raises(HTTPException) as exc_info:
+        save()
+
+    assert exc_info.value.status_code == 500
+    assert exc_info.value.detail == "Failed to save configuration: read-only file system"

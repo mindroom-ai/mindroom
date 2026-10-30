@@ -33,10 +33,10 @@ _PRIVATE_INSTANCE_ROOT_DIRNAME = "private_instances"
 SHARED_DIRECTORIES_DIRNAME = "shared_directories"
 WORKER_CREDENTIALS_DIRNAME = "credentials"
 WORKER_SHARED_CREDENTIALS_DIRNAME = ".shared_credentials"
-# Tools and dashboard integrations restricted to shared scope. MCP registry tools are supported on every scope:
-# OAuth-backed servers follow the configured worker scope, and non-OAuth servers always execute through the shared
-# server session without requester credentials.
-_SHARED_ONLY_INTEGRATION_NAMES = frozenset({"spotify", "homeassistant"})
+# Tools and dashboard integrations restricted to shared scope, with `spotify_oauth`, the credential service of the
+# Spotify connection. MCP registry tools are supported on every scope: OAuth-backed servers follow the configured
+# worker scope, and non-OAuth servers always execute through the shared server session without requester credentials.
+_SHARED_ONLY_INTEGRATION_NAMES = frozenset({"spotify", "spotify_oauth", "homeassistant"})
 
 
 @dataclass(frozen=True)

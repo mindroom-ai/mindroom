@@ -613,6 +613,34 @@ def test_load_config_directs_bind_mount_migration_to_the_host(
     assert config_path.read_text(encoding="utf-8") == original
 
 
+def test_load_config_migrates_under_the_config_write_lock(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The migration's compare-and-replace holds the lock config commits write under, so neither loses the other."""
+    from mindroom import yaml_io  # noqa: PLC0415
+    from mindroom.config.main import load_config  # noqa: PLC0415
+    from mindroom.config.personal_agents import personal_agent_roster_lock_path  # noqa: PLC0415
+    from mindroom.constants import resolve_runtime_paths  # noqa: PLC0415
+    from mindroom.file_locks import file_lock_is_held  # noqa: PLC0415
+
+    config_path = Path(tmp_path) / "config.yaml"
+    config_path.write_text("authorization:\n  global_users:\n    - '@owner:example.com'\n", encoding="utf-8")
+    runtime_paths = resolve_runtime_paths(config_path=config_path)
+    write_text_atomic = yaml_io.write_text_atomic
+    held: list[bool] = []
+
+    def replace_while_probing_the_lock(path: Path, content: str) -> None:
+        held.append(file_lock_is_held(personal_agent_roster_lock_path(runtime_paths)))
+        write_text_atomic(path, content)
+
+    monkeypatch.setattr(yaml_io, "write_text_atomic", replace_while_probing_the_lock)
+
+    load_config(runtime_paths)
+
+    assert held == [True]
+
+
 def test_load_config_rejects_access_migration_with_include(tmp_path: Path) -> None:
     """A composed legacy config must fail before validation or persistence."""
     from mindroom.config.legacy_access import AccessMigrationError  # noqa: PLC0415

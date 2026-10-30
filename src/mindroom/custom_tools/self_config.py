@@ -8,16 +8,15 @@ from typing import TYPE_CHECKING, Literal
 import yaml
 from pydantic import ValidationError
 
-from mindroom.api.config_lifecycle import validate_and_persist_config_payload
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import ConfigRuntimeValidationError, format_invalid_config_message, load_config_or_user_error
 from mindroom.custom_tools.config_manager import (
+    commit_authored_config,
     platform_administrator_error,
     preserve_tool_overrides,
     redaction_marker_error,
     validate_knowledge_bases,
 )
-from mindroom.logging_config import get_logger
 from mindroom.tool_system.authoring import Toolkit
 from mindroom.tool_system.catalog import resolved_tool_metadata_for_runtime
 
@@ -25,7 +24,6 @@ if TYPE_CHECKING:
     from mindroom.constants import RuntimePaths
     from mindroom.tool_system.tool_function import ToolFunction
 
-logger = get_logger(__name__)
 
 _SELF_CONFIG_BLOCKED_TOOLS = {"config_manager"}
 _CONFIG_CHANGE_REJECTED_MESSAGE = "Changes were NOT applied."
@@ -195,7 +193,8 @@ class SelfConfigTools(Toolkit):
         ]
         non_null_updates = {field_name: value for field_name, value in requested_updates if value is not None}
 
-        candidate_agent_data = agent.model_dump()
+        # Only the fields the entry already set, plus the requested ones, so saving does not spell out every default.
+        candidate_agent_data = agent.model_dump(exclude_unset=True)
         candidate_agent_data.update(non_null_updates)
 
         try:
@@ -206,9 +205,7 @@ class SelfConfigTools(Toolkit):
         current_values = agent.model_dump()
         validated_values = validated_agent.model_dump()
         updates: dict[str, str] = {}
-        for field_name, new_value in requested_updates:
-            if new_value is None:
-                continue
+        for field_name in non_null_updates:
             current_value = current_values[field_name]
             validated_value = validated_values[field_name]
             if validated_value == current_value:
@@ -227,7 +224,7 @@ class SelfConfigTools(Toolkit):
 
         config.agents[self.agent_name] = validated_agent
         try:
-            validate_and_persist_config_payload(config.authored_model_dump(), self.runtime_paths)
+            commit_authored_config(config, self.runtime_paths)
         except (ValidationError, ConfigRuntimeValidationError) as exc:
             return format_invalid_config_message(exc, footer=_CONFIG_CHANGE_REJECTED_MESSAGE)
         except Exception as e:
