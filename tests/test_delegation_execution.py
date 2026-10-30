@@ -789,6 +789,11 @@ async def test_delegated_approval_preserves_redacted_provider_failure(
     [record] = _record_files(tmp_path)
     assert record["status"] == "failed"
     assert "example-secret" not in json.dumps(record)
+    # The failed resume's record ends its stream, so the audit record keeps why it failed and what it used, as a fresh
+    # child's failure does.
+    *_, output = (event for event in _record_events(tmp_path) if event["kind"] == "output")
+    assert output["data"] == {"content": record["error"]}
+    assert record["usage"] is not None
 
 
 @pytest.mark.asyncio

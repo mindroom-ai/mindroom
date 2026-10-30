@@ -1472,15 +1472,19 @@ async def drive_delegation_stream[R: AnyRunRecord](
 ) -> AsyncIterator[RunEvent]:
     """Pass a run's events through; when it ends paused on delegations, drive them and end with the driven record.
 
-    The run's terminal record is a ``record_type`` record, and a run that ends without one fails. The driven record
-    is paused when a child waits for approval or the parent's own calls do, else the parent's continuation ended it.
+    The run's terminal record is a ``record_type`` record, and a run that ends without one fails. A failed run's
+    record passes on as it came, before its failure propagates. The driven record is paused when a child waits for
+    approval or the parent's own calls do, else the parent's continuation ended it.
     """
+    name = options["agent_name"]
     finished = TerminalRecord(record_type)
     async with closing_async_stream(events):
         async for event in events:
-            if not finished.collect(event):
+            # A completed or paused record waits for the end of the run's stream, where a pause on delegations is
+            # driven from; a failed one passes on at once, since only its failure follows it.
+            if not finished.collect(event) or finished.terminal(name).status is RunStatus.error:
                 yield event
-    record = finished.terminal(options["agent_name"])
+    record = finished.terminal(name)
     if record.status is not RunStatus.paused or not has_delegation_state(record):
         yield RunFinished(record)
         return

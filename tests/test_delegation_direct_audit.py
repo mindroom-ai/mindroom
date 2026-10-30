@@ -17,7 +17,6 @@ from mindroom.config.agent import AgentConfig
 from mindroom.custom_tools.delegate import DelegateTools
 from mindroom.delegation.lifecycle import (
     observe_child_event,
-    observe_child_record,
     prepare_child_turn,
 )
 from mindroom.delegation.state import child_execution_identity
@@ -147,24 +146,18 @@ async def test_direct_delegation_records_real_tool_before_provider_error(tmp_pat
         callback("real-child-run", ctx.active_model_name)
         model = ScriptedModel([calls(scripted_call("lookup", "actual-call", query="full query")), [Await(fail)]])
         spec = AgentSpec(id="child", name="child", model=model, system_messages=(), toolkits=(toolkit(lookup),))
-        stored: list[RunRecord] = []
-
-        async def persist(record: RunRecord) -> None:
-            stored.append(record)
-
         events = run_agent(
             spec,
             [Message(role="user", content="run the tool")],
             ctx=RunContext(run_id="real-child-run", session=UnstoredSession(ctx.session_id or "")),
-            persist=persist,
+            persist=None,
             request_template=EMPTY_REQUEST,
         )
         try:
+            # The failed run's record ends its stream, which ``ai_response`` passes to the observer as this does.
             async for event in events:
                 await observe_child_event(event)
         except ProviderError as error:
-            # The reply hands the failed run's stored record to the observer, as ``ai_response`` does.
-            observe_child_record(stored[-1])
             return TurnResult(f"Error generating response: {error}")
         pytest.fail("The loop did not surface the provider failure")
 
@@ -392,6 +385,45 @@ async def test_retried_child_does_not_inherit_previous_attempt_error(tmp_path: P
         await tools.run_subagent(agent_name="child", task="Run with a replacement attempt")
 
     assert _only_run(tmp_path)["error"] == "replacement provider failure"
+
+
+@pytest.mark.asyncio
+async def test_a_record_of_another_run_does_not_replace_the_child_s_own(tmp_path: Path) -> None:
+    """Only a record naming the child's run and session is the child's outcome."""
+    tools, config, runtime_paths = _tools(tmp_path)
+    context = _delegate_runtime_context(config, runtime_paths, execution_identity=_identity())
+
+    async def child_then_other(ctx: ResponseTurnContext, *_args: object, sinks: TurnSinks) -> TurnResult:
+        callback = sinks.on_attempt_start
+        assert callback is not None
+        callback("child-run", ctx.active_model_name)
+        await observe_child_event(
+            RunFinished(
+                RunRecord(
+                    run_id="child-run",
+                    session_id=ctx.session_id,
+                    status=RunStatus.completed,
+                    content="Child completed.",
+                ),
+            ),
+        )
+        await observe_child_event(
+            RunFinished(
+                RunRecord(
+                    run_id="other-run",
+                    session_id="other-session",
+                    status=RunStatus.error,
+                    error="Other failed.",
+                ),
+            ),
+        )
+        return TurnResult("Child completed.")
+
+    with tool_runtime_context(context), patch("mindroom.ai.ai_response", side_effect=child_then_other):
+        await tools.run_subagent(agent_name="child", task="Do the work")
+
+    run = _only_run(tmp_path)
+    assert (run["status"], run["output"]) == ("completed", "Child completed.")
 
 
 @pytest.mark.asyncio

@@ -48,7 +48,10 @@ class ToolCompleted:
 
 @dataclass(frozen=True, slots=True)
 class RunFinished:
-    """The run reached ``COMPLETED`` or ``PAUSED``; the record carries content, tools, and requirements."""
+    """The run ended ``COMPLETED``, ``PAUSED``, or ``ERROR``; the record carries content, tools, and requirements.
+
+    A failed run's stream raises the exception that ended it right after this event.
+    """
 
     record: AnyRunRecord
 

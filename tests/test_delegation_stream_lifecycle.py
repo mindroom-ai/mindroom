@@ -108,6 +108,45 @@ async def test_the_driver_refuses_a_paused_run_whose_owner_is_not_a_matrix_conve
 
 
 @pytest.mark.asyncio
+async def test_the_driver_passes_a_failed_runs_record_on_before_its_failure() -> None:
+    """A failed run's record ends the driven stream as the run's own stream ended, before its failure propagates."""
+    failed = RunRecord(run_id="parent-run", session_id="session-1", status=RunStatus.error, error="provider down")
+
+    async def failing_run() -> AsyncIterator[RunEvent]:
+        yield TextDelta("partial output")
+        yield RunFinished(failed)
+        message = "provider down"
+        raise RuntimeError(message)
+
+    stream = execution.drive_delegation_stream(
+        failing_run(),
+        record_type=RunRecord,
+        continue_parent=_UnusedContinuation(
+            RunStorage(
+                None,
+                new_scope_session(session_id="session-1", scope=HistoryScope(kind="agent", scope_id="leader")),
+                None,
+            ),
+        ),
+        agent_name="leader",
+        run_child=cast("Callable", None),
+        config=cast("Callable", None),  # type: ignore[arg-type]
+        runtime_paths=cast("Callable", None),  # type: ignore[arg-type]
+        execution_identity=None,
+    )
+    seen: list[RunEvent] = []
+
+    async def consume() -> None:
+        async for event in stream:
+            seen.append(event)  # noqa: PERF401 - the stream raises after its last event, which a comprehension drops
+
+    with pytest.raises(RuntimeError, match="provider down"):
+        await consume()
+
+    assert seen == [TextDelta("partial output"), RunFinished(failed)]
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("already_failed", [False, True])
 @pytest.mark.parametrize("consumer_failure", [None, RuntimeError, asyncio.CancelledError])
 async def test_closed_stream_observes_driver_failure(
