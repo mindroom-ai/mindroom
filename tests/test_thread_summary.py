@@ -2277,15 +2277,26 @@ class TestPinLandingDuringGeneration:
         client.room_send.assert_awaited_once()
 
     async def test_recheck_asks_for_the_edits_of_every_summary_it_already_holds(self) -> None:
-        """A pin can be an edit of an earlier summary, which a recursive walk may page out."""
+        """A pin can be an edit of an earlier summary, which a recursive walk may page out.
+
+        That includes a person's summary that pins nothing yet: its author can
+        edit it into a pin while the model runs.
+        """
         history = [
             *_make_thread_history(20),
             _make_summary_notice_message(_THREAD, message_count=6, event_id="$old-summary", pinned=False),
+            _make_summary_notice_message(
+                _THREAD,
+                message_count=0,
+                event_id="$human-summary",
+                sender="@user:localhost",
+                pinned=False,
+            ),
         ]
 
         walk = await self._run(make_matrix_client_mock(), history)
 
-        assert walk.await_args.kwargs["edits_of"] == ("$old-summary",)
+        assert walk.await_args.kwargs["edits_of"] == ("$old-summary", "$human-summary")
 
     async def test_a_recheck_a_bound_stopped_suppresses_delivery(self) -> None:
         """A pin can be an edit of any earlier summary, so a walk that stopped short cannot rule one out."""
