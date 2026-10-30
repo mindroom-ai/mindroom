@@ -317,7 +317,6 @@ def test_configured_primary_worker_manager_identity_uses_the_lease_signature_wit
         lambda _paths: MagicMock(proxy_url="http://worker.test", proxy_token="worker-token"),  # noqa: S106
     )
     monkeypatch.setattr(workers_runtime_module, "primary_worker_backend_available", lambda *_args, **_kwargs: True)
-    monkeypatch.setattr(workers_runtime_module, "primary_worker_backend_name", lambda _paths: "docker")
     signature = MagicMock(return_value=("signature",))
     monkeypatch.setattr(workers_runtime_module, "_primary_worker_backend_config_signature", signature)
     build_manager = MagicMock()

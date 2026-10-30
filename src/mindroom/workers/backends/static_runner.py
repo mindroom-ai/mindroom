@@ -15,6 +15,7 @@ from mindroom.workers.backend import (
     effective_idle_status,
     filter_and_sort_worker_handles,
 )
+from mindroom.workers.backend_kinds import WorkerBackendKind
 from mindroom.workers.backends._lifecycle import (
     DEFAULT_IDLE_TIMEOUT_SECONDS,
     WorkerLifecycleState,
@@ -56,7 +57,7 @@ class _StaticWorkerMetadata:
 class StaticSandboxRunnerBackend:
     """Worker backend representing the current shared sandbox-runner deployment."""
 
-    backend_name = "static_sandbox_runner"
+    backend_name = WorkerBackendKind.STATIC_RUNNER.value
     cleanup_locator: str | None = None
 
     def __init__(

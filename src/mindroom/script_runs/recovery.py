@@ -54,7 +54,6 @@ def script_recovery_signature(
     """Bind one recoverable launch to its worker authority, private scope and gateway."""
     if (
         backend is None
-        or backend.backend_name != "kubernetes"
         or not isinstance(backend, _RecoveringScriptBackend)
         or not gateway_url
         or (process_authority := script_process_authority(config, agent_name)) is None

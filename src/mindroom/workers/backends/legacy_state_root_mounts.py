@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING, cast
 
 from mindroom.logging_config import get_logger
 from mindroom.workers.backend import WorkerBackendError
+from mindroom.workers.backend_kinds import WorkerBackendKind, worker_backend_kind
 from mindroom.workers.backends import docker, kubernetes
 from mindroom.workers.backends._lifecycle import mark_worker_idle
 from mindroom.workers.backends.kubernetes_resources import (
@@ -16,7 +17,6 @@ from mindroom.workers.backends.kubernetes_resources import (
     lifecycle_annotations,
     lifecycle_from_annotations,
 )
-from mindroom.workers.runtime import primary_worker_backend_name
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
@@ -37,19 +37,19 @@ _POD_POLL_INTERVAL_SECONDS = 1.0
 
 def retire_state_root_worker_mounts(runtime_paths: RuntimePaths) -> None:
     """Stop every worker that still mounts whole state roots before the primary serves, raising if any may run."""
-    backend_name = primary_worker_backend_name(runtime_paths)
-    if backend_name == "docker":
+    kind = worker_backend_kind(runtime_paths)
+    if kind is WorkerBackendKind.DOCKER:
         _remove_docker_workers_mounting_state_roots(runtime_paths)
-    elif backend_name == "kubernetes":
+    elif kind is WorkerBackendKind.KUBERNETES:
         _stop_kubernetes_workers_mounting_state_roots(kubernetes.standalone_resource_manager(runtime_paths))
 
 
-def _warn_to_check_for_links(backend_name: str, workers: list[str]) -> None:
+def _warn_to_check_for_links(backend: WorkerBackendKind, workers: list[str]) -> None:
     if workers:
         logger.warning(
             "Stopped sandbox workers that mounted whole agent state roots; "
             "check agent state roots for links they may have planted, as the migration guide describes",
-            backend=backend_name,
+            backend=backend.value,
             workers=workers,
         )
 
@@ -79,7 +79,7 @@ def _remove_docker_workers_mounting_state_roots(runtime_paths: RuntimePaths) -> 
             failed.append(f"{container.id} ({exc})")
             continue
         removed.append(container.id)
-    _warn_to_check_for_links("docker", removed)
+    _warn_to_check_for_links(WorkerBackendKind.DOCKER, removed)
     if failed:
         msg = f"Failed to remove Docker workers that mount whole state roots: {', '.join(failed)}"
         raise WorkerBackendError(msg)
@@ -130,7 +130,7 @@ def _stop_kubernetes_workers_mounting_state_roots(resources: KubernetesResourceM
             failed.append(f"{deployment.metadata.name} ({exc})")
             continue
         stopped.append(deployment.metadata.name)
-    _warn_to_check_for_links("kubernetes", stopped)
+    _warn_to_check_for_links(WorkerBackendKind.KUBERNETES, stopped)
     if failed:
         msg = f"Could not stop workers that mount whole state roots: {', '.join(failed)}"
         raise WorkerBackendError(msg)

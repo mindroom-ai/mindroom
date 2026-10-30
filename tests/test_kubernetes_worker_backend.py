@@ -47,6 +47,7 @@ from mindroom.tool_system.worker_routing import (
     worker_root_path,
 )
 from mindroom.workers.backend import WorkerBackendError
+from mindroom.workers.backend_kinds import WorkerBackendKind, worker_backend_kind
 from mindroom.workers.backends import kubernetes as kubernetes_backend_module
 from mindroom.workers.backends import kubernetes_resources as kubernetes_resources_module
 from mindroom.workers.backends import legacy_state_root_mounts
@@ -67,11 +68,7 @@ from mindroom.workers.backends.kubernetes_resources import (
 )
 from mindroom.workers.models import WorkerHandle, WorkerLaunchConfig, WorkerReadyProgress, WorkerSpec
 from mindroom.workers.protocol import WORKER_PROTOCOL_VERSION
-from mindroom.workers.runtime import (
-    build_worker_launch_config,
-    primary_worker_backend_available,
-    primary_worker_backend_name,
-)
+from mindroom.workers.runtime import build_worker_launch_config, primary_worker_backend_available
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -1755,7 +1752,7 @@ def test_primary_worker_backend_available_uses_runtime_env_values(tmp_path: Path
     )
     runtime_paths = resolve_primary_runtime_paths(config_path=config_path)
 
-    assert primary_worker_backend_name(runtime_paths) == "kubernetes"
+    assert worker_backend_kind(runtime_paths) is WorkerBackendKind.KUBERNETES
     assert runtime_paths.env_value("MINDROOM_KUBERNETES_WORKER_IMAGE") == "test-image"
     assert primary_worker_backend_available(
         runtime_paths,

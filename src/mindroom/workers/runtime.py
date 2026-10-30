@@ -15,8 +15,8 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Never, cast
 
 from mindroom.config.worker_projection import worker_config_data
-from mindroom.runtime_env_policy import KUBERNETES_WORKER_BACKEND_CONFIG_ENV_BY_KEY
 from mindroom.workers.backend import WorkerBackendError
+from mindroom.workers.backend_kinds import WorkerBackendKind, worker_backend_kind
 from mindroom.workers.backends.docker import DockerWorkerBackend
 from mindroom.workers.backends.docker_config import (
     DockerWorkerBackendConfig,
@@ -49,8 +49,6 @@ __all__ = [
     "lease_configured_primary_worker_manager",
     "lease_primary_worker_manager",
     "primary_worker_backend_available",
-    "primary_worker_backend_is_dedicated",
-    "primary_worker_backend_name",
     "reset_primary_worker_manager",
     "serialized_dedicated_worker_validation_snapshot",
     "shutdown_primary_worker_manager",
@@ -58,8 +56,6 @@ __all__ = [
     "worker_visible_storage_root",
 ]
 
-_PRIMARY_WORKER_BACKEND_ENV = KUBERNETES_WORKER_BACKEND_CONFIG_ENV_BY_KEY["worker_backend"]
-_DEDICATED_WORKER_BACKENDS = frozenset({"docker", "kubernetes"})
 _PRIMARY_WORKER_MANAGER_LOCK = threading.Lock()
 _PRIMARY_WORKER_MANAGER_CONDITION = threading.Condition(_PRIMARY_WORKER_MANAGER_LOCK)
 _WORKER_VALIDATION_SNAPSHOT_CACHE: dict[tuple[str, ...], dict[str, dict[str, object]]] = {}
@@ -270,36 +266,15 @@ def build_worker_launch_config(
     )
 
 
-def _normalize_backend_name(raw_value: str | None) -> str:
-    normalized = (raw_value or "").strip().lower()
-    if normalized in {"", "static", "static_runner", "shared_runner", "static_sandbox_runner"}:
-        return "static_runner"
-    if normalized == "docker":
-        return "docker"
-    if normalized in {"k8s", "kubernetes"}:
-        return "kubernetes"
-    msg = f"Unsupported worker backend: {raw_value}"
-    raise WorkerBackendError(msg)
-
-
-def primary_worker_backend_name(runtime_paths: RuntimePaths) -> str:
-    """Return the configured primary-runtime worker backend name."""
-    return _normalize_backend_name(runtime_paths.env_value(_PRIMARY_WORKER_BACKEND_ENV))
-
-
-def primary_worker_backend_is_dedicated(runtime_paths: RuntimePaths) -> bool:
-    """Return whether the configured backend provisions dedicated worker runtimes."""
-    return primary_worker_backend_name(runtime_paths) in _DEDICATED_WORKER_BACKENDS
-
-
 def worker_visible_storage_root(runtime_paths: RuntimePaths) -> Path | None:
     """Return where dedicated workers mount the shared storage root, or ``None`` without dedicated workers."""
-    backend_name = primary_worker_backend_name(runtime_paths)
-    if backend_name == "kubernetes":
-        return Path(KubernetesWorkerBackendConfig.from_runtime(runtime_paths).storage_mount_path)
-    if backend_name == "docker":
-        return Path(DockerWorkerBackendConfig.from_runtime(runtime_paths).storage_mount_path)
-    return None
+    match worker_backend_kind(runtime_paths):
+        case WorkerBackendKind.STATIC_RUNNER:
+            return None
+        case WorkerBackendKind.DOCKER:
+            return Path(DockerWorkerBackendConfig.from_runtime(runtime_paths).storage_mount_path)
+        case WorkerBackendKind.KUBERNETES:
+            return Path(KubernetesWorkerBackendConfig.from_runtime(runtime_paths).storage_mount_path)
 
 
 def primary_worker_backend_available(
@@ -309,27 +284,25 @@ def primary_worker_backend_available(
     proxy_token: str | None,
 ) -> bool:
     """Return whether the configured primary-runtime worker backend can route tool calls."""
-    backend_name = primary_worker_backend_name(runtime_paths)
-    if backend_name == "static_runner":
+    kind = worker_backend_kind(runtime_paths)
+    if kind is WorkerBackendKind.STATIC_RUNNER:
         return bool(proxy_url)
-    if not primary_worker_backend_is_dedicated(runtime_paths) or not proxy_token:
+    if not proxy_token:
         return False
-
     try:
-        if backend_name == "docker":
-            docker_backend_config_signature(
-                runtime_paths,
-                auth_token=proxy_token,
-                storage_path=runtime_paths.storage_root,
-            )
-        elif backend_name == "kubernetes":
-            kubernetes_backend_config_signature(
-                runtime_paths,
-                auth_token=proxy_token,
-                storage_root=runtime_paths.storage_root,
-            )
-        else:
-            return False
+        match kind:
+            case WorkerBackendKind.DOCKER:
+                docker_backend_config_signature(
+                    runtime_paths,
+                    auth_token=proxy_token,
+                    storage_path=runtime_paths.storage_root,
+                )
+            case WorkerBackendKind.KUBERNETES:
+                kubernetes_backend_config_signature(
+                    runtime_paths,
+                    auth_token=proxy_token,
+                    storage_root=runtime_paths.storage_root,
+                )
     except WorkerBackendError:
         return False
     return True
@@ -396,7 +369,7 @@ def _static_runner_backend_config_signature(
     proxy_token: str | None,
 ) -> tuple[str, ...]:
     return (
-        "static_runner",
+        WorkerBackendKind.STATIC_RUNNER.value,
         normalize_sandbox_runner_api_root(proxy_url or ""),
         proxy_token or "",
     )
@@ -409,24 +382,22 @@ def _primary_worker_backend_config_signature(
     proxy_token: str | None,
     storage_root: Path | None,
 ) -> tuple[str, ...]:
-    backend_name = primary_worker_backend_name(runtime_paths)
     resolved_storage_root = (storage_root or runtime_paths.storage_root).expanduser().resolve()
-    if backend_name == "static_runner":
-        return _static_runner_backend_config_signature(proxy_url=proxy_url, proxy_token=proxy_token)
-    if backend_name == "docker":
-        return docker_backend_config_signature(
-            runtime_paths,
-            auth_token=proxy_token,
-            storage_path=resolved_storage_root,
-        )
-    if backend_name == "kubernetes":
-        return kubernetes_backend_config_signature(
-            runtime_paths,
-            auth_token=proxy_token,
-            storage_root=resolved_storage_root,
-        )
-    msg = f"Unsupported worker backend: {backend_name}"
-    raise WorkerBackendError(msg)
+    match worker_backend_kind(runtime_paths):
+        case WorkerBackendKind.STATIC_RUNNER:
+            return _static_runner_backend_config_signature(proxy_url=proxy_url, proxy_token=proxy_token)
+        case WorkerBackendKind.DOCKER:
+            return docker_backend_config_signature(
+                runtime_paths,
+                auth_token=proxy_token,
+                storage_path=resolved_storage_root,
+            )
+        case WorkerBackendKind.KUBERNETES:
+            return kubernetes_backend_config_signature(
+                runtime_paths,
+                auth_token=proxy_token,
+                storage_root=resolved_storage_root,
+            )
 
 
 def _primary_worker_backend_cleanup_signature(
@@ -436,17 +407,14 @@ def _primary_worker_backend_cleanup_signature(
     config_signature: tuple[str, ...],
 ) -> tuple[str, ...]:
     """Return the stable resource-owner identity used for durable script cleanup."""
-    if primary_worker_backend_name(runtime_paths) == "docker":
-        return docker_backend_cleanup_signature(
-            runtime_paths,
-            storage_path=(storage_root or runtime_paths.storage_root).expanduser().resolve(),
-        )
-    if primary_worker_backend_name(runtime_paths) == "kubernetes":
-        return kubernetes_backend_cleanup_signature(
-            runtime_paths,
-            storage_root=(storage_root or runtime_paths.storage_root).expanduser().resolve(),
-        )
-    return config_signature
+    resolved_storage_root = (storage_root or runtime_paths.storage_root).expanduser().resolve()
+    match worker_backend_kind(runtime_paths):
+        case WorkerBackendKind.STATIC_RUNNER:
+            return config_signature
+        case WorkerBackendKind.DOCKER:
+            return docker_backend_cleanup_signature(runtime_paths, storage_path=resolved_storage_root)
+        case WorkerBackendKind.KUBERNETES:
+            return kubernetes_backend_cleanup_signature(runtime_paths, storage_root=resolved_storage_root)
 
 
 def _build_primary_worker_manager(
@@ -456,32 +424,30 @@ def _build_primary_worker_manager(
     proxy_token: str | None,
     storage_root: Path | None,
 ) -> WorkerBackend:
-    backend_name = primary_worker_backend_name(runtime_paths)
     resolved_storage_root = (storage_root or runtime_paths.storage_root).expanduser().resolve()
-    if backend_name == "static_runner":
-        return StaticSandboxRunnerBackend(
-            api_root=normalize_sandbox_runner_api_root(proxy_url or ""),
-            auth_token=proxy_token,
-        )
-    if backend_name == "docker":
-        return cast(
-            "WorkerBackend",
-            DockerWorkerBackend.from_runtime(
+    match worker_backend_kind(runtime_paths):
+        case WorkerBackendKind.STATIC_RUNNER:
+            return StaticSandboxRunnerBackend(
+                api_root=normalize_sandbox_runner_api_root(proxy_url or ""),
+                auth_token=proxy_token,
+            )
+        case WorkerBackendKind.DOCKER:
+            return cast(
+                "WorkerBackend",
+                DockerWorkerBackend.from_runtime(
+                    runtime_paths,
+                    auth_token=proxy_token,
+                    current_launch=functools.partial(current_worker_launch_config, runtime_paths),
+                    storage_path=resolved_storage_root,
+                ),
+            )
+        case WorkerBackendKind.KUBERNETES:
+            return KubernetesWorkerBackend.from_runtime(
                 runtime_paths,
                 auth_token=proxy_token,
+                storage_root=resolved_storage_root,
                 current_launch=functools.partial(current_worker_launch_config, runtime_paths),
-                storage_path=resolved_storage_root,
-            ),
-        )
-    if backend_name == "kubernetes":
-        return KubernetesWorkerBackend.from_runtime(
-            runtime_paths,
-            auth_token=proxy_token,
-            storage_root=resolved_storage_root,
-            current_launch=functools.partial(current_worker_launch_config, runtime_paths),
-        )
-    msg = f"Unsupported worker backend: {backend_name}"
-    raise WorkerBackendError(msg)
+            )
 
 
 def _shutdown_worker_manager_now(

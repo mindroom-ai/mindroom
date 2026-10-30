@@ -3317,6 +3317,7 @@ depends_on = [
     "mindroom.approval.tool_approval",
     "mindroom.tool_system.worker_routing",
     "mindroom.runtime_resolution",
+    "mindroom.workers.backend_kinds",
 ]
 visibility = ["mindroom.orchestrator"]
 
@@ -5092,6 +5093,7 @@ depends_on = [
     "mindroom.providers.credentials",
     "mindroom.tool_system.worker_routing",
     "mindroom.workspaces",
+    "mindroom.workers.backend_kinds",
 ]
 
 [[modules]]
@@ -5745,6 +5747,7 @@ depends_on = [
     "mindroom.worker_computer.browser_proxy",
     "mindroom.origins",
     "mindroom.tool_system.agent_tools",
+    "mindroom.workers.backend_kinds",
 ]
 # The broker's wiring points: every module outside the feature that may import it.
 visibility = [

@@ -53,6 +53,7 @@ from mindroom.tool_system.worker_routing import (
 )
 from mindroom.workers import worker_retirement as worker_retirement_module
 from mindroom.workers.backend import WorkerBackendError
+from mindroom.workers.backend_kinds import WorkerBackendKind, worker_backend_kind
 from mindroom.workers.backends import docker as docker_backend_module
 from mindroom.workers.backends import docker_projection as docker_projection_module
 from mindroom.workers.backends.docker import (
@@ -79,11 +80,7 @@ from mindroom.workers.backends.local import local_worker_state_paths_for_root
 from mindroom.workers.compatibility import WorkerProtocolMismatch
 from mindroom.workers.models import WorkerLaunchConfig, WorkerReadyProgress, WorkerSpec
 from mindroom.workers.protocol import WORKER_PROTOCOL_VERSION
-from mindroom.workers.runtime import (
-    build_worker_launch_config,
-    primary_worker_backend_available,
-    primary_worker_backend_name,
-)
+from mindroom.workers.runtime import build_worker_launch_config, primary_worker_backend_available
 from mindroom.workspaces import resolve_agent_workspace_from_state_path
 from tests.conftest import test_runtime_paths
 from tests.test_personal_agents_config import BASE as PERSONAL_AGENTS_BASE
@@ -1163,7 +1160,7 @@ def test_primary_worker_backend_available_uses_runtime_env_values(tmp_path: Path
     )
     runtime_paths = resolve_primary_runtime_paths(config_path=config_path)
 
-    assert primary_worker_backend_name(runtime_paths) == "docker"
+    assert worker_backend_kind(runtime_paths) is WorkerBackendKind.DOCKER
     assert runtime_paths.env_value("MINDROOM_DOCKER_WORKER_IMAGE") == "test-image"
     assert primary_worker_backend_available(
         runtime_paths,

@@ -106,6 +106,7 @@ from mindroom.tool_system.worker_routing import (
 )
 from mindroom.workers import runtime as workers_runtime_module
 from mindroom.workers.backend import WorkerBackendError
+from mindroom.workers.backend_kinds import WorkerBackendKind
 from mindroom.workers.backends import static_runner as static_runner_module
 from mindroom.workers.backends.local import local_worker_state_paths_for_root
 from mindroom.workers.backends.static_runner import StaticSandboxRunnerBackend
@@ -476,9 +477,6 @@ class _TrackingWorkerManager:
         del now
         self.touched.append(worker_key)
         return None
-
-    def require_compatible_runner(self) -> None:
-        """Stand in for a shared runner of this release when a test routes an unscoped call to it."""
 
     def record_failure(
         self,
@@ -4361,7 +4359,7 @@ def test_unscoped_dedicated_worker_payload_reconciles_via_ensure_worker(
         credential_policy={},
     )
     fake_manager = _FakeWorkerManager(refreshed_handle)
-    monkeypatch.setattr(sandbox_proxy_module, "primary_worker_backend_is_dedicated", lambda _runtime_paths_arg: True)
+    monkeypatch.setattr(sandbox_proxy_module, "worker_backend_kind", lambda _paths: WorkerBackendKind.DOCKER)
     identity = ToolExecutionIdentity(
         channel="matrix",
         agent_name="code",
@@ -4526,7 +4524,7 @@ def test_static_sandbox_runner_backend_reuses_worker_handle_identity() -> None:
     assert second.worker_key == "worker-a"
     assert second.endpoint == "http://sandbox-runner:8765/api/sandbox-runner/execute"
     assert second.auth_token == _TEST_AUTH_TOKEN
-    assert second.backend_name == "static_sandbox_runner"
+    assert second.backend_name == "static_runner"
     assert second.startup_count == 1
     assert second.last_used_at == 20.0
 

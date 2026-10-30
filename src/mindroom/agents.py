@@ -93,7 +93,7 @@ from mindroom.tool_system.worker_routing import (
     agent_workspace_root_path,
     resolve_agent_owned_path,
 )
-from mindroom.workers.runtime import primary_worker_backend_name
+from mindroom.workers.backend_kinds import WorkerBackendKind, worker_backend_kind
 from mindroom.workspaces import ensure_workspace_template
 
 if TYPE_CHECKING:
@@ -891,14 +891,14 @@ def _render_tool_execution_environment(
             ],
         )
 
-    backend = primary_worker_backend_name(runtime_paths)
+    backend = worker_backend_kind(runtime_paths)
     lines = [
         "## Tool Execution Environment",
         f"- Local tools (primary MindRoom runtime): {tool_list(local_tool_names)}.",
         f"- Worker-routed tools: {tool_list(worker_routed_tool_names)}.",
-        f"- Worker backend: `{backend}`.",
+        f"- Worker backend: `{backend.value}`.",
     ]
-    if backend == "static_runner":
+    if backend is WorkerBackendKind.STATIC_RUNNER:
         lines.append(
             "- Worker reuse: requests use the configured static runner; no per-user or per-agent "
             "worker state boundary is selected.",
@@ -911,8 +911,8 @@ def _render_tool_execution_environment(
             "user_agent": "one runtime used only by this user-agent pair",
         }[worker_scope]
         idle_behavior = {
-            "docker": "the container stops",
-            "kubernetes": "the deployment scales to zero",
+            WorkerBackendKind.DOCKER: "the container stops",
+            WorkerBackendKind.KUBERNETES: "the deployment scales to zero",
         }[backend]
         lines.extend(
             (

@@ -1458,9 +1458,9 @@ def worker_dashboard_api_key_needed(runtime_paths: constants.RuntimePaths) -> bo
     Worker shells keep network access to the primary, so an open API would hand them
     MindRoom's configuration. An explicitly empty key keeps open access.
     """
-    from mindroom.workers.runtime import primary_worker_backend_is_dedicated  # noqa: PLC0415
+    from mindroom.workers.backend_kinds import worker_backend_kind  # noqa: PLC0415
 
-    return runtime_paths.env_value("MINDROOM_API_KEY") is None and primary_worker_backend_is_dedicated(runtime_paths)
+    return runtime_paths.env_value("MINDROOM_API_KEY") is None and worker_backend_kind(runtime_paths).dedicated
 
 
 def ensure_worker_dashboard_api_key(runtime_paths: constants.RuntimePaths, *, dashboard_has_credential: bool) -> bool:

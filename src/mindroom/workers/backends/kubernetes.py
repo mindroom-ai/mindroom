@@ -25,6 +25,7 @@ from mindroom.workers.backend import (
     filter_and_sort_worker_handles,
     mirrored_credential_services,
 )
+from mindroom.workers.backend_kinds import WorkerBackendKind
 from mindroom.workers.backends._dedicated_worker_common import (
     ScopedWorkspaceMount,
     SharedDirectoryMount,
@@ -330,7 +331,7 @@ def _build_progress_reporter(
 class KubernetesWorkerBackend:
     """Kubernetes-backed worker provider for dedicated worker pods."""
 
-    backend_name = "kubernetes"
+    backend_name = WorkerBackendKind.KUBERNETES.value
 
     def script_resource_profiles(self) -> dict[str, object]:
         """Return the fixed profile names and exact configured quantities."""
