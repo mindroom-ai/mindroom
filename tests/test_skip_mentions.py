@@ -175,7 +175,7 @@ async def test_send_response_with_skip_mentions(tmp_path: Path) -> None:
 
 @pytest.mark.asyncio
 async def test_extract_context_with_skip_mentions(tmp_path: Path) -> None:
-    """Test that _extract_message_context ignores mentions when skip_mentions is set."""
+    """Test that context extraction ignores mentions when skip_mentions is set."""
     bot = _context_bot(tmp_path)
 
     # Create room
@@ -203,6 +203,7 @@ async def test_extract_context_with_skip_mentions(tmp_path: Path) -> None:
     context = await bot._conversation_resolver.extract_message_context(
         room,
         event_with_skip,
+        thread_id=None,
     )
 
     # Verify mentions were ignored
@@ -233,6 +234,7 @@ async def test_extract_context_with_skip_mentions(tmp_path: Path) -> None:
         context = await bot._conversation_resolver.extract_message_context(
             room,
             event_without_skip,
+            thread_id=None,
         )
 
         # Verify mentions were detected
@@ -271,6 +273,7 @@ async def test_extract_context_without_skip_metadata_detects_tool_mentions(tmp_p
     context = await bot._conversation_resolver.extract_message_context(
         room,
         event,
+        thread_id=None,
     )
 
     assert context.am_i_mentioned is True

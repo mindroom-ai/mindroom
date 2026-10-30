@@ -9,7 +9,6 @@ import nio
 import pytest
 
 import mindroom.matrix.media as media_module
-from mindroom.matrix.room_history_reads import parse_room_message_event
 from tests.conftest import serve_media_from_download
 
 _SYNTHETIC_FILE_KEY = "SYNTHETIC_FILE_JWK_KEY_DO_NOT_USE"
@@ -127,20 +126,7 @@ async def test_parsed_encrypted_media_still_downloads_and_decrypts() -> None:
     )
 
 
-def test_thread_history_reparse_uses_encrypted_media_boundary(
-    caplog: pytest.LogCaptureFixture,
-) -> None:
-    """Thread reconstruction should preserve encrypted media without logging its content."""
-    with caplog.at_level(logging.WARNING, logger="nio.events.misc"):
-        parsed_event = parse_room_message_event(_encrypted_media_source())
-
-    assert isinstance(parsed_event, nio.RoomEncryptedImage)
-    assert parsed_event.url == _SYNTHETIC_FILE_MXC
-    _assert_synthetic_secrets_absent(caplog)
-    assert not any("Error validating event" in record.getMessage() for record in caplog.records)
-
-
-def test_text_message_with_file_extension_is_not_dropped_from_history() -> None:
+def test_text_message_with_file_extension_is_not_encrypted_media() -> None:
     """A non-media extension field should not select the encrypted-media parser."""
     event_source = {
         "type": "m.room.message",
@@ -154,21 +140,12 @@ def test_text_message_with_file_extension_is_not_dropped_from_history() -> None:
         },
     }
 
-    parsed_event = parse_room_message_event(event_source)
-
-    assert isinstance(parsed_event, nio.RoomMessageText)
-    assert parsed_event.body == "harmless text with extension metadata"
+    assert media_module.is_encrypted_media_event_source(event_source) is False
 
 
-def test_custom_message_with_encrypted_file_is_not_dropped(
-    caplog: pytest.LogCaptureFixture,
-) -> None:
-    """A custom message type should keep its normal nio representation."""
-    with caplog.at_level(logging.WARNING, logger="nio.events.misc"):
-        parsed_event = parse_room_message_event(_encrypted_media_source("io.synthetic.custom"))
-
-    assert isinstance(parsed_event, nio.RoomMessageUnknown)
-    _assert_synthetic_secrets_absent(caplog)
+def test_custom_message_with_encrypted_file_is_not_encrypted_media() -> None:
+    """A custom message type should keep its normal nio representation rather than the encrypted-media one."""
+    assert media_module.is_encrypted_media_event_source(_encrypted_media_source("io.synthetic.custom")) is False
 
 
 @pytest.mark.asyncio
@@ -187,7 +164,6 @@ async def test_non_message_event_with_media_extensions_keeps_event_type(
     }
     with caplog.at_level(logging.WARNING, logger="nio.events.misc"):
         assert media_module.is_encrypted_media_event_source(event_source) is False
-        assert parse_room_message_event(event_source) is None
         parsed_event = nio.Event.parse_event(event_source)
 
     assert isinstance(parsed_event, nio.ReactionEvent)
@@ -195,15 +171,14 @@ async def test_non_message_event_with_media_extensions_keeps_event_type(
 
 
 @pytest.mark.parametrize("msgtype", [[], {}, 5], ids=["list", "dict", "number"])
-def test_history_reparse_rejects_a_msgtype_that_is_not_text(msgtype: object) -> None:
-    """Any room member writes the msgtype, so a value that is not text parses as a bad event instead of raising."""
+def test_a_msgtype_that_is_not_text_is_not_encrypted_media(msgtype: object) -> None:
+    """Any room member writes the msgtype, so a value that is not text never selects the encrypted-media parser."""
     event_source = _encrypted_media_source()
     content = event_source["content"]
     assert isinstance(content, dict)
     content["msgtype"] = msgtype
 
     assert media_module.is_encrypted_media_event_source(event_source) is False
-    assert isinstance(parse_room_message_event(event_source), nio.BadEvent)
 
 
 @pytest.mark.asyncio
@@ -223,7 +198,7 @@ async def test_malformed_encrypted_media_preserves_bad_event_diagnostic(
         },
     }
     with caplog.at_level(logging.WARNING, logger="nio.events.misc"):
-        parsed_event = parse_room_message_event(event_source)
+        parsed_event = media_module.parse_matrix_media_event_source(event_source)
 
     captured_logs = "\n".join(record.getMessage() for record in caplog.records)
     assert isinstance(parsed_event, nio.BadEvent)
@@ -247,7 +222,7 @@ def test_plain_media_validation_warning_preserves_cause_without_payload(
     }
 
     with caplog.at_level(logging.WARNING, logger="nio.events.misc"):
-        parsed_event = parse_room_message_event(event_source)
+        parsed_event = media_module.parse_matrix_media_event_source(event_source)
 
     captured_logs = "\n".join(record.getMessage() for record in caplog.records)
     assert isinstance(parsed_event, nio.BadEvent)

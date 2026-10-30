@@ -1213,22 +1213,24 @@ async def test_edit_without_previous_response_event_is_skipped(tmp_path: Path) -
 
 
 @pytest.mark.asyncio
-async def test_edit_context_realigned_to_recorded_thread_root(tmp_path: Path) -> None:
-    """An edit resolved outside the recorded thread refetches history for the recorded root."""
-    record = _turn_record(thread_id=THREAD_ID)
+@pytest.mark.parametrize("recorded_thread_id", [THREAD_ID, None])
+async def test_edit_context_is_read_in_the_recorded_thread(tmp_path: Path, recorded_thread_id: str | None) -> None:
+    """An edit regenerates in the thread its turn was recorded in, never one resolved from the edit again."""
+    record = _turn_record(thread_id=recorded_thread_id)
     harness = _harness(tmp_path, turn_record=record)
-    harness.resolver.extract_message_context.return_value = _message_context(thread_id=None)
-    refetched_history = [make_visible_message(body="recorded thread message", thread_id=THREAD_ID)]
-    harness.resolver.fetch_thread_history.return_value = refetched_history
+    recorded_context = _message_context(thread_id=recorded_thread_id)
+    harness.resolver.extract_message_context.return_value = recorded_context
     event, event_info = _edit_event()
 
     await _handle_edit(harness, event, event_info)
 
-    harness.resolver.fetch_thread_history.assert_awaited_once_with(
-        ROOM_ID,
-        THREAD_ID,
+    harness.resolver.extract_message_context.assert_awaited_once_with(
+        harness.room,
+        event,
+        thread_id=recorded_thread_id,
     )
-    assert harness.generate_response.await_args.args[0].thread_history == refetched_history
+    harness.resolver.fetch_thread_history.assert_not_awaited()
+    assert harness.generate_response.await_args.args[0].thread_history == recorded_context.thread_history
 
 
 @pytest.mark.asyncio

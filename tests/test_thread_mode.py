@@ -29,8 +29,7 @@ from mindroom.dispatch_source import HOOK_DISPATCH_SOURCE_KIND, SCHEDULED_SOURCE
 from mindroom.entity_resolution import entity_identity_registry
 from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
 from mindroom.matrix.conversation_hydration import HYDRATED_PROMPT_WINDOW_MESSAGES
-from mindroom.matrix.conversation_reads import ConversationReader, ThreadReadMode
-from mindroom.matrix.event_info import EventInfo
+from mindroom.matrix.conversation_reads import ConversationReader
 from mindroom.matrix.thread_history_result import ThreadHistoryResult, thread_history_result
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.message_target import MessageTarget
@@ -53,7 +52,6 @@ from tests.conftest import (
     TEST_PASSWORD,
     bind_runtime_paths,
     delivered_matrix_event,
-    dispatch_context_result,
     install_runtime_journal_support,
     install_send_response_mock,
     make_conversation_reader_mock,
@@ -634,7 +632,7 @@ class TestCreateSessionIdWithNoneThread:
 
 
 class TestExtractMessageContextRoomMode:
-    """Test _extract_message_context skips thread derivation in room mode."""
+    """Test the thread decision and context skip thread derivation in room mode."""
 
     @pytest.mark.asyncio
     async def test_room_mode_skips_derive(
@@ -643,7 +641,7 @@ class TestExtractMessageContextRoomMode:
         assistant_user: AgentMatrixUser,
         tmp_path: Path,
     ) -> None:
-        """In room mode, _extract_message_context should return empty thread context."""
+        """In room mode, a threaded message is decided room-level and gets empty thread context."""
         bot = _agent_bot(config=room_mode_config, agent_user=assistant_user, storage_path=tmp_path)
         bot.client = MagicMock()
 
@@ -656,16 +654,22 @@ class TestExtractMessageContextRoomMode:
         event.source = {
             "event_id": "$event123",
             "sender": "@user:localhost",
-            "content": {"body": "hello", "msgtype": "m.text"},
+            "content": {
+                "body": "hello",
+                "msgtype": "m.text",
+                "m.relates_to": {"rel_type": "m.thread", "event_id": "$thread123"},
+            },
             "type": "m.room.message",
         }
 
         with patch("mindroom.conversation_resolver.check_agent_mentioned", return_value=([], False, False)):
-            ctx = await bot._conversation_resolver.extract_message_context(room, event)
+            thread_id = await bot._conversation_resolver.coalescing_thread_id(room, event)
+            ctx = await bot._conversation_resolver.extract_dispatch_context(room, event, thread_id=thread_id)
 
+        assert thread_id is None
         assert ctx.is_thread is False
         assert ctx.thread_id is None
-        assert ctx.thread_history == []
+        assert ctx.thread_history == ()
 
     @pytest.mark.asyncio
     async def test_room_override_skips_derive_only_for_matching_room(
@@ -692,15 +696,6 @@ class TestExtractMessageContextRoomMode:
         )
         bot = _agent_bot(config=config, agent_user=assistant_user, storage_path=tmp_path)
         bot.client = MagicMock()
-        thread_context = MagicMock(
-            is_thread=True,
-            thread_id="$thread123",
-            thread_history=[{"event_id": "$thread123"}],
-            requires_model_history_refresh=False,
-        )
-        unwrap_extracted_collaborator(bot._conversation_resolver)._resolve_thread_context = AsyncMock(
-            return_value=thread_context,
-        )
 
         room = _matrix_room("!room:localhost", name="Room Override")
 
@@ -713,21 +708,16 @@ class TestExtractMessageContextRoomMode:
         event.source = {
             "event_id": "$event123",
             "sender": "@user:localhost",
-            "content": {"body": "hello", "msgtype": "m.text"},
+            "content": {
+                "body": "hello",
+                "msgtype": "m.text",
+                "m.relates_to": {"rel_type": "m.thread", "event_id": "$thread123"},
+            },
             "type": "m.room.message",
         }
 
-        with patch("mindroom.conversation_resolver.check_agent_mentioned", return_value=([], False, False)):
-            room_mode_ctx = await bot._conversation_resolver.extract_message_context(room, event)
-            thread_mode_ctx = await bot._conversation_resolver.extract_message_context(other_room, event)
-
-        assert room_mode_ctx.is_thread is False
-        assert room_mode_ctx.thread_id is None
-        assert room_mode_ctx.thread_history == []
-
-        assert thread_mode_ctx.is_thread is True
-        assert thread_mode_ctx.thread_id == "$thread123"
-        assert thread_mode_ctx.thread_history == [{"event_id": "$thread123"}]
+        assert await bot._conversation_resolver.coalescing_thread_id(room, event) is None
+        assert await bot._conversation_resolver.coalescing_thread_id(other_room, event) == "$thread123"
 
     def test_target_helpers_delegate_to_conversation_resolver(
         self,
@@ -796,18 +786,22 @@ class TestExtractMessageContextRoomMode:
             requires_model_history_refresh=True,
         )
         bot._conversation_resolver.extract_dispatch_context = AsyncMock(
-            return_value=dispatch_context_result(context),
+            return_value=context,
         )
         bot._conversation_resolver.extract_message_context = AsyncMock(return_value=context)
 
-        dispatch_result = await bot._conversation_resolver.extract_dispatch_context(room, event)
-        assert dispatch_result.context is context
-        assert await bot._conversation_resolver.extract_message_context(room, event) is context
+        assert await bot._conversation_resolver.extract_dispatch_context(room, event, thread_id="$thread123") is context
+        assert await bot._conversation_resolver.extract_message_context(room, event, thread_id="$thread123") is context
 
-        bot._conversation_resolver.extract_dispatch_context.assert_awaited_once_with(room, event)
+        bot._conversation_resolver.extract_dispatch_context.assert_awaited_once_with(
+            room,
+            event,
+            thread_id="$thread123",
+        )
         bot._conversation_resolver.extract_message_context.assert_awaited_once_with(
             room,
             event,
+            thread_id="$thread123",
         )
 
     def test_hot_reloaded_bot_uses_updated_thread_mode_without_restart(
@@ -952,7 +946,7 @@ class TestExtractMessageContextRoomMode:
         assert target.session_id == create_session_id("!room:localhost", "$new-root:localhost")
 
     @pytest.mark.asyncio
-    async def test_extract_message_context_uses_strict_history_after_degraded_dispatch_read(
+    async def test_extract_dispatch_context_uses_strict_history_after_degraded_dispatch_read(
         self,
         assistant_user: AgentMatrixUser,
         tmp_path: Path,
@@ -1015,11 +1009,11 @@ class TestExtractMessageContextRoomMode:
             "read_strict",
             new=AsyncMock(return_value=strict_page),
         ) as mock_strict_history:
-            context_result = await bot._conversation_resolver.extract_dispatch_context(
+            context = await bot._conversation_resolver.extract_dispatch_context(
                 room,
                 event,
+                thread_id="$thread-root:localhost",
             )
-            context = context_result.context
 
         assert context.is_thread is True
         assert context.thread_id == "$thread-root:localhost"
@@ -1521,7 +1515,7 @@ class TestExtractedModuleLoggerRebinding:
             "mindroom.conversation_resolver.check_agent_mentioned",
             return_value=([assistant_user.matrix_id], True, False),
         ):
-            await bot._conversation_resolver.extract_message_context(room, event)
+            await bot._conversation_resolver.extract_dispatch_context(room, event, thread_id=None)
 
         original_logger.info.assert_any_call("Mentioned", event_id="$event123", room_id="!room:localhost")
         rebound_logger.info.assert_not_called()
@@ -1576,7 +1570,7 @@ class TestExtractedModuleLoggerRebinding:
         rebound_logger.error.assert_not_called()
 
     @pytest.mark.asyncio
-    async def test_explicit_thread_id_inherits_known_thread_for_plain_reply_target(
+    async def test_coalescing_thread_id_inherits_known_thread_for_plain_reply_target(
         self,
         assistant_user: AgentMatrixUser,
         tmp_path: Path,
@@ -1632,14 +1626,7 @@ class TestExtractedModuleLoggerRebinding:
                 },
             ),
         )
-        thread_lookup = await bot._conversation_resolver._explicit_thread_id_for_event(
-            room.room_id,
-            event.event_id,
-            EventInfo.from_event(event.source),
-            mode=ThreadReadMode.NONBLOCKING,
-        )
-
-        assert thread_lookup.thread_id == "$threadroot"
+        assert await bot._conversation_resolver.coalescing_thread_id(room, event) == "$threadroot"
 
     @pytest.mark.asyncio
     async def test_direct_thread_dispatch_uses_bounded_full_history(
@@ -1717,8 +1704,11 @@ class TestExtractedModuleLoggerRebinding:
                 new=AsyncMock(side_effect=AssertionError("dispatch planning should not block on the homeserver")),
             ),
         ):
-            context_result = await bot._conversation_resolver.extract_dispatch_context(room, event)
-        context = context_result.context
+            context = await bot._conversation_resolver.extract_dispatch_context(
+                room,
+                event,
+                thread_id="$thread-root:localhost",
+            )
 
         assert context.is_thread is True
         assert context.thread_id == "$thread-root:localhost"

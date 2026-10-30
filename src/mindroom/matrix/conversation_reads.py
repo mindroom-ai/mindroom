@@ -357,7 +357,9 @@ async def complete_thread_history(
     room_id: str,
     thread_id: str,
 ) -> ThreadHistoryResult:
-    """Return one thread's complete history for a caller outside the turn path.
+    """Return one thread's history, strictly read and bounded, for a caller outside the turn path.
+
+    ``is_full_history`` says whether the page is the whole thread.
 
     Summaries, schedulers, and Matrix tools all want the same thing the prompt
     path wants -- a conversation with nothing missing from it -- without also
@@ -372,3 +374,22 @@ async def complete_thread_history(
     # populated the conversation reached the beginning of it.
     truncated = await reader.hydration_was_truncated(room_id=room_id, thread_id=thread_id)
     return projected_thread_history(page, complete=not truncated)
+
+
+async def refetched_thread_history(
+    reader: ConversationReader,
+    room_id: str,
+    thread_id: str,
+) -> ThreadHistoryResult:
+    """Return one thread's history after walking it on the server again.
+
+    For the caller that must observe a write another runtime just made, which
+    the projection only learns about when sync delivers it. The result is full
+    history only when this walk itself read the whole thread, so a caller that
+    needs proof of absence can tell a fresh view from an old marker's.
+    """
+    walk_complete = await reader.hydrator.rewalk(room_id=room_id, thread_id=thread_id)
+    history = await complete_thread_history(reader, room_id, thread_id)
+    if walk_complete:
+        return history
+    return thread_history_result(history, is_full_history=False)

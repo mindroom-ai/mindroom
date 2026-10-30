@@ -84,7 +84,6 @@ from mindroom.command_turn_executor import CommandTurnExecutor
 from mindroom.config.load_attempt import ConfigLoad, ConfigLoadResult
 from mindroom.config.main import Config, load_config
 from mindroom.constants import RuntimePaths, resolve_runtime_paths, safe_replace
-from mindroom.conversation_resolver import DispatchContextResult, MessageContext
 from mindroom.delivery_gateway import DeliveryGateway, EditTextRequest, FinalDeliveryRequest, SendTextRequest
 from mindroom.dispatch_handoff import (
     MediaDispatchEvent,
@@ -490,7 +489,6 @@ __all__ = [
     "create_mock_room",
     "delivered_matrix_event",
     "delivered_matrix_side_effect",
-    "dispatch_context_result",
     "drain_coalescing",
     "enforce_turn_authorization",
     "handle_card_response_for_test",
@@ -798,18 +796,13 @@ async def prepare_history_for_run_for_test(
     )
 
 
-def dispatch_context_result(context: MessageContext) -> DispatchContextResult:
-    """Wrap a stable message context in the dispatch extraction result shape."""
-    return DispatchContextResult(context=context, thread_context=None)
-
-
 def prepared_dispatch_result(dispatch: PreparedDispatch) -> _DispatchPreparation:
     """Wrap a prepared dispatch in the private turn-dispatch preparation result shape."""
     return _DispatchPreparation(
         dispatch=dispatch,
         replay_guard=_ReplayGuardContext(
-            history=dispatch.context.replay_guard_history,
-            degraded=is_thread_history_degraded(dispatch.context.replay_guard_history),
+            history=dispatch.context.thread_history,
+            degraded=is_thread_history_degraded(dispatch.context.thread_history),
             thread_id=dispatch.target.resolved_thread_id,
         ),
     )
@@ -2301,6 +2294,8 @@ def make_conversation_reader_mock() -> ConversationReader:
             read=AsyncMock(return_value=page),
             read_strict=AsyncMock(return_value=page),
             latest_thread_event_id=AsyncMock(return_value=None),
+            # A walk on the server again that read the whole conversation.
+            hydrator=SimpleNamespace(rewalk=AsyncMock(return_value=True)),
         ),
     )
 

@@ -246,14 +246,16 @@ class TestDMMessageContext:
             }
             event.event_id = "test_event"
 
-            # Extract context
-            context = await bot._conversation_resolver.extract_message_context(room, event)
+            # Decide the thread, then extract context in it
+            thread_id = await bot._conversation_resolver.coalescing_thread_id(room, event)
+            context = await bot._conversation_resolver.extract_dispatch_context(room, event, thread_id=thread_id)
 
             # DMs now use threads like regular rooms - no special fetch
             # fetch_thread_history should NOT be called for non-thread messages
             mock_fetch.assert_not_called()
+            assert thread_id is None
             assert not context.is_thread
-            assert context.thread_history == []
+            assert context.thread_history == ()
 
 
 @pytest.mark.asyncio

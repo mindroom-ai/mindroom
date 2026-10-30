@@ -217,22 +217,6 @@ def _resolved_trusted_sender_ids(
     return trusted_visible_sender_ids(config, runtime_paths)
 
 
-async def extract_visible_message(
-    event: VisibleRoomMessage,
-    client: nio.AsyncClient | None = None,
-    *,
-    config: Config,
-    runtime_paths: RuntimePaths,
-    trusted_sender_ids: Collection[str] | None = None,
-) -> dict[str, Any]:
-    """Extract one visible message using runtime-derived sender trust."""
-    return await extract_and_resolve_message(
-        event,
-        client,
-        trusted_sender_ids=_resolved_trusted_sender_ids(config, runtime_paths, trusted_sender_ids),
-    )
-
-
 async def extract_visible_edit_body(
     event_source: dict[str, Any],
     client: nio.AsyncClient | None = None,
@@ -656,7 +640,6 @@ __all__ = [
     "bundled_replacement_body",
     "bundled_replacement_candidates",
     "extract_visible_edit_body",
-    "extract_visible_message",
     "is_visible_room_message",
     "message_preview",
     "replace_visible_message",

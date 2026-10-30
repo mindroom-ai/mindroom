@@ -8,9 +8,9 @@ Ownership map:
 A tool that sends or redacts a Matrix event (see `mindroom.custom_tools.matrix_api`)
 has to know whether that event belongs to a thread before it goes out, because
 the answer decides what it sends, and no later correction is possible. It asks
-here, through `resolve_event_thread_impact_for_client` or
-`resolve_redaction_thread_impact_for_client`, and refuses the operation when the
-answer is UNKNOWN.
+here, through `resolve_event_thread_impact` or `resolve_redaction_thread_impact`,
+and refuses the operation when the answer is UNKNOWN. Root proofs read the
+conversation projection, the same reader turns use.
 
 The mapping is total and UNKNOWN fails closed. THREADED names the thread,
 ROOM_LEVEL says there is none, and UNKNOWN says membership could not be proven --
@@ -28,21 +28,19 @@ from enum import Enum, auto
 from typing import TYPE_CHECKING
 
 from mindroom.matrix.event_info import EventInfo, event_type_supports_thread_relations
+from mindroom.matrix.projected_thread_membership import projected_thread_membership_access
 from mindroom.matrix.thread_membership import (
     ThreadResolution,
     ThreadResolutionState,
     resolve_event_thread_membership,
     resolve_related_event_thread_membership,
 )
-from mindroom.matrix.thread_room_scan import (
-    RoomScanRelations,
-    room_scan_membership_access_for_client,
-)
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
 
-    import nio
+    from mindroom.matrix.conversation_reads import ConversationReader
+    from mindroom.matrix.relation_lookup import RelationLookup
 
 
 def _redaction_can_affect_thread_membership(event_info: EventInfo) -> bool:
@@ -69,13 +67,13 @@ def _mutation_thread_impact_from_resolution(
     return MutationThreadImpactState.UNKNOWN
 
 
-async def resolve_event_thread_impact_for_client(
-    client: nio.AsyncClient,
+async def resolve_event_thread_impact(
+    reader: ConversationReader,
+    relations: RelationLookup,
     room_id: str,
     *,
     event_type: str,
     content: Mapping[str, object],
-    relations: RoomScanRelations,
 ) -> MutationThreadImpactState:
     """Return the mutation impact for one outbound client-side event payload."""
     if event_type != "m.room.message":
@@ -85,10 +83,7 @@ async def resolve_event_thread_impact_for_client(
         resolution = await resolve_event_thread_membership(
             room_id,
             event_info,
-            access=room_scan_membership_access_for_client(
-                client,
-                relations=relations,
-            ),
+            access=projected_thread_membership_access(reader, relations),
         )
     except Exception:
         # Two different failures, one correct answer. An ancestor that cannot
@@ -102,12 +97,12 @@ async def resolve_event_thread_impact_for_client(
     return _mutation_thread_impact_from_resolution(resolution)
 
 
-async def resolve_redaction_thread_impact_for_client(
-    client: nio.AsyncClient,
+async def resolve_redaction_thread_impact(
+    reader: ConversationReader,
+    relations: RelationLookup,
     room_id: str,
     *,
     event_id: str,
-    relations: RoomScanRelations,
 ) -> MutationThreadImpactState:
     """Return the mutation impact for one client-side redaction target."""
     target_event_info = await relations.event_info(room_id, event_id)
@@ -117,10 +112,7 @@ async def resolve_redaction_thread_impact_for_client(
         resolution = await resolve_related_event_thread_membership(
             room_id,
             event_id,
-            access=room_scan_membership_access_for_client(
-                client,
-                relations=relations,
-            ),
+            access=projected_thread_membership_access(reader, relations),
         )
     except Exception:
         return MutationThreadImpactState.UNKNOWN

@@ -10,7 +10,6 @@ from mindroom.custom_tools.attachment_helpers import (
     room_access_allowed,
 )
 from mindroom.custom_tools.tool_payloads import custom_tool_payload
-from mindroom.matrix.thread_room_scan import resolve_thread_root_event_id_for_client
 from mindroom.thread_summary import ThreadSummaryWriteError, set_manual_thread_summary
 from mindroom.tool_system.runtime_context import get_tool_runtime_context
 
@@ -86,12 +85,6 @@ class ThreadSummaryTools(Toolkit):
             context,
             room_id=resolved_room_id,
             thread_id=thread_id,
-            normalize_thread_id=lambda normalize_room_id, normalize_event_id: resolve_thread_root_event_id_for_client(
-                context.client,
-                normalize_room_id,
-                normalize_event_id,
-                relations=context.relations,
-            ),
             fail_closed_on_normalization_error=True,
         )
         if thread_target.error is not None:

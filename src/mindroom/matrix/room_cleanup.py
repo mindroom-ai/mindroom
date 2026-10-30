@@ -114,8 +114,8 @@ async def cleanup_all_orphaned_bots(
 ) -> dict[str, list[str]]:
     """Remove retired bot identities from all rooms the client has access to.
 
-    This should be called by a user or bot with admin/moderator permissions
-    in the rooms that need cleaning.
+    Called with the running router's client, which needs kick permission in
+    the rooms it cleans and is never itself a retired identity.
     Configured entities manage their own memberships, even if startup has not
     completed or their invited-room retention records have not been restored.
 
@@ -133,8 +133,7 @@ async def cleanup_all_orphaned_bots(
 
     logger.info("orphaned_bot_cleanup_started", room_count=len(joined_rooms))
 
-    # Only independent rooms overlap. Each room still kicks other orphans
-    # before leaving itself, and cancellation drains all workers before return.
+    # Only independent rooms overlap, and cancellation drains all workers before return.
     pending_rooms = iter(joined_rooms)
 
     async def clean_rooms() -> None:

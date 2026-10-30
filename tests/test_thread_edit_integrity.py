@@ -34,11 +34,13 @@ from mindroom.matrix.client_visible_messages import (
     bundled_replacement_candidates,
     is_visible_room_message,
 )
+from mindroom.matrix.conversation_reads import ConversationReader, complete_thread_history
 from mindroom.matrix.event_info import EventInfo
-from mindroom.matrix.room_history_reads import bundled_replacement_source
+from tests.test_conversation_hydration import ROOM, FakeClient, admit_all, hydrator, raw
 from tests.threading_helpers import _emote_event, _image_event, _text_event
 
 if TYPE_CHECKING:
+    from mindroom.event_journal import EventJournalStore
     from mindroom.matrix.message_content import VisibleRoomMessage
 
 _AUTHOR = "@author:localhost"
@@ -662,7 +664,7 @@ class TestEveryMsgtypeWithABodyRanksTogether:
 
 
 class TestBundledReplacementPrecedence:
-    """Every reader of a bundled `m.replace` has to pick the same candidate."""
+    """A bundled `m.replace` is read as the candidate that claims to be the newest."""
 
     @staticmethod
     def _bundled(*, under_unsigned: bool) -> dict[str, object]:
@@ -713,19 +715,51 @@ class TestBundledReplacementPrecedence:
 
         assert [candidate["event_id"] for candidate in candidates[:2]] == ["$newest", "$stale"]
 
-    @pytest.mark.parametrize("under_unsigned", [True, False])
-    def test_history_reconstruction_picks_what_a_preview_would_show(self, *, under_unsigned: bool) -> None:
-        """The two readers used to disagree, so one message read two ways.
 
-        History searched `unsigned` alone and preferred `event`; a preview
-        searched both containers and preferred `latest_event`. A source with
-        both keys therefore showed one body in a thread preview and another in
-        the history rebuilt beside it.
+class TestTheProjectionShowsWhatTheRoomPublished:
+    """A thread read from the conversation projection, the reader tools and turns share."""
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("admitted_live", [False, True])
+    async def test_new_content_on_a_message_that_replaces_nothing_is_not_its_body(
+        self,
+        journal_store: EventJournalStore,
+        *,
+        admitted_live: bool,
+    ) -> None:
+        """`m.new_content` on an event with no `m.replace` relation is not a body.
+
+        Any sender can ship a second body inside a message that revises nothing.
+        A read that showed it would hand a model a message disagreeing with the
+        body the room displays, whether the thread arrived by sync or by a walk.
         """
-        source = self._bundled(under_unsigned=under_unsigned)
+        principal = journal_store.principal("agent@general")
+        picture = {"url": "mxc://example.org/picture", "info": {"mimetype": "image/png", "w": 8, "h": 8}}
+        root = raw("$root", "the question", ts=1_000)
+        image = {
+            "event_id": "$image",
+            "sender": _IMPOSTOR,
+            "origin_server_ts": 2_000,
+            "type": "m.room.message",
+            "content": {
+                "msgtype": "m.image",
+                "body": "the caption the room shows",
+                **picture,
+                "m.new_content": {"msgtype": "m.image", "body": "a body nothing published", **picture},
+                "m.relates_to": {"rel_type": "m.thread", "event_id": "$root"},
+            },
+        }
+        if admitted_live:
+            await admit_all(principal, [root, image])
+        client = FakeClient(events={"$root": root, "$image": image}, relations={"$root": [image]})
 
-        chosen = bundled_replacement_source(source)
+        history = await complete_thread_history(
+            ConversationReader(store=principal, hydrator=hydrator(principal, client)),
+            ROOM,
+            "$root",
+        )
 
-        assert chosen is not None
-        assert chosen["event_id"] == "$newest"
-        assert chosen == bundled_replacement_candidates(source)[0]
+        picture_message = next(message for message in history if message.event_id == "$image")
+        assert picture_message.body == "the caption the room shows"
+        assert picture_message.content["body"] == "the caption the room shows"
+        assert picture_message.latest_event_id == "$image", "nothing was replaced, so nothing is a later revision"

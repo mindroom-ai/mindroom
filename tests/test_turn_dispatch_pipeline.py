@@ -439,8 +439,7 @@ class TestAgentBot(AgentBotTestBase):
                 new=AsyncMock(side_effect=AssertionError("dispatch blocked on a strict read")),
             ),
         ):
-            context_result = await bot._conversation_resolver.extract_dispatch_context(room, event)
-            context = context_result.context
+            context = await bot._conversation_resolver.extract_dispatch_context(room, event, thread_id="$thread_root")
 
         assert context.is_thread is True
         assert context.thread_id == "$thread_root"
@@ -505,8 +504,7 @@ class TestAgentBot(AgentBotTestBase):
         )
         dispatch_history = thread_history_result(seeded, is_full_history=True)
 
-        context_result = await bot._conversation_resolver.extract_dispatch_context(room, event)
-        context = context_result.context
+        context = await bot._conversation_resolver.extract_dispatch_context(room, event, thread_id="$thread_root")
 
         assert context.is_thread is True
         assert context.thread_id == "$thread_root"

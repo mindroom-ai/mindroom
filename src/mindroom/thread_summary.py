@@ -23,9 +23,13 @@ from mindroom.helper_usage import record_system_usage
 from mindroom.llm.provider import RequestOverrides
 from mindroom.logging_config import get_logger
 from mindroom.matrix.client_delivery import send_message_result
-from mindroom.matrix.conversation_reads import DeliveredResponse, complete_thread_history, with_delivered_response
+from mindroom.matrix.conversation_reads import (
+    DeliveredResponse,
+    complete_thread_history,
+    refetched_thread_history,
+    with_delivered_response,
+)
 from mindroom.matrix.message_builder import build_message_content
-from mindroom.matrix.room_history_reads import fetch_thread_messages_from_source
 from mindroom.providers import registry as provider_registry
 from mindroom.requester_identity import is_human_requester_id
 from mindroom.thread_tag_vocabulary import (
@@ -661,7 +665,7 @@ async def _thread_is_resolved(
 
 
 async def _summary_delivery_timestamp(
-    client: nio.AsyncClient,
+    conversation_reader: ConversationReader,
     room_id: str,
     thread_id: str,
     *,
@@ -676,26 +680,30 @@ async def _summary_delivery_timestamp(
     while this process is waiting on the model, and the finished automatic
     summary would then land on top of a title the user just fixed.
 
-    Reads from source rather than through the projection. A projected read is
-    strict about staleness but still answers from local state, so it cannot
+    Walks the thread on the server again before reading the projection. A
+    projected read alone answers from what sync has delivered, so it cannot
     observe a pin another runtime just wrote — which is the only case this
-    guard exists for. Costs one homeserver read per generated summary, so once
-    per interval rather than per turn.
+    guard exists for. Costs one thread walk per generated summary, so once per
+    interval rather than per turn.
 
-    A failed re-read suppresses delivery because a pin may have landed while
-    the model ran. The caller records the completed generation attempt so the
+    A failed or partial re-read suppresses delivery because a pin may have
+    landed while the model ran. The caller records the completed generation attempt so the
     next eligible pass retries at the normal interval without a retry storm.
     """
     try:
-        thread_history = await fetch_thread_messages_from_source(
-            client,
-            room_id,
-            thread_id,
-            trusted_sender_ids=trusted_sender_ids,
-        )
+        thread_history = await refetched_thread_history(conversation_reader, room_id, thread_id)
     except Exception:
         logger.exception(
             "Pin re-check before summary delivery failed; discarding automatic summary",
+            room_id=room_id,
+            thread_id=thread_id,
+        )
+        return None
+    if not thread_history.is_full_history:
+        # A pin can be an edit of any earlier summary, so a walk that did not
+        # read the whole thread cannot rule one out.
+        logger.info(
+            "Pin re-check before summary delivery could not read the whole thread; discarding automatic summary",
             room_id=room_id,
             thread_id=thread_id,
         )
@@ -823,7 +831,7 @@ async def _deliver_generated_summary(
     """
     try:
         generated_at = await _summary_delivery_timestamp(
-            client,
+            conversation_reader,
             room_id,
             thread_id,
             trusted_sender_ids=trusted_sender_ids,

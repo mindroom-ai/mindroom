@@ -14,7 +14,6 @@ from mindroom.custom_tools.attachment_helpers import (
 )
 from mindroom.custom_tools.tool_payloads import custom_tool_payload
 from mindroom.matrix.room_history_reads import RoomThreadsPageError
-from mindroom.matrix.thread_room_scan import resolve_thread_root_event_id_for_client
 from mindroom.thread_tag_vocabulary import (
     format_tag_vocabulary_for_description,
     load_tag_vocabulary_snapshot,
@@ -173,12 +172,6 @@ class ThreadTagsTools(Toolkit):
             context,
             room_id=resolved_room_id,
             thread_id=thread_id,
-            normalize_thread_id=lambda normalize_room_id, normalize_event_id: resolve_thread_root_event_id_for_client(
-                context.client,
-                normalize_room_id,
-                normalize_event_id,
-                relations=context.relations,
-            ),
         )
         if thread_target.error is not None:
             return self._payload(
@@ -281,14 +274,6 @@ class ThreadTagsTools(Toolkit):
                 context,
                 room_id=resolved_room_id,
                 thread_id=effective_thread_id,
-                normalize_thread_id=lambda normalize_room_id, normalize_event_id: (
-                    resolve_thread_root_event_id_for_client(
-                        context.client,
-                        normalize_room_id,
-                        normalize_event_id,
-                        relations=context.relations,
-                    )
-                ),
                 allow_context_fallback=False,
             )
             if thread_target.error is not None:
@@ -487,12 +472,6 @@ class ThreadTagsTools(Toolkit):
             context,
             room_id=resolved_room_id,
             thread_id=effective_thread_id,
-            normalize_thread_id=lambda normalize_room_id, normalize_event_id: resolve_thread_root_event_id_for_client(
-                context.client,
-                normalize_room_id,
-                normalize_event_id,
-                relations=context.relations,
-            ),
             allow_context_fallback=False,
         )
         if thread_target.error is not None:

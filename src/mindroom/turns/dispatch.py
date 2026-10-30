@@ -32,6 +32,7 @@ from mindroom.logging_config import bound_log_context
 from mindroom.matrix.event_info import EventInfo
 from mindroom.matrix.media import is_matrix_media_dispatch_event
 from mindroom.matrix.member_display_names import room_member_display_names
+from mindroom.matrix.thread_diagnostics import is_thread_history_degraded
 from mindroom.matrix.thread_history_result import ThreadHistoryResult
 from mindroom.response_admission import ResponseAdmissionRefusedError, admitted_response_decision
 from mindroom.response_payload_preparation import (
@@ -733,45 +734,16 @@ class TurnDispatcher:
 
     async def _prepare_dispatch(self, turn: PreparedTurn) -> _DispatchPreparation | None:
         """Build the shared dispatch context for one prepared inbound turn."""
-        extract_context_start = time.monotonic()
         room, event, facts, handled_turn = turn.room, turn.event, turn.facts, turn.handled_turn
         requester_user_id = facts.run_requester_id
         thread_id = turn.coalescing_key.thread_id
         context_event = _room_level_context_event(event) if thread_id is None else event
         if await self._settle_unmentioned_managed_sender_before_hydration(turn, context_event):
             return None
-        # A router relay of a human's message reads only the context the relay names.
-        if turn.command is None and facts.router_relay and facts.original_sender_is_human:
-            dispatch_context_result = await self.deps.resolver.extract_trusted_router_relay_context(
-                room,
-                context_event,
-                payload_metadata=turn.payload,
-            )
-            context_path = "trusted_router_relay"
-        else:
-            dispatch_context_result = await self.deps.resolver.extract_dispatch_context(
-                room,
-                context_event,
-                payload_metadata=turn.payload,
-            )
-            context_path = "normal" if turn.command is None else "command"
-        emit_elapsed_timing(
-            "dispatch_handoff.prepare_dispatch.extract_context",
-            extract_context_start,
-            path=context_path,
-        )
-        context = dispatch_context_result.context
-        thread_context = dispatch_context_result.thread_context
         target_start = time.monotonic()
-        if context.thread_id != thread_id:
-            context = replace(
-                context,
-                is_thread=thread_id is not None,
-                thread_id=thread_id,
-                thread_history=[],
-                replay_guard_history=[],
-                requires_model_history_refresh=False,
-            )
+        # The thread ingress decided, under the room's current thread mode. The
+        # context reads the thread the target says the source is in, so the
+        # two cannot disagree about which conversation this turn belongs to.
         target = self.deps.resolver.build_message_target(
             room_id=room.room_id,
             thread_id=thread_id,
@@ -783,6 +755,29 @@ class TurnDispatcher:
             "dispatch_handoff.prepare_dispatch.build_message_target",
             target_start,
             resolved_thread_id=target.resolved_thread_id,
+        )
+        extract_context_start = time.monotonic()
+        # A router relay of a human's message reads only the context the relay names.
+        if turn.command is None and facts.router_relay and facts.original_sender_is_human:
+            context = await self.deps.resolver.extract_trusted_router_relay_context(
+                room,
+                context_event,
+                thread_id=target.source_thread_id,
+                payload_metadata=turn.payload,
+            )
+            context_path = "trusted_router_relay"
+        else:
+            context = await self.deps.resolver.extract_dispatch_context(
+                room,
+                context_event,
+                thread_id=target.source_thread_id,
+                payload_metadata=turn.payload,
+            )
+            context_path = "normal" if turn.command is None else "command"
+        emit_elapsed_timing(
+            "dispatch_handoff.prepare_dispatch.extract_context",
+            extract_context_start,
+            path=context_path,
         )
         envelope_start = time.monotonic()
         envelope = self.deps.resolver.build_envelope(
@@ -825,18 +820,10 @@ class TurnDispatcher:
             await self.deps.visible_responses.settle_source_events_ignored(handled_turn)
             return None
 
-        replay_guard = (
-            _ReplayGuardContext(
-                history=thread_context.replay_guard_history,
-                degraded=thread_context.replay_guard_degraded,
-                thread_id=target.resolved_thread_id or thread_context.candidate_thread_root_id,
-            )
-            if thread_context is not None
-            else _ReplayGuardContext(
-                history=context.replay_guard_history,
-                degraded=False,
-                thread_id=target.resolved_thread_id,
-            )
+        replay_guard = _ReplayGuardContext(
+            history=context.thread_history,
+            degraded=is_thread_history_degraded(context.thread_history),
+            thread_id=target.resolved_thread_id,
         )
 
         return _DispatchPreparation(

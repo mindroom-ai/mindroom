@@ -17,9 +17,10 @@ from mindroom.matrix_identifiers import extract_server_name_from_homeserver
 
 _MATRIX_STATE_STAT_TTL_SECONDS = 1.0
 _matrix_state_write_generation = 0
-# Serializes read-modify-write cycles across threads; the event loop gets the
-# same guarantee from ``update_matrix_state`` never awaiting.
-_matrix_state_update_lock = threading.Lock()
+# Serializes every write of the file across threads, including the legacy
+# rewrite a read can trigger; the event loop gets the same guarantee from no
+# writer ever awaiting. Reentrant because an update reads through the loader.
+_matrix_state_write_lock = threading.RLock()
 
 
 class MatrixAccount(BaseModel):
@@ -129,7 +130,7 @@ def update_matrix_state[T](runtime_paths: constants.RuntimePaths, mutate: Callab
     ``mutate`` must not block or wait on anything.
     """
     state_file = constants.matrix_state_file(runtime_paths=runtime_paths)
-    with _matrix_state_update_lock:
+    with _matrix_state_write_lock:
         state = _load_matrix_state_file(state_file, current_domain=_current_runtime_domain(runtime_paths))
         result = mutate(state)
         _write_matrix_state_file(state_file, state.model_dump(mode="json"))
@@ -255,15 +256,16 @@ def _current_runtime_domain(runtime_paths: constants.RuntimePaths) -> str:
 
 def _load_matrix_state_file(state_file: Path, *, current_domain: str) -> MatrixState:
     """Load one Matrix state file from disk."""
-    if not state_file.exists():
-        return MatrixState()
-    with state_file.open(encoding="utf-8") as f:
-        data = yaml_io.safe_load(f) or {}
-    state = MatrixState.model_validate(data)
-    normalized_data = normalize_legacy_matrix_state(state, data, current_domain=current_domain)
-    if normalized_data is not None:
-        _write_matrix_state_file(state_file, normalized_data)
-    return state
+    with _matrix_state_write_lock:
+        if not state_file.exists():
+            return MatrixState()
+        with state_file.open(encoding="utf-8") as f:
+            data = yaml_io.safe_load(f) or {}
+        state = MatrixState.model_validate(data)
+        normalized_data = normalize_legacy_matrix_state(state, data, current_domain=current_domain)
+        if normalized_data is not None:
+            _write_matrix_state_file(state_file, normalized_data)
+        return state
 
 
 def _write_matrix_state_file(state_file: Path, data: dict[str, object]) -> None:

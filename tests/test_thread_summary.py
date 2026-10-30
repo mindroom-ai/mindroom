@@ -707,10 +707,10 @@ class TestMaybeGenerateThreadSummary:
         """Provide one explicit conversation-cache mock per test."""
         self.conversation_reader = make_conversation_reader_mock()
         # The pre-delivery pin guard reads from the homeserver; default "no pin".
-        self.source_read = AsyncMock(return_value=[])
+        self.source_read = AsyncMock(return_value=_full([]))
         with (
             patch(
-                "mindroom.thread_summary.fetch_thread_messages_from_source",
+                "mindroom.thread_summary.refetched_thread_history",
                 new=self.source_read,
             ),
             patch(
@@ -3042,9 +3042,9 @@ class TestPinLandingDuringGeneration:
     """A pin written while the model runs must supersede the in-flight summary."""
 
     def _reader(self, source_history: list | None = None) -> AsyncMock:
-        # The guard must read from the homeserver, not through the projection:
-        # a pin written by another runtime has not reached this one yet.
-        return AsyncMock(return_value=source_history if source_history is not None else [])
+        # The guard must walk the thread on the homeserver again: a pin written
+        # by another runtime has not reached this one's projection yet.
+        return AsyncMock(return_value=_full(source_history if source_history is not None else []))
 
     async def _run(self, source_read: AsyncMock, histories: list) -> AsyncMock:
         client = _mock_client()
@@ -3064,7 +3064,7 @@ class TestPinLandingDuringGeneration:
                 return_value="Freshly generated title",
             ),
             patch(
-                "mindroom.thread_summary.fetch_thread_messages_from_source",
+                "mindroom.thread_summary.refetched_thread_history",
                 new=source_read,
             ),
             patch(
@@ -3086,11 +3086,10 @@ class TestPinLandingDuringGeneration:
         return deliver
 
     async def test_pin_visible_only_at_source_discards_the_summary(self) -> None:
-        """A pin another runtime wrote is not in this runtime's cache yet.
+        """A pin another runtime wrote is not in this runtime's projection yet.
 
-        A projected read is strict about staleness but still answers from local
-        state, so reading through it would miss the pin and deliver the stale
-        title anyway.
+        A projected read alone answers from what sync has delivered, so it
+        would miss the pin and deliver the stale title anyway.
         """
         unpinned = _make_thread_history(12)
         pinned_at_source = [
@@ -3113,6 +3112,16 @@ class TestPinLandingDuringGeneration:
         deliver = await self._run(self._reader(source_history=list(unpinned)), [unpinned, unpinned])
 
         deliver.assert_awaited_once()
+
+    async def test_a_recheck_that_could_not_read_the_whole_thread_suppresses_delivery(self) -> None:
+        """A pin can be an edit of any earlier summary, so a partial re-read cannot rule one out."""
+        unpinned = _make_thread_history(12)
+        partial = AsyncMock(return_value=thread_history_result(list(unpinned), is_full_history=False))
+
+        deliver = await self._run(partial, [unpinned, unpinned])
+
+        deliver.assert_not_awaited()
+        partial.assert_awaited_once()
 
     async def test_recheck_failure_suppresses_delivery_until_next_interval(self) -> None:
         """An unverified title is dropped without retrying the model on every turn."""
@@ -3265,7 +3274,7 @@ class TestSummaryReadsTheAnswerItWasQueuedFor:
                 "mindroom.thread_summary.current_internal_sender_ids",
                 return_value=frozenset({_PROJECTION_BOT}),
             ),
-            patch("mindroom.thread_summary.fetch_thread_messages_from_source", new=AsyncMock(return_value=[])),
+            patch("mindroom.thread_summary.refetched_thread_history", new=AsyncMock(return_value=_full([]))),
             patch("mindroom.thread_summary.maybe_rebuild_tag_vocabulary", new=AsyncMock(return_value=None)),
             patch("mindroom.thread_summary.get_thread_tags", new=AsyncMock(return_value=None)),
             patch("mindroom.thread_summary._generate_summary", new=generate),

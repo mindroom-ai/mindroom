@@ -35,7 +35,6 @@ from tests.conftest import (
     agent_response_should_respond,
     bind_runtime_paths,
     create_mock_room,
-    dispatch_context_result,
     drain_coalescing,
     install_generate_response_mock,
     install_runtime_journal_support,
@@ -572,12 +571,10 @@ class TestCommandHandling:
         _sync_turn_policy_runtime(bot)
         install_generate_response_mock(bot, generate_response)
         bot._conversation_resolver.extract_dispatch_context = AsyncMock(
-            return_value=dispatch_context_result(
-                _message_context(
-                    am_i_mentioned=False,
-                    is_thread=False,
-                    thread_id=None,
-                ),
+            return_value=_message_context(
+                am_i_mentioned=False,
+                is_thread=False,
+                thread_id=None,
             ),
         )
 
@@ -896,7 +893,7 @@ class TestCommandHandling:
             ),
         )
         bot._conversation_resolver.extract_dispatch_context = AsyncMock(
-            return_value=dispatch_context_result(mock_context),
+            return_value=mock_context,
         )
 
         # Mock decide_agent_response to return a positive decision
@@ -956,7 +953,7 @@ class TestCommandHandling:
                 thread_id="$thread123",
             )
             bot._conversation_resolver.extract_dispatch_context = AsyncMock(
-                return_value=dispatch_context_result(mock_context),
+                return_value=mock_context,
             )
 
             # Create a room and event with error message from router agent
@@ -1082,7 +1079,7 @@ class TestCommandHandling:
             thread_id="$thread123",
         )
         bot._conversation_resolver.extract_dispatch_context = AsyncMock(
-            return_value=dispatch_context_result(mock_context),
+            return_value=mock_context,
         )
 
         # Create router's error message event
@@ -1147,7 +1144,7 @@ class TestCommandHandling:
                 thread_id="$thread123",
             )
             bot._conversation_resolver.extract_dispatch_context = AsyncMock(
-                return_value=dispatch_context_result(mock_context),
+                return_value=mock_context,
             )
 
             room = nio.MatrixRoom(room_id="!test:server", own_user_id=bot.client.user_id)
@@ -1320,7 +1317,7 @@ class TestCommandHandling:
             thread_history=thread_history,
         )
         bot._conversation_resolver.extract_dispatch_context = AsyncMock(
-            return_value=dispatch_context_result(mock_context),
+            return_value=mock_context,
         )
 
         # Create room and event for router error
@@ -1446,7 +1443,7 @@ class TestCommandHandling:
             ],
         )
         bot._conversation_resolver.extract_dispatch_context = AsyncMock(
-            return_value=dispatch_context_result(mock_context),
+            return_value=mock_context,
         )
 
         # Create room and event for router error
@@ -1509,7 +1506,7 @@ class TestCommandHandling:
             thread_id="$thread123",
         )
         bot._conversation_resolver.extract_dispatch_context = AsyncMock(
-            return_value=dispatch_context_result(mock_context),
+            return_value=mock_context,
         )
 
         # Create a room and event with message from router agent without mentions
@@ -1715,7 +1712,7 @@ class TestRouterSkipsSingleAgent:
             thread_id=None,
         )
         bot._conversation_resolver.extract_dispatch_context = AsyncMock(
-            return_value=dispatch_context_result(mock_context),
+            return_value=mock_context,
         )
 
         # Create room with only general agent (router is also there but excluded from available agents)
@@ -1803,7 +1800,7 @@ class TestRouterSkipsSingleAgent:
             thread_id=None,
         )
         bot._conversation_resolver.extract_dispatch_context = AsyncMock(
-            return_value=dispatch_context_result(mock_context),
+            return_value=mock_context,
         )
 
         # Create room with multiple agents
@@ -1913,7 +1910,7 @@ class TestRouterSkipsSingleAgent:
             ],
         )
         bot._conversation_resolver.extract_dispatch_context = AsyncMock(
-            return_value=dispatch_context_result(mock_context),
+            return_value=mock_context,
         )
 
         room = nio.MatrixRoom(room_id="!test:server", own_user_id="@mindroom_router:localhost")
@@ -2172,7 +2169,7 @@ class TestRouterSkipsSingleAgent:
             thread_id=None,
         )
         bot._conversation_resolver.extract_dispatch_context = AsyncMock(
-            return_value=dispatch_context_result(mock_context),
+            return_value=mock_context,
         )
 
         with (

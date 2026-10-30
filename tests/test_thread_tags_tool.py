@@ -150,7 +150,7 @@ async def test_tag_thread_defaults_to_context_thread_id() -> None:
 
     with (
         patch(
-            "mindroom.custom_tools.thread_tags.resolve_thread_root_event_id_for_client",
+            "mindroom.custom_tools.attachment_helpers.resolve_thread_root_event_id",
             new=AsyncMock(return_value="$ctx-thread:localhost"),
         ) as mock_normalize,
         patch(
@@ -165,10 +165,10 @@ async def test_tag_thread_defaults_to_context_thread_id() -> None:
     assert payload["action"] == "tag"
     assert payload["thread_id"] == "$ctx-thread:localhost"
     mock_normalize.assert_awaited_once_with(
-        context.client,
+        context.conversation_reader,
+        context.relations,
         context.room_id,
         "$ctx-thread:localhost",
-        relations=context.relations,
     )
     mock_set.assert_awaited_once_with(
         context.client,
@@ -190,7 +190,7 @@ async def test_tag_thread_preserves_bridge_actor_across_general_tool_identity() 
 
     with (
         patch(
-            "mindroom.custom_tools.thread_tags.resolve_thread_root_event_id_for_client",
+            "mindroom.custom_tools.attachment_helpers.resolve_thread_root_event_id",
             new=AsyncMock(return_value="$thread:localhost"),
         ),
         patch(
@@ -221,7 +221,7 @@ async def test_tag_thread_explicit_thread_id_overrides_same_room_context() -> No
 
     with (
         patch(
-            "mindroom.custom_tools.thread_tags.resolve_thread_root_event_id_for_client",
+            "mindroom.custom_tools.attachment_helpers.resolve_thread_root_event_id",
             new=AsyncMock(return_value="$explicit-thread:localhost"),
         ) as mock_normalize,
         patch(
@@ -235,10 +235,10 @@ async def test_tag_thread_explicit_thread_id_overrides_same_room_context() -> No
     assert payload["status"] == "ok"
     assert payload["thread_id"] == "$explicit-thread:localhost"
     mock_normalize.assert_awaited_once_with(
-        context.client,
+        context.conversation_reader,
+        context.relations,
         context.room_id,
         "$explicit-event:localhost",
-        relations=context.relations,
     )
     mock_set.assert_awaited_once_with(
         context.client,
@@ -259,7 +259,7 @@ async def test_tag_thread_explicit_same_room_id_keeps_context_thread_fallback() 
 
     with (
         patch(
-            "mindroom.custom_tools.thread_tags.resolve_thread_root_event_id_for_client",
+            "mindroom.custom_tools.attachment_helpers.resolve_thread_root_event_id",
             new=AsyncMock(return_value="$ctx-thread:localhost"),
         ) as mock_normalize,
         patch(
@@ -273,10 +273,10 @@ async def test_tag_thread_explicit_same_room_id_keeps_context_thread_fallback() 
     assert payload["status"] == "ok"
     assert payload["thread_id"] == "$ctx-thread:localhost"
     mock_normalize.assert_awaited_once_with(
-        context.client,
+        context.conversation_reader,
+        context.relations,
         context.room_id,
         "$ctx-thread:localhost",
-        relations=context.relations,
     )
     mock_set.assert_awaited_once_with(
         context.client,
@@ -297,7 +297,7 @@ async def test_untag_thread_defaults_to_context_thread_id() -> None:
 
     with (
         patch(
-            "mindroom.custom_tools.thread_tags.resolve_thread_root_event_id_for_client",
+            "mindroom.custom_tools.attachment_helpers.resolve_thread_root_event_id",
             new=AsyncMock(return_value="$ctx-thread:localhost"),
         ) as mock_normalize,
         patch(
@@ -313,10 +313,10 @@ async def test_untag_thread_defaults_to_context_thread_id() -> None:
     assert payload["thread_id"] == "$ctx-thread:localhost"
     assert payload["tags"] == {}
     mock_normalize.assert_awaited_once_with(
-        context.client,
+        context.conversation_reader,
+        context.relations,
         context.room_id,
         "$ctx-thread:localhost",
-        relations=context.relations,
     )
     mock_remove.assert_awaited_once_with(
         context.client,
@@ -335,7 +335,7 @@ async def test_untag_thread_coerces_free_form_tag_input() -> None:
 
     with (
         patch(
-            "mindroom.custom_tools.thread_tags.resolve_thread_root_event_id_for_client",
+            "mindroom.custom_tools.attachment_helpers.resolve_thread_root_event_id",
             new=AsyncMock(return_value="$ctx-thread:localhost"),
         ),
         patch(
@@ -367,7 +367,7 @@ async def test_untag_thread_preserves_long_canonical_tag_beside_prefix_sibling()
 
     with (
         patch(
-            "mindroom.custom_tools.thread_tags.resolve_thread_root_event_id_for_client",
+            "mindroom.custom_tools.attachment_helpers.resolve_thread_root_event_id",
             new=AsyncMock(return_value="$ctx-thread:localhost"),
         ),
         patch(
@@ -397,7 +397,7 @@ async def test_untag_thread_explicit_thread_id_overrides_same_room_context() -> 
 
     with (
         patch(
-            "mindroom.custom_tools.thread_tags.resolve_thread_root_event_id_for_client",
+            "mindroom.custom_tools.attachment_helpers.resolve_thread_root_event_id",
             new=AsyncMock(return_value="$explicit-thread:localhost"),
         ) as mock_normalize,
         patch(
@@ -411,10 +411,10 @@ async def test_untag_thread_explicit_thread_id_overrides_same_room_context() -> 
     assert payload["status"] == "ok"
     assert payload["thread_id"] == "$explicit-thread:localhost"
     mock_normalize.assert_awaited_once_with(
-        context.client,
+        context.conversation_reader,
+        context.relations,
         context.room_id,
         "$explicit-event:localhost",
-        relations=context.relations,
     )
     mock_remove.assert_awaited_once_with(
         context.client,
@@ -433,7 +433,7 @@ async def test_untag_thread_explicit_same_room_id_keeps_context_thread_fallback(
 
     with (
         patch(
-            "mindroom.custom_tools.thread_tags.resolve_thread_root_event_id_for_client",
+            "mindroom.custom_tools.attachment_helpers.resolve_thread_root_event_id",
             new=AsyncMock(return_value="$ctx-thread:localhost"),
         ) as mock_normalize,
         patch(
@@ -447,10 +447,10 @@ async def test_untag_thread_explicit_same_room_id_keeps_context_thread_fallback(
     assert payload["status"] == "ok"
     assert payload["thread_id"] == "$ctx-thread:localhost"
     mock_normalize.assert_awaited_once_with(
-        context.client,
+        context.conversation_reader,
+        context.relations,
         context.room_id,
         "$ctx-thread:localhost",
-        relations=context.relations,
     )
     mock_remove.assert_awaited_once_with(
         context.client,
@@ -469,7 +469,7 @@ async def test_list_thread_tags_defaults_to_context_thread_id() -> None:
 
     with (
         patch(
-            "mindroom.custom_tools.thread_tags.resolve_thread_root_event_id_for_client",
+            "mindroom.custom_tools.attachment_helpers.resolve_thread_root_event_id",
             new=AsyncMock(return_value="$ctx-thread:localhost"),
         ) as mock_normalize,
         patch(
@@ -489,10 +489,10 @@ async def test_list_thread_tags_defaults_to_context_thread_id() -> None:
     assert payload["thread_id"] == "$ctx-thread:localhost"
     assert payload["tags"]["resolved"]["note"] == "done"
     mock_normalize.assert_awaited_once_with(
-        context.client,
+        context.conversation_reader,
+        context.relations,
         context.room_id,
         "$ctx-thread:localhost",
-        relations=context.relations,
     )
     mock_list.assert_awaited_once_with(
         context.client,
@@ -511,7 +511,7 @@ async def test_list_thread_tags_explicit_thread_id_overrides_same_room_context()
 
     with (
         patch(
-            "mindroom.custom_tools.thread_tags.resolve_thread_root_event_id_for_client",
+            "mindroom.custom_tools.attachment_helpers.resolve_thread_root_event_id",
             new=AsyncMock(return_value="$explicit-thread:localhost"),
         ) as mock_normalize,
         patch(
@@ -530,10 +530,10 @@ async def test_list_thread_tags_explicit_thread_id_overrides_same_room_context()
     assert payload["thread_id"] == "$explicit-thread:localhost"
     assert payload["tags"]["resolved"]["note"] == "done"
     mock_normalize.assert_awaited_once_with(
-        context.client,
+        context.conversation_reader,
+        context.relations,
         context.room_id,
         "$explicit-event:localhost",
-        relations=context.relations,
     )
     mock_list.assert_awaited_once_with(
         context.client,
@@ -650,7 +650,7 @@ async def test_tag_thread_normalizes_explicit_thread_id_before_write() -> None:
 
     with (
         patch(
-            "mindroom.custom_tools.thread_tags.resolve_thread_root_event_id_for_client",
+            "mindroom.custom_tools.attachment_helpers.resolve_thread_root_event_id",
             new=AsyncMock(return_value="$thread-root:localhost"),
         ) as mock_normalize,
         patch(
@@ -675,10 +675,10 @@ async def test_tag_thread_normalizes_explicit_thread_id_before_write() -> None:
     assert payload["status"] == "ok"
     assert payload["thread_id"] == "$thread-root:localhost"
     mock_normalize.assert_awaited_once_with(
-        context.client,
+        context.conversation_reader,
+        context.relations,
         context.room_id,
         "$reply-event:localhost",
-        relations=context.relations,
     )
     mock_set.assert_awaited_once_with(
         context.client,
@@ -699,7 +699,7 @@ async def test_tag_thread_returns_error_when_normalization_fails() -> None:
 
     with (
         patch(
-            "mindroom.custom_tools.thread_tags.resolve_thread_root_event_id_for_client",
+            "mindroom.custom_tools.attachment_helpers.resolve_thread_root_event_id",
             new=AsyncMock(return_value=None),
         ),
         tool_runtime_context(context),
@@ -720,7 +720,7 @@ async def test_tag_thread_surfaces_write_failures() -> None:
 
     with (
         patch(
-            "mindroom.custom_tools.thread_tags.resolve_thread_root_event_id_for_client",
+            "mindroom.custom_tools.attachment_helpers.resolve_thread_root_event_id",
             new=AsyncMock(return_value="$thread:localhost"),
         ),
         patch(
@@ -1121,7 +1121,7 @@ async def test_list_thread_tags_explicit_same_room_target_can_list_room_wide_fro
 
     with (
         patch(
-            "mindroom.custom_tools.thread_tags.resolve_thread_root_event_id_for_client",
+            "mindroom.custom_tools.attachment_helpers.resolve_thread_root_event_id",
             new=AsyncMock(),
         ) as mock_normalize,
         patch(
@@ -1282,7 +1282,7 @@ async def test_list_thread_tags_include_untagged_suppresses_in_thread_context_fa
 
     with (
         patch(
-            "mindroom.custom_tools.thread_tags.resolve_thread_root_event_id_for_client",
+            "mindroom.custom_tools.attachment_helpers.resolve_thread_root_event_id",
             new=AsyncMock(),
         ) as mock_normalize,
         patch(
@@ -1415,7 +1415,7 @@ async def test_list_thread_tags_filters_thread_specific_payload() -> None:
 
     with (
         patch(
-            "mindroom.custom_tools.thread_tags.resolve_thread_root_event_id_for_client",
+            "mindroom.custom_tools.attachment_helpers.resolve_thread_root_event_id",
             new=AsyncMock(return_value="$ctx-thread:localhost"),
         ),
         patch(
@@ -1457,7 +1457,7 @@ async def test_list_thread_tags_thread_specific_include_exclude_filters() -> Non
 
     with (
         patch(
-            "mindroom.custom_tools.thread_tags.resolve_thread_root_event_id_for_client",
+            "mindroom.custom_tools.attachment_helpers.resolve_thread_root_event_id",
             new=AsyncMock(return_value="$ctx-thread:localhost"),
         ),
         patch(
@@ -1513,7 +1513,7 @@ async def test_untag_thread_canonical_skips_normalization() -> None:
 
     with (
         patch(
-            "mindroom.custom_tools.thread_tags.resolve_thread_root_event_id_for_client",
+            "mindroom.custom_tools.attachment_helpers.resolve_thread_root_event_id",
             new=AsyncMock(return_value=None),
         ) as mock_normalize,
         patch(
@@ -1638,7 +1638,7 @@ async def test_tag_thread_coerces_free_form_tag_input() -> None:
 
     with (
         patch(
-            "mindroom.custom_tools.thread_tags.resolve_thread_root_event_id_for_client",
+            "mindroom.custom_tools.attachment_helpers.resolve_thread_root_event_id",
             new=AsyncMock(return_value="$ctx-thread:localhost"),
         ),
         patch(
@@ -1671,7 +1671,7 @@ async def test_tag_thread_preserves_long_canonical_tag() -> None:
 
     with (
         patch(
-            "mindroom.custom_tools.thread_tags.resolve_thread_root_event_id_for_client",
+            "mindroom.custom_tools.attachment_helpers.resolve_thread_root_event_id",
             new=AsyncMock(return_value="$ctx-thread:localhost"),
         ),
         patch(

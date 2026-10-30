@@ -25,7 +25,6 @@ from tests.bot_helpers import make_test_agent_bot
 from tests.conftest import (
     TEST_PASSWORD,
     bind_runtime_paths,
-    dispatch_context_result,
     drain_coalescing,
     install_runtime_journal_support,
     install_send_response_mock,
@@ -220,7 +219,7 @@ class TestResponseTrackingRegression:
         mock_context.has_non_agent_mentions = False
         mock_context.requires_model_history_refresh = False
         bot._conversation_resolver.extract_dispatch_context = AsyncMock(
-            return_value=dispatch_context_result(mock_context),
+            return_value=mock_context,
         )
 
         send_response = AsyncMock(return_value="$response_456")

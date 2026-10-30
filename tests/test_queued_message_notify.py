@@ -8,7 +8,7 @@ from copy import deepcopy
 from dataclasses import dataclass, field, replace
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, Literal, Self, cast
-from unittest.mock import ANY, AsyncMock, MagicMock, patch
+from unittest.mock import ANY, AsyncMock, MagicMock, call, patch
 
 import nio
 import pytest
@@ -916,22 +916,6 @@ async def test_post_response_effects_queues_summary_with_stale_hint_inside_margi
     config.defaults.thread_summary_first_threshold = 5
     runtime_paths = runtime_paths_for(config)
     client = make_matrix_client_mock()
-    client.room_messages.return_value = nio.RoomMessagesResponse(
-        room_id="!room:localhost",
-        chunk=[
-            nio.RoomMessageText.from_dict(
-                {
-                    "type": "m.room.message",
-                    "event_id": "$thread",
-                    "sender": "@user0:localhost",
-                    "origin_server_ts": 0,
-                    "content": {"msgtype": "m.text", "body": "Thread root"},
-                },
-            ),
-        ],
-        start="",
-        end=None,
-    )
     config.defaults.enable_streaming = False
     runtime = BotRuntimeState(
         client=client,
@@ -1006,11 +990,10 @@ async def test_post_response_effects_queues_summary_with_stale_hint_inside_margi
         assert scheduled_tasks
         await asyncio.gather(*scheduled_tasks)
 
-    conversation_reader.read_strict.assert_awaited_once_with(
-        room_id="!room:localhost",
-        thread_id="$thread",
-        limit=HYDRATED_PROMPT_WINDOW_MESSAGES,
-    )
+    # One strict read for the gate, one after the pin re-check walked the thread again.
+    expected_read = call(room_id="!room:localhost", thread_id="$thread", limit=HYDRATED_PROMPT_WINDOW_MESSAGES)
+    assert conversation_reader.read_strict.await_args_list == [expected_read, expected_read]
+    conversation_reader.hydrator.rewalk.assert_awaited_once_with(room_id="!room:localhost", thread_id="$thread")
     # Nothing has echoed the response back, so the projection this pass reads
     # stops one message short of the thread. It summarizes the projected
     # messages plus the answer it was queued for, and counts that answer -- the

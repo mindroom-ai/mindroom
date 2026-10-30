@@ -15,11 +15,8 @@ from mindroom.matrix.thread_membership import (
     resolve_event_thread_membership,
     resolve_related_event_thread_id_best_effort,
     resolve_related_event_thread_membership,
-    room_scan_thread_membership_access,
     thread_messages_thread_membership_access,
 )
-from mindroom.matrix.thread_projection import resolve_thread_ids_for_event_infos
-from tests.cpu_budget_helpers import cpu_budget
 from tests.threading_helpers import (
     ThreadingBehaviorTestBase,
 )
@@ -142,150 +139,6 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
         assert resolution.thread_id == thread_root_id
 
     @pytest.mark.asyncio
-    async def test_resolve_thread_ids_for_event_infos_reaches_fixpoint_across_transitive_chain(
-        self,
-    ) -> None:
-        """Map-backed resolution should derive thread IDs even when children are visited before parents."""
-        room_id = "!test:localhost"
-        thread_root_id = "$thread_root:localhost"
-        thread_reply_id = "$thread_reply:localhost"
-        plain_reply_1_id = "$plain_reply_1:localhost"
-        plain_reply_2_id = "$plain_reply_2:localhost"
-        event_infos = {
-            thread_reply_id: EventInfo.from_event(
-                {
-                    "content": {
-                        "body": "thread reply",
-                        "msgtype": "m.text",
-                        "m.relates_to": {
-                            "rel_type": "m.thread",
-                            "event_id": thread_root_id,
-                        },
-                    },
-                    "event_id": thread_reply_id,
-                    "sender": "@user:localhost",
-                    "origin_server_ts": 1,
-                    "room_id": room_id,
-                    "type": "m.room.message",
-                },
-            ),
-            plain_reply_1_id: EventInfo.from_event(
-                {
-                    "content": {
-                        "body": "plain reply 1",
-                        "msgtype": "m.text",
-                        "m.relates_to": {"m.in_reply_to": {"event_id": thread_reply_id}},
-                    },
-                    "event_id": plain_reply_1_id,
-                    "sender": "@user:localhost",
-                    "origin_server_ts": 2,
-                    "room_id": room_id,
-                    "type": "m.room.message",
-                },
-            ),
-            plain_reply_2_id: EventInfo.from_event(
-                {
-                    "content": {
-                        "body": "plain reply 2",
-                        "msgtype": "m.text",
-                        "m.relates_to": {"m.in_reply_to": {"event_id": plain_reply_1_id}},
-                    },
-                    "event_id": plain_reply_2_id,
-                    "sender": "@user:localhost",
-                    "origin_server_ts": 3,
-                    "room_id": room_id,
-                    "type": "m.room.message",
-                },
-            ),
-        }
-
-        resolved_thread_ids = await resolve_thread_ids_for_event_infos(
-            room_id,
-            event_infos=event_infos,
-            ordered_event_ids=[
-                plain_reply_2_id,
-                plain_reply_1_id,
-                thread_reply_id,
-            ],
-        )
-
-        assert resolved_thread_ids == {
-            thread_reply_id: thread_root_id,
-            plain_reply_1_id: thread_root_id,
-            plain_reply_2_id: thread_root_id,
-        }
-
-    @pytest.mark.asyncio
-    async def test_resolve_thread_ids_for_event_infos_proves_roots_without_rescanning_every_event(self) -> None:
-        """Thousands of plain replies to one relation-free message resolve within a CPU budget."""
-
-        def message(event_id: str, relates_to: dict[str, object] | None = None) -> EventInfo:
-            content: dict[str, object] = {"body": event_id, "msgtype": "m.text"}
-            if relates_to is not None:
-                content["m.relates_to"] = relates_to
-            return EventInfo.from_event({"content": content, "event_id": event_id, "type": "m.room.message"})
-
-        event_infos = {
-            "$root": message("$root"),
-            "$child": message("$child", {"rel_type": "m.thread", "event_id": "$root"}),
-            "$child_reply": message("$child_reply", {"m.in_reply_to": {"event_id": "$child"}}),
-            "$plain": message("$plain"),
-            **{
-                f"$plain_reply_{index}": message(f"$plain_reply_{index}", {"m.in_reply_to": {"event_id": "$plain"}})
-                for index in range(5_000)
-            },
-        }
-
-        with cpu_budget(0.5):
-            resolved_thread_ids = await resolve_thread_ids_for_event_infos(
-                "!test:localhost",
-                event_infos=event_infos,
-                ordered_event_ids=list(event_infos),
-            )
-
-        assert resolved_thread_ids == {"$child": "$root", "$child_reply": "$root"}
-
-    @pytest.mark.asyncio
-    @pytest.mark.parametrize("descendants_first", [False, True])
-    async def test_resolve_thread_ids_for_event_infos_resolves_a_long_plain_reply_chain_without_rewalking(
-        self,
-        descendants_first: bool,
-    ) -> None:
-        """Thousands of chained plain replies under a relation-free message resolve within a CPU budget in either order."""
-
-        def message(event_id: str, relates_to: dict[str, object] | None = None) -> EventInfo:
-            content: dict[str, object] = {"body": event_id, "msgtype": "m.text"}
-            if relates_to is not None:
-                content["m.relates_to"] = relates_to
-            return EventInfo.from_event({"content": content, "event_id": event_id, "type": "m.room.message"})
-
-        event_infos = {
-            "$root": message("$root"),
-            "$child": message("$child", {"rel_type": "m.thread", "event_id": "$root"}),
-            "$child_reply": message("$child_reply", {"m.in_reply_to": {"event_id": "$child"}}),
-            "$child_reply_reply": message("$child_reply_reply", {"m.in_reply_to": {"event_id": "$child_reply"}}),
-            "$plain": message("$plain"),
-            "$plain_reply_0": message("$plain_reply_0", {"m.in_reply_to": {"event_id": "$plain"}}),
-            **{
-                f"$plain_reply_{index}": message(
-                    f"$plain_reply_{index}",
-                    {"m.in_reply_to": {"event_id": f"$plain_reply_{index - 1}"}},
-                )
-                for index in range(1, 5_000)
-            },
-        }
-
-        ordered_event_ids = list(event_infos)
-        with cpu_budget(0.5):
-            resolved_thread_ids = await resolve_thread_ids_for_event_infos(
-                "!test:localhost",
-                event_infos=event_infos,
-                ordered_event_ids=ordered_event_ids[::-1] if descendants_first else ordered_event_ids,
-            )
-
-        assert resolved_thread_ids == {"$child": "$root", "$child_reply": "$root", "$child_reply_reply": "$root"}
-
-    @pytest.mark.asyncio
     async def test_resolve_event_thread_membership_follows_reaction_target_transitively(
         self,
     ) -> None:
@@ -365,185 +218,6 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
 
         assert resolution.state is ThreadResolutionState.THREADED
         assert resolution.thread_id == thread_root_id
-
-    @pytest.mark.asyncio
-    async def test_room_scan_thread_membership_access_treats_root_with_children_as_threaded(
-        self,
-    ) -> None:
-        """Room-scan-backed access should apply one shared root-children rule."""
-        room_id = "!test:localhost"
-        thread_root_id = "$thread_root:localhost"
-        plain_reply_id = "$plain_reply:localhost"
-        root_event_info = EventInfo.from_event(
-            {
-                "content": {
-                    "body": "root",
-                    "msgtype": "m.text",
-                },
-                "event_id": thread_root_id,
-                "sender": "@user:localhost",
-                "origin_server_ts": 1,
-                "room_id": room_id,
-                "type": "m.room.message",
-            },
-        )
-        plain_reply_event_info = EventInfo.from_event(
-            {
-                "content": {
-                    "body": "plain reply",
-                    "msgtype": "m.text",
-                    "m.relates_to": {"m.in_reply_to": {"event_id": thread_root_id}},
-                },
-                "event_id": plain_reply_id,
-                "sender": "@user:localhost",
-                "origin_server_ts": 2,
-                "room_id": room_id,
-                "type": "m.room.message",
-            },
-        )
-
-        async def lookup_thread_id(_room_id: str, _event_id: str) -> str | None:
-            return None
-
-        async def fetch_event_info(_room_id: str, event_id: str) -> EventInfo | None:
-            if event_id == thread_root_id:
-                return root_event_info
-            if event_id == plain_reply_id:
-                return plain_reply_event_info
-            return None
-
-        async def fetch_thread_event_sources(
-            lookup_room_id: str,
-            requested_thread_root_id: str,
-        ) -> tuple[list[dict[str, object]], bool]:
-            assert lookup_room_id == room_id
-            assert requested_thread_root_id == thread_root_id
-            return [
-                {
-                    "content": {"body": "root", "msgtype": "m.text"},
-                    "event_id": thread_root_id,
-                    "type": "m.room.message",
-                },
-                {
-                    "content": {
-                        "body": "child",
-                        "msgtype": "m.text",
-                        "m.relates_to": {
-                            "event_id": thread_root_id,
-                            "rel_type": "m.thread",
-                        },
-                    },
-                    "event_id": "$child:localhost",
-                    "type": "m.room.message",
-                },
-            ], True
-
-        resolution = await resolve_event_thread_membership(
-            room_id,
-            plain_reply_event_info,
-            event_id=plain_reply_id,
-            access=room_scan_thread_membership_access(
-                lookup_thread_id=lookup_thread_id,
-                fetch_event_info=fetch_event_info,
-                fetch_thread_event_sources=fetch_thread_event_sources,
-            ),
-        )
-
-        assert resolution.state is ThreadResolutionState.THREADED
-        assert resolution.thread_id == thread_root_id
-
-    @pytest.mark.asyncio
-    async def test_room_scan_thread_membership_access_does_not_treat_root_edit_as_child_proof(
-        self,
-    ) -> None:
-        """A root edit alone should not prove that plain replies to the root belong to a thread."""
-        room_id = "!test:localhost"
-        thread_root_id = "$thread_root:localhost"
-        plain_reply_id = "$plain_reply:localhost"
-        root_event_info = EventInfo.from_event(
-            {
-                "content": {
-                    "body": "root",
-                    "msgtype": "m.text",
-                },
-                "event_id": thread_root_id,
-                "sender": "@user:localhost",
-                "origin_server_ts": 1,
-                "room_id": room_id,
-                "type": "m.room.message",
-            },
-        )
-        plain_reply_event_info = EventInfo.from_event(
-            {
-                "content": {
-                    "body": "plain reply",
-                    "msgtype": "m.text",
-                    "m.relates_to": {"m.in_reply_to": {"event_id": thread_root_id}},
-                },
-                "event_id": plain_reply_id,
-                "sender": "@user:localhost",
-                "origin_server_ts": 2,
-                "room_id": room_id,
-                "type": "m.room.message",
-            },
-        )
-
-        async def lookup_thread_id(_room_id: str, _event_id: str) -> str | None:
-            return None
-
-        async def fetch_event_info(_room_id: str, event_id: str) -> EventInfo | None:
-            if event_id == thread_root_id:
-                return root_event_info
-            if event_id == plain_reply_id:
-                return plain_reply_event_info
-            return None
-
-        async def fetch_thread_event_sources(
-            lookup_room_id: str,
-            requested_thread_root_id: str,
-        ) -> tuple[list[dict[str, object]], bool]:
-            assert lookup_room_id == room_id
-            assert requested_thread_root_id == thread_root_id
-            return [
-                {
-                    "event_id": thread_root_id,
-                    "type": "m.room.message",
-                    "content": {
-                        "body": "root",
-                        "msgtype": "m.text",
-                    },
-                },
-                {
-                    "event_id": "$root_edit:localhost",
-                    "type": "m.room.message",
-                    "content": {
-                        "body": "* root edited",
-                        "msgtype": "m.text",
-                        "m.new_content": {
-                            "body": "root edited",
-                            "msgtype": "m.text",
-                        },
-                        "m.relates_to": {
-                            "rel_type": "m.replace",
-                            "event_id": thread_root_id,
-                        },
-                    },
-                },
-            ], True
-
-        resolution = await resolve_event_thread_membership(
-            room_id,
-            plain_reply_event_info,
-            event_id=plain_reply_id,
-            access=room_scan_thread_membership_access(
-                lookup_thread_id=lookup_thread_id,
-                fetch_event_info=fetch_event_info,
-                fetch_thread_event_sources=fetch_thread_event_sources,
-            ),
-        )
-
-        assert resolution.state is ThreadResolutionState.ROOM_LEVEL
-        assert resolution.thread_id is None
 
     @pytest.mark.asyncio
     async def test_edit_resolves_through_its_original_not_the_thread_it_names(
@@ -823,6 +497,7 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
                 lookup_thread_id=lookup_thread_id,
                 fetch_event_info=fetch_event_info,
                 fetch_thread_messages=fetch_thread_messages,
+                absence_needs_full_history=True,
             ),
         )
 
@@ -868,6 +543,7 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
                 lookup_thread_id=lookup_thread_id,
                 fetch_event_info=fetch_event_info,
                 fetch_thread_messages=fetch_thread_messages,
+                absence_needs_full_history=True,
             ),
         )
 
@@ -879,7 +555,7 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
     async def test_thread_messages_thread_membership_access_strict_resolution_propagates_root_proof_failure(
         self,
     ) -> None:
-        """Strict resolution should surface unavailable thread-root proof."""
+        """A thread read that raises leaves the proof unavailable on the candidate root, never room level."""
         room_id = "!test:localhost"
         thread_root_id = "$thread_root:localhost"
         plain_reply_event_info = EventInfo.from_event(
@@ -927,10 +603,13 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
                 lookup_thread_id=lookup_thread_id,
                 fetch_event_info=fetch_event_info,
                 fetch_thread_messages=fetch_thread_messages,
+                absence_needs_full_history=True,
             ),
         )
 
         assert resolution.state is ThreadResolutionState.INDETERMINATE
+        assert resolution.candidate_thread_root_id == thread_root_id
+        assert resolution.thread_id is None
         assert isinstance(resolution.error, RuntimeError)
         assert str(resolution.error) == "snapshot unavailable"
 
@@ -1063,6 +742,7 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
                 lookup_thread_id=lookup_thread_id,
                 fetch_event_info=fetch_event_info,
                 fetch_thread_messages=fetch_thread_messages,
+                absence_needs_full_history=True,
             ),
         )
 

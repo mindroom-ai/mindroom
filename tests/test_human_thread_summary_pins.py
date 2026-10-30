@@ -14,6 +14,7 @@ from mindroom.config.agent import AgentConfig
 from mindroom.entity_resolution import current_internal_sender_ids, entity_identity_registry
 from mindroom.matrix.conversation_reads import DeliveredResponse
 from mindroom.matrix.room_membership import ensure_room_membership_synced
+from mindroom.matrix.thread_history_result import thread_history_result
 from mindroom.thread_summary import (
     ThreadSummaryWriteError,
     _human_summary_authorizer,
@@ -96,7 +97,10 @@ async def _run_automatic_summary(
     serve_conversation_reader(reader, history, thread_id="$thread1")
     with (
         patch("mindroom.thread_summary._generate_summary", new=AsyncMock(return_value="Automatic")) as generate,
-        patch("mindroom.thread_summary.fetch_thread_messages_from_source", new=AsyncMock(return_value=source_history)),
+        patch(
+            "mindroom.thread_summary.refetched_thread_history",
+            new=AsyncMock(return_value=thread_history_result(source_history, is_full_history=True)),
+        ),
     ):
         await maybe_generate_thread_summary(
             client,
@@ -356,7 +360,10 @@ async def test_missing_room_cache_defers_shared_pin_authorization(tmp_path: Path
         generate.assert_not_awaited()
         assert "!room:x:$thread1" not in _last_summary_counts
     else:
-        with patch("mindroom.thread_summary.fetch_thread_messages_from_source", new=AsyncMock(return_value=[notice])):
+        with patch(
+            "mindroom.thread_summary.refetched_thread_history",
+            new=AsyncMock(return_value=thread_history_result([notice], is_full_history=True)),
+        ):
             assert (
                 await _summary_delivery_timestamp(
                     client,

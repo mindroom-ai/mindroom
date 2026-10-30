@@ -788,12 +788,6 @@ async def test_handle_message_edit_reuses_persisted_target_and_thread_scope(
     with (
         patch.object(bot._conversation_resolver, "extract_message_context", new_callable=AsyncMock) as mock_context,
         patch.object(
-            bot._conversation_resolver,
-            "fetch_thread_history",
-            new_callable=AsyncMock,
-            return_value=thread_history_result([], is_full_history=True),
-        ) as mock_fetch_history,
-        patch.object(
             bot._turn_store,
             "remove_stale_runs_for_edit",
             return_value=True,
@@ -801,9 +795,9 @@ async def test_handle_message_edit_reuses_persisted_target_and_thread_scope(
     ):
         mock_context.return_value = MagicMock(
             am_i_mentioned=False,
-            is_thread=False,
-            thread_id=None,
-            thread_history=[],
+            is_thread=True,
+            thread_id=stored_target.resolved_thread_id,
+            thread_history=thread_history_result([], is_full_history=True),
             mentioned_agents=[],
             has_non_agent_mentions=False,
         )
@@ -816,10 +810,7 @@ async def test_handle_message_edit_reuses_persisted_target_and_thread_scope(
         )
         await finish_edit_regenerations(bot)
 
-    mock_fetch_history.assert_awaited_once_with(
-        room.room_id,
-        stored_target.resolved_thread_id,
-    )
+    mock_context.assert_awaited_once_with(room, edit_event, thread_id=stored_target.resolved_thread_id)
     mock_remove_stale_runs.assert_called_once()
     request = mock_generate_response.call_args.args[0]
     response_target = request.response_envelope.target
@@ -2070,11 +2061,6 @@ async def test_handle_message_edit_does_not_backfill_existing_coalesced_prompt_f
     install_edit_regeneration_mock(bot, mock_generate_response)
     with (
         patch.object(bot._conversation_resolver, "extract_message_context", new_callable=AsyncMock) as mock_context,
-        patch.object(
-            bot._conversation_resolver,
-            "fetch_thread_history",
-            new=AsyncMock(return_value=thread_history_result([], is_full_history=True)),
-        ),
         patch.object(
             bot._conversation_state_writer,
             "create_storage",

@@ -545,7 +545,7 @@ async def test_matrix_api_send_event_delegates_thread_classification_to_shared_h
 
     with (
         patch(
-            "mindroom.custom_tools.matrix_api.resolve_event_thread_impact_for_client",
+            "mindroom.custom_tools.matrix_api.resolve_event_thread_impact",
             new=AsyncMock(return_value=MutationThreadImpactState.THREADED),
         ) as mock_resolve_thread_impact,
         tool_runtime_context(ctx),
@@ -860,7 +860,7 @@ async def test_matrix_api_redact_delegates_thread_classification_to_shared_helpe
 
     with (
         patch(
-            "mindroom.custom_tools.matrix_api.resolve_redaction_thread_impact_for_client",
+            "mindroom.custom_tools.matrix_api.resolve_redaction_thread_impact",
             new=AsyncMock(return_value=MutationThreadImpactState.THREADED),
         ) as mock_resolve_thread_impact,
         tool_runtime_context(ctx),

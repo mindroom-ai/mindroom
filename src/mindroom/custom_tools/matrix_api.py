@@ -20,8 +20,8 @@ from mindroom.matrix.client_delivery import send_room_event_result
 from mindroom.matrix.client_room_admin import room_admin_power_user
 from mindroom.matrix.thread_mutation_impact import (
     MutationThreadImpactState,
-    resolve_event_thread_impact_for_client,
-    resolve_redaction_thread_impact_for_client,
+    resolve_event_thread_impact,
+    resolve_redaction_thread_impact,
 )
 from mindroom.requester_identity import (
     equivalent_requester_ids,
@@ -807,11 +807,11 @@ class MatrixApiTools(Toolkit):
     ) -> str | None:
         """Return a fail-closed error when redaction thread impact cannot be resolved."""
         try:
-            thread_impact = await resolve_redaction_thread_impact_for_client(
-                context.client,
-                room_id=room_id,
+            thread_impact = await resolve_redaction_thread_impact(
+                context.conversation_reader,
+                context.relations,
+                room_id,
                 event_id=event_id,
-                relations=context.relations,
             )
         except Exception as exc:
             logger.warning(
@@ -885,12 +885,12 @@ class MatrixApiTools(Toolkit):
             return policy_error
 
         try:
-            thread_impact = await resolve_event_thread_impact_for_client(
-                context.client,
-                room_id=room_id,
+            thread_impact = await resolve_event_thread_impact(
+                context.conversation_reader,
+                context.relations,
+                room_id,
                 event_type=normalized_event_type,
                 content=normalized_content,
-                relations=context.relations,
             )
             if thread_impact is MutationThreadImpactState.UNKNOWN:
                 return self._error_payload(

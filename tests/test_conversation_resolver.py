@@ -1,9 +1,8 @@
 """Unit tests for conversation identity and ingress envelope assembly.
 
 These are characterization tests for ConversationResolver: they pin down
-thread root resolution, reply-chain fallback, candidate demotion, target
-building, and the per-turn cache scope so the planned refactor of this layer
-has a direct safety net.
+the one thread decision ingress makes, reply-chain fallback, the context read
+in the decided thread, target building, and the per-turn cache scope.
 """
 
 from __future__ import annotations
@@ -234,29 +233,29 @@ async def test_dispatch_repairs_pending_refresh_before_counting_participants(con
     reader.hydration_was_truncated.return_value = incomplete == "truncated"  # type: ignore[attr-defined]
     resolver = _resolver(config, conversation_reader=reader)
 
-    result = await resolver.extract_dispatch_context(_room(), _threaded_event())
+    context = await resolver.extract_dispatch_context(_room(), _threaded_event(), thread_id=_THREAD_ROOT)
 
     if incomplete == "refresh":
         reader.read_strict.assert_awaited_once()  # type: ignore[attr-defined]
-        assert not result.context.planning_thread_history_unavailable
-        assert {message.sender for message in result.context.planning_thread_history} == {_SENDER, _HUMAN_USER_ID}
+        assert not context.planning_thread_history_unavailable
+        assert {message.sender for message in context.planning_thread_history} == {_SENDER, _HUMAN_USER_ID}
     else:
         reader.read_strict.assert_not_awaited()  # type: ignore[attr-defined]
-        assert result.context.planning_thread_history_unavailable
+        assert context.planning_thread_history_unavailable
 
 
 @pytest.mark.asyncio
 async def test_threaded_event_resolves_explicit_thread_root(config: Config) -> None:
-    """An m.thread relation is authoritative for thread identity and the delivery target."""
+    """An m.thread relation is authoritative for the turn's thread and its context."""
     resolver = _resolver(config)
 
-    result = await resolver.extract_dispatch_context(_room(), _threaded_event())
+    thread_id = await resolver.coalescing_thread_id(_room(), _threaded_event())
+    context = await resolver.extract_dispatch_context(_room(), _threaded_event(), thread_id=thread_id)
 
-    assert result.context.is_thread is True
-    assert result.context.thread_id == _THREAD_ROOT
-    assert result.context.requires_model_history_refresh is False
-    assert result.thread_context is not None
-    assert result.thread_context.stable_target.resolved_thread_id == _THREAD_ROOT
+    assert thread_id == _THREAD_ROOT
+    assert context.is_thread is True
+    assert context.thread_id == _THREAD_ROOT
+    assert context.requires_model_history_refresh is False
 
 
 @pytest.mark.asyncio
@@ -264,12 +263,7 @@ async def test_reply_chain_inherits_the_thread_the_journal_recorded(config: Conf
     """A plain reply inherits the thread its parent was admitted into."""
     resolver = _resolver(config, relations=make_relation_lookup(threads={_PARENT: _THREAD_ROOT}))
 
-    result = await resolver.extract_dispatch_context(_room(), _reply_event())
-
-    assert result.context.is_thread is True
-    assert result.context.thread_id == _THREAD_ROOT
-    assert result.thread_context is not None
-    assert result.thread_context.stable_target.resolved_thread_id == _THREAD_ROOT
+    assert await resolver.coalescing_thread_id(_room(), _reply_event()) == _THREAD_ROOT
 
 
 @pytest.mark.asyncio
@@ -280,44 +274,42 @@ async def test_reply_to_proven_thread_root_joins_that_thread(config: Config) -> 
         conversation_reader=_conversation_reader(_projected("$child:localhost", "child")),
     )
 
-    result = await resolver.extract_dispatch_context(_room(), _reply_event())
+    thread_id = await resolver.coalescing_thread_id(_room(), _reply_event())
+    context = await resolver.extract_dispatch_context(_room(), _reply_event(), thread_id=thread_id)
 
-    assert result.context.is_thread is True
-    assert result.context.thread_id == _PARENT
-    assert [message.event_id for message in result.context.thread_history] == ["$child:localhost"]
+    assert thread_id == _PARENT
+    assert context.is_thread is True
+    assert [message.event_id for message in context.thread_history] == ["$child:localhost"]
 
 
 @pytest.mark.asyncio
 async def test_reply_to_plain_message_demotes_to_room_level(config: Config) -> None:
     """Replying to a childless event stays room-level with a room-level delivery target."""
     resolver = _resolver(config)
+    reply = _reply_event()
 
-    result = await resolver.extract_dispatch_context(_room(), _reply_event())
+    thread_id = await resolver.coalescing_thread_id(_room(), reply)
+    target = resolver.build_message_target(
+        room_id=_ROOM_ID,
+        thread_id=thread_id,
+        reply_to_event_id=reply.event_id,
+        event_source=reply.source,
+    )
 
-    assert result.context.is_thread is False
-    assert result.context.thread_id is None
-    assert result.thread_context is not None
-    assert result.thread_context.candidate_thread_root_id is None
+    assert thread_id is None
     # A reply event carries a relation, so per MSC3440 it cannot become a thread root itself.
-    assert result.thread_context.stable_target.source_thread_id is None
-    assert result.thread_context.stable_target.resolved_thread_id is None
-    assert result.thread_context.stable_target.reply_to_event_id == _EVENT_ID
+    assert target.source_thread_id is None
+    assert target.resolved_thread_id is None
+    assert target.reply_to_event_id == _EVENT_ID
 
 
 @pytest.mark.asyncio
-async def test_reply_to_missing_parent_keeps_unproven_candidate(config: Config) -> None:
-    """An unresolvable parent demotes to room level but keeps the candidate for replay safety."""
+async def test_reply_to_missing_parent_decides_no_thread(config: Config) -> None:
+    """A parent the homeserver will not serve leaves the turn without any thread, never a guessed one."""
     resolver = _resolver(config, relations=make_relation_lookup(client=_ClientWithoutEvents()))
 
-    result = await resolver.extract_dispatch_context(_room(), _reply_event())
-
-    assert result.context.is_thread is False
-    assert result.context.thread_id is None
-    assert result.thread_context is not None
-    assert result.thread_context.candidate_thread_root_id == _PARENT
-    assert result.thread_context.replay_guard_degraded is True
-    # Unproven candidates must not adopt a thread target.
-    assert result.thread_context.stable_target.resolved_thread_id is None
+    with pytest.raises(RelatedEventUnavailableError):
+        await resolver.coalescing_thread_id(_room(), _reply_event())
 
 
 @pytest.mark.parametrize(("thread_mode", "one_conversation"), [("thread", False), ("room", True)])
@@ -337,7 +329,7 @@ def test_room_is_one_conversation_only_in_room_thread_mode(
 
 @pytest.mark.asyncio
 async def test_room_thread_mode_skips_thread_resolution(tmp_path: Path) -> None:
-    """Agents in room thread mode treat every message as room-level."""
+    """Agents in room thread mode decide every message room-level and read no thread history."""
     config = bind_runtime_paths(
         Config(agents={"general": AgentConfig(display_name="General", thread_mode="room")}),
         test_runtime_paths(tmp_path),
@@ -345,11 +337,14 @@ async def test_room_thread_mode_skips_thread_resolution(tmp_path: Path) -> None:
     reader = _empty_conversation_reader()
     resolver = _resolver(config, conversation_reader=reader)
 
-    result = await resolver.extract_dispatch_context(_room(), _threaded_event())
+    thread_id = await resolver.coalescing_thread_id(_room(), _threaded_event())
+    # A trusted automation fire keeps its own root even here, and is still planned against the room.
+    rooted_context = await resolver.extract_dispatch_context(_room(), _threaded_event(), thread_id=_THREAD_ROOT)
 
-    assert result.context.is_thread is False
-    assert result.context.thread_id is None
-    assert result.thread_context is None
+    assert thread_id is None
+    assert rooted_context.thread_id == _THREAD_ROOT
+    assert rooted_context.thread_history == ()
+    assert rooted_context.requires_model_history_refresh is False
     reader.read.assert_not_awaited()  # type: ignore[attr-defined]
     reader.read_strict.assert_not_awaited()  # type: ignore[attr-defined]
 
@@ -358,12 +353,11 @@ async def test_room_thread_mode_skips_thread_resolution(tmp_path: Path) -> None:
 async def test_router_relay_context_ignores_the_thread_a_relayed_edit_names(config: Config) -> None:
     """A relayed edit cannot choose the thread the response is delivered into.
 
-    This context deliberately skips the canonical resolver so the relay does not pay for thread
-    hydration before the lock. That makes the relation written inside an ``m.new_content`` the one
-    value here nothing would ever check - and Matrix ignores it in any case, placing an edit by the
-    event it replaces. Reading it would let whoever authored the relayed payload pick the thread.
+    The relation written inside an ``m.new_content`` is one Matrix ignores, placing an edit by the
+    event it replaces. Reading it would let whoever authored the relayed payload pick the thread,
+    so the relay context takes the thread ingress decided from the edited original.
     """
-    resolver = _resolver(config)
+    resolver = _resolver(config, relations=make_relation_lookup(threads={_PARENT: None}))
     relayed_edit = _event(
         {
             "body": "* updated",
@@ -376,21 +370,29 @@ async def test_router_relay_context_ignores_the_thread_a_relayed_edit_names(conf
         },
     )
 
-    result = await resolver.extract_trusted_router_relay_context(_room(), relayed_edit)
+    thread_id = await resolver.coalescing_thread_id(_room(), relayed_edit)
+    context = await resolver.extract_trusted_router_relay_context(_room(), relayed_edit, thread_id=thread_id)
 
-    assert result.context.thread_id is None
-    assert result.context.is_thread is False
+    assert thread_id is None
+    assert context.thread_id is None
+    assert context.is_thread is False
+    assert context.requires_model_history_refresh is False
 
 
 @pytest.mark.asyncio
 async def test_router_relay_context_keeps_the_relays_own_thread_relation(config: Config) -> None:
-    """A relay that really is in a thread still resolves to it without a lookup."""
-    resolver = _resolver(config)
+    """A relay in a thread keeps it and defers the thread read until after the lock."""
+    reader = _empty_conversation_reader()
+    resolver = _resolver(config, conversation_reader=reader)
 
-    result = await resolver.extract_trusted_router_relay_context(_room(), _threaded_event())
+    context = await resolver.extract_trusted_router_relay_context(_room(), _threaded_event(), thread_id=_THREAD_ROOT)
 
-    assert result.context.thread_id == _THREAD_ROOT
-    assert result.context.is_thread is True
+    assert context.thread_id == _THREAD_ROOT
+    assert context.is_thread is True
+    assert context.thread_history == ()
+    assert context.requires_model_history_refresh is True
+    reader.read.assert_not_awaited()  # type: ignore[attr-defined]
+    reader.read_strict.assert_not_awaited()  # type: ignore[attr-defined]
 
 
 @pytest.mark.asyncio
@@ -466,13 +468,15 @@ async def test_the_turn_scope_makes_one_turn_pay_for_one_lookup(config: Config) 
     resolver = _resolver(config, relations=make_relation_lookup(client=client))
 
     async with resolver.turn_lookup_scope():
-        await resolver.extract_dispatch_context(_room(), _reply_event())
-        await resolver.extract_dispatch_context(_room(), _reply_event())
+        for _ in range(2):
+            with pytest.raises(RelatedEventUnavailableError):
+                await resolver.coalescing_thread_id(_room(), _reply_event())
     scoped = client.lookups
 
     client.lookups = 0
-    await resolver.extract_dispatch_context(_room(), _reply_event())
-    await resolver.extract_dispatch_context(_room(), _reply_event())
+    for _ in range(2):
+        with pytest.raises(RelatedEventUnavailableError):
+            await resolver.coalescing_thread_id(_room(), _reply_event())
     unscoped = client.lookups
 
     # The exact counts are the resolver's business; that the scope reduces them
@@ -495,11 +499,11 @@ async def test_dispatch_context_extracts_agent_mentions(config: Config) -> None:
         },
     )
 
-    result = await resolver.extract_dispatch_context(_room(), event)
+    context = await resolver.extract_dispatch_context(_room(), event, thread_id=None)
 
-    assert result.context.am_i_mentioned is True
-    assert [agent.full_id for agent in result.context.mentioned_agents] == [general_id.full_id]
-    assert result.context.has_non_agent_mentions is False
+    assert context.am_i_mentioned is True
+    assert [agent.full_id for agent in context.mentioned_agents] == [general_id.full_id]
+    assert context.has_non_agent_mentions is False
 
 
 @pytest.mark.parametrize(
@@ -533,9 +537,9 @@ async def test_dispatch_context_only_counts_joined_non_agent_mentions(
         },
     )
 
-    result = await resolver.extract_dispatch_context(room, event)
+    context = await resolver.extract_dispatch_context(room, event, thread_id=None)
 
-    assert result.context.has_non_agent_mentions is expected
+    assert context.has_non_agent_mentions is expected
 
 
 @pytest.mark.asyncio
@@ -552,11 +556,11 @@ async def test_skip_mentions_metadata_suppresses_mention_extraction(config: Conf
         },
     )
 
-    result = await resolver.extract_dispatch_context(_room(), event)
+    context = await resolver.extract_dispatch_context(_room(), event, thread_id=None)
 
-    assert result.context.am_i_mentioned is False
-    assert result.context.mentioned_agents == []
-    assert result.context.has_non_agent_mentions is False
+    assert context.am_i_mentioned is False
+    assert context.mentioned_agents == []
+    assert context.has_non_agent_mentions is False
 
 
 @pytest.mark.asyncio
@@ -823,11 +827,12 @@ async def test_unhydrated_candidate_root_is_not_demoted_to_room_level(
     from the empty page the dispatch-safe read started with.
     """
     async with _resolver_on_a_cold_journal(config, tmp_path) as resolver:
-        result = await resolver.extract_dispatch_context(_room(), _reply_event())
+        thread_id = await resolver.coalescing_thread_id(_room(), _reply_event())
+        context = await resolver.extract_dispatch_context(_room(), _reply_event(), thread_id=thread_id)
 
-    assert result.context.is_thread is True
-    assert result.context.thread_id == _PARENT
-    assert [message.event_id for message in result.context.thread_history] == [_PARENT, _CHILD]
+    assert thread_id == _PARENT
+    assert context.is_thread is True
+    assert [message.event_id for message in context.thread_history] == [_PARENT, _CHILD]
 
 
 @pytest.mark.asyncio

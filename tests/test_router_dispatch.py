@@ -42,7 +42,6 @@ from tests.bot_helpers import (
 )
 from tests.conftest import (
     TEST_PASSWORD,
-    dispatch_context_result,
     drain_coalescing,
     install_generate_response_mock,
     install_runtime_journal_support,
@@ -138,7 +137,7 @@ class TestAgentBot(AgentBotTestBase):
             bot._turn_dispatcher.deps,
             room,
             event,
-            [],
+            (),
             "$img_route",
             message="[Attached image]",
             requester_user_id="@user:localhost",
@@ -1105,15 +1104,13 @@ class TestAgentBot(AgentBotTestBase):
         room = nio.MatrixRoom(room_id="!test:localhost", own_user_id="@mindroom_calculator:localhost")
 
         bot._conversation_resolver.extract_dispatch_context = AsyncMock(
-            return_value=dispatch_context_result(
-                MessageContext(
-                    am_i_mentioned=True,
-                    is_thread=True,
-                    thread_id="$img_root",
-                    thread_history=ThreadHistoryResult([], is_full_history=True),
-                    mentioned_agents=[mock_agent_user.matrix_id],
-                    has_non_agent_mentions=False,
-                ),
+            return_value=MessageContext(
+                am_i_mentioned=True,
+                is_thread=True,
+                thread_id="$img_root",
+                thread_history=ThreadHistoryResult([], is_full_history=True),
+                mentioned_agents=[mock_agent_user.matrix_id],
+                has_non_agent_mentions=False,
             ),
         )
 

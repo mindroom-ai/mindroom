@@ -1,9 +1,12 @@
 """Building a conversation from the server, once per membership.
 
-Hydration is the only thing in MindRoom that reads history from Matrix, and it
-runs at most once per conversation per membership. There is no periodic repair
-scan and no room-wide fallback: if hydration fails, the read fails, which is
-visible. A background repairer that quietly half-works is not.
+Hydration is the only thing in MindRoom that reads conversation history from
+Matrix -- turns, tools, and summaries all read the projection it fills -- and it
+runs at most once per conversation per membership, except for an explicit
+`rewalk` by a caller that must see another runtime's write before sync delivers
+it. There is no periodic repair scan and no room-wide fallback: if hydration
+fails, the read fails, which is visible. A background repairer that quietly
+half-works is not.
 
 The same code path serves three callers — first read of a conversation, the
 point refetch owed after the visible revision of a message was redacted, and
@@ -744,6 +747,32 @@ class ConversationHydrator:
             # marker that only vouches for a bounded walk does not discharge a
             # strict caller's walk any more than it discharged its short-circuit.
             return
+        await self._walk_and_install(room_id=room_id, thread_id=thread_id)
+
+    async def rewalk(self, *, room_id: str, thread_id: str | None) -> bool:
+        """Walk one conversation on the server again even though its marker stands, returning whether it was whole.
+
+        The one exception to "once per membership", for a caller that must see
+        a write another runtime made moments ago: sync delivers it eventually,
+        and this caller cannot wait for eventually. Installing is idempotent and
+        coverage only grows, so the walk can only add what the server has now.
+
+        Returning means this walk's events were installed under the current
+        membership. An existing marker proves nothing about that, and neither
+        does joining a walk that started before the caller asked, so this walk
+        is its own and a refused install is retried, then raised. The result is
+        this walk's own completeness: the durable marker keeps the widest walk
+        ever recorded, which says nothing about whether this one read everything.
+        """
+        for _ in range(_HYDRATION_EPOCH_ATTEMPTS):
+            walk = await self._walk_and_install(room_id=room_id, thread_id=thread_id)
+            if walk is not None:
+                return walk.complete
+        msg = f"Conversation rewalk kept losing its membership epoch for {room_id} thread {thread_id}"
+        raise _HydrationError(msg)
+
+    async def _walk_and_install(self, *, room_id: str, thread_id: str | None) -> _Walk | None:
+        """Walk one conversation and install it, returning the walk, or None if the current membership refused it."""
         epoch = await self.store.membership_epoch(room_id)
         walk = (
             await self._fetch_thread(room_id, thread_id) if thread_id is not None else await self._fetch_room(room_id)
@@ -766,6 +795,8 @@ class ConversationHydrator:
             # Membership moved while the fetch was in flight, so this view is of
             # a room the bot is no longer in the same relationship with.
             logger.info("conversation_hydration_superseded", room_id=room_id, thread_id=thread_id)
+            return None
+        return walk
 
     async def _repair(self, recovery: RoomHistoryRecovery) -> HistoryRecoveryOutcome:
         """Walk a repairable room to server exhaustion or a configured ceiling.
