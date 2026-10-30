@@ -1750,7 +1750,7 @@ class TestUserIdPassthrough:
         [entry] = [
             logged
             for logged in (json.loads(line) for line in log_file.read_text(encoding="utf-8").splitlines())
-            if "messages" in logged
+            if "body" in logged
         ]
         assert entry["agent_id"] == "general"
         assert entry["session_id"] == "session1"
@@ -1762,8 +1762,7 @@ class TestUserIdPassthrough:
         assert entry["model_prompt"] == "expanded prompt"
         prompt = model.requests[0].messages[-1]
         assert entry["full_prompt"] == prompt.content
-        assert entry["messages"][-1]["role"] == "user"
-        assert entry["messages"][-1]["content"] == prompt.content
+        assert entry["body"]["messages"][-1] == {"role": "user", "content": prompt.content}
 
     @pytest.mark.asyncio
     @pytest.mark.usefixtures("probe")

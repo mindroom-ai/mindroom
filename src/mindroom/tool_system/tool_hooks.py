@@ -351,14 +351,19 @@ async def run_async_entrypoint_blocking_call(
     return await run_sync_tool_entrypoint(call)
 
 
+def _answered_failure(result: _ToolHookResult) -> bool:
+    """Return whether ``result`` is a failed ``ToolOutcome``, a failure the tool answered with instead of raising it."""
+    return isinstance(result, ToolOutcome) and result.is_error
+
+
 def _observed(result: _ToolHookResult) -> _ToolHookResult:
-    """Return what a call's observers read for ``result``: a failed outcome's text, as for a call a hook declined.
+    """Return what the after-call hooks read for ``result``: a failed outcome's text, as for a call a hook declined.
 
     A tool that answers its own failure with a failed ``ToolOutcome``, as ``run_scheduled_call`` does, fails its call,
-    while the after-call hooks and the tool-call log read the text it answered with. The reply's record takes the
-    outcome itself, so it keeps that the call failed.
+    while the after-call hooks read the text it answered with. The reply's record takes the outcome itself, and the
+    tool-call log and the timing event record a failure, so they keep that the call failed.
     """
-    return result.content if isinstance(result, ToolOutcome) and result.is_error else result
+    return result.content if _answered_failure(result) else result
 
 
 async def _call_recorded_tool(
@@ -497,14 +502,23 @@ class _ToolBridgeTiming:
         )
 
 
-def _record_success(
+def _record_answer(
     tool_name: str,
     args: dict[str, Any],
     result: _ToolHookResult,
     timing: ToolCallTiming,
     resolved_context: _ResolvedToolContext,
 ) -> None:
-    """Record a successful call durably when the config logs LLM requests."""
+    """Record a call that answered: a failed outcome always, as a failure; a success when LLM requests are logged."""
+    if _answered_failure(result):
+        record_tool_failure(
+            tool_name=tool_name,
+            arguments=args,
+            error=result.content,
+            timing=timing,
+            **resolved_context.record_kwargs(),
+        )
+        return
     if not resolved_context.config.debug.log_llm_requests:
         return
     record_tool_success(
@@ -612,9 +626,9 @@ async def _execute_bridge(  # noqa: C901, PLR0915
             timing.after_hooks_ms = elapsed_ms_since(after_hooks_started_at, clock=time.perf_counter, ndigits=2)
         timing.emit_finish(ready, tool_name=tool_name, agent_name=resolved_agent_name, outcome=outcome)
 
-    async def succeed(result: _ToolHookResult, outcome: str) -> _ToolHookResult:
+    async def answer(result: _ToolHookResult, outcome: str) -> _ToolHookResult:
         ready = timing.result_ready()
-        _record_success(tool_name, args, _observed(result), ready, resolved_context)
+        _record_answer(tool_name, args, result, ready, resolved_context)
         await finish(outcome, ready, result=_observed(result))
         return result
 
@@ -674,7 +688,7 @@ async def _execute_bridge(  # noqa: C901, PLR0915
             result = await _call_recorded_tool(func, args, tool_name=tool_name, agent_name=resolved_agent_name)
     except OAuthConnectionRequired as exc:
         timing.tool_body_ms = elapsed_ms_since(tool_body_started_at, clock=time.perf_counter, ndigits=2)
-        return await succeed(oauth_connection_required_payload(exc), "oauth_connection_required")
+        return await answer(oauth_connection_required_payload(exc), "oauth_connection_required")
     except BaseException as error:
         timing.tool_body_ms = elapsed_ms_since(tool_body_started_at, clock=time.perf_counter, ndigits=2)
         ready = timing.result_ready()
@@ -682,7 +696,7 @@ async def _execute_bridge(  # noqa: C901, PLR0915
         await finish("error", ready, error=error)
         raise
     timing.tool_body_ms = elapsed_ms_since(tool_body_started_at, clock=time.perf_counter, ndigits=2)
-    return await succeed(result, "success")
+    return await answer(result, "error" if _answered_failure(result) else "success")
 
 
 async def dispatch_external_tool_hooks(

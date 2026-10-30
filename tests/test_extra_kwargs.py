@@ -209,6 +209,11 @@ async def test_model_params_mask_credentials_nested_in_request_params_and_extra_
     (log_file,) = log_dir.glob("llm-requests-*.jsonl")
     [request_record] = [json.loads(line) for line in log_file.read_text().splitlines()]
     assert request_record["model_params"] == provider.model_params
+    # The body the record holds is the one sent, its secret field masked and the header left out as a request option.
+    assert (request_record["body"]["api_key"], request_record["body"]["transforms"]) == (REDACTED, ["middle-out"])
+    assert not [
+        secret for secret in ("nested-header-secret", "nested-body-secret") if secret in json.dumps(request_record)
+    ]
 
 
 # --- The Claude prompt-cache ladder ---------------------------------------------------------------------------

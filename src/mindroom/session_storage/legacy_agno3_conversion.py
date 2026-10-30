@@ -28,7 +28,6 @@ from typing import TYPE_CHECKING, Any, cast
 from mindroom.background_tasks import run_blocking_until_complete
 from mindroom.constants import resolve_session_state_root
 from mindroom.delegation.legacy_snapshots import rewrite_run_snapshots
-from mindroom.history.legacy_compaction_state import adopt_summary_rows, adoption_copy_bytes
 from mindroom.history.legacy_stored_tool_calls import repair_legacy_tool_calls
 from mindroom.history.types import HistoryScope
 from mindroom.llm.messages import Message
@@ -44,7 +43,9 @@ from mindroom.session_storage.legacy_agno3_schema import (
     agno_schema_sql,
     run_from_row,
 )
+from mindroom.session_storage.legacy_compaction_state import adopt_summary_rows, adoption_copy_bytes
 from mindroom.session_storage.legacy_conversion_backup import leave_write_ahead_log, write_conversion_backup
+from mindroom.session_storage.legacy_paused_runs import rewrite_paused_runs
 from mindroom.session_storage.legacy_session_columns import (
     convert_session_columns,
     stored_counts,
@@ -107,11 +108,11 @@ def convert_conversation_database(
     In one ``BEGIN IMMEDIATE``: the backup, the Agno-era steps (usage ledger seeding, summary-row adoption with Agno 2
     blob runs and positions), the conversion, the drop of the Agno tables, the log tables and the meta row, which
     records the current version and ``owner``, once an agent ``owner``'s session rows name it
-    (``adopt_agent_session_owners``), the sessions table's conversion (``convert_session_columns``), and the rewrite of
-    the delegation children its runs hold (``rewrite_run_snapshots``). A file in
-    write-ahead-log mode returns to the rollback journal first, which checkpoints its log. The file is then compacted
-    when that pays off (``_compact``), and its conversion is logged. ``descriptors`` takes the backup's descriptor of
-    the file, which the caller closes after ``connection``.
+    (``adopt_agent_session_owners``), the sessions table's conversion (``convert_session_columns``), and the rewrites of
+    the delegation children its runs hold (``rewrite_run_snapshots``) and of the paused runs it copied
+    (``rewrite_paused_runs``). A file in write-ahead-log mode returns to the rollback journal first, which checkpoints
+    its log. The file is then compacted when that pays off (``_compact``), and its conversion is logged.
+    ``descriptors`` takes the backup's descriptor of the file, which the caller closes after ``connection``.
     """
     leave_write_ahead_log(connection, path)
     started = time.monotonic()
@@ -129,6 +130,7 @@ def convert_conversation_database(
                 adopt_agent_session_owners(connection, names, owner.scope_id)
             convert_session_columns(connection, names)
         rewrite_run_snapshots(connection, names)
+        rewrite_paused_runs(connection, names)
         runs, messages = stored_counts(connection, names)
     compacted = _compact(connection, path)
     logger.info(
@@ -288,7 +290,7 @@ def _convert(
 # Handling: Before any other step reads them, each such column is stored encoded once, so the conversion's steps and
 # every later load decode it once; a column that does not decode stays as stored, which a load reads as unreadable.
 # Coverage: tests/session_storage/test_legacy_agno3_conversion.py::test_session_columns_encoded_twice_are_stored_once
-# and tests/test_legacy_compaction_state.py::test_opening_storage_reads_double_encoded_legacy_metadata.
+# and tests/session_storage/test_legacy_compaction_state.py::test_opening_storage_reads_double_encoded_legacy_metadata.
 def _session_json_encoded_once(connection: sqlite3.Connection, names: AgnoTableNames) -> None:
     sessions = quote_identifier(names.sessions)
     present = table_columns(connection, names.sessions)

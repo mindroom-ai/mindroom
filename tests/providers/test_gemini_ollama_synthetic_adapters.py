@@ -1924,6 +1924,17 @@ async def test_ollama_native_settings_reach_the_chat_request(tmp_path: Path) -> 
 
 
 @pytest.mark.asyncio
+async def test_ollama_request_params_merge_over_the_request_but_keep_it_streaming(tmp_path: Path) -> None:
+    """Authored ``request_params`` merge over MindRoom's fields, as on other routes, and the request still streams."""
+    config = _config(OLLAMA, request_params={"model": "other", "messages": [], "stream": False})
+
+    request, _ = await run_adapter(config, _request(), tmp_path, ollama_ndjson(_ollama_done()))
+
+    body = request["body"]
+    assert (body["model"], body["messages"], body["stream"]) == ("other", [], True)
+
+
+@pytest.mark.asyncio
 async def test_ollama_api_key_and_timeout_reach_the_http_client(tmp_path: Path) -> None:
     """An API key authenticates against Ollama's hosted endpoint, and ``timeout`` bounds every HTTP phase."""
     seen: list[httpx.Request] = []

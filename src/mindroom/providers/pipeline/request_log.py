@@ -1,22 +1,22 @@
 """Token telemetry for every provider request, and the opt-in full request log.
 
 Each request emits one ``LLM usage`` log line once it ends, completed or not, attributed to the turn
-its request context names. With ``debug.log_llm_requests`` the request (messages, tools, model
-settings) and its usage are appended to the day's ``llm-requests-YYYY-MM-DD.jsonl``, joined by
-``request_log_id`` and attributed to the same turn.
+its request context names. With ``debug.log_llm_requests`` the body each route hands its SDK
+(``ModelRequest.on_send``), the model settings, and the request's usage are appended to the day's
+``llm-requests-YYYY-MM-DD.jsonl``, joined by ``request_log_id`` and attributed to the same turn. A request that never
+reaches its SDK, such as one whose attachment cannot be read, logs no record.
 """
 
 from __future__ import annotations
 
 import asyncio
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime
 from typing import TYPE_CHECKING, Any
 from uuid import uuid4
 
 from mindroom.constants import llm_request_log_dir
-from mindroom.llm.messages import system_text
 from mindroom.llm.provider import ReportedUsage, TurnCompleted
 from mindroom.llm.request_context import REQUEST_ATTRIBUTION_FIELDS, current_llm_request_log_context, json_safe
 from mindroom.logging_config import get_logger
@@ -35,9 +35,6 @@ if TYPE_CHECKING:
 __all__ = ["RequestLog", "logged_stream"]
 
 logger = get_logger(__name__)
-
-# Message fields the request record leaves out: none of them reaches any wire.
-_NON_API_MESSAGE_FIELDS = frozenset({"id", "tool_args", "stop_after_tool_call", "from_history", "add_to_agent_memory"})
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -60,25 +57,20 @@ def _attribution(context: Mapping[str, Any]) -> dict[str, Any]:
 
 def _write_request_record(
     path: Path,
-    request: ModelRequest,
+    body: Mapping[str, Any],
     log: RequestLog,
     *,
     model_id: str,
     model_params: dict[str, Any],
+    deferred_tool_names: list[str],
     request_log_id: str,
     context: Mapping[str, Any],
 ) -> None:
     """Build and append the request record, in the thread that writes it.
 
     Serializing the whole conversation and tool schemas takes long enough to stall the event loop, so the record is
-    built in the writer thread; the request waits for the write, so nothing edits its messages meanwhile.
+    built in the writer thread; the adapter sends the body only after the write, so nothing edits it meanwhile.
     """
-    messages = [
-        {key: value for key, value in message.to_dict().items() if key not in _NON_API_MESSAGE_FIELDS}
-        for message in request.messages
-    ]
-    tools = [json_safe(tool) for tool in request.tools]
-    system_prompt = system_text(request.messages)
     _write_line(
         path,
         {
@@ -87,12 +79,8 @@ def _write_request_record(
             **context,
             "model_name": log.model_name,
             "model_id": model_id,
-            "system_prompt": system_prompt,
-            "messages": json_safe(messages),
-            "message_count": len(messages),
-            "tools": tools,
-            "tool_count": len(tools),
-            "deferred_tool_names": sorted(request.deferred_tools.names),
+            "body": json_safe(body),
+            "deferred_tool_names": deferred_tool_names,
             "model_params": model_params,
         },
     )
@@ -166,24 +154,37 @@ def _served_provider(provider_data: Mapping[str, Any] | None) -> str | None:
 async def logged_stream(inner: ModelProvider, request: ModelRequest, *, log: RequestLog) -> AsyncIterator[StreamEvent]:
     """Stream ``request``, emitting usage telemetry when it ends and the request record when enabled."""
     context = current_llm_request_log_context()
-    log_path: Path | None = None
     request_log_id = uuid4().hex
+    # Set once the request record is written, so the response record joins only a logged request.
+    logged_path: Path | None = None
     if log.debug.log_llm_requests:
         log_path = _daily_log_path(log.debug.llm_request_log_dir, log.storage_root, datetime.now().astimezone())
-        try:
-            await asyncio.to_thread(
-                _write_request_record,
-                log_path,
-                request,
-                log,
-                model_id=inner.identity.id,
-                model_params=inner.model_params,
-                request_log_id=request_log_id,
-                context=context,
-            )
-        except Exception:
-            logger.exception("Failed to persist LLM request log", model_name=log.model_name, model_id=inner.identity.id)
-            log_path = None
+        deferred_tool_names = sorted(request.deferred_tools.names)
+
+        async def write_request_record(body: Mapping[str, Any]) -> None:
+            nonlocal logged_path
+            try:
+                await asyncio.to_thread(
+                    _write_request_record,
+                    log_path,
+                    body,
+                    log,
+                    model_id=inner.identity.id,
+                    model_params=inner.model_params,
+                    deferred_tool_names=deferred_tool_names,
+                    request_log_id=request_log_id,
+                    context=context,
+                )
+            except Exception:
+                logger.exception(
+                    "Failed to persist LLM request log",
+                    model_name=log.model_name,
+                    model_id=inner.identity.id,
+                )
+            else:
+                logged_path = log_path
+
+        request = replace(request, on_send=write_request_record)
     reported = ReportedUsage()
     served_provider: str | None = None
     stop_reason: StopReason | None = None
@@ -200,7 +201,7 @@ async def logged_stream(inner: ModelProvider, request: ModelRequest, *, log: Req
         usage = reported.received
         try:
             _log_usage(inner, log, usage, served_provider, stop_reason, context)
-            if log_path is not None and usage is not None:
+            if logged_path is not None and usage is not None:
                 response: dict[str, Any] = {
                     "timestamp": datetime.now().astimezone().isoformat(),
                     "record": "response",
@@ -215,7 +216,7 @@ async def logged_stream(inner: ModelProvider, request: ModelRequest, *, log: Req
                         "cache_write_tokens": usage.tokens.cache_write_tokens,
                     },
                 }
-                await asyncio.to_thread(_write_line, log_path, response)
+                await asyncio.to_thread(_write_line, logged_path, response)
         except Exception:
             logger.exception(
                 "Failed to emit LLM response telemetry",
