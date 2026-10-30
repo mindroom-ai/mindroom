@@ -7,7 +7,7 @@ import time
 from contextlib import asynccontextmanager
 from copy import deepcopy
 from dataclasses import dataclass, field, replace
-from typing import TYPE_CHECKING, Protocol
+from typing import TYPE_CHECKING
 
 from mindroom.agent_cli.events import emit_cli_suspension
 from mindroom.agent_cli.lifetime import current_cli_lifetime
@@ -32,14 +32,10 @@ if TYPE_CHECKING:
     from mindroom.cancellation import CancelSource
     from mindroom.event_journal import ApprovalContinuation, ApprovalFailure
     from mindroom.event_journal.approval_store import ApprovalStore
+    from mindroom.final_delivery import TurnProgress
     from mindroom.llm.runs import RunRequirement
     from mindroom.message_target import MessageTarget
     from mindroom.response_turn import PausedAttempt
-
-
-class _ApprovalProgress(Protocol):
-    # How the response ended, once its settlement decided it.
-    ending: TurnEnding | None
 
 
 # What a response that ended without saying how leaves its paused CLI call to fail with.
@@ -163,7 +159,7 @@ class CliApprovalWaits:
         self,
         *,
         source_event_ids: tuple[str, ...],
-        progress: _ApprovalProgress,
+        progress: TurnProgress,
         target: MessageTarget,
         publish: Callable[[PausedAttempt], Awaitable[object]],
         authorize: Callable[[], Awaitable[bool]],
