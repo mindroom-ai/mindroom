@@ -72,7 +72,8 @@ _LEGACY_SCHEMA_VERSION = 1
 # tests/test_knowledge_legacy_index_state.py::test_an_unreadable_legacy_state_stays_unreadable_and_protects_every_collection,
 # tests/test_knowledge_legacy_index_state.py::test_a_second_start_changes_nothing_and_an_interrupted_conversion_finishes,
 # tests/test_knowledge_legacy_index_state.py::test_a_failed_conversion_is_not_retried_over_a_later_publication,
-# tests/test_knowledge_legacy_index_state.py::test_a_failed_conversion_leaves_the_base_unpublished_until_a_refresh_rebuilds_it.
+# tests/test_knowledge_legacy_index_state.py::test_a_failed_conversion_leaves_the_base_unpublished_until_a_refresh_rebuilds_it,
+# tests/test_knowledge_legacy_index_state.py::test_a_private_base_converts_where_private_indexes_live.
 def _legacy_publication(payload: dict[str, object], retired: str | None) -> Publication | None:
     settings = settings_from_json(payload.get("settings"))
     collection = optional_str(payload.get("collection"))

@@ -394,7 +394,7 @@ async def test_a_failed_upgrade_of_a_candidate_leaves_the_published_collection_c
     embedder: _RecordingEmbedder,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The published collection converts first, so a candidate that cannot convert does not cost the live index."""
+    """The published collection converts first, so a candidate that cannot convert leaves the live index readable."""
     del embedder
     _config, runtime_paths, storage = _install("mid_build_journal", tmp_path)
     published = json.loads((storage / "indexing_settings.json").read_text(encoding="utf-8"))["collection"]
@@ -410,6 +410,27 @@ async def test_a_failed_upgrade_of_a_candidate_leaves_the_published_collection_c
     await migrate_knowledge_index_state(runtime_paths)
 
     assert _schema_version(KnowledgeCollection(path=storage, name=published)) == 2
+
+
+@pytest.mark.asyncio
+async def test_a_private_base_converts_where_private_indexes_live(
+    tmp_path: Path,
+    embedder: _RecordingEmbedder,
+) -> None:
+    """A private agent's index, under its requester's own knowledge root, converts like a shared one."""
+    del embedder
+    _config, runtime_paths, storage = _install("two_publications", tmp_path)
+    private = runtime_paths.storage_root / "knowledge_db" / "private" / "requester" / "knowledge_db" / storage.name
+    private.parent.mkdir(parents=True)
+    storage.rename(private)
+
+    await migrate_knowledge_index_state(runtime_paths)
+
+    publication = load_publication(private)
+    assert publication is not None
+    assert publication.collection is not None
+    assert _schema_version(KnowledgeCollection(path=private, name=publication.collection)) == 2
+    assert not (private / "indexing_settings.json").exists()
 
 
 @pytest.mark.asyncio
