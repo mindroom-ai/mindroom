@@ -66,8 +66,6 @@ from tests.journal_membership_helpers import admit_room_membership
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
 
-    from nio.responses import Response
-
 
 _DURABLE_MEMBERSHIP_GATEWAY = AgentBot.change_local_membership
 
@@ -500,36 +498,6 @@ async def test_pending_invite_ledger_keeps_only_the_newest_invites_off_the_event
     ]
     assert len(save_threads) == 5
     assert threading.current_thread() not in save_threads
-
-
-@pytest.fixture
-def mock_config(tmp_path: Path) -> Config:
-    """Create a mock config with agents and teams."""
-    return bind_runtime_paths(
-        Config(
-            agents={
-                "agent1": AgentConfig(
-                    display_name="Agent 1",
-                    role="Test agent",
-                    rooms=["room1", "room2"],
-                ),
-                "agent2": AgentConfig(
-                    display_name="Agent 2",
-                    role="Another test agent",
-                    rooms=["room1"],
-                ),
-            },
-            teams={
-                "team1": TeamConfig(
-                    display_name="Team 1",
-                    role="Test team",
-                    agents=["agent1", "agent2"],
-                    rooms=["room2"],
-                ),
-            },
-        ),
-        tmp_path,
-    )
 
 
 @pytest.mark.asyncio
@@ -2387,7 +2355,7 @@ async def test_orphan_cleanup_preserves_router_persisted_invited_room(
 
 
 @pytest.mark.asyncio
-async def test_agent_leaves_unconfigured_rooms(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:  # noqa: ARG001
+async def test_agent_leaves_unconfigured_rooms(tmp_path: Path) -> None:
     """Test that agents leave rooms they're no longer configured for."""
     # Create a mock agent user
     agent_user = AgentMatrixUser(
@@ -2413,19 +2381,14 @@ async def test_agent_leaves_unconfigured_rooms(monkeypatch: pytest.MonkeyPatch, 
     bot.client = mock_client
 
     # Mock joined_rooms to return both room1 and room2 (agent is in both)
-    joined_rooms_response = MagicMock()
-    joined_rooms_response.__class__ = nio.JoinedRoomsResponse
-    joined_rooms_response.rooms = ["!room1:localhost", "!room2:localhost"]
-    mock_client.joined_rooms.return_value = joined_rooms_response
+    mock_client.joined_rooms.return_value = nio.JoinedRoomsResponse(rooms=["!room1:localhost", "!room2:localhost"])
 
     # Track which rooms were left
     left_rooms = []
 
-    async def mock_room_leave(room_id: str) -> Response:
+    async def mock_room_leave(room_id: str) -> nio.RoomLeaveResponse:
         left_rooms.append(room_id)
-        response = MagicMock()
-        response.__class__ = nio.RoomLeaveResponse
-        return response
+        return nio.RoomLeaveResponse()
 
     mock_client.room_leave = mock_room_leave
     install_runtime_journal_support(bot)
@@ -2526,20 +2489,15 @@ async def test_agent_manages_rooms_on_config_update(monkeypatch: pytest.MonkeyPa
         joined_rooms.append(room_id)
         return RoomJoinOutcome.JOINED
 
-    async def mock_room_leave(room_id: str) -> Response:
+    async def mock_room_leave(room_id: str) -> nio.RoomLeaveResponse:
         left_rooms.append(room_id)
-        response = MagicMock()
-        response.__class__ = nio.RoomLeaveResponse
-        return response
+        return nio.RoomLeaveResponse()
 
     monkeypatch.setattr("mindroom.matrix.client_room_admin.join_room", mock_join_room)
     mock_client.room_leave = mock_room_leave
 
     # Mock joined_rooms to return room1 and room3 (agent is in both)
-    joined_rooms_response = MagicMock()
-    joined_rooms_response.__class__ = nio.JoinedRoomsResponse
-    joined_rooms_response.rooms = ["!room1:localhost", "!room3:localhost"]
-    mock_client.joined_rooms.return_value = joined_rooms_response
+    mock_client.joined_rooms.return_value = nio.JoinedRoomsResponse(rooms=["!room1:localhost", "!room3:localhost"])
 
     # Update configuration: now configured for room1 and room2 (not room3)
     bot.rooms = ["!room1:localhost", "!room2:localhost"]
@@ -3013,7 +2971,6 @@ async def test_agent_invite_does_not_auto_add_router_to_ad_hoc_room(
         runtime_paths=runtime_paths,
     )
     router_bot.client = make_matrix_client_mock(user_id="@mindroom_router:localhost")
-    bot.client.rooms = {}
     router_bot.join_configured_rooms = AsyncMock()
 
     orchestrator = _MultiAgentOrchestrator(runtime_paths=runtime_paths)
