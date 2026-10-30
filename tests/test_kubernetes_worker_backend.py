@@ -3615,34 +3615,12 @@ def test_kubernetes_backend_waits_for_deployment_deletion_before_recreate(tmp_pa
     )
 
 
-def test_kubernetes_backend_seeds_ui_shared_credentials_for_unscoped_workers(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Unscoped dedicated workers should mirror shared UI credentials into their shared layer."""
-    backend, _apps_api, _core_api = _backend()
-    sync_calls: list[tuple[str, frozenset[str] | None]] = []
-
-    def _record_sync(
-        worker_key: str,
-        *,
-        allowed_services: frozenset[str] | None = None,
-        credentials_manager: object | None = None,
-    ) -> None:
-        del credentials_manager
-        sync_calls.append((worker_key, allowed_services))
-
-    monkeypatch.setattr(
-        "mindroom.workers.backends.kubernetes.sync_shared_credentials_to_worker",
-        _record_sync,
-    )
-
-    backend.ensure_worker(_spec("v1:tenant-123:unscoped:general"), now=10.0)
-
-    assert sync_calls == [("v1:tenant-123:unscoped:general", DEFAULT_WORKER_GRANTABLE_CREDENTIALS)]
-
-
-def test_kubernetes_backend_mirrors_shared_credentials_for_scoped_workers(
+@pytest.mark.parametrize("worker_key", ["v1:tenant-123:unscoped:general", "v1:tenant-123:user:@alice:example.org"])
+def test_kubernetes_backend_mirrors_shared_credentials_for_unscoped_and_scoped_workers(
     monkeypatch: pytest.MonkeyPatch,
+    worker_key: str,
 ) -> None:
-    """Scoped dedicated workers should use the same allowlisted shared-credential sync path."""
+    """Unscoped and scoped dedicated workers mirror shared UI credentials through the same allowlisted sync."""
     backend, _apps_api, _core_api = _backend()
     sync_calls: list[tuple[str, frozenset[str] | None]] = []
 
@@ -3660,9 +3638,9 @@ def test_kubernetes_backend_mirrors_shared_credentials_for_scoped_workers(
         _record_sync,
     )
 
-    backend.ensure_worker(_spec("v1:tenant-123:user:@alice:example.org"), now=10.0)
+    backend.ensure_worker(_spec(worker_key), now=10.0)
 
-    assert sync_calls == [("v1:tenant-123:user:@alice:example.org", DEFAULT_WORKER_GRANTABLE_CREDENTIALS)]
+    assert sync_calls == [(worker_key, DEFAULT_WORKER_GRANTABLE_CREDENTIALS)]
 
 
 def test_kubernetes_backend_uses_configured_worker_grantable_credentials(
