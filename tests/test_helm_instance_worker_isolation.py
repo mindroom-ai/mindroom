@@ -1267,6 +1267,10 @@ def test_static_runner_storage_mounts_hold_no_record_or_lock_the_primary_trusts(
     for lock in recovery_locks:
         with lock.open("a") as holder:
             fcntl.flock(holder.fileno(), fcntl.LOCK_EX)
+            # A database this process already prepared opens without the lock.
+            database = _open_sessions(lock.parent).path
+            # Its first open in a process, as after a restart, takes the lock and fails instead of stalling.
+            monkeypatch.delitem(agent_storage._PREPARED, database)
             with pytest.raises(TimeoutError, match="Session recovery lock"):
                 _open_sessions(lock.parent)
 
