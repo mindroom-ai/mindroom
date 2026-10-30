@@ -48,13 +48,10 @@ def _is_environ(node: ast.expr) -> bool:
     )
 
 
-def _env_reads(module_name: str) -> set[str]:
-    """Return the variables one Agno module reads with `getenv`, `environ.get`, or `environ[...]`, from its source."""
-    spec = importlib.util.find_spec(module_name)
-    assert spec is not None
-    assert spec.origin is not None
+def _env_reads(source: str) -> set[str]:
+    """Return the variables `source` reads with `getenv`, `environ.get`, or `environ[...]`."""
     names: set[str] = set()
-    for node in ast.walk(ast.parse(Path(spec.origin).read_text(encoding="utf-8"))):
+    for node in ast.walk(ast.parse(source)):
         if isinstance(node, ast.Call) and (
             (isinstance(node.func, ast.Name) and node.func.id == "getenv")
             or (isinstance(node.func, ast.Attribute) and node.func.attr == "getenv")
@@ -65,10 +62,18 @@ def _env_reads(module_name: str) -> set[str]:
             name = node.slice
         else:
             continue
-        assert isinstance(name, ast.Constant), f"{module_name}:{node.lineno} reads a variable it does not name"
+        assert isinstance(name, ast.Constant), f"line {node.lineno} reads a variable it does not name"
         assert isinstance(name.value, str)
         names.add(name.value)
     return names
+
+
+def _module_env_reads(module_name: str) -> set[str]:
+    """Return the variables one Agno module reads, from its source file."""
+    spec = importlib.util.find_spec(module_name)
+    assert spec is not None
+    assert spec.origin is not None
+    return _env_reads(Path(spec.origin).read_text(encoding="utf-8"))
 
 
 def _agno_modules(tool_name: str) -> set[str]:
@@ -93,7 +98,7 @@ def _agno_modules(tool_name: str) -> set[str]:
 def test_each_tool_declares_the_environment_variables_its_toolkit_reads(tool_name: str) -> None:
     """Each variable the tool's Agno toolkit reads is declared or allowlisted, and each declared variable is read."""
     modules = _agno_modules(tool_name)
-    reads = set().union(*map(_env_reads, modules))
+    reads = set().union(*map(_module_env_reads, modules))
     allowlisted = set().union(*(UNDECLARED_AGNO_ENV_READS.get(module, ()) for module in modules))
     declared = {name for field in BUILTIN_TOOL_METADATA[tool_name].config_fields or () for name in field.env}
 
@@ -106,7 +111,17 @@ def test_each_tool_declares_the_environment_variables_its_toolkit_reads(tool_nam
 @pytest.mark.parametrize("module_name", sorted(UNDECLARED_AGNO_ENV_READS))
 def test_each_undeclared_agno_read_is_still_in_agno(module_name: str) -> None:
     """An allowlisted read leaves the list once Agno stops reading it."""
-    assert _env_reads(module_name) >= UNDECLARED_AGNO_ENV_READS[module_name]
+    assert _module_env_reads(module_name) >= UNDECLARED_AGNO_ENV_READS[module_name]
+
+
+def test_the_source_scan_finds_every_way_a_module_reads_the_environment() -> None:
+    """`getenv`, `os.getenv`, `environ.get`, and `environ[...]` count as reads; assigning a variable does not."""
+    source = (
+        "import os\nfrom os import environ, getenv\n"
+        'getenv("A")\nos.getenv("B")\nenviron.get("C")\nos.environ.get("D")\nos.environ["E"]\nos.environ["F"] = ""\n'
+    )
+
+    assert _env_reads(source) == {"A", "B", "C", "D", "E"}
 
 
 def _tavily(
