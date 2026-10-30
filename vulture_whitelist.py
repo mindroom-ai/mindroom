@@ -166,7 +166,6 @@ _.validate_knowledge_graph  # Pydantic model validator (src/mindroom/config/main
 _.fit_tool_results_in_episodes  # Pydantic model validator (src/mindroom/config/knowledge_graph.py)
 _._generate_response  # Graphiti LLMClient hook Graphiti calls (src/mindroom/knowledge_graph/clients.py)
 _.create_batch  # Graphiti EmbedderClient hook Graphiti calls (src/mindroom/knowledge_graph/clients.py)
-_.markers  # TypedDict key read by subscript (src/mindroom/knowledge_graph/ingestion.py)
 _.bad_outputs  # TypedDict key read by subscript (src/mindroom/knowledge_graph/ingestion.py)
 _.failing_since  # TypedDict key read by subscript (src/mindroom/knowledge_graph/ingestion.py)
 _.failing_piece  # TypedDict key read by subscript (src/mindroom/knowledge_graph/ingestion.py)

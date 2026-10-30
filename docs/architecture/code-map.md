@@ -88,6 +88,9 @@ Matrix sync callback
 | `reply_presentation.py` | Reply presentation model, its JSON codec, and rendering into a body, trace, and terminal wire status |
 | `reply_scope.py` | `ReplyRuntime` and `SpanHandle`: reply claims, span exits, write-ahead, owed writes, and runtime ownership |
 | `edit_regenerator.py` | Decides which message edits regenerate a reply and runs each off the room's event lane, as the entity answers now |
+| `event_journal/views.py` | The narrow journal views collaborators are typed as, each operation declared once on the view that owns it; `PrincipalStore` inherits them |
+| `event_journal/principal_rows.py` | `PrincipalRows`: the backend and principal a view is bound to, and the typed read, write, and recovery-read helpers that pick each operation's lane |
+| `event_journal/matrix_delivery_rows.py` | The delivery outbox's transactions: enqueueing replies and final answers, acknowledgement, retirement, and permanent failure |
 | `event_journal/replies.py` | `ReplyStore`: reply rules applied inside journal transactions, with their in-transaction effects |
 | `event_journal/approval_store.py` | `ApprovalStore`: one principal's approval calls, cards, grants, scheduled calls, and paused-run continuations |
 | `event_journal/approval_calls.py` | One row per gated call, whatever owns it, and `resolve_call`, the only writer of a call's decision and its card's terminal edit |
@@ -317,7 +320,7 @@ Matrix sync callback
 | `session_storage/agent_storage.py` | Opens an agent's, a team scope's, or the system usage ledger's conversation store, naming its owner: the preflight archive check, the link-refusing connect, the tables of a new database, the conversion of one in an older layout, and the layout version upgrade |
 | `session_storage/store.py` | The conversation store: one SQLite database of sessions, runs with a row per stored message and per tool execution, summary rows, and the usage ledger, with full run saves refused once a run is final and single facts patched onto stored rows, each operation in one transaction on its own connection |
 | `session_storage/schema.py` | File and table names, a team scope's database name, identifier quoting, table and column listing, and the layout of a conversation database: the sessions table, the six `*_log_*` tables, the meta row naming the owner, and the usage ledger with its upsert |
-| `session_storage/summary_rows.py` | The conversation log's summary rows: compare-and-append of compaction chunks and mid-turn folds, the event ids each row covers, the tool calls folds took, and edit and redaction cuts |
+| `session_storage/summary_rows.py` | The conversation log's summary rows: compare-and-append of compaction chunks and mid-turn folds, the event ids each row covers, the tool calls folds took, and edit and redaction cuts with the snapshot a cut is decided from |
 | `session_storage/usage_reader.py` | Read-only reads of a conversation database's sessions, owner, and usage ledger for usage reports, returning what is stored unchecked for the report to validate |
 | `session_storage/codec.py` | A run record to its run row, message rows, and tool-execution rows and back, with the JSON keys stored runs carry, and the JSON decode that reads worker-written text without failing |
 | `session_storage/types.py` | `ConversationSession` and the other values the store reads and writes |
@@ -330,13 +333,16 @@ Matrix sync callback
 | `session_storage/legacy_conversion_backup.py` | The `<name>.db.pre-storage-v2` and `<name>.db.pre-storage-v4` copies a database gets before its conversions, after a free-space check, through no-follow descriptors |
 | `session_storage/legacy_agno3_schema.py` | The Agno layout's table names, DDL, run-row decoder, and member-subtree delete, read only by the conversion and its Agno-era steps |
 | `session_storage/legacy_usage_ledger.py` | The conversion's step that seeds the usage ledger of an Agno-layout database without one from its run rows and Agno 2 blobs |
+| `session_storage/legacy_usage_totals.py` | The layout version 6 step that keeps the usage stored session totals held beyond their run rows as one undated `pre_ledger` ledger row |
 | `history/legacy_compaction_state.py` | The conversion's step that turns earlier compaction state, the compaction archive, and unpositioned run rows into summary rows and positioned runs before they convert |
 | `history/mid_turn_compaction.py` | Compaction between the model requests of one reply: request sizing, folding, and the scoped or run-local summary |
 | `history/turn_recorder.py` | `TurnRecorder`: what one turn did, which the turn driver writes, and the interrupted-replay snapshot the driver stores when the turn stops |
 | `history/legacy_summary_system_prompt.py` | Approval resume of runs paused with the summary inside their saved system message |
 | `history/legacy_stored_tool_calls.py` | Tool-call shapes earlier releases stored, which the conversion to storage v2 stores in the current shape in every message a converted run replays |
 | `history/summary_message.py` | The compaction summary as a user message: its text, its scope or run-local marker, and the marker that replays the scope's summary after a mid-turn compacted prompt |
-| `history/session_runs.py` | Finished Matrix turns of an agent's conversations, live and compacted, with the approval hold-back and redaction filter background workers share |
+| `history/session_runs.py` | The follower background readers share: a conversation's Matrix turns in log order, read in one snapshot with what a redaction would cut, the due scan, backoff, and where a conversation never read starts |
+| `history/legacy_session_cursors.py` | Progress entries and note tags the released background readers wrote in creation order, read as log positions when a reader next reads the conversation |
+| `history/legacy_scope_metadata.py` | The layout version 6 step that moves the owner's per-scope force-compaction flag and preserved seen ids into one metadata value |
 | `history/` | Persisted history: what a request replays from stored runs, the replay budget, compaction before and during a reply, summary rows, and interrupted-turn replay |
 | `history/request_messages.py` | A model request assembled from a scope's stored runs, its compaction summary, and the current turn |
 | `history/replay.py` | Materializes, estimates, and fits persisted history within one replay budget |

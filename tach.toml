@@ -2539,6 +2539,7 @@ depends_on = [
     "mindroom.matrix.state",
     "mindroom.runtime_protocols",
     "mindroom.thread_summary",
+    "mindroom.thread_summary.notices",
 ]
 
 [[modules]]
@@ -4166,6 +4167,7 @@ visibility = [
     "mindroom.scheduling.executor",
     "mindroom.streaming",
     "mindroom.thread_summary",
+    "mindroom.thread_summary.notices",
     "mindroom.skill_learning.runner",
 ]
 
@@ -6072,12 +6074,25 @@ depends_on = [
     "mindroom.entity_resolution",
     "mindroom.matrix.client_delivery",
     "mindroom.matrix.conversation_reads",
+    "mindroom.thread_summary.notices",
     "mindroom.providers.registry",
     "mindroom.agent_loop.helper",
     "mindroom.llm",
     "mindroom.thread_tag_vocabulary",
     "mindroom.thread_tags",
     "mindroom.tool_system.events",
+]
+
+[[modules]]
+path = "mindroom.thread_summary.notices"
+depends_on = [
+    "mindroom.authorization",
+    "mindroom.constants",
+    "mindroom.entity_resolution",
+    "mindroom.logging_config",
+    "mindroom.matrix.client_delivery",
+    "mindroom.matrix.message_builder",
+    "mindroom.thread_summary",
 ]
 
 [[modules]]
