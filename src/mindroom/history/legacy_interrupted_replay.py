@@ -13,7 +13,7 @@ if TYPE_CHECKING:
 # ``mindroom_original_status``, saved over the stopped, failed, or unspoken run's own record: the turn's user message,
 # then one assistant message of the partial text, a "(turn stopped before completion ...)" status line, and the
 # finished calls' redacted previews.
-# Last legacy release: v2026.10.732; replacement: the next release, which keeps the run's own record under the status
+# Last legacy release: v2026.10.739; replacement: the next release, which keeps the run's own record under the status
 # ``INTERRUPTED``.
 # Handling: such a run replays as stored, its summary included, as before the upgrade; only ``utterances`` reads the
 # flag, leaving the summary, which can quote tool previews, out of what background readers take as the agent's words.
