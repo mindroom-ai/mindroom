@@ -322,27 +322,30 @@ async def test_a_record_whose_replica_key_is_not_text_counts_as_a_turn_of_its_ow
 
 
 @pytest.mark.asyncio
-async def test_a_team_whose_store_refuses_its_records_keeps_its_copies_and_is_not_merged_again(storage: Path) -> None:
-    """A planted record of another dimension makes the team's store refuse the batch; the copies stay, unmerged."""
-    planted = _client(storage / "agents" / "planter" / "chroma").get_or_create_collection(
-        _COLLECTION,
-        embedding_function=None,
-    )
-    planted.add(
-        ids=["planted"],
-        embeddings=[[1.0, 0.0]],
-        metadatas=[{"user_id": _TEAM, "data": "Planted fact", "mindroom_replica_key": "planted-turn"}],
-    )
+async def test_a_team_whose_store_rejects_its_records_keeps_its_copies_and_is_not_merged_again(storage: Path) -> None:
+    """A planted record of another dimension makes the team's store reject the batch; the copies stay, unmerged."""
+    pair = "team_general+planter"
+    for member, record_id, embedding in (
+        ("general", "paired", [1.0, 0.0, 0.0, 0.0]),
+        ("planter", "planted", [1.0, 0.0]),
+    ):
+        _client(storage / "agents" / member / "chroma").get_or_create_collection(
+            _COLLECTION,
+            embedding_function=None,
+        ).add(
+            ids=[record_id],
+            embeddings=[embedding],
+            metadatas=[{"user_id": pair, "data": f"{record_id} fact", "mindroom_replica_key": f"{record_id}-turn"}],
+        )
     runtime_paths = runtime_paths_for(_config(storage, "mem0"))
 
     await _migrate(storage, "planter")
 
     # No later start writes them again, so none undoes an edit made to a merged fact since.
     assert (tracking_dir(runtime_paths) / "team_memory_merged.json").exists()
-    for member in ("calculator", "general"):
-        assert set(_stored(storage / "agents" / member / "chroma")) == {
-            row["id"] for row in _RECORDED[member][_COLLECTION]
-        }
+    assert _stored(storage / "team_memory" / _TEAM / "chroma") == _expected_team_records()
+    assert "paired" in _stored(storage / "agents" / "general" / "chroma")
+    assert set(_stored(storage / "agents" / "planter" / "chroma")) == {"planted"}
 
 
 @pytest.mark.asyncio
@@ -600,6 +603,21 @@ async def test_only_the_mem0_stores_the_runtime_opens_merge(storage: Path) -> No
 
     assert {path.parts[1] for path in opened if path.parts[0] == "agents"} == {"calculator", "general"}
     _assert_merged(storage)
+
+
+@pytest.mark.asyncio
+async def test_a_team_copy_held_by_an_agent_outside_the_team_stays_where_it_is(storage: Path) -> None:
+    """The earlier runtime read a team's copies only from its members, so another agent's copy is not merged."""
+    _plant(storage, "outsider", [("o1", "outsider-turn", "Outsider fact")])
+    copy = storage / "agents" / "outsider" / "memory_files" / _TEAM
+    copy.mkdir(parents=True)
+    (copy / "MEMORY.md").write_text("# Memory\n\n- [id=m_outsider] Outsider note.\n")
+
+    await _migrate(storage, "outsider")
+
+    _assert_merged(storage)
+    assert set(_stored(storage / "agents" / "outsider" / "chroma")) == {"o1"}
+    assert (copy / "MEMORY.md").exists()
 
 
 @pytest.mark.asyncio

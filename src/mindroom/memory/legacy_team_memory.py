@@ -10,7 +10,8 @@
 #   `team_memory/<team scope>/`.
 # Handling: before serving, once per storage root, the copies merge into their team's store and leave the members.
 #   File entries union by id; a copy holding anything MindRoom did not write stays where it was. Mem0 copies merge
-#   from the stores the runtime opens, those of configured shared agents on Mem0, since no copy elsewhere was read.
+#   from the stores the runtime opens, those of configured shared agents on Mem0, since no copy elsewhere was read,
+#   and a team's copies of either kind merge only from its members, the only ones each member read.
 #   Each member's extraction of a turn shares the turn's replica key, so a turn keeps the extraction with the most
 #   distinct facts, the first member's by name among equals; an edit or delete through another member had rewritten
 #   or removed the turn in the other copies. Records move with their ids, embeddings, and metadata, so nothing is
@@ -94,7 +95,7 @@ def _merge_file_copies(runtime_paths: RuntimePaths, members: list[str]) -> None:
     for member in members:
         member_files = Path("agents", member, "memory_files")
         for name in _subdirectories(storage_root, member_files):
-            text = _recognized_copy(storage_root, member_files / name) if name.startswith(TEAM_SCOPE_PREFIX) else None
+            text = _recognized_copy(storage_root, member_files / name) if _names_member(name, member) else None
             if text is not None:
                 copies.setdefault(name, []).append((member_files / name, text))
     for scope_dir, team_copies in copies.items():
@@ -213,24 +214,37 @@ class _MemberCopy:
     records: list[_Record]
 
 
-def _mem0_member_stores(config: Config, runtime_paths: RuntimePaths) -> list[Path]:
-    """Return the Mem0 stores the runtime itself opens below `agents/`: those of configured shared agents on Mem0.
+def _mem0_member_stores(config: Config, runtime_paths: RuntimePaths) -> dict[str, Path]:
+    """Return the Mem0 store of each agent whose store the runtime itself opens: configured shared agents on Mem0.
 
     Earlier releases read team copies only from these, so a copy anywhere else was already unread, and the merge opens
     no store the runtime would not open anyway.
     """
     storage_root = runtime_paths.storage_root.resolve()
-    return [
-        mem0_chroma_path(agent_state_root_path(storage_root, agent_name).relative_to(storage_root))
+    return {
+        agent_name: mem0_chroma_path(agent_state_root_path(storage_root, agent_name).relative_to(storage_root))
         for agent_name in sorted(config.agents)
         if memory_backend(config, agent_name) == "mem0" and config.get_agent(agent_name).private is None
-    ]
+    }
 
 
-def _merge_mem0_copies(runtime_paths: RuntimePaths, member_stores: list[Path]) -> bool:
+def _names_member(scope_user_id: object, agent_name: str) -> bool:
+    """Return whether a team scope ID names the agent, as earlier releases read a team's copies only from its members."""
+    return (
+        isinstance(scope_user_id, str)
+        and scope_user_id.startswith(TEAM_SCOPE_PREFIX)
+        and agent_name in scope_user_id.removeprefix(TEAM_SCOPE_PREFIX).split("+")
+    )
+
+
+def _merge_mem0_copies(runtime_paths: RuntimePaths, member_stores: dict[str, Path]) -> bool:
     """Merge the member stores' Mem0 team records into their teams' stores; False while Chroma cannot be installed."""
     storage_root = runtime_paths.storage_root
-    stores = [storage_root / store for store in member_stores if _holds_only_plain_files(storage_root, store)]
+    stores = {
+        agent_name: storage_root / store
+        for agent_name, store in member_stores.items()
+        if _holds_only_plain_files(storage_root, store)
+    }
     if not stores:
         return True
     try:
@@ -239,7 +253,7 @@ def _merge_mem0_copies(runtime_paths: RuntimePaths, member_stores: list[Path]) -
     except ImportError as error:
         logger.warning("Left Mem0 team memory in member stores until Chroma is installed", error=str(error))
         return False
-    copies = [copy for store in stores for copy in _member_copies(store)]
+    copies = [copy for agent_name, store in stores.items() for copy in _member_copies(store, agent_name)]
     kept = _kept_records(copies)
     rejected: set[tuple[str, str]] = set()
     for (scope, collection_name), records in sorted(kept.items()):
@@ -344,8 +358,8 @@ def _plain_tree(directory: int) -> bool:
     return True
 
 
-def _member_copies(store: Path) -> list[_MemberCopy]:
-    """Return each Mem0 fact collection of a member's store with its team records; none when Chroma cannot read it.
+def _member_copies(store: Path, agent_name: str) -> list[_MemberCopy]:
+    """Return each Mem0 fact collection of an agent's store with its teams' records; none when Chroma cannot read it.
 
     The store is worker-writable in some deployments, so one Chroma cannot open leaves its copies where they are
     instead of stopping startup.
@@ -367,8 +381,7 @@ def _member_copies(store: Path) -> list[_MemberCopy]:
                     payload["embeddings"],
                     strict=True,
                 )
-                if isinstance((metadata or {}).get("user_id"), str)
-                and metadata["user_id"].startswith(TEAM_SCOPE_PREFIX)
+                if _names_member((metadata or {}).get("user_id"), agent_name)
             ]
             if records:
                 copies.append(_MemberCopy(store, client, collection, records))
