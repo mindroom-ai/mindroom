@@ -456,13 +456,11 @@ def _stop_waiting(record: AnyRunRecord) -> None:
             tool.external_execution_required = False
 
 
-def end_paused(record: AnyRunRecord, *, error: str | None = None) -> None:
-    """End a paused ``record`` that will never resume, cancelled or failed with ``error``, as the loop ends a run.
+def stop_paused(record: AnyRunRecord) -> None:
+    """Make a paused ``record`` that will never resume stop waiting; its owner sets the status it ends with.
 
-    The context its requests sent but no history holds leaves with its waits, as when a running run ends that way.
+    The context its requests sent but no history holds leaves with its waits, as when a running run ends.
     """
-    record.status = RunStatus.cancelled if error is None else RunStatus.error
-    record.error = error
     record.messages = [message for message in record.messages if message.add_to_agent_memory]
     _stop_waiting(record)
 
@@ -506,7 +504,6 @@ __all__ = [
     "check_approved_tools_offered",
     "decide_requirements",
     "drive_run",
-    "end_paused",
     "fail_unbuilt_run",
     "own_model_messages",
     "plan_resume",
@@ -515,4 +512,5 @@ __all__ = [
     "resumed_record",
     "run_agent",
     "started_run_fields",
+    "stop_paused",
 ]

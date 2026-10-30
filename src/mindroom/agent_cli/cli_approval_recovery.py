@@ -13,7 +13,7 @@ from mindroom.agent_cli.lifetime import response_cli_lifetime
 from mindroom.agent_cli.minimal_agent import bind_minimal_owner, minimal_context_documents, prepare_minimal_catalog
 from mindroom.agent_cli.projection import register_cli_media
 from mindroom.agent_loop.build import tool_owners_by_agent
-from mindroom.agent_loop.run import end_paused
+from mindroom.agent_loop.run import stop_paused
 from mindroom.agent_loop.spec import RunContext
 from mindroom.approval.tool_owners import validate_approval_tool_owners
 from mindroom.delegation.state import DelegationState
@@ -294,7 +294,7 @@ async def continue_cli_approval(  # noqa: C901, PLR0912, PLR0915 - one claimed r
     # The paused run never resumes: it ends stopped, as a cancelled run does, and is its turn's interrupted record,
     # which history replays; the follow-up turn reports the recovered call.
     ended = deepcopy(persisted)
-    end_paused(ended)
+    stop_paused(ended)
     ended.status = RunStatus.interrupted
     # The ended run and the state the recovered call left commit together.
     await write_with_session_state(

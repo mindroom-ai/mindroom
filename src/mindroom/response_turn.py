@@ -29,7 +29,7 @@ from uuid import uuid4
 
 from mindroom import ai_runtime
 from mindroom.agent_cli.lifetime import CliTurnLifetime
-from mindroom.agent_loop.run import end_paused
+from mindroom.agent_loop.run import stop_paused
 from mindroom.background_tasks import run_blocking_until_complete
 from mindroom.cancellation import current_task_is_process_shutdown
 from mindroom.constants import (
@@ -826,7 +826,8 @@ def _mark_interrupted(
     """Make the run the turn's loop stored, in the turn's scope, the turn's ``INTERRUPTED`` record.
 
     The run keeps what it stored, and ``error``, when given, is its failure's text. A run its loop left paused, which
-    nothing resumes now, first ends as a run cut short does (``end_paused``). A run no save stored is left unrecorded.
+    nothing resumes now, first stops waiting as a run cut short does (``stop_paused``). A run no save stored is left
+    unrecorded.
     """
     storage = scope_context.storage
     try:
@@ -834,7 +835,7 @@ def _mark_interrupted(
         if record is None:
             return
         if record.status is RunStatus.paused:
-            end_paused(record, error=error)
+            stop_paused(record)
         record.status = RunStatus.interrupted
         record.error = error or record.error
         storage.save_interrupted_record(scope_context.stored_or_first_session(), record)
