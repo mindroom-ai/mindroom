@@ -33,6 +33,7 @@ from mindroom.constants import (
     runtime_paths_with_storage_root,
     sandbox_startup_manifest_path,
 )
+from mindroom.credentials.manager import CredentialsManager, sync_shared_credentials_to_worker
 from mindroom.personal_agents import _append_personal_agent_roster_entry, _write_personal_agent_roster
 from mindroom.private_storage.private_instance_identity_store import ensure_private_instance_identity
 from mindroom.runtime_env_policy import (
@@ -2025,6 +2026,37 @@ def test_docker_backend_mirrors_exactly_the_launch_grantable_credentials(
     backend.ensure_worker(_spec(backend, _TEST_UNSCOPED_WORKER_KEY), now=10.0)
 
     assert sync_calls == [(_TEST_UNSCOPED_WORKER_KEY, frozenset({"openai", "github_private"}))]
+
+
+def test_docker_backend_mirrors_credentials_the_primary_environment_declares(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A granted credential the primary's `.env` declares reaches the worker, wherever the worker's config file lives."""
+    primary_dir = tmp_path / "primary"
+    primary_dir.mkdir()
+    (primary_dir / ".env").write_text("GITHUB_TOKEN=ghp-primary\n", encoding="utf-8")
+    config_text = "defaults:\n  worker_grantable_credentials: [github_private]\nagents: {}\n"
+    (primary_dir / "config.yaml").write_text(config_text, encoding="utf-8")
+    runtime_paths = resolve_primary_runtime_paths(
+        config_path=primary_dir / "config.yaml",
+        storage_path=tmp_path,
+        process_env={},
+    )
+    host_config_path = tmp_path / "host-config" / "config.yaml"
+    backend, _fake_client, _sync_calls = _backend(
+        monkeypatch,
+        tmp_path,
+        config_text=config_text,
+        runtime_paths=runtime_paths,
+        host_config_path=host_config_path,
+    )
+    monkeypatch.setattr(docker_backend_module, "sync_shared_credentials_to_worker", sync_shared_credentials_to_worker)
+
+    backend.ensure_worker(_spec(backend, _TEST_UNSCOPED_WORKER_KEY), now=10.0)
+
+    mirror = CredentialsManager(tmp_path / "credentials").for_worker(_TEST_UNSCOPED_WORKER_KEY).shared_manager()
+    assert (mirror.load_credentials("github_private") or {}).get("token") == "ghp-primary"
 
 
 def test_docker_script_worker_profile_mirrors_no_global_credentials(

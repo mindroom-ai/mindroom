@@ -102,6 +102,7 @@ def mock_credentials_manager() -> Generator[MagicMock, None, None]:
     """Mock the credentials manager."""
     with patch("mindroom.api.credentials_target.get_runtime_credentials_manager") as mock:
         mock_manager = MagicMock()
+        mock_manager.declared_variable.return_value = None
         mock.return_value = mock_manager
         yield mock_manager
 
@@ -1966,11 +1967,9 @@ class TestCredentialsAPI:
         client: TestClient,
         mock_credentials_manager: MagicMock,
     ) -> None:
-        """Test that get_api_key returns source field for env-sourced keys."""
-        mock_credentials_manager.load_credentials.return_value = {
-            "api_key": "sk-test-long-key-value",
-            "_source": "env",
-        }
+        """A key the environment declares carries no source tag; the endpoint reports it as `env`."""
+        mock_credentials_manager.load_credentials.return_value = {"api_key": "sk-test-long-key-value"}
+        mock_credentials_manager.declared_variable.return_value = "OPENAI_API_KEY"
 
         response = client.get("/api/credentials/openai/api-key")
 

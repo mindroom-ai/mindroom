@@ -20,6 +20,7 @@ from mindroom.constants import (
     RuntimePaths,
     resolve_primary_runtime_paths,
     runtime_env_values,
+    runtime_paths_with_storage_root,
     sandbox_startup_manifest_path,
 )
 from mindroom.credentials.manager import (
@@ -512,7 +513,11 @@ class DockerWorkerBackend:
         if runtime_paths is None:
             self._credentials_manager = CredentialsManager(base_path=self._storage_root / "credentials")
         else:
-            self._credentials_manager = get_runtime_credentials_manager(self._runtime_paths)
+            # The primary's own environment declares the credentials it grants; the worker's config file may live
+            # beside another `.env`, so only the storage root is rebased.
+            self._credentials_manager = get_runtime_credentials_manager(
+                runtime_paths_with_storage_root(runtime_paths, self._storage_root),
+            )
         self._runtime_namespace = _runtime_namespace_for_workers_root(self._workers_root)
         self._workers_root.mkdir(parents=True, exist_ok=True)
         drop_retired_docker_worker_record_keys(self._control_root)

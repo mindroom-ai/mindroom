@@ -425,7 +425,9 @@ async def get_api_key(
         )
 
     if api_key:
-        source = credentials.get("_source")
+        # The environment's own declarations carry no source tag; the store knows which variable supplies them.
+        declared = access.target.base_manager.declared_variable(credential_service) is not None
+        source = credentials.get("_source") or ("env" if declared else None)
         response = {
             "service": service,
             "credential_service": credential_service,
