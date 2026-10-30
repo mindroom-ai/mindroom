@@ -280,19 +280,18 @@ class ConversationStore:
         with self.transaction(write=True) as connection:
             created = ensure_session_row(connection, self.names, session)
             saved = _write_run(connection, self.names, session.session_id, data, kind, interrupted=interrupted)
-            # A run saved again when it continues after a pause, or at a checkpoint, replaces its snapshot, so it
-            # counts once.
-            recorded = False
             if usage is not None and saved.outcome != "final":
-                recorded = True
-                snapshot = {**usage, "created_at": saved.created_at, "updated_at": saved.updated_at}
-                connection.execute(
-                    usage_upsert_sql(self.names),
-                    (session.session_id, data["run_id"], json.dumps(snapshot)),
+                _record_usage(
+                    connection,
+                    self.names,
+                    session.session_id,
+                    data["run_id"],
+                    usage,
+                    created_at=saved.created_at,
+                    updated_at=saved.updated_at,
                 )
-            # Background readers learn of recorded usage, and of a finished run new to the log or finished after the
-            # turns it waited for, through the session's update time (``list_updated_sessions``).
-            if recorded or (saved.moved and data["status"] not in _NON_VISIBLE):
+            elif saved.moved and data["status"] not in _NON_VISIBLE:
+                # A finished run new to the log, or finished after the turns it waited for, is news to the readers too.
                 _move_update_time(connection, self.names, session.session_id, saved.updated_at)
             stored = self._write_state(connection, session, created, state)
         _record_stored_state(session, stored)
@@ -321,9 +320,15 @@ class ConversationStore:
             created = ensure_session_row(connection, self.names, session)
             delete_runs_in_transaction(connection, self.names, [run_id], session_id=session_id)
             _adopt_requester(connection, self.names, session_id, data.get("user_id"))
-            snapshot = {**usage, "created_at": data.get("created_at") or now, "updated_at": now}
-            connection.execute(usage_upsert_sql(self.names), (session_id, run_id, json.dumps(snapshot)))
-            _move_update_time(connection, self.names, session_id, now)
+            _record_usage(
+                connection,
+                self.names,
+                session_id,
+                run_id,
+                usage,
+                created_at=data.get("created_at") or now,
+                updated_at=now,
+            )
             stored = self._write_state(connection, session, created, state)
         _record_stored_state(session, stored)
         session.runs = runs_without(session.runs, [run_id])
@@ -572,6 +577,25 @@ def _mirror(session: ConversationSession, saved: _Saved) -> None:
     # A new list, so a reader of the old one is unaffected. Only the store assigns a session's runs and summary, and
     # async callers run its writes in the database's lane one at a time, so no write's assignment overtakes another's.
     session.runs = runs
+
+
+def _record_usage(
+    connection: sqlite3.Connection,
+    names: TableNames,
+    session_id: str,
+    run_id: str,
+    usage: dict[str, object],
+    *,
+    created_at: int,
+    updated_at: int,
+) -> None:
+    """Replace the run's usage snapshot, so a run saved again after a pause or at a checkpoint counts once.
+
+    The session's update time moves to the snapshot's, so background readers learn of the recorded usage.
+    """
+    snapshot = {**usage, "created_at": created_at, "updated_at": updated_at}
+    connection.execute(usage_upsert_sql(names), (session_id, run_id, json.dumps(snapshot)))
+    _move_update_time(connection, names, session_id, updated_at)
 
 
 def _move_update_time(connection: sqlite3.Connection, names: TableNames, session_id: str, updated_at: int) -> None:
