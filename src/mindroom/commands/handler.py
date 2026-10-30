@@ -199,10 +199,10 @@ class CommandHandlerContext:
     send_response: _CommandResponseSender
     agent_reply_memberships: AgentReplyMembershipIndex
     responder_candidates_for_room: Callable[[nio.MatrixRoom, str], Awaitable[list[MatrixID]]]
-    reload_plugins: Callable[[], Awaitable[PluginReloadResult]] | None = None
-    controller_identity: Callable[[str], DesktopControllerIdentity] | None = None
+    reload_plugins: Callable[[], Awaitable[PluginReloadResult]]
+    controller_identity: Callable[[str], DesktopControllerIdentity]
     # Runs saved schedules.
-    scheduled_tasks: ScheduledTaskRuntime | None = None
+    scheduled_tasks: ScheduledTaskRuntime
 
 
 def _format_agent_description(agent_name: str, config: Config) -> str:
@@ -421,8 +421,6 @@ async def handle_command(  # noqa: C901, PLR0912, PLR0915
     elif command.type == CommandType.RELOAD_PLUGINS:
         if not is_platform_administrator(requester_user_id, context.config, context.runtime_paths):
             response_text = "❌ Admin only."
-        elif context.reload_plugins is None:
-            response_text = "❌ Plugin reload unavailable."
         else:
             try:
                 response_text = _format_plugin_reload_summary(await context.reload_plugins())
@@ -456,8 +454,6 @@ async def handle_command(  # noqa: C901, PLR0912, PLR0915
                 "❌ Use `!desktop` in a private room containing only you, the serving bot, "
                 "and exactly one Desktop-enabled agent."
             )
-        elif context.controller_identity is None:
-            response_text = "❌ Desktop setup is unavailable until the target agent is running."
         else:
             response_text = handle_desktop_command(
                 command.args.get("args_text", ""),

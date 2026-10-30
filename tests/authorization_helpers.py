@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
+from unittest.mock import AsyncMock, MagicMock
 
 if TYPE_CHECKING:
     import nio
@@ -67,10 +68,20 @@ def make_test_turn_policy_deps(*args: Any, **kwargs: Any) -> TurnPolicyDeps:  # 
 
 
 def make_test_command_handler_context(*args: Any, **kwargs: Any) -> CommandHandlerContext:  # noqa: ANN401
-    """Build a detached command context with an explicit isolated index."""
+    """Build a detached command context with an explicit isolated index and runtime stand-ins a test may replace."""
     from mindroom.commands.handler import CommandHandlerContext  # noqa: PLC0415
+    from mindroom.scheduling.runtime import ScheduledTaskRuntime  # noqa: PLC0415
 
     _add_default_responder_candidate_resolver(kwargs)
+    kwargs.setdefault(
+        "reload_plugins",
+        AsyncMock(side_effect=AssertionError("the test did not expect a plugin reload")),
+    )
+    kwargs.setdefault(
+        "controller_identity",
+        MagicMock(side_effect=AssertionError("the test did not expect a Desktop controller lookup")),
+    )
+    kwargs.setdefault("scheduled_tasks", MagicMock(spec=ScheduledTaskRuntime))
     return CommandHandlerContext(*args, **kwargs)
 
 
