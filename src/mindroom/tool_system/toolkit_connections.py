@@ -12,32 +12,48 @@ import asyncio
 import inspect
 import weakref
 from functools import partial
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Protocol
 
 from mindroom.background_tasks import create_background_task
 from mindroom.logging_config import get_logger
+from mindroom.tool_system.agno_toolkits import requires_connect
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Coroutine
 
-    from mindroom.tool_system.agno_toolkits import Toolkit
+    from mindroom.tool_system.agno_toolkits import AnyToolkit
     from mindroom.tool_system.tool_function import ToolkitClose, ToolkitConnect
 
 logger = get_logger(__name__)
 
+
+class _ConnectingToolkit(Protocol):
+    """What a run reads of a toolkit that holds a connection for one run."""
+
+    name: str
+
+    def connect(self) -> object:
+        """Open the toolkit's connection."""
+        ...
+
+    def close(self) -> object:
+        """Close the toolkit's connection."""
+        ...
+
+
 # The latest cleanup of each toolkit's connect that a cancelled run stopped waiting for; once done, it closed what it
 # connected.
-_pending_cleanups: weakref.WeakKeyDictionary[Toolkit, asyncio.Task[None]] = weakref.WeakKeyDictionary()
+_pending_cleanups: weakref.WeakKeyDictionary[_ConnectingToolkit, asyncio.Task[None]] = weakref.WeakKeyDictionary()
 
 
-def run_connection(toolkit: Toolkit) -> ToolkitConnect | None:
+def run_connection(toolkit: AnyToolkit) -> ToolkitConnect | None:
     """Return how a run connects ``toolkit`` before its first request, or None for a toolkit that holds no connection."""
-    if toolkit.requires_connect:
+    if requires_connect(toolkit):
         return partial(_connect, toolkit)
     return None
 
 
-async def _connect(toolkit: Toolkit) -> ToolkitClose | None:
+async def _connect(toolkit: _ConnectingToolkit) -> ToolkitClose | None:
     if (cleanup := _pending_cleanups.get(toolkit)) is not None and not cleanup.done():
         # That cleanup closes the toolkit instance, so connecting first would let it close this run's connection.
         await asyncio.wait({cleanup})
@@ -49,7 +65,7 @@ async def _connect(toolkit: Toolkit) -> ToolkitClose | None:
     return partial(_close, toolkit)
 
 
-async def _connect_shielded(toolkit: Toolkit) -> None:
+async def _connect_shielded(toolkit: _ConnectingToolkit) -> None:
     """Connect ``toolkit`` on the loop or a thread; a cancelled caller stops waiting, and what connects is closed."""
 
     def close_once_connected(connecting: asyncio.Task[None]) -> None:
@@ -59,7 +75,7 @@ async def _connect_shielded(toolkit: Toolkit) -> None:
     await shielded_lifecycle(run_toolkit_lifecycle(toolkit.connect), retain=close_once_connected)
 
 
-async def _close_once_connected(toolkit: Toolkit, connecting: asyncio.Task[None]) -> None:
+async def _close_once_connected(toolkit: _ConnectingToolkit, connecting: asyncio.Task[None]) -> None:
     try:
         await connecting
     except Exception as exc:
@@ -68,7 +84,7 @@ async def _close_once_connected(toolkit: Toolkit, connecting: asyncio.Task[None]
     await _close(toolkit)
 
 
-async def _close(toolkit: Toolkit) -> None:
+async def _close(toolkit: _ConnectingToolkit) -> None:
     try:
         await run_toolkit_lifecycle(toolkit.close)
     except Exception as exc:

@@ -142,7 +142,7 @@ def _contract_cases() -> tuple[_ContractCase, ...]:
         _ContractCase("show_canvas/shared", "", "show_canvas", "shared"),
     )
     # read_canvas_state only reads, so it sends no UI action for Chat to handle.
-    registered_actions = set(ChatUITools(enable_show_canvas=True).get_async_functions()) - {"read_canvas_state"}
+    registered_actions = set(ChatUITools(enable_show_canvas=True).functions) - {"read_canvas_state"}
     exported_actions = {case.action for case in actions}
     if registered_actions != exported_actions:
         msg = (

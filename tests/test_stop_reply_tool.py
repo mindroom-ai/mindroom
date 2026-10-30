@@ -19,6 +19,7 @@ from mindroom.dispatch_source import TRUSTED_INTERNAL_RELAY_SOURCE_KIND
 from mindroom.message_target import MessageTarget
 from mindroom.response_sources import ResponseSources
 from mindroom.tool_system.runtime_context import ToolRuntimeContext, tool_runtime_context
+from tests.agent_tool_helpers import toolkit_offers
 from tests.authorization_helpers import make_test_tool_runtime_context
 from tests.conftest import (
     bind_runtime_paths,
@@ -70,8 +71,7 @@ def _context(tmp_path: Path) -> ToolRuntimeContext:
 
 def test_stop_agent_reply_schema_asks_the_model_for_the_target_name() -> None:
     """The target is a model-supplied name, never a parameter Agno fills with the calling Agent."""
-    function = StopReplyTools().async_functions["stop_agent_reply"]
-    function.process_entrypoint(strict=False)
+    function = toolkit_offers(StopReplyTools(), "stop_agent_reply")
 
     assert function.parameters["required"] == ["agent_name"]
 

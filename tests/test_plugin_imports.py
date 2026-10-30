@@ -35,7 +35,7 @@ _PLUGIN_PROCESS_SCRIPT = textwrap.dedent(
     from mindroom.event_journal.opening import event_journal_sqlite_path
     from mindroom.tool_jobs.runtime import BackgroundOutcome, ToolJobRuntime
     from mindroom.tool_system.construction import get_toolkit_construction
-    from mindroom.tool_system.agno_toolkits import adapt_function
+    from mindroom.tool_system.agno_toolkits import toolkit_function
     from mindroom.tool_system.metadata import get_tool_by_name
     from mindroom.tool_system.plugins import load_plugins
     from mindroom.tool_system.registry_state import tool_registry_origin
@@ -72,7 +72,7 @@ _PLUGIN_PROCESS_SCRIPT = textwrap.dedent(
             worker_target=None,
         )
         tool = JobTool(
-            function=replace(adapt_function(toolkit.get_async_functions()["stable_echo"]), toolkit="stable_plugin"),
+            function=replace(toolkit_function(toolkit, "stable_echo"), toolkit="stable_plugin"),
             toolkit=toolkit,
             authority=toolkit_authority(authority_snapshot(config, "lead"), toolkit),
         )

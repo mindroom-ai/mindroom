@@ -18,8 +18,6 @@ from pathlib import Path, PureWindowsPath
 from typing import TYPE_CHECKING, Any, cast
 
 import json5
-from agno.tools import Toolkit
-from agno.tools.function import Function
 
 from mindroom import yaml_io
 from mindroom.background_tasks import create_background_task
@@ -27,7 +25,8 @@ from mindroom.constants import runtime_env_values
 from mindroom.credentials.manager import get_runtime_credentials_manager
 from mindroom.logging_config import get_logger
 from mindroom.path_confinement import open_directory_within_root, read_regular_file_within_root
-from mindroom.tool_system.output_files import ToolOutputFilePolicy, wrap_function_for_output_files
+from mindroom.tool_system.agno_toolkits import configure_toolkit_functions
+from mindroom.tool_system.authoring import Toolkit, tool
 from mindroom.tool_system.skill_usage import record_skill_use
 
 if TYPE_CHECKING:
@@ -35,6 +34,7 @@ if TYPE_CHECKING:
 
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
+    from mindroom.tool_system.output_files import ToolOutputFilePolicy
 
 logger = get_logger(__name__)
 
@@ -206,15 +206,7 @@ class SkillsToolkit(Toolkit):
         self._skills = dict(skills)
         # The workspace root of each skill that came from an agent workspace.
         self._workspace_roots = dict(workspace_roots)
-        for entrypoint, description in (
-            (self.get_skill_instructions, _GET_SKILL_INSTRUCTIONS_DESCRIPTION),
-            (self.get_skill_reference, _GET_SKILL_REFERENCE_DESCRIPTION),
-            (self.get_skill_script, _GET_SKILL_SCRIPT_DESCRIPTION),
-        ):
-            function = Function(name=entrypoint.__name__, description=description, entrypoint=entrypoint)
-            if output_file_policy is not None:
-                function = wrap_function_for_output_files(function, output_file_policy)
-            self.functions[function.name] = function
+        configure_toolkit_functions(self, output_files=output_file_policy)
 
     @property
     def skills(self) -> tuple[Skill, ...]:
@@ -239,6 +231,7 @@ class SkillsToolkit(Toolkit):
         lines.extend(("", "</skills_system>"))
         return "\n".join(lines)
 
+    @tool(description=_GET_SKILL_INSTRUCTIONS_DESCRIPTION)
     def get_skill_instructions(self, skill_name: str) -> str:
         """Load the full instructions for a skill.
 
@@ -263,6 +256,7 @@ class SkillsToolkit(Toolkit):
             },
         )
 
+    @tool(description=_GET_SKILL_REFERENCE_DESCRIPTION)
     def get_skill_reference(self, skill_name: str, reference_path: str | None = None) -> str:
         """Load a reference document from a skill.
 
@@ -276,6 +270,7 @@ class SkillsToolkit(Toolkit):
         """
         return self._read_skill_file(skill_name, _REFERENCES, reference_path)
 
+    @tool(description=_GET_SKILL_SCRIPT_DESCRIPTION)
     def get_skill_script(self, skill_name: str, script_path: str | None = None) -> str:
         """Read a script from a skill without running it.
 

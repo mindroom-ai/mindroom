@@ -22,7 +22,6 @@ from mindroom.knowledge.search import (
     _knowledge_search_tool_description,
 )
 from mindroom.knowledge.vector_store import KnowledgeCollection, StoredRow
-from mindroom.tool_system.agno_toolkits import adapt_function
 from mindroom.tool_system.tool_access import tool_definition
 from tests.agno_parity import knowledge_goldens
 from tests.agno_parity.golden_files import render
@@ -186,7 +185,7 @@ def test_search_function_definition_is_the_golden_tool(memory_search_available: 
     knowledge = AgentKnowledge(sources=(source,))
 
     definition = tool_definition(
-        adapt_function(knowledge.search_function(memory_search_available=memory_search_available)).definition(),
+        knowledge.search_function(memory_search_available=memory_search_available).definition(),
     )
 
     prompt_golden = json.loads((GOLDEN_DIR.parent / "prompts" / "agent_openai_chat.json").read_text(encoding="utf-8"))

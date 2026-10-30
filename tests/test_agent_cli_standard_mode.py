@@ -23,9 +23,9 @@ from mindroom.config.approval import ApprovalRuleConfig, ToolApprovalConfig
 from mindroom.config.models import BackgroundToolJobsConfig
 from mindroom.custom_tools.job import JobTools
 from mindroom.runtime_state import clear_api_server_address, set_api_server_address
-from mindroom.tool_system.agno_toolkits import adapt_function
 from mindroom.tool_system.runtime_context import build_execution_identity_from_runtime_context, tool_runtime_context
 from tests.access_schema_support import with_responder_access
+from tests.agent_tool_helpers import toolkit_offers
 from tests.conftest import test_runtime_paths
 from tests.delegation_helpers import ScriptedAgents
 from tests.fakes.scripted_model import ScriptedModel, answer
@@ -304,8 +304,7 @@ async def test_approval_gated_tools_stay_native_only(
 
 def test_the_job_controls_are_not_offered_to_the_cli(tmp_path: Path) -> None:
     """A job read through the CLI is never saved as the reply's own call, so the reply reads its jobs directly."""
-    job = JobTools(test_runtime_paths(tmp_path), job_owner()).get_async_functions()["job"]
-    assert not _cli_callable(adapt_function(job))
+    assert not _cli_callable(toolkit_offers(JobTools(test_runtime_paths(tmp_path), job_owner()), "job"))
 
 
 @pytest.mark.parametrize("jobs", [False, True], ids=["paused-run", "job-approval"])

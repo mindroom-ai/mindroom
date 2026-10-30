@@ -62,6 +62,7 @@ from mindroom.tool_system.tool_function import ToolOutcome
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity, agent_workspace_root_path
 from tests.access_schema_support import with_responder_access
 from tests.agent_loop.helpers import collect, spec, toolkit
+from tests.agent_tool_helpers import toolkit_offers
 from tests.conftest import FakeApprovalTransport
 from tests.delegation_helpers import ScriptedAgents, _delegate_runtime_context, _runtime_paths
 from tests.fakes.scripted_model import ScriptedModel, answer, calls, tool_call
@@ -1498,7 +1499,7 @@ async def test_only_a_top_level_delegate_offers_background_waits(tmp_path: Path,
             execution_identity=owner,
             delegation_depth=depth,
         )
-        description = delegate.async_functions["run_subagent"].description or ""
+        description = toolkit_offers(delegate, "run_subagent").description or ""
         offered = "background_after" in description
         instructed = config.get_prompt("DELEGATE_BACKGROUND_JOB_INSTRUCTIONS") in (delegate.instructions or "")
         assert (offered, instructed) == (depth == 0, depth == 0)
