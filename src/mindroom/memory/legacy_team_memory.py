@@ -276,8 +276,9 @@ async def _trusted_embedding_size(runtime_paths: RuntimePaths, config: Config) -
     """Return the size the configured embedder gives its embeddings; None, with a warning, while it cannot answer.
 
     Every team's records share the one team store, so a record of another size would make it refuse the rest. Member
-    stores are worker-writable, so the size comes from records the team store already holds, else from the embedder's
-    settings, else from asking it once; settings that fix it keep an embedder outage from holding the merge back.
+    stores are worker-writable, so the size comes from records the team store already holds, else from the settings of
+    an embedder at OpenAI's own API, else from asking it once; settings that fix it keep an embedder outage from holding
+    the merge back. Asking has no deadline, because building the embedder can install packages or download its model.
     """
     team_root = team_memory_root(runtime_paths)
     if (held := await asyncio.to_thread(_held_embedding_size, team_root, mem0_collection_name(config))) is not None:
@@ -298,14 +299,15 @@ async def _trusted_embedding_size(runtime_paths: RuntimePaths, config: Config) -
 
 
 def _configured_embedding_size(config: Config) -> int | None:
-    """Return the size the embedder's settings fix: its `dimensions`, or an OpenAI model's own size."""
+    """Return the size OpenAI's own API gives the configured embeddings: their `dimensions`, or the model's own size."""
     embedder = config.memory.embedder
+    # Only OpenAI's own API applies `dimensions` for certain: other providers never receive it, and an OpenAI-compatible
+    # server at another host may ignore it or serve another model under the same name.
+    if embedder.provider != "openai" or embedder.config.host is not None:
+        return None
     if embedder.config.dimensions is not None:
         return embedder.config.dimensions
-    # An OpenAI-compatible server at another host may serve another model under the same name.
-    if embedder.provider == "openai" and embedder.config.host is None:
-        return OPENAI_EMBEDDING_DIMENSIONS.get(embedder.config.model)
-    return None
+    return OPENAI_EMBEDDING_DIMENSIONS.get(embedder.config.model)
 
 
 def _held_embedding_size(team_root: Path, collection_name: str) -> int | None:

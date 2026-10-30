@@ -456,16 +456,25 @@ async def test_a_storage_root_without_mem0_copies_never_asks_the_embedder(tmp_pa
         ("openai", {"model": "text-embedding-3-small", "dimensions": 256}, 256),
         ("openai", {"model": "text-embedding-3-large"}, 3072),
         ("openai", {"model": "text-embedding-3-small", "host": "http://embedder.test/v1"}, None),
+        ("openai", {"model": "text-embedding-3-small", "host": "http://embedder.test/v1", "dimensions": 256}, None),
         ("sentence_transformers", {"model": "sentence-transformers/all-MiniLM-L6-v2"}, None),
+        ("huggingface", {"model": "sentence-transformers/all-MiniLM-L6-v2", "dimensions": 256}, None),
     ],
-    ids=["configured dimensions", "known OpenAI model", "other OpenAI-compatible host", "local model"],
+    ids=[
+        "configured dimensions",
+        "known OpenAI model",
+        "other OpenAI-compatible host",
+        "dimensions another host may ignore",
+        "local model",
+        "dimensions no Mem0-only embedder receives",
+    ],
 )
 def test_only_settings_that_fix_the_embedding_size_spare_the_embedder_call(
     provider: str,
     settings: dict[str, object],
     size: int | None,
 ) -> None:
-    """A server at another host may serve another model under an OpenAI name, and a local model's size needs loading it."""
+    """Only OpenAI's own API is sure to apply `dimensions` and to serve an OpenAI model's size; any other embedder is asked."""
     memory = MemoryConfig(embedder=_MemoryEmbedderConfig(provider=provider, config=EmbedderConfig(**settings)))
     with patch.object(legacy_team_memory, "OPENAI_EMBEDDING_DIMENSIONS", OPENAI_EMBEDDING_DIMENSIONS):
         assert legacy_team_memory._configured_embedding_size(Config(memory=memory)) == size
