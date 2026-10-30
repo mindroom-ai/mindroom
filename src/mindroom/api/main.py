@@ -39,7 +39,6 @@ from mindroom.api.egress_credentials import router as egress_credentials_router
 from mindroom.api.external_triggers import router as external_triggers_router
 from mindroom.api.frontend import router as frontend_router
 from mindroom.api.homeassistant_integration import router as homeassistant_router
-from mindroom.api.integrations import router as integrations_router
 from mindroom.api.knowledge import router as knowledge_router
 from mindroom.api.matrix_operations import router as matrix_router
 from mindroom.api.mcp_gateway import gateway_cors_origins, gateway_lifespan, install_gateway_routes
@@ -636,7 +635,6 @@ app.include_router(credentials_router, dependencies=[Depends(verify_user)])
 app.include_router(egress_broker_router, dependencies=[Depends(verify_user)])
 app.include_router(provider_setup_router, dependencies=[Depends(verify_user)])
 app.include_router(homeassistant_router, dependencies=[Depends(verify_user)])
-app.include_router(integrations_router, dependencies=[Depends(verify_user)])
 app.include_router(matrix_router, dependencies=[Depends(verify_user)])
 app.include_router(thread_exports_router, dependencies=[Depends(verify_user)])
 app.include_router(response_activity_router)  # Aggregate operational probe, like health/readiness.

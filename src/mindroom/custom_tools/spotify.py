@@ -1,4 +1,4 @@
-"""Spotify toolkit that renews the dashboard's OAuth access token before it expires."""
+"""Spotify toolkit that sends the connected account's current OAuth access token."""
 
 from __future__ import annotations
 
@@ -6,31 +6,50 @@ from typing import TYPE_CHECKING, Any
 
 from agno.tools.spotify import SpotifyTools as AgnoSpotifyTools
 
-from mindroom.credentials.manager import CredentialsManager, load_scoped_credentials, save_scoped_credentials
-from mindroom.spotify_tokens import current_spotify_credentials
+from mindroom.config.main import Config  # noqa: TC001  # resolved by tool contract introspection
+from mindroom.credentials.manager import CredentialsManager  # noqa: TC001  # resolved by tool contract introspection
+from mindroom.logging_config import get_logger
+from mindroom.oauth.client import active_oauth_credential_context
+from mindroom.oauth.credential_lifecycle import (
+    OAuthCredentialUnreadableError,
+    oauth_credentials_usable,
+    refresh_oauth_credentials_blocking,
+)
+from mindroom.oauth.providers import OAuthProviderError, OAuthRefreshRejectedError
+from mindroom.oauth.service import (
+    OAUTH_REFRESH_REJECTED_REASON,
+    OAUTH_RESET_REQUIRED_REASON,
+    oauth_connection_required,
+)
+from mindroom.oauth.spotify import spotify_oauth_provider
 
 if TYPE_CHECKING:
     from mindroom.constants import RuntimePaths
     from mindroom.tool_system.worker_routing import ResolvedWorkerTarget
 
+logger = get_logger(__name__)
+
 
 class SpotifyTools(AgnoSpotifyTools):
-    """Agno Spotify toolkit whose stored access token is renewed in the primary process, which holds the client secret."""
+    """Agno Spotify toolkit that reads its access token from the Spotify OAuth connection on every request."""
 
     def __init__(
         self,
-        access_token: str,
         default_market: str | None = "US",
         timeout: int = 30,
         *,
         runtime_paths: RuntimePaths,
         credentials_manager: CredentialsManager,
         worker_target: ResolvedWorkerTarget | None,
+        runtime_config: Config | None = None,
     ) -> None:
-        super().__init__(access_token=access_token, default_market=default_market, timeout=timeout)
+        # Each request reads the token, so none is known yet.
+        super().__init__(access_token="", default_market=default_market, timeout=timeout)
+        self._provider = spotify_oauth_provider()
         self._runtime_paths = runtime_paths
         self._credentials_manager = credentials_manager
         self._worker_target = worker_target
+        self._config = runtime_config
 
     # AGNO_COMPAT: SpotifyTools sends one fixed access token and never renews it.
     # Reason: Agno 3.0.9 SpotifyTools takes only an access token and sends it on every request, while Spotify access
@@ -38,10 +57,9 @@ class SpotifyTools(AgnoSpotifyTools):
     # Upstream issue: Tracking gap; no matching issue has been verified.
     # Upstream PR: No matching fix has been verified.
     # Remove when: Agno accepts a token provider or refresh credentials and renews expiring tokens itself;
-    # saving the renewed token in MindRoom's scoped credential store stays MindRoom behavior.
-    # Coverage: tests/test_spotify_tools.py::test_tool_renews_an_expiring_token_before_calling_spotify;
-    # tests/test_spotify_tools.py::test_tool_without_the_client_secret_keeps_the_stored_token;
-    # tests/test_spotify_tools.py::test_tool_does_not_renew_a_connection_shared_through_the_worker_grant.
+    # reading the token from MindRoom's OAuth connection of the call's scope stays MindRoom behavior.
+    # Coverage: tests/test_spotify_tools.py::test_tool_sends_the_refreshed_oauth_token,
+    # tests/test_spotify_tools.py::test_tool_without_a_connection_asks_to_connect.
     def _make_request(
         self,
         endpoint: str,
@@ -49,25 +67,29 @@ class SpotifyTools(AgnoSpotifyTools):
         body: dict[str, Any] | None = None,
         params: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
-        # Read only the target's own store, which the renewal saves back to.
-        # A connection shared through worker_grantable_credentials keeps its construction-time token,
-        # so it is never copied into this agent's store; the dashboard status check follows the same rule.
-        credentials = load_scoped_credentials(
-            "spotify",
-            credentials_manager=self._credentials_manager,
-            worker_target=self._worker_target,
-            primary_built_tool=True,
-        )
-        if credentials and credentials.get("access_token"):
-            renewed = current_spotify_credentials(credentials, self._runtime_paths, self._save_credentials)
-            self.access_token = renewed["access_token"]
+        self.access_token = self._current_access_token()
         return super()._make_request(endpoint, method, body, params)
 
-    def _save_credentials(self, credentials: dict[str, Any]) -> None:
-        save_scoped_credentials(
-            "spotify",
-            credentials,
-            credentials_manager=self._credentials_manager,
-            worker_target=self._worker_target,
-            primary_built_tool=True,
+    def _current_access_token(self) -> str:
+        """Return a current access token, refreshing one about to expire, or raise the connect prompt."""
+        context = active_oauth_credential_context(
+            self._provider,
+            self._runtime_paths,
+            self._credentials_manager,
+            self._worker_target,
+            config=self._config,
         )
+        try:
+            credentials = refresh_oauth_credentials_blocking(context)
+        except OAuthCredentialUnreadableError:
+            raise oauth_connection_required(context, reason=OAUTH_RESET_REQUIRED_REASON) from None
+        except OAuthRefreshRejectedError:
+            raise oauth_connection_required(context, reason=OAUTH_REFRESH_REJECTED_REASON) from None
+        except OAuthProviderError as exc:
+            logger.warning("spotify_oauth_refresh_failed", error_type=type(exc).__name__)
+            msg = "Spotify authorization could not be refreshed. Retry this request shortly."
+            raise OAuthProviderError(msg) from None
+        token = (credentials or {}).get("token")
+        if not oauth_credentials_usable(self._provider, self._runtime_paths, credentials) or not isinstance(token, str):
+            raise oauth_connection_required(context)
+        return token

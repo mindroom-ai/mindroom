@@ -44,6 +44,7 @@ warnings.filterwarnings(
 
 if TYPE_CHECKING:
     from mindroom.constants import RuntimePaths
+    from mindroom.oauth.credential_store_types import OAuthCredentialStoreContext
 
 logger = get_logger(__name__)
 
@@ -578,6 +579,18 @@ def _pkce_s256_code_challenge(code_verifier: str) -> str:
 
 
 @dataclass(frozen=True, slots=True)
+class OAuthLegacyCredentials:
+    """Tokens a provider's former routes stored outside the OAuth store, adopted when a scope's store is created.
+
+    `read` returns the scope's tokens in the store's format, or None; `remove` drops them once the store holding
+    them committed.
+    """
+
+    read: Callable[[OAuthCredentialStoreContext], dict[str, Any] | None]
+    remove: Callable[[OAuthCredentialStoreContext], None]
+
+
+@dataclass(frozen=True, slots=True)
 class OAuthProvider:
     """Provider definition registered by core or a plugin."""
 
@@ -613,6 +626,7 @@ class OAuthProvider:
     # the claims already stored. It is best effort: it may return no claims or raise, and a failed read (an
     # exception is caught and logged by its type only) leaves the connection without them.
     account_claims_reader: _OAuthAccountClaimsReader | None = None
+    legacy_credentials: OAuthLegacyCredentials | None = None
 
     def __post_init__(self) -> None:
         """Validate provider identifiers and redirect path shape."""

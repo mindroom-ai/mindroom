@@ -379,15 +379,21 @@ async def oauth_credential_reader(
 
 
 async def _initialize_store(context: OAuthCredentialStoreContext, database: _OAuthDatabase) -> None:
-    await database.run(_initialize_store_state, context, database.connection)
+    adopted_legacy_credentials = await database.run(_initialize_store_state, context, database.connection)
     await _commit_connection(database)
+    legacy_credentials = context.provider.legacy_credentials
+    if adopted_legacy_credentials and legacy_credentials is not None:
+        await database.run(legacy_credentials.remove, context)
 
 
 def _initialize_store_state(
     context: OAuthCredentialStoreContext,
     connection: sqlite3.Connection,
-) -> None:
-    """Create and bind one authoritative SQLite credential database."""
+) -> bool:
+    """Create and bind one authoritative SQLite credential database, and return whether it adopted legacy tokens.
+
+    A new scope's store starts with the tokens the provider's former routes stored for it, if any.
+    """
     connection.execute(
         """
         CREATE TABLE IF NOT EXISTS oauth_credential_state (
@@ -425,6 +431,13 @@ def _initialize_store_state(
         "SELECT * FROM oauth_credential_state WHERE singleton = 1",
     ).fetchone()
     if row is None:
+        legacy_credentials = context.provider.legacy_credentials
+        adopted = legacy_credentials.read(context) if legacy_credentials is not None else None
+        payload = (
+            None
+            if adopted is None
+            else context.credentials_manager.encode_credentials(context.provider.credential_service, adopted)
+        )
         connection.execute(
             """
             INSERT INTO oauth_credential_state(
@@ -441,13 +454,14 @@ def _initialize_store_state(
                 expected_binding["routing_agent_name"],
                 secrets.token_hex(32),
                 secrets.token_hex(32),
-                None,
-                0,
+                payload,
+                int(adopted is not None),
                 0,
             ),
         )
-    else:
-        _validate_scope_binding(context, connection, row)
+        return adopted is not None
+    _validate_scope_binding(context, connection, row)
+    return False
 
 
 async def _reader_requires_write_preparation(

@@ -14,8 +14,8 @@ Use these tools to caption and extract audio from local videos, search GIFs and 
 ## Setup
 
 `moviepy_video_tools` and `youtube` need no credentials.
-`giphy` and `unsplash` need an API key, `brandfetch` needs an API key or a client ID depending on the enabled function, and `spotify` needs an OAuth access token, normally from the dashboard connection.
-Enter `api_key`, `access_key`, and `access_token` in the dashboard **Tools** tab, not in `config.yaml` (see [Security Restrictions](https://docs.mindroom.chat/tools/#security-restrictions)).
+`giphy` and `unsplash` need an API key, `brandfetch` needs an API key or a client ID depending on the enabled function, and `spotify` needs a Spotify OAuth connection from the dashboard.
+Enter `api_key` and `access_key` in the dashboard **Tools** tab, not in `config.yaml` (see [Security Restrictions](https://docs.mindroom.chat/tools/#security-restrictions)).
 `giphy`, `unsplash`, and `brandfetch` also read the environment variables named in their configuration tables when no key is stored.
 Missing Python dependencies install on first use (see [Automatic Dependency Installation](https://docs.mindroom.chat/tools/#automatic-dependency-installation)).
 
@@ -180,22 +180,25 @@ It provides `search_tracks()`, `search_playlists()`, `search_artists()`, `search
 
 ### Connect Spotify
 
-1. Create an app in the [Spotify Developer Dashboard](https://developer.spotify.com/dashboard) and add the redirect URI `<dashboard URL>/api/integrations/spotify/callback`.
-2. Set `SPOTIFY_CLIENT_ID` and `SPOTIFY_CLIENT_SECRET` in MindRoom's environment; without them, connecting fails with `Spotify OAuth not configured. Set SPOTIFY_CLIENT_ID and SPOTIFY_CLIENT_SECRET environment variables.`
-3. If the dashboard is reached through a different public URL than the one MindRoom sees, set `SPOTIFY_REDIRECT_URI` to the exact registered redirect URI.
-4. In the dashboard **Tools** tab, connect Spotify and approve access.
+1. Create an app in the [Spotify Developer Dashboard](https://developer.spotify.com/dashboard) and add the redirect URI `<public URL>/api/oauth/spotify/callback`.
+2. Save the app's client ID and client secret under the `spotify_oauth_client` credential service.
+3. In the dashboard **Tools** tab, connect Spotify and approve access.
 
 The connection requests the scopes `user-read-private`, `user-read-email`, `user-read-playback-state`, `user-read-currently-playing`, `user-top-read`, `playlist-read-private`, `playlist-modify-public`, `playlist-modify-private`, and `user-modify-playback-state`.
-MindRoom renews the access token automatically, so a connection keeps working after Spotify's one-hour token lifetime.
-A connection that a shared-scope agent uses through `defaults.worker_grantable_credentials` is not renewed, so reconnect Spotify when its token expires.
+MindRoom refreshes the access token automatically, so a connection keeps working after Spotify's one-hour token lifetime.
+Until Spotify is connected, `spotify` calls return an `OAuthConnectionRequired` result containing the connect link.
 
 `spotify` requires `worker_scope` unset or `shared` and always runs in the primary runtime (see [Shared-only integrations](https://docs.mindroom.chat/deployment/sandbox-proxy/#shared-only-integrations)).
+
+### Upgrading from the environment-variable setup
+
+MindRoom no longer reads `SPOTIFY_CLIENT_ID`, `SPOTIFY_CLIENT_SECRET`, or `SPOTIFY_REDIRECT_URI`, and `/api/integrations/spotify/callback` is gone.
+Register `<public URL>/api/oauth/spotify/callback` as a redirect URI of your Spotify app and save its client ID and secret under `spotify_oauth_client`; an existing connection keeps working with the same app, and otherwise connect Spotify again.
 
 ### Configuration
 
 | Option | Type | Default | Notes |
 | --- | --- | --- | --- |
-| `access_token` | `password` | `null` | Required Spotify OAuth access token, saved by the dashboard connection or entered manually; a manually entered token is not renewed and stops working when it expires. |
 | `default_market` | `text` | `US` | Default market code for search and album lookups. |
 | `timeout` | `number` | `30` | Request timeout in seconds. |
 

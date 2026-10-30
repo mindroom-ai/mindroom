@@ -29,12 +29,16 @@ from mindroom.api.credentials_target import (
     resolve_request_credentials_target,
     save_credentials_for_target,
 )
-from mindroom.api.integrations import get_dashboard_url
 from mindroom.homeassistant_requests import send_homeassistant_request
 from mindroom.homeassistant_url_validation import homeassistant_url_error_detail, validate_homeassistant_instance_url
 from mindroom.server_fetch_url import ServerFetchAsyncHTTPTransport, ServerFetchUrlError
 
 router = APIRouter(prefix="/api/homeassistant", tags=["homeassistant-integration"])
+
+
+def _dashboard_url(request: Request) -> str:
+    """Return the dashboard base URL for OAuth redirects."""
+    return str(request.base_url).rstrip("/")
 
 
 class HomeAssistantStatus(BaseModel):
@@ -246,7 +250,7 @@ async def connect_oauth(
     # Home Assistant OAuth2 flow: https://developers.home-assistant.io/docs/auth_api/
     resolve_request_credentials_target(request, agent_name=agent_name, service_names=("homeassistant",))
     fetch_url = _validate_homeassistant_instance_url(instance_url, allow_private_url=config.allow_private_url)
-    redirect_uri = f"{get_dashboard_url(request)}/api/homeassistant/callback"
+    redirect_uri = f"{_dashboard_url(request)}/api/homeassistant/callback"
     state = issue_pending_oauth_state(
         request,
         "homeassistant",
@@ -385,7 +389,7 @@ async def callback(request: Request) -> RedirectResponse:
                 },
             )
 
-            return RedirectResponse(url=f"{get_dashboard_url(request)}/?homeassistant=connected")
+            return RedirectResponse(url=f"{_dashboard_url(request)}/?homeassistant=connected")
 
     except ServerFetchUrlError as e:
         raise _homeassistant_url_http_error(e, allow_private_url=allow_private_url) from e

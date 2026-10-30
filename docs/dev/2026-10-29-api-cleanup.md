@@ -23,10 +23,14 @@ This record holds the decisions behind one write protocol for the config file, o
 - OAuth operations never authenticate a request; each router authenticates through its own dependency, so the dashboard route gate no longer exempts `/api/connections` paths.
   The callback, success, and reset exemptions stay, because those handlers validate their own state or reset capability.
 - The app caches the auth clients for the runtime it serves, resolved once per request, and a request whose app moved to another runtime meanwhile is refused as stale when it rebinds its snapshot, so its auth state and its config never name two runtimes.
+- Spotify is a registered OAuth provider, so its connect, status, refresh, and disconnect are the generic ones, and the former routes, their environment client, and their redirect path are gone without an alias.
+  Tokens those routes stored are adopted when a scope's `spotify_oauth` store is created, because that is the one moment the scope's identity and its store's binding are both known; legacy directory names are hashed and cannot be mapped back to a scope.
+  The adopted connection records `SPOTIFY_CLIENT_ID` as its client, because that is the client the former routes renewed it with; the configured client is not assumed, since a different app would make the token look usable.
 
 ## Rejected alternatives
 
 - A registry of "config views" under `config/` that the API registers into: it needs a protocol whose only implementer is the API state, and a callback for the dashboard's pinned-snapshot check, because the publication must hold the API locks across the write.
 - Caching the auth state per config generation: it reads only the environment, so rebuilding it per save would drop the Supabase client and JWKS cache for nothing.
 - Gating only reports on `ACCOUNT_ID`: that keeps two requester rules; gating credentials too would move private credentials in an unhosted configuration.
+- Migrating Spotify tokens eagerly at startup over the configured shared agents: it misses unscoped connections and those of agents since removed, and runs before an operator could save the client.
 - Reconciling at every publication, tool commits and the runtime's load included: the embedded runtime already reconciles what it applies, so it only reconciled the same transition twice.

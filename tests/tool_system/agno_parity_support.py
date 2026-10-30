@@ -115,7 +115,6 @@ DUMMY_CREDENTIALS: dict[str, dict[str, object]] = {
     "oxylabs": {"username": _KEY, "password": _KEY},
     "scrapegraph": {"api_key": _KEY},
     "searxng": {"host": _URL},
-    "spotify": {"access_token": _KEY},
     "sql": {"db_url": "sqlite://"},
     "tavily": {"api_key": _KEY},
     # The client rejects bot tokens without a colon.

@@ -21,7 +21,6 @@ import {
   IntegrationProvider,
   IntegrationScope,
 } from "./types";
-import { spotifyIntegration } from "./spotify";
 import { homeAssistantIntegration } from "./homeassistant";
 
 type OAuthStatus = {
@@ -360,7 +359,6 @@ export const integrationProviders: Record<string, IntegrationProvider> = {
   google_gmail: googleGmailIntegration,
   google_sheets: googleSheetsIntegration,
   google_tasks: googleTasksIntegration,
-  spotify: spotifyIntegration,
   homeassistant: homeAssistantIntegration,
 };
 

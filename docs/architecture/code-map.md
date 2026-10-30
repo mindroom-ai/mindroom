@@ -143,6 +143,8 @@ Matrix sync callback
 | `oauth/reset.py` | OAuth reset target resolution and requester-bound browser intents |
 | `oauth/reset_execution.py` | MCP retirement and durable reset execution |
 | `oauth/microsoft.py` | Microsoft 365 OAuth providers sharing one Entra app, with the tenant resolved per runtime |
+| `oauth/spotify.py` | Spotify OAuth provider |
+| `oauth/legacy_spotify_credentials.py` | Tokens the former Spotify routes stored, adopted once into a scope's OAuth store when that store is created |
 | `custom_tools/oauth_connections.py` | Requester-bound agent tool for issuing OAuth reset confirmation links |
 | `egress_broker/` | Agent Keys: the egress broker in the primary that adds stored keys or connected-account tokens to worker HTTP(S) requests the worker never sees |
 | `egress_broker/env.py` | Whether the broker and its personal page are on, the one rule for which agents use Agent Keys (`egress_credentials` plus a worker-routed `shell` or `python`), and the worker env overlay |

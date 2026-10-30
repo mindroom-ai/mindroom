@@ -1939,15 +1939,6 @@ path = "mindroom.api.homeassistant_integration"
 depends_on = [
     "mindroom.api.credentials_oauth_flows",
     "mindroom.api.credentials_target",
-    "mindroom.api.integrations",
-]
-
-[[modules]]
-path = "mindroom.api.integrations"
-depends_on = [
-    "mindroom.api.credentials_oauth_flows",
-    "mindroom.api.credentials_target",
-    "mindroom.tool_system.dependencies",
 ]
 
 [[modules]]
@@ -2151,7 +2142,6 @@ depends_on = [
     "mindroom.api.external_triggers",
     "mindroom.api.frontend",
     "mindroom.api.homeassistant_integration",
-    "mindroom.api.integrations",
     "mindroom.api.knowledge",
     "mindroom.api.matrix_operations",
     "mindroom.api.openai_compat",
