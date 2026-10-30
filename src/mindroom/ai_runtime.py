@@ -35,7 +35,6 @@ if TYPE_CHECKING:
 __all__ = [
     "EMPTY_RESPONSE_NOTICE",
     "bind_mid_turn_conversation_context",
-    "discard_empty_completed_run",
     "finalize_queued_notice_response_turn_async",
     "queued_message_signal_context",
     "queued_notice_after_tool_batch",
@@ -507,38 +506,4 @@ def scrub_queued_notice_session_context(
             entity=entity_name,
             session_id=session.session_id,
             session_type=session.kind,
-        )
-
-
-def discard_empty_completed_run(
-    *,
-    scope_context: ScopeSessionContext | None,
-    session_id: str,
-    run_id: str | None,
-    entity_name: str,
-    output_tokens: int | None,
-) -> None:
-    """Log one empty completed model response and purge its run from session history.
-
-    A persisted assistant turn with no content teaches the model that ending the
-    turn immediately is the expected continuation, so the run is removed from both
-    the loaded session and storage before the next prompt is built.
-    """
-    logger.warning(
-        "model_returned_empty_response",
-        entity=entity_name,
-        session_id=session_id,
-        run_id=run_id,
-        output_tokens=output_tokens,
-    )
-    if scope_context is None or not run_id:
-        return
-    try:
-        scope_context.storage.delete_runs([run_id], session_id=scope_context.session_id, session=scope_context.session)
-    except Exception:
-        logger.exception(
-            "Failed to remove empty run from session history",
-            entity=entity_name,
-            session_id=session_id,
-            run_id=run_id,
         )

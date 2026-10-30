@@ -260,7 +260,7 @@ SENTENCE_TRANSFORMERS_DEFAULT = "sentence-transformers/all-MiniLM-L6-v2"
 
 OPENAI_TRANSCRIPTION = "gpt-transcribe"
 OPENROUTER_OPENAI_TRANSCRIPTION = f"openai/{OPENAI_TRANSCRIPTION}"
-OPENAI_TTS = "gpt-4o-mini-tts"
+OPENAI_TTS = "gpt-realtime-2.1-mini"
 OPENAI_IMAGE = "gpt-image-2.5-sunburst"
 OPENAI_AVATAR_IMAGE = OPENAI_IMAGE
 

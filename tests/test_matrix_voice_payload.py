@@ -10,6 +10,7 @@ import pytest
 from mindroom.matrix.voice_message import (
     _is_opus_ogg,
     _parse_duration_ms,
+    can_prepare_voice_audio,
     prepare_voice_audio_bytes,
 )
 
@@ -130,3 +131,34 @@ async def test_prepare_voice_audio_bytes_non_opus_requires_ffmpeg(monkeypatch: p
     monkeypatch.setattr("mindroom.matrix.voice_message.shutil.which", lambda _name: None)
 
     assert await prepare_voice_audio_bytes(b"wav-bytes", response_format="wav") is None
+
+
+@pytest.mark.parametrize(("response_format", "expected"), [("opus", True), ("wav", False), ("mp3", False)])
+def test_only_opus_can_be_prepared_without_ffmpeg(
+    monkeypatch: pytest.MonkeyPatch,
+    response_format: str,
+    *,
+    expected: bool,
+) -> None:
+    """Without ffmpeg and ffprobe, only opus speech can become a voice note."""
+    monkeypatch.setattr("mindroom.matrix.voice_message.shutil.which", lambda _name: None)
+
+    assert can_prepare_voice_audio(response_format) is expected
+
+
+@pytest.mark.parametrize("missing", ["ffmpeg", "ffprobe"])
+def test_non_opus_needs_both_media_tools(monkeypatch: pytest.MonkeyPatch, missing: str) -> None:
+    """Missing either ffmpeg or ffprobe rules out non-opus speech."""
+    monkeypatch.setattr(
+        "mindroom.matrix.voice_message.shutil.which",
+        lambda name: None if name == missing else f"/usr/bin/{name}",
+    )
+
+    assert not can_prepare_voice_audio("wav")
+
+
+def test_any_format_can_be_prepared_with_ffmpeg(monkeypatch: pytest.MonkeyPatch) -> None:
+    """With ffmpeg and ffprobe, non-opus speech can become a voice note."""
+    monkeypatch.setattr("mindroom.matrix.voice_message.shutil.which", lambda name: f"/usr/bin/{name}")
+
+    assert can_prepare_voice_audio("wav")
