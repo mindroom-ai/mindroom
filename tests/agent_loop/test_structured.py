@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import json
 from enum import StrEnum
-from typing import Any
 
 import pytest
 from graphiti_core.prompts.extract_nodes import ExtractedEntities
@@ -33,16 +32,12 @@ JSON_SCHEMA = Capabilities(structured_output="json_schema")
 JSON_MODE = Capabilities(structured_output="json_mode")
 
 
-def _first_request(name: str) -> dict[str, Any]:
-    return load_golden(name)["requests"][0]
-
-
 @pytest.mark.parametrize("helper", sorted(HELPER_SCHEMAS))
 def test_only_json_mode_ends_the_system_message_with_the_json_prompt(helper: str) -> None:
     """The JSON prompt follows the helper's own prompt after a blank line, on the JSON-mode route only."""
     schema = HELPER_SCHEMAS[helper]
     system = {
-        route: _first_request(f"helper_{helper}_{route}")["messages"][0]["content"]
+        route: load_golden(f"helper_{helper}_{route}")["requests"][0]["messages"][0]["content"]
         for route in ("anthropic", "cerebras", "vertexai_claude")
     }
     prompt = output_format_prompt(JSON_MODE, schema)

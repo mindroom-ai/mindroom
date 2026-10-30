@@ -214,7 +214,7 @@ async def test_response_direct_cli_parity(tmp_path, monkeypatch, function) -> No
     assert ("run_shell_command", "before") in hooks
     assert shell.receipts[0]["outcome"] == "result:7"
     assert shell.owner.catalog.run.session_state["parity"] == 7
-    assert all("done" in str(result) for result in results)
+    assert all("done" in result for result in results)
     assert len(provider.requests) == 4
     assert function in offered_tools(provider.requests[0])
     assert all(offered_tools(request) == ["bash"] for request in provider.requests[2:])
@@ -431,7 +431,7 @@ async def test_generated_tools_actual_minimal_response(response_harness, generat
         [_bash_call("agent", function, arguments), "done"],
         knowledge=knowledge if generated == "knowledge" else None,
     )
-    assert "done" in str(result)
+    assert "done" in result
     assert expected in str(h.shell.receipts[-1]["outcome"])
     assert expected in str(h.provider.requests[-1].messages)
     assert all(offered_tools(request) == ["bash"] for request in h.provider.requests)
@@ -447,7 +447,7 @@ async def test_deferred_toolkit_is_callable_through_bash_without_loading(respons
         tools=["shell", {"calculator": {"defer": True}}],
     )
     result = await h.respond([_bash_call("calculator", "add", {"a": 2, "b": 3}), "done"])
-    assert "done" in str(result)
+    assert "done" in result
     assert len(h.shell.receipts) == 1
     assert '"result": 5' in h.shell.receipts[0]["outcome"]
     assert len(h.provider.requests) == 2
@@ -495,7 +495,7 @@ async def test_deferred_upstream_mcp_response_filters_and_requester(
         await manager.sync_servers(h.runtime.config)
         sync_mcp_tool_registry(h.runtime.config)
         result = await h.respond([_bash_call("mcp_echo", "echo_echo", {"text": "same requester"}), "done"])
-        assert "done" in str(result)
+        assert "done" in result
         assert "echo:same requester" in h.shell.receipts[-1]["outcome"]
         assert len(calls) == 1
         server, function, arguments, kwargs = calls[0]
@@ -518,7 +518,7 @@ async def test_compaction_cli_marks_real_session_before_next_reply(response_harn
     h.runtime.config.agents["helper"].tools = ["shell", "compact_context"]
     h.runtime.config.models["default"].context_window = 128000
     result = await h.respond([_bash_call("compact_context", "compact_context", {}), "done"])
-    assert "done" in str(result)
+    assert "done" in result
     assert "before the next reply" in h.shell.receipts[-1]["outcome"]
     catalog = h.shell.owner.catalog
     assert catalog.store is not None

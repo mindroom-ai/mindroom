@@ -222,13 +222,10 @@ class Recorder:
         self.calls.append(call)
         return self.responder(call)
 
-    def _next_index(self) -> int:
+    def _bind_adapter(self, adapter: ModelProvider) -> _RecordingAdapter:
         index = self._built_models
         self._built_models += 1
-        return index
-
-    def _bind_adapter(self, adapter: ModelProvider) -> _RecordingAdapter:
-        return _RecordingAdapter(adapter, partial(self._respond_to_request, adapter, self._next_index()))
+        return _RecordingAdapter(adapter, partial(self._respond_to_request, adapter, index))
 
     @contextmanager
     def installed(self) -> Iterator[None]:
@@ -1494,7 +1491,7 @@ def load_golden(name: str) -> dict[str, Any]:
 
 @dataclass(frozen=True)
 class RecordedScenario:
-    """What one scenario ran and handed out, and every request it sent, grouped by model in build order."""
+    """What one scenario ran and handed out, and every request it sent, in ``Recorder.ordered_calls`` order."""
 
     output: ScenarioOutput
     calls: list[ModelCall]
