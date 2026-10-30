@@ -12,7 +12,7 @@ import pytest
 from mindroom.agent_loop.model_loop import EMPTY_REQUEST, LoopHooks
 from mindroom.agent_loop.run import run_agent
 from mindroom.agent_loop.spec import AgentSpec, RunContext, UnstoredSession
-from mindroom.ai import run_delegated_child_response
+from mindroom.ai import TurnResult, run_delegated_child_response
 from mindroom.config.agent import AgentConfig
 from mindroom.custom_tools.delegate import DelegateTools
 from mindroom.delegation.lifecycle import (
@@ -104,7 +104,7 @@ async def test_direct_delegation_does_not_infer_success_from_unretained_text(tmp
         patch(
             "mindroom.ai.ai_response",
             new_callable=AsyncMock,
-            return_value="child answer",
+            return_value=TurnResult("child answer"),
         ) as child_response,
     ):
         result = await tools.run_subagent(agent_name="child", task="Do the work")
@@ -141,7 +141,7 @@ async def test_direct_delegation_records_real_tool_before_provider_error(tmp_pat
         msg = "provider failed after tool"
         raise ProviderError(msg, provider="Synthetic")
 
-    async def run_real_envelope(ctx: ResponseTurnContext, *_args: object, sinks: TurnSinks) -> str:
+    async def run_real_envelope(ctx: ResponseTurnContext, *_args: object, sinks: TurnSinks) -> TurnResult:
         callback = sinks.on_attempt_start
         assert callback is not None
         callback("real-child-run", ctx.active_model_name)
@@ -165,7 +165,7 @@ async def test_direct_delegation_records_real_tool_before_provider_error(tmp_pat
         except ProviderError as error:
             # The reply hands the failed run's stored record to the observer, as ``ai_response`` does.
             observe_child_record(stored[-1])
-            return f"Error generating response: {error}"
+            return TurnResult(f"Error generating response: {error}")
         pytest.fail("The loop did not surface the provider failure")
 
     with (
@@ -200,7 +200,7 @@ async def test_real_parent_tool_call_records_direct_provenance_without_schema_fi
     # Minimal mode is hidden here because no allowed subagent can run it.
     assert set(function.parameters["properties"]) == {"agent_name", "task", "model"}
 
-    async def complete_child(ctx: ResponseTurnContext, *_args: object, sinks: TurnSinks) -> str:
+    async def complete_child(ctx: ResponseTurnContext, *_args: object, sinks: TurnSinks) -> TurnResult:
         callback = sinks.on_attempt_start
         assert callback is not None
         callback("direct-child-run", ctx.active_model_name)
@@ -214,7 +214,7 @@ async def test_real_parent_tool_call_records_direct_provenance_without_schema_fi
                 ),
             ),
         )
-        return "child result"
+        return TurnResult("child result")
 
     with (
         tool_runtime_context(context),
@@ -301,7 +301,7 @@ async def test_denied_tool_middleware_clears_direct_provenance(
         await deny(tools)
     assert not list(tmp_path.glob("agents/child/workspace/.mindroom/delegations/*/*/run.json"))
 
-    async def complete_child(ctx: ResponseTurnContext, *_args: object, sinks: TurnSinks) -> str:
+    async def complete_child(ctx: ResponseTurnContext, *_args: object, sinks: TurnSinks) -> TurnResult:
         callback = sinks.on_attempt_start
         assert callback is not None
         callback("later-child-run", ctx.active_model_name)
@@ -315,7 +315,7 @@ async def test_denied_tool_middleware_clears_direct_provenance(
                 ),
             ),
         )
-        return "later result"
+        return TurnResult("later result")
 
     with (
         tool_runtime_context(context),
@@ -335,7 +335,7 @@ async def test_a_subagent_reports_what_it_says_and_calls_as_progress(tmp_path: P
     context = _delegate_runtime_context(config, runtime_paths, execution_identity=_identity())
     reports: list[str] = []
 
-    async def talking_child(ctx: ResponseTurnContext, *_args: object, sinks: TurnSinks) -> str:
+    async def talking_child(ctx: ResponseTurnContext, *_args: object, sinks: TurnSinks) -> TurnResult:
         assert sinks.on_attempt_start is not None
         sinks.on_attempt_start("child-run", ctx.active_model_name)
         await observe_child_event(TextDelta("Reading "))
@@ -343,7 +343,7 @@ async def test_a_subagent_reports_what_it_says_and_calls_as_progress(tmp_path: P
         await observe_child_event(
             ToolStarted(ToolExecution(tool_call_id="call-1", tool_name="lookup", tool_args={}).call),
         )
-        return "done"
+        return TurnResult("done")
 
     with (
         tool_runtime_context(context),
@@ -361,7 +361,7 @@ async def test_retried_child_does_not_inherit_previous_attempt_error(tmp_path: P
     tools, config, runtime_paths = _tools(tmp_path)
     context = _delegate_runtime_context(config, runtime_paths, execution_identity=_identity())
 
-    async def retry_child(ctx: ResponseTurnContext, *_args: object, sinks: TurnSinks) -> str:
+    async def retry_child(ctx: ResponseTurnContext, *_args: object, sinks: TurnSinks) -> TurnResult:
         callback = sinks.on_attempt_start
         assert callback is not None
         callback("first-run", ctx.active_model_name)
@@ -386,7 +386,7 @@ async def test_retried_child_does_not_inherit_previous_attempt_error(tmp_path: P
                 ),
             ),
         )
-        return "replacement provider failure"
+        return TurnResult("replacement provider failure")
 
     with tool_runtime_context(context), patch("mindroom.ai.ai_response", side_effect=retry_child):
         await tools.run_subagent(agent_name="child", task="Run with a replacement attempt")
@@ -477,7 +477,7 @@ async def test_direct_delegation_preserves_completed_outcome_after_envelope_erro
     context = _delegate_runtime_context(config, runtime_paths, execution_identity=_identity())
     error = error_type("Envelope interrupted after child completion")
 
-    async def complete_then_interrupt(ctx: ResponseTurnContext, *_args: object, sinks: TurnSinks) -> str:
+    async def complete_then_interrupt(ctx: ResponseTurnContext, *_args: object, sinks: TurnSinks) -> TurnResult:
         callback = sinks.on_attempt_start
         assert callback is not None
         callback("completed-child-run", ctx.active_model_name)
@@ -522,7 +522,7 @@ async def test_native_delegation_leaves_record_ownership_to_driver(tmp_path: Pat
         patch(
             "mindroom.ai.ai_response",
             new_callable=AsyncMock,
-            return_value="native child answer",
+            return_value=TurnResult("native child answer"),
         ) as response,
     ):
         child = prepare_child_turn(
@@ -560,9 +560,9 @@ async def test_a_delegated_child_runs_its_tools_as_itself(tmp_path: Path) -> Non
     context = _delegate_runtime_context(config, runtime_paths, execution_identity=_identity())
     seen: list[ToolExecutionIdentity | None] = []
 
-    async def respond(*_args: object, **_kwargs: object) -> str:
+    async def respond(*_args: object, **_kwargs: object) -> TurnResult:
         seen.append(get_tool_execution_identity())
-        return "child answer"
+        return TurnResult("child answer")
 
     with tool_runtime_context(context), tool_execution_identity(_identity()), patch("mindroom.ai.ai_response", respond):
         child = prepare_child_turn(

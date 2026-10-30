@@ -131,7 +131,7 @@ async def _delegate(
         paths,
         config,
     )
-    assert "Parent done" in result
+    assert "Parent done" in result.text
     return next(
         message.get_content_string()
         for message in leader.requests[-1].messages
@@ -423,7 +423,7 @@ async def test_minimal_parent_runs_a_minimal_child_through_its_cli(
     with tool_runtime_context(live):
         result = await ai.ai_response(replace(turn, prompt="Delegate", execution_identity=identity), paths, config)
 
-    assert "Leader done" in result, result
+    assert "Leader done" in result.text, result
     assert len(child_listings) == 1
     assert [offered_tools(request) for request in child.requests] == [["bash"], ["bash"]]
     # The parent's delegation ran inside its Bash call, so its run never paused and kept its Bash-only surface.

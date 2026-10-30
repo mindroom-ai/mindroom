@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING, Any
 
 import pytest
 
-from mindroom.ai import ai_response, stream_agent_response
+from mindroom.ai import TurnResult, ai_response, stream_agent_response
 from mindroom.ai_runtime import (
     EMPTY_RESPONSE_NOTICE,
     discard_empty_completed_run,
@@ -77,7 +77,7 @@ def _ctx(**turn_inputs: object) -> ResponseTurnContext:
     return replace(make_turn_context("general", session_id="session-1"), prompt="test", **turn_inputs)
 
 
-async def _respond(config: Config, *, sinks: TurnSinks = TurnSinks(), **turn_inputs: object) -> str:  # noqa: B008
+async def _respond(config: Config, *, sinks: TurnSinks = TurnSinks(), **turn_inputs: object) -> TurnResult:  # noqa: B008
     return await ai_response(_ctx(**turn_inputs), runtime_paths_for(config), config, sinks=sinks)
 
 
@@ -208,7 +208,7 @@ async def test_ai_response_retries_once_after_empty_completed_run(
 
     result = await _respond(config, pipeline_timing=timing)
 
-    assert result == "Recovered"
+    assert result.text == "Recovered"
     assert len(model.requests) == 2
     assert timing.marks["first_model_request_sent"] < timing.marks["model_request_sent"]
     assert len(stored_runs(config, runtime_paths_for(config), "session-1")) == 1
@@ -227,7 +227,7 @@ async def test_ai_response_returns_fallback_notice_when_retry_is_also_empty(
     result = await _respond(config)
 
     # The retry's whitespace streamed before the notice, as a streamed reply shows it.
-    assert result == f"  {EMPTY_RESPONSE_NOTICE}"
+    assert result.text == f"  {EMPTY_RESPONSE_NOTICE}"
     assert len(model.requests) == 2
     # The retry's empty run is discarded too; the notice is delivery-only.
     assert stored_runs(config, runtime_paths_for(config), "session-1") == []
@@ -241,15 +241,14 @@ async def test_a_blocking_reply_that_ends_empty_publishes_the_error_status_a_str
     """A blocking reply whose retry is empty too publishes its run as failed, as the streamed reply does."""
     config = _config(tmp_path)
     install_model_providers(monkeypatch, {"default": ScriptedModel([answer(""), answer(""), answer(""), answer("")])})
-    blocking: dict[str, Any] = {}
     streamed: dict[str, Any] = {}
 
-    result = await _respond(config, sinks=TurnSinks(run_metadata_collector=blocking))
+    result = await _respond(config)
     chunks = await _stream(config, sinks=TurnSinks(run_metadata_collector=streamed))
 
-    assert result == EMPTY_RESPONSE_NOTICE
+    assert result.text == EMPTY_RESPONSE_NOTICE
     assert streamed_text(chunks) == [EMPTY_RESPONSE_NOTICE]
-    assert blocking[AI_RUN_METADATA_KEY]["status"] == "error"
+    assert result.run_metadata[AI_RUN_METADATA_KEY]["status"] == "error"
     assert streamed[AI_RUN_METADATA_KEY]["status"] == "error"
 
 
@@ -265,7 +264,7 @@ async def test_ai_response_fallback_notice_stays_out_of_the_turn_recorder(
 
     result = await _respond(config, sinks=TurnSinks(turn_recorder=recorder))
 
-    assert result == EMPTY_RESPONSE_NOTICE
+    assert result.text == EMPTY_RESPONSE_NOTICE
     assert recorder.outcome == "completed"
     assert recorder.assistant_text == ""
 

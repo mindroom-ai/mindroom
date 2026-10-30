@@ -25,6 +25,7 @@ from mindroom.redaction import redact_sensitive_text
 from mindroom.session_storage.agent_storage import create_session_storage
 from mindroom.session_storage.types import ConversationSession
 from mindroom.tool_system.worker_routing import serialize_tool_execution_identity
+from tests.approval_continuation_helpers import answered_calls
 from tests.conftest import test_runtime_paths
 from tests.test_delegation_audit import _child, _config, _identity, _record_dir
 
@@ -226,7 +227,13 @@ async def test_a_child_that_plants_a_directory_over_its_record_export_is_still_s
         tools=[ToolExecution(tool_call_id="gated", tool_name="shell", requires_confirmation=True)],
     )
 
-    await settle_child_response(child, paused, config=config, runtime_paths=paths, decisions={"gated": True})
+    await settle_child_response(
+        child,
+        paused,
+        config=config,
+        runtime_paths=paths,
+        approval_calls=answered_calls(["gated"], approved=True),
+    )
     # The parent's stored snapshot still holds the paused child after the child's failure settled its record.
     parent = RunRecord(
         run_id="parent-run",

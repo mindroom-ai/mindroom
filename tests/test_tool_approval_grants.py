@@ -2074,16 +2074,16 @@ async def test_an_active_grant_does_not_approve_a_call_already_past_its_deadline
     try:
         assert (await _approve(manager, await _card(journal, manager, "granted"))).consumed
         late = await _card(journal, manager, "past-deadline", expires_at_ns=1)
-        card = await pending_card(
-            journal.principal("router@shared").approvals,
+        # The deadline sweep the card's publication woke may already be expiring it; one more pass settles it either way.
+        await manager.recover_cards_on_startup()
+        card = await journal.principal("router@shared").approvals.approval_card(
             room_id="!room:test",
             card_event_id=late,
         )
         assert card is not None
         assert card.kind == "request"
-        assert card.offers_timed_approval
-        # The grant never approves it; the deadline sweep the card's publication woke may already have expired it.
-        assert await _call_row(journal, "past-deadline") in {(None, None), ("expired", None)}
+        assert card.retired
+        assert await _call_row(journal, "past-deadline") == ("expired", None)
     finally:
         await manager.shutdown()
 

@@ -32,13 +32,14 @@ from mindroom.tool_system.worker_routing import serialize_tool_execution_identit
 from mindroom.turn_model import ModelScope, TurnBudget, resolve_turn_model
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Mapping, Sequence
+    from collections.abc import AsyncIterator, Sequence
 
     from mindroom.agent_modes import AgentMode
     from mindroom.budgets.monitor import BudgetMonitor
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
     from mindroom.delegation.state import DelegationTerminalStatus, SubagentPersona
+    from mindroom.event_journal import ApprovalCall
     from mindroom.llm.events import RunEvent
     from mindroom.tool_system.runtime_context import ToolRuntimeContext
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
@@ -166,8 +167,7 @@ async def settle_child_response(
     *,
     config: Config,
     runtime_paths: RuntimePaths,
-    decisions: Mapping[str, bool] | None = None,
-    denial_reasons: Mapping[str, str | None] | None = None,
+    approval_calls: Sequence[ApprovalCall] = (),
 ) -> None:
     """Derive operational state from one exact run, then publish its audit view.
 
@@ -198,8 +198,7 @@ async def settle_child_response(
             response,
             config=config,
             runtime_paths=runtime_paths,
-            decisions=decisions,
-            denial_reasons=denial_reasons,
+            approval_calls=approval_calls,
         )
     except DelegationRecordLimitError:
         if child.status not in TERMINAL_CHILD_STATUSES:

@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from typing import TYPE_CHECKING
 
 from mindroom.approval.response import identify_approval_tools, plan_approval_calls
 from mindroom.delegation.lifecycle import live_delegation_config
+from mindroom.event_journal import ApprovalDecision
 from mindroom.response_turn import paused_attempt_from_response
 from mindroom.tool_jobs.approvals import ask_job_approvals
 from mindroom.tool_jobs.runtime import get_background_runtime
@@ -29,10 +31,10 @@ async def request_child_approvals(
     owner: ToolExecutionIdentity,
     config: Config,
     runtime_paths: RuntimePaths,
-) -> tuple[dict[str, bool], dict[str, str | None], tuple[ApprovalCall, ...]]:
+) -> tuple[ApprovalCall, ...]:
     """Ask the requester about each gated call of a paused child through cards its job owns, and wait for them.
 
-    Returns each call's decision and denial reason, and the planned calls the child resumes with.
+    Returns the planned calls the child resumes with, each approved, or denied with its reason.
     """
     paused = paused_attempt_from_response(
         response,
@@ -66,9 +68,11 @@ async def request_child_approvals(
         config=config,
         runtime_paths=runtime_paths,
     )
-    decisions = {call.tool_call_id: approved for call, (approved, _reason) in zip(plan.calls, decided, strict=True)}
-    reasons = {
-        call.tool_call_id: None if approved else reason
+    return tuple(
+        replace(
+            call,
+            decision=ApprovalDecision.APPROVED if approved else ApprovalDecision.DENIED,
+            reason=None if approved else reason,
+        )
         for call, (approved, reason) in zip(plan.calls, decided, strict=True)
-    }
-    return decisions, reasons, plan.calls
+    )
