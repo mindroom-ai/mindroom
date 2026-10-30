@@ -24,12 +24,14 @@ if TYPE_CHECKING:
     config_fields=[
         ConfigField(
             name="chat_id",
+            env=("TELEGRAM_CHAT_ID",),
             label="Chat ID",
             type="text",
             required=True,
         ),
         ConfigField(
             name="token",
+            env=("TELEGRAM_TOKEN",),
             label="Token",
             type="password",
             required=False,

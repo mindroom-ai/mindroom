@@ -13,7 +13,7 @@ from mindroom.llm import usage as llm_usage
 from mindroom.llm.media import Audio, File, Image, Video
 from mindroom.llm.messages import Message
 from mindroom.llm.runs import RunRecord, RunRequirement, RunStatus, TeamRunRecord, ToolExecution
-from mindroom.llm.usage import MessageMetrics, ModelMetrics, RunMetrics, SessionMetrics, TokenCounts
+from mindroom.llm.usage import MessageMetrics, ModelMetrics, RunMetrics, TokenCounts
 
 # --- media -----------------------------------------------------------------------------------------------------
 
@@ -630,54 +630,3 @@ def test_run_statuses_are_stored_by_value_and_named_in_lower_case() -> None:
         # ``.name`` is persisted as ``mindroom_original_status``, so the member names are stored values too.
         assert status.name == status.value.lower()
         assert status == str(status)
-
-
-# --- session totals --------------------------------------------------------------------------------------------
-
-
-def test_session_metrics_count_token_counters_only() -> None:
-    """A run's cost, timing, and provider metrics never reach the session totals, in total or per model."""
-    counters = TokenCounts(input_tokens=2, total_tokens=2)
-    run = RunMetrics(
-        tokens=counters,
-        cost=1.5,
-        duration=3.0,
-        details={"model": [ModelMetrics(tokens=counters, cost=1.5, id="m", provider="P", provider_metrics={"x": 1})]},
-    )
-    totals = SessionMetrics()
-
-    totals.count_run(run, replacing=None)
-
-    assert totals.to_dict() == {
-        "input_tokens": 2,
-        "total_tokens": 2,
-        "details": {"model": [{"input_tokens": 2, "total_tokens": 2, "id": "m", "provider": "P"}]},
-    }
-
-
-def test_session_metrics_count_a_saved_again_run_once() -> None:
-    """A run saved when it paused and again when it finished adds only its final usage."""
-    paused = RunMetrics()
-    paused.add(MessageMetrics(tokens=TokenCounts(input_tokens=300, output_tokens=60)), model_id="m", provider="P")
-    finished = RunMetrics.from_dict(paused.to_dict())
-    finished.add(
-        MessageMetrics(tokens=TokenCounts(input_tokens=7, output_tokens=3, total_tokens=10)),
-        model_id="m",
-        provider="P",
-    )
-    once = SessionMetrics()
-    once.count_run(finished, replacing=None)
-
-    twice = SessionMetrics()
-    twice.count_run(paused, replacing=None)
-    twice.count_run(finished, replacing=paused)
-
-    assert twice.tokens.input_tokens == finished.tokens.input_tokens
-    assert twice.to_dict() == once.to_dict()
-
-
-def test_session_metrics_from_dict_ignores_unreadable_details() -> None:
-    assert SessionMetrics.from_dict({"input_tokens": 3, "details": "garbage", "timer": 1}).to_dict() == {
-        "input_tokens": 3,
-    }
-    assert SessionMetrics.from_dict({"details": {"model": "garbage"}}).to_dict() == {}

@@ -537,15 +537,10 @@ async def test_a_file_copy_that_cannot_be_removed_stays_and_the_merge_finishes(s
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("missing", ["chroma", "config"])
-async def test_without_chroma_or_config_only_file_copies_merge_and_the_rest_waits(storage: Path, missing: str) -> None:
-    """A start that cannot install Chroma or load its config merges file copies; a later start merges the Mem0 ones."""
-    runtime_paths = runtime_paths_for(_config(storage, "mem0"))
-    if missing == "chroma":
-        with patch.object(legacy_team_memory, "ensure_optional_deps", side_effect=ImportError("Missing dependencies")):
-            await _migrate(storage)
-    else:
-        await legacy_team_memory.migrate_team_memory(runtime_paths, None)
+async def test_without_chroma_only_file_copies_merge_and_the_rest_waits(storage: Path) -> None:
+    """A start that cannot install Chroma merges file copies; a later start merges the Mem0 ones."""
+    with patch.object(legacy_team_memory, "ensure_optional_deps", side_effect=ImportError("Missing dependencies")):
+        await _migrate(storage)
 
     assert (storage / "team_memory" / _TEAM / "MEMORY.md").exists()
     assert not (storage / "team_memory" / "chroma").exists()
@@ -654,12 +649,11 @@ async def test_the_runtime_merges_team_memory_with_its_loaded_config_before_it_s
 
     with (
         patch("mindroom.orchestrator.setup_logging"),
-        patch("mindroom.orchestrator.sync_env_to_credentials"),
         patch(
-            "mindroom.orchestrator.retire_state_root_worker_mounts",
+            "mindroom.orchestration.storage_preparation.retire_state_root_worker_mounts",
             side_effect=lambda _paths: steps.append("retire"),
         ),
-        patch("mindroom.orchestrator.migrate_conversation_storage"),
+        patch("mindroom.orchestration.storage_preparation.migrate_conversation_storage"),
         patch("mindroom.orchestrator.load_startup_config", side_effect=lambda *_a, **_k: startup_config),
         patch("mindroom.orchestrator.migrate_team_memory", side_effect=merge),
         patch("mindroom.orchestrator._MultiAgentOrchestrator", side_effect=_NextStartupStepError),

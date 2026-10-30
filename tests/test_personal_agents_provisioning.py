@@ -24,6 +24,7 @@ from mindroom.personal_agents import (
     provision_personal_agent,
 )
 from tests.conftest import test_runtime_paths
+from tests.matrix_state_helpers import save_matrix_state
 from tests.test_personal_agents_config import BASE, _entry
 
 if TYPE_CHECKING:
@@ -147,7 +148,7 @@ async def test_provision_suffixes_a_taken_matrix_localpart(tmp_path: Path) -> No
     config = Config.validate_with_runtime(deepcopy(BASE), paths)
     state = MatrixState.load(runtime_paths=paths)
     state.add_account("agent_other", "mindroom_mind_alice_smith", None, domain="localhost")
-    state.save(runtime_paths=paths)
+    save_matrix_state(state, paths)
     create_user = _create_agent_user()
 
     with patch("mindroom.personal_agents.create_agent_user", new=create_user):
@@ -240,7 +241,7 @@ async def test_provision_does_not_adopt_a_leftover_account(tmp_path: Path) -> No
     config = Config.validate_with_runtime(deepcopy(BASE), paths)
     state = MatrixState.load(runtime_paths=paths)
     state.add_account("agent_mind_alice_smith", "mindroom_mind_alice_smith", None, domain="localhost")
-    state.save(runtime_paths=paths)
+    save_matrix_state(state, paths)
     create_user = _create_agent_user()
 
     with patch("mindroom.personal_agents.create_agent_user", new=create_user):
@@ -256,7 +257,7 @@ async def test_provision_refuses_a_mindroom_account(tmp_path: Path) -> None:
     config = Config.validate_with_runtime(deepcopy(BASE), paths)
     state = MatrixState.load(runtime_paths=paths)
     state.add_account("agent_mind_bob", "mindroom_mind_bob", None, domain="localhost")
-    state.save(runtime_paths=paths)
+    save_matrix_state(state, paths)
     create_user = _create_agent_user()
 
     with (
@@ -316,7 +317,7 @@ async def test_interrupted_provisioning_resumes_with_its_own_account(tmp_path: P
             None,
             domain="localhost",
         )
-        state.save(runtime_paths=runtime_paths)
+        save_matrix_state(state, runtime_paths)
         if attempts == 1:
             msg = "process died after saving the account"
             raise RuntimeError(msg)

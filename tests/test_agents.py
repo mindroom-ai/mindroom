@@ -101,6 +101,7 @@ from mindroom.tool_system.worker_routing import (
 from mindroom.workspaces import _copy_workspace_template, validate_workspace_template_dir
 from tests.agent_tool_helpers import toolkit_offers
 from tests.identity_helpers import persist_entity_accounts
+from tests.matrix_state_helpers import save_matrix_state
 from tests.tool_approval_helpers import gated_functions
 from tests.turn_model_helpers import turn_model
 
@@ -364,7 +365,7 @@ def test_agent_identity_prompt_uses_persisted_current_matrix_id(tmp_path: Path) 
     )
     state = MatrixState.load(runtime_paths=runtime_paths)
     state.add_account("agent_general", "mindroom_general_oldns", "pw", domain="localhost")
-    state.save(runtime_paths=runtime_paths)
+    save_matrix_state(state, runtime_paths)
 
     agent = _create_agent_for_test("general", config)
 
@@ -452,12 +453,21 @@ def test_config_round_trips_structured_agent_tool_entries() -> None:
     }
 
 
-def test_get_agent_calculator() -> None:
-    """Tests that the calculator agent is created correctly."""
+@pytest.mark.parametrize(
+    ("agent_name", "display_name"),
+    [
+        ("calculator", "CalculatorAgent"),
+        ("code", "CodeAgent"),
+        ("shell", "ShellAgent"),
+        ("summary", "SummaryAgent"),
+    ],
+)
+def test_get_agent_builds_configured_agent(agent_name: str, display_name: str) -> None:
+    """Each configured agent builds under its display name."""
     config = _test_config()
-    agent = _create_agent_for_test("calculator", config=config)
+    agent = _create_agent_for_test(agent_name, config=config)
     assert isinstance(agent, AgentBuild)
-    assert agent.spec.name == "CalculatorAgent"
+    assert agent.spec.name == display_name
 
 
 def test_get_agent_general() -> None:
@@ -2556,30 +2566,6 @@ def test_matrix_message_implied_attachments_does_not_duplicate() -> None:
     assert effective_tools.count("attachments") == 1
 
 
-def test_get_agent_code() -> None:
-    """Tests that the code agent is created correctly."""
-    config = _test_config()
-    agent = _create_agent_for_test("code", config=config)
-    assert isinstance(agent, AgentBuild)
-    assert agent.spec.name == "CodeAgent"
-
-
-def test_get_agent_shell() -> None:
-    """Tests that the shell agent is created correctly."""
-    config = _test_config()
-    agent = _create_agent_for_test("shell", config=config)
-    assert isinstance(agent, AgentBuild)
-    assert agent.spec.name == "ShellAgent"
-
-
-def test_get_agent_summary() -> None:
-    """Tests that the summary agent is created correctly."""
-    config = _test_config()
-    agent = _create_agent_for_test("summary", config=config)
-    assert isinstance(agent, AgentBuild)
-    assert agent.spec.name == "SummaryAgent"
-
-
 def test_get_agent_unknown() -> None:
     """Tests that an unknown agent raises a ValueError."""
     from tests.conftest import runtime_paths_for  # noqa: PLC0415
@@ -2591,17 +2577,17 @@ def test_get_agent_unknown() -> None:
         _create_agent_for_test("unknown", config=config, model=model)
 
 
-def test_get_agent_uses_storage_path_for_sessions(tmp_path: Path) -> None:
+def test_agent_session_storage_uses_the_agent_state_root(tmp_path: Path) -> None:
     """Session databases should live under the canonical agent state root."""
-    config = _test_config()
-    build = _create_agent_for_test("general", config=_bind_runtime_paths(config, _runtime_paths(tmp_path)))
+    runtime_paths = _runtime_paths(tmp_path)
+    config = _bind_runtime_paths(_test_config(), runtime_paths)
 
-    agent_root = agent_state_root_path(tmp_path, "general")
-    assert build.store is not None
-    assert build.store.path == agent_root / "sessions" / "general.db"
+    store = create_session_storage("general", config, runtime_paths, execution_identity=None)
+
+    assert store.path == agent_state_root_path(tmp_path, "general") / "sessions" / "general.db"
 
 
-def test_get_agent_routes_only_sessions_to_explicit_session_storage(
+def test_agent_session_storage_routes_only_sessions_to_explicit_session_storage(
     tmp_path: Path,
 ) -> None:
     """Dedicated session storage holds the agent's session database instead of its state root."""
@@ -2614,13 +2600,12 @@ def test_get_agent_routes_only_sessions_to_explicit_session_storage(
     )
     config = _bind_runtime_paths(_test_config(), runtime_paths)
 
-    build = _create_agent_for_test("general", config=config)
+    store = create_session_storage("general", config, runtime_paths, execution_identity=None)
 
-    assert build.store is not None
-    assert build.store.path == session_storage_root / "agents" / "general" / "sessions" / "general.db"
+    assert store.path == session_storage_root / "agents" / "general" / "sessions" / "general.db"
 
 
-def test_get_agent_uses_worker_storage_for_sessions(tmp_path: Path) -> None:
+def test_agent_session_storage_ignores_a_user_worker_scope(tmp_path: Path) -> None:
     """Worker scope should not change the canonical session path."""
     config = _test_config()
     config.agents["general"].worker_scope = "user"
@@ -2635,16 +2620,19 @@ def test_get_agent_uses_worker_storage_for_sessions(tmp_path: Path) -> None:
     )
     worker_key = resolve_worker_key("user", execution_identity, agent_name="general")
     assert worker_key is not None
+    runtime_paths = _runtime_paths(tmp_path)
 
-    with tool_execution_identity(execution_identity):
-        build = _create_agent_for_test("general", config=_bind_runtime_paths(config, _runtime_paths(tmp_path)))
+    store = create_session_storage(
+        "general",
+        _bind_runtime_paths(config, runtime_paths),
+        runtime_paths,
+        execution_identity=execution_identity,
+    )
 
-    agent_root = agent_state_root_path(tmp_path, "general")
-    assert build.store is not None
-    assert build.store.path == agent_root / "sessions" / "general.db"
+    assert store.path == agent_state_root_path(tmp_path, "general") / "sessions" / "general.db"
 
 
-def test_get_agent_uses_shared_worker_storage_without_execution_identity(
+def test_agent_session_storage_ignores_a_shared_worker_scope_without_execution_identity(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -2652,8 +2640,14 @@ def test_get_agent_uses_shared_worker_storage_without_execution_identity(
     config = _test_config()
     config.agents["general"].worker_scope = "shared"
     monkeypatch.setenv("CUSTOMER_ID", "tenant-123")
+    runtime_paths = _runtime_paths(tmp_path)
 
-    build = _create_agent_for_test("general", config=_bind_runtime_paths(config, _runtime_paths(tmp_path)))
+    store = create_session_storage(
+        "general",
+        _bind_runtime_paths(config, runtime_paths),
+        runtime_paths,
+        execution_identity=None,
+    )
 
     shared_identity = ToolExecutionIdentity(
         channel="matrix",
@@ -2669,9 +2663,7 @@ def test_get_agent_uses_shared_worker_storage_without_execution_identity(
     worker_key = resolve_worker_key("shared", shared_identity, agent_name="general")
     assert worker_key is not None
 
-    agent_root = agent_state_root_path(tmp_path, "general")
-    assert build.store is not None
-    assert build.store.path == agent_root / "sessions" / "general.db"
+    assert store.path == agent_state_root_path(tmp_path, "general") / "sessions" / "general.db"
 
 
 def test_create_agent_loads_shared_worker_scoped_tool_credentials_with_explicit_shared_identity(
@@ -3249,13 +3241,14 @@ def test_create_agent_uses_unscoped_kubernetes_worker_workspace_for_dedicated_to
     monkeypatch.setenv("MINDROOM_WORKER_BACKEND", "kubernetes")
     monkeypatch.setenv("CUSTOMER_ID", "tenant-123")
     runtime_paths = _runtime_paths(tmp_path, config_path=config_dir / "config.yaml")
+    config = _bind_runtime_paths(config, runtime_paths)
 
-    build = _create_agent_for_test("general", config=_bind_runtime_paths(config, runtime_paths))
+    _create_agent_for_test("general", config=config)
 
     agent_root = agent_state_root_path(tmp_path, "general")
     canonical_workspace = agent_workspace_root_path(tmp_path, "general")
-    assert build.store is not None
-    assert build.store.path == agent_root / "sessions" / "general.db"
+    store = create_session_storage("general", config, runtime_paths, execution_identity=None)
+    assert store.path == agent_root / "sessions" / "general.db"
     assert mock_get_tool_by_name.call_args is not None
     assert mock_get_tool_by_name.call_args.kwargs["tool_init_overrides"] == {"base_dir": str(canonical_workspace)}
 
@@ -3283,13 +3276,14 @@ def test_create_agent_uses_mounted_dedicated_worker_root_for_unscoped_agent_stat
     monkeypatch.setenv("MINDROOM_SANDBOX_DEDICATED_WORKER_KEY", worker_key)
     monkeypatch.setenv("MINDROOM_SANDBOX_DEDICATED_WORKER_ROOT", str(dedicated_root))
     runtime_paths = _runtime_paths(shared_root, config_path=config_dir / "config.yaml")
+    config = _bind_runtime_paths(config, runtime_paths)
 
-    build = _create_agent_for_test("general", config=_bind_runtime_paths(config, runtime_paths))
+    _create_agent_for_test("general", config=config)
 
     agent_root = agent_state_root_path(shared_root, "general")
     canonical_workspace = agent_workspace_root_path(shared_root, "general")
-    assert build.store is not None
-    assert build.store.path == agent_root / "sessions" / "general.db"
+    store = create_session_storage("general", config, runtime_paths, execution_identity=None)
+    assert store.path == agent_root / "sessions" / "general.db"
     assert mock_get_tool_by_name.call_args is not None
     assert mock_get_tool_by_name.call_args.kwargs["tool_init_overrides"] == {"base_dir": str(canonical_workspace)}
 
@@ -4267,7 +4261,6 @@ def test_create_agent_disable_runtime_capabilities_does_not_materialize_private_
         config=config,
         runtime_paths=runtime_paths,
         execution_identity=identity,
-        persist_runtime_state=False,
         disable_runtime_capabilities=True,
         knowledge=None,
         model=turn_model(config, runtime_paths, "general"),
@@ -5382,6 +5375,24 @@ def test_config_rejects_git_backed_private_knowledge_overlapping_template_conten
             ),
             runtime_paths,
         )
+
+
+def test_a_team_member_build_opens_no_conversation_database(tmp_path: Path) -> None:
+    """A member saves through its team's store, so building it leaves its own sessions directory untouched."""
+    runtime_paths = _runtime_paths(tmp_path)
+    config = _bind_runtime_paths(_test_config(), runtime_paths)
+    members = resolve_exact_team_members(
+        ["calculator"],
+        config=config,
+        runtime_paths=runtime_paths,
+        execution_identity=None,
+        refresh_scheduler=None,
+        active_model_names={"calculator": turn_model(config, runtime_paths, "calculator").model_name},
+    )
+
+    members.build("calculator", members.model_names["calculator"])
+
+    assert not (agent_state_root_path(tmp_path, "calculator") / "sessions").exists()
 
 
 def test_team_member_matches_solo_agent_construction() -> None:

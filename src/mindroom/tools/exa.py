@@ -87,6 +87,7 @@ if TYPE_CHECKING:
         ),
         ConfigField(
             name="api_key",
+            env=("EXA_API_KEY",),
             label="API Key",
             type="password",
             required=False,

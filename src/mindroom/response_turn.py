@@ -70,6 +70,7 @@ if TYPE_CHECKING:
     from mindroom.llm.events import ReportedCall
     from mindroom.llm.request_context import RequestAttribution
     from mindroom.llm.runs import AnyRunRecord
+    from mindroom.llm.usage import RunMetrics
     from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
     from mindroom.media_inputs import MediaInputs
     from mindroom.participation import ParticipationGate
@@ -297,22 +298,28 @@ class TurnContinuationRunState:
         self,
         *,
         continuation_prompt: str,
-        previous_run_id: str | None,
         active_model_name: str | None,
         apply_model_to_team_members: bool,
     ) -> TurnContinuationRunState:
         """Return the continuation state for one more same-turn attempt."""
         return replace(
-            self,
+            self.next_attempt(),
             active_prompt=continuation_prompt,
             active_model_prompt=self.continuation_model_prompt_tail or None,
             active_current_timestamp_ms=None,
             active_current_prompt_is_structured=False,
             active_current_event_id=None,
-            active_run_id=None if previous_run_id is None else str(uuid4()),
             active_model_name=active_model_name,
             apply_model_to_team_members=apply_model_to_team_members,
         )
+
+    def next_attempt(self) -> TurnContinuationRunState:
+        """Return the state for one more attempt at the active prompt, which runs under a run id of its own.
+
+        A save under a stored run's id replaces that run's record and usage, which only the run itself may do, as when
+        it resumes after a pause, so no attempt reuses the run id of the attempt before it.
+        """
+        return replace(self, active_run_id=str(uuid4()))
 
 
 @dataclass(frozen=True)
@@ -458,8 +465,9 @@ class TurnRunState:
     # None until the driver loads the turn's scope, which it does before the turn's first attempt.
     scope_context: ScopeSessionContext | None = None
     run_metadata: dict[str, Any] | None = None
-    # The calls the turn's spent attempts finished, before a continuation started another.
+    # The calls the turn's spent attempts finished, and their usage, before a retry or a continuation started another.
     prior_completed_tools: tuple[ToolTraceEntry, ...] = ()
+    prior_usage: tuple[RunMetrics, ...] = ()
     empty_response_retried: bool = False
     attempt: _LiveAttempt | None = None
 
@@ -491,12 +499,14 @@ class CompletedAttempt:
     run_id: str | None = None
     attempt_run_id: str | None = None
     runtime_model_name: str | None = None
-    output_tokens: int | None = None
+    # The usage the attempt's runs reported, which the turn's later attempts publish with their own once it is spent.
+    usage: RunMetrics | None = None
     # The run's own calls, read from its record, and the control calls its hidden CLI calls made.
     tool_executions: tuple[ToolExecution, ...] = ()
     control_calls: tuple[ReportedCall, ...] = ()
     completed_tools: tuple[ToolTraceEntry, ...] = ()
-    # Builds the run metadata the attempt publishes; building prices the run, so only a reader of it calls this.
+    # Builds the run metadata the reply publishes when the attempt ends the turn: its usage adds the turn's spent
+    # attempts' (``TurnRunState.prior_usage``). Building prices the usage, so only a reader of it calls this.
     build_run_metadata: Callable[[], dict[str, Any]] | None = None
     status: RunStatus = RunStatus.completed
 
@@ -809,8 +819,8 @@ async def _record_interrupted(
         return
     snapshot = run.partial_snapshot()
     run.record.record_interrupted(
-        # Between a continuation's attempts, the attempt it was about to start names the turn, so the record does not
-        # replace a run an earlier attempt stored.
+        # Between two attempts, such as a continuation's or an empty run's retry, the attempt about to start names the
+        # turn, so the record does not replace a run an earlier attempt stored.
         run_id=snapshot.attempt_run_id or continuation.active_run_id or ctx.run_id,
         run_metadata=_interrupted_run_metadata(ctx, run),
         assistant_text=snapshot.assistant_text,
@@ -888,13 +898,21 @@ def _settle_empty_run(
         entity=ctx.entity_label,
         session_id=ctx.session_id,
         run_id=resolution.run_id,
-        output_tokens=resolution.output_tokens,
+        output_tokens=resolution.usage.tokens.output_tokens if resolution.usage is not None else None,
     )
     if run.empty_response_retried or continuation_count >= TURN_CONTINUATION_LIMIT:
         return False
     run.empty_response_retried = True
-    run.attempt = None
+    _drop_spent_attempt(run, resolution)
     return True
+
+
+def _drop_spent_attempt(run: TurnRunState, resolution: CompletedAttempt) -> None:
+    """Drop the attempt a retry or a continuation follows, keeping its finished calls and its usage for the turn."""
+    run.prior_completed_tools = (*run.prior_completed_tools, *resolution.completed_tools)
+    if resolution.usage is not None:
+        run.prior_usage = (*run.prior_usage, resolution.usage)
+    run.attempt = None
 
 
 def _advance_turn_continuation(
@@ -907,11 +925,9 @@ def _advance_turn_continuation(
     apply_model_to_team_members: bool,
 ) -> TurnContinuationRunState:
     """Drop the spent attempt and prepare run state for one more continuation."""
-    run.prior_completed_tools = (*run.prior_completed_tools, *resolution.completed_tools)
-    run.attempt = None
+    _drop_spent_attempt(run, resolution)
     return continuation.advance(
         continuation_prompt=next_prompt or continuation.original_prompt,
-        previous_run_id=resolution.attempt_run_id,
         active_model_name=active_model_name,
         apply_model_to_team_members=apply_model_to_team_members,
     )
@@ -1002,7 +1018,7 @@ def _record_completed_turn(
     resolution: CompletedAttempt,
     settle: _CompletionSettle,
 ) -> None:
-    """Publish the turn-ending attempt's run metadata, record the completed turn, and hand the attempt to the caller."""
+    """Publish the reply's run metadata, which the turn-ending attempt builds, record the turn, and hand the attempt over."""
     _publish_run_metadata(sinks, resolution.build_run_metadata)
     run.record.record_completed(
         run_id=resolution.attempt_run_id or resolution.run_id,
@@ -1047,7 +1063,7 @@ def _settle_completed_attempt(
         return _CompletionSettle(keep_going=False, continuation=continuation)
     if resolution.is_empty:
         if _settle_empty_run(ctx, run, resolution, continuation_count=continuation_count):
-            return _CompletionSettle(keep_going=True, continuation=continuation)
+            return _CompletionSettle(keep_going=True, continuation=continuation.next_attempt())
         # The notice falls through: run metadata and recorder completion
         # still apply to this notice-only turn.
         return _CompletionSettle(

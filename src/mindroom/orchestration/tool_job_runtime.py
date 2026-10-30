@@ -107,10 +107,10 @@ class ToolJobRuntimeCoordinator:
     """Own the background job runtime; replies deliver outcomes."""
 
     runtime_paths: RuntimePaths
-    config_provider: Callable[[], Config | None]
+    config_provider: Callable[[], Config]
     bot_provider: Callable[[str], AgentBot | None]
     agent_reply_memberships: AgentReplyMembershipIndex
-    # The event journal jobs are kept in; it is read only once a config exists, and outlives this coordinator.
+    # The event journal jobs are kept in; it outlives this coordinator.
     journal_provider: Callable[[], EventJournalStore]
     _instance: ToolJobInstance | None = field(default=None, init=False)
     _runtime: ToolJobRuntime | None = field(default=None, init=False)
@@ -126,8 +126,6 @@ class ToolJobRuntimeCoordinator:
         if self._initialized:
             return
         config = self.config_provider()
-        if config is None:
-            return
         self._journal = journal = self.journal_provider()
         self._instance = instance = pin_background_tool_jobs(config, self.runtime_paths)
         # With background jobs off, saved jobs wait untouched for the next enabled start, which reports them.
@@ -159,9 +157,6 @@ class ToolJobRuntimeCoordinator:
             # A gated tool call that runs as a job may wait on its approval card.
             return end_tool_call_approval(job)
         config = self.config_provider()
-        if config is None:
-            msg = "Cannot settle a background job without runtime configuration."
-            raise RuntimeError(msg)
         return await reconcile_delegation(
             job,
             cleanup=partial(
@@ -185,7 +180,7 @@ class ToolJobRuntimeCoordinator:
         """Recheck current delegation, team membership, and requester reply access."""
         config = self.config_provider()
         owner = job.owner
-        if config is None or owner.channel != "matrix" or owner.requester_id is None or owner.room_id is None:
+        if owner.channel != "matrix" or owner.requester_id is None or owner.room_id is None:
             return "denied"
         if owner.agent_name not in config.agents:
             return "denied"
@@ -252,7 +247,7 @@ class ToolJobRuntimeCoordinator:
         origin = function_provenance(tool, arguments)
         config = self.config_provider()
         edges = active_delegation_edges(owner)
-        if config is None or not locally_allowed(
+        if not locally_allowed(
             config,
             owner,
             tool_name=tool.function.name,
@@ -287,10 +282,6 @@ class ToolJobRuntimeCoordinator:
     async def sync(self) -> None:
         """Recover once, publish the service, and wake it after config changes."""
         await self.initialize()
-        config = self.config_provider()
-        if config is None:
-            await self.stop()
-            return
         runtime = self._runtime
         if runtime is None:
             return

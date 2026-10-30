@@ -37,7 +37,6 @@ from tests.conftest import (
     SETTLE_TIMEOUT_SECONDS,
     live_turn_claim,
     make_pending_event,
-    prepared_dispatch_result,
     record_turn_answered,
     replace_interactive_selection_handlers,
     replace_turn_deps,
@@ -473,13 +472,14 @@ async def test_unresolved_router_command_waits_for_reload_and_rechecks_authoriza
         message = "unproven root"
         raise ThreadMembershipLookupError(message)
 
+    wait_for_admission_or_shutdown = bot._runtime_view.wait_for_admission_or_shutdown
+
     async def wait_for_replacement() -> bool:
         gate_wait_started.set()
-        await admission_gate.wait_until_open()
-        return True
+        return await wait_for_admission_or_shutdown()
 
-    replace_turn_deps(bot, wait_for_admission_or_shutdown=wait_for_replacement)
     with (
+        patch.object(bot._runtime_view, "wait_for_admission_or_shutdown", new=wait_for_replacement),
         patch.object(bot._conversation_resolver, "coalescing_thread_id", side_effect=unresolved_thread),
         patch.object(bot._delivery_gateway, "send_text", new_callable=AsyncMock, return_value="$notice") as send_text,
         patch.object(TurnDispatcher, "dispatch_turn", new_callable=AsyncMock) as dispatch,
@@ -487,7 +487,7 @@ async def test_unresolved_router_command_waits_for_reload_and_rechecks_authoriza
         command_task = asyncio.create_task(bot._turn_ingress.handle_text_event(room, command_event))
         await asyncio.wait_for(lookup_started.wait(), timeout=1)
         assert admission_gate.close_if_idle()
-        bot.config = replacement_config
+        bot.orchestrator.config = replacement_config
         fail_lookup.set()
         await asyncio.wait_for(gate_wait_started.wait(), timeout=1)
 
@@ -821,13 +821,12 @@ async def test_long_running_turn_never_delays_other_ingress_from_same_sender(tmp
 
     async def fake_prepare_dispatch(turn: PreparedTurn) -> object:
         thread_id = "$other" if turn.event.event_id == "$m3" else f"{turn.event.event_id}-thread"
-        dispatch = _prepared_dispatch(
+        return _prepared_dispatch(
             event_id=turn.event.event_id,
             requester_user_id=turn.facts.run_requester_id,
             body=turn.event.body,
             thread_id=thread_id,
         )
-        return prepared_dispatch_result(dispatch)
 
     with (
         patch.object(bot._turn_dispatcher, "_prepare_dispatch", new=fake_prepare_dispatch),
@@ -1022,13 +1021,12 @@ async def test_voice_echo_and_follow_up_slots_never_hold_another_conversation(tm
 
     async def fake_prepare_dispatch(turn: PreparedTurn) -> object:
         thread_id = "$threadB" if turn.event.event_id == "$b1" else "$threadA"
-        dispatch = _prepared_dispatch(
+        return _prepared_dispatch(
             event_id=turn.event.event_id,
             requester_user_id=turn.facts.run_requester_id,
             body=turn.event.body,
             thread_id=thread_id,
         )
-        return prepared_dispatch_result(dispatch)
 
     def fake_prepare_voice_event(
         request: inbound_turn_normalizer.VoiceNormalizationRequest,
@@ -1105,13 +1103,12 @@ async def test_interactive_answer_during_active_turn_never_holds_sender_lane(tmp
 
     async def fake_prepare_dispatch(turn: PreparedTurn) -> object:
         thread_id = "$threadB" if turn.event.event_id == "$b1" else "$threadA"
-        dispatch = _prepared_dispatch(
+        return _prepared_dispatch(
             event_id=turn.event.event_id,
             requester_user_id=turn.facts.run_requester_id,
             body=turn.event.body,
             thread_id=thread_id,
         )
-        return prepared_dispatch_result(dispatch)
 
     async def fake_send_text(_request: object) -> str:
         ack_sent.set()
@@ -1319,13 +1316,12 @@ async def test_response_failure_drains_follow_up_queue(tmp_path: Path) -> None:
             raise RuntimeError(msg)
 
     async def fake_prepare_dispatch(turn: PreparedTurn) -> object:
-        dispatch = _prepared_dispatch(
+        return _prepared_dispatch(
             event_id=turn.event.event_id,
             requester_user_id=turn.facts.run_requester_id,
             body=turn.event.body,
             thread_id="$m1-thread",
         )
-        return prepared_dispatch_result(dispatch)
 
     with (
         patch.object(bot._turn_dispatcher, "_prepare_dispatch", new=fake_prepare_dispatch),

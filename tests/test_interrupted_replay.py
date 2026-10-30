@@ -17,7 +17,6 @@ from mindroom.history.interrupted_replay import (
     persist_interrupted_replay_snapshot,
     split_interrupted_tool_trace,
 )
-from mindroom.history.session_context import ScopeSessionContext
 from mindroom.history.storage import new_scope_session
 from mindroom.history.turn_recorder import TurnRecorder
 from mindroom.history.types import HistoryScope
@@ -451,8 +450,12 @@ def test_an_interrupted_replay_replaces_a_stored_answer_where_it_sorted(tmp_path
 
 
 @pytest.mark.parametrize("stored", [True, False], ids=["stored-session", "first-session"])
-def test_an_interrupted_replay_is_saved_as_the_session_its_scope_context_names(tmp_path: Path, *, stored: bool) -> None:
-    """The scope context's stored session, else a first one under its session id, receives the replay run."""
+def test_an_interrupted_replay_through_a_stand_in_session_joins_or_starts_the_stored_one(
+    tmp_path: Path,
+    *,
+    stored: bool,
+) -> None:
+    """A stand-in session names the row, so the replay run lands after the stored runs, or starts the session."""
     storage = create_agent_state_storage("test_agent", tmp_path)
     if stored:
         seed_session(
@@ -465,16 +468,10 @@ def test_an_interrupted_replay_is_saved_as_the_session_its_scope_context_names(t
                 runs=[_completed_run("earlier-run", "Earlier answer")],
             ),
         )
-    context = ScopeSessionContext(
-        scope=HistoryScope(kind="agent", scope_id="test_agent"),
-        storage=storage,
-        session=storage.load_session("session-1"),
-        session_id="session-1",
-        storage_factory=lambda: storage,
-    )
 
     persist_interrupted_replay(
-        scope_context=context,
+        storage=storage,
+        session=_session(),
         run_id="cancelled-run",
         user_message="Please continue",
         user_message_is_structured=False,
@@ -491,39 +488,6 @@ def test_an_interrupted_replay_is_saved_as_the_session_its_scope_context_names(t
     replay = persisted.runs[-1]
     assert isinstance(replay, RunRecord)
     assert (replay.session_id, replay.agent_id) == ("session-1", "test_agent")
-    if stored:
-        # The stored session itself receives the run, so a later attempt of the turn replays it.
-        assert context.session is not None
-        assert [run.run_id for run in context.session.runs] == expected_run_ids
-
-
-def test_a_team_scopes_first_interrupted_replay_is_a_team_run(tmp_path: Path) -> None:
-    """The scope context's kind decides whether a scope's first session, and so its replay run, is a team's."""
-    storage = create_state_storage("test_scope", tmp_path, HistoryScope(kind="team", scope_id="squad"))
-    context = ScopeSessionContext(
-        scope=HistoryScope(kind="team", scope_id="squad"),
-        storage=storage,
-        session=None,
-        session_id="session-1",
-        storage_factory=lambda: storage,
-    )
-
-    persist_interrupted_replay(
-        scope_context=context,
-        run_id="cancelled-run",
-        user_message="Please continue",
-        user_message_is_structured=False,
-        partial_text="Text emitted before interruption",
-        completed_tools=(),
-        interrupted_tools=(),
-        run_metadata=None,
-    )
-
-    persisted = storage.load_session("session-1")
-    assert persisted is not None
-    [replay] = persisted.runs
-    assert isinstance(replay, TeamRunRecord)
-    assert replay.team_id == "squad"
 
 
 def test_a_team_sessions_interrupted_replay_is_a_team_run(tmp_path: Path) -> None:

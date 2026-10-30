@@ -10,26 +10,29 @@ runtime seam (``tests/team_turn_helpers.py``).
 from __future__ import annotations
 
 import time
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 from unittest.mock import patch
 
 import pytest
 
 from mindroom import ai_runtime
 from mindroom.agents import create_agent
-from mindroom.constants import SILENT_SCHEDULE_NO_REPLY_TOKEN
+from mindroom.budgets.pricing import format_cost_usd
+from mindroom.config.models import ModelPricing
+from mindroom.constants import AI_RUN_METADATA_KEY, SILENT_SCHEDULE_NO_REPLY_TOKEN
 from mindroom.llm.errors import ProviderError
 from mindroom.llm.messages import Message
 from mindroom.llm.runs import TeamRunRecord
 from mindroom.timing import DispatchPipelineTiming
 from mindroom.turn_continuation import TURN_CONTINUATION_LIMIT
 from tests.conftest import seed_session
-from tests.fakes.scripted_model import Await, ScriptStep, answer, calls, tool_call
+from tests.fakes.scripted_model import Await, ScriptStep, answer, calls, tool_call, usage
 from tests.history_helpers import _completed_team_run, _team_session
 from tests.scripted_agent_helpers import ProcessCrash, crash_after_first_terminal_store
 from tests.team_turn_helpers import (
     EVENT_ID,
     PROBE_TOOL,
+    REQUESTER_ID,
     ROOM_ID,
     SESSION_ID,
     ProbeToolkit,
@@ -39,6 +42,7 @@ from tests.team_turn_helpers import (
     delegate,
     registered_probe,
 )
+from tests.usage_helpers import assert_counted_usage, counted_total
 
 if TYPE_CHECKING:
     from collections.abc import Iterator, Sequence
@@ -98,20 +102,119 @@ def _failing(message: str) -> list[ScriptStep]:
 
 
 @pytest.mark.asyncio
-async def test_an_empty_completed_attempt_is_left_out_of_history_and_retried_once(
+async def test_an_empty_completed_attempt_is_left_out_of_history_and_retried_once_under_a_run_id_of_its_own(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The empty run is never stored; the retry is a fresh model request the pipeline timing marks."""
+    """The empty run is never stored; the retry is a fresh model request the pipeline timing marks.
+
+    The retry's run is the turn's final run, which the turn's record and its run metadata name.
+    """
     team = _team(tmp_path, monkeypatch, leader=[answer(""), answer("Recovered answer")])
     timing = DispatchPipelineTiming(source_event_id=EVENT_ID, room_id=ROOM_ID)
+    run_metadata: dict[str, Any] = {}
 
-    text = await team.respond(pipeline_timing=timing)
+    text = await team.respond(pipeline_timing=timing, run_metadata_collector=run_metadata)
 
     assert text.endswith("Recovered answer")
     assert len(team.models["default"].requests) == 2
-    assert _team_run_ids(team) == ["run-1"]
+    [run_id] = _team_run_ids(team)
+    assert run_id != "run-1"
+    assert (team.recorder.outcome, team.recorder.run_id) == ("completed", run_id)
+    assert run_metadata[AI_RUN_METADATA_KEY]["run_id"] == run_id
     assert 0 < timing.marks["first_model_request_sent"] < timing.marks["model_request_sent"]
+
+
+@pytest.mark.asyncio
+async def test_an_empty_attempt_s_retry_leaves_its_usage_in_the_ledger_the_totals_and_the_budget(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Under the turn's run id, the retry's run does not replace the empty run's usage: both attempts count.
+
+    They count in the usage ledger, the session totals, the usage report, and the requester's monthly spend.
+    """
+    team = _team(tmp_path, monkeypatch, leader=[answer("", usage(100, 5)), answer("Recovered answer", usage(120, 9))])
+
+    await team.respond()
+
+    assert_counted_usage(
+        team.storage,
+        SESSION_ID,
+        [(100, 5), (120, 9)],
+        config=team.config,
+        runtime_paths=team.runtime_paths,
+        model=team.models["default"].identity,
+        requester_id=REQUESTER_ID,
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("stream", [True, False], ids=["streamed", "collected"])
+@pytest.mark.parametrize("ending", ["empty_retry", "model_switch"])
+async def test_a_team_reply_publishes_the_usage_and_cost_of_every_attempt_its_turn_ran(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    ending: str,
+    stream: bool,
+) -> None:
+    """The reply's usage and cost sum its attempts, an empty one and its retry or a member's switch and the continuation.
+
+    They are what the usage ledger counts, the leader's and the member's. The run is the attempt that answered.
+    """
+    if ending == "empty_retry":
+        team = _team(tmp_path, monkeypatch, leader=[answer("", usage(100, 5)), answer("Recovered.", usage(120, 9))])
+    else:
+        switch = tool_call("switch_thread_model", "call-switch", model_name="large", when="next-turn")
+        team = _team(
+            tmp_path,
+            monkeypatch,
+            leader=[
+                delegate("call-team", "general", "Go"),
+                answer("Asked.", usage(60, 6)),
+                answer("Done.", usage(120, 9)),
+            ],
+            general=[calls(switch, metrics=usage(30, 3))],
+        )
+    # Every scripted model answers as one identity, which the leader's prices price.
+    team.config.models["default"].pricing = ModelPricing(input=2, output=10)
+    run_metadata: dict[str, Any] = {}
+
+    await team.reply(stream=stream, run_metadata_collector=run_metadata)
+
+    published = run_metadata[AI_RUN_METADATA_KEY]
+    input_tokens, output_tokens = counted_total(team.storage, SESSION_ID)
+    assert (input_tokens, output_tokens) == ((220, 14) if ending == "empty_retry" else (250, 22))
+    assert (published["usage"]["input_tokens"], published["usage"]["output_tokens"]) == (input_tokens, output_tokens)
+    assert published["cost"] == {"usd": format_cost_usd((input_tokens * 2 + output_tokens * 10) / 1_000_000)}
+    [*_, final_run_id] = _team_run_ids(team)
+    assert (published["run_id"], published["status"]) == (final_run_id, "completed")
+    assert final_run_id != "run-1"
+
+
+@pytest.mark.asyncio
+async def test_a_team_reply_whose_continuation_failed_publishes_the_usage_of_the_attempt_before_it(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The failed attempt ends the turn, and the reply's usage still holds the switch's attempt, as the ledger does."""
+    switch = tool_call("switch_thread_model", "call-switch", model_name="large", when="next-turn")
+    team = _team(
+        tmp_path,
+        monkeypatch,
+        leader=[delegate("call-team", "general", "Go"), answer("Asked.", usage(60, 6)), _failing("Leader failed")],
+        general=[calls(switch, metrics=usage(30, 3))],
+    )
+    run_metadata: dict[str, Any] = {}
+
+    text = await team.respond(run_metadata_collector=run_metadata)
+
+    assert "Leader failed" in text
+    published = run_metadata[AI_RUN_METADATA_KEY]
+    assert published["status"] == "error"
+    assert counted_total(team.storage, SESSION_ID) == (130, 13)
+    assert (published["usage"]["input_tokens"], published["usage"]["output_tokens"]) == (130, 13)
 
 
 @pytest.mark.asyncio

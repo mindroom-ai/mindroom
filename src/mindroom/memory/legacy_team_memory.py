@@ -58,13 +58,12 @@ _MEM0_ENTITY_SUFFIX = "_entities"
 _MAX_COPY_BYTES = 64 << 20
 
 
-async def migrate_team_memory(runtime_paths: RuntimePaths, config: Config | None) -> None:
+async def migrate_team_memory(runtime_paths: RuntimePaths, config: Config) -> None:
     """Finish the one-time merge before any reply reads or writes team memory.
 
-    ``config`` names the agents whose Mem0 stores hold copies anyone read and the embedder that wrote them; without
-    one, the Mem0 copies wait for a start that loads one.
+    ``config`` names the agents whose Mem0 stores hold copies anyone read and the embedder that wrote them.
     """
-    if not await run_blocking_until_complete(_merge_file_copies_unless_done, runtime_paths) or config is None:
+    if not await run_blocking_until_complete(_merge_file_copies_unless_done, runtime_paths):
         return
     if (copies := await run_blocking_until_complete(_read_mem0_copies, runtime_paths, config)) is None:
         return

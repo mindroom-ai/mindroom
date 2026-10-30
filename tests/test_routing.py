@@ -23,7 +23,7 @@ from mindroom.entity_resolution import entity_identity_registry, mindroom_user_i
 from mindroom.llm.errors import ProviderError
 from mindroom.matrix.identity import MatrixID
 from mindroom.matrix.users import AgentMatrixUser
-from mindroom.router_relay import execute_router_relay
+from mindroom.router.relay import execute_router_relay
 from tests.bot_helpers import make_test_agent_bot
 from tests.conftest import (
     TEST_ACCESS_TOKEN,
@@ -40,8 +40,7 @@ from tests.identity_helpers import persist_entity_accounts
 if TYPE_CHECKING:
     from collections.abc import Sequence
 
-    from mindroom.bot import AgentBot
-    from mindroom.matrix.client import ResolvedVisibleMessage
+    from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
 
 
 def _runtime_bound_config(config: Config, runtime_root: Path | None = None) -> Config:
@@ -126,14 +125,6 @@ def has_multiple_non_agent_users_in_thread(thread_history: list[ResolvedVisibleM
 def entity_name_for_sender(sender_id: str, config: Config) -> str | None:
     """Extract configured agent names with the test config's bound runtime context."""
     return entity_identity_registry(config, runtime_paths_for(config)).current_entity_name_for_user_id(sender_id)
-
-
-def _agent_bot(*args: object, **kwargs: object) -> AgentBot:
-    """Construct an agent bot with the explicit runtime bound to the test config."""
-    config = kwargs["config"]
-    assert isinstance(config, Config)
-    kwargs["runtime_paths"] = runtime_paths_for(config)
-    return make_test_agent_bot(*args, **kwargs)
 
 
 def _agent_description_config() -> Config:
@@ -366,7 +357,7 @@ class TestAIRouting:
         assert len(failing.requests) == 1
 
     @pytest.mark.asyncio
-    async def test_only_router_agent_routes(self, tmp_path: Path) -> None:
+    async def test_only_router_agent_routes(self) -> None:
         """Test that only the router agent handles routing."""
         # Create general agent (not router)
         agent = AgentMatrixUser(
@@ -379,7 +370,7 @@ class TestAIRouting:
 
         config = _runtime_bound_config(Config(router=RouterConfig(model="default")))
 
-        bot = _agent_bot(agent, tmp_path, config=config)
+        bot = make_test_agent_bot(agent, config=config)
 
         mock_room = MagicMock()
         mock_room.users = MagicMock()
@@ -392,7 +383,7 @@ class TestAIRouting:
         mock_event = MagicMock()
         mock_event.body = "Test message"
 
-        with patch("mindroom.router_relay.suggest_responder_for_message") as mock_suggest:
+        with patch("mindroom.router.relay.suggest_responder_for_message") as mock_suggest:
             # Should raise AssertionError since general is not the router agent
             with pytest.raises(AssertionError):
                 await execute_router_relay(

@@ -33,7 +33,7 @@ from anthropic.types.beta import (
 )
 
 from mindroom.constants import PROVIDER_ENV_KEYS
-from mindroom.credentials.sync import get_secret_from_env
+from mindroom.credentials.environment import get_secret_from_env
 from mindroom.llm.errors import ProviderError
 from mindroom.llm.provider import (
     STRUCTURED_OUTPUT_TOOL,
@@ -87,7 +87,9 @@ from mindroom.providers.claude_wire_blocks import SERVER_TOOL_USE_BLOCK_TYPE, as
 from mindroom.providers.credentials import model_api_key
 from mindroom.providers.errors import (
     classify_provider_error,
+    media_ids,
     missing_api_key_error,
+    path_tokens,
     provider_failure,
     retry_after_seconds,
 )
@@ -95,11 +97,11 @@ from mindroom.providers.extra_kwargs import sdk_request_body, settings_params
 from mindroom.providers.google_adc import load_ambient_google_credentials, with_runtime_application_credentials
 from mindroom.providers.model_http_client import MODEL_HTTP_CLIENT
 from mindroom.providers.names import provider_route
-from mindroom.runtime_env_policy import AWS_BEDROCK_CLAUDE_ENV_BY_KEY, VERTEXAI_CLAUDE_ENV_BY_KEY
+from mindroom.runtime_env_policy import AWS_ENV_BY_KEY, VERTEXAI_CLAUDE_ENV_BY_KEY
 from mindroom.tool_system.dependencies import ensure_optional_deps, optional_dependency_environment
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Mapping
+    from collections.abc import AsyncIterator, Mapping, Sequence
 
     import httpx2
     from anthropic.lib.bedrock import AsyncAnthropicBedrockMantle
@@ -109,7 +111,8 @@ if TYPE_CHECKING:
 
     from mindroom.config.models import ModelConfig
     from mindroom.constants import RuntimePaths
-    from mindroom.llm.provider import NativeHistoryRoute, StructuredOutput
+    from mindroom.llm.messages import Message
+    from mindroom.llm.provider import MediaKind, NativeHistoryRoute, StructuredOutput
 
     type _AsyncClaudeClient = AsyncAnthropic | AsyncAnthropicVertex | AsyncAnthropicBedrockMantle
 
@@ -294,7 +297,9 @@ class ClaudeProvider:
                         # show the provider is still working; the SDK's own convenience events repeat them.
                         yield _progress(event)
         except Exception as error:
-            raise _provider_error(error, provider=self.identity.provider_name) from error
+            failure = _provider_error(error, provider=self.identity.provider_name)
+            failure.rejected_media = _rejected_media(error, request.messages)
+            raise failure from error
 
     def _finished_turn(
         self,
@@ -598,23 +603,56 @@ def _provider_error(error: Exception, *, provider: str) -> ProviderError:
 
 @dataclass(frozen=True, slots=True)
 class _ErrorBody:
-    """The names of an error response's or a stream ``error`` event's ``error`` object, ``{"type": "error", ...}``.
+    """The names and message of an error response's or a stream ``error`` event's ``error`` object.
 
-    ``code`` is the ``details.error_code`` that tells apart failures sharing a type.
+    The body is ``{"type": "error", "error": {...}}``, and ``code`` is the ``details.error_code`` that tells apart
+    failures sharing a type.
     """
 
     type: str | None
     code: str | None
+    message: str | None
 
     @classmethod
     def of(cls, body: object) -> _ErrorBody:
         error = as_dict((as_dict(body) or {}).get("error")) or {}
         details = as_dict(error.get("details")) or {}
-        error_type, code = error.get("type"), details.get("error_code")
+        error_type, code, message = error.get("type"), details.get("error_code"), error.get("message")
         return cls(
             type=error_type if isinstance(error_type, str) else None,
             code=code if isinstance(code, str) else None,
+            message=message if isinstance(message, str) else None,
         )
+
+
+# The media kind of each content block a rejection's body path names: Claude names a document by its source's type.
+_BLOCK_KINDS: dict[str, MediaKind] = {"image": "image", "document": "file", "pdf": "file"}
+# A reported rejection of an image Claude could not read, which names no path.
+_UNPROCESSED_IMAGE = "could not process image"
+
+
+def _rejected_media(error: Exception, messages: Sequence[Message]) -> frozenset[str]:
+    """Return the ids of the attachments in ``messages`` of the kind a rejection names, or none when it names none.
+
+    Claude starts the message with the body path of the block it rejects, as reported in
+    ``messages.2.content.0.image.source.base64: image exceeds 5 MB maximum`` and
+    ``messages.8.content.0.pdf.source.base64.data: The PDF specified was not valid.``; the block's name is its kind.
+    The path indexes the request body rather than the conversation, so only the block's kind is read.
+    """
+    if not isinstance(error, anthropic.APIStatusError):
+        return frozenset()
+    text = _ErrorBody.of(error.body).message or ""
+    path, separator, _detail = text.partition(": ")
+    steps = path_tokens(path) if separator else []
+    blocks = [
+        name
+        for step, index, name in zip(steps, steps[1:], steps[2:], strict=False)
+        if step == "content" and isinstance(index, int) and isinstance(name, str)
+    ]
+    kind = _BLOCK_KINDS.get(blocks[-1]) if blocks else None
+    if kind is None and _UNPROCESSED_IMAGE in text.casefold():
+        kind = "image"
+    return frozenset() if kind is None else media_ids(messages, kind)
 
 
 def _output_event(event: object) -> TextDelta | ReasoningDelta | ToolCallReady | None:
@@ -764,9 +802,9 @@ def _vertex_kwargs(authored: dict[str, Any], runtime_paths: RuntimePaths) -> dic
 
 def _bedrock_static_credentials(kwargs: dict[str, Any], runtime_paths: RuntimePaths) -> None:
     for config_key, env_key in (
-        ("aws_access_key", AWS_BEDROCK_CLAUDE_ENV_BY_KEY["access_key"]),
-        ("aws_secret_key", AWS_BEDROCK_CLAUDE_ENV_BY_KEY["secret_key"]),
-        ("aws_session_token", AWS_BEDROCK_CLAUDE_ENV_BY_KEY["session_token"]),
+        ("aws_access_key", AWS_ENV_BY_KEY["access_key"]),
+        ("aws_secret_key", AWS_ENV_BY_KEY["secret_key"]),
+        ("aws_session_token", AWS_ENV_BY_KEY["session_token"]),
     ):
         if config_key not in kwargs and (value := get_secret_from_env(env_key, runtime_paths=runtime_paths)):
             kwargs[config_key] = value
@@ -799,9 +837,9 @@ def _bedrock_kwargs(authored: dict[str, Any], runtime_paths: RuntimePaths) -> di
         return kwargs
     if "aws_region" not in kwargs:
         aws_region = get_secret_from_env(
-            AWS_BEDROCK_CLAUDE_ENV_BY_KEY["region"],
+            AWS_ENV_BY_KEY["region"],
             runtime_paths=runtime_paths,
-        ) or get_secret_from_env(AWS_BEDROCK_CLAUDE_ENV_BY_KEY["default_region"], runtime_paths=runtime_paths)
+        ) or get_secret_from_env(AWS_ENV_BY_KEY["default_region"], runtime_paths=runtime_paths)
         if aws_region:
             kwargs["aws_region"] = aws_region
     if "aws_access_key" in kwargs or "aws_secret_key" in kwargs:
@@ -815,7 +853,7 @@ def _bedrock_kwargs(authored: dict[str, Any], runtime_paths: RuntimePaths) -> di
     _bedrock_static_credentials(kwargs, runtime_paths)
     if kwargs.get("aws_access_key") or kwargs.get("aws_secret_key"):
         return kwargs
-    _bedrock_session(kwargs, get_secret_from_env(AWS_BEDROCK_CLAUDE_ENV_BY_KEY["profile"], runtime_paths=runtime_paths))
+    _bedrock_session(kwargs, get_secret_from_env(AWS_ENV_BY_KEY["profile"], runtime_paths=runtime_paths))
     return kwargs
 
 

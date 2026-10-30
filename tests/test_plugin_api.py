@@ -10,6 +10,8 @@ from __future__ import annotations
 import enum
 import inspect
 
+import typing_extensions
+
 from mindroom import plugin_api
 
 _EXPORTS = [
@@ -60,6 +62,8 @@ _EXPORTS = [
     "MessageEnvelope",
     "MessageReceivedContext",
     "MessageTarget",
+    "ModelProvider",
+    "ModelScope",
     "OAuthDiscoveryConfig",
     "OAuthProvider",
     "ReactionReceivedContext",
@@ -114,6 +118,7 @@ _EXPORTS = [
     "resolve_agent_file",
     "resolve_config_relative_path",
     "resolve_tool_runtime_hook_bindings",
+    "resolve_turn_model",
     "tool",
     "toolkit_functions",
     "write_file_within_root",
@@ -151,7 +156,7 @@ _SIGNATURES = {
         f"token_count_after, compaction_summary, *, {_HOOK_HELPERS})"
     ),
     "ConfigField": (
-        "(name, label, type, required, default, placeholder, description, options, validation, authored_override)"
+        "(name, label, type, required, default, placeholder, description, options, validation, authored_override, env)"
     ),
     "ConfigReloadedContext": (
         f"({_HOOK}, changed_entities, added_entities, removed_entities, plugin_changes, *, {_HOOK_HELPERS})"
@@ -173,6 +178,7 @@ _SIGNATURES = {
     ),
     "MessageReceivedContext": f"({_HOOK}, envelope, skip_plugin_names, suppress, *, {_HOOK_HELPERS})",
     "MessageTarget": "(room_id, source_thread_id, resolved_thread_id, reply_to_event_id, session_id)",
+    "ModelScope": "(entity, room_id, thread_id, explicit, explicit_context_window)",
     "OAuthDiscoveryConfig": (
         "(resource, discovery, authorization_server, authorization_url, token_url, registration_url, "
         "dynamic_client_registration, token_endpoint_auth_method, pkce_code_challenge_method, allow_insecure_env, "
@@ -182,10 +188,9 @@ _SIGNATURES = {
         "(id, display_name, authorization_url, token_url, scopes, credential_service, tool_config_service, "
         "client_config_services, shared_client_config_services, default_redirect_path, extra_auth_params, "
         "extra_token_params, token_endpoint_auth_method, pkce_code_challenge_method, allow_empty_scopes, "
-        "requester_scoped_credentials, tool_config_oauth_fallback_fields, tool_config_oauth_fallback_env_vars, "
-        "allowed_email_domains, allowed_hosted_domains, allowed_email_domains_env, allowed_hosted_domains_env, "
-        "status_capabilities, token_parser, token_exchanger, claim_validator, runtime_bootstrapper, "
-        "account_claims_reader)"
+        "requester_scoped_credentials, tool_config_oauth_fallback_fields, allowed_email_domains, "
+        "allowed_hosted_domains, allowed_email_domains_env, allowed_hosted_domains_env, status_capabilities, "
+        "token_parser, token_exchanger, claim_validator, runtime_bootstrapper, account_claims_reader)"
     ),
     "ReactionReceivedContext": (
         f"({_HOOK}, room_id, event_id, sender_id, reaction_key, target_event_id, thread_id, *, {_HOOK_HELPERS})"
@@ -274,6 +279,7 @@ _SIGNATURES = {
     "resolve_agent_file": "(raw_path, *, workspace_root, file_access, field_name)",
     "resolve_config_relative_path": "(raw_path, runtime_paths)",
     "resolve_tool_runtime_hook_bindings": "(context)",
+    "resolve_turn_model": "(config, runtime_paths, scope, budget)",
     "tool": "(function, /, *, name, description)",
     "toolkit_functions": "(toolkit)",
     "write_file_within_root": "(root, relative_path, payload, *, file_mode, dir_mode, exclusive)",
@@ -348,9 +354,16 @@ def test_plugin_api_exports_exactly_the_supported_names() -> None:
 
 
 def test_each_exported_callable_keeps_its_parameter_names_and_kinds() -> None:
-    """A plugin calls these by position or keyword as documented, so each parameter's name and kind stay put."""
+    """A plugin calls these by position or keyword as documented, so each parameter's name and kind stay put.
+
+    A protocol, such as `ModelProvider`, is a type plugins annotate with and never call.
+    """
     exported = {name: getattr(plugin_api, name) for name in plugin_api.__all__}
-    shapes = {name: _parameter_shape(obj) for name, obj in exported.items() if callable(obj) and not _is_enum(obj)}
+    shapes = {
+        name: _parameter_shape(obj)
+        for name, obj in exported.items()
+        if callable(obj) and not _is_enum(obj) and not typing_extensions.is_protocol(obj)
+    }
     assert shapes == _SIGNATURES
 
 

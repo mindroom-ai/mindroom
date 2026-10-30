@@ -1,4 +1,4 @@
-"""What ``create_agent`` builds for the agent loop: the agent's spec, prompt, request settings, store, and surface."""
+"""What ``create_agent`` builds for the agent loop: the agent's spec, prompt, request settings, and surface."""
 
 from __future__ import annotations
 
@@ -17,7 +17,6 @@ if TYPE_CHECKING:
     from mindroom.knowledge.search import KnowledgeSourceDescription
     from mindroom.llm.messages import Message
     from mindroom.llm.provider import ModelRequest
-    from mindroom.session_storage.store import ConversationStore
     from mindroom.tool_jobs.execution import JobActor
     from mindroom.tool_system.agent_tool_calls import DeferredAgentToolkit
     from mindroom.tool_system.invocation import ToolMiddleware
@@ -79,7 +78,6 @@ class AgentBuild:
     prompt: PromptSpec
     request_template: ModelRequest
     history_settings: ResolvedHistorySettings
-    store: ConversationStore | None
     surface: AgentSurface
     tool_policy: tuple[ToolMiddleware, ...]
     tool_jobs: JobActor | None

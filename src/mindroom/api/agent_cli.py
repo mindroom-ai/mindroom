@@ -21,7 +21,7 @@ from mindroom.agent_cli.session import (
     CliOperationError,
 )
 from mindroom.agent_cli.shell_contract import AGENT_CLI_WINDOW_HEADER
-from mindroom.api import config_lifecycle
+from mindroom.api.app_state import ensure_app_state
 
 if TYPE_CHECKING:
     from mindroom.agent_cli.session import CliOperationOwner, TurnToolRegistry
@@ -31,12 +31,12 @@ router = APIRouter(prefix="/api/agent-cli", tags=["agent-cli"])
 
 def bind_agent_cli_registry(app: FastAPI, registry: TurnToolRegistry | None) -> None:
     """Expose the orchestrator's registry without taking ownership of its lifetime."""
-    state = config_lifecycle.ensure_app_state(app)
+    state = ensure_app_state(app)
     state.agent_cli_registry = registry
 
 
 def _owner(request: Request) -> CliOperationOwner:
-    registry = config_lifecycle.ensure_app_state(request.app).agent_cli_registry
+    registry = ensure_app_state(request.app).agent_cli_registry
     try:
         if registry is not None:
             return registry.resolve(request.headers.get("authorization"), now_ns=time.time_ns())

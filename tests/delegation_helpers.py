@@ -299,7 +299,7 @@ def approval_executor(config: Config, runtime_paths: RuntimePaths) -> AgentAppro
         client=AsyncMock,
         tool_runtime=MagicMock(run_in_context=_run_in_tool_context),
         knowledge_access=KnowledgeAccessSupport(
-            runtime=MagicMock(config=config, orchestrator=None),
+            runtime=MagicMock(config=config, orchestrator=SimpleNamespace(knowledge_refresh_scheduler=None)),
             runtime_paths=runtime_paths,
         ),
         refresh_scheduler=lambda: None,
@@ -408,7 +408,6 @@ async def pause_parent(
         config,
         runtime_paths,
         identity,
-        history_storage=store,
         supports_native_tool_approval=True,
         knowledge=None,
         model=turn_model(config, runtime_paths, agent_name),
@@ -485,7 +484,7 @@ async def respond_team(
         correlation_id=correlation_id,
     )
     orchestrator = team_orchestrator(config, runtime_paths)
-    orchestrator.agent_bots = {name: SimpleNamespace(running=True) for name in members}
+    orchestrator.running_entity_names = lambda: frozenset(members)
     ctx = replace(
         make_turn_context(
             team_name,

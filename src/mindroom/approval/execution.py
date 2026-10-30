@@ -46,6 +46,7 @@ from mindroom.response_turn import (
 )
 from mindroom.run_storage import TerminalRecord, scope_run_storage
 from mindroom.session_storage.agent_storage import create_session_storage
+from mindroom.session_storage.lanes import run_session_storage_operation
 from mindroom.tool_jobs.consumption import finalize_consumption, set_consumption_storage
 from mindroom.tool_jobs.execution_scope import owned_tool_execution
 from mindroom.tool_jobs.settings import background_tool_jobs_enabled
@@ -253,6 +254,7 @@ async def _continue_persisted_agent(
         run_id=response.run_id,
         attempt_run_id=response.run_id,
         runtime_model_name=model_name,
+        usage=response.metrics,
         status=response.status,
         tool_executions=collected.tool_executions,
         completed_tools=tuple(presentation.tool_trace),
@@ -424,10 +426,11 @@ class AgentApprovalExecution:
             self.runtime_paths,
             execution_identity,
         )
-        store = await asyncio.to_thread(storage_factory)
+        store, session, persisted = await run_session_storage_operation(
+            storage_factory,
+            lambda opened: (opened, opened.load_session(continuation.session_id), opened.get_run(continuation.run_id)),
+        )
         set_consumption_storage(storage_factory)
-        session = await asyncio.to_thread(store.load_session, continuation.session_id)
-        persisted = await asyncio.to_thread(store.get_run, continuation.run_id)
         if (
             session is None
             or not isinstance(persisted, RunRecord)
@@ -465,7 +468,6 @@ class AgentApprovalExecution:
             config,
             self.runtime_paths,
             execution_identity,
-            history_storage=store,
             model=model,
             knowledge=knowledge,
             refresh_scheduler=self.refresh_scheduler(),

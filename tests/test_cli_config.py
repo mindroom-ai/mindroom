@@ -41,8 +41,8 @@ from mindroom.cli.main import (
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig, RouterConfig
 from mindroom.constants import OWNER_MATRIX_USER_ID_ENV, OWNER_MATRIX_USER_ID_PLACEHOLDER
+from mindroom.credentials.environment import get_secret_from_env
 from mindroom.credentials.manager import get_runtime_shared_credentials_manager
-from mindroom.credentials.sync import get_secret_from_env, sync_env_to_credentials
 from mindroom.error_handling import AvatarGenerationError, AvatarSyncError
 from mindroom.logging_config import configure_default_logging, uses_default_logging
 from mindroom.matrix.state import MatrixAccount, MatrixState
@@ -68,6 +68,7 @@ from mindroom.thread_export import ThreadExportStats
 from mindroom.thread_export.models import ThreadExportRoom, failure_for_room, failure_for_target
 from mindroom.tool_system.worker_routing import agent_workspace_root_path
 from tests.conftest import load_config_yaml, normalize_console_output
+from tests.matrix_state_helpers import save_matrix_state
 from tests.providers.golden_support import httpx2_transport, streamed_reply
 
 if TYPE_CHECKING:
@@ -948,7 +949,6 @@ class TestConfigInit:
             env_text.replace("OLLAMA_HOST=http://localhost:11434\n", "OLLAMA_HOST=http://gpu.example:11434\n"),
         )
         runtime_paths = constants_module.resolve_primary_runtime_paths(config_path=target, process_env={})
-        sync_env_to_credentials(runtime_paths)
 
         config = config_cli.load_config_quiet(runtime_paths)
 
@@ -3094,8 +3094,7 @@ class TestRunFirstRunSetup:
         assert "OpenAI API key" in result.output
         assert "Skipped" in result.output
         assert "OPENAI_API_KEY=your-openai-key-here # replace this\n" in env_path.read_text(encoding="utf-8")
-        # Startup credential sync stores nothing, so the dashboard still offers to connect the provider.
-        sync_env_to_credentials(started[0])
+        # The placeholder supplies no key, so the dashboard still offers to connect the provider.
         config = load_config_yaml(config_path)
         assert missing_model_api_key_provider(config, started[0], "default") == "openai"
 
@@ -3711,7 +3710,7 @@ class TestRunApiFlags:
             assert runtime_paths.storage_root == runtime_storage.resolve()
             assert constants_module.tracking_dir(runtime_paths) == runtime_storage.resolve() / "tracking"
             assert constants_module.matrix_state_file(runtime_paths) == runtime_storage.resolve() / "matrix_state.yaml"
-            MatrixState().save(runtime_paths=runtime_paths)
+            save_matrix_state(MatrixState(), runtime_paths)
             assert (runtime_storage.resolve() / "matrix_state.yaml").exists()
 
         with patch("mindroom.orchestrator.main", AsyncMock(side_effect=_fake_main)) as mock_main:
@@ -4012,7 +4011,7 @@ class TestDoctor:
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        """Doctor warns when a persisted device has no encryption store on disk."""
+        """Doctor warns when a bot's persisted device has no encryption store; the internal user never has one."""
         cfg = tmp_path / "config.yaml"
         cfg.write_text(_VALID_CONFIG)
         storage = tmp_path / "storage"
@@ -4021,21 +4020,32 @@ class TestDoctor:
         _patch_homeserver_ok(monkeypatch)
 
         runtime_paths = constants_module.resolve_runtime_paths(config_path=cfg, storage_path=storage)
-        MatrixState(
-            accounts={
-                "agent_general": MatrixAccount(
-                    username="mindroom_general",
-                    password="pw",  # noqa: S106
-                    domain="localhost",
-                    device_id="LOSTDEVICE",
-                ),
-            },
-        ).save(runtime_paths=runtime_paths)
+        save_matrix_state(
+            MatrixState(
+                accounts={
+                    "agent_general": MatrixAccount(
+                        username="mindroom_general",
+                        password="pw",  # noqa: S106
+                        domain="localhost",
+                        device_id="LOSTDEVICE",
+                    ),
+                    "agent_user": MatrixAccount(
+                        username="mindroom_user",
+                        password="pw",  # noqa: S106
+                        domain="localhost",
+                        device_id="HTTPONLY",
+                    ),
+                },
+            ),
+            runtime_paths,
+        )
 
         result = _invoke_with_runtime(["doctor"], cfg, storage_path=storage)
 
         assert result.exit_code == 0
         assert "Encryption store missing for agent_general" in result.output
+        assert "does not start until" in result.output
+        assert "agent_user" not in result.output
         assert "1 warning" not in result.output  # memory warning plus this one
         assert "2 warnings" in result.output
 

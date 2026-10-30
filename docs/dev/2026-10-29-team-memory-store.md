@@ -21,7 +21,7 @@ It records reasons, rejected alternatives, and accepted limitations; the code sh
 - Search ranks every scope's hits together and does not merge equal texts across scopes, because two equal texts in two scopes are two records with their own IDs, and hiding one would make it reappear after the shown one is deleted.
 - The `memory` tool's IDs stay unqualified: Mem0 IDs are UUIDs, file entry IDs carry a timestamp and 32 random bits, and `file:<path>:<line>` IDs come only from non-entrypoint Markdown, which only an agent's own workspace has; qualifying them would break every ID a model has already seen in a conversation.
 - `memory.team_reads_member_memory` and `memory.file.path` are dropped before validation rather than rejected, because the dashboard wrote both on every save; neither ever changed behavior, since nothing read memory for a whole team and the file path applied only to an empty member list.
-- The merge runs before anything serves, as the Migration Policy requires: in `mindroom run` under the runtime lock after old state-root worker mounts are retired, and in the standalone API beside its other startup migrations, which run there without that retirement too.
+- The merge runs before anything serves, as the Migration Policy requires: in `mindroom run` under the runtime lock after old state-root worker mounts are retired, the one process that runs agent turns and memory tools.
   It runs right after the startup config loads, which names the agents whose Mem0 stores it reads (below); each copy's scope ID names its target team, so copies of teams the config no longer has merge too.
 
 ## Merge decisions
@@ -48,9 +48,8 @@ It records reasons, rejected alternatives, and accepted limitations; the code sh
 - Every step is idempotent: records are upserted by their IDs, member copies are deleted only after the team store holds every team's records, and the dropped extractions go before the kept ones, which go only once every dropped one went, so a start interrupted anywhere still finds each kept extraction beside any dropped one and chooses it again; writes go in batches within Chroma's batch limit, which needs no atomicity across batches.
 - The merge reads the paths the earlier runtime read, walked without following links from the storage root: a team's copies only from its members, so a copy in another agent's directory or store, which no member read, does not become team memory.
   Chroma opens a store's files by path, so the merge opens a member's Mem0 store only when it holds nothing but directories and regular files; hard links are allowed, because a backup made with hard links gives every file a second link, and worker code can link only files it can already write.
-- A receipt in `tracking/` stops later starts from opening every agent's Chroma store; it is withheld while Chroma cannot be installed, the embedder cannot answer, or no config loaded, the only cases in which no Mem0 copy was merged, so a later start merges the Mem0 copies.
+- A receipt in `tracking/` stops later starts from opening every agent's Chroma store; it is withheld while Chroma cannot be installed or the embedder cannot answer, the only cases in which no Mem0 copy was merged, so a later start merges the Mem0 copies.
   The merge installs Chroma itself when a member Mem0 store exists, as the first memory call would, because merging later would hide old team memories until another restart.
-- Both the runtime and the standalone API run the merge, because both run agent turns and memory tools.
 
 ## Rejected alternatives
 
@@ -73,7 +72,6 @@ It records reasons, rejected alternatives, and accepted limitations; the code sh
 - One corrupt or unreadable team store affects every team's Mem0 memory, where a store per team confined it to one team.
 - Mem0 team copies an earlier embedder wrote stay in member stores, so switching back to that embedder does not bring them back.
 - Mem0 copies in the store of an agent not on Mem0 at the upgrade stay unmerged, so switching it back to Mem0 later does not bring them back; merging such a store later would need a ledger of the turns already merged, since the team store cannot tell which merged facts users edited or deleted since.
-- A standalone API whose config fails to load at startup merges Mem0 copies only at a later start with a valid config, not when a repaired config loads while it runs, because a merge must finish before anything reads team memory, and the API serves while the config is invalid.
 - The merge checks a member's Mem0 store for links before Chroma opens it by path, so a link swapped in between is followed, as every Mem0 open of an agent's store below `agents/` already follows one.
 - Each member's Mem0 history database stays where it is, because it also holds the member's own history; each team's recent-message extraction context in the team store starts empty once.
 - Mem0's entity rows are not carried over; Mem0 writes them only when spaCy is installed, which MindRoom does not install.

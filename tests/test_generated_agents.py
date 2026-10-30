@@ -46,6 +46,7 @@ from mindroom.personal_agents import (
 from mindroom.tool_system.agent_tools import resolve_agent_tools
 from mindroom.workers.runtime import build_worker_launch_config
 from tests.conftest import test_runtime_paths
+from tests.matrix_state_helpers import save_matrix_state
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -562,7 +563,7 @@ def _delete(
 def _add_account(paths: RuntimePaths, agent_name: str) -> None:
     state = MatrixState.load(runtime_paths=paths)
     state.add_account(f"agent_{agent_name}", f"mindroom_{agent_name}", None, domain="localhost")
-    state.save(runtime_paths=paths)
+    save_matrix_state(state, paths)
 
 
 def test_only_owners_may_change_a_created_agent(tmp_path: Path) -> None:

@@ -63,7 +63,6 @@ from tests.bot_helpers import (
     make_test_agent_bot,
 )
 from tests.conftest import (
-    dispatch_context_result,
     drain_coalescing,
     install_generate_response_mock,
     replace_turn_deps,
@@ -110,20 +109,10 @@ class TestAgentBot(AgentBotTestBase):
     ) -> None:
         """Image messages should reach response generation with an images payload."""
         config = self._config_for_storage(tmp_path)
-        bot = make_test_agent_bot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
+        bot = make_test_agent_bot(mock_agent_user, config=config, runtime_paths=runtime_paths_for(config))
         _wrap_extracted_collaborators(bot)
         bot.client = AsyncMock()
 
-        bot._conversation_resolver.extract_message_context = AsyncMock(
-            return_value=MessageContext(
-                am_i_mentioned=False,
-                is_thread=False,
-                thread_id=None,
-                thread_history=[],
-                mentioned_agents=[],
-                has_non_agent_mentions=False,
-            ),
-        )
         generate_response = AsyncMock(return_value="$response")
         install_generate_response_mock(bot, generate_response)
 
@@ -175,7 +164,7 @@ class TestAgentBot(AgentBotTestBase):
         assert attachment_id in generate_kwargs["model_prompt"]
         assert response_target.reply_to_event_id == "$img_event"
         assert response_target.resolved_thread_id == "$img_event"
-        assert generate_kwargs["thread_history"] == []
+        assert generate_kwargs["thread_history"] == ()
         assert response_target.source_thread_id is None
         assert generate_kwargs["user_id"] == "@user:localhost"
         media = generate_kwargs["media"]
@@ -209,7 +198,7 @@ class TestAgentBot(AgentBotTestBase):
     ) -> None:
         """Image/file media dispatch should fix its conversation key before enqueueing dispatch."""
         config = self._config_for_storage(tmp_path)
-        bot = make_test_agent_bot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
+        bot = make_test_agent_bot(mock_agent_user, config=config, runtime_paths=runtime_paths_for(config))
         bot.client = _make_matrix_client_mock()
         room = _synced_room(bot.matrix_id.full_id)
         event = self._make_handler_event("image", sender="@user:localhost", event_id="$img_event")
@@ -230,7 +219,7 @@ class TestAgentBot(AgentBotTestBase):
     ) -> None:
         """Audio dispatch should reserve receive order, then admit under a resolved key."""
         config = self._config_for_storage(tmp_path)
-        bot = make_test_agent_bot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
+        bot = make_test_agent_bot(mock_agent_user, config=config, runtime_paths=runtime_paths_for(config))
         bot.client = _make_matrix_client_mock()
         room = _synced_room(bot.matrix_id.full_id)
         event = self._make_handler_event("voice", sender="@user:localhost", event_id="$voice_event")
@@ -309,7 +298,7 @@ class TestAgentBot(AgentBotTestBase):
     ) -> None:
         """A media replay cannot repeat thread resolution while the first delivery owns the turn."""
         config = self._config_for_storage(tmp_path)
-        bot = make_test_agent_bot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
+        bot = make_test_agent_bot(mock_agent_user, config=config, runtime_paths=runtime_paths_for(config))
         bot.client = _make_matrix_client_mock()
         room = _synced_room(bot.matrix_id.full_id)
         event = _room_image_event(sender="@user:localhost", event_id="$image_event", body="photo.jpg")
@@ -347,7 +336,7 @@ class TestAgentBot(AgentBotTestBase):
     ) -> None:
         """A redelivery a live owner holds defers at once, stays owned, and returns to the journal when that owner ends."""
         config = self._config_for_storage(tmp_path)
-        bot = make_test_agent_bot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
+        bot = make_test_agent_bot(mock_agent_user, config=config, runtime_paths=runtime_paths_for(config))
         bot.client = _make_matrix_client_mock()
         room = _synced_room(bot.matrix_id.full_id)
         event = _room_image_event(sender="@user:localhost", event_id="$image_event", body="photo.jpg")
@@ -381,7 +370,7 @@ class TestAgentBot(AgentBotTestBase):
     ) -> None:
         """A lane reservation that fails comes before the claim, so the source stays retryable."""
         config = self._config_for_storage(tmp_path)
-        bot = make_test_agent_bot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
+        bot = make_test_agent_bot(mock_agent_user, config=config, runtime_paths=runtime_paths_for(config))
         bot.client = _make_matrix_client_mock()
         room = _synced_room(bot.matrix_id.full_id)
         event = _room_image_event(sender="@user:localhost", event_id="$image_event", body="photo.jpg")
@@ -415,7 +404,7 @@ class TestAgentBot(AgentBotTestBase):
     ) -> None:
         """Cancelled pre-admission audio resolution must not leave gate work behind."""
         config = self._config_for_storage(tmp_path)
-        bot = make_test_agent_bot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
+        bot = make_test_agent_bot(mock_agent_user, config=config, runtime_paths=runtime_paths_for(config))
         bot.client = _make_matrix_client_mock()
         room = _synced_room(bot.matrix_id.full_id)
         event = self._make_handler_event("voice", sender="@user:localhost", event_id="$voice_event")
@@ -436,7 +425,7 @@ class TestAgentBot(AgentBotTestBase):
     ) -> None:
         """An earlier text message must not be overtaken by a later voice message."""
         config = self._config_for_storage(tmp_path)
-        bot = make_test_agent_bot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
+        bot = make_test_agent_bot(mock_agent_user, config=config, runtime_paths=runtime_paths_for(config))
         bot.client = _make_matrix_client_mock()
         room = MagicMock()
         room.room_id = "!test:localhost"
@@ -526,7 +515,7 @@ class TestAgentBot(AgentBotTestBase):
     ) -> None:
         """An earlier non-audio media event must reserve before thread lookup can block."""
         config = self._config_for_storage(tmp_path)
-        bot = make_test_agent_bot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
+        bot = make_test_agent_bot(mock_agent_user, config=config, runtime_paths=runtime_paths_for(config))
         bot.client = _make_matrix_client_mock()
         room = MagicMock()
         room.room_id = "!test:localhost"
@@ -598,7 +587,7 @@ class TestAgentBot(AgentBotTestBase):
     ) -> None:
         """An earlier file sidecar text preview must reserve before preview normalization can block."""
         config = self._config_for_storage(tmp_path)
-        bot = make_test_agent_bot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
+        bot = make_test_agent_bot(mock_agent_user, config=config, runtime_paths=runtime_paths_for(config))
         bot.client = _make_matrix_client_mock()
         room = MagicMock()
         room.room_id = "!test:localhost"
@@ -692,7 +681,7 @@ class TestAgentBot(AgentBotTestBase):
     ) -> None:
         """Media turns should include attachment IDs already referenced in thread history."""
         config = self._config_for_storage(tmp_path)
-        bot = make_test_agent_bot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
+        bot = make_test_agent_bot(mock_agent_user, config=config, runtime_paths=runtime_paths_for(config))
         _wrap_extracted_collaborators(bot)
         bot.client = AsyncMock()
 
@@ -710,15 +699,13 @@ class TestAgentBot(AgentBotTestBase):
             is_full_history=True,
         )
         bot._conversation_resolver.extract_dispatch_context = AsyncMock(
-            return_value=dispatch_context_result(
-                MessageContext(
-                    am_i_mentioned=False,
-                    is_thread=True,
-                    thread_id="$thread_root",
-                    thread_history=routed_history,
-                    mentioned_agents=[],
-                    has_non_agent_mentions=False,
-                ),
+            return_value=MessageContext(
+                am_i_mentioned=False,
+                is_thread=True,
+                thread_id="$thread_root",
+                thread_history=routed_history,
+                mentioned_agents=[],
+                has_non_agent_mentions=False,
             ),
         )
         generate_response = AsyncMock(return_value="$response")
@@ -778,7 +765,7 @@ class TestAgentBot(AgentBotTestBase):
 
         assert mock_resolve_media.call_args_list == [
             call(
-                tmp_path,
+                bot.storage_path,
                 [current_attachment_id, history_attachment_id],
                 room_id="!test:localhost",
                 thread_id="$thread_root",
@@ -821,28 +808,28 @@ class TestAgentBot(AgentBotTestBase):
     ) -> None:
         """Inline media carries only current-turn attachments while IDs stay thread/history-scoped."""
         config = self._config_for_storage(tmp_path)
-        bot = make_test_agent_bot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
+        bot = make_test_agent_bot(mock_agent_user, config=config, runtime_paths=runtime_paths_for(config))
         bot.client = _make_matrix_client_mock()
         current_attachment_id = f"att_current_{kind}"
         thread_attachment_id = f"att_thread_{kind}"
         history_attachment_id = f"att_history_{kind}"
         same_content = b"same media bytes"
         current_path = _register_payload_media_attachment(
-            tmp_path,
+            bot.storage_path,
             kind=kind,
             attachment_id=current_attachment_id,
             filename=f"current-{kind}.bin",
             content=same_content,
         )
         _register_payload_media_attachment(
-            tmp_path,
+            bot.storage_path,
             kind=kind,
             attachment_id=thread_attachment_id,
             filename=f"thread-{kind}.bin",
             content=same_content,
         )
         _register_payload_media_attachment(
-            tmp_path,
+            bot.storage_path,
             kind=kind,
             attachment_id=history_attachment_id,
             filename=f"history-{kind}.bin",
@@ -886,23 +873,23 @@ class TestAgentBot(AgentBotTestBase):
     ) -> None:
         """Thread and history attachments stay ID-only instead of joining the current turn."""
         config = self._config_for_storage(tmp_path)
-        bot = make_test_agent_bot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
+        bot = make_test_agent_bot(mock_agent_user, config=config, runtime_paths=runtime_paths_for(config))
         bot.client = _make_matrix_client_mock()
         current_attachment_id = "att_current_image"
         thread_attachment_id = "att_thread_image"
         history_attachment_id = "att_history_image"
         current_path = _register_payload_image_attachment(
-            tmp_path,
+            bot.storage_path,
             attachment_id=current_attachment_id,
             filename="current.png",
         )
         _register_payload_image_attachment(
-            tmp_path,
+            bot.storage_path,
             attachment_id=thread_attachment_id,
             filename="thread.png",
         )
         _register_payload_image_attachment(
-            tmp_path,
+            bot.storage_path,
             attachment_id=history_attachment_id,
             filename="history.png",
         )
@@ -942,7 +929,7 @@ class TestAgentBot(AgentBotTestBase):
     ) -> None:
         """An edited root's original media is not added beside the edited revision's media."""
         config = self._config_for_storage(tmp_path)
-        bot = make_test_agent_bot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
+        bot = make_test_agent_bot(mock_agent_user, config=config, runtime_paths=runtime_paths_for(config))
         bot.client = _make_matrix_client_mock()
         original_content = {"msgtype": "m.image", "body": "old.png", "url": "mxc://localhost/old"}
         bot.client.room_get_event = AsyncMock(
@@ -958,12 +945,12 @@ class TestAgentBot(AgentBotTestBase):
             ),
         )
         _register_payload_image_attachment(
-            tmp_path,
+            bot.storage_path,
             attachment_id=_attachment_id_for_event("$thread"),
             filename="old.png",
         )
         revision_attachment_id = _attachment_id_for_event("$root-edit")
-        _register_payload_image_attachment(tmp_path, attachment_id=revision_attachment_id, filename="new.png")
+        _register_payload_image_attachment(bot.storage_path, attachment_id=revision_attachment_id, filename="new.png")
         root = _visible_message(sender="@user:localhost", event_id="$thread", content=original_content)
         root.apply_edit(
             body="new.png",
@@ -993,7 +980,7 @@ class TestAgentBot(AgentBotTestBase):
     ) -> None:
         """Payloads without attachments should have empty inline media and no tool-visible IDs."""
         config = self._config_for_storage(tmp_path)
-        bot = make_test_agent_bot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
+        bot = make_test_agent_bot(mock_agent_user, config=config, runtime_paths=runtime_paths_for(config))
         bot.client = _make_matrix_client_mock()
 
         payload = await bot._inbound_turn_normalizer.build_dispatch_payload_with_attachments(
@@ -1021,7 +1008,7 @@ class TestAgentBot(AgentBotTestBase):
     ) -> None:
         """Fallback images should still populate inline media when no current IDs resolve."""
         config = self._config_for_storage(tmp_path)
-        bot = make_test_agent_bot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
+        bot = make_test_agent_bot(mock_agent_user, config=config, runtime_paths=runtime_paths_for(config))
         bot.client = _make_matrix_client_mock()
         fallback_image = Image(content=b"\x89PNG\r\n\x1a\nfallback", mime_type="image/png")
 
@@ -1051,7 +1038,7 @@ class TestAgentBot(AgentBotTestBase):
     ) -> None:
         """Fallback image bytes should be appended instead of discarded when some registrations succeed."""
         config = self._config_for_storage(tmp_path)
-        bot = make_test_agent_bot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
+        bot = make_test_agent_bot(mock_agent_user, config=config, runtime_paths=runtime_paths_for(config))
         bot.client = _make_matrix_client_mock()
         stored_image = Image(content=b"\x89PNG\r\n\x1a\nstored", mime_type="image/png")
         fallback_image = Image(content=b"\x89PNG\r\n\x1a\nfallback", mime_type="image/png")
@@ -1098,7 +1085,7 @@ class TestAgentBot(AgentBotTestBase):
     ) -> None:
         """Attachment IDs should be isolated to model_prompt instead of mutating the raw user prompt."""
         config = self._config_for_storage(tmp_path)
-        bot = make_test_agent_bot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
+        bot = make_test_agent_bot(mock_agent_user, config=config, runtime_paths=runtime_paths_for(config))
         bot.client = _make_matrix_client_mock()
         stored_image = Image(content=b"\x89PNG\r\n\x1a\nstored", mime_type="image/png")
 
@@ -1141,11 +1128,11 @@ class TestAgentBot(AgentBotTestBase):
     ) -> None:
         """Successful voice transcripts should explain that raw audio is optional."""
         config = self._config_for_storage(tmp_path)
-        bot = make_test_agent_bot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
+        bot = make_test_agent_bot(mock_agent_user, config=config, runtime_paths=runtime_paths_for(config))
         bot.client = _make_matrix_client_mock()
         current_attachment_id = "att_current_audio"
         current_path = _register_payload_media_attachment(
-            tmp_path,
+            bot.storage_path,
             kind="audio",
             attachment_id=current_attachment_id,
             filename="voice.ogg",
@@ -1182,11 +1169,11 @@ class TestAgentBot(AgentBotTestBase):
     ) -> None:
         """Raw voice fallback should leave audio transcription up to the agent."""
         config = self._config_for_storage(tmp_path)
-        bot = make_test_agent_bot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
+        bot = make_test_agent_bot(mock_agent_user, config=config, runtime_paths=runtime_paths_for(config))
         bot.client = _make_matrix_client_mock()
         current_attachment_id = "att_raw_audio"
         _register_payload_media_attachment(
-            tmp_path,
+            bot.storage_path,
             kind="audio",
             attachment_id=current_attachment_id,
             filename="voice.ogg",
@@ -1219,7 +1206,7 @@ class TestAgentBot(AgentBotTestBase):
     ) -> None:
         """Message enrichment should extend an existing model prompt rather than replacing it."""
         config = self._config_for_storage(tmp_path)
-        bot = make_test_agent_bot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
+        bot = make_test_agent_bot(mock_agent_user, config=config, runtime_paths=runtime_paths_for(config))
         dispatch = PreparedDispatch(
             requester_user_id="@user:localhost",
             context=MessageContext(
@@ -1237,7 +1224,7 @@ class TestAgentBot(AgentBotTestBase):
         )
         registry_stub = MagicMock()
         registry_stub.has_hooks.return_value = True
-        bot._ingress_hook_runner.hook_context.hook_registry_state.registry = registry_stub
+        bot.orchestrator.hook_registry_state.registry = registry_stub
 
         with patch(
             "mindroom.hooks.ingress.emit_collect",
@@ -1269,19 +1256,9 @@ class TestAgentBot(AgentBotTestBase):
     ) -> None:
         """Image download failure should not mark the event responded without a visible terminal error."""
         config = self._config_for_storage(tmp_path)
-        bot = make_test_agent_bot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
+        bot = make_test_agent_bot(mock_agent_user, config=config, runtime_paths=runtime_paths_for(config))
         bot.client = AsyncMock()
 
-        bot._conversation_resolver.extract_message_context = AsyncMock(
-            return_value=MessageContext(
-                am_i_mentioned=False,
-                is_thread=False,
-                thread_id=None,
-                thread_history=[],
-                mentioned_agents=[],
-                has_non_agent_mentions=False,
-            ),
-        )
         generate_response = AsyncMock()
         install_generate_response_mock(bot, generate_response)
 
@@ -1315,19 +1292,9 @@ class TestAgentBot(AgentBotTestBase):
     ) -> None:
         """File messages should reach response generation with a local media path in prompt."""
         config = self._config_for_storage(tmp_path)
-        bot = make_test_agent_bot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
+        bot = make_test_agent_bot(mock_agent_user, config=config, runtime_paths=runtime_paths_for(config))
         bot.client = AsyncMock()
 
-        bot._conversation_resolver.extract_message_context = AsyncMock(
-            return_value=MessageContext(
-                am_i_mentioned=False,
-                is_thread=False,
-                thread_id=None,
-                thread_history=[],
-                mentioned_agents=[],
-                has_non_agent_mentions=False,
-            ),
-        )
         generate_response = AsyncMock(return_value="$response")
         install_generate_response_mock(bot, generate_response)
 
@@ -1342,7 +1309,7 @@ class TestAgentBot(AgentBotTestBase):
         local_media_path.parent.mkdir(parents=True, exist_ok=True)
         local_media_path.write_bytes(b"pdf")
         attachment_record = register_local_attachment(
-            tmp_path,
+            bot.storage_path,
             local_media_path,
             kind="file",
             attachment_id=_attachment_id_for_event("$file_event"),
@@ -1379,7 +1346,7 @@ class TestAgentBot(AgentBotTestBase):
         assert response_target.room_id == "!test:localhost"
         assert response_target.reply_to_event_id == "$file_event"
         assert response_target.resolved_thread_id == "$file_event"
-        assert generate_kwargs["thread_history"] == []
+        assert generate_kwargs["thread_history"] == ()
         assert response_target.source_thread_id is None
         assert generate_kwargs["user_id"] == "@user:localhost"
         assert generate_kwargs["attachment_ids"] == [attachment_id]
@@ -1419,19 +1386,9 @@ class TestAgentBot(AgentBotTestBase):
     ) -> None:
         """File persistence failure should not mark the event responded without a visible terminal error."""
         config = self._config_for_storage(tmp_path)
-        bot = make_test_agent_bot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
+        bot = make_test_agent_bot(mock_agent_user, config=config, runtime_paths=runtime_paths_for(config))
         bot.client = AsyncMock()
 
-        bot._conversation_resolver.extract_message_context = AsyncMock(
-            return_value=MessageContext(
-                am_i_mentioned=False,
-                is_thread=False,
-                thread_id=None,
-                thread_history=[],
-                mentioned_agents=[],
-                has_non_agent_mentions=False,
-            ),
-        )
         generate_response = AsyncMock()
         install_generate_response_mock(bot, generate_response)
 

@@ -21,7 +21,7 @@ MindRoom stores data in `mindroom_data/` next to `config.yaml` by default; set `
 - `knowledge_git/` - Git data of [Git-backed knowledge bases](../knowledge.md#checkout-layout)
 - `tracking/` - Durable response and callback state, including the SQLite event journal, that prevents duplicate replies across restarts
 - `control_state/` - Primary-only control records, such as [external triggers](../external-triggers.md), [background script](../tools/background-scripts.md) runs, and [`matrix_message`](../tools/matrix-message.md#safe-send-retries) send receipts, unless [`MINDROOM_CONTROL_STATE_PATH`](../configuration/index.md#environment-variables) points elsewhere
-- `credentials/` - Secrets synchronized from `.env`
+- `credentials/` - Credentials saved in the dashboard or by tools; keys from the environment are read at each start and not stored (see [Credentials from the Environment](../oauth-framework.md#credentials-from-the-environment))
 - `private_oauth/` - Per-user and per-agent connection credentials, such as OAuth tokens
 - `egress_broker/` - Agent Keys CA, worker token signing key, and request log (see [Resetting broker state](egress-broker.md#resetting-broker-state))
 - `budgets/` - Per-user caps set on the [Budgets](../budgets.md#per-user-caps) page or through the Budget API

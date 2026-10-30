@@ -34,6 +34,7 @@ from mindroom.mcp_gateway.oauth import GatewayOAuthProvider
 from mindroom.mcp_gateway.selection import GatewaySelections
 from mindroom.mcp_gateway.types import GatewayErrorCode, GatewayOwner
 from mindroom.oauth.providers import OAuthConnectionRequired
+from mindroom.tool_system import agno_toolkits
 from mindroom.tool_system.catalog import TOOL_METADATA, ConfigField, ensure_tool_registry_loaded
 from mindroom.tool_system.invocation import DETACHED_SESSION_ID
 from mindroom.tool_system.registry_state import BUILTIN_TOOL_METADATA, BUILTIN_TOOL_REGISTRY, TOOL_REGISTRY
@@ -48,6 +49,7 @@ from tests.test_mcp_manager import _FakeClientSession, _patch_manager, _tool
 from tests.test_tool_hooks import _tool_runtime_context
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
     from pathlib import Path
 
     from mindroom.api.connection_agents import AgentToolContext
@@ -325,13 +327,13 @@ async def test_selected_schema_prepares_only_selected_function(
         "unrelated": Function(name="unrelated", entrypoint=unrelated),
     }
     prepared: list[str] = []
-    original = Function.process_entrypoint
+    original = agno_toolkits.tool_parameters
 
-    def track_preparation(function: Function, strict: bool = False) -> None:
-        prepared.append(function.name)
-        original(function, strict=strict)
+    def track_preparation(entrypoint: Callable[..., Any], **options: Any) -> dict[str, Any]:  # noqa: ANN401
+        prepared.append(entrypoint.__name__)
+        return original(entrypoint, **options)
 
-    monkeypatch.setattr(Function, "process_entrypoint", track_preparation)
+    monkeypatch.setattr(agno_toolkits, "tool_parameters", track_preparation)
     _replace_calculator(monkeypatch, toolkit)
 
     result = await gateway.get_tool(context, toolkit="calculator", function="selected")

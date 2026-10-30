@@ -43,7 +43,7 @@ if TYPE_CHECKING:
     from mindroom.hooks import (
         HookMatrixAdmin,
         HookMessageSender,
-        HookRegistryState,
+        HookRegistrySource,
         HookRoomStatePutter,
         HookRoomStateQuerier,
     )
@@ -135,7 +135,7 @@ class ToolRuntimeContext:
     runtime_attachment_ids: list[str] = field(default_factory=list)
     runtime_media_attachments: dict[str, RuntimeEncryptedMediaAttachment] = field(default_factory=dict)
     hook_registry: HookRegistry = field(default_factory=HookRegistry.empty)
-    hook_registry_state: HookRegistryState | None = None
+    hook_registry_state: HookRegistrySource | None = None
     correlation_id: str | None = None
     hook_message_sender: HookMessageSender | None = None
     matrix_admin: HookMatrixAdmin | None = None

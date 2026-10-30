@@ -98,8 +98,8 @@ Design migrations around that assumption rather than adding machinery to coordin
 
 ### Agno Compatibility Policy
 
-- MindRoom owns its run loop, providers, storage, teams, history, and the tool authoring API its tools use (`tool_system/authoring.py`; tools return text or `ToolValue`); Agno stays only as the vendor tool library and the knowledge reader layer.
-  What stays Agno: vendor toolkits with MindRoom's overrides, Agno's `Toolkit`, `Function`, and `@tool` for them and for plugins built on them (the adapter reads their `ToolResult` once), their schema generation and coercion, and the knowledge readers and chunkers in `knowledge/readers.py`.
+- MindRoom owns its run loop, providers, storage, teams, history, tool schemas, and the tool authoring API its tools use (`tool_system/authoring.py`; tools return text or `ToolValue`); Agno stays only as the vendor tool library and the knowledge reader layer.
+  What stays Agno: vendor toolkits with MindRoom's overrides, Agno's `Toolkit`, `Function`, and `@tool` for them and for plugins built on them (the adapter reads their `ToolResult` once; `@tool` derives its own schema), and the knowledge readers and chunkers in `knowledge/readers.py`.
 - The agent loop sees tools only as `ToolFunction`, produced by `adapt_toolkit` and `toolkit_function` in `tool_system/agno_toolkits.py`; only it, vendor subclasses, and `oauth/agno_compat_google_auth.py` read Agno toolkits.
   Only the modules `tests/test_agno_boundary.py` allows may import Agno; others use the adapter and MindRoom's types, never Agno's agent, team, model, run, storage, or learning layers.
 - The goal is to fix Agno weaknesses upstream and remove local workarounds as those fixes ship.
@@ -115,7 +115,7 @@ Design migrations around that assumption rather than adding machinery to coordin
   Treat a tracking gap as unfinished upstream work, and search for existing tracking before opening a new item.
 - For an upstream contribution, reduce the problem to an Agno-only reproducer, keep MindRoom policy out of the fix, and keep local coverage for the behavior MindRoom requires.
 - Keep the weakness-to-upstream map in `docs/architecture/agno-compatibility.md` aligned with the markers; source comments own exact upstream links and test references.
-- On each Agno upgrade, run `tests/tool_system/`, whose goldens pin the tool schemas and argument coercion Agno produces, verify which fixes the pinned release includes, and run each marker's coverage.
+- On each Agno upgrade, run `tests/tool_system/`, whose goldens pin vendor tool schemas and argument coercion, verify which fixes the pinned release includes, and run each marker's coverage.
   Remove a workaround only when its tests pass without it; a merged PR alone is insufficient.
 
 ### Security Trust Model

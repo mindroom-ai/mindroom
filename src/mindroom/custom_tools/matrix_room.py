@@ -23,7 +23,7 @@ from mindroom.matrix.client_visible_messages import (
     trusted_visible_sender_ids,
 )
 from mindroom.matrix.room_history_reads import RoomThreadsPageError, get_room_threads_page
-from mindroom.thread_summary import current_thread_summary
+from mindroom.thread_summary.state import current_thread_summary
 from mindroom.tool_system.authoring import Toolkit
 from mindroom.tool_system.runtime_context import ToolRuntimeContext, get_tool_runtime_context
 
@@ -450,13 +450,6 @@ class MatrixRoomTools(Toolkit):
             if exc.retry_after_ms is not None:
                 error_payload["retry_after_ms"] = exc.retry_after_ms
             return self._payload("error", **error_payload)
-        except (ClientError, TimeoutError) as exc:
-            return self._payload(
-                "error",
-                action="threads",
-                room_id=room_id,
-                message=self._transport_error_message(exc),
-            )
 
         threads_list: list[dict[str, object]] = []
         trusted_sender_ids = trusted_visible_sender_ids(context.config, context.runtime_paths)

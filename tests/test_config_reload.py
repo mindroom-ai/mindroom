@@ -49,7 +49,7 @@ from mindroom.orchestration.plugin_watch import (
 from mindroom.orchestration.runtime import log_startup_phase_finished, log_startup_phase_started
 from mindroom.orchestrator import _MultiAgentOrchestrator, _watch_skills_task
 from mindroom.personal_agents import _append_personal_agent_roster_entry
-from mindroom.response_admission import ResponseAdmissionGate, ResponseAdmissionRefusedError
+from mindroom.response_admission import ResponseAdmissionRefusedError
 from mindroom.response_runner import ResponseRequest
 from mindroom.response_sources import ResponseSources
 from mindroom.runtime_shutdown import SYNC_RESTART_SHUTDOWN
@@ -71,6 +71,8 @@ from tests.conftest import (
     test_runtime_paths,
     unwrap_extracted_collaborator,
 )
+from tests.matrix_state_helpers import save_matrix_state
+from tests.runtime_fakes import ready_runtime
 from tests.test_personal_agents_config import BASE as PERSONAL_AGENTS_BASE
 from tests.test_personal_agents_config import _entry as personal_agent_entry
 
@@ -406,8 +408,7 @@ async def test_plugin_watcher_debounces_changes_and_ignores_unconfigured_roots(
     (ignored_root / "hooks.py").write_text("VALUE = 1\n", encoding="utf-8")
 
     config = _runtime_bound_config(Config(plugins=["./plugins/demo"]), tmp_path)
-    orchestrator = _MultiAgentOrchestrator(runtime_paths_for(config))
-    orchestrator.config = config
+    orchestrator = _MultiAgentOrchestrator(runtime_paths_for(config), config=config)
     orchestrator.running = True
 
     reload_calls: list[tuple[str, tuple[Path, ...]]] = []
@@ -459,8 +460,7 @@ async def test_plugin_watcher_idles_until_cancelled_once_shutdown_begins(
     )
     (plugin_root / "hooks.py").write_text("VALUE = 1\n", encoding="utf-8")
     config = _runtime_bound_config(Config(plugins=["./plugins/demo"]), tmp_path)
-    orchestrator = _MultiAgentOrchestrator(runtime_paths_for(config))
-    orchestrator.config = config
+    orchestrator = _MultiAgentOrchestrator(runtime_paths_for(config), config=config)
     orchestrator.running = True
     orchestrator.reload_plugins_now = AsyncMock()
     watcher_task = asyncio.create_task(watch_plugins_task(orchestrator))
@@ -512,8 +512,7 @@ async def test_plugin_watcher_tracks_configured_absolute_root_outside_config_dir
     hooks_path.write_text("VALUE = 1\n", encoding="utf-8")
 
     config = _runtime_bound_config(Config(plugins=[str(external_plugin_root)]), runtime_root)
-    orchestrator = _MultiAgentOrchestrator(runtime_paths_for(config))
-    orchestrator.config = config
+    orchestrator = _MultiAgentOrchestrator(runtime_paths_for(config), config=config)
     orchestrator.running = True
 
     reload_calls: list[tuple[str, tuple[Path, ...]]] = []
@@ -560,8 +559,7 @@ async def test_plugin_watcher_catches_first_save_after_startup(
     hooks_path.write_text("VALUE = 1\n", encoding="utf-8")
 
     config = _runtime_bound_config(Config(plugins=["./plugins/demo"]), tmp_path)
-    orchestrator = _MultiAgentOrchestrator(runtime_paths_for(config))
-    orchestrator.config = config
+    orchestrator = _MultiAgentOrchestrator(runtime_paths_for(config), config=config)
     orchestrator.running = True
 
     reload_calls: list[tuple[str, tuple[Path, ...]]] = []
@@ -614,8 +612,7 @@ async def test_plugin_watcher_catches_first_save_after_config_switch(
 
     first_config = _runtime_bound_config(Config(plugins=["./plugins/first"]), tmp_path)
     second_config = _runtime_bound_config(Config(plugins=["./plugins/second"]), tmp_path)
-    orchestrator = _MultiAgentOrchestrator(runtime_paths_for(first_config))
-    orchestrator.config = first_config
+    orchestrator = _MultiAgentOrchestrator(runtime_paths_for(first_config), config=first_config)
     orchestrator.running = True
 
     reload_calls: list[tuple[str, tuple[Path, ...]]] = []
@@ -674,8 +671,7 @@ async def test_plugin_watcher_does_not_reload_on_config_switch_without_plugin_ed
 
     first_config = _runtime_bound_config(Config(plugins=["./plugins/first"]), tmp_path)
     second_config = _runtime_bound_config(Config(plugins=["./plugins/second"]), tmp_path)
-    orchestrator = _MultiAgentOrchestrator(runtime_paths_for(first_config))
-    orchestrator.config = first_config
+    orchestrator = _MultiAgentOrchestrator(runtime_paths_for(first_config), config=first_config)
     orchestrator.running = True
 
     reload_calls: list[tuple[str, tuple[Path, ...]]] = []
@@ -718,8 +714,7 @@ async def test_plugin_watcher_ignores_cache_artifacts_created_during_reload(
     hooks_path.write_text("VALUE = 1\n", encoding="utf-8")
 
     config = _runtime_bound_config(Config(plugins=["./plugins/demo"]), tmp_path)
-    orchestrator = _MultiAgentOrchestrator(runtime_paths_for(config))
-    orchestrator.config = config
+    orchestrator = _MultiAgentOrchestrator(runtime_paths_for(config), config=config)
     orchestrator.running = True
 
     reload_calls: list[tuple[str, tuple[Path, ...]]] = []
@@ -784,8 +779,7 @@ async def test_manual_plugin_reload_consumes_pending_watcher_changes(
     hooks_path.write_text("VALUE = 1\n", encoding="utf-8")
 
     config = _runtime_bound_config(Config(plugins=["./plugins/demo"]), tmp_path)
-    orchestrator = _MultiAgentOrchestrator(runtime_paths_for(config))
-    orchestrator.config = config
+    orchestrator = _MultiAgentOrchestrator(runtime_paths_for(config), config=config)
     orchestrator.running = True
 
     reload_call_count = 0
@@ -816,8 +810,7 @@ async def test_manual_plugin_reload_consumes_pending_watcher_changes(
 async def test_manual_plugin_reload_interrupts_scripts_before_plugin_publication(tmp_path: Path) -> None:
     """Command and watcher reloads share the fail-closed script boundary."""
     config = _runtime_bound_config(Config(), tmp_path)
-    orchestrator = _MultiAgentOrchestrator(runtime_paths_for(config))
-    orchestrator.config = config
+    orchestrator = _MultiAgentOrchestrator(runtime_paths_for(config), config=config)
     orchestrator.running = True
     order: list[str] = []
 
@@ -856,8 +849,7 @@ def _plugin_watcher_race_runtime(tmp_path: Path) -> tuple[_MultiAgentOrchestrato
     hooks_path = plugin_root / "hooks.py"
     hooks_path.write_text("VALUE = 1\n", encoding="utf-8")
     config = _runtime_bound_config(Config(plugins=[str(plugin_root)]), tmp_path)
-    orchestrator = _MultiAgentOrchestrator(runtime_paths_for(config))
-    orchestrator.config = config
+    orchestrator = _MultiAgentOrchestrator(runtime_paths_for(config), config=config)
     orchestrator.running = True
     return orchestrator, config, plugin_root, hooks_path
 
@@ -895,7 +887,7 @@ async def test_plugin_watcher_drops_pending_changes_when_reload_commits_during_s
     task = asyncio.create_task(watch_plugins_task(orchestrator))
     try:
         await asyncio.wait_for(second_scan_started.wait(), timeout=1)
-        orchestrator.plugin_watch.refresh(config)
+        orchestrator.plugin_watch.replace_snapshots(*orchestrator.plugin_watch.capture(config))
         release_second_scan.set()
         # The scan after the committed reload shows the watcher already handled the pending edit.
         await asyncio.wait_for(third_scan_started.wait(), timeout=1)
@@ -945,7 +937,7 @@ async def test_watcher_reload_drops_stale_revision_after_waiting_for_config_lock
         ),
     )
     await asyncio.sleep(0)
-    orchestrator.plugin_watch.refresh(config)
+    orchestrator.plugin_watch.replace_snapshots(*orchestrator.plugin_watch.capture(config))
     orchestrator._config_update_lock.release()
     assert await task is None
 
@@ -990,8 +982,7 @@ async def test_plugin_watcher_does_not_retry_failed_reload_without_new_change(
     hooks_path.write_text("VALUE = 1\n", encoding="utf-8")
 
     config = _runtime_bound_config(Config(plugins=["./plugins/demo"]), tmp_path)
-    orchestrator = _MultiAgentOrchestrator(runtime_paths_for(config))
-    orchestrator.config = config
+    orchestrator = _MultiAgentOrchestrator(runtime_paths_for(config), config=config)
     orchestrator.running = True
 
     reload_calls: list[tuple[str, tuple[Path, ...]]] = []
@@ -1049,8 +1040,7 @@ async def test_reload_plugins_now_deactivates_broken_plugin_after_failure(tmp_pa
         encoding="utf-8",
     )
     config = _runtime_bound_config(Config(plugins=["./plugins/broken-reload"]), tmp_path)
-    orchestrator = _MultiAgentOrchestrator(runtime_paths_for(config))
-    orchestrator.config = config
+    orchestrator = _MultiAgentOrchestrator(runtime_paths_for(config), config=config)
     orchestrator.running = True
 
     original_plugin_roots = get_plugin_skill_roots()
@@ -1131,8 +1121,7 @@ async def test_reload_plugins_now_deactivates_all_plugins_when_degraded_reload_s
     )
 
     config = _runtime_bound_config(Config(plugins=["./plugins/first", "./plugins/second"]), tmp_path)
-    orchestrator = _MultiAgentOrchestrator(runtime_paths_for(config))
-    orchestrator.config = config
+    orchestrator = _MultiAgentOrchestrator(runtime_paths_for(config), config=config)
     orchestrator.running = True
 
     original_plugin_roots = get_plugin_skill_roots()
@@ -1189,8 +1178,7 @@ async def test_update_config_keeps_current_config_when_new_entity_account_prepar
         ),
         tmp_path,
     )
-    orchestrator = _MultiAgentOrchestrator(runtime_paths_for(current_config))
-    orchestrator.config = current_config
+    orchestrator = _MultiAgentOrchestrator(runtime_paths_for(current_config), config=current_config)
     install_bots(orchestrator, {ROUTER_AGENT_NAME: MagicMock(), "general": MagicMock()})
     orchestrator.running = True
     account_error = PermanentStartupError("configured entities share a Matrix ID")
@@ -1214,8 +1202,7 @@ async def test_update_config_starts_agent_added_only_by_personal_agent_roster(tm
     _append_personal_agent_roster_entry(paths, personal_agent_entry())
     new_config = Config.validate_with_runtime(deepcopy(PERSONAL_AGENTS_BASE), paths)
     assert current_config.authored_model_dump() == new_config.authored_model_dump()
-    orchestrator = _MultiAgentOrchestrator(paths)
-    orchestrator.config = current_config
+    orchestrator = _MultiAgentOrchestrator(paths, config=current_config)
     install_bots(orchestrator, {ROUTER_AGENT_NAME: MagicMock()})
     orchestrator.running = True
 
@@ -1251,8 +1238,7 @@ async def test_update_config_keeps_current_config_when_restarted_entity_account_
         ),
         tmp_path,
     )
-    orchestrator = _MultiAgentOrchestrator(runtime_paths_for(current_config))
-    orchestrator.config = current_config
+    orchestrator = _MultiAgentOrchestrator(runtime_paths_for(current_config), config=current_config)
     install_bots(orchestrator, {ROUTER_AGENT_NAME: MagicMock(), "general": MagicMock()})
     orchestrator.running = True
     account_error = PermanentStartupError("configured entities share a Matrix ID")
@@ -1269,8 +1255,8 @@ async def test_update_config_keeps_current_config_when_restarted_entity_account_
 
 
 @pytest.mark.asyncio
-async def test_initialize_keeps_config_unpublished_when_entity_account_preparation_fails(tmp_path: Path) -> None:
-    """Startup should not publish runtime config before entity accounts validate."""
+async def test_initialize_binds_nothing_when_entity_account_preparation_fails(tmp_path: Path) -> None:
+    """Startup must not bind the journal or build bots before entity accounts validate."""
     config = _runtime_bound_config(
         Config(
             agents={"general": {"display_name": "GeneralAgent", "model": "default"}},
@@ -1278,7 +1264,7 @@ async def test_initialize_keeps_config_unpublished_when_entity_account_preparati
         ),
         tmp_path,
     )
-    orchestrator = _MultiAgentOrchestrator(runtime_paths_for(config))
+    orchestrator = _MultiAgentOrchestrator(runtime_paths_for(config), config=config)
     account_error = PermanentStartupError("configured entities share a Matrix ID")
 
     with (
@@ -1286,9 +1272,10 @@ async def test_initialize_keeps_config_unpublished_when_entity_account_preparati
         patch.object(orchestrator, "_prepare_entity_accounts", new=AsyncMock(side_effect=account_error)),
         pytest.raises(PermanentStartupError, match="share a Matrix ID"),
     ):
-        await orchestrator.initialize(config)
+        await orchestrator.initialize()
 
-    assert orchestrator.config is None
+    assert orchestrator._open_journal is None
+    assert orchestrator.agent_bots == {}
 
 
 @pytest.mark.asyncio
@@ -1321,9 +1308,8 @@ async def test_update_config_validates_internal_user_collision_before_publish(tm
         requested_username="mindroom_user",
         domain="localhost",
     )
-    state.save(runtime_paths=runtime_paths)
-    orchestrator = _MultiAgentOrchestrator(runtime_paths)
-    orchestrator.config = current_config
+    save_matrix_state(state, runtime_paths)
+    orchestrator = _MultiAgentOrchestrator(runtime_paths, config=current_config)
     install_bots(orchestrator, {ROUTER_AGENT_NAME: MagicMock(), "general": MagicMock()})
     orchestrator.running = True
 
@@ -1350,7 +1336,7 @@ async def test_prepare_entity_accounts_retries_transient_create_agent_user_failu
         tmp_path,
     )
     runtime_paths = runtime_paths_for(config)
-    orchestrator = _MultiAgentOrchestrator(runtime_paths)
+    orchestrator = _MultiAgentOrchestrator(runtime_paths, config=config)
     calls: list[str] = []
     test_paths = runtime_paths
 
@@ -1370,7 +1356,7 @@ async def test_prepare_entity_accounts_retries_transient_create_agent_user_failu
         state = MatrixState.load(runtime_paths=test_paths)
         actual_username = f"actual_{entity_name}"
         state.add_account(f"agent_{entity_name}", actual_username, TEST_PASSWORD, domain="localhost")
-        state.save(runtime_paths=test_paths)
+        save_matrix_state(state, test_paths)
         return AgentMatrixUser(
             agent_name=entity_name,
             user_id=f"@{actual_username}:localhost",
@@ -1395,8 +1381,7 @@ async def test_ready_personal_agent_nudges_router_reconciliation(tmp_path: Path)
     paths = test_runtime_paths(tmp_path)
     _append_personal_agent_roster_entry(paths, personal_agent_entry())
     data = deepcopy(PERSONAL_AGENTS_BASE) | {"agents": {"general": {"display_name": "General"}}}
-    orchestrator = _MultiAgentOrchestrator(paths)
-    orchestrator.config = Config.validate_with_runtime(data, paths)
+    orchestrator = _MultiAgentOrchestrator(paths, config=Config.validate_with_runtime(data, paths))
     router = MagicMock(spec=AgentBot)
     install_bots(orchestrator, {ROUTER_AGENT_NAME: router})
 
@@ -1412,7 +1397,7 @@ async def test_prepare_entity_accounts_requests_personal_agent_username(tmp_path
     paths = test_runtime_paths(tmp_path)
     _append_personal_agent_roster_entry(paths, personal_agent_entry(matrix_username="alice.mind"))
     config = Config.validate_with_runtime(deepcopy(PERSONAL_AGENTS_BASE), paths)
-    orchestrator = _MultiAgentOrchestrator(paths)
+    orchestrator = _MultiAgentOrchestrator(paths, config=config)
     requested: dict[str, str | None] = {}
 
     async def record_user(
@@ -1428,7 +1413,7 @@ async def test_prepare_entity_accounts_requests_personal_agent_username(tmp_path
         actual_username = username or f"actual_{entity_name}"
         state = MatrixState.load(runtime_paths=paths)
         state.add_account(f"agent_{entity_name}", actual_username, TEST_PASSWORD, domain="localhost")
-        state.save(runtime_paths=paths)
+        save_matrix_state(state, paths)
         return AgentMatrixUser(
             agent_name=entity_name,
             user_id=f"@{actual_username}:localhost",
@@ -1449,8 +1434,8 @@ def test_preflight_account_provisioning_checks_personal_agent_username(tmp_path:
     config = Config.validate_with_runtime(deepcopy(PERSONAL_AGENTS_BASE), paths)
     state = MatrixState.load(runtime_paths=paths)
     state.add_account("agent_other", "alice.mind", TEST_PASSWORD, domain="localhost")
-    state.save(runtime_paths=paths)
-    orchestrator = _MultiAgentOrchestrator(paths)
+    save_matrix_state(state, paths)
+    orchestrator = _MultiAgentOrchestrator(paths, config=config)
 
     with pytest.raises(PermanentStartupError, match=r"'alice\.mind'"):
         orchestrator._preflight_account_provisioning(
@@ -1478,8 +1463,8 @@ async def test_prepare_entity_accounts_rejects_duplicate_persisted_matrix_ids(tm
     state.add_account("agent_router", "actual_router", TEST_PASSWORD, domain="localhost")
     state.add_account("agent_general", "shared_bot", TEST_PASSWORD, domain="localhost")
     state.add_account("agent_writer", "shared_bot", TEST_PASSWORD, domain="localhost")
-    state.save(runtime_paths=runtime_paths)
-    orchestrator = _MultiAgentOrchestrator(runtime_paths)
+    save_matrix_state(state, runtime_paths)
+    orchestrator = _MultiAgentOrchestrator(runtime_paths, config=config)
     calls: list[str] = []
 
     async def existing_user(
@@ -1530,8 +1515,8 @@ async def test_prepare_entity_accounts_rejects_internal_user_entity_id_collision
         requested_username="mindroom_user",
         domain="localhost",
     )
-    state.save(runtime_paths=runtime_paths)
-    orchestrator = _MultiAgentOrchestrator(runtime_paths)
+    save_matrix_state(state, runtime_paths)
+    orchestrator = _MultiAgentOrchestrator(runtime_paths, config=config)
 
     async def existing_user(
         _homeserver: str,
@@ -1572,8 +1557,7 @@ async def test_update_config_cancels_tasks_for_removed_plugins(
     try:
         _write_plugin_removal_test_config(tmp_path, with_plugin=True)
         _patch_orchestrator_plugin_update_test_runtime(monkeypatch)
-        orchestrator = _MultiAgentOrchestrator(runtime_paths=orchestrator_runtime_paths(tmp_path))
-        await initialize_from_config_file(orchestrator)
+        orchestrator = await initialize_from_config_file(orchestrator_runtime_paths(tmp_path))
 
         hooks_module = cached_plugin_module(hooks_path.resolve())
         package_root = hooks_module.__name__.split(".", 1)[0]
@@ -1629,9 +1613,8 @@ async def test_initialize_and_reload_warn_about_foreign_homeserver_authorities(
 
     _patch_orchestrator_plugin_update_test_runtime(monkeypatch)
     write_config(administrators=["@owner:localhost"], invite_users=["@test:m-test-4.mindroom.chat"])
-    orchestrator = _MultiAgentOrchestrator(runtime_paths=orchestrator_runtime_paths(tmp_path))
     with capture_logs() as startup_logs:
-        await initialize_from_config_file(orchestrator)
+        orchestrator = await initialize_from_config_file(orchestrator_runtime_paths(tmp_path))
 
     write_config(administrators=["@owner:localhost", "@admin:remote.example"], invite_users=["@owner:localhost"])
     with capture_logs() as reload_logs:
@@ -1672,9 +1655,8 @@ async def test_initialize_and_reload_warn_about_unrestricted_file_access_next_to
 
     _patch_orchestrator_plugin_update_test_runtime(monkeypatch)
     write_config("coder")
-    orchestrator = _MultiAgentOrchestrator(runtime_paths=orchestrator_runtime_paths(tmp_path))
     with capture_logs() as startup_logs:
-        await initialize_from_config_file(orchestrator)
+        orchestrator = await initialize_from_config_file(orchestrator_runtime_paths(tmp_path))
 
     write_config("builder")
     with capture_logs() as reload_logs:
@@ -1724,8 +1706,7 @@ async def test_update_config_serializes_live_plugin_reload_against_staged_plugin
         tmp_path,
     )
 
-    orchestrator = _MultiAgentOrchestrator(runtime_paths_for(current_config))
-    orchestrator.config = current_config
+    orchestrator = _MultiAgentOrchestrator(runtime_paths_for(current_config), config=current_config)
     orchestrator.running = True
 
     plan = ConfigUpdatePlan(
@@ -1801,8 +1782,7 @@ async def test_config_update_serializes_manual_plugin_reload_and_mcp_catalog_cha
         ),
         tmp_path,
     )
-    orchestrator = _MultiAgentOrchestrator(runtime_paths_for(config))
-    orchestrator.config = config
+    orchestrator = _MultiAgentOrchestrator(runtime_paths_for(config), config=config)
     orchestrator.running = True
     # The catalog change restarts only dependents that have a bot.
     install_bots(orchestrator, {"agent1": MagicMock(spec=AgentBot, running=True)})
@@ -1869,7 +1849,6 @@ async def test_queued_config_reload_waits_for_in_flight_response_without_event_i
     )
     bot = make_test_agent_bot(
         agent_user=mock_agent_users["agent1"],
-        storage_path=tmp_path,
         config=config,
         runtime_paths=runtime_paths_for(config),
     )
@@ -1907,12 +1886,8 @@ async def test_queued_config_reload_waits_for_in_flight_response_without_event_i
         await response_function(None)
         return None
 
-    orchestrator = _MultiAgentOrchestrator(runtime_paths=orchestrator_runtime_paths(tmp_path))
-    orchestrator.config = config
-    orchestrator.running = True
-    orchestrator.fleet.add("agent1", bot)
-    # The orchestrator owns one shared gate that every managed bot admits through.
-    bot.admission_gate = orchestrator.config_reload.response_admission_gate
+    # The bot's runtime owns the one shared gate that every managed bot admits through and a reload drains.
+    orchestrator = bot.orchestrator
     reloaded_config = _runtime_bound_config(
         config.model_copy(update={"defaults": config.defaults.model_copy(update={"enable_streaming": False})}),
         tmp_path,
@@ -3054,9 +3029,7 @@ def mock_agent_users() -> dict[str, AgentMatrixUser]:
 
 
 @pytest.mark.asyncio
-async def test_agent_joins_new_rooms_on_config_reload(  # noqa: C901
-    initial_config: Config,  # noqa: ARG001
-    updated_config: Config,  # noqa: ARG001
+async def test_agent_joins_new_rooms_on_config_reload(
     mock_agent_users: dict[str, AgentMatrixUser],
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -3083,24 +3056,9 @@ async def test_agent_joins_new_rooms_on_config_reload(  # noqa: C901
     monkeypatch.setattr("mindroom.matrix.client_room_admin.join_room", mock_join_room)
     monkeypatch.setattr("mindroom.matrix.rooms.leave_room", mock_leave_room)
 
-    # Mock resolve_room_aliases
-    def mock_resolve_room_aliases(aliases: list[str], _runtime_paths: object | None = None) -> list[str]:
-        return list(aliases)
-
-    monkeypatch.setattr("mindroom.bot.resolve_room_aliases", mock_resolve_room_aliases)
-
-    # Mock get_joined_rooms to simulate current room membership
-    async def mock_get_joined_rooms(client: AsyncMock) -> list[str]:
-        user_id = client.user_id
-        if "agent1" in user_id:
-            return ["room1", "room2"]  # agent1 is currently in room1 and room2
-        if "agent2" in user_id:
-            return ["room1"]  # agent2 is currently in room1
-        if "team1" in user_id:
-            return ["room3"]  # team1 is currently in room3
-        if ROUTER_AGENT_NAME in user_id:
-            return ["room1", "room2", "room3"]  # router is in all initial rooms
-        return []
+    # agent1 is currently in room1 and room2
+    async def mock_get_joined_rooms(_client: AsyncMock) -> list[str]:
+        return ["room1", "room2"]
 
     monkeypatch.setattr("mindroom.bot_room_lifecycle.get_joined_rooms", mock_get_joined_rooms)
 
@@ -3108,7 +3066,6 @@ async def test_agent_joins_new_rooms_on_config_reload(  # noqa: C901
     config = _runtime_bound_config(Config(router=RouterConfig(model="default")), tmp_path)
     agent1_bot = make_test_agent_bot(
         agent_user=mock_agent_users["agent1"],
-        storage_path=tmp_path,
         config=config,
         runtime_paths=runtime_paths_for(config),
         rooms=["room1", "room2"],  # Initial rooms
@@ -3154,12 +3111,6 @@ async def test_router_updates_rooms_on_config_reload(
     monkeypatch.setattr("mindroom.matrix.client_room_admin.join_room", mock_join_room)
     monkeypatch.setattr("mindroom.matrix.rooms.leave_room", mock_leave_room)
 
-    # Mock resolve_room_aliases
-    def mock_resolve_room_aliases(aliases: list[str], _runtime_paths: object | None = None) -> list[str]:
-        return list(aliases)
-
-    monkeypatch.setattr("mindroom.bot.resolve_room_aliases", mock_resolve_room_aliases)
-
     # Mock get_joined_rooms to simulate current room membership
     async def mock_get_joined_rooms(_client: AsyncMock) -> list[str]:
         # Router is currently in initial config rooms
@@ -3179,7 +3130,6 @@ async def test_router_updates_rooms_on_config_reload(
     config = _runtime_bound_config(Config(router=RouterConfig(model="default")), tmp_path)
     router_bot = make_test_agent_bot(
         agent_user=mock_agent_users[ROUTER_AGENT_NAME],
-        storage_path=tmp_path,
         config=config,
         runtime_paths=runtime_paths_for(config),
         rooms=list(updated_router_rooms),
@@ -3202,8 +3152,6 @@ async def test_router_updates_rooms_on_config_reload(
 
 @pytest.mark.asyncio
 async def test_new_agent_joins_rooms_on_config_reload(
-    initial_config: Config,  # noqa: ARG001
-    updated_config: Config,  # noqa: ARG001
     mock_agent_users: dict[str, AgentMatrixUser],
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -3221,12 +3169,6 @@ async def test_new_agent_joins_rooms_on_config_reload(
 
     monkeypatch.setattr("mindroom.matrix.client_room_admin.join_room", mock_join_room)
 
-    # Mock resolve_room_aliases
-    def mock_resolve_room_aliases(aliases: list[str]) -> list[str]:
-        return list(aliases)
-
-    monkeypatch.setattr("mindroom.bot.resolve_room_aliases", mock_resolve_room_aliases)
-
     # Mock get_joined_rooms
     async def mock_get_joined_rooms(_client: AsyncMock) -> list[str]:
         return []  # New agent has no rooms initially
@@ -3237,7 +3179,6 @@ async def test_new_agent_joins_rooms_on_config_reload(
     config = _runtime_bound_config(Config(router=RouterConfig(model="default")), tmp_path)
     agent3_bot = make_test_agent_bot(
         agent_user=mock_agent_users["agent3"],
-        storage_path=tmp_path,
         config=config,
         runtime_paths=runtime_paths_for(config),
         rooms=["room5"],
@@ -3255,8 +3196,6 @@ async def test_new_agent_joins_rooms_on_config_reload(
 
 @pytest.mark.asyncio
 async def test_team_room_changes_on_config_reload(
-    initial_config: Config,  # noqa: ARG001
-    updated_config: Config,  # noqa: ARG001
     mock_agent_users: dict[str, AgentMatrixUser],
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -3283,18 +3222,9 @@ async def test_team_room_changes_on_config_reload(
     monkeypatch.setattr("mindroom.matrix.client_room_admin.join_room", mock_join_room)
     monkeypatch.setattr("mindroom.matrix.rooms.leave_room", mock_leave_room)
 
-    # Mock resolve_room_aliases
-    def mock_resolve_room_aliases(aliases: list[str]) -> list[str]:
-        return list(aliases)
-
-    monkeypatch.setattr("mindroom.bot.resolve_room_aliases", mock_resolve_room_aliases)
-
-    # Mock get_joined_rooms to simulate current room membership
-    async def mock_get_joined_rooms(client: AsyncMock) -> list[str]:
-        user_id = client.user_id
-        if "team1" in user_id:
-            return ["room3"]  # team1 is currently only in room3
-        return []
+    # team1 is currently only in room3
+    async def mock_get_joined_rooms(_client: AsyncMock) -> list[str]:
+        return ["room3"]
 
     monkeypatch.setattr("mindroom.bot_room_lifecycle.get_joined_rooms", mock_get_joined_rooms)
 
@@ -3302,7 +3232,6 @@ async def test_team_room_changes_on_config_reload(
     config = _runtime_bound_config(Config(router=RouterConfig(model="default")), tmp_path)
     team1_bot = make_test_agent_bot(
         agent_user=mock_agent_users["team1"],
-        storage_path=tmp_path,
         config=config,
         runtime_paths=runtime_paths_for(config),
         rooms=["room3", "room6"],
@@ -3358,11 +3287,11 @@ async def test_orchestrator_handles_config_reload(
     monkeypatch.setattr("mindroom.orchestrator._MultiAgentOrchestrator._ensure_user_account", AsyncMock())
     monkeypatch.setattr("mindroom.orchestration.rooms.RoomSetup.setup", AsyncMock())
 
-    orchestrator = _MultiAgentOrchestrator(runtime_paths=orchestrator_runtime_paths(tmp_path))
+    orchestrator = _MultiAgentOrchestrator(runtime_paths=orchestrator_runtime_paths(tmp_path), config=initial_config)
     monkeypatch.setattr(orchestrator.config_reload, "load_config", lambda: published_config_load(updated_config))
 
     # Initialize with initial config
-    await orchestrator.initialize(initial_config)
+    await orchestrator.initialize()
 
     # Verify initial state
     assert "agent1" in orchestrator.agent_bots
@@ -3378,19 +3307,19 @@ async def test_orchestrator_handles_config_reload(
     assert set(orchestrator.agent_bots[ROUTER_AGENT_NAME].rooms) == {"room1", "room2", "room3"}
 
     # Create a mock start method that initializes client
-    async def mock_start_with_thread_manager(self: AgentBot) -> None:
+    async def mock_start_with_client(self: AgentBot) -> None:
         """Mock start that initializes client."""
-        if not hasattr(self, "client") or self.client is None:
+        if self.client is None:
             self.client = AsyncMock()
             self.client.user_id = self.agent_user.user_id
 
     # Patch AgentBot.start to use our mock
-    monkeypatch.setattr("mindroom.bot.AgentBot.start", mock_start_with_thread_manager)
+    monkeypatch.setattr("mindroom.bot.AgentBot.start", mock_start_with_client)
 
     # Mock bot operations for update
     for bot in orchestrator.agent_bots.values():
         monkeypatch.setattr(bot, "stop", AsyncMock())
-        monkeypatch.setattr(bot, "start", mock_start_with_thread_manager)
+        monkeypatch.setattr(bot, "start", mock_start_with_client)
         monkeypatch.setattr(bot, "ensure_user_account", AsyncMock())
         monkeypatch.setattr(bot, "sync_forever", AsyncMock(side_effect=asyncio.CancelledError()))
 
@@ -3422,8 +3351,6 @@ async def test_orchestrator_handles_config_reload(
 
 @pytest.mark.asyncio
 async def test_room_membership_state_after_config_update(  # noqa: C901
-    initial_config: Config,  # noqa: ARG001
-    updated_config: Config,  # noqa: ARG001
     mock_agent_users: dict[str, AgentMatrixUser],
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -3462,12 +3389,6 @@ async def test_room_membership_state_after_config_update(  # noqa: C901
     monkeypatch.setattr("mindroom.matrix.client_room_admin.join_room", mock_join_room)
     monkeypatch.setattr("mindroom.matrix.rooms.leave_room", mock_leave_room)
 
-    # Mock resolve_room_aliases
-    def mock_resolve_room_aliases(aliases: list[str]) -> list[str]:
-        return list(aliases)
-
-    monkeypatch.setattr("mindroom.bot.resolve_room_aliases", mock_resolve_room_aliases)
-
     # Mock get_joined_rooms based on room_memberships
     async def mock_get_joined_rooms(client: AsyncMock) -> list[str]:
         user_id = client.user_id
@@ -3479,43 +3400,28 @@ async def test_room_membership_state_after_config_update(  # noqa: C901
 
     monkeypatch.setattr("mindroom.bot_room_lifecycle.get_joined_rooms", mock_get_joined_rooms)
 
-    # Apply config updates for each bot
-    bots_config = {
-        "@mindroom_agent1:localhost": {"old": ["room1", "room2"], "new": ["room1", "room4"]},
-        "@mindroom_agent2:localhost": {"old": ["room1"], "new": ["room2", "room3"]},
-        "@mindroom_agent3:localhost": {"old": [], "new": ["room5"]},
-        "@mindroom_team1:localhost": {"old": ["room3"], "new": ["room3", "room6"]},
-        f"@mindroom_{ROUTER_AGENT_NAME}:localhost": {
-            "old": ["room1", "room2", "room3"],
-            "new": ["room1", "room2", "room3", "room4", "room5", "room6"],
-        },
+    # Apply the updated config's rooms to each bot
+    new_rooms_by_entity = {
+        "agent1": ["room1", "room4"],
+        "agent2": ["room2", "room3"],
+        "agent3": ["room5"],
+        "team1": ["room3", "room6"],
+        ROUTER_AGENT_NAME: ["room1", "room2", "room3", "room4", "room5", "room6"],
     }
 
     # Simulate config update for each bot
-    for user_id, bot_config in bots_config.items():
+    for entity_name, new_rooms in new_rooms_by_entity.items():
+        agent_user = mock_agent_users[entity_name]
         mock_client = AsyncMock()
-        mock_client.user_id = user_id
-
-        # Determine which agent this is
-        if "agent1" in user_id:
-            agent_user = mock_agent_users["agent1"]
-        elif "agent2" in user_id:
-            agent_user = mock_agent_users["agent2"]
-        elif "agent3" in user_id:
-            agent_user = mock_agent_users["agent3"]
-        elif "team1" in user_id:
-            agent_user = mock_agent_users["team1"]
-        else:
-            agent_user = mock_agent_users[ROUTER_AGENT_NAME]
+        mock_client.user_id = agent_user.user_id
 
         config = _runtime_bound_config(Config(router=RouterConfig(model="default")), tmp_path)
 
         bot = make_test_agent_bot(
             agent_user=agent_user,
-            storage_path=tmp_path,
             config=config,
             runtime_paths=runtime_paths_for(config),
-            rooms=bot_config["new"],
+            rooms=new_rooms,
         )
         setup_test_bot(bot, mock_client)
 
@@ -3565,7 +3471,6 @@ async def test_in_flight_response_count_nonzero_during_send_response(
     )
     bot = make_test_agent_bot(
         agent_user=mock_agent_users["agent1"],
-        storage_path=tmp_path,
         config=config,
         runtime_paths=runtime_paths_for(config),
     )
@@ -3640,20 +3545,14 @@ async def test_in_flight_response_count_stays_per_entity_across_bots(
         ),
         tmp_path,
     )
+    runtime = ready_runtime(config, runtime_paths_for(config))
     bots = {}
     for agent_name in ("agent1", "agent2"):
-        bot = make_test_agent_bot(
-            agent_user=mock_agent_users[agent_name],
-            storage_path=tmp_path,
-            config=config,
-            runtime_paths=runtime_paths_for(config),
-        )
+        bot = make_test_agent_bot(mock_agent_users[agent_name], orchestrator=runtime)
         setup_test_bot(bot, AsyncMock())
         bots[agent_name] = bot
 
-    shared_gate = ResponseAdmissionGate()
-    for bot in bots.values():
-        bot.admission_gate = shared_gate
+    shared_gate = runtime.response_admission_gate
 
     busy, idle = bots["agent1"], bots["agent2"]
     entered = asyncio.Event()
@@ -3714,14 +3613,12 @@ async def test_closed_admission_defers_response_until_gate_reopens(
     )
     bot = make_test_agent_bot(
         agent_user=mock_agent_users["agent1"],
-        storage_path=tmp_path,
         config=config,
         runtime_paths=runtime_paths_for(config),
     )
     setup_test_bot(bot, AsyncMock())
     runner = unwrap_extracted_collaborator(bot._response_runner)
-    admission_gate = ResponseAdmissionGate()
-    bot.admission_gate = admission_gate
+    admission_gate = bot.orchestrator.response_admission_gate
     response_started = asyncio.Event()
 
     async def run_response(_target: MessageTarget, _early_placeholder: object) -> str:
@@ -3779,7 +3676,6 @@ async def test_replaced_runtime_refuses_deferred_response_without_matrix_io(
     )
     bot = make_test_agent_bot(
         agent_user=mock_agent_users["agent1"],
-        storage_path=tmp_path,
         config=config,
         runtime_paths=runtime_paths_for(config),
     )
@@ -3787,14 +3683,12 @@ async def test_replaced_runtime_refuses_deferred_response_without_matrix_io(
     send_response = AsyncMock(return_value="$thinking")
     install_send_response_mock(bot, send_response)
     runner = unwrap_extracted_collaborator(bot._response_runner)
-    admission_gate = ResponseAdmissionGate()
-    bot.admission_gate = admission_gate
+    admission_gate = bot.orchestrator.response_admission_gate
     refusal_logger = MagicMock()
     runner.deps = replace(runner.deps, logger=refusal_logger)
 
     # Stand where a config apply stands: admission closed, plan in progress.
     assert admission_gate.close_if_idle()
-    assert bot.admission_gate is admission_gate
     task = bot._response_runner.inbox.track_inbox_response(
         bot._response_runner.generate_response(
             ResponseRequest(
@@ -3855,10 +3749,9 @@ async def test_shutdown_during_active_drain_cancels_reload(
     monkeypatch.setattr("mindroom.orchestration.config_lifecycle._CONFIG_RELOAD_DEBOUNCE_SECONDS", 0.01)
     monkeypatch.setattr("mindroom.orchestration.config_lifecycle._REPLACEMENT_DRAIN_IDLE_POLL_SECONDS", 0.01)
 
-    orchestrator = _MultiAgentOrchestrator(runtime_paths=orchestrator_runtime_paths(tmp_path))
     current_config = _runtime_bound_config(Config(), tmp_path)
     reloaded_config = _runtime_bound_config(Config(defaults={"enable_streaming": False}), tmp_path)
-    orchestrator.config = current_config
+    orchestrator = _MultiAgentOrchestrator(runtime_paths=orchestrator_runtime_paths(tmp_path), config=current_config)
     orchestrator.running = True
 
     mock_bot = MagicMock(spec=AgentBot)

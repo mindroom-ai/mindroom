@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import threading
+import time
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, cast
 from unittest.mock import patch
@@ -15,7 +16,12 @@ from structlog.testing import capture_logs
 import mindroom.memory._semantic_file_search as semantic_file_search
 from mindroom.config.agent import AgentConfig, AgentPrivateConfig
 from mindroom.config.main import Config
-from mindroom.constants import HOOK_SOURCE_RUN_METADATA_KEY, MATRIX_EVENT_ID_METADATA_KEY, resolve_runtime_paths
+from mindroom.constants import (
+    HOOK_SOURCE_RUN_METADATA_KEY,
+    MATRIX_EVENT_ID_METADATA_KEY,
+    resolve_runtime_paths,
+)
+from mindroom.history import session_runs
 from mindroom.hooks import EnrichmentItem, render_enrichment_block
 from mindroom.llm.errors import ModelSafeguardRefusal, ProviderError
 from mindroom.llm.messages import Message
@@ -27,6 +33,7 @@ from mindroom.memory.functions import append_agent_daily_memory
 from mindroom.prompt_message_tags import render_msg_tag
 from mindroom.session_storage.agent_storage import create_session_storage
 from mindroom.session_storage.schema import quote_identifier
+from mindroom.session_storage.store import LoggedRun
 from mindroom.session_storage.types import ConversationSession
 from mindroom.tool_system.worker_routing import (
     ToolExecutionIdentity,
@@ -38,11 +45,12 @@ from mindroom.tool_system.worker_routing import (
 )
 from tests.conftest import bind_runtime_paths, install_model_providers, runtime_paths_for, seed_session
 from tests.fakes.scripted_model import Await, ScriptedModel, answer
+from tests.history_helpers import unreadable_conversations
 
 if TYPE_CHECKING:
     from pathlib import Path
 
-    from mindroom.history.session_runs import RedactedEventIds
+    from mindroom.history.session_runs import DueConversation, RedactedEventIds
     from mindroom.session_storage.store import ConversationStore
 
 T0 = 1_760_000_000
@@ -262,7 +270,7 @@ async def test_the_first_pass_removes_the_old_queue_and_flushes_only_later_turns
     assert extractor.lines() == [_lines("new")]
     [note] = _general_notes(tmp_path)
     assert note.startswith("- [id=")
-    assert note.endswith(f"] [auto_flush:{session}:new] important decision")
+    assert note.endswith(f"] [auto_flush:{session}@2] important decision")
 
 
 @pytest.mark.asyncio
@@ -283,11 +291,11 @@ async def test_each_private_instance_flushes_into_its_own_memory(tmp_path: Path,
         ALICE,
         BOB,
     ]
-    for identity, run_id in ((alice, "a1"), (bob, "b1")):
+    for identity, name in ((alice, "a"), (bob, "b")):
         worker_key = resolve_worker_key("user", identity, agent_name="mind")
         assert worker_key is not None
         [note] = _notes(private_instance_scope_root_path(tmp_path, worker_key) / "mind" / "mind_data")
-        assert f":{run_id}] important decision" in note
+        assert f"[auto_flush:{_thread(name)}@1] important decision" in note
 
 
 @pytest.mark.asyncio
@@ -417,8 +425,8 @@ async def test_a_retry_after_a_failed_progress_write_never_writes_a_note_twice(
     assert extractor.lines() == [_lines("r1"), _lines("r2")]
     notes = _general_notes(tmp_path)
     assert [note.split("] ", 1)[1] for note in notes] == [
-        f"[auto_flush:{session}:r1] important decision",
-        f"[auto_flush:{session}:r2] important decision",
+        f"[auto_flush:{session}@1] important decision",
+        f"[auto_flush:{session}@2] important decision",
     ]
     await worker._run_cycle(config)
     assert len(extractor.calls) == 2
@@ -452,8 +460,8 @@ async def test_automation_turns_are_skipped_while_other_turns_in_the_thread_are_
     _seed(config, only_automation, [_run("weekly", only_automation, T0 + 50, hook_source="automation/weekly")])
     await worker._run_cycle(config)
     assert len(extractor.calls) == 1
-    assert _entry(tmp_path, only_automation)["marker"] == [T0 + 50, "weekly"]
-    assert _entry(tmp_path, session)["marker"] == [T0 + 40, "curate"]
+    assert _entry(tmp_path, only_automation)["seq"] == 5
+    assert _entry(tmp_path, session)["seq"] == 4
 
 
 @pytest.mark.asyncio
@@ -486,7 +494,7 @@ async def test_a_redacted_turn_stays_out_and_an_agent_that_cannot_tell_waits_unb
     await worker._run_cycle(config)
 
     assert extractor.lines() == [_lines("kept")]
-    assert _entry(tmp_path, session)["marker"] == [T0 + 10, "kept"]
+    assert _entry(tmp_path, session)["seq"] == 1
     with pytest.raises(StopIteration):
         _entry(tmp_path, waiting)
 
@@ -530,46 +538,181 @@ async def test_a_conversation_whose_redactions_cannot_be_checked_backs_off_witho
 
 
 @pytest.mark.asyncio
-async def test_a_turn_waiting_for_approval_holds_back_later_turns_until_it_finishes(
+async def test_a_stopped_turn_saved_completed_later_is_flushed(tmp_path: Path, extractor: _Extractor) -> None:
+    """A stopped turn's record saved as completed after the conversation was caught up, without usage, is still read."""
+    config, clock = _config(tmp_path), _Clock()
+    worker = await _started(config, clock)
+    session = _thread("t1")
+    stopped = _run("stopped", session, T0 + 10, status=RunStatus.cancelled)
+    _seed(config, session, [stopped])
+    await worker._run_cycle(config)
+    assert extractor.calls == []
+    assert _entry(tmp_path, session)["updated_at"] == T0 + 11
+
+    stopped.status = RunStatus.completed
+    storage = create_session_storage("general", config, runtime_paths_for(config), execution_identity=None)
+    conversation = ConversationSession(session_id=session, kind="agent", owner_id="general")
+    assert storage.save_interrupted_record(conversation, stopped) == "written"
+    clock.now = time.time() + 10
+    await worker._run_cycle(config)
+
+    assert extractor.lines() == [_lines("stopped")]
+
+
+@pytest.mark.asyncio
+async def test_a_turn_approved_after_the_turns_after_it_were_flushed_is_flushed_once(
     tmp_path: Path,
     extractor: _Extractor,
 ) -> None:
-    """A paused turn finishes in place later, so it and the turns after it are flushed once, after it finishes."""
-    config = _config(tmp_path)
-    worker = await _started(config)
+    """A turn that completes after its approval is flushed once, even when the turns after it were flushed first.
+
+    It keeps its creation time, which is older than theirs, so reading turns in creation order would leave it behind.
+    The approval here outlives the window the current settings give it, as when `timeout_days` was lowered meanwhile.
+    """
+    config, clock = _config(tmp_path), _Clock()
+    worker = await _started(config, clock)
     session = _thread("t1")
     paused = _run("asks", session, T0 + 10, status=RunStatus.paused)
     after = _run("after", session, T0 + 20)
     _seed(config, session, [paused, after])
-
+    clock.now = T0 + 10 + config.tool_approval.timeout_days * 86_400 + 3600
     await worker._run_cycle(config)
-    assert extractor.calls == []
+    assert extractor.lines() == [_lines("after")]
 
     paused.status = RunStatus.completed
-    _seed(config, session, [paused, after], updated_at=T0 + 30)
+    _seed(config, session, [paused, after], updated_at=int(clock.now) + 10)
+    clock.now += 1000
+    await worker._run_cycle(config)
+    _seed(config, session, [paused, after], updated_at=int(clock.now) + 10)
+    clock.now += 1000
     await worker._run_cycle(config)
 
-    assert extractor.lines() == [_lines("asks", "after")]
+    assert extractor.lines() == [_lines("after"), _lines("asks")]
+
+
+def _approved_after_a_later_turn(config: Config, session: str) -> None:
+    """Store ``P`` (created at T0 + 100), paused, then ``R`` (created at T0 + 200), then ``P`` completed.
+
+    ``R`` takes place 2 and ``P`` place 3, after the turn it waited for.
+    """
+    paused = _run("P", session, T0 + 100, status=RunStatus.paused)
+    _seed(config, session, [paused, _run("R", session, T0 + 200)])
+    paused.status = RunStatus.completed
+    _seed(config, session, [paused], updated_at=T0 + 201)
+
+
+def _save_released_entry(tmp_path: Path, config: Config, session: str, marker: list[int | str]) -> None:
+    """Save the conversation's progress as the released auto-flush wrote it, behind the conversation's last update."""
+    path = tmp_path / "tracking" / "memory_auto_flush.json"
+    state = json.loads(path.read_text(encoding="utf-8"))
+    [scope] = auto_flush._flush_scopes(config, runtime_paths_for(config), ["general"])
+    released = {"updated_at": 0, "marker": marker, "failures": 0, "failing_since": 0, "retry_at": 0, "recheck_at": 0}
+    state["scopes"].setdefault(scope.key, {})[session] = released
+    path.write_text(json.dumps(state), encoding="utf-8")
 
 
 @pytest.mark.asyncio
-async def test_a_turn_whose_approval_expired_releases_the_turns_after_it_without_news(
-    tmp_path: Path,
-    extractor: _Extractor,
-) -> None:
-    """Once every approval a paused turn could get has expired, the conversation is read again and moves on."""
-    config, clock = _config(tmp_path), _Clock()
-    worker = await _started(config, clock)
+async def test_released_progress_reads_only_the_turns_after_its_marker(tmp_path: Path, extractor: _Extractor) -> None:
+    """A marker past ``R`` converts to its place in the log, so ``R`` and ``P`` are not read again and later turns are."""
+    config = _config(tmp_path)
+    worker = await _started(config)
     session = _thread("t1")
-    _seed(config, session, [_run("asks", session, T0 + 10, status=RunStatus.paused), _run("after", session, T0 + 20)])
+    _approved_after_a_later_turn(config, session)
+    _save_released_entry(tmp_path, config, session, [T0 + 200, "R"])
 
     await worker._run_cycle(config)
     assert extractor.calls == []
+    assert _entry(tmp_path, session) == {
+        "updated_at": T0 + 201,
+        "seq": 3,
+        "failures": 0,
+        "failing_since": 0,
+        "retry_at": 0,
+    }
 
-    clock.now = T0 + 10 + config.tool_approval.timeout_days * 86_400 + 3600
+    _seed(config, session, [_run("N", session, T0 + 300)])
     await worker._run_cycle(config)
 
-    assert extractor.lines() == [_lines("after")]
+    assert extractor.lines() == [_lines("N")]
+
+
+@pytest.mark.asyncio
+async def test_a_released_note_keeps_its_turn_from_being_flushed_again(tmp_path: Path, extractor: _Extractor) -> None:
+    """A released batch that flushed only ``P`` named it; ``R``, unflushed though placed before ``P``, is flushed alone."""
+    config = _config(tmp_path)
+    worker = await _started(config)
+    session = _thread("t1")
+    _approved_after_a_later_turn(config, session)
+    append_agent_daily_memory(
+        f"[auto_flush:{session}:P] P's fact",
+        "general",
+        tmp_path,
+        config,
+        runtime_paths_for(config),
+    )
+    _save_released_entry(tmp_path, config, session, [T0 + 100, "P"])
+
+    await worker._run_cycle(config)
+    # Progress moves past ``P`` too, which the released note covers.
+    assert _entry(tmp_path, session)["seq"] == 3
+    _seed(config, session, [_run("N", session, T0 + 300)])
+    await worker._run_cycle(config)
+
+    assert extractor.lines() == [_lines("R"), _lines("N")]
+    assert [note.split("] ", 1)[1] for note in _general_notes(tmp_path)] == [
+        f"[auto_flush:{session}:P] P's fact",
+        f"[auto_flush:{session}@2] important decision",
+        f"[auto_flush:{session}@4] important decision",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_a_turn_completed_after_a_released_note_is_flushed_once(tmp_path: Path, extractor: _Extractor) -> None:
+    """``A``, created in ``Z``'s second with a run id sorting before it, waited for approval past the upgrade.
+
+    The released worker flushed ``Z`` and named it in a note; ``A`` completes after the progress converts, so the note
+    does not cover it.
+    """
+    config = _config(tmp_path)
+    worker = await _started(config)
+    session = _thread("t1")
+    paused = _run("A", session, T0 + 100, status=RunStatus.paused)
+    _seed(config, session, [_run("Z", session, T0 + 100), paused])
+    append_agent_daily_memory(
+        f"[auto_flush:{session}:Z] Z's fact",
+        "general",
+        tmp_path,
+        config,
+        runtime_paths_for(config),
+    )
+    _save_released_entry(tmp_path, config, session, [T0 + 100, "Z"])
+    await worker._run_cycle(config)
+    assert extractor.lines() == []
+
+    paused.status = RunStatus.completed
+    _seed(config, session, [paused], updated_at=T0 + 201)
+    await worker._run_cycle(config)
+    await worker._run_cycle(config)
+
+    assert extractor.lines() == [_lines("A")]
+
+
+@pytest.mark.asyncio
+async def test_released_progress_that_never_flushed_starts_like_a_conversation_first_seen(
+    tmp_path: Path,
+    extractor: _Extractor,
+) -> None:
+    """An empty released marker skips the turns from before auto-flush started, as a conversation first seen does."""
+    config = _config(tmp_path)
+    worker = await _started(config)
+    session = _thread("t1")
+    _seed(config, session, [_run("old", session, T0 - 50), _run("new", session, T0 + 10)])
+    _save_released_entry(tmp_path, config, session, [])
+
+    await worker._run_cycle(config)
+
+    assert extractor.lines() == [_lines("new")]
+    assert _entry(tmp_path, session)["seq"] == 2
 
 
 @pytest.mark.asyncio
@@ -598,13 +741,19 @@ async def test_a_conversation_still_active_is_not_read_and_reads_happen_off_the_
     _seed(config, session, [_run("r1", session, T0 + 900)], updated_at=T0 + 990)
     loop_thread = threading.get_ident()
     reads: list[bool] = []
-    real_session_runs = auto_flush.session_runs
+    real_read_conversation = session_runs._read_conversation
 
-    def session_runs(storage: object, session_id: str) -> list[RunRecord]:
+    def read_conversation(
+        storage: ConversationStore,
+        session_id: str,
+        *,
+        agent_name: str,
+        updated_at: int,
+    ) -> DueConversation:
         reads.append(threading.get_ident() != loop_thread)
-        return real_session_runs(storage, session_id)
+        return real_read_conversation(storage, session_id, agent_name=agent_name, updated_at=updated_at)
 
-    monkeypatch.setattr(auto_flush, "session_runs", session_runs)
+    monkeypatch.setattr(session_runs, "_read_conversation", read_conversation)
 
     await worker._run_cycle(config)
     assert (reads, extractor.calls) == ([], [])
@@ -654,10 +803,9 @@ def test_a_turn_too_long_for_one_extraction_keeps_its_newest_lines(tmp_path: Pat
     messages = [Message(role="user", content=f"part {index}") for index in range(4)]
     long_turn, following = _run("long", session, T0 + 10, messages=messages), _run("next", session, T0 + 20)
 
-    assert auto_flush._next_batch([automation, long_turn, following], settings) == (
-        [automation, long_turn],
-        [f"{ALICE}: part 2", f"{ALICE}: part 3"],
-    )
+    turns = [LoggedRun(seq, run) for seq, run in enumerate([automation, long_turn, following], 1)]
+
+    assert auto_flush._next_batch(turns, settings) == (turns[:2], [f"{ALICE}: part 2", f"{ALICE}: part 3"])
 
 
 def test_each_turn_is_read_as_who_said_what() -> None:
@@ -681,9 +829,9 @@ def test_the_character_limit_bounds_each_extraction(tmp_path: Path) -> None:
     """``max_chars_per_flush`` ends a batch, and a single turn over it keeps only its newest lines."""
     settings = _config(tmp_path, extractor={"max_chars_per_flush": 30}).memory.auto_flush
     session = _thread("t1")
-    first, second = _run("r1", session, T0 + 10), _run("r2", session, T0 + 20)
+    turns = [LoggedRun(1, _run("r1", session, T0 + 10)), LoggedRun(2, _run("r2", session, T0 + 20))]
 
-    assert auto_flush._next_batch([first, second], settings) == ([first], ["assistant: answer r1"])
+    assert auto_flush._next_batch(turns, settings) == (turns[:1], ["assistant: answer r1"])
 
 
 @pytest.mark.asyncio
@@ -715,7 +863,7 @@ async def test_failures_back_off_from_when_they_happen_and_are_given_up_after_th
     clock.now = T0 + 1005 + 3600 - 5
     await worker._run_cycle(config)
     entry = _entry(tmp_path, session)
-    assert (entry["failures"], entry["marker"]) == (0, [T0 + 10, "r1"])
+    assert (entry["failures"], entry["seq"]) == (0, 1)
     assert _general_notes(tmp_path) == []
 
     clock.now += 10_000
@@ -735,7 +883,7 @@ async def test_giving_up_moves_past_the_failing_turns_not_ones_already_written(
     session = _thread("t1")
     _seed(config, session, [_run(f"r{index}", session, T0 + 10 + index) for index in range(1, 4)])
     append_agent_daily_memory(
-        f"[auto_flush:{session}:r1] written before its progress was saved",
+        f"[auto_flush:{session}@1] written before its progress was saved",
         "general",
         config,
         runtime_paths_for(config),
@@ -747,7 +895,7 @@ async def test_giving_up_moves_past_the_failing_turns_not_ones_already_written(
     await worker._run_cycle(config)
 
     assert extractor.lines() == [_lines("r2"), _lines("r2")]
-    assert _entry(tmp_path, session)["marker"] == [T0 + 12, "r2"]
+    assert _entry(tmp_path, session)["seq"] == 2
     extractor.error = None
     await worker._run_cycle(config)
     assert extractor.lines()[-1] == _lines("r3")
@@ -785,15 +933,11 @@ async def test_an_unreadable_conversation_backs_off_without_blocking_the_others(
     broken, fine = _thread("broken"), _thread("fine")
     _seed(config, broken, [_run("b1", broken, T0 + 10)])
     _seed(config, fine, [_run("f1", fine, T0 + 20)])
-    real_session_runs = auto_flush.session_runs
-
-    def session_runs(storage: object, session_id: str) -> list[RunRecord]:
-        if session_id == broken:
-            msg = "session database is locked"
-            raise OSError(msg)
-        return real_session_runs(storage, session_id)
-
-    monkeypatch.setattr(auto_flush, "session_runs", session_runs)
+    monkeypatch.setattr(
+        session_runs,
+        "_read_conversation",
+        unreadable_conversations(lambda session_id: session_id == broken),
+    )
 
     await worker._run_cycle(config)
 
@@ -838,13 +982,13 @@ async def test_budgets_cap_each_pass_and_each_agent_and_passes_take_turns(
     config.memory.auto_flush.batch.max_sessions_per_cycle = 1
     config.memory.auto_flush.batch.max_sessions_per_agent_per_cycle = 3
     listed: list[str] = []
-    real_updated_sessions = auto_flush.updated_sessions
+    real_updated_sessions = session_runs.updated_sessions
 
     def updated_sessions(storage: ConversationStore, *, since: int) -> list[tuple[str, int]]:
         listed.append(storage.names.storage_name)
         return real_updated_sessions(storage, since=since)
 
-    monkeypatch.setattr(auto_flush, "updated_sessions", updated_sessions)
+    monkeypatch.setattr(session_runs, "updated_sessions", updated_sessions)
     await worker._run_cycle(config)
     await worker._run_cycle(config)
     assert [call["agent_name"] for call in extractor.calls[2:]] == ["general", "other"]
@@ -1126,7 +1270,7 @@ async def test_a_refused_extraction_is_given_up_at_once_and_the_next_turns_flush
 
     assert [entry["log_level"] for entry in logs] == ["warning"]
     entry = _entry(tmp_path, session)
-    assert (entry["failures"], entry["retry_at"], entry["marker"]) == (0, 0, [T0 + 10, "r1"])
+    assert (entry["failures"], entry["retry_at"], entry["seq"]) == (0, 0, 1)
     extractor.error = None
     await worker._run_cycle(config)
     assert extractor.lines() == [_lines("r1"), _lines("r2")]

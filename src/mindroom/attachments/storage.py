@@ -53,7 +53,7 @@ from .legacy_attachments import legacy_attachment_source, open_legacy_attachment
 if TYPE_CHECKING:
     from collections.abc import Sequence
 
-    from mindroom.matrix.client import ResolvedVisibleMessage
+    from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
 
 logger = get_logger(__name__)
 

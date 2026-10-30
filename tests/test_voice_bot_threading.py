@@ -38,7 +38,6 @@ from tests.conftest import (
     TEST_ACCESS_TOKEN,
     TEST_PASSWORD,
     bind_runtime_paths,
-    dispatch_context_result,
     drain_coalescing,
     install_edit_message_mock,
     install_generate_response_mock,
@@ -51,6 +50,7 @@ from tests.conftest import (
     unwrap_extracted_collaborator,
     wrap_extracted_collaborators,
 )
+from tests.runtime_fakes import ready_runtime
 from tests.turn_dispatch_helpers import prepared_turn_recorder
 
 if TYPE_CHECKING:
@@ -59,16 +59,12 @@ if TYPE_CHECKING:
     from mindroom.turn_record import TurnRecord
 
 
-def _agent_bot(*, agent_user: AgentMatrixUser, storage_path: Path, config: Config, rooms: list[str]) -> AgentBot:
-    """Construct an agent bot with the explicit runtime bound to the test config."""
+def _agent_bot(*, agent_user: AgentMatrixUser, config: Config, rooms: list[str]) -> AgentBot:
+    """Construct an agent bot in a runtime whose router has not finished its first sync, so no voice echo is expected."""
+    runtime = ready_runtime(config, runtime_paths_for(config))
+    runtime.not_ready.add(ROUTER_AGENT_NAME)
     return install_runtime_journal_support(
-        make_test_agent_bot(
-            agent_user=agent_user,
-            storage_path=storage_path,
-            config=config,
-            runtime_paths=runtime_paths_for(config),
-            rooms=rooms,
-        ),
+        make_test_agent_bot(agent_user=agent_user, rooms=rooms, orchestrator=runtime),
     )
 
 
@@ -97,7 +93,7 @@ def mock_home_bot(generate_response_mock: AsyncMock) -> AgentBot:
         ),
     )
     config = bind_runtime_paths(config, test_runtime_paths(tmpdir))
-    bot = _agent_bot(agent_user=agent_user, storage_path=tmpdir, config=config, rooms=["!test:server"])
+    bot = _agent_bot(agent_user=agent_user, config=config, rooms=["!test:server"])
     wrap_extracted_collaborators(bot)
     bot.client = AsyncMock()
     bot.client.rooms = {}
@@ -356,7 +352,7 @@ async def test_voice_message_in_main_room_creates_thread(
         requires_model_history_refresh=False,
     )
     bot._conversation_resolver.extract_dispatch_context = AsyncMock(
-        return_value=dispatch_context_result(mock_context),
+        return_value=mock_context,
     )
 
     room = MagicMock(spec=nio.MatrixRoom)
@@ -404,7 +400,7 @@ async def test_voice_message_in_thread_continues_thread(
         requires_model_history_refresh=False,
     )
     bot._conversation_resolver.extract_dispatch_context = AsyncMock(
-        return_value=dispatch_context_result(mock_context),
+        return_value=mock_context,
     )
 
     room = MagicMock(spec=nio.MatrixRoom)
@@ -475,7 +471,7 @@ async def test_voice_plain_reply_to_thread_message_stays_threaded_transitively(
         requires_model_history_refresh=False,
     )
     bot._conversation_resolver.extract_dispatch_context = AsyncMock(
-        return_value=dispatch_context_result(mock_context),
+        return_value=mock_context,
     )
 
     with (
@@ -532,7 +528,6 @@ async def test_voice_plain_reply_unproven_thread_candidate_is_not_admitted(
             new=AsyncMock(
                 return_value=ThreadResolution._indeterminate(
                     RuntimeError("proof unavailable"),
-                    candidate_thread_root_id="$maybe-thread-root",
                 ),
             ),
         ),
@@ -709,16 +704,14 @@ async def test_non_router_skips_visible_echo_and_dispatches_canonical_voice(
         thread_id="$thread_root",
     )
     bot._conversation_resolver.extract_dispatch_context = AsyncMock(
-        return_value=dispatch_context_result(
-            MessageContext(
-                am_i_mentioned=True,
-                is_thread=True,
-                thread_id="$thread_root",
-                thread_history=[],
-                mentioned_agents=[bot.matrix_id],
-                has_non_agent_mentions=False,
-                requires_model_history_refresh=False,
-            ),
+        return_value=MessageContext(
+            am_i_mentioned=True,
+            is_thread=True,
+            thread_id="$thread_root",
+            thread_history=[],
+            mentioned_agents=[bot.matrix_id],
+            has_non_agent_mentions=False,
+            requires_model_history_refresh=False,
         ),
     )
 

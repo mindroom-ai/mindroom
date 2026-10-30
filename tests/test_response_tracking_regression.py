@@ -6,8 +6,7 @@ are properly tracked to prevent re-processing after restart.
 
 from __future__ import annotations
 
-import tempfile
-from pathlib import Path
+from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import nio
@@ -17,15 +16,15 @@ from mindroom.commands.parsing import Command, CommandType
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
+from mindroom.conversation_resolver import MessageContext
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.message_target import MessageTarget
-from mindroom.router_relay import execute_router_relay
+from mindroom.router.relay import execute_router_relay
 from mindroom.turn_record import TurnRecord
 from tests.bot_helpers import make_test_agent_bot
 from tests.conftest import (
     TEST_PASSWORD,
     bind_runtime_paths,
-    dispatch_context_result,
     drain_coalescing,
     install_runtime_journal_support,
     install_send_response_mock,
@@ -34,6 +33,9 @@ from tests.conftest import (
     test_runtime_paths,
     wrap_extracted_collaborators,
 )
+
+if TYPE_CHECKING:
+    from pathlib import Path
 
 
 @pytest.fixture
@@ -48,9 +50,9 @@ def mock_router_agent() -> AgentMatrixUser:
 
 
 @pytest.fixture
-def mock_config() -> Config:
+def mock_config(tmp_path: Path) -> Config:
     """Create a mock config with some agents."""
-    runtime_paths = test_runtime_paths(Path(tempfile.mkdtemp()))
+    runtime_paths = test_runtime_paths(tmp_path)
     return bind_runtime_paths(
         Config(
             agents={
@@ -73,7 +75,6 @@ class TestResponseTrackingRegression:
         self,
         mock_router_agent: AgentMatrixUser,
         mock_config: Config,
-        tmp_path: Path,
     ) -> None:
         """Test that commands are tracked in response tracker.
 
@@ -87,13 +88,11 @@ class TestResponseTrackingRegression:
         bot = make_test_agent_bot(
             agent_user=mock_router_agent,
             config=mock_config,
-            storage_path=tmp_path,
             runtime_paths=runtime_paths_for(mock_config),
             rooms=[test_room_id],
         )
         wrap_extracted_collaborators(bot)
         bot.client = make_matrix_client_mock(user_id=mock_router_agent.user_id)
-        bot.client.user_id = mock_router_agent.user_id
         install_runtime_journal_support(bot)
 
         # Mock successful room_send
@@ -135,7 +134,6 @@ class TestResponseTrackingRegression:
         assert bot.client.room_send.call_count == 1
 
         # IMPORTANT: Check if event was marked as responded
-        # This should be True after the fix
         assert await bot._turn_store.is_handled(test_room_id, command_event.event_id), (
             "Command event should be marked as responded to prevent re-processing"
         )
@@ -157,7 +155,6 @@ class TestResponseTrackingRegression:
         )
 
         # Should NOT send another response if properly tracked
-        # (In real scenario, _should_skip_duplicate_response would prevent this)
         # But here we're testing that the tracking was done
 
     @pytest.mark.asyncio
@@ -165,7 +162,6 @@ class TestResponseTrackingRegression:
         self,
         mock_router_agent: AgentMatrixUser,
         mock_config: Config,
-        tmp_path: Path,
     ) -> None:
         """Test that unknown commands are tracked in response tracker.
 
@@ -179,7 +175,6 @@ class TestResponseTrackingRegression:
         bot = make_test_agent_bot(
             agent_user=mock_router_agent,
             config=mock_config,
-            storage_path=tmp_path,
             runtime_paths=runtime_paths_for(mock_config),
             rooms=[test_room_id],
         )
@@ -211,44 +206,39 @@ class TestResponseTrackingRegression:
         mock_room.users = {mock_router_agent.user_id: MagicMock()}
 
         # Mock the necessary methods for _on_message flow
-        mock_context = MagicMock()
-        mock_context.am_i_mentioned = False
-        mock_context.is_thread = False
-        mock_context.thread_id = None
-        mock_context.thread_history = []
-        mock_context.mentioned_agents = []
-        mock_context.has_non_agent_mentions = False
-        mock_context.requires_model_history_refresh = False
         bot._conversation_resolver.extract_dispatch_context = AsyncMock(
-            return_value=dispatch_context_result(mock_context),
+            return_value=MessageContext(
+                am_i_mentioned=False,
+                is_thread=False,
+                thread_id=None,
+                thread_history=[],
+                mentioned_agents=[],
+                has_non_agent_mentions=False,
+            ),
         )
 
         send_response = AsyncMock(return_value="$response_456")
         install_send_response_mock(bot, send_response)
 
-        # Mock constants to make router handle commands
-        with patch("mindroom.constants.ROUTER_AGENT_NAME", "router"):
-            # Call _on_message which should detect unknown command and respond
-            await bot._on_message(mock_room, unknown_command_event)
-            await drain_coalescing(bot)
+        # Call _on_message which should detect unknown command and respond
+        await bot._on_message(mock_room, unknown_command_event)
+        await drain_coalescing(bot)
 
         send_response.assert_awaited_once()
         assert "❌ Unknown command" in send_response.await_args.kwargs["response_text"]
 
         # IMPORTANT: Check if event was marked as responded
-        # This should be True after the fix in bot.py at line 371
         assert await bot._turn_store.is_handled(test_room_id, unknown_command_event.event_id), (
             "Unknown command event should be marked as responded"
         )
 
     @pytest.mark.asyncio
-    @patch("mindroom.router_relay.suggest_responder_for_message")
+    @patch("mindroom.router.relay.suggest_responder_for_message")
     async def test_router_ai_routing_response_tracking(
         self,
         mock_suggest_responder: AsyncMock,
         mock_router_agent: AgentMatrixUser,
         mock_config: Config,
-        tmp_path: Path,
     ) -> None:
         """Test that router AI routing is tracked in the turn rows.
 
@@ -262,13 +252,11 @@ class TestResponseTrackingRegression:
         bot = make_test_agent_bot(
             agent_user=mock_router_agent,
             config=mock_config,
-            storage_path=tmp_path,
             runtime_paths=runtime_paths_for(mock_config),
             rooms=[test_room_id],
         )
         wrap_extracted_collaborators(bot)
         bot.client = make_matrix_client_mock(user_id=mock_router_agent.user_id)
-        bot.client.user_id = mock_router_agent.user_id
         install_runtime_journal_support(bot)
 
         # Mock successful room_send
@@ -322,7 +310,6 @@ class TestResponseTrackingRegression:
         assert bot.client.room_send.call_count == 1
 
         # IMPORTANT: Check if event was marked as responded
-        # This should be True after the fix
         assert await bot._turn_store.is_handled(test_room_id, message_event.event_id), (
             "Router event should be marked as responded to prevent re-routing"
         )
@@ -350,4 +337,3 @@ class TestResponseTrackingRegression:
         )
 
         # With proper tracking, this shouldn't happen again
-        # (In real scenario, _should_skip_duplicate_response would prevent reaching here)

@@ -25,7 +25,7 @@ from mindroom.custom_tools.config_manager import ConfigManagerTools, _InfoType
 from mindroom.matrix.state import MatrixState
 from mindroom.mcp.config import MCPServerConfig
 from mindroom.message_target import MessageTarget
-from mindroom.oauth.google_drive import google_drive_oauth_provider
+from mindroom.oauth.google import google_oauth_provider
 from mindroom.oauth.service import lookup_oauth_connect_token
 from mindroom.tool_system.agent_tools import resolve_agent_tools
 from mindroom.tool_system.metadata import _AUTHORED_OVERRIDE_INHERIT
@@ -43,6 +43,7 @@ from tests.conftest import (
     write_config_yaml,
 )
 from tests.identity_helpers import persist_entity_accounts
+from tests.matrix_state_helpers import save_matrix_state
 from tests.test_generated_agents import BASE as GENERATED_BASE
 from tests.test_generated_agents import _created as created_entry
 from tests.test_generated_agents import _load as load_generated
@@ -1172,7 +1173,7 @@ class TestConsolidatedConfigManager:
             return
 
         connect_target = lookup_oauth_connect_token(
-            google_drive_oauth_provider(),
+            google_oauth_provider("google_drive"),
             cm.runtime_paths,
             connect_tokens[0],
         )
@@ -1231,7 +1232,7 @@ class TestConsolidatedConfigManager:
         assert query["agent_name"] == ["research"]
         assert query["execution_scope"] == [private_scope]
         connect_target = lookup_oauth_connect_token(
-            google_drive_oauth_provider(),
+            google_oauth_provider("google_drive"),
             cm.runtime_paths,
             query["connect_token"][0],
         )
@@ -1584,7 +1585,7 @@ class TestConsolidatedConfigManager:
             runtime_paths = resolve_runtime_paths(config_path=config_path, process_env={})
             matrix_state = MatrixState.load(runtime_paths=runtime_paths)
             matrix_state.add_account("agent_assistant", "mindroom_assistant", "pw", domain="localhost")
-            matrix_state.save(runtime_paths=runtime_paths)
+            save_matrix_state(matrix_state, runtime_paths)
             cm = _config_manager(config_path)
             result = cm.manage_agent(
                 operation="create",
@@ -2136,39 +2137,6 @@ class TestConsolidatedConfigManager:
                 result = cm.get_info(info_type=info_type.value)
                 # Should not error for valid types without name
                 assert "Error: Unknown info_type" not in result
-
-    def test_reduced_tool_count(self, tmp_path: Path) -> None:
-        """Verify the toolkit remains consolidated into four functions."""
-        cm = _config_manager(_minimal_config_path(tmp_path))
-
-        assert len(cm.functions) == 4
-
-        # Check the specific tools
-        tool_names = [tool.__name__ for tool in cm.functions.values()]
-        assert "get_info" in tool_names
-        assert "manage_config" in tool_names
-        assert "manage_agent" in tool_names
-        assert "manage_team" in tool_names
-
-        # Old tool names should NOT be present
-        old_tools = [
-            "get_mindroom_info",
-            "get_config_schema",
-            "get_available_models",
-            "list_agents",
-            "list_teams",
-            "list_available_tools",
-            "get_tool_details",
-            "suggest_tools_for_task",
-            "create_agent_config",
-            "update_agent_config",
-            "create_team_config",
-            "validate_agent_config",
-            "get_agent_config",
-            "generate_agent_template",
-        ]
-        for old_tool in old_tools:
-            assert old_tool not in tool_names
 
     def test_agent_template_generation(self, tmp_path: Path) -> None:
         """Test agent template generation through get_info."""

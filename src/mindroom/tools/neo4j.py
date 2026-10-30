@@ -24,6 +24,7 @@ if TYPE_CHECKING:
     config_fields=[
         ConfigField(
             name="uri",
+            env=("NEO4J_URI",),
             label="URI",
             type="url",
             required=False,
@@ -33,6 +34,7 @@ if TYPE_CHECKING:
         ),
         ConfigField(
             name="user",
+            env=("NEO4J_USERNAME",),
             label="Username",
             type="text",
             required=True,
@@ -41,6 +43,7 @@ if TYPE_CHECKING:
         ),
         ConfigField(
             name="password",
+            env=("NEO4J_PASSWORD",),
             label="Password",
             type="password",
             required=True,

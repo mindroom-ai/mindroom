@@ -68,7 +68,7 @@ class TestAgentBot(AgentBotTestBase):
             },
             runtime_root=tmp_path,
         )
-        bot = make_test_agent_bot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
+        bot = make_test_agent_bot(mock_agent_user, config=config, runtime_paths=runtime_paths_for(config))
 
         resolution = await bot._knowledge_access_support.resolve_for_agent_async("calculator")
 
@@ -88,7 +88,7 @@ class TestAgentBot(AgentBotTestBase):
             },
             runtime_root=tmp_path,
         )
-        bot = make_test_agent_bot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
+        bot = make_test_agent_bot(mock_agent_user, config=config, runtime_paths=runtime_paths_for(config))
         expected_reader = _StubIndex(hits=[])
         lookup = SimpleNamespace(
             key=SimpleNamespace(
@@ -106,6 +106,7 @@ class TestAgentBot(AgentBotTestBase):
             ),
             availability=KnowledgeAvailability.READY,
             state=None,
+            schedule_refresh_on_access=False,
         )
 
         with patch("mindroom.knowledge.utils.get_published_index", return_value=lookup):
@@ -132,7 +133,7 @@ class TestAgentBot(AgentBotTestBase):
             },
             runtime_root=tmp_path,
         )
-        bot = make_test_agent_bot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
+        bot = make_test_agent_bot(mock_agent_user, config=config, runtime_paths=runtime_paths_for(config))
         readers = {
             "research": _StubIndex(hits=_hits("research content 1", "research content 2", "research content 3")),
             "legal": _StubIndex(hits=_hits("legal content 1", "legal content 2", "legal content 3")),
@@ -155,6 +156,7 @@ class TestAgentBot(AgentBotTestBase):
                 ),
                 availability=KnowledgeAvailability.READY,
                 state=None,
+                schedule_refresh_on_access=False,
             )
 
         with patch("mindroom.knowledge.utils.get_published_index", side_effect=_lookup):

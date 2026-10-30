@@ -27,7 +27,7 @@ from mindroom.thread_export.storage import (
     write_room_index,
     write_thread_payload,
 )
-from mindroom.thread_summary import current_thread_summary_from_history
+from mindroom.thread_summary.state import current_thread_summary_from_history
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Sequence

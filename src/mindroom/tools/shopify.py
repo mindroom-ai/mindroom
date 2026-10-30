@@ -24,6 +24,7 @@ if TYPE_CHECKING:
     config_fields=[
         ConfigField(
             name="shop_name",
+            env=("SHOPIFY_SHOP_NAME",),
             label="Shop Name",
             type="text",
             required=True,
@@ -32,6 +33,7 @@ if TYPE_CHECKING:
         ),
         ConfigField(
             name="access_token",
+            env=("SHOPIFY_ACCESS_TOKEN",),
             label="Access Token",
             type="password",
             required=True,

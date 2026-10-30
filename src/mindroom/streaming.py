@@ -1599,7 +1599,7 @@ async def _drain_worker_progress_events(
             if not should_refresh:
                 continue
             # Shown at once rather than throttled: a backend reports only a few phases, so a notice the throttle
-            # dropped would stay hidden until the next phase, which for a Docker cold start is "ready".
+            # dropped would stay hidden until the next phase, seconds later.
             _queue_delivery_request(
                 delivery_queue,
                 force_refresh=True,

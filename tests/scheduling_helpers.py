@@ -11,10 +11,12 @@ import nio
 
 from mindroom.bot import AgentBot
 from mindroom.constants import ROUTER_AGENT_NAME, resolve_runtime_paths
+from mindroom.hooks import HookRegistry, HookRegistryState
 from mindroom.matrix.identity import MatrixID, managed_account_key
 from mindroom.matrix.state import MatrixState
 from mindroom.scheduling import runtime as scheduling_runtime
 from mindroom.scheduling.runtime import ScheduledTaskRuntime, _TaskRunner
+from tests.matrix_state_helpers import save_matrix_state
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -22,7 +24,7 @@ if TYPE_CHECKING:
 
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
-    from mindroom.hooks import HookMatrixAdmin
+    from mindroom.hooks import HookMatrixAdmin, HookRegistryLifetime
     from mindroom.matrix.conversation_reads import ConversationReader
     from mindroom.scheduling.tasks import ScheduledTaskRecord, ScheduledWorkflow
 
@@ -41,7 +43,7 @@ def persist_schedule_writer(
     matrix_id = MatrixID.parse(writer_id)
     state = MatrixState.load(runtime_paths=runtime_paths)
     state.add_account(managed_account_key(entity_name), matrix_id.username, "test-password", domain=matrix_id.domain)
-    state.save(runtime_paths=runtime_paths)
+    save_matrix_state(state, runtime_paths)
 
 
 def schedule_runtime_paths(tmp_path: Path, writer_id: str = SCHEDULE_WRITER_ID) -> RuntimePaths:
@@ -126,9 +128,7 @@ def serve_task_state_events(client: Any, *, sender: str = SCHEDULE_WRITER_ID) ->
             return await fallback(response_class, method, path, *args, **kwargs)
         assert response_class is nio.RoomGetStateEventResponse
         assert method == "GET"
-        room_id, state, event_type, state_key = (
-            unquote(part) for part in url.path.removeprefix(_STATE_EVENT_PATH_PREFIX).split("/")
-        )
+        room_id, state, event_type, state_key = parts
         assert state == "state"
         response = await client.room_get_state_event(room_id=room_id, event_type=event_type, state_key=state_key)
         if not isinstance(response, nio.RoomGetStateEventResponse):
@@ -152,7 +152,7 @@ def scheduling_bot(
     bot.client = client
     bot.running = True
     bot.first_sync_complete = True
-    bot._conversation_reader = conversation_reader if conversation_reader is not None else AsyncMock()
+    bot.conversation_reader = conversation_reader if conversation_reader is not None else AsyncMock()
     return bot
 
 
@@ -160,16 +160,25 @@ def scheduled_task_runtime(
     runtime_paths: RuntimePaths,
     *bots: AgentBot,
     config: Config | None = None,
-    config_provider: Callable[[], Config | None] | None = None,
+    config_provider: Callable[[], Config] | None = None,
     matrix_admin: HookMatrixAdmin | None = None,
+    hooks: HookRegistryLifetime | None = None,
 ) -> ScheduledTaskRuntime:
     """Return the scheduled-task owner over these bots, reading ``config`` unless a provider is given."""
+    if config_provider is None:
+        assert config is not None, "A scheduled-task runtime reads a config or a config provider"
+        fixed_config = config
+
+        def config_provider() -> Config:
+            return fixed_config
+
     bots_by_name = {bot.agent_name: bot for bot in bots}
     return ScheduledTaskRuntime(
         runtime_paths=runtime_paths,
-        config_provider=config_provider if config_provider is not None else lambda: config,
+        config_provider=config_provider,
         bots=lambda: bots_by_name,
         matrix_admin=lambda: matrix_admin,
+        hooks=hooks if hooks is not None else HookRegistryState(HookRegistry.empty()).lifetime(),
     )
 
 
@@ -182,7 +191,8 @@ def task_runner(
     conversation_reader: ConversationReader | None = None,
     matrix_admin: HookMatrixAdmin | None = None,
     *,
-    config_provider: Callable[[], Config | None] | None = None,
+    config_provider: Callable[[], Config] | None = None,
+    hooks: HookRegistryLifetime | None = None,
 ) -> _TaskRunner:
     """Return one task's runner owned by a ready router bot on ``client``."""
     bot = scheduling_bot(client, conversation_reader=conversation_reader)
@@ -192,6 +202,7 @@ def task_runner(
         config=config,
         config_provider=config_provider,
         matrix_admin=matrix_admin,
+        hooks=hooks,
     )
     return _TaskRunner(runtime, ROUTER_AGENT_NAME, room_id, task_id)
 
@@ -205,7 +216,7 @@ async def run_once_task(
     conversation_reader: ConversationReader | None = None,
     matrix_admin: HookMatrixAdmin | None = None,
     *,
-    config_provider: Callable[[], Config | None] | None = None,
+    config_provider: Callable[[], Config] | None = None,
 ) -> None:
     """Run one one-time task to completion on a ready router bot."""
     assert workflow.room_id is not None
@@ -231,7 +242,8 @@ async def run_cron_task(
     conversation_reader: ConversationReader | None = None,
     matrix_admin: HookMatrixAdmin | None = None,
     *,
-    config_provider: Callable[[], Config | None] | None = None,
+    config_provider: Callable[[], Config] | None = None,
+    hooks: HookRegistryLifetime | None = None,
 ) -> None:
     """Run one recurring task on a ready router bot until it ends or completes its first fire."""
     assert workflow.room_id is not None
@@ -244,6 +256,7 @@ async def run_cron_task(
         conversation_reader,
         matrix_admin,
         config_provider=config_provider,
+        hooks=hooks,
     )
     complete = scheduling_runtime.complete_recurring_occurrence
 
@@ -269,7 +282,7 @@ async def runnable_task(
     *,
     config: Config,
     runtime_paths: RuntimePaths,
-    config_provider: Callable[[], Config | None] | None = None,
+    config_provider: Callable[[], Config] | None = None,
 ) -> ScheduledTaskRecord | None:
     """Return a task's runnable state the way its runner reconciles it before waiting or firing."""
     runner = task_runner(client, task_id, room_id, config, runtime_paths, config_provider=config_provider)

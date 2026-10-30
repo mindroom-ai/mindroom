@@ -39,6 +39,8 @@ from tests.api.test_oauth_api import (
     _stored_oauth_credentials,
     _use_runtime_auth_settings,
 )
+from tests.matrix_state_helpers import save_matrix_state
+from tests.runtime_fakes import bind_test_embedded_runtime
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -79,6 +81,7 @@ def portal(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, enforce_turn_authori
         },
     }
     main.initialize_api_app(main.app, paths)
+    bind_test_embedded_runtime(main.app)
     _publish_config(main.app, paths, payload)
     _use_runtime_auth_settings(main.app)
     provider = _fake_provider(provider_id="google_drive", credential_service="google_drive_oauth")
@@ -113,6 +116,7 @@ def _enable_egress_broker(portal: dict[str, Any]) -> None:
     paths = replace(portal["paths"], process_env={**portal["paths"].process_env, "MINDROOM_EGRESS_BROKER_PORT": "8768"})
     portal["paths"] = paths
     main.initialize_api_app(main.app, paths)
+    bind_test_embedded_runtime(main.app)
     _publish_config(main.app, paths, portal["payload"])
     _use_runtime_auth_settings(main.app)
 
@@ -215,7 +219,7 @@ def test_avatar_serves_current_matrix_thumbnail(
     """Visible private and management-only shared agents use their saved Matrix identity."""
     state = MatrixState()
     state.add_account(f"agent_{agent_name}", "custom_bot", None, domain="example.org", access_token="avatar-token")  # noqa: S106
-    state.save(runtime_paths=shared_portal["paths"])
+    save_matrix_state(state, shared_portal["paths"])
     with aioresponses() as matrix:
         matrix.get(
             "http://localhost:8008/_matrix/client/v3/profile/@custom_bot:example.org",
@@ -251,7 +255,7 @@ def test_avatar_without_image_is_204(portal: dict[str, Any], avatar_url: str | N
     """An absent or non-Matrix picture is "no avatar", never an arbitrary URL proxy, and never a 404 in the console."""
     state = MatrixState()
     state.add_account("agent_personal", "personal", None, domain="example.org", access_token="avatar-token")  # noqa: S106
-    state.save(runtime_paths=portal["paths"])
+    save_matrix_state(state, portal["paths"])
     with aioresponses() as matrix:
         matrix.get(
             re.compile(r"http://localhost:8008/_matrix/client/v3/profile/.*"),
@@ -361,7 +365,7 @@ def test_me_names_the_user_by_matrix_display_name(
     """The header greets the user by their Matrix display name, and by their localpart when the profile has none."""
     state = MatrixState()
     state.add_account("agent_router", "mindroom_router", None, domain="example.org", access_token="router-token")  # noqa: S106
-    state.save(runtime_paths=portal["paths"])
+    save_matrix_state(state, portal["paths"])
     with aioresponses() as matrix:
         matrix.get(
             "http://localhost:8008/_matrix/client/v3/profile/@bob:example.org/displayname",
@@ -386,7 +390,7 @@ def test_me_falls_back_at_once_when_the_homeserver_fails(portal: dict[str, Any],
     """A homeserver that is down or rate limiting gets one try, so the header links are not held up by retries."""
     state = MatrixState()
     state.add_account("agent_router", "mindroom_router", None, domain="example.org", access_token="router-token")  # noqa: S106
-    state.save(runtime_paths=portal["paths"])
+    save_matrix_state(state, portal["paths"])
     with aioresponses() as matrix:
         matrix.get(re.compile(r"http://localhost:8008/_matrix/client/v3/profile/.*"), repeat=True, **failure)
         started = time.monotonic()
@@ -462,6 +466,7 @@ def test_personal_mutations_reject_cleartext_public_origin(
         env.pop("MINDROOM_PUBLIC_URL")
     paths = replace(portal["paths"], process_env=env)
     main.initialize_api_app(main.app, paths)
+    bind_test_embedded_runtime(main.app)
     _publish_config(main.app, paths, portal["payload"])
     _use_runtime_auth_settings(main.app)
     client = TestClient(main.app, base_url="http://portal.example.org")
@@ -612,6 +617,7 @@ def test_shared_service_account_is_not_a_personal_connection(portal: dict[str, A
         process_env={**portal["paths"].process_env, "GOOGLE_SERVICE_ACCOUNT_FILE": "service-account.json"},
     )
     main.initialize_api_app(main.app, paths)
+    bind_test_embedded_runtime(main.app)
     _publish_config(main.app, paths, portal["payload"])
     _use_runtime_auth_settings(main.app)
     response = portal["client"].get(
@@ -1052,7 +1058,11 @@ def _connected(portal: dict[str, Any], user: str, agent: str, provider: str = "g
 
 
 def _sqlite_stores(portal: dict[str, Any]) -> list[Path]:
-    return sorted(portal["paths"].storage_root.rglob("*.sqlite3"))
+    """Return the credential stores under the storage root, leaving out the runtime's own control state."""
+    storage_root = portal["paths"].storage_root
+    return sorted(
+        path for path in storage_root.rglob("*.sqlite3") if not path.is_relative_to(storage_root / "control_state")
+    )
 
 
 def test_catalog_reads_no_connection_state(portal: dict[str, Any], monkeypatch: pytest.MonkeyPatch) -> None:

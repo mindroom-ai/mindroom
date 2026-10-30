@@ -337,8 +337,8 @@ async def test_removed_agent_fails_each_task_it_runs_and_says_so_where_it_posts(
     assert save_status.await_args.args[2] == "failed"
     notice.assert_awaited_once()
     assert notice.await_args.args[0] is removed_bot.client
-    assert notice.await_args.args[2].resolved_thread_id == "$thread"
-    assert "❌ Schedule failed because its agent was removed: " in notice.await_args.args[3]
+    assert notice.await_args.args[1].resolved_thread_id == "$thread"
+    assert "❌ Schedule failed because its agent was removed: " in notice.await_args.args[2]
     await runtime.stop()
 
 
@@ -476,7 +476,7 @@ async def test_restore_fails_a_task_whose_owner_was_removed_while_mindroom_was_d
         client.room_put_state.assert_awaited_once()
         assert client.room_put_state.await_args.kwargs["content"]["status"] == "failed"
         notice.assert_awaited_once()
-        assert "❌ Schedule failed because its agent was removed: " in notice.await_args.args[3]
+        assert "❌ Schedule failed because its agent was removed: " in notice.await_args.args[2]
     else:
         client.room_put_state.assert_not_awaited()
         notice.assert_not_awaited()
@@ -752,7 +752,10 @@ async def test_task_saved_without_an_owner_restores_under_the_rule_over_its_writ
 @pytest.mark.asyncio
 async def test_orchestrator_fences_changing_entities_and_fails_removed_entities_tasks(tmp_path: Path) -> None:
     """The fleet's change hook fences the stopping bots; its removal hook fails their tasks before approvals settle."""
-    orchestrator = _MultiAgentOrchestrator(runtime_paths=orchestrator_runtime_paths(tmp_path))
+    orchestrator = _MultiAgentOrchestrator(
+        runtime_paths=orchestrator_runtime_paths(tmp_path),
+        config=Config(agents={"general": AgentConfig(display_name="General")}),
+    )
     bot = scheduling_bot(_client("@general:localhost"), agent_name="general")
     install_bots(orchestrator, {"general": bot})
     order: list[str] = []
@@ -779,7 +782,7 @@ async def test_orchestrator_fences_changing_entities_and_fails_removed_entities_
 @pytest.mark.asyncio
 async def test_process_shutdown_cancels_runners_before_any_bot_stops(tmp_path: Path) -> None:
     """Runners end before bots stop, so none uses a client process shutdown closes."""
-    orchestrator = _MultiAgentOrchestrator(runtime_paths=orchestrator_runtime_paths(tmp_path))
+    orchestrator = _MultiAgentOrchestrator(runtime_paths=orchestrator_runtime_paths(tmp_path), config=Config())
     order: list[str] = []
     runner_cancelled = asyncio.Event()
 

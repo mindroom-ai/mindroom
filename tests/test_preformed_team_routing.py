@@ -20,7 +20,7 @@ from mindroom.config.agent import AgentConfig, TeamConfig
 from mindroom.config.main import Config
 from mindroom.config.models import RouterConfig
 from mindroom.constants import STREAM_STATUS_KEY
-from mindroom.matrix.client import DeliveredMatrixEvent
+from mindroom.matrix.client_delivery import DeliveredMatrixEvent
 from mindroom.matrix.thread_history_result import thread_history_result
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.response_runner import ResponseRequest
@@ -50,14 +50,8 @@ if TYPE_CHECKING:
     from contextvars import Context
     from pathlib import Path
 
-    from mindroom.final_delivery import FinalDeliveryOutcome
     from mindroom.response_turn import ResponseTurnContext, TurnSinks
     from mindroom.teams.envelope import TeamTurnSpec
-
-
-def _running_members() -> dict[str, MagicMock]:
-    """Return the live fleet the team and its members run in."""
-    return {name: MagicMock(running=True) for name in ("t1", "a1", "a2")}
 
 
 def _bind_runtime_paths(config: Config, tmp_path: Path) -> Config:
@@ -125,10 +119,6 @@ def _mock_event_with_team_mention(team_user_id: str, body: str = "@team please h
     return ev
 
 
-def _handled_response_event_id(outcome: FinalDeliveryOutcome) -> str | None:
-    return outcome.event_id if outcome.mark_handled and outcome.is_visible_response and not outcome.suppressed else None
-
-
 @pytest.mark.asyncio
 async def test_router_does_not_route_when_preformed_team_is_mentioned(config_with_team: Config, tmp_path: Path) -> None:
     """Router must not route if the message mentions a predefined team."""
@@ -143,7 +133,7 @@ async def test_router_does_not_route_when_preformed_team_is_mentioned(config_wit
         display_name="Router",
         password="p",  # noqa: S106
     )
-    router = make_test_agent_bot(router_user, tmp_path, config_with_team, runtime_paths)
+    router = make_test_agent_bot(router_user, config_with_team, runtime_paths)
     router.client = _make_matrix_client_mock()
     install_runtime_journal_support(router)
 
@@ -157,7 +147,7 @@ async def test_router_does_not_route_when_preformed_team_is_mentioned(config_wit
     event = _mock_event_with_team_mention(team_user_id)
 
     # Also patch suggest_responder_for_message to detect accidental routing
-    with patch("mindroom.router_relay.suggest_responder_for_message", new=AsyncMock(return_value="a1")):
+    with patch("mindroom.router.relay.suggest_responder_for_message", new=AsyncMock(return_value="a1")):
         await router._on_message(room, event)
 
     # Router must not send any message (i.e., must not route)
@@ -179,7 +169,6 @@ async def test_preformed_team_bot_responds_when_mentioned(config_with_team: Conf
     config_with_team.defaults.enable_streaming = False
     bot = make_test_agent_bot(
         agent_user=team_user,
-        storage_path=tmp_path,
         config=config_with_team,
         runtime_paths=runtime_paths,
         rooms=["!room:localhost"],
@@ -190,10 +179,6 @@ async def test_preformed_team_bot_responds_when_mentioned(config_with_team: Conf
 
     async def fake_team_response_stream(*_args: Any, **_kwargs: Any) -> AsyncIterator[str]:  # noqa: ANN401
         yield "🤝 Team Response (a1, a2):\n\n**a1**: ok\n\n**a2**: ok"
-
-    # Minimal orchestrator stub is fine because we patch team_response_stream
-    bot.orchestrator = MagicMock()
-    bot.orchestrator.agent_bots = _running_members()
 
     team_user_id = ids["t1"].full_id
     room = _mock_room("!room:localhost", [team_user_id, "@user:localhost"])
@@ -245,15 +230,12 @@ async def _team_memory_saves(
     config.defaults.enable_streaming = False
     bot = make_test_agent_bot(
         agent_user=user,
-        storage_path=tmp_path,
         config=config,
         runtime_paths=runtime_paths,
         rooms=["!room:localhost"],
     )
     bot.client = _make_matrix_client_mock()
     install_runtime_journal_support(bot)
-    bot.orchestrator = MagicMock()
-    bot.orchestrator.agent_bots = _running_members()
 
     store_calls: list[tuple[tuple[Any, ...], dict[str, Any]]] = []
     scheduled_tasks: list[asyncio.Task[Any]] = []
@@ -369,7 +351,6 @@ async def test_team_reply_resumed_after_approval_saves_the_conversation(
     ids = entity_ids(config, runtime_paths)
     bot = make_test_agent_bot(
         agent_user=AgentMatrixUser(agent_name="t1", user_id=ids["t1"].full_id, display_name="t1", password="p"),  # noqa: S106
-        storage_path=tmp_path,
         config=config,
         runtime_paths=runtime_paths,
         rooms=["!room:localhost"],
@@ -420,7 +401,6 @@ async def test_preformed_team_rejection_edits_existing_message(config_with_team:
     config_with_team.defaults.enable_streaming = False
     bot = make_test_agent_bot(
         agent_user=team_user,
-        storage_path=tmp_path,
         config=config_with_team,
         runtime_paths=runtime_paths,
         rooms=["!room:localhost"],
@@ -428,8 +408,7 @@ async def test_preformed_team_rejection_edits_existing_message(config_with_team:
     install_direct_response_admission(bot)
     bot.client = _make_matrix_client_mock()
     install_runtime_journal_support(bot)
-    bot.orchestrator = MagicMock()
-    bot.orchestrator.agent_bots = {"a1": MagicMock()}
+    bot.orchestrator.unavailable.add("a2")
 
     with patch(
         "mindroom.delivery_gateway.send_message_outcome",
@@ -488,15 +467,12 @@ async def test_preformed_team_plain_reply_does_not_continue_existing_thread_root
     config_with_team.defaults.enable_streaming = False
     bot = make_test_agent_bot(
         agent_user=team_user,
-        storage_path=tmp_path,
         config=config_with_team,
         runtime_paths=runtime_paths,
         rooms=["!room:localhost"],
     )
     bot.client = _make_matrix_client_mock()
     install_runtime_journal_support(bot)
-    bot.orchestrator = MagicMock()
-    bot.orchestrator.agent_bots = _running_members()
 
     team_user_id = ids["t1"].full_id
     room = _mock_room("!room:localhost", [team_user_id, "@user:localhost"])
@@ -559,15 +535,12 @@ async def test_team_does_not_respond_to_different_domain_mention(config_with_tea
     config_with_team.defaults.enable_streaming = False
     bot = make_test_agent_bot(
         agent_user=team_user,
-        storage_path=tmp_path,
         config=config_with_team,
         runtime_paths=runtime_paths,
         rooms=["!room:localhost"],
     )
     bot.client = _make_matrix_client_mock()
     install_runtime_journal_support(bot)
-    bot.orchestrator = MagicMock()
-    bot.orchestrator.agent_bots = _running_members()
 
     async def fake_team_response_stream(*_args: Any, **_kwargs: Any) -> AsyncIterator[str]:  # noqa: ANN401
         yield "🤝 Team Response (a1, a2): ok"
@@ -609,7 +582,6 @@ async def test_agent_reply_saves_its_conversation_only_with_mem0(
     ids = entity_ids(config, runtime_paths)
     bot = make_test_agent_bot(
         agent_user=AgentMatrixUser(agent_name="a1", user_id=ids["a1"].full_id, display_name="a1", password="p"),  # noqa: S106
-        storage_path=tmp_path,
         config=config,
         runtime_paths=runtime_paths,
         rooms=["!room:localhost"],
@@ -656,7 +628,6 @@ async def test_job_follow_up_hands_no_prompt_to_memory(
     ids = entity_ids(config, runtime_paths)
     bot = make_test_agent_bot(
         agent_user=AgentMatrixUser(agent_name="t1", user_id=ids["t1"].full_id, display_name="t1", password="p"),  # noqa: S106
-        storage_path=tmp_path,
         config=config,
         runtime_paths=runtime_paths,
         rooms=["!room:localhost"],

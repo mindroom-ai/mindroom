@@ -1,11 +1,11 @@
-"""Shared Google OAuth provider helpers."""
+"""Built-in Google OAuth providers and their shared helpers."""
 
 from __future__ import annotations
 
 import asyncio
 import time
 from collections.abc import Mapping
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from functools import partial
 from typing import TYPE_CHECKING, Any, cast
 
@@ -39,11 +39,83 @@ _GOOGLE_PROVISIONING_PATH = "/v1/local-mindroom/oauth/google-client"
 _GOOGLE_PROVISIONED_CLIENT_FETCHED_AT_KEY = "_oauth_client_runtime_bootstrap_fetched_at"
 _GOOGLE_PROVISIONED_CLIENT_TTL_SECONDS = 60 * 60
 _GOOGLE_IDENTITY_VERIFICATION_TIMEOUT_SECONDS = 20.0
-GOOGLE_IDENTITY_SCOPES = (
+_GOOGLE_IDENTITY_SCOPES = (
     "openid",
     "https://www.googleapis.com/auth/userinfo.email",
     "https://www.googleapis.com/auth/userinfo.profile",
 )
+GOOGLE_DRIVE_READ_OAUTH_SCOPES = (
+    *_GOOGLE_IDENTITY_SCOPES,
+    "https://www.googleapis.com/auth/drive.readonly",
+)
+GOOGLE_DRIVE_WRITE_SCOPE = "https://www.googleapis.com/auth/drive"
+
+
+@dataclass(frozen=True, slots=True)
+class _GoogleProviderSpec:
+    """What sets one built-in Google provider apart; every other field comes from the shared Google defaults."""
+
+    display_name: str
+    tool_config_service: str | None
+    # Requested after `_GOOGLE_IDENTITY_SCOPES`.
+    service_scopes: tuple[str, ...]
+    status_capabilities: tuple[str, ...]
+    include_granted_scopes: bool = True
+
+
+_GOOGLE_PROVIDERS = {
+    "google_calendar": _GoogleProviderSpec(
+        display_name="Google Calendar",
+        tool_config_service="google_calendar",
+        service_scopes=(
+            "https://www.googleapis.com/auth/calendar.events",
+            "https://www.googleapis.com/auth/calendar.calendarlist.readonly",
+            "https://www.googleapis.com/auth/calendar.freebusy",
+            "https://www.googleapis.com/auth/calendar.settings.readonly",
+        ),
+        status_capabilities=("Calendar event read/write",),
+    ),
+    "google_cloud": _GoogleProviderSpec(
+        display_name="Google Cloud",
+        # Several tools share this connection; each keeps settings under its own tool name.
+        tool_config_service=None,
+        service_scopes=("https://www.googleapis.com/auth/cloud-platform.read-only",),
+        status_capabilities=("Read-only Google Cloud API access",),
+        include_granted_scopes=False,
+    ),
+    "google_docs": _GoogleProviderSpec(
+        display_name="Google Docs",
+        tool_config_service="google_docs",
+        service_scopes=("https://www.googleapis.com/auth/documents",),
+        status_capabilities=("Docs create and read", "Docs text editing"),
+        include_granted_scopes=False,
+    ),
+    "google_drive": _GoogleProviderSpec(
+        display_name="Google Drive",
+        tool_config_service="google_drive",
+        service_scopes=(GOOGLE_DRIVE_WRITE_SCOPE,),
+        status_capabilities=("Drive file search and read", "Drive file upload and organization"),
+    ),
+    "google_gmail": _GoogleProviderSpec(
+        display_name="Gmail",
+        tool_config_service="gmail",
+        service_scopes=("https://www.googleapis.com/auth/gmail.modify",),
+        status_capabilities=("Gmail read, send, draft, and mailbox management",),
+    ),
+    "google_sheets": _GoogleProviderSpec(
+        display_name="Google Sheets",
+        tool_config_service="google_sheets",
+        service_scopes=("https://www.googleapis.com/auth/spreadsheets",),
+        status_capabilities=("Sheets read/write",),
+    ),
+    "google_tasks": _GoogleProviderSpec(
+        display_name="Google Tasks",
+        tool_config_service="google_tasks",
+        service_scopes=("https://www.googleapis.com/auth/tasks",),
+        status_capabilities=("Tasks read/write",),
+        include_granted_scopes=False,
+    ),
+}
 
 
 def _google_runtime_endpoints() -> OAuthRuntimeEndpoints:
@@ -273,39 +345,40 @@ def _google_domain_env_names(provider_id: str, suffix: str) -> tuple[str, ...]:
     return (f"{prefix}_{suffix}", f"MINDROOM_OAUTH_{prefix}_{suffix}")
 
 
-def _google_oauth_provider(
-    *,
-    provider_id: str,
-    display_name: str,
-    scopes: tuple[str, ...],
-    credential_service: str,
-    tool_config_service: str | None,
-    client_config_services: tuple[str, ...],
-    status_capabilities: tuple[str, ...],
-    include_granted_scopes: bool = True,
-) -> OAuthProvider:
-    """Return a Google OAuth provider with shared Google OAuth defaults."""
+def google_oauth_provider(provider_id: str) -> OAuthProvider:
+    """Return the built-in Google provider `provider_id` with the shared Google OAuth defaults."""
+    spec = _GOOGLE_PROVIDERS[provider_id]
     extra_auth_params = {
         "access_type": "offline",
         "prompt": "consent",
     }
-    if include_granted_scopes:
+    if spec.include_granted_scopes:
         extra_auth_params["include_granted_scopes"] = "true"
     return OAuthProvider(
         id=provider_id,
-        display_name=display_name,
+        display_name=spec.display_name,
         authorization_url=_GOOGLE_AUTHORIZATION_URL,
         token_url=_GOOGLE_TOKEN_URL,
-        scopes=scopes,
-        credential_service=credential_service,
-        tool_config_service=tool_config_service,
-        client_config_services=client_config_services,
+        scopes=(*_GOOGLE_IDENTITY_SCOPES, *spec.service_scopes),
+        credential_service=f"{provider_id}_oauth",
+        tool_config_service=spec.tool_config_service,
+        client_config_services=(f"{provider_id}_oauth_client",),
         shared_client_config_services=(_GOOGLE_CLIENT_CONFIG_SERVICE,),
         allowed_email_domains_env=_google_domain_env_names(provider_id, "ALLOWED_EMAIL_DOMAINS"),
         allowed_hosted_domains_env=_google_domain_env_names(provider_id, "ALLOWED_HOSTED_DOMAINS"),
         extra_auth_params=extra_auth_params,
         pkce_code_challenge_method="S256",
         runtime_bootstrapper=_google_runtime_bootstrapper,
-        status_capabilities=status_capabilities,
+        status_capabilities=spec.status_capabilities,
         token_parser=_google_token_parser,
     )
+
+
+def google_oauth_providers() -> tuple[OAuthProvider, ...]:
+    """Return every built-in Google provider."""
+    return tuple(google_oauth_provider(provider_id) for provider_id in _GOOGLE_PROVIDERS)
+
+
+def google_cloud_oauth_provider() -> OAuthProvider:
+    """Return the shared read-only connection used by every Google Cloud tool."""
+    return google_oauth_provider("google_cloud")

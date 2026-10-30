@@ -575,7 +575,7 @@ async def test_an_interrupted_import_into_a_populated_store_keeps_its_owners(jou
     current = await store.backend.write(
         lambda transaction: turn_rows.record_pending_turn(transaction, AGENT, newer, room_id=ROOM),
     )
-    assert isinstance(current, turn_rows.Accepted)
+    assert isinstance(current, turn_rows.PendingTurn)
     ledger_records = {
         "$m1": (old := blob(["$m1", "$m3"], response="$old", redacted_source_event_ids=["$m1"])),
         "$m3": old,

@@ -1,0 +1,372 @@
+{
+  "family": "codex",
+  "input": {
+    "deferred_tool_search": null,
+    "messages": [
+      {
+        "content": "You are Parity, a concise travel assistant used by the MindRoom provider goldens.",
+        "role": "system"
+      },
+      {
+        "audio": [
+          {
+            "content": "UklGRiQAAABXQVZFZm10IBAAAAABAAEAQB8AAIA+AAACABAAZGF0YQAAAAA=",
+            "id": "parity-audio",
+            "mime_type": "audio/wav"
+          }
+        ],
+        "content": "Use the attached media to plan my packing.",
+        "files": [
+          {
+            "content": "JVBERi0xLjQKJSVFT0YK",
+            "filename": "itinerary.pdf",
+            "id": "parity-pdf",
+            "mime_type": "application/pdf"
+          },
+          {
+            "content": "UEsDBHBhcml0eS1kb2N4",
+            "filename": "packing.docx",
+            "id": "parity-docx"
+          },
+          {
+            "content": "Pack light.\n",
+            "filename": "notes.txt",
+            "id": "parity-txt",
+            "mime_type": "text/plain"
+          },
+          {
+            "content": "PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSIxIiBoZWlnaHQ9IjEiLz4=",
+            "filename": "route.svg",
+            "id": "parity-svg-file",
+            "mime_type": "image/svg+xml"
+          },
+          {
+            "filename": "empty.txt",
+            "id": "parity-empty",
+            "mime_type": "text/plain"
+          },
+          {
+            "filename": "guide.pdf",
+            "id": "parity-file-url",
+            "mime_type": "application/pdf",
+            "url": "https://example.com/parity/guide.pdf"
+          }
+        ],
+        "images": [
+          {
+            "content": "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==",
+            "format": "png",
+            "id": "parity-image",
+            "mime_type": "image/png"
+          },
+          {
+            "content": "PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSIxIiBoZWlnaHQ9IjEiLz4=",
+            "id": "parity-svg-image",
+            "mime_type": "image/svg+xml"
+          },
+          {
+            "id": "parity-image-url",
+            "url": "https://example.com/parity/map.png"
+          }
+        ],
+        "role": "user",
+        "videos": [
+          {
+            "content": "AAAAGGZ0eXBtcDQy",
+            "id": "parity-video",
+            "mime_type": "video/mp4"
+          }
+        ]
+      }
+    ],
+    "model_config": {
+      "extra_kwargs": {
+        "codex_home": "<codex_home>"
+      },
+      "id": "gpt-6.1-sol",
+      "provider": "codex"
+    },
+    "output_schema": null,
+    "portable_replay": null,
+    "tool_choice": null,
+    "tools": []
+  },
+  "parsed": {
+    "message": {
+      "content": "Pack a light rain jacket and comfortable shoes.",
+      "provider_data": {
+        "mindroom_model": {
+          "id": "gpt-6.1-sol",
+          "provider": "OpenAI Codex Responses"
+        },
+        "mindroom_native_compaction": null,
+        "mindroom_portable_replay": false,
+        "mindroom_response_output": [
+          {
+            "content": [
+              {
+                "annotations": [],
+                "text": "Pack a light rain jacket and comfortable shoes.",
+                "type": "output_text"
+              }
+            ],
+            "id": "msg_parity",
+            "role": "assistant",
+            "status": "completed",
+            "type": "message"
+          }
+        ],
+        "mindroom_response_stored": false,
+        "response_id": "resp_parity"
+      },
+      "role": "assistant"
+    },
+    "metrics": {
+      "input_tokens": 42,
+      "output_tokens": 12,
+      "total_tokens": 54
+    },
+    "stop_reason": "end"
+  },
+  "request": {
+    "body": {
+      "model": "gpt-6.1-sol",
+      "stream": true,
+      "include": [
+        "reasoning.encrypted_content"
+      ],
+      "input": [
+        {
+          "role": "developer",
+          "content": "You are Parity, a concise travel assistant used by the MindRoom provider goldens."
+        },
+        {
+          "role": "user",
+          "content": [
+            {
+              "type": "input_text",
+              "text": "Use the attached media to plan my packing.\n\n[Inline media unavailable for this model]\nThe model or provider adapter could not accept some inline attachments for this request. Their content was not inspected. Do not claim to have seen, heard, or read the removed media. Do not repeat get_attachment(view=True) for it on this model. Use get_attachment without view to inspect metadata or save the file with mindroom_output_path. Then use other available tools to extract or interpret its content. If no suitable tool is available, explain the limitation to the user."
+            },
+            {
+              "type": "input_image",
+              "image_url": "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg=="
+            },
+            {
+              "type": "input_image",
+              "image_url": "data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSIxIiBoZWlnaHQ9IjEiLz4="
+            },
+            {
+              "type": "input_image",
+              "image_url": "https://example.com/parity/map.png"
+            },
+            {
+              "type": "input_file",
+              "filename": "itinerary.pdf",
+              "file_data": "data:application/pdf;base64,JVBERi0xLjQKJSVFT0YK"
+            },
+            {
+              "type": "input_file",
+              "filename": "packing.docx",
+              "file_data": "data:application/vnd.openxmlformats-officedocument.wordprocessingml.document;base64,UEsDBHBhcml0eS1kb2N4"
+            },
+            {
+              "type": "input_file",
+              "filename": "notes.txt",
+              "file_data": "data:text/plain;base64,UGFjayBsaWdodC4K"
+            },
+            {
+              "type": "input_file",
+              "filename": "route.svg",
+              "file_data": "data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSIxIiBoZWlnaHQ9IjEiLz4="
+            },
+            {
+              "type": "input_file",
+              "file_url": "https://example.com/parity/guide.pdf"
+            }
+          ]
+        }
+      ],
+      "instructions": "You are a helpful assistant.",
+      "reasoning": {},
+      "store": false
+    },
+    "headers": {
+      "accept": "application/json",
+      "chatgpt-account-id": "parity-account",
+      "content-type": "application/json"
+    },
+    "method": "POST",
+    "url": "https://chatgpt.com/backend-api/codex/responses"
+  },
+  "response_raw": {
+    "headers": {
+      "content-type": "text/event-stream"
+    },
+    "sse": [
+      {
+        "data": {
+          "response": {
+            "created_at": 1792540800,
+            "error": null,
+            "id": "resp_parity",
+            "incomplete_details": null,
+            "model": "gpt-6.1-sol",
+            "object": "response",
+            "output": [],
+            "status": "in_progress",
+            "usage": null
+          },
+          "sequence_number": 0,
+          "type": "response.created"
+        },
+        "event": "response.created"
+      },
+      {
+        "data": {
+          "item": {
+            "content": [],
+            "id": "msg_parity",
+            "role": "assistant",
+            "status": "in_progress",
+            "type": "message"
+          },
+          "output_index": 0,
+          "sequence_number": 1,
+          "type": "response.output_item.added"
+        },
+        "event": "response.output_item.added"
+      },
+      {
+        "data": {
+          "content_index": 0,
+          "item_id": "msg_parity",
+          "output_index": 0,
+          "part": {
+            "annotations": [],
+            "text": "",
+            "type": "output_text"
+          },
+          "sequence_number": 2,
+          "type": "response.content_part.added"
+        },
+        "event": "response.content_part.added"
+      },
+      {
+        "data": {
+          "content_index": 0,
+          "delta": "Pack a light rain jacket",
+          "item_id": "msg_parity",
+          "logprobs": [],
+          "output_index": 0,
+          "sequence_number": 3,
+          "type": "response.output_text.delta"
+        },
+        "event": "response.output_text.delta"
+      },
+      {
+        "data": {
+          "content_index": 0,
+          "delta": " and comfortable shoes.",
+          "item_id": "msg_parity",
+          "logprobs": [],
+          "output_index": 0,
+          "sequence_number": 4,
+          "type": "response.output_text.delta"
+        },
+        "event": "response.output_text.delta"
+      },
+      {
+        "data": {
+          "content_index": 0,
+          "item_id": "msg_parity",
+          "logprobs": [],
+          "output_index": 0,
+          "sequence_number": 5,
+          "text": "Pack a light rain jacket and comfortable shoes.",
+          "type": "response.output_text.done"
+        },
+        "event": "response.output_text.done"
+      },
+      {
+        "data": {
+          "content_index": 0,
+          "item_id": "msg_parity",
+          "output_index": 0,
+          "part": {
+            "annotations": [],
+            "text": "Pack a light rain jacket and comfortable shoes.",
+            "type": "output_text"
+          },
+          "sequence_number": 6,
+          "type": "response.content_part.done"
+        },
+        "event": "response.content_part.done"
+      },
+      {
+        "data": {
+          "item": {
+            "content": [
+              {
+                "annotations": [],
+                "text": "Pack a light rain jacket and comfortable shoes.",
+                "type": "output_text"
+              }
+            ],
+            "id": "msg_parity",
+            "role": "assistant",
+            "status": "completed",
+            "type": "message"
+          },
+          "output_index": 0,
+          "sequence_number": 7,
+          "type": "response.output_item.done"
+        },
+        "event": "response.output_item.done"
+      },
+      {
+        "data": {
+          "response": {
+            "created_at": 1792540800,
+            "error": null,
+            "id": "resp_parity",
+            "incomplete_details": null,
+            "model": "gpt-6.1-sol",
+            "object": "response",
+            "output": [
+              {
+                "content": [
+                  {
+                    "annotations": [],
+                    "text": "Pack a light rain jacket and comfortable shoes.",
+                    "type": "output_text"
+                  }
+                ],
+                "id": "msg_parity",
+                "role": "assistant",
+                "status": "completed",
+                "type": "message"
+              }
+            ],
+            "status": "completed",
+            "usage": {
+              "input_tokens": 42,
+              "input_tokens_details": {
+                "cached_tokens": 0
+              },
+              "output_tokens": 12,
+              "output_tokens_details": {
+                "reasoning_tokens": 0
+              },
+              "total_tokens": 54
+            }
+          },
+          "sequence_number": 8,
+          "type": "response.completed"
+        },
+        "event": "response.completed"
+      }
+    ],
+    "status": 200
+  },
+  "scenario": "mixed_media_input"
+}

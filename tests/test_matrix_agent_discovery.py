@@ -100,9 +100,7 @@ async def test_agent_discovery_reports_only_available_authorized_targets(
             context,
             orchestrator=cast(
                 "OrchestratorRuntime",
-                SimpleNamespace(
-                    agent_bots={"general": SimpleNamespace(running=True), "code": SimpleNamespace(running=False)},
-                ),
+                SimpleNamespace(running_entity_names=lambda: frozenset({"general"})),
             ),
         )
         expected = ["general"]

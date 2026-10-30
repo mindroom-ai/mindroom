@@ -9,7 +9,7 @@ from typing import TYPE_CHECKING
 from mindroom.agent_cli.session import MAX_CLI_GRANT_LIFETIME_NS, cli_turn_owner
 from mindroom.agent_cli.shell_access import agent_cli_shell_env, minimal_shell_problems
 from mindroom.agent_cli.turn import LiveTurnTools
-from mindroom.approval.tool_owners import authorize_prepared_tool_call
+from mindroom.approval.tool_owners import authorize_prepared_tool_call, check_prepared_catalog_authority
 from mindroom.tool_jobs.execution import agent_tool_middleware
 from mindroom.tool_system.agent_tool_calls import PreparedAgentToolCatalog
 
@@ -87,8 +87,11 @@ def bind_response_owner(
 
     async def authorize(key: ToolKey, _arguments: dict[str, object]) -> None:
         current = new_owner.catalog
-        if current.runtime_context.current_config != current.runtime_context.config:
-            raise PermissionError(failure_message("Current configuration no longer permits this CLI catalog"))
+        # Before binding, so a refused catalog builds no deferred toolkit; dispatch checks again after the bind's awaits.
+        try:
+            check_prepared_catalog_authority(current.runtime_context)
+        except PermissionError as exc:
+            raise PermissionError(failure_message(str(exc))) from exc
         cache_key = (id(current), key)
         binding = bindings.get(cache_key)
         if binding is None:

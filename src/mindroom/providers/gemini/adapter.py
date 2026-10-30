@@ -37,6 +37,7 @@ from mindroom.providers.gemini.wire import (
     function_declarations,
     malformed_tool_call_error,
     read_chunk,
+    rejected_media,
     reply_provider_data,
     stop_reason,
     without_tool_selection,
@@ -118,7 +119,10 @@ class GeminiProvider:
             # Media and chunk failures arrive normalized.
             raise
         except Exception as error:
-            raise _provider_error(error, provider=provider) from error
+            failure = _provider_error(error, provider=provider)
+            if isinstance(error, APIError):
+                failure.rejected_media = rejected_media(error.message, request.messages)
+            raise failure from error
         if not reply.finished:
             # The stream ended before Gemini ended the reply, so the turn did not finish.
             return

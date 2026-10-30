@@ -31,6 +31,7 @@ from testing.worker_computer_matrix import create_matrix_fixture
 from testing.worker_computer_native import connect_viewer, docker_environment, native_json, native_tabs, shell_stdout
 
 from mindroom.api import computers, config_lifecycle
+from mindroom.api.app_state import ensure_app_state
 from mindroom.api.main import _RuntimeDashboardCorsMiddleware
 from mindroom.config.main import Config
 from mindroom.constants import resolve_primary_runtime_paths
@@ -456,7 +457,7 @@ res.writeHead(200,{'Content-Type':'text/html'});res.end(HTML);
     @asynccontextmanager
     async def lifespan(self, app: FastAPI) -> AsyncIterator[None]:
         """Own only this run's manager, stream sessions and worker containers."""
-        state = config_lifecycle.ensure_app_state(app)
+        state = ensure_app_state(app)
         state.api_state = config_lifecycle.ApiState(
             threading.Lock(),
             config_lifecycle.ApiSnapshot(

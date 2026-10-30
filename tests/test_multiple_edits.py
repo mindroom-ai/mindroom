@@ -33,11 +33,6 @@ if TYPE_CHECKING:
     from pathlib import Path
 
 
-def _delivery_resolution(response_event_id: str | None) -> str | None:
-    """Build one test-side response result for edit-regeneration tests."""
-    return response_event_id
-
-
 @pytest.mark.asyncio
 async def test_agent_regenerates_on_multiple_edits(tmp_path: Path) -> None:
     """Test that agents regenerate their response on each consecutive edit."""
@@ -66,17 +61,11 @@ async def test_agent_regenerates_on_multiple_edits(tmp_path: Path) -> None:
 
     bot = make_test_agent_bot(
         agent_user=agent_user,
-        storage_path=tmp_path,
         rooms=["!test:localhost"],
         config=config,
         runtime_paths=runtime_paths_for(config),
     )
     install_direct_response_admission(bot)
-
-    # Mock the orchestrator and client
-    mock_orchestrator = MagicMock()
-    mock_orchestrator.current_config = config
-    bot.orchestrator = mock_orchestrator
 
     bot.client = make_matrix_client_mock(user_id="@mindroom_test:localhost")
     install_runtime_journal_support(bot)
@@ -166,7 +155,7 @@ async def test_agent_regenerates_on_multiple_edits(tmp_path: Path) -> None:
     edit1_event.source = edit1_event.__dict__["source"]
 
     # Process first edit and verify regeneration happens through the shared response helper.
-    mock_generate_response = AsyncMock(return_value=_delivery_resolution("$response123"))
+    mock_generate_response = AsyncMock(return_value="$response123")
     install_edit_regeneration_mock(bot, mock_generate_response)
     await bot._on_message(room, edit1_event)
     await drain_coalescing(bot)
@@ -203,7 +192,7 @@ async def test_agent_regenerates_on_multiple_edits(tmp_path: Path) -> None:
     edit2_event.source = edit2_event.__dict__["source"]
 
     # Process second edit and verify regeneration happens again.
-    mock_generate_response = AsyncMock(return_value=_delivery_resolution("$response123"))
+    mock_generate_response = AsyncMock(return_value="$response123")
     install_edit_regeneration_mock(bot, mock_generate_response)
     await bot._on_message(room, edit2_event)
     await drain_coalescing(bot)
@@ -240,7 +229,7 @@ async def test_agent_regenerates_on_multiple_edits(tmp_path: Path) -> None:
     bot.client.room_send.reset_mock()
 
     # Process third edit and verify regeneration still happens.
-    mock_generate_response = AsyncMock(return_value=_delivery_resolution("$response123"))
+    mock_generate_response = AsyncMock(return_value="$response123")
     install_edit_regeneration_mock(bot, mock_generate_response)
     await bot._on_message(room, edit3_event)
     await drain_coalescing(bot)

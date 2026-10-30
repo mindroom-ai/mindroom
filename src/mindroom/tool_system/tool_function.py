@@ -42,11 +42,6 @@ class ToolFunction:
     ``external_execution_silent`` marks an externally executed call whose pause the run reports without text.
     ``injected_params`` maps each entrypoint parameter the framework supplies at call time to what it receives; the
     model never sees one, and its model-sent values are dropped unless it is a media name the schema declares.
-    ``entrypoint_processed`` marks a function whose schema was derived from its signature: an owned one that
-    ``passthrough_tool`` did not mark, as MCP tools are, or an Agno one that does not set ``skip_entrypoint_processing``
-    (an Agno toolkit's ``@tool`` methods set it);
-    realtime calls run Agno's entrypoint processing on such a function a second time, which closes its object schemas
-    (see the TODO in ``matrix_rtc/call_tools.py``).
     ``actor_state`` is what an Agno toolkit keeps on its injected agent or team (``ToolCallActor``): one dict per
     adapted toolkit, shared by its functions and calls and never stored.
     ``middleware`` is the function's own policy, which every call of it runs innermost, inside whatever policy the
@@ -74,7 +69,6 @@ class ToolFunction:
     stop_after_call: bool = False
     entrypoint: Callable[..., Any]
     injected_params: Mapping[str, InjectedValue] = field(default_factory=dict)
-    entrypoint_processed: bool = False
     actor_state: dict[str, Any] = field(default_factory=dict, compare=False, repr=False)
     middleware: tuple[ToolMiddleware, ...] = ()
 

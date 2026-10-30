@@ -24,6 +24,7 @@ from mindroom.external_triggers.store import (
 )
 from mindroom.matrix.identity import managed_account_key
 from mindroom.matrix.state import MatrixState
+from tests.matrix_state_helpers import save_matrix_state
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -397,7 +398,7 @@ def test_store_rejects_persisted_managed_account_owner(tmp_path: Path) -> None:
         password="secret",  # noqa: S106 - test Matrix state fixture only.
         domain="example.org",
     )
-    matrix_state.save(runtime_paths)
+    save_matrix_state(matrix_state, runtime_paths)
     store = ExternalTriggerStore(runtime_paths)
 
     with pytest.raises(ExternalTriggerStoreError, match="human requester"):

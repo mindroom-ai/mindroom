@@ -100,6 +100,7 @@ The harness writes each `sse` event as its `event:` and `data:` lines plus a bla
 | `parallel_tool_calls`, `parallel_tool_results` | Two calls in one reply, then both results replayed. |
 | `foreign_tool_history` | A tool turn stored by another provider (Claude, or OpenAI Chat for Claude routes) replayed after a model switch. |
 | `image_input`, `file_input`, `audio_input` | A 1x1 PNG, a tiny PDF, or an empty WAV on the prompt; routes that omit a kind pin the media-fallback note instead. |
+| `mixed_media_input` | One prompt with a PNG and an SVG image, a PDF, a DOCX, a text file, an SVG file, a file without content, an empty WAV, and a video, plus an image URL where the route sends image URLs and a file URL where it sends file URLs, recorded before per-attachment media recovery so it pins that the first request did not change; the DOCX names no type on the OpenAI-family routes, which type it by its name without the host's MIME table. |
 | `reasoning`, `reasoning_replay` | A reasoning or thinking reply, then that turn replayed. |
 | `reasoning_tool_call`, `reasoning_tool_results` | A reasoning reply that calls a tool, then the tool loop continued with its result, so signed thinking, reasoning content, and thought signatures replay inside one turn. |
 | `claude_citations`, `claude_citations_replay` | A text document, which the request sends without asking for citations, and a reply that still carries them, as turns earlier releases stored do; then that turn replayed without them. |
@@ -181,7 +182,7 @@ The schema files list tools in sorted order and keep every other key in the orde
 The file maps each built-in tool registration name to `{"instructions", "guidance", "functions"}`, the adapted toolkit's fields.
 `instructions` is the text the system prompt shows for the toolkit, null unless the toolkit asks for its instructions there, and `guidance` the toolkit's instructions whether or not the prompt shows them, which the agent CLI and minimal mode show; no function adds instructions of its own.
 `functions` lists the functions in the order Agno prepares them for an async run: sync functions in registration order, each replaced in place by an async variant of the same name, then async-only functions.
-Each function records `name`, `description`, `parameters`, `strict`, `requires_confirmation`, `external_execution`, `approval_type`, and `stop_after_tool_call` after Agno's per-run preparation (`parse_tools`), which runs `process_entrypoint` and MindRoom's schema postprocessors; the owned adapter (`adapt_toolkit`) repeats that preparation, and a regeneration records its output.
+Each function records `name`, `description`, `parameters`, `strict`, `requires_confirmation`, `external_execution`, `approval_type`, and `stop_after_tool_call`, first captured after Agno's per-run preparation (`parse_tools`), which ran `process_entrypoint` and MindRoom's schema postprocessors, and regenerated from the owned adapter (`adapt_toolkit`), which derives every schema a function's signature gives through MindRoom's generator.
 The function's `ToolSpec`, the definition a provider adapter receives, is the same entry, in the same key order, without `stop_after_tool_call`; Agno's `show_result`, which the adapter ignores because MindRoom gives a tool's result only to the model, is not recorded.
 Only Agno's non-strict preparation is captured, because Agno makes functions strict only for a run with an output schema on a model with native structured outputs, and no MindRoom run that has tools sets an output schema.
 
@@ -202,7 +203,6 @@ Not captured:
 
 Agno behavior the golden pins as it is:
 
-- `gemini`'s `generate_image` has no description and exposes only `mindroom_output_path`, because Agno cannot resolve its `Agent` annotation and falls back to an empty schema.
 - `openclaw_compat` builds a toolkit without functions.
 
 ### `tools/schemas_all_enabled.json`
@@ -264,7 +264,7 @@ Every run with a provider request also has its usage row in `<table>_usage`.
 - `legacy_agno3/storage/loaded_sessions.json`: `AgentSession.to_dict()` or `TeamSession.to_dict()` of every session as `get_agent_session` or `get_team_session` loads it: runs after the scope's latest summary row plus every non-visible run and its descendants, folded messages removed, and the summary taken from the latest summary row.
 - `legacy_agno3/runs/<type>.json`: `{case: dict}` for every value of that type nested in the stored `run_data` columns, summary-row segments, and `session_data`, exactly as stored.
   A case key is `<store>:<run id or segment:<row id>>` followed by its path, such as `agent_code:run-tools.messages[3].metrics`.
-  The types are `run_output` (`RunOutput`), `team_run_output` (`TeamRunOutput`), `message` (`Message`), `image`, `audio`, `video`, and `file` (media dicts, read through `Message.from_dict` because Agno media has no `from_dict`), `tool_execution` (`ToolExecution`), `run_requirement` (`RunRequirement`), `message_metrics` (`MessageMetrics`), `run_metrics` (`RunMetrics`), `model_metrics` (`ModelMetrics`), and `session_metrics` (`SessionMetrics`).
+  The types are `run_output` (`RunOutput`), `team_run_output` (`TeamRunOutput`), `message` (`Message`), `image`, `audio`, `video`, and `file` (media dicts, read through `Message.from_dict` because Agno media has no `from_dict`), `tool_execution` (`ToolExecution`), `run_requirement` (`RunRequirement`), `message_metrics` (`MessageMetrics`), `run_metrics` (`RunMetrics`), and `model_metrics` (`ModelMetrics`).
 - `legacy_agno3/history/<store>__<session>.json`: `get_messages` results for the loaded session under each selection's keyword arguments, and `filter_tool_calls` applied to `copy_history_message` copies of a selection, as Agno's message builder does.
   Agno's builder passes `num_history_runs` as `last_n_runs`, `num_history_messages` as `limit`, `[system_message_role]` as `skip_roles` only for a role other than `user`, `assistant`, or `tool`, and the member's id as `agent_id` only for a team member.
 - `events/ai_run.json`: the `io.mindroom.ai_run` Matrix metadata each golden run publishes, keyed by run id, as the owned reply or approval resume publishes it; a turn stopped by cancelling its task and a turn paused for approval publish none.

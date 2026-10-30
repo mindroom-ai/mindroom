@@ -1056,24 +1056,26 @@ class TestMemoryConfig:
         project_root.mkdir(parents=True, exist_ok=True)
         monkeypatch.chdir(project_root)
 
-        orchestrator = _MultiAgentOrchestrator(runtime_paths=orchestrator_runtime_paths(Path("mindroom_data")))
-
-        other_cwd = tmp_path / "other"
-        other_cwd.mkdir(parents=True, exist_ok=True)
-        monkeypatch.chdir(other_cwd)
-
         embedder_config = _MemoryEmbedderConfig(
             provider="ollama",
             config=EmbedderConfig(model="test", host=None),
         )
         memory = MemoryConfig(embedder=embedder_config, llm=None)
         config = Config(memory=memory, router=RouterConfig(model="default"))
+        orchestrator = _MultiAgentOrchestrator(
+            runtime_paths=orchestrator_runtime_paths(Path("mindroom_data")),
+            config=config,
+        )
 
-        result = _get_memory_config(orchestrator.storage_path, config, orchestrator.runtime_paths)
+        other_cwd = tmp_path / "other"
+        other_cwd.mkdir(parents=True, exist_ok=True)
+        monkeypatch.chdir(other_cwd)
+
+        result = _get_memory_config(orchestrator.runtime_paths.storage_root, config, orchestrator.runtime_paths)
 
         expected_storage = (project_root / "mindroom_data").resolve()
         expected_chroma = (expected_storage / "chroma").resolve()
-        assert orchestrator.storage_path == expected_storage
+        assert orchestrator.runtime_paths.storage_root == expected_storage
         assert Path(result["vector_store"]["config"]["path"]) == expected_chroma
 
     @pytest.mark.asyncio

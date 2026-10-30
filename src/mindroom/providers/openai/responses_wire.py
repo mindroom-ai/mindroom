@@ -56,6 +56,7 @@ __all__ = [
     "ResponsesTurnParts",
     "ResponsesWire",
     "conversation_digest",
+    "request_replay",
     "request_store",
     "responses_input",
     "responses_replay",
@@ -201,6 +202,16 @@ def responses_replay(
         sent_from=0 if chained is None else chained[0] + 1,
         previous_response_id=None if chained is None else chained[1]["response_id"],
         native_route=route,
+    )
+
+
+def request_replay(wire: ResponsesWire, request: ModelRequest) -> ResponsesReplay:
+    """Return how ``request`` continues its history on ``wire`` (``responses_replay``)."""
+    return responses_replay(
+        request.messages,
+        store=request_store(wire, request),
+        portable_replay=request.portable_replay,
+        native_compaction=request.native_compaction,
     )
 
 
@@ -390,12 +401,7 @@ def responses_request_kwargs(
     Fields the SDK names are its keywords and the rest travel in ``extra_body`` (``sdk_call_kwargs``).
     """
     store = request_store(wire, request)
-    replay = responses_replay(
-        request.messages,
-        store=store,
-        portable_replay=request.portable_replay,
-        native_compaction=request.native_compaction,
-    )
+    replay = request_replay(wire, request)
     params = _base_params(settings, request)
     if tools := _tool_dicts(request.tools):
         params["tools"] = tools

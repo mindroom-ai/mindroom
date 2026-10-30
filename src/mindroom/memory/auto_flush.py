@@ -1,8 +1,8 @@
 """Background auto-flush for file-backed memory: the new finished turns of conversations become daily notes.
 
-Stored sessions are the source of truth; one progress file below `tracking/` records how far each conversation has been
-flushed, so a restart resumes where the last pass stopped, and each note names its last turn, so a retry never writes it
-twice.
+Stored sessions are the source of truth; one progress file below `tracking/` records how far each conversation's log
+has been flushed, so a restart resumes where the last pass stopped, and each note names its last turn's place, so a
+retry never writes it twice.
 """
 
 from __future__ import annotations
@@ -26,17 +26,23 @@ from mindroom.helper_usage import HelperUsageOwner, record_helper_usage
 from mindroom.history.conversation_text import one_line, utterances
 from mindroom.history.session_runs import (
     DELEGATION_SESSION_PREFIX,
-    finished_runs,
-    run_key,
-    session_runs,
-    unredacted_runs,
-    updated_sessions,
+    Cursor,
+    back_off,
+    caught_up,
+    due_conversations,
+    start_seq,
+    unredacted,
 )
 from mindroom.llm.errors import ModelSafeguardRefusal
 from mindroom.logging_config import get_logger
 from mindroom.memory._prompting import redact_memory_text
 from mindroom.memory.functions import append_agent_daily_memory, list_all_agent_memories
-from mindroom.memory.legacy_auto_flush import remove_legacy_flush_queue
+from mindroom.memory.legacy_auto_flush import (
+    released_flush_start,
+    released_note_covers,
+    released_note_turns,
+    remove_legacy_flush_queue,
+)
 from mindroom.providers import registry as provider_registry
 from mindroom.requester_identity import agent_instances
 from mindroom.runtime_resolution import resolve_agent_storage
@@ -50,9 +56,10 @@ if TYPE_CHECKING:
     from mindroom.config.main import Config
     from mindroom.config.memory import MemoryAutoFlushConfig
     from mindroom.constants import RuntimePaths
-    from mindroom.history.session_runs import RedactedEventIds
-    from mindroom.llm.runs import RunRecord
+    from mindroom.history.session_runs import DueConversation, RedactedEventIds
+    from mindroom.llm.runs import AnyRunRecord
     from mindroom.memory._shared import MemoryResult
+    from mindroom.session_storage.store import LoggedRun
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 
 logger = get_logger(__name__)
@@ -72,34 +79,19 @@ class _FlushScope:
     key: str
 
 
-class _ConversationState(TypedDict):
-    # The conversation's update time once every new turn in it was flushed.
-    updated_at: int
-    # The run key of the last turn flushed or skipped; empty until then, when turns from before auto-flush started are
-    # skipped.
-    marker: list[int | str]
-    # Consecutive failures, which set the backoff.
-    failures: int
-    # When the current failures began, so turns that never flush are given up after a while.
-    failing_since: float
-    retry_at: float
-    # When a turn holding the conversation back stops waiting for approval, or 0.
-    recheck_at: float
+class _ConversationState(Cursor):
+    # The log place of the last turn flushed or given up; None until the conversation is first read, when its turns from
+    # before auto-flush started are skipped.
+    seq: int | None
 
 
 class _FlushState(TypedDict):
     started_at: int
-    # Each file-memory agent's start; turns created before it are never flushed, in any of the agent's scopes.
+    # Each file-memory agent's start; in any of the agent's scopes, turns created before it that had finished when their
+    # conversation was first read are never flushed.
     agents: dict[str, int]
     # Each scope's conversations by session ID.
     scopes: dict[str, dict[str, _ConversationState]]
-
-
-@dataclass(frozen=True)
-class _DueConversation:
-    session_id: str
-    updated_at: int
-    runs: list[RunRecord]
 
 
 def _auto_flush_enabled(config: Config) -> bool:
@@ -132,19 +124,36 @@ def _flush_scopes(config: Config, runtime_paths: RuntimePaths, agent_names: list
 
 
 def _new_conversation() -> _ConversationState:
-    return {"updated_at": 0, "marker": [], "failures": 0, "failing_since": 0, "retry_at": 0, "recheck_at": 0}
+    return {"updated_at": 0, "seq": None, "failures": 0, "failing_since": 0, "retry_at": 0}
 
 
-def _start(entry: _ConversationState, runs: list[RunRecord], started_at: int) -> tuple[int, str] | None:
-    """Return the run key the conversation's unflushed turns follow, or None when all of them are unflushed."""
-    if entry["marker"]:
-        return (int(entry["marker"][0]), str(entry["marker"][1]))
-    # A conversation first seen now starts with the turns after auto-flush started, so history is never flushed.
-    older = [run for run in runs if run.created_at < started_at]
-    return run_key(older[-1]) if older else None
+def _progress(
+    conversations: dict[str, _ConversationState],
+    session_id: str,
+    turns: list[LoggedRun],
+    started_at: int,
+) -> tuple[_ConversationState, int]:
+    """Return the conversation's progress and the place its unflushed turns follow, fixed when it is first read."""
+    entry = conversations.setdefault(session_id, _new_conversation())
+    if (seq := entry.get("seq")) is not None:
+        return entry, seq
+    seq = released_flush_start(entry, turns)
+    if seq is None:
+        # A conversation first seen now starts with the turns after auto-flush started, so history is never flushed.
+        seq = start_seq(turns, older=lambda run: run.created_at < started_at)
+    # Rebuilt rather than updated, so a released entry's `marker` and `recheck_at` leave the file.
+    current: _ConversationState = {
+        "updated_at": entry["updated_at"],
+        "seq": seq,
+        "failures": entry["failures"],
+        "failing_since": entry["failing_since"],
+        "retry_at": entry["retry_at"],
+    }
+    conversations[session_id] = current
+    return current, seq
 
 
-def _run_lines(run: RunRecord) -> list[str]:
+def _run_lines(run: AnyRunRecord) -> list[str]:
     """Return what was said in one turn as the ``speaker: text`` lines auto-flush extracts memories from."""
     lines: list[str] = []
     for said in utterances(run):
@@ -173,45 +182,54 @@ def _newest_lines(lines: list[str], *, max_messages: int, max_chars: int) -> lis
     return selected
 
 
-def _next_batch(runs: list[RunRecord], settings: MemoryAutoFlushConfig) -> tuple[list[RunRecord], list[str]]:
+def _next_batch(turns: list[LoggedRun], settings: MemoryAutoFlushConfig) -> tuple[list[LoggedRun], list[str]]:
     """Return the oldest turns whose lines fit one extraction, and those lines; a turn too long alone keeps its newest."""
     limits = {
         "max_messages": settings.extractor.max_messages_per_flush,
         "max_chars": settings.extractor.max_chars_per_flush,
     }
-    batch: list[RunRecord] = []
+    batch: list[LoggedRun] = []
     lines: list[str] = []
-    for run in runs:
-        candidate = [*lines, *_run_lines(run)]
+    for turn in turns:
+        candidate = [*lines, *_run_lines(turn.run)]
         # Turns with no lines at the start of a batch, such as an automation's, ride along with the turn after them.
         if lines and len(_newest_lines(candidate, **limits)) < len(candidate):
             break
-        batch.append(run)
+        batch.append(turn)
         lines = candidate
     return batch, _newest_lines(lines, **limits)
 
 
-def _flush_tag(session_id: str, run: RunRecord) -> str:
-    return f"{_TAG_PREFIX}{session_id}:{run.run_id}]"
+def _flush_tag(session_id: str, seq: int) -> str:
+    return f"{_TAG_PREFIX}{session_id}@{seq}]"
 
 
-def _already_flushed(runs: list[RunRecord], session_id: str, memories: list[MemoryResult]) -> int:
-    """Return how many of the runs a note written before its progress was saved already covers."""
-    tags = {
-        text.partition("]")[0] + "]"
-        for memory in memories
-        if (text := memory.get("memory", "")).startswith(_TAG_PREFIX)
-    }
-    covered = [index for index, run in enumerate(runs, 1) if _flush_tag(session_id, run) in tags]
-    return covered[-1] if covered else 0
+def _unflushed_turns(
+    pending: list[LoggedRun],
+    turns: list[LoggedRun],
+    session_id: str,
+    memories: list[MemoryResult],
+) -> list[LoggedRun]:
+    """Return the pending turns no note written before its progress was saved already covers.
+
+    A note covers the turns placed at or before the turn it names, its batch's last.
+    """
+    notes = [memory.get("memory", "") for memory in memories]
+    prefix = f"{_TAG_PREFIX}{session_id}@"
+    places = [note[len(prefix) :].partition("]")[0] for note in notes if note.startswith(prefix)]
+    through = max((int(place) for place in places if place.isdigit()), default=0)
+    named = released_note_turns(notes, session_id, turns)
+    return [turn for turn in pending if turn.seq > through and not released_note_covers(named, turn)]
 
 
 def _record_failure(entry: _ConversationState, settings: MemoryAutoFlushConfig, failed_at: float) -> bool:
     """Count one failed attempt, back off from when it failed, and return whether to give up on the failing turns."""
-    entry["failing_since"] = entry["failing_since"] or failed_at
-    entry["failures"] += 1
-    cooldown = settings.retry_cooldown_seconds * 2 ** (entry["failures"] - 1)
-    entry["retry_at"] = failed_at + min(settings.max_retry_cooldown_seconds, cooldown)
+    back_off(
+        entry,
+        failed_at,
+        first_seconds=settings.retry_cooldown_seconds,
+        max_seconds=settings.max_retry_cooldown_seconds,
+    )
     return failed_at - entry["failing_since"] >= settings.stale_ttl_seconds
 
 
@@ -223,26 +241,27 @@ def _record_unreadable(
 ) -> None:
     """Back off a conversation that could not be read, and once that has failed for long enough, wait until it changes."""
     if _record_failure(entry, settings, failed_at):
-        entry.update(updated_at=updated_at, failures=0, failing_since=0, retry_at=0)
+        caught_up(entry, updated_at)
 
 
 def _record_progress(
     entry: _ConversationState,
-    pending: list[RunRecord],
-    covered: int,
+    pending: list[LoggedRun],
+    fresh: list[LoggedRun],
+    done: list[LoggedRun],
     updated_at: int,
-    blocked_until: float | None,
 ) -> None:
-    """Move the marker past the turns flushed or given up, and mark the conversation done when none is left."""
-    entry.update(failures=0, failing_since=0, retry_at=0)
-    if covered < len(pending):
+    """Move past the turns flushed or given up, and mark the conversation caught up when none of ``fresh`` is left.
+
+    ``fresh`` are the pending turns no note covers yet and ``done`` the first of them, flushed or given up.
+    """
+    if len(done) < len(fresh):
         # A long backlog spreads over passes; the conversation stays due because its recorded update time is unchanged.
-        entry["marker"] = list(run_key(pending[covered - 1]))
+        entry.update(seq=done[-1].seq, failures=0, failing_since=0, retry_at=0)
         return
     if pending:
-        entry["marker"] = list(run_key(pending[-1]))
-    # Held back by a turn waiting for approval, it is looked at again when those approvals expire, even without news.
-    entry.update(updated_at=updated_at, recheck_at=blocked_until or 0)
+        entry["seq"] = pending[-1].seq
+    caught_up(entry, updated_at)
 
 
 def _normalize_extractor_line(line: str, no_reply_token: str) -> str | None:
@@ -388,7 +407,7 @@ class _MemoryAutoFlushWorker:
                 if changed:
                     await self._persist(state)
                 for conversation in due:
-                    budget -= await self._flush(config, scope, state, conversation, now)
+                    budget -= await self._flush(config, scope, state, conversation)
             except Exception:
                 logger.exception("Memory auto-flush failed for an agent", agent=scope.agent_name)
 
@@ -399,11 +418,9 @@ class _MemoryAutoFlushWorker:
         state: _FlushState,
         now: float,
         limit: int,
-    ) -> tuple[list[_DueConversation], bool]:
-        """Return up to ``limit`` quiet conversations with new turns, and whether listing them changed the progress."""
+    ) -> tuple[list[DueConversation], bool]:
+        """Return up to ``limit`` quiet conversations with news, and whether listing them changed the progress."""
         settings = config.memory.auto_flush
-        # At least a second, so a conversation updated after a pass always carries a later update time than it had then.
-        idle_seconds = max(settings.idle_seconds, 1)
         storage = create_session_storage(
             scope.agent_name,
             config,
@@ -411,60 +428,45 @@ class _MemoryAutoFlushWorker:
             execution_identity=scope.execution_identity,
         )
         conversations = state["scopes"].setdefault(scope.key, {})
-        due: list[_DueConversation] = []
-        changed = False
-        for session_id, updated_at in updated_sessions(
+        scan = due_conversations(
             storage,
+            conversations,
+            agent_name=scope.agent_name,
             # Update times are whole seconds, so one in the start's own second is listed too.
             since=state["agents"][scope.agent_name] - 1,
-        ):
-            if len(due) >= limit:
-                break
+            now=now,
+            idle_seconds=settings.idle_seconds,
+            limit=limit,
             # A delegated task's prompt comes from another agent, so it is not the delegate's conversation.
-            if session_id.startswith(DELEGATION_SESSION_PREFIX) or now - updated_at < idle_seconds:
-                continue
-            entry = conversations.get(session_id)
-            if entry is not None and (
-                entry["retry_at"] > now or (updated_at <= entry["updated_at"] and not 0 < entry["recheck_at"] <= now)
-            ):
-                continue
-            try:
-                runs = session_runs(storage, session_id)
-            except Exception:
-                # One conversation that cannot be read backs off instead of blocking the agent's others.
-                logger.exception(
-                    "Memory auto-flush could not read a conversation",
-                    agent=scope.agent_name,
-                    session_id=session_id,
-                )
-                entry = conversations.setdefault(session_id, _new_conversation())
-                _record_unreadable(entry, settings, updated_at, self.clock())
-                changed = True
-                continue
-            if not runs:
-                # A conversation with no Matrix turns, such as one through the OpenAI-compatible API, has nothing to
-                # flush, so it does not take a place in the pass.
-                conversations.setdefault(session_id, _new_conversation())["updated_at"] = updated_at
-                changed = True
-                continue
-            due.append(_DueConversation(session_id, updated_at, runs))
-        return due, changed
+            skip=lambda session_id: session_id.startswith(DELEGATION_SESSION_PREFIX),
+        )
+        for session_id, updated_at in scan.empty:
+            caught_up(conversations.setdefault(session_id, _new_conversation()), updated_at)
+        for unreadable in scan.unreadable:
+            # One conversation that cannot be read backs off instead of blocking the agent's others.
+            logger.error(
+                "Memory auto-flush could not read a conversation",
+                agent=scope.agent_name,
+                session_id=unreadable.session_id,
+                exc_info=unreadable.error,
+            )
+            entry = conversations.setdefault(unreadable.session_id, _new_conversation())
+            _record_unreadable(entry, settings, unreadable.updated_at, self.clock())
+        return scan.due, bool(scan.empty or scan.unreadable)
 
     async def _flush(
         self,
         config: Config,
         scope: _FlushScope,
         state: _FlushState,
-        conversation: _DueConversation,
-        now: float,
+        conversation: DueConversation,
     ) -> int:
         """Flush the oldest new turns of one conversation and return how much of the pass budget that spent."""
         settings = config.memory.auto_flush
         session_id = conversation.session_id
         conversations = state["scopes"][scope.key]
-        finished, blocked_until = finished_runs(conversation.runs, config, now=now)
         try:
-            runs = await unredacted_runs(finished, scope.agent_name, self.redacted_event_ids)
+            kept = await unredacted(conversation, scope.agent_name, self.redacted_event_ids)
         except Exception:
             # A conversation whose redactions cannot be checked backs off like one that cannot be read.
             logger.exception(
@@ -480,14 +482,12 @@ class _MemoryAutoFlushWorker:
             )
             await self._persist(state)
             return 0
-        if runs is None:
+        if kept is None:
             # Its agent cannot say yet what was redacted, so the conversation waits for a later pass.
             return 0
-        entry = conversations.setdefault(session_id, _new_conversation())
-        start = _start(entry, runs, state["agents"][scope.agent_name])
-        pending = [run for run in runs if start is None or run_key(run) > start]
-        skipped = 0
-        batch: list[RunRecord] = []
+        entry, start = _progress(conversations, session_id, conversation.turns, state["agents"][scope.agent_name])
+        pending = fresh = [turn for turn in kept if turn.seq > start]
+        batch: list[LoggedRun] = []
         try:
             if pending:
                 memories = await list_all_agent_memories(
@@ -498,8 +498,8 @@ class _MemoryAutoFlushWorker:
                     execution_identity=scope.execution_identity,
                 )
                 # A note written by an attempt whose progress was not saved already covers its turns.
-                skipped = _already_flushed(pending, session_id, memories)
-                batch, lines = _next_batch(pending[skipped:], settings)
+                fresh = _unflushed_turns(pending, conversation.turns, session_id, memories)
+                batch, lines = _next_batch(fresh, settings)
                 if lines:
                     await self._write_note(config, scope, session_id, batch[-1], lines, memories)
         except ModelSafeguardRefusal:
@@ -509,7 +509,7 @@ class _MemoryAutoFlushWorker:
                 agent=scope.agent_name,
                 session_id=session_id,
             )
-            batch = _next_batch(pending[skipped:], settings)[0]
+            batch = _next_batch(fresh, settings)[0]
         except Exception as exc:
             if isinstance(exc, TimeoutError):
                 logger.warning(
@@ -528,8 +528,8 @@ class _MemoryAutoFlushWorker:
                 agent=scope.agent_name,
                 session_id=session_id,
             )
-            batch = _next_batch(pending[skipped:], settings)[0]
-        _record_progress(entry, pending, skipped + len(batch), conversation.updated_at, blocked_until)
+            batch = _next_batch(fresh, settings)[0]
+        _record_progress(entry, pending, fresh, batch, conversation.updated_at)
         await self._persist(state)
         return 1
 
@@ -538,7 +538,7 @@ class _MemoryAutoFlushWorker:
         config: Config,
         scope: _FlushScope,
         session_id: str,
-        last_run: RunRecord,
+        last_turn: LoggedRun,
         lines: list[str],
         memories: list[MemoryResult],
     ) -> None:
@@ -557,7 +557,7 @@ class _MemoryAutoFlushWorker:
         )
         if summary is not None:
             append_agent_daily_memory(
-                f"{_flush_tag(session_id, last_run)} {summary}",
+                f"{_flush_tag(session_id, last_turn.seq)} {summary}",
                 agent_name=scope.agent_name,
                 config=config,
                 runtime_paths=self.runtime_paths,

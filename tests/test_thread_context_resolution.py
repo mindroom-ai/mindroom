@@ -1,4 +1,4 @@
-"""Conversation thread context resolution: extract_context and dispatch-context thread inheritance, demotion, and proofs."""
+"""Conversation thread decisions: ingress thread inheritance, edits, root proofs, and the context read in the decided thread."""
 
 from __future__ import annotations
 
@@ -19,10 +19,12 @@ from mindroom.matrix.thread_diagnostics import (
     THREAD_HISTORY_SOURCE_DIAGNOSTIC,
     is_thread_history_degraded,
 )
-from mindroom.matrix.thread_history_result import ThreadHistoryResult
+from mindroom.matrix.thread_history_result import ThreadHistoryResult, thread_history_result
 from mindroom.matrix.thread_membership import (
+    RelatedEventUnavailableError,
+    ThreadMembershipLookupError,
     ThreadResolution,
-    resolve_related_event_thread_id_best_effort,
+    resolve_related_event_thread_membership,
     thread_messages_thread_membership_access,
 )
 from mindroom.response_runner import ResponseRequest
@@ -39,7 +41,6 @@ from tests.threading_helpers import (
     _message,
     seed_thread_history,
     seed_unhydrated_room_event,
-    thread_history_result,
 )
 from tests.turn_dispatch_helpers import dispatch_test_turn
 
@@ -102,7 +103,7 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
     """Threading behavior tests moved verbatim from tests/test_threading_error.py."""
 
     @pytest.mark.asyncio
-    async def test_extract_context_edit_ignores_the_thread_its_new_content_names(self, bot: AgentBot) -> None:
+    async def test_thread_decision_edit_ignores_the_thread_its_new_content_names(self, bot: AgentBot) -> None:
         """An edit is placed by the message it edits, not by the thread it names inside itself.
 
         Matrix applies ``m.new_content`` by keeping the original event's relation and ignoring
@@ -142,14 +143,14 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
             thread_id="$thread_root:localhost",
             messages=expected_history,
         )
-        context = await bot._conversation_resolver.extract_message_context(room, event)
+        thread_id = await bot._conversation_resolver.coalescing_thread_id(room, event)
+        context = await bot._conversation_resolver.extract_dispatch_context(room, event, thread_id=thread_id)
 
-        assert context.is_thread is True
-        assert context.thread_id == "$thread_root:localhost"
+        assert thread_id == "$thread_root:localhost"
         assert context.thread_history == expected_history
 
     @pytest.mark.asyncio
-    async def test_extract_context_edit_resolves_thread_from_original_event(self, bot: AgentBot) -> None:
+    async def test_thread_decision_edit_resolves_thread_from_original_event(self, bot: AgentBot) -> None:
         """Edits without nested thread metadata should still resolve to the edited message thread."""
         room = _matrix_room(name="Test Room")
 
@@ -199,15 +200,15 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
             thread_id="$thread_root:localhost",
             messages=expected_history,
         )
-        context = await bot._conversation_resolver.extract_message_context(room, event)
+        thread_id = await bot._conversation_resolver.coalescing_thread_id(room, event)
+        context = await bot._conversation_resolver.extract_dispatch_context(room, event, thread_id=thread_id)
 
-        assert context.is_thread is True
-        assert context.thread_id == "$thread_root:localhost"
+        assert thread_id == "$thread_root:localhost"
         assert context.thread_history == expected_history
         bot.client.room_get_event.assert_awaited_once_with(room.room_id, "$thread_msg:localhost")
 
     @pytest.mark.asyncio
-    async def test_extract_context_edit_of_plain_root_message_stays_room_level(self, bot: AgentBot) -> None:
+    async def test_thread_decision_edit_of_plain_root_message_stays_room_level(self, bot: AgentBot) -> None:
         """Edits of plain room-root messages should not be promoted into thread context."""
         room = _matrix_room(name="Test Room")
 
@@ -259,15 +260,13 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
             thread_id="$room_message:localhost",
             messages=root_only,
         )
-        context = await bot._conversation_resolver.extract_message_context(room, event)
+        thread_id = await bot._conversation_resolver.coalescing_thread_id(room, event)
 
-        assert context.is_thread is False
-        assert context.thread_id is None
-        assert context.thread_history == []
+        assert thread_id is None
         bot.client.room_get_event.assert_awaited_once_with(room.room_id, "$room_message:localhost")
 
     @pytest.mark.asyncio
-    async def test_extract_context_plain_reply_to_thread_reply_inherits_existing_thread(
+    async def test_thread_decision_plain_reply_to_thread_reply_inherits_existing_thread(
         self,
         bot: AgentBot,
     ) -> None:
@@ -299,14 +298,14 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
             thread_id="$thread_root:localhost",
             messages=expected_history,
         )
-        context = await bot._conversation_resolver.extract_message_context(room, event)
+        thread_id = await bot._conversation_resolver.coalescing_thread_id(room, event)
+        context = await bot._conversation_resolver.extract_dispatch_context(room, event, thread_id=thread_id)
 
-        assert context.is_thread is True
-        assert context.thread_id == "$thread_root:localhost"
+        assert thread_id == "$thread_root:localhost"
         assert context.thread_history == expected_history
 
     @pytest.mark.asyncio
-    async def test_extract_context_plain_reply_to_thread_root_inherits_existing_thread(
+    async def test_thread_decision_plain_reply_to_thread_root_inherits_existing_thread(
         self,
         bot: AgentBot,
     ) -> None:
@@ -354,15 +353,15 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
             thread_id="$thread_root:localhost",
             messages=expected_history,
         )
-        context = await bot._conversation_resolver.extract_message_context(room, event)
+        thread_id = await bot._conversation_resolver.coalescing_thread_id(room, event)
+        context = await bot._conversation_resolver.extract_dispatch_context(room, event, thread_id=thread_id)
 
-        assert context.is_thread is True
-        assert context.thread_id == "$thread_root:localhost"
+        assert thread_id == "$thread_root:localhost"
         assert context.thread_history == expected_history
         bot.client.room_get_event.assert_awaited_once_with(room.room_id, "$thread_root:localhost")
 
     @pytest.mark.asyncio
-    async def test_extract_context_plain_reply_chain_stays_threaded_transitively(
+    async def test_thread_decision_plain_reply_chain_stays_threaded_transitively(
         self,
         bot: AgentBot,
     ) -> None:
@@ -434,10 +433,10 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
             messages=expected_history,
         )
         relations = install_relation_lookup(bot)
-        context = await bot._conversation_resolver.extract_message_context(room, event)
+        thread_id = await bot._conversation_resolver.coalescing_thread_id(room, event)
+        context = await bot._conversation_resolver.extract_dispatch_context(room, event, thread_id=thread_id)
 
-        assert context.is_thread is True
-        assert context.thread_id == "$thread_root:localhost"
+        assert thread_id == "$thread_root:localhost"
         assert [message.event_id for message in context.thread_history] == [
             "$thread_root:localhost",
             "$thread_msg:localhost",
@@ -458,7 +457,7 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
         }
 
     @pytest.mark.asyncio
-    async def test_extract_context_plain_reply_to_promoted_plain_reply_stays_threaded(
+    async def test_thread_decision_plain_reply_to_promoted_plain_reply_stays_threaded(
         self,
         bot: AgentBot,
     ) -> None:
@@ -509,15 +508,15 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
         # The journal already admitted the promoted plain reply into the thread,
         # which is what the cached index used to be told.
         install_relation_lookup(bot, threads={"$plain_reply_1:localhost": "$thread_root:localhost"})
-        context = await bot._conversation_resolver.extract_message_context(room, event)
+        thread_id = await bot._conversation_resolver.coalescing_thread_id(room, event)
+        context = await bot._conversation_resolver.extract_dispatch_context(room, event, thread_id=thread_id)
 
-        assert context.is_thread is True
-        assert context.thread_id == "$thread_root:localhost"
+        assert thread_id == "$thread_root:localhost"
         assert context.thread_history == expected_history
         assert {c.args[1] for c in bot.client.room_get_event.await_args_list} == {"$plain_reply_1:localhost"}
 
     @pytest.mark.asyncio
-    async def test_extract_context_edit_of_thread_root_refetches_when_thread_lookup_cache_is_cold(
+    async def test_thread_decision_edit_of_thread_root_refetches_when_thread_lookup_cache_is_cold(
         self,
         bot: AgentBot,
     ) -> None:
@@ -569,15 +568,15 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
             thread_id="$thread_root:localhost",
             messages=expected_history,
         )
-        context = await bot._conversation_resolver.extract_message_context(room, event)
+        thread_id = await bot._conversation_resolver.coalescing_thread_id(room, event)
+        context = await bot._conversation_resolver.extract_dispatch_context(room, event, thread_id=thread_id)
 
-        assert context.is_thread is True
-        assert context.thread_id == "$thread_root:localhost"
+        assert thread_id == "$thread_root:localhost"
         assert context.thread_history == expected_history
         bot.client.room_get_event.assert_awaited_once_with(room.room_id, "$thread_root:localhost")
 
     @pytest.mark.asyncio
-    async def test_extract_context_edit_of_promoted_plain_reply_refetches_thread_when_lookup_cache_is_cold(
+    async def test_thread_decision_edit_of_promoted_plain_reply_refetches_thread_when_lookup_cache_is_cold(
         self,
         bot: AgentBot,
     ) -> None:
@@ -652,10 +651,10 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
         # already know these events' thread from having admitted them, and the
         # walk this test is about would never happen.
         install_relation_lookup(bot)
-        context = await bot._conversation_resolver.extract_message_context(room, event)
+        thread_id = await bot._conversation_resolver.coalescing_thread_id(room, event)
+        context = await bot._conversation_resolver.extract_dispatch_context(room, event, thread_id=thread_id)
 
-        assert context.is_thread is True
-        assert context.thread_id == "$thread-root:localhost"
+        assert thread_id == "$thread-root:localhost"
         assert context.thread_history == expected_history
         # Which events were fetched, not how many times: the resolver used to
         # ask a cached index and then the server, and now asks the journal and
@@ -668,7 +667,7 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
         }
 
     @pytest.mark.asyncio
-    async def test_extract_context_edit_of_plain_root_message_stays_room_level_when_history_has_only_root(
+    async def test_thread_decision_edit_of_plain_root_message_stays_room_level_when_history_has_only_root(
         self,
         bot: AgentBot,
     ) -> None:
@@ -719,19 +718,17 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
             thread_id="$room_root:localhost",
             messages=root_only,
         )
-        context = await bot._conversation_resolver.extract_message_context(room, event)
+        thread_id = await bot._conversation_resolver.coalescing_thread_id(room, event)
 
-        assert context.is_thread is False
-        assert context.thread_id is None
-        assert context.thread_history == []
+        assert thread_id is None
         bot.client.room_get_event.assert_awaited_once_with(room.room_id, "$room_root:localhost")
 
     @pytest.mark.asyncio
-    async def test_extract_context_edit_of_plain_root_message_degrades_when_thread_lookup_fails(
+    async def test_thread_decision_edit_of_plain_root_message_degrades_when_thread_lookup_fails(
         self,
         bot: AgentBot,
     ) -> None:
-        """Advisory thread-id lookup failures should not break plain edit context resolution."""
+        """Advisory thread-id lookup failures should not break the thread decision for a plain edit."""
         room = _matrix_room(name="Test Room")
 
         event = nio.RoomMessageText.from_dict(
@@ -783,11 +780,9 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
             thread_id="$room_message:localhost",
             messages=root_only,
         )
-        context = await bot._conversation_resolver.extract_message_context(room, event)
+        thread_id = await bot._conversation_resolver.coalescing_thread_id(room, event)
 
-        assert context.is_thread is False
-        assert context.thread_id is None
-        assert context.thread_history == []
+        assert thread_id is None
         # Twice: the edit's target, and then the thread lookup that the failed
         # journal read degraded onto the homeserver rather than giving up.
         assert bot.client.room_get_event.await_args_list == [
@@ -796,7 +791,7 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
         ]
 
     @pytest.mark.asyncio
-    async def test_extract_context_plain_reply_to_threaded_message_stays_threaded_transitively(
+    async def test_thread_decision_plain_reply_to_threaded_message_stays_threaded_transitively(
         self,
         bot: AgentBot,
     ) -> None:
@@ -879,14 +874,14 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
             thread_id="$thread_root:localhost",
             messages=expected_history,
         )
-        context = await bot._conversation_resolver.extract_message_context(room, event)
+        thread_id = await bot._conversation_resolver.coalescing_thread_id(room, event)
+        context = await bot._conversation_resolver.extract_dispatch_context(room, event, thread_id=thread_id)
 
-        assert context.is_thread is True
-        assert context.thread_id == "$thread_root:localhost"
+        assert thread_id == "$thread_root:localhost"
         assert context.thread_history == expected_history
 
     @pytest.mark.asyncio
-    async def test_explicit_thread_id_returns_none_for_cyclic_edit_chain(self, bot: AgentBot) -> None:
+    async def test_coalescing_thread_id_returns_none_for_cyclic_edit_chain(self, bot: AgentBot) -> None:
         """Cyclic edit chains should fail closed instead of raising from the shared resolver."""
         cycle = {
             "$edit-a:localhost": ("a", "$edit-b:localhost", 1),
@@ -912,7 +907,7 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
             )
 
         bot.client.room_get_event = AsyncMock(side_effect=fetch_cyclic_edit)
-        event_info = EventInfo.from_event(
+        event = nio.RoomMessageText.from_dict(
             {
                 "content": {
                     "body": "* incoming",
@@ -928,14 +923,9 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
             },
         )
 
-        thread_lookup = await bot._conversation_resolver._explicit_thread_id_for_event(
-            "!test:localhost",
-            "$incoming-edit:localhost",
-            event_info,
-            mode=ThreadReadMode.STRICT,
-        )
+        thread_id = await bot._conversation_resolver.coalescing_thread_id(_matrix_room(), event)
 
-        assert thread_lookup.thread_id is None
+        assert thread_id is None
 
     @pytest.mark.asyncio
     async def test_extract_dispatch_context_plain_reply_inherits_thread_with_bounded_full_history(
@@ -1007,11 +997,10 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
             thread_id="$thread_root:localhost",
             messages=list(dispatch_history),
         )
-        preview_context_result = await bot._conversation_resolver.extract_dispatch_context(room, event)
-        preview_context = preview_context_result.context
+        thread_id = await bot._conversation_resolver.coalescing_thread_id(room, event)
+        preview_context = await bot._conversation_resolver.extract_dispatch_context(room, event, thread_id=thread_id)
 
-        assert preview_context.is_thread is True
-        assert preview_context.thread_id == "$thread_root:localhost"
+        assert thread_id == "$thread_root:localhost"
         assert [message.event_id for message in preview_context.thread_history] == [
             "$thread_root:localhost",
             "$thread_msg:localhost",
@@ -1056,19 +1045,18 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
             messages=list(dispatch_history),
         )
 
-        context_result = await bot._conversation_resolver.extract_dispatch_context(room, event)
-        context = context_result.context
+        thread_id = await bot._conversation_resolver.coalescing_thread_id(room, event)
+        context = await bot._conversation_resolver.extract_dispatch_context(room, event, thread_id=thread_id)
 
-        assert context.is_thread is True
-        assert context.thread_id == "$thread_root:localhost"
+        assert thread_id == "$thread_root:localhost"
         assert context.requires_model_history_refresh is False
 
     @pytest.mark.asyncio
-    async def test_dispatch_room_demotion_clears_source_and_resolved_thread_ids(
+    async def test_coalescing_strict_proof_demotes_unproven_candidate_to_room_level(
         self,
         bot: AgentBot,
     ) -> None:
-        """Strict root proof should demote an indeterminate plain-reply candidate to room-level dispatch."""
+        """Strict root proof should decide an indeterminate plain-reply candidate is room-level."""
         room = _matrix_room(name="Test Room")
         event = nio.RoomMessageText.from_dict(
             {
@@ -1096,7 +1084,7 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
         )
         # The room holds an admitted event this conversation has never
         # hydrated, so local absence cannot prove the thread is empty and the
-        # dispatch read comes back degraded.
+        # dispatch-safe read comes back degraded.
         await seed_unhydrated_room_event(
             bot,
             room_id=room.room_id,
@@ -1117,25 +1105,10 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
                 new=AsyncMock(return_value=empty_strict_page),
             ) as mock_strict_read,
         ):
-            context_result = await bot._conversation_resolver.extract_dispatch_context(room, event)
-            context = context_result.context
+            thread_id = await bot._conversation_resolver.coalescing_thread_id(room, event)
 
-        assert context_result.thread_context is not None
-        assert context_result.thread_context.candidate_thread_root_id == "$thread_root:localhost"
-        assert context_result.thread_context.stable_target.source_thread_id is None
-        assert context_result.thread_context.stable_target.resolved_thread_id is None
-        assert context.is_thread is False
-        assert context.thread_id is None
-        assert context.thread_history == []
-        assert context_result.thread_context.thread_history == []
-        # The strict read answered, so the guard history is that complete page
-        # rather than the degraded dispatch page that preceded it.
-        assert context_result.thread_context.replay_guard_history == []
-        assert context_result.thread_context.replay_guard_history.is_full_history is True
-        assert context_result.thread_context.replay_guard_degraded is False
+        assert thread_id is None
         assert mock_strict_read.await_count >= 1
-        assert context.requires_model_history_refresh is False
-        assert context.planning_thread_history == ()
         assert relations.asked == [
             (room.room_id, "$thread_root:localhost"),
             (room.room_id, "$thread_root:localhost"),
@@ -1148,11 +1121,11 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
         )
 
     @pytest.mark.asyncio
-    async def test_dispatch_candidate_without_proof_history_demotes_without_retry(
+    async def test_coalescing_candidate_whose_strict_proof_fails_is_not_guessed(
         self,
         bot: AgentBot,
     ) -> None:
-        """Proof-unavailable candidates without reusable history must demote without repeating the failed read."""
+        """A candidate root whose strict proof read fails leaves the scope unresolved rather than guessed."""
         room = _matrix_room(name="Test Room")
         event = nio.RoomMessageText.from_dict(
             {
@@ -1189,66 +1162,18 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
             patch.object(bot.client, "room_get_event", AsyncMock(return_value=root_response)),
             patch(
                 "mindroom.matrix.conversation_reads.ConversationReader.read_strict",
-                new=AsyncMock(side_effect=TimeoutError("dispatch read timed out")),
+                new=AsyncMock(side_effect=TimeoutError("strict read timed out")),
             ),
+            pytest.raises(ThreadMembershipLookupError),
         ):
-            context_result = await bot._conversation_resolver.extract_dispatch_context(
-                room,
-                event,
-                mode=ThreadReadMode.NONBLOCKING,
-            )
-            context = context_result.context
-
-        assert context_result.thread_context is not None
-        assert context_result.thread_context.candidate_thread_root_id == "$maybe_root:localhost"
-        assert context_result.thread_context.replay_guard_degraded is True
-        assert context_result.thread_context.replay_guard_history == []
-        assert context.is_thread is False
-        assert context.thread_id is None
-        assert context.thread_history == []
-        assert context.requires_model_history_refresh is False
+            await bot._conversation_resolver.coalescing_thread_id(room, event)
 
     @pytest.mark.asyncio
-    async def test_dispatch_related_lookup_failure_keeps_candidate_root(
+    async def test_coalescing_related_not_found_is_unavailable(
         self,
         bot: AgentBot,
     ) -> None:
-        """Related-event lookup failures should demote while keeping the candidate root for dispatch."""
-        room = _matrix_room(name="Test Room")
-        event = nio.RoomMessageText.from_dict(
-            {
-                "content": {
-                    "body": "plain reply to maybe-root",
-                    "msgtype": "m.text",
-                    "m.relates_to": {"m.in_reply_to": {"event_id": "$maybe_root:localhost"}},
-                },
-                "event_id": "$event:localhost",
-                "sender": "@user:localhost",
-                "origin_server_ts": 1234567890,
-                "room_id": room.room_id,
-                "type": "m.room.message",
-            },
-        )
-
-        with (
-            patch.object(bot.client, "room_get_event", AsyncMock(side_effect=RuntimeError("lookup failed"))),
-        ):
-            context_result = await bot._conversation_resolver.extract_dispatch_context(room, event)
-
-        assert context_result.thread_context is not None
-        assert context_result.thread_context.candidate_thread_root_id == "$maybe_root:localhost"
-        assert context_result.thread_context.stable_target.source_thread_id is None
-        assert context_result.thread_context.stable_target.resolved_thread_id is None
-        assert context_result.thread_context.replay_guard_degraded is True
-        assert context_result.context.is_thread is False
-        assert context_result.context.thread_id is None
-
-    @pytest.mark.asyncio
-    async def test_dispatch_related_not_found_keeps_candidate_root(
-        self,
-        bot: AgentBot,
-    ) -> None:
-        """M_NOT_FOUND related-event lookups should demote while keeping the candidate root for dispatch."""
+        """An M_NOT_FOUND reply target fails the decision the same way on every retry, never with a guessed thread."""
         room = _matrix_room(name="Test Room")
         event = nio.RoomMessageText.from_dict(
             {
@@ -1271,19 +1196,12 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
                 "room_get_event",
                 AsyncMock(return_value=nio.RoomGetEventError("missing", status_code="M_NOT_FOUND")),
             ),
+            pytest.raises(RelatedEventUnavailableError),
         ):
-            context_result = await bot._conversation_resolver.extract_dispatch_context(room, event)
-
-        assert context_result.thread_context is not None
-        assert context_result.thread_context.candidate_thread_root_id == "$missing_root:localhost"
-        assert context_result.thread_context.stable_target.source_thread_id is None
-        assert context_result.thread_context.stable_target.resolved_thread_id is None
-        assert context_result.thread_context.replay_guard_degraded is True
-        assert context_result.context.is_thread is False
-        assert context_result.context.thread_id is None
+            await bot._conversation_resolver.coalescing_thread_id(room, event)
 
     @pytest.mark.asyncio
-    async def test_dispatch_first_journal_event_in_an_existing_room_keeps_the_thread(
+    async def test_coalescing_first_journal_event_in_an_existing_room_keeps_the_thread(
         self,
         bot: AgentBot,
     ) -> None:
@@ -1347,49 +1265,10 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
                 new=AsyncMock(return_value=hydrated_thread),
             ) as mock_strict_read,
         ):
-            context_result = await bot._conversation_resolver.extract_dispatch_context(room, event)
+            thread_id = await bot._conversation_resolver.coalescing_thread_id(room, event)
 
-        assert context_result.context.is_thread is True
-        assert context_result.context.thread_id == "$thread_root:localhost"
-        assert context_result.thread_context is not None
-        assert context_result.thread_context.stable_target.source_thread_id == "$thread_root:localhost"
+        assert thread_id == "$thread_root:localhost"
         assert mock_strict_read.await_count >= 1
-
-    @pytest.mark.asyncio
-    async def test_advisory_context_missing_related_reply_demotes_room_level(
-        self,
-        bot: AgentBot,
-    ) -> None:
-        """Advisory context extraction should not fail closed for missing/redacted related events."""
-        room = _matrix_room(name="Test Room")
-        event = nio.RoomMessageText.from_dict(
-            {
-                "content": {
-                    "body": "plain reply to redacted root",
-                    "msgtype": "m.text",
-                    "m.relates_to": {"m.in_reply_to": {"event_id": "$redacted_root:localhost"}},
-                },
-                "event_id": "$event:localhost",
-                "sender": "@user:localhost",
-                "origin_server_ts": 1234567890,
-                "room_id": room.room_id,
-                "type": "m.room.message",
-            },
-        )
-
-        with (
-            patch.object(
-                bot.client,
-                "room_get_event",
-                AsyncMock(return_value=nio.RoomGetEventError("missing", status_code="M_NOT_FOUND")),
-            ),
-        ):
-            context = await bot._conversation_resolver.extract_message_context(room, event)
-
-        assert context.is_thread is False
-        assert context.thread_id is None
-        assert context.thread_history == []
-        assert context.requires_model_history_refresh is False
 
     @pytest.mark.asyncio
     async def test_dispatch_new_root_target_does_not_become_existing_thread_context(
@@ -1413,20 +1292,27 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
             },
         )
 
-        context_result = await bot._conversation_resolver.extract_dispatch_context(room, event)
-        context = context_result.context
+        resolver = bot._conversation_resolver
+        thread_id = await resolver.coalescing_thread_id(room, event)
+        target = resolver.build_message_target(
+            room_id=room.room_id,
+            thread_id=thread_id,
+            reply_to_event_id=event.event_id,
+            event_source=event.source,
+        )
+        context = await resolver.extract_dispatch_context(room, event, thread_id=target.source_thread_id)
 
-        assert context_result.thread_context is not None
-        assert context_result.thread_context.stable_target.source_thread_id is None
-        assert context_result.thread_context.stable_target.resolved_thread_id == "$new_root:localhost"
+        assert thread_id is None
+        assert target.source_thread_id is None
+        assert target.resolved_thread_id == "$new_root:localhost"
         assert context.is_thread is False
         assert context.thread_id is None
-        assert context.thread_history == []
+        assert context.thread_history == ()
         assert context.requires_model_history_refresh is False
         assert context.planning_thread_history == ()
 
     @pytest.mark.asyncio
-    async def test_extract_dispatch_context_plain_reply_to_plain_message_stays_room_level_with_empty_history(
+    async def test_coalescing_plain_reply_to_plain_message_stays_room_level_with_empty_history(
         self,
         bot: AgentBot,
     ) -> None:
@@ -1459,20 +1345,16 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
             ),
         )
 
-        context_result = await bot._conversation_resolver.extract_dispatch_context(room, event)
-        context = context_result.context
+        thread_id = await bot._conversation_resolver.coalescing_thread_id(room, event)
 
-        assert context.is_thread is False
-        assert context.thread_id is None
-        assert context.thread_history == []
-        assert context.requires_model_history_refresh is False
+        assert thread_id is None
 
     @pytest.mark.asyncio
-    async def test_degraded_dispatch_candidate_calls_strict_proof_before_planning(
+    async def test_an_unproven_candidate_gets_a_strict_proof_before_ingress_decides_no_thread(
         self,
         bot: AgentBot,
     ) -> None:
-        """Degraded dispatch candidates must receive strict proof before room-level planning."""
+        """Ingress proves a degraded candidate strictly before it decides the turn is room level."""
         room = _matrix_room(name="Test Room")
         event = nio.RoomMessageText.from_dict(
             {
@@ -1662,17 +1544,18 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
         async def fetch_thread_messages(_room_id: str, _thread_id: str) -> ThreadHistoryResult:
             return thread_history
 
-        resolved_thread_id = await resolve_related_event_thread_id_best_effort(
+        resolution = await resolve_related_event_thread_membership(
             room_id,
             thread_root_id,
             access=thread_messages_thread_membership_access(
                 lookup_thread_id=lookup_thread_id,
                 fetch_event_info=fetch_event_info,
                 fetch_thread_messages=fetch_thread_messages,
+                absence_needs_full_history=False,
             ),
         )
 
-        assert resolved_thread_id == thread_root_id
+        assert resolution.thread_id == thread_root_id
 
     @pytest.mark.asyncio
     async def test_coalescing_thread_id_labels_thread_membership_reads(self, bot: AgentBot) -> None:
@@ -1712,7 +1595,6 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
                 new=AsyncMock(
                     return_value=ThreadResolution._indeterminate(
                         RuntimeError("proof unavailable"),
-                        candidate_thread_root_id="$thread_root:localhost",
                     ),
                 ),
             ),
@@ -1763,9 +1645,10 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
         bot: AgentBot,
     ) -> None:
         """Full-history resolution should use full history, not partial snapshots, to prove a root thread exists."""
-        room_id = "!test:localhost"
+        room = _matrix_room()
+        room_id = room.room_id
         incoming_event_id = "$incoming:localhost"
-        event_info = EventInfo.from_event(
+        event = nio.RoomMessageText.from_dict(
             {
                 "content": {
                     "body": "Newest plain reply",
@@ -1793,17 +1676,12 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
             messages=list(thread_history),
         )
 
-        thread_context = await bot._conversation_resolver._resolve_thread_context(
-            room_id,
-            incoming_event_id,
-            event_info,
-            mode=ThreadReadMode.STRICT,
-        )
+        thread_id = await bot._conversation_resolver.coalescing_thread_id(room, event)
+        context = await bot._conversation_resolver.extract_dispatch_context(room, event, thread_id=thread_id)
 
-        assert thread_context.is_thread is True
-        assert thread_context.thread_id == "$thread_root:localhost"
-        assert [message.event_id for message in thread_context.thread_history] == [
+        assert thread_id == "$thread_root:localhost"
+        assert [message.event_id for message in context.thread_history] == [
             "$thread_root:localhost",
             "$thread_reply:localhost",
         ]
-        assert thread_context.requires_model_history_refresh is False
+        assert context.requires_model_history_refresh is False

@@ -89,7 +89,7 @@ async def _persist_and_reload(journal_store: EventJournalStore, record: TurnReco
     """Persist a pending turn as ingress does and read it back from the database."""
     records = journal_store.turn_records(_AGENT_NAME)
     pending = await records.write(turn_rows.record_pending_turn, record, room_id=_ROOM_ID)
-    assert isinstance(pending, turn_rows.Accepted)
+    assert isinstance(pending, turn_rows.PendingTurn)
     reloaded = await journal_store.turn_records(_AGENT_NAME).read(
         turn_rows.get_turn_record,
         record.source_event_ids[-1],

@@ -13,8 +13,7 @@ from mindroom.api import tools as tools_api
 from mindroom.constants import resolve_runtime_paths
 from mindroom.credentials.manager import get_runtime_credentials_manager, save_scoped_credentials
 from mindroom.oauth.github import github_oauth_provider
-from mindroom.oauth.google_cloud import google_cloud_oauth_provider
-from mindroom.oauth.google_tasks import google_tasks_oauth_provider
+from mindroom.oauth.google import google_cloud_oauth_provider, google_oauth_provider
 from mindroom.tool_system.catalog import TOOL_METADATA
 from mindroom.tool_system.metadata import export_tools_metadata
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity, resolve_worker_target
@@ -58,6 +57,7 @@ def _provider_context(
 ) -> tools_api._ResolvedToolAvailabilityContext:
     return tools_api._ResolvedToolAvailabilityContext(
         execution_scope="user_agent",
+        agent_name=worker_target.routing_agent_name,
         status_authoritative=True,
         credentials_manager=credentials_manager,
         worker_target=worker_target,
@@ -76,18 +76,10 @@ def _context(
     return _provider_context(github_oauth_provider(), runtime_paths, credentials_manager, worker_target)
 
 
-def _github_tool() -> dict[str, object]:
-    return {
-        "name": "github",
-        "status": "requires_config",
-        "setup_type": "oauth",
-        "auth_provider": "github",
-        "config_fields": [
-            {"name": "access_token", "required": False},
-            {"name": "base_url", "required": False},
-        ],
-        "oauth_fallback_fields": ["access_token"],
-    }
+def _github_tool() -> dict[str, Any]:
+    tool = export_tools_metadata({"github": TOOL_METADATA["github"]})[0]
+    assert tool["status"] == "requires_config"
+    return tool
 
 
 @pytest.mark.asyncio
@@ -158,6 +150,48 @@ async def test_environment_oauth_fallback_status_is_available_and_secret_free(tm
 
 
 @pytest.mark.asyncio
+async def test_environment_oauth_fallback_reads_the_env_file_past_a_blank_exported_value(tmp_path: Path) -> None:
+    """A blank exported token does not hide the `.env` token the tool itself falls back to."""
+    (tmp_path / "config.yaml").write_text("agents: {}\n")
+    (tmp_path / ".env").write_text("GITHUB_ACCESS_TOKEN=github-env-file-secret\n")
+    runtime_paths = resolve_runtime_paths(
+        config_path=tmp_path / "config.yaml",
+        storage_path=tmp_path / "mindroom_data",
+        process_env={"GITHUB_ACCESS_TOKEN": " "},
+    )
+    manager = get_runtime_credentials_manager(runtime_paths)
+    target = _worker_target("@alice:example.test")
+    tool = _github_tool()
+
+    await tools_api._update_tools_statuses([tool], _context(runtime_paths, manager, target))
+
+    assert tool["environment_auth_configured"] is True
+    assert tool["status"] == "available"
+
+
+@pytest.mark.asyncio
+async def test_environment_oauth_fallback_needs_every_fallback_field(tmp_path: Path) -> None:
+    """The environment configures a tool only when it sets every manual fallback field."""
+    runtime_paths = resolve_runtime_paths(
+        config_path=tmp_path / "config.yaml",
+        storage_path=tmp_path / "mindroom_data",
+        process_env={"PROBE_KEY_ID": "key-id"},
+    )
+    manager = get_runtime_credentials_manager(runtime_paths)
+    target = _worker_target("@alice:example.test")
+    tool = _github_tool()
+    tool["config_fields"] = [
+        {"name": "key_id", "required": False, "env": ["PROBE_KEY_ID"]},
+        {"name": "key_secret", "required": False, "env": ["PROBE_KEY_SECRET"]},
+    ]
+    tool["oauth_fallback_fields"] = ["key_id", "key_secret"]
+
+    await tools_api._update_tools_statuses([tool], _context(runtime_paths, manager, target))
+
+    assert tool["environment_auth_configured"] is False
+
+
+@pytest.mark.asyncio
 async def test_tool_status_reads_settings_from_primary_stores(tmp_path: Path) -> None:
     runtime_paths = resolve_runtime_paths(
         config_path=tmp_path / "config.yaml",
@@ -175,6 +209,7 @@ async def test_tool_status_reads_settings_from_primary_stores(tmp_path: Path) ->
     }
     context = tools_api._ResolvedToolAvailabilityContext(
         execution_scope="shared",
+        agent_name=target.routing_agent_name,
         status_authoritative=True,
         credentials_manager=manager,
         worker_target=target,
@@ -316,7 +351,7 @@ async def test_google_cloud_settings_alone_do_not_make_tool_available(tmp_path: 
 
 @pytest.mark.asyncio
 async def test_connected_oauth_tool_without_required_settings_is_available(tmp_path: Path) -> None:
-    provider = google_tasks_oauth_provider()
+    provider = google_oauth_provider("google_tasks")
     target = _worker_target("@alice:example.test")
     runtime_paths, manager = _connect_google(provider, "oauth", tmp_path, target)
     tool = _google_tool("google_tasks")

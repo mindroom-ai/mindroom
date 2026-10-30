@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import re
 import sqlite3
-from contextlib import closing
+from contextlib import closing, contextmanager
 from typing import TYPE_CHECKING, Any
 
 from mindroom.history.types import HistoryScope
@@ -17,7 +17,7 @@ from mindroom.session_storage.types import ConversationSession
 from mindroom.usage.storage import SYSTEM_USAGE_OWNER, SYSTEM_USAGE_STORAGE_NAME
 
 if TYPE_CHECKING:
-    from collections.abc import Iterable, Mapping
+    from collections.abc import Iterable, Iterator, Mapping
     from pathlib import Path
 
     from mindroom.session_storage.types import SessionKind
@@ -104,6 +104,21 @@ def write_agno_database(path: Path, *sessions: ConversationSession, usage: bool 
                 created_at=session.created_at,
             )
     return path
+
+
+@contextmanager
+def replacing_database(path: Path) -> Iterator[sqlite3.Connection]:
+    """Yield a connection to a new database that moves over the one at ``path`` when the block exits, as a restore would.
+
+    A process prepares each database file once and knows it by its device and inode. The database at ``path`` stays
+    there until the new one moves over it, so the two never share an inode and the next open prepares the new one.
+    Deleting ``path`` and creating the new file in its place lets a filesystem such as ext4 hand it the freed inode,
+    and the next open then takes it for the file it already prepared.
+    """
+    staged = path.with_name(f"{path.name}.replacement")
+    with closing(sqlite3.connect(staged)) as connection, connection:
+        yield connection
+    staged.replace(path)
 
 
 def converted_store(

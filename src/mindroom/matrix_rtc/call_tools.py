@@ -35,7 +35,7 @@ from mindroom.approval.tool_approval import tool_may_require_approval
 from mindroom.background_tasks import wait_for_future_until_complete
 from mindroom.helper_usage import HelperUsageOwner, helper_usage_owner_context, record_helper_usage
 from mindroom.history.interrupted_replay import persist_interrupted_replay
-from mindroom.history.session_context import create_scope_session_storage, load_scope_session
+from mindroom.history.storage import new_scope_session
 from mindroom.history.turn_recorder import TurnRecorder
 from mindroom.history.types import HistoryScope
 from mindroom.hooks import EnrichmentItem
@@ -48,10 +48,10 @@ from mindroom.matrix_rtc.voice_agent import CallAgentResponse
 from mindroom.message_target import MessageTarget
 from mindroom.session_ids import create_session_id
 from mindroom.session_storage.agent_storage import create_session_storage
+from mindroom.session_storage.lanes import run_session_storage_operation
 from mindroom.session_storage.types import ConversationSession
 from mindroom.tool_jobs.execution import agent_tool_middleware
 from mindroom.tool_system.agent_tools import room_turn_offers
-from mindroom.tool_system.agno_toolkits import AGNO_EMPTY_PARAMETERS
 from mindroom.tool_system.declarations import (
     MATRIX_ROOM_RUNTIME_APPROVAL_TYPE,
     MATRIX_ROOM_RUNTIME_TOOL_NAMES,
@@ -74,6 +74,7 @@ if TYPE_CHECKING:
     from mindroom.knowledge.refresh_scheduler import KnowledgeRefreshScheduler
     from mindroom.knowledge.search import AgentKnowledge
     from mindroom.matrix_rtc.voice_agent import LiveVoiceUsage, RealtimeCallUsage
+    from mindroom.session_storage.store import ConversationStore
     from mindroom.tool_system.events import ToolTraceEntry
     from mindroom.tool_system.invocation import ToolCall, ToolMiddleware, ToolNext
     from mindroom.tool_system.runtime_context import ToolRuntimeContext, ToolRuntimeSupport
@@ -318,23 +319,36 @@ class _CallResponseTracker:
         original_status: RunStatus,
     ) -> None:
         async with self.settlement_lock:
-            await asyncio.to_thread(self._persist, state, spoken_text, original_status)
+            await run_session_storage_operation(
+                functools.partial(
+                    create_session_storage,
+                    self.agent_name,
+                    self.config,
+                    self.runtime_paths,
+                    self.execution_identity,
+                ),
+                functools.partial(self._persist, state, spoken_text, original_status),
+            )
 
     def _pop(self, token: str | None) -> _CallAgentRunState | None:
         if token is not None:
             return self.pending.pop(token, None)
         return self.pending.pop(next(iter(self.pending))) if self.pending else None
 
-    def _persist(self, state: _CallAgentRunState, spoken_text: str, original_status: RunStatus) -> None:
-        scope_context = load_scope_session(
-            scope=HistoryScope(kind="agent", scope_id=self.agent_name),
-            session_id=state.session_id,
-            runtime_paths=self.runtime_paths,
-            config=self.config,
-            execution_identity=self.execution_identity,
-        )
+    def _persist(
+        self,
+        state: _CallAgentRunState,
+        spoken_text: str,
+        original_status: RunStatus,
+        storage: ConversationStore,
+    ) -> None:
         persist_interrupted_replay(
-            scope_context=scope_context,
+            storage=storage,
+            # The session only names the run's row, which the save creates when the call's conversation has none yet.
+            session=new_scope_session(
+                session_id=state.session_id,
+                scope=HistoryScope(kind="agent", scope_id=self.agent_name),
+            ),
             run_id=state.run_id,
             user_message=state.user_message,
             user_message_is_structured=False,
@@ -421,13 +435,7 @@ class _CallAgentCache:
         knowledge: AgentKnowledge | None,
         refresh_scheduler: KnowledgeRefreshScheduler | None,
     ) -> AgentBuild:
-        """Build the call's agent with canonical prompt-sanitizing history storage."""
-        history_storage = create_scope_session_storage(
-            scope=HistoryScope(kind="agent", scope_id=self.agent_name),
-            config=self.config,
-            runtime_paths=self.runtime_paths,
-            execution_identity=self.execution_identity,
-        )
+        """Build the call's agent."""
         # Build the same tools and system prompt as text chat, less its Markdown output format, which a call speaks.
         # The shell's mindroom-agent CLI stays off: call turns have no turn identity to own it.
         build = create_agent(
@@ -437,7 +445,6 @@ class _CallAgentCache:
             execution_identity=self.execution_identity,
             hook_registry=self.context.hook_registry,
             knowledge=knowledge,
-            history_storage=history_storage,
             model=resolve_turn_model(
                 self.config,
                 self.runtime_paths,
@@ -939,20 +946,8 @@ def _function_available_during_call(
 
 
 def _realtime_parameters(function: ToolFunction) -> dict[str, Any]:
-    """Return the realtime model's parameters schema: the function's schema after a second Agno processing pass.
-
-    A second pass closes a schema Agno's processing produced to other keys once it differs from Agno's empty schema,
-    which the voice_call_realtime golden pins, and leaves a schema the tool supplies as is
-    (``skip_entrypoint_processing``, as MCP tools do) unchanged. An empty schema becomes an object without properties.
-    """
-    schema = dict(function.parameters)
-    if not schema:
-        return {"type": "object", "properties": {}}
-    # TODO(simplify): `additionalProperties: false` here reproduces a second pass of Agno's entrypoint processing.
-    # Offer the function's schema as it is. The realtime model would see tool schemas without it; the golden pins it.
-    if function.entrypoint_processed and schema != AGNO_EMPTY_PARAMETERS:
-        schema["additionalProperties"] = False
-    return schema
+    """Return the realtime model's parameters schema: the function's own, or an object without properties for none."""
+    return dict(function.parameters) or {"type": "object", "properties": {}}
 
 
 def _wrap_tool_function(

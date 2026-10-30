@@ -32,11 +32,11 @@ from mindroom.matrix.large_messages import (
     _calculate_delivery_event_size,
     _create_preview,
     _oversized_nonterminal_streaming_edit_next_allowed_at,
-    _upload_text_as_mxc,
     calculate_event_size,
     is_edit_message,
     prepare_large_message,
     should_send_oversized_nonterminal_streaming_edit,
+    upload_json_sidecar,
 )
 from mindroom.matrix.media import parse_matrix_media_event_source
 from mindroom.matrix.message_builder import markdown_to_html
@@ -48,7 +48,6 @@ _SIDECAR_UPLOAD_FALLBACK_TEXT = _SIDECAR_UPLOAD_FALLBACK_INDICATOR.strip()
 
 
 class _UploadClient:
-    rooms: dict = {}  # noqa: RUF012
     olm = None
     device_id = "DEVICE"
 
@@ -72,17 +71,20 @@ def _large_text_content(prefix: str) -> dict[str, str]:
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("encrypted", [False, True])
-@pytest.mark.parametrize(
-    ("mimetype", "filename"),
-    [("text/plain", "message.txt"), ("text/html", "message.html"), ("application/json", "message-content.json")],
-)
-async def test_text_upload_preserves_bytes_and_metadata(encrypted: bool, mimetype: str, filename: str) -> None:
+async def test_json_sidecar_upload_preserves_bytes_and_metadata(encrypted: bool) -> None:
     """Sidecars retain plaintext size and type while uploading decryptable bytes under the right name."""
     client = MagicMock(spec=nio.AsyncClient)
     client.upload.return_value = (nio.UploadResponse("mxc://server/sidecar"), None)
-    text = "Sidecar with UTF-8: café"
+    text = '{"body":"Sidecar with UTF-8: café"}'
+    mimetype = "application/json"
+    filename = "message-content.json"
 
-    uri, info = await _upload_text_as_mxc(client, text, mimetype=mimetype, room_encrypted=encrypted)
+    uri, info = await upload_json_sidecar(
+        client,
+        "!room:localhost",
+        {"body": "Sidecar with UTF-8: café"},
+        room_encrypted=encrypted,
+    )
 
     assert uri == "mxc://server/sidecar"
     assert info is not None
@@ -113,7 +115,7 @@ async def test_text_upload_preserves_bytes_and_metadata(encrypted: bool, mimetyp
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("missing_field", ["key", "iv", "hashes"])
-async def test_text_upload_rejects_incomplete_encryption_metadata(missing_field: str) -> None:
+async def test_json_sidecar_upload_rejects_incomplete_encryption_metadata(missing_field: str) -> None:
     """Sidecars handle malformed SDK metadata as an encryption failure before uploading."""
     client = _UploadClient(nio.UploadResponse("mxc://server/sidecar"))
     encryption = {
@@ -125,7 +127,10 @@ async def test_text_upload_rejects_incomplete_encryption_metadata(missing_field:
     del encryption[missing_field]
 
     with patch("mindroom.matrix.media.crypto.attachments.encrypt_attachment", return_value=(b"encrypted", encryption)):
-        assert await _upload_text_as_mxc(client, "secret", room_encrypted=True) == (None, None)
+        assert await upload_json_sidecar(client, "!room:localhost", {"body": "secret"}, room_encrypted=True) == (
+            None,
+            None,
+        )
 
     assert client.uploaded_data is None
 
@@ -233,6 +238,7 @@ async def test_oversized_interactive_values_do_not_escape_the_matrix_event_limit
         _UploadClient(nio.UploadResponse("mxc://server/sidecar")),
         "!room:server",
         content,
+        room_encrypted=False,
     )
 
     assert "io.mindroom.interactive" not in prepared
@@ -386,49 +392,29 @@ def test__create_preview() -> None:
 @pytest.mark.asyncio
 async def test_prepare_large_message_passthrough() -> None:
     """Test that small messages pass through unchanged."""
-
-    # Mock client
-    class MockClient:
-        rooms: dict = {}  # noqa: RUF012
-
-    client = MockClient()
+    client = _UploadClient(nio.UploadResponse("mxc://server/unused"))
 
     # Small message should pass through
     small_content = {"body": "Small message", "msgtype": "m.text"}
-    result = await prepare_large_message(client, "!room:server", small_content)
+    result = await prepare_large_message(client, "!room:server", small_content, room_encrypted=False)
     assert result == small_content
 
     # Message just under limit should pass through
     text = "x" * (_NORMAL_MESSAGE_LIMIT - 3000)
     content = {"body": text, "msgtype": "m.text"}
-    result = await prepare_large_message(client, "!room:server", content)
+    result = await prepare_large_message(client, "!room:server", content, room_encrypted=False)
     assert result == content
 
 
 @pytest.mark.asyncio
 async def test_prepare_large_message_truncation() -> None:
     """Test that large messages get truncated with MXC upload."""
-
-    # Mock client with upload - nio returns tuple
-    class MockClient:
-        rooms: dict = {}  # noqa: RUF012
-        uploaded_data: bytes | None = None
-
-        async def upload(self, **kwargs) -> tuple:  # noqa: ANN003
-            data_provider = kwargs.get("data_provider")
-            if data_provider:
-                data = data_provider(None, None)
-                self.uploaded_data = data.read()
-            # Create a mock UploadResponse
-            response = nio.UploadResponse.from_dict({"content_uri": "mxc://server/file123"})
-            return response, None  # nio returns (response, encryption_dict)
-
-    client = MockClient()
+    client = _UploadClient(nio.UploadResponse("mxc://server/file123"))
 
     # Large message should get processed
     large_text = "x" * 100000  # 100KB
     content = {"body": large_text, "msgtype": "m.text"}
-    result = await prepare_large_message(client, "!room:server", content)
+    result = await prepare_large_message(client, "!room:server", content, room_encrypted=False)
 
     # Should be an m.file message
     assert result["msgtype"] == "m.file"
@@ -468,7 +454,7 @@ async def test_prepare_large_message_upload_failure_falls_back_to_text() -> None
     client = _UploadClient(RuntimeError("upload failed"))
     content = _large_text_content("upload failure ")
 
-    result = await prepare_large_message(client, "!room:server", content)
+    result = await prepare_large_message(client, "!room:server", content, room_encrypted=False)
 
     _assert_text_sidecar_fallback(result, "upload failure ")
 
@@ -483,7 +469,7 @@ async def test_prepare_large_message_missing_content_uri_falls_back_to_text(
     client = _UploadClient(nio.UploadResponse(""))
     content = _large_text_content("missing uri ")
 
-    result = await prepare_large_message(client, "!room:server", content)
+    result = await prepare_large_message(client, "!room:server", content, room_encrypted=False)
 
     _assert_text_sidecar_fallback(result, "missing uri ")
     mock_logger.warning.assert_any_call(
@@ -519,7 +505,7 @@ async def test_prepare_large_message_missing_sidecar_file_metadata_falls_back_to
         _room_id: str,
         _full_content: dict[str, object],
         *,
-        room_encrypted: bool | None = None,
+        room_encrypted: bool,
     ) -> tuple[str, dict[str, object] | None]:
         assert room_encrypted is False
         return "mxc://server/missing-metadata", file_info
@@ -528,7 +514,7 @@ async def test_prepare_large_message_missing_sidecar_file_metadata_falls_back_to
     client = _UploadClient(nio.UploadResponse("mxc://server/unused"))
     content = _large_text_content("missing metadata ")
 
-    result = await prepare_large_message(client, "!room:server", content)
+    result = await prepare_large_message(client, "!room:server", content, room_encrypted=False)
 
     _assert_text_sidecar_fallback(result, "missing metadata ")
 
@@ -544,7 +530,7 @@ async def test_prepare_large_message_encrypted_incomplete_file_metadata_falls_ba
         _room_id: str,
         _full_content: dict[str, object],
         *,
-        room_encrypted: bool | None = None,
+        room_encrypted: bool,
     ) -> tuple[str, dict[str, object]]:
         assert room_encrypted is True
         return "mxc://server/incomplete-encrypted-metadata", {
@@ -552,17 +538,14 @@ async def test_prepare_large_message_encrypted_incomplete_file_metadata_falls_ba
             "mimetype": "application/json",
         }
 
-    room = MagicMock()
-    room.encrypted = True
     client = _UploadClient(nio.UploadResponse("mxc://server/unused"))
-    client.rooms = {"!room:server": room}
     monkeypatch.setattr(
         "mindroom.matrix.large_messages.upload_json_sidecar",
         incomplete_encrypted_file_metadata,
     )
     content = _large_text_content("encrypted missing metadata ")
 
-    result = await prepare_large_message(client, "!room:server", content)
+    result = await prepare_large_message(client, "!room:server", content, room_encrypted=True)
 
     _assert_text_sidecar_fallback(result, "encrypted missing metadata ")
 
@@ -588,19 +571,16 @@ async def test_prepare_large_message_encrypted_valid_sidecar_keeps_file_preview(
         _room_id: str,
         _full_content: dict[str, object],
         *,
-        room_encrypted: bool | None = None,
+        room_encrypted: bool,
     ) -> tuple[str, dict[str, object]]:
         assert room_encrypted is True
         return mxc_uri, file_info
 
-    room = MagicMock()
-    room.encrypted = True
     client = _UploadClient(nio.UploadResponse("mxc://server/unused"))
-    client.rooms = {"!room:server": room}
     monkeypatch.setattr("mindroom.matrix.large_messages.upload_json_sidecar", encrypted_file_metadata)
     content = _large_text_content("encrypted sidecar ")
 
-    result = await prepare_large_message(client, "!room:server", content)
+    result = await prepare_large_message(client, "!room:server", content, room_encrypted=True)
 
     assert result["msgtype"] == "m.file"
     assert result["file"] == file_info
@@ -619,7 +599,7 @@ async def test_prepare_streaming_edit_encrypted_incomplete_file_metadata_omits_s
         _room_id: str,
         _full_content: dict[str, object],
         *,
-        room_encrypted: bool | None = None,
+        room_encrypted: bool,
     ) -> tuple[str, dict[str, object]]:
         assert room_encrypted is True
         return "mxc://server/incomplete-streaming-sidecar", {
@@ -627,10 +607,7 @@ async def test_prepare_streaming_edit_encrypted_incomplete_file_metadata_omits_s
             "mimetype": "application/json",
         }
 
-    room = MagicMock()
-    room.encrypted = True
     client = _UploadClient(nio.UploadResponse("mxc://server/unused"))
-    client.rooms = {"!room:server": room}
     monkeypatch.setattr(
         "mindroom.matrix.large_messages.upload_json_sidecar",
         incomplete_encrypted_file_metadata,
@@ -647,7 +624,7 @@ async def test_prepare_streaming_edit_encrypted_incomplete_file_metadata_omits_s
         "msgtype": "m.text",
     }
 
-    result = await prepare_large_message(client, "!room:server", edit_content)
+    result = await prepare_large_message(client, "!room:server", edit_content, room_encrypted=True)
 
     inner = result["m.new_content"]
     assert inner["msgtype"] == "m.text"
@@ -671,7 +648,7 @@ async def test_prepare_edit_message_upload_failure_falls_back_to_text() -> None:
         "msgtype": "m.text",
     }
 
-    result = await prepare_large_message(client, "!room:server", edit_content)
+    result = await prepare_large_message(client, "!room:server", edit_content, room_encrypted=False)
 
     assert result["msgtype"] == "m.text"
     assert result["m.relates_to"] == relates_to
@@ -719,7 +696,7 @@ async def test_prepare_nonterminal_streaming_edit_double_fallback_preserves_noti
         STREAM_STATUS_KEY: STREAM_STATUS_STREAMING,
     }
 
-    result = await prepare_large_message(client, "!room:server", edit_content)
+    result = await prepare_large_message(client, "!room:server", edit_content, room_encrypted=False)
 
     assert result["msgtype"] == "m.notice"
     assert result[STREAM_STATUS_KEY] == STREAM_STATUS_STREAMING
@@ -737,7 +714,7 @@ async def test_prepare_large_message_valid_sidecar_keeps_file_preview() -> None:
     client = _UploadClient(nio.UploadResponse("mxc://server/sidecar"))
     content = _large_text_content("successful sidecar ")
 
-    result = await prepare_large_message(client, "!room:server", content)
+    result = await prepare_large_message(client, "!room:server", content, room_encrypted=False)
 
     assert result["msgtype"] == "m.file"
     assert result["url"] == "mxc://server/sidecar"
@@ -750,22 +727,7 @@ async def test_prepare_large_message_valid_sidecar_keeps_file_preview() -> None:
 @pytest.mark.asyncio
 async def test_prepare_edit_message() -> None:
     """Test that edit messages use lower size threshold."""
-
-    # Mock client with upload - nio returns tuple
-    class MockClient:
-        rooms: dict = {}  # noqa: RUF012
-        uploaded_data: bytes | None = None
-
-        async def upload(self, **kwargs) -> tuple:  # noqa: ANN003
-            data_provider = kwargs.get("data_provider")
-            if data_provider:
-                data = data_provider(None, None)
-                self.uploaded_data = data.read()
-            # Create a mock UploadResponse
-            response = nio.UploadResponse.from_dict({"content_uri": "mxc://server/file456"})
-            return response, None  # nio returns (response, encryption_dict)
-
-    client = MockClient()
+    client = _UploadClient(nio.UploadResponse("mxc://server/file456"))
 
     # Message that's under normal limit but over edit limit
     text = "y" * 30000  # 30KB
@@ -776,7 +738,7 @@ async def test_prepare_edit_message() -> None:
         "msgtype": "m.text",
     }
 
-    result = await prepare_large_message(client, "!room:server", edit_content)
+    result = await prepare_large_message(client, "!room:server", edit_content, room_encrypted=False)
 
     # Should be processed due to edit limit
     # For edits, the structure is different - check for m.new_content
@@ -810,7 +772,7 @@ async def test_prepare_text_edit_with_file_sidecar_keeps_parseable_fallback() ->
         "msgtype": "m.text",
     }
 
-    prepared = await prepare_large_message(client, "!room:server", edit_content)
+    prepared = await prepare_large_message(client, "!room:server", edit_content, room_encrypted=False)
     parsed = nio.Event.parse_event(
         {
             "content": prepared,
@@ -843,7 +805,7 @@ async def test_prepare_terminal_edit_updates_sidecar_size_after_inner_preview_sh
         "io.mindroom.required_metadata": metadata,
     }
 
-    result = await prepare_large_message(client, "!room:server", edit_content)
+    result = await prepare_large_message(client, "!room:server", edit_content, room_encrypted=False)
 
     inner = result["m.new_content"]
     assert len(inner["body"]) < 22_000
@@ -870,7 +832,7 @@ async def test_prepare_terminal_edit_uses_empty_previews_at_the_metadata_boundar
         "io.mindroom.required_metadata": metadata,
     }
 
-    result = await prepare_large_message(client, "!room:server", edit_content)
+    result = await prepare_large_message(client, "!room:server", edit_content, room_encrypted=False)
 
     assert result["body"] == ""
     assert result["m.new_content"]["body"] == ""
@@ -924,7 +886,7 @@ async def test_prepare_terminal_edit_keeps_the_largest_outer_preview_that_fits()
         "io.mindroom.test_metadata": metadata,
     }
 
-    result = await prepare_large_message(client, "!room:server", edit_content)
+    result = await prepare_large_message(client, "!room:server", edit_content, room_encrypted=False)
 
     assert result["m.new_content"]["body"] == text
     assert calculate_event_size(result) <= _MATRIX_EVENT_HARD_LIMIT
@@ -966,7 +928,7 @@ async def test_prepare_terminal_edit_preview_keeps_the_rendered_answer_when_only
         "msgtype": "m.text",
     }
 
-    result = await prepare_large_message(client, "!room:server", edit_content)
+    result = await prepare_large_message(client, "!room:server", edit_content, room_encrypted=False)
 
     inner = result["m.new_content"]
     assert inner["msgtype"] == "m.file"
@@ -1049,7 +1011,7 @@ async def test_prepare_terminal_edit_rejects_irreducible_metadata_before_repeate
         ) as calculate_size,
         pytest.raises(ValueError, match="cannot fit within the Matrix event limit"),
     ):
-        await prepare_large_message(client, "!room:server", edit_content)
+        await prepare_large_message(client, "!room:server", edit_content, room_encrypted=False)
 
     assert calculate_size.call_count <= 3
 
@@ -1120,7 +1082,7 @@ async def test_prepare_oversized_file_edit_remains_parseable() -> None:
         "url": "mxc://server/previous-sidecar",
     }
 
-    prepared = await prepare_large_message(client, "!room:server", edit_content)
+    prepared = await prepare_large_message(client, "!room:server", edit_content, room_encrypted=False)
     parsed = nio.Event.parse_event(
         {
             "content": prepared,
@@ -1255,20 +1217,7 @@ async def test_prepare_oversized_file_edit_upload_failure_uses_parseable_text_fa
 @pytest.mark.asyncio
 async def test_prepare_nonterminal_streaming_edit_uses_rich_inline_preview() -> None:
     """Oversized in-progress stream edits keep an HTML preview and fresh sidecar."""
-
-    class MockClient:
-        rooms: dict = {}  # noqa: RUF012
-        uploaded_data: bytes | None = None
-
-        async def upload(self, **kwargs) -> tuple:  # noqa: ANN003
-            data_provider = kwargs.get("data_provider")
-            if data_provider:
-                data = data_provider(None, None)
-                self.uploaded_data = data.read()
-            response = nio.UploadResponse.from_dict({"content_uri": "mxc://server/streaming-preview"})
-            return response, None
-
-    client = MockClient()
+    client = _UploadClient(nio.UploadResponse("mxc://server/streaming-preview"))
     text = ("streaming **markdown**\n\n🔧 `save_file` [1]\n" * 1000) + "tail"
     formatted_body = "<p>streaming <strong>markdown</strong></p><p>🔧 <code>save_file</code> [1]</p>" * 1000
     tool_trace = {"version": 2, "events": [{"type": "tool_call_started", "tool_name": "save_file"}]}
@@ -1288,7 +1237,7 @@ async def test_prepare_nonterminal_streaming_edit_uses_rich_inline_preview() -> 
         "msgtype": "m.text",
     }
 
-    result = await prepare_large_message(client, "!room:server", edit_content)
+    result = await prepare_large_message(client, "!room:server", edit_content, room_encrypted=False)
 
     assert result["m.new_content"]["msgtype"] == "m.text"
     assert result["m.new_content"][STREAM_STATUS_KEY] == STREAM_STATUS_STREAMING
@@ -1320,20 +1269,7 @@ async def test_prepare_nonterminal_streaming_edit_uses_rich_inline_preview() -> 
 @pytest.mark.asyncio
 async def test_prepare_nonterminal_streaming_edit_keeps_preview_large_with_huge_sidecar_tool_trace() -> None:
     """Huge tool traces should go to the sidecar instead of shrinking visible preview."""
-
-    class MockClient:
-        rooms: dict = {}  # noqa: RUF012
-        uploaded_data: bytes | None = None
-
-        async def upload(self, **kwargs) -> tuple:  # noqa: ANN003
-            data_provider = kwargs.get("data_provider")
-            if data_provider:
-                data = data_provider(None, None)
-                self.uploaded_data = data.read()
-            response = nio.UploadResponse.from_dict({"content_uri": "mxc://server/huge-trace"})
-            return response, None
-
-    client = MockClient()
+    client = _UploadClient(nio.UploadResponse("mxc://server/huge-trace"))
     text = ("streaming **markdown**\n" * 2000) + "tail"
     huge_tool_trace = {
         "version": 2,
@@ -1361,7 +1297,7 @@ async def test_prepare_nonterminal_streaming_edit_keeps_preview_large_with_huge_
         "msgtype": "m.text",
     }
 
-    result = await prepare_large_message(client, "!room:server", edit_content)
+    result = await prepare_large_message(client, "!room:server", edit_content, room_encrypted=False)
 
     assert result["m.new_content"]["msgtype"] == "m.text"
     assert result["m.new_content"]["format"] == "org.matrix.custom.html"
@@ -1380,27 +1316,14 @@ async def test_prepare_nonterminal_streaming_edit_keeps_preview_large_with_huge_
 @pytest.mark.asyncio
 async def test_prepare_large_message_moves_tool_trace_to_json_sidecar_regular() -> None:
     """Large-message conversion keeps tool trace in uploaded sidecar, not preview."""
-
-    class MockClient:
-        rooms: dict = {}  # noqa: RUF012
-        uploaded_data: bytes | None = None
-
-        async def upload(self, **kwargs) -> tuple:  # noqa: ANN003
-            data_provider = kwargs.get("data_provider")
-            if data_provider:
-                data = data_provider(None, None)
-                self.uploaded_data = data.read()
-            response = nio.UploadResponse.from_dict({"content_uri": "mxc://server/file789"})
-            return response, None
-
-    client = MockClient()
+    client = _UploadClient(nio.UploadResponse("mxc://server/file789"))
     content = {
         "body": "z" * 100000,
         "msgtype": "m.text",
         _TOOL_TRACE_KEY: {"version": 1, "events": [{"type": "tool_call_started", "tool_name": "save_file"}]},
     }
 
-    result = await prepare_large_message(client, "!room:server", content)
+    result = await prepare_large_message(client, "!room:server", content, room_encrypted=False)
     assert _TOOL_TRACE_KEY not in result
     assert client.uploaded_data is not None
     uploaded_payload = json.loads(client.uploaded_data.decode("utf-8"))
@@ -1410,27 +1333,14 @@ async def test_prepare_large_message_moves_tool_trace_to_json_sidecar_regular() 
 @pytest.mark.asyncio
 async def test_prepare_large_message_preserves_ai_run_metadata() -> None:
     """AI run metadata should remain in the preview event for large messages."""
-
-    class MockClient:
-        rooms: dict = {}  # noqa: RUF012
-        uploaded_data: bytes | None = None
-
-        async def upload(self, **kwargs) -> tuple:  # noqa: ANN003
-            data_provider = kwargs.get("data_provider")
-            if data_provider:
-                data = data_provider(None, None)
-                self.uploaded_data = data.read()
-            response = nio.UploadResponse.from_dict({"content_uri": "mxc://server/file999"})
-            return response, None
-
-    client = MockClient()
+    client = _UploadClient(nio.UploadResponse("mxc://server/file999"))
     content = {
         "body": "m" * 100000,
         "msgtype": "m.text",
         AI_RUN_METADATA_KEY: {"version": 1, "usage": {"total_tokens": 1234}},
     }
 
-    result = await prepare_large_message(client, "!room:server", content)
+    result = await prepare_large_message(client, "!room:server", content, room_encrypted=False)
     assert AI_RUN_METADATA_KEY in result
     assert result[AI_RUN_METADATA_KEY]["usage"]["total_tokens"] == 1234
     assert client.uploaded_data is not None
@@ -1441,27 +1351,14 @@ async def test_prepare_large_message_preserves_ai_run_metadata() -> None:
 @pytest.mark.asyncio
 async def test_prepare_large_message_preserves_original_sender_metadata() -> None:
     """Original sender metadata should remain on large preview events for self-resume."""
-
-    class MockClient:
-        rooms: dict = {}  # noqa: RUF012
-        uploaded_data: bytes | None = None
-
-        async def upload(self, **kwargs) -> tuple:  # noqa: ANN003
-            data_provider = kwargs.get("data_provider")
-            if data_provider:
-                data = data_provider(None, None)
-                self.uploaded_data = data.read()
-            response = nio.UploadResponse.from_dict({"content_uri": "mxc://server/file1001"})
-            return response, None
-
-    client = MockClient()
+    client = _UploadClient(nio.UploadResponse("mxc://server/file1001"))
     content = {
         "body": "n" * 100000,
         "msgtype": "m.text",
         ORIGINAL_SENDER_KEY: "@user:localhost",
     }
 
-    result = await prepare_large_message(client, "!room:server", content)
+    result = await prepare_large_message(client, "!room:server", content, room_encrypted=False)
 
     assert result[ORIGINAL_SENDER_KEY] == "@user:localhost"
     assert client.uploaded_data is not None
@@ -1479,19 +1376,9 @@ async def test_prepare_large_message_trusted_metadata_round_trips_through_sideca
 ) -> None:
     """Large-message writer and reader should preserve trusted dispatch metadata."""
 
-    class MockClient:
-        rooms: dict = {}  # noqa: RUF012
-        uploaded_data: bytes | None = None
+    class MockClient(_UploadClient):
         user_id = "@mindroom_agent:localhost"
         access_token = TEST_ACCESS_TOKEN
-
-        async def upload(self, **kwargs) -> tuple:  # noqa: ANN003
-            data_provider = kwargs.get("data_provider")
-            if data_provider:
-                data = data_provider(None, None)
-                self.uploaded_data = data.read()
-            response = nio.UploadResponse.from_dict({"content_uri": f"mxc://server/{source_kind}-metadata-sidecar"})
-            return response, None
 
         async def download(self, *, mxc: str) -> nio.DownloadResponse:
             assert mxc == f"mxc://server/{source_kind}-metadata-sidecar"
@@ -1503,7 +1390,7 @@ async def test_prepare_large_message_trusted_metadata_round_trips_through_sideca
         async def send(self, _method: str, path: str, *_args: object, **_kwargs: object) -> FakeMediaResponse:
             return await serve_media_download(self.download, path)
 
-    client = MockClient()
+    client = MockClient(nio.UploadResponse(f"mxc://server/{source_kind}-metadata-sidecar"))
     content = {
         "body": "trusted metadata " * 10000,
         "msgtype": "m.text",
@@ -1520,7 +1407,7 @@ async def test_prepare_large_message_trusted_metadata_round_trips_through_sideca
         VOICE_RAW_AUDIO_FALLBACK_KEY: True,
     }
 
-    preview = await prepare_large_message(client, "!room:server", content)
+    preview = await prepare_large_message(client, "!room:server", content, room_encrypted=False)
     assert client.uploaded_data is not None
     assert preview[PER_FIRE_THREAD_ROOT_KEY] is True
     assert preview[PER_FIRE_THREAD_ROOT_EVENT_ID_KEY] == "$fire-root:localhost"
@@ -1553,27 +1440,14 @@ async def test_prepare_large_message_trusted_metadata_round_trips_through_sideca
 @pytest.mark.asyncio
 async def test_prepare_large_message_moves_visible_body_to_json_sidecar_regular() -> None:
     """Large streamed previews should keep canonical visible body only in the JSON sidecar payload."""
-
-    class MockClient:
-        rooms: dict = {}  # noqa: RUF012
-        uploaded_data: bytes | None = None
-
-        async def upload(self, **kwargs) -> tuple:  # noqa: ANN003
-            data_provider = kwargs.get("data_provider")
-            if data_provider:
-                data = data_provider(None, None)
-                self.uploaded_data = data.read()
-            response = nio.UploadResponse.from_dict({"content_uri": "mxc://server/file1002"})
-            return response, None
-
-    client = MockClient()
+    client = _UploadClient(nio.UploadResponse("mxc://server/file1002"))
     content = {
         "body": "v" * 100000,
         "msgtype": "m.text",
         "io.mindroom.visible_body": "v" * 100000,
     }
 
-    result = await prepare_large_message(client, "!room:server", content)
+    result = await prepare_large_message(client, "!room:server", content, room_encrypted=False)
 
     assert "io.mindroom.visible_body" not in result
     assert client.uploaded_data is not None
@@ -1584,20 +1458,7 @@ async def test_prepare_large_message_moves_visible_body_to_json_sidecar_regular(
 @pytest.mark.asyncio
 async def test_prepare_large_message_keeps_explicit_warmup_suffix_on_preview() -> None:
     """Large streamed previews should retain the explicit warmup suffix metadata on the preview event."""
-
-    class MockClient:
-        rooms: dict = {}  # noqa: RUF012
-        uploaded_data: bytes | None = None
-
-        async def upload(self, **kwargs) -> tuple:  # noqa: ANN003
-            data_provider = kwargs.get("data_provider")
-            if data_provider:
-                data = data_provider(None, None)
-                self.uploaded_data = data.read()
-            response = nio.UploadResponse.from_dict({"content_uri": "mxc://server/file1002"})
-            return response, None
-
-    client = MockClient()
+    client = _UploadClient(nio.UploadResponse("mxc://server/file1002"))
     warmup_suffix = "⏳ Preparing isolated worker..."
     content = {
         "body": ("v" * 100000) + f"\n\n{warmup_suffix}",
@@ -1606,7 +1467,7 @@ async def test_prepare_large_message_keeps_explicit_warmup_suffix_on_preview() -
         STREAM_WARMUP_SUFFIX_KEY: warmup_suffix,
     }
 
-    result = await prepare_large_message(client, "!room:server", content)
+    result = await prepare_large_message(client, "!room:server", content, room_encrypted=False)
 
     assert result[STREAM_WARMUP_SUFFIX_KEY] == warmup_suffix
     assert "io.mindroom.visible_body" not in result
@@ -1615,20 +1476,7 @@ async def test_prepare_large_message_keeps_explicit_warmup_suffix_on_preview() -
 @pytest.mark.asyncio
 async def test_prepare_large_message_moves_tool_trace_to_json_sidecar_edit() -> None:
     """Edit large-message conversion keeps tool trace in uploaded sidecar, not preview."""
-
-    class MockClient:
-        rooms: dict = {}  # noqa: RUF012
-        uploaded_data: bytes | None = None
-
-        async def upload(self, **kwargs) -> tuple:  # noqa: ANN003
-            data_provider = kwargs.get("data_provider")
-            if data_provider:
-                data = data_provider(None, None)
-                self.uploaded_data = data.read()
-            response = nio.UploadResponse.from_dict({"content_uri": "mxc://server/file999"})
-            return response, None
-
-    client = MockClient()
+    client = _UploadClient(nio.UploadResponse("mxc://server/file999"))
     edit_content = {
         "body": "* " + "w" * 50000,
         "m.new_content": {
@@ -1640,7 +1488,7 @@ async def test_prepare_large_message_moves_tool_trace_to_json_sidecar_edit() -> 
         "msgtype": "m.text",
     }
 
-    result = await prepare_large_message(client, "!room:server", edit_content)
+    result = await prepare_large_message(client, "!room:server", edit_content, room_encrypted=False)
     assert "m.new_content" in result
     assert _TOOL_TRACE_KEY not in result["m.new_content"]
     assert client.uploaded_data is not None
@@ -1651,20 +1499,7 @@ async def test_prepare_large_message_moves_tool_trace_to_json_sidecar_edit() -> 
 @pytest.mark.asyncio
 async def test_prepare_large_message_moves_visible_body_to_json_sidecar_edit() -> None:
     """Large streamed edit previews should keep canonical visible body only in the JSON sidecar payload."""
-
-    class MockClient:
-        rooms: dict = {}  # noqa: RUF012
-        uploaded_data: bytes | None = None
-
-        async def upload(self, **kwargs) -> tuple:  # noqa: ANN003
-            data_provider = kwargs.get("data_provider")
-            if data_provider:
-                data = data_provider(None, None)
-                self.uploaded_data = data.read()
-            response = nio.UploadResponse.from_dict({"content_uri": "mxc://server/file1003"})
-            return response, None
-
-    client = MockClient()
+    client = _UploadClient(nio.UploadResponse("mxc://server/file1003"))
     visible_body = "w" * 50000
     edit_content = {
         "body": "* " + visible_body,
@@ -1678,7 +1513,7 @@ async def test_prepare_large_message_moves_visible_body_to_json_sidecar_edit() -
         "msgtype": "m.text",
     }
 
-    result = await prepare_large_message(client, "!room:server", edit_content)
+    result = await prepare_large_message(client, "!room:server", edit_content, room_encrypted=False)
 
     assert "io.mindroom.visible_body" not in result
     assert "io.mindroom.visible_body" not in result["m.new_content"]

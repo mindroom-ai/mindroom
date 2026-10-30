@@ -1,4 +1,4 @@
-"""Which thread an outbound Matrix mutation lands in, decided before it is sent.
+"""Whether an outbound Matrix mutation's thread membership is known before it is sent.
 
 Ownership map:
 - canonical resolution: `mindroom.matrix.thread_membership`
@@ -6,43 +6,38 @@ Ownership map:
 - tool-facing root normalization: `mindroom.custom_tools.attachment_helpers`
 
 A tool that sends or redacts a Matrix event (see `mindroom.custom_tools.matrix_api`)
-has to know whether that event belongs to a thread before it goes out, because
-the answer decides what it sends, and no later correction is possible. It asks
-here, through `resolve_event_thread_impact_for_client` or
-`resolve_redaction_thread_impact_for_client`, and refuses the operation when the
-answer is UNKNOWN.
+asks here, through `event_thread_membership_known` or
+`redaction_thread_membership_known`, before the mutation goes out, and refuses
+the operation when the answer is False. Root proofs read the conversation
+projection, the same reader turns use.
 
-The mapping is total and UNKNOWN fails closed. THREADED names the thread,
-ROOM_LEVEL says there is none, and UNKNOWN says membership could not be proven --
-which a caller must treat as a refusal rather than as "no thread", because
-sending threaded work at room level is not recoverable.
+The answer is True when membership is proven threaded or room level, or when
+the mutation cannot affect thread membership at all. It is False when
+membership could not be proven, which fails closed: a mutation whose thread
+cannot be decided is refused rather than treated as room level.
 
 Redactions are thread-affecting only when the target identifies a plaintext or
-encrypted room message. Reactions and non-message targets are ROOM_LEVEL,
-because removing them cannot move a message between conversations.
+encrypted room message. Removing a reaction or a non-message event cannot move
+a message between conversations, so those redactions are always known.
 """
 
 from __future__ import annotations
 
-from enum import Enum, auto
 from typing import TYPE_CHECKING
 
 from mindroom.matrix.event_info import EventInfo, event_type_supports_thread_relations
+from mindroom.matrix.projected_thread_membership import projected_thread_membership_access
 from mindroom.matrix.thread_membership import (
-    ThreadResolution,
     ThreadResolutionState,
     resolve_event_thread_membership,
     resolve_related_event_thread_membership,
-)
-from mindroom.matrix.thread_room_scan import (
-    RoomScanRelations,
-    room_scan_membership_access_for_client,
 )
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
 
-    import nio
+    from mindroom.matrix.conversation_reads import ConversationReader
+    from mindroom.matrix.relation_lookup import RelationLookup
 
 
 def _redaction_can_affect_thread_membership(event_info: EventInfo) -> bool:
@@ -50,78 +45,53 @@ def _redaction_can_affect_thread_membership(event_info: EventInfo) -> bool:
     return event_type_supports_thread_relations(event_info.event_type) and not event_info.is_reaction
 
 
-class MutationThreadImpactState(Enum):
-    """Mutation outcomes for one event relation."""
-
-    THREADED = auto()
-    ROOM_LEVEL = auto()
-    UNKNOWN = auto()
-
-
-def _mutation_thread_impact_from_resolution(
-    resolution: ThreadResolution,
-) -> MutationThreadImpactState:
-    """Map canonical membership results onto mutation behavior."""
-    if resolution.state is ThreadResolutionState.THREADED:
-        return MutationThreadImpactState.THREADED
-    if resolution.state is ThreadResolutionState.ROOM_LEVEL:
-        return MutationThreadImpactState.ROOM_LEVEL
-    return MutationThreadImpactState.UNKNOWN
-
-
-async def resolve_event_thread_impact_for_client(
-    client: nio.AsyncClient,
+async def event_thread_membership_known(
+    reader: ConversationReader,
+    relations: RelationLookup,
     room_id: str,
     *,
     event_type: str,
     content: Mapping[str, object],
-    relations: RoomScanRelations,
-) -> MutationThreadImpactState:
-    """Return the mutation impact for one outbound client-side event payload."""
+) -> bool:
+    """Return whether one outbound client-side event payload has known thread membership."""
     if event_type != "m.room.message":
-        return MutationThreadImpactState.ROOM_LEVEL
+        return True
     event_info = EventInfo.from_event({"type": event_type, "content": dict(content)})
     try:
         resolution = await resolve_event_thread_membership(
             room_id,
             event_info,
-            access=room_scan_membership_access_for_client(
-                client,
-                relations=relations,
-            ),
+            access=projected_thread_membership_access(reader, relations),
         )
     except Exception:
         # Two different failures, one correct answer. An ancestor that cannot
         # carry thread membership -- a sticker, a reaction -- proves nothing;
         # a lookup that simply failed proves nothing either. Both must report
-        # UNKNOWN rather than "no thread", because the caller turns UNKNOWN
+        # unknown rather than "no thread", because the caller turns unknown
         # into an explicit error and would otherwise send threaded work at
         # room level. The strict lookup exists so this path sees the failure
         # at all instead of a silently degraded None.
-        return MutationThreadImpactState.UNKNOWN
-    return _mutation_thread_impact_from_resolution(resolution)
+        return False
+    return resolution.state is not ThreadResolutionState.INDETERMINATE
 
 
-async def resolve_redaction_thread_impact_for_client(
-    client: nio.AsyncClient,
+async def redaction_thread_membership_known(
+    reader: ConversationReader,
+    relations: RelationLookup,
     room_id: str,
     *,
     event_id: str,
-    relations: RoomScanRelations,
-) -> MutationThreadImpactState:
-    """Return the mutation impact for one client-side redaction target."""
+) -> bool:
+    """Return whether one client-side redaction target has known thread membership."""
     target_event_info = await relations.event_info(room_id, event_id)
     if target_event_info is not None and not _redaction_can_affect_thread_membership(target_event_info):
-        return MutationThreadImpactState.ROOM_LEVEL
+        return True
     try:
         resolution = await resolve_related_event_thread_membership(
             room_id,
             event_id,
-            access=room_scan_membership_access_for_client(
-                client,
-                relations=relations,
-            ),
+            access=projected_thread_membership_access(reader, relations),
         )
     except Exception:
-        return MutationThreadImpactState.UNKNOWN
-    return _mutation_thread_impact_from_resolution(resolution)
+        return False
+    return resolution.state is not ThreadResolutionState.INDETERMINATE

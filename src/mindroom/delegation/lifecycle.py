@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from contextlib import asynccontextmanager
 from contextvars import ContextVar
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Literal
 from uuid import uuid4
 
@@ -41,6 +41,7 @@ if TYPE_CHECKING:
     from mindroom.delegation.state import DelegationTerminalStatus, SubagentPersona
     from mindroom.event_journal import ApprovalCall
     from mindroom.llm.events import RunEvent
+    from mindroom.llm.usage import RunMetrics
     from mindroom.tool_system.runtime_context import ToolRuntimeContext
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 
@@ -62,6 +63,9 @@ class ChildRunObservation:
     child: DelegationChild
     parent: ChildRunObservation | None = None
     response: RunRecord | None = None
+    # The usage each run of the child's turn reported in this context, by run: a resumed run's replaces its pause's,
+    # as the usage ledger's row for the run does.
+    run_usage: dict[str, RunMetrics | None] = field(default_factory=dict)
     # The tail of what the child said and which tools it called, reported as its caller's progress.
     activity: str = ""
 
@@ -69,6 +73,15 @@ class ChildRunObservation:
         """Return the terminal record of the child's current run, None while that run has handed over none."""
         response = self.response
         return response if response is not None and response.run_id == self.child.run_id else None
+
+    def observe(self, record: RunRecord) -> None:
+        """Keep ``record``, which ended the stream of the child's current run, and the usage it reported."""
+        self.response = record
+        self.run_usage[record.run_id] = record.metrics
+
+    def prior_usage(self, final: RunRecord) -> tuple[RunMetrics, ...]:
+        """Return the usage of the turn's runs before ``final``, which the child's record reports with ``final``'s."""
+        return tuple(usage for run_id, usage in self.run_usage.items() if run_id != final.run_id and usage is not None)
 
 
 _CHILD_RUN: ContextVar[ChildRunObservation | None] = ContextVar("delegation_child_run", default=None)
@@ -165,12 +178,13 @@ async def settle_child_response(
     config: Config,
     runtime_paths: RuntimePaths,
     approval_calls: Sequence[ApprovalCall] = (),
+    prior_usage: Sequence[RunMetrics] = (),
 ) -> None:
     """Derive operational state from one exact run, then publish its audit view.
 
     A finished run's result is what it hands over (``handover_content``), so a failed run's is why it failed, a run
     recovery cancelled hands over why, and a resumed run's is what it wrote before its pause and since, else the
-    completion note.
+    completion note. A finished turn's usage is the run's with ``prior_usage``, that of the turn's earlier runs.
     """
     if response.run_id != child.run_id or response.session_id != child.session_id:
         msg = "Delegation child response does not match its retained run"
@@ -190,7 +204,7 @@ async def settle_child_response(
         child.result = None
     await update_subagent_turn(child, runtime_paths)
     try:
-        usage = await record_child_response(
+        await record_child_response(
             child,
             response,
             config=config,
@@ -198,12 +212,17 @@ async def settle_child_response(
             approval_calls=approval_calls,
         )
     except DelegationRecordLimitError:
+        # A full record keeps room for its terminal event, so a terminal child is settled without the remaining
+        # ordinary events.
         if child.status not in TERMINAL_CHILD_STATUSES:
             raise
-        # A full record keeps room for its terminal event, so settle it without the remaining ordinary events.
-        usage = child_response_usage(response)
     if child.status in TERMINAL_CHILD_STATUSES:
-        await finish_child_record(child, config=config, runtime_paths=runtime_paths, usage=usage)
+        await finish_child_record(
+            child,
+            config=config,
+            runtime_paths=runtime_paths,
+            usage=child_response_usage(response, prior_usage),
+        )
 
 
 async def finish_child_turn(
@@ -244,7 +263,13 @@ async def child_run_context(
         try:
             response = observation.current_record()
             if response is not None:
-                await settle_child_response(child, response, config=config, runtime_paths=runtime_paths)
+                await settle_child_response(
+                    child,
+                    response,
+                    config=config,
+                    runtime_paths=runtime_paths,
+                    prior_usage=observation.prior_usage(response),
+                )
         finally:
             _CHILD_RUN.reset(token)
 
@@ -269,7 +294,7 @@ async def observe_child_event(event: RunEvent) -> None:
         elif isinstance(event, RunFinished) and isinstance(record := event.record, RunRecord):
             child = observation.child
             if record.run_id == child.run_id and record.session_id == child.session_id:
-                observation.response = record
+                observation.observe(record)
     await record_child_event(event)
 
 

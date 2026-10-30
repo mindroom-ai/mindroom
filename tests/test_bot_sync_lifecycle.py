@@ -19,6 +19,7 @@ import nio
 import pytest
 
 from mindroom.background_tasks import create_background_task, wait_for_background_tasks
+from mindroom.bot_runtime_view import RunPhase
 from mindroom.cancellation import SYNC_RESTART_CANCEL_MSG, current_task_is_process_shutdown
 from mindroom.config.plugin import PluginEntryConfig
 from mindroom.dispatch_callback_outcome import TurnDispatchOutcome
@@ -40,16 +41,8 @@ class TestBotSyncLifecycle(ThreadingBehaviorTestBase):
     """Startup, checkpoint certification, redaction ownership, and drain behavior."""
 
     @pytest.mark.asyncio
-    @pytest.mark.parametrize(("standalone", "first_sync_response"), [(False, True), (True, True), (True, False)])
-    async def test_start_holds_reactions_until_semantic_dispatch_is_released(
-        self,
-        bot: AgentBot,
-        standalone: bool,
-        first_sync_response: bool,
-    ) -> None:
+    async def test_start_holds_reactions_until_semantic_dispatch_is_released(self, bot: AgentBot) -> None:
         """Durable non-turn work must survive startup without running under stale grants."""
-        if standalone:
-            bot.orchestrator = None
         dispatched = asyncio.Event()
 
         async def on_reaction(_room: nio.MatrixRoom, _event: nio.ReactionEvent) -> TurnDispatchOutcome:
@@ -73,7 +66,7 @@ class TestBotSyncLifecycle(ThreadingBehaviorTestBase):
             patch.object(bot, "ensure_user_account", AsyncMock()),
             patch.object(bot, "_open_owned_matrix_client", AsyncMock(return_value=bot.client)),
             patch.object(bot, "_set_avatar_if_available", AsyncMock()),
-            patch.object(bot, "_set_presence_with_model_info", AsyncMock()),
+            patch.object(bot, "refresh_presence", AsyncMock()),
             patch.object(bot, "_emit_agent_lifecycle_event", AsyncMock()),
         ):
             await bot.start()
@@ -84,15 +77,7 @@ class TestBotSyncLifecycle(ThreadingBehaviorTestBase):
                 await asyncio.wait_for(dispatched.wait(), timeout=0.05)
             assert await dispatcher.store.is_pending(event.event_id)
 
-            if standalone:
-                with (
-                    patch.object(bot, "_refresh_agent_reply_memberships_if_needed", AsyncMock()),
-                    patch.object(bot, "_schedule_delivery_recovery"),
-                    patch.object(bot, "_emit_agent_lifecycle_event", AsyncMock()),
-                ):
-                    await bot._run_sync_response_side_effects(first_sync_response=first_sync_response)
-            else:
-                bot.release_pending_turn_journal_replay()
+            bot.release_pending_turn_journal_replay()
             await asyncio.wait_for(dispatched.wait(), timeout=1.0)
             await dispatcher.drain_once()
             assert not await dispatcher.store.is_pending(event.event_id)
@@ -128,8 +113,9 @@ class TestBotSyncLifecycle(ThreadingBehaviorTestBase):
 
         ingestion_session.close.side_effect = close_ingestion
         start_client.close.side_effect = close_http
-        bot.hook_registry = MagicMock()
-        bot.hook_registry.has_hooks.side_effect = lambda event_name: event_name == EVENT_AGENT_STARTED
+        hook_registry = MagicMock()
+        hook_registry.has_hooks.side_effect = lambda event_name: event_name == EVENT_AGENT_STARTED
+        bot.orchestrator.hook_registry_state.registry = hook_registry
 
         with (
             patch.object(bot, "ensure_user_account", AsyncMock()),
@@ -138,7 +124,7 @@ class TestBotSyncLifecycle(ThreadingBehaviorTestBase):
                 AsyncMock(return_value=SimpleNamespace(client=start_client, session=ingestion_session)),
             ),
             patch.object(bot, "_set_avatar_if_available", AsyncMock()),
-            patch.object(bot, "_set_presence_with_model_info", AsyncMock()),
+            patch.object(bot, "refresh_presence", AsyncMock()),
             patch("mindroom.bot.emit", AsyncMock(side_effect=startup_error)),
             pytest.raises(type(startup_error)),
         ):
@@ -174,7 +160,7 @@ class TestBotSyncLifecycle(ThreadingBehaviorTestBase):
         async def backfill(_ctx: object) -> None:
             await later_hook()
 
-        bot.hook_registry = HookRegistry.from_plugins(
+        bot.orchestrator.hook_registry_state.registry = HookRegistry.from_plugins(
             [
                 SimpleNamespace(
                     name="room-owner",
@@ -194,7 +180,7 @@ class TestBotSyncLifecycle(ThreadingBehaviorTestBase):
                 AsyncMock(return_value=SimpleNamespace(client=client, session=session)),
             ),
             patch.object(bot, "_set_avatar_if_available", AsyncMock()),
-            patch.object(bot, "_set_presence_with_model_info", AsyncMock()),
+            patch.object(bot, "refresh_presence", AsyncMock()),
             pytest.raises(RuntimeError, match="Required startup hook") as error,
         ):
             await bot.start()
@@ -247,19 +233,17 @@ class TestBotSyncLifecycle(ThreadingBehaviorTestBase):
         client.sync.assert_not_awaited()
 
     @pytest.mark.asyncio
-    async def test_a_login_as_another_user_keeps_the_journal_this_bot_already_opened(self, bot: AgentBot) -> None:
+    async def test_a_login_as_another_user_keeps_the_runtime_journal(self, bot: AgentBot) -> None:
         """A re-login under a different Matrix ID moves the principal, not the database.
 
-        This bot was built without a store handed to it, so it opened its own,
-        and the rebuild that follows an identity change runs that same
-        constructor step a second time. One database holds every principal, so
-        the new identity's view comes from the store that is already open --
-        and turn records are deliberately not principal-scoped precisely so
-        that a re-login keeps reading the same database. Opening a second store
-        would abandon the first with nobody left to close it: ``stop`` closes
-        the handle the bot is holding, which would be the replacement.
+        The bot borrows its runtime's one store, and the rebuild that follows an
+        identity change borrows that same store again. One database holds every
+        principal, and turn records are deliberately not principal-scoped
+        precisely so that a re-login keeps reading the same database. The bot's
+        stop leaves the store open for the other bots of its runtime.
         """
         store_before_login = bot._journal_store
+        assert store_before_login is bot.orchestrator.event_journal_store()
         identity_before_login = bot.matrix_id
 
         bot.agent_user.user_id = "@mindroom_general_2:localhost"
@@ -270,8 +254,7 @@ class TestBotSyncLifecycle(ThreadingBehaviorTestBase):
 
         await bot.stop()
 
-        with pytest.raises(RuntimeError, match="The event-journal store is closed"):
-            await store_before_login.existing_generation()
+        await store_before_login.existing_generation()
 
     def test_a_rebuild_wires_each_collaborator_to_the_owners_of_its_own_build(self, bot: AgentBot) -> None:
         """Collaborators built after the owners they hand work to hold those owners, never ones from an earlier build."""
@@ -331,7 +314,6 @@ class TestBotSyncLifecycle(ThreadingBehaviorTestBase):
             await wait_for_background_tasks(timeout=1.0, owner=bot._runtime_view)
 
         with (
-            patch.object(bot, "_refresh_agent_reply_memberships_if_needed", AsyncMock()),
             patch.object(bot, "_schedule_delivery_recovery"),
         ):
             await publish_frame()
@@ -358,7 +340,6 @@ class TestBotSyncLifecycle(ThreadingBehaviorTestBase):
                 raise
 
         with (
-            patch.object(bot, "_refresh_agent_reply_memberships_if_needed", AsyncMock()),
             patch.object(bot, "_schedule_delivery_recovery"),
             patch.object(bot._turn_store, "cleanup", side_effect=blocked_cleanup) as cleanup,
         ):
@@ -556,3 +537,84 @@ class TestBotSyncLifecycle(ThreadingBehaviorTestBase):
 
         assert completed is False
         assert process_shutdown_markers == [True]
+
+
+class TestBotRunPhase(ThreadingBehaviorTestBase):
+    """Which work a bot generation accepts across restart drains, process shutdown, and ingestion quiesce."""
+
+    @staticmethod
+    async def _accepts_waiting_responses(bot: AgentBot) -> bool:
+        return await asyncio.wait_for(bot._runtime_view.wait_for_admission_or_shutdown(), timeout=1.0)
+
+    @pytest.mark.asyncio
+    async def test_a_restart_drain_refuses_waiting_responses_until_the_next_sync_loop(self, bot: AgentBot) -> None:
+        """A sync restart refuses work waiting for admission but keeps owned responses, and the next loop reopens."""
+        assert await self._accepts_waiting_responses(bot)
+        bot._sync_shutdown_budget = ShutdownBudget.start(0.01)
+
+        await asyncio.wait_for(bot.prepare_for_sync_shutdown(shutdown_intent=SYNC_RESTART_SHUTDOWN), timeout=2.0)
+
+        assert not await self._accepts_waiting_responses(bot)
+        # Owned and inbox responses still drain; only a process shutdown refuses them.
+        assert bot._runtime_view.phase is RunPhase.DRAINING
+        bot.mark_sync_loop_started()
+        assert await self._accepts_waiting_responses(bot)
+
+    @pytest.mark.asyncio
+    async def test_a_drain_refuses_a_response_already_waiting_for_admission(self, bot: AgentBot) -> None:
+        """A response waiting while a config apply holds admission closed is refused when a drain begins."""
+        gate = bot.orchestrator.response_admission_gate
+        gate.close()
+        try:
+            waiting = asyncio.create_task(bot._runtime_view.wait_for_admission_or_shutdown())
+            await asyncio.sleep(0)
+            assert not waiting.done()
+            bot._sync_shutdown_budget = ShutdownBudget.start(0.01)
+            await asyncio.wait_for(bot.prepare_for_sync_shutdown(shutdown_intent=SYNC_RESTART_SHUTDOWN), timeout=2.0)
+            assert await asyncio.wait_for(waiting, timeout=1.0) is False
+        finally:
+            gate.reopen()
+
+    @pytest.mark.asyncio
+    async def test_a_response_waiting_for_admission_enters_once_the_apply_reopens_it(self, bot: AgentBot) -> None:
+        """A response that waited out a config apply is admitted when the gate reopens."""
+        gate = bot.orchestrator.response_admission_gate
+        gate.close()
+        waiting = asyncio.create_task(bot._runtime_view.wait_for_admission_or_shutdown())
+        await asyncio.sleep(0)
+        assert not waiting.done()
+        gate.reopen()
+        assert await asyncio.wait_for(waiting, timeout=1.0) is True
+
+    @pytest.mark.asyncio
+    async def test_a_drain_after_process_shutdown_keeps_the_generation_shut_down(self, bot: AgentBot) -> None:
+        """A stop that drains once process shutdown began never turns the shutdown back into a restart drain."""
+        bot.begin_process_shutdown()
+        bot._sync_shutdown_budget = ShutdownBudget.start(0.01)
+
+        await asyncio.wait_for(bot.prepare_for_sync_shutdown(shutdown_intent=SYNC_RESTART_SHUTDOWN), timeout=2.0)
+
+        assert bot._runtime_view.phase is RunPhase.SHUTTING_DOWN
+
+    @pytest.mark.asyncio
+    async def test_process_shutdown_refuses_everything_and_no_sync_loop_reopens_it(self, bot: AgentBot) -> None:
+        """Orderly process shutdown closes admission for good, including new inbox responses."""
+        bot.begin_process_shutdown()
+
+        assert not await self._accepts_waiting_responses(bot)
+        assert bot._runtime_view.phase is RunPhase.SHUTTING_DOWN
+        bot.mark_sync_loop_started()
+        assert not await self._accepts_waiting_responses(bot)
+        assert bot._runtime_view.phase is RunPhase.SHUTTING_DOWN
+
+    @pytest.mark.asyncio
+    async def test_a_quiesced_generation_stays_closed_after_its_drain(self, bot: AgentBot) -> None:
+        """Once the fleet quiesces a bot's ingestion before stopping it, a late sync loop cannot reopen admission."""
+        bot._ingestion_session = None
+        await bot.quiesce_matrix_ingestion()
+        bot._sync_shutdown_budget = ShutdownBudget.start(0.01)
+        await asyncio.wait_for(bot.prepare_for_sync_shutdown(shutdown_intent=SYNC_RESTART_SHUTDOWN), timeout=2.0)
+
+        bot.mark_sync_loop_started()
+
+        assert not await self._accepts_waiting_responses(bot)

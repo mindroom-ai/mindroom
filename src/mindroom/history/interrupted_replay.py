@@ -22,7 +22,6 @@ from mindroom.tool_system.events import (
 if TYPE_CHECKING:
     from collections.abc import Collection, Mapping, Sequence
 
-    from mindroom.history.session_context import ScopeSessionContext
     from mindroom.llm.runs import AnyRunRecord, ToolExecution
     from mindroom.session_storage.store import ConversationStore
     from mindroom.session_storage.types import ConversationSession
@@ -306,7 +305,8 @@ def persist_interrupted_replay_snapshot(
 
 def persist_interrupted_replay(
     *,
-    scope_context: ScopeSessionContext | None,
+    storage: ConversationStore,
+    session: ConversationSession,
     run_id: str,
     user_message: str | None,
     user_message_is_structured: bool,
@@ -316,12 +316,10 @@ def persist_interrupted_replay(
     run_metadata: Mapping[str, object] | None,
     original_status: RunStatus = RunStatus.cancelled,
 ) -> None:
-    """Persist one interrupted top-level turn from trusted runtime state, into the session its scope context names."""
-    if scope_context is None:
-        return
+    """Persist one interrupted top-level turn from trusted runtime state into ``session``'s history."""
     persist_interrupted_replay_snapshot(
-        storage=scope_context.storage,
-        session=scope_context.stored_or_first_session(),
+        storage=storage,
+        session=session,
         run_id=run_id,
         snapshot=build_interrupted_replay_snapshot(
             user_message=user_message,

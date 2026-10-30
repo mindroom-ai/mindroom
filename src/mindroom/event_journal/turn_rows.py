@@ -67,10 +67,18 @@ type RevisionRegistration = tuple[str, str, int]
 
 
 @dataclass(frozen=True, slots=True)
-class Accepted:
-    """The write landed; ``record`` is the turn as stored after it."""
+class PendingTurn:
+    """The write landed: ``record`` is the turn as stored after it, with what the caller must reconcile before it answers.
+
+    ``resumes_response`` means an earlier attempt of these sources already owned
+    a response, so a visible one may already exist. ``deleted_sources`` names the
+    sources deleted, directly or through the message they answer for, when the
+    context was stored.
+    """
 
     record: TurnRecord
+    resumes_response: bool
+    deleted_sources: frozenset[str]
 
 
 @dataclass(frozen=True, slots=True)
@@ -83,7 +91,7 @@ class Refused:
     """An answered or delivery-bound turn of another key owns a candidate source; nothing was written."""
 
 
-type ReshapeResult = Accepted | Answered | Refused
+type ReshapeResult = PendingTurn | Answered | Refused
 
 
 @dataclass(frozen=True, slots=True)
@@ -205,6 +213,15 @@ def _source_from_row(row: Row) -> _Source:
     )
 
 
+def _revision_from_row(row: Row) -> _Revision:
+    return _Revision(
+        str(row["revision_id"]),
+        str(row["source_event_id"]),
+        int(row["timestamp_ms"]),
+        row["response_event_id"],
+    )
+
+
 def _turns(transaction: Transaction, agent_name: str, keys: Iterable[str]) -> dict[str, _Turn]:
     rows = _fetch_in(
         transaction,
@@ -242,14 +259,7 @@ def _load_rows(transaction: Transaction, agent_name: str, keys: Iterable[str]) -
         (agent_name,),
         turns,
     ):
-        loaded[str(row["turn_key"])].revisions.append(
-            _Revision(
-                str(row["revision_id"]),
-                str(row["source_event_id"]),
-                int(row["timestamp_ms"]),
-                row["response_event_id"],
-            ),
-        )
+        loaded[str(row["turn_key"])].revisions.append(_revision_from_row(row))
     return loaded
 
 
@@ -263,16 +273,59 @@ def _physical_owners(transaction: Transaction, agent_name: str, event_ids: Itera
     return {str(row["event_id"]): str(row["turn_key"]) for row in rows}
 
 
-def _alias_owners(transaction: Transaction, agent_name: str, event_ids: Iterable[str]) -> dict[str, set[str]]:
-    owners: dict[str, set[str]] = {}
+@dataclass(frozen=True, slots=True)
+class _Owners:
+    """The turns that own some events, as one read found them: physical owners, alias owners, and their turn rows."""
+
+    physical: dict[str, str]
+    aliases: dict[str, set[str]]
+    turns: dict[str, _Turn]
+
+    def keys(self, event_id: str) -> set[str]:
+        """Return every turn that owns this event, physically or as an alias."""
+        physical = self.physical.get(event_id)
+        return {*self.aliases.get(event_id, ()), *((physical,) if physical is not None else ())}
+
+    def lookup(self, event_id: str) -> _Turn | None:
+        """Return the turn one event answers to.
+
+        A completed owner wins: the physical owner if it is completed, else a
+        completed alias owner. Then the physical owner, then the most recently
+        updated alias owner. A relay that completed for an original whose own turn
+        is unfinished is therefore what the original reads, while physical
+        ownership stays with the original for claims and checkpoints.
+        """
+        physical = self.physical.get(event_id)
+        aliases = [self.turns[key] for key in self.aliases.get(event_id, ())]
+        if physical is not None and self.turns[physical].completed:
+            return self.turns[physical]
+        completed_alias = _newest(turn for turn in aliases if turn.completed)
+        if completed_alias is not None:
+            return completed_alias
+        if physical is not None:
+            return self.turns[physical]
+        return _newest(aliases)
+
+    def pending_response_intent(self, event_ids: Iterable[str]) -> bool:
+        """Return whether an unfinished turn one of these events answers to already owns a response attempt."""
+        return any(
+            (turn := self.lookup(event_id)) is not None and not turn.completed and _has_response_intent(turn)
+            for event_id in event_ids
+        )
+
+
+def _owners(transaction: Transaction, agent_name: str, event_ids: Collection[str]) -> _Owners:
+    physical = _physical_owners(transaction, agent_name, event_ids)
+    aliases: dict[str, set[str]] = {}
     for row in _fetch_in(
         transaction,
         "SELECT event_id, turn_key FROM turn_aliases WHERE agent_name = ? AND event_id IN ({in})",
         (agent_name,),
         event_ids,
     ):
-        owners.setdefault(str(row["event_id"]), set()).add(str(row["turn_key"]))
-    return owners
+        aliases.setdefault(str(row["event_id"]), set()).add(str(row["turn_key"]))
+    keys = {*physical.values(), *chain.from_iterable(aliases.values())}
+    return _Owners(physical, aliases, _turns(transaction, agent_name, keys))
 
 
 def _newest(turns: Iterable[_Turn]) -> _Turn | None:
@@ -280,12 +333,16 @@ def _newest(turns: Iterable[_Turn]) -> _Turn | None:
 
 
 def _assemble(rows: _Rows) -> TurnRecord:
-    """Build the immutable read value of one turn from its rows."""
+    """Build the immutable read value of one turn from its rows.
+
+    Aliases are taken in the byte order a read returns them, so rows a write
+    kept in memory assemble to the value a later read would.
+    """
     turn = rows.turn
     sources = rows.sources
     return TurnRecord.create(
         [source.event_id for source in sources],
-        discovery_event_ids=rows.aliases,
+        discovery_event_ids=sorted(rows.aliases),
         anchor_event_id=turn.anchor_event_id,
         response_event_id=turn.response_event_id,
         completed=turn.completed,
@@ -404,14 +461,18 @@ def deleted_sources(transaction: Transaction, agent_name: str, source_event_ids:
     owners = _physical_owners(transaction, agent_name, source_event_ids)
     deleted: set[str] = set()
     for rows in _load_rows(transaction, agent_name, tuple(set(owners.values()))).values():
-        room_id = rows.turn.room_id
-        mapped = {source.discovery_event_id for source in rows.sources}
-        unmapped = [alias for alias in rows.aliases if alias not in mapped]
-        if room_id is not None and redacted_events(transaction, agent_name, room_id, unmapped):
-            deleted.update(source.event_id for source in rows.sources)
-        else:
-            deleted |= _deleted_among(transaction, agent_name, room_id, rows.sources)
+        deleted |= _deleted_in(transaction, agent_name, rows)
     return frozenset(event_id for event_id in owners if event_id in deleted)
+
+
+def _deleted_in(transaction: Transaction, agent_name: str, rows: _Rows) -> frozenset[str]:
+    """Return which sources of one turn are deleted by the redactions recorded in its room, by the rule above."""
+    room_id = rows.turn.room_id
+    mapped = {source.discovery_event_id for source in rows.sources}
+    unmapped = [alias for alias in rows.aliases if alias not in mapped]
+    if room_id is not None and redacted_events(transaction, agent_name, room_id, unmapped):
+        return frozenset(source.event_id for source in rows.sources)
+    return _deleted_among(transaction, agent_name, room_id, rows.sources)
 
 
 def deleted_events(
@@ -464,33 +525,10 @@ def sources_deleted_by(transaction: Transaction, agent_name: str, room_id: str, 
 # Turn reads.
 
 
-def _lookup_key(transaction: Transaction, agent_name: str, event_id: str) -> str | None:
-    """Return the turn one event id answers to.
-
-    A completed owner wins: the physical owner if it is completed, else a
-    completed alias owner. Then the physical owner, then the most recently
-    updated alias owner. A relay that completed for an original whose own turn
-    is unfinished is therefore what the original reads, while physical
-    ownership stays with the original for claims and checkpoints.
-    """
-    physical = _physical_owners(transaction, agent_name, (event_id,)).get(event_id)
-    aliases = _alias_owners(transaction, agent_name, (event_id,)).get(event_id, set())
-    turns = _turns(transaction, agent_name, {*aliases, *((physical,) if physical else ())})
-    if physical is not None and turns[physical].completed:
-        return physical
-    completed_alias = _newest(turns[key] for key in aliases if turns[key].completed)
-    if completed_alias is not None:
-        return completed_alias.turn_key
-    if physical is not None:
-        return physical
-    newest_alias = _newest(turns[key] for key in aliases)
-    return None if newest_alias is None else newest_alias.turn_key
-
-
 def get_turn_record(transaction: Transaction, agent_name: str, event_id: str) -> TurnRecord | None:
-    """Return the turn one source or alias answers to, by the lookup precedence of ``_lookup_key``."""
-    key = _lookup_key(transaction, agent_name, event_id)
-    return None if key is None else _record(transaction, agent_name, key)
+    """Return the turn one source or alias answers to, by the lookup precedence of ``_Owners.lookup``."""
+    turn = _owners(transaction, agent_name, (event_id,)).lookup(event_id)
+    return None if turn is None else _record(transaction, agent_name, turn.turn_key)
 
 
 def load_turn(transaction: Transaction, agent_name: str, turn_key: str) -> TurnRecord | None:
@@ -651,14 +689,15 @@ def _insert_alias(transaction: Transaction, agent_name: str, turn_key: str, even
     )
 
 
-def _upsert_revision(transaction: Transaction, agent_name: str, turn_key: str, revision: _Revision) -> None:
-    """Record a revision for one turn; a stored row is kept and only gains a missing response proof."""
-    transaction.execute(
+def _upsert_revision(transaction: Transaction, agent_name: str, turn_key: str, revision: _Revision) -> _Revision:
+    """Record a revision for one turn and return it as stored; a stored row is kept and only gains a missing proof."""
+    row = transaction.fetchone(
         """
         INSERT INTO turn_revisions (agent_name, turn_key, revision_id, source_event_id, timestamp_ms, response_event_id)
         VALUES (?, ?, ?, ?, ?, ?)
         ON CONFLICT (agent_name, turn_key, revision_id) DO UPDATE SET
             response_event_id = COALESCE(turn_revisions.response_event_id, excluded.response_event_id)
+        RETURNING revision_id, source_event_id, timestamp_ms, response_event_id
         """,
         (
             agent_name,
@@ -669,6 +708,8 @@ def _upsert_revision(transaction: Transaction, agent_name: str, turn_key: str, r
             revision.response_event_id,
         ),
     )
+    assert row is not None, "an upsert returns its row"
+    return _revision_from_row(row)
 
 
 def _write_source(transaction: Transaction, agent_name: str, turn_key: str, source: _Source) -> None:
@@ -953,12 +994,14 @@ def _reshape(
     candidate: TurnRecord,
     *,
     room_id: str,
-) -> _Turn | Refused:
-    """Give the candidate's ordered sources one turn and return it.
+    owners: _Owners,
+) -> _Rows | Refused:
+    """Give the candidate's ordered sources one turn and return its rows as stored.
 
     This is the one whole-turn operation, and it is merge policy written out:
 
-    1. Every physical owner and alias owner of a candidate source is read.
+    1. ``owners``, read in this transaction, holds every physical owner and
+       alias owner of a candidate source.
     2. A completed or delivery-bound turn of another key that physically owns
        a candidate source, or indexes one as its alias, refuses the write.
     3. The target is the stored turn with exactly this ordered tuple, else a
@@ -985,27 +1028,21 @@ def _reshape(
     if not sources:
         msg = "A turn write requires at least one source"
         raise ValueError(msg)
-    owners = _physical_owners(transaction, agent_name, sources)
-    alias_owners = _alias_owners(transaction, agent_name, sources)
-    turns = _turns(transaction, agent_name, {*owners.values(), *chain.from_iterable(alias_owners.values())})
-    target: _Turn | None = None
-    if len(owners) == len(sources) and len(set(owners.values())) == 1:
-        key = owners[sources[0]]
-        if tuple(source.event_id for source in _load_rows(transaction, agent_name, (key,))[key].sources) == sources:
-            target = turns[key]
-    target_key = None if target is None else target.turn_key
-    if any(
-        turns[key].frozen
-        for source in sources
-        for key in {owners.get(source), *alias_owners.get(source, ())}
-        if key is not None and key != target_key
-    ):
+    owner_keys = set(owners.physical.values())
+    target: _Rows | None = None
+    if len(owners.physical) == len(sources) and len(owner_keys) == 1:
+        key = owners.physical[sources[0]]
+        rows = _load_rows(transaction, agent_name, (key,))[key]
+        if tuple(source.event_id for source in rows.sources) == sources:
+            target = rows
+    target_key = None if target is None else target.turn.turn_key
+    if any(owners.turns[key].frozen for source in sources for key in owners.keys(source) if key != target_key):
         return Refused()
-    for key in set(owners.values()):
-        _require_same_room(turns[key], room_id)
+    for key in owner_keys:
+        _require_same_room(owners.turns[key], room_id)
     if target is not None:
         return target
-    return _absorb(transaction, agent_name, candidate, room_id=room_id, owner_keys=set(owners.values()))
+    return _absorb(transaction, agent_name, candidate, room_id=room_id, owner_keys=owner_keys)
 
 
 def _absorb(
@@ -1015,8 +1052,8 @@ def _absorb(
     *,
     room_id: str,
     owner_keys: set[str],
-) -> _Turn:
-    """Write a new turn for the candidate's tuple from the unfinished turns that owned its sources."""
+) -> _Rows:
+    """Write a new turn for the candidate's tuple from the unfinished turns that owned its sources; return its rows."""
     absorbed = _load_rows(transaction, agent_name, sorted(owner_keys))
     candidate_ids = set(candidate.source_event_ids)
     turn = _backfilled_turn(candidate.source_event_ids[-1], room_id, _newest(rows.turn for rows in absorbed.values()))
@@ -1049,17 +1086,14 @@ def _absorb(
         transaction.execute("DELETE FROM turns WHERE agent_name = ? AND turn_key = ?", (agent_name, key))
     for rows in detached:
         _insert_rows(transaction, agent_name, rows)
-    _insert_rows(
-        transaction,
-        agent_name,
-        _Rows(
-            turn=turn,
-            sources=[moved.get(event_id) or _Source(event_id) for event_id in candidate.source_event_ids],
-            aliases=list(aliases),
-            revisions=list(revisions.values()),
-        ),
+    target = _Rows(
+        turn=turn,
+        sources=[moved.get(event_id) or _Source(event_id) for event_id in candidate.source_event_ids],
+        aliases=list(aliases),
+        revisions=list(revisions.values()),
     )
-    return turn
+    _insert_rows(transaction, agent_name, target)
+    return target
 
 
 def _backfilled_turn(anchor_event_id: str, room_id: str, backfill: _Turn | None) -> _Turn:
@@ -1086,18 +1120,17 @@ def _detached_turn(room_id: str | None, source: _Source) -> _Rows:
     return rows
 
 
-def _add_aliases(transaction: Transaction, agent_name: str, turn_key: str, candidate: TurnRecord) -> None:
-    """Index the candidate's aliases, unless a completed turn of another key owns one."""
-    aliases = candidate.discovery_event_ids
+def _add_aliases(transaction: Transaction, agent_name: str, rows: _Rows, candidate: TurnRecord) -> None:
+    """Index the candidate's aliases on its turn, unless a completed turn of another key owns one."""
+    aliases = [alias for alias in candidate.discovery_event_ids if alias not in rows.aliases]
     if not aliases:
         return
-    physical = _physical_owners(transaction, agent_name, aliases)
-    indexed = _alias_owners(transaction, agent_name, aliases)
-    turns = _turns(transaction, agent_name, {*physical.values(), *chain.from_iterable(indexed.values())})
+    turn_key = rows.turn.turn_key
+    owners = _owners(transaction, agent_name, aliases)
     for alias in aliases:
-        owners = {physical.get(alias), *indexed.get(alias, ())} - {None, turn_key}
-        if not any(turns[key].completed for key in owners if key is not None):
+        if not any(owners.turns[key].completed for key in owners.keys(alias) - {turn_key}):
             _insert_alias(transaction, agent_name, turn_key, alias)
+            rows.aliases.append(alias)
 
 
 def _candidate_selection(candidate: TurnRecord, source_event_id: str) -> SourceEventRevision | None:
@@ -1131,18 +1164,20 @@ def _candidate_revisions(record: TurnRecord) -> list[_Revision]:
 def _apply_candidate(
     transaction: Transaction,
     agent_name: str,
-    turn: _Turn,
+    rows: _Rows,
     candidate: TurnRecord,
 ) -> None:
-    """Write the candidate's context, revisions, and per-source payload into its reshaped turn."""
-    _apply_context(transaction, agent_name, turn, candidate)
+    """Write the candidate's context, revisions, and per-source payload into its reshaped turn, keeping ``rows`` as stored."""
+    rows.turn = _apply_context(transaction, agent_name, rows.turn, candidate)
+    turn_key = rows.turn.turn_key
+    revisions = {revision.revision_id: revision for revision in rows.revisions}
     for revision in _candidate_revisions(candidate):
-        _upsert_revision(transaction, agent_name, turn.turn_key, revision)
-    sources = _load_rows(transaction, agent_name, (turn.turn_key,))[turn.turn_key].sources
-    _attribute(sources, candidate)
-    _apply_payload(transaction, agent_name, turn, sources, candidate)
-    for source in sources:
-        _write_source(transaction, agent_name, turn.turn_key, source)
+        revisions[revision.revision_id] = _upsert_revision(transaction, agent_name, turn_key, revision)
+    rows.revisions = list(revisions.values())
+    _attribute(rows.sources, candidate)
+    _apply_payload(transaction, agent_name, rows.turn, rows.sources, candidate)
+    for source in rows.sources:
+        _write_source(transaction, agent_name, turn_key, source)
 
 
 @dataclass(frozen=True, slots=True)
@@ -1170,11 +1205,14 @@ def _context(record: TurnRecord, room_id: str | None) -> _Context:
     )
 
 
-def _apply_context(transaction: Transaction, agent_name: str, turn: _Turn, candidate: TurnRecord) -> None:
-    """Write the candidate's response context: present values win, absent ones are kept, checkpoints only grow."""
+def _apply_context(transaction: Transaction, agent_name: str, turn: _Turn, candidate: TurnRecord) -> _Turn:
+    """Write the candidate's response context and return the turn as stored.
+
+    Present values win, absent ones are kept, and checkpoints only grow.
+    """
     context = _context(candidate, turn.room_id)
-    transaction.execute(
-        """
+    row = transaction.fetchone(
+        f"""
         UPDATE turns SET
             response_event_id = COALESCE(?, response_event_id),
             response_owner = COALESCE(?, response_owner),
@@ -1187,7 +1225,8 @@ def _apply_context(transaction: Transaction, agent_name: str, turn: _Turn, candi
             command_result_text = COALESCE(command_result_text, ?),
             updated_at = ?
         WHERE agent_name = ? AND turn_key = ?
-        """,
+        RETURNING {_TURN_COLUMNS}
+        """,  # noqa: S608 - fixed column list
         (
             candidate.response_event_id,
             candidate.response_owner,
@@ -1202,6 +1241,8 @@ def _apply_context(transaction: Transaction, agent_name: str, turn: _Turn, candi
             turn.turn_key,
         ),
     )
+    assert row is not None, "a reshaped turn exists"
+    return _turn_from_row(row)
 
 
 def _attribute(sources: Sequence[_Source], candidate: TurnRecord) -> None:
@@ -1334,15 +1375,25 @@ def record_pending_turn(
     *,
     room_id: str,
 ) -> ReshapeResult:
-    """Persist a turn's response context before generation starts."""
-    turn = _reshape(transaction, agent_name, record, room_id=room_id)
-    if isinstance(turn, Refused):
-        return turn
-    if turn.frozen:
+    """Persist a turn's response context before generation starts.
+
+    Every reply awaits this write on the journal's single writer before it
+    starts, so the result is assembled from the rows this transaction read and
+    wrote rather than read again.
+    """
+    owners = _owners(transaction, agent_name, record.source_event_ids)
+    rows = _reshape(transaction, agent_name, record, room_id=room_id, owners=owners)
+    if isinstance(rows, Refused):
+        return rows
+    if rows.turn.frozen:
         return Answered()
-    _add_aliases(transaction, agent_name, turn.turn_key, record)
-    _apply_candidate(transaction, agent_name, turn, record)
-    return Accepted(_record(transaction, agent_name, turn.turn_key))
+    _add_aliases(transaction, agent_name, rows, record)
+    _apply_candidate(transaction, agent_name, rows, record)
+    return PendingTurn(
+        record=_assemble(rows),
+        resumes_response=owners.pending_response_intent(record.source_event_ids),
+        deleted_sources=_deleted_in(transaction, agent_name, rows),
+    )
 
 
 def record_turn(
@@ -1356,20 +1407,27 @@ def record_turn(
 
     Returns its key, or None when the write was refused.
     """
-    turn = _reshape(transaction, agent_name, record, room_id=room_id)
-    if isinstance(turn, Refused):
+    rows = _reshape(
+        transaction,
+        agent_name,
+        record,
+        room_id=room_id,
+        owners=_owners(transaction, agent_name, record.source_event_ids),
+    )
+    if isinstance(rows, Refused):
         return None
-    _add_aliases(transaction, agent_name, turn.turn_key, record)
+    turn_key = rows.turn.turn_key
+    _add_aliases(transaction, agent_name, rows, record)
     # A turn handed to its final delivery keeps its context; only the acknowledgement's answer is still owed.
-    if turn.final_delivery_id is None:
+    if rows.turn.final_delivery_id is None:
         transaction.execute(
             "UPDATE turns SET room_id = COALESCE(room_id, ?) WHERE agent_name = ? AND turn_key = ?",
-            (room_id, agent_name, turn.turn_key),
+            (room_id, agent_name, turn_key),
         )
-        turn.room_id = turn.room_id or room_id
-        _apply_candidate(transaction, agent_name, turn, record)
-    _complete(transaction, agent_name, turn.turn_key)
-    return turn.turn_key
+        rows.turn.room_id = rows.turn.room_id or room_id
+        _apply_candidate(transaction, agent_name, rows, record)
+    _complete(transaction, agent_name, turn_key)
+    return turn_key
 
 
 def record_responded_turn(
@@ -1679,8 +1737,8 @@ def retain(
 
 
 __all__ = [
-    "Accepted",
     "Answered",
+    "PendingTurn",
     "Refused",
     "ReshapeResult",
     "RetentionResult",

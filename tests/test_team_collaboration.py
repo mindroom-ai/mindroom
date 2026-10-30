@@ -4,8 +4,7 @@ from __future__ import annotations
 
 import tempfile
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, cast
-from unittest.mock import AsyncMock, patch
+from typing import TYPE_CHECKING
 
 import nio
 import pytest
@@ -13,11 +12,10 @@ import pytest
 from mindroom.authorization import get_available_responders_in_room
 from mindroom.config.agent import AgentConfig, AgentPrivateConfig, TeamConfig
 from mindroom.config.main import Config
-from mindroom.config.models import ModelConfig, RouterConfig
+from mindroom.config.models import ModelConfig
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.teams.formation import TeamIntent, TeamMemberStatus, TeamOutcome, TeamResolution, decide_team_formation
 from mindroom.thread_utils import get_agents_in_thread
-from tests.bot_helpers import make_test_agent_bot
 from tests.conftest import (
     TEST_PASSWORD,
     bind_runtime_paths,
@@ -28,7 +26,7 @@ from tests.conftest import (
 from tests.identity_helpers import actual_entity_usernames, entity_ids, entity_name_for_id, persist_entity_accounts
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncGenerator, Sequence
+    from collections.abc import Sequence
 
 
 def _runtime_bound_config(config: Config, runtime_root: Path | None = None) -> Config:
@@ -101,12 +99,6 @@ def mock_security_agent() -> AgentMatrixUser:
     )
 
 
-@pytest.fixture
-def team_room_id() -> str:
-    """Room ID where team collaboration happens."""
-    return "!team_room:localhost"
-
-
 class TestTeamFormation:
     """Test team formation logic."""
 
@@ -127,76 +119,10 @@ class TestTeamFormation:
         )
 
     @pytest.mark.asyncio
-    async def test_multiple_agents_tagged_form_team(
-        self,
-        mock_research_agent: AgentMatrixUser,
-        mock_analyst_agent: AgentMatrixUser,
-        team_room_id: str,
-        tmp_path: Path,
-    ) -> None:
-        """Test that multiple agents tagged in a message form a team."""
-        # Create bots
-        config = _runtime_bound_config(Config(router=RouterConfig(model="default")), tmp_path)
-
-        research_bot = make_test_agent_bot(
-            mock_research_agent,
-            tmp_path,
-            config,
-            runtime_paths_for(config),
-            rooms=[team_room_id],
-        )
-        config = _runtime_bound_config(Config(router=RouterConfig(model="default")), tmp_path)
-
-        analyst_bot = make_test_agent_bot(
-            mock_analyst_agent,
-            tmp_path,
-            config,
-            runtime_paths_for(config),
-            rooms=[team_room_id],
-        )
-
-        # Setup bots
-        research_bot.client = AsyncMock()
-        analyst_bot.client = AsyncMock()
-
-        # Create message mentioning both agents
-        message_event: dict[str, Any] = {
-            "type": "m.room.message",
-            "content": {
-                "msgtype": "m.text",
-                "body": f"@{mock_research_agent.display_name} @{mock_analyst_agent.display_name} analyze the market trends",
-                "m.mentions": {
-                    "user_ids": [
-                        mock_research_agent.user_id,
-                        mock_analyst_agent.user_id,
-                    ],
-                },
-            },
-            "sender": "@user:localhost",
-            "room_id": team_room_id,
-            "event_id": "$test_event",
-            "origin_server_ts": 1234567890,
-        }
-
-        # Add thread relation
-        message_event["content"]["m.relates_to"] = {
-            "rel_type": "m.thread",
-            "event_id": "$thread_root",
-        }
-
-        # Both agents should recognize they're part of a team request
-        # This test verifies the setup - actual team behavior will be tested
-        # once implementation is done
-        assert mock_research_agent.user_id in message_event["content"]["m.mentions"]["user_ids"]
-        assert mock_analyst_agent.user_id in message_event["content"]["m.mentions"]["user_ids"]
-
-    @pytest.mark.asyncio
     async def test_multiple_agents_in_thread_form_team(
         self,
         mock_code_agent: AgentMatrixUser,
         mock_security_agent: AgentMatrixUser,
-        team_room_id: str,  # noqa: ARG002
-        tmp_path: Path,  # noqa: ARG002
     ) -> None:
         """Test that multiple agents already in a thread form a team when no one is mentioned."""
         # Mock thread history showing both agents have participated
@@ -215,95 +141,6 @@ class TestTeamFormation:
         assert "code" in agent_names
         assert "security" in agent_names
         assert len(agent_names) == 2
-
-
-class TestTeamCollaboration:
-    """Test team collaboration behaviors."""
-
-    @pytest.mark.asyncio
-    @patch("mindroom.response_runner.stream_agent_response")
-    async def test_team_coordinate_mode(
-        self,
-        mock_stream_agent_response: AsyncMock,  # noqa: ARG002
-        mock_research_agent: AgentMatrixUser,  # noqa: ARG002
-        mock_analyst_agent: AgentMatrixUser,  # noqa: ARG002
-        team_room_id: str,  # noqa: ARG002
-        tmp_path: Path,  # noqa: ARG002
-    ) -> None:
-        """Test team coordination mode where agents build on each other's work."""
-
-        # Setup responses for coordinate mode
-        async def research_response() -> AsyncGenerator[str, None]:
-            yield "I've gathered the following data on renewable energy:\n"
-            yield "- Solar capacity increased 23% YoY\n"
-            yield "- Wind energy adoption up 18%"
-
-        async def analyst_response() -> AsyncGenerator[str, None]:
-            yield "Based on the research data:\n"
-            yield "- The 23% solar growth indicates strong market momentum\n"
-            yield "- Combined renewable growth of 20.5% exceeds projections"
-
-        # This test sets up the expected behavior for coordinate mode
-        # Implementation will ensure agents respond sequentially
-
-        # Expected: Research agent provides data, then analyst builds on it
-        research_chunks = [chunk async for chunk in research_response()]
-
-        analyst_chunks = [chunk async for chunk in analyst_response()]
-
-        # Verify responses can be combined coherently
-        combined = "".join(research_chunks) + "\n\n" + "".join(analyst_chunks)
-        assert "gathered the following data" in combined
-        assert "Based on the research data" in combined
-
-    @pytest.mark.asyncio
-    async def test_team_collaborate_mode(
-        self,
-        mock_code_agent: AgentMatrixUser,  # noqa: ARG002
-        mock_security_agent: AgentMatrixUser,  # noqa: ARG002
-        team_room_id: str,  # noqa: ARG002
-        tmp_path: Path,  # noqa: ARG002
-    ) -> None:
-        """Test team collaboration mode where agents work in parallel."""
-        # In collaborate mode, multiple agents analyze the same problem
-        # and provide different perspectives simultaneously
-
-        # In collaborate mode, multiple agents analyze the same problem
-
-        # Team synthesis would combine these perspectives
-        expected_synthesis = (
-            "Team Response:\n"
-            "Implementation approach: JWT tokens with refresh tokens\n"
-            "Security requirements: Multi-factor authentication and rate limiting"
-        )
-
-        # Verify the perspectives can be synthesized
-        assert "JWT tokens" in expected_synthesis
-        assert "Multi-factor authentication" in expected_synthesis
-
-    @pytest.mark.asyncio
-    async def test_team_route_mode(
-        self,
-        mock_research_agent: AgentMatrixUser,
-        mock_code_agent: AgentMatrixUser,
-        mock_analyst_agent: AgentMatrixUser,
-        team_room_id: str,  # noqa: ARG002
-        tmp_path: Path,  # noqa: ARG002
-    ) -> None:
-        """Test team route mode where lead agent delegates to specialists."""
-        # In route mode, a lead agent determines who should handle what
-
-        # In route mode, a lead agent determines who should handle what
-
-        expected_delegations = {
-            "research_task": mock_research_agent.agent_name,
-            "analysis_task": mock_analyst_agent.agent_name,
-            "visualization_task": mock_code_agent.agent_name,
-        }
-
-        # Verify routing logic (to be implemented)
-        for agent in expected_delegations.values():
-            assert agent in ["research", "code", "analyst"]
 
 
 class TestTeamResponseBehavior:
@@ -329,8 +166,6 @@ class TestTeamResponseBehavior:
     async def test_single_agent_still_continues_conversation(
         self,
         mock_code_agent: AgentMatrixUser,
-        team_room_id: str,  # noqa: ARG002
-        tmp_path: Path,  # noqa: ARG002
     ) -> None:
         """Test that single agent behavior remains unchanged."""
         # Thread with only one agent
@@ -347,40 +182,10 @@ class TestTeamResponseBehavior:
         # Single agent should continue responding
 
     @pytest.mark.asyncio
-    async def test_explicit_mention_overrides_team(
-        self,
-        mock_code_agent: AgentMatrixUser,
-        mock_security_agent: AgentMatrixUser,  # noqa: ARG002
-        team_room_id: str,  # noqa: ARG002
-        tmp_path: Path,  # noqa: ARG002
-    ) -> None:
-        """Test that explicit mention of one agent prevents team formation."""
-        # Thread with multiple agents (thread_history would show both agents)
-
-        # Explicitly mention only one agent
-        message_event = {
-            "type": "m.room.message",
-            "content": {
-                "msgtype": "m.text",
-                "body": f"@{mock_code_agent.display_name} can you add error handling?",
-                "m.mentions": {"user_ids": [mock_code_agent.user_id]},
-            },
-        }
-
-        # Only mentioned agent should respond, not the team
-        content = cast("dict[str, Any]", message_event["content"])
-        mentions = cast("dict[str, Any]", content["m.mentions"])
-        user_ids = cast("list[str]", mentions["user_ids"])
-        assert len(user_ids) == 1
-        assert mock_code_agent.user_id in user_ids
-
-    @pytest.mark.asyncio
     async def test_team_with_invited_agents(
         self,
         mock_research_agent: AgentMatrixUser,
         mock_analyst_agent: AgentMatrixUser,
-        team_room_id: str,  # noqa: ARG002
-        tmp_path: Path,  # noqa: ARG002
     ) -> None:
         """Test team formation with invited agents."""
         # One agent is native to room, another is invited
@@ -399,44 +204,6 @@ class TestTeamResponseBehavior:
         assert "research" in agent_names
         assert "analyst" in agent_names
 
-
-class TestTeamEdgeCases:
-    """Test edge cases and error scenarios."""
-
-    @pytest.mark.asyncio
-    async def test_team_member_unavailable(
-        self,
-        mock_code_agent: AgentMatrixUser,
-        mock_security_agent: AgentMatrixUser,
-        team_room_id: str,
-        tmp_path: Path,
-    ) -> None:
-        """Test behavior when a team member is unavailable."""
-        # Setup scenario where one agent is offline/unavailable
-        # Team should adapt and continue with available members
-
-    @pytest.mark.asyncio
-    async def test_conflicting_team_responses(
-        self,
-        mock_analyst_agent: AgentMatrixUser,
-        mock_research_agent: AgentMatrixUser,
-        team_room_id: str,
-        tmp_path: Path,
-    ) -> None:
-        """Test handling of conflicting information from team members."""
-        # Agents might have different data or opinions
-        # Team synthesis should handle gracefully
-
-    @pytest.mark.asyncio
-    async def test_team_context_overflow(
-        self,
-        mock_code_agent: AgentMatrixUser,
-        mock_security_agent: AgentMatrixUser,
-        mock_analyst_agent: AgentMatrixUser,
-        team_room_id: str,
-        tmp_path: Path,
-    ) -> None:
-        """Test team behavior when context window is nearly full."""
         # Large thread history approaching token limits
         # Team should coordinate to provide concise responses
 
@@ -445,45 +212,8 @@ class TestRouterTeamFormation:
     """Test router-initiated team formation."""
 
     @pytest.mark.asyncio
-    async def test_router_forms_team_for_complex_query(
-        self,
-        team_room_id: str,  # noqa: ARG002
-        tmp_path: Path,  # noqa: ARG002
-    ) -> None:
-        """Test router creating a team for multi-domain queries."""
-        # Complex query requiring multiple agents:
-        # "I need to build a secure web API with authentication,
-        # analyze performance requirements, and create documentation"
-
-        # Router should identify need for: code, security, analyst agents
-        expected_team_members = ["code", "security", "analyst"]
-
-        # Verify router would select appropriate team
-        # (Implementation will use AI to determine this)
-        assert len(expected_team_members) > 1
-
-    @pytest.mark.asyncio
-    async def test_router_single_agent_for_simple_query(
-        self,
-        team_room_id: str,  # noqa: ARG002
-        tmp_path: Path,  # noqa: ARG002
-    ) -> None:
-        """Test router selecting single agent for simple queries."""
-        # Simple query = "What's 2 + 2?"
-        # Router should select only calculator agent, not form a team
-        expected_agent = "calculator"
-
-        # Verify simple queries don't trigger team formation
-        assert expected_agent == "calculator"
-
-    @pytest.mark.asyncio
     async def test_dm_room_team_formation(self) -> None:
         """Test that multiple agents in a DM room form a team when no one is mentioned."""
-        from mindroom.config.agent import AgentConfig  # noqa: PLC0415
-        from mindroom.config.main import Config  # noqa: PLC0415
-        from mindroom.config.models import ModelConfig  # noqa: PLC0415
-        from mindroom.teams.formation import decide_team_formation  # noqa: PLC0415
-
         config = _runtime_bound_config(
             Config(
                 agents={
@@ -536,11 +266,6 @@ class TestRouterTeamFormation:
     @pytest.mark.asyncio
     async def test_dm_room_thread_single_agent_no_team(self) -> None:
         """In a DM with multiple agents, a thread with a single agent should not form a team."""
-        from mindroom.config.agent import AgentConfig  # noqa: PLC0415
-        from mindroom.config.main import Config  # noqa: PLC0415
-        from mindroom.config.models import ModelConfig  # noqa: PLC0415
-        from mindroom.teams.formation import decide_team_formation  # noqa: PLC0415
-
         config = _runtime_bound_config(
             Config(
                 agents={
@@ -581,8 +306,6 @@ class TestRouterTeamFormation:
     @pytest.mark.asyncio
     async def test_dm_room_ignores_private_agents_for_team_formation(self) -> None:
         """A DM room's auto team leaves out a private agent and degrades to the one supported agent left."""
-        from mindroom.teams.formation import decide_team_formation  # noqa: PLC0415
-
         config = _runtime_bound_config(
             Config(
                 agents={
@@ -624,8 +347,6 @@ class TestRouterTeamFormation:
     @pytest.mark.asyncio
     async def test_thread_history_unavailable_agents_degrade_to_individual(self) -> None:
         """Implicit thread continuation should not reject when one historical agent is off-room."""
-        from mindroom.teams.formation import decide_team_formation  # noqa: PLC0415
-
         config = _runtime_bound_config(
             Config(
                 agents={
@@ -663,8 +384,6 @@ class TestRouterTeamFormation:
     @pytest.mark.asyncio
     async def test_thread_history_ignores_configured_team_participants(self) -> None:
         """Implicit thread teams must ignore configured team bots instead of treating them as leaf members."""
-        from mindroom.teams.formation import decide_team_formation  # noqa: PLC0415
-
         config = _runtime_bound_config(
             Config(
                 agents={
@@ -727,8 +446,6 @@ class TestRouterTeamFormation:
     @pytest.mark.asyncio
     async def test_previously_mentioned_off_room_agents_degrade_to_individual(self) -> None:
         """Implicit thread mentions should degrade instead of surfacing explicit-request rejection."""
-        from mindroom.teams.formation import decide_team_formation  # noqa: PLC0415
-
         config = _runtime_bound_config(
             Config(
                 agents={
@@ -766,8 +483,6 @@ class TestRouterTeamFormation:
     @pytest.mark.asyncio
     async def test_tagged_off_room_agents_reject_the_entire_team_request(self) -> None:
         """An explicit team request rejects a member the room does not hold, which the sender cannot reach there."""
-        from mindroom.teams.formation import decide_team_formation  # noqa: PLC0415
-
         config = _runtime_bound_config(
             Config(
                 agents={
@@ -810,8 +525,6 @@ class TestRouterTeamFormation:
     @pytest.mark.asyncio
     async def test_tagged_agents_reject_when_sender_can_talk_to_zero_agents(self) -> None:
         """A sender who can reach no responder in the room has every tagged agent rejected, named in one reason."""
-        from mindroom.teams.formation import decide_team_formation  # noqa: PLC0415
-
         config = _runtime_bound_config(
             Config(
                 agents={
@@ -846,8 +559,6 @@ class TestRouterTeamFormation:
     @pytest.mark.asyncio
     async def test_tagged_off_room_agents_reject_without_collapsing_requested_members(self) -> None:
         """Explicit rejects should preserve the full requested-member failure state."""
-        from mindroom.teams.formation import decide_team_formation  # noqa: PLC0415
-
         config = _runtime_bound_config(
             Config(
                 agents={
@@ -886,8 +597,6 @@ class TestRouterTeamFormation:
     @pytest.mark.asyncio
     async def test_tagged_private_agent_can_join_explicit_ad_hoc_team(self) -> None:
         """Explicit shared/private mentions should form one ad hoc team."""
-        from mindroom.teams.formation import decide_team_formation  # noqa: PLC0415
-
         config = _runtime_bound_config(
             Config(
                 agents={
@@ -939,8 +648,6 @@ class TestRouterTeamFormation:
     @pytest.mark.asyncio
     async def test_tagged_unsupported_non_materializable_member_keeps_requested_member_statuses(self) -> None:
         """Explicit rejects should keep requested-member eligibility separate from delivery ownership."""
-        from mindroom.teams.formation import decide_team_formation  # noqa: PLC0415
-
         config = _runtime_bound_config(
             Config(
                 agents={
@@ -984,8 +691,6 @@ class TestRouterTeamFormation:
     @pytest.mark.asyncio
     async def test_tagged_mixed_reject_causes_report_member_specific_reasons(self) -> None:
         """Mixed reject causes should explain the actual member failures instead of flattening them."""
-        from mindroom.teams.formation import decide_team_formation  # noqa: PLC0415
-
         config = _runtime_bound_config(
             Config(
                 agents={
@@ -1033,8 +738,6 @@ class TestRouterTeamFormation:
         self,
     ) -> None:
         """Ad hoc team formation must reject explicit member sets that reach private agents."""
-        from mindroom.teams.formation import decide_team_formation  # noqa: PLC0415
-
         config = _runtime_bound_config(
             Config(
                 agents={
