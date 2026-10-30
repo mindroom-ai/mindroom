@@ -27,6 +27,7 @@ from mindroom.session_storage.types import ConversationSession
 from mindroom.tool_system.worker_routing import build_requester_execution_identity
 from tests.conftest import bind_runtime_paths, create_agno_2_sessions_db, delete_runs, runtime_paths_for, seed_session
 from tests.history_helpers import stored_run_ids
+from tests.session_storage.agno_layout import replacing_database
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
@@ -171,6 +172,27 @@ def test_a_database_moved_over_a_prepared_one_is_prepared_at_the_next_open(tmp_p
     _open(tmp_path)
     moved = create_agno_2_sessions_db(tmp_path / "elsewhere" / "code.db")
     moved.replace(_NAMES.database_path(tmp_path))
+
+    loaded = _open(tmp_path).load_session("session-1")
+
+    assert loaded is not None
+    assert [run.run_id for run in loaded.runs] == ["run-1", "run-2", "run-3"]
+
+
+def test_a_replacing_database_moves_over_a_prepared_one_without_taking_its_inode(tmp_path: Path) -> None:
+    """The tests' ``replacing_database`` keeps the replaced file in place until the new one moves over it.
+
+    ext4 can hand a file deleted and recreated in place its freed inode, which the next open takes for the prepared
+    file; tmpfs, where the suite's temporary files live, never does, so the conversion alone would not notice.
+    """
+    store = _open(tmp_path)
+    replaced = store.path.stat().st_ino
+    with (
+        closing(sqlite3.connect(create_agno_2_sessions_db(tmp_path / "elsewhere" / "code.db"))) as agno_2,
+        replacing_database(store.path) as connection,
+    ):
+        assert store.path.stat().st_ino == replaced
+        agno_2.backup(connection)
 
     loaded = _open(tmp_path).load_session("session-1")
 
