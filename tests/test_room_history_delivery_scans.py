@@ -14,6 +14,7 @@ from mindroom.matrix.room_history_reads import (
     _UnresolvedOpaqueRoomHistoryError,
     find_outbox_delivery_event_id_via_room_messages,
     find_response_event_ids_via_room_messages,
+    missing_outbox_delivery_copy_indices_via_room_messages,
 )
 
 
@@ -413,6 +414,48 @@ async def test_exact_delivery_bound_does_not_override_a_completed_source_scan() 
     )
 
     assert response_event_ids == frozenset()
+    assert client.room_messages.await_count == _MAX_EXACT_DELIVERY_SCAN_PAGES
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("final_cursor", ["older-history", "page-1"], ids=["more-history", "repeated-cursor"])
+async def test_copy_count_settles_on_the_page_that_holds_the_last_copy(final_cursor: str) -> None:
+    """Finding the last missing copy settles the count, even on the bound's final page or one whose cursor repeats."""
+    continuation = _frozen_delivery(body="continued", delivery_id="segmented-turn")
+    client = AsyncMock()
+    client.room_messages = AsyncMock(
+        side_effect=[
+            *[
+                _messages_response(
+                    [_message_event(f"$unrelated-{page}:localhost", "unrelated", timestamp=page)],
+                    end=f"page-{page}",
+                )
+                for page in range(1, _MAX_EXACT_DELIVERY_SCAN_PAGES)
+            ],
+            _messages_response(
+                [
+                    _message_event(
+                        "$copy:localhost",
+                        "continued",
+                        timestamp=1,
+                        sender="@bot:localhost",
+                        extra_content=continuation,
+                    ),
+                ],
+                end=final_cursor,
+            ),
+        ],
+    )
+
+    missing = await missing_outbox_delivery_copy_indices_via_room_messages(
+        client,
+        _ROOM_ID,
+        delivery_sender="@bot:localhost",
+        delivery_contents=[continuation],
+        delivery_event_type="m.room.message",
+    )
+
+    assert missing == []
     assert client.room_messages.await_count == _MAX_EXACT_DELIVERY_SCAN_PAGES
 
 

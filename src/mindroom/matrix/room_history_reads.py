@@ -248,7 +248,10 @@ async def _count_delivery_copies_via_room_messages(
     seen_pagination_tokens: set[str] = set()
     pages_fetched = 0
 
-    while any(found[key] < count for key, count in expected.items()):
+    def all_found() -> bool:
+        return all(found[key] >= count for key, count in expected.items())
+
+    while not all_found():
         response = await client.room_messages(
             room_id,
             start=from_token,
@@ -270,12 +273,12 @@ async def _count_delivery_copies_via_room_messages(
             )
             if key is not None:
                 found[key] += 1
-        if not response.end:
+        if all_found() or not response.end:
             break
         if response.end in seen_pagination_tokens:
             msg = f"delivery copy count room scan repeated pagination token for {room_id}"
             raise RuntimeError(msg)
-        # Still inside the loop, so something is missing: the bound can only raise.
+        # A copy is still missing, so the bound can only raise.
         _finish_exact_delivery_scan_at_bound(room_id=room_id, pages_fetched=pages_fetched, delivery_found=False)
         seen_pagination_tokens.add(response.end)
         from_token = response.end
