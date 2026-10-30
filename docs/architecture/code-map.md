@@ -308,7 +308,7 @@ Matrix sync callback
 | `providers/errors.py` | One classification of provider statuses, context-window wording, and transport failures into the normalized provider errors, shared by every adapter |
 | `providers/assistant_turn.py` | What adapters share to build a turn: the `mindroom_model` provenance stamp and timings, the progress event of a provider chunk without events, the events that end a finished turn, and the split of a leading inline `<think>` block into reasoning |
 | `llm/request_context.py` | The per-request logging context (agent, session, correlation id) bound around a model request and read by request telemetry |
-| `providers/media_files.py` | Reads the attachment files every wire sends; a file that cannot be read raises `InvalidRequest`, so the media fallback replaces the request's media with its note |
+| `providers/media_files.py` | Reads the attachment files every wire sends; a file that cannot be read raises `InvalidRequest`, so the media fallback replaces that file with its note |
 | `budgets/pricing.py` | Per-model USD pricing of token counters, keyed by the provider and model ID usage records |
 | `budgets/spend.py` | Month-to-date per-requester spend derived from retained usage |
 | `budgets/caps.py` | Per-user monthly caps kept as runtime state under the storage root, written atomically and read lock-free |

@@ -13,7 +13,7 @@ from mindroom.providers.assistant_turn import TurnTimer, finished_turn
 from mindroom.providers.extra_kwargs import sdk_request_body, settings_params
 from mindroom.providers.openai.adapter_common import SDKClients, request_settings
 from mindroom.providers.openai.chat_wire import SDK_OPTION_KEYS
-from mindroom.providers.openai.errors import provider_error, sdk_failures
+from mindroom.providers.openai.errors import provider_error, rejected_media, sdk_failures
 from mindroom.providers.openai.replay_estimate import (
     estimate_responses_replay_tokens,
     responses_replay_uses_visual_tokens,
@@ -22,6 +22,7 @@ from mindroom.providers.openai.responses_wire import (
     ResponsesStream,
     ResponsesWire,
     conversation_digest,
+    request_replay,
     request_store,
     responses_request_kwargs,
     responses_stop_reason,
@@ -164,7 +165,11 @@ class ResponsesAdapter:
                 async for event in events:
                     yield event
         except sdk_failures() as error:
-            raise provider_error(error, provider=self.identity.provider_name) from error
+            failure = provider_error(error, provider=self.identity.provider_name)
+            # A request that continues a stored response sends only the messages after it.
+            replay = request_replay(self.wire, request)
+            failure.rejected_media = rejected_media(error, kwargs, replay.history[replay.sent_from :], chat=False)
+            raise failure from error
         if not accumulator.ended:
             # The stream stopped before the response ended, so the turn did not finish.
             return

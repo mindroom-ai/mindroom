@@ -237,7 +237,8 @@ async def _format_message(message: Message, provider: str) -> dict[str, Any]:
 async def _image_bytes(image: Image, provider: str) -> bytes | None:
     if image.filepath is None:
         return image.content
-    return await asyncio.to_thread(partial(read_media_bytes, image.filepath, kind="image", provider=provider))
+    read = partial(read_media_bytes, image.filepath, media_id=image.id, kind="image", provider=provider)
+    return await asyncio.to_thread(read)
 
 
 def _read_chunk(reply: _OllamaReply, chunk: ChatResponse) -> list[StreamEvent]:

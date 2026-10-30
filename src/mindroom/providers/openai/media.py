@@ -24,6 +24,7 @@ __all__ = [
     "chat_audio_part",
     "chat_file_part",
     "chat_image_part",
+    "file_part_name",
     "responses_file_part",
     "responses_image_part",
 ]
@@ -40,9 +41,10 @@ _FILE_MIME_TYPES = {
 def _image_url(image: Image, provider: str) -> str | None:
     if image.url is not None:
         return image.url
-    data = (
-        image.content if image.filepath is None else read_media_bytes(image.filepath, kind="image", provider=provider)
-    )
+    if image.filepath is None:
+        data = image.content
+    else:
+        data = read_media_bytes(image.filepath, media_id=image.id, kind="image", provider=provider)
     if data is None:
         return None
     return f"data:{image_mime_type(image, data)};base64,{base64.b64encode(data).decode('utf-8')}"
@@ -75,7 +77,7 @@ def chat_audio_part(audio: Audio, *, provider: str) -> dict[str, Any] | None:
     if audio.content:
         data, audio_format = audio.content, audio.format or "wav"
     elif audio.filepath is not None:
-        data = read_media_bytes(audio.filepath, kind="audio", provider=provider)
+        data = read_media_bytes(audio.filepath, media_id=audio.id, kind="audio", provider=provider)
         audio_format = audio.format or Path(audio.filepath).suffix.lstrip(".")
     else:
         return None
@@ -89,14 +91,18 @@ def chat_audio_part(audio: Audio, *, provider: str) -> dict[str, Any] | None:
 
 def _content_bytes(file: File, provider: str) -> bytes | None:
     if file.filepath is not None:
-        return read_media_bytes(file.filepath, kind="file", provider=provider)
+        return read_media_bytes(file.filepath, media_id=file.id, kind="file", provider=provider)
     if isinstance(file.content, str):
         return file.content.encode("utf-8")
     return file.content
 
 
-def _file_part_name(file: File, fallback: str) -> str:
-    """Return the name a file part carries: the attachment's original filename, else its stored file's name."""
+def file_part_name(file: File, *, chat: bool) -> str:
+    """Return the name a Chat (``chat``) or Responses file part carries for ``file``.
+
+    That is the attachment's original filename, else its stored file's name, else the wire's generic name.
+    """
+    fallback = "file" if chat else "document"
     return file.filename or file.name or (Path(file.filepath).name if file.filepath else None) or fallback
 
 
@@ -122,9 +128,9 @@ def _file_part_data_url(file: File, name: str, data: bytes) -> str:
 def chat_file_part(file: File, *, provider: str) -> dict[str, Any] | None:
     """Return a Chat Completions ``file`` part with an inline data URL, or None for a file without bytes or an empty one.
 
-    It is named and typed as a Responses file part is (``_file_part_name``, ``_file_part_data_url``).
+    It is named and typed as a Responses file part is (``file_part_name``, ``_file_part_data_url``).
     """
-    name = _file_part_name(file, "file")
+    name = file_part_name(file, chat=True)
     data = _content_bytes(file, provider)
     if data is None:
         return None
@@ -133,7 +139,7 @@ def chat_file_part(file: File, *, provider: str) -> dict[str, Any] | None:
 
 def responses_file_part(file: File, *, provider: str) -> dict[str, Any] | None:
     """Return a Responses ``input_file`` part, a URL reference or inline data, or None when neither is available."""
-    name = _file_part_name(file, "document")
+    name = file_part_name(file, chat=False)
     if file.url:
         return {"type": "input_file", "file_url": file.url}
     data = _content_bytes(file, provider)
