@@ -64,6 +64,7 @@ from mindroom.session_storage.types import ConversationSession
 from mindroom.streaming import StreamingDeliveryError
 from mindroom.teams.spec import TeamMode
 from mindroom.tool_system.context_bound_streams import closing_async_stream
+from mindroom.tool_system.events import FailedReply
 from tests.access_schema_support import with_current_room_member_access
 from tests.ai_user_id_helpers import (
     _build_response_runner,
@@ -1688,7 +1689,7 @@ async def test_generate_team_response_helper_uses_persisted_team_scope_for_sessi
 
     async def fails(_run: TurnRunState) -> AsyncIterator[str | AttemptResolved]:
         # The turn driver stores the failed turn's record, which creates the team's session.
-        yield AttemptResolved(HandledAttempt("Team hello", error=RuntimeError("Team hello")))
+        yield AttemptResolved(HandledAttempt(FailedReply("Team hello", RuntimeError("Team hello"))))
 
     with (
         patch("mindroom.response_runner.should_use_streaming", new=AsyncMock(return_value=False)),
@@ -1943,7 +1944,7 @@ async def test_generate_team_response_helper_persists_interrupted_history_after_
     async def fails_after_partial_text(run: TurnRunState) -> AsyncIterator[str | AttemptResolved]:
         run.attempt = _Shown("Team partial")
         yield "Team partial"
-        yield AttemptResolved(HandledAttempt("Team run failed", error=RuntimeError("Team run failed")))
+        yield AttemptResolved(HandledAttempt(FailedReply("Team run failed", RuntimeError("Team run failed"))))
 
     with (
         patch("mindroom.response_runner.should_use_streaming", new=AsyncMock(return_value=True)),

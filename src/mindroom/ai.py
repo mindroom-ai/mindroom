@@ -98,6 +98,7 @@ from mindroom.tool_jobs.settings import background_tool_jobs_enabled
 from mindroom.tool_system.context_bound_streams import closing_async_stream
 from mindroom.tool_system.events import (
     CollectedStreamPresentation,
+    FailedReply,
     StreamingToolTracker,
     append_stream_text,
 )
@@ -137,7 +138,7 @@ __all__ = [
     "run_delegated_child_response",
     "stream_agent_response",
 ]
-AIStreamChunk = str | TextDelta | ToolStarted | ToolCompleted | RunFinished
+AIStreamChunk = TextDelta | ToolStarted | ToolCompleted | RunFinished | FailedReply
 
 
 def _compose_current_turn_prompt(
@@ -1253,7 +1254,7 @@ async def stream_agent_response(  # noqa: C901, PLR0915
     try:
         _assert_agent_target(agent_name, config)
     except ValueError as e:
-        yield error_text(e)
+        yield FailedReply(error_text(e), e)
         return
 
     async def _run_attempt(  # noqa: C901
@@ -1276,9 +1277,7 @@ async def stream_agent_response(  # noqa: C901, PLR0915
             if skipped := skip_unapproved_attempt(ctx.participation, reason="preparation_failed"):
                 yield AttemptResolved(skipped)
                 return
-            yield AttemptResolved(
-                HandledAttempt(error_text(e), error=e),
-            )
+            yield AttemptResolved(HandledAttempt(FailedReply(error_text(e), e)))
             return
         prepared_run = run_context.prepared_run
         state = _StreamingAttemptState()
@@ -1304,7 +1303,7 @@ async def stream_agent_response(  # noqa: C901, PLR0915
                 shown = state.assistant_text
                 yield AttemptResolved(
                     HandledAttempt(
-                        append_stream_text(shown, failure_text, separate=True)[len(shown) :],
+                        FailedReply(append_stream_text(shown, failure_text, separate=True)[len(shown) :], state.error),
                         build_run_metadata=_attempt_run_metadata_builder(
                             run_context,
                             record,
@@ -1312,7 +1311,6 @@ async def stream_agent_response(  # noqa: C901, PLR0915
                             run_id=attempt.run_id,
                             prior_usage=run.prior_usage,
                         ),
-                        error=state.error,
                     ),
                 )
             return

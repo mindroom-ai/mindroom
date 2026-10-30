@@ -48,7 +48,6 @@ from mindroom.ai_run_metadata import build_ai_run_metadata_content, build_prepar
 from mindroom.api import config_lifecycle, openai_compat
 from mindroom.api.main import initialize_api_app
 from mindroom.api.openai_request_parsing import ChatMessage, _extract_content_text, convert_messages, derive_session_id
-from mindroom.api.openai_streaming_protocol import _is_error_response
 from mindroom.approval.tool_approval import shutdown_approval_runtime
 from mindroom.budgets.monitor import BudgetMonitor
 from mindroom.config.access import ResponderAccessConfig
@@ -89,6 +88,7 @@ from mindroom.teams.envelope import PreparedTeamExecution
 from mindroom.teams.runtime import MemberEvent
 from mindroom.teams.spec import TeamMode, TeamSpec
 from mindroom.tool_system.agno_toolkits import Toolkit, adapt_toolkit
+from mindroom.tool_system.events import FailedReply
 from mindroom.tool_system.invocation import current_tool_call
 from mindroom.tool_system.tool_calls import ToolCallTiming, record_tool_success
 from mindroom.tool_system.worker_routing import (
@@ -1865,7 +1865,7 @@ def test_a_streamed_turn_that_fails_after_partial_text_ends_with_its_failure(
         if "content" in delta
     ]
     assert contents[0] == "Checking..."
-    assert _is_error_response(contents[-1])
+    assert contents[-1] == "\n\n[general] ⚠️ Error: Connection reset by peer"
 
 
 @dataclass
@@ -2144,11 +2144,38 @@ class TestStreamingCompletion:
         await asyncio.create_task(body_iterator.aclose(), context=Context())
         assert observed_final_identities == [execution_identity]
 
-    def test_streaming_cached_response(self, app_client: TestClient) -> None:
-        """Cached full response (string) is streamed correctly."""
+    def test_streaming_first_event_failure_returns_500(self, app_client: TestClient) -> None:
+        """A stream that starts with a failed turn's reply is HTTP 500 instead of SSE, whatever the reply's wording."""
 
-        async def mock_stream(*_args: object, **_kw: object) -> AsyncIterator[str]:
-            yield "This is a cached response"
+        async def mock_stream(*_args: object, **_kw: object) -> AsyncIterator[FailedReply]:
+            yield FailedReply("The run could not finish.", RuntimeError("boom"))
+
+        with (
+            patch("mindroom.api.openai_compat.stream_agent_response", side_effect=mock_stream),
+            capture_logs() as logs,
+        ):
+            response = app_client.post(
+                "/v1/chat/completions",
+                json={
+                    "model": "general",
+                    "messages": [{"role": "user", "content": "Hi"}],
+                    "stream": True,
+                },
+            )
+
+        assert response.status_code == 500
+        error = response.json()["error"]
+        assert error["type"] == "server_error"
+        assert error["message"] == "Agent execution failed"
+        # The warning names why the turn failed, as a blocking completion's does.
+        [warning] = [log for log in logs if log["event"] == "Stream returned error"]
+        assert warning["error"] == "boom"
+
+    def test_a_streamed_answer_that_starts_like_an_error_is_the_answer(self, app_client: TestClient) -> None:
+        """An answer's wording never makes it a failure: only a failed turn's reply is one."""
+
+        async def mock_stream(*_args: object, **_kw: object) -> AsyncIterator[TextDelta]:
+            yield TextDelta("⚠️ Error: the log line you asked about means the disk is full.")
 
         with patch("mindroom.api.openai_compat.stream_agent_response", side_effect=mock_stream):
             response = app_client.post(
@@ -2163,28 +2190,55 @@ class TestStreamingCompletion:
         assert response.status_code == 200
         lines = response.text.strip().split("\n\n")
         content_chunk = json.loads(lines[1].removeprefix("data: "))
-        assert content_chunk["choices"][0]["delta"]["content"] == "This is a cached response"
+        assert content_chunk["choices"][0]["delta"]["content"].startswith("⚠️ Error: the log line")
 
-    def test_streaming_first_event_error_returns_500(self, app_client: TestClient) -> None:
-        """If first stream event is an error string, return HTTP 500 instead of SSE."""
+    @pytest.mark.asyncio
+    async def test_a_failure_after_streamed_text_ends_the_stream_uncompleted(self, test_config: Config) -> None:
+        """A failed turn's reply after streamed text is the last content chunk, and the stream does not count as done.
 
-        async def mock_stream(*_args: object, **_kw: object) -> AsyncIterator[str]:
-            yield "❌ Authentication failed (openai): Invalid API key"
+        Its warning names why the turn failed, never the reply, as a blocking completion's does.
+        """
 
-        with patch("mindroom.api.openai_compat.stream_agent_response", side_effect=mock_stream):
-            response = app_client.post(
-                "/v1/chat/completions",
-                json={
-                    "model": "general",
-                    "messages": [{"role": "user", "content": "Hi"}],
-                    "stream": True,
-                },
-            )
+        async def mock_stream(*_args: object, **_kw: object) -> AsyncIterator[TextDelta | FailedReply]:
+            yield TextDelta("Checking.")
+            yield FailedReply("\n\n⚠️ Error: provider connection lost", RuntimeError("provider connection lost"))
 
-        assert response.status_code == 500
-        error = response.json()["error"]
-        assert error["type"] == "server_error"
-        assert error["message"] == "Agent execution failed"
+        runtime_paths = _runtime_paths()
+        execution_identity = build_tool_execution_identity(
+            channel="openai_compat",
+            agent_name="general",
+            session_id="session-123",
+            runtime_paths=runtime_paths,
+            requester_id=None,
+            room_id=None,
+            thread_id=None,
+            resolved_thread_id=None,
+        )
+        turn = openai_compat._openai_turn_context(
+            "general",
+            session_id="session-123",
+            execution_identity=execution_identity,
+        )
+        with (
+            patch("mindroom.api.openai_compat.stream_agent_response", side_effect=mock_stream),
+            capture_logs() as logs,
+        ):
+            response = await openai_compat._stream_completion(turn, test_config, runtime_paths)
+            assert isinstance(response, openai_compat.OpenAIStreamingResponse)
+            body = [cast("str", chunk) async for chunk in response.body_iterator]
+
+        contents = [
+            delta["content"]
+            for line in body
+            if line.startswith("data: {")
+            for delta in [json.loads(line.removeprefix("data: "))["choices"][0]["delta"]]
+            if "content" in delta
+        ]
+        assert contents == ["Checking.", "\n\n⚠️ Error: provider connection lost"]
+        assert response.completion_predicate is not None
+        assert not response.completion_predicate()
+        [warning] = [log for log in logs if log["event"] == "Stream emitted terminal failure"]
+        assert warning["error"] == "provider connection lost"
 
     def test_streaming_tool_events(self, app_client: TestClient) -> None:
         """Streaming emits start/done tool blocks with a stable per-stream tool id."""
@@ -3070,61 +3124,6 @@ class TestSessionIdDerivation:
         # Fallback sessions are intentionally distinct to avoid collisions.
         assert len(session_ids) == 2
         assert session_ids[0] != session_ids[1]
-
-
-# ---------------------------------------------------------------------------
-# Error detection
-# ---------------------------------------------------------------------------
-
-
-class TestErrorDetection:
-    """Tests for _is_error_response()."""
-
-    @pytest.mark.parametrize(
-        "text",
-        [
-            "❌ Authentication failed (openai): Invalid API key",
-            "⏱️ Rate limited. Please wait a moment and try again.",
-            "⏰ Request timed out. Please try again.",
-            "⚠️ Error: something went wrong",
-        ],
-    )
-    def test_detects_error_prefixes(self, text: str) -> None:
-        """Detects all error emoji prefixes."""
-        assert _is_error_response(text) is True
-
-    @pytest.mark.parametrize(
-        "text",
-        [
-            "[general] ❌ Authentication failed",
-            "[code] ⚠️ Error: model not available",
-            "[research] ⏱️ Rate limited",
-        ],
-    )
-    def test_detects_agent_prefix_errors(self, text: str) -> None:
-        """Detects errors with [agent_name] prefix."""
-        assert _is_error_response(text) is True
-
-    @pytest.mark.parametrize(
-        "text",
-        [
-            "Error code: 404 - {'type': 'error', 'error': {'type': 'not_found_error', 'message': 'model: foo'}}",
-            "Error code: 500 - Internal Server Error",
-            "openai.NotFoundError: Error code: 404 - {'error': {'message': 'model not found'}}",
-            '{"error": {"message": "model not found", "type": "not_found_error"}}',
-        ],
-    )
-    def test_detects_raw_provider_errors(self, text: str) -> None:
-        """Detects raw provider error strings surfaced by agno."""
-        assert _is_error_response(text) is True
-
-    def test_normal_response_not_error(self) -> None:
-        """Normal response text is not detected as error."""
-        assert _is_error_response("Hello! How can I help you?") is False
-
-    def test_empty_string_not_error(self) -> None:
-        """Empty string is not detected as error."""
-        assert _is_error_response("") is False
 
 
 # ---------------------------------------------------------------------------

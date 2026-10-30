@@ -45,7 +45,6 @@ from mindroom.api.openai_streaming_protocol import (
     OpenAIJSONResponse,
     OpenAIStreamingResponse,
     error_response,
-    extract_agent_stream_failure,
     extract_stream_text,
     finalize_pending_tools,
     format_stream_tool_event,
@@ -86,6 +85,7 @@ from mindroom.teams.members import (
 from mindroom.teams.runtime import MemberEvent, team_usage_runs
 from mindroom.teams.spec import TeamMode
 from mindroom.tool_system.context_bound_streams import closing_async_stream, context_bound_async_stream
+from mindroom.tool_system.events import FailedReply
 from mindroom.tool_system.runtime_context import DetachedRequesterContext, detached_requester_context
 from mindroom.tool_system.worker_routing import (
     ToolExecutionIdentity,
@@ -815,13 +815,13 @@ async def _non_stream_completion(
 
     # A failed turn completes no attempt, also when it failed after part of its answer, which its text then holds. One
     # that failed for want of a provider key answers with its reply, the setup guidance the user has to read.
-    if result.completed is None and not (failed is not None and needs_provider_key(failed.error)):
+    if result.completed is None and not (failed is not None and needs_provider_key(failed.reply.error)):
         # The reply text can hold the answer the turn had started, which is conversation content; log only why it failed.
         logger.warning(
             "AI response failed",
             model=agent_name,
             session_id=session_id,
-            error=redact_sensitive_text(failure_text(failed.error)) if failed is not None else None,
+            error=redact_sensitive_text(failure_text(failed.reply.error)) if failed is not None else None,
         )
         return error_response(500, "Agent execution failed", error_type="server_error")
 
@@ -845,6 +845,16 @@ async def _non_stream_completion(
 # ---------------------------------------------------------------------------
 
 
+def _stream_failure(event: AIStreamChunk) -> FailedReply | None:
+    """Return the failed turn's reply that ends an agent stream, unless it is the missing-key reply.
+
+    That reply is setup guidance the user has to read, so it streams as the answer, as a blocking completion sends it.
+    """
+    if isinstance(event, FailedReply) and not needs_provider_key(event.error):
+        return event
+    return None
+
+
 async def _stream_completion(
     turn: ResponseTurnContext,
     config: Config,
@@ -866,13 +876,12 @@ async def _stream_completion(
         await stream.aclose()
         return error_response(500, "Agent returned empty response", error_type="server_error")
 
-    first_error = extract_agent_stream_failure(first_event)
-    if first_error is not None:
+    if (first_failure := _stream_failure(first_event)) is not None:
         logger.warning(
             "Stream returned error",
             model=agent_name,
             session_id=session_id,
-            error=first_error,
+            error=redact_sensitive_text(failure_text(first_failure.error)),
         )
         await stream.aclose()
         return error_response(500, "Agent execution failed", error_type="server_error")
@@ -893,18 +902,18 @@ async def _stream_completion(
                 if isinstance(event, RunFinished):
                     content = event.record.content
                     completed_body = content if content is not None else completed_body
-                elif (failure := extract_agent_stream_failure(event)) is not None:
+                elif (failure := _stream_failure(event)) is not None:
                     stream_failed = True
                     logger.warning(
                         "Stream emitted terminal failure",
                         model=agent_name,
                         session_id=session_id,
-                        error=failure,
+                        error=redact_sensitive_text(failure_text(failure.error)),
                     )
-                    yield sse_chunk(state, {"content": failure})
+                    yield sse_chunk(state, {"content": failure.text})
                     break
                 elif text := extract_stream_text(event, state.tool_state):
-                    if isinstance(event, TextDelta | str):
+                    if isinstance(event, TextDelta | FailedReply):
                         saw_text_delta = True
                     yield sse_chunk(state, {"content": text})
                 event = await anext(stream, None)

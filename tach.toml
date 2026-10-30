@@ -2041,6 +2041,7 @@ depends_on = [
     "mindroom.run_storage",
     "mindroom.teams",
     "mindroom.tool_system.context_bound_streams",
+    "mindroom.tool_system.events",
     "mindroom.tool_system.runtime_context",
     "mindroom.tool_system.worker_routing",
     "mindroom.config.resolution",
@@ -7682,6 +7683,7 @@ from = ["mindroom.history.turn_recorder"]
 [[interfaces]]
 expose = [
     "CollectedStreamPresentation",
+    "FailedReply",
     "StreamingToolTracker",
     "StructuredStreamChunk",
     "ToolTraceEntry",

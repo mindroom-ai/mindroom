@@ -17,6 +17,7 @@ from mindroom.custom_tools.tool_payloads import custom_tool_payload
 from mindroom.llm.events import TextDelta
 from mindroom.session_storage.agent_storage import create_session_storage
 from mindroom.tool_system.declarations import ToolFileAccess
+from mindroom.tool_system.events import FailedReply
 from mindroom.tool_system.metadata import ToolCategory
 from mindroom.tool_system.registration import register_tool_with_metadata
 from mindroom.tool_system.registry_state import capture_tool_registry_snapshot, restore_tool_registry_snapshot
@@ -48,8 +49,8 @@ def stored_runs(
 
 
 def streamed_text(chunks: Iterable[AIStreamChunk]) -> list[str]:
-    """Return the text a reply streamed, in order: its deltas, and a failed run's reply, which is a bare string."""
-    return [chunk if isinstance(chunk, str) else chunk.text for chunk in chunks if isinstance(chunk, str | TextDelta)]
+    """Return the text a reply streamed, in order: its deltas, and a failed turn's reply."""
+    return [chunk.text for chunk in chunks if isinstance(chunk, TextDelta | FailedReply)]
 
 
 @contextmanager

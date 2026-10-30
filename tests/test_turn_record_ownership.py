@@ -28,7 +28,7 @@ from mindroom.response_turn import (
     stream_response_turn,
 )
 from mindroom.session_storage.store import ConversationStore
-from mindroom.tool_system.events import ToolTraceEntry
+from mindroom.tool_system.events import FailedReply, ToolTraceEntry
 
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator, AsyncIterator, Callable
@@ -211,15 +211,16 @@ async def test_a_process_shutdown_records_nothing_so_replay_continues_the_reply(
 
 
 async def test_a_failure_is_recorded_before_its_text_reaches_the_consumer(stored: _Stored) -> None:
-    """A consumer that closes the stream as soon as it reads the failure text cannot turn the failure into a stop."""
+    """A consumer that closes the stream as soon as it reads the failed reply cannot turn the failure into a stop."""
     record = TurnRecorder()
+    failure = FailedReply("the model failed", RuntimeError("the model failed"))
 
     async def _failing(
         run: TurnRunState,
         _continuation: TurnContinuationRunState,
     ) -> AsyncGenerator[str | AttemptResolved, None]:
         run.attempt = _Partial()
-        yield AttemptResolved(HandledAttempt("the model failed", error=RuntimeError("the model failed")))
+        yield AttemptResolved(HandledAttempt(failure))
 
     stream = stream_response_turn(
         _ctx(),
@@ -227,8 +228,7 @@ async def test_a_failure_is_recorded_before_its_text_reaches_the_consumer(stored
         TurnSinks(turn_recorder=record),
         continuation=_continuation(),
     )
-    # A failure's text is a bare string, not the adapter's text chunk: readers take it as a failed run's reply.
-    assert await anext(stream) == "the model failed"
+    assert await anext(stream) == failure
     await stream.aclose()
 
     assert record.outcome == "interrupted"
