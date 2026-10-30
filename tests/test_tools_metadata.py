@@ -196,9 +196,6 @@ def test_export_tools_metadata_json() -> None:
         assert "managed_init_args" not in first_tool
 
 
-_DOCS_ROOT = Path(__file__).parent.parent / "docs"
-
-
 def test_icon_mapping_matches_what_the_frontend_build_generates() -> None:
     """A frontend build regenerates iconMapping.tsx from the tool metadata, so the committed copy must be that output."""
     node = shutil.which("node")
@@ -210,7 +207,7 @@ def test_icon_mapping_matches_what_the_frontend_build_generates() -> None:
         "const metadata = JSON.parse(require('fs').readFileSync(process.argv[2], 'utf8'));"
         "process.stdout.write(generator.renderIconMapping(generator.groupIcons(metadata)));"
     )
-    rendered = subprocess.run(
+    result = subprocess.run(
         [
             node,
             "-e",
@@ -219,14 +216,18 @@ def test_icon_mapping_matches_what_the_frontend_build_generates() -> None:
             str(root / "src/mindroom/tools_metadata.json"),
         ],
         capture_output=True,
-        check=True,
+        check=False,
         encoding="utf-8",
-    ).stdout
+    )
+    assert result.returncode == 0, result.stderr
 
     committed = (root / "frontend/src/components/Integrations/iconMapping.tsx").read_text(encoding="utf-8")
-    assert rendered == committed, (
+    assert result.stdout == committed, (
         "iconMapping.tsx is out of date, regenerate it with `node frontend/scripts/generate-icon-imports.cjs`"
     )
+
+
+_DOCS_ROOT = Path(__file__).parent.parent / "docs"
 
 
 def _docs_page(url_path: str) -> Path:

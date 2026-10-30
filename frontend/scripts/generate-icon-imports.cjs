@@ -8,17 +8,18 @@ const outputPath = path.join(__dirname, "../src/components/Integrations/iconMapp
 // The repository's prettier hook formats the output with Prettier's defaults, which keep an import of several names on
 // one line only when it fits in 80 columns; emitting that layout makes a build reproduce the committed file exactly.
 const PRINT_WIDTH = 80;
-// Each icon library, in the order the file imports and maps it.
+// Each icon library, in the order the file imports and maps it, with the test for the icons it provides. An icon goes to
+// the first library whose test it passes, so lucide-react, last, takes every icon no other library claims.
 const LIBRARIES = [
-  ["fa", "react-icons/fa"],
-  ["fi", "react-icons/fi"],
-  ["si", "react-icons/si"],
-  ["gi", "react-icons/gi"],
-  ["tb", "react-icons/tb"],
-  ["vsc", "react-icons/vsc"],
-  ["wi", "react-icons/wi"],
-  ["aws", "./awsIcons"],
-  ["lucide", "lucide-react"],
+  ["react-icons/fa", icon => icon.startsWith("Fa")],
+  ["react-icons/fi", icon => /^Fi[A-Z]/.test(icon)],
+  ["react-icons/si", icon => icon.startsWith("Si")],
+  ["react-icons/gi", icon => icon.startsWith("Gi")],
+  ["react-icons/tb", icon => icon.startsWith("Tb")],
+  ["react-icons/vsc", icon => icon.startsWith("Vsc")],
+  ["react-icons/wi", icon => icon.startsWith("Wi")],
+  ["./awsIcons", icon => icon.startsWith("Aws")],
+  ["lucide-react", () => true],
 ];
 
 const HEADER = `// THIS FILE IS AUTO-GENERATED - DO NOT EDIT MANUALLY
@@ -80,7 +81,7 @@ export {
 } from "lucide-react";
 `;
 
-/** Return every icon the tools declare, grouped by the library that provides it. */
+/** Return every icon the tools declare, as `[library, icons]` pairs in `LIBRARIES` order. */
 function groupIcons(toolsMetadata) {
   const iconNames = new Set();
   for (const tool of toolsMetadata.tools) {
@@ -92,42 +93,11 @@ function groupIcons(toolsMetadata) {
   // The fallback must be available even when no tool declares it.
   iconNames.add("Globe");
 
-  const iconsByLibrary = {
-    fa: [],
-    fi: [],
-    si: [],
-    gi: [],
-    tb: [],
-    vsc: [],
-    wi: [],
-    aws: [],
-    lucide: [],
-  };
-
+  const groups = LIBRARIES.map(([library]) => [library, []]);
   for (const icon of iconNames) {
-    if (icon.startsWith('Fa')) {
-      iconsByLibrary.fa.push(icon);
-    } else if (/^Fi[A-Z]/.test(icon)) {
-      iconsByLibrary.fi.push(icon);
-    } else if (icon.startsWith('Si')) {
-      iconsByLibrary.si.push(icon);
-    } else if (icon.startsWith('Gi')) {
-      iconsByLibrary.gi.push(icon);
-    } else if (icon.startsWith('Tb')) {
-      iconsByLibrary.tb.push(icon);
-    } else if (icon.startsWith('Vsc')) {
-      iconsByLibrary.vsc.push(icon);
-    } else if (icon.startsWith('Wi')) {
-      iconsByLibrary.wi.push(icon);
-    } else if (icon.startsWith('Aws')) {
-      iconsByLibrary.aws.push(icon);
-    } else {
-      // Assume it's a lucide icon
-      iconsByLibrary.lucide.push(icon);
-    }
+    groups[LIBRARIES.findIndex(([, provides]) => provides(icon))][1].push(icon);
   }
-
-  return iconsByLibrary;
+  return groups;
 }
 
 function iconImport(library, icons) {
@@ -139,22 +109,22 @@ function iconImport(library, icons) {
   return `import {\n  ${icons.join(",\n  ")},\n} from "${library}";\n`;
 }
 
-/** Render iconMapping.tsx for these icons, exactly as the repository formats it. */
-function renderIconMapping(iconsByLibrary) {
-  const libraries = LIBRARIES.filter(([key]) => iconsByLibrary[key].length > 0);
-  const imports = libraries.map(([key, library]) => iconImport(library, iconsByLibrary[key])).join("");
-  const entries = libraries.flatMap(([key]) => iconsByLibrary[key].map(icon => `  ${icon},\n`)).join("");
+/** Render iconMapping.tsx for these icon groups, exactly as the repository formats it. */
+function renderIconMapping(groups) {
+  const used = groups.filter(([, icons]) => icons.length > 0);
+  const imports = used.map(([library, icons]) => iconImport(library, icons)).join("");
+  const entries = used.flatMap(([, icons]) => icons.map(icon => `  ${icon},\n`)).join("");
   return HEADER + imports + MAP_OPENING + entries + FOOTER;
 }
 
 module.exports = { groupIcons, renderIconMapping };
 
 if (require.main === module) {
-  const iconsByLibrary = groupIcons(JSON.parse(fs.readFileSync(toolsMetadataPath, "utf8")));
-  fs.writeFileSync(outputPath, renderIconMapping(iconsByLibrary), "utf8");
-  console.log(`✅ Generated icon imports for ${Object.values(iconsByLibrary).flat().length} unique icons`);
-  for (const [key, library] of LIBRARIES) {
-    console.log(`   - ${iconsByLibrary[key].length} from ${library}`);
+  const groups = groupIcons(JSON.parse(fs.readFileSync(toolsMetadataPath, "utf8")));
+  fs.writeFileSync(outputPath, renderIconMapping(groups), "utf8");
+  console.log(`✅ Generated icon imports for ${groups.flatMap(([, icons]) => icons).length} unique icons`);
+  for (const [library, icons] of groups) {
+    console.log(`   - ${icons.length} from ${library}`);
   }
   console.log(`📁 Output: ${outputPath}`);
 }
