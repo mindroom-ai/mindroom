@@ -303,15 +303,17 @@ def _rejected_record_errors() -> tuple[type[Exception], ...]:
 
 
 def _write_team_records(chroma_path: Path, collection_name: str, records: list[_Record]) -> None:
-    """Write the records whose fact the team's store does not hold yet.
+    """Write the records whose ID and fact the team's store does not hold yet.
 
     Mem0 keeps one record per fact in a scope, so a fact two turns' kept extractions share, or one an interrupted
-    earlier start already wrote, is written once per scope; two scopes sharing a directory keep their own.
+    earlier start already wrote, is written once per scope; two scopes sharing a directory keep their own. Only planted
+    records share an ID, which Chroma refuses within one write, so the first of them is kept.
     """
     target = _chroma_client(chroma_path)
     collection = target.get_or_create_collection(collection_name, embedding_function=None)
     payload = collection.get(include=["metadatas"])
-    held = {
+    held_ids = set(payload["ids"])
+    held_facts = {
         (stored.team, stored.fact)
         for stored in (
             _Record(record_id, metadata or {}, None)
@@ -320,9 +322,11 @@ def _write_team_records(chroma_path: Path, collection_name: str, records: list[_
     }
     written: list[_Record] = []
     for record in records:
-        if (record.team, record.fact) not in held:
-            held.add((record.team, record.fact))
-            written.append(record)
+        if record.id in held_ids or (record.team, record.fact) in held_facts:
+            continue
+        held_ids.add(record.id)
+        held_facts.add((record.team, record.fact))
+        written.append(record)
     for batch in batched(written, target.get_max_batch_size()):
         collection.upsert(
             ids=[record.id for record in batch],

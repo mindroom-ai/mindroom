@@ -729,6 +729,26 @@ async def test_a_turn_whose_extractions_tie_keeps_the_first_member_s_by_name(tmp
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("interrupted", [False, True], ids=["one start", "interrupted"])
+async def test_records_planted_under_one_id_in_two_members_stores_never_stop_the_start(
+    tmp_path: Path,
+    interrupted: bool,
+) -> None:
+    """Chroma refuses two records of one ID in a write, so the team's store keeps the first, on every start."""
+    _plant(tmp_path, "calculator", [("planted", "t2", "Fact B")])
+    _plant(tmp_path, "general", [("planted", "t1", "Fact A")])
+    if interrupted:
+        with patch.object(Collection, "delete", _delete_stopping_after(0)), pytest.raises(_StartStoppedError):
+            await _migrate(tmp_path)
+
+    await _migrate(tmp_path)
+
+    merged = _stored(tmp_path / "team_memory" / _TEAM / "chroma")
+    assert {record_id: record["metadata"]["data"] for record_id, record in merged.items()} == {"planted": "Fact B"}
+    assert _receipt(tmp_path).exists()
+
+
+@pytest.mark.asyncio
 async def test_a_tied_copy_main_s_edit_bug_rewrote_is_stored_once(tmp_path: Path) -> None:
     """An edit through general rewrote both of calculator's records of the turn to its one edited fact."""
     _plant(tmp_path, "calculator", [("c1", "t1", "Fact A, edited"), ("c2", "t1", "Fact A, edited")])
