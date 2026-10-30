@@ -192,9 +192,6 @@ class ConversationResolver:
             raise RuntimeError(msg)
         return client
 
-    def _matrix_id(self) -> MatrixID:
-        return self.deps.matrix_id
-
     def _mention_facts(
         self,
         event_source: dict[str, Any],
@@ -206,7 +203,7 @@ class ConversationResolver:
             return [], False, False
         return check_agent_mentioned(
             event_source,
-            self._matrix_id(),
+            self.deps.matrix_id,
             self.deps.runtime.config,
             self.deps.runtime_paths,
             room=room,
@@ -380,12 +377,10 @@ class ConversationResolver:
         if resolution.state is ThreadResolutionState.INDETERMINATE and resolution.candidate_thread_root_id is not None:
             # A non-blocking read cannot prove a root in a conversation it has
             # never hydrated, and a plain reply to an unthreaded message is the
-            # ordinary way to reach one. Unlike thread-context resolution, which
-            # repairs an unproven candidate a moment later, coalescing has no
-            # later stage to correct a wrong key in -- the batch is formed here.
-            # So the same repair happens here, and it costs nothing extra: it is
-            # the walk this turn was about to do anyway, and `ensure_hydrated`
-            # shares one of those per conversation.
+            # ordinary way to reach one. This is the one decision of the turn's
+            # thread -- the batch is formed under it and dispatch never revisits
+            # it -- so an unproven candidate gets the strict walk here, which
+            # `ensure_hydrated` shares per conversation.
             resolution = await self._coalescing_thread_resolution(
                 room,
                 event,
@@ -463,7 +458,7 @@ class ConversationResolver:
         """
         return thread_messages_thread_membership_access(
             lookup_thread_id=self.deps.relations.thread_id,
-            fetch_event_info=self._event_info_for_event_id,
+            fetch_event_info=self.deps.relations.event_info,
             fetch_thread_messages=lambda room_id, thread_id: self._read_thread_messages(
                 room_id,
                 thread_id,
@@ -532,13 +527,6 @@ class ConversationResolver:
             complete=not hydration_truncated and not source_degraded,
             source_degraded=source_degraded,
         )
-
-    async def _event_info_for_event_id(
-        self,
-        room_id: str,
-        event_id: str,
-    ) -> EventInfo | None:
-        return await self.deps.relations.event_info(room_id, event_id)
 
     async def _message_context(
         self,

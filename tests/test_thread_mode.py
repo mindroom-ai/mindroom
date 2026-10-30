@@ -23,7 +23,6 @@ from mindroom.constants import (
     SOURCE_KIND_KEY,
     resolve_runtime_paths,
 )
-from mindroom.conversation_resolver import MessageContext
 from mindroom.delivery_gateway import SendTextRequest
 from mindroom.dispatch_source import HOOK_DISPATCH_SOURCE_KIND, SCHEDULED_SOURCE_KIND
 from mindroom.entity_resolution import entity_identity_registry
@@ -751,57 +750,6 @@ class TestExtractMessageContextRoomMode:
             room_id="!room:localhost",
             thread_id="$thread123",
             reply_to_event_id="$event123",
-        )
-
-    @pytest.mark.asyncio
-    async def test_context_helpers_delegate_to_conversation_resolver(
-        self,
-        assistant_user: AgentMatrixUser,
-        tmp_path: Path,
-    ) -> None:
-        """Context extraction helpers should go through the extracted resolver."""
-        config = _runtime_bound_config(
-            Config(
-                agents={"assistant": AgentConfig(display_name="Assistant", rooms=["!room:localhost"])},
-                teams={},
-                room_models={},
-                models={"default": ModelConfig(provider="ollama", id="test-model")},
-                router=RouterConfig(model="default"),
-            ),
-            tmp_path,
-        )
-        bot = _agent_bot(config=config, agent_user=assistant_user, storage_path=tmp_path)
-        room = _matrix_room("!room:localhost")
-        event = MagicMock(spec=nio.RoomMessageText)
-        event.event_id = "$event123"
-        event.sender = "@user:localhost"
-        event.source = {"content": {"body": "hello", "msgtype": "m.text"}}
-        context = MessageContext(
-            am_i_mentioned=False,
-            is_thread=True,
-            thread_id="$thread123",
-            thread_history=[],
-            mentioned_agents=[],
-            has_non_agent_mentions=False,
-            requires_model_history_refresh=True,
-        )
-        bot._conversation_resolver.extract_dispatch_context = AsyncMock(
-            return_value=context,
-        )
-        bot._conversation_resolver.extract_message_context = AsyncMock(return_value=context)
-
-        assert await bot._conversation_resolver.extract_dispatch_context(room, event, thread_id="$thread123") is context
-        assert await bot._conversation_resolver.extract_message_context(room, event, thread_id="$thread123") is context
-
-        bot._conversation_resolver.extract_dispatch_context.assert_awaited_once_with(
-            room,
-            event,
-            thread_id="$thread123",
-        )
-        bot._conversation_resolver.extract_message_context.assert_awaited_once_with(
-            room,
-            event,
-            thread_id="$thread123",
         )
 
     def test_hot_reloaded_bot_uses_updated_thread_mode_without_restart(

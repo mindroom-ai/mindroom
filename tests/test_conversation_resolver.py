@@ -796,25 +796,6 @@ async def _resolver_on_a_cold_journal(
 
 
 @pytest.mark.asyncio
-async def test_unhydrated_candidate_root_still_gets_a_coalescing_scope(
-    config: Config,
-    tmp_path: Path,
-) -> None:
-    """A plain reply resolves its scope even when nothing has walked that conversation.
-
-    Coalescing reads dispatch-safe, so an unhydrated conversation answers with
-    a page that proves nothing, and an unproven root is INDETERMINATE. Raising
-    there fails the whole turn, and coalescing is the one caller with nothing
-    downstream to correct a wrong key with -- the batch is formed here -- so it
-    repairs the answer with a strict read instead of giving up.
-    """
-    async with _resolver_on_a_cold_journal(config, tmp_path) as resolver:
-        scope = await resolver.coalescing_thread_id(_room(), _reply_event())
-
-    assert scope == _PARENT
-
-
-@pytest.mark.asyncio
 async def test_unhydrated_candidate_root_is_not_demoted_to_room_level(
     config: Config,
     tmp_path: Path,

@@ -1351,11 +1351,11 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
         assert thread_id is None
 
     @pytest.mark.asyncio
-    async def test_degraded_dispatch_candidate_calls_strict_proof_before_planning(
+    async def test_an_unproven_candidate_gets_a_strict_proof_before_ingress_decides_no_thread(
         self,
         bot: AgentBot,
     ) -> None:
-        """Degraded dispatch candidates must receive strict proof before room-level planning."""
+        """Ingress proves a degraded candidate strictly before it decides the turn is room level."""
         room = _matrix_room(name="Test Room")
         event = nio.RoomMessageText.from_dict(
             {

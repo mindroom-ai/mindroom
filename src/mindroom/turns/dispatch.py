@@ -134,28 +134,10 @@ def _scheduled_history_budget_for_dispatch(
 
 
 @dataclass(frozen=True)
-class _ReplayGuardContext:
-    """Dispatch-local evidence for deciding whether an older turn should still run."""
-
-    history: Sequence[ResolvedVisibleMessage]
-    degraded: bool
-    thread_id: str | None
-
-
-@dataclass(frozen=True)
-class _DispatchPreparation:
-    """Prepared dispatch plus evidence that must stay out of policy-visible context."""
-
-    dispatch: PreparedDispatch
-    replay_guard: _ReplayGuardContext
-
-
-@dataclass(frozen=True)
 class _PreparedTextDispatch:
     turn: PreparedTurn
     handled_turn: TurnRecord
     dispatch: PreparedDispatch
-    replay_guard: _ReplayGuardContext
     dispatch_started_at: float
 
 
@@ -389,10 +371,9 @@ class TurnDispatcher:
             # relayed, so edits and redactions of that message reach this responder's persisted runs.
             handled_turn=canonicalize_turn_record(
                 turn.handled_turn,
-                requester_id=prepared.dispatch.requester_user_id,
+                requester_id=prepared.requester_user_id,
             ),
-            dispatch=prepared.dispatch,
-            replay_guard=prepared.replay_guard,
+            dispatch=prepared,
             dispatch_started_at=dispatch_started_at,
         )
 
@@ -428,13 +409,15 @@ class TurnDispatcher:
             # letting it absorb this turn would answer out of receipt order or not at all.
             and not prepared.turn.queues_other_run(requester_user_id)
         )
-        if prepared.replay_guard.degraded:
+        thread_history = prepared.dispatch.context.thread_history
+        thread_id = prepared.dispatch.target.resolved_thread_id
+        if is_thread_history_degraded(thread_history):
             # Thread history degraded, so only pending journal events can prove a newer message.
             skips_turn = await has_newer_unresponded_journal_thread_event(
                 room_id=room.room_id,
                 event=event,
                 requester_user_id=requester_user_id,
-                thread_id=prepared.replay_guard.thread_id,
+                thread_id=thread_id,
                 may_be_superseded_by_newer_requester_turn=may_be_superseded,
                 pending_turns=self.deps.pending_turns,
                 classify=self.deps.ingress.classify_source,
@@ -446,7 +429,7 @@ class TurnDispatcher:
                     "Thread replay guard degraded; proceeding without negative newer-message proof",
                     event_id=event.event_id,
                     room_id=room.room_id,
-                    thread_id=prepared.replay_guard.thread_id,
+                    thread_id=thread_id,
                     thread_read_degraded=True,
                 )
         else:
@@ -454,7 +437,7 @@ class TurnDispatcher:
                 room.room_id,
                 event,
                 requester_user_id,
-                prepared.replay_guard.history,
+                thread_history,
                 may_be_superseded_by_newer_requester_turn=may_be_superseded,
             )
         if skips_turn:
@@ -732,7 +715,7 @@ class TurnDispatcher:
         await self.deps.visible_responses.settle_source_events_ignored(handled_turn)
         return True
 
-    async def _prepare_dispatch(self, turn: PreparedTurn) -> _DispatchPreparation | None:
+    async def _prepare_dispatch(self, turn: PreparedTurn) -> PreparedDispatch | None:
         """Build the shared dispatch context for one prepared inbound turn."""
         room, event, facts, handled_turn = turn.room, turn.event, turn.facts, turn.handled_turn
         requester_user_id = facts.run_requester_id
@@ -820,24 +803,15 @@ class TurnDispatcher:
             await self.deps.visible_responses.settle_source_events_ignored(handled_turn)
             return None
 
-        replay_guard = _ReplayGuardContext(
-            history=context.thread_history,
-            degraded=is_thread_history_degraded(context.thread_history),
-            thread_id=target.resolved_thread_id,
-        )
-
-        return _DispatchPreparation(
-            dispatch=PreparedDispatch(
-                requester_user_id=requester_user_id,
-                context=context,
-                target=target,
-                correlation_id=event.event_id,
-                envelope=envelope,
-                current_prompt_is_structured=turn.current_prompt_is_structured,
-                scheduled_history_budget=_scheduled_history_budget_for_dispatch(event, origin.intent),
-                scheduled_model=_scheduled_model_for_dispatch(event, origin.intent),
-            ),
-            replay_guard=replay_guard,
+        return PreparedDispatch(
+            requester_user_id=requester_user_id,
+            context=context,
+            target=target,
+            correlation_id=event.event_id,
+            envelope=envelope,
+            current_prompt_is_structured=turn.current_prompt_is_structured,
+            scheduled_history_budget=_scheduled_history_budget_for_dispatch(event, origin.intent),
+            scheduled_model=_scheduled_model_for_dispatch(event, origin.intent),
         )
 
     async def _router_handled_turn_outcome(

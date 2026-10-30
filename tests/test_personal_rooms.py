@@ -2852,7 +2852,7 @@ async def test_dispatched_welcome_selects_target_through_real_turn_policy(
         make_test_turn(room, event, facts=facts, handled_turn=TurnRecord.create([event.event_id])),
     )
     assert prepared is not None
-    dispatch = prepared.dispatch
+    dispatch = prepared
     plan = await target._turn_policy.plan_turn(
         room,
         event,

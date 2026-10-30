@@ -147,7 +147,6 @@ from mindroom.matrix.identity import MatrixID
 from mindroom.matrix.large_messages import _oversized_nonterminal_streaming_edit_next_allowed_at
 from mindroom.matrix.media import is_matrix_media_dispatch_event
 from mindroom.matrix.relation_lookup import RelationLookup
-from mindroom.matrix.thread_diagnostics import is_thread_history_degraded
 from mindroom.mcp import toolkit as mcp_toolkit_module
 from mindroom.message_target import MessageTarget
 from mindroom.model_defaults import OLLAMA_HOST_DEFAULT
@@ -178,7 +177,7 @@ from mindroom.tool_system import plugin_imports
 from mindroom.turn_origin import TurnOrigin, classify_turn_origin
 from mindroom.turn_policy import PreparedDispatch, TurnPolicy
 from mindroom.turn_store import _CLAIM_REGISTRIES, TurnClaim, TurnStore, _ClaimRegistry
-from mindroom.turns.dispatch import TurnDispatcher, _DispatchPreparation, _ReplayGuardContext
+from mindroom.turns.dispatch import TurnDispatcher
 from mindroom.turns.facts import IngressFacts
 from mindroom.turns.ingress import TurnIngress
 from mindroom.turns.interactive_selection import InteractiveSelections
@@ -511,7 +510,6 @@ __all__ = [
     "patch_response_runner_module",
     "prepare_history_for_run_for_test",
     "prepare_payload_via_seam",
-    "prepared_dispatch_result",
     "replace_delivery_gateway_deps",
     "replace_edit_regenerator_deps",
     "replace_response_runner_deps",
@@ -793,18 +791,6 @@ async def prepare_history_for_run_for_test(
         config=config,
         static_prompt_tokens=static_prompt_tokens,
         pipeline_timing=None,
-    )
-
-
-def prepared_dispatch_result(dispatch: PreparedDispatch) -> _DispatchPreparation:
-    """Wrap a prepared dispatch in the private turn-dispatch preparation result shape."""
-    return _DispatchPreparation(
-        dispatch=dispatch,
-        replay_guard=_ReplayGuardContext(
-            history=dispatch.context.thread_history,
-            degraded=is_thread_history_degraded(dispatch.context.thread_history),
-            thread_id=dispatch.target.resolved_thread_id,
-        ),
     )
 
 

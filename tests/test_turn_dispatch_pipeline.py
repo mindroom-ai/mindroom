@@ -94,7 +94,6 @@ from tests.conftest import (
     make_ingress_facts,
     message_origin,
     patch_response_runner_module,
-    prepared_dispatch_result,
     replace_delivery_gateway_deps,
     replace_turn_deps,
     runtime_paths_for,
@@ -625,7 +624,7 @@ class TestAgentBot(AgentBotTestBase):
             patch.object(
                 bot._turn_dispatcher,
                 "_prepare_dispatch",
-                new=AsyncMock(return_value=prepared_dispatch_result(dispatch)),
+                new=AsyncMock(return_value=dispatch),
             ),
             patch.object(bot._turn_policy, "plan_turn", new=AsyncMock(side_effect=fake_plan)),
             patch.object(
@@ -732,7 +731,7 @@ class TestAgentBot(AgentBotTestBase):
             patch.object(
                 bot._turn_dispatcher,
                 "_prepare_dispatch",
-                new=AsyncMock(return_value=prepared_dispatch_result(dispatch)),
+                new=AsyncMock(return_value=dispatch),
             ),
             patch.object(
                 bot._turn_policy,
@@ -813,7 +812,7 @@ class TestAgentBot(AgentBotTestBase):
             patch.object(
                 bot._turn_dispatcher,
                 "_prepare_dispatch",
-                new=AsyncMock(return_value=prepared_dispatch_result(dispatch)),
+                new=AsyncMock(return_value=dispatch),
             ),
             patch.object(
                 bot._command_turn_executor,
@@ -969,7 +968,7 @@ class TestAgentBot(AgentBotTestBase):
             patch.object(
                 bot._turn_dispatcher,
                 "_prepare_dispatch",
-                new=AsyncMock(return_value=prepared_dispatch_result(dispatch)),
+                new=AsyncMock(return_value=dispatch),
             ),
             patch.object(bot._turn_dispatcher, "_has_newer_unresponded_in_thread", return_value=False),
         ):
@@ -1078,7 +1077,7 @@ class TestAgentBot(AgentBotTestBase):
             patch.object(
                 bot._turn_dispatcher,
                 "_prepare_dispatch",
-                new=AsyncMock(return_value=prepared_dispatch_result(dispatch)),
+                new=AsyncMock(return_value=dispatch),
             ),
             patch.object(
                 bot._turn_policy,

@@ -113,7 +113,6 @@ async def test_a_threaded_turn_replayed_after_the_room_switched_to_room_mode_is_
     )
 
     assert prepared is not None
-    dispatch = prepared.dispatch
+    dispatch = prepared
     assert dispatch.target.resolved_thread_id is None
     assert (dispatch.context.is_thread, dispatch.context.thread_id) == (False, None)
-    assert prepared.replay_guard.thread_id is None
