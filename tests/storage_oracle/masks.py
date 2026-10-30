@@ -58,69 +58,37 @@ if TYPE_CHECKING:
     from tests.storage_oracle.determinism import Determinism
 
 
-@dataclass(frozen=True)
-class Mask:
-    """One deliberate difference, and where the design decides it."""
-
-    name: str
-    decided_by: str
-
-
-MASKS: dict[str, Mask] = {
-    mask.name: mask
-    for mask in (
-        Mask("tables_exist_at_open", "spec v4 3.13: opening a store creates every table"),
-        Mask("outcome_names", "the v2 operations name their results differently; no behavior changes"),
-        Mask("visible_run_is_final", "spec v4 3.15, row 1: any visible run is final for P1"),
-        Mask("interrupted_record_replaces_covered_run", "spec v4 3.15, row 2"),
-        Mask("member_final_once_team_visible", "spec v4 3.15, row 3"),
-        Mask("paused_team_members_from_requirements", "spec v4 3.15, row 4"),
-        Mask("link_reaches_any_stored_run", "spec v4 3.15, row 5"),
-        Mask("history_copies_not_stored", "spec v4 3.15, row 6"),
-        Mask("fold_stores_cancelled_row", "spec v4 3.15, row 7"),
-        Mask("first_stored_by_fold_sorts_at_fold", "spec v4 3.15, row 8"),
-        Mask("minimal_mode_delegation_patches_checkpoint", "spec v4 3.15, row 10"),
-        Mask("stored_copy_hides_folded_messages", "spec v4 3.15, row 11"),
-        Mask(
-            "delegation_state_is_a_key_patch",
-            "spec v4 3.6 and 3.7 (v4 change 2): a record that is not paused, or is final, gets only its delegation "
-            "key; 3.15 lists only the minimal-mode case",
-        ),
-        Mask(
-            "folded_calls_go_with_their_run",
-            "not in spec v4: a discarded or retired fold owner's folded calls go with its message rows, while its "
-            "fold row stays",
-        ),
-        Mask(
-            "force_request_only_in_metadata",
-            "decision 5 (W9): a manual compaction request is only the metadata flag, with no copy in the session state "
-            "that the next reply moves into the flag",
-        ),
-        Mask(
-            "ledger_is_the_only_usage_owner",
-            "a run's usage lives only in the ledger: the session row keeps no totals beside it",
-        ),
-        Mask(
-            "readers_follow_the_log",
-            "background readers list a conversation's turns in log order, where a turn finished after an approval "
-            "comes after the turns that finished meanwhile, not in creation order",
-        ),
-        Mask(
-            "a_finished_interrupted_record_is_news",
-            "an interrupted record new to the log, or saved over its cancelled or errored row, moves the session's "
-            "update time, as every save that places a visible run at the log's end does, so readers that follow the log "
-            "see it",
-        ),
-        Mask(
-            "history_state_is_the_owners_one_value",
-            "layout version 7: the owner's force flag and preserved seen ids are one metadata value, not maps keyed "
-            "by scope",
-        ),
-        Mask(
-            "summary_requests_name_their_model",
-            "#3109 item 6: a compaction summary's usage row names the model that answered its request, as its run does",
-        ),
-    )
+# Each deliberate difference, by name, and where the design decides it.
+MASKS: dict[str, str] = {
+    "tables_exist_at_open": "spec v4 3.13: opening a store creates every table",
+    "outcome_names": "the v2 operations name their results differently; no behavior changes",
+    "visible_run_is_final": "spec v4 3.15, row 1: any visible run is final for P1",
+    "interrupted_record_replaces_covered_run": "spec v4 3.15, row 2",
+    "member_final_once_team_visible": "spec v4 3.15, row 3",
+    "paused_team_members_from_requirements": "spec v4 3.15, row 4",
+    "link_reaches_any_stored_run": "spec v4 3.15, row 5",
+    "history_copies_not_stored": "spec v4 3.15, row 6",
+    "fold_stores_cancelled_row": "spec v4 3.15, row 7",
+    "first_stored_by_fold_sorts_at_fold": "spec v4 3.15, row 8",
+    "minimal_mode_delegation_patches_checkpoint": "spec v4 3.15, row 10",
+    "stored_copy_hides_folded_messages": "spec v4 3.15, row 11",
+    "delegation_state_is_a_key_patch": "spec v4 3.6 and 3.7 (v4 change 2): a record that is not paused, or is final, "
+    "gets only its delegation key; 3.15 lists only the minimal-mode case",
+    "folded_calls_go_with_their_run": "not in spec v4: a discarded or retired fold owner's folded calls go with its "
+    "message rows, while its fold row stays",
+    "force_request_only_in_metadata": "decision 5 (W9): a manual compaction request is only the metadata flag, with no "
+    "copy in the session state that the next reply moves into the flag",
+    "ledger_is_the_only_usage_owner": "a run's usage lives only in the ledger: the session row keeps no totals "
+    "beside it",
+    "readers_follow_the_log": "background readers list a conversation's turns in log order, where a turn finished "
+    "after an approval comes after the turns that finished meanwhile, not in creation order",
+    "a_finished_interrupted_record_is_news": "an interrupted record new to the log, or saved over its cancelled or "
+    "errored row, moves the session's update time, as every save that places a visible run at the log's end does, so "
+    "readers that follow the log see it",
+    "history_state_is_the_owners_one_value": "layout version 7: the owner's force flag and preserved seen ids are one "
+    "metadata value, not maps keyed by scope",
+    "summary_requests_name_their_model": "#3109 item 6: a compaction summary's usage row names the model that answered "
+    "its request, as its run does",
 }
 _NON_VISIBLE = frozenset(NON_VISIBLE_RUN_STATUS_VALUES)
 _MISSING = object()
@@ -948,4 +916,4 @@ class MaskedBackend(StoreBackend):
         return dict(sorted(folded.items()))
 
 
-__all__ = ["MASKS", "Diverged", "Mask", "MaskedBackend", "untag_summary_requests"]
+__all__ = ["MASKS", "Diverged", "MaskedBackend", "untag_summary_requests"]
