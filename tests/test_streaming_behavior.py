@@ -6,7 +6,7 @@ import asyncio
 import tempfile
 import threading
 import time
-from contextlib import asynccontextmanager, suppress
+from contextlib import asynccontextmanager
 from itertools import pairwise
 from pathlib import Path
 from types import SimpleNamespace
@@ -51,17 +51,15 @@ from mindroom.streaming import (
     _INTERRUPTED_RESPONSE_NOTE,
     _PROGRESS_PLACEHOLDER,
     CANCELLED_RESPONSE_NOTE,
+    PausePresentationError,
     ProgressPermission,
     ReplacementStreamingResponse,
     StreamingDeliveryError,
-    StreamingLifecycleSuspensionError,
     StreamingResponse,
     _DeliveryRequest,
     _drive_stream_delivery,
     _flush_phase_boundary_if_needed,
     _queue_delivery_request,
-    _shutdown_stream_delivery,
-    _StreamDeliveryShutdownTimeoutError,
     build_restart_interrupted_body,
     clean_partial_reply_text,
     is_interrupted_partial_reply,
@@ -180,6 +178,15 @@ def _make_bot_with_shared_knowledge(
     return bot
 
 
+async def _finish_delivery(
+    delivery_queue: asyncio.Queue[_DeliveryRequest | None],
+    delivery_task: asyncio.Task[None],
+) -> None:
+    """Let the delivery owner send what is queued, then end, raising its error."""
+    delivery_queue.put_nowait(None)
+    await delivery_task
+
+
 async def _consume_streaming_chunks_for_test(
     client: nio.AsyncClient,
     response_stream: AsyncIterator[object],
@@ -189,15 +196,8 @@ async def _consume_streaming_chunks_for_test(
     delivery_task = asyncio.create_task(_drive_stream_delivery(client, streaming, delivery_queue))
     try:
         await _consume_streaming_chunks_impl(response_stream, streaming, delivery_queue)
-        shutdown_error = await _shutdown_stream_delivery(delivery_queue, delivery_task)
-        delivery_task = None
-        if shutdown_error is not None:
-            raise shutdown_error
     finally:
-        if delivery_task is not None:
-            cleanup_error = await _shutdown_stream_delivery(delivery_queue, delivery_task)
-            if cleanup_error is not None:
-                raise cleanup_error
+        await _finish_delivery(delivery_queue, delivery_task)
 
 
 @pytest.mark.asyncio
@@ -251,9 +251,8 @@ async def test_dropped_optional_delivery_still_sends_latest_visible_text(tmp_pat
     assert delivery_queue.qsize() == 32
 
     delivery_task = asyncio.create_task(_drive_stream_delivery(mock_client, streaming, delivery_queue))
-    shutdown_error = await _shutdown_stream_delivery(delivery_queue, delivery_task)
+    await _finish_delivery(delivery_queue, delivery_task)
 
-    assert shutdown_error is None
     mock_client.room_send.assert_awaited_once()
     assert mock_client.room_send.await_args.kwargs["content"]["body"] == "latest body"
 
@@ -1065,8 +1064,7 @@ class TestStreamingBehavior:
 
         allow_send_to_finish.set()
         await consume_task
-        shutdown_error = await _shutdown_stream_delivery(delivery_queue, delivery_task)
-        assert shutdown_error is None
+        await _finish_delivery(delivery_queue, delivery_task)
 
     @pytest.mark.asyncio
     async def test_visible_tool_start_burst_coalesces_to_one_nonterminal_send(self) -> None:
@@ -1126,8 +1124,7 @@ class TestStreamingBehavior:
         await asyncio.sleep(0)
         allow_send_to_finish.set()
         await consume_task
-        shutdown_error = await _shutdown_stream_delivery(delivery_queue, delivery_task)
-        assert shutdown_error is None
+        await _finish_delivery(delivery_queue, delivery_task)
 
         assert mock_client.room_send.call_count == 1
         assert "search_web" in streaming.accumulated_text
@@ -1198,8 +1195,7 @@ class TestStreamingBehavior:
         await asyncio.sleep(0)
         allow_first_send_to_finish.set()
         await consume_task
-        shutdown_error = await _shutdown_stream_delivery(delivery_queue, delivery_task)
-        assert shutdown_error is None
+        await _finish_delivery(delivery_queue, delivery_task)
 
         assert mock_client.room_send.call_count == 2
         bodies = [
@@ -1405,8 +1401,7 @@ class TestStreamingBehavior:
 
         allow_send_to_finish.set()
         await consume_task
-        shutdown_error = await _shutdown_stream_delivery(delivery_queue, delivery_task)
-        assert shutdown_error is None
+        await _finish_delivery(delivery_queue, delivery_task)
 
     @pytest.mark.asyncio
     async def test_visible_tool_start_after_unsent_text_refreshes_immediately(self) -> None:
@@ -1450,9 +1445,8 @@ class TestStreamingBehavior:
         )
 
         with patch("mindroom.streaming.time.time", return_value=100.0):
-            shutdown_error = await _shutdown_stream_delivery(delivery_queue, delivery_task)
+            await _finish_delivery(delivery_queue, delivery_task)
 
-        assert shutdown_error is None
         assert mock_client.room_send.call_count == 1
         bodies = [
             call.kwargs["content"].get("m.new_content", call.kwargs["content"])["body"]
@@ -1583,9 +1577,8 @@ class TestStreamingBehavior:
         await _flush_phase_boundary_if_needed(streaming, delivery_queue)
 
         with patch("mindroom.streaming.time.time", return_value=101.0):
-            shutdown_error = await _shutdown_stream_delivery(delivery_queue, delivery_task)
+            await _finish_delivery(delivery_queue, delivery_task)
 
-        assert shutdown_error is None
         assert mock_client.room_send.call_count == 0
         assert streaming.last_update == float("-inf")
         assert streaming.chars_since_last_update == 1
@@ -1679,9 +1672,8 @@ class TestStreamingBehavior:
             # A progress request with no new text, past the minimum spacing, meets the 10-character threshold.
             clock = 100.4
             _queue_delivery_request(delivery_queue, progress_hint=True)
-            shutdown_error = await _shutdown_stream_delivery(delivery_queue, delivery_task)
+            await _finish_delivery(delivery_queue, delivery_task)
 
-        assert shutdown_error is None
         bodies = [
             call.kwargs["content"].get("m.new_content", call.kwargs["content"])["body"]
             for call in mock_client.room_send.call_args_list
@@ -1747,9 +1739,8 @@ class TestStreamingBehavior:
             # A later request with no new text delivers the rewrite once the window has passed.
             clock = 100.6
             _queue_delivery_request(delivery_queue, progress_hint=True)
-            shutdown_error = await _shutdown_stream_delivery(delivery_queue, delivery_task)
+            await _finish_delivery(delivery_queue, delivery_task)
 
-        assert shutdown_error is None
         bodies = [
             call.kwargs["content"].get("m.new_content", call.kwargs["content"])["body"]
             for call in mock_client.room_send.call_args_list
@@ -1827,9 +1818,8 @@ class TestStreamingBehavior:
             # A later request with no new text delivers it once the window has passed.
             clock = 100.6
             _queue_delivery_request(delivery_queue, progress_hint=True)
-            shutdown_error = await _shutdown_stream_delivery(delivery_queue, delivery_task)
+            await _finish_delivery(delivery_queue, delivery_task)
 
-        assert shutdown_error is None
         assert mock_client.room_send.call_count == 2
         bodies = [
             call.kwargs["content"].get("m.new_content", call.kwargs["content"])["body"]
@@ -1859,9 +1849,8 @@ class TestStreamingBehavior:
         delivery_queue.put_nowait(_DeliveryRequest(boundary_refresh=True))
 
         with patch("mindroom.streaming.time.time", return_value=101.0):
-            shutdown_error = await _shutdown_stream_delivery(delivery_queue, delivery_task)
+            await _finish_delivery(delivery_queue, delivery_task)
 
-        assert shutdown_error is None
         assert streaming.stream_started_at == 101.0
 
     @pytest.mark.asyncio
@@ -3186,64 +3175,6 @@ class TestStreamingBehavior:
         assert streaming._last_delivered_text == ""
 
     @pytest.mark.asyncio
-    async def test_shutdown_stream_delivery_reports_timeout_when_task_does_not_stop(self) -> None:
-        """A delivery task that ignores cancellation must surface a timeout instead of reporting clean shutdown."""
-        delivery_queue: asyncio.Queue[object | None] = asyncio.Queue()
-        task_started = asyncio.Event()
-        release_task = asyncio.Event()
-
-        async def stuck_delivery() -> None:
-            task_started.set()
-            while not release_task.is_set():
-                try:
-                    await asyncio.wait_for(release_task.wait(), timeout=3600)
-                except asyncio.CancelledError:
-                    continue
-
-        delivery_task = asyncio.create_task(stuck_delivery())
-        await task_started.wait()
-
-        shutdown_error = await _shutdown_stream_delivery(
-            delivery_queue,
-            delivery_task,
-            drain_timeout_seconds=0.01,
-            cancel_timeout_seconds=0.01,
-        )
-
-        assert isinstance(shutdown_error, TimeoutError)
-        release_task.set()
-        await delivery_task
-
-    @pytest.mark.asyncio
-    async def test_shutdown_stream_delivery_allows_slow_but_finishing_delivery_task(self) -> None:
-        """A slow delivery task should be allowed to finish without a synthetic timeout failure."""
-        delivery_queue: asyncio.Queue[object | None] = asyncio.Queue()
-        task_started = asyncio.Event()
-        release_task = asyncio.Event()
-
-        async def slow_delivery() -> None:
-            task_started.set()
-            while not release_task.is_set():
-                try:
-                    await asyncio.wait_for(release_task.wait(), timeout=3600)
-                except asyncio.CancelledError:
-                    continue
-
-        delivery_task = asyncio.create_task(slow_delivery())
-        await task_started.wait()
-        asyncio.get_running_loop().call_later(0.05, release_task.set)
-
-        shutdown_error = await _shutdown_stream_delivery(
-            delivery_queue,
-            delivery_task,
-            drain_timeout_seconds=0.1,
-            cancel_timeout_seconds=0.05,
-        )
-
-        assert shutdown_error is None
-        await delivery_task
-
-    @pytest.mark.asyncio
     async def test_drive_stream_delivery_preserves_oldest_prior_delta_at_for_idle_flush(self) -> None:
         """Merged requests must retain the oldest unsent delta so idle flush still fires."""
         mock_client = _make_matrix_client_mock()
@@ -3274,9 +3205,8 @@ class TestStreamingBehavior:
         delivery_queue.put_nowait(_DeliveryRequest(prior_delta_at=105.0))
 
         with patch("mindroom.streaming.time.time", return_value=105.02):
-            shutdown_error = await _shutdown_stream_delivery(delivery_queue, delivery_task)
+            await _finish_delivery(delivery_queue, delivery_task)
 
-        assert shutdown_error is None
         assert streaming._send_content.await_count == 1
         assert streaming.chars_since_last_update == 0
 
@@ -3307,133 +3237,21 @@ class TestStreamingBehavior:
         )
 
         with patch("mindroom.streaming.time.time", return_value=101.0):
-            shutdown_error = await _shutdown_stream_delivery(delivery_queue, delivery_task)
+            await _finish_delivery(delivery_queue, delivery_task)
 
-        assert shutdown_error is None
         assert capture_completion.done()
         assert capture_completion.result() is None
         assert streaming.last_boundary_refresh_at == 101.0
 
     @pytest.mark.asyncio
-    async def test_send_streaming_response_skips_terminal_finalize_when_delivery_shutdown_times_out(self) -> None:
-        """Terminal finalization must not run when the delivery owner refuses to stop."""
-        mock_client = _make_matrix_client_mock()
-        finalize_calls: list[str | None] = []
-
-        class TrackingStreamingResponse(StreamingResponse):
-            async def finalize(self, client: nio.AsyncClient) -> StreamTransportOutcome:
-                del client
-                finalize_calls.append(self.event_id)
-                return StreamTransportOutcome(
-                    last_physical_stream_event_id=self.event_id,
-                    rendered_body=None,
-                    visible_body_state="none",
-                )
-
-        async def fail_stream_supervision(
-            response_stream: AsyncIterator[object],
-            streaming: StreamingResponse,
-            progress_task: asyncio.Task[None] | None,
-            delivery_task: asyncio.Task[None] | None,
-            delivery_queue: asyncio.Queue[object | None],
-            placeholder_ready: Callable[[], Awaitable[bool]] | None,
-        ) -> None:
-            del response_stream, streaming, progress_task, delivery_task, delivery_queue, placeholder_ready
-            msg = "stream blew up"
-            raise RuntimeError(msg)
-
-        async def timeout_shutdown(
-            delivery_queue: asyncio.Queue[object | None],
-            delivery_task: asyncio.Task[None] | None,
-        ) -> Exception | None:
-            del delivery_queue
-            if delivery_task is not None:
-                delivery_task.cancel()
-                with suppress(asyncio.CancelledError):
-                    await delivery_task
-            return _StreamDeliveryShutdownTimeoutError("Timed out shutting down stream delivery controller")
-
-        with (
-            patch("mindroom.streaming._consume_stream_with_progress_supervision", new=fail_stream_supervision),
-            patch("mindroom.streaming._shutdown_stream_delivery", new=timeout_shutdown),
-            pytest.raises(StreamingDeliveryError, match="stream blew up") as exc_info,
-        ):
-            await send_streaming_response(
-                client=mock_client,
-                target=MessageTarget.resolve("!test:localhost", None, "$original_123"),
-                config=self.config,
-                runtime_paths=runtime_paths_for(self.config),
-                response_stream=_aiter(),
-                streaming_cls=TrackingStreamingResponse,
-                **reply_hooks(),
-            )
-
-        # The stream's own failure is what it reports; the timed-out shutdown is only logged.
-        assert isinstance(exc_info.value.error, RuntimeError)
-        assert finalize_calls == []
-
-    @pytest.mark.asyncio
-    async def test_approval_pause_fails_when_stream_delivery_refuses_to_stop(self) -> None:
-        """A live delivery owner must block approval handoff instead of escaping unowned."""
-        mock_client = _make_matrix_client_mock()
-        suspension = StreamingLifecycleSuspensionError("paused")
-        delivery_started = asyncio.Event()
-        release_delivery = asyncio.Event()
-        shutdown_attempts = 0
-        original_shutdown = _shutdown_stream_delivery
-
-        async def stubborn_delivery(
-            _client: nio.AsyncClient,
-            _streaming: StreamingResponse,
-            delivery_queue: asyncio.Queue[object | None],
-        ) -> None:
-            await delivery_queue.get()
-            delivery_started.set()
-            while not release_delivery.is_set():
-                try:
-                    await release_delivery.wait()
-                except asyncio.CancelledError:
-                    continue
-
-        async def short_shutdown(
-            delivery_queue: asyncio.Queue[object | None],
-            delivery_task: asyncio.Task[None] | None,
-        ) -> Exception | None:
-            nonlocal shutdown_attempts
-            shutdown_attempts += 1
-            if shutdown_attempts == 2:
-                release_delivery.set()
-            return await original_shutdown(
-                delivery_queue,
-                delivery_task,
-                drain_timeout_seconds=0.01,
-                cancel_timeout_seconds=0.01,
-            )
-
-        async def paused_stream() -> AsyncIterator[str]:
-            yield "partial"
-            await delivery_started.wait()
-            raise suspension
-
-        with (
-            patch("mindroom.streaming._drive_stream_delivery", new=stubborn_delivery),
-            patch("mindroom.streaming._shutdown_stream_delivery", new=short_shutdown),
-            pytest.raises(StreamingDeliveryError) as exc_info,
-        ):
-            await send_streaming_response(
-                client=mock_client,
-                target=MessageTarget.resolve("!test:localhost", None, "$original_123"),
-                config=self.config,
-                runtime_paths=runtime_paths_for(self.config),
-                response_stream=paused_stream(),
-                **reply_hooks(),
-            )
-
-        assert isinstance(exc_info.value.error, TimeoutError)
-        assert shutdown_attempts == 2
-
-    @pytest.mark.asyncio
-    @pytest.mark.parametrize("flush_succeeds", [False, True], ids=["failure", "success"])
+    @pytest.mark.parametrize(
+        "flush_succeeds",
+        [
+            False,
+            True,
+        ],
+        ids=["failure", "success"],
+    )
     async def test_suspension_flush_controls_approval_handoff(self, flush_succeeds: bool) -> None:
         """Only an acknowledged latest ordered presentation may escape to approval."""
         mock_client = _make_matrix_client_mock()
@@ -3511,7 +3329,7 @@ class TestStreamingBehavior:
                 assert pause.presentation.response_text == f"Before approval.{marker}".rstrip()
                 assert pause.presentation.tool_trace == (trace_entry,)
             else:
-                with pytest.raises(StreamingDeliveryError) as raised_delivery:
+                with pytest.raises(PausePresentationError) as raised_delivery:
                     await run_stream()
                 assert "suspension" in str(raised_delivery.value.error).lower()
                 assert pause.presentation is None
@@ -4458,9 +4276,8 @@ class TestStreamingBehavior:
             await asyncio.sleep(0)
             allow_first_send_to_finish.set()
             await consume_task
-            shutdown_error = await _shutdown_stream_delivery(delivery_queue, delivery_task)
+            await _finish_delivery(delivery_queue, delivery_task)
 
-        assert shutdown_error is None
         assert mock_client.room_send.call_count == 2
         bodies = [
             call.kwargs["content"].get("m.new_content", call.kwargs["content"])["body"]
