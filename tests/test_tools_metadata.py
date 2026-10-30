@@ -9,6 +9,7 @@ import json
 import os
 import re
 import shutil
+import subprocess
 import sys
 import threading
 import weakref
@@ -196,6 +197,36 @@ def test_export_tools_metadata_json() -> None:
 
 
 _DOCS_ROOT = Path(__file__).parent.parent / "docs"
+
+
+def test_icon_mapping_matches_what_the_frontend_build_generates() -> None:
+    """A frontend build regenerates iconMapping.tsx from the tool metadata, so the committed copy must be that output."""
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("Node required to run the icon generator")
+    root = Path(__file__).parent.parent
+    script = (
+        "const generator = require(process.argv[1]);"
+        "const metadata = JSON.parse(require('fs').readFileSync(process.argv[2], 'utf8'));"
+        "process.stdout.write(generator.renderIconMapping(generator.groupIcons(metadata)));"
+    )
+    rendered = subprocess.run(
+        [
+            node,
+            "-e",
+            script,
+            str(root / "frontend/scripts/generate-icon-imports.cjs"),
+            str(root / "src/mindroom/tools_metadata.json"),
+        ],
+        capture_output=True,
+        check=True,
+        encoding="utf-8",
+    ).stdout
+
+    committed = (root / "frontend/src/components/Integrations/iconMapping.tsx").read_text(encoding="utf-8")
+    assert rendered == committed, (
+        "iconMapping.tsx is out of date, regenerate it with `node frontend/scripts/generate-icon-imports.cjs`"
+    )
 
 
 def _docs_page(url_path: str) -> Path:
