@@ -165,7 +165,6 @@ describe("ModelConfig", () => {
     keyStatusByService.openrouter = {
       has_key: true,
       credential_service: "openrouter",
-      source: "env",
       masked_key: "sk-o...-key",
     };
 
@@ -521,7 +520,7 @@ describe("ModelConfig", () => {
       codex_model: { provider: "codex", id: "gpt-6-astra" },
       vertex_model: { provider: "vertexai_claude", id: "claude-opus-5" },
     });
-    keyStatusByService["vertexai_claude"] = { has_key: true, source: "env" };
+    keyStatusByService["vertexai_claude"] = { has_key: true };
     render(<ModelConfig />);
 
     for (const modelName of ["codex_model", "vertex_model"]) {
@@ -540,7 +539,6 @@ describe("ModelConfig", () => {
     addKeyedOpenAIModel({ api_key: "sk-openai-config" });
     keyStatusByService["openai"] = {
       has_key: true,
-      source: "env",
       masked_key: "sk-en...5678",
     };
     render(<ModelConfig />);
@@ -586,7 +584,6 @@ describe("ModelConfig", () => {
     };
     keyStatusByService["openrouter"] = {
       has_key: true,
-      source: "env",
       masked_key: "sk-en...5678",
       api_key: "sk-openrouter-env-real",
     };
