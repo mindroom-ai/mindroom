@@ -134,16 +134,28 @@ class TestReshape:
         assert reordered.anchor_event_id == "$a"
         assert await read(store, turn_rows.load_turn, first.turn_key) is None
 
-    async def test_a_rewrite_returns_the_response_proof_its_stored_revision_keeps(
-        self,
-        store: EventJournalStore,
-    ) -> None:
-        """A pending write repeating a revision without its response proof returns the proof the stored row keeps."""
-        await accepted(store, turn(["$a"], replay={"$e1": RevisionReplay("$a", 10, response_event_id="$answer")}))
+    async def test_a_rewrite_returns_each_revisions_response_proof_as_stored(self, store: EventJournalStore) -> None:
+        """A pending write repeating revisions returns the proof each stored row ends with: one it kept or one it gained."""
+        await accepted(
+            store,
+            turn(
+                ["$a"],
+                replay={"$e1": RevisionReplay("$a", 10, response_event_id="$answer"), "$e2": RevisionReplay("$a", 20)},
+            ),
+        )
 
-        again = await accepted(store, turn(["$a"], replay={"$e1": RevisionReplay("$a", 10)}))
+        again = await accepted(
+            store,
+            turn(
+                ["$a"],
+                replay={"$e1": RevisionReplay("$a", 10), "$e2": RevisionReplay("$a", 20, response_event_id="$later")},
+            ),
+        )
 
-        assert again.revision_replay == {"$e1": RevisionReplay("$a", 10, response_event_id="$answer")}
+        assert again.revision_replay == {
+            "$e1": RevisionReplay("$a", 10, response_event_id="$answer"),
+            "$e2": RevisionReplay("$a", 20, response_event_id="$later"),
+        }
 
     async def test_watermarks_and_consumed_revision_proof_survive_reshape(self, store: EventJournalStore) -> None:
         """Watermarks and consumed revision proof survive reshape."""
