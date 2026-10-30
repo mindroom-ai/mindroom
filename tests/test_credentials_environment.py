@@ -206,6 +206,21 @@ def test_a_valid_name_ignores_an_unresolvable_file_variable(tmp_path: Path) -> N
     assert get_runtime_credentials_manager(runtime_paths).get_api_key("openai") == "sk-direct"
 
 
+@pytest.mark.parametrize("content", [None, b"\xff\xfe not text"], ids=["directory", "not-utf8"])
+def test_an_unreadable_secret_file_supplies_no_key(tmp_path: Path, content: bytes | None) -> None:
+    """A NAME_FILE that cannot be read as text supplies no key instead of failing the start."""
+    secret_file = tmp_path / "openai.key"
+    if content is None:
+        secret_file.mkdir()
+    else:
+        secret_file.write_bytes(content)
+
+    assert (
+        get_secret_from_env("OPENAI_API_KEY", _runtime_paths(tmp_path, {"OPENAI_API_KEY_FILE": str(secret_file)}))
+        is None
+    )
+
+
 def test_an_empty_variable_declares_nothing(tmp_path: Path) -> None:
     """Blank values declare no credential, and only the variables that are set do."""
     runtime_paths = _runtime_paths(

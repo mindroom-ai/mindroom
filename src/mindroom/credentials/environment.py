@@ -57,8 +57,7 @@ def _read_secret_from_env(name: str, runtime_paths: RuntimePaths) -> tuple[str, 
     if file_path is not None and file_path.exists():
         try:
             content = file_path.read_text(encoding="utf-8").strip()
-        except Exception:
-            # Avoid noisy logs here; callers can handle None gracefully
+        except (OSError, UnicodeDecodeError):
             return None
         return None if is_unset_env_value(name, content) else (content, file_var)
     return None
