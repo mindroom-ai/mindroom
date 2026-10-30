@@ -141,6 +141,7 @@ from mindroom.interactive import InteractiveMetadata
 from mindroom.interactive_models import InteractivePrompt, interactive_prompt_content
 from mindroom.matrix.client_delivery import DeliveredMatrixEvent, build_edit_event_content
 from mindroom.matrix.client_room_admin import RoomJoinOutcome
+from mindroom.matrix.client_session import MindRoomAsyncClient, matrix_client_config, olm_store_dir
 from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
 from mindroom.matrix.conversation_reads import ConversationReader
 from mindroom.matrix.identity import MatrixID
@@ -1468,6 +1469,21 @@ async def push_stream_chunk(streaming: "StreamingResponse", chunk: str, client: 
     prior_delta_at = streaming.last_delta_at
     streaming._update(chunk)
     await streaming._throttled_send(client, prior_delta_at=prior_delta_at)
+
+
+def legacy_default_store_client(
+    homeserver: str,
+    user_id: str,
+    device_id: str,
+    access_token: str,
+    runtime_paths: RuntimePaths,
+) -> MindRoomAsyncClient:
+    """Open a client on the ordinary nio DefaultStore that MindRoom wrote before owned sessions existed."""
+    store_dir = olm_store_dir(user_id, runtime_paths)
+    store_dir.mkdir(parents=True, exist_ok=True)
+    client = MindRoomAsyncClient(homeserver, user_id, store_path=str(store_dir), config=matrix_client_config())
+    client.restore_login(user_id, device_id, access_token)
+    return client
 
 
 def make_matrix_client_mock(*, user_id: str = "@mindroom_test:example.com") -> AsyncMock:

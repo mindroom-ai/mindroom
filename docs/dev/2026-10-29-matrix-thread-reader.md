@@ -19,6 +19,9 @@
   Edit regeneration reads the recorded target's thread strictly, whatever the room's thread mode is now.
 - Every write of `matrix_state.yaml` goes through one read-modify-write with no await inside, under a reentrant lock that also covers the loader's legacy rewrite.
   Writers used to save whole copies they had loaded before awaiting the network, which lost a bot's freshly persisted device and token and made its next restart fail permanently.
+- The internal user joins rooms through an HTTP-only client whose credentials come from the store-free helpers bots use, so MindRoom keeps one login path.
+  That client never opens an encryption store, so MindRoom no longer cross-signs the internal user's device; nothing relied on it, because the account only joins rooms and a person who signs in to it brings their own device.
+  A saved session the server rejects falls back to the configured login on the same device, unlike a bot's, because no device keys are at stake and a person signing out other sessions of that account must not stop startup.
 
 ## Rejected alternatives
 
@@ -28,6 +31,7 @@
 - Reconciling the dispatch-time resolution with the ingress decision through a refresh: still two decisions, and the ingress one is the one the batch was formed under and the one replay uses.
 - Letting a decided thread override room mode in `build_message_target`: router relays rely on the target agent's room mode applying to a threaded source.
 - A file lock for `matrix_state.yaml`: one process owns the file, and the bug was a copy held across awaits, not a second process.
+- Giving the internal user an owned session: it would open and own a sync and encryption store for an account that only joins rooms.
 
 ## Limitations
 

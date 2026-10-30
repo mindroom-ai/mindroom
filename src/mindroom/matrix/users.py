@@ -12,7 +12,6 @@ from uuid import UUID
 import httpx
 import nio
 from aiohttp import ClientError, ClientResponse
-from nio import crypto
 from nio.durable import DurableSyncConfig
 
 from mindroom.constants import RuntimePaths, runtime_matrix_homeserver, runtime_matrix_ssl_verify
@@ -27,14 +26,10 @@ from mindroom.matrix._owned_session import (
     restore_credentials,
 )
 from mindroom.matrix.client_session import (
-    DEFAULT_MATRIX_SYNC_STORAGE,
-    MatrixSyncStorage,
     create_matrix_http_client,
-    login,
     matrix_client,
     matrix_startup_error,
     olm_store_exists,
-    restore_login,
 )
 from mindroom.matrix.cross_signing import ensure_agent_cross_signing
 from mindroom.matrix.identity import MatrixID, managed_account_key, parse_current_matrix_user_id
@@ -214,19 +209,6 @@ def _save_agent_credentials(
 
 def _validated_expected_agent_user_id(agent_user: AgentMatrixUser) -> str:
     return _validated_returned_user_id(agent_user.user_id, source="Managed Matrix account")
-
-
-def _validated_authenticated_agent_matrix_id(
-    client: nio.AsyncClient,
-    *,
-    expected_user_id: str,
-    source: str,
-) -> MatrixID:
-    actual_user_id = _validated_returned_user_id(client.user_id, source=source)
-    if actual_user_id != expected_user_id:
-        msg = f"{source} returned {actual_user_id} for managed Matrix account {expected_user_id}"
-        raise matrix_startup_error(msg, permanent=True)
-    return MatrixID.parse(expected_user_id)
 
 
 def _persist_authenticated_agent_session(
@@ -1027,38 +1009,6 @@ async def create_agent_user(
     )
 
 
-async def _login_agent_with_configured_auth(
-    homeserver: str,
-    agent_user: AgentMatrixUser,
-    expected_user_id: str,
-    auth: appservice.ManagedAccountAuth,
-    runtime_paths: RuntimePaths,
-    sync_storage: MatrixSyncStorage,
-) -> tuple[nio.AsyncClient, str]:
-    if auth.mode == "appservice":
-        assert auth.appservice_token is not None
-        client = await appservice.login_appservice_user(
-            homeserver,
-            user_id=expected_user_id,
-            token=auth.appservice_token,
-            runtime_paths=runtime_paths,
-            sync_storage=sync_storage,
-        )
-        return client, "Matrix application-service login"
-
-    if agent_user.password is None:
-        msg = f"Stored Matrix password for {agent_user.agent_name} is missing"
-        raise matrix_startup_error(msg, permanent=True)
-    client = await login(
-        homeserver,
-        expected_user_id,
-        agent_user.password,
-        runtime_paths=runtime_paths,
-        sync_storage=sync_storage,
-    )
-    return client, "Matrix password login"
-
-
 async def _owned_agent_credentials(
     homeserver: str,
     agent_user: AgentMatrixUser,
@@ -1083,7 +1033,17 @@ async def _owned_agent_credentials(
         )
         if restored is not None:
             return restored, "Matrix session restore"
+    return await _configured_auth_credentials(homeserver, agent_user, expected_user_id, auth, runtime_paths)
 
+
+async def _configured_auth_credentials(
+    homeserver: str,
+    agent_user: AgentMatrixUser,
+    expected_user_id: str,
+    auth: appservice.ManagedAccountAuth,
+    runtime_paths: RuntimePaths,
+) -> tuple[MatrixCredentials, str]:
+    """Log in through the configured account auth, keeping any saved device."""
     if auth.mode == "appservice":
         assert auth.appservice_token is not None
         credentials = await appservice.login_appservice_credentials(
@@ -1182,122 +1142,50 @@ async def login_agent_owned_session(
     return opened
 
 
-async def login_agent_user(
+async def login_agent_http_client(
     homeserver: str,
     agent_user: AgentMatrixUser,
     runtime_paths: RuntimePaths,
-    sync_storage: MatrixSyncStorage = DEFAULT_MATRIX_SYNC_STORAGE,
 ) -> nio.AsyncClient:
-    """Login an agent user and return the authenticated client.
+    """Authenticate an HTTP-only client for an account whose device holds no encryption state.
 
-    Args:
-        homeserver: The Matrix homeserver URL
-        agent_user: The agent user to login
-        runtime_paths: Explicit runtime context for environment and SSL resolution
-        sync_storage: Selects which sync state nio persists for this client
-
-    Returns:
-        Authenticated AsyncClient instance
-
-    Raises:
-        ValueError: If login fails
-
+    No device keys are at stake, so a saved session the server no longer accepts
+    falls back to the configured auth on the same device.
     """
     auth = appservice.resolve_managed_account_auth(runtime_paths)
     expected_user_id = _validated_expected_agent_user_id(agent_user)
-
-    store_intact = not crypto.ENCRYPTION_ENABLED or (
-        agent_user.device_id is None or olm_store_exists(expected_user_id, agent_user.device_id, runtime_paths)
-    )
-    if not store_intact:
-        logger.warning(
-            "matrix_olm_store_missing_fresh_device_login",
-            agent=agent_user.agent_name,
-            user_id=expected_user_id,
-            device_id=agent_user.device_id,
-            hint=(
-                "The encryption store for this device is gone; restoring the session would wedge "
-                "its crypto identity. Logging in as a fresh device instead. Messages encrypted "
-                "only to the lost device stay undecryptable."
-            ),
-        )
-
-    if store_intact and agent_user.access_token and agent_user.device_id:
+    credentials = None
+    if agent_user.device_id is not None and agent_user.access_token:
         try:
-            restored_client = await restore_login(
+            credentials = await restore_credentials(
                 homeserver,
                 expected_user_id,
                 agent_user.device_id,
                 agent_user.access_token,
-                runtime_paths=runtime_paths,
-                sync_storage=sync_storage,
+                runtime_paths,
             )
         except ValueError:
             logger.warning(
                 "matrix_login_restore_failed_falling_back_to_configured_auth",
                 agent=agent_user.agent_name,
-                user_id=agent_user.user_id,
+                user_id=expected_user_id,
                 device_id=agent_user.device_id,
             )
-        else:
-            try:
-                matrix_id = _validated_authenticated_agent_matrix_id(
-                    restored_client,
-                    expected_user_id=expected_user_id,
-                    source="Matrix session restore",
-                )
-            except ValueError as exc:
-                await restored_client.close()
-                logger.warning(
-                    "matrix_login_restore_identity_mismatch_falling_back_to_configured_auth",
-                    agent=agent_user.agent_name,
-                    expected_user_id=expected_user_id,
-                    returned_user_id=restored_client.user_id,
-                    device_id=agent_user.device_id,
-                    error=str(exc),
-                )
-            else:
-                _persist_authenticated_agent_session(
-                    agent_user,
-                    restored_client,
-                    runtime_paths,
-                    matrix_id=matrix_id,
-                )
-                await ensure_agent_cross_signing(restored_client, agent_user)
-                return restored_client
-
-    client, login_source = await _login_agent_with_configured_auth(
-        homeserver,
-        agent_user,
-        expected_user_id,
-        auth,
-        runtime_paths,
-        sync_storage,
-    )
-    try:
-        matrix_id = _validated_authenticated_agent_matrix_id(
-            client,
-            expected_user_id=expected_user_id,
-            source=login_source,
+    if credentials is None:
+        credentials, _ = await _configured_auth_credentials(
+            homeserver,
+            agent_user,
+            expected_user_id,
+            auth,
+            runtime_paths,
         )
-    except ValueError:
-        await client.close()
-        raise
-
-    if auth.mode == "appservice":
-        display_response = await client.set_displayname(agent_user.display_name)
-        if isinstance(display_response, nio.ErrorResponse):
-            logger.warning(
-                "matrix_user_display_name_sync_failed",
-                user_id=expected_user_id,
-                error=str(display_response),
-            )
-
+    client = create_matrix_http_client(homeserver, runtime_paths, credentials.user_id)
+    client.device_id = credentials.device_id
+    client.access_token = credentials.access_token
     _persist_authenticated_agent_session(
         agent_user,
         client,
         runtime_paths,
-        matrix_id=matrix_id,
+        matrix_id=MatrixID.parse(credentials.user_id),
     )
-    await ensure_agent_cross_signing(client, agent_user)
     return client

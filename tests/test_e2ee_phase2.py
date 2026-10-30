@@ -18,7 +18,6 @@ from mindroom.matrix import rooms as matrix_rooms
 from mindroom.matrix import state as matrix_state
 from mindroom.matrix.client_room_admin import create_room, ensure_room_encryption_enabled
 from mindroom.matrix.client_session import olm_store_dir, olm_store_exists
-from mindroom.matrix.users import AgentMatrixUser, login_agent_user
 from tests.conftest import bind_runtime_paths, runtime_paths_for
 
 if TYPE_CHECKING:
@@ -400,77 +399,8 @@ class TestCommandParsing:
         assert command.type == CommandType.E2EE
 
 
-class TestStoreLossFallback:
-    """Missing olm stores must trigger a fresh-device login instead of a wedged restore."""
-
-    @pytest.mark.asyncio
-    async def test_missing_store_skips_restore_and_logs_in_fresh(self, tmp_path: Path) -> None:
-        """A lost store must produce a fresh device."""
-        runtime_paths = _runtime_paths(tmp_path)
-        agent_user = AgentMatrixUser(
-            agent_name="assistant",
-            user_id="@mindroom_assistant:localhost",
-            display_name="Assistant",
-            password="pw",  # noqa: S106
-            device_id="LOSTDEVICE",
-            access_token="token",  # noqa: S106
-        )
-        fresh_client = AsyncMock(spec=nio.AsyncClient)
-        fresh_client.user_id = "@mindroom_assistant:localhost"
-        fresh_client.device_id = "NEWDEVICE"
-        fresh_client.access_token = "new-token"  # noqa: S105
-        fresh_client.olm = None
-
-        with (
-            patch("mindroom.matrix.users.restore_login", new=AsyncMock()) as mock_restore,
-            patch("mindroom.matrix.users.login", new=AsyncMock(return_value=fresh_client)) as mock_login,
-            patch("mindroom.matrix.users.ensure_agent_cross_signing", new=AsyncMock()) as mock_cross_signing,
-        ):
-            client = await login_agent_user("http://localhost:8008", agent_user, runtime_paths=runtime_paths)
-
-        mock_restore.assert_not_awaited()
-        mock_login.assert_awaited_once()
-        assert client is fresh_client
-        assert agent_user.device_id == "NEWDEVICE"
-        # The fresh device must be re-signed with the persisted cross-signing keys.
-        mock_cross_signing.assert_awaited_once_with(fresh_client, agent_user)
-
-    @pytest.mark.asyncio
-    async def test_present_store_restores_session(self, tmp_path: Path) -> None:
-        """An intact store restores the persisted session."""
-        runtime_paths = _runtime_paths(tmp_path)
-        user_id = "@mindroom_assistant:localhost"
-        store_dir = olm_store_dir(user_id, runtime_paths)
-        store_dir.mkdir(parents=True)
-        (store_dir / f"{user_id}_GOODDEVICE.db").write_bytes(b"")
-        assert olm_store_exists(user_id, "GOODDEVICE", runtime_paths)
-
-        agent_user = AgentMatrixUser(
-            agent_name="assistant",
-            user_id=user_id,
-            display_name="Assistant",
-            password="pw",  # noqa: S106
-            device_id="GOODDEVICE",
-            access_token="token",  # noqa: S106
-        )
-        restored_client = AsyncMock(spec=nio.AsyncClient)
-        restored_client.user_id = user_id
-        restored_client.device_id = "GOODDEVICE"
-        restored_client.access_token = "token"  # noqa: S105
-        restored_client.olm = None
-
-        with (
-            patch("mindroom.matrix.users.restore_login", new=AsyncMock(return_value=restored_client)) as mock_restore,
-            patch("mindroom.matrix.users.login", new=AsyncMock()) as mock_login,
-            patch("mindroom.matrix.users.ensure_agent_cross_signing", new=AsyncMock()) as mock_cross_signing,
-        ):
-            client = await login_agent_user("http://localhost:8008", agent_user, runtime_paths=runtime_paths)
-
-        mock_restore.assert_awaited_once()
-        mock_login.assert_not_awaited()
-        assert client is restored_client
-        # Every login path must bootstrap cross-signing for the session's device.
-        mock_cross_signing.assert_awaited_once_with(restored_client, agent_user)
+class TestOlmStorePresence:
+    """The owned login refuses a saved device whose store is gone, so the presence check must match nio's files."""
 
     def test_olm_store_exists_matches_real_nio_store_naming(self, tmp_path: Path) -> None:
         """The presence check must agree with the file nio actually creates."""

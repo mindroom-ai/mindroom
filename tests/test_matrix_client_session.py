@@ -6,7 +6,7 @@ import asyncio
 import os
 import ssl
 import stat
-from collections.abc import Callable, Coroutine, Iterator, Mapping
+from collections.abc import Iterator, Mapping
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -31,12 +31,12 @@ from mindroom.event_journal import EventJournalStore
 from mindroom.event_journal.models import IngestionConsumer
 from mindroom.matrix import _owned_session, client_session
 from mindroom.matrix.client_session import (
-    MatrixSyncStorage,
     MindRoomAsyncClient,
     PermanentMatrixStartupError,
     login_flows,
     matrix_client_config,
 )
+from tests.conftest import legacy_default_store_client
 
 
 def test_encryption_exposes_only_mindroom_recovery_markers(
@@ -156,15 +156,6 @@ def test_matrix_client_config_enables_sync_token_storage() -> None:
     config = matrix_client_config()
 
     assert config.store_sync_tokens is True
-
-
-def test_matrix_client_config_supports_application_owned_sync_tokens() -> None:
-    """Classic ingress can leave its cursor under application ownership."""
-    config = matrix_client_config(
-        sync_storage=MatrixSyncStorage(store_tokens=False),
-    )
-
-    assert config.store_sync_tokens is False
 
 
 @pytest.mark.asyncio
@@ -809,7 +800,7 @@ async def test_owned_matrix_session_factory_adopts_default_then_reopens_marked(
         "AGENTDEVICE",
         "access-token",
     )
-    legacy = client_session.create_authenticated_client(
+    legacy = legacy_default_store_client(
         "https://matrix.example.org",
         credentials.user_id,
         credentials.device_id,
@@ -1111,18 +1102,13 @@ async def test_transient_transport_failure_logs_the_underlying_error_before_nio_
     runtime_paths = resolve_runtime_paths(config_path=tmp_path / "config.yaml", process_env={})
 
     with capture_logs() as logs:
-        login = asyncio.create_task(
-            client_session.login(
-                "https://matrix.example.org",
-                "@mindroom_router:example.org",
-                "password",
-                runtime_paths,
-            ),
+        login_flows = asyncio.create_task(
+            client_session.login_flows("https://matrix.example.org", runtime_paths),
         )
         await asyncio.wait_for(blocked.wait(), timeout=1.0)
-        login.cancel()
+        login_flows.cancel()
         with pytest.raises(asyncio.CancelledError):
-            await login
+            await login_flows
 
     assert requests == [1, 1]
     transport_errors = [entry for entry in logs if entry["event"] == "matrix_request_transport_failed"]
@@ -1130,72 +1116,6 @@ async def test_transient_transport_failure_logs_the_underlying_error_before_nio_
     assert transport_errors[0]["homeserver"] == "https://matrix.example.org"
     assert transport_errors[0]["error_type"] == "ClientConnectorError"
     assert "Connection refused" in transport_errors[0]["error"]
-
-
-def _password_login(runtime_paths: RuntimePaths) -> Coroutine[Any, Any, nio.AsyncClient]:
-    return client_session.login("https://matrix.example.org", "@mindroom_router:example.org", "password", runtime_paths)
-
-
-def _session_restore(runtime_paths: RuntimePaths) -> Coroutine[Any, Any, nio.AsyncClient]:
-    return client_session.restore_login(
-        "https://matrix.example.org",
-        "@mindroom_router:example.org",
-        "ROUTERDEVICE",
-        "access-token",
-        runtime_paths,
-    )
-
-
-def _forbidden_response() -> SimpleNamespace:
-    return SimpleNamespace(
-        status=403,
-        content_type="application/json",
-        content_disposition=None,
-        json=AsyncMock(return_value={"errcode": "M_FORBIDDEN", "error": "rejected"}),
-    )
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize(
-    ("outcome", "expected_error"),
-    [
-        (None, asyncio.CancelledError),
-        (RuntimeError("transport broke"), RuntimeError),
-        (_forbidden_response(), PermanentMatrixStartupError),
-    ],
-    ids=["cancelled", "failed", "rejected"],
-)
-@pytest.mark.parametrize("authenticate", [_password_login, _session_restore], ids=["login", "restore_login"])
-async def test_authentication_closes_the_client_it_does_not_return(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-    authenticate: Callable[[RuntimePaths], Coroutine[Any, Any, nio.AsyncClient]],
-    outcome: object,
-    expected_error: type[BaseException],
-) -> None:
-    """Ctrl+C during a startup retry, a transport error, or a rejection must not leave an unclosed HTTP session."""
-    _, blocked = _install_scripted_transport(monkeypatch, *([] if outcome is None else [outcome]))
-    created: list[nio.AsyncClient] = []
-    create_client = client_session._create_matrix_client
-
-    def record_client(*args: Any, **kwargs: Any) -> nio.AsyncClient:  # noqa: ANN401
-        client = create_client(*args, **kwargs)
-        created.append(client)
-        return client
-
-    monkeypatch.setattr(client_session, "_create_matrix_client", record_client)
-    runtime_paths = resolve_runtime_paths(config_path=tmp_path / "config.yaml", process_env={})
-
-    attempt = asyncio.create_task(authenticate(runtime_paths))
-    if outcome is None:
-        await asyncio.wait_for(blocked.wait(), timeout=1.0)
-        attempt.cancel()
-    with pytest.raises(expected_error):
-        await attempt
-
-    [client] = created
-    # nio drops its aiohttp session only in close().
-    assert client.client_session is None
 
 
 @pytest.mark.asyncio

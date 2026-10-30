@@ -7019,19 +7019,14 @@ from = ["mindroom.matrix.client_room_admin"]
 
 [[interfaces]]
 expose = [
-    "DEFAULT_MATRIX_SYNC_STORAGE",
-    "MatrixSyncStorage",
     "PermanentMatrixStartupError",
-    "create_authenticated_client",
     "create_matrix_http_client",
-    "login",
     "login_flows",
     "matrix_client",
     "matrix_client_config",
     "matrix_startup_error",
     "olm_store_dir",
     "olm_store_exists",
-    "restore_login",
 ]
 from = ["mindroom.matrix.client_session"]
 

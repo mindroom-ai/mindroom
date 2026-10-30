@@ -34,7 +34,7 @@ from mindroom.matrix.client_room_admin import (
 )
 from mindroom.matrix.room_reconciliation import RoomStateSnapshot, read_room_state
 from mindroom.matrix.state import update_matrix_state
-from mindroom.matrix.users import INTERNAL_USER_ACCOUNT_KEY, INTERNAL_USER_AGENT_NAME, AgentMatrixUser, login_agent_user
+from mindroom.matrix.users import INTERNAL_USER_AGENT_NAME, load_agent_user, login_agent_http_client
 from mindroom.matrix_identifiers import (
     extract_server_name_from_homeserver,
     managed_room_alias_localpart,
@@ -627,34 +627,20 @@ async def ensure_user_in_rooms(
     room_ids: dict[str, str],
     runtime_paths: RuntimePaths,
 ) -> None:
-    """Ensure the user account is a member of all specified rooms.
+    """Join the internal user account to every given room through an HTTP-only client.
 
     Args:
         homeserver: Matrix homeserver URL
         room_ids: Dict mapping room keys to room IDs
-        runtime_paths: Explicit runtime context for server-name resolution.
+        runtime_paths: Explicit runtime context holding the saved account.
 
     """
-    state = matrix_state.matrix_state_for_runtime(runtime_paths)
-    user_account = state.get_account(INTERNAL_USER_ACCOUNT_KEY)
-    if not user_account:
+    user = load_agent_user(INTERNAL_USER_AGENT_NAME, runtime_paths)
+    if user is None:
         logger.warning("No user account found, skipping user room membership")
         return
 
-    server_name = user_account.domain or extract_server_name_from_homeserver(homeserver, runtime_paths=runtime_paths)
-    user_id = f"@{user_account.username}:{server_name}"
-    user_client = await login_agent_user(
-        homeserver,
-        AgentMatrixUser(
-            agent_name=INTERNAL_USER_AGENT_NAME,
-            user_id=user_id,
-            display_name=INTERNAL_USER_AGENT_NAME,
-            password=user_account.password,
-            device_id=user_account.device_id,
-            access_token=user_account.access_token,
-        ),
-        runtime_paths,
-    )
+    user_client = await login_agent_http_client(homeserver, user, runtime_paths)
     try:
         logger.info("matrix_user_logged_in", user_id=user_client.user_id)
         joined_room_ids = set(await get_joined_rooms(user_client) or ())

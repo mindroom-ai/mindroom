@@ -23,8 +23,9 @@ from mindroom.config.main import Config
 from mindroom.config.matrix import MindRoomUserConfig
 from mindroom.matrix import _owned_session, provisioning
 from mindroom.matrix import users as matrix_users
+from mindroom.matrix._owned_session import MatrixCredentials
 from mindroom.matrix.appservice import ManagedAccountAuth
-from mindroom.matrix.client_session import DEFAULT_MATRIX_SYNC_STORAGE, PermanentMatrixStartupError, olm_store_dir
+from mindroom.matrix.client_session import PermanentMatrixStartupError, olm_store_dir
 from mindroom.matrix.state import MatrixAccount, MatrixState
 from mindroom.matrix.users import (
     INTERNAL_USER_AGENT_NAME,
@@ -34,7 +35,7 @@ from mindroom.matrix.users import (
     _save_agent_credentials,
     create_agent_user,
     load_agent_user,
-    login_agent_user,
+    login_agent_http_client,
 )
 from mindroom.matrix_identifiers import agent_username_localpart
 from mindroom.orchestrator import _MultiAgentOrchestrator
@@ -1648,50 +1649,89 @@ space_room_id: null
 class TestAgentLogin:
     """Test agent login functionality."""
 
-    @pytest.mark.asyncio
-    async def test_login_agent_user_success(self, tmp_path: Path) -> None:
-        """Test successful agent login."""
-        agent_user = AgentMatrixUser(
-            agent_name="calculator",
-            user_id="@mindroom_calculator:localhost",
-            display_name="CalculatorAgent",
+    @staticmethod
+    def _internal_user(**session: str) -> AgentMatrixUser:
+        return AgentMatrixUser(
+            agent_name=INTERNAL_USER_AGENT_NAME,
+            user_id="@mindroom_user:localhost",
+            display_name=INTERNAL_USER_AGENT_NAME,
             password=TEST_PASSWORD,
+            **session,
         )
 
+    @pytest.mark.asyncio
+    async def test_http_login_reuses_the_saved_session_without_a_crypto_store(self, tmp_path: Path) -> None:
+        """A saved session the server accepts is reused, on a client that never opens a crypto store."""
+        agent_user = self._internal_user(device_id="SAVED", access_token="saved-token")  # noqa: S106
         runtime_paths = _runtime_paths(tmp_path)
-        with patch("mindroom.matrix.users.login") as mock_login:
-            mock_client = AsyncMock()
-            mock_client.user_id = "@mindroom_calculator:localhost"
-            mock_client.access_token = "new_token"  # noqa: S105
-            mock_client.device_id = "new_device"
-            mock_login.return_value = mock_client
+        restored = MatrixCredentials("@mindroom_user:localhost", "SAVED", "saved-token")
+        with (
+            patch("mindroom.matrix.users.restore_credentials", new=AsyncMock(return_value=restored)) as restore,
+            patch("mindroom.matrix.users.login_password_credentials", new=AsyncMock()) as password_login,
+        ):
+            client = await login_agent_http_client("http://localhost:8008", agent_user, runtime_paths)
 
-            client = await login_agent_user("http://localhost:8008", agent_user, runtime_paths)
-
-            assert client == mock_client
-            assert agent_user.access_token == "new_token"  # noqa: S105
-            assert agent_user.device_id == "new_device"
-            state = MatrixState.load(runtime_paths=runtime_paths)
-            account = state.accounts["agent_calculator"]
-            assert account.username == "mindroom_calculator"
-            assert account.domain == "localhost"
-            assert account.device_id == "new_device"
-            assert account.access_token == "new_token"  # noqa: S105
-            mock_login.assert_called_once_with(
-                "http://localhost:8008",
-                agent_user.user_id,
-                agent_user.password,
-                runtime_paths=runtime_paths,
-                sync_storage=DEFAULT_MATRIX_SYNC_STORAGE,
+        try:
+            assert (client.user_id, client.device_id, client.access_token) == (
+                "@mindroom_user:localhost",
+                "SAVED",
+                "saved-token",
             )
+            assert client.store_path is None
+            assert client.config.encryption_enabled is False
+        finally:
+            await client.close()
+        restore.assert_awaited_once_with(
+            "http://localhost:8008",
+            "@mindroom_user:localhost",
+            "SAVED",
+            "saved-token",
+            runtime_paths,
+        )
+        password_login.assert_not_awaited()
 
     @pytest.mark.asyncio
-    async def test_login_agent_user_appservice_mode_uses_no_password(self, tmp_path: Path) -> None:
-        """Application-service mode creates and persists a per-user device session."""
+    async def test_http_login_replaces_a_rejected_session_on_the_saved_device(self, tmp_path: Path) -> None:
+        """A session the server rejects, such as one signed out from another client, falls back to password login."""
+        agent_user = self._internal_user(device_id="SAVED", access_token="revoked-token")  # noqa: S106
+        runtime_paths = _runtime_paths(tmp_path)
+        renewed = MatrixCredentials("@mindroom_user:localhost", "SAVED", "new-token")
+        with (
+            patch(
+                "mindroom.matrix.users.restore_credentials",
+                new=AsyncMock(side_effect=PermanentMatrixStartupError("M_UNKNOWN_TOKEN")),
+            ),
+            patch(
+                "mindroom.matrix.users.login_password_credentials",
+                new=AsyncMock(return_value=renewed),
+            ) as password_login,
+        ):
+            client = await login_agent_http_client("http://localhost:8008", agent_user, runtime_paths)
+        await client.close()
+
+        password_login.assert_awaited_once_with(
+            "http://localhost:8008",
+            "@mindroom_user:localhost",
+            TEST_PASSWORD,
+            runtime_paths,
+            device_id="SAVED",
+        )
+        assert client.access_token == "new-token"  # noqa: S105
+        account = MatrixState.load(runtime_paths=runtime_paths).accounts["agent_user"]
+        assert (account.username, account.domain, account.device_id, account.access_token) == (
+            "mindroom_user",
+            "localhost",
+            "SAVED",
+            "new-token",
+        )
+
+    @pytest.mark.asyncio
+    async def test_http_login_in_appservice_mode_needs_no_password(self, tmp_path: Path) -> None:
+        """Application-service mode logs in without a password and persists the session it gets."""
         agent_user = AgentMatrixUser(
-            agent_name="calculator",
-            user_id="@mindroom_calculator:localhost",
-            display_name="CalculatorAgent",
+            agent_name=INTERNAL_USER_AGENT_NAME,
+            user_id="@mindroom_user:localhost",
+            display_name=INTERNAL_USER_AGENT_NAME,
             password=None,
         )
         runtime_paths = _runtime_paths(
@@ -1699,195 +1739,39 @@ class TestAgentLogin:
             MATRIX_MANAGED_ACCOUNT_AUTH="appservice",
             MATRIX_APPSERVICE_TOKEN=APPSERVICE_TOKEN,
         )
+        with patch(
+            "mindroom.matrix.users.appservice.login_appservice_credentials",
+            new=AsyncMock(return_value=("@mindroom_user:localhost", "NEW", "new-token")),
+        ) as login_as:
+            client = await login_agent_http_client("http://localhost:8008", agent_user, runtime_paths)
+        await client.close()
 
-        with patch("mindroom.matrix.users.appservice.login_appservice_user", new_callable=AsyncMock) as login_as:
-            mock_client = AsyncMock()
-            mock_client.user_id = "@mindroom_calculator:localhost"
-            mock_client.access_token = "new_token"  # noqa: S105
-            mock_client.device_id = "new_device"
-            login_as.return_value = mock_client
-
-            client = await login_agent_user("http://localhost:8008", agent_user, runtime_paths)
-
-        assert client is mock_client
-        assert agent_user.access_token == "new_token"  # noqa: S105
-        assert agent_user.device_id == "new_device"
-        account = MatrixState.load(runtime_paths=runtime_paths).accounts["agent_calculator"]
-        assert account.password is None
-        assert account.access_token == "new_token"  # noqa: S105
         login_as.assert_awaited_once_with(
             "http://localhost:8008",
-            user_id="@mindroom_calculator:localhost",
+            user_id="@mindroom_user:localhost",
             token=APPSERVICE_TOKEN,
             runtime_paths=runtime_paths,
-            sync_storage=DEFAULT_MATRIX_SYNC_STORAGE,
+            device_id=None,
         )
+        account = MatrixState.load(runtime_paths=runtime_paths).accounts["agent_user"]
+        assert account.password is None
+        assert (account.device_id, account.access_token) == ("NEW", "new-token")
 
     @pytest.mark.asyncio
-    async def test_login_agent_user_rejects_password_user_id_mismatch(self, tmp_path: Path) -> None:
-        """Password login rejects a Matrix account identity mismatch."""
-        agent_user = AgentMatrixUser(
-            agent_name="calculator",
-            user_id="@mindroom_calculator:localhost",
-            display_name="CalculatorAgent",
-            password=TEST_PASSWORD,
-        )
-
+    async def test_http_login_failure_persists_nothing(self, tmp_path: Path) -> None:
+        """A failed password login raises and leaves the saved account untouched."""
+        agent_user = self._internal_user()
         runtime_paths = _runtime_paths(tmp_path)
-        _save_agent_credentials(
-            "calculator",
-            "mindroom_calculator",
-            TEST_PASSWORD,
-            runtime_paths,
-            domain="localhost",
-            device_id="old_device",
-            access_token="old_token",  # noqa: S106
-        )
-        with patch("mindroom.matrix.users.login") as mock_login:
-            mock_client = AsyncMock()
-            mock_client.user_id = "@actual_calculator:matrix.example"
-            mock_client.access_token = "new_token"  # noqa: S105
-            mock_client.device_id = "new_device"
-            mock_client.close = AsyncMock()
-            mock_login.return_value = mock_client
-
-            with pytest.raises(PermanentMatrixStartupError, match="Matrix password login returned"):
-                await login_agent_user("http://localhost:8008", agent_user, runtime_paths)
-
-        state = MatrixState.load(runtime_paths=runtime_paths)
-        account = state.accounts["agent_calculator"]
-        assert agent_user.user_id == "@mindroom_calculator:localhost"
-        assert account.username == "mindroom_calculator"
-        assert account.domain == "localhost"
-        assert account.device_id == "old_device"
-        assert account.access_token == "old_token"  # noqa: S105
-        mock_client.close.assert_awaited_once()
-
-    @pytest.mark.asyncio
-    async def test_login_agent_user_restore_refreshes_session_for_expected_user_id(self, tmp_path: Path) -> None:
-        """Restored sessions refresh credentials only for the expected Matrix account."""
-        agent_user = AgentMatrixUser(
-            agent_name="calculator",
-            user_id="@mindroom_calculator:localhost",
-            display_name="CalculatorAgent",
-            password=TEST_PASSWORD,
-            device_id="old_device",
-            access_token="old_token",  # noqa: S106
-        )
-
-        runtime_paths = _runtime_paths(tmp_path)
-        _save_agent_credentials(
-            "calculator",
-            "mindroom_calculator",
-            TEST_PASSWORD,
-            runtime_paths,
-            domain="localhost",
-            device_id="old_device",
-            access_token="old_token",  # noqa: S106
-        )
-        _create_olm_store_file(runtime_paths, "@mindroom_calculator:localhost", "old_device")
         with (
-            patch("mindroom.matrix.users.restore_login") as mock_restore,
-            patch("mindroom.matrix.users.login") as mock_login,
+            patch(
+                "mindroom.matrix.users.login_password_credentials",
+                new=AsyncMock(side_effect=ValueError("Failed to login @mindroom_user:localhost")),
+            ),
+            pytest.raises(ValueError, match="Failed to login"),
         ):
-            restored_client = AsyncMock()
-            restored_client.user_id = "@mindroom_calculator:localhost"
-            restored_client.access_token = "restored_token"  # noqa: S105
-            restored_client.device_id = "restored_device"
-            mock_restore.return_value = restored_client
+            await login_agent_http_client("http://localhost:8008", agent_user, runtime_paths)
 
-            client = await login_agent_user("http://localhost:8008", agent_user, runtime_paths)
-
-        state = MatrixState.load(runtime_paths=runtime_paths)
-        account = state.accounts["agent_calculator"]
-        assert client == restored_client
-        assert agent_user.user_id == "@mindroom_calculator:localhost"
-        assert agent_user.device_id == "restored_device"
-        assert agent_user.access_token == "restored_token"  # noqa: S105
-        assert account.username == "mindroom_calculator"
-        assert account.domain == "localhost"
-        assert account.device_id == "restored_device"
-        assert account.access_token == "restored_token"  # noqa: S105
-        mock_login.assert_not_awaited()
-
-    @pytest.mark.asyncio
-    async def test_login_agent_user_restore_mismatch_falls_back_to_password(self, tmp_path: Path) -> None:
-        """Restored sessions for another Matrix account are closed before password login."""
-        agent_user = AgentMatrixUser(
-            agent_name="calculator",
-            user_id="@mindroom_calculator:localhost",
-            display_name="CalculatorAgent",
-            password=TEST_PASSWORD,
-            device_id="old_device",
-            access_token="old_token",  # noqa: S106
-        )
-
-        runtime_paths = _runtime_paths(tmp_path)
-        _save_agent_credentials(
-            "calculator",
-            "mindroom_calculator",
-            TEST_PASSWORD,
-            runtime_paths,
-            domain="localhost",
-            device_id="old_device",
-            access_token="old_token",  # noqa: S106
-        )
-        _create_olm_store_file(runtime_paths, "@mindroom_calculator:localhost", "old_device")
-        with (
-            patch("mindroom.matrix.users.restore_login") as mock_restore,
-            patch("mindroom.matrix.users.login") as mock_login,
-        ):
-            restored_client = AsyncMock()
-            restored_client.user_id = "@actual_calculator:matrix.example"
-            restored_client.access_token = "restored_token"  # noqa: S105
-            restored_client.device_id = "restored_device"
-            restored_client.close = AsyncMock()
-            mock_restore.return_value = restored_client
-
-            password_client = AsyncMock()
-            password_client.user_id = "@mindroom_calculator:localhost"
-            password_client.access_token = "password_token"  # noqa: S105
-            password_client.device_id = "password_device"
-            mock_login.return_value = password_client
-
-            client = await login_agent_user("http://localhost:8008", agent_user, runtime_paths)
-
-        state = MatrixState.load(runtime_paths=runtime_paths)
-        account = state.accounts["agent_calculator"]
-        assert client == password_client
-        assert agent_user.user_id == "@mindroom_calculator:localhost"
-        assert agent_user.device_id == "password_device"
-        assert agent_user.access_token == "password_token"  # noqa: S105
-        assert account.username == "mindroom_calculator"
-        assert account.domain == "localhost"
-        assert account.device_id == "password_device"
-        assert account.access_token == "password_token"  # noqa: S105
-        restored_client.close.assert_awaited_once()
-        mock_login.assert_awaited_once_with(
-            "http://localhost:8008",
-            "@mindroom_calculator:localhost",
-            TEST_PASSWORD,
-            runtime_paths=runtime_paths,
-            sync_storage=DEFAULT_MATRIX_SYNC_STORAGE,
-        )
-
-    @pytest.mark.asyncio
-    async def test_login_agent_user_failure(self, tmp_path: Path) -> None:
-        """Test failed agent login."""
-        agent_user = AgentMatrixUser(
-            agent_name="calculator",
-            user_id="@mindroom_calculator:localhost",
-            display_name="CalculatorAgent",
-            password=TEST_PASSWORD,
-        )
-
-        runtime_paths = _runtime_paths(tmp_path)
-        with patch("mindroom.matrix.users.login") as mock_login:
-            # Mock failed login
-            mock_login.side_effect = ValueError("Failed to login @mindroom_calculator:localhost: Login error")
-
-            with pytest.raises(ValueError, match="Failed to login"):
-                await login_agent_user("http://localhost:8008", agent_user, runtime_paths)
+        assert MatrixState.load(runtime_paths=runtime_paths).accounts == {}
 
     @pytest.mark.asyncio
     async def test_login_agent_owned_session_gets_credentials_before_factory(

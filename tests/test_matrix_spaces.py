@@ -140,7 +140,7 @@ async def test_ensure_user_in_rooms_uses_managed_login_boundary(
         return client
 
     join_room = AsyncMock(return_value=RoomJoinOutcome.JOINED)
-    monkeypatch.setattr(matrix_rooms, "login_agent_user", _login_user)
+    monkeypatch.setattr(matrix_rooms, "login_agent_http_client", _login_user)
     monkeypatch.setattr(matrix_rooms, "join_room", join_room)
     monkeypatch.setattr(
         matrix_rooms,
