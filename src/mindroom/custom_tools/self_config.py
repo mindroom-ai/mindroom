@@ -8,11 +8,10 @@ import yaml
 from agno.tools import Toolkit
 from pydantic import ValidationError
 
-from mindroom.api.config_lifecycle import commit_config
 from mindroom.config.agent import AgentConfig
-from mindroom.config.commit import ConfigCommit
 from mindroom.config.main import ConfigRuntimeValidationError, format_invalid_config_message, load_config_or_user_error
 from mindroom.custom_tools.config_manager import (
+    commit_authored_config,
     platform_administrator_error,
     preserve_tool_overrides,
     redaction_marker_error,
@@ -222,8 +221,7 @@ class SelfConfigTools(Toolkit):
 
         config.agents[self.agent_name] = validated_agent
         try:
-            commit = ConfigCommit.from_payload(config.authored_model_dump(), self.runtime_paths)
-            commit_config(self.runtime_paths, commit, loaded=config)
+            commit_authored_config(config, self.runtime_paths)
         except (ValidationError, ConfigRuntimeValidationError) as exc:
             return format_invalid_config_message(exc, footer=_CONFIG_CHANGE_REJECTED_MESSAGE)
         except Exception as e:

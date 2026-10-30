@@ -501,6 +501,13 @@ class _InfoType(str, Enum):
     AGENT_TEMPLATE = "agent_template"
 
 
+def commit_authored_config(config: Config, runtime_paths: RuntimePaths) -> Config:
+    """Commit an in-place edit of the loaded `config`, refused when the file changed since; return what runs."""
+    commit = ConfigCommit.from_payload(config.authored_model_dump(), runtime_paths)
+    commit_config(runtime_paths, commit, loaded=config)
+    return commit.config
+
+
 class ConfigManagerTools(Toolkit):
     """Consolidated tools for inspecting and controlling the MindRoom configuration.
 
@@ -890,12 +897,6 @@ class ConfigManagerTools(Toolkit):
             self._help_text = get_command_help()
         return self._help_text
 
-    def _commit_authored_config(self, config: Config) -> Config:
-        """Commit an in-place edit of the loaded `config`, refused when the file changed since; return what runs."""
-        commit = ConfigCommit.from_payload(config.authored_model_dump(), self.runtime_paths)
-        commit_config(self.runtime_paths, commit, loaded=config)
-        return commit.config
-
     def _load_config_or_error(
         self,
         *,
@@ -1237,7 +1238,7 @@ class ConfigManagerTools(Toolkit):
             # Add to config
             config.agents[agent_name] = new_agent
 
-            persisted_config = self._commit_authored_config(config)
+            persisted_config = commit_authored_config(config, self.runtime_paths)
 
             oauth_guidance = _oauth_onboarding_guidance(
                 persisted_config,
@@ -1346,7 +1347,7 @@ class ConfigManagerTools(Toolkit):
             if not changes:
                 return "No changes made. All provided values are the same as current configuration."
 
-            persisted_config = self._commit_authored_config(config)
+            persisted_config = commit_authored_config(config, self.runtime_paths)
 
             oauth_guidance = _oauth_onboarding_guidance(
                 persisted_config,
@@ -1399,7 +1400,7 @@ class ConfigManagerTools(Toolkit):
             # Add to config
             config.teams[team_name] = new_team
 
-            self._commit_authored_config(config)
+            commit_authored_config(config, self.runtime_paths)
 
             return (
                 f"✅ Successfully created team '{team_name}'!\n\n"

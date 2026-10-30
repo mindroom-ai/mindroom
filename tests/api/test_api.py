@@ -1444,6 +1444,20 @@ def test_cleanup_workers_endpoint_runs_the_backend_maintenance_pass_off_the_even
     assert on_event_loop == [False]
 
 
+def test_load_config_serves_a_config_whose_authored_form_is_empty(
+    test_client: TestClient,
+    temp_config_file: Path,
+) -> None:
+    """A config file that sets nothing is a valid config with nothing authored, not a missing one."""
+    temp_config_file.write_text("{}\n", encoding="utf-8")
+    assert config_lifecycle.load_config_into_app(main._app_runtime_paths(main.app), main.app).loaded
+
+    response = test_client.post("/api/config/load")
+
+    assert response.status_code == 200, response.text
+    assert response.json() == {}
+
+
 def test_load_config(test_client: TestClient) -> None:
     """Test loading configuration."""
     response = test_client.post("/api/config/load")
