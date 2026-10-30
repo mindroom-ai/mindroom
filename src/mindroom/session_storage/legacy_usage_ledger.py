@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING, cast
 
 from mindroom.session_storage.legacy_agno2_runs import decode_session_json, has_blob_column
 from mindroom.session_storage.schema import quote_identifier, table_names, usage_table_sql, usage_upsert_sql
-from mindroom.usage.storage import project_token_counters
+from mindroom.usage.storage import project_model_entry, project_token_counters
 
 if TYPE_CHECKING:
     import sqlite3
@@ -27,19 +27,12 @@ if TYPE_CHECKING:
 # Coverage: tests/session_storage/test_legacy_usage_ledger.py.
 def seed_usage_ledger(connection: sqlite3.Connection, names: AgnoTableNames) -> None:
     """Seed the usage ledger of a database that has none in the caller's write transaction."""
-    if _needs_migration(connection, names):
-        _seed_usage(connection, names)
-
-
-def _needs_migration(connection: sqlite3.Connection, names: AgnoTableNames) -> bool:
     tables = table_names(connection)
-    return names.sessions in tables and names.usage not in tables
-
-
-def _seed_usage(connection: sqlite3.Connection, names: AgnoTableNames) -> None:
+    if names.sessions not in tables or names.usage in tables:
+        return
     connection.execute(usage_table_sql(names))
     legacy_column = "runs" if has_blob_column(connection, names) else "NULL"
-    has_runs = names.runs in table_names(connection)
+    has_runs = names.runs in tables
     for session_id, blob in connection.execute(
         f"SELECT session_id, {legacy_column} FROM {quote_identifier(names.sessions)}",  # noqa: S608
     ):
@@ -164,10 +157,5 @@ def _project_model_details(details: object) -> object:
         for entry in entries:
             if not isinstance(entry, dict):
                 return False
-            model_metrics = cast("dict[str, object]", entry)
-            model = project_token_counters(model_metrics)
-            for key in ("id", "provider"):
-                if isinstance(model_metrics.get(key), str):
-                    model[key] = model_metrics[key]
-            models.append(model)
+            models.append(project_model_entry(cast("dict[str, object]", entry)))
     return {"model": models}

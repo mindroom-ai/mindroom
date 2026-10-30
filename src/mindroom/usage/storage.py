@@ -14,7 +14,7 @@ if TYPE_CHECKING:
 
     from mindroom.llm.messages import Message
     from mindroom.llm.runs import AnyRunRecord
-    from mindroom.llm.usage import HelperUsage, ModelMetrics, RunMetrics
+    from mindroom.llm.usage import HelperUsage, RunMetrics
 
 # Run metadata key holding the projected usage of requests mid-turn compaction folded out of the run's messages.
 COMPACTED_REQUESTS_METADATA_KEY = "mindroom_compacted_requests"
@@ -190,17 +190,19 @@ def _project_run_metrics(metrics: RunMetrics) -> dict[str, object]:
     selected = project_token_counters(metrics.to_dict())
     if metrics.details:
         selected["details"] = {
-            "model": [_project_model(entry) for entries in metrics.details.values() for entry in entries],
+            "model": [
+                project_model_entry(entry.to_dict()) for entries in metrics.details.values() for entry in entries
+            ],
         }
     return selected
 
 
-def _project_model(entry: ModelMetrics) -> dict[str, object]:
-    stored = entry.to_dict()
-    model = project_token_counters(stored)
+def project_model_entry(entry: Mapping[str, object]) -> dict[str, object]:
+    """Return a stored model entry's token counters as ``project_token_counters`` does, and its string model names."""
+    model = project_token_counters(entry)
     for key in ("id", "provider"):
-        if isinstance(stored.get(key), str):
-            model[key] = stored[key]
+        if isinstance(entry.get(key), str):
+            model[key] = entry[key]
     return model
 
 
