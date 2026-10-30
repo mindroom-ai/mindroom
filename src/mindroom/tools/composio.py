@@ -1,7 +1,7 @@
 """Composio tool configuration."""
 
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, cast
 
 from mindroom.tool_system.declarations import ConfigField, SetupType, ToolCategory, ToolFileAccess, ToolStatus
 from mindroom.tool_system.registration import register_tool_with_metadata
@@ -153,7 +153,6 @@ def composio_tools() -> "type[Toolkit]":
             max_retries: int = 3,
             lockfile: Path | None = None,
             lock: bool = True,
-            **kwargs: Any,  # noqa: ANN401 - forwards metadata-selected SDK constructor kwargs.
         ) -> None:
             if not actions:
                 msg = "Composio requires a nonempty actions list."
@@ -171,7 +170,6 @@ def composio_tools() -> "type[Toolkit]":
                 max_retries=max_retries,
                 lockfile=lockfile,
                 lock=lock,
-                **kwargs,
             )
             for toolkit in cast("list[Toolkit]", toolset.get_tools(actions=actions)):
                 # Preserve SDK entrypoints and their deferred schema processing.
