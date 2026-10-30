@@ -1,7 +1,7 @@
 """The candidate lifecycle of one semantic knowledge base: choose a collection to build, catch it up, publish it.
 
 Every collection holds its own claims, failures, and lifecycle (``knowledge.vector_store``), so the next refresh
-resumes from whichever collection survives, with no separate journal to replay or verify.
+resumes from whichever collection survives.
 """
 
 from __future__ import annotations
@@ -21,9 +21,9 @@ from mindroom.knowledge.collections import (
     CollectionSpace,
     candidate_collection_name,
     cleanup_superseded_collections,
+    drain_readers,
     open_collection,
     owned_collection_names,
-    readers_drained,
 )
 from mindroom.knowledge.corpus_signature import corpus_signature, scan_corpus, scan_file_signatures_async
 from mindroom.knowledge.file_indexer import FileIndexer, max_concurrent_file_indexes
@@ -190,7 +190,6 @@ class KnowledgeManager:
     _indexing_settings: IndexingSettings = field(init=False)
     _base_storage_path: Path = field(init=False)
     _collections: CollectionSpace = field(init=False, repr=False)
-    _lock: asyncio.Lock = field(default_factory=asyncio.Lock, init=False)
     _max_concurrent_file_indexes: int = field(init=False, repr=False)
     #: The files a local base's last corpus hash listed and signed, which the next reconciliation adopts once.
     _source_scan: dict[str, tuple[FileSignature, Path]] | None = field(default=None, init=False, repr=False)
@@ -293,7 +292,7 @@ class KnowledgeManager:
         """Return whether a forced rebuild of the current settings was interrupted before it published."""
         return any(
             self._unpublished_rebuild(collection, meta, publication)
-            for collection, meta in await self._working_collections(publication)
+            for collection, meta in await asyncio.to_thread(self._working_collections, publication)
         )
 
     @staticmethod
@@ -329,44 +328,40 @@ class KnowledgeManager:
         settings, a missing collection -- the reuse rules reject on their own,
         apart from a Chroma-era publication, whose vectors are copied once.
         """
-        if self.config.get_knowledge_base_config(self.base_id).mode != "semantic":
-            return RefreshOutcome(indexed_count=0, published=False, error=None)
-
-        async with self._lock:
-            run = await self._open_candidate_run(force_reindex=force_reindex)
-            indexer = FileIndexer(
-                base_id=self.base_id,
-                config=self.config,
-                runtime_paths=self.runtime_paths,
-                knowledge_root=self._knowledge_root(),
-                collection=run.collection,
-                embedder=RefreshEmbedder(
-                    create_configured_embedder(self.config, self.runtime_paths, caller_retries=True),
-                ),
-                max_concurrent_file_indexes=self._max_concurrent_file_indexes,
+        run = await self._open_candidate_run(force_reindex=force_reindex)
+        indexer = FileIndexer(
+            base_id=self.base_id,
+            config=self.config,
+            runtime_paths=self.runtime_paths,
+            knowledge_root=self._knowledge_root(),
+            collection=run.collection,
+            embedder=RefreshEmbedder(
+                create_configured_embedder(self.config, self.runtime_paths, caller_retries=True),
+            ),
+            max_concurrent_file_indexes=self._max_concurrent_file_indexes,
+        )
+        progress = _CandidateProgress(
+            base_id=self.base_id,
+            resumed=run.resumed,
+            target_revision=run.baseline_revision,
+            collection=run.collection.name,
+            completed=len(run.completed),
+        )
+        try:
+            await self._advance_candidate(run, indexer, progress)
+        except Exception as exc:
+            if run.error is None:
+                run.record_error(str(exc))
+            raise
+        finally:
+            progress.retrying = indexer.retry_count
+            outcome = RefreshOutcome(
+                indexed_count=progress.indexed_this_run,
+                published=run.published,
+                error=run.error,
             )
-            progress = _CandidateProgress(
-                base_id=self.base_id,
-                resumed=run.resumed,
-                target_revision=run.baseline_revision,
-                collection=run.collection.name,
-                completed=len(run.completed),
-            )
-            try:
-                await self._advance_candidate(run, indexer, progress)
-            except Exception as exc:
-                if run.error is None:
-                    run.record_error(str(exc))
-                raise
-            finally:
-                progress.retrying = indexer.retry_count
-                outcome = RefreshOutcome(
-                    indexed_count=progress.indexed_this_run,
-                    published=run.published,
-                    error=run.error,
-                )
-                progress.log_summary(outcome)
-            return outcome
+            progress.log_summary(outcome)
+        return outcome
 
     async def _open_candidate_run(self, *, force_reindex: bool) -> _CandidateRun:
         """Choose the collection this refresh advances, deleting the working collections it will not.
@@ -402,19 +397,16 @@ class KnowledgeManager:
             resumed=meta.stage == "building",
         )
 
-    async def _working_collections(
-        self,
-        publication: Publication | None,
-    ) -> list[tuple[KnowledgeCollection, CollectionMeta]]:
+    def _working_collections(self, publication: Publication | None) -> list[tuple[KnowledgeCollection, CollectionMeta]]:
         """Return the working collections built under the current settings, with their state."""
         published = None if publication is None else publication.collection
         usable: list[tuple[KnowledgeCollection, CollectionMeta]] = []
-        for name in await asyncio.to_thread(owned_collection_names, self._collections):
+        for name in owned_collection_names(self._collections):
             if name == published:
                 continue
             collection = open_collection(self._collections, name)
             try:
-                meta = await asyncio.to_thread(collection.meta)
+                meta = collection.meta()
             except Exception as error:
                 if not _unusable_collection(error):
                     raise
@@ -435,7 +427,7 @@ class KnowledgeManager:
         leftover the last publication did not keep, such as the one a forced rebuild replaced, and is deleted. Before
         any publication there is nothing to leave over, so a complete collection is a finished build to resume.
         """
-        usable = await self._working_collections(publication)
+        usable = await asyncio.to_thread(self._working_collections, publication)
         retired_name = None if publication is None else publication.retired
         unfinished = [entry for entry in usable if entry[1].stage == "building" or publication is None]
         if unfinished:
@@ -455,17 +447,13 @@ class KnowledgeManager:
         ):
             return None
         # Readers that selected it before the last publication finish first; no new reader can select it since.
-        await run_blocking_until_complete(self._drain_readers)
+        await run_blocking_until_complete(drain_readers, self._collections)
         logger.info(
             "Resuming the retired knowledge collection instead of copying the published one",
             base_id=self.base_id,
             collection=collection.name,
         )
         return collection, meta
-
-    def _drain_readers(self) -> None:
-        with readers_drained(self._collections):
-            pass
 
     async def _delete_working(self, publication: Publication | None, *, keep: str | None) -> None:
         """Delete every working collection but ``keep``; a legacy one under the default name waits for a publication."""
@@ -484,6 +472,7 @@ class KnowledgeManager:
         collection = open_collection(self._collections, candidate_collection_name(self._collections))
         revision = await self._create_candidate(collection, rebuild=rebuild, publication=publication)
         completed = await asyncio.to_thread(collection.files)
+        failed = await asyncio.to_thread(collection.failed_paths)
         if completed:
             logger.info(
                 "Reused published knowledge vectors in a new candidate",
@@ -497,6 +486,7 @@ class KnowledgeManager:
             retired=publication,
             baseline_revision=revision,
             completed=completed,
+            failed=failed,
         )
 
     async def _create_candidate(
@@ -565,7 +555,7 @@ class KnowledgeManager:
         else:
             listed = sorted((self._relative_path(path), path) for path in await asyncio.to_thread(self.list_files))
             if changed_files is None:
-                signatures = await scan_file_signatures_async(listed, {})
+                signatures = await scan_file_signatures_async(listed)
             else:
                 to_scan = [entry for entry in listed if entry[0] in changed_files or entry[0] not in run.completed]
                 signatures = {
@@ -573,7 +563,7 @@ class KnowledgeManager:
                     for relative_path, file_path in listed
                     if relative_path not in changed_files and relative_path in run.completed
                 }
-                signatures.update(await scan_file_signatures_async(to_scan, {}))
+                signatures.update(await scan_file_signatures_async(to_scan))
                 logger.info(
                     "Used knowledge Git delta for candidate reconciliation",
                     base_id=self.base_id,
@@ -624,12 +614,6 @@ class KnowledgeManager:
         )
         return present, pending
 
-    async def _source_revision(self) -> str | None:
-        """Return the current Git revision, or None when the source is not Git-backed."""
-        if not self.git_source.is_configured():
-            return None
-        return await self.git_source.head()
-
     async def _candidate_matches_source(
         self,
         round_revision: str | None,
@@ -663,8 +647,15 @@ class KnowledgeManager:
 
     async def _advance_candidate(self, run: _CandidateRun, indexer: FileIndexer, progress: _CandidateProgress) -> None:
         """Reconcile, index and publish until the candidate matches the live source."""
+
+        def record_file() -> None:
+            progress.completed = len(run.completed)
+            progress.failed = len(run.failed)
+            progress.retrying = indexer.retry_count
+            progress.maybe_log()
+
         for round_index in range(_MAX_CANDIDATE_RECONCILE_ROUNDS):
-            round_revision = await self._source_revision()
+            round_revision = await self.git_source.head() if self.git_source.is_configured() else None
             changed_files = (
                 await self.git_source.changed_files_between(run.baseline_revision, round_revision)
                 if round_index == 0 and self.git_source.is_configured()
@@ -680,19 +671,12 @@ class KnowledgeManager:
             progress.completed = len(run.completed)
 
             if pending:
-
-                def _record_file(active_run: _CandidateRun = run) -> None:
-                    progress.completed = len(active_run.completed)
-                    progress.failed = len(active_run.failed)
-                    progress.retrying = indexer.retry_count
-                    progress.maybe_log()
-
                 progress.indexed_this_run += await indexer.index_files(
                     pending,
                     completed=run.completed,
                     failed=run.failed,
                     vanished=run.vanished,
-                    on_file_done=_record_file,
+                    on_file_done=record_file,
                 )
                 progress.completed = len(run.completed)
                 progress.failed = len(run.failed)

@@ -1,6 +1,6 @@
 """Collection lifecycle for one knowledge base.
 
-Naming, opening, probing, deleting and reclaiming the collections a knowledge
+Naming, opening, writing, deleting and reclaiming the collections a knowledge
 base owns. None of that depends on the refresh advancing the base: a base's
 collections are a function of where it stores vectors and what those vectors
 are called, so this deliberately holds no per-refresh state and takes what it
@@ -28,7 +28,6 @@ from mindroom.logging_config import get_logger
 
 if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
-    from contextlib import AbstractContextManager
     from pathlib import Path
 
     from mindroom.knowledge.corpus_signature import FileSignature
@@ -56,6 +55,10 @@ class CollectionSpace:
     storage_path: Path
 
     @property
+    def _candidate_prefix(self) -> str:
+        return f"{self._default_collection}_candidate_"
+
+    @property
     def _default_collection(self) -> str:
         """Return the published collection name this base's identity owns."""
         return _collection_name_for_base(self.base_id, self.knowledge_path)
@@ -79,7 +82,7 @@ def _collection_name_for_base(base_id: str, knowledge_path: Path) -> str:
 
 def candidate_collection_name(space: CollectionSpace) -> str:
     """Return a fresh candidate name under the prefix this base provably owns."""
-    return f"{space._default_collection}_candidate_{uuid.uuid4().hex[:16]}"
+    return f"{space._candidate_prefix}{uuid.uuid4().hex[:16]}"
 
 
 def open_collection(space: CollectionSpace, collection_name: str) -> KnowledgeCollection:
@@ -93,13 +96,14 @@ def owned_collection_names(space: CollectionSpace) -> list[str]:
     return [
         name
         for name in list_collection_names(space.storage_path)
-        if name == default_collection or name.startswith(f"{default_collection}_candidate_")
+        if name == default_collection or name.startswith(space._candidate_prefix)
     ]
 
 
-def readers_drained(space: CollectionSpace) -> AbstractContextManager[None]:
-    """Wait out every reader of this base's collections, and admit none until released."""
-    return collection_lifetime_lock(space.storage_path, exclusive=True)
+def drain_readers(space: CollectionSpace) -> None:
+    """Wait out every reader of this base's collections that selected one before the last publication."""
+    with collection_lifetime_lock(space.storage_path, exclusive=True):
+        pass
 
 
 def _source_content_hash(source_metadata: Mapping[str, Any]) -> str:
@@ -146,10 +150,10 @@ def write_file_rows(
     never empties a file. Row ids are fixed by the file version and the
     chunk's position.
     """
-    mtime_ns, size, digest = signature
+    stamp, size, digest = signature
     source_metadata = {
         SOURCE_PATH_KEY: relative_path,
-        SOURCE_MTIME_NS_KEY: mtime_ns,
+        SOURCE_MTIME_NS_KEY: stamp,
         SOURCE_SIZE_KEY: size,
         SOURCE_DIGEST_KEY: digest,
     }
@@ -184,7 +188,7 @@ def cleanup_superseded_collections(
     because nothing here can prove who owns it.
     """
     default_collection = space._default_collection
-    candidate_prefix = f"{default_collection}_candidate_"
+    candidate_prefix = space._candidate_prefix
 
     try:
         collection_names = list_collection_names(space.storage_path)
@@ -218,7 +222,7 @@ def cleanup_superseded_collections(
                     exc_info=True,
                 )
         for leftover in space.storage_path.glob(f"{default_collection}*.sqlite3.building"):
-            # A reset killed before its rename; no collection is ever read from these.
+            # A build killed before its rename; no collection is ever read from these.
             leftover.unlink(missing_ok=True)
         if not candidates_only:
             # Only the sweep after a publication: until then the Chroma files are what a downgrade would read.

@@ -147,15 +147,12 @@ def corpus_signature(file_signatures: Mapping[str, FileSignature]) -> str:
     return digest.hexdigest()
 
 
-async def scan_file_signatures_async(
-    files: Sequence[tuple[str, Path]],
-    known: Mapping[str, FileSignature],
-) -> dict[str, tuple[FileSignature, Path]]:
-    """Sign listed files a chunk per thread hop, so a huge corpus still yields to the loop and to cancellation."""
+async def scan_file_signatures_async(files: Sequence[tuple[str, Path]]) -> dict[str, tuple[FileSignature, Path]]:
+    """Read and sign listed files a chunk per thread hop, so a huge corpus still yields to the loop and to cancellation."""
     signatures: dict[str, tuple[FileSignature, Path]] = {}
     for start in range(0, len(files), _SIGNATURE_SCAN_CHUNK):
         batch = files[start : start + _SIGNATURE_SCAN_CHUNK]
-        scanned = await asyncio.to_thread(lambda batch=batch: list(_scan_file_signatures(batch, known)))
+        scanned = await asyncio.to_thread(lambda batch=batch: list(_scan_file_signatures(batch, {})))
         for relative_path, signature, file_path in scanned:
             signatures[relative_path] = (signature, file_path)
     return signatures

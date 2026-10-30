@@ -1173,23 +1173,6 @@ async def test_file_mode_refresh_cancelled_after_its_publication_records_success
     assert status.last_refresh_at is not None
 
 
-@pytest.mark.asyncio
-async def test_file_mode_reindex_reports_an_empty_unpublished_outcome(tmp_path: Path) -> None:
-    """A file-only base builds no vectors, so its refresh publishes nothing and reports no failure."""
-    docs_path = tmp_path / "docs"
-    docs_path.mkdir()
-    config = _config(
-        tmp_path,
-        bases={"docs": docs_path},
-        agent_bases=["docs"],
-        modes={"docs": "files"},
-    )
-    runtime_paths = runtime_paths_for(config)
-    manager = KnowledgeManager("docs", config=config, runtime_paths=runtime_paths)
-
-    assert await manager.reindex_all() == RefreshOutcome(indexed_count=0, published=False, error=None)
-
-
 def test_file_mode_source_signature_tracks_non_semantic_files(tmp_path: Path) -> None:
     """File-only metadata should cover every managed file agents can inspect."""
     docs_path = tmp_path / "docs"
@@ -8748,12 +8731,9 @@ async def test_git_update_uses_reliable_delta_for_file_signature_scan(
     scanned: list[tuple[str, ...]] = []
     original_scan = knowledge_manager_module.scan_file_signatures_async
 
-    async def _record_scanned_files(
-        files: Sequence[tuple[str, Path]],
-        known: Mapping[str, FileSignature],
-    ) -> dict[str, tuple[FileSignature, Path]]:
+    async def _record_scanned_files(files: Sequence[tuple[str, Path]]) -> dict[str, tuple[FileSignature, Path]]:
         scanned.append(tuple(sorted(relative_path for relative_path, _path in files)))
-        return await original_scan(files, known)
+        return await original_scan(files)
 
     monkeypatch.setattr(knowledge_manager_module, "scan_file_signatures_async", _record_scanned_files)
 

@@ -250,14 +250,10 @@ class FileIndexer:
     def _relative_path(self, file_path: Path) -> str:
         return file_path.relative_to(self.knowledge_root).as_posix()
 
-    def _chunking_strategy(self) -> SafeFixedSizeChunking:
-        """Build the chunking strategy every text-like read of this base uses."""
-        base_config = self.config.get_knowledge_base_config(self.base_id)
-        return SafeFixedSizeChunking(chunk_size=base_config.chunk_size, overlap=base_config.chunk_overlap)
-
     def _configure_text_reader(self, reader: TextReader | MarkdownReader) -> TextReader | MarkdownReader:
         """Apply this base's text chunking policy to ``reader`` in place."""
-        chunking_strategy = self._chunking_strategy()
+        base_config = self.config.get_knowledge_base_config(self.base_id)
+        chunking_strategy = SafeFixedSizeChunking(chunk_size=base_config.chunk_size, overlap=base_config.chunk_overlap)
         reader.chunk = True
         reader.chunk_size = chunking_strategy.chunk_size
         reader.chunking_strategy = chunking_strategy
@@ -366,19 +362,20 @@ class FileIndexer:
             end += 1
             prepared_file = await self._prepare_file(file_path, vanished=vanished)
             if prepared_file is None:
-                if self._relative_path(file_path) not in vanished:
-                    await settle(self._relative_path(file_path), None)
+                if (relative_path := self._relative_path(file_path)) not in vanished:
+                    await settle(relative_path, None)
                 continue
             prepared.append(prepared_file)
             text_bytes += prepared_file.text_bytes()
-        if self.config.get_knowledge_base_config(self.base_id).chunk_context_model is None:
+        model_name = self.config.get_knowledge_base_config(self.base_id).chunk_context_model
+        if model_name is None:
             return prepared, end
         # Files get their chunk contexts concurrently, under the same per-file limit as their writes.
         slots = asyncio.Semaphore(self.max_concurrent_file_indexes)
 
         async def with_contexts(prepared_file: _PreparedFile) -> _PreparedFile | None:
             async with slots:
-                return await self._with_chunk_contexts(prepared_file)
+                return await self._with_chunk_contexts(prepared_file, model_name)
 
         contextualized: list[_PreparedFile] = []
         for prepared_file, result in zip(
@@ -392,13 +389,12 @@ class FileIndexer:
                 contextualized.append(result)
         return contextualized, end
 
-    async def _with_chunk_contexts(self, prepared: _PreparedFile) -> _PreparedFile | None:
+    async def _with_chunk_contexts(self, prepared: _PreparedFile, model_name: str) -> _PreparedFile | None:
         """Prefix each chunk with the context the base's ``chunk_context_model`` writes; None when that fails.
 
         A single-chunk file is its own document, so there is nothing to situate it in.
         """
-        model_name = self.config.get_knowledge_base_config(self.base_id).chunk_context_model
-        if model_name is None or len(prepared.chunks) < 2:
+        if len(prepared.chunks) < 2:
             return prepared
         try:
             contexts = await chunk_contexts(
@@ -456,10 +452,7 @@ class FileIndexer:
                         # request; stop now instead of grinding out one doomed
                         # request per remaining chunk, and report the failure the
                         # same way a per-file rejection would.
-                        if self.first_error is None:
-                            self.first_error = classified_embedder_error(exc) or (
-                                f"knowledge indexing failed ({type(exc).__name__})"
-                            )
+                        self._record_first_error(exc)
                         raise _PermanentEmbeddingError from exc
                     # Exhausted transient retries: stop batching for this batch
                     # and leave the texts no request finished to their files'
@@ -573,11 +566,13 @@ class FileIndexer:
 
     def _record_file_failure(self, file_path: Path, exc: Exception) -> None:
         """Record why one file failed to index, for the refresh summary and the global-failure evidence."""
-        classified = classified_embedder_error(exc)
-        if self.first_error is None:
-            self.first_error = classified or f"knowledge indexing failed ({type(exc).__name__})"
+        self._record_first_error(exc)
         self._record_embedder_rejection(exc)
         logger.error("Failed to index knowledge file", base_id=self.base_id, path=str(file_path), exc_info=exc)
+
+    def _record_first_error(self, exc: Exception) -> None:
+        if self.first_error is None:
+            self.first_error = classified_embedder_error(exc) or f"knowledge indexing failed ({type(exc).__name__})"
 
     def _record_embedding_retry(self) -> None:
         self.retry_count += 1
