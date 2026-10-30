@@ -44,6 +44,7 @@ from mindroom.workers.backends._lifecycle import (
 )
 from mindroom.workers.compatibility import ready_worker_protocol_mismatch
 from mindroom.workers.models import (
+    SANDBOX_RUNNER_API_ROOT,
     ConfiguredWorkerBackend,
     ProgressSink,
     WorkerHandle,
@@ -946,7 +947,7 @@ class KubernetesWorkerBackend:
             worker_id=worker_id,
             worker_key=worker_key,
             lifecycle=lifecycle,
-            endpoint=f"{endpoint_root}/api/sandbox-runner/execute",
+            endpoint=f"{endpoint_root}{SANDBOX_RUNNER_API_ROOT}/execute",
             auth_token=resources.worker_auth_token(self.auth_token, worker_key),
             status=status,
             backend_name=self.backend_name,
@@ -955,7 +956,7 @@ class KubernetesWorkerBackend:
                 "deployment_name": worker_id,
                 "service_name": worker_id,
                 "state_subpath": state_subpath,
-                "api_root": f"{endpoint_root}/api/sandbox-runner",
+                "api_root": f"{endpoint_root}{SANDBOX_RUNNER_API_ROOT}",
             },
         )
 

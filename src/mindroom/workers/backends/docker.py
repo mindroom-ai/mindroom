@@ -7,7 +7,6 @@ import hmac
 import importlib
 import json
 import math
-import os
 import threading
 import time
 from dataclasses import dataclass
@@ -18,7 +17,6 @@ import httpx
 
 from mindroom.constants import (
     RuntimePaths,
-    resolve_primary_runtime_paths,
     runtime_env_values,
     runtime_paths_with_storage_root,
     sandbox_startup_manifest_path,
@@ -102,7 +100,7 @@ from mindroom.workers.backends.legacy_docker_worker_metadata import (
 from mindroom.workers.backends.local import LocalWorkerStatePaths, local_worker_state_paths_for_root
 from mindroom.workers.backends.worker_security import docker_worker_security_options
 from mindroom.workers.compatibility import WorkerProtocolMismatch, ready_worker_protocol_mismatch
-from mindroom.workers.models import ConfiguredWorkerBackend
+from mindroom.workers.models import SANDBOX_RUNNER_API_ROOT, ConfiguredWorkerBackend
 from mindroom.workers.progress import WorkerWarmupProgress, noop_finalize_progress
 from mindroom.workers.worker_retirement import open_worker_state_root
 
@@ -245,22 +243,17 @@ def _launch_hash(image: str, arguments: Mapping[str, object]) -> str:
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
-def ensure_docker_dependencies(runtime_paths: RuntimePaths | None = None) -> None:
+def ensure_docker_dependencies(runtime_paths: RuntimePaths) -> None:
     """Install the optional Docker SDK runtime when needed."""
-    effective_runtime_paths = runtime_paths or resolve_primary_runtime_paths(process_env=dict(os.environ))
     try:
-        ensure_optional_deps(
-            _DOCKER_DEPENDENCIES,
-            _DOCKER_EXTRA,
-            effective_runtime_paths,
-        )
+        ensure_optional_deps(_DOCKER_DEPENDENCIES, _DOCKER_EXTRA, runtime_paths)
     except ImportError as exc:
         raise WorkerBackendError(str(exc)) from exc
 
 
 def _load_docker_client_and_errors(
     *,
-    runtime_paths: RuntimePaths | None = None,
+    runtime_paths: RuntimePaths,
     timeout_seconds: float | None = None,
     ensure_dependencies: bool = True,
 ) -> tuple[_DockerClient, _DockerErrors]:
@@ -279,9 +272,7 @@ def _load_docker_client_and_errors(
 
     docker_from_env = cast("Callable[..., _DockerClient]", docker_module.from_env)
     try:
-        kwargs: dict[str, object] = {}
-        if runtime_paths is not None:
-            kwargs["environment"] = runtime_env_values(runtime_paths)
+        kwargs: dict[str, object] = {"environment": runtime_env_values(runtime_paths)}
         if timeout_seconds is not None:
             kwargs["timeout"] = timeout_seconds
         client = docker_from_env(**kwargs)
@@ -1082,9 +1073,7 @@ class DockerWorkerBackend:
     ) -> None:
         """Poll the worker's health until it answers with this runtime's protocol, calling ``on_poll_tick`` per retry."""
         host_port = self._container_host_port(container)
-        if host_port is None:
-            msg = "Docker worker is missing a published port."
-            raise WorkerBackendError(msg)
+        assert host_port is not None, "callers pass a container whose published port was checked"
 
         endpoint_root = self._endpoint_root(host_port)
         healthz_url = f"{endpoint_root}/healthz"
@@ -1325,18 +1314,6 @@ class DockerWorkerBackend:
         image_id = container.attrs.get("Image")
         return image_id if isinstance(image_id, str) and image_id.strip() else None
 
-    def _container_status(self, container: _DockerContainer) -> str | None:
-        status = container.status
-        if isinstance(status, str):
-            return status
-        attrs = container.attrs
-        state = attrs.get("State", {})
-        if isinstance(state, dict):
-            state_status = state.get("Status")
-            if isinstance(state_status, str):
-                return state_status
-        return None
-
     def _container_logs_excerpt(self, container: _DockerContainer, *, tail: int = 50) -> str:
         """Return a short tail of a worker container's logs for failure diagnostics.
 
@@ -1356,20 +1333,13 @@ class DockerWorkerBackend:
         return f"\nRecent worker container logs:\n{text}"
 
     def _container_is_running(self, container: _DockerContainer | None) -> bool:
-        if container is None:
-            return False
-        return self._container_status(container) == "running"
+        return container is not None and container.status == "running"
 
     def _container_host_port(self, container: _DockerContainer | None) -> int | None:
-        host_port: int | None = None
         if container is None:
-            return host_port
-
-        attrs = container.attrs
-        network_settings = attrs.get("NetworkSettings")
-        if not isinstance(network_settings, dict):
-            return host_port
-        ports = cast("dict[str, object]", network_settings).get("Ports")
+            return None
+        network_settings = container.attrs.get("NetworkSettings")
+        ports = cast("dict[str, object]", network_settings).get("Ports") if isinstance(network_settings, dict) else None
         bindings = (
             cast("dict[str, object]", ports).get(f"{self.config.worker_port}/tcp") if isinstance(ports, dict) else None
         )
@@ -1378,18 +1348,11 @@ class DockerWorkerBackend:
             cast("dict[str, object]", first_binding).get("HostPort") if isinstance(first_binding, dict) else None
         )
         if not isinstance(raw_host_port, str):
-            return host_port
-        try:
-            host_port = int(raw_host_port)
-        except (TypeError, ValueError):
-            host_port = None
-        return host_port
-
-    def _container_id(self, container: _DockerContainer | None) -> str | None:
-        if container is None:
             return None
-        container_id = container.id
-        return container_id if isinstance(container_id, str) and container_id else None
+        try:
+            return int(raw_host_port)
+        except ValueError:
+            return None
 
     def _stop_container(self, container: _DockerContainer | None) -> None:
         if container is None or not self._container_is_running(container):
@@ -1415,11 +1378,6 @@ class DockerWorkerBackend:
     def _endpoint_root(self, host_port: int) -> str:
         return f"http://{self.config.endpoint_host}:{host_port}"
 
-    def _endpoint_for_host_port(self, host_port: int | None) -> str:
-        if host_port is None:
-            return ""
-        return f"{self._endpoint_root(host_port)}/api/sandbox-runner/execute"
-
     def _effective_status(
         self,
         metadata: _DockerWorkerMetadata,
@@ -1428,15 +1386,9 @@ class DockerWorkerBackend:
         now: float,
     ) -> WorkerStatus:
         lifecycle = metadata.lifecycle
-        if lifecycle.status == "failed":
-            return "failed"
-
-        if container is None or not self._container_is_running(container):
-            return "idle" if lifecycle.status != "starting" else "starting"
-
-        if lifecycle.status == "starting":
-            return "starting"
-        if now - lifecycle.last_used_at >= self.idle_timeout_seconds:
+        if lifecycle.status in ("failed", "starting"):
+            return lifecycle.status
+        if not self._container_is_running(container) or now - lifecycle.last_used_at >= self.idle_timeout_seconds:
             return "idle"
         return "ready"
 
@@ -1450,7 +1402,7 @@ class DockerWorkerBackend:
     ) -> WorkerHandle:
         # Only a running container publishes a port, so any other worker has no endpoint.
         host_port = self._container_host_port(container) if self._container_is_running(container) else None
-        endpoint = self._endpoint_for_host_port(host_port)
+        endpoint = "" if host_port is None else f"{self._endpoint_root(host_port)}{SANDBOX_RUNNER_API_ROOT}/execute"
         return worker_handle(
             worker_id=metadata.worker_id,
             worker_key=metadata.worker_key,
@@ -1461,7 +1413,7 @@ class DockerWorkerBackend:
             backend_name=self.backend_name,
             debug_metadata={
                 "container_name": metadata.container_name,
-                "container_id": self._container_id(container) or "",
+                "container_id": "" if container is None else container.id,
                 "host_port": str(host_port or ""),
                 "state_root": str(paths.state.root),
                 "api_root": endpoint.removesuffix("/execute").rstrip("/"),

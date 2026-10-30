@@ -3117,19 +3117,21 @@ def test_worker_config_data_error_for_a_malformed_tool_entry_omits_its_values() 
 
 def test_load_docker_client_auto_installs_optional_runtime(
     monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
 ) -> None:
     """Docker backend startup should ensure the optional Docker SDK before importing it."""
     captured: dict[str, object] = {}
     fake_client = object()
     fake_errors = SimpleNamespace(DockerException=_FakeDockerError, NotFound=_FakeNotFoundError)
+    runtime_paths = _docker_preflight_runtime_paths(tmp_path)
 
-    def _ensure(runtime_paths: RuntimePaths | None = None) -> None:
+    def _ensure(provided_runtime_paths: RuntimePaths) -> None:
         captured["installed"] = True
-        captured["runtime_paths"] = runtime_paths
+        captured["runtime_paths"] = provided_runtime_paths
 
     def _import_module(name: str) -> object:
         if name == "docker":
-            return SimpleNamespace(from_env=lambda: fake_client)
+            return SimpleNamespace(from_env=lambda **_kwargs: fake_client)
         if name == "docker.errors":
             return fake_errors
         msg = f"Unexpected import: {name}"
@@ -3138,10 +3140,10 @@ def test_load_docker_client_auto_installs_optional_runtime(
     monkeypatch.setattr("mindroom.workers.backends.docker.ensure_docker_dependencies", _ensure)
     monkeypatch.setattr("mindroom.workers.backends.docker.importlib.import_module", _import_module)
 
-    client, errors = _load_docker_client_and_errors()
+    client, errors = _load_docker_client_and_errors(runtime_paths=runtime_paths)
 
     assert captured["installed"] is True
-    assert captured["runtime_paths"] is None
+    assert captured["runtime_paths"] is runtime_paths
     assert client is fake_client
     assert errors is fake_errors
 
@@ -5583,6 +5585,43 @@ def test_docker_worker_without_a_running_container_has_no_endpoint(
     assert missing.debug_metadata["container_id"] == ""
     record = json.loads(_control_metadata_path(tmp_path, _TEST_UNSCOPED_WORKER_KEY).read_text(encoding="utf-8"))
     assert {"endpoint", "host_port", "container_id"}.isdisjoint(record)
+
+
+@pytest.mark.parametrize("ports", [{}, {"8766/tcp": [{"HostIp": "127.0.0.1", "HostPort": "not-a-port"}]}])
+def test_docker_worker_restarted_without_a_published_port_fails(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    ports: dict[str, object],
+) -> None:
+    """A restarted container that publishes no usable port fails the ensure instead of serving no endpoint."""
+    backend, fake_client, _sync_calls = _backend(monkeypatch, tmp_path)
+    handle = backend.ensure_worker(_spec(backend, _TEST_UNSCOPED_WORKER_KEY), now=10.0)
+    container = fake_client.containers.by_name[handle.worker_id]
+    container.stop()
+    container.attrs["NetworkSettings"]["Ports"] = ports
+
+    with pytest.raises(WorkerBackendError, match="missing a published port"):
+        backend.ensure_worker(_spec(backend, _TEST_UNSCOPED_WORKER_KEY), now=20.0)
+
+
+def test_docker_worker_recorded_as_starting_reports_starting_with_or_without_its_container(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A worker another start is still bringing up reports starting, even past its idle timeout."""
+    backend, fake_client, _sync_calls = _backend(monkeypatch, tmp_path, idle_timeout_seconds=60.0)
+    handle = backend.ensure_worker(_spec(backend, _TEST_UNSCOPED_WORKER_KEY), now=10.0)
+    metadata_path = _control_metadata_path(tmp_path, _TEST_UNSCOPED_WORKER_KEY)
+    record = json.loads(metadata_path.read_text(encoding="utf-8"))
+    record["status"] = "starting"
+    metadata_path.write_text(json.dumps(record), encoding="utf-8")
+
+    [running] = backend.list_workers(include_idle=True, now=100.0)
+    fake_client.containers.by_name[handle.worker_id].stop()
+    [stopped] = backend.list_workers(include_idle=True, now=100.0)
+
+    assert running.status == "starting"
+    assert stopped.status == "starting"
 
 
 def test_docker_projection_hash_is_stable_across_hash_seeds(tmp_path: Path) -> None:
