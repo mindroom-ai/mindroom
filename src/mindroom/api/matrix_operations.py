@@ -10,7 +10,7 @@ from aiohttp import ClientError
 from fastapi import APIRouter, HTTPException, Request, Response
 from pydantic import BaseModel, Field
 
-from mindroom.api.config_lifecycle import app_state, read_committed_config_and_runtime, read_committed_runtime_config
+from mindroom.api.config_lifecycle import app_state, read_committed_runtime_config
 from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.entity_rooms import get_rooms_for_entity
 from mindroom.logging_config import get_logger
@@ -61,25 +61,6 @@ class AllAgentsRoomsResponse(BaseModel):
     """Response containing all configured Matrix entities' room information."""
 
     agents: list[AgentRoomsResponse]
-
-
-def _get_configured_matrix_entities(config_data: dict[str, Any]) -> dict[str, dict[str, Any]]:
-    """Return configured agents and teams keyed by their Matrix entity ID."""
-    return {
-        **config_data.get("agents", {}),
-        **config_data.get("teams", {}),
-    }
-
-
-def _get_configured_matrix_entity(
-    config_data: dict[str, Any],
-    entity_id: str,
-) -> dict[str, Any]:
-    """Return one configured Matrix entity or raise a 404."""
-    entities = _get_configured_matrix_entities(config_data)
-    if entity_id not in entities:
-        raise HTTPException(status_code=404, detail=f"Agent or team {entity_id} not found")
-    return entities[entity_id]
 
 
 def _get_runtime_matrix_entities(config: Config) -> dict[str, AgentConfig | TeamConfig]:
@@ -303,10 +284,8 @@ async def leave_room_endpoint(request: RoomLeaveRequest, api_request: Request) -
         HTTPException: If the entity is not found or the leave operation fails
 
     """
-    read_committed_config_and_runtime(
-        api_request,
-        lambda config_data: _get_configured_matrix_entity(config_data, request.agent_id),
-    )
+    config, _ = read_committed_runtime_config(api_request)
+    _get_runtime_matrix_entity(config, request.agent_id)
     leave = app_state(api_request.app).leave_matrix_room
     if leave is None:
         raise HTTPException(status_code=503, detail="Leaving a room requires a running MindRoom instance")
@@ -332,7 +311,8 @@ async def leave_rooms_bulk(requests: list[RoomLeaveRequest], api_request: Reques
         Results for each request
 
     """
-    read_committed_config_and_runtime(api_request, lambda _config_data: None)
+    # A broken config file fails the whole request, not each leave.
+    read_committed_runtime_config(api_request)
     results = []
     for request in requests:
         try:

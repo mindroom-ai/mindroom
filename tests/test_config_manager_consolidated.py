@@ -2296,3 +2296,77 @@ class TestWorkerGrantableCredentials:
         """Worker credential mirroring should reject every unsupported credential service."""
         with pytest.raises(ValidationError, match=service):
             DefaultsConfig(worker_grantable_credentials=[service])
+
+
+def _write_concurrent_edit_while_validating(
+    monkeypatch: pytest.MonkeyPatch,
+    config_path: Path,
+    concurrent_source: str,
+) -> None:
+    """Write ``concurrent_source`` to the file while a candidate carrying the tool's change is validating."""
+    validate = Config.validate_with_runtime
+
+    def validate_after_concurrent_edit(data: object, runtime_paths: RuntimePaths, **kwargs: Any) -> Config:  # noqa: ANN401
+        if (
+            "Agent change" in json.dumps(data, default=str)
+            and config_path.read_text(encoding="utf-8") != concurrent_source
+        ):
+            config_path.write_text(concurrent_source, encoding="utf-8")
+        return validate(data, runtime_paths, **kwargs)
+
+    monkeypatch.setattr(Config, "validate_with_runtime", staticmethod(validate_after_concurrent_edit))
+
+
+@pytest.mark.parametrize("writer", ["patch", "update_agent", "create_agent", "create_team"])
+def test_config_write_refuses_a_file_edited_while_it_validated(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    writer: str,
+) -> None:
+    """A dashboard save or hand edit landing while a tool change validates is kept, and the tool change is refused."""
+    config_path = tmp_path / "config.yaml"
+    config = Config.model_validate(
+        {
+            "administrators": ["@admin:example.org"],
+            "models": {"default": {"provider": "openai", "id": "test-model"}},
+            "agents": {"talent": {"display_name": "Talent", "role": "Original"}},
+        },
+    )
+    write_config_yaml(config, config_path)
+    concurrent = config.authored_model_dump()
+    concurrent["agents"]["talent"]["display_name"] = "Saved from the dashboard"
+    concurrent_source = yaml.safe_dump(concurrent, sort_keys=True)
+    _write_concurrent_edit_while_validating(monkeypatch, config_path, concurrent_source)
+    config_manager = _config_manager(config_path)
+    writers = {
+        "patch": lambda: config_manager.manage_config(
+            operation="patch",
+            changes=[{"op": "replace", "path": "/agents/talent/role", "value": "Agent change"}],
+        ),
+        "update_agent": lambda: config_manager.manage_agent(
+            operation="update",
+            agent_name="talent",
+            role="Agent change",
+        ),
+        "create_agent": lambda: config_manager.manage_agent(
+            operation="create",
+            agent_name="helper",
+            display_name="Helper",
+            role="Agent change",
+        ),
+        "create_team": lambda: config_manager.manage_team(
+            team_name="reviewers",
+            display_name="Reviewers",
+            role="Agent change",
+            agents=["talent"],
+        ),
+    }
+
+    with tool_runtime_context(
+        _caller_context(config_manager, config, agent_name="talent", requester_id="@admin:example.org"),
+    ):
+        result = writers[writer]()
+
+    assert "configuration file changed" in result
+    assert "NOT applied" in result
+    assert config_path.read_text(encoding="utf-8") == concurrent_source

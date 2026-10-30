@@ -75,7 +75,6 @@ def _runtime_paths(tmp_path: Path) -> RuntimePaths:
 
 def _publish_committed_runtime_config(api_app: object, config: Config) -> None:
     context = main._app_context(api_app)
-    context.config_data = config.authored_model_dump()
     context.runtime_config = config
     context.config_load_result = main.ConfigLoadResult(success=True)
 

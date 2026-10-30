@@ -378,6 +378,35 @@ class TestUpdateOwnConfig:
         finally:
             config_path.unlink(missing_ok=True)
 
+    def test_update_refuses_a_file_edited_while_it_validated(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """A dashboard save or hand edit landing while the update validates is kept, and the update is refused."""
+        config, config_path = _make_config(
+            agents={"coder": AgentConfig(display_name="Coder", role="Old role")},
+        )
+        try:
+            concurrent = config.authored_model_dump()
+            concurrent["agents"]["coder"]["display_name"] = "Saved from the dashboard"
+            concurrent_source = yaml.safe_dump(concurrent, sort_keys=True)
+            validate = Config.validate_with_runtime
+
+            def validate_after_concurrent_edit(data: object, runtime_paths: RuntimePaths, **kwargs: object) -> Config:
+                if "Agent change" in json.dumps(data, default=str) and (
+                    config_path.read_text(encoding="utf-8") != concurrent_source
+                ):
+                    config_path.write_text(concurrent_source, encoding="utf-8")
+                return validate(data, runtime_paths, **kwargs)
+
+            monkeypatch.setattr(Config, "validate_with_runtime", staticmethod(validate_after_concurrent_edit))
+            tool = _self_config_tools(agent_name="coder", config_path=config_path)
+            with _as_requester(tool):
+                result = tool.update_own_config(role="Agent change")
+
+            assert "configuration file changed" in result
+            assert "NOT applied" in result
+            assert config_path.read_text(encoding="utf-8") == concurrent_source
+        finally:
+            config_path.unlink(missing_ok=True)
+
     def test_update_own_config_advances_registered_api_snapshot_generation(self) -> None:
         """Tool-side self-config writes should advance the in-process API generation immediately."""
         _, config_path = _make_config(
@@ -395,7 +424,10 @@ class TestUpdateOwnConfig:
 
             assert "Successfully" in result
             assert main._app_context(main.app).generation > initial_generation
-            assert main._app_context(main.app).config_data["agents"]["coder"]["role"] == "New role"
+            assert (
+                main._app_context(main.app).runtime_config.authored_model_dump()["agents"]["coder"]["role"]
+                == "New role"
+            )
         finally:
             config_path.unlink(missing_ok=True)
 

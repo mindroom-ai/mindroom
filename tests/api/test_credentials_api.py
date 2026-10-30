@@ -67,7 +67,6 @@ def _config_with_worker_scope(
 def _publish_committed_runtime_config(api_app: object, config: Config) -> None:
     """Publish one committed config snapshot for dashboard credential tests."""
     context = main._app_context(api_app)
-    context.config_data = config.authored_model_dump()
     context.runtime_config = config
     context.config_load_result = main.ConfigLoadResult(success=True)
 

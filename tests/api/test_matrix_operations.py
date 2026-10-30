@@ -30,15 +30,6 @@ def _add_test_team_to_runtime_config() -> None:
         if context.runtime_config is None:
             msg = "runtime config should be loaded"
             raise AssertionError(msg)
-        context.config_data["teams"] = {
-            "test_team": {
-                "display_name": "Test Team",
-                "role": "A test team",
-                "agents": ["test_agent"],
-                "rooms": ["team_room"],
-                "mode": "coordinate",
-            },
-        }
         context.runtime_config.teams["test_team"] = TeamConfig(
             display_name="Test Team",
             role="A test team",
@@ -56,7 +47,6 @@ def _add_room_metadata_to_runtime_config(room_key: str) -> None:
         if context.runtime_config is None:
             msg = "runtime config should be loaded"
             raise AssertionError(msg)
-        context.config_data.setdefault("rooms", {})[room_key] = {"description": "Room-only metadata"}
         context.runtime_config.rooms[room_key] = RoomConfig(description="Room-only metadata")
 
 
@@ -785,30 +775,14 @@ class TestMatrixOperations:
         first_runtime = constants.resolve_primary_runtime_paths(config_path=tmp_path / "first.yaml", process_env={})
         second_runtime = constants.resolve_primary_runtime_paths(config_path=tmp_path / "second.yaml", process_env={})
 
-        def _fake_snapshot_read(
-            _request: Any,  # noqa: ANN401
-            reader: Any,  # noqa: ANN401
-        ) -> tuple[dict[str, Any], constants.RuntimePaths]:
+        def _fake_snapshot_read(_request: Any) -> tuple[Config, constants.RuntimePaths]:  # noqa: ANN401
             main.initialize_api_app(main.app, second_runtime)
-            return (
-                reader(
-                    {
-                        "agents": {
-                            "old_agent": {
-                                "display_name": "Old",
-                                "role": "Test",
-                                "rooms": [],
-                            },
-                        },
-                    },
-                ),
-                first_runtime,
+            config = Config.model_validate(
+                {"agents": {"old_agent": {"display_name": "Old", "role": "Test", "rooms": []}}},
             )
+            return config, first_runtime
 
-        monkeypatch.setattr(
-            "mindroom.api.matrix_operations.read_committed_config_and_runtime",
-            _fake_snapshot_read,
-        )
+        monkeypatch.setattr("mindroom.api.matrix_operations.read_committed_runtime_config", _fake_snapshot_read)
 
         with (
             patch(

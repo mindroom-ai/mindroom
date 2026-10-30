@@ -11,6 +11,7 @@ from pydantic import ValidationError
 
 from mindroom import yaml_io
 from mindroom.api import config_lifecycle
+from mindroom.config.commit import ConfigCommit
 from mindroom.config.main import (
     Config,
     ConfigRuntimeValidationError,
@@ -354,22 +355,23 @@ async def apply_config_change(
         # Apply the specific change
         _set_nested_value(config_dict, config_path_str, new_value)
 
+        def commit_change() -> ConfigCommit:
+            commit = ConfigCommit.from_payload(config_dict, runtime_paths)
+            config_lifecycle.commit_config(runtime_paths, commit, loaded=config)
+            return commit
+
         try:
-            saved = await asyncio.to_thread(
-                config_lifecycle.validate_and_persist_config_payload,
-                config_dict,
-                runtime_paths,
-            )
+            commit = await asyncio.to_thread(commit_change)
         except (ValidationError, ConfigRuntimeValidationError) as ve:
             return format_invalid_config_message(ve, footer=_CONFIG_CHANGE_REJECTED_MESSAGE)
 
         # Startup-pinned settings (the shared event journal store, background tool jobs) keep their in-force
         # value until restart; saying the change affects new interactions would be untrue for them.
         restart_notices = []
-        if pending_background_tool_jobs_restart(saved, runtime_paths):
+        if pending_background_tool_jobs_restart(commit.config, runtime_paths):
             restart_notices.append("⚠️ Background tool jobs keep their startup setting until MindRoom restarts.")
         in_force_journal = describe_in_force_event_journal(runtime_paths)
-        if in_force_journal is not None and pending_event_journal_restart(saved, runtime_paths):
+        if in_force_journal is not None and pending_event_journal_restart(commit.config, runtime_paths):
             restart_notices.append(
                 f"⚠️ The event journal in force is still {in_force_journal}; the new value applies after MindRoom restarts.",
             )

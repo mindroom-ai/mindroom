@@ -5,7 +5,7 @@ import asyncio
 import json
 from collections.abc import Callable, Generator
 from datetime import UTC, datetime, timedelta
-from functools import cache
+from functools import cache, partial
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -17,8 +17,12 @@ from fastapi.testclient import TestClient
 from jwt.algorithms import RSAAlgorithm
 
 from mindroom.api import config_lifecycle
+from mindroom.config.commit import ConfigCommit
+from mindroom.config.main import Config, load_config
 
 if TYPE_CHECKING:
+    from starlette.requests import Request
+
     from mindroom.constants import RuntimePaths
 
 
@@ -219,3 +223,32 @@ def calls_on_event_loop(monkeypatch: pytest.MonkeyPatch) -> Callable[[object, st
         return on_loop
 
     return record
+
+
+def save_config(request: "Request", payload: dict[str, Any], *, expected_generation: int | None = None) -> int:
+    """Commit a dashboard structured save and return its generation."""
+    build = partial(ConfigCommit.from_payload, payload)
+    return config_lifecycle.commit_dashboard_config(request, build, expected_generation=expected_generation).generation
+
+
+def save_raw_config(request: "Request", source: str, *, expected_generation: int | None = None) -> int:
+    """Commit a dashboard raw save and return its generation."""
+    build = partial(ConfigCommit.from_source, source)
+    return config_lifecycle.commit_dashboard_config(request, build, expected_generation=expected_generation).generation
+
+
+def commit_tool_change(
+    payload: dict[str, Any],
+    runtime_paths: "RuntimePaths",
+    *,
+    loaded: Config | None = None,
+) -> Config:
+    """Commit a change the way a tool does: validated, and refused when the file changed since `loaded` was read.
+
+    Without `loaded`, the tool loads the file right before committing.
+    """
+    if loaded is None:
+        loaded = load_config(runtime_paths, tolerate_plugin_load_errors=True)
+    commit = ConfigCommit.from_payload(payload, runtime_paths)
+    config_lifecycle.commit_config(runtime_paths, commit, loaded=loaded)
+    return commit.config

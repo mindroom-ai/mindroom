@@ -198,7 +198,6 @@ def _test_indexing_settings(base_id: str = "docs") -> IndexingSettings:
 
 def _publish_api_config(api_app: object, config: Config) -> None:
     context = main._app_context(api_app)
-    context.config_data = config.authored_model_dump()
     context.runtime_config = config
     context.config_load_result = main.ConfigLoadResult(success=True)
 

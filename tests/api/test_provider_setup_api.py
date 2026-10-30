@@ -32,7 +32,6 @@ def _hosted_config() -> Config:
 
 def _publish_config(config: Config) -> None:
     context = main._app_context(app)
-    context.config_data = config.authored_model_dump()
     context.runtime_config = config
     context.config_load_result = main.ConfigLoadResult(success=True)
 

@@ -13,7 +13,7 @@ import yaml
 from agno.tools import Toolkit
 from pydantic import BaseModel, ConfigDict, JsonValue, ValidationError, model_validator
 
-from mindroom.api.config_lifecycle import persist_runtime_validated_config, validate_and_persist_config_payload
+from mindroom.api.config_lifecycle import commit_config
 from mindroom.authorization import (
     is_platform_administrator,
     is_sender_allowed_for_agent_credential_management,
@@ -21,6 +21,7 @@ from mindroom.authorization import (
 )
 from mindroom.commands.parsing import get_command_help
 from mindroom.config.agent import AgentConfig, TeamConfig
+from mindroom.config.commit import ConfigCommit
 from mindroom.config.main import (
     Config,
     ConfigRuntimeValidationError,
@@ -655,10 +656,10 @@ class ConfigManagerTools(Toolkit):
             normalized_changes = _normalize_patch_changes(changes)
             _reject_redaction_markers(normalized_changes)
             candidate, changed_paths = _apply_config_patch(authored, normalized_changes)
-            validated_config = Config.validate_with_runtime(candidate, self.runtime_paths)
-            _reject_normalized_root_nulls(normalized_changes, validated_config.authored_model_dump())
+            commit = ConfigCommit.from_payload(candidate, self.runtime_paths)
+            _reject_normalized_root_nulls(normalized_changes, commit.config.authored_model_dump())
             if not dry_run:
-                persist_runtime_validated_config(validated_config, self.runtime_paths)
+                commit_config(self.runtime_paths, commit, loaded=config)
         except _ConfigPatchError as exc:
             return f"Error: {exc}\n\n{_CONFIG_CHANGE_REJECTED_MESSAGE}"
         except (ValidationError, ConfigRuntimeValidationError) as exc:
@@ -888,6 +889,12 @@ class ConfigManagerTools(Toolkit):
         if self._help_text is None:
             self._help_text = get_command_help()
         return self._help_text
+
+    def _commit_authored_config(self, config: Config) -> Config:
+        """Commit an in-place edit of the loaded `config`, refused when the file changed since; return what runs."""
+        commit = ConfigCommit.from_payload(config.authored_model_dump(), self.runtime_paths)
+        commit_config(self.runtime_paths, commit, loaded=config)
+        return commit.config
 
     def _load_config_or_error(
         self,
@@ -1230,11 +1237,7 @@ class ConfigManagerTools(Toolkit):
             # Add to config
             config.agents[agent_name] = new_agent
 
-            # Save config
-            persisted_config = validate_and_persist_config_payload(
-                config.authored_model_dump(),
-                self.runtime_paths,
-            )
+            persisted_config = self._commit_authored_config(config)
 
             oauth_guidance = _oauth_onboarding_guidance(
                 persisted_config,
@@ -1343,11 +1346,7 @@ class ConfigManagerTools(Toolkit):
             if not changes:
                 return "No changes made. All provided values are the same as current configuration."
 
-            # Save config
-            persisted_config = validate_and_persist_config_payload(
-                config.authored_model_dump(),
-                self.runtime_paths,
-            )
+            persisted_config = self._commit_authored_config(config)
 
             oauth_guidance = _oauth_onboarding_guidance(
                 persisted_config,
@@ -1400,8 +1399,7 @@ class ConfigManagerTools(Toolkit):
             # Add to config
             config.teams[team_name] = new_team
 
-            # Save config
-            validate_and_persist_config_payload(config.authored_model_dump(), self.runtime_paths)
+            self._commit_authored_config(config)
 
             return (
                 f"✅ Successfully created team '{team_name}'!\n\n"

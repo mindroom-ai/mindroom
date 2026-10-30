@@ -170,7 +170,6 @@ def _publish_committed_runtime_config(
     main.initialize_api_app(api_app, runtime_paths)
     context = main._app_context(api_app)
     runtime_config = Config.validate_with_runtime(authored_payload, runtime_paths)
-    context.config_data = runtime_config.authored_model_dump()
     context.runtime_config = runtime_config
     context.config_load_result = config_lifecycle.ConfigLoadResult(success=True)
     context.auth_state = None
@@ -206,7 +205,6 @@ def test_config_lifecycle_published_snapshot_owns_optional_runtime_fields(tmp_pa
     snapshot = main.ApiSnapshot(
         generation=7,
         runtime_paths=first_runtime,
-        config_data={"agents": {"old": {"display_name": "Old"}}},
         runtime_config=runtime_config,
         config_load_result=load_result,
         source_fingerprint="old-source",
@@ -217,7 +215,6 @@ def test_config_lifecycle_published_snapshot_owns_optional_runtime_fields(tmp_pa
 
     assert preserved.generation == 7
     assert preserved.runtime_paths == first_runtime
-    assert preserved.config_data is snapshot.config_data
     assert preserved.runtime_config is runtime_config
     assert preserved.config_load_result is load_result
     assert preserved.source_fingerprint == "old-source"
@@ -226,7 +223,6 @@ def test_config_lifecycle_published_snapshot_owns_optional_runtime_fields(tmp_pa
     cleared = config_lifecycle._published_snapshot(
         snapshot,
         runtime_paths=second_runtime,
-        config_data={},
         runtime_config=None,
         config_load_result=None,
         source_fingerprint=None,
@@ -235,7 +231,6 @@ def test_config_lifecycle_published_snapshot_owns_optional_runtime_fields(tmp_pa
 
     assert cleared.generation == 8
     assert cleared.runtime_paths == second_runtime
-    assert cleared.config_data == {}
     assert cleared.runtime_config is None
     assert cleared.config_load_result is None
     assert cleared.source_fingerprint is None
@@ -441,7 +436,7 @@ async def test_supabase_bearer_check_skips_malformed_tokens_and_leaves_event_loo
     request = Request({"type": "http", "method": "GET", "path": "/api/config/agents", "headers": []})
     config_lifecycle.store_request_snapshot(
         request,
-        config_lifecycle.ApiSnapshot(generation=1, runtime_paths=runtime_paths, config_data={}, auth_state=auth_state),
+        config_lifecycle.ApiSnapshot(generation=1, runtime_paths=runtime_paths, auth_state=auth_state),
     )
 
     for malformed in ("x", "header.payload", "a.b.c.d", "a.b." + "c" * 16 * 1024):
@@ -604,7 +599,7 @@ def test_initialize_api_app_initializes_fresh_app_state(tmp_path: Path) -> None:
     main.initialize_api_app(fresh_app, runtime_paths)
 
     assert main._app_runtime_paths(fresh_app) == runtime_paths
-    assert main._app_context(fresh_app).config_data == {}
+    assert main._app_context(fresh_app).runtime_config is None
     assert hasattr(config_lifecycle.require_api_state(fresh_app).config_lock, "acquire")
     assert auth._app_auth_state(fresh_app).runtime_paths == runtime_paths
 
@@ -684,12 +679,12 @@ def test_initialize_api_app_clears_config_cache_when_config_path_changes(tmp_pat
 
     main.initialize_api_app(fresh_app, first_runtime)
     config_lifecycle.load_config_into_app(first_runtime, fresh_app)
-    assert set(main._app_context(fresh_app).config_data["agents"]) == {"first"}
+    assert set(main._app_context(fresh_app).runtime_config.authored_model_dump()["agents"]) == {"first"}
     assert main._app_context(fresh_app).source_fingerprint is not None
 
     main.initialize_api_app(fresh_app, second_runtime)
 
-    assert main._app_context(fresh_app).config_data == {}
+    assert main._app_context(fresh_app).runtime_config is None
     assert main._app_context(fresh_app).source_fingerprint is None
 
 
@@ -711,12 +706,12 @@ def test_initialize_api_app_clears_config_cache_when_runtime_changes(tmp_path: P
 
     main.initialize_api_app(fresh_app, runtime_one)
     config_lifecycle.load_config_into_app(runtime_one, fresh_app)
-    assert set(main._app_context(fresh_app).config_data["agents"]) == {"first"}
+    assert set(main._app_context(fresh_app).runtime_config.authored_model_dump()["agents"]) == {"first"}
     assert main._app_context(fresh_app).source_fingerprint is not None
 
     main.initialize_api_app(fresh_app, runtime_two)
 
-    assert main._app_context(fresh_app).config_data == {}
+    assert main._app_context(fresh_app).runtime_config is None
     assert main._app_context(fresh_app).source_fingerprint is None
 
 
@@ -783,7 +778,7 @@ def test_load_config_into_app_discards_stale_results_after_runtime_swap(tmp_path
     context = main._app_context(fresh_app)
     assert context.runtime_paths == second_runtime
     assert context.config_load_result == config_lifecycle.ConfigLoadResult(success=True)
-    assert set(context.config_data["agents"]) == {"second"}
+    assert set(context.runtime_config.authored_model_dump()["agents"]) == {"second"}
 
 
 def test_load_config_into_app_ignores_runtime_mismatches_after_api_runtime_swap(tmp_path: Path) -> None:
@@ -820,14 +815,14 @@ def test_load_config_into_app_ignores_runtime_mismatches_after_api_runtime_swap(
 
     main.initialize_api_app(fresh_app, first_runtime)
     assert config_lifecycle.load_config_into_app(first_runtime, fresh_app).loaded
-    assert set(main._app_context(fresh_app).config_data["agents"]) == {"first"}
+    assert set(main._app_context(fresh_app).runtime_config.authored_model_dump()["agents"]) == {"first"}
 
     main.initialize_api_app(fresh_app, second_runtime)
     assert config_lifecycle.load_config_into_app(second_runtime, fresh_app).loaded
-    assert set(main._app_context(fresh_app).config_data["agents"]) == {"second"}
+    assert set(main._app_context(fresh_app).runtime_config.authored_model_dump()["agents"]) == {"second"}
 
     assert not config_lifecycle.load_config_into_app(first_runtime, fresh_app).loaded
-    assert set(main._app_context(fresh_app).config_data["agents"]) == {"second"}
+    assert set(main._app_context(fresh_app).runtime_config.authored_model_dump()["agents"]) == {"second"}
     assert main._app_context(fresh_app).config_load_result == config_lifecycle.ConfigLoadResult(success=True)
 
 
@@ -852,7 +847,7 @@ def test_api_lifespan_loads_config_from_injected_runtime(
         storage_path=tmp_path / "storage",
     )
     main.initialize_api_app(main.app, runtime_paths)
-    main._app_context(main.app).config_data = {"agents": {"wrong": {"display_name": "Wrong"}}}
+    main._app_context(main.app).runtime_config = Config.model_validate({"agents": {"wrong": {"display_name": "Wrong"}}})
 
     async def _idle_watch_config(
         stop_event: asyncio.Event,
@@ -3859,6 +3854,37 @@ def test_save_raw_config_source_can_recover_from_invalid_reload(
     assert load_response.json()["agents"]["recovered_agent"]["display_name"] == "Recovered Agent"
 
 
+@pytest.mark.parametrize("endpoint", ["save", "raw"])
+def test_config_saves_validate_off_the_event_loop(
+    test_client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+    endpoint: str,
+) -> None:
+    """Validation loads plugins and can take seconds, so neither save endpoint runs it on the event loop."""
+    config = test_client.post("/api/config/load").json()
+    on_event_loop: list[bool] = []
+    validate = Config.validate_with_runtime
+
+    def validate_recording_loop(data: object, runtime_paths: constants.RuntimePaths, **kwargs: object) -> Config:
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            on_event_loop.append(False)
+        else:
+            on_event_loop.append(True)
+        return validate(data, runtime_paths, **kwargs)
+
+    monkeypatch.setattr(Config, "validate_with_runtime", staticmethod(validate_recording_loop))
+    if endpoint == "save":
+        response = test_client.put("/api/config/save", json=config)
+    else:
+        response = test_client.put("/api/config/raw", json={"source": yaml.safe_dump(config)})
+
+    assert response.status_code == 200, response.text
+    assert on_event_loop
+    assert not any(on_event_loop)
+
+
 def test_config_generation_headers_protect_full_and_raw_save_endpoints(
     test_client: TestClient,
     temp_config_file: Path,
@@ -4098,7 +4124,7 @@ def test_api_config_load_does_not_serve_stale_cache_after_invalid_reload(temp_co
 
     assert response.status_code == 422
     assert "Could not parse configuration YAML" in response.json()["detail"][0]["msg"]
-    assert "test_agent" in main._app_context(main.app).config_data["agents"]
+    assert "test_agent" in main._app_context(main.app).runtime_config.authored_model_dump()["agents"]
 
 
 @pytest.mark.parametrize(
@@ -4206,7 +4232,7 @@ def test_load_config_into_app_omits_legacy_null_optional_sections(tmp_path: Path
 
     config_lifecycle.load_config_into_app(runtime_paths, main.app)
 
-    config_data = main._app_context(main.app).config_data
+    config_data = main._app_context(main.app).runtime_config.authored_model_dump()
     assert "teams" not in config_data
     assert "plugins" not in config_data
 
@@ -5118,24 +5144,24 @@ def test_protected_read_keeps_auth_time_snapshot_after_runtime_swap(tmp_path: Pa
             },
         },
     }
-    original_read = config_lifecycle.read_committed_config
+    original_read = config_lifecycle.read_committed_runtime_config
 
-    def _swap_then_read(request: Request, reader: Callable[[dict[str, Any]], object]) -> object:
+    def _swap_then_read(request: Request) -> object:
         _publish_committed_runtime_config(main.app, runtime_b, payload_b)
-        return original_read(request, reader)
+        return original_read(request)
 
     with (
-        patch.object(config_lifecycle, "read_committed_config", side_effect=_swap_then_read),
+        patch.object(config_lifecycle, "read_committed_runtime_config", side_effect=_swap_then_read),
         TestClient(main.app) as client,
     ):
         _publish_committed_runtime_config(main.app, runtime_a, payload_a)
-        response = client.get(
-            "/api/rooms",
+        response = client.post(
+            "/api/config/load",
             headers={"Authorization": "Bearer key-a"},
         )
 
     assert response.status_code == 200
-    assert response.json() == ["old-room"]
+    assert response.json()["agents"]["assistant"]["rooms"] == ["old-room"]
 
 
 def test_protected_write_rejects_runtime_swap_after_auth(tmp_path: Path) -> None:
@@ -5153,25 +5179,14 @@ def test_protected_write_rejects_runtime_swap_after_auth(tmp_path: Path) -> None
     payload_a = _authored_config_payload("old")
     payload_b = _authored_config_payload("new")
     runtime_b.config_path.write_text(yaml.safe_dump(payload_b), encoding="utf-8")
-    original_replace = config_lifecycle.replace_committed_config
+    original_commit = config_lifecycle.commit_dashboard_config
 
-    def _swap_then_replace(
-        request: Request,
-        new_config: dict[str, Any],
-        *,
-        error_prefix: str,
-        expected_generation: int | None = None,
-    ) -> int:
+    def _swap_then_commit(*args: object, **kwargs: object) -> object:
         _publish_committed_runtime_config(main.app, runtime_b, payload_b)
-        return original_replace(
-            request,
-            new_config,
-            error_prefix=error_prefix,
-            expected_generation=expected_generation,
-        )
+        return original_commit(*args, **kwargs)
 
     with (
-        patch.object(config_lifecycle, "replace_committed_config", side_effect=_swap_then_replace),
+        patch.object(config_lifecycle, "commit_dashboard_config", side_effect=_swap_then_commit),
         TestClient(main.app) as client,
     ):
         _publish_committed_runtime_config(main.app, runtime_a, payload_a)
@@ -5240,25 +5255,14 @@ def test_protected_raw_write_rejects_runtime_swap_after_auth(tmp_path: Path) -> 
     payload_b = _authored_config_payload("new")
     source_b = yaml.safe_dump(payload_b, sort_keys=True)
     runtime_b.config_path.write_text(source_b, encoding="utf-8")
-    original_replace = config_lifecycle.replace_raw_config_source
+    original_commit = config_lifecycle.commit_dashboard_config
 
-    def _swap_then_replace(
-        request: Request,
-        source: str,
-        *,
-        error_prefix: str,
-        expected_generation: int | None = None,
-    ) -> int:
+    def _swap_then_commit(*args: object, **kwargs: object) -> object:
         _publish_committed_runtime_config(main.app, runtime_b, payload_b)
-        return original_replace(
-            request,
-            source,
-            error_prefix=error_prefix,
-            expected_generation=expected_generation,
-        )
+        return original_commit(*args, **kwargs)
 
     with (
-        patch.object(config_lifecycle, "replace_raw_config_source", side_effect=_swap_then_replace),
+        patch.object(config_lifecycle, "commit_dashboard_config", side_effect=_swap_then_commit),
         TestClient(main.app) as client,
     ):
         _publish_committed_runtime_config(main.app, runtime_a, payload_a)
@@ -5287,19 +5291,14 @@ def test_protected_crud_write_rejects_runtime_swap_after_auth(tmp_path: Path) ->
     payload_a = _authored_config_payload("old")
     payload_b = _authored_config_payload("new")
     runtime_b.config_path.write_text(yaml.safe_dump(payload_b), encoding="utf-8")
-    original_write = config_lifecycle.write_committed_config
+    original_commit = config_lifecycle.commit_dashboard_config
 
-    def _swap_then_write(
-        request: Request,
-        mutate: Callable[[dict[str, Any]], object],
-        *,
-        error_prefix: str,
-    ) -> object:
+    def _swap_then_commit(*args: object, **kwargs: object) -> object:
         _publish_committed_runtime_config(main.app, runtime_b, payload_b)
-        return original_write(request, mutate, error_prefix=error_prefix)
+        return original_commit(*args, **kwargs)
 
     with (
-        patch.object(config_lifecycle, "write_committed_config", side_effect=_swap_then_write),
+        patch.object(config_lifecycle, "commit_dashboard_config", side_effect=_swap_then_commit),
         TestClient(main.app) as client,
     ):
         _publish_committed_runtime_config(main.app, runtime_a, payload_a)

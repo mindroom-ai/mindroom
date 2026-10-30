@@ -10,6 +10,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from fastapi import FastAPI
+from starlette.requests import Request
 
 import mindroom.orchestration.config_lifecycle as lifecycle_module
 from mindroom.api import config_lifecycle as api_config_lifecycle
@@ -20,6 +21,7 @@ from mindroom.config.reload_status import ConfigReloadStatus
 from mindroom.orchestration.config_lifecycle import _ReplacementDrainState
 from mindroom.orchestration.runtime import create_logged_task
 from mindroom.response_admission import ResponseAdmissionGate
+from tests.api.conftest import save_config
 from tests.conftest import (
     bind_runtime_paths,
     make_config_reload_lifecycle,
@@ -1224,7 +1226,7 @@ async def test_reload_that_loses_to_a_dashboard_save_adopts_nothing_and_stays_pe
 
     def load_then_lose_to_dashboard_save(paths: object) -> object:
         attempt = real_load_attempt(paths)
-        api_config_lifecycle._build_and_commit_replacement(api_app, saved_payload, error_prefix="save")
+        save_config(Request({"type": "http", "app": api_app}), saved_payload)
         return attempt
 
     monkeypatch.setattr(api_config_lifecycle, "load_config_attempt", load_then_lose_to_dashboard_save)
@@ -1240,7 +1242,7 @@ async def test_reload_that_loses_to_a_dashboard_save_adopts_nothing_and_stays_pe
     snapshot = api_config_lifecycle.require_api_state(api_app).snapshot
     assert snapshot.config_load_result is not None
     assert snapshot.config_load_result.success
-    assert snapshot.config_data["agents"]["agent1"]["display_name"] == "Saved From Dashboard"
+    assert snapshot.runtime_config.authored_model_dump()["agents"]["agent1"]["display_name"] == "Saved From Dashboard"
     lifecycle.apply_update_plan.assert_not_awaited()
     assert lifecycle.status == ConfigReloadStatus(status="pending")
     assert lifecycle.watched_source_files == frozenset()

@@ -251,7 +251,6 @@ def _publish_config(
 ) -> None:
     context = main._app_context(api_app)
     runtime_config = Config.validate_with_runtime(payload, runtime_paths)
-    context.config_data = runtime_config.authored_model_dump()
     context.runtime_config = runtime_config
     context.config_load_result = main.ConfigLoadResult(success=True)
     context.auth_state = auth.ApiAuthState(

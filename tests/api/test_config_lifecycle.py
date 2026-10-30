@@ -23,6 +23,7 @@ from mindroom.config.main import Config, ConfigRuntimeValidationError, load_conf
 from mindroom.config.personal_agents import read_personal_agent_roster
 from mindroom.event_journal.opening import record_opened_event_journal
 from mindroom.personal_agents import _append_personal_agent_roster_entry
+from tests.api.conftest import commit_tool_change, save_config, save_raw_config
 from tests.conftest import test_runtime_paths
 from tests.test_generated_agents import BASE as GENERATED_BASE
 from tests.test_generated_agents import _created as created_entry
@@ -58,7 +59,6 @@ def _make_api_app(runtime_paths: constants.RuntimePaths) -> FastAPI:
         snapshot=config_lifecycle.ApiSnapshot(
             generation=0,
             runtime_paths=runtime_paths,
-            config_data={},
         ),
     )
     config_lifecycle.register_api_app(api_app)
@@ -131,11 +131,11 @@ def test_approved_egress_structured_save_preserves_authored_tool_defaults(
     )
 
     if writer == "persist":
-        config_lifecycle.validate_and_persist_config_payload(payload, paths)
+        commit_tool_change(payload, paths)
     else:
         api_app = _make_api_app(paths)
         assert config_lifecycle.load_config_into_app(paths, api_app).loaded
-        config_lifecycle.replace_committed_config(_request_for(api_app), payload, error_prefix="Save failed")
+        save_config(_request_for(api_app), payload)
 
     saved = yaml.safe_load(config_path.read_text())
     assert saved.get("defaults", {}) == defaults
@@ -175,9 +175,9 @@ def test_save_refuses_a_name_a_personal_agent_reserved_after_validation(
     monkeypatch.setattr(Config, "validate_with_runtime", staticmethod(validate_then_reserve))
     request = _request_for(api_app)
     writers = {
-        "persist": lambda: config_lifecycle.validate_and_persist_config_payload(payload, paths),
-        "structured": lambda: config_lifecycle.replace_committed_config(request, payload, error_prefix="Save failed"),
-        "raw": lambda: config_lifecycle.replace_raw_config_source(request, yaml.dump(payload), error_prefix="Save"),
+        "persist": lambda: commit_tool_change(payload, paths),
+        "structured": lambda: save_config(request, payload),
+        "raw": lambda: save_raw_config(request, yaml.dump(payload)),
     }
     with pytest.raises((ConfigRuntimeValidationError, HTTPException), match=r"agents\.mind_alice_smith collides"):
         writers[writer]()
@@ -199,7 +199,7 @@ def test_save_refuses_a_created_agent_name(tmp_path: Path, section: str) -> None
     )
 
     with pytest.raises(ConfigRuntimeValidationError, match=rf"{section}\.creator_research collides"):
-        config_lifecycle.validate_and_persist_config_payload(payload, paths)
+        commit_tool_change(payload, paths)
 
     assert paths.config_path.read_bytes() == saved
 
@@ -213,7 +213,7 @@ class TestLoadAndValidationFailure:
         assert config_lifecycle.load_config_into_app(runtime_paths, api_app).loaded
         snapshot = _snapshot(api_app)
         assert snapshot.generation == 1
-        assert snapshot.config_data["agents"]["test_agent"]["display_name"] == "Test Agent"
+        assert snapshot.runtime_config.authored_model_dump()["agents"]["test_agent"]["display_name"] == "Test Agent"
         assert snapshot.runtime_config is not None
         assert snapshot.config_load_result == config_lifecycle.ConfigLoadResult(success=True)
         assert snapshot.source_fingerprint is not None
@@ -234,7 +234,7 @@ class TestLoadAndValidationFailure:
 
         snapshot = _snapshot(api_app)
         rewritten = config_path.read_bytes()
-        assert snapshot.config_data["administrators"] == ["@owner:example.com"]
+        assert snapshot.runtime_config.authored_model_dump()["administrators"] == ["@owner:example.com"]
         assert snapshot.source_fingerprint == hashlib.sha256(rewritten).hexdigest()
         assert b"global_users" not in rewritten
         backup_path = config_path.with_name(f"{config_path.name}.pre-membership-access")
@@ -250,7 +250,7 @@ class TestLoadAndValidationFailure:
         """Reads against a never-loaded app surface the shared missing-config error."""
         api_app = _make_api_app(runtime_paths)
         with pytest.raises(HTTPException) as exc_info:
-            config_lifecycle.read_committed_config(_request_for(api_app), lambda config: config)
+            config_lifecycle.read_committed_runtime_config(_request_for(api_app))
         assert exc_info.value.status_code == 500
 
     def test_validation_failure_keeps_last_good_committed_config(self, loaded_app: FastAPI) -> None:
@@ -267,13 +267,12 @@ class TestLoadAndValidationFailure:
         assert failed.config_load_result is not None
         assert failed.config_load_result.success is False
         assert failed.config_load_result.error_status_code == 422
-        # Last good committed payload and runtime config are preserved, not clobbered.
-        assert failed.config_data == snapshot.config_data
+        # The last good runtime config is preserved, not clobbered.
         assert failed.runtime_config is snapshot.runtime_config
 
         # But reads surface the load failure instead of silently serving stale data.
         with pytest.raises(HTTPException) as exc_info:
-            config_lifecycle.read_committed_config(_request_for(loaded_app), lambda config: config)
+            config_lifecycle.read_committed_runtime_config(_request_for(loaded_app))
         assert exc_info.value.status_code == 422
 
     def test_malformed_yaml_then_good_edit_recovers(self, loaded_app: FastAPI) -> None:
@@ -281,13 +280,15 @@ class TestLoadAndValidationFailure:
         runtime_paths = _snapshot(loaded_app).runtime_paths
         runtime_paths.config_path.write_text("agents: [unclosed\n", encoding="utf-8")
         assert not config_lifecycle.load_config_into_app(runtime_paths, loaded_app).loaded
-        assert _snapshot(loaded_app).config_data["agents"]["test_agent"]["role"] == "A test agent"
+        assert (
+            _snapshot(loaded_app).runtime_config.authored_model_dump()["agents"]["test_agent"]["role"] == "A test agent"
+        )
 
         _write_config(runtime_paths.config_path, VALID_CONFIG)
         assert config_lifecycle.load_config_into_app(runtime_paths, loaded_app).loaded
         recovered = _snapshot(loaded_app)
         assert recovered.config_load_result == config_lifecycle.ConfigLoadResult(success=True)
-        result = config_lifecycle.read_committed_config(_request_for(loaded_app), lambda config: dict(config))
+        result = config_lifecycle.read_committed_runtime_config(_request_for(loaded_app))[0].authored_model_dump()
         assert result["agents"]["test_agent"]["display_name"] == "Test Agent"
 
 
@@ -298,10 +299,9 @@ class TestGenerationTrackingAndWrites:
         """A write carrying a stale client generation is rejected with 409."""
         current_generation = _snapshot(loaded_app).generation
         with pytest.raises(HTTPException) as exc_info:
-            config_lifecycle.replace_committed_config(
+            save_config(
                 _request_for(loaded_app),
                 copy.deepcopy(VALID_CONFIG),
-                error_prefix="test replace",
                 expected_generation=current_generation - 1,
             )
         assert exc_info.value.status_code == 409
@@ -312,17 +312,16 @@ class TestGenerationTrackingAndWrites:
         new_config = copy.deepcopy(VALID_CONFIG)
         new_config["agents"]["test_agent"]["role"] = "An updated test agent"
 
-        new_generation = config_lifecycle.replace_committed_config(
+        new_generation = save_config(
             _request_for(loaded_app),
             new_config,
-            error_prefix="test replace",
             expected_generation=before.generation,
         )
 
         after = _snapshot(loaded_app)
         assert new_generation == before.generation + 1
         assert after.generation == new_generation
-        assert after.config_data["agents"]["test_agent"]["role"] == "An updated test agent"
+        assert after.runtime_config.authored_model_dump()["agents"]["test_agent"]["role"] == "An updated test agent"
         on_disk = yaml.safe_load(before.runtime_paths.config_path.read_text(encoding="utf-8"))
         assert on_disk["agents"]["test_agent"]["role"] == "An updated test agent"
 
@@ -331,7 +330,6 @@ class TestGenerationTrackingAndWrites:
         config_lifecycle.write_committed_config(
             _request_for(loaded_app),
             lambda config: config["agents"]["test_agent"]["instructions"].append("Extra instruction"),
-            error_prefix="test write",
         )
         committed = _snapshot(loaded_app)
         # The file watcher reloads after every write; the matching source fingerprint
@@ -346,7 +344,6 @@ class TestGenerationTrackingAndWrites:
             config_lifecycle.write_committed_config(
                 _request_for(loaded_app),
                 lambda config: config.__setitem__("agents", "not-a-mapping"),
-                error_prefix="test write",
             )
         assert exc_info.value.status_code == 422
         assert _snapshot(loaded_app) is before
@@ -357,18 +354,16 @@ class TestGenerationTrackingAndWrites:
         raw_source = "# keep this comment\n" + yaml.dump(VALID_CONFIG)
 
         with pytest.raises(HTTPException) as exc_info:
-            config_lifecycle.replace_raw_config_source(
+            save_raw_config(
                 _request_for(loaded_app),
                 raw_source,
-                error_prefix="test raw replace",
                 expected_generation=before.generation - 1,
             )
         assert exc_info.value.status_code == 409
 
-        new_generation = config_lifecycle.replace_raw_config_source(
+        new_generation = save_raw_config(
             _request_for(loaded_app),
             raw_source,
-            error_prefix="test raw replace",
             expected_generation=before.generation,
         )
         assert new_generation == before.generation + 1
@@ -382,14 +377,16 @@ class TestGenerationTrackingAndWrites:
 
         # Unlike mutations, full replacement skips the failed-load gate so the
         # raw editor can repair a broken config through the API.
-        config_lifecycle.replace_committed_config(
+        save_config(
             _request_for(loaded_app),
             copy.deepcopy(VALID_CONFIG),
-            error_prefix="test replace",
         )
         recovered = _snapshot(loaded_app)
         assert recovered.config_load_result == config_lifecycle.ConfigLoadResult(success=True)
-        assert yaml.safe_load(runtime_paths.config_path.read_text(encoding="utf-8")) == recovered.config_data
+        assert (
+            yaml.safe_load(runtime_paths.config_path.read_text(encoding="utf-8"))
+            == recovered.runtime_config.authored_model_dump()
+        )
 
 
 class TestRequestSnapshotLifecycle:
@@ -403,13 +400,12 @@ class TestRequestSnapshotLifecycle:
         config_lifecycle.write_committed_config(
             _request_for(loaded_app),
             lambda config: config["agents"]["test_agent"].__setitem__("role", "Changed mid-request"),
-            error_prefix="test write",
         )
         assert _snapshot(loaded_app).generation == pinned.generation + 1
 
         # The pinned request keeps reading its original coherent snapshot.
         assert config_lifecycle.committed_generation(request) == pinned.generation
-        role = config_lifecycle.read_committed_config(request, lambda config: config["agents"]["test_agent"]["role"])
+        role = config_lifecycle.read_committed_runtime_config(request)[0].agents["test_agent"].role
         assert role == "A test agent"
         runtime_config, _ = config_lifecycle.read_committed_runtime_config(request)
         assert runtime_config is pinned.runtime_config
@@ -423,16 +419,16 @@ class TestRequestSnapshotLifecycle:
         config_lifecycle.write_committed_config(
             _request_for(loaded_app),
             lambda config: config["agents"]["test_agent"]["instructions"].append("Won the race"),
-            error_prefix="test write",
         )
         with pytest.raises(HTTPException) as exc_info:
             config_lifecycle.write_committed_config(
                 stale_request,
                 lambda config: config["agents"]["test_agent"]["instructions"].append("Lost the race"),
-                error_prefix="test write",
             )
         assert exc_info.value.status_code == 409
-        instructions = _snapshot(loaded_app).config_data["agents"]["test_agent"]["instructions"]
+        instructions = _snapshot(loaded_app).runtime_config.authored_model_dump()["agents"]["test_agent"][
+            "instructions"
+        ]
         assert instructions == ["Test instruction", "Won the race"]
 
 
@@ -449,7 +445,7 @@ class TestFileWatcherReload:
         assert config_lifecycle.load_config_into_app(before.runtime_paths, loaded_app).loaded
         after = _snapshot(loaded_app)
         assert after.generation == before.generation + 1
-        assert after.config_data["agents"]["test_agent"]["role"] == "Edited outside the API"
+        assert after.runtime_config.authored_model_dump()["agents"]["test_agent"]["role"] == "Edited outside the API"
 
     def test_stale_load_is_discarded_after_concurrent_commit(
         self,
@@ -485,13 +481,16 @@ class TestExternalWriterPublishing:
         payload = copy.deepcopy(VALID_CONFIG)
         payload["agents"]["test_agent"]["role"] = "Updated by an external writer"
 
-        config_lifecycle.validate_and_persist_config_payload(payload, before.runtime_paths)
+        commit_tool_change(payload, before.runtime_paths)
 
         after = _snapshot(loaded_app)
         assert after.generation == before.generation + 1
-        assert after.config_data["agents"]["test_agent"]["role"] == "Updated by an external writer"
+        assert (
+            after.runtime_config.authored_model_dump()["agents"]["test_agent"]["role"]
+            == "Updated by an external writer"
+        )
         on_disk = yaml.safe_load(before.runtime_paths.config_path.read_text(encoding="utf-8"))
-        assert on_disk == after.config_data
+        assert on_disk == after.runtime_config.authored_model_dump()
 
 
 class TestCommitRevision:
@@ -520,7 +519,6 @@ class TestCommitRevision:
             config_lifecycle.write_committed_config(
                 request,
                 lambda config: config["defaults"].__setitem__("markdown", False),
-                error_prefix="test write",
             )
 
         assert exc_info.value.status_code == 409
@@ -547,10 +545,9 @@ class TestEventJournalPendingRestart:
 
         moved = copy.deepcopy(VALID_CONFIG)
         moved["event_journal"] = {"backend": "postgres", "database_url": "postgresql://journal.invalid/moved"}
-        config_lifecycle.replace_committed_config(
+        save_config(
             _request_for(loaded_app),
             moved,
-            error_prefix="test replace",
         )
 
         on_disk = yaml.safe_load(before.runtime_paths.config_path.read_text(encoding="utf-8"))
@@ -578,7 +575,6 @@ class TestConcurrencySmoke:
                 config_lifecycle.write_committed_config(
                     request,
                     lambda config: config["agents"]["test_agent"]["instructions"].append(marker),
-                    error_prefix="test write",
                 )
                 outcomes[marker] = "ok"
             except HTTPException as exc:
@@ -597,10 +593,10 @@ class TestConcurrencySmoke:
         after = _snapshot(loaded_app)
         # Exactly one writer wins each generation; losers see the stale-write conflict.
         assert after.generation == before.generation + len(winners)
-        instructions = after.config_data["agents"]["test_agent"]["instructions"]
+        instructions = after.runtime_config.authored_model_dump()["agents"]["test_agent"]["instructions"]
         assert instructions[0] == "Test instruction"
         assert set(instructions[1:]) == winners
         # No torn state: the on-disk file matches the committed snapshot exactly.
         on_disk = yaml.safe_load(after.runtime_paths.config_path.read_text(encoding="utf-8"))
-        assert on_disk == after.config_data
+        assert on_disk == after.runtime_config.authored_model_dump()
         assert after.config_load_result == config_lifecycle.ConfigLoadResult(success=True)
