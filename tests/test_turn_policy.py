@@ -629,6 +629,25 @@ async def test_router_ignores_thread_with_unavailable_policy_history(config: Con
     assert plan.ignore_reason == "router"
 
 
+@pytest.mark.asyncio
+async def test_router_only_mention_gets_guidance_even_when_thread_policy_history_degraded(config: Config) -> None:
+    """A question to the router itself needs no thread policy history, so degraded history does not drop it."""
+    policy = _policy_for(config, ROUTER_AGENT_NAME)
+    room = _room_with_members(_SENDER, _entity_id(config, "general").full_id, _entity_id(config, "research").full_id)
+    context = _context(
+        mentioned=[_entity_id(config, ROUTER_AGENT_NAME)],
+        thread_id="$thread:localhost",
+        thread_history=[make_visible_message(sender=_SENDER, body="earlier")],
+        full_history=False,
+    )
+    assert context.planning_thread_history_unavailable
+
+    plan = await _plan(policy, room, _dispatch(context, agent_name=ROUTER_AGENT_NAME))
+
+    assert plan.kind == "respond"
+    assert plan.response_action.kind == "reject"
+
+
 def test_prepared_dispatch_rejects_mismatched_envelope_target() -> None:
     """PreparedDispatch enforces that envelope and dispatch describe the same delivery."""
     target = MessageTarget.resolve(_ROOM_ID, None, _EVENT_ID)

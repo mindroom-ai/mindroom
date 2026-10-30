@@ -584,6 +584,11 @@ def test_orchestrator_unbind_revokes_active_stream(gateway: Gateway, monkeypatch
         assert websocket.receive_bytes() == b"screen"
         assert client.portal is not None
         client.portal.call(coordinator.unbind)
+        # The sessions close at once, not only once the stream's maintenance notices the runtime is gone.
+        sessions = config_lifecycle.app_state(app).computer_sessions
+        assert sessions is not None
+        with pytest.raises(ComputerError):
+            sessions.get(session["session_id"])
         with pytest.raises(WebSocketDisconnect):
             websocket.receive_bytes()
     assert client.get(path, headers=headers).status_code == 401

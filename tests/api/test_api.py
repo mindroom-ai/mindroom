@@ -5290,6 +5290,13 @@ def test_invalid_dashboard_url_fails_startup(tmp_path: Path) -> None:
         )
 
 
+def test_platform_auth_checks_the_account_of_the_runtime_it_serves(tmp_path: Path) -> None:
+    """The platform account a dashboard session must belong to comes from the served runtime's `ACCOUNT_ID`."""
+    settings = auth._build_auth_settings(_runtime_paths(tmp_path, process_env={"ACCOUNT_ID": "account-1"}))
+
+    assert settings.account_id == "account-1"
+
+
 def test_trusted_upstream_assertion_ignored_when_disabled(tmp_path: Path) -> None:
     """A signed upstream assertion must do nothing unless trusted upstream auth is enabled."""
     api_app = _trusted_auth_test_app(_runtime_paths(tmp_path))

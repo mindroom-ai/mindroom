@@ -495,6 +495,9 @@ def test_team_request_responder_filtering_uses_actual_member_ids(tmp_path: Path)
     )
 
     assert filtered == [ids["worker"], ids["squad"]]
+    # A configured team whose own bot is not running cannot answer, however materializable its members are.
+    not_running = _ResponderAvailability(materializable_agent_names={"worker"}, live_entity_names=frozenset())
+    assert policy._filter_materializable_responders([ids["squad"]], not_running) == []
 
 
 @pytest.fixture
