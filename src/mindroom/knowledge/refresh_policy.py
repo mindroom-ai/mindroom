@@ -156,12 +156,10 @@ def refresh_trigger(
             cooldown_seconds=_refresh_on_access_cooldown_seconds(lookup, config),
         )
 
-    cooldown_seconds = (
-        _REFRESH_RETRY_COOLDOWN_SECONDS
-        if availability is KnowledgeAvailability.INITIALIZING
-        else _refresh_cooldown_seconds(lookup, config, availability)
+    return _RefreshTrigger(
+        availability_while_refreshing=availability,
+        cooldown_seconds=_refresh_cooldown_seconds(lookup, config, availability),
     )
-    return _RefreshTrigger(availability_while_refreshing=availability, cooldown_seconds=cooldown_seconds)
 
 
 def refresh_cooldown_key(
@@ -179,22 +177,12 @@ def refresh_cooldown_key(
     scheduler probe rules out an in-flight refresh.
     """
     refresh_target = refresh_target_for_published_index_key(lookup.key)
-    if availability in (KnowledgeAvailability.READY, KnowledgeAvailability.INITIALIZING):
-        return (refresh_target, availability, lookup.key.indexing_settings)
-    return (refresh_target, availability, _refresh_retry_settings(lookup, config, runtime_paths, availability))
-
-
-def _refresh_retry_settings(
-    lookup: PublishedIndexResolution,
-    config: Config,
-    runtime_paths: RuntimePaths,
-    availability: KnowledgeAvailability,
-) -> Hashable | None:
-    if availability is KnowledgeAvailability.CONFIG_MISMATCH:
-        return lookup.key.indexing_settings
+    settings: Hashable | None = lookup.key.indexing_settings
     if availability is KnowledgeAvailability.REFRESH_FAILED:
-        return (lookup.key.indexing_settings, *_failed_refresh_retry_fingerprint(lookup, config, runtime_paths))
-    return None
+        settings = (lookup.key.indexing_settings, *_failed_refresh_retry_fingerprint(lookup, config, runtime_paths))
+    elif availability is KnowledgeAvailability.STALE:
+        settings = None
+    return (refresh_target, availability, settings)
 
 
 def _failed_refresh_retry_fingerprint(

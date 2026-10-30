@@ -99,14 +99,10 @@ def published_index_lookup(
     base_id: str,
     reader: object | None,
     *,
-    availability: KnowledgeAvailability | None = None,
     storage_root: str = "storage",
     knowledge_path: str | None = None,
 ) -> PublishedIndexResolution:
-    """Return a lookup of ``base_id``: published and served by ``reader``, or unpublished when ``reader`` is None.
-
-    ``availability`` defaults to READY for a published base and INITIALIZING for an unpublished one.
-    """
+    """Return a lookup of ``base_id``: published, ready, and served by ``reader``, or unpublished when it is None."""
     knowledge_path = knowledge_path or f"{storage_root}/{base_id}"
     settings = fake_indexing_settings(base_id, storage_root=storage_root, knowledge_path=knowledge_path)
     publication = (
@@ -120,8 +116,6 @@ def published_index_lookup(
             published_revision=None,
         )
     )
-    if availability is None:
-        availability = KnowledgeAvailability.INITIALIZING if reader is None else KnowledgeAvailability.READY
     return PublishedIndexResolution(
         key=PublishedIndexKey(
             base_id=base_id,
@@ -132,5 +126,5 @@ def published_index_lookup(
         reader=cast("PublishedIndexReader | None", reader),
         publication=publication,
         status=RefreshStatus(),
-        availability=availability,
+        availability=KnowledgeAvailability.INITIALIZING if reader is None else KnowledgeAvailability.READY,
     )

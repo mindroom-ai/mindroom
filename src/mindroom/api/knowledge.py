@@ -8,7 +8,6 @@ import uuid
 from contextlib import suppress
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from functools import partial
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -203,23 +202,6 @@ def _request_refresh_scheduler(request: Request) -> KnowledgeRefreshScheduler | 
     return config_lifecycle.app_state(request.app).knowledge_refresh_scheduler
 
 
-def _schedule_refresh(
-    config: Config,
-    base_id: str,
-    runtime_paths: RuntimePaths,
-    *,
-    request: Request,
-) -> None:
-    refresh_scheduler = _request_refresh_scheduler(request)
-    if refresh_scheduler is None:
-        return
-    refresh_scheduler.schedule_refresh(
-        base_id,
-        config=config,
-        runtime_paths=runtime_paths,
-    )
-
-
 def _schedule_refreshes(
     config: Config,
     base_ids: tuple[str, ...],
@@ -227,10 +209,12 @@ def _schedule_refreshes(
     *,
     request: Request,
 ) -> None:
+    refresh_scheduler = _request_refresh_scheduler(request)
+    if refresh_scheduler is None:
+        return
     for base_id in dict.fromkeys(base_ids):
-        if config.get_knowledge_base_config(base_id).mode != "semantic":
-            continue
-        _schedule_refresh(config, base_id, runtime_paths, request=request)
+        if config.get_knowledge_base_config(base_id).mode == "semantic":
+            refresh_scheduler.schedule_refresh(base_id, config=config, runtime_paths=runtime_paths)
 
 
 def _same_source_base_ids(
@@ -321,7 +305,7 @@ async def _mark_committed_mutation_and_schedule_refresh(
     return cancelled_after_source_changed
 
 
-def _index_status_sync(
+async def _index_status(
     config: Config,
     base_id: str,
     runtime_paths: RuntimePaths,
@@ -332,7 +316,8 @@ def _index_status_sync(
     if base_config.mode == "files" and base_config.git is None:
         return KnowledgeIndexStatus(availability=KnowledgeAvailability.READY)
     try:
-        return get_knowledge_index_status(
+        return await asyncio.to_thread(
+            get_knowledge_index_status,
             base_id,
             config=config,
             runtime_paths=runtime_paths,
@@ -341,16 +326,6 @@ def _index_status_sync(
     except ValueError:
         logger.warning("Could not resolve published knowledge index state", base_id=base_id, exc_info=True)
         return KnowledgeIndexStatus()
-
-
-async def _index_status(
-    config: Config,
-    base_id: str,
-    runtime_paths: RuntimePaths,
-    *,
-    refreshing: bool,
-) -> KnowledgeIndexStatus:
-    return await asyncio.to_thread(partial(_index_status_sync, config, base_id, runtime_paths, refreshing=refreshing))
 
 
 def _redacted_last_error(value: str | None) -> str | None:

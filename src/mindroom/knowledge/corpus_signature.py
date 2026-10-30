@@ -77,7 +77,7 @@ def file_signature(file_path: Path, snapshot: Path | None = None) -> FileSignatu
 def _scan_file_signatures(
     files: Iterable[tuple[str, Path]],
     known: Mapping[str, FileSignature],
-) -> Iterator[tuple[str, FileSignature, Path]]:
+) -> Iterator[tuple[str, tuple[FileSignature, Path]]]:
     """Sign listed files, reusing a ``known`` signature while the file's ctime and size still match it.
 
     As git does, an unchanged stat counts as unchanged bytes, so most files of a large corpus are not read again;
@@ -96,7 +96,7 @@ def _scan_file_signatures(
                     and stat.S_ISREG(status.st_mode)
                     and recorded[:2] == (status.st_ctime_ns, status.st_size)
                 ):
-                    yield relative_path, recorded, path
+                    yield relative_path, (recorded, path)
                     continue
                 descriptor = open_regular_file_at(parent_fd, path.name)
                 try:
@@ -105,7 +105,7 @@ def _scan_file_signatures(
                     os.close(descriptor)
             except (OSError, ValueError):
                 continue
-            yield relative_path, signature, path
+            yield relative_path, (signature, path)
 
 
 def scan_corpus(
@@ -129,10 +129,7 @@ def scan_corpus(
         )
         files = knowledge_files_from_relative_paths(config, base_id, knowledge_root, tracked_paths)
     listed = sorted((path.relative_to(knowledge_root).as_posix(), path) for path in files)
-    return {
-        relative_path: (signature, path)
-        for relative_path, signature, path in _scan_file_signatures(listed, known or {})
-    }
+    return dict(_scan_file_signatures(listed, known or {}))
 
 
 def corpus_signature(file_signatures: Mapping[str, FileSignature]) -> str:
@@ -152,7 +149,5 @@ async def scan_file_signatures_async(files: Sequence[tuple[str, Path]]) -> dict[
     signatures: dict[str, tuple[FileSignature, Path]] = {}
     for start in range(0, len(files), _SIGNATURE_SCAN_CHUNK):
         batch = files[start : start + _SIGNATURE_SCAN_CHUNK]
-        scanned = await asyncio.to_thread(lambda batch=batch: list(_scan_file_signatures(batch, {})))
-        for relative_path, signature, file_path in scanned:
-            signatures[relative_path] = (signature, file_path)
+        signatures.update(await asyncio.to_thread(lambda batch=batch: list(_scan_file_signatures(batch, {}))))
     return signatures

@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import sqlite3
 from contextlib import closing
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Literal
 
 from mindroom.background_tasks import run_blocking_until_complete
@@ -73,7 +74,8 @@ _LEGACY_SCHEMA_VERSION = 1
 # tests/test_knowledge_legacy_index_state.py::test_a_second_start_changes_nothing_and_an_interrupted_conversion_finishes,
 # tests/test_knowledge_legacy_index_state.py::test_a_failed_conversion_is_not_retried_over_a_later_publication,
 # tests/test_knowledge_legacy_index_state.py::test_a_failed_conversion_leaves_the_base_unpublished_until_a_refresh_rebuilds_it,
-# tests/test_knowledge_legacy_index_state.py::test_a_private_base_converts_where_private_indexes_live.
+# tests/test_knowledge_legacy_index_state.py::test_a_private_base_converts_where_private_indexes_live,
+# tests/test_knowledge_legacy_index_state.py::test_a_linked_base_directory_is_left_alone.
 def _legacy_publication(payload: dict[str, object], retired: str | None) -> Publication | None:
     settings = settings_from_json(payload.get("settings"))
     collection = optional_str(payload.get("collection"))
@@ -122,7 +124,19 @@ def _legacy_refresh_status(payload: dict[str, object]) -> RefreshStatus:
 # Coverage: tests/test_knowledge_legacy_index_state.py::test_a_published_base_with_its_retired_collection_converts_and_refreshes_without_embedding,
 # tests/test_knowledge_legacy_index_state.py::test_an_interrupted_build_with_a_journal_resumes_where_it_stopped,
 # tests/test_knowledge_legacy_index_state.py::test_an_interrupted_bulk_copy_is_discarded_and_the_publication_kept.
-def _legacy_snapshot(path: Path) -> tuple[str, IndexingSettings, dict[str, object]] | None:
+@dataclass(frozen=True)
+class _LegacySnapshot:
+    """A checkpoint or seal: the collection it names, its settings, and what its claims described."""
+
+    collection: str
+    settings: IndexingSettings
+    revision: str | None
+    total_files: int | None
+    #: Whether the snapshot itself recorded claims.
+    claimed: bool
+
+
+def _legacy_snapshot(path: Path) -> _LegacySnapshot | None:
     payload = load_json_object(path)
     if payload is None:
         return None
@@ -130,15 +144,21 @@ def _legacy_snapshot(path: Path) -> tuple[str, IndexingSettings, dict[str, objec
     settings = settings_from_json(payload.get("settings"))
     if collection is None or settings is None:
         return None
-    return collection, settings, payload
+    return _LegacySnapshot(
+        collection=collection,
+        settings=settings,
+        revision=optional_str(payload.get("target_revision")),
+        total_files=_legacy_count(payload.get("total_files")),
+        claimed=bool(payload.get("completed")),
+    )
 
 
-def _interrupted_copy(storage: Path, snapshot: dict[str, object]) -> bool:
+def _interrupted_copy(storage: Path, checkpoint: _LegacySnapshot) -> bool:
     try:
         journal = (storage / _LEGACY_JOURNAL_FILE).read_text(encoding="utf-8")
     except OSError:
         journal = ""
-    return not snapshot.get("completed") and not journal.strip()
+    return not checkpoint.claimed and not journal.strip()
 
 
 # LEGACY_COMPAT: Knowledge collection files without their own state tables.
@@ -156,7 +176,8 @@ def _interrupted_copy(storage: Path, snapshot: dict[str, object]) -> bool:
 # tests/test_knowledge_legacy_index_state.py::test_a_publication_of_a_resumed_candidate_converts_with_its_claims,
 # tests/test_knowledge_legacy_index_state.py::test_an_interrupted_build_with_a_journal_resumes_where_it_stopped,
 # tests/test_knowledge_legacy_index_state.py::test_a_failed_first_build_keeps_its_error_and_resumes_its_candidate,
-# tests/test_knowledge_legacy_index_state.py::test_a_failed_upgrade_of_a_candidate_leaves_the_published_collection_converted.
+# tests/test_knowledge_legacy_index_state.py::test_a_failed_upgrade_of_a_candidate_leaves_the_published_collection_converted,
+# tests/test_knowledge_legacy_index_state.py::test_a_collection_an_unfinished_record_names_is_resumed.
 def _upgrade_collection(collection: KnowledgeCollection, meta: CollectionMeta) -> None:
     with closing(sqlite3.connect(collection.file, timeout=30.0)) as connection:
         if connection.execute("PRAGMA user_version").fetchone()[0] != _LEGACY_SCHEMA_VERSION:
@@ -198,14 +219,11 @@ def _migrate_base(storage: Path) -> None:
             {"unreadable_legacy_state": state_file.read_text(encoding="utf-8", errors="replace")},
         )
     else:
-        seals = {
-            name: snapshot
-            for name in (_LEGACY_PUBLISHED_SEAL_FILE, _LEGACY_RETIRED_SEAL_FILE)
-            if (snapshot := _legacy_snapshot(storage / name)) is not None
-        }
-        retired_seal = seals.get(_LEGACY_RETIRED_SEAL_FILE)
-        publication = _legacy_publication(payload, None if retired_seal is None else retired_seal[0])
+        published_seal = _legacy_snapshot(storage / _LEGACY_PUBLISHED_SEAL_FILE)
+        retired_seal = _legacy_snapshot(storage / _LEGACY_RETIRED_SEAL_FILE)
+        publication = _legacy_publication(payload, None if retired_seal is None else retired_seal.collection)
         # Collections first, so a publication is written only once the collection it names can be read.
+        seals = [seal for seal in (published_seal, retired_seal) if seal is not None]
         _upgrade_named_collections(storage, payload, publication, seals)
         if publication is not None:
             save_publication(storage, publication)
@@ -230,35 +248,29 @@ def _upgrade_named_collections(
     storage: Path,
     payload: dict[str, object],
     publication: Publication | None,
-    seals: dict[str, tuple[str, IndexingSettings, dict[str, object]]],
+    seals: list[_LegacySnapshot],
 ) -> None:
     """Upgrade each schema-1 collection the legacy state names, with the settings and stage it names it under."""
+    published = None if publication is None else publication.collection
     named: dict[str, tuple[IndexingSettings, Literal["building", "complete"], str | None, int | None]] = {}
     checkpoint = _legacy_snapshot(storage / _LEGACY_CHECKPOINT_FILE)
     if checkpoint is not None:
-        collection, settings, snapshot = checkpoint
-        published = None if publication is None else publication.collection
-        if _interrupted_copy(storage, snapshot) and collection != published:
-            KnowledgeCollection(path=storage, name=collection).delete()
+        if _interrupted_copy(storage, checkpoint) and checkpoint.collection != published:
+            KnowledgeCollection(path=storage, name=checkpoint.collection).delete()
         else:
-            named[collection] = (
-                settings,
+            named[checkpoint.collection] = (
+                checkpoint.settings,
                 "building",
-                optional_str(snapshot.get("target_revision")),
-                _legacy_count(snapshot.get("total_files")),
+                checkpoint.revision,
+                checkpoint.total_files,
             )
     if publication is None:
         settings = settings_from_json(payload.get("settings"))
         collection = optional_str(payload.get("collection"))
         if settings is not None and collection is not None:
             named.setdefault(collection, (settings, "building", optional_str(payload.get("published_revision")), None))
-    for collection, settings, snapshot in seals.values():
-        named[collection] = (
-            settings,
-            "complete",
-            optional_str(snapshot.get("target_revision")),
-            _legacy_count(snapshot.get("total_files")),
-        )
+    for seal in seals:
+        named[seal.collection] = (seal.settings, "complete", seal.revision, seal.total_files)
     if publication is not None and publication.collection is not None:
         named[publication.collection] = (
             publication.settings,
@@ -268,7 +280,6 @@ def _upgrade_named_collections(
         )
     present = set(list_collection_names(storage))
     now = utc_now()
-    published = None if publication is None else publication.collection
     # The published collection first, so a failure upgrading another still leaves the live one readable.
     for collection, (settings, stage, revision, total_files) in sorted(
         named.items(),

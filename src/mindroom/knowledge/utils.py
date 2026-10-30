@@ -218,26 +218,24 @@ def _finish_base_knowledge_resolution(
     execution_identity: ToolExecutionIdentity | None,
 ) -> tuple[KnowledgeSource | None, KnowledgeAvailability, str | None]:
     """Finish one lookup on the caller's thread, including refresh scheduling."""
+    # A cold index has a resolution; None means the binding lookup raised.
+    if lookup is None:
+        return None, KnowledgeAvailability.REFRESH_FAILED, None
     # One instant per resolve: the poll-interval boundary must not be evaluated
     # against two different clock readings within a single turn.
     wall_now = datetime.now(tz=UTC)
-    refreshing = (
-        lookup is not None
-        and refresh_scheduler is not None
-        and refresh_scheduler.is_refreshing(refresh_target_for_published_index_key(lookup.key))
+    refreshing = refresh_scheduler is not None and refresh_scheduler.is_refreshing(
+        refresh_target_for_published_index_key(lookup.key),
     )
-    if lookup is not None and refreshing:
+    if refreshing:
         lookup = lookup.while_refreshing()
-    # A cold index has a resolution; None means the binding lookup raised.
-    availability = lookup.availability if lookup is not None else KnowledgeAvailability.REFRESH_FAILED
-    if lookup is not None and availability is KnowledgeAvailability.READY:
-        availability = ready_index_effective_availability(lookup, config, wall_now=wall_now)
+    availability = ready_index_effective_availability(lookup, config, wall_now=wall_now)
     source = (
         KnowledgeSource(description=_knowledge_source_description(base_id, config), index=lookup.reader)
-        if lookup is not None and lookup.reader is not None
+        if lookup.reader is not None
         else None
     )
-    if lookup is not None and refresh_scheduler is not None and not refreshing:
+    if refresh_scheduler is not None and not refreshing:
         availability = _schedule_refresh_for_availability(
             refresh_scheduler,
             base_id,
@@ -248,7 +246,7 @@ def _finish_base_knowledge_resolution(
             availability=availability,
             wall_now=wall_now,
         )
-    return source, availability, None if lookup is None else lookup.status.last_error
+    return source, availability, lookup.status.last_error
 
 
 def _agent_knowledge_base_ids(

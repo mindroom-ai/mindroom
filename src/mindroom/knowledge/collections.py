@@ -65,6 +65,10 @@ class CollectionSpace:
         """Return the published collection name this base's identity owns."""
         return _collection_name_for_base(self.base_id, self.knowledge_path)
 
+    def _owns(self, collection_name: str) -> bool:
+        """Return whether this base provably owns ``collection_name``: its default name or its candidate prefix."""
+        return collection_name == self._default_collection or collection_name.startswith(self._candidate_prefix)
+
 
 @dataclass(frozen=True)
 class KnowledgeChunk:
@@ -93,13 +97,8 @@ def open_collection(space: CollectionSpace, collection_name: str) -> KnowledgeCo
 
 
 def _owned_collection_names(space: CollectionSpace) -> list[str]:
-    """Return the collections this base provably owns: its default name and its candidate prefix."""
-    default_collection = space._default_collection
-    return [
-        name
-        for name in list_collection_names(space.storage_path)
-        if name == default_collection or name.startswith(space._candidate_prefix)
-    ]
+    """Return the collections this base provably owns."""
+    return [name for name in list_collection_names(space.storage_path) if space._owns(name)]
 
 
 def unusable_collection(error: Exception) -> bool:
@@ -226,9 +225,6 @@ def cleanup_superseded_collections(
     else in that directory is left alone and reported rather than deleted,
     because nothing here can prove who owns it.
     """
-    default_collection = space._default_collection
-    candidate_prefix = space._candidate_prefix
-
     try:
         collection_names = list_collection_names(space.storage_path)
     except Exception:
@@ -244,12 +240,12 @@ def cleanup_superseded_collections(
         for collection_name in collection_names:
             if collection_name in preserved:
                 continue
-            is_candidate = collection_name.startswith(candidate_prefix)
-            if not is_candidate and (candidates_only or collection_name != default_collection):
+            if not space._owns(collection_name):
+                unowned.append(collection_name)
+                continue
+            if candidates_only and collection_name == space._default_collection:
                 # Reclaiming abandoned candidates must never race a legacy
                 # published collection whose metadata predates this layout.
-                if collection_name != default_collection:
-                    unowned.append(collection_name)
                 continue
             try:
                 open_collection(space, collection_name).delete()
@@ -260,7 +256,7 @@ def cleanup_superseded_collections(
                     collection=collection_name,
                     exc_info=True,
                 )
-        for leftover in space.storage_path.glob(f"{default_collection}*.sqlite3.building*"):
+        for leftover in space.storage_path.glob(f"{space._default_collection}*.sqlite3.building*"):
             # A build killed before its rename, and its journal; no collection is ever read from these.
             leftover.unlink(missing_ok=True)
         if not candidates_only:

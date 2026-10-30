@@ -363,16 +363,16 @@ def get_published_index(
     # A publication whose settings differ only in ways queries do not see, such as chunking, keeps serving until the
     # refresh its config mismatch schedules replaces it.
     if publication is not None and publication.serves(key.indexing_settings):
-        try:
-            # Checked once per publication read: the reader picks the current publication at each search, so one
-            # that replaced this one since keeps the base searchable.
-            reader = _cached_reader(key, config=config, runtime_paths=runtime_paths) if collection_exists else None
-        except Exception:
-            logger.warning("Published knowledge index handle could not be opened", base_id=base_id, exc_info=True)
-            availability = KnowledgeAvailability.REFRESH_FAILED
-        else:
-            if reader is None and availability is KnowledgeAvailability.READY:
+        # Checked once per publication read: the reader picks the current publication at each search, so one that
+        # replaced this one since keeps the base searchable.
+        if collection_exists:
+            try:
+                reader = _cached_reader(key, config=config, runtime_paths=runtime_paths)
+            except Exception:
+                logger.warning("Published knowledge index handle could not be opened", base_id=base_id, exc_info=True)
                 availability = KnowledgeAvailability.REFRESH_FAILED
+        elif availability is KnowledgeAvailability.READY:
+            availability = KnowledgeAvailability.REFRESH_FAILED
     return PublishedIndexResolution(
         key=key,
         reader=reader,
@@ -523,7 +523,7 @@ def _mark_knowledge_source_changed(
     )
     for matching_key in matching_keys:
         mark_published_index_stale(matching_key, reason=reason)
-    return tuple(dict.fromkeys(key.base_id for key in matching_keys))
+    return tuple(key.base_id for key in matching_keys)
 
 
 async def mark_knowledge_source_changed_async(

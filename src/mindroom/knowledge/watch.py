@@ -224,8 +224,6 @@ class KnowledgeSourceWatcher:
                 if not changes or not _changes_include_indexable_path(target, config, changes):
                     continue
                 await self._schedule_refresh_for_target(target, config=config, runtime_paths=runtime_paths)
-        except asyncio.CancelledError:
-            raise
         except Exception:
             logger.exception(
                 "Knowledge filesystem watcher stopped after failure",
@@ -267,8 +265,6 @@ class KnowledgeSourceWatcher:
                     poll_interval_seconds=target.poll_interval_seconds,
                     git=target.git,
                 )
-        except asyncio.CancelledError:
-            raise
         except Exception:
             logger.exception("Knowledge poller stopped after failure", base_id=target.base_id, git=target.git)
         finally:

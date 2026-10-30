@@ -224,7 +224,18 @@ class KnowledgeCollection:
     def meta(self) -> CollectionMeta:
         """Return the collection's settings and lifecycle."""
         with closing(self._connect()) as connection:
-            return _read_meta(connection)
+            settings, stage, rebuild, revision, total_files, created_at, updated_at = connection.execute(
+                f"SELECT {_META_COLUMNS} FROM meta",  # noqa: S608 - fixed column list
+            ).fetchone()
+        return CollectionMeta(
+            settings=json.loads(settings),
+            stage=cast("Literal['building', 'complete']", stage),
+            rebuild=bool(rebuild),
+            revision=revision,
+            total_files=total_files,
+            created_at=created_at,
+            updated_at=updated_at,
+        )
 
     def files(self) -> dict[str, FileSignature]:
         """Return the file version each claimed source path's rows embed."""
@@ -418,21 +429,6 @@ def _write_meta(connection: sqlite3.Connection, meta: CollectionMeta) -> None:
             meta.created_at,
             meta.updated_at,
         ),
-    )
-
-
-def _read_meta(connection: sqlite3.Connection) -> CollectionMeta:
-    settings, stage, rebuild, revision, total_files, created_at, updated_at = connection.execute(
-        f"SELECT {_META_COLUMNS} FROM meta",  # noqa: S608 - fixed column list
-    ).fetchone()
-    return CollectionMeta(
-        settings=json.loads(settings),
-        stage=cast("Literal['building', 'complete']", stage),
-        rebuild=bool(rebuild),
-        revision=revision,
-        total_files=total_files,
-        created_at=created_at,
-        updated_at=updated_at,
     )
 
 

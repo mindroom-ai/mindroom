@@ -636,7 +636,7 @@ async def _refresh_locked(
         known = (
             None if publication.collection is None else await manager.published_file_signatures(publication.collection)
         )
-        if await manager.source_signature(known or {}) != publication.source_signature:
+        if await manager.source_signature(known) != publication.source_signature:
             source_changed = "source_changed"
     outcome = await manager.reindex_all(force_reindex=force_reindex)
     return _RefreshChildResult(
@@ -940,11 +940,6 @@ async def _run_subprocess_refresh_request(payload: bytes) -> _RefreshChildResult
     )
 
 
-def _parse_refresh_runner_args(argv: list[str] | None = None) -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Run one internal MindRoom knowledge refresh request.")
-    return parser.parse_args(argv)
-
-
 def _failed_child_result(error: Exception) -> _RefreshChildResult:
     """Return what a refresh child reports for an error it did not handle, credential-redacted."""
     return _RefreshChildResult(error=redact_credentials_in_text(str(error)) or type(error).__name__)
@@ -952,7 +947,7 @@ def _failed_child_result(error: Exception) -> _RefreshChildResult:
 
 def main(argv: list[str] | None = None) -> int:
     """Internal CLI used by scheduled knowledge refresh subprocesses."""
-    _parse_refresh_runner_args(argv)
+    argparse.ArgumentParser(description="Run one internal MindRoom knowledge refresh request.").parse_args(argv)
     setup_subprocess_logging()
     payload = sys.stdin.buffer.read()
     # Native libraries and configured handlers can retain stdout's descriptor.

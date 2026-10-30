@@ -121,10 +121,6 @@ class _CandidateProgress:
         """Return files still owed by the candidate."""
         return max(self.total - self.completed, 0)
 
-    def elapsed_seconds(self) -> float:
-        """Return wall-clock seconds since this refresh started working."""
-        return max(time.monotonic() - self.started_at, 0.0)
-
     def _fields(self) -> dict[str, object]:
         return {
             "base_id": self.base_id,
@@ -137,7 +133,7 @@ class _CandidateProgress:
             "pending": self.pending,
             "failed": self.failed,
             "retrying": self.retrying,
-            "elapsed_seconds": round(self.elapsed_seconds(), 3),
+            "elapsed_seconds": round(max(time.monotonic() - self.started_at, 0.0), 3),
         }
 
     def maybe_log(self) -> None:
@@ -340,8 +336,7 @@ class KnowledgeManager:
         try:
             await self._advance_candidate(run, indexer, progress)
         except Exception as exc:
-            if run.error is None:
-                run.record_error(str(exc))
+            run.record_error(str(exc))
             raise
         finally:
             progress.retrying = indexer.retry_count
@@ -368,14 +363,11 @@ class KnowledgeManager:
                 base_id=self.base_id,
             )
             return await self._new_candidate_run(publication=None, rebuild=force_reindex)
-        if force_reindex:
-            await self._delete_working(publication, keep=None)
-            return await self._new_candidate_run(publication=publication, rebuild=True)
-
-        chosen = await self._resumable_collection(publication)
+        # A forced rebuild trusts no working collection, so it resumes none and deletes them all.
+        chosen = None if force_reindex else await self._resumable_collection(publication)
         await self._delete_working(publication, keep=None if chosen is None else chosen[0].name)
         if chosen is None:
-            return await self._new_candidate_run(publication=publication, rebuild=False)
+            return await self._new_candidate_run(publication=publication, rebuild=force_reindex)
         collection, meta = chosen
         return _CandidateRun(
             collection=collection,

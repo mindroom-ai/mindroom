@@ -11,6 +11,7 @@ import time
 from contextlib import suppress
 from contextvars import Context
 from dataclasses import dataclass, field, replace
+from functools import partial
 from typing import TYPE_CHECKING
 
 from mindroom.embeddings.embedder_health import (
@@ -221,14 +222,7 @@ class KnowledgeRefreshScheduler:
             context=context,
         )
         self._tasks[target] = task
-        task.add_done_callback(
-            lambda completed, *, scheduled_target=target, scheduled=request: self._handle_done(
-                scheduled_target,
-                scheduled,
-                completed,
-            ),
-            context=context,
-        )
+        task.add_done_callback(partial(self._handle_done, target, request), context=context)
 
     def _handle_done(
         self,
