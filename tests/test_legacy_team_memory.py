@@ -405,11 +405,15 @@ async def test_a_file_copy_that_cannot_be_removed_stays_and_the_merge_finishes(s
 
 
 @pytest.mark.asyncio
-async def test_without_chroma_only_file_copies_merge_and_the_rest_waits_for_a_later_start(storage: Path) -> None:
-    """A start that cannot install Chroma merges file copies and leaves Mem0 copies; a start with Chroma merges them."""
+@pytest.mark.parametrize("missing", ["chroma", "config"])
+async def test_without_chroma_or_config_only_file_copies_merge_and_the_rest_waits(storage: Path, missing: str) -> None:
+    """A start that cannot install Chroma or load its config merges file copies; a later start merges the Mem0 ones."""
     runtime_paths = runtime_paths_for(_config(storage, "mem0"))
-    with patch.object(legacy_team_memory, "ensure_optional_deps", side_effect=ImportError("Missing dependencies")):
-        await _migrate(storage)
+    if missing == "chroma":
+        with patch.object(legacy_team_memory, "ensure_optional_deps", side_effect=ImportError("Missing dependencies")):
+            await _migrate(storage)
+    else:
+        await legacy_team_memory.migrate_team_memory(runtime_paths, None)
 
     assert (storage / "team_memory" / _TEAM / "MEMORY.md").exists()
     assert not (storage / "team_memory" / _TEAM / "chroma").exists()

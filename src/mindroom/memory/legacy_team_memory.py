@@ -6,7 +6,7 @@
 #   member's `agents/<member>/memory_files/team_<sorted members>/MEMORY.md`, each entry under one shared `[id=...]`.
 #   v2026.3.72 started both the copies and the replica key, so every native copy carries the key; only a planted
 #   record lacks one, and it counts as a turn of its own.
-# Last legacy release: v2026.10.696; replacement: unreleased; writes each team scope once, to
+# Last legacy release: v2026.10.705; replacement: unreleased; writes each team scope once, to
 #   `team_memory/<team scope>/`.
 # Handling: before serving, once per storage root, the copies merge into their team's store and leave the members.
 #   File entries union by id; a copy holding anything MindRoom did not write stays where it was. Mem0 copies merge
@@ -206,6 +206,7 @@ class _Record:
 class _MemberCopy:
     """One member store's team records in one Mem0 fact collection."""
 
+    store: Path
     client: Any
     collection: Any
     records: list[_Record]
@@ -265,7 +266,11 @@ def _merge_mem0_copies(runtime_paths: RuntimePaths, member_stores: list[Path]) -
                     copy.collection.delete(ids=list(batch))
             except Exception as error:
                 # The runtime reads only an agent's own records from its store, so a copy left there is never read.
-                logger.warning("Left Mem0 team copies a member store refused to delete", error=str(error))
+                logger.warning(
+                    "Left Mem0 team copies a member store refused to delete",
+                    path=str(copy.store),
+                    error=str(error),
+                )
                 all_removed = False
         if not all_removed:
             break
@@ -356,7 +361,7 @@ def _member_copies(store: Path) -> list[_MemberCopy]:
                 and metadata["user_id"].startswith(TEAM_SCOPE_PREFIX)
             ]
             if records:
-                copies.append(_MemberCopy(client, collection, records))
+                copies.append(_MemberCopy(store, client, collection, records))
     except Exception as error:
         logger.warning("Left a Mem0 store Chroma cannot read", path=str(store), error=str(error))
         return []
