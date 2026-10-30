@@ -492,7 +492,6 @@ class _MemoryAutoFlushWorker:
             if pending:
                 memories = await list_all_agent_memories(
                     scope.agent_name,
-                    self.runtime_paths.storage_root,
                     config,
                     self.runtime_paths,
                     limit=sys.maxsize,
@@ -560,7 +559,6 @@ class _MemoryAutoFlushWorker:
             append_agent_daily_memory(
                 f"{_flush_tag(session_id, last_turn.seq)} {summary}",
                 agent_name=scope.agent_name,
-                storage_path=self.runtime_paths.storage_root,
                 config=config,
                 runtime_paths=self.runtime_paths,
                 execution_identity=scope.execution_identity,

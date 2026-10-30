@@ -1,7 +1,11 @@
 import { useEffect, useState } from "react";
 import { Brain } from "lucide-react";
 
-import type { Config as MindRoomConfig, MemoryBackend } from "@/types/config";
+import type {
+  Config as MindRoomConfig,
+  MemoryBackend,
+  MemorySearchMode,
+} from "@/types/config";
 import { EditorPanel } from "@/components/shared/EditorPanel";
 import { FieldGroup } from "@/components/shared/FieldGroup";
 import { Input } from "@/components/ui/input";
@@ -33,18 +37,11 @@ const DEFAULT_MODELS: Record<string, string> = {
   sentence_transformers: "sentence-transformers/all-MiniLM-L6-v2",
 };
 
-const MODEL_PLACEHOLDERS: Record<string, string> = {
-  openai: "e.g. text-embedding-3-small",
-  ollama: "e.g. nomic-embed-text",
-  sentence_transformers: "e.g. sentence-transformers/all-MiniLM-L6-v2",
-};
-
 type MemorySettings = MindRoomConfig["memory"];
 
 /** MemoryConfig keys this page renders by hand; More settings shows the rest. */
 const MEMORY_EDITOR_FIELDS = [
   "backend",
-  "team_reads_member_memory",
   "embedder",
   "file",
   "search",
@@ -59,7 +56,6 @@ const EMBEDDER_EDITOR_FIELDS = [
 
 const DEFAULT_MEMORY_SETTINGS: MemorySettings = {
   backend: "mem0",
-  team_reads_member_memory: false,
   embedder: {
     provider: "openai",
     config: {
@@ -68,7 +64,6 @@ const DEFAULT_MEMORY_SETTINGS: MemorySettings = {
     },
   },
   file: {
-    path: "",
     max_entrypoint_lines: 200,
     max_entrypoint_tokens: 50000,
   },
@@ -172,8 +167,9 @@ function providerHelperText(provider: string): string {
   return "Choose your embedding provider";
 }
 
-function shouldShowHostField(provider: string): boolean {
-  return provider !== "sentence_transformers";
+function modelPlaceholder(provider: string): string {
+  const model = DEFAULT_MODELS[provider];
+  return model ? `e.g. ${model}` : "Model name";
 }
 
 function defaultEmbedderConfig(
@@ -223,27 +219,16 @@ export function MemoryConfig() {
     });
   };
 
-  const handleModelChange = (model: string) => {
+  const updateEmbedderConfig = (
+    updates: Partial<MemorySettings["embedder"]["config"]>,
+  ) => {
     applyMemoryConfig({
       ...localConfig,
       embedder: {
         ...localConfig.embedder,
         config: {
           ...localConfig.embedder.config,
-          model,
-        },
-      },
-    });
-  };
-
-  const handleHostChange = (host: string) => {
-    applyMemoryConfig({
-      ...localConfig,
-      embedder: {
-        ...localConfig.embedder,
-        config: {
-          ...localConfig.embedder.config,
-          host,
+          ...updates,
         },
       },
     });
@@ -266,52 +251,26 @@ export function MemoryConfig() {
     });
   };
 
-  const handleFilePathChange = (path: string) => {
+  const updateFile = (
+    updates: Partial<NonNullable<MemorySettings["file"]>>,
+  ) => {
     applyMemoryConfig({
       ...localConfig,
       file: {
         ...localConfig.file,
-        path,
+        ...updates,
       },
     });
   };
 
-  const handleSearchModeChange = (mode: "keyword" | "semantic") => {
+  const updateSearch = (
+    updates: Partial<NonNullable<MemorySettings["search"]>>,
+  ) => {
     applyMemoryConfig({
       ...localConfig,
       search: {
         ...localConfig.search,
-        mode,
-      },
-    });
-  };
-
-  const handleSearchIncludeChange = (value: string) => {
-    applyMemoryConfig({
-      ...localConfig,
-      search: {
-        ...localConfig.search,
-        include: parseIncludePatterns(value),
-      },
-    });
-  };
-
-  const handleIncludeEntrypointChange = (include_entrypoint: boolean) => {
-    applyMemoryConfig({
-      ...localConfig,
-      search: {
-        ...localConfig.search,
-        include_entrypoint,
-      },
-    });
-  };
-
-  const handleAutoFlushEnabled = (enabled: boolean) => {
-    applyMemoryConfig({
-      ...localConfig,
-      auto_flush: {
-        ...localConfig.auto_flush,
-        enabled,
+        ...updates,
       },
     });
   };
@@ -371,16 +330,12 @@ export function MemoryConfig() {
     });
   };
 
-  const handleSave = async () => {
-    return saveConfig();
-  };
-
   return (
     <EditorPanel
       icon={Brain}
       title="Memory Configuration"
       isDirty={isDirty}
-      onSave={handleSave}
+      onSave={saveConfig}
       onDelete={() => {}}
       showActions={true}
       disableSave={isLoading}
@@ -425,33 +380,6 @@ export function MemoryConfig() {
           </FieldGroup>
 
           <FieldGroup
-            label="Team Reads Member Memory"
-            helperText="Allow team-context memory reads to include member agent memories."
-            htmlFor="team-reads-member-memory"
-          >
-            <Select
-              value={String(localConfig.team_reads_member_memory ?? false)}
-              onValueChange={(value) =>
-                applyMemoryConfig({
-                  ...localConfig,
-                  team_reads_member_memory: parseBoolean(value),
-                })
-              }
-            >
-              <SelectTrigger
-                id="team-reads-member-memory"
-                className="transition-colors hover:border-ring"
-              >
-                <SelectValue />
-              </SelectTrigger>
-              <SelectContent>
-                <SelectItem value="true">Enabled</SelectItem>
-                <SelectItem value="false">Disabled</SelectItem>
-              </SelectContent>
-            </Select>
-          </FieldGroup>
-
-          <FieldGroup
             label="Embedder Provider"
             helperText={providerHelperText(localConfig.embedder.provider)}
             required
@@ -487,11 +415,8 @@ export function MemoryConfig() {
               id="model"
               type="text"
               value={localConfig.embedder.config.model}
-              onChange={(e) => handleModelChange(e.target.value)}
-              placeholder={
-                MODEL_PLACEHOLDERS[localConfig.embedder.provider] ||
-                "Model name"
-              }
+              onChange={(e) => updateEmbedderConfig({ model: e.target.value })}
+              placeholder={modelPlaceholder(localConfig.embedder.provider)}
               className="transition-colors hover:border-ring focus:border-ring"
             />
           </FieldGroup>
@@ -513,7 +438,7 @@ export function MemoryConfig() {
             </FieldGroup>
           )}
 
-          {shouldShowHostField(localConfig.embedder.provider) && (
+          {localConfig.embedder.provider !== "sentence_transformers" && (
             <FieldGroup
               label={
                 localConfig.embedder.provider === "ollama"
@@ -531,7 +456,7 @@ export function MemoryConfig() {
                 id="host"
                 type="url"
                 value={localConfig.embedder.config.host || ""}
-                onChange={(e) => handleHostChange(e.target.value)}
+                onChange={(e) => updateEmbedderConfig({ host: e.target.value })}
                 placeholder={
                   localConfig.embedder.provider === "ollama"
                     ? "http://localhost:11434"
@@ -557,21 +482,6 @@ export function MemoryConfig() {
           {localConfig.backend === "file" && (
             <>
               <FieldGroup
-                label="File Memory Path"
-                helperText="Directory containing MEMORY.md and daily files under memory/YYYY-MM-DD.md."
-                htmlFor="file-memory-path"
-              >
-                <Input
-                  id="file-memory-path"
-                  type="text"
-                  value={localConfig.file?.path || ""}
-                  onChange={(e) => handleFilePathChange(e.target.value)}
-                  placeholder="./mindroom_data/memory_files"
-                  className="transition-colors hover:border-ring focus:border-ring"
-                />
-              </FieldGroup>
-
-              <FieldGroup
                 label="Entrypoint Max Lines"
                 helperText="Maximum lines preloaded from the entrypoint file."
                 htmlFor="entrypoint-max-lines"
@@ -582,12 +492,8 @@ export function MemoryConfig() {
                   min={1}
                   value={localConfig.file?.max_entrypoint_lines ?? 200}
                   onChange={(e) =>
-                    applyMemoryConfig({
-                      ...localConfig,
-                      file: {
-                        ...localConfig.file,
-                        max_entrypoint_lines: parseInteger(e.target.value, 200),
-                      },
+                    updateFile({
+                      max_entrypoint_lines: parseInteger(e.target.value, 200),
                     })
                   }
                   className="transition-colors hover:border-ring focus:border-ring"
@@ -605,15 +511,11 @@ export function MemoryConfig() {
                   min={1}
                   value={localConfig.file?.max_entrypoint_tokens ?? 50000}
                   onChange={(e) =>
-                    applyMemoryConfig({
-                      ...localConfig,
-                      file: {
-                        ...localConfig.file,
-                        max_entrypoint_tokens: parseInteger(
-                          e.target.value,
-                          50000,
-                        ),
-                      },
+                    updateFile({
+                      max_entrypoint_tokens: parseInteger(
+                        e.target.value,
+                        50000,
+                      ),
                     })
                   }
                   className="transition-colors hover:border-ring focus:border-ring"
@@ -628,7 +530,7 @@ export function MemoryConfig() {
                 <Select
                   value={localConfig.search?.mode ?? "keyword"}
                   onValueChange={(value) =>
-                    handleSearchModeChange(value as "keyword" | "semantic")
+                    updateSearch({ mode: value as MemorySearchMode })
                   }
                 >
                   <SelectTrigger
@@ -653,7 +555,11 @@ export function MemoryConfig() {
                   id="memory-search-include"
                   type="text"
                   value={(localConfig.search?.include || []).join(", ")}
-                  onChange={(e) => handleSearchIncludeChange(e.target.value)}
+                  onChange={(e) =>
+                    updateSearch({
+                      include: parseIncludePatterns(e.target.value),
+                    })
+                  }
                   placeholder="memory/**/*.md"
                   className="transition-colors hover:border-ring focus:border-ring"
                 />
@@ -669,7 +575,7 @@ export function MemoryConfig() {
                     localConfig.search?.include_entrypoint ?? false,
                   )}
                   onValueChange={(value) =>
-                    handleIncludeEntrypointChange(parseBoolean(value))
+                    updateSearch({ include_entrypoint: parseBoolean(value) })
                   }
                 >
                   <SelectTrigger
@@ -693,7 +599,7 @@ export function MemoryConfig() {
                 <Select
                   value={String(localConfig.auto_flush?.enabled ?? false)}
                   onValueChange={(value) =>
-                    handleAutoFlushEnabled(parseBoolean(value))
+                    updateAutoFlush({ enabled: parseBoolean(value) })
                   }
                 >
                   <SelectTrigger
@@ -1023,12 +929,6 @@ export function MemoryConfig() {
               <span className="text-muted-foreground">Provider:</span>
               <span className="font-mono text-foreground">
                 {localConfig.embedder.provider}
-              </span>
-            </div>
-            <div className="flex justify-between">
-              <span className="text-muted-foreground">Team Reads Members:</span>
-              <span className="font-mono text-foreground">
-                {localConfig.team_reads_member_memory ? "enabled" : "disabled"}
               </span>
             </div>
             <div className="flex justify-between">

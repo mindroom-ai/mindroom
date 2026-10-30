@@ -22,6 +22,7 @@ from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig, ModelPricing
 from mindroom.constants import resolve_runtime_paths
 from mindroom.custom_tools.delegate import DelegateTools
+from mindroom.llm.events import TextDelta
 from mindroom.routing import ResponderSelection
 from mindroom.tool_system.runtime_context import get_detached_requester_context, get_tool_runtime_context
 from mindroom.tool_system.worker_routing import agent_workspace_root_path
@@ -128,9 +129,9 @@ def test_mapped_request_delegates_with_canonical_identity(api: _ApiHarness, stre
         )
         return await tool.run_subagent(agent_name="specialist", task="help")
 
-    async def streaming(ctx: ResponseTurnContext, *_args: object, **_kwargs: object) -> AsyncIterator[str]:
-        yield "Working: "
-        yield await delegate(ctx)
+    async def streaming(ctx: ResponseTurnContext, *_args: object, **_kwargs: object) -> AsyncIterator[TextDelta]:
+        yield TextDelta("Working: ")
+        yield TextDelta(await delegate(ctx))
 
     with (
         patch.object(openai_compat, "ai_response", side_effect=completing(delegate)),

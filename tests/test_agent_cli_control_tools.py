@@ -717,7 +717,7 @@ async def test_hidden_memory_write_standard_read_and_live_compaction(tmp_path) -
     config.agents["helper"] = AgentConfig(display_name="Helper", memory_backend="file")
     config.memory.backend = "file"
     bind_runtime_paths(config, paths)
-    memory = adapt_toolkit(MemoryTools("helper", paths.storage_root, config, paths))
+    memory = adapt_toolkit(MemoryTools("helper", config, paths))
     catalog = await _catalog(tmp_path, [memory])
     identity = build_execution_identity_from_runtime_context(catalog.runtime_context)
     await catalog.prepare(
@@ -729,7 +729,7 @@ async def test_hidden_memory_write_standard_read_and_live_compaction(tmp_path) -
         async for event in execute_agent_tool_call(binding, "memory-write", {"content": "Canonical hidden memory"})
     ]
     assert events[-1].call.result == "Memorized: Canonical hidden memory"
-    memories = await search_agent_memories("Canonical hidden", "helper", paths.storage_root, config, paths, limit=5)
+    memories = await search_agent_memories("Canonical hidden", "helper", config, paths, limit=5)
     assert any(item["memory"] == "Canonical hidden memory" for item in memories.results)
     catalog.run.session_state["sentinel"] = "kept"
     original = catalog.run.session_state
