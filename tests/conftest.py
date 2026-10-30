@@ -3088,11 +3088,7 @@ def replace_turn_deps(bot: RuntimeBot, **changes: object) -> None:
                 validator_deps,
                 turn_store=rebuilt_changes["turn_store"],
                 turn_policy=rebuilt_changes["turn_policy"],
-                **{
-                    name: changes[name]
-                    for name in ("wait_for_admission_or_shutdown", "settle_ignored_sources")
-                    if name in changes
-                },
+                **{name: changes[name] for name in ("settle_ignored_sources",) if name in changes},
             ),
         )
     bot._ingress_validator = rebuilt_changes["ingress"]

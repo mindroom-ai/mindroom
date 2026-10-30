@@ -161,15 +161,22 @@ def scheduled_task_runtime(
     runtime_paths: RuntimePaths,
     *bots: AgentBot,
     config: Config | None = None,
-    config_provider: Callable[[], Config | None] | None = None,
+    config_provider: Callable[[], Config] | None = None,
     matrix_admin: HookMatrixAdmin | None = None,
     hooks: HookRegistryLifetime | None = None,
 ) -> ScheduledTaskRuntime:
     """Return the scheduled-task owner over these bots, reading ``config`` unless a provider is given."""
+    if config_provider is None:
+        assert config is not None, "A scheduled-task runtime reads a config or a config provider"
+        fixed_config = config
+
+        def config_provider() -> Config:
+            return fixed_config
+
     bots_by_name = {bot.agent_name: bot for bot in bots}
     return ScheduledTaskRuntime(
         runtime_paths=runtime_paths,
-        config_provider=config_provider if config_provider is not None else lambda: config,
+        config_provider=config_provider,
         bots=lambda: bots_by_name,
         matrix_admin=lambda: matrix_admin,
         hooks=hooks if hooks is not None else HookRegistryState(HookRegistry.empty()).lifetime(),
@@ -185,7 +192,7 @@ def task_runner(
     conversation_reader: ConversationReader | None = None,
     matrix_admin: HookMatrixAdmin | None = None,
     *,
-    config_provider: Callable[[], Config | None] | None = None,
+    config_provider: Callable[[], Config] | None = None,
     hooks: HookRegistryLifetime | None = None,
 ) -> _TaskRunner:
     """Return one task's runner owned by a ready router bot on ``client``."""
@@ -210,7 +217,7 @@ async def run_once_task(
     conversation_reader: ConversationReader | None = None,
     matrix_admin: HookMatrixAdmin | None = None,
     *,
-    config_provider: Callable[[], Config | None] | None = None,
+    config_provider: Callable[[], Config] | None = None,
     hooks: HookRegistryLifetime | None = None,
 ) -> None:
     """Run one one-time task to completion on a ready router bot."""
@@ -238,7 +245,7 @@ async def run_cron_task(
     conversation_reader: ConversationReader | None = None,
     matrix_admin: HookMatrixAdmin | None = None,
     *,
-    config_provider: Callable[[], Config | None] | None = None,
+    config_provider: Callable[[], Config] | None = None,
     hooks: HookRegistryLifetime | None = None,
 ) -> None:
     """Run one recurring task on a ready router bot until it ends or completes its first fire."""
@@ -278,7 +285,7 @@ async def runnable_task(
     *,
     config: Config,
     runtime_paths: RuntimePaths,
-    config_provider: Callable[[], Config | None] | None = None,
+    config_provider: Callable[[], Config] | None = None,
 ) -> ScheduledTaskRecord | None:
     """Return a task's runnable state the way its runner reconciles it before waiting or firing."""
     runner = task_runner(client, task_id, room_id, config, runtime_paths, config_provider=config_provider)
