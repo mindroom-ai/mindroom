@@ -5,7 +5,6 @@ from __future__ import annotations
 import hashlib
 import hmac
 import importlib
-import json
 import math
 import threading
 import time
@@ -47,6 +46,7 @@ from mindroom.workers.backends._dedicated_worker_common import (
     plan_scoped_workspace_mounts,
     plan_shared_directory_mounts,
     resolve_state_scope_worker_key,
+    stable_json_digest,
     validate_dedicated_worker_extra_env,
     validate_unique_worker_visible_paths,
 )
@@ -240,8 +240,7 @@ def _container_name_for_worker(worker_key: str, *, prefix: str, runtime_namespac
 
 def _launch_hash(image: str, arguments: Mapping[str, object]) -> str:
     """Return the digest of one ``containers.run`` call, given without its launch-hash label."""
-    payload = json.dumps({"image": image, **arguments}, sort_keys=True, separators=(",", ":"))
-    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+    return stable_json_digest({"image": image, **arguments})
 
 
 def ensure_docker_dependencies(runtime_paths: RuntimePaths) -> None:

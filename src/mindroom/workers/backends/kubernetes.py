@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import hashlib
-import json
 import logging
 import threading
 import time
@@ -31,6 +29,7 @@ from mindroom.workers.backends._dedicated_worker_common import (
     SharedDirectoryMount,
     plan_scoped_workspace_mounts,
     resolve_state_scope_worker_key,
+    stable_json_digest,
 )
 from mindroom.workers.backends._lifecycle import (
     WorkerLifecycleState,
@@ -184,8 +183,7 @@ class KubernetesWorkerBackend:
 
     def script_recovery_signature(self) -> str:
         """Identify the worker authority that must stay fixed while an old image finishes a run."""
-        payload = self._script_recovery_payload()
-        return hashlib.sha256(json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+        return stable_json_digest(self._script_recovery_payload())
 
     def _script_recovery_payload(self) -> dict[str, object]:
         config = asdict(self.config)

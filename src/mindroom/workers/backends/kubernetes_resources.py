@@ -54,6 +54,7 @@ from mindroom.workers.backends._dedicated_worker_common import (
     plan_scoped_workspace_mounts,
     plan_shared_directory_mounts,
     resolve_state_scope_worker_key,
+    stable_json_digest,
     validate_unique_worker_visible_paths,
 )
 from mindroom.workers.backends._lifecycle import WorkerLifecycleState
@@ -476,8 +477,7 @@ def lifecycle_from_annotations(annotations: Mapping[str, str], *, now: float) ->
 
 def _template_hash(template: dict[str, object]) -> str:
     """Return a stable hash for one Deployment pod template."""
-    payload = json.dumps(template, sort_keys=True, separators=(",", ":"))
-    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+    return stable_json_digest(template)
 
 
 def parse_private_agent_names_annotation(annotations: dict[str, str]) -> frozenset[str] | None:
