@@ -123,7 +123,7 @@ def _without_mentions(text: str) -> str:
 
 
 def _state(ctx: AutomationContext) -> tuple[float | None, dict[str, int], int | None]:
-    """Return when the last run ended, the place each conversation was read through for it, and the log's end then."""
+    """Return the check time of the last finished exploration, each conversation's place read through, and the log's end."""
     try:
         state = json.loads((ctx.state_dir / _STATE_FILE).read_text(encoding="utf-8"))
     except FileNotFoundError:
@@ -136,9 +136,7 @@ def _state(ctx: AutomationContext) -> tuple[float | None, dict[str, int], int | 
     # ran; a turn created before that check that completed after it is offered only when it completed after one of
     # those turns.
     # Coverage: tests/test_exploration_automation.py::test_a_state_file_without_places_offers_turns_created_since_the_check.
-    sessions = {session_id: int(seq) for session_id, seq in state.get("sessions", {}).items()}
-    log_end = state.get("log_end")
-    return float(state["last_run_at"]), sessions, int(log_end) if log_end is not None else None
+    return float(state["last_run_at"]), state.get("sessions", {}), state.get("log_end")
 
 
 @automation("exploration")
