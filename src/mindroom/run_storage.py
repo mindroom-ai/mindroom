@@ -7,7 +7,7 @@ The run's hooks, resume, and delegation driver read the same value, and the tool
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING
 
 from mindroom.llm.events import RunFinished
@@ -15,6 +15,8 @@ from mindroom.llm.runs import RunStatus, TeamRunRecord
 from mindroom.session_storage.store import persist_to
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
     from mindroom.agent_loop.run import Persist
     from mindroom.history.session_context import ScopeSessionContext
     from mindroom.history.types import HistoryScope
@@ -28,12 +30,15 @@ if TYPE_CHECKING:
 class RunStorage:
     """Where one run is stored: the scope's store, the session whose state its tools share, and the scope.
 
-    An agent turn outside a scope has no ``scope``, and a run without a ``store`` stores nothing.
+    An agent turn outside a scope has no ``scope``, and a run without a ``store`` stores nothing. ``replays``, when
+    given, says which terminal records the run hands over are stored as turns that later prompts replay; any other,
+    such as a response turn's empty reply, records only its usage.
     """
 
     store: ConversationStore | None
     session: ConversationSession
     scope: HistoryScope | None
+    replays: Callable[[AnyRunRecord], bool] | None = None
 
 
 def scope_run_storage(scope_context: ScopeSessionContext) -> RunStorage:
@@ -41,14 +46,15 @@ def scope_run_storage(scope_context: ScopeSessionContext) -> RunStorage:
     return RunStorage(scope_context.storage, scope_context.stored_or_first_session(), scope_context.scope)
 
 
-def bind_turn_session(run: TurnRunState) -> RunStorage:
+def bind_turn_session(run: TurnRunState, *, replays: Callable[[AnyRunRecord], bool]) -> RunStorage:
     """Bind the session the turn's runs save into to its scope context, and return where its next attempt is stored.
 
-    A scope without a stored session gets its first session, which stays on the turn's scope context, so a later
-    attempt of the same turn replays this one's run and an empty-run discard finds it, as a reload of the scope would.
+    ``replays`` says which of the attempt's terminal records are stored as turns (``replays_as_turn``). A scope
+    without a stored session gets its first session, which stays on the turn's scope context, so a later attempt of
+    the same turn replays this one's run, as a reload of the scope would.
     """
     run.scope_context = run.scope.with_session()
-    return scope_run_storage(run.scope_context)
+    return replace(scope_run_storage(run.scope_context), replays=replays)
 
 
 @dataclass
@@ -103,11 +109,14 @@ def persist_into[R: AnyRunRecord](
 ) -> Persist[AnyRunRecord]:
     """Return the persist callback of one run: keep its terminal record in ``terminal`` when given, then store it.
 
-    Every record the run hands over is stored where ``storage`` stores, which updates the session the run loaded,
-    a team's member rows included; a run without a store stores nothing.
+    Every record the run hands over is stored where ``storage`` stores, as a turn or only its usage as ``storage``
+    says, which updates the session the run loaded, a team's member rows included; a run without a store stores
+    nothing.
     """
     store_persist = (
-        persist_to(storage.store, storage.session) if storage is not None and storage.store is not None else None
+        persist_to(storage.store, storage.session, replays=storage.replays)
+        if storage is not None and storage.store is not None
+        else None
     )
 
     async def persist(record: AnyRunRecord) -> None:

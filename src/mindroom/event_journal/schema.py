@@ -730,6 +730,12 @@ _INDEXES = (
     ON visible_messages (principal_id, room_id, revision_event_id)
     """,
     """
+    -- A redaction deletes the prompts of the revision it names, so its cost must
+    -- not grow with how many questions a principal holds.
+    CREATE INDEX IF NOT EXISTS interactive_questions_revision
+    ON interactive_questions (principal_id, room_id, revision_event_id)
+    """,
+    """
     -- A redaction blanks the held edit it names, so its cost must not grow
     -- with how many edits a room member left waiting on absent targets.
     CREATE INDEX IF NOT EXISTS unresolved_edits_edit_event
@@ -797,10 +803,15 @@ _INDEXES = (
     CREATE INDEX IF NOT EXISTS turns_final_delivery ON turns (agent_name, final_delivery_id)
     """,
     """
-    CREATE INDEX IF NOT EXISTS turn_sources_selected_revision ON turn_sources (agent_name, selected_rev_id)
+    -- Partial: few sources hold a selected revision or a discovery alias, and
+    -- with statistics an index full of NULLs still reads as unselective, so the
+    -- turn-rows upgrade's redactions would walk every source of the agent.
+    CREATE INDEX IF NOT EXISTS turn_sources_selected_revision_set ON turn_sources (agent_name, selected_rev_id)
+    WHERE selected_rev_id IS NOT NULL
     """,
     """
-    CREATE INDEX IF NOT EXISTS turn_sources_discovery ON turn_sources (agent_name, discovery_event_id)
+    CREATE INDEX IF NOT EXISTS turn_sources_discovery_set ON turn_sources (agent_name, discovery_event_id)
+    WHERE discovery_event_id IS NOT NULL
     """,
     """
     CREATE INDEX IF NOT EXISTS turn_sources_visible_echo ON turn_sources (agent_name, visible_echo_event_id)
