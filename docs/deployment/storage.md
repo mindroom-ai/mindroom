@@ -14,7 +14,7 @@ MindRoom stores data in `mindroom_data/` next to `config.yaml` by default; set `
 - `agents/*/chroma/` - Per-agent Mem0 ChromaDB storage
 - `agents/*/mem0/` - Per-agent Mem0 history, which keeps the text of changed and deleted memories and the recent conversation messages Mem0 reads when it extracts memories
 - `agents/*/workspace/` - Per-agent workspace files, including file-backed memory
-- `team_memory/` - Team memory shared by each team's members: one Mem0 store for every team (`chroma/`, `mem0/`), and each team's `MEMORY.md` under `team_memory/team_<sorted_members>/`
+- `team_memory/` - Team memory shared by each team's members: one Mem0 store all teams share (`chroma/`, `mem0/`), each team's records kept apart, and each team's `MEMORY.md` under `team_memory/team_<sorted_members>/`
 - `private_instances/` - The same per-agent directories for private agents, one tree per requester scope
 - `shared_directories/` - [Shared directories](../tools/execution-and-coding.md#shared_directories) at `shared_directories/<agent>/<name>/`; deleting one leaves an empty folder, and the directories of agents removed from the config stay until you delete them
 - `knowledge_db/` - Knowledge base vector stores
