@@ -32,13 +32,14 @@ from mindroom.egress_broker.secrets import (
     PERSONAL_WORKER_SCOPES,
     Secret,
     SecretMissing,
+    SecretNotForAgent,
     SecretResult,
     SecretServiceChanged,
     load_secret,
     service_status,
 )
 from mindroom.egress_broker.tokens import TokenSigner, WorkerClaims
-from mindroom.egress_broker.user_services import consistent_read, effective_config
+from mindroom.egress_broker.user_services import consistent_read, effective_config, services_for_agent
 from mindroom.logging_config import get_logger
 from mindroom.runtime_env_policy import (
     CREDENTIALS_ENCRYPTION_KEY_ENV,
@@ -258,13 +259,18 @@ def _routed_key(
 ) -> Secret | SecretServiceChanged | None:
     """Return the scope's key for `name` if, once it is read, the effective config still defines `name` as `routed`.
 
-    None without a key, and for a service with its own account (`oauth_separate_account`), which uses only that
-    account. Under `consistent_read` no user-service write lands during the read and the check. A config change does
-    not take that lock, so the check reads the current config after the key: a key saved after the config moved `name`
-    to other hosts is only read once the new config is current, and the check then refuses it.
+    An `admin_key` service's key is its administrator key. None without a key, and for a service with its own account
+    (`oauth_separate_account`), which uses only that account. Under `consistent_read` no user-service write lands
+    during the read and the check. A config change does not take that lock, so the check reads the current config
+    after the key: a key saved after the config moved `name` to other hosts is only read once the new config is
+    current, and the check then refuses it.
     """
     with consistent_read():
-        key = None if routed.oauth_separate_account else load_secret(credentials_manager, target, name)
+        key = (
+            None
+            if routed.oauth_separate_account
+            else load_secret(credentials_manager, target, name, admin_key=routed.admin_key)
+        )
         current = config.current()
         effective = None if current is None else effective_config(current.egress_broker, credentials_manager, target)
         if effective is None or effective.services.get(name) != routed:
@@ -285,6 +291,7 @@ async def _resolve_secret(
 ) -> SecretResult:
     """Return the secret for service `name` in the claims' scope: the stored key, else the OAuth connection's token.
 
+    A service whose `agents` list leaves out the claims' routing agent resolves nothing (`SecretNotForAgent`).
     A service with its own account gets only that account's token, never a key stored under its name.
 
     `routed` is the definition of `name` whose rule routed the request. The requester's effective config (the
@@ -295,11 +302,13 @@ async def _resolve_secret(
     an account allowed only to read is checked against. A stored key is never limited by that.
     """
     target = claims.to_worker_target()
+    if not routed.serves_agent(target.routing_agent_name):
+        return SecretNotForAgent()
     stored = await asyncio.to_thread(_routed_key, config, credentials_manager, target, name, routed)
     if stored is not None:
         return stored
     if routed.oauth_provider is None:
-        return SecretMissing()
+        return SecretMissing(admin_key=routed.admin_key)
     current = config.current()
     if current is None:
         # Without a config nothing defines `name`, so `routed` is not its definition.
@@ -510,7 +519,8 @@ def execution_env_for_worker(
     Empty when the broker is not running, there is no config, or the target has no worker identity to sign.
     `routed_worker_key` is the worker key the call was routed to, if any, which an unscoped target's token names.
     Placeholders come only from services with a secret in the target's scope, a stored key or a usable OAuth
-    connection, checked in the stores the broker injects from. The services are the config's plus the scope's own.
+    connection, checked in the stores the broker injects from. The services are the config's plus the scope's own,
+    less those whose `agents` list leaves out the target's agent.
     `call_env` is the env the call already carries; overlaying the result on it keeps its Git config entries.
     """
     runtime = _active.runtime
@@ -528,6 +538,7 @@ def execution_env_for_worker(
         # still gets the proxy env.
         logger.warning("egress_broker_user_services_failed", error_type=type(exc).__name__)
         services = config.egress_broker.services
+    services = services_for_agent(services, scope_target.routing_agent_name)
     config_placeholders: dict[str, str] = {}
     user_placeholders: dict[str, str] = {}
     for name, egress_service in services.items():

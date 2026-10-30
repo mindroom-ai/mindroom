@@ -150,6 +150,14 @@ export interface EgressCredentialService {
   /** The account is the service's own, not the one the agent's tools use. Sent in the personal listing only. */
   separate_account?: boolean;
   /**
+   * One key for every agent the service serves, which only an administrator
+   * sets, on the dashboard; the personal listing sends such a row with
+   * `can_manage` false.
+   */
+  admin_key: boolean;
+  /** The agents the service serves, `null` for every agent. Sent on the dashboard only. */
+  agents?: string[] | null;
+  /**
    * The names of the variables the service sets in the sandbox, a preset's
    * included, so a service of one's own that sets the same one can be warned
    * about those of an administrator's. Sent for every service in the personal
@@ -239,6 +247,10 @@ export interface AuthoredEgressService {
   restrict_to_rules?: boolean;
   /** Only limits paths: no key, account, or placeholders, and its rules never pick a credential. */
   restrict_only?: boolean;
+  /** Operator-only: one key for every agent the service serves, which only an administrator sets. */
+  admin_key?: boolean;
+  /** Operator-only: the agents whose requests get the service's credential; absent for every agent. */
+  agents?: string[];
 }
 
 /** A built-in service preset as the server expands it. */

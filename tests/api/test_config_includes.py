@@ -39,6 +39,7 @@ from tests.conftest import (
     make_matrix_client_mock,
     make_relation_lookup,
 )
+from tests.file_watcher_helpers import record_watcher_scans
 
 SPLIT_TOP_SOURCE = (
     "agents: !include_dir_merge_named agents/\nmodels: !include models.yaml\ndefaults:\n  markdown: true\n"
@@ -1093,20 +1094,23 @@ async def test_watch_config_reloads_when_an_included_file_changes(
     main.initialize_api_app(main.app, split_runtime_paths)
     assert config_lifecycle.load_config_into_app(split_runtime_paths, main.app).loaded
 
+    loop = asyncio.get_running_loop()
     loaded_paths: list[Path] = []
     load_event = asyncio.Event()
     stop_event = asyncio.Event()
 
+    # The watcher loads in a worker thread, so the load reaches the loop through call_soon_threadsafe.
     def _record_load(runtime_paths: constants.RuntimePaths, _app: FastAPI) -> ConfigLoad:
         loaded_paths.append(runtime_paths.config_path)
-        load_event.set()
+        loop.call_soon_threadsafe(load_event.set)
         return failed_config_load(OSError("this test only records the load"))
 
     monkeypatch.setattr(config_lifecycle, "load_config_into_app", _record_load)
+    scans = record_watcher_scans(monkeypatch)
+    agent_file = split_runtime_paths.config_path.parent / "agents" / "test_agent.yaml"
 
     watch_task = asyncio.create_task(main._watch_config(stop_event, main.app, poll_interval_seconds=0.01))
-    await asyncio.sleep(0.05)
-    agent_file = split_runtime_paths.config_path.parent / "agents" / "test_agent.yaml"
+    await scans.wait_for_scan_of(agent_file)
     future_time = time.time() + 5
     agent_file.write_text(TEST_AGENT_SOURCE.replace("A test agent", "Edited via include"), encoding="utf-8")
     os.utime(agent_file, (future_time, future_time))
@@ -1127,28 +1131,34 @@ async def test_watch_config_coalesces_a_multi_file_burst_into_one_reload(
     main.initialize_api_app(main.app, split_runtime_paths)
     assert config_lifecycle.load_config_into_app(split_runtime_paths, main.app).loaded
 
+    loop = asyncio.get_running_loop()
     loaded_paths: list[Path] = []
+    load_event = asyncio.Event()
     stop_event = asyncio.Event()
 
+    # The watcher loads in a worker thread, so the load reaches the loop through call_soon_threadsafe.
     def _record_load(runtime_paths: constants.RuntimePaths, _app: FastAPI) -> ConfigLoad:
         loaded_paths.append(runtime_paths.config_path)
+        loop.call_soon_threadsafe(load_event.set)
         return failed_config_load(OSError("this test only records the load"))
 
     monkeypatch.setattr(config_lifecycle, "load_config_into_app", _record_load)
-
-    watch_task = asyncio.create_task(main._watch_config(stop_event, main.app, poll_interval_seconds=0.01))
-    await asyncio.sleep(0.05)
+    scans = record_watcher_scans(monkeypatch)
     config_dir = split_runtime_paths.config_path.parent
     burst_paths = (
         split_runtime_paths.config_path,
         config_dir / "models.yaml",
         config_dir / "agents" / "test_agent.yaml",
     )
+
+    watch_task = asyncio.create_task(main._watch_config(stop_event, main.app, poll_interval_seconds=0.01))
+    await scans.wait_for_scan_of(*burst_paths)
     future_time = time.time() + 5
     for path in burst_paths:
         path.write_text(path.read_text(encoding="utf-8") + "# touched\n", encoding="utf-8")
         os.utime(path, (future_time, future_time))
-    await asyncio.sleep(0.2)
+    await asyncio.wait_for(load_event.wait(), timeout=2)
+    await scans.wait_for_next_scan()
 
     stop_event.set()
     await watch_task
@@ -1174,16 +1184,18 @@ async def _wait_for_snapshot(
 
 @pytest.mark.asyncio
 async def test_watch_config_recovers_after_fixing_a_broken_new_include(
+    monkeypatch: pytest.MonkeyPatch,
     split_runtime_paths: constants.RuntimePaths,
 ) -> None:
     """Fixing only a broken newly referenced include file triggers a reload that goes live."""
     main.initialize_api_app(main.app, split_runtime_paths)
     assert config_lifecycle.load_config_into_app(split_runtime_paths, main.app).loaded
     stop_event = asyncio.Event()
-    watch_task = asyncio.create_task(main._watch_config(stop_event, main.app, poll_interval_seconds=0.01))
-    await asyncio.sleep(0.05)
-
+    scans = record_watcher_scans(monkeypatch)
     top = split_runtime_paths.config_path
+    watch_task = asyncio.create_task(main._watch_config(stop_event, main.app, poll_interval_seconds=0.01))
+    await scans.wait_for_scan_of(top)
+
     new_include = top.parent / "defaults.yaml"
     future_time = time.time() + 5
     new_include.write_text("markdown: [unclosed\n", encoding="utf-8")
@@ -1203,7 +1215,7 @@ async def test_watch_config_recovers_after_fixing_a_broken_new_include(
     assert failed.source_files is not None
     assert new_include.resolve() in failed.source_files
     # Let the watcher baseline the newly watched file before fixing it.
-    await asyncio.sleep(0.1)
+    await scans.wait_for_scan_of(new_include)
 
     # Fix ONLY the new include file; the next scans reload and go live.
     future_time += 5
@@ -1293,16 +1305,19 @@ async def test_api_config_watcher_scans_off_the_event_loop(
     assert config_lifecycle.load_config_into_app(split_runtime_paths, main.app).loaded
 
     offloaded: list[str] = []
+    two_scans_offloaded = asyncio.Event()
     stop_event = asyncio.Event()
 
     async def fake_to_thread(function: Callable[..., object], *args: object, **kwargs: object) -> object:
         offloaded.append(getattr(function, "__name__", repr(function)))
+        if offloaded.count("paths_mtime_snapshot") == 2:
+            two_scans_offloaded.set()
         return function(*args, **kwargs)
 
     monkeypatch.setattr(main.asyncio, "to_thread", fake_to_thread)
 
     watch_task = asyncio.create_task(main._watch_config(stop_event, main.app, poll_interval_seconds=0.01))
-    await asyncio.sleep(0.05)
+    await asyncio.wait_for(two_scans_offloaded.wait(), timeout=5)
     stop_event.set()
     await asyncio.wait_for(watch_task, timeout=2)
 
