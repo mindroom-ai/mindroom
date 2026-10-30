@@ -356,6 +356,28 @@ def test_requested_toolkit_returns_the_granted_live_function(tmp_path: Path) -> 
     assert toolkit.functions["add"].name == "add"
 
 
+def test_a_requested_toolkit_comes_from_the_plugins_the_call_s_context_captured(tmp_path: Path) -> None:
+    """A publication after the call's context captured its plugins leaves its toolkit on the generation of its hooks."""
+    paths = test_runtime_paths(tmp_path)
+    plugin_root = paths.config_dir / "plugins" / "generation-probe"
+    write_generation_probe_plugin(plugin_root, 1)
+    config = Config(
+        agents={"general": AgentConfig(display_name="General", tools=[GENERATION_PROBE_TOOL])},
+        defaults=DefaultsConfig(tools=[]),
+        plugins=["./plugins/generation-probe"],
+        models={"default": ModelConfig(provider="openai", id="test-model")},
+    )
+    publish_test_plugins(bind_runtime_paths(config, paths), paths)
+    context = _context_for_config(tmp_path, config, paths)
+    (plugin_root / "tools.py").write_text("raise RuntimeError('broken after the call started')\n", encoding="utf-8")
+    plugins_module.publish_plugins(plugins_module.prepare_plugins(context.config, paths))
+
+    toolkit = resolve_current_script_tool(context, ScriptToolGrant(GENERATION_PROBE_TOOL, "which_generation"))
+
+    assert toolkit is not None
+    assert toolkit.name == GENERATION_PROBE_TOOL
+
+
 def test_requested_toolkit_builds_only_the_granted_toolkit(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

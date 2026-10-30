@@ -1478,6 +1478,33 @@ def test_a_plugin_edit_taking_a_configured_mcp_server_s_tool_name_fails_the_load
     assert "mcp_crm" in _tools(config)
 
 
+@pytest.mark.parametrize(
+    ("oauth_source", "error"),
+    [
+        pytest.param("import missing_oauth_dependency\n", "No module named 'missing_oauth_dependency'", id="import"),
+        pytest.param("PROVIDERS = []\n", "must define callable register_oauth_providers", id="callback"),
+    ],
+)
+def test_config_validation_rejects_a_plugin_whose_oauth_module_does_not_load(
+    tmp_path: Path,
+    oauth_source: str,
+    error: str,
+) -> None:
+    """Validation executes a plugin's OAuth module as loading it does, so a plugin loading would skip is rejected."""
+    plugin_root = tmp_path / "plugins" / "oauth-demo"
+    plugin_root.mkdir(parents=True)
+    (plugin_root / "mindroom.plugin.json").write_text(
+        json.dumps({"name": "oauth-demo", "oauth_module": "oauth.py", "skills": []}),
+        encoding="utf-8",
+    )
+    (plugin_root / "oauth.py").write_text(oauth_source, encoding="utf-8")
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text("agents: {}", encoding="utf-8")
+
+    with pytest.raises(ConfigRuntimeValidationError, match=error):
+        _bind_runtime_paths(Config(plugins=["./plugins/oauth-demo"]), config_path)
+
+
 def test_plugin_loading_rejects_plugin_tool_name_collisions(tmp_path: Path) -> None:
     """Active plugins must not register the same tool name."""
     first_root = tmp_path / "plugins" / "first"

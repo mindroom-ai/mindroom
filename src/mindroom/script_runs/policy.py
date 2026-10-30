@@ -7,7 +7,6 @@ from typing import TYPE_CHECKING
 from mindroom.script_runs.models import ScriptToolGrant
 from mindroom.tool_system.agent_tools import resolve_agent_tools
 from mindroom.tool_system.agno_toolkits import adapt_toolkit, toolkit_function_names
-from mindroom.tool_system.plugins import config_plugins
 from mindroom.tool_system.sandbox_proxy import tool_placement
 
 if TYPE_CHECKING:
@@ -74,7 +73,8 @@ def resolve_current_script_tool(
     config = context.current_config
     if context.agent_name not in config.agents:
         return None
-    tools = config_plugins(config, context.runtime_paths).tools
+    # The registry the call's tool hooks come from, so its toolkit and hooks share one generation.
+    tools = context.plugins.tools
     tool_entry = next(
         (entry for entry in _visible_script_tool_entries(context, config, tools) if entry.name == grant.toolkit_name),
         None,

@@ -502,7 +502,7 @@ def _execute_candidate_plugin(
     registrations: dict[str, ToolMetadata],
     completed: list[str],
 ) -> None:
-    """Execute one plugin's tools and hooks modules under a fresh namespace, collecting its tools module's tools.
+    """Execute one plugin's modules under a fresh namespace as loading it does, collecting its tools module's tools.
 
     Afterwards the namespace is removed, with any module from the plugin's root they imported by absolute name, so
     the plugin's next load imports and registers those again. Live plugin modules another thread imports meanwhile
@@ -511,13 +511,21 @@ def _execute_candidate_plugin(
     prefix = f"{CANDIDATE_PLUGIN_MODULE_PREFIX}{next(_CANDIDATE_NAMESPACES)}_"
     loaded_before = set(sys.modules)
     try:
-        for kind, module_path in (("tools", plugin.tools_module_path), ("hooks", plugin.hooks_module_path)):
-            if module_path is None or (kind == "hooks" and module_path == plugin.tools_module_path):
+        executed: set[Path] = set()
+        for kind, module_path in (
+            ("tools", plugin.tools_module_path),
+            ("hooks", plugin.hooks_module_path),
+            ("oauth", plugin.oauth_module_path),
+        ):
+            if module_path is None or module_path in executed:
                 continue
+            executed.add(module_path)
             entry = _load_plugin_module(plugin.name, plugin.root, module_path, kind=kind, prefix=prefix)
             assert entry is not None
             if kind == "tools":
                 registrations.update(entry.registrations)
+            elif kind == "oauth":
+                _oauth_provider_callback(entry.module)
             completed.append(kind)
     finally:
         candidate_modules = {

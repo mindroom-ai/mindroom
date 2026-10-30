@@ -178,7 +178,8 @@ def test_an_oauth_provider_lookup_runs_no_plugin_module(tmp_path: Path, monkeypa
     ]
 
     assert labels == ["First", "Second"]
-    assert imports_path.read_text(encoding="utf-8").splitlines() == ["import"]
+    # The first config's validation and its publication executed the module; no lookup did.
+    assert imports_path.read_text(encoding="utf-8").splitlines() == ["import", "import"]
 
 
 def test_a_rejected_plugin_validates_once_its_source_is_repaired(tmp_path: Path) -> None:
