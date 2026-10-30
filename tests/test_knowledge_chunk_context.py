@@ -8,11 +8,12 @@ from typing import TYPE_CHECKING
 import pytest
 
 import mindroom.knowledge.chunk_context as chunk_context_module
-import mindroom.knowledge.manager as manager_module
+import mindroom.knowledge.file_indexer as file_indexer_module
 from mindroom.knowledge.chunk_context import _document_window, chunk_contexts
+from mindroom.knowledge.collections import _owned_collection_names, open_collection
 from mindroom.knowledge.manager import KnowledgeManager
 from tests.conftest import runtime_paths_for
-from tests.knowledge_test_support import _config, patch_vector_store, stored_rows  # noqa: F401
+from tests.knowledge_test_support import _config, patch_vector_store, published_collection, stored_rows  # noqa: F401
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -100,7 +101,7 @@ async def test_refresh_prefixes_multi_chunk_files_with_their_contexts(
         requests.append(len(chunks))
         return [f"Context {index}." for index in range(len(chunks))]
 
-    monkeypatch.setattr(manager_module, "chunk_contexts", contexts)
+    monkeypatch.setattr(file_indexer_module, "chunk_contexts", contexts)
     config = _contextual_config(tmp_path)
     manager = KnowledgeManager("docs", config=config, runtime_paths=runtime_paths_for(config))
 
@@ -108,9 +109,9 @@ async def test_refresh_prefixes_multi_chunk_files_with_their_contexts(
 
     assert outcome.published
     assert requests == [2]
-    documents = {row["metadata"]["source_path"]: [] for row in stored_rows(manager._published_collection)}
-    for row in stored_rows(manager._published_collection):
-        documents[row["metadata"]["source_path"]].append(row["content"])
+    documents: dict[str, list[str]] = {}
+    for row in stored_rows(published_collection(manager)):
+        documents.setdefault(row["metadata"]["source_path"], []).append(row["content"])
     assert documents["note.md"] == ["one chunk only"]
     assert [document.split("\n\n", 1)[0] for document in documents["guide.md"]] == ["Context 0.", "Context 1."]
     assert "first part" in documents["guide.md"][0]
@@ -124,15 +125,17 @@ async def test_a_failed_context_call_fails_only_that_file(monkeypatch: pytest.Mo
         msg = "model unavailable"
         raise RuntimeError(msg)
 
-    monkeypatch.setattr(manager_module, "chunk_contexts", failing)
+    monkeypatch.setattr(file_indexer_module, "chunk_contexts", failing)
     config = _contextual_config(tmp_path)
     manager = KnowledgeManager("docs", config=config, runtime_paths=runtime_paths_for(config))
 
     outcome = await manager.reindex_all()
 
     assert not outcome.published
-    assert "guide.md" in manager._file_index_errors
-    assert "note.md" not in manager._file_index_errors
+    [candidate_name] = _owned_collection_names(manager._collections)
+    candidate = open_collection(manager._collections, candidate_name)
+    assert set(candidate.files()) == {"note.md"}
+    assert candidate.claim_counts() == (1, 1)
 
 
 def test_neighbouring_chunks_of_a_long_document_share_a_window(monkeypatch: pytest.MonkeyPatch) -> None:

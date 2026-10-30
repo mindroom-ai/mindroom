@@ -1,0 +1,10 @@
+{
+  "base_id": "docs",
+  "description": "A files-mode base: a publication without a collection.",
+  "docs": {
+    "a.md": "alpha one"
+  },
+  "knowledge_path": "/dev/shm/pytest-of-basnijholt/pytest-8778/test_files_mode0/docs",
+  "storage_key": "docs_0502f07a",
+  "storage_root": "/dev/shm/pytest-of-basnijholt/pytest-8778/test_files_mode0/mindroom_data"
+}

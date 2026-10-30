@@ -1835,15 +1835,12 @@ depends_on = []
 path = "mindroom.api.config_lifecycle"
 depends_on = [
     "mindroom.api.app_state",
+    "mindroom.config.commit",
     "mindroom.config.load_attempt",
     "mindroom.config.main",
-    "mindroom.config.yaml_includes",
-    "mindroom.config.reload_status",
-    "mindroom.constants",
     "mindroom.event_journal.opening",
-    "mindroom.file_locks",
+    "mindroom.knowledge.status",
     "mindroom.logging_config",
-    "mindroom.response_activity",
     "mindroom.tool_jobs.settings",
 ]
 
@@ -1854,14 +1851,18 @@ depends_on = []
 [[modules]]
 path = "mindroom.api.auth"
 depends_on = [
+    "mindroom.api.auth_user",
     "mindroom.authorization",
     "mindroom.api.config_lifecycle",
     "mindroom.api.connections_session_cookie",
     "mindroom.api.open_access",
-    "mindroom.constants",
     "mindroom.origins",
     "mindroom.tool_system.dependencies",
 ]
+
+[[modules]]
+path = "mindroom.api.auth_user"
+depends_on = ["mindroom.constants", "mindroom.matrix.identity"]
 
 [[modules]]
 path = "mindroom.api.open_access"
@@ -1889,9 +1890,9 @@ depends_on = [
 [[modules]]
 path = "mindroom.api.dynamic_workflows"
 depends_on = [
+    "mindroom.api.auth_user",
     "mindroom.api.config_lifecycle",
     "mindroom.api.report_headers",
-    "mindroom.constants",
     "mindroom.dynamic_workflows",
 ]
 
@@ -1978,19 +1979,8 @@ depends_on = [
 [[modules]]
 path = "mindroom.api.homeassistant_integration"
 depends_on = [
-    "mindroom.api.auth",
     "mindroom.api.credentials_oauth_flows",
     "mindroom.api.credentials_target",
-    "mindroom.api.integrations",
-]
-
-[[modules]]
-path = "mindroom.api.integrations"
-depends_on = [
-    "mindroom.api.auth",
-    "mindroom.api.credentials_oauth_flows",
-    "mindroom.api.credentials_target",
-    "mindroom.tool_system.dependencies",
 ]
 
 [[modules]]
@@ -2013,7 +2003,6 @@ path = "mindroom.api.matrix_operations"
 depends_on = [
     "mindroom.api.config_lifecycle",
     "mindroom.constants",
-    "mindroom.logging_config",
     "mindroom.matrix.client_room_admin",
     "mindroom.matrix.media",
     "mindroom.matrix.rooms",
@@ -2132,6 +2121,7 @@ depends_on = [
 [[modules]]
 path = "mindroom.api.oauth"
 depends_on = [
+    "mindroom.api.auth_user",
     "mindroom.api.auth",
     "mindroom.api.config_lifecycle",
     "mindroom.api.credentials_oauth_flows",
@@ -2167,11 +2157,12 @@ depends_on = [
 path = "mindroom.api.main"
 depends_on = [
     "mindroom.api.app_state",
+    "mindroom.api.auth_user",
+    "mindroom.config.commit",
     "mindroom.origins",
     "mindroom.api.agent_cli",
     "mindroom.api.config_reload",
     "mindroom.api.response_activity",
-    "mindroom.knowledge.status",
     "mindroom.api.computers",
     "mindroom.api.mcp_gateway",
     "mindroom.api.connections",
@@ -2187,7 +2178,6 @@ depends_on = [
     "mindroom.api.external_triggers",
     "mindroom.api.frontend",
     "mindroom.api.homeassistant_integration",
-    "mindroom.api.integrations",
     "mindroom.api.knowledge",
     "mindroom.api.matrix_operations",
     "mindroom.api.openai_compat",
@@ -2220,6 +2210,7 @@ depends_on = [
 [[modules]]
 path = "mindroom.api.credentials"
 depends_on = [
+    "mindroom.api.config_lifecycle",
     "mindroom.api.credential_responses",
     "mindroom.api.credentials_oauth_policy",
     "mindroom.api.credentials_target",
@@ -2251,6 +2242,7 @@ depends_on = [
 [[modules]]
 path = "mindroom.api.credentials_oauth_flows"
 depends_on = [
+    "mindroom.api.auth_user",
     "mindroom.api.config_lifecycle",
     "mindroom.api.dashboard_credential_scope",
     "mindroom.oauth.providers",
@@ -2281,6 +2273,7 @@ depends_on = [
 [[modules]]
 path = "mindroom.api.dashboard_credential_scope"
 depends_on = [
+    "mindroom.api.auth_user",
     "mindroom.api.config_lifecycle",
     "mindroom.authorization",
     "mindroom.config.resolution",
@@ -2512,6 +2505,7 @@ depends_on = [
 [[modules]]
 path = "mindroom.api.usage"
 depends_on = [
+    "mindroom.api.auth_user",
     "mindroom.api.auth",
     "mindroom.api.config_lifecycle",
     "mindroom.api.usage_export",
@@ -5444,6 +5438,7 @@ depends_on = []
 path = "mindroom.commands.config_commands"
 depends_on = [
     "mindroom.api.config_lifecycle",
+    "mindroom.config.commit",
     "mindroom.config.main",
     "mindroom.config.schema_hints",
     "mindroom.event_journal.opening",
@@ -6603,33 +6598,59 @@ depends_on = [
 
 [[modules]]
 path = "mindroom.knowledge.index_metadata"
-depends_on = ["mindroom.knowledge.indexing_config"]
+depends_on = ["mindroom.file_locks", "mindroom.knowledge.indexing_config"]
 visibility = [
-    "mindroom.knowledge.candidate_checkpoint",
+    "mindroom.knowledge.collection_lifetime",
+    "mindroom.knowledge.legacy_chroma_storage",
+    "mindroom.knowledge.legacy_index_state",
     "mindroom.knowledge.manager",
     "mindroom.knowledge.refresh_runner",
     "mindroom.knowledge.registry",
-    "mindroom.knowledge.collection_lifetime",
+    "mindroom.knowledge.status",
+    "mindroom.knowledge.vector_store",
 ]
 
 [[modules]]
-path = "mindroom.knowledge.candidate_checkpoint"
+path = "mindroom.knowledge.legacy_index_state"
 depends_on = [
+    "mindroom.background_tasks",
     "mindroom.knowledge.index_metadata",
     "mindroom.knowledge.indexing_config",
+    "mindroom.knowledge.vector_store",
+    "mindroom.logging_config",
 ]
-visibility = [
-    "mindroom.knowledge.manager",
-    "mindroom.knowledge.status",
+visibility = ["mindroom.orchestration.storage_preparation"]
+
+[[modules]]
+path = "mindroom.knowledge.corpus_signature"
+depends_on = ["mindroom.knowledge.file_listing", "mindroom.path_confinement"]
+visibility = ["mindroom.knowledge.file_indexer", "mindroom.knowledge.manager"]
+
+[[modules]]
+path = "mindroom.knowledge.file_indexer"
+depends_on = [
+    "mindroom.background_tasks",
+    "mindroom.constants",
+    "mindroom.embeddings.batching",
+    "mindroom.embeddings.errors",
+    "mindroom.knowledge.chunk_context",
+    "mindroom.knowledge.chunking",
+    "mindroom.knowledge.collections",
+    "mindroom.knowledge.corpus_signature",
+    "mindroom.knowledge.index_retry",
+    "mindroom.knowledge.readers",
+    "mindroom.logging_config",
 ]
+visibility = ["mindroom.knowledge.manager"]
 
 [[modules]]
 path = "mindroom.knowledge.vector_store"
-depends_on = ["mindroom.knowledge.read_protocol"]
+depends_on = ["mindroom.knowledge.index_metadata", "mindroom.knowledge.read_protocol"]
 visibility = [
     "mindroom.knowledge.collections",
     "mindroom.knowledge.index_reader",
     "mindroom.knowledge.legacy_chroma_storage",
+    "mindroom.knowledge.legacy_index_state",
     "mindroom.knowledge.manager",
     "mindroom.knowledge.registry",
 ]
@@ -6644,11 +6665,12 @@ depends_on = [
     "mindroom.knowledge.vector_store",
     "mindroom.logging_config",
 ]
-visibility = ["mindroom.knowledge.manager"]
+visibility = ["mindroom.knowledge.file_indexer", "mindroom.knowledge.manager", "mindroom.knowledge.status"]
 
 [[modules]]
 path = "mindroom.knowledge.legacy_chroma_storage"
 depends_on = [
+    "mindroom.knowledge.index_metadata",
     "mindroom.knowledge.registry",
     "mindroom.knowledge.vector_store",
     "mindroom.logging_config",
@@ -6662,12 +6684,12 @@ depends_on = [
     "mindroom.embeddings.errors",
     "mindroom.logging_config",
 ]
-visibility = ["mindroom.knowledge.manager"]
+visibility = ["mindroom.knowledge.file_indexer", "mindroom.knowledge.manager"]
 
 [[modules]]
 path = "mindroom.knowledge.index_retry"
 depends_on = ["mindroom.embeddings.errors"]
-visibility = ["mindroom.knowledge.manager"]
+visibility = ["mindroom.knowledge.file_indexer"]
 
 [[modules]]
 path = "mindroom.knowledge.git_source"
@@ -6728,25 +6750,21 @@ depends_on = []
 [[modules]]
 path = "mindroom.knowledge.manager"
 depends_on = [
-    "mindroom.knowledge.legacy_chroma_storage",
-    "mindroom.knowledge.chunk_context",
-    "mindroom.path_confinement",
-    "mindroom.knowledge.chunking",
+    "mindroom.background_tasks",
     "mindroom.constants",
-    "mindroom.embeddings.errors",
-    "mindroom.embeddings.factory",
     "mindroom.embeddings.batching",
-    "mindroom.knowledge.candidate_checkpoint",
+    "mindroom.embeddings.factory",
     "mindroom.knowledge.collections",
+    "mindroom.knowledge.corpus_signature",
+    "mindroom.knowledge.file_indexer",
     "mindroom.knowledge.file_listing",
     "mindroom.knowledge.git_source",
     "mindroom.knowledge.index_metadata",
-    "mindroom.knowledge.index_retry",
     "mindroom.knowledge.indexing_config",
+    "mindroom.knowledge.legacy_chroma_storage",
     "mindroom.knowledge.redaction",
     "mindroom.knowledge.refresh_outcome",
-    "mindroom.knowledge.read_protocol",
-    "mindroom.knowledge.readers",
+    "mindroom.knowledge.vector_store",
 ]
 
 [[modules]]
@@ -6765,7 +6783,10 @@ depends_on = []
 path = "mindroom.knowledge.status"
 depends_on = [
     "mindroom.knowledge.availability",
-    "mindroom.knowledge.candidate_checkpoint",
+    "mindroom.knowledge.collection_lifetime",
+    "mindroom.knowledge.collections",
+    "mindroom.knowledge.index_metadata",
+    "mindroom.knowledge.indexing_config",
     "mindroom.knowledge.registry",
 ]
 
@@ -6773,7 +6794,6 @@ depends_on = [
 path = "mindroom.knowledge.refresh_scheduler"
 depends_on = [
     "mindroom.embeddings.embedder_health",
-    "mindroom.knowledge.refresh_locks",
     "mindroom.knowledge.refresh_runner",
     "mindroom.knowledge.registry",
     "mindroom.logging_config",
@@ -6781,10 +6801,9 @@ depends_on = [
 
 [[modules]]
 path = "mindroom.knowledge.refresh_locks"
-depends_on = ["mindroom.knowledge.registry"]
+depends_on = ["mindroom.file_locks"]
 visibility = [
     "mindroom.knowledge.refresh_runner",
-    "mindroom.knowledge.refresh_scheduler",
 ]
 
 [[modules]]
@@ -6839,7 +6858,7 @@ depends_on = [
 [[modules]]
 path = "mindroom.knowledge.chunk_context"
 depends_on = ["mindroom.agent_loop.helper", "mindroom.helper_usage", "mindroom.providers.registry"]
-visibility = ["mindroom.knowledge.manager"]
+visibility = ["mindroom.knowledge.file_indexer"]
 
 [[modules]]
 path = "mindroom.knowledge.rerank"
@@ -7651,7 +7670,7 @@ expose = [
     "load_oauth_reset_connection_generation",
     "oauth_account_label",
     "oauth_credential_generation",
-    "oauth_credential_store_exists",
+    "oauth_credentials_may_exist",
     "oauth_credentials_have_required_scopes",
     "oauth_credentials_have_scopes",
     "oauth_credentials_match_client_id",
@@ -8095,7 +8114,14 @@ depends_on = [
 
 [[modules]]
 path = "mindroom.api.mcp_identity"
-depends_on = ["mindroom.api.auth", "mindroom.api.config_lifecycle", "mindroom.mcp_gateway.accounts", "mindroom.mcp_gateway.types", "mindroom.requester_identity"]
+depends_on = [
+    "mindroom.api.auth",
+    "mindroom.api.auth_user",
+    "mindroom.api.config_lifecycle",
+    "mindroom.mcp_gateway.accounts",
+    "mindroom.mcp_gateway.types",
+    "mindroom.requester_identity",
+]
 
 [[modules]]
 path = "mindroom.api.mcp_selection"
@@ -8143,6 +8169,15 @@ depends_on = []
 [[modules]]
 path = "mindroom.config.load_attempt"
 depends_on = ["mindroom.config.main", "mindroom.config.yaml_includes", "mindroom.logging_config"]
+
+[[modules]]
+path = "mindroom.config.commit"
+depends_on = [
+    "mindroom.config.load_attempt",
+    "mindroom.config.main",
+    "mindroom.config.yaml_includes",
+    "mindroom.constants",
+]
 
 [[modules]]
 path = "mindroom.config.bundle"
@@ -9121,6 +9156,7 @@ depends_on = [
     "mindroom.background_tasks",
     "mindroom.credentials.legacy_tool_credentials",
     "mindroom.delegation.legacy_snapshots",
+    "mindroom.knowledge.legacy_index_state",
     "mindroom.legacy_state_root_records",
     "mindroom.private_storage.legacy_private_storage",
     "mindroom.session_storage.legacy_agno3_conversion",
@@ -9245,7 +9281,7 @@ visibility = ["mindroom.tool_jobs.results"]
 [[modules]]
 path = "mindroom.knowledge.collection_lifetime"
 depends_on = ["mindroom.file_locks", "mindroom.knowledge.index_metadata", "mindroom.knowledge.indexing_config"]
-visibility = ["mindroom.knowledge.collections", "mindroom.knowledge.index_reader"]
+visibility = ["mindroom.knowledge.collections", "mindroom.knowledge.index_reader", "mindroom.knowledge.status"]
 
 [[modules]]
 path = "mindroom.tool_system.agent_tool_calls"

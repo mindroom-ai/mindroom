@@ -14,7 +14,6 @@ from contextvars import Context
 from dataclasses import dataclass, replace
 from functools import partial
 from pathlib import Path
-from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, cast
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -22,18 +21,20 @@ from tests.conftest import completed_ai_response_mock, completing, install_model
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Callable, Iterator, Sequence
+    from types import SimpleNamespace
 
     from agno.run import RunContext as AgnoRunContext
     from httpx import Response
 
     from mindroom.agent_loop.build import AgentBuild
     from mindroom.agent_loop.spec import RunContext
+    from mindroom.knowledge.registry import PublishedIndexResolution
     from mindroom.response_turn import ResponseTurnContext
     from mindroom.teams.members import BuiltTeam, ResolvedExactTeamMembers
     from mindroom.tool_system.tool_function import AdaptedToolkit
 
 import pytest
-from fastapi import FastAPI, Request
+from fastapi import Request
 from fastapi.responses import JSONResponse, StreamingResponse
 from fastapi.testclient import TestClient
 from starlette.background import BackgroundTask
@@ -68,7 +69,6 @@ from mindroom.history.types import HistoryScope, PreparedHistoryState, ResolvedR
 from mindroom.judgment.client import JudgmentClient
 from mindroom.judgment.typesafe import _PINNED_MODEL
 from mindroom.knowledge.availability import KnowledgeAvailability
-from mindroom.knowledge.indexing_config import IndexingSettings
 from mindroom.knowledge.search import AgentKnowledge
 from mindroom.knowledge.utils import KnowledgeAvailabilityDetail, _KnowledgeResolution
 from mindroom.llm.errors import MISSING_API_KEY, AuthenticationFailed, ProviderError
@@ -99,6 +99,8 @@ from mindroom.tool_system.worker_routing import (
 from mindroom.turn_model import ModelScope, TeamTurnModelSelection, resolve_team_turn_models
 from mindroom.usage.stats import collect_admin_usage
 from tests.agent_loop.helpers import toolkit
+from tests.api.conftest import publish_api_config
+from tests.fakes.knowledge import RecordingRefreshScheduler, published_index_lookup
 from tests.fakes.scripted_model import SYNTHETIC, Await, ScriptedModel, ScriptStep, answer, calls, tool_call, usage
 from tests.identity_helpers import persist_entity_accounts
 from tests.runtime_fakes import bind_test_embedded_runtime, openai_compat_app
@@ -108,6 +110,16 @@ from tests.turn_model_helpers import turn_model
 
 _QUEUED_NOTICE_MARKER_KEY = "mindroom_queued_message_notice"
 _QUEUED_NOTICE_RESPONSE_TURN_ID_KEY = "mindroom_queued_message_notice_response_turn_id"
+
+
+@contextmanager
+def _openai_client(config: Config | None, runtime_paths: RuntimePaths) -> Iterator[TestClient]:
+    """Serve the OpenAI-compatible routes for `runtime_paths`, with `config` as their committed config when given."""
+    app = openai_compat_app(runtime_paths)
+    if config is not None:
+        publish_api_config(app, config)
+    with TestClient(app, base_url="http://localhost") as client:
+        yield client
 
 
 def _runtime_paths(process_env: dict[str, str] | None = None) -> RuntimePaths:
@@ -154,69 +166,10 @@ def _team_identity(
     )
 
 
-def _fake_indexing_settings(base_id: str) -> IndexingSettings:
-    return IndexingSettings(
-        base_id=base_id,
-        storage_root="memory",
-        knowledge_path=f"memory/{base_id}",
-        mode="semantic",
-        embedder_provider="openai",
-        embedder_model="text-embedding-3-small",
-        embedder_host="",
-        embedder_dimensions="",
-        chunk_size="5000",
-        chunk_overlap="0",
-        repo_identity="",
-        git_branch="",
-        git_lfs="",
-        git_skip_hidden="",
-        git_include_patterns="",
-        git_exclude_patterns="",
-        include_patterns="",
-        exclude_patterns="",
-        include_extensions="",
-        exclude_extensions="()",
-    )
-
-
 def _knowledge_indexes(knowledge: object) -> list[object]:
     """Return the published index readers behind the knowledge handle an agent received."""
     assert isinstance(knowledge, AgentKnowledge)
     return [source.index for source in knowledge.sources]
-
-
-def _knowledge_lookup(
-    reader: object | None,
-    *,
-    base_id: str = "docs",
-    availability: KnowledgeAvailability = KnowledgeAvailability.READY,
-) -> SimpleNamespace:
-    index = (
-        SimpleNamespace(
-            reader=reader,
-            state=SimpleNamespace(
-                source_signature=hashlib.sha256().hexdigest(),
-                last_published_at="2999-01-01T00:00:00+00:00",
-                last_refresh_at=None,
-                last_error=None,
-            ),
-        )
-        if reader is not None
-        else None
-    )
-    key = SimpleNamespace(
-        base_id=base_id,
-        storage_root="memory",
-        knowledge_path=f"memory/{base_id}",
-        indexing_settings=_fake_indexing_settings(base_id),
-    )
-    return SimpleNamespace(
-        key=key,
-        index=index,
-        state=index.state if index is not None else None,
-        availability=availability,
-        schedule_refresh_on_access=False,
-    )
 
 
 def _prepared_team_execution_context(
@@ -298,83 +251,25 @@ def test_config() -> Config:
 @pytest.fixture
 def app_client(test_config: Config) -> Iterator[TestClient]:
     """Create a FastAPI test client with mocked config."""
-    from mindroom.api.openai_compat import router  # noqa: PLC0415
-
-    app = FastAPI()
-    app.include_router(router)
     runtime_paths = _runtime_paths({"OPENAI_COMPAT_ALLOW_UNAUTHENTICATED": "true"})
     persist_entity_accounts(test_config, runtime_paths)
-    initialize_api_app(app, runtime_paths)
-    bind_test_embedded_runtime(app)
 
-    with (
-        patch("mindroom.api.openai_compat._load_config", return_value=(test_config, runtime_paths)),
-        TestClient(app, base_url="http://localhost") as client,
-    ):
+    with _openai_client(test_config, runtime_paths) as client:
         yield client
 
 
 @pytest.fixture
 def authed_client(test_config: Config) -> Iterator[TestClient]:
     """Create a test client with API key auth enabled."""
-    from mindroom.api.openai_compat import router  # noqa: PLC0415
-
-    app = FastAPI()
-    app.include_router(router)
     runtime_paths = _runtime_paths({"OPENAI_COMPAT_API_KEYS": "test-key-1,test-key-2"})
     persist_entity_accounts(test_config, runtime_paths)
-    initialize_api_app(app, runtime_paths)
-    bind_test_embedded_runtime(app)
 
-    with (
-        patch("mindroom.api.openai_compat._load_config", return_value=(test_config, runtime_paths)),
-        TestClient(app) as client,
-    ):
+    with _openai_client(test_config, runtime_paths) as client:
         yield client
-
-
-def test_load_config_uses_dynamic_runtime_config_path(
-    tmp_path: Path,
-) -> None:
-    """OpenAI-compatible config loading should follow the active runtime config path."""
-    config_path = tmp_path / "alt-config.yaml"
-    config_path.write_text(
-        "models:\n  default:\n    provider: openai\n    id: gpt-6-astra\n"
-        "agents:\n  only_alt:\n    display_name: OnlyAlt\n    role: alt\n    rooms: []\n"
-        "router:\n  model: default\n",
-        encoding="utf-8",
-    )
-    runtime_paths = constants.resolve_runtime_paths(config_path=config_path)
-
-    app = FastAPI()
-    initialize_api_app(app, runtime_paths)
-    bind_test_embedded_runtime(app)
-    assert openai_compat.config_lifecycle.load_config_into_app(runtime_paths, app).loaded
-    request = Request({"type": "http", "app": app})
-
-    config, resolved_runtime_paths = openai_compat._load_config(request)
-
-    assert resolved_runtime_paths.config_path == config_path.resolve()
-    assert "only_alt" in config.agents
-
-
-def test_load_config_requires_runtime_paths() -> None:
-    """OpenAI-compatible config loading should fail fast without app runtime paths."""
-    request = Request(
-        {
-            "type": "http",
-            "app": type("_App", (), {"state": type("_State", (), {})()})(),
-        },
-    )
-
-    with pytest.raises(TypeError, match="MindRoom app state is not initialized"):
-        openai_compat._load_config(request)
 
 
 def test_list_models_uses_committed_snapshot_until_reload(tmp_path: Path) -> None:
     """OpenAI-compatible routes should ignore newer on-disk edits until reload publishes a new snapshot."""
-    from mindroom.api.openai_compat import router  # noqa: PLC0415
-
     config_path = tmp_path / "config.yaml"
     config_path.write_text(
         "models:\n"
@@ -390,31 +285,27 @@ def test_list_models_uses_committed_snapshot_until_reload(tmp_path: Path) -> Non
         "    rooms: []\n",
         encoding="utf-8",
     )
-    app = FastAPI()
-    app.include_router(router)
     runtime_paths = resolve_runtime_paths(
         config_path=config_path,
         process_env={"OPENAI_COMPAT_ALLOW_UNAUTHENTICATED": "true"},
     )
-    initialize_api_app(app, runtime_paths)
-    bind_test_embedded_runtime(app)
-    assert openai_compat.config_lifecycle.load_config_into_app(runtime_paths, app).loaded
-    config_path.write_text(
-        "models:\n"
-        "  default:\n"
-        "    provider: openai\n"
-        "    id: gpt-6-astra\n"
-        "router:\n"
-        "  model: default\n"
-        "agents:\n"
-        "  changed:\n"
-        "    display_name: Changed\n"
-        "    role: helper\n"
-        "    rooms: []\n",
-        encoding="utf-8",
-    )
 
-    with TestClient(app, base_url="http://localhost") as client:
+    with _openai_client(None, runtime_paths) as client:
+        assert config_lifecycle.load_config_into_app(runtime_paths, client.app).loaded
+        config_path.write_text(
+            "models:\n"
+            "  default:\n"
+            "    provider: openai\n"
+            "    id: gpt-6-astra\n"
+            "router:\n"
+            "  model: default\n"
+            "agents:\n"
+            "  changed:\n"
+            "    display_name: Changed\n"
+            "    role: helper\n"
+            "    rooms: []\n",
+            encoding="utf-8",
+        )
         response = client.get("/v1/models")
 
     assert response.status_code == 200
@@ -425,15 +316,8 @@ def test_list_models_uses_committed_snapshot_until_reload(tmp_path: Path) -> Non
 
 def test_list_models_keeps_auth_runtime_bound_across_runtime_swap(test_config: Config) -> None:
     """Model listing should load config from the same runtime that authenticated the request."""
-    from mindroom.api.openai_compat import router  # noqa: PLC0415
-
-    app = FastAPI()
-    app.include_router(router)
     runtime_a = _runtime_paths({"OPENAI_COMPAT_API_KEYS": "old-key"})
     runtime_b = _runtime_paths({"OPENAI_COMPAT_API_KEYS": "new-key"})
-    initialize_api_app(app, runtime_a)
-    bind_test_embedded_runtime(app)
-    captured_runtime_paths: list[RuntimePaths | None] = []
 
     def _authenticate_and_swap(
         _request: Request,
@@ -442,26 +326,18 @@ def test_list_models_keeps_auth_runtime_bound_across_runtime_swap(test_config: C
     ) -> openai_compat._AuthenticatedCaller:
         assert authorization == "Bearer old-key"
         assert runtime_paths == runtime_a
-        initialize_api_app(app, runtime_b)
+        # The swapped-in runtime publishes no config, so a read from it would answer 500.
+        initialize_api_app(client.app, runtime_b)
         return openai_compat._AuthenticatedCaller(session_namespace="old-key-namespace", requester_id=None)
-
-    def _capture_load_config(
-        _request: Request,
-        *,
-        runtime_paths: RuntimePaths | None = None,
-    ) -> tuple[Config, RuntimePaths]:
-        captured_runtime_paths.append(runtime_paths)
-        return test_config, runtime_paths or runtime_b
 
     with (
         patch("mindroom.api.openai_compat._authenticate_request", side_effect=_authenticate_and_swap),
-        patch("mindroom.api.openai_compat._load_config", side_effect=_capture_load_config),
-        TestClient(app) as client,
+        _openai_client(test_config, runtime_a) as client,
     ):
         response = client.get("/v1/models", headers={"authorization": "Bearer old-key"})
 
     assert response.status_code == 200
-    assert captured_runtime_paths == [runtime_a]
+    assert "general" in {model["id"] for model in response.json()["data"]}
 
 
 def _offered_function_names(build: AgentBuild) -> set[str]:
@@ -668,40 +544,10 @@ def test_openai_compatible_agent_hides_script_gated_tools(
     assert "run_shell_command" not in exposed_tool_names
 
 
-def test_chat_completions_keeps_auth_runtime_bound_across_runtime_swap(tmp_path: Path) -> None:
+def test_chat_completions_keeps_auth_runtime_bound_across_runtime_swap(test_config: Config) -> None:
     """Chat completions should parse against the same runtime that authenticated the request."""
-    from mindroom.api.openai_compat import router  # noqa: PLC0415
-
-    config_path = tmp_path / "config.yaml"
-    config_path.write_text(
-        "models:\n"
-        "  default:\n"
-        "    provider: openai\n"
-        "    id: gpt-6-astra\n"
-        "router:\n"
-        "  model: default\n"
-        "agents:\n"
-        "  general:\n"
-        "    display_name: General\n"
-        "    role: helper\n"
-        "    rooms: []\n",
-        encoding="utf-8",
-    )
-    app = FastAPI()
-    app.include_router(router)
-    runtime_a = resolve_runtime_paths(
-        config_path=config_path,
-        process_env={"OPENAI_COMPAT_API_KEYS": "old-key"},
-    )
-    runtime_b = resolve_runtime_paths(
-        config_path=tmp_path / "other-config.yaml",
-        process_env={"OPENAI_COMPAT_API_KEYS": "new-key"},
-    )
-    runtime_b.config_path.write_text(config_path.read_text(encoding="utf-8"), encoding="utf-8")
-    initialize_api_app(app, runtime_a)
-    bind_test_embedded_runtime(app)
-    assert openai_compat.config_lifecycle.load_config_into_app(runtime_a, app).loaded
-    captured_runtime_paths: list[RuntimePaths | None] = []
+    runtime_a = _runtime_paths({"OPENAI_COMPAT_API_KEYS": "old-key"})
+    runtime_b = _runtime_paths({"OPENAI_COMPAT_API_KEYS": "new-key"})
 
     def _authenticate_and_swap(
         _request: Request,
@@ -710,27 +556,15 @@ def test_chat_completions_keeps_auth_runtime_bound_across_runtime_swap(tmp_path:
     ) -> openai_compat._AuthenticatedCaller:
         assert authorization == "Bearer old-key"
         assert runtime_paths == runtime_a
-        initialize_api_app(app, runtime_b)
+        # The swapped-in runtime publishes no config, so a read from it would answer 500.
+        initialize_api_app(client.app, runtime_b)
         return openai_compat._AuthenticatedCaller(session_namespace="old-key-namespace", requester_id=None)
 
-    real_load_config = openai_compat._load_config
-
-    def _capture_load_config(
-        request: Request,
-        *,
-        runtime_paths: RuntimePaths | None = None,
-    ) -> tuple[Config, RuntimePaths]:
-        captured_runtime_paths.append(runtime_paths)
-        return real_load_config(request, runtime_paths=runtime_paths)
-
+    completion = AsyncMock(return_value=openai_compat.OpenAIJSONResponse({"ok": True}))
     with (
         patch("mindroom.api.openai_compat._authenticate_request", side_effect=_authenticate_and_swap),
-        patch("mindroom.api.openai_compat._load_config", side_effect=_capture_load_config),
-        patch(
-            "mindroom.api.openai_compat._non_stream_completion",
-            new=AsyncMock(return_value=openai_compat.OpenAIJSONResponse({"ok": True})),
-        ),
-        TestClient(app) as client,
+        patch("mindroom.api.openai_compat._non_stream_completion", new=completion),
+        _openai_client(test_config, runtime_a) as client,
     ):
         response = client.post(
             "/v1/chat/completions",
@@ -740,13 +574,12 @@ def test_chat_completions_keeps_auth_runtime_bound_across_runtime_swap(tmp_path:
 
     assert response.status_code == 200
     assert response.json() == {"ok": True}
-    assert captured_runtime_paths == [runtime_a]
+    _turn, config, runtime_paths = completion.await_args.args
+    assert (config, runtime_paths) == (test_config, runtime_a)
 
 
 def test_list_models_tolerate_missing_plugin_path(tmp_path: Path) -> None:
     """OpenAI-compatible reads should keep working when plugin loading degrades."""
-    from mindroom.api.openai_compat import router  # noqa: PLC0415
-
     config_path = tmp_path / "config.yaml"
     config_path.write_text(
         "models:\n"
@@ -760,17 +593,13 @@ def test_list_models_tolerate_missing_plugin_path(tmp_path: Path) -> None:
         "  - ./plugins/missing\n",
         encoding="utf-8",
     )
-    app = FastAPI()
-    app.include_router(router)
     runtime_paths = resolve_runtime_paths(
         config_path=config_path,
         process_env={"OPENAI_COMPAT_ALLOW_UNAUTHENTICATED": "true"},
     )
-    initialize_api_app(app, runtime_paths)
-    bind_test_embedded_runtime(app)
-    assert openai_compat.config_lifecycle.load_config_into_app(runtime_paths, app).loaded
 
-    with TestClient(app, base_url="http://localhost") as client:
+    with _openai_client(None, runtime_paths) as client:
+        assert config_lifecycle.load_config_into_app(runtime_paths, client.app).loaded
         response = client.get("/v1/models")
 
     assert response.status_code == 200
@@ -779,21 +608,15 @@ def test_list_models_tolerate_missing_plugin_path(tmp_path: Path) -> None:
 
 def test_list_models_returns_malformed_yaml_errors(tmp_path: Path) -> None:
     """OpenAI-compatible routes should surface malformed YAML as 422."""
-    from mindroom.api.openai_compat import router  # noqa: PLC0415
-
     config_path = tmp_path / "config.yaml"
     config_path.write_text("agents:\n  bad: [\n", encoding="utf-8")
-    app = FastAPI()
-    app.include_router(router)
     runtime_paths = resolve_runtime_paths(
         config_path=config_path,
         process_env={"OPENAI_COMPAT_ALLOW_UNAUTHENTICATED": "true"},
     )
-    initialize_api_app(app, runtime_paths)
-    bind_test_embedded_runtime(app)
-    assert not openai_compat.config_lifecycle.load_config_into_app(runtime_paths, app).loaded
 
-    with TestClient(app, base_url="http://localhost") as client:
+    with _openai_client(None, runtime_paths) as client:
+        assert not config_lifecycle.load_config_into_app(runtime_paths, client.app).loaded
         response = client.get("/v1/models")
 
     assert response.status_code == 422
@@ -802,8 +625,6 @@ def test_list_models_returns_malformed_yaml_errors(tmp_path: Path) -> None:
 
 def test_chat_completions_tolerate_missing_plugin_path_during_model_validation(tmp_path: Path) -> None:
     """Chat completions should reach normal request validation when plugin loading degrades."""
-    from mindroom.api.openai_compat import router  # noqa: PLC0415
-
     config_path = tmp_path / "config.yaml"
     config_path.write_text(
         "models:\n"
@@ -821,17 +642,13 @@ def test_chat_completions_tolerate_missing_plugin_path_during_model_validation(t
         "  - ./plugins/missing\n",
         encoding="utf-8",
     )
-    app = FastAPI()
-    app.include_router(router)
     runtime_paths = resolve_runtime_paths(
         config_path=config_path,
         process_env={"OPENAI_COMPAT_ALLOW_UNAUTHENTICATED": "true"},
     )
-    initialize_api_app(app, runtime_paths)
-    bind_test_embedded_runtime(app)
-    assert openai_compat.config_lifecycle.load_config_into_app(runtime_paths, app).loaded
 
-    with TestClient(app, base_url="http://localhost") as client:
+    with _openai_client(None, runtime_paths) as client:
+        assert config_lifecycle.load_config_into_app(runtime_paths, client.app).loaded
         response = client.post(
             "/v1/chat/completions",
             json={"model": "missing-model", "messages": [{"role": "user", "content": "hi"}]},
@@ -843,21 +660,15 @@ def test_chat_completions_tolerate_missing_plugin_path_during_model_validation(t
 
 def test_chat_completions_returns_malformed_yaml_errors(tmp_path: Path) -> None:
     """Chat completions should surface malformed YAML as 422."""
-    from mindroom.api.openai_compat import router  # noqa: PLC0415
-
     config_path = tmp_path / "config.yaml"
     config_path.write_text("agents:\n  bad: [\n", encoding="utf-8")
-    app = FastAPI()
-    app.include_router(router)
     runtime_paths = resolve_runtime_paths(
         config_path=config_path,
         process_env={"OPENAI_COMPAT_ALLOW_UNAUTHENTICATED": "true"},
     )
-    initialize_api_app(app, runtime_paths)
-    bind_test_embedded_runtime(app)
-    assert not openai_compat.config_lifecycle.load_config_into_app(runtime_paths, app).loaded
 
-    with TestClient(app, base_url="http://localhost") as client:
+    with _openai_client(None, runtime_paths) as client:
+        assert not config_lifecycle.load_config_into_app(runtime_paths, client.app).loaded
         response = client.post(
             "/v1/chat/completions",
             json={"model": "general", "messages": [{"role": "user", "content": "hi"}]},
@@ -923,10 +734,17 @@ class TestListModels:
         assert general["name"] == "GeneralAgent"
         assert general["description"] == "General-purpose assistant"
 
+    def test_an_agent_named_auto_is_not_listed(self, test_config: Config, app_client: TestClient) -> None:
+        """The `auto` model id always means automatic routing, so an agent of that name is not offered."""
+        test_config.agents["auto"] = AgentConfig(display_name="Auto Agent")
+
+        response = app_client.get("/v1/models")
+
+        assert response.status_code == 200
+        assert [(m["id"], m["name"]) for m in response.json()["data"] if m["id"] == "auto"] == [("auto", "Auto")]
+
     def test_hides_models_with_non_shared_worker_scopes(self, test_config: Config) -> None:
         """Agents and teams that require non-shared worker scopes should not be advertised on /v1."""
-        from mindroom.api.openai_compat import router  # noqa: PLC0415
-
         test_config.agents["code"].worker_scope = "user"
         test_config.teams = {
             "dev-team": TeamConfig(
@@ -937,16 +755,9 @@ class TestListModels:
             ),
         }
 
-        app = FastAPI()
-        app.include_router(router)
         runtime_paths = _runtime_paths({"OPENAI_COMPAT_ALLOW_UNAUTHENTICATED": "true"})
-        initialize_api_app(app, runtime_paths)
-        bind_test_embedded_runtime(app)
 
-        with (
-            patch("mindroom.api.openai_compat._load_config", return_value=(test_config, runtime_paths)),
-            TestClient(app, base_url="http://localhost") as client,
-        ):
+        with _openai_client(test_config, runtime_paths) as client:
             response = client.get("/v1/models")
 
         assert response.status_code == 200
@@ -957,21 +768,12 @@ class TestListModels:
 
     def test_hides_agents_that_delegate_to_private_agents(self, test_config: Config) -> None:
         """Shared agents should not be advertised on /v1 when delegation reaches private agents."""
-        from mindroom.api.openai_compat import router  # noqa: PLC0415
-
         test_config.agents["research"].private = AgentPrivateConfig(per="user", root="research_data")
         test_config.agents["general"].delegate_to = ["research"]
 
-        app = FastAPI()
-        app.include_router(router)
         runtime_paths = _runtime_paths({"OPENAI_COMPAT_ALLOW_UNAUTHENTICATED": "true"})
-        initialize_api_app(app, runtime_paths)
-        bind_test_embedded_runtime(app)
 
-        with (
-            patch("mindroom.api.openai_compat._load_config", return_value=(test_config, runtime_paths)),
-            TestClient(app, base_url="http://localhost") as client,
-        ):
+        with _openai_client(test_config, runtime_paths) as client:
             response = client.get("/v1/models")
 
         assert response.status_code == 200
@@ -981,22 +783,13 @@ class TestListModels:
 
     def test_hides_auto_model_when_no_openai_compatible_agents(self, test_config: Config) -> None:
         """Auto should not be advertised when no compatible agents can satisfy auto-routing."""
-        from mindroom.api.openai_compat import router  # noqa: PLC0415
-
         test_config.agents["general"].worker_scope = "user"
         test_config.agents["code"].worker_scope = "user_agent"
         test_config.agents["research"].worker_scope = "user"
 
-        app = FastAPI()
-        app.include_router(router)
         runtime_paths = _runtime_paths({"OPENAI_COMPAT_ALLOW_UNAUTHENTICATED": "true"})
-        initialize_api_app(app, runtime_paths)
-        bind_test_embedded_runtime(app)
 
-        with (
-            patch("mindroom.api.openai_compat._load_config", return_value=(test_config, runtime_paths)),
-            TestClient(app, base_url="http://localhost") as client,
-        ):
+        with _openai_client(test_config, runtime_paths) as client:
             response = client.get("/v1/models")
 
         assert response.status_code == 200
@@ -1029,23 +822,14 @@ class TestListModels:
 
     def test_empty_agents_list_is_empty(self) -> None:
         """With no agents configured, /v1/models should not advertise auto-routing."""
-        from mindroom.api.openai_compat import router  # noqa: PLC0415
-
-        app = FastAPI()
-        app.include_router(router)
         runtime_paths = _runtime_paths({"OPENAI_COMPAT_ALLOW_UNAUTHENTICATED": "true"})
-        initialize_api_app(app, runtime_paths)
-        bind_test_embedded_runtime(app)
 
         empty_config = Config(
             agents={},
             models={"default": ModelConfig(provider="ollama", id="test")},
             router=RouterConfig(model="default"),
         )
-        with (
-            patch("mindroom.api.openai_compat._load_config", return_value=(empty_config, runtime_paths)),
-            TestClient(app, base_url="http://localhost") as client,
-        ):
+        with _openai_client(empty_config, runtime_paths) as client:
             response = client.get("/v1/models")
             assert response.status_code == 200
             data = response.json()["data"]
@@ -1306,13 +1090,11 @@ class TestChatCompletions:
             storage_path=tmp_path / "data",
             process_env={"OPENAI_COMPAT_ALLOW_UNAUTHENTICATED": "true"},
         )
-        app = openai_compat_app(runtime_paths)
 
         install_model_providers(monkeypatch, {"default": ScriptedModel([answer("Agent reply")])})
         with (
-            patch("mindroom.api.openai_compat._load_config", return_value=(config, runtime_paths)),
             patch("mindroom.ai.build_memory_prompt_parts", new=AsyncMock(return_value=MemoryPromptParts())),
-            TestClient(app, base_url="http://localhost") as client,
+            _openai_client(config, runtime_paths) as client,
         ):
             response = client.post(
                 "/v1/chat/completions",
@@ -1348,7 +1130,6 @@ class TestChatCompletions:
             storage_path=tmp_path / "data",
             process_env={"OPENAI_COMPAT_ALLOW_UNAUTHENTICATED": "true"},
         )
-        app = openai_compat_app(runtime_paths)
 
         async def lose_the_provider() -> None:
             msg = "provider connection lost"
@@ -1357,9 +1138,8 @@ class TestChatCompletions:
         model = ScriptedModel([[TextDelta("Checking."), Await(lose_the_provider)]])
         install_model_providers(monkeypatch, {"default": model})
         with (
-            patch("mindroom.api.openai_compat._load_config", return_value=(config, runtime_paths)),
             patch("mindroom.ai.build_memory_prompt_parts", new=AsyncMock(return_value=MemoryPromptParts())),
-            TestClient(app, base_url="http://localhost") as client,
+            _openai_client(config, runtime_paths) as client,
             capture_logs() as logs,
         ):
             response = client.post(
@@ -1406,7 +1186,6 @@ class TestChatCompletions:
             storage_path=tmp_path / "data",
             process_env={"OPENAI_COMPAT_ALLOW_UNAUTHENTICATED": "true"},
         )
-        app = openai_compat_app(runtime_paths)
 
         async def no_key() -> None:
             msg = "no API key"
@@ -1414,9 +1193,8 @@ class TestChatCompletions:
 
         install_model_providers(monkeypatch, {"default": ScriptedModel([[Await(no_key)]])})
         with (
-            patch("mindroom.api.openai_compat._load_config", return_value=(config, runtime_paths)),
             patch("mindroom.ai.build_memory_prompt_parts", new=AsyncMock(return_value=MemoryPromptParts())),
-            TestClient(app, base_url="http://localhost") as client,
+            _openai_client(config, runtime_paths) as client,
         ):
             response = client.post(
                 "/v1/chat/completions",
@@ -1478,19 +1256,10 @@ class TestChatCompletions:
 
     def test_rejects_non_shared_worker_scope_agent(self, test_config: Config) -> None:
         """Explicit agent requests should fail on /v1 when worker_scope is not shared."""
-        from mindroom.api.openai_compat import router  # noqa: PLC0415
-
         test_config.agents["general"].worker_scope = "user"
-        app = FastAPI()
-        app.include_router(router)
         runtime_paths = _runtime_paths({"OPENAI_COMPAT_ALLOW_UNAUTHENTICATED": "true"})
-        initialize_api_app(app, runtime_paths)
-        bind_test_embedded_runtime(app)
 
-        with (
-            patch("mindroom.api.openai_compat._load_config", return_value=(test_config, runtime_paths)),
-            TestClient(app, base_url="http://localhost") as client,
-        ):
+        with _openai_client(test_config, runtime_paths) as client:
             response = client.post(
                 "/v1/chat/completions",
                 json={
@@ -1507,8 +1276,6 @@ class TestChatCompletions:
 
     def test_rejects_non_shared_worker_scope_team(self, test_config: Config) -> None:
         """Team requests should fail on /v1 when any member requires a non-shared worker scope."""
-        from mindroom.api.openai_compat import router  # noqa: PLC0415
-
         test_config.agents["code"].worker_scope = "user_agent"
         test_config.teams = {
             "dev-team": TeamConfig(
@@ -1518,16 +1285,9 @@ class TestChatCompletions:
                 mode="coordinate",
             ),
         }
-        app = FastAPI()
-        app.include_router(router)
         runtime_paths = _runtime_paths({"OPENAI_COMPAT_ALLOW_UNAUTHENTICATED": "true"})
-        initialize_api_app(app, runtime_paths)
-        bind_test_embedded_runtime(app)
 
-        with (
-            patch("mindroom.api.openai_compat._load_config", return_value=(test_config, runtime_paths)),
-            TestClient(app, base_url="http://localhost") as client,
-        ):
+        with _openai_client(test_config, runtime_paths) as client:
             response = client.post(
                 "/v1/chat/completions",
                 json={
@@ -1544,21 +1304,12 @@ class TestChatCompletions:
 
     def test_rejects_agent_that_delegates_to_private_agent(self, test_config: Config) -> None:
         """Shared agents should fail on /v1 when delegation reaches a private agent."""
-        from mindroom.api.openai_compat import router  # noqa: PLC0415
-
         test_config.agents["research"].private = AgentPrivateConfig(per="user", root="research_data")
         test_config.agents["general"].delegate_to = ["research"]
 
-        app = FastAPI()
-        app.include_router(router)
         runtime_paths = _runtime_paths({"OPENAI_COMPAT_ALLOW_UNAUTHENTICATED": "true"})
-        initialize_api_app(app, runtime_paths)
-        bind_test_embedded_runtime(app)
 
-        with (
-            patch("mindroom.api.openai_compat._load_config", return_value=(test_config, runtime_paths)),
-            TestClient(app, base_url="http://localhost") as client,
-        ):
+        with _openai_client(test_config, runtime_paths) as client:
             response = client.post(
                 "/v1/chat/completions",
                 json={
@@ -1575,21 +1326,12 @@ class TestChatCompletions:
 
     def test_auto_route_errors_when_no_openai_compatible_agents(self, test_config: Config) -> None:
         """Auto-routing should fail when all agents require unsupported worker scopes."""
-        from mindroom.api.openai_compat import router  # noqa: PLC0415
-
         test_config.agents["general"].worker_scope = "user"
         test_config.agents["code"].worker_scope = "user_agent"
         test_config.agents["research"].worker_scope = "user"
-        app = FastAPI()
-        app.include_router(router)
         runtime_paths = _runtime_paths({"OPENAI_COMPAT_ALLOW_UNAUTHENTICATED": "true"})
-        initialize_api_app(app, runtime_paths)
-        bind_test_embedded_runtime(app)
 
-        with (
-            patch("mindroom.api.openai_compat._load_config", return_value=(test_config, runtime_paths)),
-            TestClient(app, base_url="http://localhost") as client,
-        ):
+        with _openai_client(test_config, runtime_paths) as client:
             response = client.post(
                 "/v1/chat/completions",
                 json={
@@ -1805,12 +1547,10 @@ def _post_to_a_real_turn(
         storage_path=tmp_path / "data",
         process_env={"OPENAI_COMPAT_ALLOW_UNAUTHENTICATED": "true"},
     )
-    app = openai_compat_app(runtime_paths)
     install_model_providers(monkeypatch, {"default": ScriptedModel([list(script)])})
     with (
-        patch("mindroom.api.openai_compat._load_config", return_value=(config, runtime_paths)),
         patch("mindroom.ai.build_memory_prompt_parts", new=AsyncMock(return_value=MemoryPromptParts())),
-        TestClient(app, base_url="http://localhost") as client,
+        _openai_client(config, runtime_paths) as client,
     ):
         return client.post(
             "/v1/chat/completions",
@@ -2351,42 +2091,25 @@ class TestAuthentication:
         )
         assert response.status_code == 401
 
-    def test_auth_required_when_keys_unset(self, test_config: Config) -> None:
+    def test_auth_required_when_keys_unset(self) -> None:
         """Auth is required by default when OPENAI_COMPAT_API_KEYS is unset."""
-        from mindroom.api.openai_compat import router  # noqa: PLC0415
-
-        app = FastAPI()
-        app.include_router(router)
         runtime_paths = _runtime_paths(
             {
                 "OPENAI_COMPAT_API_KEYS": "",
                 "OPENAI_COMPAT_ALLOW_UNAUTHENTICATED": "false",
             },
         )
-        initialize_api_app(app, runtime_paths)
-        bind_test_embedded_runtime(app)
-        with (
-            patch("mindroom.api.openai_compat._load_config", return_value=(test_config, runtime_paths)),
-            TestClient(app) as client,
-        ):
+        with _openai_client(None, runtime_paths) as client:
             response = client.get("/v1/models")
         assert response.status_code == 401
         assert response.json()["error"]["code"] == "invalid_api_key"
 
     def test_missing_key_401_does_not_load_config_first(self) -> None:
         """Missing auth should fail before config loading."""
-        from mindroom.api.openai_compat import router  # noqa: PLC0415
-
-        app = FastAPI()
-        app.include_router(router)
         runtime_paths = _runtime_paths({"OPENAI_COMPAT_API_KEYS": "test-key-1"})
-        initialize_api_app(app, runtime_paths)
-        bind_test_embedded_runtime(app)
 
-        with (
-            patch("mindroom.api.openai_compat._load_config", side_effect=RuntimeError("should not load config")),
-            TestClient(app) as client,
-        ):
+        # No config is published, so a route that read config first would answer 500.
+        with _openai_client(None, runtime_paths) as client:
             response = client.get("/v1/models")
 
         assert response.status_code == 401
@@ -3348,23 +3071,15 @@ class TestAutoRouting:
 
     def test_auto_no_agents_returns_500(self) -> None:
         """Auto with no configured agents returns 500."""
-        from mindroom.api.openai_compat import router  # noqa: PLC0415
-
-        app = FastAPI()
-        app.include_router(router)
-
         empty_config = Config(
             agents={},
             models={"default": ModelConfig(provider="ollama", id="test")},
             router=RouterConfig(model="default"),
         )
         runtime_paths = _runtime_paths({"OPENAI_COMPAT_ALLOW_UNAUTHENTICATED": "true"})
-        initialize_api_app(app, runtime_paths)
-        bind_test_embedded_runtime(app)
         with (
-            patch("mindroom.api.openai_compat._load_config", return_value=(empty_config, runtime_paths)),
             patch("mindroom.api.openai_compat.suggest_responder", new_callable=AsyncMock) as mock_route,
-            TestClient(app, base_url="http://localhost") as client,
+            _openai_client(empty_config, runtime_paths) as client,
         ):
             mock_route.return_value = None
             response = client.post(
@@ -3441,18 +3156,9 @@ def team_config() -> Config:
 @pytest.fixture
 def team_app_client(team_config: Config) -> Iterator[TestClient]:
     """Create a FastAPI test client with team-enabled config."""
-    from mindroom.api.openai_compat import router  # noqa: PLC0415
-
-    app = FastAPI()
-    app.include_router(router)
     runtime_paths = _runtime_paths({"OPENAI_COMPAT_ALLOW_UNAUTHENTICATED": "true"})
     persist_entity_accounts(team_config, runtime_paths)
-    initialize_api_app(app, runtime_paths)
-    bind_test_embedded_runtime(app)
-    with (
-        patch("mindroom.api.openai_compat._load_config", return_value=(team_config, runtime_paths)),
-        TestClient(app, base_url="http://localhost") as client,
-    ):
+    with _openai_client(team_config, runtime_paths) as client:
         yield client
 
 
@@ -3611,11 +3317,7 @@ def test_team_run_uses_mapped_requester_instead_of_request_body_user(team_config
         },
     )
     persist_entity_accounts(team_config, runtime_paths)
-    app = openai_compat_app(runtime_paths)
-    with (
-        patch("mindroom.api.openai_compat._load_config", return_value=(team_config, runtime_paths)),
-        TestClient(app, base_url="http://localhost") as client,
-    ):
+    with _openai_client(team_config, runtime_paths) as client:
         ctx = _post_team_completion_capturing_run_user(
             client,
             stream=stream,
@@ -3636,7 +3338,6 @@ def test_agent_turn_names_the_mapped_keys_requester(test_config: Config, stream:
         },
     )
     persist_entity_accounts(test_config, runtime_paths)
-    app = openai_compat_app(runtime_paths)
     contexts: list[ResponseTurnContext] = []
 
     async def respond(ctx: ResponseTurnContext, *_args: object, **_kwargs: object) -> str:
@@ -3648,10 +3349,9 @@ def test_agent_turn_names_the_mapped_keys_requester(test_config: Config, stream:
         yield TextDelta("Response")
 
     with (
-        patch("mindroom.api.openai_compat._load_config", return_value=(test_config, runtime_paths)),
         patch("mindroom.api.openai_compat.ai_response", new=completing(respond)),
         patch("mindroom.api.openai_compat.stream_agent_response", new=stream_response),
-        TestClient(app, base_url="http://localhost") as client,
+        _openai_client(test_config, runtime_paths) as client,
     ):
         response = client.post(
             "/v1/chat/completions",
@@ -4013,16 +3713,7 @@ class TestTeamCompletion:
         stream: bool,
     ) -> None:
         """Team completions should prepend the degraded knowledge notice to the prompt."""
-        scheduled_base_ids: list[str] = []
-
-        class _FakeRefreshScheduler:
-            def schedule_refresh(self, base_id: str, **_kwargs: object) -> None:
-                scheduled_base_ids.append(base_id)
-
-            def is_refreshing(self, base_id: str, **_kwargs: object) -> bool:
-                _ = base_id
-                return False
-
+        app_refresh_scheduler = RecordingRefreshScheduler()
         member_models = [("general", "GeneralAgent", ScriptedModel([])), ("code", "CodeAgent", ScriptedModel([]))]
         members = _resolved_members(member_models)
         built = _scripted_team(answer("Team consensus result", chunk=99), members=member_models)
@@ -4035,21 +3726,16 @@ class TestTeamCompletion:
                 "dict[str, KnowledgeAvailabilityDetail] | None",
                 kwargs["unavailable_bases"],
             )
-            refresh_scheduler = kwargs["refresh_scheduler"]
             assert unavailable_bases is not None
-            assert isinstance(refresh_scheduler, _FakeRefreshScheduler)
-            assert (
-                refresh_scheduler is config_lifecycle.app_state(team_app_client.app).runtime.knowledge_refresh_scheduler
-            )
+            assert kwargs["refresh_scheduler"] is app_refresh_scheduler
             unavailable_bases["docs"] = KnowledgeAvailabilityDetail(
                 availability=availability,
                 search_available=search_available,
             )
-            refresh_scheduler.schedule_refresh("docs")
             assert requested_agent_names == members.requested_agent_names
             return members
 
-        bind_test_embedded_runtime(team_app_client.app, knowledge_refresh_scheduler=_FakeRefreshScheduler())
+        bind_test_embedded_runtime(team_app_client.app, knowledge_refresh_scheduler=app_refresh_scheduler)
         with (
             patch("mindroom.api.openai_compat.resolve_exact_team_members", side_effect=fake_materialize),
             patch("mindroom.api.openai_compat.build_team_spec", return_value=built),
@@ -4070,7 +3756,6 @@ class TestTeamCompletion:
 
         assert response.status_code == 200
         assert notice in mock_prepare.await_args.kwargs["message"]
-        assert scheduled_base_ids == ["docs"]
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize("stream", [False, True])
@@ -4689,14 +4374,12 @@ class TestTeamCompletion:
         """A configured team's API run lands in the team scope store, and the session's next request replays it."""
         runtime_paths = _runtime_paths({"OPENAI_COMPAT_ALLOW_UNAUTHENTICATED": "true"})
         persist_entity_accounts(team_config, runtime_paths)
-        app = openai_compat_app(runtime_paths)
         team = _scripted_team(answer("First answer", chunk=99), answer("Second answer", chunk=99), team_id="super_team")
 
         with (
-            patch("mindroom.api.openai_compat._load_config", return_value=(team_config, runtime_paths)),
             patch("mindroom.api.openai_compat._build_team", return_value=team),
             _recorded_team_runs() as runs,
-            TestClient(app, base_url="http://localhost") as client,
+            _openai_client(team_config, runtime_paths) as client,
         ):
             for prompt in ("Start", "Follow-up"):
                 response = client.post(
@@ -4734,7 +4417,6 @@ class TestTeamCompletion:
         """An API team run stores the leader's and the member's usage in the team scope and the state a tool changed."""
         runtime_paths = _runtime_paths({"OPENAI_COMPAT_ALLOW_UNAUTHENTICATED": "true"})
         persist_entity_accounts(team_config, runtime_paths)
-        app = openai_compat_app(runtime_paths)
         member = ScriptedModel(
             [answer("Done", usage(40, 4))],
             identity=ModelIdentity(id="member-model", provider="Synthetic"),
@@ -4755,10 +4437,9 @@ class TestTeamCompletion:
         )
 
         with (
-            patch("mindroom.api.openai_compat._load_config", return_value=(team_config, runtime_paths)),
             patch("mindroom.api.openai_compat._build_team", return_value=replace(built, spec=spec)),
             _recorded_team_runs() as runs,
-            TestClient(app, base_url="http://localhost") as client,
+            _openai_client(team_config, runtime_paths) as client,
         ):
             response = client.post(
                 "/v1/chat/completions",
@@ -5250,17 +4931,8 @@ def knowledge_config() -> Config:
 @pytest.fixture
 def knowledge_app_client(knowledge_config: Config) -> Iterator[TestClient]:
     """Create a FastAPI test client with knowledge-enabled config."""
-    from mindroom.api.openai_compat import router  # noqa: PLC0415
-
-    app = FastAPI()
-    app.include_router(router)
     runtime_paths = _runtime_paths({"OPENAI_COMPAT_ALLOW_UNAUTHENTICATED": "true"})
-    initialize_api_app(app, runtime_paths)
-    bind_test_embedded_runtime(app)
-    with (
-        patch("mindroom.api.openai_compat._load_config", return_value=(knowledge_config, runtime_paths)),
-        TestClient(app, base_url="http://localhost") as client,
-    ):
+    with _openai_client(knowledge_config, runtime_paths) as client:
         yield client
 
 
@@ -5275,7 +4947,7 @@ class TestKnowledgeIntegration:
             patch("mindroom.api.openai_compat.ai_response", new_callable=completed_ai_response_mock) as mock_ai,
             patch(
                 "mindroom.knowledge.utils._lookup_knowledge_for_base",
-                return_value=_knowledge_lookup(mock_reader),
+                return_value=published_index_lookup("docs", mock_reader),
             ),
         ):
             mock_ai.return_value = "Response with knowledge"
@@ -5293,13 +4965,7 @@ class TestKnowledgeIntegration:
 
     def test_knowledge_lookup_uses_explicit_runtime_key(self, knowledge_config: Config) -> None:
         """Shared knowledge lookup should resolve by config/runtime, not the static fallback map."""
-        from mindroom.api.openai_compat import router  # noqa: PLC0415
-
-        app = FastAPI()
-        app.include_router(router)
         runtime_paths = _runtime_paths({"OPENAI_COMPAT_ALLOW_UNAUTHENTICATED": "true"})
-        initialize_api_app(app, runtime_paths)
-        bind_test_embedded_runtime(app)
 
         mock_reader = MagicMock()
         observed_calls: list[tuple[str, Config | None, RuntimePaths | None]] = []
@@ -5310,18 +4976,16 @@ class TestKnowledgeIntegration:
             config: Config | None = None,
             runtime_paths: RuntimePaths | None = None,
             execution_identity: object | None = None,  # noqa: ARG001
-            on_availability: Callable[[object], None] | None = None,  # noqa: ARG001
-        ) -> SimpleNamespace | None:
+        ) -> PublishedIndexResolution | None:
             observed_calls.append((base_id, config, runtime_paths))
             if config is None or runtime_paths is None or base_id != "docs":
                 return None
-            return _knowledge_lookup(mock_reader, base_id=base_id)
+            return published_index_lookup(base_id, mock_reader)
 
         with (
-            patch("mindroom.api.openai_compat._load_config", return_value=(knowledge_config, runtime_paths)),
             patch("mindroom.api.openai_compat.ai_response", new_callable=completed_ai_response_mock) as mock_ai,
             patch("mindroom.knowledge.utils._lookup_knowledge_for_base", side_effect=fake_lookup_knowledge_for_base),
-            TestClient(app, base_url="http://localhost") as client,
+            _openai_client(knowledge_config, runtime_paths) as client,
         ):
             mock_ai.return_value = "Response with keyed knowledge"
             response = client.post(
@@ -5374,29 +5038,12 @@ class TestKnowledgeIntegration:
 
     def test_unready_kb_emits_system_hint(self, knowledge_app_client: TestClient) -> None:
         """Missing published knowledge should inject a system-style degraded hint."""
-        scheduled_base_ids: list[str] = []
+        refresh_scheduler = RecordingRefreshScheduler()
 
-        class _FakeRefreshScheduler:
-            def schedule_refresh(self, base_id: str, **_kwargs: object) -> None:
-                scheduled_base_ids.append(base_id)
+        def fake_lookup_knowledge_for_base(base_id: str, **_kwargs: object) -> PublishedIndexResolution:
+            return published_index_lookup(base_id, None)
 
-            def is_refreshing(self, base_id: str, **_kwargs: object) -> bool:
-                _ = base_id
-                return False
-
-        def fake_lookup_knowledge_for_base(
-            base_id: str,
-            *,
-            config: Config | None = None,  # noqa: ARG001
-            runtime_paths: RuntimePaths | None = None,  # noqa: ARG001
-            execution_identity: object | None = None,  # noqa: ARG001
-            on_availability: Callable[[KnowledgeAvailability], None] | None = None,
-        ) -> SimpleNamespace:
-            if on_availability is not None:
-                on_availability(KnowledgeAvailability.INITIALIZING)
-            return _knowledge_lookup(None, base_id=base_id, availability=KnowledgeAvailability.INITIALIZING)
-
-        bind_test_embedded_runtime(knowledge_app_client.app, knowledge_refresh_scheduler=_FakeRefreshScheduler())
+        bind_test_embedded_runtime(knowledge_app_client.app, knowledge_refresh_scheduler=refresh_scheduler)
         with (
             patch("mindroom.api.openai_compat.ai_response", new_callable=completed_ai_response_mock) as mock_ai,
             patch("mindroom.knowledge.utils._lookup_knowledge_for_base", side_effect=fake_lookup_knowledge_for_base),
@@ -5417,7 +5064,7 @@ class TestKnowledgeIntegration:
             "Knowledge base `docs` is initializing and unavailable for semantic search this turn."
             in mock_ai.call_args.args[0].prompt
         )
-        assert scheduled_base_ids == ["docs"]
+        assert refresh_scheduler.scheduled_base_ids == ["docs"]
 
     def test_streaming_with_knowledge(self, knowledge_app_client: TestClient) -> None:
         """Knowledge is passed through in streaming mode too."""
@@ -5430,7 +5077,7 @@ class TestKnowledgeIntegration:
             patch("mindroom.api.openai_compat.stream_agent_response", side_effect=mock_stream) as mock_stream_fn,
             patch(
                 "mindroom.knowledge.utils._lookup_knowledge_for_base",
-                return_value=_knowledge_lookup(mock_reader),
+                return_value=published_index_lookup("docs", mock_reader),
             ),
         ):
             response = knowledge_app_client.post(
@@ -5447,38 +5094,25 @@ class TestKnowledgeIntegration:
 
     def test_multi_knowledge_bases_merged(self, knowledge_config: Config) -> None:
         """Agent with multiple knowledge_bases gets a merged Knowledge object."""
-        from mindroom.api.openai_compat import router  # noqa: PLC0415
         from mindroom.config.knowledge import KnowledgeBaseConfig  # noqa: PLC0415
 
         # Add a second knowledge base and assign both to the research agent
         knowledge_config.knowledge_bases["wiki"] = KnowledgeBaseConfig(path="./test_wiki")
         knowledge_config.agents["research"].knowledge_bases = ["docs", "wiki"]
 
-        app = FastAPI()
-        app.include_router(router)
         runtime_paths = _runtime_paths({"OPENAI_COMPAT_ALLOW_UNAUTHENTICATED": "true"})
-        initialize_api_app(app, runtime_paths)
-        bind_test_embedded_runtime(app)
 
         mock_reader_docs = MagicMock()
         mock_reader_wiki = MagicMock()
 
-        def fake_lookup_knowledge_for_base(
-            base_id: str,
-            *,
-            config: Config | None = None,  # noqa: ARG001
-            runtime_paths: RuntimePaths | None = None,  # noqa: ARG001
-            execution_identity: object | None = None,  # noqa: ARG001
-            on_availability: Callable[[object], None] | None = None,  # noqa: ARG001
-        ) -> SimpleNamespace | None:
+        def fake_lookup_knowledge_for_base(base_id: str, **_kwargs: object) -> PublishedIndexResolution | None:
             reader = {"docs": mock_reader_docs, "wiki": mock_reader_wiki}.get(base_id)
-            return _knowledge_lookup(reader, base_id=base_id) if reader is not None else None
+            return published_index_lookup(base_id, reader) if reader is not None else None
 
         with (
-            patch("mindroom.api.openai_compat._load_config", return_value=(knowledge_config, runtime_paths)),
             patch("mindroom.api.openai_compat.ai_response", new_callable=completed_ai_response_mock) as mock_ai,
             patch("mindroom.knowledge.utils._lookup_knowledge_for_base", side_effect=fake_lookup_knowledge_for_base),
-            TestClient(app, base_url="http://localhost") as client,
+            _openai_client(knowledge_config, runtime_paths) as client,
         ):
             mock_ai.return_value = "Merged knowledge response"
             response = client.post(

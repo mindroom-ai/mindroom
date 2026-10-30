@@ -3,15 +3,16 @@
 from __future__ import annotations
 
 from contextlib import contextmanager
-from pathlib import Path
 from typing import TYPE_CHECKING
 
 from mindroom.file_locks import advisory_file_lock
-from mindroom.knowledge.index_metadata import load_published_index_state
-from mindroom.knowledge.indexing_config import IndexingSettings
+from mindroom.knowledge.index_metadata import load_publication
 
 if TYPE_CHECKING:
-    from collections.abc import Iterator, Mapping
+    from collections.abc import Iterator
+    from pathlib import Path
+
+    from mindroom.knowledge.indexing_config import IndexingSettings
 
 
 @contextmanager
@@ -28,19 +29,11 @@ def collection_lifetime_lock(storage_path: Path, *, exclusive: bool) -> Iterator
 
 
 @contextmanager
-def read_collection(path: str, collection: str, published_settings: Mapping[str, str] | None) -> Iterator[str]:
-    """Resolve the collection at ``path`` a reader of ``published_settings`` may read, held until the reader closes.
-
-    Without settings that is ``collection`` itself; with them it is the current publication compatible with them.
-    """
-    with collection_lifetime_lock(Path(path), exclusive=False):
-        if published_settings is None:
-            yield collection
-            return
-        expected = IndexingSettings.from_metadata(published_settings)
-        state = load_published_index_state(Path(path) / "indexing_settings.json")
-        if expected is None or state is None or not state.queryable_for(expected):
+def read_collection(storage_path: Path, settings: IndexingSettings) -> Iterator[str]:
+    """Resolve the published collection a reader of ``settings`` may read, held until the reader closes."""
+    with collection_lifetime_lock(storage_path, exclusive=False):
+        publication = load_publication(storage_path)
+        if publication is None or publication.collection is None or not publication.serves(settings):
             message = "Published knowledge index is unavailable or incompatible with this reader"
             raise ValueError(message)
-        assert state.collection is not None
-        yield state.collection
+        yield publication.collection

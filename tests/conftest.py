@@ -62,6 +62,7 @@ import mindroom.cli.config as cli_config_module
 import mindroom.cli.desktop as cli_desktop_module
 import mindroom.cli.service as cli_service_module
 import mindroom.custom_tools.todo as todo_tool_module
+import mindroom.knowledge.refresh_scheduler as knowledge_refresh_scheduler_module
 import mindroom.managed_avatars as managed_avatars_module
 import mindroom.matrix.client_room_admin as client_room_admin_module
 import mindroom.matrix.rooms as matrix_rooms_module
@@ -2579,6 +2580,65 @@ def make_config_reload_lifecycle(
     )
 
 
+def write_concurrent_edit_while_validating(monkeypatch: pytest.MonkeyPatch, config_path: Path, agent_name: str) -> str:
+    """Rename ``agent_name`` on disk, as a dashboard save would, while a candidate carrying "Agent change" validates.
+
+    Returns the concurrently written source.
+    """
+    concurrent = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    concurrent["agents"][agent_name]["display_name"] = "Saved from the dashboard"
+    concurrent_source = yaml.safe_dump(concurrent, sort_keys=True)
+    validate = Config.validate_with_runtime
+
+    def validate_after_concurrent_edit(data: object, runtime_paths: RuntimePaths, **kwargs: object) -> Config:
+        if (
+            "Agent change" in json.dumps(data, default=str)
+            and config_path.read_text(encoding="utf-8") != concurrent_source
+        ):
+            config_path.write_text(concurrent_source, encoding="utf-8")
+        return validate(data, runtime_paths, **kwargs)
+
+    monkeypatch.setattr(Config, "validate_with_runtime", staticmethod(validate_after_concurrent_edit))
+    return concurrent_source
+
+
+def assert_refused_for_concurrent_edit(result: str, config_path: Path, concurrent_source: str) -> None:
+    """Assert a change was refused because the file changed, keeping the concurrent edit on disk."""
+    assert "configuration file changed" in result
+    assert "NOT applied" in result
+    assert "Invalid configuration" not in result
+    assert config_path.read_text(encoding="utf-8") == concurrent_source
+
+
+def write_demo_tool_plugin(plugin_root: Path, tool_name: str) -> None:
+    """Write a plugin at ``plugin_root`` whose tools module registers one tool named ``tool_name``."""
+    plugin_root.mkdir(parents=True)
+    (plugin_root / "mindroom.plugin.json").write_text(
+        json.dumps({"name": "demo_plugin", "tools_module": "tools.py", "skills": []}),
+        encoding="utf-8",
+    )
+    (plugin_root / "tools.py").write_text(
+        "from agno.tools import Toolkit\n"
+        "from mindroom.tool_system.declarations import ToolCategory, ToolFileAccess\n"
+        "from mindroom.tool_system.registration import register_tool_with_metadata\n"
+        "\n"
+        "class DemoTool(Toolkit):\n"
+        "    def __init__(self) -> None:\n"
+        "        super().__init__(name='demo', tools=[])\n"
+        "\n"
+        "@register_tool_with_metadata(\n"
+        f"    name='{tool_name}',\n"
+        "    file_access=ToolFileAccess.NONE,\n"
+        "    display_name='Plugin Tool',\n"
+        "    description='Plugin-defined tool',\n"
+        "    category=ToolCategory.DEVELOPMENT,\n"
+        ")\n"
+        "def demo_plugin_tools():\n"
+        "    return DemoTool\n",
+        encoding="utf-8",
+    )
+
+
 def write_config_yaml(config: Config, config_path: Path) -> None:
     """Write a test config using the authored YAML representation."""
     path = Path(config_path)
@@ -3458,6 +3518,12 @@ def _withdraw_embedded_runtime_from_the_shared_api_app() -> Generator[None, None
 def _reset_active_mcp_server_manager(monkeypatch: pytest.MonkeyPatch) -> None:
     """Keep an orchestrator's process-wide MCP manager from leaking into later tests."""
     monkeypatch.setattr(mcp_toolkit_module, "_ACTIVE_MCP_SERVER_MANAGER", None)
+
+
+@pytest.fixture(autouse=True)
+def _reset_runtime_refresh_scheduler(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep a test's process-wide knowledge refresh scheduler, bound to its event loop, from leaking into later tests."""
+    monkeypatch.setattr(knowledge_refresh_scheduler_module, "_runtime_scheduler", None)
 
 
 @pytest.fixture(autouse=True)
