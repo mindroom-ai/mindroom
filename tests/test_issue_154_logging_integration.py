@@ -37,7 +37,6 @@ from tests.conftest import (
     make_turn_context,
     replace_turn_deps,
     request_envelope,
-    runtime_paths_for,
     test_runtime_paths,
 )
 from tests.fakes.scripted_model import ScriptedModel, answer, calls, tool_call, usage
@@ -177,7 +176,7 @@ async def test_cross_sink_correlation_invariant_for_matrix_turn_processing_log(
     bot = make_test_agent_bot(
         agent_user=agent_user,
         config=config,
-        runtime_paths=runtime_paths_for(config),
+        runtime_paths=runtime_paths,
         rooms=["!test:localhost"],
     )
     bot.client = AsyncMock()

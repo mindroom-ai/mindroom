@@ -192,7 +192,7 @@ def test_cached_room_display_name_uses_synced_matrix_room() -> None:
 
 
 class TestAgentBot(AgentBotTestBase):
-    """Bot behavior tests moved verbatim from tests/test_multi_agent_bot.py."""
+    """Agent replies a bot runs through its response runner, from preparation to delivery."""
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize(
@@ -831,22 +831,12 @@ class TestAgentBot(AgentBotTestBase):
 
             return _gen()
 
-        async def _consuming_send_streaming(*args: object, **_kwargs: object) -> StreamTransportOutcome:
-            stream = args[4]
-            async for _ in stream:
-                pass
-            return StreamTransportOutcome(
-                last_physical_stream_event_id="$response",
-                rendered_body="chunk",
-                visible_body_state="visible_body",
-            )
-
         attachment_ids = ["att_image", "att_zip"]
         with (
             patch(
                 "mindroom.delivery_gateway.send_streaming_response",
                 new_callable=AsyncMock,
-                side_effect=_consuming_send_streaming,
+                side_effect=_consuming_send(stream_transport("$response", "chunk")),
             ) as mock_send_streaming_response,
             patch_response_runner_module(
                 typing_indicator=_noop_typing_indicator,
@@ -930,21 +920,11 @@ class TestAgentBot(AgentBotTestBase):
 
             return _gen()
 
-        async def _consuming_send_streaming(*args: object, **_kwargs: object) -> StreamTransportOutcome:
-            stream = args[4]
-            async for _ in stream:
-                pass
-            return StreamTransportOutcome(
-                last_physical_stream_event_id="$response",
-                rendered_body="hello",
-                visible_body_state="visible_body",
-            )
-
         with (
             patch(
                 "mindroom.delivery_gateway.send_streaming_response",
                 new_callable=AsyncMock,
-                side_effect=_consuming_send_streaming,
+                side_effect=_consuming_send(stream_transport("$response", "hello")),
             ) as mock_send_streaming_response,
             patch_response_runner_module(
                 typing_indicator=_noop_typing_indicator,
@@ -1225,11 +1205,6 @@ class TestAgentBot(AgentBotTestBase):
         tmp_path: Path,
     ) -> None:
         """Non-streaming AI calls should receive the events of the room's replies whose span runs here."""
-
-        @asynccontextmanager
-        async def noop_typing_indicator(*_args: object, **_kwargs: object) -> AsyncGenerator[None]:
-            yield
-
         config = self._config_for_storage(tmp_path)
         bot = make_test_agent_bot(mock_agent_user, config=config, runtime_paths=runtime_paths_for(config))
         install_direct_response_admission(bot)
@@ -1243,7 +1218,7 @@ class TestAgentBot(AgentBotTestBase):
         with patch.object(ReplyRuntime, "live_event_ids", new=live_event_ids):
             mock_ai_response = AsyncMock(return_value="Handled")
             with patch_response_runner_module(
-                typing_indicator=noop_typing_indicator,
+                typing_indicator=_noop_typing_indicator,
                 stream_agent_response=streamed_answer(mock_ai_response),
             ):
                 await _respond(
@@ -1349,10 +1324,6 @@ class TestAgentBot(AgentBotTestBase):
     ) -> None:
         """Streaming AI calls should receive the events of the room's replies whose span runs here."""
 
-        @asynccontextmanager
-        async def noop_typing_indicator(*_args: object, **_kwargs: object) -> AsyncGenerator[None]:
-            yield
-
         async def mock_streaming_response() -> AsyncGenerator[str, None]:
             yield "chunk"
 
@@ -1372,7 +1343,7 @@ class TestAgentBot(AgentBotTestBase):
             ) as mock_send_streaming_response:
                 mock_send_streaming_response.side_effect = _consuming_send(stream_transport("$response", "chunk"))
                 with patch_response_runner_module(
-                    typing_indicator=noop_typing_indicator,
+                    typing_indicator=_noop_typing_indicator,
                     stream_agent_response=mock_stream,
                 ):
                     await _respond(
@@ -1403,11 +1374,6 @@ class TestAgentBot(AgentBotTestBase):
         tmp_path: Path,
     ) -> None:
         """Suppressing a placeholder-backed response should redact the provisional event."""
-
-        @hook(EVENT_MESSAGE_BEFORE_RESPONSE)
-        async def before_hook(ctx: BeforeResponseContext) -> None:
-            ctx.draft.suppress = True
-
         config = self._config_for_storage(tmp_path)
         bot = make_test_agent_bot(mock_agent_user, config=config, runtime_paths=runtime_paths_for(config))
         bot.client = MagicMock()
@@ -1474,11 +1440,6 @@ class TestAgentBot(AgentBotTestBase):
         tmp_path: Path,
     ) -> None:
         """Suppressing a non-placeholder edit should keep the prior visible event retryable."""
-
-        @hook(EVENT_MESSAGE_BEFORE_RESPONSE)
-        async def before_hook(ctx: BeforeResponseContext) -> None:
-            ctx.draft.suppress = True
-
         config = self._config_for_storage(tmp_path)
         bot = make_test_agent_bot(mock_agent_user, config=config, runtime_paths=runtime_paths_for(config))
         bot.client = MagicMock()
@@ -1681,11 +1642,6 @@ class TestAgentBot(AgentBotTestBase):
         tmp_path: Path,
     ) -> None:
         """Hidden tool calls should not propagate structured tool metadata."""
-
-        @asynccontextmanager
-        async def noop_typing_indicator(*_args: object, **_kwargs: object) -> AsyncGenerator[None]:
-            yield
-
         config = _runtime_bound_config(
             Config(
                 agents={
@@ -1715,7 +1671,7 @@ class TestAgentBot(AgentBotTestBase):
             yield "Hidden tool call output"
 
         with patch_response_runner_module(
-            typing_indicator=noop_typing_indicator,
+            typing_indicator=_noop_typing_indicator,
             stream_agent_response=fake_stream_agent_response,
         ):
             delivery = await _respond(
@@ -1748,11 +1704,6 @@ class TestAgentBot(AgentBotTestBase):
         tmp_path: Path,
     ) -> None:
         """A reply delivered without streaming that shows its tool calls sends the trace ``ai_response`` collected."""
-
-        @asynccontextmanager
-        async def noop_typing_indicator(*_args: object, **_kwargs: object) -> AsyncGenerator[None]:
-            yield
-
         config = _runtime_bound_config(
             Config(
                 agents={
@@ -1785,7 +1736,7 @@ class TestAgentBot(AgentBotTestBase):
             yield "Final answer"
 
         with patch_response_runner_module(
-            typing_indicator=noop_typing_indicator,
+            typing_indicator=_noop_typing_indicator,
             stream_agent_response=fake_stream_agent_response,
         ):
             delivery = await _respond(
@@ -3429,11 +3380,7 @@ class TestAdaptiveResponse(AgentBotTestBase):
     @pytest.mark.asyncio
     @pytest.mark.parametrize(
         ("failure_stage", "streaming"),
-        [
-            *((stage, streaming) for stage in ("history", "payload", "runtime") for streaming in (False, True)),
-            ("knowledge", False),
-            ("knowledge", True),
-        ],
+        [(stage, streaming) for stage in ("history", "payload", "runtime", "knowledge") for streaming in (False, True)],
     )
     async def test_adaptive_setup_failure_settles_quietly(
         self,

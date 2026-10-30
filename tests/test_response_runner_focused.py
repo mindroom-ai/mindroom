@@ -2,8 +2,8 @@
 
 These pin the response-execution seam directly (lifecycle lock, attempt
 mechanics, cancellation, streaming vs non-streaming delivery, queued-notice
-state, and post-response effects) with mocked collaborators instead of a full
-orchestrator/bot boot, so shrinking ``response_runner.py`` has a safety net.
+state, and post-response effects) on a bot built in a ready test runtime,
+without booting an orchestrator or syncing with Matrix.
 """
 
 from __future__ import annotations
@@ -106,7 +106,6 @@ from mindroom.message_target import MessageTarget, ResponseLifecycleKey
 from mindroom.mid_turn import MidTurnGate, QueuedMessage
 from mindroom.post_response_effects import PostResponseEffectsDeps, ResponseOutcome, apply_post_response_effects
 from mindroom.reply_presentation import Presentation, Segment, encode_presentation
-from mindroom.reply_scope import SpanHandle
 from mindroom.reply_turn.enrichment import prepare_memory_and_model_context
 from mindroom.response_admission import ResponseAdmissionRefusedError
 from mindroom.response_attempt import ResponseAttemptDeps, ResponseAttemptRequest, ResponseAttemptRunner, SpanAttempt
@@ -2069,76 +2068,6 @@ async def test_recovery_fails_an_approval_whose_resume_already_failed(tmp_path: 
     assert event_id == "$waiting"
     settle_failure.assert_awaited_once()
     release_to_replay.assert_not_awaited()
-
-
-def _visible_event_response(*, sender: str, body: str) -> nio.RoomGetEventResponse:
-    """Return one complete visible Matrix event response."""
-    response = nio.RoomGetEventResponse.from_dict(
-        {
-            "event_id": "$waiting",
-            "sender": sender,
-            "origin_server_ts": 1_000,
-            "type": "m.room.message",
-            "content": {"msgtype": "m.text", "body": body},
-        },
-    )
-    assert isinstance(response, nio.RoomGetEventResponse)
-    return response
-
-
-def _encrypted_event(*, sender: str, event_id: str = "$edit") -> nio.MegolmEvent:
-    """Return one encrypted Matrix event."""
-    event = nio.MegolmEvent.from_dict(
-        {
-            "event_id": event_id,
-            "sender": sender,
-            "origin_server_ts": 2_000,
-            "type": "m.room.encrypted",
-            "content": {
-                "algorithm": "m.megolm.v1.aes-sha2",
-                "ciphertext": "ciphertext",
-                "device_id": "DEVICE",
-                "sender_key": "sender-key",
-                "session_id": "session",
-            },
-        },
-    )
-    assert isinstance(event, nio.MegolmEvent)
-    return event
-
-
-def _decrypted_edit(*, sender: str, target_event_id: str = "$waiting") -> nio.RoomMessage:
-    """Return the visible edit corresponding to `_encrypted_event`."""
-    event = nio.Event.parse_event(
-        {
-            "event_id": "$edit",
-            "sender": sender,
-            "origin_server_ts": 2_000,
-            "type": "m.room.message",
-            "content": {
-                "msgtype": "m.text",
-                "body": "latest partial",
-                "m.new_content": {"msgtype": "m.text", "body": "latest partial"},
-                "m.relates_to": {"rel_type": "m.replace", "event_id": target_event_id},
-            },
-        },
-    )
-    assert isinstance(event, nio.RoomMessage)
-    return event
-
-
-def _sidecar_preview_content() -> dict[str, Any]:
-    """Return one unresolved v2 long-text preview."""
-    return {
-        "msgtype": "m.file",
-        "body": "Preview partial...",
-        "info": {"mimetype": "application/json"},
-        "io.mindroom.long_text": {
-            "version": 2,
-            "encoding": "matrix_event_content_json",
-        },
-        "url": "mxc://server/recovery-sidecar",
-    }
 
 
 @pytest.mark.asyncio

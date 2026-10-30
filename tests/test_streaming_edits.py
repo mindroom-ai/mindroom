@@ -23,22 +23,15 @@ from tests.conftest import (
     install_edit_regeneration_mock,
     install_runtime_journal_support,
     make_matrix_client_mock,
-    runtime_paths_for,
     test_runtime_paths,
 )
-from tests.identity_helpers import persist_entity_accounts
 from tests.response_attempt_helpers import install_direct_response_admission
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncGenerator, AsyncIterator, Callable
+    from collections.abc import AsyncIterator, Callable
     from pathlib import Path
 
     from mindroom.bot import AgentBot
-
-
-async def _empty_event_iterator() -> AsyncGenerator[object, None]:
-    if False:
-        yield None
 
 
 def _answer_stream(text: str) -> Callable[..., AsyncIterator[str]]:
@@ -53,42 +46,25 @@ def _answer_stream(text: str) -> Callable[..., AsyncIterator[str]]:
     return stream
 
 
-def _make_matrix_client_mock() -> AsyncMock:
-    client = make_matrix_client_mock(user_id="@mindroom_calculator:localhost")
-    client.room_get_event_relations = MagicMock(side_effect=lambda *_args, **_kwargs: _empty_event_iterator())
-    return client
-
-
-def _delivery_resolution(response_event_id: str | None) -> str | None:
-    return response_event_id
-
-
 def setup_test_bot(
     agent: AgentMatrixUser,
     storage_path: Path,
     room_id: str,
-    config: Config | None = None,
+    config: Config,
 ) -> AgentBot:
     """Set up a non-streaming test bot with all required mocks."""
     runtime_paths = test_runtime_paths(storage_path)
-    if config is None:
-        config = bind_runtime_paths(Config(router=RouterConfig(model="default")), runtime_paths)
-    else:
-        try:
-            runtime_paths_for(config)
-        except KeyError:
-            config = bind_runtime_paths(config, runtime_paths)
-    persist_entity_accounts(config, runtime_paths_for(config))
+    config = bind_runtime_paths(config, runtime_paths)
     config.defaults.enable_streaming = False
 
     bot = make_test_agent_bot(
         agent,
         config,
-        runtime_paths_for(config),
+        runtime_paths,
         rooms=[room_id],
     )
     install_direct_response_admission(bot)
-    bot.client = _make_matrix_client_mock()
+    bot.client = make_matrix_client_mock(user_id="@mindroom_calculator:localhost")
     install_runtime_journal_support(bot)
     bot._turn_ingress.deps.resolver.dispatch_thread_snapshot = AsyncMock(
         return_value=thread_history_result([], is_full_history=False),
@@ -175,10 +151,6 @@ class TestStreamingEdits:
             room_id="!test:localhost",
         )
 
-        # Reset mocks
-        bot.client.room_send.reset_mock()
-        mock_stream_agent_response.reset_mock()
-
         # Edit event 1 - simulating streaming update
         edit_event1 = MagicMock()
         edit_event1.sender = "@user:localhost"
@@ -201,7 +173,7 @@ class TestStreamingEdits:
         }
 
         # Process edit - bot SHOULD regenerate its response.
-        mock_generate_response = AsyncMock(return_value=_delivery_resolution("$response123"))
+        mock_generate_response = AsyncMock(return_value="$response123")
         install_edit_regeneration_mock(bot, mock_generate_response)
         await bot._on_message(mock_room, edit_event1)
         await drain_coalescing(bot)
@@ -228,12 +200,8 @@ class TestStreamingEdits:
             },
         }
 
-        # Reset mocks again
-        bot.client.room_send.reset_mock()
-        mock_stream_agent_response.reset_mock()
-
         # Process second edit - bot should regenerate again.
-        mock_generate_response = AsyncMock(return_value=_delivery_resolution("$response123"))
+        mock_generate_response = AsyncMock(return_value="$response123")
         install_edit_regeneration_mock(bot, mock_generate_response)
         await bot._on_message(mock_room, edit_event2)
         await drain_coalescing(bot)
@@ -353,16 +321,15 @@ class TestStreamingEdits:
 
     @pytest.mark.asyncio
     @patch("mindroom.response_runner.stream_agent_response")
-    async def test_agent_responds_to_user_edits_with_new_mentions(
+    async def test_agent_ignores_user_edits_of_unanswered_messages(
         self,
         mock_stream_agent_response: MagicMock,
         mock_agent_user: AgentMatrixUser,
         tmp_path: Path,
     ) -> None:
-        """Test that agents DO NOT respond to user edits (even those that add mentions).
+        """An agent does not answer a user's edit of a message it never answered, even one that adds its mention.
 
-        This is by design - the bot ignores all edits to prevent confusion.
-        Users should send a new message if they want a new response after editing.
+        Edits only regenerate replies the agent already sent; a user who wants a new reply sends a new message.
         """
         # Set up bot
         bot = setup_test_bot(mock_agent_user, tmp_path, "!test:localhost", config=self.config)
@@ -416,7 +383,7 @@ class TestStreamingEdits:
             },
         }
 
-        # Process edit - calculator should NOT respond (bot ignores all edits)
+        # Process edit - calculator should NOT respond (it never answered the original)
         await bot._on_message(mock_room, edit_event)
         await drain_coalescing(bot)
         assert bot.client.room_send.call_count == 0

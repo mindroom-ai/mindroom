@@ -64,7 +64,7 @@ def mock_agent_user() -> AgentMatrixUser:
 
 
 class TestAgentBot(AgentBotTestBase):
-    """Bot behavior tests moved verbatim from tests/test_multi_agent_bot.py."""
+    """Which response action a bot resolves for a message: an individual reply, a team, a rejection, or none."""
 
     @pytest.mark.asyncio
     @pytest.mark.usefixtures("enforce_turn_authorization")

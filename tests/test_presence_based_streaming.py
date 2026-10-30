@@ -10,6 +10,7 @@ import nio
 import pytest
 
 from mindroom.bot import AgentBot
+from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.delivery_gateway import DeliveryGateway
 from mindroom.matrix.presence import is_user_online, should_use_streaming
@@ -34,18 +35,13 @@ if TYPE_CHECKING:
     from pathlib import Path
 
 
-def _mock_client() -> AsyncMock:
-    """Return an AsyncClient mock with safe thread-history defaults."""
-    return make_matrix_client_mock()
-
-
 class TestPresenceDetection:
     """Test presence detection functionality."""
 
     @pytest.mark.asyncio
     async def test_is_user_online_when_online(self) -> None:
         """Test that is_user_online returns True when user is online."""
-        mock_client = _mock_client()
+        mock_client = make_matrix_client_mock()
 
         # Mock successful presence response - user is online
         mock_response = Mock(spec=nio.PresenceGetResponse)
@@ -61,7 +57,7 @@ class TestPresenceDetection:
     @pytest.mark.asyncio
     async def test_is_user_online_prefers_cached_room_user_presence(self) -> None:
         """Cached room membership presence should avoid an extra `/presence` lookup."""
-        mock_client = _mock_client()
+        mock_client = make_matrix_client_mock()
         mock_client.rooms = {
             "!room:example.com": Mock(
                 users={
@@ -81,7 +77,7 @@ class TestPresenceDetection:
     @pytest.mark.asyncio
     async def test_is_user_online_falls_back_when_cached_room_user_presence_is_offline_default(self) -> None:
         """A cached room user with nio's offline default should still fall back to `/presence`."""
-        mock_client = _mock_client()
+        mock_client = make_matrix_client_mock()
         mock_client.rooms = {
             "!room:example.com": Mock(
                 users={
@@ -105,7 +101,7 @@ class TestPresenceDetection:
     @pytest.mark.asyncio
     async def test_is_user_online_when_unavailable(self) -> None:
         """Test that is_user_online returns True when user is unavailable (idle but client open)."""
-        mock_client = _mock_client()
+        mock_client = make_matrix_client_mock()
 
         # Mock successful presence response - user is unavailable (idle)
         mock_response = Mock(spec=nio.PresenceGetResponse)
@@ -121,7 +117,7 @@ class TestPresenceDetection:
     @pytest.mark.asyncio
     async def test_is_user_online_when_offline(self) -> None:
         """Test that is_user_online returns False when user is offline."""
-        mock_client = _mock_client()
+        mock_client = make_matrix_client_mock()
 
         # Mock successful presence response - user is offline
         mock_response = Mock(spec=nio.PresenceGetResponse)
@@ -137,7 +133,7 @@ class TestPresenceDetection:
     @pytest.mark.asyncio
     async def test_is_user_online_on_error(self) -> None:
         """Test that is_user_online returns False on presence check error."""
-        mock_client = _mock_client()
+        mock_client = make_matrix_client_mock()
 
         # Mock error response - create instance properly
         mock_error = nio.PresenceGetError.from_dict({"errcode": "M_FORBIDDEN", "error": "Forbidden"})
@@ -150,7 +146,7 @@ class TestPresenceDetection:
     @pytest.mark.asyncio
     async def test_is_user_online_on_exception(self) -> None:
         """Test that is_user_online returns False when exception is raised."""
-        mock_client = _mock_client()
+        mock_client = make_matrix_client_mock()
 
         # Mock exception
         mock_client.get_presence.side_effect = Exception("Network error")
@@ -274,8 +270,6 @@ class TestBotIntegration:
         mock_stream_agent_response.return_value = mock_streaming_response()
 
         # Create bot with streaming enabled
-        from mindroom.config.agent import AgentConfig  # noqa: PLC0415
-
         config = bind_runtime_paths(
             with_current_room_member_access(
                 Config(
@@ -305,12 +299,11 @@ class TestBotIntegration:
 
         bot = make_test_bot_for_entity("test_agent", agent_user, config, runtime_paths_for(config))
         assert isinstance(bot, AgentBot)
-        bot.client = _mock_client()
+        bot.client = make_matrix_client_mock()
         bot.client.user_id = "@mindroom_test_agent:localhost"
         bot.client.room_send = AsyncMock()
         bot.client.room_put_state = AsyncMock()
         install_runtime_journal_support(bot)
-        expected_config = config
 
         async def mock_edit_message_result(
             _client: object,
@@ -319,7 +312,6 @@ class TestBotIntegration:
             content: dict,
             _display_text: str,
         ) -> object:
-            assert config is expected_config
             return delivered_matrix_event("$edit", content)
 
         # Simulate a message from a user
@@ -382,8 +374,6 @@ class TestBotIntegration:
         mock_stream_agent_response.return_value = mock_streaming_response()
 
         # Create bot with streaming enabled
-        from mindroom.config.agent import AgentConfig  # noqa: PLC0415
-
         config = bind_runtime_paths(
             with_current_room_member_access(
                 Config(
@@ -413,7 +403,7 @@ class TestBotIntegration:
 
         bot = make_test_bot_for_entity("test_agent", agent_user, config, runtime_paths_for(config))
         assert isinstance(bot, AgentBot)
-        bot.client = _mock_client()
+        bot.client = make_matrix_client_mock()
         bot.client.user_id = "@mindroom_test_agent:localhost"
         bot.client.room_send = AsyncMock()
         bot.client.room_put_state = AsyncMock()

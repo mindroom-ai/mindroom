@@ -46,10 +46,6 @@ if TYPE_CHECKING:
     from mindroom.response_turn import ResponseTurnContext
 
 
-def _matrix_client_mock() -> AsyncMock:
-    return make_matrix_client_mock()
-
-
 def _answer_stream(text: str) -> Callable[..., AsyncGenerator[str, None]]:
     """Return a turn stream that answers ``text`` each time a turn runs."""
 
@@ -73,7 +69,7 @@ async def test_streaming_e2e_worker_warmup_edit_sequence(tmp_path: Path) -> None
         ),
         orchestrator_runtime_paths(tmp_path),
     )
-    client = _matrix_client_mock()
+    client = make_matrix_client_mock()
     deliveries: list[tuple[str, str]] = []
     delivered = asyncio.Event()
 
@@ -253,8 +249,8 @@ async def test_streaming_edits_e2e(  # noqa: C901, PLR0915
     calc_events: list[dict[str, object]] = []
 
     # Create mock clients for each agent
-    helper_client = _matrix_client_mock()
-    calc_client = _matrix_client_mock()
+    helper_client = make_matrix_client_mock()
+    calc_client = make_matrix_client_mock()
 
     # Configure login to return appropriate clients
     def login_side_effect(_homeserver: str, agent_user: object, **_kwargs: object) -> object:
@@ -265,11 +261,11 @@ async def test_streaming_edits_e2e(  # noqa: C901, PLR0915
                 return owned_matrix_login(calc_client)
             if agent_user.agent_name == "router":
                 # Return a mock client for the router
-                router_client = _matrix_client_mock()
+                router_client = make_matrix_client_mock()
                 router_client.joined_rooms.return_value = nio.JoinedRoomsResponse(rooms=[test_room_id])
                 router_client.sync_forever = AsyncMock()
                 return owned_matrix_login(router_client)
-        return owned_matrix_login(_matrix_client_mock())  # Default mock client
+        return owned_matrix_login(make_matrix_client_mock())  # Default mock client
 
     mock_login.side_effect = login_side_effect
 
@@ -322,7 +318,7 @@ async def test_streaming_edits_e2e(  # noqa: C901, PLR0915
 
     # The config startup loaded, with rooms assigned
     orchestrator_runtime = orchestrator_runtime_paths(tmp_path)
-    mock_cfg = bind_runtime_paths(
+    config = bind_runtime_paths(
         Config(
             agents={
                 "helper": AgentConfig(display_name="HelperAgent", rooms=[test_room_id]),
@@ -335,7 +331,7 @@ async def test_streaming_edits_e2e(  # noqa: C901, PLR0915
         ),
         orchestrator_runtime,
     )
-    orchestrator = _MultiAgentOrchestrator(runtime_paths=orchestrator_runtime, config=mock_cfg)
+    orchestrator = _MultiAgentOrchestrator(runtime_paths=orchestrator_runtime, config=config)
 
     # Patch create_bot_for_entity to create bots with proper user_ids
     with (
@@ -361,7 +357,7 @@ async def test_streaming_edits_e2e(  # noqa: C901, PLR0915
         await orchestrator.initialize()
 
     # Start the orchestrator (in background). This test uses a deliberately small
-    # MagicMock config, so keep unrelated runtime services stubbed.
+    # two-agent config, so keep unrelated runtime services stubbed.
     support_services_patch = patch.object(orchestrator, "_sync_runtime_support_services", new=AsyncMock())
     support_services_patch.start()
     room_setup_patch = patch.object(orchestrator._rooms, "setup", new=AsyncMock())
@@ -545,7 +541,7 @@ async def test_user_edits_with_mentions_e2e(tmp_path: Path) -> None:
 
     # Mock login
     with patch("mindroom.bot.login_agent_owned_session") as mock_login:
-        mock_client = _matrix_client_mock()
+        mock_client = make_matrix_client_mock()
         mock_login.return_value = owned_matrix_login(mock_client)
 
         # Track events

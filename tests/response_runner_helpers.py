@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from contextlib import asynccontextmanager
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock
 
@@ -16,6 +15,7 @@ from mindroom.message_target import MessageTarget
 from mindroom.response_runner import ResponseRequest
 from mindroom.response_sources import ResponseSources
 from tests.access_schema_support import with_current_room_member_access
+from tests.bot_helpers import _noop_typing_indicator as _noop_typing  # noqa: F401
 from tests.bot_helpers import make_test_agent_bot
 from tests.conftest import (
     TEST_PASSWORD,
@@ -23,7 +23,6 @@ from tests.conftest import (
     install_runtime_journal_support,
     make_matrix_client_mock,
     message_origin,
-    runtime_paths_for,
     test_runtime_paths,
     wrap_extracted_collaborators,
 )
@@ -66,7 +65,6 @@ def _bot(tmp_path: Path, *, journal_store: EventJournalStore | None = None) -> A
     bot = make_test_agent_bot(
         agent_user,
         config,
-        runtime_paths_for(config),
         rooms=["!room:localhost"],
         journal_store=journal_store,
     )
@@ -109,11 +107,6 @@ def _plain_request(target: MessageTarget, *, source_event_id: str = "$event") ->
             logical_source_event_ids=(source_event_id,),
         ),
     )
-
-
-@asynccontextmanager
-async def _noop_typing(*_args: object, **_kwargs: object) -> AsyncIterator[None]:
-    yield
 
 
 def streamed_answer(answer: Callable[..., Awaitable[str]]) -> Callable[..., AsyncIterator[str]]:

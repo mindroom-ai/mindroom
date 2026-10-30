@@ -69,7 +69,6 @@ from tests.ai_user_id_helpers import (
     _install_inert_post_response_effects,
     _knowledge_access_support,
     _make_bot,
-    _plugin,
     _response_request,
     _runtime_paths,
     _set_gateway_method,
@@ -78,6 +77,7 @@ from tests.ai_user_id_helpers import (
 )
 from tests.bot_helpers import (
     _handled_response_event_id,
+    _hook_plugin,
     unique_room_send_responses,
 )
 from tests.conftest import install_model_providers, seed_session
@@ -851,7 +851,6 @@ async def test_team_session_started_fires_once_for_the_reply_that_creates_its_se
     # The leader answers both turns itself; the member never runs.
     install_model_providers(monkeypatch, {"default": ScriptedModel([answer("Team hello"), answer("Team again")])})
     orchestrator = team_orchestrator(config, runtime_paths)
-    orchestrator.agent_bots = {"general": SimpleNamespace(running=True)}
     with (
         patch("mindroom.response_runner.should_use_streaming", new=AsyncMock(return_value=streaming)),
         patch("mindroom.response_lifecycle.apply_post_response_effects", new=AsyncMock(return_value=None)),
@@ -862,7 +861,7 @@ async def test_team_session_started_fires_once_for_the_reply_that_creates_its_se
             runtime_paths=runtime_paths,
             storage_path=tmp_path,
             requester_id="@alice:localhost",
-            hook_registry=HookRegistry.from_plugins([_plugin("session-hooks", [started, after])]),
+            hook_registry=HookRegistry.from_plugins([_hook_plugin("session-hooks", [started, after])]),
             team_history_storage=store,
             message_target=MessageTarget.resolve("!test:localhost", "$thread-root", "$user_msg"),
             orchestrator=orchestrator,
@@ -929,7 +928,7 @@ async def test_generate_team_response_helper_streaming_emits_session_started_aft
     async def started(ctx: SessionHookContext) -> None:
         sequence.append(f"started:{ctx.scope.key}:{ctx.session_id}:{ctx.thread_id}")
 
-    registry = HookRegistry.from_plugins([_plugin("session-hooks", [started])])
+    registry = HookRegistry.from_plugins([_hook_plugin("session-hooks", [started])])
 
     def run_writes() -> None:
         if stored_by == "run":
@@ -1523,7 +1522,6 @@ async def test_generate_team_response_helper_persists_original_user_message_for_
         patch("mindroom.response_lifecycle.apply_post_response_effects", new=AsyncMock(return_value=None)),
     ):
         orchestrator = team_orchestrator(config, runtime_paths)
-        orchestrator.agent_bots = {"general": SimpleNamespace(running=True)}
         coordinator = _build_response_runner(
             bot,
             config=config,
@@ -1580,7 +1578,7 @@ async def test_generate_team_response_helper_emits_session_started_after_persist
     async def started(ctx: SessionHookContext) -> None:
         sequence.append(f"started:{ctx.scope.key}:{ctx.session_id}:{ctx.thread_id}")
 
-    registry = HookRegistry.from_plugins([_plugin("session-hooks", [started])])
+    registry = HookRegistry.from_plugins([_hook_plugin("session-hooks", [started])])
 
     async def fake_team_response_stream(
         _spec: TeamTurnSpec,
@@ -1666,7 +1664,7 @@ async def test_generate_team_response_helper_streaming_emits_session_started_aft
     async def started(ctx: SessionHookContext) -> None:
         sequence.append(f"started:{ctx.scope.key}:{ctx.session_id}:{ctx.thread_id}")
 
-    registry = HookRegistry.from_plugins([_plugin("session-hooks", [started])])
+    registry = HookRegistry.from_plugins([_hook_plugin("session-hooks", [started])])
 
     async def fake_run_cancellable_response(**kwargs: object) -> str:
         response_function = cast("Callable[[str | None], Awaitable[object]]", kwargs["response_function"])
@@ -1757,7 +1755,7 @@ async def test_generate_team_response_helper_uses_persisted_team_scope_for_sessi
     async def started(ctx: SessionHookContext) -> None:
         sequence.append(f"started:{ctx.scope.key}:{ctx.agent_name}")
 
-    registry = HookRegistry.from_plugins([_plugin("session-hooks", [started])])
+    registry = HookRegistry.from_plugins([_hook_plugin("session-hooks", [started])])
 
     async def fails(_run: TurnRunState) -> AsyncIterator[str | AttemptResolved]:
         # The turn driver stores the failed turn's record, which creates the team's session.

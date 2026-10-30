@@ -31,7 +31,6 @@ from mindroom.budgets.spend import collect_monthly_spend
 from mindroom.config.approval import ApprovalRuleConfig, ToolApprovalConfig
 from mindroom.config.main import Config
 from mindroom.config.models import CompactionConfig, ModelPricing
-from mindroom.config.plugin import PluginEntryConfig
 from mindroom.dispatch_source import ScheduledHistoryBudget
 from mindroom.entity_resolution import entity_identity_registry
 from mindroom.final_delivery import FinalDeliveryOutcome
@@ -83,7 +82,7 @@ from mindroom.usage.storage import COMPACTED_REQUESTS_METADATA_KEY
 from tests.access_schema_support import with_current_room_member_access
 from tests.approval_continuation_helpers import RECEIPT_CALLS, RECEIPT_TEXT
 from tests.authorization_helpers import make_test_tool_runtime_context
-from tests.bot_helpers import make_test_agent_bot, unique_room_send_responses
+from tests.bot_helpers import _hook_plugin, make_test_agent_bot, unique_room_send_responses
 from tests.conftest import (
     TEST_PASSWORD,
     bind_runtime_paths,
@@ -348,16 +347,6 @@ def _cut_off(call: dict[str, Any]) -> list[ScriptStep]:
     ]
 
 
-def _plugin(name: str, callbacks: Sequence[object]) -> SimpleNamespace:
-    return SimpleNamespace(
-        name=name,
-        discovered_hooks=tuple(callbacks),
-        discovered_automations=(),
-        entry_config=PluginEntryConfig(path=f"./plugins/{name}", settings={}),
-        plugin_order=0,
-    )
-
-
 class _QueuedState:
     def __init__(self, *, pending: bool) -> None:
         self.pending = pending
@@ -519,7 +508,7 @@ async def test_plugin_hooks_gate_and_observe_every_tool_call_and_the_call_is_rec
             calls(tool_call("touch", "call_a", label="a"), tool_call("touch", "call_b", label="b")),
             answer("Both handled."),
         ],
-        plugins=[_plugin("policy", [block_b, observe])],
+        plugins=[_hook_plugin("policy", [block_b, observe])],
     )
 
     with recording_tool_calls(_Recorder()):

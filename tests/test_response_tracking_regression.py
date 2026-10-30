@@ -6,8 +6,7 @@ are properly tracked to prevent re-processing after restart.
 
 from __future__ import annotations
 
-import tempfile
-from pathlib import Path
+from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import nio
@@ -35,6 +34,9 @@ from tests.conftest import (
     wrap_extracted_collaborators,
 )
 
+if TYPE_CHECKING:
+    from pathlib import Path
+
 
 @pytest.fixture
 def mock_router_agent() -> AgentMatrixUser:
@@ -48,9 +50,9 @@ def mock_router_agent() -> AgentMatrixUser:
 
 
 @pytest.fixture
-def mock_config() -> Config:
+def mock_config(tmp_path: Path) -> Config:
     """Create a mock config with some agents."""
-    runtime_paths = test_runtime_paths(Path(tempfile.mkdtemp()))
+    runtime_paths = test_runtime_paths(tmp_path)
     return bind_runtime_paths(
         Config(
             agents={
@@ -91,7 +93,6 @@ class TestResponseTrackingRegression:
         )
         wrap_extracted_collaborators(bot)
         bot.client = make_matrix_client_mock(user_id=mock_router_agent.user_id)
-        bot.client.user_id = mock_router_agent.user_id
         install_runtime_journal_support(bot)
 
         # Mock successful room_send
@@ -222,11 +223,9 @@ class TestResponseTrackingRegression:
         send_response = AsyncMock(return_value="$response_456")
         install_send_response_mock(bot, send_response)
 
-        # Mock constants to make router handle commands
-        with patch("mindroom.constants.ROUTER_AGENT_NAME", "router"):
-            # Call _on_message which should detect unknown command and respond
-            await bot._on_message(mock_room, unknown_command_event)
-            await drain_coalescing(bot)
+        # Call _on_message which should detect unknown command and respond
+        await bot._on_message(mock_room, unknown_command_event)
+        await drain_coalescing(bot)
 
         send_response.assert_awaited_once()
         assert "❌ Unknown command" in send_response.await_args.kwargs["response_text"]
@@ -262,7 +261,6 @@ class TestResponseTrackingRegression:
         )
         wrap_extracted_collaborators(bot)
         bot.client = make_matrix_client_mock(user_id=mock_router_agent.user_id)
-        bot.client.user_id = mock_router_agent.user_id
         install_runtime_journal_support(bot)
 
         # Mock successful room_send

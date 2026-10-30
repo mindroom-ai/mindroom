@@ -77,7 +77,6 @@ def _mock_bot() -> AgentBot:
     install_direct_response_admission(bot)
     bot.logger = MagicMock()
     bot.client = make_matrix_client_mock(user_id=bot.agent_user.user_id)
-    bot.client.user_id = "@mindroom_test_agent:localhost"
     install_runtime_journal_support(bot)
     bot._conversation_resolver.build_message_target = MagicMock(
         return_value=MessageTarget.resolve("!room:localhost", None, None, room_mode=True),
@@ -97,8 +96,6 @@ def _mock_bot() -> AgentBot:
 
 def _knowledge_access_support() -> SimpleNamespace:
     return SimpleNamespace(
-        for_agent=MagicMock(return_value=None),
-        resolve_for_agent=MagicMock(return_value=_KnowledgeResolution(knowledge=None)),
         resolve_for_agent_async=AsyncMock(return_value=_KnowledgeResolution(knowledge=None)),
     )
 
@@ -213,20 +210,6 @@ class TestAIErrorDisplay:
     async def test_streaming_error_updates_message(self) -> None:
         """Test that when streaming AI fails, the message is updated with the error."""
         bot = _mock_bot()
-
-        # Mock the _edit_message method to track what gets edited
-        edited_messages = []
-
-        async def mock_edit_message(
-            room_id: str,  # noqa: ARG001
-            event_id: str,
-            text: str,
-            thread_id: str | None,  # noqa: ARG001
-            extra_content: object | None = None,  # noqa: ARG001
-        ) -> None:
-            edited_messages.append((event_id, text))
-
-        bot._edit_message = mock_edit_message
 
         error_text = "[test_agent] 🔴 Rate limited. Please wait before trying again."
         edited_messages: list[tuple[str, dict[str, object]]] = []
@@ -407,7 +390,6 @@ class TestAIErrorDisplay:
     async def test_unavailable_knowledge_falls_back_to_response_without_knowledge(self) -> None:
         """Matrix reply paths should continue when no published knowledge is available."""
         bot = _mock_bot()
-        bot._knowledge_access_support = _knowledge_access_support()
 
         mock_ai = AsyncMock(return_value="Response without knowledge")
         with (

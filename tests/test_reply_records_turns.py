@@ -135,6 +135,12 @@ def _sent_bodies(bot: AgentBot) -> list[str]:
     return bodies
 
 
+async def _wait_until_sent(bot: AgentBot, body: str) -> None:
+    """Return once Matrix shows ``body`` in one of the bot's messages."""
+    while body not in _sent_bodies(bot):  # noqa: ASYNC110
+        await asyncio.sleep(0.01)
+
+
 def _model_stream(model: AsyncMock) -> Callable[..., AsyncIterator[str]]:
     """Return a turn stream that awaits ``model`` with the turn's inputs, then yields the answer it returns."""
 
@@ -192,8 +198,7 @@ async def test_a_streamed_answer_that_fails_after_showing_content_reports_it(tmp
     async def stream(*_args: object, **_kwargs: object) -> AsyncIterator[str]:
         # A stream's first text is sent at once; the stream fails once Matrix shows it.
         yield "Hello there, friend."
-        while "Hello there, friend." not in _sent_bodies(bot):  # noqa: ASYNC110
-            await asyncio.sleep(0.01)
+        await _wait_until_sent(bot, "Hello there, friend.")
         msg = "failed after streaming"
         raise RuntimeError(msg)
 
@@ -229,13 +234,7 @@ async def test_a_streamed_turn_that_fails_before_streaming_ends_with_its_error(t
 async def test_blocking_answer_completes_its_reply(tmp_path: Path) -> None:
     """A non-streamed answer is the reply's terminal row."""
     bot = await _streaming_bot(tmp_path)
-    runner = unwrap_extracted_collaborator(bot._response_runner)
-    with patch_response_runner_module(
-        stream_agent_response=_model_stream(AsyncMock(return_value="A complete answer.")),
-        should_use_streaming=AsyncMock(return_value=False),
-        typing_indicator=_noop_typing,
-    ):
-        await runner.generate_response(_plain_request(_target()))
+    await _answer(bot, _plain_request(_target()), AsyncMock(return_value="A complete answer."))
 
     reply = await _reply(bot)
     assert reply.state is rl.ReplyState.COMPLETED
@@ -248,15 +247,7 @@ async def test_the_replys_settlement_alone_records_its_turn_answered(tmp_path: P
     """Settling the reply's sources records the turn answered in the ledger and its cache, with no acknowledgement path."""
     bot = await _streaming_bot(tmp_path)
     await _pending_turn(bot)
-    runner = unwrap_extracted_collaborator(bot._response_runner)
-    with (
-        patch_response_runner_module(
-            stream_agent_response=_model_stream(AsyncMock(return_value="A complete answer.")),
-            should_use_streaming=AsyncMock(return_value=False),
-            typing_indicator=_noop_typing,
-        ),
-    ):
-        await runner.generate_response(_plain_request(_target()))
+    await _answer(bot, _plain_request(_target()), AsyncMock(return_value="A complete answer."))
 
     record = await bot._turn_store.get_turn_record("$event")
     assert record is not None
@@ -391,16 +382,8 @@ async def test_a_participation_turn_whose_preparation_fails_leaves_nothing_behin
 async def test_an_error_before_delivery_ends_the_reply_failed_without_a_retry(tmp_path: Path) -> None:
     """A failure before anything streamed shows its error and ends the turn, as a failure during delivery does."""
     bot = await _streaming_bot(tmp_path)
-    runner = unwrap_extracted_collaborator(bot._response_runner)
-    with (
-        patch_response_runner_module(
-            stream_agent_response=_model_stream(AsyncMock(side_effect=RuntimeError("model down"))),
-            should_use_streaming=AsyncMock(return_value=False),
-            typing_indicator=_noop_typing,
-        ),
-        pytest.raises(RuntimeError, match="model down"),
-    ):
-        await runner.generate_response(_plain_request(_target()))
+    with pytest.raises(RuntimeError, match="model down"):
+        await _answer(bot, _plain_request(_target()), AsyncMock(side_effect=RuntimeError("model down")))
 
     reply = await _reply(bot)
     assert reply.state is rl.ReplyState.FAILED
@@ -416,16 +399,10 @@ async def test_an_error_before_delivery_ends_the_reply_failed_without_a_retry(tm
 async def test_sources_that_reach_an_ended_reply_again_run_nothing(tmp_path: Path) -> None:
     """A Stop can end the reply between the source gate and the claim: the turn adds neither an answer nor an error."""
     bot = await _streaming_bot(tmp_path)
-    runner = unwrap_extracted_collaborator(bot._response_runner)
-    with patch_response_runner_module(
-        stream_agent_response=_model_stream(AsyncMock(return_value="A complete answer.")),
-        should_use_streaming=AsyncMock(return_value=False),
-        typing_indicator=_noop_typing,
-    ):
-        await runner.generate_response(_plain_request(_target()))
-        completed = await _reply(bot)
-        sends = len(_sent_bodies(bot))
-        assert await runner.generate_response(_plain_request(_target())) is None
+    await _answer(bot, _plain_request(_target()), AsyncMock(return_value="A complete answer."))
+    completed = await _reply(bot)
+    sends = len(_sent_bodies(bot))
+    assert await _answer(bot, _plain_request(_target()), AsyncMock(return_value="A complete answer.")) is None
 
     assert await _reply(bot) == completed
     assert len(_sent_bodies(bot)) == sends
@@ -827,7 +804,6 @@ async def test_an_interrupted_regeneration_leaves_the_answer_it_replaced_shown(t
     assert await _answer(bot, _plain_request(_target()), AsyncMock(return_value="First answer.")) == "$sent1"
     await _admit_edit(bot)
     sends = len(_sent_bodies(bot))
-    runner = unwrap_extracted_collaborator(bot._response_runner)
     preparing = asyncio.Event()
 
     async def stalled_prepare(*_args: object, **_kwargs: object) -> object:
@@ -835,15 +811,10 @@ async def test_an_interrupted_regeneration_leaves_the_answer_it_replaced_shown(t
         await asyncio.Event().wait()
         raise AssertionError
 
-    with (
-        patch.object(ResponseRunner, "prepare_response_runtime", new=stalled_prepare),
-        patch_response_runner_module(
-            stream_agent_response=_model_stream(AsyncMock(return_value="Never.")),
-            should_use_streaming=AsyncMock(return_value=False),
-            typing_indicator=_noop_typing,
-        ),
-    ):
-        response = asyncio.create_task(runner.generate_response(_regeneration(answer_event_id="$sent1")))
+    with patch.object(ResponseRunner, "prepare_response_runtime", new=stalled_prepare):
+        response = asyncio.create_task(
+            _answer(bot, _regeneration(answer_event_id="$sent1"), AsyncMock(return_value="Never.")),
+        )
         await asyncio.wait_for(preparing.wait(), timeout=5)
         response.cancel()
         with suppress(asyncio.CancelledError):
@@ -944,7 +915,6 @@ async def test_stop_before_the_span_starts_its_task_cancels_it_before_the_model_
     if selection:
         ack_event_id, span_id = await _acknowledge_selection(bot)
         request = replace(request, existing_event_id=ack_event_id, interactive_span_id=span_id)
-    runner = unwrap_extracted_collaborator(bot._response_runner)
     preparing = asyncio.Event()
     release = asyncio.Event()
     prepare = ResponseRunner.prepare_response_runtime
@@ -955,15 +925,8 @@ async def test_stop_before_the_span_starts_its_task_cancels_it_before_the_model_
         return await prepare(self, *args, **kwargs)
 
     model = AsyncMock(return_value="An answer.")
-    with (
-        patch.object(ResponseRunner, "prepare_response_runtime", new=slow_prepare),
-        patch_response_runner_module(
-            stream_agent_response=_model_stream(model),
-            should_use_streaming=AsyncMock(return_value=False),
-            typing_indicator=_noop_typing,
-        ),
-    ):
-        response = asyncio.create_task(runner.generate_response(request))
+    with patch.object(ResponseRunner, "prepare_response_runtime", new=slow_prepare):
+        response = asyncio.create_task(_answer(bot, request, model))
         await asyncio.wait_for(preparing.wait(), timeout=5)
         stop = await _stop(bot, "$sent1", 7)
         release.set()
@@ -1483,14 +1446,8 @@ async def test_a_replay_of_an_attempt_that_showed_only_its_placeholder_is_warned
         prompts.append(html.unescape(str(ctx.model_prompt)))
         return "The complete report."
 
-    runner = unwrap_extracted_collaborator(restarted._response_runner)
     try:
-        with patch_response_runner_module(
-            stream_agent_response=_model_stream(AsyncMock(side_effect=answer)),
-            should_use_streaming=AsyncMock(return_value=False),
-            typing_indicator=_noop_typing,
-        ):
-            await runner.generate_response(_plain_request(_target()))
+        await _answer(restarted, _plain_request(_target()), AsyncMock(side_effect=answer))
 
         (prompt,) = prompts
         account = prompt.split('<item key="interrupted_attempt" cache_policy="volatile">\n', 1)[1]
@@ -1629,14 +1586,8 @@ async def test_a_replay_is_told_which_tool_calls_its_stopped_attempt_made_though
         prompts.append(html.unescape(str(ctx.model_prompt)))
         return "The complete report."
 
-    runner = unwrap_extracted_collaborator(restarted._response_runner)
     try:
-        with patch_response_runner_module(
-            stream_agent_response=_model_stream(AsyncMock(side_effect=answer)),
-            should_use_streaming=AsyncMock(return_value=False),
-            typing_indicator=_noop_typing,
-        ):
-            await runner.generate_response(_plain_request(_target()))
+        await _answer(restarted, _plain_request(_target()), AsyncMock(side_effect=answer))
 
         (prompt,) = prompts
         account = prompt.split('<item key="interrupted_attempt" cache_policy="volatile">\n', 1)[1]
@@ -1761,11 +1712,7 @@ async def test_leaving_the_room_mid_stream_ends_the_reply_without_writing_to_it(
     bot = await _streaming_bot(tmp_path)
     response, _streaming = await _blocked_stream(bot)
 
-    async def partial_shown() -> None:
-        while "Partial" not in _sent_bodies(bot):  # noqa: ASYNC110
-            await asyncio.sleep(0.01)
-
-    await asyncio.wait_for(partial_shown(), timeout=5)
+    await asyncio.wait_for(_wait_until_sent(bot, "Partial"), timeout=5)
     reply = await _reply(bot)
     assert reply.event_id is not None
     sends = len(bot.client.room_send.await_args_list)
@@ -1834,11 +1781,7 @@ async def test_deleting_the_prompt_mid_stream_removes_its_reply(tmp_path: Path) 
     bot = await _streaming_bot(tmp_path)
     response, _streaming = await _blocked_stream(bot)
 
-    async def partial_shown() -> None:
-        while "Partial" not in _sent_bodies(bot):  # noqa: ASYNC110
-            await asyncio.sleep(0.01)
-
-    await asyncio.wait_for(partial_shown(), timeout=5)
+    await asyncio.wait_for(_wait_until_sent(bot, "Partial"), timeout=5)
     shown = await _reply(bot)
     assert shown.event_id is not None
     sends = len(bot.client.room_send.await_args_list)
@@ -1885,16 +1828,8 @@ async def test_deleting_the_prompt_mid_stream_removes_its_reply(tmp_path: Path) 
 async def test_the_stop_button_is_the_replys_and_leaves_with_its_active_state(tmp_path: Path) -> None:
     """The button is sent once on the reply's event, recorded on the reply, and redacted when the reply ends."""
     bot = await _streaming_bot(tmp_path)
-    runner = unwrap_extracted_collaborator(bot._response_runner)
-    with (
-        patch("mindroom.response_attempt.is_user_online", new=AsyncMock(return_value=True)),
-        patch_response_runner_module(
-            stream_agent_response=_model_stream(AsyncMock(return_value="An answer.")),
-            should_use_streaming=AsyncMock(return_value=False),
-            typing_indicator=_noop_typing,
-        ),
-    ):
-        await runner.generate_response(_plain_request(_target()))
+    with patch("mindroom.response_attempt.is_user_online", new=AsyncMock(return_value=True)):
+        await _answer(bot, _plain_request(_target()), AsyncMock(return_value="An answer."))
     # A reply whose row resolves after the button was recorded redacts the button in a settlement task.
     assert await wait_for_background_tasks(timeout=5.0, owner=bot._runtime_view)
 
@@ -1918,23 +1853,14 @@ async def test_the_stop_button_is_the_replys_and_leaves_with_its_active_state(tm
 async def test_a_stop_button_decided_after_its_reply_ended_is_never_sent(tmp_path: Path) -> None:
     """A presence check that outlasts a short answer leaves no button to send and then redact."""
     bot = await _streaming_bot(tmp_path)
-    runner = unwrap_extracted_collaborator(bot._response_runner)
 
     async def online_once_answered(*_args: object, **_kwargs: object) -> bool:
         # The answer's final edit goes out while the presence check runs.
-        while "An answer." not in _sent_bodies(bot):  # noqa: ASYNC110
-            await asyncio.sleep(0.01)
+        await _wait_until_sent(bot, "An answer.")
         return True
 
-    with (
-        patch("mindroom.response_attempt.is_user_online", new=online_once_answered),
-        patch_response_runner_module(
-            stream_agent_response=_model_stream(AsyncMock(return_value="An answer.")),
-            should_use_streaming=AsyncMock(return_value=False),
-            typing_indicator=_noop_typing,
-        ),
-    ):
-        await runner.generate_response(_plain_request(_target()))
+    with patch("mindroom.response_attempt.is_user_online", new=online_once_answered):
+        await _answer(bot, _plain_request(_target()), AsyncMock(return_value="An answer."))
     assert await wait_for_background_tasks(timeout=5.0, owner=bot._runtime_view)
 
     reply = await _reply(bot)

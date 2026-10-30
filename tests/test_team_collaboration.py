@@ -214,11 +214,6 @@ class TestRouterTeamFormation:
     @pytest.mark.asyncio
     async def test_dm_room_team_formation(self) -> None:
         """Test that multiple agents in a DM room form a team when no one is mentioned."""
-        from mindroom.config.agent import AgentConfig  # noqa: PLC0415
-        from mindroom.config.main import Config  # noqa: PLC0415
-        from mindroom.config.models import ModelConfig  # noqa: PLC0415
-        from mindroom.teams.formation import decide_team_formation  # noqa: PLC0415
-
         config = _runtime_bound_config(
             Config(
                 agents={
@@ -271,11 +266,6 @@ class TestRouterTeamFormation:
     @pytest.mark.asyncio
     async def test_dm_room_thread_single_agent_no_team(self) -> None:
         """In a DM with multiple agents, a thread with a single agent should not form a team."""
-        from mindroom.config.agent import AgentConfig  # noqa: PLC0415
-        from mindroom.config.main import Config  # noqa: PLC0415
-        from mindroom.config.models import ModelConfig  # noqa: PLC0415
-        from mindroom.teams.formation import decide_team_formation  # noqa: PLC0415
-
         config = _runtime_bound_config(
             Config(
                 agents={
@@ -316,8 +306,6 @@ class TestRouterTeamFormation:
     @pytest.mark.asyncio
     async def test_dm_room_ignores_private_agents_for_team_formation(self) -> None:
         """A DM room's auto team leaves out a private agent and degrades to the one supported agent left."""
-        from mindroom.teams.formation import decide_team_formation  # noqa: PLC0415
-
         config = _runtime_bound_config(
             Config(
                 agents={
@@ -359,8 +347,6 @@ class TestRouterTeamFormation:
     @pytest.mark.asyncio
     async def test_thread_history_unavailable_agents_degrade_to_individual(self) -> None:
         """Implicit thread continuation should not reject when one historical agent is off-room."""
-        from mindroom.teams.formation import decide_team_formation  # noqa: PLC0415
-
         config = _runtime_bound_config(
             Config(
                 agents={
@@ -398,8 +384,6 @@ class TestRouterTeamFormation:
     @pytest.mark.asyncio
     async def test_thread_history_ignores_configured_team_participants(self) -> None:
         """Implicit thread teams must ignore configured team bots instead of treating them as leaf members."""
-        from mindroom.teams.formation import decide_team_formation  # noqa: PLC0415
-
         config = _runtime_bound_config(
             Config(
                 agents={
@@ -462,8 +446,6 @@ class TestRouterTeamFormation:
     @pytest.mark.asyncio
     async def test_previously_mentioned_off_room_agents_degrade_to_individual(self) -> None:
         """Implicit thread mentions should degrade instead of surfacing explicit-request rejection."""
-        from mindroom.teams.formation import decide_team_formation  # noqa: PLC0415
-
         config = _runtime_bound_config(
             Config(
                 agents={
@@ -501,8 +483,6 @@ class TestRouterTeamFormation:
     @pytest.mark.asyncio
     async def test_tagged_off_room_agents_reject_the_entire_team_request(self) -> None:
         """An explicit team request rejects a member the room does not hold, which the sender cannot reach there."""
-        from mindroom.teams.formation import decide_team_formation  # noqa: PLC0415
-
         config = _runtime_bound_config(
             Config(
                 agents={
@@ -545,8 +525,6 @@ class TestRouterTeamFormation:
     @pytest.mark.asyncio
     async def test_tagged_agents_reject_when_sender_can_talk_to_zero_agents(self) -> None:
         """A sender who can reach no responder in the room has every tagged agent rejected, named in one reason."""
-        from mindroom.teams.formation import decide_team_formation  # noqa: PLC0415
-
         config = _runtime_bound_config(
             Config(
                 agents={
@@ -581,8 +559,6 @@ class TestRouterTeamFormation:
     @pytest.mark.asyncio
     async def test_tagged_off_room_agents_reject_without_collapsing_requested_members(self) -> None:
         """Explicit rejects should preserve the full requested-member failure state."""
-        from mindroom.teams.formation import decide_team_formation  # noqa: PLC0415
-
         config = _runtime_bound_config(
             Config(
                 agents={
@@ -621,8 +597,6 @@ class TestRouterTeamFormation:
     @pytest.mark.asyncio
     async def test_tagged_private_agent_can_join_explicit_ad_hoc_team(self) -> None:
         """Explicit shared/private mentions should form one ad hoc team."""
-        from mindroom.teams.formation import decide_team_formation  # noqa: PLC0415
-
         config = _runtime_bound_config(
             Config(
                 agents={
@@ -674,8 +648,6 @@ class TestRouterTeamFormation:
     @pytest.mark.asyncio
     async def test_tagged_unsupported_non_materializable_member_keeps_requested_member_statuses(self) -> None:
         """Explicit rejects should keep requested-member eligibility separate from delivery ownership."""
-        from mindroom.teams.formation import decide_team_formation  # noqa: PLC0415
-
         config = _runtime_bound_config(
             Config(
                 agents={
@@ -719,8 +691,6 @@ class TestRouterTeamFormation:
     @pytest.mark.asyncio
     async def test_tagged_mixed_reject_causes_report_member_specific_reasons(self) -> None:
         """Mixed reject causes should explain the actual member failures instead of flattening them."""
-        from mindroom.teams.formation import decide_team_formation  # noqa: PLC0415
-
         config = _runtime_bound_config(
             Config(
                 agents={
@@ -768,8 +738,6 @@ class TestRouterTeamFormation:
         self,
     ) -> None:
         """Ad hoc team formation must reject explicit member sets that reach private agents."""
-        from mindroom.teams.formation import decide_team_formation  # noqa: PLC0415
-
         config = _runtime_bound_config(
             Config(
                 agents={

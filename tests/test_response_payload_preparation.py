@@ -18,11 +18,9 @@ from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
 from mindroom.conversation_resolver import MessageContext
 from mindroom.final_delivery import FinalDeliveryOutcome
-from mindroom.hooks import MessageEnvelope
 from mindroom.inbound_turn_normalizer import DispatchPayload
 from mindroom.matrix.thread_history_result import ThreadHistoryResult
 from mindroom.matrix.users import AgentMatrixUser
-from mindroom.message_target import MessageTarget
 from mindroom.response_payload_preparation import DispatchPayloadInputs, ResponsePayloadPreparation
 from mindroom.response_runner import ResponseRequest
 from mindroom.response_sources import ResponseSources
@@ -33,12 +31,12 @@ from tests.conftest import (
     TEST_PASSWORD,
     bind_runtime_paths,
     install_runtime_journal_support,
-    message_origin,
     runtime_paths_for,
     test_runtime_paths,
     unwrap_extracted_collaborator,
     wrap_extracted_collaborators,
 )
+from tests.response_runner_helpers import _envelope, _target
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Sequence
@@ -47,6 +45,7 @@ if TYPE_CHECKING:
     from mindroom.bot import AgentBot
     from mindroom.dispatch_handoff import MediaDispatchEvent
     from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
+    from mindroom.message_target import MessageTarget
 
 
 def _config(tmp_path: Path) -> Config:
@@ -76,27 +75,6 @@ def _bot(tmp_path: Path) -> AgentBot:
     install_runtime_journal_support(bot)
     wrap_extracted_collaborators(bot)
     return bot
-
-
-def _target(thread_id: str | None = None) -> MessageTarget:
-    return MessageTarget.resolve(
-        room_id="!room:localhost",
-        thread_id=thread_id,
-        reply_to_event_id="$event",
-        room_mode=thread_id is None,
-    )
-
-
-def _envelope(target: MessageTarget) -> MessageEnvelope:
-    return MessageEnvelope(
-        source_event_id="$event",
-        target=target,
-        body="hello",
-        attachment_ids=(),
-        mentioned_agents=(),
-        agent_name="general",
-        origin=message_origin(sender_id="@user:localhost", requester_id="@user:localhost", source_kind="message"),
-    )
 
 
 def _preparation(

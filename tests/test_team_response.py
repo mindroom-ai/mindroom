@@ -200,8 +200,7 @@ async def test_a_team_with_a_member_that_is_not_running_answers_why_without_runn
 ) -> None:
     """The exact member set is required: a member without a running bot is named, and no model is asked."""
     team = _team(tmp_path, monkeypatch, members=("general", "research"))
-    running = team.orchestrator.running_entity_names()
-    team.orchestrator.running_entity_names = lambda: running - {"research"}
+    team.orchestrator.running_entity_names = lambda: frozenset({"general"})
 
     text = await team.respond()
 
@@ -750,8 +749,7 @@ async def test_a_private_member_is_refused_without_a_matrix_requester(
 ) -> None:
     """Private agents join only explicit Matrix ad hoc teams with a requester, even when no bot of theirs runs."""
     team = _private_team(tmp_path, monkeypatch)
-    running = team.orchestrator.running_entity_names()
-    team.orchestrator.running_entity_names = lambda: running - {"general"}
+    team.orchestrator.running_entity_names = lambda: frozenset({"research"})
     team.identity = None if identity is None else replace(team.identity, **identity)
 
     with pytest.raises(

@@ -44,7 +44,6 @@ from mindroom.teams.formation import TeamIntent, TeamMemberStatus, TeamOutcome, 
 from mindroom.teams.spec import TeamMode
 from mindroom.thread_summary import thread_summary_message_count_hint
 from mindroom.tool_system.events import StructuredStreamChunk, ToolTraceEntry
-from mindroom.turn_policy import TurnPolicy, _ResponderAvailability
 from tests.bot_helpers import (
     AgentBotTestBase,
     _configured_team_test_config,
@@ -77,6 +76,7 @@ from tests.conftest import (
 from tests.identity_helpers import entity_ids
 from tests.reply_span_helpers import seed_finished_reply
 from tests.response_attempt_helpers import install_direct_response_admission
+from tests.runtime_fakes import ready_runtime
 from tests.team_turn_helpers import scripted_team_stream
 
 if TYPE_CHECKING:
@@ -153,7 +153,7 @@ def mock_agent_user() -> AgentMatrixUser:
 
 
 class TestAgentBot(AgentBotTestBase):
-    """Bot behavior tests moved verbatim from tests/test_multi_agent_bot.py."""
+    """Team replies a bot runs through its response runner, and configured-team regeneration."""
 
     @pytest.mark.asyncio
     async def test_team_model_snapshot_precedes_locked_turn_preparation(
@@ -300,8 +300,7 @@ class TestAgentBot(AgentBotTestBase):
         config.agents["calculator"].model = "large"
         config.agents["general"].model = "local"
         config.budgets = BudgetsConfig(fallback_model="cheap", monthly_limit_usd=0)
-        runtime_paths = runtime_paths_for(config)
-        bot = make_test_agent_bot(mock_agent_user, config=config, runtime_paths=runtime_paths)
+        bot = make_test_agent_bot(mock_agent_user, config=config, runtime_paths=runtime_paths_for(config))
         bot.client = _make_matrix_client_mock()
         coordinator = unwrap_extracted_collaborator(bot._response_runner)
         team_stream = scripted_team_stream("Team reply")
@@ -759,8 +758,7 @@ class TestAgentBot(AgentBotTestBase):
 
         config = self._config_for_storage(tmp_path)
         config.defaults.show_stop_button = False
-        runtime_paths = runtime_paths_for(config)
-        bot = make_test_agent_bot(mock_agent_user, config=config, runtime_paths=runtime_paths)
+        bot = make_test_agent_bot(mock_agent_user, config=config, runtime_paths=runtime_paths_for(config))
         install_direct_response_admission(bot)
         bot.client = _make_matrix_client_mock()
         envelope = MessageEnvelope(
@@ -854,11 +852,6 @@ class TestAgentBot(AgentBotTestBase):
         deliver_team_rejection = AsyncMock(return_value=None)
 
         with (
-            patch.object(
-                TurnPolicy,
-                "_responder_availability",
-                return_value=_ResponderAvailability(materializable_agent_names=set(), live_entity_names=None),
-            ),
             patch("mindroom.turn_policy.resolve_configured_team", return_value=resolution),
             patch.object(
                 unwrap_extracted_collaborator(bot._response_runner),
@@ -899,11 +892,10 @@ class TestAgentBot(AgentBotTestBase):
         runtime_paths = runtime_paths_for(config)
         initial_ids = entity_ids(config, runtime_paths)
         stale_member = initial_ids["general"]
-        bot = make_test_agent_bot(
-            _configured_team_user(config, runtime_paths),
-            config=config,
-            runtime_paths=runtime_paths,
-        )
+        orchestrator = ready_runtime(config, runtime_paths)
+        # The calculator is down, so only the general agent can join the team.
+        orchestrator.unavailable = {"calculator"}
+        bot = make_test_agent_bot(_configured_team_user(config, runtime_paths), orchestrator=orchestrator)
         _wrap_extracted_collaborators(bot)
         bot.client = _make_matrix_client_mock()
 
@@ -952,11 +944,6 @@ class TestAgentBot(AgentBotTestBase):
         deliver_team_rejection = AsyncMock(return_value="$reject")
 
         with (
-            patch.object(
-                TurnPolicy,
-                "_responder_availability",
-                return_value=_ResponderAvailability(materializable_agent_names={"general"}, live_entity_names=None),
-            ),
             patch("mindroom.turn_policy.resolve_configured_team", side_effect=capture_resolve_configured_team),
             patch.object(
                 unwrap_extracted_collaborator(bot._response_runner),
@@ -1161,10 +1148,6 @@ class TestAgentBot(AgentBotTestBase):
     ) -> None:
         """Team streaming should stay enabled when reusing the startup placeholder."""
 
-        @asynccontextmanager
-        async def noop_typing_indicator(*_args: object, **_kwargs: object) -> AsyncGenerator[None]:
-            yield
-
         async def run_cancellable_response(*_args: object, **kwargs: object) -> str:
             response_kwargs = cast("dict[str, Callable[[str | None], Awaitable[None]]]", kwargs)
             response_function = response_kwargs["response_function"]
@@ -1182,7 +1165,7 @@ class TestAgentBot(AgentBotTestBase):
         with (
             patch_response_runner_module(
                 should_use_streaming=AsyncMock(return_value=True),
-                typing_indicator=noop_typing_indicator,
+                typing_indicator=_noop_typing_indicator,
                 team_response_stream=fake_team_response_stream,
             ),
             patch.object(
@@ -1434,11 +1417,11 @@ class TestAgentBot(AgentBotTestBase):
         config = self._config_for_storage(tmp_path)
         bot = make_test_agent_bot(mock_agent_user, config=config, runtime_paths=runtime_paths_for(config))
         bot.client = _make_matrix_client_mock()
-        bot._redact_message_event = AsyncMock(return_value=True)
+        redact_message_event = AsyncMock(return_value=True)
         bot.orchestrator.hook_registry_state.registry = HookRegistry.from_plugins(
             [_hook_plugin("hooked", [before_hook])],
         )
-        replace_delivery_gateway_deps(bot, redact_message_event=bot._redact_message_event)
+        replace_delivery_gateway_deps(bot, redact_message_event=redact_message_event)
 
         with (
             patch_response_runner_module(
@@ -1473,7 +1456,7 @@ class TestAgentBot(AgentBotTestBase):
         assert reply.state is rl.ReplyState.GONE
         # Nothing was shown, so nothing is left to redact.
         assert reply.event_id is None
-        bot._redact_message_event.assert_not_awaited()
+        redact_message_event.assert_not_awaited()
 
 
 def _team_regeneration_request(

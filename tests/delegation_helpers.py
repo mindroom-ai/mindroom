@@ -485,7 +485,6 @@ async def respond_team(
         correlation_id=correlation_id,
     )
     orchestrator = team_orchestrator(config, runtime_paths)
-    orchestrator.agent_bots = {name: SimpleNamespace(running=True) for name in members}
     orchestrator.running_entity_names = lambda: frozenset(members)
     ctx = replace(
         make_turn_context(

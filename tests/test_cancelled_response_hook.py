@@ -185,18 +185,13 @@ def _team_bot(tmp_path: Path) -> AgentBot:
             "team_bot": TeamConfig(display_name="Team Bot", role="Team", agents=["code"], rooms=["!room:localhost"]),
         },
     )
-    runtime_paths = runtime_paths_for(config)
     team_user = AgentMatrixUser(
         agent_name="team_bot",
         user_id="@mindroom_team_bot:localhost",
         display_name="Team Bot",
         password=TEST_PASSWORD,
     )
-    bot = make_test_agent_bot(
-        team_user,
-        config=config,
-        runtime_paths=runtime_paths,
-    )
+    bot = make_test_agent_bot(team_user, config=config)
     wrap_extracted_collaborators(bot)
     bot.client = make_matrix_client_mock(user_id=team_user.user_id)
     install_runtime_journal_support(bot)

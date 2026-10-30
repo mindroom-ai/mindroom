@@ -122,6 +122,7 @@ if TYPE_CHECKING:
     from mindroom.tool_system.runtime_context import ToolRuntimeContext
 
 HEADER = "🤝 **Team Response** (Writer, Checker):\n\n"
+_TOUCH_NEEDS_APPROVAL = [ApprovalRuleConfig(match="touch", action="require_approval")]
 
 # Every test registers the members' probe toolkit.
 pytestmark = pytest.mark.usefixtures("squad_probe")
@@ -733,7 +734,7 @@ async def _pause_on_the_checker(
         monkeypatch,
         leader=[delegate("call-team", "checker", "Touch it")],
         checker=[calls(tool_call("touch", "call-touch", label="dangerous"), metrics=usage(10, 1))],
-        approval_rules=[ApprovalRuleConfig(match="touch", action="require_approval")],
+        approval_rules=_TOUCH_NEEDS_APPROVAL,
     )
     with pytest.raises(ResponsePausedForApproval) as raised:
         await team.stream(show_tool_calls=show_tool_calls)
@@ -863,7 +864,7 @@ async def test_an_approved_member_call_resumes_the_stored_team_run_and_renders_t
     assert isinstance(result, CompletedApprovalRun)
     assert ProbeToolkit.calls == ["dangerous"]
     assert result.response_text == HEADER + body
-    assert result.metadata_content["io.mindroom.ai_run"]["status"] == "completed"
+    assert result.metadata_content[AI_RUN_METADATA_KEY]["status"] == "completed"
     record, [member] = team.stored_runs()
     assert (record.status, member.status) == (RunStatus.completed, RunStatus.completed)
     assert record.requirements == []
@@ -1070,7 +1071,7 @@ async def test_an_approval_resume_repeats_the_request_the_leader_and_the_member_
         monkeypatch,
         leader=[delegate("call-team", "checker", "Touch it")],
         checker=[calls(tool_call("touch", "call-touch", label="dangerous"), metrics=usage(10, 1))],
-        approval_rules=[ApprovalRuleConfig(match="touch", action="require_approval")],
+        approval_rules=_TOUCH_NEEDS_APPROVAL,
     )
     location = EnrichmentItem(key="location", text="Alice is in Lisbon.", persist=False)
     with pytest.raises(ResponsePausedForApproval) as raised:
@@ -1119,7 +1120,7 @@ async def test_a_member_continued_after_its_own_delegation_in_an_approval_resume
         leader=[delegate("call-team", "checker", "Touch it")],
         checker=[calls(tool_call("touch", "call-touch", label="dangerous"), metrics=usage(10, 1))],
         helper=[],
-        approval_rules=[ApprovalRuleConfig(match="touch", action="require_approval")],
+        approval_rules=_TOUCH_NEEDS_APPROVAL,
     )
     with pytest.raises(ResponsePausedForApproval) as raised:
         await team.stream(show_tool_calls=False)
@@ -1495,7 +1496,7 @@ async def test_a_team_pause_shows_a_failed_member_run_s_reason_after_the_text_it
         leader=[delegate("call-check", "checker", "Check"), delegate("call-write", "writer", "Touch it")],
         checker=[[TextDelta("Checking it"), Await(_checker_leaks_its_key)]],
         writer=[calls(tool_call("touch", "call-touch", label="dangerous"))],
-        approval_rules=[ApprovalRuleConfig(match="touch", action="require_approval")],
+        approval_rules=_TOUCH_NEEDS_APPROVAL,
     )
 
     with pytest.raises(ResponsePausedForApproval) as raised:
@@ -1527,7 +1528,7 @@ async def test_a_team_reply_shows_the_no_consensus_note_only_once_it_finishes(
         monkeypatch,
         leader=[delegate("call-team", "checker", "Touch it")],
         checker=[calls(tool_call("touch", "call-touch", label="dangerous"), content="Let me touch it.")],
-        approval_rules=[ApprovalRuleConfig(match="touch", action="require_approval")],
+        approval_rules=_TOUCH_NEEDS_APPROVAL,
     )
     live: list[TeamStreamChunk] = []
     with pytest.raises(ResponsePausedForApproval) as raised:
@@ -1595,7 +1596,7 @@ async def _pause_after_the_checker_wrote(
             ),
         ],
         checker=[calls(tool_call("touch", "call-touch", label="dangerous"), content="Let me touch it.")],
-        approval_rules=[ApprovalRuleConfig(match="touch", action="require_approval")],
+        approval_rules=_TOUCH_NEEDS_APPROVAL,
     )
     with pytest.raises(ResponsePausedForApproval) as raised:
         await team.stream(show_tool_calls=False)
@@ -1637,7 +1638,7 @@ async def test_a_member_asked_again_after_an_approval_resume_starts_a_new_paragr
         leader=[delegate("call-draft", "writer", "Draft"), delegate("call-check", "checker", "Touch it")],
         writer=[answer("Draft one.")],
         checker=[calls(tool_call("touch", "call-touch", label="dangerous"))],
-        approval_rules=[ApprovalRuleConfig(match="touch", action="require_approval")],
+        approval_rules=_TOUCH_NEEDS_APPROVAL,
     )
     with pytest.raises(ResponsePausedForApproval) as raised:
         await team.stream(show_tool_calls=False)
@@ -1718,9 +1719,6 @@ async def test_a_chained_approval_shows_the_text_each_run_wrote_once(
     assert isinstance(result, CompletedApprovalRun)
     assert ProbeToolkit.calls == ["dangerous", "again"]
     assert result.response_text == _WROTE_BEFORE_THE_PAUSE
-
-
-_TOUCH_NEEDS_APPROVAL = [ApprovalRuleConfig(match="touch", action="require_approval")]
 
 
 @pytest.mark.asyncio
@@ -1821,6 +1819,11 @@ async def test_a_chained_team_approval_hands_the_leader_each_member_s_result(
     assert [message.content for message in request.messages if message.role == "tool"] == answered
 
 
+async def _lose_the_provider() -> None:
+    msg = "provider connection lost"
+    raise ProviderError(msg, provider="Synthetic")
+
+
 @pytest.mark.asyncio
 async def test_a_failed_resume_stores_the_error_over_the_paused_row_and_ran_the_approved_tool_once(
     tmp_path: Path,
@@ -1828,12 +1831,7 @@ async def test_a_failed_resume_stores_the_error_over_the_paused_row_and_ran_the_
 ) -> None:
     """A leader request that fails after the approved call ran reaches the caller; the rows record the outcome."""
     team, raised = await _pause_on_the_checker(tmp_path, monkeypatch)
-
-    async def lose_the_provider() -> None:
-        msg = "provider connection lost"
-        raise ProviderError(msg, provider="Synthetic")
-
-    team.models["default"] = ScriptedModel([[Await(lose_the_provider)]])
+    team.models["default"] = ScriptedModel([[Await(_lose_the_provider)]])
     team.models["checker-model"] = ScriptedModel([answer("Touched.")])
 
     with pytest.raises(ProviderError, match="provider connection lost"):
@@ -1856,15 +1854,10 @@ async def test_a_team_reply_that_fails_mid_turn_reports_its_stored_run_in_the_me
 
     The turn driver stores the failed turn as its interrupted record, in the failed run's place.
     """
-
-    async def lose_the_provider() -> None:
-        msg = "provider connection lost"
-        raise ProviderError(msg, provider="Synthetic")
-
     team = squad_turn(
         tmp_path,
         monkeypatch,
-        leader=[delegate("call-team", "writer", "Draft it"), [Await(lose_the_provider)]],
+        leader=[delegate("call-team", "writer", "Draft it"), [Await(_lose_the_provider)]],
         writer=[answer("Draft.", usage(20, 2))],
     )
     metadata: dict[str, Any] = {}
@@ -1877,11 +1870,6 @@ async def test_a_team_reply_that_fails_mid_turn_reports_its_stored_run_in_the_me
     assert record.metadata is not None
     assert record.metadata["mindroom_original_status"] == "error"
     assert payload["tools"] == {"count": 1}
-
-
-async def _lose_the_provider() -> None:
-    msg = "provider connection lost"
-    raise ProviderError(msg, provider="Synthetic")
 
 
 @pytest.mark.asyncio
@@ -2217,7 +2205,7 @@ async def test_two_members_approvals_under_one_call_id_are_refused_and_neither_c
         ],
         writer=[calls(tool_call("touch", "call-touch", label="a"), metrics=usage(10, 1))],
         checker=[calls(tool_call("touch", "call-touch", label="b"), metrics=usage(10, 1))],
-        approval_rules=[ApprovalRuleConfig(match="touch", action="require_approval")],
+        approval_rules=_TOUCH_NEEDS_APPROVAL,
     )
 
     chunks = await team.stream(show_tool_calls=False)
@@ -2337,7 +2325,7 @@ async def test_a_team_paused_on_its_child_s_approval_resumes_through_the_delegat
         leader=[delegate("call-team", "writer", "Research it"), answer("Consensus.", usage(50, 5))],
         writer=[_delegate_to_helper("Dig"), answer("Writer: dug.")],
         helper=[calls(tool_call("touch", "call-helper", label="deep"), metrics=usage(5, 1)), answer("Dug deep.")],
-        approval_rules=[ApprovalRuleConfig(match="touch", action="require_approval")],
+        approval_rules=_TOUCH_NEEDS_APPROVAL,
     )
     with pytest.raises(ResponsePausedForApproval) as raised:
         await team.stream(show_tool_calls=False)
@@ -2392,7 +2380,7 @@ async def test_a_child_that_pauses_again_after_its_approval_shows_the_leader_s_e
             calls(tool_call("touch", "call-helper-again", label="deeper"), metrics=usage(5, 1)),
             answer("Dug deeper."),
         ],
-        approval_rules=[ApprovalRuleConfig(match="touch", action="require_approval")],
+        approval_rules=_TOUCH_NEEDS_APPROVAL,
     )
     with pytest.raises(ResponsePausedForApproval) as raised:
         await team.stream(show_tool_calls=False)
@@ -2603,36 +2591,6 @@ async def test_a_stopped_member_keeps_its_usage_and_its_row_ends_cancelled(
 
 
 @pytest.mark.asyncio
-async def test_a_stopped_team_turn_records_the_text_its_members_streamed(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """A Stop records what the reply showed: the writer, stopped while its call ran, records what it wrote before.
-
-    The checker failed before any text; the stopped turn records its reason in its slot all the same.
-    """
-    team = squad_turn(
-        tmp_path,
-        monkeypatch,
-        leader=[delegate("call-check", "checker", "Check"), delegate("call-write", "writer", "Write")],
-        checker=[[Await(_checker_overloaded)]],
-        writer=[calls(tool_call("touch", "call-touch", label="draft", wait=True), content="Drafting.")],
-    )
-    task = asyncio.create_task(team.respond(show_tool_calls=False))
-    await asyncio.wait_for(ProbeToolkit.waiting.wait(), timeout=5)
-    task.cancel()
-    with pytest.raises(asyncio.CancelledError):
-        await task
-
-    record, members = team.stored_runs()
-    assert [run.status for run in (record, *members)] == [RunStatus.completed, RunStatus.error, RunStatus.cancelled]
-    assert record.metadata is not None
-    assert record.metadata["mindroom_original_status"] == "cancelled"
-    assert team.recorder.outcome == "interrupted"
-    assert team.recorder.assistant_text == "**Writer**: Drafting.\n\n**Checker**: Checker overloaded"
-
-
-@pytest.mark.asyncio
 @pytest.mark.parametrize("stream", [True, False])
 async def test_a_stopped_team_turn_records_its_member_runs_in_configured_order(
     tmp_path: Path,
@@ -2812,11 +2770,6 @@ def _team_bot(team: TeamTurn, entity: str = "squad") -> AgentBot:
     return bot
 
 
-def _runner(team: TeamTurn) -> Any:  # noqa: ANN401
-    """Return the runner of the squad's team bot."""
-    return _team_bot(team)._response_runner
-
-
 def _request(prompt: str = "Hello") -> ResponseRequest:
     target = MessageTarget.resolve(room_id=ROOM_ID, thread_id=THREAD_ID, reply_to_event_id=EVENT_ID)
     return ResponseRequest(
@@ -2974,7 +2927,7 @@ async def test_the_driver_writes_the_interrupted_record_after_the_loop_stored_th
         leader=[delegate("call-team", "writer", "Write")],
         writer=[[TextDelta("Dra"), UsageReported(usage(30, 2), final=False), Await(wait_to_be_cancelled)]],
     )
-    runner = _runner(team)
+    runner = _team_bot(team)._response_runner
     statuses_when_interrupted_record_written: list[RunStatus | None] = []
     original = response_turn.persist_interrupted_replay_snapshot
 

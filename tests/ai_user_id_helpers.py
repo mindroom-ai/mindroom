@@ -17,7 +17,6 @@ from mindroom.budgets.monitor import BudgetMonitor
 from mindroom.config.agent import AgentConfig, TeamConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
-from mindroom.config.plugin import PluginEntryConfig
 from mindroom.constants import (
     RuntimePaths,
     resolve_runtime_paths,
@@ -162,16 +161,6 @@ def _metadata_config(provider: str, model_id: str) -> Config:
     )
 
 
-def _plugin(name: str, callbacks: list[object]) -> SimpleNamespace:
-    return SimpleNamespace(
-        name=name,
-        discovered_hooks=tuple(callbacks),
-        discovered_automations=(),
-        entry_config=PluginEntryConfig(path=f"./plugins/{name}"),
-        plugin_order=0,
-    )
-
-
 def _mark_requester_online(client: AsyncMock, user_id: str, room_id: str = "!test:localhost") -> None:
     """Make the requester show as online in the client's synced room cache.
 
@@ -207,13 +196,6 @@ def _knowledge_access_support(
     unavailable: dict[str, KnowledgeAvailabilityDetail] | None = None,
 ) -> SimpleNamespace:
     return SimpleNamespace(
-        for_agent=MagicMock(return_value=knowledge),
-        resolve_for_agent=MagicMock(
-            return_value=_KnowledgeResolution(
-                knowledge=cast("AgentKnowledge | None", knowledge),
-                unavailable=unavailable or {},
-            ),
-        ),
         resolve_for_agent_async=AsyncMock(
             return_value=_KnowledgeResolution(
                 knowledge=cast("AgentKnowledge | None", knowledge),
@@ -318,9 +300,7 @@ def _build_response_runner(
         )
 
     bot._conversation_state_writer.team_history_scope = MagicMock(side_effect=_team_history_scope_for_test)
-    bot._edit_message = AsyncMock(return_value=True)
     agent_reply_memberships = AgentReplyMembershipIndex()
-    bot.agent_reply_memberships = agent_reply_memberships
     runtime = SimpleNamespace(
         client=bot.client,
         config=config,
@@ -440,15 +420,6 @@ def _build_response_runner(
             ),
         ),
     )
-
-
-@asynccontextmanager
-async def _claimed_reply_span(runner: ResponseRunner, request: ResponseRequest) -> AsyncIterator[ResponseRequest]:
-    """Claim the reply span the locked generation claims for ``request``, for calls made below that claim."""
-    async with runner.deps.replies.span_scope():
-        claimed = await runner._claim_reply_span(request, history_scope=runner.deps.state_writer.history_scope())
-        assert claimed is not None
-        yield claimed
 
 
 def _response_request(

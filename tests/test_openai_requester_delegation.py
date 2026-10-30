@@ -267,7 +267,7 @@ def test_team_access_grants_its_members(api: _ApiHarness) -> None:
 
 
 def test_room_membership_access_reads_the_runtime_membership_index(api: _ApiHarness) -> None:
-    """A caller granted through a room reaches the agent whether or not trigger delivery is bound."""
+    """A caller granted through a room reaches the agent while no trigger delivery is bound."""
     api.config.agents["specialist"].rooms = ["lobby"]
     api.config.agents["specialist"].access = ResponderAccessConfig(members_of_rooms=["lobby"])
     bind_test_embedded_runtime(
