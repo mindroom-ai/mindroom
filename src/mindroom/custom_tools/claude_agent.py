@@ -313,7 +313,7 @@ async def _record_turn_usage(turn: _ClaudeTurn, session_model: str | None) -> No
     metrics = RunMetrics()
     for model, counts in models.items():
         metrics.add(MessageMetrics(tokens=counts.with_totals()), model_id=model, provider="Anthropic")
-    if not (metrics.tokens.total_tokens or metrics.tokens.cache_read_tokens or metrics.tokens.cache_write_tokens):
+    if not metrics.reported:
         return
     await record_helper_usage(
         HelperUsage(run_id=uuid4().hex, model=None, provider=None, metrics=metrics),

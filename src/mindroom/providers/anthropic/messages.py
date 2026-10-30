@@ -337,8 +337,7 @@ class ClaudeProvider:
                 blocks=len(dropped),
                 reasons=sorted({entry.reason for entry in dropped}),
             )
-        # A finished Claude response always carries its usage.
-        return turn_end(message, stop_reason, usage_reported=True)
+        return turn_end(message, stop_reason)
 
     def _output_format(self, schema: type[BaseModel] | None) -> dict[str, Any] | None:
         """Return the ``output_config.format`` value, or None on every route but ``native``.

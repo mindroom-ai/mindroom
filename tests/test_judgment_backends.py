@@ -21,6 +21,7 @@ from mindroom.judgment.llm import judge_with_llm
 from mindroom.judgment.state import JudgmentMessage, JudgmentQuestion, build_judgment_request
 from mindroom.judgment.typesafe import _PINNED_MODEL, SYSTEM_ONE
 from mindroom.llm.errors import ProviderError
+from mindroom.llm.usage import MessageMetrics
 from mindroom.providers.model_http_client import MODEL_HTTP_CLIENT
 from tests.conftest import install_model_providers, test_runtime_paths
 from tests.fakes.scripted_model import Await, ScriptedModel, answer, calls, tool_call, usage
@@ -284,8 +285,9 @@ async def test_llm_without_reported_usage_leaves_the_counts_unknown(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A provider that reports no usage leaves the token counts unknown instead of zero."""
-    _judge(monkeypatch, *_decision('{"decision": false}'))
+    """A provider that reports no usage leaves the token counts unknown instead of zero, though its turn is timed."""
+    # Every adapter times the turns it finishes, usage or not.
+    _judge(monkeypatch, *answer('{"decision": false}', MessageMetrics(duration=0.4, time_to_first_token=0.1)))
     result = await judge_with_llm(
         _request(),
         LLMJudgmentConfig(provider="llm", model="cheap"),

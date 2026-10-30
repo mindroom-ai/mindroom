@@ -65,7 +65,7 @@ def install_mem0_usage_capture(llm: Any, provider: str) -> None:  # noqa: ANN401
         def counted_call(*args: object, **kwargs: object) -> object:
             response = call(*args, **kwargs)
             calls = _calls.get()
-            if calls is not None and (metrics := read(response)).tokens.total_tokens:
+            if calls is not None and (metrics := read(response)).reported:
                 calls.append(RequestUsage(created_at=int(time()), metrics=metrics, model=model))
             return response
 

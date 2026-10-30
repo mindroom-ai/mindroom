@@ -105,6 +105,11 @@ class _Counts:
     tokens: TokenCounts = TokenCounts()
     cost: float | None = None
 
+    @property
+    def reported(self) -> bool:
+        """Whether the provider reported usage: it did unless every counter is zero, whatever timings were taken."""
+        return any(getattr(self.tokens, name) for name in TOKEN_FIELDS)
+
     def to_dict(self) -> dict[str, Any]:
         """Return the stored dict shape."""
         return _compact(_flattened(self))

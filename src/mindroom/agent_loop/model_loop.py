@@ -434,7 +434,7 @@ async def _stream_turn(
             # A cut-off request settles exactly what was billed: the completed turn's usage, else the final reports
             # plus a partial none replaced.
             billed = turn.message.metrics if turn is not None else reported.received
-            if billed is not None and billed.to_dict():
+            if billed is not None and billed.reported:
                 provider_data = model_provenance(identity.id, identity.provider_name)
                 # The retrying stage marks usage that sums attempts on the finished turn and on the reports alike.
                 sums_attempts = (

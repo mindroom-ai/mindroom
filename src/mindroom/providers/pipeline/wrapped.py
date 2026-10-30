@@ -32,7 +32,7 @@ from mindroom.llm.provider import (
     TurnCompleted,
     UsageReported,
 )
-from mindroom.llm.usage import TokenCounts, add_usage
+from mindroom.llm.usage import add_usage
 from mindroom.tool_system.context_bound_streams import closing_async_stream
 
 if TYPE_CHECKING:
@@ -165,7 +165,7 @@ def _with_carried_usage(event: StreamEvent, carried: MessageMetrics | None) -> S
     """
     if carried is None:
         return event
-    sums_attempts = carried.tokens != TokenCounts()
+    sums_attempts = carried.reported
     if isinstance(event, UsageReported):
         return replace(event, sums_attempts=True) if sums_attempts else event
     if not isinstance(event, TurnCompleted):
