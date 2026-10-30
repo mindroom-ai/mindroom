@@ -646,7 +646,6 @@ async def test_a_released_note_keeps_its_turn_from_being_flushed_again(tmp_path:
     append_agent_daily_memory(
         f"[auto_flush:{session}:P] P's fact",
         "general",
-        tmp_path,
         config,
         runtime_paths_for(config),
     )
@@ -681,7 +680,6 @@ async def test_a_turn_completed_after_a_released_note_is_flushed_once(tmp_path: 
     append_agent_daily_memory(
         f"[auto_flush:{session}:Z] Z's fact",
         "general",
-        tmp_path,
         config,
         runtime_paths_for(config),
     )
