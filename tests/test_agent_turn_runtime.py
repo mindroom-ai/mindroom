@@ -1418,7 +1418,7 @@ async def test_the_runner_delivers_an_empty_attempt_s_retry_as_the_turn_s_final_
     Both attempts' usage counts: the retry's run does not replace the empty one's usage.
     """
     reply = _reply(tmp_path, monkeypatch, [answer("", usage(100, 5)), answer("Recovered.", usage(120, 9))])
-    runner = _runner(reply, tmp_path)
+    runner = _runner(reply)
 
     delivery, outcome = await _respond_through_runner(runner, _request(), streaming=streaming)
 
