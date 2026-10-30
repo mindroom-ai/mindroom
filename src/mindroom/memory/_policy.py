@@ -84,11 +84,9 @@ def team_scopes(agent_name: str, config: Config, runtime_paths: RuntimePaths) ->
     A member reads every team's store through its own backend, so a team's older store stays readable after a
     teammate's backend change sends the team's new memories to another backend.
     """
-    scope_user_ids: list[str] = []
+    scope_user_ids: dict[str, None] = {}
     for team_name, team_config in config.teams.items():
-        if agent_name not in team_config.agents:
-            continue
-        config.assert_team_agents_supported(team_config.agents, team_name=team_name)
-        if (scope_user_id := team_user_id(team_config.agents)) not in scope_user_ids:
-            scope_user_ids.append(scope_user_id)
+        if agent_name in team_config.agents:
+            config.assert_team_agents_supported(team_config.agents, team_name=team_name)
+            scope_user_ids[team_user_id(team_config.agents)] = None
     return [team_scope(scope_user_id, runtime_paths) for scope_user_id in scope_user_ids]

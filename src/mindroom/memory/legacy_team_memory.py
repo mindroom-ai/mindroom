@@ -94,13 +94,11 @@ def _merge_file_copies(runtime_paths: RuntimePaths, members: list[str]) -> None:
     for member in members:
         member_files = Path("agents", member, "memory_files")
         for name in _subdirectories(storage_root, member_files):
-            text = (
-                _recognized_copy(storage_root, member_files / name)
-                if _names_member(storage_root, name, member)
-                else None
-            )
-            if text is not None:
-                copies.setdefault(name, []).append((member_files / name, text))
+            if not _names_member(storage_root, name, member):
+                continue
+            copy = member_files / name
+            if (text := _recognized_copy(storage_root, copy)) is not None:
+                copies.setdefault(name, []).append((copy, text))
     for scope_dir, team_copies in copies.items():
         target = team_scope(scope_dir, runtime_paths).root
         target.mkdir(parents=True, exist_ok=True)
@@ -110,7 +108,8 @@ def _merge_file_copies(runtime_paths: RuntimePaths, members: list[str]) -> None:
             try:
                 _remove_copy(storage_root, copy)
             except OSError as error:
-                # The runtime no longer reads member copies, so one left behind is never read.
+                # The runtime no longer reads member copies. Until the receipt is written, each start merges one left
+                # behind again, so an entry deleted from the team's file meanwhile would come back.
                 logger.warning(
                     "Left a merged team memory copy MindRoom could not remove",
                     path=str(copy),
@@ -226,8 +225,8 @@ def _mem0_member_stores(config: Config, runtime_paths: RuntimePaths) -> list[Pat
     storage_root = runtime_paths.storage_root.resolve()
     return [
         mem0_chroma_path(agent_state_root_path(storage_root, agent_name).relative_to(storage_root))
-        for agent_name in sorted(config.agents)
-        if memory_backend(config, agent_name) == "mem0" and config.get_agent(agent_name).private is None
+        for agent_name, agent in sorted(config.agents.items())
+        if memory_backend(config, agent_name) == "mem0" and agent.private is None
     ]
 
 
@@ -409,8 +408,8 @@ def _kept_records(copies: list[_MemberCopy]) -> dict[tuple[str, str], list[_Reco
         by_turn: dict[tuple[str, str, str], list[_Record]] = {}
         for record in copy.records:
             by_turn.setdefault((record.team, copy.collection.name, record.turn), []).append(record)
-        for turn, records in by_turn.items():
-            extractions.setdefault(turn, []).append(records)
+        for key, records in by_turn.items():
+            extractions.setdefault(key, []).append(records)
     kept: dict[tuple[str, str], list[_Record]] = {}
     for (scope, collection_name, _turn), candidates in extractions.items():
         best = max(candidates, key=lambda records: len({record.fact for record in records}))

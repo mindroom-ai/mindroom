@@ -21,7 +21,7 @@ from chromadb.api.client import Client
 from chromadb.api.models.Collection import Collection
 from chromadb.config import Settings
 
-from mindroom.config.agent import AgentConfig, TeamConfig
+from mindroom.config.agent import AgentConfig, AgentPrivateConfig, TeamConfig
 from mindroom.config.main import Config
 from mindroom.config.memory import MemoryConfig, _MemoryEmbedderConfig
 from mindroom.config.models import EmbedderConfig
@@ -579,8 +579,8 @@ async def test_the_runtime_merges_team_memory_with_its_loaded_config_before_it_s
 
 @pytest.mark.asyncio
 async def test_only_the_mem0_stores_the_runtime_opens_merge(storage: Path) -> None:
-    """A store of an agent no longer configured, or on file memory, was never read for team memory and stays shut."""
-    for name in ("removed", "filer"):
+    """A store of an agent no longer configured, private, or on file memory was never read for team memory."""
+    for name in ("removed", "filer", "secret"):
         store = _client(storage / "agents" / name / "chroma").get_or_create_collection(
             _COLLECTION,
             embedding_function=None,
@@ -590,8 +590,9 @@ async def test_only_the_mem0_stores_the_runtime_opens_merge(storage: Path) -> No
             embeddings=[[1.0, 0.0, 0.0, 0.0]],
             metadatas=[{"user_id": _TEAM, "data": f"{name} fact", "mindroom_replica_key": f"{name}-turn"}],
         )
-    config = _config(storage, "mem0", "filer")
+    config = _config(storage, "mem0", "filer", "secret")
     config.agents["filer"].memory_backend = "file"
+    config.agents["secret"].private = AgentPrivateConfig(per="user")
     opened: list[Path] = []
     client = legacy_team_memory._chroma_client
 

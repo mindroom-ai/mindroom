@@ -25,8 +25,8 @@ class MemoryResult(TypedDict, total=False):
     user_id: str
 
 
-class ScopedMemoryWriter(Protocol):
-    """Minimal protocol for writing scoped memory entries."""
+class ScopedMemoryCrud(Protocol):
+    """Minimal protocol for mem0 CRUD operations used by this package."""
 
     async def add(
         self,
@@ -36,10 +36,6 @@ class ScopedMemoryWriter(Protocol):
         metadata: dict[str, object] | None = None,
     ) -> object:
         """Persist messages for a scoped memory user ID."""
-
-
-class ScopedMemoryCrud(ScopedMemoryWriter, Protocol):
-    """Minimal protocol for mem0 CRUD operations used by this package."""
 
     async def get(self, memory_id: str) -> dict[str, Any] | None:
         """Return the memory payload for a given memory ID."""

@@ -244,8 +244,7 @@ async def conversation_entrypoint_preamble(
     conversation: ConversationRef,
 ) -> str:
     """Return the `MEMORY.md` preamble for ``conversation``, loading the file again when its history was compacted."""
-    backend = resolve_memory_backend(agent_name, config, runtime_paths)
-    if backend is None:
+    if (backend := resolve_memory_backend(agent_name, config, runtime_paths)) is None:
         return ""
     return await _entrypoint_preamble(backend, agent_name, config, execution_identity, conversation)
 

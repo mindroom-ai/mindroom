@@ -113,14 +113,7 @@ def reject_legacy_defaults_fields(value: object) -> object:
 # Handling: Drop both before validation, so a config that still sets them loads unchanged while every other unknown
 #   memory.auto_flush key fails, and the next dashboard save removes them.
 # Coverage: tests/test_memory_config.py::TestMemoryConfig::test_retired_auto_flush_fields_still_load.
-_RETIRED_AUTO_FLUSH_FIELDS = frozenset({"max_dirty_age_seconds", "max_cross_session_reprioritize"})
-
-
-def drop_retired_auto_flush_fields(value: object) -> object:
-    """Return memory.auto_flush settings without the retired dirty-queue fields."""
-    if isinstance(value, dict):
-        return {key: item for key, item in value.items() if key not in _RETIRED_AUTO_FLUSH_FIELDS}
-    return value
+RETIRED_AUTO_FLUSH_FIELDS = frozenset({"max_dirty_age_seconds", "max_cross_session_reprioritize"})
 
 
 # LEGACY_COMPAT: Retired memory.team_reads_member_memory switch.
@@ -131,11 +124,7 @@ def drop_retired_auto_flush_fields(value: object) -> object:
 # Handling: Drop it before validation, so a config that still sets it loads unchanged and the next dashboard save
 #   removes it.
 # Coverage: tests/test_memory_config.py::TestMemoryConfig::test_retired_team_memory_fields_still_load.
-def drop_retired_memory_fields(value: object) -> object:
-    """Return memory settings without the retired team-read switch."""
-    if isinstance(value, dict):
-        return {key: item for key, item in value.items() if key != "team_reads_member_memory"}
-    return value
+RETIRED_MEMORY_FIELDS = frozenset({"team_reads_member_memory"})
 
 
 # LEGACY_COMPAT: Retired memory.file.path fallback root.
@@ -146,10 +135,13 @@ def drop_retired_memory_fields(value: object) -> object:
 # Handling: Drop it before validation, so a config that still sets it loads unchanged and the next dashboard save
 #   removes it.
 # Coverage: tests/test_memory_config.py::TestMemoryConfig::test_retired_team_memory_fields_still_load.
-def drop_retired_memory_file_fields(value: object) -> object:
-    """Return file-memory settings without the retired fallback root."""
+RETIRED_MEMORY_FILE_FIELDS = frozenset({"path"})
+
+
+def drop_retired_fields(value: object, fields: frozenset[str]) -> object:
+    """Return a settings mapping without the retired ``fields``; any other value as it is."""
     if isinstance(value, dict):
-        return {key: item for key, item in value.items() if key != "path"}
+        return {key: item for key, item in value.items() if key not in fields}
     return value
 
 

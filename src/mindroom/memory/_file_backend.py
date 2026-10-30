@@ -88,11 +88,9 @@ class _ScopeMemoryFile:
 @dataclass(frozen=True)
 class _PathMemoryLine:
     memory_file: _ScopeMemoryFile
-    relative_path: str
     line_no: int
     raw_line: str
     memory: str
-    lines: tuple[str, ...]
 
 
 def _tag_keyword_mode(result: MemoryResult) -> None:
@@ -100,16 +98,6 @@ def _tag_keyword_mode(result: MemoryResult) -> None:
     result["metadata"] = (
         {**metadata, "search_mode": "keyword"} if isinstance(metadata, dict) else {"search_mode": "keyword"}
     )
-
-
-def _scope_relative_markdown_path(relative_path: str) -> Path | None:
-    """Return the lexically in-scope markdown path, never resolving a link."""
-    candidate = Path(relative_path)
-    if candidate.is_absolute() or not candidate.parts or ".." in candidate.parts:
-        return None
-    if candidate.suffix.lower() != ".md":
-        return None
-    return candidate
 
 
 def _is_regular_file_at(directory_fd: int, name: str) -> bool:
@@ -414,10 +402,7 @@ def _match_score(query_tokens: set[str], text: str) -> float:
     if not query_tokens:
         return 0.0
     lowered = text.lower()
-    overlap = sum(1 for token in query_tokens if token in lowered)
-    if overlap == 0:
-        return 0.0
-    return overlap / len(query_tokens)
+    return sum(1 for token in query_tokens if token in lowered) / len(query_tokens)
 
 
 def _format_entry_line(memory_id: str, content: str) -> str:
@@ -498,28 +483,16 @@ def refresh_agent_memory_search(
 def _append_scope_memory_entry(
     scope: MemoryScope,
     content: str,
-    *,
-    target_relative_path: str | None = None,
+    relative_path: str = FILE_MEMORY_ENTRYPOINT,
 ) -> MemoryResult:
     scope.root.mkdir(parents=True, exist_ok=True)
-    if target_relative_path is None:
-        target_path = Path(FILE_MEMORY_ENTRYPOINT)
-        initial_text = f"{FILE_MEMORY_ENTRYPOINT_HEADER}\n\n".encode()
-    else:
-        validated_path = _scope_relative_markdown_path(target_relative_path)
-        if validated_path is None:
-            msg = f"Invalid markdown memory path: {target_relative_path}"
-            raise ValueError(msg)
-        target_path = validated_path
-        initial_text = b""
-
-    relative_path = target_path.as_posix()
+    initial_text = f"{FILE_MEMORY_ENTRYPOINT_HEADER}\n\n".encode() if relative_path == FILE_MEMORY_ENTRYPOINT else b""
     memory_id = new_memory_id()
     # Appending keeps the existing bytes untouched, so a planted entry can neither
     # redirect the write nor cost the file its content; it raises instead.
     _append_scope_markdown_line(
         scope.root,
-        target_path,
+        Path(relative_path),
         _format_entry_line(memory_id, content),
         initial_text=initial_text,
     )
@@ -546,11 +519,8 @@ def _search_scope_memory_entries(scope: MemoryScope, query: str, *, limit: int) 
         score = _match_score(query_tokens, text)
         if score <= 0:
             continue
-        enriched = dict(entry)
-        enriched["score"] = score
-        scored_entries.append(cast("MemoryResult", enriched))
-        if normalized_text:
-            seen_scored_text.add(normalized_text)
+        scored_entries.append({**entry, "score": score})
+        seen_scored_text.add(normalized_text)
 
     scored_entries.sort(key=lambda item: cast("float", item.get("score", 0.0)), reverse=True)
     scored_entries = scored_entries[:limit]
@@ -559,12 +529,7 @@ def _search_scope_memory_entries(scope: MemoryScope, query: str, *, limit: int) 
         return scored_entries
 
     remaining_limit = limit - len(scored_entries)
-    existing_memory_text = {
-        memory_text
-        for entry in scored_entries
-        if (memory_text := _normalize_memory_text_for_dedup(entry.get("memory", "")))
-    }
-    snippet_results = _scan_scope_memory_snippets(scope, query_tokens, existing_memory_text)
+    snippet_results = _scan_scope_memory_snippets(scope, query_tokens, seen_scored_text)
 
     snippet_results.sort(key=lambda item: cast("float", item.get("score", 0.0)), reverse=True)
     return scored_entries + snippet_results[:remaining_limit]
@@ -576,25 +541,11 @@ def _scan_scope_memory_snippets(
     query_tokens: set[str],
     existing_memory_text: set[str],
 ) -> list[MemoryResult]:
-    snippet_results: list[MemoryResult] = []
-    for relative_path, line_no, snippet in _iter_scope_unstructured_lines(scope.root):
-        normalized_snippet = _normalize_memory_text_for_dedup(snippet)
-        if normalized_snippet in existing_memory_text:
-            continue
-        score = _match_score(query_tokens, snippet)
-        if score <= 0:
-            continue
-        existing_memory_text.add(normalized_snippet)
-        snippet_results.append(
-            {
-                "id": f"file:{relative_path}:{line_no}",
-                "memory": snippet,
-                "user_id": scope.user_id,
-                "metadata": {"source_file": relative_path, "line": line_no},
-                "score": score,
-            },
-        )
-    return snippet_results
+    return [
+        {**entry, "score": score}
+        for entry in _load_scope_unstructured_entries(scope, existing_memory_text)
+        if (score := _match_score(query_tokens, entry["memory"])) > 0
+    ]
 
 
 def _load_scope_path_memory_line(scope: MemoryScope, memory_id: str) -> _PathMemoryLine | None:
@@ -616,14 +567,7 @@ def _load_scope_path_memory_line(scope: MemoryScope, memory_id: str) -> _PathMem
     snippet = raw_line.strip()
     if not _is_unstructured_memory_line(snippet):
         return None
-    return _PathMemoryLine(
-        memory_file=memory_file,
-        relative_path=relative_path,
-        line_no=line_no,
-        raw_line=raw_line,
-        memory=snippet,
-        lines=tuple(lines),
-    )
+    return _PathMemoryLine(memory_file=memory_file, line_no=line_no, raw_line=raw_line, memory=snippet)
 
 
 def _get_scope_memory_by_path_id(scope: MemoryScope, memory_id: str) -> MemoryResult | None:
@@ -634,7 +578,7 @@ def _get_scope_memory_by_path_id(scope: MemoryScope, memory_id: str) -> MemoryRe
         "id": memory_id,
         "memory": path_memory_line.memory,
         "user_id": scope.user_id,
-        "metadata": {"source_file": path_memory_line.relative_path, "line": path_memory_line.line_no},
+        "metadata": {"source_file": path_memory_line.memory_file.relative_path, "line": path_memory_line.line_no},
     }
 
 
@@ -656,7 +600,6 @@ def _replace_scope_memory_entry(scope: MemoryScope, memory_id: str, content: str
     if (memory_file := id_to_file.get(memory_id)) is None:
         return False
 
-    changed = False
     new_lines: list[str] = []
     for raw_line in memory_file.text.splitlines():
         stripped = raw_line.strip()
@@ -664,17 +607,12 @@ def _replace_scope_memory_entry(scope: MemoryScope, memory_id: str, content: str
         if match is None or match.group("id").strip() != memory_id:
             new_lines.append(raw_line)
             continue
-
-        changed = True
         if content is None:
             continue
 
         updated_line = _format_entry_line(memory_id, content)
         prefix_len = len(raw_line) - len(raw_line.lstrip(" "))
         new_lines.append(f"{raw_line[:prefix_len]}{updated_line}")
-
-    if not changed:
-        return False
 
     _require_rewritable(memory_file)
     write_scope_markdown_file(scope.root, Path(memory_file.relative_path), _memory_lines_payload(new_lines))
@@ -687,7 +625,7 @@ def _replace_scope_path_memory_entry(scope: MemoryScope, memory_id: str, content
         return False
     _require_rewritable(path_memory_line.memory_file)
 
-    lines = list(path_memory_line.lines)
+    lines = path_memory_line.memory_file.text.splitlines()
 
     if content is None or not content.strip():
         lines[path_memory_line.line_no - 1] = ""
@@ -815,11 +753,7 @@ def append_agent_daily_file_memory(
     """Append one memory entry to the agent's daily file."""
     scope = _agent_scope(agent_name, config, runtime_paths, execution_identity)
     current_date = datetime.now(ZoneInfo(entity_timezone(config, agent_name))).date().isoformat()
-    result = _append_scope_memory_entry(
-        scope,
-        content,
-        target_relative_path=f"{FILE_MEMORY_DAILY_DIR}/{current_date}.md",
-    )
+    result = _append_scope_memory_entry(scope, content, f"{FILE_MEMORY_DAILY_DIR}/{current_date}.md")
     _schedule_semantic_refresh(agent_name, scope, config, runtime_paths, execution_identity)
     logger.info("File daily memory added", agent=agent_name, date=current_date)
     return result
@@ -892,6 +826,7 @@ class FileMemoryBackend:
         )
 
         degraded_reason: str | None = None
+        results: list[MemoryResult] | None = None
         search_config = memory_search(config, agent_name)
         # Semantic matches are read-only locators, so an editable search matches by keyword.
         if search_config.mode == "semantic" and not editable:
@@ -915,7 +850,6 @@ class FileMemoryBackend:
                     agent=agent_name,
                     degraded_reason=degraded_reason,
                 )
-                results = await asyncio.to_thread(_agent_keyword_results, agent_scope, query, limit)
             except Exception as exc:
                 degraded_reason = (
                     classified_embedder_error(exc) or f"semantic memory search failed ({type(exc).__name__})"
@@ -924,8 +858,7 @@ class FileMemoryBackend:
                     "File-memory semantic search failed; falling back to keyword search",
                     agent=agent_name,
                 )
-                results = await asyncio.to_thread(_agent_keyword_results, agent_scope, query, limit)
-        else:
+        if results is None:
             results = await asyncio.to_thread(_agent_keyword_results, agent_scope, query, limit)
 
         results.extend(await asyncio.to_thread(_team_keyword_results, teams, query, limit))

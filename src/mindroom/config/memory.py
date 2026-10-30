@@ -7,9 +7,10 @@ from typing import Any, Literal, Self
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from mindroom.config.legacy_fields import (
-    drop_retired_auto_flush_fields,
-    drop_retired_memory_fields,
-    drop_retired_memory_file_fields,
+    RETIRED_AUTO_FLUSH_FIELDS,
+    RETIRED_MEMORY_FIELDS,
+    RETIRED_MEMORY_FILE_FIELDS,
+    drop_retired_fields,
 )
 from mindroom.config.models import EmbedderConfig, normalize_api_key_setting
 from mindroom.config.schema_hints import dashboard_hint
@@ -151,7 +152,7 @@ class _MemoryFileConfig(BaseModel):
     @classmethod
     def drop_retired_memory_file_fields(cls, data: object) -> object:
         """Drop the retired fallback root older dashboards saved, before unknown keys are rejected."""
-        return drop_retired_memory_file_fields(data)
+        return drop_retired_fields(data, RETIRED_MEMORY_FILE_FIELDS)
 
     max_entrypoint_lines: int = Field(
         default=200,
@@ -242,7 +243,7 @@ class MemoryAutoFlushConfig(BaseModel):
     @classmethod
     def drop_retired_auto_flush_fields(cls, data: object) -> object:
         """Drop the retired dirty-queue fields older dashboards saved, before unknown keys are rejected."""
-        return drop_retired_auto_flush_fields(data)
+        return drop_retired_fields(data, RETIRED_AUTO_FLUSH_FIELDS)
 
     enabled: bool = Field(default=False, description="Enable background file-memory auto-flush worker")
     flush_interval_seconds: int = Field(
@@ -291,7 +292,7 @@ class MemoryConfig(BaseModel):
         """Normalize memory: none shorthand into the structured config shape, without retired fields."""
         if data == "none":
             return {"backend": "none"}
-        return drop_retired_memory_fields(data)
+        return drop_retired_fields(data, RETIRED_MEMORY_FIELDS)
 
     backend: MemoryBackend = Field(
         default="mem0",

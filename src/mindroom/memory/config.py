@@ -255,7 +255,6 @@ def _get_memory_config(store_root: Path, config: Config, runtime_paths: RuntimeP
         Configuration dictionary for Mem0
 
     """
-    app_config = config
     # Canonicalize once so Chroma path is independent of runtime cwd changes.
     resolved_store_root = store_root.expanduser().resolve()
 
@@ -266,7 +265,7 @@ def _get_memory_config(store_root: Path, config: Config, runtime_paths: RuntimeP
     # next extraction prompt under keys that do not name the requester, so each store root needs its own.
     history_dir = resolved_store_root / "mem0"
     history_dir.mkdir(exist_ok=True)
-    resolved_embedder = resolve_embedder_settings(app_config, runtime_paths)
+    resolved_embedder = resolve_embedder_settings(config, runtime_paths)
     embedder_provider = resolved_embedder.provider
 
     # Build embedder config from config.yaml
@@ -291,11 +290,11 @@ def _get_memory_config(store_root: Path, config: Config, runtime_paths: RuntimeP
 
     return {
         "embedder": embedder_config,
-        "llm": _mem0_llm_config(app_config, runtime_paths),
+        "llm": _mem0_llm_config(config, runtime_paths),
         "vector_store": {
             "provider": "chroma",
             "config": {
-                "collection_name": _memory_collection_name(app_config),
+                "collection_name": _memory_collection_name(config),
                 "path": str(chroma_path),
             },
         },

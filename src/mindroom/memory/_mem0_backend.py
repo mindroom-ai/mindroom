@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from functools import partial
-from typing import TYPE_CHECKING, ClassVar, TypeVar, cast
+from typing import TYPE_CHECKING, ClassVar, cast
 
 from mindroom.embeddings.embedder_health import (
     EmbedderHealthRecorder,
@@ -28,7 +28,6 @@ from ._shared import (
     MemoryResult,
     MemorySearchOutcome,
     ScopedMemoryCrud,
-    ScopedMemoryWriter,
 )
 from .config import mem0_store_exists, recorded_embedder_failures
 
@@ -42,7 +41,6 @@ if TYPE_CHECKING:
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 
 _MemoryFactory = Callable[..., Awaitable[ScopedMemoryCrud]]
-_T = TypeVar("_T")
 
 logger = get_logger(__name__)
 
@@ -64,36 +62,34 @@ def _record_classified_embedder_failure(
 
 
 async def _run_mem0_embedder_mutation(
-    operation: Callable[[], Awaitable[_T]],
+    operation: Callable[[], Awaitable[None]],
     health_recorder: EmbedderHealthRecorder,
-) -> _T:
+) -> None:
     """Run a Mem0 write, recording a classified embedder failure as embedder health and raising it alone.
 
     A raw provider failure, such as one from Mem0's memory model, propagates as raised and records no embedder health.
     """
     try:
-        result = await operation()
+        await operation()
     except EmbedderRequestError as error:
         health_recorder.record(str(error))
         # Raise the classified error itself, so it keeps its retry judgment, without the raw provider exception.
         raise error from None
     health_recorder.record(None)
-    return result
 
 
 async def _strict_mem0_add(
-    memory: ScopedMemoryWriter,
+    memory: ScopedMemoryCrud,
     messages: list[dict],
     *,
     user_id: str,
     metadata: dict[str, object],
-) -> object:
+) -> None:
     """Add through Mem0 and raise the add's first embedding failure, which Mem0 may have caught."""
     with recorded_embedder_failures() as failures:
-        result = await memory.add(messages, user_id=user_id, metadata=metadata)
+        await memory.add(messages, user_id=user_id, metadata=metadata)
     if failures:
         raise failures[0]
-    return result
 
 
 def _mem0_results(payload: object) -> list[MemoryResult]:
@@ -103,10 +99,6 @@ def _mem0_results(payload: object) -> list[MemoryResult]:
         if isinstance(results, list):
             return cast("list[MemoryResult]", results)
     return []
-
-
-def _scope_filter(scope_user_id: str) -> dict[str, object]:
-    return {"user_id": scope_user_id}
 
 
 @timed("system_prompt_assembly.memory_search.mem0.create_memory_instance")
@@ -131,7 +123,7 @@ async def _search_mem0_scope(
     return _mem0_results(
         await memory.search(
             query,
-            filters=_scope_filter(scope.user_id),
+            filters={"user_id": scope.user_id},
             top_k=limit,
             threshold=_MEM0_SEARCH_THRESHOLD,
         ),
@@ -302,7 +294,7 @@ class Mem0MemoryBackend:
         """List mem0 memories stored for an agent."""
         scope = self._agent_scope(agent_name, config, execution_identity)
         memory = await self.create_memory(scope.root, config)
-        return _mem0_results(await memory.get_all(filters=_scope_filter(scope.user_id), top_k=limit))
+        return _mem0_results(await memory.get_all(filters={"user_id": scope.user_id}, top_k=limit))
 
     async def get(
         self,

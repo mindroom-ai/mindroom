@@ -186,6 +186,8 @@ _.validate_chunking  # unused method (src/mindroom/config/agent.py, src/mindroom
 _.validate_poll_interval_is_local  # Pydantic model validator (src/mindroom/config/knowledge.py)
 _.validate_private_context_files  # unused method (src/mindroom/config/agent.py)
 _.normalize_shorthand  # unused method (src/mindroom/config/memory.py)
+_.drop_retired_memory_file_fields  # unused method (src/mindroom/config/memory.py)
+_.drop_retired_auto_flush_fields  # unused method (src/mindroom/config/memory.py)
 _.validate_include_patterns  # unused method (src/mindroom/config/memory.py, src/mindroom/config/knowledge.py)
 _._check_history_config  # unused method (src/mindroom/config/models.py, src/mindroom/config/agent.py)
 _._validate_credentials_service  # Pydantic field validator (src/mindroom/config/models.py, src/mindroom/config/calls.py, src/mindroom/config/judgment.py, src/mindroom/config/voice.py)
