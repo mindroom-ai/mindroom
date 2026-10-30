@@ -233,7 +233,10 @@ def test_check_plugin_accepts_a_tool_whose_factory_imports_a_package_installed_l
 
 
 def _owned_toolkit_plugin(root: Path, date_import: str) -> Path:
-    """Write a plugin whose owned toolkit annotates a model parameter with ``date``, imported by ``date_import``."""
+    """Write a plugin whose owned toolkit annotates a model parameter with ``date``, imported by ``date_import``.
+
+    ``schedule`` takes ``self`` only by position, which only its bound method, as an agent build derives it, accepts.
+    """
     return _write_plugin(
         root,
         manifest={"name": "calendar", "tools_module": "tools.py"},
@@ -250,7 +253,7 @@ def _owned_toolkit_plugin(root: Path, date_import: str) -> Path:
                 "    def __init__(self, api_key: str) -> None:\n"
                 "        raise AssertionError('The check must not construct the toolkit')\n"
                 "    @tool\n"
-                "    def schedule(self, day: date) -> str:\n"
+                "    def schedule(self, /, day: date) -> str:\n"
                 "        '''Schedule a meeting on a day.'''\n"
                 "        return str(day)\n"
                 "    @tool\n"
