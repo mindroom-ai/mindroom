@@ -1,5 +1,6 @@
 """Tests for the credentials API endpoints."""
 
+import json
 from collections.abc import Generator
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -2389,3 +2390,50 @@ def test_oauth_client_config_keeps_base_store_with_separate_shared_layer(
     assert manager.load_credentials(service) is None
     assert manager.shared_manager().load_credentials(service) == {"client_id": "shared-client"}
     assert worker_manager.load_credentials(service) == {"client_id": "worker-client"}
+
+
+@pytest.mark.parametrize(
+    ("worker_scope", "service", "variable"),
+    [
+        (None, "openai", "OPENAI_API_KEY"),
+        ("shared", "google_oauth_client", "MINDROOM_CREDENTIAL_SEEDS_JSON"),
+        ("shared", "homeassistant", "MINDROOM_CREDENTIAL_SEEDS_JSON"),
+        ("user", "google_oauth_client", "MINDROOM_CREDENTIAL_SEEDS_JSON"),
+        ("shared", "weather", None),
+    ],
+)
+def test_the_environment_variable_of_a_target_follows_the_store_deletes_reach(
+    tmp_path: Path,
+    worker_scope: WorkerScope | None,
+    service: str,
+    variable: str | None,
+) -> None:
+    """A delete is refused for a credential the environment supplies in the store the delete reaches, in any scope."""
+    seeds = json.dumps(
+        [
+            {"service": "google_oauth_client", "credentials": {"client_id": "id", "client_secret": "secret"}},
+            {"service": "homeassistant", "credentials": {"instance_url": "http://ha", "long_lived_token": "t"}},
+            {"service": "weather", "credentials": {"api_key": "seeded"}},
+        ],
+    )
+    runtime_paths = constants.resolve_primary_runtime_paths(
+        config_path=tmp_path / "config.yaml",
+        storage_path=tmp_path,
+        process_env={"OPENAI_API_KEY": "sk-env", "MINDROOM_CREDENTIAL_SEEDS_JSON": seeds},
+    )
+    manager = get_runtime_credentials_manager(runtime_paths)
+    identity = ToolExecutionIdentity("matrix", "general", "@alice:example.org", None, None, None, None)
+    target = credentials_target.RequestCredentialsTarget(
+        runtime_paths=runtime_paths,
+        base_manager=manager,
+        worker_scope=worker_scope,
+        agent_name="general" if worker_scope is not None else None,
+        execution_identity=identity if worker_scope is not None else None,
+        allowed_shared_services=frozenset(),
+    )
+
+    assert credentials_target.environment_variable_for_target(service, target) == variable
+    if variable is not None:
+        manager.save_credentials(service, {"saved": True, "_source": "ui"})
+        # A saved override can still be deleted, which reveals the variable again.
+        assert credentials_target.environment_variable_for_target(service, target) is None

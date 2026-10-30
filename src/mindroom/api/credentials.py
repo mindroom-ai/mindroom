@@ -28,6 +28,7 @@ from mindroom.api.credentials_target import (
     RequestCredentialsTarget,
     dashboard_candidate_services,
     delete_credentials_for_target,
+    environment_variable_for_target,
     load_credentials_for_target,
     loaded_runtime_config_for_credentials_request,
     request_may_target_scoped_credentials,
@@ -485,7 +486,7 @@ async def delete_credentials(
     existing_credentials = access.load(service)
     if existing_credentials:
         access.reject_stored_oauth_credentials(existing_credentials)
-    variable = access.target.base_manager.declared_variable(service) if access.target.worker_scope is None else None
+    variable = environment_variable_for_target(service, access.target)
     if variable is not None:
         raise HTTPException(
             status_code=409,
