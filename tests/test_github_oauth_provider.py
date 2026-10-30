@@ -100,7 +100,6 @@ def test_github_provider_declares_github_app_user_oauth_contract() -> None:
     assert provider.redirect_path == "/api/oauth/github/callback"
     assert provider.requester_scoped_credentials is True
     assert provider.tool_config_oauth_fallback_fields == ("access_token",)
-    assert provider.tool_config_oauth_fallback_env_vars == ("GITHUB_ACCESS_TOKEN",)
 
 
 def test_github_authorization_url_omits_classic_oauth_scope(tmp_path: Path) -> None:

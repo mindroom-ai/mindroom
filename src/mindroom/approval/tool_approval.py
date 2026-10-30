@@ -225,7 +225,7 @@ async def evaluate_tool_approval(
     require_approval = approval_config.default == "require_approval"
     timeout_seconds = approval_config.timeout_days * 24 * 60 * 60
 
-    if tool_call_is_approval_exempt(tool_name, arguments):
+    if tool_call_is_approval_exempt(tool_name, arguments, runtime_paths):
         return False, timeout_seconds
 
     rule = _matching_tool_approval_rule(config, tool_name)

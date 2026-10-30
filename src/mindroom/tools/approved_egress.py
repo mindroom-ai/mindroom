@@ -10,7 +10,6 @@ from __future__ import annotations
 import asyncio
 import ipaddress
 import json
-import os
 import unicodedata
 from dataclasses import replace
 from typing import TYPE_CHECKING, cast
@@ -26,7 +25,14 @@ from mindroom.egress.policy import (
 )
 from mindroom.tool_system.approval_exemptions import register_tool_approval_exemption
 from mindroom.tool_system.authoring import Toolkit
-from mindroom.tool_system.declarations import ConfigField, SetupType, ToolCategory, ToolFileAccess, ToolStatus
+from mindroom.tool_system.declarations import (
+    ConfigField,
+    SetupType,
+    ToolCategory,
+    ToolFileAccess,
+    ToolManagedInitArg,
+    ToolStatus,
+)
 from mindroom.tool_system.registration import register_tool_with_metadata
 from mindroom.tool_system.runtime_context import (
     build_execution_identity_from_runtime_context,
@@ -38,6 +44,7 @@ if TYPE_CHECKING:
     from http.client import HTTPMessage
     from typing import IO
 
+    from mindroom.constants import RuntimePaths
     from mindroom.egress.policy import EgressGrantSubject
     from mindroom.tool_system.runtime_context import ToolRuntimeContext
     from mindroom.tool_system.tool_function import ToolFunction
@@ -51,8 +58,8 @@ _MAX_REASON_CHARS = 500
 _MAX_HOSTNAMES_PER_REQUEST = 20
 
 
-def _env_int(name: str, default: int) -> int:
-    raw = os.environ.get(name, "").strip()
+def _env_int(runtime_paths: RuntimePaths, name: str, default: int) -> int:
+    raw = (runtime_paths.env_value(name) or "").strip()
     if not raw:
         return default
     try:
@@ -62,8 +69,8 @@ def _env_int(name: str, default: int) -> int:
         raise RuntimeError(msg) from exc
 
 
-def _static_allowlist_description() -> str:
-    entries = load_static_allowlist()
+def _static_allowlist_description(runtime_paths: RuntimePaths) -> str:
+    entries = load_static_allowlist(runtime_paths)
     if not entries:
         return (
             "Static egress allowlist: unavailable when this tool loaded. "
@@ -79,7 +86,7 @@ def _static_allowlist_description() -> str:
     )
 
 
-def _request_network_access_description(*, allow_full_access: bool) -> str:
+def _request_network_access_description(runtime_paths: RuntimePaths, *, allow_full_access: bool) -> str:
     full_access = (
         ' Alternatively, use hostnames=["*"] to request temporary access to all public hostnames. '
         "This requires approval and still enforces the proxy's private-network and port restrictions."
@@ -91,11 +98,11 @@ def _request_network_access_description(*, allow_full_access: bool) -> str:
         "Batch every hostname the task needs into a single call so one approval covers all of them. "
         "Use this only when the worker needs hostnames that are not already allowed."
         f"{full_access}\n\n"
-        f"{_static_allowlist_description()}"
+        f"{_static_allowlist_description(runtime_paths)}"
     )
 
 
-def _request_network_access_is_approval_exempt(arguments: Mapping[str, object]) -> bool:
+def _request_network_access_is_approval_exempt(arguments: Mapping[str, object], runtime_paths: RuntimePaths) -> bool:
     """True when every requested hostname is already statically allowed, so approval would be redundant.
 
     Fails closed: anything that is not a provably allowlisted hostname list keeps
@@ -107,7 +114,7 @@ def _request_network_access_is_approval_exempt(arguments: Mapping[str, object]) 
     hostnames = arguments.get("hostnames")
     if not isinstance(hostnames, list) or not hostnames:
         return False
-    policy = resolve_worker_egress_policy()
+    policy = resolve_worker_egress_policy(runtime_paths)
     for hostname in hostnames:
         if not isinstance(hostname, str):
             return False
@@ -135,8 +142,8 @@ def _is_plain_http_api_host_allowed(hostname: str) -> bool:
         return False
 
 
-def _policy_api_url() -> str:
-    url = (os.environ.get("MINDROOM_APPROVED_EGRESS_API_URL") or _DEFAULT_POLICY_API_URL).rstrip("/")
+def _policy_api_url(runtime_paths: RuntimePaths) -> str:
+    url = (runtime_paths.env_value("MINDROOM_APPROVED_EGRESS_API_URL") or _DEFAULT_POLICY_API_URL).rstrip("/")
     parsed = parse.urlsplit(url)
     if parsed.scheme not in {"http", "https"} or not parsed.netloc:
         msg = "MINDROOM_APPROVED_EGRESS_API_URL must be an http or https URL"
@@ -151,8 +158,8 @@ def _policy_api_url() -> str:
     return url
 
 
-def _policy_token() -> str:
-    token = (os.environ.get("MINDROOM_APPROVED_EGRESS_TOKEN") or "").strip()
+def _policy_token(runtime_paths: RuntimePaths) -> str:
+    token = (runtime_paths.env_value("MINDROOM_APPROVED_EGRESS_TOKEN") or "").strip()
     if not token:
         msg = "MINDROOM_APPROVED_EGRESS_TOKEN is not configured"
         raise RuntimeError(msg)
@@ -193,11 +200,11 @@ def _canonical_hostnames(hostnames: list[str]) -> list[str]:
     return list(dict.fromkeys(hosts))
 
 
-def _effective_ttl_seconds(requested_ttl_seconds: int) -> int:
+def _effective_ttl_seconds(runtime_paths: RuntimePaths, requested_ttl_seconds: int) -> int:
     if requested_ttl_seconds <= 0:
         msg = "ttl_minutes must be positive"
         raise ValueError(msg)
-    max_ttl = _env_int("MINDROOM_APPROVED_EGRESS_MAX_TTL_SECONDS", _DEFAULT_MAX_TTL_SECONDS)
+    max_ttl = _env_int(runtime_paths, "MINDROOM_APPROVED_EGRESS_MAX_TTL_SECONDS", _DEFAULT_MAX_TTL_SECONDS)
     return max(1, min(requested_ttl_seconds, max_ttl))
 
 
@@ -259,13 +266,13 @@ def _parse_policy_response(response_body: bytes) -> dict[str, object]:
     return parsed
 
 
-def _post_grant(payload: dict[str, object]) -> dict[str, object]:
+def _post_grant(runtime_paths: RuntimePaths, payload: dict[str, object]) -> dict[str, object]:
     body = json.dumps(payload, sort_keys=True).encode("utf-8")
     req = request.Request(  # noqa: S310 - _policy_api_url validates scheme and host.
-        f"{_policy_api_url()}/grants",
+        f"{_policy_api_url(runtime_paths)}/grants",
         data=body,
         headers={
-            "authorization": f"Bearer {_policy_token()}",
+            "authorization": f"Bearer {_policy_token(runtime_paths)}",
             "content-type": "application/json",
         },
         method="POST",
@@ -284,10 +291,11 @@ def _post_grant(payload: dict[str, object]) -> dict[str, object]:
 class _ApprovedEgressTools(Toolkit):
     """Request temporary hostname egress access for MindRoom workers."""
 
-    def __init__(self, *, allow_full_access: bool = False) -> None:
+    def __init__(self, *, runtime_paths: RuntimePaths, allow_full_access: bool = False) -> None:
         if not isinstance(allow_full_access, bool):
             msg = "allow_full_access must be a boolean"
             raise TypeError(msg)
+        self._runtime_paths = runtime_paths
         self._allow_full_access = allow_full_access
         super().__init__(
             name="approved_egress",
@@ -304,7 +312,10 @@ class _ApprovedEgressTools(Toolkit):
         """Describe ``request_network_access`` with what this instance lets it request."""
         return replace(
             function,
-            description=_request_network_access_description(allow_full_access=self._allow_full_access),
+            description=_request_network_access_description(
+                self._runtime_paths,
+                allow_full_access=self._allow_full_access,
+            ),
         )
 
     async def request_network_access(
@@ -323,7 +334,7 @@ class _ApprovedEgressTools(Toolkit):
             blocked = ["*"]
         else:
             hosts = _canonical_hostnames(hostnames)
-            policy = resolve_worker_egress_policy()
+            policy = resolve_worker_egress_policy(self._runtime_paths)
             already_allowed = [host for host in hosts if is_hostname_allowed(host, policy)]
             blocked = [host for host in hosts if host not in already_allowed]
         if not blocked:
@@ -333,7 +344,7 @@ class _ApprovedEgressTools(Toolkit):
             )
         normalized_reason = _normalize_reason(reason)
         requested_ttl_seconds = ttl_minutes * 60
-        effective_ttl_seconds = _effective_ttl_seconds(requested_ttl_seconds)
+        effective_ttl_seconds = _effective_ttl_seconds(self._runtime_paths, requested_ttl_seconds)
 
         context = get_tool_runtime_context()
         if context is None:
@@ -356,7 +367,7 @@ class _ApprovedEgressTools(Toolkit):
                 "reason": normalized_reason,
             }
             try:
-                grant = await asyncio.to_thread(_post_grant, payload)
+                grant = await asyncio.to_thread(_post_grant, self._runtime_paths, payload)
             except (RuntimeError, OSError) as exc:
                 if granted:
                     msg = f"created grants for {', '.join(granted)} but failed to grant {host}: {exc}"
@@ -411,6 +422,7 @@ class _ApprovedEgressTools(Toolkit):
         ),
     ],
     function_names=("request_network_access",),
+    managed_init_args=(ToolManagedInitArg.RUNTIME_PATHS,),
 )
 def approved_egress_tools() -> type[Toolkit]:
     """Return the approved worker egress toolkit."""

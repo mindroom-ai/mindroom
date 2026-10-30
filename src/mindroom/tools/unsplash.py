@@ -24,6 +24,7 @@ if TYPE_CHECKING:
     config_fields=[
         ConfigField(
             name="access_key",
+            env=("UNSPLASH_ACCESS_KEY",),
             label="Access Key",
             type="password",
             required=True,

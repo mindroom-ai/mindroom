@@ -301,9 +301,7 @@ class GithubTools(AgnoGithubTools):
         self._worker_target = worker_target
         self._config = runtime_config
         self._oauth_provider = github_oauth_provider()
-        explicit_access_token = _normalized_access_token(access_token) or _normalized_access_token(
-            runtime_paths.env_value("GITHUB_ACCESS_TOKEN"),
-        )
+        explicit_access_token = _normalized_access_token(access_token)
         self._explicit_access_token = explicit_access_token
         initial_access_token = explicit_access_token or self._stored_access_token() or _PENDING_ACCESS_TOKEN
         super().__init__(access_token=initial_access_token, base_url=base_url, **kwargs)

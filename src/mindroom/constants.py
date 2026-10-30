@@ -6,7 +6,7 @@ import os
 import re
 import shutil
 import sys
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from types import MappingProxyType
@@ -171,6 +171,14 @@ class RuntimePaths:
         if name in self.env_file_values:
             return self.env_file_values[name]
         return default
+
+    def first_env_value(self, names: Sequence[str]) -> str | None:
+        """Return the first non-blank value of ``names``, trying each in the process env before any in the `.env`.
+
+        A blank exported value does not hide a `.env` value, so settings with fallbacks treat it as unset.
+        """
+        candidates = (layer.get(name, "") for layer in (self.process_env, self.env_file_values) for name in names)
+        return next((candidate for candidate in candidates if candidate.strip()), None)
 
     def env_flag(self, name: str, *, default: bool = False) -> bool:
         """Resolve one boolean env value against this runtime context."""
