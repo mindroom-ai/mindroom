@@ -293,16 +293,42 @@ class ConversationStore:
             # Background readers learn of recorded usage, and of a finished run new to the log or finished after the
             # turns it waited for, through the session's update time (``list_updated_sessions``).
             if recorded or (saved.moved and data["status"] not in _NON_VISIBLE):
-                connection.execute(
-                    f"UPDATE {quote_identifier(self.names.sessions)} SET updated_at = ? WHERE session_id = ?",  # noqa: S608
-                    (saved.updated_at, session.session_id),
-                )
+                _move_update_time(connection, self.names, session.session_id, saved.updated_at)
             stored = self._write_state(connection, session, created, state)
         _record_stored_state(session, stored)
         _mirror(session, saved)
         if created is not None:
             report_created_row(session)
         return saved.outcome
+
+    def _save_usage(
+        self,
+        session: ConversationSession,
+        data: dict[str, Any],
+        usage: dict[str, object],
+        *,
+        state: dict[str, Any] | None,
+    ) -> None:
+        """Record the ``usage`` snapshot of the run whose stored dict is ``data`` and commit ``state``, but no run.
+
+        The run is no turn of the conversation, so no load ever replays it: any row it already holds, such as the
+        cancelled one a mid-turn fold wrote, goes with its member runs and messages, while every summary row stays.
+        Its usage counts as a stored run's does, the session row is created if needed, and the first requester the
+        run names goes on a row that has none. ``session.runs`` then holds none of the run.
+        """
+        session_id, run_id, now = session.session_id, data["run_id"], int(time())
+        with self.transaction(write=True) as connection:
+            created = ensure_session_row(connection, self.names, session)
+            delete_runs_in_transaction(connection, self.names, [run_id], session_id=session_id)
+            _adopt_requester(connection, self.names, session_id, data.get("user_id"))
+            snapshot = {**usage, "created_at": data.get("created_at") or now, "updated_at": now}
+            connection.execute(usage_upsert_sql(self.names), (session_id, run_id, json.dumps(snapshot)))
+            _move_update_time(connection, self.names, session_id, now)
+            stored = self._write_state(connection, session, created, state)
+        _record_stored_state(session, stored)
+        session.runs = runs_without(session.runs, [run_id])
+        if created is not None:
+            report_created_row(session)
 
     def patch_run_metadata(
         self,
@@ -364,24 +390,6 @@ class ConversationStore:
                 loaded = self._read_load(connection, session_id)
         if session is not None:
             _adopt_log(session, loaded)
-
-    def delete_runs(
-        self,
-        run_ids: Collection[str],
-        *,
-        session_id: str,
-        session: ConversationSession | None = None,
-    ) -> set[str]:
-        """Delete session ``session_id``'s runs ``run_ids`` with their member runs and messages; return the deleted ids.
-
-        It records no removed run and keeps every summary row, so it suits discarding a run, not cutting history.
-        Once it commits, ``session``, when given, holds none of the runs nor their members.
-        """
-        with self.transaction(write=True) as connection:
-            deleted = delete_runs_in_transaction(connection, self.names, run_ids, session_id=session_id)
-        if session is not None:
-            session.runs = runs_without(session.runs, run_ids)
-        return deleted
 
     def get_run(self, run_id: str) -> AnyRunRecord | None:
         """Return one stored run, in whatever session, in its replay view; a paused team run comes with its members."""
@@ -563,6 +571,14 @@ def _mirror(session: ConversationSession, saved: _Saved) -> None:
     session.runs = runs
 
 
+def _move_update_time(connection: sqlite3.Connection, names: TableNames, session_id: str, updated_at: int) -> None:
+    """Set the session row's update time, through which background readers learn of news (``list_updated_sessions``)."""
+    connection.execute(
+        f"UPDATE {quote_identifier(names.sessions)} SET updated_at = ? WHERE session_id = ?",  # noqa: S608
+        (updated_at, session_id),
+    )
+
+
 def logged_runs(connection: sqlite3.Connection, names: TableNames, session_id: str) -> list[LoggedRun]:
     """Return every top-level run of the session with its ``seq``, in ``seq`` order, each in its replay view.
 
@@ -583,10 +599,16 @@ def runs_without(runs: Iterable[AnyRunRecord], run_ids: Iterable[str]) -> list[A
     return [run for run in runs if run.run_id not in removed and run.parent_run_id not in removed]
 
 
-def persist_to(store: ConversationStore, session: ConversationSession) -> Callable[[AnyRunRecord], Awaitable[None]]:
+def persist_to(
+    store: ConversationStore,
+    session: ConversationSession,
+    *,
+    replays: Callable[[AnyRunRecord], bool] | None = None,
+) -> Callable[[AnyRunRecord], Awaitable[None]]:
     """Return the callback a run hands its terminal record to: save it to ``store`` with its usage, in the database's lane.
 
-    The record saves as ``ConversationStore.save_run`` saves it with ``record_usage``.
+    A record saves as ``ConversationStore.save_run`` saves it with ``record_usage``, a turn later loads replay, unless
+    ``replays`` rejects it: such a record is no turn, and only its usage is recorded (``_save_usage``).
     The record, with its usage snapshot, and ``session.session_state``, which the run's tools change in place, are
     copied on the caller's task before the lane is awaited, so what lands is what was handed over. The state is written
     back, in the record's own transaction, when it differs from ``session.stored_session_state``, which every write of
@@ -597,9 +619,13 @@ def persist_to(store: ConversationStore, session: ConversationSession) -> Callab
 
     async def persist(record: AnyRunRecord) -> None:
         data, kind, usage = record.to_dict(), run_kind(record), run_usage_snapshot(record)
+        turn = replays is None or replays(record)
 
-        def save(opened: ConversationStore, state: dict[str, Any]) -> SaveOutcome:
-            return opened._save(session, data, kind, usage=usage, state=state)
+        def save(opened: ConversationStore, state: dict[str, Any]) -> None:
+            if turn:
+                opened._save(session, data, kind, usage=usage, state=state)
+            else:
+                opened._save_usage(session, data, usage, state=state)
 
         await write_with_session_state(store, session, save)
 
@@ -1122,7 +1148,11 @@ def delete_runs_in_transaction(
     *,
     session_id: str,
 ) -> set[str]:
-    """Delete session ``session_id``'s runs ``run_ids`` with their members and messages; return the deleted ids."""
+    """Delete session ``session_id``'s runs ``run_ids`` with their members and messages; return the deleted ids.
+
+    It records no removed run and keeps every summary row; a caller that cuts or retires history records the removed
+    runs itself.
+    """
     selected = json.dumps(sorted(run_ids))
     return {
         run_id

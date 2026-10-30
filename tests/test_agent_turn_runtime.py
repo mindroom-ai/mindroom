@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 import json
 from dataclasses import dataclass, replace
+from datetime import UTC, datetime
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, ClassVar
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -25,9 +26,11 @@ from mindroom.agent_loop.output_limit import CUT_OFF_TOOL_CALL_RESULT
 from mindroom.ai import ai_response, stream_agent_response
 from mindroom.ai_runtime import queued_message_signal_context
 from mindroom.approval.receipt_readers import approval_receipt_context
+from mindroom.budgets.pricing import PricedModel
+from mindroom.budgets.spend import collect_monthly_spend
 from mindroom.config.approval import ApprovalRuleConfig, ToolApprovalConfig
 from mindroom.config.main import Config
-from mindroom.config.models import CompactionConfig
+from mindroom.config.models import CompactionConfig, ModelPricing
 from mindroom.config.plugin import PluginEntryConfig
 from mindroom.dispatch_source import ScheduledHistoryBudget
 from mindroom.entity_resolution import entity_identity_registry
@@ -75,6 +78,7 @@ from mindroom.session_storage.types import ConversationSession
 from mindroom.skill_learning.capture import SkillReviewCapture
 from mindroom.tool_system.call_record import recording_tool_calls
 from mindroom.tool_system.runtime_context import build_execution_identity_from_runtime_context, tool_runtime_context
+from mindroom.usage.stats import collect_admin_usage
 from mindroom.usage.storage import COMPACTED_REQUESTS_METADATA_KEY
 from tests.access_schema_support import with_current_room_member_access
 from tests.approval_continuation_helpers import RECEIPT_CALLS, RECEIPT_TEXT
@@ -100,7 +104,12 @@ from tests.fakes.scripted_model import Await, ScriptedModel, ScriptStep, answer,
 from tests.fakes.summary_model import summary_model
 from tests.history_helpers import RecordingCompactionLifecycle
 from tests.response_attempt_helpers import install_direct_response_admission
-from tests.scripted_agent_helpers import registered_toolkit, streamed_text
+from tests.scripted_agent_helpers import (
+    ProcessCrash,
+    crash_after_first_terminal_store,
+    registered_toolkit,
+    streamed_text,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Iterator, Mapping, Sequence
@@ -693,18 +702,18 @@ async def test_an_error_record_never_takes_an_earlier_reply_in_the_thread_for_it
 
 @pytest.mark.asyncio
 @pytest.mark.usefixtures("probe")
-async def test_an_empty_reply_is_discarded_and_retried_once(
+async def test_an_empty_reply_is_left_out_of_history_and_retried_once(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A completed run with nothing to show is removed from the scope and the turn tries again under a new run id."""
+    """A completed run with nothing to show is never stored as a turn, and the turn tries again."""
     reply = _reply(tmp_path, monkeypatch, [answer(""), answer("Second try.")])
 
     chunks = await _stream(reply)
 
     assert "".join(streamed_text(chunks)) == "Second try."
     assert len(reply.model.requests) == 2
-    # The retry reuses the turn's run id, so the discarded empty run leaves nothing behind.
+    # The retry reuses the turn's run id, and the empty run was never stored.
     [record] = reply.storage.list_runs(SESSION_ID)
     assert (record.run_id, record.content) == ("run-1", "Second try.")
     assert reply.recorder.outcome == "completed"
@@ -830,6 +839,83 @@ async def test_a_silent_participation_decision_ends_the_reply_before_any_model_r
     assert decision.tool_choice == "none"
     assert reply.storage.list_runs(SESSION_ID) == []
     assert reply.recorder.outcome == "skipped"
+
+
+_SILENT_DECISION = '{"action":"stay_silent","reason":"Humans are talking."}'
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("probe")
+@pytest.mark.parametrize("ending", ["empty", "declined"])
+async def test_a_crash_after_a_reply_that_is_no_turn_leaves_nothing_the_next_prompt_replays(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    ending: str,
+) -> None:
+    """An empty reply, or one its participation check declined, is never stored as a turn, so no crash leaves one."""
+    first = answer("") if ending == "empty" else answer(_SILENT_DECISION)
+    reply = _reply(tmp_path, monkeypatch, [first, answer("Next answer.")])
+    crash_after_first_terminal_store(monkeypatch)
+
+    with pytest.raises(ProcessCrash):
+        await _respond(reply, participation=ParticipationGate() if ending == "declined" else None)
+    reply.recorder = TurnRecorder(user_message="Next question")
+    result = await _respond(reply, prompt="Next question", run_id="run-2")
+
+    assert result == "Next answer."
+    assert [message for message in reply.model.requests[-1].messages if message.from_history] == []
+    assert [run.run_id for run in reply.storage.list_runs(SESSION_ID)] == ["run-2"]
+
+
+def _session_usage(reply: _Reply) -> list[tuple[int, int]]:
+    """Return the input and output tokens of the session's usage snapshots."""
+    names = reply.storage.names
+    with reply.storage.transaction(write=False) as connection:
+        snapshots = connection.execute(
+            f"SELECT usage_data FROM {quote_identifier(names.usage)} WHERE session_id = ?",  # noqa: S608
+            (SESSION_ID,),
+        ).fetchall()
+    return sorted(
+        (metrics["input_tokens"], metrics["output_tokens"])
+        for metrics in (json.loads(snapshot)["metrics"] for (snapshot,) in snapshots)
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("probe")
+@pytest.mark.parametrize("ending", ["empty", "declined"])
+async def test_a_reply_that_is_no_turn_still_counts_toward_usage_and_budgets(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    ending: str,
+) -> None:
+    """Its tokens stay in the usage ledger, the usage report's session totals, and the requester's monthly spend."""
+    if ending == "empty":
+        script = [answer("", usage(100, 5)), answer("Recovered.", usage(120, 9))]
+        expected_snapshots, stored = [(100, 5), (120, 9)], ["Recovered."]
+    else:
+        script = [answer(_SILENT_DECISION, usage(80, 12))]
+        expected_snapshots, stored = [(80, 12)], []
+    reply = _reply(tmp_path, monkeypatch, script)
+
+    # Without a turn run id, each attempt runs under a run id of its own.
+    await _respond(reply, run_id=None, participation=ParticipationGate() if ending == "declined" else None)
+
+    assert [run.content for run in reply.storage.list_runs(SESSION_ID)] == stored
+    input_tokens = sum(counted[0] for counted in expected_snapshots)
+    output_tokens = sum(counted[1] for counted in expected_snapshots)
+    assert _session_usage(reply) == expected_snapshots
+    report = collect_admin_usage(config=reply.config, runtime_paths=reply.runtime_paths)
+    assert (report.totals.input_tokens, report.totals.output_tokens) == (input_tokens, output_tokens)
+    priced = PricedModel(pricing=ModelPricing(input=2, output=10), input_includes_cache=False)
+    identity = reply.model.identity
+    prices = {(identity.provider_name, identity.id): priced}
+    spend = collect_monthly_spend(reply.config, reply.runtime_paths, datetime.now(UTC), prices)
+    assert spend.spend_usd == {
+        REQUESTER_ID: pytest.approx((input_tokens * 2 + output_tokens * 10) / 1_000_000),
+    }
 
 
 @pytest.mark.asyncio

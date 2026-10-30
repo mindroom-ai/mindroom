@@ -10,11 +10,12 @@ from typing import TYPE_CHECKING
 
 import pytest
 
+from mindroom.history.types import HistoryScope
 from mindroom.llm.messages import Message
 from mindroom.llm.runs import RunRecord, RunStatus
 from mindroom.llm.usage import MessageMetrics, ModelMetrics, RunMetrics, TokenCounts
 from mindroom.session_storage.agent_storage import create_agent_state_storage
-from mindroom.session_storage.store import ConversationStore
+from mindroom.session_storage.store import ConversationStore, persist_to, watch_session_row
 from mindroom.session_storage.types import ConversationSession
 from mindroom.usage.stats_storage import UsageSessionRow, UsageStorageSource, iter_usage_storage_rows
 from mindroom.usage.storage import (
@@ -23,10 +24,11 @@ from mindroom.usage.storage import (
     request_usage,
     run_usage_snapshot,
 )
-from tests.conftest import persist_runs, seed_session_row
+from tests.conftest import delete_runs, persist_runs, seed_session_row
 from tests.history_helpers import compact_runs
 
 if TYPE_CHECKING:
+    from mindroom.llm.runs import AnyRunRecord
     from mindroom.session_storage.store import ConversationStore
 
 
@@ -171,7 +173,7 @@ def test_a_refused_save_of_a_removed_run_still_records_usage(usage_db: Conversat
 def test_run_cleanup_preserves_usage_before_regeneration(usage_db: ConversationStore) -> None:
     """Replay cleanup cannot erase incurred usage, and the replacement run adds its own work."""
     _save(usage_db, _run())
-    usage_db.delete_runs(["run-1"], session_id="session")
+    delete_runs(usage_db, ["run-1"], session_id="session")
     _save(usage_db, _run(20, run_id="run-2"))
 
     assert [(run_id, payload["metrics"]["total_tokens"]) for run_id, payload in _rows(usage_db)] == [
@@ -181,6 +183,51 @@ def test_run_cleanup_preserves_usage_before_regeneration(usage_db: ConversationS
     session = usage_db.load_session("session")
     assert session is not None
     assert [run.run_id for run in session.runs] == ["run-2"]
+
+
+def _no_turn(_record: AnyRunRecord) -> bool:
+    return False
+
+
+def _session_row(storage: ConversationStore) -> tuple[object, dict[str, object]]:
+    """Return the session row's requester and its stored session state."""
+    with sqlite3.connect(storage.path) as connection:
+        user_id, state = connection.execute(
+            "SELECT user_id, session_state FROM code_sessions WHERE session_id = 'session'",
+        ).fetchone()
+    return user_id, json.loads(state)
+
+
+@pytest.mark.asyncio
+async def test_a_run_that_is_no_turn_records_its_usage_and_removes_the_row_it_held(usage_db: ConversationStore) -> None:
+    """Its usage replaces what the run recorded before, while the cancelled row a mid-turn fold left for it goes."""
+    _save(usage_db, _run(10, status=RunStatus.cancelled))
+    session = usage_db.load_session("session")
+    assert session is not None
+
+    await persist_to(usage_db, session, replays=_no_turn)(_run(30))
+
+    [(run_id, snapshot)] = _rows(usage_db)
+    assert (run_id, snapshot["metrics"]["total_tokens"], snapshot["created_at"]) == ("run-1", 30, 1_700_000_000)
+    assert usage_db.list_runs("session") == []
+    assert session.runs == []
+
+
+@pytest.mark.asyncio
+async def test_a_run_that_is_no_turn_creates_the_session_row_with_its_requester_and_state(tmp_path: Path) -> None:
+    """The first write of a conversation can be such a run: the row it creates names its requester and holds the state."""
+    storage = create_agent_state_storage("code", tmp_path)
+    session = _session()
+    session.session_state["checked"] = True
+
+    with watch_session_row(HistoryScope(kind="agent", scope_id="code"), "session") as watch:
+        await persist_to(storage, session, replays=_no_turn)(_run(10))
+
+    assert watch.created
+    assert _session_row(storage) == ("@alice:example.test", {"checked": True})
+    assert [snapshot["metrics"]["total_tokens"] for _, snapshot in _rows(storage)] == [10]
+    assert session.stored_session_state == {"checked": True}
+    assert storage.list_runs("session") == []
 
 
 def test_usage_write_failure_rolls_back_the_run(usage_db: ConversationStore) -> None:
@@ -218,7 +265,7 @@ def test_nested_run_usage_retains_parent_identity(usage_db: ConversationStore) -
     # A member saves before its team run, as a team turn saves them.
     _save(usage_db, _run(5, run_id="member", parent_run_id="run-1"))
     _save(usage_db, _run())
-    usage_db.delete_runs(["run-1"], session_id="session")
+    delete_runs(usage_db, ["run-1"], session_id="session")
 
     rows = _rows(usage_db)
     assert [run_id for run_id, _ in rows] == ["member", "run-1"]

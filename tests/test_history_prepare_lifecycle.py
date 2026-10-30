@@ -56,7 +56,7 @@ from mindroom.providers.assistant_turn import stamp_model
 from mindroom.session_ids import create_session_id
 from mindroom.session_storage.agent_storage import create_session_storage
 from mindroom.token_budget import estimate_compaction_input_tokens
-from tests.conftest import install_model_providers, prepare_history_for_run_for_test, seed_session
+from tests.conftest import delete_runs, install_model_providers, prepare_history_for_run_for_test, seed_session
 from tests.fakes.scripted_model import ScriptedModel, estimate_only_model
 from tests.fakes.summary_model import ScriptedSummaryModel, summary_model
 from tests.history_helpers import (
@@ -1237,7 +1237,7 @@ async def test_prepare_history_for_run_persists_successful_compaction_chunks_bef
         if second_chunk == "fails":
             msg = "summary failed"
             raise RuntimeError(msg)
-        storage.delete_runs(["run-3"], session_id="session-1")
+        delete_runs(storage, ["run-3"], session_id="session-1")
         return "stale second summary"
 
     summary_mock = AsyncMock(side_effect=summarize)
@@ -1809,12 +1809,12 @@ async def test_a_manual_compaction_the_conversation_outran_says_so_and_stays_req
 
     def basis_after_a_redaction_cuts_a_run(*args: object, **kwargs: object) -> object:
         if race == "before_summary":
-            storage.delete_runs(["run-1"], session_id="session-1")
+            delete_runs(storage, ["run-1"], session_id="session-1")
         return read_chunk_basis(*args, **kwargs)
 
     async def summary_while_a_redaction_cuts_a_run(**_kwargs: object) -> str:
         if race == "during_summary":
-            storage.delete_runs(["run-1"], session_id="session-1")
+            delete_runs(storage, ["run-1"], session_id="session-1")
         return "stale summary"
 
     install_model_providers(monkeypatch, {"default": summary_model()})

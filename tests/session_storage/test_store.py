@@ -32,7 +32,7 @@ from mindroom.session_storage.store import (
     watch_session_row,
 )
 from mindroom.session_storage.types import ConversationSession, session_state_snapshot
-from tests.conftest import seed_session_row, seed_session_state, stored_session_state
+from tests.conftest import delete_runs, seed_session_row, seed_session_state, stored_session_state
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterator
@@ -278,7 +278,7 @@ def test_a_first_write_takes_the_next_seq_whatever_its_status(team_store: Conver
 def test_a_deleted_runs_number_is_never_handed_out_again(store: ConversationStore) -> None:
     """The counter only grows, so a run saved after the newest runs were deleted sorts after every number used."""
     _save(store, _run("r1"), _run("r2"), _run("r3"))
-    store.delete_runs(["r2", "r3"], session_id="s1")
+    delete_runs(store, ["r2", "r3"], session_id="s1")
 
     _save(store, _run("r4"))
 
@@ -832,8 +832,11 @@ def test_a_message_rewrite_that_stores_no_run_leaves_the_session_the_load_its_ed
 # --- deletes ----------------------------------------------------------------------------------------------------
 
 
-def test_deleting_runs_takes_their_members_and_messages_and_fences_nothing(team_store: ConversationStore) -> None:
-    """A discard deletes the team run's member rows too; it records no removed run and keeps the summaries."""
+@pytest.mark.asyncio
+async def test_a_team_run_that_is_no_turn_takes_its_member_rows_and_fences_nothing(
+    team_store: ConversationStore,
+) -> None:
+    """Its terminal save deletes the rows it held, its member rows too; it records no removed run and keeps summaries."""
     team = _team()
     _save(team_store, _member("m0", "t0"), _member("m1", "t0"), _team_run("t0"), _team_run("t1"), session=team)
     seed_session_row(team_store, _session("s2", kind="team", owner="crew"))
@@ -842,9 +845,9 @@ def test_deleting_runs_takes_their_members_and_messages_and_fences_nothing(team_
     session = _loaded(team_store)
     session.runs = [*session.runs, _member("m0", "t0"), _member("m1", "t0"), _team_run("t0")]
 
-    deleted = team_store.delete_runs(["t0", "missing"], session_id="s1", session=session)
+    await persist_to(team_store, session, replays=lambda _record: False)(_team_run("t0"))
 
-    assert deleted == {"t0", "m0", "m1"}
+    assert _query(team_store, "SELECT run_id FROM code_sessions_log_runs WHERE session_id = 's1'") == [("t1",)]
     assert _query(team_store, "SELECT run_id FROM code_sessions_log_runs WHERE parent_run_id = 't0'") == [
         ("elsewhere",),
     ]
@@ -1144,7 +1147,7 @@ async def test_a_removed_save_takes_the_run_and_its_members_out_of_the_session(t
         session=team,
     )
     session = _loaded(team_store)
-    team_store.delete_runs(["t0"], session_id="s1")
+    delete_runs(team_store, ["t0"], session_id="s1")
     _remove(team_store, "t0")
 
     await persist_to(team_store, session)(_team_run("t0", RunStatus.cancelled))
@@ -1809,7 +1812,7 @@ def test_news_in_the_log_moves_the_sessions_update_time_and_rewrites_do_not(stor
     assert updated_at() > 5
 
     store.save_interrupted_record(_session(), _run("r1", content="what was heard"))
-    store.delete_runs(["r2"], session_id="s1")
+    delete_runs(store, ["r2"], session_id="s1")
     assert updated_at() == 5
 
     _persist(store, _session(), _run("r4"))

@@ -20,6 +20,7 @@ from collections.abc import (
     AsyncIterator,
     Awaitable,
     Callable,
+    Collection,
     Generator,
     Iterable,
     Iterator,
@@ -174,7 +175,14 @@ from mindroom.response_turn import CompletedAttempt, ResponseTurnContext
 from mindroom.session_storage.agent_storage import create_state_storage
 from mindroom.session_storage.legacy_usage_totals import add_pre_ledger_baselines
 from mindroom.session_storage.schema import quote_identifier
-from mindroom.session_storage.store import _session_state, _write_session_state, ensure_session_row, persist_to
+from mindroom.session_storage.store import (
+    _session_state,
+    _write_session_state,
+    delete_runs_in_transaction,
+    ensure_session_row,
+    persist_to,
+    runs_without,
+)
 from mindroom.thread_summary import schedule as thread_summary_schedule
 from mindroom.thread_summary.schedule import _ThreadSummaryBaselines
 from mindroom.thread_utils import decide_agent_response
@@ -4086,6 +4094,25 @@ def persist_runs(storage: "ConversationStore", session: "ConversationSession", *
 
     with ThreadPoolExecutor(max_workers=1) as pool:
         pool.submit(asyncio.run, persist_all()).result()
+
+
+def delete_runs(
+    storage: "ConversationStore",
+    run_ids: Collection[str],
+    *,
+    session_id: str,
+    session: "ConversationSession | None" = None,
+) -> set[str]:
+    """Delete the session's runs ``run_ids`` with their member runs and messages, as another writer's delete does.
+
+    No summary row goes and no removed run is recorded, as when a run that holds a fold's row ends as no turn.
+    ``session``, when given, then holds none of the runs; returns the deleted ids.
+    """
+    with storage.transaction(write=True) as connection:
+        deleted = delete_runs_in_transaction(connection, storage.names, run_ids, session_id=session_id)
+    if session is not None:
+        session.runs = runs_without(session.runs, run_ids)
+    return deleted
 
 
 def seed_session_metrics(storage: "ConversationStore", session_id: str, totals: "Mapping[str, object]") -> None:

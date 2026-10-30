@@ -157,7 +157,6 @@ async def test_interrupted_unconfirmed_result_is_retrieved_after_runtime_reconst
                     response_text=str(response.content or ""),
                     replayable_text=str(response.content or ""),
                     has_visible_content=bool(response.content),
-                    session_id=response.session_id,
                     attempt_run_id=response.run_id,
                 ),
             )

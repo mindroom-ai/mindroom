@@ -20,7 +20,7 @@ from mindroom.session_storage.agent_storage import create_agent_state_storage
 from mindroom.session_storage.store import watch_session_row
 from mindroom.session_storage.summary_rows import CoveredRun, Fold
 from mindroom.session_storage.types import ConversationSession
-from tests.conftest import seed_session_row
+from tests.conftest import delete_runs, seed_session_row
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -326,10 +326,10 @@ def test_an_append_refuses_input_that_changed_since_it_was_read(store: Conversat
         assert _chunk(store, ["r0", "r1"], "another response's chunk") is not None
         based_on = _latest_id(store)
     elif change == "covered run gone":
-        assert store.delete_runs(["r1"], session_id="s1") == {"r1"}
+        assert delete_runs(store, ["r1"], session_id="s1") == {"r1"}
     elif change == "covered run saved again":
         # A discard fences nothing, so a late save stores the run again, at a new place.
-        assert store.delete_runs(["r1"], session_id="s1") == {"r1"}
+        assert delete_runs(store, ["r1"], session_id="s1") == {"r1"}
         assert _save(store, _run("r1")) == ["written"]
     else:
         interrupted = _run("r1", RunStatus.cancelled)
@@ -799,7 +799,7 @@ def test_redaction_candidates_are_every_event_an_element_holds_for_a_cut(store: 
     _save(store, _run("done"), _run("asks", RunStatus.paused, seen=["$asked"]), _run("failed", RunStatus.error))
     _save(store, _run("member", parent="done"))
     assert _fold(store, _run("live", seen=["$context"]), "S") is not None
-    assert store.delete_runs(["live"], session_id="s1") == {"live"}
+    assert delete_runs(store, ["live"], session_id="s1") == {"live"}
 
     basis = _redaction_basis(store)
     candidates = basis.candidates()
@@ -833,7 +833,7 @@ def test_redacting_an_event_only_the_running_turn_read_cuts_at_its_fold(
     assert _fold(store, running, "S") is not None
     _save(store, _run("r3"))
     if discarded:
-        assert store.delete_runs(["live"], session_id="s1") == {"live"}
+        assert delete_runs(store, ["live"], session_id="s1") == {"live"}
 
     assert _redact(store, "$context")
 
@@ -850,7 +850,7 @@ def test_a_fold_row_holds_what_its_turn_answered_for_an_edit_and_what_it_read_fo
     _save(store, _run("r1"))
     running = _run("live", seen=["$context"])
     assert _fold(store, running, "S") is not None
-    assert store.delete_runs(["live"], session_id="s1") == {"live"}
+    assert delete_runs(store, ["live"], session_id="s1") == {"live"}
 
     assert not _edit(store, "$context")
     assert _log(store) == ["run:r1", "row:S"]
@@ -862,7 +862,7 @@ def test_a_redaction_of_what_a_discarded_fold_read_cuts_at_its_row(store: Conver
     """Either provenance set holds an event for a redaction."""
     _save(store, _run("r1"))
     assert _fold(store, _run("live", seen=["$context"]), "S") is not None
-    assert store.delete_runs(["live"], session_id="s1") == {"live"}
+    assert delete_runs(store, ["live"], session_id="s1") == {"live"}
 
     assert _redact(store, "$context")
 
@@ -1059,7 +1059,7 @@ def test_retiring_writes_a_barrier_and_removes_every_run_that_folded_mid_turn(st
     running = _run("live")
     assert _fold(store, running, "S2") is not None
     # The running turn discarded its row, as an empty run does; its fold still names it.
-    assert store.delete_runs(["live"], session_id="s1") == {"live"}
+    assert delete_runs(store, ["live"], session_id="s1") == {"live"}
 
     summary_rows.retire(store, session=_session(), scope_key=_AGENT)
 

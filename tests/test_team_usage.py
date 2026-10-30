@@ -23,7 +23,7 @@ from mindroom.session_storage.schema import quote_identifier
 from mindroom.session_storage.types import ConversationSession
 from mindroom.tool_system.worker_routing import build_tool_execution_identity
 from mindroom.usage.stats import collect_admin_usage, collect_private_usage, collect_self_usage
-from tests.conftest import persist_runs, seed_session_row
+from tests.conftest import delete_runs, persist_runs, seed_session_row
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
@@ -150,7 +150,7 @@ def test_team_export_counts_each_saved_call_once(
     )
     with _stored_team(paths, config, team_id) as storage:
         if not retained_conversation:
-            storage.delete_runs(["leader"], session_id="session")
+            delete_runs(storage, ["leader"], session_id="session")
         report = collect_admin_usage(config=config, runtime_paths=paths, include_daily=True, include_requests=True)
 
     assert report.totals.input_tokens == 60

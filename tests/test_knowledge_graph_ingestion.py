@@ -33,7 +33,7 @@ from mindroom.prompt_message_tags import render_msg_tag
 from mindroom.session_storage.agent_storage import create_session_storage
 from mindroom.session_storage.schema import quote_identifier
 from mindroom.session_storage.types import ConversationSession
-from tests.conftest import seed_session
+from tests.conftest import delete_runs, seed_session
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Coroutine, Iterator
@@ -1462,7 +1462,7 @@ async def test_a_failing_conversation_left_without_matrix_turns_stops_keeping_he
 
     # The failing turn is deleted, and the conversation goes on with a turn that is not a Matrix turn.
     storage = create_session_storage("mind", config, paths, execution_identity=None)
-    assert storage.delete_runs(["r1"], session_id="!room:x:$t1") == {"r1"}
+    assert delete_runs(storage, ["r1"], session_id="!room:x:$t1") == {"r1"}
     _seed(config, paths, "!room:x:$t1", ["r2"], updated_at=T0 + 4000, matrix=False)
     await _pass(worker, config, now=T0 + 5000)
 
