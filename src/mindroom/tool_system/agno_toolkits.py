@@ -35,11 +35,7 @@ from mindroom.llm.media import Audio, File, Image, Video, named_by_resource
 from mindroom.logging_config import get_logger
 from mindroom.tool_system import authoring
 from mindroom.tool_system.declarations import SupportsPrimaryCallPlacement
-from mindroom.tool_system.output_files import (
-    ToolOutputFilePolicy,
-    output_file_entrypoint,
-    with_optional_output_path,
-)
+from mindroom.tool_system.output_files import ToolOutputFilePolicy, with_output_files
 from mindroom.tool_system.tool_function import AdaptedToolkit, InjectedValue, ToolFunction, ToolValue
 from mindroom.tool_system.tool_schema import tool_description, tool_parameters, validated_entrypoint
 
@@ -82,26 +78,16 @@ class _Finishing:
     output_files: ToolOutputFilePolicy | None = None
     to_worker: Callable[[str, Callable[..., object]], Callable[..., object]] | None = None
 
-    def entrypoint(
-        self,
-        name: str,
-        entrypoint: Callable[..., object],
-        parameters: Mapping[str, Any] | None,
-    ) -> tuple[Callable[..., object], bool]:
-        """Return the entrypoint a function's schema and validation derive from, and whether it takes output files.
+    def finished(self, function: ToolFunction, *, derived: bool) -> ToolFunction:
+        """Return ``function``, adapted, with output files and through its worker stand-in where configured.
 
-        ``parameters`` is the schema the tool authored, if any; a function that takes ``mindroom_output_path`` by
-        either keeps its own.
+        ``derived`` says its schema was derived from its entrypoint's signature, which places the output path.
         """
-        wrapped = (
-            None
-            if self.output_files is None
-            else output_file_entrypoint(entrypoint, self.output_files, tool_name=name, parameters=parameters)
-        )
-        entrypoint = wrapped or entrypoint
+        if self.output_files is not None:
+            function = with_output_files(function, self.output_files, derived=derived)
         if self.to_worker is not None:
-            entrypoint = self.to_worker(name, entrypoint)
-        return entrypoint, wrapped is not None
+            function = replace(function, entrypoint=self.to_worker(function.name, function.entrypoint))
+        return function
 
 
 # No value holds its toolkit, which would keep the toolkit, and whatever it holds, alive for the whole process.
@@ -119,7 +105,7 @@ def configure_toolkit_functions[T: AnyToolkit](
 
     ``offered`` names the functions an agent is offered, None every one, as ``get_tool_by_name``'s function filters
     leave them. With ``output_files``, each function takes ``mindroom_output_path`` too, and ``to_worker``, given
-    a function's name and entrypoint, returns its stand-in that sends its calls to a worker.
+    a function's name and finished entrypoint, returns its stand-in that sends its calls to a worker.
     """
     _FINISHING[toolkit] = _Finishing(None if offered is None else frozenset(offered), output_files, to_worker)
     return toolkit
@@ -433,7 +419,7 @@ def _refusal(function: Function) -> str | None:
 
 
 def _adapt(function: Function, finishing: _Finishing) -> ToolFunction:
-    """Process one Agno function once, on a copy, and return it as a ``ToolFunction`` with its finished schema.
+    """Process one Agno function once, on a copy, and return it as a ``ToolFunction``, finished as configured.
 
     ``process_entrypoint`` rewrites a user-authored schema in place and replaces the entrypoint with its coercing
     wrapper, so the shared ``Function`` stays untouched for whoever else holds it. A field MindRoom refuses is left
@@ -442,24 +428,16 @@ def _adapt(function: Function, finishing: _Finishing) -> ToolFunction:
     if function.entrypoint is None:
         msg = f"Tool function {function.name!r} has no entrypoint"
         raise ValueError(msg)
-    authored = function.skip_entrypoint_processing or function.parameters != AGNO_EMPTY_PARAMETERS
-    entrypoint, output_files = finishing.entrypoint(
-        function.name,
-        function.entrypoint,
-        function.parameters if authored else None,
-    )
     prepared = function.model_copy(deep=False)
-    prepared.entrypoint = entrypoint
     prepared.parameters = deepcopy(function.parameters)
-    strict = False if output_files else function.strict
     # An explicit strict setting on the function wins; MindRoom never asks Agno for strict schemas otherwise.
-    prepared.process_entrypoint(strict=bool(strict))
+    prepared.process_entrypoint(strict=bool(function.strict))
     assert prepared.entrypoint is not None
-    return ToolFunction(
+    adapted = ToolFunction(
         name=prepared.name,
         description=prepared.description,
-        parameters=with_optional_output_path(prepared.parameters) if output_files else prepared.parameters,
-        strict=strict,
+        parameters=prepared.parameters,
+        strict=function.strict,
         requires_confirmation=prepared.requires_confirmation,
         approval_type=prepared.approval_type,
         external_execution=prepared.external_execution,
@@ -469,6 +447,8 @@ def _adapt(function: Function, finishing: _Finishing) -> ToolFunction:
         injected_params=injected_parameters(function.entrypoint),
         entrypoint_processed=not function.skip_entrypoint_processing,
     )
+    derived = not function.skip_entrypoint_processing and function.parameters == AGNO_EMPTY_PARAMETERS
+    return finishing.finished(adapted, derived=derived)
 
 
 def _owned_function(toolkit: authoring.Toolkit, name: str, finishing: _Finishing) -> ToolFunction:
@@ -490,23 +470,20 @@ def _owned_function(toolkit: authoring.Toolkit, name: str, finishing: _Finishing
         )
         raise ValueError(msg)
     authored = authoring.passthrough_parameters(function)
-    entrypoint, output_files = finishing.entrypoint(name, function, authored)
     derived = authored is None
     offered = toolkit.offered_function(
         ToolFunction(
             name=name,
-            description=authoring.authored_description(function) or (tool_description(entrypoint) if derived else None),
-            parameters=tool_parameters(entrypoint) if authored is None else deepcopy(authored),
+            description=authoring.authored_description(function) or (tool_description(function) if derived else None),
+            parameters=tool_parameters(function) if authored is None else deepcopy(authored),
             # The flags Agno's registration sets for a function no toolkit option asks anything of.
             requires_confirmation=False,
             external_execution=False,
-            entrypoint=validated_entrypoint(entrypoint) if derived else entrypoint,
+            entrypoint=validated_entrypoint(function) if derived else function,
             entrypoint_processed=derived,
         ),
     )
-    if not output_files:
-        return offered
-    return replace(offered, parameters=with_optional_output_path(offered.parameters), strict=False)
+    return finishing.finished(offered, derived=derived)
 
 
 def injected_parameters(entrypoint: Callable[..., Any]) -> dict[str, InjectedValue]:

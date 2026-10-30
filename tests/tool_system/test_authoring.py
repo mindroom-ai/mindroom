@@ -582,6 +582,30 @@ def test_the_function_filters_leave_the_built_toolkit_and_hide_its_functions(
 
 
 @pytest.mark.asyncio
+async def test_a_registered_owned_toolkit_with_a_workspace_and_a_function_filter_builds_and_calls(
+    registered_twins: RuntimePaths,
+    tmp_path: Path,
+) -> None:
+    """Output files and an exclude filter together: the filter hides its function, and the others save their output."""
+    toolkit = get_tool_by_name(
+        "owned_twin",
+        registered_twins,
+        tool_config_overrides={"exclude_tools": ["count_words"]},
+        tool_output_workspace_root=tmp_path,
+        worker_target=None,
+        tools=builtin_tool_registry(),
+    )
+    [shout] = adapt_toolkit(toolkit).functions
+
+    outcome = await execute_tool_call(shout, {"text": "hi", OUTPUT_PATH_ARGUMENT: "shout.txt"}, _CONTEXT, middleware=())
+
+    assert shout.name == "shout_text"
+    assert toolkit_function(toolkit, "count_words") is None
+    assert "saved_to_file" in outcome.content
+    assert (tmp_path / "shout.txt").read_text() == "HI"
+
+
+@pytest.mark.asyncio
 async def test_a_registered_owned_function_writes_its_result_where_the_model_asks(
     registered_twins: RuntimePaths,
     tmp_path: Path,

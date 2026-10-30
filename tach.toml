@@ -5921,6 +5921,7 @@ path = "mindroom.tool_system.sandbox_proxy"
 depends_on = [
     "mindroom.config.worker_projection",
     "mindroom.tool_system.media_transport",
+    "mindroom.tool_system.output_files",
     "mindroom.tool_system.media_attachments",
     "mindroom.constants",
     "mindroom.tool_system.declarations",

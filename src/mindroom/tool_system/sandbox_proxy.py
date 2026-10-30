@@ -27,6 +27,7 @@ from mindroom.shell.execution import shell_request_budget_seconds
 from mindroom.tool_system.declarations import SupportsPrimaryCallPlacement
 from mindroom.tool_system.dedicated_threads import WORKER_PROXY_CALL_EXECUTOR
 from mindroom.tool_system.media_transport import decode_media_result, is_media_result_envelope
+from mindroom.tool_system.output_files import OUTPUT_PATH_ARGUMENT
 from mindroom.tool_system.runtime_context import (
     WorkerProgressEvent,
     WorkerProgressPump,
@@ -689,6 +690,11 @@ def _worker_argument_value(value: object) -> object:
     raise TypeError(msg)
 
 
+def _authored_arguments(kwargs: dict[str, object]) -> dict[str, object]:
+    """Return a call's keyword arguments without ``mindroom_output_path``, which its function's own signature lacks."""
+    return {name: value for name, value in kwargs.items() if name != OUTPUT_PATH_ARGUMENT}
+
+
 def _worker_call_arguments(
     args: tuple[object, ...],
     kwargs: dict[str, object],
@@ -696,19 +702,20 @@ def _worker_call_arguments(
     entrypoint: Callable[..., object],
     inert_agent: bool,
 ) -> tuple[list[object], dict[str, object]]:
-    """Serialize one call's arguments for the worker, keeping the call shape.
+    """Serialize one call's arguments for the worker as the call sent them, keeping its shape.
 
     A function declared to leave its injected ``agent`` unused receives None there, since the primary's run state
     stays on the primary.
     """
     if inert_agent:
-        bound = inspect.signature(entrypoint).bind(*args, **kwargs)
+        bound = inspect.signature(entrypoint).bind(*args, **_authored_arguments(kwargs))
         if "agent" in bound.arguments:
             if "agent" in kwargs:
                 kwargs = {**kwargs, "agent": None}
             else:
+                output_path = {name: value for name, value in kwargs.items() if name == OUTPUT_PATH_ARGUMENT}
                 bound.arguments["agent"] = None
-                args, kwargs = bound.args, bound.kwargs
+                args, kwargs = bound.args, {**bound.kwargs, **output_path}
     return [_worker_argument_value(arg) for arg in args], cast("dict[str, object]", _worker_argument_value(kwargs))
 
 
@@ -873,9 +880,10 @@ def _worker_stand_in(
 ) -> Callable[..., object]:
     """Return ``local``'s stand-in sending each call to the worker, except one its toolkit keeps here.
 
-    ``primary_placement`` refers to the toolkit, when it places calls. The stand-in keeps ``local``'s signature, so the
-    call's arguments are validated before they are sent. A synchronous function keeps the completion ownership its own
-    body has; an async one keeps prompt cancellation.
+    ``local`` is the finished entrypoint: output files, then validation, then the function. A call goes to the worker
+    with its arguments as sent, where the worker's own finished function handles and validates them; a call the
+    toolkit (``primary_placement``, when it places calls) keeps here runs ``local``. A synchronous function keeps the
+    completion ownership its own body has; an async one keeps prompt cancellation.
     """
     # The toolkit being adapted, which the stand-in keeps for as long as its function lives.
     placement = None if primary_placement is None else primary_placement()
@@ -886,7 +894,7 @@ def _worker_stand_in(
     async def proxy_entrypoint(*args: object, **kwargs: object) -> object:
         if placement is not None and placement.runs_on_primary(
             function_name,
-            inspect.signature(local).bind(*args, **kwargs).arguments,
+            inspect.signature(local).bind(*args, **_authored_arguments(kwargs)).arguments,
         ):
             if local_is_async:
                 return await cast("Callable[..., Awaitable[object]]", local)(*args, **kwargs)
@@ -935,7 +943,7 @@ def worker_stand_ins(
 ) -> Callable[[str, Callable[..., object]], Callable[..., object]]:
     """Return the factory of the stand-ins that send the calls of ``toolkit``, built to run in a worker, there.
 
-    Given a function's name and entrypoint, the factory returns the stand-in that sends the function's calls there.
+    Given a function's name and finished entrypoint, the factory returns the stand-in that sends its calls there.
     ``runtime_config`` is the config the toolkit was built from; each call carries the parts runners need from it.
     ``tools`` is the registry the toolkit was built from.
     """

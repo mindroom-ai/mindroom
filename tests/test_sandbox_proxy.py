@@ -160,7 +160,7 @@ _TEST_RUNTIME_PATHS = resolve_runtime_paths(config_path=Path("config.yaml"), pro
 
 
 def _offered_entrypoint(tool: AnyToolkit, name: str) -> Callable[..., Any]:
-    """Return the entrypoint an agent's run calls for ``name``: validated, and sent to the worker when routed."""
+    """Return the entrypoint an agent's run calls for ``name``: sent to the worker when routed, else validated here."""
     function = toolkit_function(tool, name)
     assert function is not None
     return function.entrypoint
@@ -859,12 +859,12 @@ def test_proxy_wraps_tool_calls(monkeypatch: pytest.MonkeyPatch) -> None:
 
     tool = get_tool_by_name("calculator", runtime_paths, worker_target=None, tools=builtin_tool_registry())
     entrypoint = blocking_entrypoint(tool, "add")
-    result = entrypoint(1, 2)
+    result = entrypoint("1", 2)
 
     assert result == "sandbox-result"
     assert captured["url"] == "http://sandbox-runner:8765/api/sandbox-runner/execute"
-    # The arguments reach the worker validated against the function's annotations, the floats it takes, with the id
-    # a cancelled call stops its request by.
+    # The arguments reach the worker as the call sent them, for the worker to validate, with the id a cancelled call
+    # stops its request by.
     request_id = captured["json"].pop("request_id")
     assert isinstance(request_id, str)
     assert captured["json"] == {
@@ -878,7 +878,7 @@ def test_proxy_wraps_tool_calls(monkeypatch: pytest.MonkeyPatch) -> None:
         "base_dir": None,
         "tool_name": "calculator",
         "function_name": "add",
-        "args": [1.0, 2.0],
+        "args": ["1", 2],
         "kwargs": {},
         "lease_id": None,
         "tool_config_overrides": {},
@@ -1026,10 +1026,10 @@ def test_sandbox_runner_executes_wrapper_before_to_json_compatible(tmp_path: Pat
 
 
 @pytest.mark.asyncio
-async def test_an_owned_toolkit_routed_to_a_worker_validates_on_the_primary_and_runs_on_the_worker(
+async def test_an_owned_toolkit_routed_to_a_worker_sends_its_arguments_as_sent_and_validates_on_the_worker(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """An owned function keeps its schema behind the proxy, sends coerced arguments, and the runner finds it."""
+    """An owned function keeps its schema behind the proxy, sends the model's arguments, and the runner coerces them."""
     captured: dict[str, Any] = {}
     tool_name = "test_proxy_owned_tool"
 
@@ -1096,8 +1096,8 @@ async def test_an_owned_toolkit_routed_to_a_worker_validates_on_the_primary_and_
         "required": ["word"],
     }
     assert outcome.content == "sandbox-result"
-    assert captured["json"]["kwargs"] == {"word": "ab", "times": 2}
-    assert entrypoint(word="ab", times=2) == "abab"
+    assert captured["json"]["kwargs"] == {"word": "ab", "times": "2"}
+    assert entrypoint(word="ab", times="2") == "abab"
 
 
 @pytest.mark.asyncio
@@ -1838,6 +1838,130 @@ async def test_sync_function_placed_on_the_primary_runs_locally_through_its_asyn
     assert caller_threads != [threading.get_ident()]
     assert await entrypoint(place="worker") == "worker"
     assert [url for url, _payload in calls] == ["http://sandbox-runner:8765/api/sandbox-runner/execute"]
+
+
+@pytest.mark.asyncio
+async def test_a_placed_call_binds_only_its_own_arguments_and_one_missing_an_argument_fails_there(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Placement reads the call's own arguments, not the output path, and a call it cannot bind reaches no worker."""
+    calls: list[tuple[str, dict[str, Any]]] = []
+    runtime_paths = _configure_proxy_runtime(
+        monkeypatch,
+        proxy_url="http://sandbox-runner:8765",
+        proxy_token=_TEST_AUTH_TOKEN,
+        execution_mode="all",
+    )
+    monkeypatch.setattr(
+        "mindroom.tool_system.sandbox_proxy.httpx.Client",
+        _recording_client_class(captured_calls=calls, responder=lambda _url, _payload: {"ok": True, "result": "w"}),
+    )
+
+    class PlacedTools(Toolkit):
+        def __init__(self) -> None:
+            super().__init__(name="calculator", tools=[self.where])
+
+        def where(self, place: str) -> str:
+            """Report where the call ran."""
+            return f"ran {place}"
+
+        def runs_on_primary(self, function_name: str, arguments: Mapping[str, object]) -> bool:
+            assert function_name == "where"
+            assert OUTPUT_PATH_ARGUMENT not in arguments
+            return arguments["place"] == "primary"
+
+    placed = PlacedTools()
+    toolkit = configure_toolkit_functions(
+        placed,
+        output_files=ToolOutputFilePolicy(workspace_root=tmp_path),
+        to_worker=sandbox_proxy_module.worker_stand_ins(
+            "calculator",
+            placed,
+            runtime_paths=runtime_paths,
+            credentials_manager=None,
+            worker_target=None,
+            tools=builtin_tool_registry(),
+        ),
+    )
+    entrypoint = _offered_entrypoint(toolkit, "where")
+
+    saved = await entrypoint(place="primary", mindroom_output_path="where.txt")
+    with pytest.raises(TypeError, match="missing a required argument: 'place'"):
+        await entrypoint(mindroom_output_path="where.txt")
+
+    assert saved["mindroom_tool_output"]["status"] == "saved_to_file"
+    assert (tmp_path / "where.txt").read_text() == "ran primary"
+    assert calls == []
+
+
+@pytest.mark.asyncio
+async def test_a_routed_call_reaches_the_worker_as_sent_which_coerces_and_validates_it(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """The primary forwards the model's arguments unchanged; the worker coerces "3" and rejects what does not validate."""
+    primary_paths, _workspace, sent_payloads = _forward_proxy_to_seeded_runner(
+        monkeypatch,
+        tmp_path,
+        proxy_tools=frozenset({"calculator"}),
+    )
+    tool = get_tool_by_name("calculator", primary_paths, worker_target=None, tools=builtin_tool_registry())
+    entrypoint = _offered_entrypoint(tool, "add")
+
+    added = await entrypoint(a="3", b=4)
+    with pytest.raises(RuntimeError) as invalid:
+        await entrypoint(a="x", b=4)
+
+    assert [payload["kwargs"] for payload in sent_payloads] == [{"a": "3", "b": 4}, {"a": "x", "b": 4}]
+    assert json.loads(added) == {"operation": "addition", "result": 7.0}
+    assert str(invalid.value).startswith(
+        "Sandbox tool execution failed: ValidationError: 1 validation error for CalculatorTools.add\na\n"
+        "  Input should be a valid number, unable to parse string as a number",
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("a", [3, "x"], ids=["valid-argument", "invalid-argument"])
+async def test_a_routed_output_path_is_sent_as_given_and_reported_by_the_worker_before_the_arguments(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    a: object,
+) -> None:
+    """A non-string path travels to the worker, whose output files answer with its error before validating the rest."""
+    sent: list[dict[str, object]] = []
+    runtime_paths = _configure_proxy_runtime(
+        monkeypatch,
+        proxy_url="http://sandbox-runner:8765",
+        proxy_token=_TEST_AUTH_TOKEN,
+        execution_mode="selective",
+        proxy_tools={"calculator"},
+    )
+    monkeypatch.setattr(sandbox_proxy_module, "_call_proxy_sync", lambda **call: sent.append(call["kwargs"]))
+    tool = get_tool_by_name(
+        "calculator",
+        runtime_paths,
+        tool_output_workspace_root=tmp_path / "primary",
+        worker_target=None,
+        tools=builtin_tool_registry(),
+    )
+    await _offered_entrypoint(tool, "add")(a=a, b=4, mindroom_output_path=5)
+    _toolkit, worker_entrypoint = sandbox_runner_module._resolve_entrypoint(
+        runtime_paths=resolve_runtime_paths(config_path=tmp_path / "config.yaml", process_env={}),
+        config=Config(agents={}, models={}),
+        tool_name="calculator",
+        function_name="add",
+        tools=builtin_tool_registry(),
+        tool_output_workspace_root=tmp_path / "worker",
+    )
+
+    assert sent == [{"a": a, "b": 4, OUTPUT_PATH_ARGUMENT: 5}]
+    assert worker_entrypoint(**sent[0]) == {
+        "mindroom_tool_output": {
+            "status": "error",
+            "error": "mindroom_output_path must be a workspace-relative string path.",
+        },
+    }
 
 
 @pytest.mark.asyncio

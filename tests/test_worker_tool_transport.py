@@ -29,6 +29,7 @@ from mindroom.tool_jobs.execution import agent_tool_middleware
 from mindroom.tool_system import sandbox_proxy
 from mindroom.tool_system.agno_toolkits import ToolCallActor
 from mindroom.tool_system.invocation import ToolCallContext, execute_tool_call
+from mindroom.tool_system.output_files import OUTPUT_PATH_ARGUMENT
 from mindroom.tool_system.plugins import config_plugins
 from mindroom.tool_system.runtime_context import (
     get_tool_runtime_context,
@@ -333,9 +334,18 @@ def test_invalid_arguments_rejected_before_worker_side_effects(
         )
 
 
+@pytest.mark.parametrize(
+    "output_path",
+    [{}, {OUTPUT_PATH_ARGUMENT: "saved.wav"}],
+    ids=["no-output-path", "output-path"],
+)
 @pytest.mark.parametrize("positional", [True, False])
-def test_declared_unused_agent_keeps_call_arguments(positional: bool, tmp_path: Path) -> None:
-    """Discard only the declared runtime slot while retaining normal call data."""
+def test_declared_unused_agent_keeps_call_arguments(
+    positional: bool,
+    output_path: dict[str, object],
+    tmp_path: Path,
+) -> None:
+    """Discard only the declared runtime slot while retaining normal call data and the call's output path."""
 
     def entrypoint(agent: object, path: Path, *, options: object) -> None:
         del agent, path, options
@@ -348,7 +358,7 @@ def test_declared_unused_agent_keeps_call_arguments(positional: bool, tmp_path: 
 
     encoded_args, encoded_kwargs = sandbox_proxy._worker_call_arguments(
         args,
-        kwargs,
+        {**kwargs, **output_path},
         entrypoint=entrypoint,
         inert_agent=True,
     )
@@ -356,7 +366,9 @@ def test_declared_unused_agent_keeps_call_arguments(positional: bool, tmp_path: 
     expected_options = {"values": [1, True, None, 2.5]}
     assert encoded_args == ([None, str(path)] if positional else [])
     assert encoded_kwargs == (
-        {"options": expected_options} if positional else {"agent": None, "path": str(path), "options": expected_options}
+        {"options": expected_options, **output_path}
+        if positional
+        else {"agent": None, "path": str(path), "options": expected_options, **output_path}
     )
 
 

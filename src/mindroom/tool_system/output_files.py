@@ -6,14 +6,13 @@ import functools
 import inspect
 import json
 import stat
-import sys
 import uuid
 from collections.abc import Awaitable, Callable, Iterator, Mapping
 from contextvars import ContextVar
-from dataclasses import asdict, dataclass, is_dataclass
+from dataclasses import asdict, dataclass, is_dataclass, replace
 from enum import Enum
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Literal, cast, get_type_hints
+from typing import TYPE_CHECKING, Any, Literal, cast
 
 from pydantic import BaseModel
 
@@ -23,11 +22,9 @@ from mindroom.logging_config import get_logger
 from mindroom.path_confinement import is_git_metadata_path, open_directory_within_root
 from mindroom.workspaces import resolve_relative_path_within_root_preserving_leaf
 
-if sys.version_info >= (3, 14):
-    from annotationlib import Format, type_repr
-
 if TYPE_CHECKING:
     from mindroom.constants import RuntimePaths
+    from mindroom.tool_system.tool_function import ToolFunction
 
 logger = get_logger(__name__)
 
@@ -211,10 +208,17 @@ def _output_path_schema() -> dict[str, object]:
     }
 
 
-def with_optional_output_path(parameters: Mapping[str, Any]) -> dict[str, Any]:
-    """Return a copy of ``parameters`` offering MindRoom's reserved output-path argument as an optional property."""
+def with_optional_output_path(parameters: Mapping[str, Any], *, before: str | None = None) -> dict[str, Any]:
+    """Return a copy of ``parameters`` offering MindRoom's reserved output-path argument as an optional property.
+
+    The property goes before the one named ``before`` when the schema has it, else last.
+    """
     finished = dict(parameters)
-    properties = dict(finished.get("properties") or {})
+    properties: dict[str, Any] = {}
+    for name, schema in (finished.get("properties") or {}).items():
+        if name == before:
+            properties[OUTPUT_PATH_ARGUMENT] = _output_path_schema()
+        properties[name] = schema
     properties[OUTPUT_PATH_ARGUMENT] = _output_path_schema()
     finished["type"] = finished.get("type") or "object"
     finished["properties"] = properties
@@ -538,46 +542,6 @@ def _write_auto_saved_result(
     )
 
 
-def _signature_with_output_path(entrypoint: Callable[..., object]) -> inspect.Signature:
-    signature = inspect.signature(entrypoint)
-    parameters = list(signature.parameters.values())
-    output_parameter = inspect.Parameter(
-        OUTPUT_PATH_ARGUMENT,
-        inspect.Parameter.KEYWORD_ONLY,
-        default=None,
-        annotation=str | None,
-    )
-    var_keyword_index = next(
-        (index for index, parameter in enumerate(parameters) if parameter.kind is inspect.Parameter.VAR_KEYWORD),
-        len(parameters),
-    )
-    parameters.insert(var_keyword_index, output_parameter)
-    return signature.replace(parameters=parameters)
-
-
-def _copy_annotations_with_output_path(
-    wrapper: Callable[..., object],
-    original_entrypoint: Callable[..., object],
-) -> None:
-    try:
-        annotations = dict(get_type_hints(original_entrypoint))
-    except Exception:
-        annotations = dict(getattr(original_entrypoint, "__annotations__", {}) or {})
-    annotations[OUTPUT_PATH_ARGUMENT] = str | None
-    if sys.version_info < (3, 14):
-        wrapper.__annotations__ = annotations
-        return
-
-    # Python 3.14 functools.wraps copies __annotate__, which assigning __annotations__ sets to None,
-    # so outer wrappers such as the sandbox proxy would expose no types and skip argument validation.
-    def annotate(annotation_format: Format) -> dict[str, object]:
-        if annotation_format == Format.STRING:
-            return {name: type_repr(value) for name, value in annotations.items()}
-        return dict(annotations)
-
-    wrapper.__annotate__ = annotate
-
-
 def prepare_tool_output_file(
     policy: ToolOutputFilePolicy,
     *,
@@ -601,29 +565,53 @@ def finalize_tool_output_file(request: ToolOutputFileRequest, result: object) ->
     return _redirect_result_to_file(result, policy=request.policy, validated_path=request.path)
 
 
-def output_file_entrypoint(
+def with_output_files(function: ToolFunction, policy: ToolOutputFilePolicy, *, derived: bool) -> ToolFunction:
+    """Return ``function`` taking and handling ``mindroom_output_path`` beside its own arguments, no longer strict.
+
+    Its schema offers the argument as an optional property, before the one derived for the entrypoint's ``**kwargs``
+    when ``derived`` says the schema was derived from the entrypoint's signature, else last. The entrypoint takes the
+    argument out of each call, runs the call with the rest, and saves or redirects its output. A strict function keeps
+    its schema as its author made it, and a function that takes the argument itself, by its entrypoint or its schema,
+    stays as it is too.
+    """
+    parameters = inspect.signature(function.entrypoint).parameters
+    properties = function.parameters.get("properties")
+    if function.strict:
+        return function
+    if OUTPUT_PATH_ARGUMENT in parameters or (isinstance(properties, Mapping) and OUTPUT_PATH_ARGUMENT in properties):
+        logger.debug(
+            "tool_output_path_argument_collision",
+            function_name=function.name,
+            argument_name=OUTPUT_PATH_ARGUMENT,
+        )
+        return function
+    var_keyword = next(
+        (name for name, parameter in parameters.items() if parameter.kind is inspect.Parameter.VAR_KEYWORD),
+        None,
+    )
+    return replace(
+        function,
+        parameters=with_optional_output_path(function.parameters, before=var_keyword if derived else None),
+        strict=False,
+        entrypoint=_handling_output_files(function.entrypoint, policy, tool_name=function.name),
+    )
+
+
+def _handling_output_files(
     entrypoint: Callable[..., object],
     policy: ToolOutputFilePolicy,
     *,
     tool_name: str,
-    parameters: Mapping[str, Any] | None = None,
-) -> Callable[..., object] | None:
-    """Return ``entrypoint`` taking and handling ``mindroom_output_path`` beside its own arguments.
+) -> Callable[..., object]:
+    """Return ``entrypoint`` taking ``mindroom_output_path`` out of each call and saving or redirecting its output.
 
-    Its signature, annotations, and docstring name the argument, so the schema and validation derived from it offer
-    it; the schema derived for it still needs ``with_optional_output_path``, which gives it its default. None for a
-    function that takes the argument itself, by its entrypoint or by ``parameters``, the schema its tool authored.
+    A synchronous entrypoint stays synchronous, so preparing the path, the call, and writing the file share its thread.
     """
-    properties = (parameters or {}).get("properties")
-    if OUTPUT_PATH_ARGUMENT in inspect.signature(entrypoint).parameters or (
-        isinstance(properties, dict) and OUTPUT_PATH_ARGUMENT in properties
-    ):
-        logger.debug("tool_output_path_argument_collision", function_name=tool_name, argument_name=OUTPUT_PATH_ARGUMENT)
-        return None
     if inspect.iscoroutinefunction(entrypoint):
         async_entrypoint = cast("Callable[..., Awaitable[object]]", entrypoint)
 
-        async def async_wrapper(*args: object, mindroom_output_path: str | None = None, **kwargs: object) -> object:
+        @functools.wraps(entrypoint)
+        async def async_wrapper(*args: object, mindroom_output_path: object = None, **kwargs: object) -> object:
             request = prepare_tool_output_file(policy, tool_name=tool_name, output_path=mindroom_output_path)
             if isinstance(request, dict):
                 return request
@@ -634,27 +622,18 @@ def output_file_entrypoint(
                 _active_output_request.reset(token)
             return finalize_tool_output_file(request, result)
 
-        wrapper = async_wrapper
-    else:
+        return async_wrapper
 
-        def sync_wrapper(*args: object, mindroom_output_path: str | None = None, **kwargs: object) -> object:
-            request = prepare_tool_output_file(policy, tool_name=tool_name, output_path=mindroom_output_path)
-            if isinstance(request, dict):
-                return request
-            token = _active_output_request.set(request)
-            try:
-                result = entrypoint(*args, **kwargs)
-            finally:
-                _active_output_request.reset(token)
-            return finalize_tool_output_file(request, result)
+    @functools.wraps(entrypoint)
+    def sync_wrapper(*args: object, mindroom_output_path: object = None, **kwargs: object) -> object:
+        request = prepare_tool_output_file(policy, tool_name=tool_name, output_path=mindroom_output_path)
+        if isinstance(request, dict):
+            return request
+        token = _active_output_request.set(request)
+        try:
+            result = entrypoint(*args, **kwargs)
+        finally:
+            _active_output_request.reset(token)
+        return finalize_tool_output_file(request, result)
 
-        wrapper = sync_wrapper
-
-    wrapper.__name__ = getattr(entrypoint, "__name__", "tool_entrypoint")
-    # with_optional_output_path describes the output path, so the docstring, whose Args describe the others, stays.
-    wrapper.__doc__ = entrypoint.__doc__
-    wrapper.__module__ = getattr(entrypoint, "__module__", __name__)
-    functools.update_wrapper(wrapper, entrypoint, assigned=(), updated=())
-    wrapper.__dict__["__signature__"] = _signature_with_output_path(entrypoint)
-    _copy_annotations_with_output_path(wrapper, entrypoint)
-    return wrapper
+    return sync_wrapper
