@@ -91,7 +91,7 @@ from mindroom.providers.errors import (
     provider_failure,
     retry_after_seconds,
 )
-from mindroom.providers.extra_kwargs import settings_params
+from mindroom.providers.extra_kwargs import sdk_request_body, settings_params
 from mindroom.providers.google_adc import load_ambient_google_credentials, with_runtime_application_credentials
 from mindroom.providers.model_http_client import MODEL_HTTP_CLIENT
 from mindroom.providers.names import provider_route
@@ -135,6 +135,9 @@ _VERTEX_ENDPOINTS = {
     "eu": "https://aiplatform.eu.rep.googleapis.com/v1",
 }
 _SAMPLING_CONTROL_NAMES = ("temperature", "top_p", "top_k")
+# The SDK's ``messages.stream`` arguments that are request options or headers, not body fields. The SDK adds its own
+# ``stream`` flag to the body, and its Vertex AI and Bedrock clients rewrite the body for their platform.
+_SDK_OPTION_KEYS = ("extra_headers", "extra_query", "extra_body", "timeout", "betas")
 
 
 def vertex_project_and_region(settings: ClaudeSettings) -> tuple[str | None, str | None]:
@@ -274,6 +277,7 @@ class ClaudeProvider:
         prepared = await asyncio.to_thread(self._prepare, request)
         client, kwargs = prepared.client, prepared.kwargs
         try:
+            await request.on_send(sdk_request_body(kwargs, _SDK_OPTION_KEYS))
             manager = client.beta.messages.stream(**kwargs) if prepared.beta else client.messages.stream(**kwargs)
             async with manager as events:
                 async for event in events:

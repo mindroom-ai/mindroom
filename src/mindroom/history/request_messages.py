@@ -11,7 +11,6 @@ from dataclasses import dataclass, replace
 from itertools import dropwhile, islice
 from typing import TYPE_CHECKING
 
-from mindroom.history.legacy_summary_system_prompt import system_message_embeds_summary
 from mindroom.history.message_content import project_history_media_for_replay, with_tool_calls
 from mindroom.history.run_visibility import replays_in_scope
 from mindroom.history.summary_message import compaction_summary_message, is_scope_summary, summary_follows
@@ -182,17 +181,16 @@ def build_resume_request(
     are reused, and the context the paused request sent without any history keeping it (``add_to_agent_memory=False``),
     such as memory results, stays where it was. So when the summary and history replay as they did for the paused
     request, this request repeats that one up to its last assistant turn: a signed reasoning block there stays valid
-    against an unchanged prefix, and the provider's prompt cache still matches. A run paused while Agno rendered the
-    summary inside its system message keeps that single summary.
+    against an unchanged prefix, and the provider's prompt cache still matches.
     """
     # LEGACY_COMPAT: Paused runs stored without the context their paused request sent.
     # Legacy format: a paused run whose stored messages, an Agno-layout ``run_data`` row the storage v2 conversion
     # copied or its storage v2 message rows, hold no ``add_to_agent_memory: false`` message, because the run ended
     # without storing its memory results, transient enrichment, job notes, and approval receipt.
-    # Last legacy release: v2026.10.611, whose runs stored no such message; replacement: the first release after it,
-    # whose paused runs store them in place.
-    # Handling: such a run resumes from the messages it stored, without that context, as it did before; nothing
-    # else changes, and the run it resumes into stores the current shape when it pauses again.
+    # Last legacy release: v2026.10.611, whose runs stored no such message; replacement: v2026.10.612, whose paused
+    # runs store them in place.
+    # Handling: such a run resumes from the messages it stored, without that context, as it did before, since nothing
+    # stored it to restore; the run it resumes into stores the current shape when it pauses again.
     # Coverage: tests/test_history_request_messages.py::test_a_run_paused_without_its_turn_context_resumes_without_it,
     #   tests/test_approval_resume.py::test_a_paused_approval_resumes_into_a_completed_run
     messages = [
@@ -200,8 +198,6 @@ def build_resume_request(
         *history,
         *(message for message in paused if message.role != "system"),
     ]
-    if system_message_embeds_summary(messages):
-        return messages
     return _with_scope_summary(messages, summary)
 
 

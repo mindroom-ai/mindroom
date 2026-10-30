@@ -13,7 +13,7 @@ from mindroom.llm.errors import incomplete_stream_error
 from mindroom.llm.usage import add_usage
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Mapping, Sequence
+    from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequence
 
     from pydantic import BaseModel
 
@@ -147,6 +147,11 @@ class NativeCompactionReplay:
     basis: str | None = None
 
 
+async def _unobserved(body: Mapping[str, Any]) -> None:
+    """Ignore the body of a request the request log does not record."""
+    del body
+
+
 @dataclass(frozen=True, slots=True, kw_only=True)
 class ModelRequest:
     """One provider request.
@@ -155,6 +160,8 @@ class ModelRequest:
     ``deferred_tools`` are the tools kept out of the rendered prompt and how tool search reaches them.
     ``portable_replay`` replays history explicitly instead of continuing provider-stored state, and
     ``native_compaction`` turns on provider-side compaction for routes that support it.
+    The adapter awaits ``on_send`` with the body it hands its SDK just before sending it, without request options such
+    as headers, query parameters, or timeouts; the request log sets it.
     """
 
     messages: Sequence[Message]
@@ -165,6 +172,7 @@ class ModelRequest:
     deferred_tools: DeferredTools = DeferredTools()
     portable_replay: bool = False
     native_compaction: NativeCompactionReplay | None = None
+    on_send: Callable[[Mapping[str, Any]], Awaitable[None]] = _unobserved
 
 
 @dataclass(frozen=True, slots=True)
