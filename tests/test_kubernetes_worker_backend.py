@@ -3789,7 +3789,7 @@ def test_kubernetes_backend_cleanup_skips_locked_worker() -> None:
     held = backend.ensure_worker(_spec(_TEST_SCOPED_WORKER_KEY_A), now=0.0)
     free = backend.ensure_worker(_spec(_TEST_SCOPED_WORKER_KEY_B), now=0.0)
 
-    with backend._worker_lock(held.worker_key):
+    with backend._worker_locks.for_key(held.worker_key):
         cleaned = backend.cleanup_idle_workers(now=10.0)
 
     assert [worker.worker_id for worker in cleaned] == [free.worker_id]
@@ -3963,7 +3963,7 @@ def test_kubernetes_backend_provisions_a_waiting_request_from_the_launch_applied
     runtime_paths = _write_two_shared_agents_config(tmp_path, research_scope="shared")
     backend, apps_api, _core_api = _backend(runtime_paths=runtime_paths)
     newer = _launch(_write_two_shared_agents_config(tmp_path, research_scope="user"))
-    worker_lock = backend._worker_lock(_TEST_SCOPED_WORKER_KEY_A)
+    worker_lock = backend._worker_locks.for_key(_TEST_SCOPED_WORKER_KEY_A)
     handles: list[WorkerHandle] = []
     with worker_lock:
         waiting = threading.Thread(

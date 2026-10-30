@@ -52,6 +52,7 @@ from mindroom.workers.backends._dedicated_worker_common import (
 )
 from mindroom.workers.backends._lifecycle import (
     WorkerLifecycleState,
+    WorkerLocks,
     initial_worker_lifecycle_state,
     mark_worker_failed,
     mark_worker_idle,
@@ -479,8 +480,7 @@ class DockerWorkerBackend:
         self._runtime_paths = docker_primary_runtime_paths(runtime_paths, config, storage_root=self._storage_root)
         config.validate_runtime_security(self._runtime_paths)
         self._client, self._docker_errors = _load_docker_client_and_errors(runtime_paths=self._runtime_paths)
-        self._worker_locks: dict[str, threading.Lock] = {}
-        self._worker_locks_lock = threading.Lock()
+        self._worker_locks = WorkerLocks()
         self._metadata_lock = threading.Lock()
         self._progress = WorkerWarmupProgress(self.backend_name)
         self._projection_manager = DockerProjectionManager(
@@ -505,7 +505,7 @@ class DockerWorkerBackend:
             metadata = self._load_metadata(paths)
             if metadata is None:
                 continue
-            with self._worker_lock(metadata.worker_key):
+            with self._worker_locks.for_key(metadata.worker_key):
                 metadata = self._load_metadata(paths)
                 if metadata is None:
                     continue
@@ -531,7 +531,7 @@ class DockerWorkerBackend:
         """Resolve or start the worker container for one worker key, from the launch applied once its lock is held."""
         timestamp = time.time() if now is None else now
         # A caller waiting behind another's start of this worker is sent that start's progress.
-        with self._progress.subscribed(spec.worker_key, progress_sink), self._worker_lock(spec.worker_key):
+        with self._progress.subscribed(spec.worker_key, progress_sink), self._worker_locks.for_key(spec.worker_key):
             launch = self._current_launch()
             # Docker creates missing bind sources as root, so shared workspaces exist before any plan.
             plan_scoped_workspace_mounts(
@@ -605,7 +605,7 @@ class DockerWorkerBackend:
     def touch_worker(self, worker_key: str, *, now: float | None = None) -> WorkerHandle | None:
         """Refresh last-used metadata for one existing worker."""
         timestamp = time.time() if now is None else now
-        with self._worker_lock(worker_key):
+        with self._worker_locks.for_key(worker_key):
             paths = self._worker_paths(worker_key)
             metadata = self._load_metadata(paths, expected_worker_key=worker_key)
             if metadata is None:
@@ -623,7 +623,7 @@ class DockerWorkerBackend:
             metadata = self._load_metadata(paths)
             if metadata is None:
                 continue
-            with self._worker_lock(metadata.worker_key):
+            with self._worker_locks.for_key(metadata.worker_key):
                 metadata = self._load_metadata(paths)
                 if metadata is None:
                     continue
@@ -639,7 +639,7 @@ class DockerWorkerBackend:
             metadata = self._load_metadata(paths)
             if metadata is None:
                 continue
-            with self._worker_lock(metadata.worker_key):
+            with self._worker_locks.for_key(metadata.worker_key):
                 metadata = self._load_metadata(paths)
                 if metadata is None:
                     continue
@@ -663,7 +663,7 @@ class DockerWorkerBackend:
 
     def retire_worker(self, worker_key: str) -> None:
         """Remove one exact Docker worker container and all backend-owned state."""
-        with self._worker_lock(worker_key):
+        with self._worker_locks.for_key(worker_key):
             worker_name = worker_dir_name(worker_key)
             try:
                 with (
@@ -717,7 +717,7 @@ class DockerWorkerBackend:
     ) -> WorkerHandle:
         """Persist a failed worker startup or execution state."""
         timestamp = time.time() if now is None else now
-        with self._worker_lock(worker_key):
+        with self._worker_locks.for_key(worker_key):
             paths = self._worker_paths(worker_key)
             metadata = self._load_metadata(
                 paths,
@@ -741,14 +741,6 @@ class DockerWorkerBackend:
             metadata = self._default_metadata(worker_key, now)
             metadata.lifecycle = mark_worker_idle(metadata.lifecycle)
             self._save_metadata(self._worker_paths(worker_key), metadata)
-
-    def _worker_lock(self, worker_key: str) -> threading.Lock:
-        with self._worker_locks_lock:
-            worker_lock = self._worker_locks.get(worker_key)
-            if worker_lock is None:
-                worker_lock = threading.Lock()
-                self._worker_locks[worker_key] = worker_lock
-        return worker_lock
 
     def _worker_paths(self, worker_key: str) -> _DockerWorkerPaths:
         return _docker_worker_paths(self._workers_root, worker_dir_name(worker_key))

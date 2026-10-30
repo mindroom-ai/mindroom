@@ -34,6 +34,7 @@ from mindroom.workers.backends._dedicated_worker_common import (
 )
 from mindroom.workers.backends._lifecycle import (
     WorkerLifecycleState,
+    WorkerLocks,
     initial_worker_lifecycle_state,
     mark_worker_failed,
     mark_worker_idle,
@@ -225,8 +226,7 @@ class KubernetesWorkerBackend:
             auth_token=auth_token,
             storage_root=self.storage_root,
         )
-        self._worker_locks: dict[str, threading.Lock] = {}
-        self._worker_locks_lock = threading.Lock()
+        self._worker_locks = WorkerLocks()
         self._progress = WorkerWarmupProgress(self.backend_name)
         self._ready_workers: dict[str, _ReadyWorkerCacheEntry] = {}
         self._ready_workers_lock = threading.Lock()
@@ -245,7 +245,7 @@ class KubernetesWorkerBackend:
     ) -> WorkerHandle:
         """Resolve or start the worker backing the given worker key, from the launch applied when its lock is held."""
         # A caller waiting behind another's start of this worker is sent that start's progress.
-        with self._progress.subscribed(spec.worker_key, progress_sink), self._worker_lock(spec.worker_key):
+        with self._progress.subscribed(spec.worker_key, progress_sink), self._worker_locks.for_key(spec.worker_key):
             launch = self._current_launch()
             timestamp = time.time() if now is None else now
             cached_handle = self._reuse_cached_ready_worker(spec, launch, now=timestamp)
@@ -400,7 +400,7 @@ class KubernetesWorkerBackend:
     def touch_worker(self, worker_key: str, *, now: float | None = None) -> WorkerHandle | None:
         """Refresh last-used metadata for one existing worker."""
         timestamp = time.time() if now is None else now
-        with self._worker_lock(worker_key):
+        with self._worker_locks.for_key(worker_key):
             cached_handle = self._touch_cached_worker(worker_key, now=timestamp)
             if cached_handle is not None:
                 return cached_handle
@@ -441,7 +441,7 @@ class KubernetesWorkerBackend:
 
     def retire_worker(self, worker_key: str) -> None:
         """Remove one exact Kubernetes worker and all backend-owned state."""
-        with self._worker_lock(worker_key):
+        with self._worker_locks.for_key(worker_key):
             worker_id = self._worker_id(worker_key)
             state_subpath = self._state_subpath(worker_key)
             state_parts = tuple(part for part in state_subpath.split("/") if part)
@@ -496,7 +496,7 @@ class KubernetesWorkerBackend:
             handle = self._handle_from_deployment(deployment, now=now)
             if handle.status != "idle" or int(deployment.spec.replicas or 0) == 0:
                 continue
-            worker_lock = self._worker_lock(handle.worker_key)
+            worker_lock = self._worker_locks.for_key(handle.worker_key)
             if not worker_lock.acquire(blocking=False):
                 continue
             try:
@@ -547,7 +547,7 @@ class KubernetesWorkerBackend:
                 scaled_down=handle.worker_id in scaled_down_worker_ids,
             ):
                 continue
-            worker_lock = self._worker_lock(handle.worker_key)
+            worker_lock = self._worker_locks.for_key(handle.worker_key)
             if not worker_lock.acquire(blocking=False):
                 continue
             try:
@@ -680,7 +680,7 @@ class KubernetesWorkerBackend:
     ) -> WorkerHandle:
         """Persist a failed worker startup or execution state."""
         timestamp = time.time() if now is None else now
-        with self._worker_lock(worker_key):
+        with self._worker_locks.for_key(worker_key):
             return self._record_failure_locked(
                 worker_key,
                 failure_reason,
@@ -880,14 +880,6 @@ class KubernetesWorkerBackend:
                 )
         elif auth_secret_applied:
             self._resources.delete_secret(worker_id)
-
-    def _worker_lock(self, worker_key: str) -> threading.Lock:
-        with self._worker_locks_lock:
-            worker_lock = self._worker_locks.get(worker_key)
-            if worker_lock is None:
-                worker_lock = threading.Lock()
-                self._worker_locks[worker_key] = worker_lock
-        return worker_lock
 
     def _worker_id(self, worker_key: str) -> str:
         return worker_id_for_key(worker_key, prefix=self.config.name_prefix)
