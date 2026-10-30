@@ -8672,14 +8672,14 @@
         {
           "authored_override": true,
           "default": null,
-          "description": null,
+          "description": "Paths of the CSV files the tool reads, each named by its filename stem.",
           "env": [],
-          "label": "Csvs",
+          "label": "CSV Files",
           "name": "csvs",
           "options": null,
           "placeholder": null,
           "required": false,
-          "type": "text",
+          "type": "string[]",
           "validation": null
         },
         {
@@ -8912,14 +8912,14 @@
         {
           "authored_override": true,
           "default": null,
-          "description": null,
+          "description": "SQL statements run, in order, when the tool opens its database connection.",
           "env": [],
           "label": "Init Commands",
           "name": "init_commands",
           "options": null,
           "placeholder": null,
           "required": false,
-          "type": "text",
+          "type": "string[]",
           "validation": null
         },
         {

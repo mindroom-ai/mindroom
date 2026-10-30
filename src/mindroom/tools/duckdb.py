@@ -40,9 +40,10 @@ if TYPE_CHECKING:
         ConfigField(
             name="init_commands",
             label="Init Commands",
-            type="text",
+            type="string[]",
             required=False,
             default=None,
+            description="SQL statements run, in order, when the tool opens its database connection.",
         ),
         ConfigField(
             name="read_only",

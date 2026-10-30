@@ -24,10 +24,11 @@ if TYPE_CHECKING:
     config_fields=[
         ConfigField(
             name="csvs",
-            label="Csvs",
-            type="text",
+            label="CSV Files",
+            type="string[]",
             required=False,
             default=None,
+            description="Paths of the CSV files the tool reads, each named by its filename stem.",
         ),
         ConfigField(
             name="row_limit",

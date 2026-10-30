@@ -16,16 +16,21 @@ from agno.tools.function import Function
 import mindroom.tool_system.tool_hooks
 import mindroom.tools  # noqa: F401
 from mindroom.config.models import FileAccess
-from mindroom.constants import RuntimePaths
+from mindroom.constants import RuntimePaths, resolve_runtime_paths
 from mindroom.shared_directories.tool_roots import SharedDirectoryRoot
 from mindroom.tool_system.agno_toolkits import adapt_callable
 from mindroom.tool_system.authoring import Toolkit as OwnedToolkit
 from mindroom.tool_system.declarations import ToolManagedInitArg, ToolStatus
 from mindroom.tool_system.invocation import parse_tool_arguments
-from mindroom.tool_system.metadata import TOOL_METADATA, TOOL_REGISTRY, validate_authored_tool_entry_overrides
+from mindroom.tool_system.metadata import (
+    TOOL_METADATA,
+    TOOL_REGISTRY,
+    get_tool_by_name,
+    validate_authored_tool_entry_overrides,
+)
 from mindroom.tool_system.tool_function import ToolFunction
 from mindroom.tool_system.worker_routing import ResolvedWorkerTarget
-from tests.agent_tool_helpers import offered_agno_function
+from tests.agent_tool_helpers import blocking_entrypoint, offered_agno_function
 
 SKIP_CONFIG_FIELD_VALIDATION = {
     "agent_vault_access",
@@ -90,6 +95,40 @@ def test_mapping_only_upstream_fields_are_not_authored(tool_name: str, mapping_f
     authored_names = {field.name for field in TOOL_METADATA[tool_name].config_fields or []}
 
     assert mapping_field not in authored_names
+
+
+def test_authored_csv_paths_register_each_file(tmp_path: Path) -> None:
+    """A list of CSV paths in a tool entry gives the toolkit those files, each named by its filename stem."""
+    orders = tmp_path / "orders.csv"
+    orders.write_text("id,total\n1,9\n", encoding="utf-8")
+    runtime_paths = resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path / "storage")
+
+    tool = get_tool_by_name(
+        "csv",
+        runtime_paths,
+        tool_config_overrides={"csvs": [str(orders)]},
+        runs_in_worker=False,
+        worker_target=None,
+    )
+
+    assert json.loads(blocking_entrypoint(tool, "list_csv_files")()) == ["orders"]
+
+
+def test_authored_duckdb_init_commands_run_when_the_connection_opens(tmp_path: Path) -> None:
+    """Each authored startup statement runs, whole and in order, when the toolkit opens its database."""
+    runtime_paths = resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path / "storage")
+
+    tool = get_tool_by_name(
+        "duckdb",
+        runtime_paths,
+        tool_config_overrides={
+            "init_commands": ["CREATE TABLE orders (id INTEGER, total INTEGER)", "INSERT INTO orders VALUES (1, 9)"],
+        },
+        runs_in_worker=False,
+        worker_target=None,
+    )
+
+    assert blocking_entrypoint(tool, "run_query")("SELECT total FROM orders") == "total\n9"
 
 
 def test_arxiv_download_directory_is_converted_to_path(tmp_path: Path) -> None:
