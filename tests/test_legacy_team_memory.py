@@ -33,6 +33,7 @@ from mindroom.memory._file_backend import FileMemoryBackend
 from mindroom.memory._mem0_backend import Mem0MemoryBackend
 from mindroom.memory._policy import team_scope, team_user_id
 from mindroom.memory.config import create_memory_instance
+from mindroom.model_defaults import OPENAI_EMBEDDING_DIMENSIONS
 from mindroom.orchestrator import main
 from tests.conftest import bind_runtime_paths, runtime_paths_for
 
@@ -102,8 +103,11 @@ def storage(tmp_path: Path) -> Path:
 
 @pytest.fixture(autouse=True)
 def _recorded_embedder() -> Iterator[None]:
-    """The merge asks the configured embedder for the size of its embeddings, here the recording's offline embedder."""
-    with patch("mindroom.embeddings.factory.create_configured_embedder", return_value=_RecordedEmbedder()):
+    """The recording embedded offline, four values per embedding, under the configured OpenAI model's name."""
+    with (
+        patch("mindroom.embeddings.factory.create_configured_embedder", return_value=_RecordedEmbedder()),
+        patch.object(legacy_team_memory, "OPENAI_EMBEDDING_DIMENSIONS", {"text-embedding-3-small": 4}),
+    ):
         yield
 
 
@@ -446,11 +450,46 @@ async def test_a_storage_root_without_mem0_copies_never_asks_the_embedder(tmp_pa
     assert _receipt(tmp_path).exists()
 
 
+@pytest.mark.parametrize(
+    ("provider", "settings", "size"),
+    [
+        ("openai", {"model": "text-embedding-3-small", "dimensions": 256}, 256),
+        ("openai", {"model": "text-embedding-3-large"}, 3072),
+        ("openai", {"model": "text-embedding-3-small", "host": "http://embedder.test/v1"}, None),
+        ("sentence_transformers", {"model": "sentence-transformers/all-MiniLM-L6-v2"}, None),
+    ],
+    ids=["configured dimensions", "known OpenAI model", "other OpenAI-compatible host", "local model"],
+)
+def test_only_settings_that_fix_the_embedding_size_spare_the_embedder_call(
+    provider: str,
+    settings: dict[str, object],
+    size: int | None,
+) -> None:
+    """A server at another host may serve another model under an OpenAI name, and a local model's size needs loading it."""
+    memory = MemoryConfig(embedder=_MemoryEmbedderConfig(provider=provider, config=EmbedderConfig(**settings)))
+    with patch.object(legacy_team_memory, "OPENAI_EMBEDDING_DIMENSIONS", OPENAI_EMBEDDING_DIMENSIONS):
+        assert legacy_team_memory._configured_embedding_size(Config(memory=memory)) == size
+
+
 @pytest.mark.asyncio
-async def test_while_the_embedder_cannot_answer_the_mem0_copies_wait(storage: Path) -> None:
-    """Without a size the team store or the embedder vouches for, no Mem0 copy moves and the receipt waits."""
+async def test_an_embedder_whose_settings_fix_its_size_is_never_asked(storage: Path) -> None:
+    """A known OpenAI model's size needs no call, so an embedder outage at the first start holds no merge back."""
     unreachable = EmbedderRequestError("embedder endpoint unreachable")
     with patch("mindroom.embeddings.factory.create_configured_embedder", side_effect=unreachable):
+        await _migrate(storage)
+
+    _assert_merged(storage)
+    assert _receipt(storage).exists()
+
+
+@pytest.mark.asyncio
+async def test_while_the_embedder_cannot_answer_the_mem0_copies_wait(storage: Path) -> None:
+    """Without a size the team store, the embedder's settings, or the embedder vouches for, no Mem0 copy moves."""
+    unreachable = EmbedderRequestError("embedder endpoint unreachable")
+    with (
+        patch("mindroom.embeddings.factory.create_configured_embedder", side_effect=unreachable),
+        patch.object(legacy_team_memory, "OPENAI_EMBEDDING_DIMENSIONS", {}),
+    ):
         await _migrate(storage)
 
     assert _team_records(storage) == {}

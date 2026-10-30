@@ -3868,6 +3868,7 @@ depends_on = [
     "mindroom.constants",
     "mindroom.durable_write",
     "mindroom.logging_config",
+    "mindroom.model_defaults",
     "mindroom.memory._file_backend",
     "mindroom.memory._policy",
     "mindroom.memory._shared",

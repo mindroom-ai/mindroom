@@ -31,6 +31,7 @@ from mindroom.config.resolution import memory_backend
 from mindroom.constants import tracking_dir
 from mindroom.durable_write import write_json_file_durable
 from mindroom.logging_config import get_logger
+from mindroom.model_defaults import OPENAI_EMBEDDING_DIMENSIONS
 from mindroom.path_confinement import open_directory_within_root, read_regular_file_within_root
 from mindroom.tool_system.dependencies import ensure_optional_deps, optional_dependency_environment
 from mindroom.tool_system.worker_routing import agent_state_root_path
@@ -275,11 +276,14 @@ async def _trusted_embedding_size(runtime_paths: RuntimePaths, config: Config) -
     """Return the size the configured embedder gives its embeddings; None, with a warning, while it cannot answer.
 
     Every team's records share the one team store, so a record of another size would make it refuse the rest. Member
-    stores are worker-writable, so the size comes from records the team store already holds, else from the embedder.
+    stores are worker-writable, so the size comes from records the team store already holds, else from the embedder's
+    settings, else from asking it once; settings that fix it keep an embedder outage from holding the merge back.
     """
     team_root = team_memory_root(runtime_paths)
     if (held := await asyncio.to_thread(_held_embedding_size, team_root, mem0_collection_name(config))) is not None:
         return held
+    if (configured := _configured_embedding_size(config)) is not None:
+        return configured
     try:
         memory = await create_memory_instance(team_root, config, runtime_paths)
         embedding = await asyncio.to_thread(cast("Any", memory).embedding_model.embed, "team memory", "search")
@@ -291,6 +295,17 @@ async def _trusted_embedding_size(runtime_paths: RuntimePaths, config: Config) -
         )
         return None
     return len(embedding)
+
+
+def _configured_embedding_size(config: Config) -> int | None:
+    """Return the size the embedder's settings fix: its `dimensions`, or an OpenAI model's own size."""
+    embedder = config.memory.embedder
+    if embedder.config.dimensions is not None:
+        return embedder.config.dimensions
+    # An OpenAI-compatible server at another host may serve another model under the same name.
+    if embedder.provider == "openai" and embedder.config.host is None:
+        return OPENAI_EMBEDDING_DIMENSIONS.get(embedder.config.model)
+    return None
 
 
 def _held_embedding_size(team_root: Path, collection_name: str) -> int | None:
