@@ -135,38 +135,32 @@ def log(m: str) -> None:
 
 def call_config(openai_key: str) -> CallsConfig:
     """Build the selected real call backend for this live harness."""
-    if CALL_BACKEND == "realtime":
-        return CallsConfig(
-            enabled=True,
-            profiles={
-                "voice": RealtimeCallProfile(
-                    backend="realtime",
-                    model="gpt-realtime-2.1",
-                    credentials_service="openai",
-                    voice="marin",
-                ),
-            },
-            agents={AGENT: "voice"},
-            livekit_service_url=SERVICE_URL,
+    profile = (
+        RealtimeCallProfile(
+            backend="realtime",
+            model="gpt-realtime-2.1",
+            credentials_service="openai",
+            voice="marin",
         )
+        if CALL_BACKEND == "realtime"
+        else CascadedCallProfile(
+            backend="cascaded",
+            stt=SpeechServiceConfig(
+                provider="openai",
+                model="gpt-transcribe",
+                api_key=openai_key,
+            ),
+            tts=SpeechServiceConfig(
+                provider="openai",
+                model="tts-1",
+                api_key=openai_key,
+                extra_kwargs={"voice": "alloy"},
+            ),
+        )
+    )
     return CallsConfig(
         enabled=True,
-        profiles={
-            "voice": CascadedCallProfile(
-                backend="cascaded",
-                stt=SpeechServiceConfig(
-                    provider="openai",
-                    model="gpt-transcribe",
-                    api_key=openai_key,
-                ),
-                tts=SpeechServiceConfig(
-                    provider="openai",
-                    model="tts-1",
-                    api_key=openai_key,
-                    extra_kwargs={"voice": "alloy"},
-                ),
-            ),
-        },
+        profiles={"voice": profile},
         agents={AGENT: "voice"},
         livekit_service_url=SERVICE_URL,
     )

@@ -519,7 +519,7 @@ async def _upload_file_as_mxc(
     file_path: Path,
     *,
     mimetype: str,
-    filename: str | None = None,
+    filename: str,
 ) -> tuple[str | None, dict[str, Any] | None]:
     """Upload a local file as MXC, encrypting payloads in encrypted rooms."""
     try:
@@ -532,7 +532,7 @@ async def _upload_file_as_mxc(
         client,
         room_id,
         file_bytes,
-        filename=filename or file_path.name,
+        filename=filename,
         mimetype=mimetype,
     )
 

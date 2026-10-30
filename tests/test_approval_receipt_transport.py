@@ -34,7 +34,6 @@ async def test_timed_card_offloads_complete_arguments_before_receipt_enrichment(
     }
     upload = AsyncMock(return_value=("mxc://example.org/arguments", encrypted_file))
     monkeypatch.setattr("mindroom.approval.transport.upload_json_sidecar", upload)
-    monkeypatch.setattr("mindroom.approval.transport.sidecar_upload_is_usable", lambda *_args, **_kwargs: True)
     client = MagicMock(spec=nio.AsyncClient)
 
     prepared = await _offload_oversized_full_arguments(client, "!room:example.org", content)

@@ -144,11 +144,6 @@ def _wrap_large_edit(
     return wrapper
 
 
-def _copy_inline_streaming_preview_metadata(source_content: dict[str, Any], target_content: dict[str, Any]) -> None:
-    """Copy metadata that should remain inline on rich streaming previews."""
-    _copy_preview_metadata(source_content, target_content)
-
-
 def _add_sidecar_metadata(
     target_content: dict[str, Any],
     *,
@@ -348,7 +343,7 @@ def _build_nonterminal_streaming_edit_preview(
             "format": "org.matrix.custom.html",
             "formatted_body": formatted_preview,
         }
-        _copy_inline_streaming_preview_metadata(source_content, preview_content)
+        _copy_preview_metadata(source_content, preview_content)
         _add_sidecar_metadata(
             preview_content,
             room_encrypted=room_encrypted,

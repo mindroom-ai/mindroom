@@ -1,9 +1,9 @@
-"""Direct tests for send_file_message and _upload_file_as_mxc."""
+"""Direct tests for Matrix client delivery: media uploads, message sends, and room joins."""
 
 from __future__ import annotations
 
 from types import SimpleNamespace
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING, Any, cast
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import nio
@@ -12,7 +12,6 @@ from nio.exceptions import OlmUnverifiedDeviceError
 from PIL import Image, JpegImagePlugin, PngImagePlugin
 
 from mindroom.matrix.client_delivery import (
-    DeliveredMatrixEvent,
     _msgtype_for_mimetype,
     _upload_file_as_mxc,
     edit_message_result,
@@ -45,9 +44,7 @@ def _mock_client(*, encrypted: bool = False) -> AsyncMock:
 
 
 def _upload_response(content_uri: str = "mxc://localhost/abc123") -> nio.UploadResponse:
-    resp = MagicMock(spec=nio.UploadResponse)
-    resp.content_uri = content_uri
-    return resp
+    return nio.UploadResponse(content_uri)
 
 
 _TEST_ENCRYPTION_KEYS = {"key": {"k": "k1"}, "iv": "iv1", "hashes": {"sha256": "h1"}}
@@ -76,12 +73,16 @@ def _encrypted_file(mimetype: str, size: int) -> dict[str, object]:
     }
 
 
-def _thread_fallback(latest_event_id: str = "$latest:localhost") -> dict[str, object]:
+async def _upload_file(client: AsyncMock, file: Path, mimetype: str) -> tuple[str | None, dict[str, Any] | None]:
+    return await _upload_file_as_mxc(client, "!room:localhost", file, mimetype=mimetype, filename=file.name)
+
+
+def _thread_fallback() -> dict[str, object]:
     return {
         "rel_type": "m.thread",
         "event_id": "$thread:localhost",
         "is_falling_back": True,
-        "m.in_reply_to": {"event_id": latest_event_id},
+        "m.in_reply_to": {"event_id": "$latest:localhost"},
     }
 
 
@@ -99,12 +100,7 @@ class TestUploadFileAsMxc:
         file = tmp_path / "doc.txt"
         file.write_text("hello", encoding="utf-8")
 
-        mxc_uri, payload = await _upload_file_as_mxc(
-            client,
-            "!room:localhost",
-            file,
-            mimetype="text/plain",
-        )
+        mxc_uri, payload = await _upload_file(client, file, "text/plain")
 
         assert mxc_uri == "mxc://localhost/plain"
         assert payload is not None
@@ -127,7 +123,7 @@ class TestUploadFileAsMxc:
         file = tmp_path / "chart.png"
         Image.new("RGB", (1600, 900), "white").save(file)
 
-        _mxc_uri, payload = await _upload_file_as_mxc(client, "!room:localhost", file, mimetype="image/png")
+        _mxc_uri, payload = await _upload_file(client, file, "image/png")
 
         assert payload is not None
         assert payload["info"] == {"size": file.stat().st_size, "mimetype": "image/png", "w": 1600, "h": 900}
@@ -142,7 +138,7 @@ class TestUploadFileAsMxc:
         exif[274] = 6
         Image.new("RGB", (400, 300), "white").save(file, exif=exif)
 
-        _mxc_uri, payload = await _upload_file_as_mxc(client, "!room:localhost", file, mimetype="image/jpeg")
+        _mxc_uri, payload = await _upload_file(client, file, "image/jpeg")
 
         assert payload is not None
         assert (payload["info"]["w"], payload["info"]["h"]) == (300, 400)
@@ -170,8 +166,8 @@ class TestUploadFileAsMxc:
         for image_class in (PngImagePlugin.PngImageFile, JpegImagePlugin.JpegImageFile):
             monkeypatch.setattr(image_class, "load", record_load)
 
-        _mxc_uri, png_payload = await _upload_file_as_mxc(client, "!room:localhost", png, mimetype="image/png")
-        _mxc_uri, jpeg_payload = await _upload_file_as_mxc(client, "!room:localhost", jpeg, mimetype="image/jpeg")
+        _mxc_uri, png_payload = await _upload_file(client, png, "image/png")
+        _mxc_uri, jpeg_payload = await _upload_file(client, jpeg, "image/jpeg")
 
         assert png_payload is not None
         assert png_payload["info"] == {"size": png.stat().st_size, "mimetype": "image/png", "w": 1600, "h": 900}
@@ -187,7 +183,7 @@ class TestUploadFileAsMxc:
         file = tmp_path / "broken.png"
         file.write_bytes(b"not a png")
 
-        _mxc_uri, payload = await _upload_file_as_mxc(client, "!room:localhost", file, mimetype="image/png")
+        _mxc_uri, payload = await _upload_file(client, file, "image/png")
 
         assert payload is not None
         assert payload["info"] == {"size": 9, "mimetype": "image/png"}
@@ -220,12 +216,7 @@ class TestUploadFileAsMxc:
                 },
             ),
         ):
-            mxc_uri, payload = await _upload_file_as_mxc(
-                client,
-                "!room:localhost",
-                file,
-                mimetype="application/octet-stream",
-            )
+            mxc_uri, payload = await _upload_file(client, file, "application/octet-stream")
 
         assert mxc_uri == "mxc://localhost/enc"
         assert payload is not None
@@ -280,7 +271,7 @@ class TestUploadFileAsMxc:
             ),
             pytest.raises(KeyError, match=missing_field),
         ):
-            await _upload_file_as_mxc(client, "!room:localhost", file, mimetype="text/plain")
+            await _upload_file(client, file, "text/plain")
 
         client.upload.assert_not_awaited()
 
@@ -290,12 +281,7 @@ class TestUploadFileAsMxc:
         client = _mock_client()
         missing = tmp_path / "nonexistent.txt"
 
-        mxc_uri, payload = await _upload_file_as_mxc(
-            client,
-            "!room:localhost",
-            missing,
-            mimetype="text/plain",
-        )
+        mxc_uri, payload = await _upload_file(client, missing, "text/plain")
 
         assert mxc_uri is None
         assert payload is None
@@ -311,12 +297,7 @@ class TestUploadFileAsMxc:
         file = tmp_path / "doc.txt"
         file.write_text("content", encoding="utf-8")
 
-        mxc_uri, payload = await _upload_file_as_mxc(
-            client,
-            "!room:localhost",
-            file,
-            mimetype="text/plain",
-        )
+        mxc_uri, payload = await _upload_file(client, file, "text/plain")
 
         assert mxc_uri is None
         assert payload is None
@@ -330,93 +311,7 @@ class TestUploadFileAsMxc:
         file = tmp_path / "secret.txt"
         file.write_bytes(b"secret")
 
-        assert await _upload_file_as_mxc(client, "!room:localhost", file, mimetype="text/plain") == (None, None)
-        client.upload.assert_not_awaited()
-
-
-class TestSendRuntimeEncryptedMediaMessage:
-    """Tests for resending turn-scoped encrypted MXC media."""
-
-    @staticmethod
-    def _attachment() -> RuntimeEncryptedMediaAttachment:
-        return RuntimeEncryptedMediaAttachment(
-            attachment_id="att_screenshot",
-            filename="desktop-screenshot.png",
-            url="mxc://localhost/existing",
-            key="key",
-            iv="iv",
-            sha256="hash",
-            mime_type="image/png",
-            size=321,
-        )
-
-    @pytest.mark.asyncio
-    async def test_reuses_encrypted_media_without_upload(self) -> None:
-        """A runtime image sends the existing MXC object and keys inside the encrypted room event."""
-        client = _mock_client(encrypted=True)
-        attachment = self._attachment()
-
-        with patch(
-            "mindroom.matrix.client_delivery.send_message_result",
-            new=AsyncMock(
-                side_effect=lambda _client, _room, content, **_kwargs: DeliveredMatrixEvent(
-                    event_id="$image:localhost",
-                    content_sent=content,
-                ),
-            ),
-        ) as send_message:
-            event_id = await send_runtime_encrypted_media_message(
-                client,
-                "!room:localhost",
-                attachment,
-                thread_id="$thread:localhost",
-                latest_thread_event_id="$latest:localhost",
-            )
-
-        assert event_id == "$image:localhost"
-        content = send_message.await_args.args[2]
-        assert content["msgtype"] == "m.image"
-        assert content["body"] == attachment.filename
-        assert content["info"] == {"size": 321, "mimetype": "image/png"}
-        assert content["file"] == {
-            "url": "mxc://localhost/existing",
-            "key": {"alg": "A256CTR", "ext": True, "k": "key", "key_ops": ["encrypt", "decrypt"], "kty": "oct"},
-            "iv": "iv",
-            "hashes": {"sha256": "hash"},
-            "v": "v2",
-            "mimetype": "image/png",
-            "size": 321,
-        }
-        assert content["m.relates_to"] == {
-            "rel_type": "m.thread",
-            "event_id": "$thread:localhost",
-            "is_falling_back": True,
-            "m.in_reply_to": {"event_id": "$latest:localhost"},
-        }
-        client.upload.assert_not_awaited()
-
-    @pytest.mark.asyncio
-    async def test_reuses_encrypted_media_in_unencrypted_room(self) -> None:
-        """An unencrypted room can receive the existing encrypted MXC object without another upload."""
-        client = _mock_client(encrypted=False)
-
-        with patch(
-            "mindroom.matrix.client_delivery.send_message_result",
-            new=AsyncMock(
-                side_effect=lambda _client, _room, content, **_kwargs: DeliveredMatrixEvent(
-                    event_id="$image:localhost",
-                    content_sent=content,
-                ),
-            ),
-        ) as send_message:
-            event_id = await send_runtime_encrypted_media_message(
-                client,
-                "!room:localhost",
-                self._attachment(),
-            )
-
-        assert event_id == "$image:localhost"
-        assert send_message.await_args.args[2]["file"] == self._attachment().encrypted_file_content()
+        assert await _upload_file(client, file, "text/plain") == (None, None)
         client.upload.assert_not_awaited()
 
 
@@ -657,15 +552,11 @@ class TestSendMessageResult:
             "!room:localhost",
         )
 
-        with patch(
-            "mindroom.matrix.client_delivery.prepare_large_message",
-            new=AsyncMock(side_effect=lambda *_, **__: {"body": "hello", "msgtype": "m.text"}),
-        ):
-            result = await send_message_result(
-                client,
-                "!room:localhost",
-                {"body": "hello", "msgtype": "m.text"},
-            )
+        result = await send_message_result(
+            client,
+            "!room:localhost",
+            {"body": "hello", "msgtype": "m.text"},
+        )
 
         assert result is None
         client.room_get_state_event.assert_awaited_once_with("!room:localhost", "m.room.encryption")
@@ -681,13 +572,7 @@ class TestSendMessageResult:
             "unverified device @private:localhost SECRETDEVICE",
         )
 
-        with (
-            patch(
-                "mindroom.matrix.client_delivery.prepare_large_message",
-                new=AsyncMock(side_effect=lambda *_, **__: {"body": "hello", "msgtype": "m.text"}),
-            ),
-            patch("mindroom.matrix.client_delivery.logger.error") as mock_error,
-        ):
+        with patch("mindroom.matrix.client_delivery.logger.error") as mock_error:
             result = await send_message_result(
                 client,
                 "!room:localhost",
@@ -711,13 +596,7 @@ class TestSendMessageResult:
             "unverified device @private:localhost SECRETDEVICE",
         )
 
-        with (
-            patch(
-                "mindroom.matrix.client_delivery.prepare_large_message",
-                new=AsyncMock(side_effect=lambda *_, **__: {"body": "hello", "msgtype": "m.text"}),
-            ),
-            patch("mindroom.matrix.client_delivery.logger.error") as mock_error,
-        ):
+        with patch("mindroom.matrix.client_delivery.logger.error") as mock_error:
             result = await edit_message_result(
                 client,
                 "!room:localhost",
@@ -743,7 +622,7 @@ class TestSendMessageResult:
             _room_id: str,
             _content: dict[str, object],
             *,
-            room_encrypted: bool | None,
+            room_encrypted: bool,
         ) -> dict[str, str]:
             assert room_encrypted is True
             client.rooms.clear()
@@ -847,13 +726,7 @@ class TestSendMessageResult:
             "failed token=supersecret for @private:localhost via https://matrix.example/private",
         )
 
-        with (
-            patch(
-                "mindroom.matrix.client_delivery.prepare_large_message",
-                new=AsyncMock(side_effect=lambda *_, **__: {"body": "hello", "msgtype": "m.text"}),
-            ),
-            patch("mindroom.matrix.client_delivery.logger.error") as mock_error,
-        ):
+        with patch("mindroom.matrix.client_delivery.logger.error") as mock_error:
             result = await send_message_result(
                 client,
                 "!room:localhost",
@@ -1076,7 +949,7 @@ class TestMediaWireContent:
         )
 
         with patch("mindroom.matrix.client_delivery.crypto.ENCRYPTION_ENABLED", True):
-            await send_runtime_encrypted_media_message(
+            event_id = await send_runtime_encrypted_media_message(
                 client,
                 "!room:localhost",
                 attachment,
@@ -1085,6 +958,8 @@ class TestMediaWireContent:
                 latest_thread_event_id="$latest:localhost",
                 extra_content={"com.mindroom.skip_mentions": True},
             )
+
+        assert event_id == "$media:localhost"
 
         assert _wire_content(client) == {
             "msgtype": "m.file",
@@ -1112,7 +987,7 @@ class TestMediaWireContent:
             size=12,
         )
 
-        await send_runtime_encrypted_media_message(client, "!room:localhost", attachment)
+        assert await send_runtime_encrypted_media_message(client, "!room:localhost", attachment) == "$media:localhost"
 
         assert _wire_content(client) == {
             "msgtype": "m.image",
@@ -1120,6 +995,7 @@ class TestMediaWireContent:
             "info": {"size": 12, "mimetype": "image/png"},
             "file": attachment.encrypted_file_content(),
         }
+        client.upload.assert_not_awaited()
 
 
 class TestEncryptionEnabledDuringMediaUpload:

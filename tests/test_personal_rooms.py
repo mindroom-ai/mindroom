@@ -132,7 +132,6 @@ class MatrixServer:
         self.unkickable: set[str] = set()
         self.kicks: list[tuple[str, str]] = []
         self.fail_send = False
-        self.fail_receipt = False
         self.create_count = 0
         self.lobby_members = {"@alice:localhost", "@bob:localhost"}
 
@@ -2848,11 +2847,10 @@ async def test_dispatched_welcome_selects_target_through_real_turn_policy(
     facts = target._ingress_validator.classify(event)
     assert await target._ingress_validator.precheck_event(room, event, facts)
     assert facts.lane_requester_id == "@alice:localhost"
-    prepared = await target._turn_dispatcher._prepare_dispatch(
+    dispatch = await target._turn_dispatcher._prepare_dispatch(
         make_test_turn(room, event, facts=facts, handled_turn=TurnRecord.create([event.event_id])),
     )
-    assert prepared is not None
-    dispatch = prepared
+    assert dispatch is not None
     plan = await target._turn_policy.plan_turn(
         room,
         event,

@@ -48,7 +48,6 @@ _SIDECAR_UPLOAD_FALLBACK_TEXT = _SIDECAR_UPLOAD_FALLBACK_INDICATOR.strip()
 
 
 class _UploadClient:
-    rooms: dict = {}  # noqa: RUF012
     olm = None
     device_id = "DEVICE"
 
@@ -393,12 +392,7 @@ def test__create_preview() -> None:
 @pytest.mark.asyncio
 async def test_prepare_large_message_passthrough() -> None:
     """Test that small messages pass through unchanged."""
-
-    # Mock client
-    class MockClient:
-        rooms: dict = {}  # noqa: RUF012
-
-    client = MockClient()
+    client = _UploadClient(nio.UploadResponse("mxc://server/unused"))
 
     # Small message should pass through
     small_content = {"body": "Small message", "msgtype": "m.text"}
@@ -415,22 +409,7 @@ async def test_prepare_large_message_passthrough() -> None:
 @pytest.mark.asyncio
 async def test_prepare_large_message_truncation() -> None:
     """Test that large messages get truncated with MXC upload."""
-
-    # Mock client with upload - nio returns tuple
-    class MockClient:
-        rooms: dict = {}  # noqa: RUF012
-        uploaded_data: bytes | None = None
-
-        async def upload(self, **kwargs) -> tuple:  # noqa: ANN003
-            data_provider = kwargs.get("data_provider")
-            if data_provider:
-                data = data_provider(None, None)
-                self.uploaded_data = data.read()
-            # Create a mock UploadResponse
-            response = nio.UploadResponse.from_dict({"content_uri": "mxc://server/file123"})
-            return response, None  # nio returns (response, encryption_dict)
-
-    client = MockClient()
+    client = _UploadClient(nio.UploadResponse("mxc://server/file123"))
 
     # Large message should get processed
     large_text = "x" * 100000  # 100KB
@@ -748,22 +727,7 @@ async def test_prepare_large_message_valid_sidecar_keeps_file_preview() -> None:
 @pytest.mark.asyncio
 async def test_prepare_edit_message() -> None:
     """Test that edit messages use lower size threshold."""
-
-    # Mock client with upload - nio returns tuple
-    class MockClient:
-        rooms: dict = {}  # noqa: RUF012
-        uploaded_data: bytes | None = None
-
-        async def upload(self, **kwargs) -> tuple:  # noqa: ANN003
-            data_provider = kwargs.get("data_provider")
-            if data_provider:
-                data = data_provider(None, None)
-                self.uploaded_data = data.read()
-            # Create a mock UploadResponse
-            response = nio.UploadResponse.from_dict({"content_uri": "mxc://server/file456"})
-            return response, None  # nio returns (response, encryption_dict)
-
-    client = MockClient()
+    client = _UploadClient(nio.UploadResponse("mxc://server/file456"))
 
     # Message that's under normal limit but over edit limit
     text = "y" * 30000  # 30KB
@@ -1253,20 +1217,7 @@ async def test_prepare_oversized_file_edit_upload_failure_uses_parseable_text_fa
 @pytest.mark.asyncio
 async def test_prepare_nonterminal_streaming_edit_uses_rich_inline_preview() -> None:
     """Oversized in-progress stream edits keep an HTML preview and fresh sidecar."""
-
-    class MockClient:
-        rooms: dict = {}  # noqa: RUF012
-        uploaded_data: bytes | None = None
-
-        async def upload(self, **kwargs) -> tuple:  # noqa: ANN003
-            data_provider = kwargs.get("data_provider")
-            if data_provider:
-                data = data_provider(None, None)
-                self.uploaded_data = data.read()
-            response = nio.UploadResponse.from_dict({"content_uri": "mxc://server/streaming-preview"})
-            return response, None
-
-    client = MockClient()
+    client = _UploadClient(nio.UploadResponse("mxc://server/streaming-preview"))
     text = ("streaming **markdown**\n\n🔧 `save_file` [1]\n" * 1000) + "tail"
     formatted_body = "<p>streaming <strong>markdown</strong></p><p>🔧 <code>save_file</code> [1]</p>" * 1000
     tool_trace = {"version": 2, "events": [{"type": "tool_call_started", "tool_name": "save_file"}]}
@@ -1318,20 +1269,7 @@ async def test_prepare_nonterminal_streaming_edit_uses_rich_inline_preview() -> 
 @pytest.mark.asyncio
 async def test_prepare_nonterminal_streaming_edit_keeps_preview_large_with_huge_sidecar_tool_trace() -> None:
     """Huge tool traces should go to the sidecar instead of shrinking visible preview."""
-
-    class MockClient:
-        rooms: dict = {}  # noqa: RUF012
-        uploaded_data: bytes | None = None
-
-        async def upload(self, **kwargs) -> tuple:  # noqa: ANN003
-            data_provider = kwargs.get("data_provider")
-            if data_provider:
-                data = data_provider(None, None)
-                self.uploaded_data = data.read()
-            response = nio.UploadResponse.from_dict({"content_uri": "mxc://server/huge-trace"})
-            return response, None
-
-    client = MockClient()
+    client = _UploadClient(nio.UploadResponse("mxc://server/huge-trace"))
     text = ("streaming **markdown**\n" * 2000) + "tail"
     huge_tool_trace = {
         "version": 2,
@@ -1378,20 +1316,7 @@ async def test_prepare_nonterminal_streaming_edit_keeps_preview_large_with_huge_
 @pytest.mark.asyncio
 async def test_prepare_large_message_moves_tool_trace_to_json_sidecar_regular() -> None:
     """Large-message conversion keeps tool trace in uploaded sidecar, not preview."""
-
-    class MockClient:
-        rooms: dict = {}  # noqa: RUF012
-        uploaded_data: bytes | None = None
-
-        async def upload(self, **kwargs) -> tuple:  # noqa: ANN003
-            data_provider = kwargs.get("data_provider")
-            if data_provider:
-                data = data_provider(None, None)
-                self.uploaded_data = data.read()
-            response = nio.UploadResponse.from_dict({"content_uri": "mxc://server/file789"})
-            return response, None
-
-    client = MockClient()
+    client = _UploadClient(nio.UploadResponse("mxc://server/file789"))
     content = {
         "body": "z" * 100000,
         "msgtype": "m.text",
@@ -1408,20 +1333,7 @@ async def test_prepare_large_message_moves_tool_trace_to_json_sidecar_regular() 
 @pytest.mark.asyncio
 async def test_prepare_large_message_preserves_ai_run_metadata() -> None:
     """AI run metadata should remain in the preview event for large messages."""
-
-    class MockClient:
-        rooms: dict = {}  # noqa: RUF012
-        uploaded_data: bytes | None = None
-
-        async def upload(self, **kwargs) -> tuple:  # noqa: ANN003
-            data_provider = kwargs.get("data_provider")
-            if data_provider:
-                data = data_provider(None, None)
-                self.uploaded_data = data.read()
-            response = nio.UploadResponse.from_dict({"content_uri": "mxc://server/file999"})
-            return response, None
-
-    client = MockClient()
+    client = _UploadClient(nio.UploadResponse("mxc://server/file999"))
     content = {
         "body": "m" * 100000,
         "msgtype": "m.text",
@@ -1439,20 +1351,7 @@ async def test_prepare_large_message_preserves_ai_run_metadata() -> None:
 @pytest.mark.asyncio
 async def test_prepare_large_message_preserves_original_sender_metadata() -> None:
     """Original sender metadata should remain on large preview events for self-resume."""
-
-    class MockClient:
-        rooms: dict = {}  # noqa: RUF012
-        uploaded_data: bytes | None = None
-
-        async def upload(self, **kwargs) -> tuple:  # noqa: ANN003
-            data_provider = kwargs.get("data_provider")
-            if data_provider:
-                data = data_provider(None, None)
-                self.uploaded_data = data.read()
-            response = nio.UploadResponse.from_dict({"content_uri": "mxc://server/file1001"})
-            return response, None
-
-    client = MockClient()
+    client = _UploadClient(nio.UploadResponse("mxc://server/file1001"))
     content = {
         "body": "n" * 100000,
         "msgtype": "m.text",
@@ -1477,19 +1376,9 @@ async def test_prepare_large_message_trusted_metadata_round_trips_through_sideca
 ) -> None:
     """Large-message writer and reader should preserve trusted dispatch metadata."""
 
-    class MockClient:
-        rooms: dict = {}  # noqa: RUF012
-        uploaded_data: bytes | None = None
+    class MockClient(_UploadClient):
         user_id = "@mindroom_agent:localhost"
         access_token = TEST_ACCESS_TOKEN
-
-        async def upload(self, **kwargs) -> tuple:  # noqa: ANN003
-            data_provider = kwargs.get("data_provider")
-            if data_provider:
-                data = data_provider(None, None)
-                self.uploaded_data = data.read()
-            response = nio.UploadResponse.from_dict({"content_uri": f"mxc://server/{source_kind}-metadata-sidecar"})
-            return response, None
 
         async def download(self, *, mxc: str) -> nio.DownloadResponse:
             assert mxc == f"mxc://server/{source_kind}-metadata-sidecar"
@@ -1501,7 +1390,7 @@ async def test_prepare_large_message_trusted_metadata_round_trips_through_sideca
         async def send(self, _method: str, path: str, *_args: object, **_kwargs: object) -> FakeMediaResponse:
             return await serve_media_download(self.download, path)
 
-    client = MockClient()
+    client = MockClient(nio.UploadResponse(f"mxc://server/{source_kind}-metadata-sidecar"))
     content = {
         "body": "trusted metadata " * 10000,
         "msgtype": "m.text",
@@ -1551,20 +1440,7 @@ async def test_prepare_large_message_trusted_metadata_round_trips_through_sideca
 @pytest.mark.asyncio
 async def test_prepare_large_message_moves_visible_body_to_json_sidecar_regular() -> None:
     """Large streamed previews should keep canonical visible body only in the JSON sidecar payload."""
-
-    class MockClient:
-        rooms: dict = {}  # noqa: RUF012
-        uploaded_data: bytes | None = None
-
-        async def upload(self, **kwargs) -> tuple:  # noqa: ANN003
-            data_provider = kwargs.get("data_provider")
-            if data_provider:
-                data = data_provider(None, None)
-                self.uploaded_data = data.read()
-            response = nio.UploadResponse.from_dict({"content_uri": "mxc://server/file1002"})
-            return response, None
-
-    client = MockClient()
+    client = _UploadClient(nio.UploadResponse("mxc://server/file1002"))
     content = {
         "body": "v" * 100000,
         "msgtype": "m.text",
@@ -1582,20 +1458,7 @@ async def test_prepare_large_message_moves_visible_body_to_json_sidecar_regular(
 @pytest.mark.asyncio
 async def test_prepare_large_message_keeps_explicit_warmup_suffix_on_preview() -> None:
     """Large streamed previews should retain the explicit warmup suffix metadata on the preview event."""
-
-    class MockClient:
-        rooms: dict = {}  # noqa: RUF012
-        uploaded_data: bytes | None = None
-
-        async def upload(self, **kwargs) -> tuple:  # noqa: ANN003
-            data_provider = kwargs.get("data_provider")
-            if data_provider:
-                data = data_provider(None, None)
-                self.uploaded_data = data.read()
-            response = nio.UploadResponse.from_dict({"content_uri": "mxc://server/file1002"})
-            return response, None
-
-    client = MockClient()
+    client = _UploadClient(nio.UploadResponse("mxc://server/file1002"))
     warmup_suffix = "⏳ Preparing isolated worker..."
     content = {
         "body": ("v" * 100000) + f"\n\n{warmup_suffix}",
@@ -1613,20 +1476,7 @@ async def test_prepare_large_message_keeps_explicit_warmup_suffix_on_preview() -
 @pytest.mark.asyncio
 async def test_prepare_large_message_moves_tool_trace_to_json_sidecar_edit() -> None:
     """Edit large-message conversion keeps tool trace in uploaded sidecar, not preview."""
-
-    class MockClient:
-        rooms: dict = {}  # noqa: RUF012
-        uploaded_data: bytes | None = None
-
-        async def upload(self, **kwargs) -> tuple:  # noqa: ANN003
-            data_provider = kwargs.get("data_provider")
-            if data_provider:
-                data = data_provider(None, None)
-                self.uploaded_data = data.read()
-            response = nio.UploadResponse.from_dict({"content_uri": "mxc://server/file999"})
-            return response, None
-
-    client = MockClient()
+    client = _UploadClient(nio.UploadResponse("mxc://server/file999"))
     edit_content = {
         "body": "* " + "w" * 50000,
         "m.new_content": {
@@ -1649,20 +1499,7 @@ async def test_prepare_large_message_moves_tool_trace_to_json_sidecar_edit() -> 
 @pytest.mark.asyncio
 async def test_prepare_large_message_moves_visible_body_to_json_sidecar_edit() -> None:
     """Large streamed edit previews should keep canonical visible body only in the JSON sidecar payload."""
-
-    class MockClient:
-        rooms: dict = {}  # noqa: RUF012
-        uploaded_data: bytes | None = None
-
-        async def upload(self, **kwargs) -> tuple:  # noqa: ANN003
-            data_provider = kwargs.get("data_provider")
-            if data_provider:
-                data = data_provider(None, None)
-                self.uploaded_data = data.read()
-            response = nio.UploadResponse.from_dict({"content_uri": "mxc://server/file1003"})
-            return response, None
-
-    client = MockClient()
+    client = _UploadClient(nio.UploadResponse("mxc://server/file1003"))
     visible_body = "w" * 50000
     edit_content = {
         "body": "* " + visible_body,

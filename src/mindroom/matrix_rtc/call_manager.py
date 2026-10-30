@@ -276,14 +276,18 @@ class _RoomCall:
             self.expiry_handle.cancel()
             self.expiry_handle = None
 
+    async def stop_session(self, *, event: str = "call_session_stop_failed") -> None:
+        """Detach and stop the room's active session, if any."""
+        session, self.session = self.session, None
+        if session is not None:
+            await _stop_session(session, event=event)
+
     async def end_call(self, *, event: str = "call_session_stop_failed") -> None:
         """Forget the room's call: cancel its retry and expiry timer, drop its queued keys, and stop its session."""
         self.clear_logical_call()
         self.pending_keys.clear()
         self.cancel_expiry()
-        session, self.session = self.session, None
-        if session is not None:
-            await _stop_session(session, event=event)
+        await self.stop_session(event=event)
 
 
 async def _stop_session(session: CallSession, *, event: str = "call_session_stop_failed") -> None:
@@ -738,42 +742,29 @@ class CallManager:
         agent_call_events: tuple[dict[str, Any], ...],
     ) -> None:
         """Apply one authoritative room/call roster to the active session."""
-        session = room_call.session
         if not self._members_are_authorized(members, room.room_id) or not members:
             room_call.clear_logical_call()
             room_call.pending_keys.clear()
-            if session is not None:
-                room_call.session = None
-                await _stop_session(session)
+            await room_call.stop_session()
             return
         logical_call = room_call.logical_call
         requester_id = members[0].user_id
         if logical_call is None or logical_call.requester_id != requester_id:
             room_call.clear_logical_call()
             logical_call = room_call.start_logical_call(requester_id)
-        if session is None:
-            await self._join_populated(
-                room,
-                room_call,
-                logical_call,
-                members,
-                retrying=retrying,
-                agent_call_events=agent_call_events,
-            )
+        session = room_call.session
+        if session is not None and session.requester_id == requester_id:
+            await self._update_session_members(room, room_call, session, members)
             return
-        if session.requester_id != requester_id:
-            room_call.session = None
-            await _stop_session(session)
-            await self._join_populated(
-                room,
-                room_call,
-                logical_call,
-                members,
-                retrying=retrying,
-                agent_call_events=agent_call_events,
-            )
-            return
-        await self._update_session_members(room, room_call, session, members)
+        await room_call.stop_session()
+        await self._join_populated(
+            room,
+            room_call,
+            logical_call,
+            members,
+            retrying=retrying,
+            agent_call_events=agent_call_events,
+        )
 
     async def _join_populated(
         self,

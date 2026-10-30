@@ -113,6 +113,7 @@ BOT_USER = "@helper:example.org"
 BOT_DEVICE = "BOTDEV"
 ROOM_ID = "!room:example.org"
 SERVICE_URL = "https://rtc.example.org"
+GRANT_ROOM_ID = "!grant:example.org"
 GRANT = SfuGrant(url="wss://sfu.example.org", jwt="jwt-token")
 
 
@@ -314,33 +315,55 @@ def _set_helper_access(
     )
 
 
-def _call_execution_identity(
-    *,
-    runtime_paths: RuntimePaths,
-    requester_id: str,
-    room_id: str = ROOM_ID,
-    agent_name: str = "helper",
-    session_id: str | None = None,
-) -> ToolExecutionIdentity:
-    return build_tool_execution_identity(
-        channel="matrix",
-        agent_name=agent_name,
-        runtime_paths=runtime_paths,
-        requester_id=requester_id,
-        room_id=room_id,
-        thread_id=None,
-        resolved_thread_id=None,
-        session_id=session_id or room_id,
+async def _grant_room_memberships(config: Config, client: AsyncMock, tmp_path: Path) -> AgentReplyMembershipIndex:
+    """Authorize the helper's callers through Alice's membership in a separate grant room."""
+    config.agents["helper"].rooms = [ROOM_ID, "grant"]
+    _set_helper_access(config, members_of_rooms=["grant"])
+    runtime_paths = test_runtime_paths(tmp_path)
+    state = MatrixState.load(runtime_paths=runtime_paths)
+    state.add_room("grant", GRANT_ROOM_ID, "#grant:example.org", "Grant")
+    save_matrix_state(state, runtime_paths)
+    client.joined_rooms.return_value = nio.JoinedRoomsResponse(rooms=[GRANT_ROOM_ID])
+    client.joined_members.return_value = nio.JoinedMembersResponse(
+        members=[nio.RoomMember("@alice:example.org", None, None)],
+        room_id=GRANT_ROOM_ID,
+    )
+    memberships = AgentReplyMembershipIndex()
+    await memberships.refresh(config, runtime_paths, client)
+    return memberships
+
+
+def _leave_grant_room(memberships: AgentReplyMembershipIndex, config: Config) -> None:
+    """Record Alice leaving the grant room."""
+    memberships.apply_member_event(
+        config,
+        GRANT_ROOM_ID,
+        nio.RoomMemberEvent.from_dict(
+            {
+                "type": "m.room.member",
+                "event_id": "$grant-leave",
+                "sender": "@alice:example.org",
+                "state_key": "@alice:example.org",
+                "origin_server_ts": 1,
+                "content": {"membership": "leave"},
+                "unsigned": {"prev_content": {"membership": "join"}},
+            },
+        ),
+        control_user_id=BOT_USER,
     )
 
 
 def _call_execution_identity_from_tool_kwargs(kwargs: dict[str, object]) -> ToolExecutionIdentity:
-    return _call_execution_identity(
+    room_id = cast("str", kwargs["room_id"])
+    return build_tool_execution_identity(
+        channel="matrix",
+        agent_name=cast("str", kwargs["agent_name"]),
         runtime_paths=cast("RuntimePaths", kwargs["runtime_paths"]),
         requester_id=cast("str", kwargs["requester_id"]),
-        room_id=cast("str", kwargs["room_id"]),
-        agent_name=cast("str", kwargs["agent_name"]),
-        session_id=cast("str | None", kwargs["session_id"]),
+        room_id=room_id,
+        thread_id=None,
+        resolved_thread_id=None,
+        session_id=cast("str | None", kwargs["session_id"]) or room_id,
     )
 
 
@@ -470,11 +493,6 @@ def _call_state(manager: CallManager, room_id: str = ROOM_ID) -> _RoomCall:
     return manager._rooms.get(room_id) or _RoomCall(_room(room_id=room_id))
 
 
-def _tracked_room_ids(manager: CallManager) -> set[str]:
-    """Return every room the manager holds call state for."""
-    return set(manager._rooms)
-
-
 def _frame_key_event(
     *,
     room_id: str = ROOM_ID,
@@ -501,6 +519,16 @@ def _frame_key_event(
         type=CALL_ENCRYPTION_KEYS_EVENT_TYPE,
         authenticated_sender=AuthenticatedDevice(user_id, device_id, "curve", "signing"),
     )
+
+
+@pytest.fixture
+def deliver_frame_keys(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Report every frame-key target as delivered."""
+
+    async def send_key(_self: object, *, targets: list[CallMember], **_kwargs: object) -> list[CallMember]:
+        return targets
+
+    monkeypatch.setattr("mindroom.matrix_rtc.call_manager.ToDeviceFrameKeyTransport.send_key", send_key)
 
 
 @pytest.fixture(autouse=True)
@@ -774,17 +802,14 @@ async def test_manager_clears_departure_guard_on_own_rejoin(tmp_path: Path) -> N
 
 
 async def _join_call_with_queued_key_and_retry(
-    monkeypatch: pytest.MonkeyPatch,
     client: AsyncMock,
     manager: CallManager,
     room: nio.MatrixRoom,
 ) -> _RoomCall:
-    """Join a call, queue the key of a device outside its roster, and return a snapshot with a state-read retry pending."""
+    """Join a call, queue the key of a device outside its roster, and return a snapshot with a state-read retry pending.
 
-    async def send_key(_self: object, *, targets: list[CallMember], **_kwargs: object) -> list[CallMember]:
-        return targets
-
-    monkeypatch.setattr("mindroom.matrix_rtc.call_manager.ToDeviceFrameKeyTransport.send_key", send_key)
+    Callers use the ``deliver_frame_keys`` fixture.
+    """
     client.room_get_state.return_value = _state_response(_remote_member_event())
     await _deliver(manager, manager.on_room_event(room, _member_unknown_event()))
     client.room_get_state.side_effect = OSError("homeserver unavailable")
@@ -799,17 +824,15 @@ async def _join_call_with_queued_key_and_retry(
 
 
 @pytest.mark.asyncio
-async def test_leaving_a_call_room_ends_its_call_and_forgets_its_state(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> None:
+@pytest.mark.usefixtures("deliver_frame_keys")
+async def test_leaving_a_call_room_ends_its_call_and_forgets_its_state(tmp_path: Path) -> None:
     """Leaving stops the session, cancels the retry and expiry timer, and drops queued keys, but keeps the departure."""
     client = _client()
     room = _room(encrypted=True)
     client.rooms = {ROOM_ID: room}
     bridge = FakeBridge()
     manager = _manager(client, bridge, tmp_path)
-    state = await _join_call_with_queued_key_and_retry(monkeypatch, client, manager, room)
+    state = await _join_call_with_queued_key_and_retry(client, manager, room)
 
     await manager.on_sync_room_membership(joined_room_ids=set(), left_room_ids={ROOM_ID})
     await asyncio.gather(state.retry_task, return_exceptions=True)
@@ -817,7 +840,7 @@ async def test_leaving_a_call_room_ends_its_call_and_forgets_its_state(
     assert bridge.closed
     assert state.retry_task.cancelled()
     assert state.expiry_handle.cancelled()
-    assert _tracked_room_ids(manager) == set()
+    assert manager._rooms == {}
     assert ROOM_ID in manager._departed_rooms
     client.room_get_state.reset_mock()
     await manager.on_to_device_event(_frame_key_event())
@@ -828,10 +851,8 @@ async def test_leaving_a_call_room_ends_its_call_and_forgets_its_state(
 
 
 @pytest.mark.asyncio
-async def test_call_room_joins_a_new_call_after_the_bot_rejoins(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> None:
+@pytest.mark.usefixtures("deliver_frame_keys")
+async def test_call_room_joins_a_new_call_after_the_bot_rejoins(tmp_path: Path) -> None:
     """After a leave and rejoin, the next call gets a fresh session without the keys queued before the leave."""
     client = _client()
     room = _room(encrypted=True)
@@ -843,7 +864,7 @@ async def test_call_room_joins_a_new_call_after_the_bot_rejoins(
         return bridges[-1]
 
     manager = _manager(client, FakeBridge(), tmp_path, bridge_factory=new_bridge)
-    first_call = (await _join_call_with_queued_key_and_retry(monkeypatch, client, manager, room)).logical_call
+    first_call = (await _join_call_with_queued_key_and_retry(client, manager, room)).logical_call
 
     await manager.on_sync_room_membership(joined_room_ids=set(), left_room_ids={ROOM_ID})
     await manager.on_sync_room_membership(joined_room_ids={ROOM_ID}, left_room_ids=set())
@@ -865,10 +886,8 @@ async def test_call_room_joins_a_new_call_after_the_bot_rejoins(
 
 
 @pytest.mark.asyncio
-async def test_shutdown_ends_every_call_and_forgets_all_room_state(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> None:
+@pytest.mark.usefixtures("deliver_frame_keys")
+async def test_shutdown_ends_every_call_and_forgets_all_room_state(tmp_path: Path) -> None:
     """Shutdown stops each session, awaits its cancelled retry, cancels its expiry timer, and forgets departures."""
     other_room_id = "!other:example.org"
     config = _config()
@@ -878,7 +897,7 @@ async def test_shutdown_ends_every_call_and_forgets_all_room_state(
     client.rooms = {ROOM_ID: room, other_room_id: _room(room_id=other_room_id)}
     bridge = FakeBridge()
     manager = _manager(client, bridge, tmp_path, config)
-    state = await _join_call_with_queued_key_and_retry(monkeypatch, client, manager, room)
+    state = await _join_call_with_queued_key_and_retry(client, manager, room)
     await manager.on_sync_room_membership(joined_room_ids=set(), left_room_ids={other_room_id})
     assert other_room_id in manager._departed_rooms
 
@@ -887,7 +906,7 @@ async def test_shutdown_ends_every_call_and_forgets_all_room_state(
     assert bridge.closed
     assert state.retry_task.cancelled()
     assert state.expiry_handle.cancelled()
-    assert _tracked_room_ids(manager) == set()
+    assert manager._rooms == {}
     assert manager._departed_rooms == set()
     assert dict(manager._locks) == {}
     assert manager._reconcile_requests == {}
@@ -1173,59 +1192,38 @@ def test_fully_local_speech_services_never_resolve_cloud_credentials(
     assert manager._config.memory.backend == "none"
 
 
-def test_openai_speech_with_custom_host_uses_named_credential(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> None:
-    """OpenAI speech resolves only its explicitly selected credential."""
-    service_lookup = MagicMock(return_value="openai-call-key")
-    monkeypatch.setattr("mindroom.matrix_rtc.call_backends.get_api_key_for_service", service_lookup)
-    runtime_paths = test_runtime_paths(tmp_path)
-
-    service = _resolve_speech_service(
-        SpeechServiceConfig(
-            provider="openai",
-            model="gpt-transcribe",
-            credentials_service="openai-realtime",
-            host="https://proxy.example.test",
-        ),
-        runtime_paths,
-        agent_name="helper",
-        component="stt",
-        room_id=ROOM_ID,
-        warn_if_unavailable=True,
-    )
-
-    assert service is not None
-    assert service.api_key == "openai-call-key"
-    assert service.base_url == "https://proxy.example.test/v1"
-    service_lookup.assert_called_once_with("openai-realtime", runtime_paths)
-
-
+@pytest.mark.parametrize(
+    ("component", "model", "host", "base_url"),
+    [
+        ("stt", "gpt-transcribe", "https://proxy.example.test", "https://proxy.example.test/v1"),
+        ("tts", "gpt-4o-mini-tts", None, "https://api.openai.com/v1"),
+    ],
+)
 def test_each_speech_service_selects_its_own_credential(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
+    component: str,
+    model: str,
+    host: str | None,
+    base_url: str,
 ) -> None:
-    """Each cascaded speech leg may select its own named credential."""
+    """Each cascaded speech leg resolves only its explicitly selected credential, with or without a custom host."""
     lookup = MagicMock(return_value="speech-key")
     monkeypatch.setattr("mindroom.matrix_rtc.call_backends.get_api_key_for_service", lookup)
     runtime_paths = test_runtime_paths(tmp_path)
 
     service = _resolve_speech_service(
-        SpeechServiceConfig(
-            provider="openai",
-            model="gpt-4o-mini-tts",
-            credentials_service="speech-override",
-        ),
+        SpeechServiceConfig(provider="openai", model=model, credentials_service="speech-override", host=host),
         runtime_paths,
         agent_name="helper",
-        component="tts",
+        component=component,
         room_id=ROOM_ID,
         warn_if_unavailable=True,
     )
 
     assert service is not None
     assert service.api_key == "speech-key"
+    assert service.base_url == base_url
     lookup.assert_called_once_with("speech-override", runtime_paths)
 
 
@@ -1300,18 +1298,7 @@ def test_call_manager_uses_assigned_realtime_profile(
     key_lookup = MagicMock(return_value="sk-global")
     monkeypatch.setattr("mindroom.matrix_rtc.call_backends.get_api_key_for_service", key_lookup)
 
-    manager = CallManager(
-        agent_name="helper",
-        config=config,
-        client=_client(),
-        runtime_paths=test_runtime_paths(tmp_path),
-        ssl_verify=True,
-        tool_support=object(),  # type: ignore[arg-type]
-        get_invited_rooms_by_agent=dict,
-        agent_reply_memberships=AgentReplyMembershipIndex(),
-        response_admission_gate=ResponseAdmissionGate(),
-        wait_for_admission_or_shutdown=_admission_available,
-    )
+    manager = _manager(_client(), FakeBridge(), tmp_path, config)
 
     backend = resolve_voice_backend(manager._call_config, manager._runtime_paths, agent_name="helper", room_id=ROOM_ID)
 
@@ -1374,45 +1361,24 @@ def test_default_bridge_factory_uses_assigned_profile_backend(tmp_path: Path, mo
             },
         ),
     )
-    realtime_manager = CallManager(
-        agent_name="helper",
-        config=config,
-        client=_client(),
-        runtime_paths=test_runtime_paths(tmp_path),
-        ssl_verify=True,
-        tool_support=object(),  # type: ignore[arg-type]
-        get_invited_rooms_by_agent=dict,
-        agent_reply_memberships=AgentReplyMembershipIndex(),
-        response_admission_gate=ResponseAdmissionGate(),
-        wait_for_admission_or_shutdown=_admission_available,
-    )
-    cascaded_manager = CallManager(
-        agent_name="other",
-        config=config,
-        client=_client(),
-        runtime_paths=test_runtime_paths(tmp_path),
-        ssl_verify=True,
-        tool_support=object(),  # type: ignore[arg-type]
-        get_invited_rooms_by_agent=dict,
-        agent_reply_memberships=AgentReplyMembershipIndex(),
-        response_admission_gate=ResponseAdmissionGate(),
-        wait_for_admission_or_shutdown=_admission_available,
+    realtime_manager, cascaded_manager, live_manager = (
+        CallManager(
+            agent_name=agent_name,
+            config=config,
+            client=_client(),
+            runtime_paths=test_runtime_paths(tmp_path),
+            ssl_verify=True,
+            tool_support=object(),  # type: ignore[arg-type]
+            get_invited_rooms_by_agent=dict,
+            agent_reply_memberships=AgentReplyMembershipIndex(),
+            response_admission_gate=ResponseAdmissionGate(),
+            wait_for_admission_or_shutdown=_admission_available,
+        )
+        for agent_name in ("helper", "other", "speaker")
     )
 
     realtime_bridge = realtime_manager._bridge_factory("@helper:example.org:BOTDEV", False)
     cascaded_bridge = cascaded_manager._bridge_factory("@other:example.org:BOTDEV", False)
-    live_manager = CallManager(
-        agent_name="speaker",
-        config=config,
-        client=_client(),
-        runtime_paths=test_runtime_paths(tmp_path),
-        ssl_verify=True,
-        tool_support=object(),  # type: ignore[arg-type]
-        get_invited_rooms_by_agent=dict,
-        agent_reply_memberships=AgentReplyMembershipIndex(),
-        response_admission_gate=ResponseAdmissionGate(),
-        wait_for_admission_or_shutdown=_admission_available,
-    )
     live_bridge = live_manager._bridge_factory("@speaker:example.org:BOTDEV", False)
 
     assert isinstance(realtime_bridge, RealtimeVoiceBridge)
@@ -1658,24 +1624,11 @@ async def test_manager_accepts_call_member_authorized_by_grant_room(tmp_path: Pa
 @pytest.mark.parametrize("backend", ["realtime", "live"])
 async def test_manager_leaves_active_call_when_cross_room_grant_is_revoked(tmp_path: Path, backend: str) -> None:
     """A grant-room departure must end an active call without another call-room event."""
-    grant_room_id = "!grant:example.org"
     client = _client()
     client.room_get_state.return_value = _state_response(_remote_member_event())
     bridge = FakeBridge()
     config = _live_config() if backend == "live" else _config()
-    config.agents["helper"].rooms = [ROOM_ID, "grant"]
-    _set_helper_access(config, members_of_rooms=["grant"])
-    runtime_paths = test_runtime_paths(tmp_path)
-    state = MatrixState.load(runtime_paths=runtime_paths)
-    state.add_room("grant", grant_room_id, "#grant:example.org", "Grant")
-    save_matrix_state(state, runtime_paths)
-    client.joined_rooms.return_value = nio.JoinedRoomsResponse(rooms=[grant_room_id])
-    client.joined_members.return_value = nio.JoinedMembersResponse(
-        members=[nio.RoomMember("@alice:example.org", None, None)],
-        room_id=grant_room_id,
-    )
-    memberships = AgentReplyMembershipIndex()
-    await memberships.refresh(config, runtime_paths, client)
+    memberships = await _grant_room_memberships(config, client, tmp_path)
     manager = _manager(
         client,
         bridge,
@@ -1686,22 +1639,7 @@ async def test_manager_leaves_active_call_when_cross_room_grant_is_revoked(tmp_p
     await _deliver(manager, manager.on_room_event(_room(), _member_unknown_event()))
     assert bridge.connected_grant is not None
 
-    memberships.apply_member_event(
-        config,
-        grant_room_id,
-        nio.RoomMemberEvent.from_dict(
-            {
-                "type": "m.room.member",
-                "event_id": "$grant-leave",
-                "sender": "@alice:example.org",
-                "state_key": "@alice:example.org",
-                "origin_server_ts": 1,
-                "content": {"membership": "leave"},
-                "unsigned": {"prev_content": {"membership": "join"}},
-            },
-        ),
-        control_user_id=BOT_USER,
-    )
+    _leave_grant_room(memberships, config)
     await manager.reconcile_reply_authorization()
 
     assert bridge.closed
@@ -1713,7 +1651,6 @@ async def test_manager_leaves_active_call_when_cross_room_grant_is_revoked(tmp_p
 @pytest.mark.usefixtures("enforce_turn_authorization")
 async def test_manager_starts_observed_call_after_grant_snapshot_becomes_ready(tmp_path: Path) -> None:
     """A successful refresh must reconsider a call denied while grants were unready."""
-    grant_room_id = "!grant:example.org"
     client = _client()
     client.rooms = {ROOM_ID: _room()}
     client.room_get_state.return_value = _state_response(_remote_member_event())
@@ -1723,7 +1660,7 @@ async def test_manager_starts_observed_call_after_grant_snapshot_becomes_ready(t
     _set_helper_access(config, members_of_rooms=["grant"])
     runtime_paths = test_runtime_paths(tmp_path)
     state = MatrixState.load(runtime_paths=runtime_paths)
-    state.add_room("grant", grant_room_id, "#grant:example.org", "Grant")
+    state.add_room("grant", GRANT_ROOM_ID, "#grant:example.org", "Grant")
     save_matrix_state(state, runtime_paths)
     memberships = AgentReplyMembershipIndex()
     memberships.invalidate(config, reason="startup")
@@ -1737,10 +1674,10 @@ async def test_manager_starts_observed_call_after_grant_snapshot_becomes_ready(t
     await _deliver(manager, manager.on_room_event(_room(), _member_unknown_event()))
     assert bridge.connected_grant is None
 
-    client.joined_rooms.return_value = nio.JoinedRoomsResponse(rooms=[grant_room_id])
+    client.joined_rooms.return_value = nio.JoinedRoomsResponse(rooms=[GRANT_ROOM_ID])
     client.joined_members.return_value = nio.JoinedMembersResponse(
         members=[nio.RoomMember("@alice:example.org", None, None)],
-        room_id=grant_room_id,
+        room_id=GRANT_ROOM_ID,
     )
     await memberships.refresh(config, runtime_paths, client)
     await manager.reconcile_reply_authorization()
@@ -1752,7 +1689,6 @@ async def test_manager_starts_observed_call_after_grant_snapshot_becomes_ready(t
 @pytest.mark.usefixtures("enforce_turn_authorization")
 async def test_manager_starts_observed_call_after_live_grant_join(tmp_path: Path) -> None:
     """A live grant-room join must reconsider a previously denied joined call."""
-    grant_room_id = "!grant:example.org"
     client = _client()
     client.rooms = {ROOM_ID: _room()}
     client.room_get_state.return_value = _state_response(_remote_member_event())
@@ -1762,10 +1698,10 @@ async def test_manager_starts_observed_call_after_live_grant_join(tmp_path: Path
     _set_helper_access(config, members_of_rooms=["grant"])
     runtime_paths = test_runtime_paths(tmp_path)
     state = MatrixState.load(runtime_paths=runtime_paths)
-    state.add_room("grant", grant_room_id, "#grant:example.org", "Grant")
+    state.add_room("grant", GRANT_ROOM_ID, "#grant:example.org", "Grant")
     save_matrix_state(state, runtime_paths)
-    client.joined_rooms.return_value = nio.JoinedRoomsResponse(rooms=[grant_room_id])
-    client.joined_members.return_value = nio.JoinedMembersResponse(members=[], room_id=grant_room_id)
+    client.joined_rooms.return_value = nio.JoinedRoomsResponse(rooms=[GRANT_ROOM_ID])
+    client.joined_members.return_value = nio.JoinedMembersResponse(members=[], room_id=GRANT_ROOM_ID)
     memberships = AgentReplyMembershipIndex()
     await memberships.refresh(config, runtime_paths, client)
     manager = _manager(
@@ -1780,7 +1716,7 @@ async def test_manager_starts_observed_call_after_live_grant_join(tmp_path: Path
 
     memberships.apply_member_event(
         config,
-        grant_room_id,
+        GRANT_ROOM_ID,
         nio.RoomMemberEvent.from_dict(
             {
                 "type": "m.room.member",
@@ -1983,24 +1919,11 @@ async def test_reply_revocation_stops_call_while_admission_is_closed(
 ) -> None:
     """Revocation never waits for admission; the origin write-back does, and runs once admission reopens."""
     post, access = _patch_call_writeback(monkeypatch)
-    grant_room_id = "!grant:example.org"
     client = _client()
     client.room_get_state.return_value = _state_response(_remote_member_event(), _agent_call_state_event())
     bridge = FakeBridge()
     config = _config()
-    config.agents["helper"].rooms = [ROOM_ID, "grant"]
-    _set_helper_access(config, members_of_rooms=["grant"])
-    runtime_paths = test_runtime_paths(tmp_path)
-    state = MatrixState.load(runtime_paths=runtime_paths)
-    state.add_room("grant", grant_room_id, "#grant:example.org", "Grant")
-    save_matrix_state(state, runtime_paths)
-    client.joined_rooms.return_value = nio.JoinedRoomsResponse(rooms=[grant_room_id])
-    client.joined_members.return_value = nio.JoinedMembersResponse(
-        members=[nio.RoomMember("@alice:example.org", None, None)],
-        room_id=grant_room_id,
-    )
-    memberships = AgentReplyMembershipIndex()
-    await memberships.refresh(config, runtime_paths, client)
+    memberships = await _grant_room_memberships(config, client, tmp_path)
     gate = ResponseAdmissionGate()
     manager = _manager(
         client,
@@ -2016,22 +1939,7 @@ async def test_reply_revocation_stops_call_while_admission_is_closed(
     _record_two_minute_exchange(bridge)
     assert gate.close_if_idle()
 
-    memberships.apply_member_event(
-        config,
-        grant_room_id,
-        nio.RoomMemberEvent.from_dict(
-            {
-                "type": "m.room.member",
-                "event_id": "$grant-leave-closed",
-                "sender": "@alice:example.org",
-                "state_key": "@alice:example.org",
-                "origin_server_ts": 1,
-                "content": {"membership": "leave"},
-                "unsigned": {"prev_content": {"membership": "join"}},
-            },
-        ),
-        control_user_id=BOT_USER,
-    )
+    _leave_grant_room(memberships, config)
     await asyncio.wait_for(manager.revoke_reply_authorization(), timeout=1)
 
     assert bridge.closed
@@ -2061,24 +1969,11 @@ async def test_reply_revocation_cancels_an_inflight_call_start(tmp_path: Path) -
             self.agent_starting.set()
             await self.release_agent.wait()
 
-    grant_room_id = "!grant:example.org"
     client = _client()
     client.room_get_state.return_value = _state_response(_remote_member_event())
     bridge = StartingBridge()
     config = _config()
-    config.agents["helper"].rooms = [ROOM_ID, "grant"]
-    _set_helper_access(config, members_of_rooms=["grant"])
-    runtime_paths = test_runtime_paths(tmp_path)
-    state = MatrixState.load(runtime_paths=runtime_paths)
-    state.add_room("grant", grant_room_id, "#grant:example.org", "Grant")
-    save_matrix_state(state, runtime_paths)
-    client.joined_rooms.return_value = nio.JoinedRoomsResponse(rooms=[grant_room_id])
-    client.joined_members.return_value = nio.JoinedMembersResponse(
-        members=[nio.RoomMember("@alice:example.org", None, None)],
-        room_id=grant_room_id,
-    )
-    memberships = AgentReplyMembershipIndex()
-    await memberships.refresh(config, runtime_paths, client)
+    memberships = await _grant_room_memberships(config, client, tmp_path)
     manager = _manager(
         client,
         bridge,
@@ -2089,22 +1984,7 @@ async def test_reply_revocation_cancels_an_inflight_call_start(tmp_path: Path) -
 
     join_task = asyncio.create_task(_deliver(manager, manager.on_room_event(_room(), _member_unknown_event())))
     await asyncio.wait_for(bridge.agent_starting.wait(), timeout=1)
-    memberships.apply_member_event(
-        config,
-        grant_room_id,
-        nio.RoomMemberEvent.from_dict(
-            {
-                "type": "m.room.member",
-                "event_id": "$grant-leave-during-start",
-                "sender": "@alice:example.org",
-                "state_key": "@alice:example.org",
-                "origin_server_ts": 1,
-                "content": {"membership": "leave"},
-                "unsigned": {"prev_content": {"membership": "join"}},
-            },
-        ),
-        control_user_id=BOT_USER,
-    )
+    _leave_grant_room(memberships, config)
 
     try:
         await asyncio.wait_for(manager.revoke_reply_authorization(), timeout=1)
@@ -2175,7 +2055,7 @@ async def test_reply_recheck_does_not_clear_state_after_tracked_call_already_end
         _frame_key_event(),
     )
     pending_keys = {("@alice:example.org", "ALICEDEV", 0): pending_key}
-    manager._rooms[ROOM_ID] = _RoomCall(_room(), pending_keys=pending_keys, expiry_handle=expiry)
+    manager._rooms[ROOM_ID] = _RoomCall(_room(), pending_keys=dict(pending_keys), expiry_handle=expiry)
 
     await manager._reconcile_room_reply_authorization(ROOM_ID)
 
@@ -2185,17 +2065,9 @@ async def test_reply_recheck_does_not_clear_state_after_tracked_call_already_end
 
 
 @pytest.mark.asyncio
-@pytest.mark.usefixtures("enforce_turn_authorization")
-async def test_reply_revocation_drops_keys_queued_for_the_revoked_call(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> None:
+@pytest.mark.usefixtures("enforce_turn_authorization", "deliver_frame_keys")
+async def test_reply_revocation_drops_keys_queued_for_the_revoked_call(tmp_path: Path) -> None:
     """Keys queued while a revoked call ran never reach the next call."""
-
-    async def send_key(_self: object, *, targets: list[CallMember], **_kwargs: object) -> list[CallMember]:
-        return targets
-
-    monkeypatch.setattr("mindroom.matrix_rtc.call_manager.ToDeviceFrameKeyTransport.send_key", send_key)
     client = _client()
     room = _room(encrypted=True)
     client.rooms = {ROOM_ID: room}
@@ -2321,19 +2193,7 @@ async def test_manager_restarts_when_sole_requester_changes(
     alice_bridge = FakeBridge()
     bob_bridge = FakeBridge()
     bridges = iter((alice_bridge, bob_bridge))
-    manager = CallManager(
-        agent_name="helper",
-        config=config,
-        client=client,
-        runtime_paths=test_runtime_paths(tmp_path),
-        ssl_verify=True,
-        bridge_factory=lambda _identity, _e2ee: next(bridges),
-        tool_support=object(),  # type: ignore[arg-type]
-        get_invited_rooms_by_agent=dict,
-        agent_reply_memberships=AgentReplyMembershipIndex(),
-        response_admission_gate=ResponseAdmissionGate(),
-        wait_for_admission_or_shutdown=_admission_available,
-    )
+    manager = _manager(client, alice_bridge, tmp_path, config, bridge_factory=lambda _identity, _e2ee: next(bridges))
     client.room_get_state.return_value = _state_response(_remote_member_event())
     await _deliver(manager, manager.on_room_event(_room(), _member_unknown_event()))
 
@@ -2571,15 +2431,23 @@ async def test_manager_reconcile_contains_session_stop_failure(tmp_path: Path) -
 
 
 @pytest.mark.asyncio
-async def test_maybe_build_call_manager_respects_configuration(tmp_path: Path) -> None:
-    """Maybe build call manager respects configuration."""
-    client = _client()
-    runtime_paths = test_runtime_paths(tmp_path)
-    disabled = await maybe_build_call_manager(
-        agent_name="helper",
-        config=_config(enabled=False),
-        client=client,
-        runtime_paths=runtime_paths,
+@pytest.mark.parametrize(
+    ("agent_name", "enabled", "builds"),
+    [("helper", False, False), ("other", True, False), ("helper", True, True)],
+    ids=["disabled", "not_listed", "enabled"],
+)
+async def test_maybe_build_call_manager_respects_configuration(
+    tmp_path: Path,
+    agent_name: str,
+    enabled: bool,
+    builds: bool,
+) -> None:
+    """Only an agent assigned to enabled calls gets a call manager."""
+    manager = await maybe_build_call_manager(
+        agent_name=agent_name,
+        config=_config(enabled=enabled),
+        client=_client(),
+        runtime_paths=test_runtime_paths(tmp_path),
         ssl_verify=True,
         tool_support=object(),
         get_invited_rooms_by_agent=dict,
@@ -2587,33 +2455,8 @@ async def test_maybe_build_call_manager_respects_configuration(tmp_path: Path) -
         response_admission_gate=ResponseAdmissionGate(),
         wait_for_admission_or_shutdown=_admission_available,
     )
-    assert disabled is None
-    not_listed = await maybe_build_call_manager(
-        agent_name="other",
-        config=_config(),
-        client=client,
-        runtime_paths=runtime_paths,
-        ssl_verify=True,
-        tool_support=object(),
-        get_invited_rooms_by_agent=dict,
-        agent_reply_memberships=AgentReplyMembershipIndex(),
-        response_admission_gate=ResponseAdmissionGate(),
-        wait_for_admission_or_shutdown=_admission_available,
-    )
-    assert not_listed is None
-    enabled = await maybe_build_call_manager(
-        agent_name="helper",
-        config=_config(),
-        client=client,
-        runtime_paths=runtime_paths,
-        ssl_verify=True,
-        tool_support=object(),
-        get_invited_rooms_by_agent=dict,
-        agent_reply_memberships=AgentReplyMembershipIndex(),
-        response_admission_gate=ResponseAdmissionGate(),
-        wait_for_admission_or_shutdown=_admission_available,
-    )
-    assert isinstance(enabled, CallManager)
+
+    assert isinstance(manager, CallManager) is builds
 
 
 @pytest.mark.asyncio
@@ -3942,16 +3785,9 @@ async def test_manager_skips_call_when_same_agent_materialization_fails(
 
 
 @pytest.mark.asyncio
-async def test_manager_replays_a_key_received_before_startup_reconciliation(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> None:
+@pytest.mark.usefixtures("deliver_frame_keys")
+async def test_manager_replays_a_key_received_before_startup_reconciliation(tmp_path: Path) -> None:
     """A to-device key preceding full-state call discovery remains available."""
-
-    async def send_key(_self: object, *, targets: list[CallMember], **_kwargs: object) -> list[CallMember]:
-        return targets
-
-    monkeypatch.setattr("mindroom.matrix_rtc.call_manager.ToDeviceFrameKeyTransport.send_key", send_key)
     client = _client()
     client.rooms = {ROOM_ID: _room(encrypted=True)}
     client.room_get_state.return_value = _state_response(_remote_member_event())
@@ -3965,16 +3801,9 @@ async def test_manager_replays_a_key_received_before_startup_reconciliation(
 
 
 @pytest.mark.asyncio
-async def test_manager_replays_key_after_transient_admission_fetch_failure(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> None:
+@pytest.mark.usefixtures("deliver_frame_keys")
+async def test_manager_replays_key_after_transient_admission_fetch_failure(tmp_path: Path) -> None:
     """A one-shot to-device key survives a transient roster-fetch failure."""
-
-    async def send_key(_self: object, *, targets: list[CallMember], **_kwargs: object) -> list[CallMember]:
-        return targets
-
-    monkeypatch.setattr("mindroom.matrix_rtc.call_manager.ToDeviceFrameKeyTransport.send_key", send_key)
     client = _client()
     client.rooms = {ROOM_ID: _room(encrypted=True)}
     message = "offline"
@@ -4011,16 +3840,9 @@ async def test_manager_ignores_plaintext_custom_key_event(tmp_path: Path) -> Non
 
 
 @pytest.mark.asyncio
-async def test_manager_replays_a_key_received_before_active_roster_update(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> None:
+@pytest.mark.usefixtures("deliver_frame_keys")
+async def test_manager_replays_a_key_received_before_active_roster_update(tmp_path: Path) -> None:
     """An unmatched key survives stale federation state until its device appears."""
-
-    async def send_key(_self: object, *, targets: list[CallMember], **_kwargs: object) -> list[CallMember]:
-        return targets
-
-    monkeypatch.setattr("mindroom.matrix_rtc.call_manager.ToDeviceFrameKeyTransport.send_key", send_key)
     client = _client()
     room = _room(encrypted=True)
     client.room_get_state.return_value = _state_response(_remote_member_event())
@@ -4048,16 +3870,9 @@ async def test_manager_replays_a_key_received_before_active_roster_update(
 
 
 @pytest.mark.asyncio
-async def test_manager_accepts_key_for_alias_only_configured_room(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> None:
+@pytest.mark.usefixtures("deliver_frame_keys")
+async def test_manager_accepts_key_for_alias_only_configured_room(tmp_path: Path) -> None:
     """To-device admission uses the cached room alias just like room events."""
-
-    async def send_key(_self: object, *, targets: list[CallMember], **_kwargs: object) -> list[CallMember]:
-        return targets
-
-    monkeypatch.setattr("mindroom.matrix_rtc.call_manager.ToDeviceFrameKeyTransport.send_key", send_key)
     config = Config(
         agents={
             "helper": AgentConfig(
@@ -4085,16 +3900,9 @@ async def test_manager_accepts_key_for_alias_only_configured_room(
 
 
 @pytest.mark.asyncio
-async def test_manager_expires_pending_key_from_device_outside_roster(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> None:
+@pytest.mark.usefixtures("deliver_frame_keys")
+async def test_manager_expires_pending_key_from_device_outside_roster(tmp_path: Path) -> None:
     """An unmatched key stays bounded briefly, then expires without a retry loop."""
-
-    async def send_key(_self: object, *, targets: list[CallMember], **_kwargs: object) -> list[CallMember]:
-        return targets
-
-    monkeypatch.setattr("mindroom.matrix_rtc.call_manager.ToDeviceFrameKeyTransport.send_key", send_key)
     client = _client()
     client.rooms = {ROOM_ID: _room(encrypted=True)}
     client.room_get_state.return_value = _state_response(_remote_member_event(device="DIFFERENTDEV"))
@@ -4148,17 +3956,12 @@ def test_manager_bounds_and_deduplicates_pending_keys() -> None:
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("revoked", [False, True])
+@pytest.mark.usefixtures("deliver_frame_keys")
 async def test_manager_replays_a_key_received_while_starting(
-    monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
     revoked: bool,
 ) -> None:
     """A key received after call membership publication is applied once the bridge is ready."""
-
-    async def send_key(_self: object, *, targets: list[CallMember], **_kwargs: object) -> list[CallMember]:
-        return targets
-
-    monkeypatch.setattr("mindroom.matrix_rtc.call_manager.ToDeviceFrameKeyTransport.send_key", send_key)
     client = _client()
     client.room_get_state.return_value = _state_response(_remote_member_event())
     bridge = FakeBridge()
@@ -4195,16 +3998,9 @@ async def test_manager_replays_a_key_received_while_starting(
 
 
 @pytest.mark.asyncio
-async def test_manager_key_admission_uses_one_authoritative_state_fetch(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> None:
+@pytest.mark.usefixtures("deliver_frame_keys")
+async def test_manager_key_admission_uses_one_authoritative_state_fetch(tmp_path: Path) -> None:
     """Key admission reuses normal reconciliation instead of fetching state twice."""
-
-    async def send_key(_self: object, *, targets: list[CallMember], **_kwargs: object) -> list[CallMember]:
-        return targets
-
-    monkeypatch.setattr("mindroom.matrix_rtc.call_manager.ToDeviceFrameKeyTransport.send_key", send_key)
     client = _client()
     room = _room(encrypted=True)
     client.rooms = {ROOM_ID: room}
@@ -4221,16 +4017,9 @@ async def test_manager_key_admission_uses_one_authoritative_state_fetch(
 
 
 @pytest.mark.asyncio
-async def test_frame_key_floods_share_background_state_reads(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> None:
+@pytest.mark.usefixtures("deliver_frame_keys")
+async def test_frame_key_floods_share_background_state_reads(tmp_path: Path) -> None:
     """Frame keys arriving before a session settle at once and coalesce their state reads."""
-
-    async def send_key(_self: object, *, targets: list[CallMember], **_kwargs: object) -> list[CallMember]:
-        return targets
-
-    monkeypatch.setattr("mindroom.matrix_rtc.call_manager.ToDeviceFrameKeyTransport.send_key", send_key)
     client = _client()
     client.rooms = {ROOM_ID: _room(encrypted=True)}
     release_state = asyncio.Event()
@@ -4262,11 +4051,6 @@ async def test_frame_key_floods_share_background_state_reads(
 @pytest.mark.asyncio
 async def test_livekit_service_rejects_participant_selected_remote_focus() -> None:
     """A server-hosted agent never dials a participant-selected remote focus."""
-    config = Config(
-        agents={"helper": AgentConfig(display_name="Helper")},
-        models={},
-        calls=_realtime_calls(),
-    )
     members = [
         _member(
             "@oldest:remote.example",
@@ -4280,7 +4064,7 @@ async def test_livekit_service_rejects_participant_selected_remote_focus() -> No
     service = await resolve_livekit_service(
         members,
         user_id=BOT_USER,
-        configured_url=config.calls.livekit_service_url,
+        configured_url=SERVICE_URL,
         ssl_verify=True,
     )
 
@@ -4290,11 +4074,6 @@ async def test_livekit_service_rejects_participant_selected_remote_focus() -> No
 @pytest.mark.asyncio
 async def test_livekit_service_rejects_unconfigured_same_server_focus() -> None:
     """A local participant cannot redirect the server-hosted agent to another focus."""
-    config = Config(
-        agents={"helper": AgentConfig(display_name="Helper")},
-        models={},
-        calls=_realtime_calls(),
-    )
     member = _member(
         "@alice:example.org",
         "ALICEDEV",
@@ -4304,7 +4083,7 @@ async def test_livekit_service_rejects_unconfigured_same_server_focus() -> None:
     service = await resolve_livekit_service(
         [member],
         user_id=BOT_USER,
-        configured_url=config.calls.livekit_service_url,
+        configured_url=SERVICE_URL,
         ssl_verify=True,
     )
 
@@ -4377,11 +4156,6 @@ async def test_manager_does_not_retry_invalid_sfu_grant(
 @pytest.mark.asyncio
 async def test_livekit_service_recovers_inherited_focus_after_founder_leaves() -> None:
     """A remote follower may inherit and advertise the trusted local focus."""
-    config = Config(
-        agents={"helper": AgentConfig(display_name="Helper")},
-        models={},
-        calls=_realtime_calls(),
-    )
     follower = _member(
         "@follower:follower.example",
         "FOLLOWER",
@@ -4391,7 +4165,7 @@ async def test_livekit_service_recovers_inherited_focus_after_founder_leaves() -
     service = await resolve_livekit_service(
         [follower],
         user_id=BOT_USER,
-        configured_url=config.calls.livekit_service_url,
+        configured_url=SERVICE_URL,
         ssl_verify=True,
     )
 
@@ -4446,11 +4220,6 @@ async def test_sfu_grant_fetch_uses_local_network_trust(monkeypatch: pytest.Monk
 @pytest.mark.asyncio
 async def test_livekit_service_rejects_insecure_remote_focus() -> None:
     """A remote plaintext focus cannot receive the bot's OpenID token."""
-    config = Config(
-        agents={"helper": AgentConfig(display_name="Helper")},
-        models={},
-        calls=_realtime_calls(livekit_service_url=None),
-    )
     member = _member(
         "@alice:remote.example",
         "ALICEDEV",
@@ -4460,7 +4229,7 @@ async def test_livekit_service_rejects_insecure_remote_focus() -> None:
     service = await resolve_livekit_service(
         [member],
         user_id=BOT_USER,
-        configured_url=config.calls.livekit_service_url,
+        configured_url=None,
         ssl_verify=True,
     )
 
@@ -5762,22 +5531,13 @@ def test_speech_config_rejects_connection_fields_in_extra_kwargs() -> None:
         )
 
 
-class UndeliverableKeyTransport(FakeKeyTransport):
-    """A transport whose targets never receive the key."""
-
-    async def send_key(self, **kwargs: object) -> list[CallMember]:
-        """Record the attempt and deliver to nobody."""
-        await super().send_key(**kwargs)  # type: ignore[arg-type]
-        return []
-
-
 @pytest.mark.asyncio
 async def test_key_distribution_retry_backs_off_and_gives_up(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Undeliverable frame keys retry on a bounded backoff, not a 1s poll forever."""
     client = _client()
-    transport = UndeliverableKeyTransport()
+    transport = RecoveringKeyTransport()
     clock = [1_000]
     session = _session(client, FakeBridge(), transport, clock)
 
