@@ -9849,6 +9849,29 @@ async def test_refresh_scheduler_manual_reindex_waits_behind_the_running_refresh
 
 
 @pytest.mark.asyncio
+async def test_a_shutdown_before_a_queued_reindex_starts_answers_its_caller(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A reindex the shutdown cancels before it ran still tells its caller it was cancelled."""
+    config = _config(tmp_path, bases={"docs": tmp_path / "docs"}, agent_bases=["docs"])
+    runtime_paths = runtime_paths_for(config)
+    scheduler = KnowledgeRefreshScheduler()
+    refresh = AsyncMock()
+    monkeypatch.setattr("mindroom.knowledge.refresh_runner.refresh_knowledge_binding_in_subprocess", refresh)
+    waiter = asyncio.create_task(
+        scheduler.refresh_now("docs", config=config, runtime_paths=runtime_paths, force_reindex=True),
+    )
+    await asyncio.sleep(0)
+
+    await scheduler.shutdown()
+
+    with pytest.raises(asyncio.CancelledError):
+        await asyncio.wait_for(waiter, timeout=SETTLE_TIMEOUT_SECONDS)
+    refresh.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_an_abandoned_manual_reindex_that_fails_is_logged(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

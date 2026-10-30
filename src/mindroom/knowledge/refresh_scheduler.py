@@ -225,14 +225,25 @@ class KnowledgeRefreshScheduler:
         )
         self._tasks[target] = task
         task.add_done_callback(
-            lambda completed, *, scheduled_target=target: self._handle_done(scheduled_target, completed),
+            lambda completed, *, scheduled_target=target, scheduled=request: self._handle_done(
+                scheduled_target,
+                scheduled,
+                completed,
+            ),
             context=context,
         )
 
-    def _handle_done(self, target: KnowledgeRefreshTarget, task: asyncio.Task[None]) -> None:
+    def _handle_done(
+        self,
+        target: KnowledgeRefreshTarget,
+        request: _ScheduledRefresh,
+        task: asyncio.Task[None],
+    ) -> None:
         if self._tasks.get(target) is task:
             self._tasks.pop(target, None)
         if task.cancelled():
+            # Also a task cancelled before it first ran, whose waiters nothing else would answer.
+            _cancel_waiters(request)
             return
         if (error := task.exception()) is not None:
             logger.error("Background knowledge refresh failed", base_id=target.base_id, exc_info=error)
@@ -253,9 +264,6 @@ class KnowledgeRefreshScheduler:
                     force_reindex=request.force_reindex,
                     health_recorder=request.health_recorder,
                 )
-        except asyncio.CancelledError:
-            _cancel_waiters(request)
-            raise
         except Exception as exc:
             answered = [waiter for waiter in request.waiters if not waiter.done()]
             for waiter in answered:
