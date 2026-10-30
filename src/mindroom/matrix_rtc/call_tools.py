@@ -51,7 +51,6 @@ from mindroom.session_storage.agent_storage import create_session_storage
 from mindroom.session_storage.types import ConversationSession
 from mindroom.tool_jobs.execution import agent_tool_middleware
 from mindroom.tool_system.agent_tools import room_turn_offers
-from mindroom.tool_system.agno_toolkits import AGNO_EMPTY_PARAMETERS
 from mindroom.tool_system.declarations import (
     MATRIX_ROOM_RUNTIME_APPROVAL_TYPE,
     MATRIX_ROOM_RUNTIME_TOOL_NAMES,
@@ -939,20 +938,8 @@ def _function_available_during_call(
 
 
 def _realtime_parameters(function: ToolFunction) -> dict[str, Any]:
-    """Return the realtime model's parameters schema: the function's schema after a second Agno processing pass.
-
-    A second pass closes a schema Agno's processing produced to other keys once it differs from Agno's empty schema,
-    which the voice_call_realtime golden pins, and leaves a schema the tool supplies as is
-    (``skip_entrypoint_processing``, as MCP tools do) unchanged. An empty schema becomes an object without properties.
-    """
-    schema = dict(function.parameters)
-    if not schema:
-        return {"type": "object", "properties": {}}
-    # TODO(simplify): `additionalProperties: false` here reproduces a second pass of Agno's entrypoint processing.
-    # Offer the function's schema as it is. The realtime model would see tool schemas without it; the golden pins it.
-    if function.entrypoint_processed and schema != AGNO_EMPTY_PARAMETERS:
-        schema["additionalProperties"] = False
-    return schema
+    """Return the realtime model's parameters schema: the function's own, or an object without properties for none."""
+    return dict(function.parameters) or {"type": "object", "properties": {}}
 
 
 def _wrap_tool_function(
