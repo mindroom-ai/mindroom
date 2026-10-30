@@ -26,7 +26,7 @@ from mindroom.tool_system.metadata import (
     serialize_tool_validation_snapshot,
     validate_authored_tool_entry_overrides,
 )
-from mindroom.tool_system.registry import ToolMetadataValidationError, ToolRegistry, builtin_tool_registry
+from mindroom.tool_system.registry import ToolMetadataValidationError, builtin_tool_registry
 
 __all__ = [
     "ConfigField",
@@ -39,7 +39,6 @@ __all__ = [
     "ToolManagedInitArg",
     "ToolMetadata",
     "ToolMetadataValidationError",
-    "ToolRegistry",
     "ToolStatus",
     "ToolValidationInfo",
     "apply_authored_overrides",

@@ -67,11 +67,6 @@ def _plugin_skill_roots(request: Request) -> tuple[Path, ...]:
     return config_plugins(snapshot.runtime_config, snapshot.runtime_paths).skill_roots
 
 
-def _listings(request: Request) -> list[SkillListing]:
-    plugin_skill_roots = _plugin_skill_roots(request)
-    return list_skill_listings(default_skill_roots(plugin_skill_roots), plugin_skill_roots=plugin_skill_roots)
-
-
 def _listing(skill_name: str, request: Request) -> SkillListing | None:
     plugin_skill_roots = _plugin_skill_roots(request)
     return resolve_skill_listing(
@@ -84,7 +79,8 @@ def _listing(skill_name: str, request: Request) -> SkillListing | None:
 @router.get("")
 async def list_skills(request: Request) -> list[SkillSummary]:
     """List installed skills."""
-    listings = _listings(request)
+    plugin_skill_roots = _plugin_skill_roots(request)
+    listings = list_skill_listings(default_skill_roots(plugin_skill_roots), plugin_skill_roots=plugin_skill_roots)
     return [
         SkillSummary(
             name=listing.name,

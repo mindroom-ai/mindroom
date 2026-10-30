@@ -151,7 +151,6 @@ def compose_tool_registry(
     *,
     unavailable: Mapping[str, ToolMetadata] = MappingProxyType({}),
     unresolved_plugin_sources: frozenset[str] = frozenset(),
-    runtime_unavailable: frozenset[str] = frozenset(),
 ) -> ToolRegistry:
     """Return the built-ins plus one config's plugin and MCP tools; an MCP tool may not reuse a registered name."""
     entries = {**builtin_tool_registry().entries, **plugin_tools}
@@ -165,5 +164,4 @@ def compose_tool_registry(
         # A failed plugin's declaration that another source registers is dropped.
         unavailable=MappingProxyType({name: metadata for name, metadata in unavailable.items() if name not in entries}),
         unresolved_plugin_sources=unresolved_plugin_sources,
-        runtime_unavailable=runtime_unavailable & set(entries),
     )

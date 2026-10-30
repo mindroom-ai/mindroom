@@ -140,7 +140,7 @@ if TYPE_CHECKING:
 
     from mindroom.agent_policy import AgentPolicySeed, ResolvedAgentPolicy
     from mindroom.config.personal_agents import PersonalAgentRoster
-    from mindroom.tool_system.catalog import ToolValidationInfo
+    from mindroom.tool_system.registry import ToolRegistry
     from mindroom.tool_system.worker_routing import WorkerScope
 
 _APPROVED_EGRESS_ENABLED_ENV = "MINDROOM_APPROVED_EGRESS_ENABLED"
@@ -1497,25 +1497,25 @@ class Config(BaseModel):
         entry: ToolConfigEntry,
         *,
         config_path_prefix: str,
-        tool_validation_snapshot: dict[str, ToolValidationInfo],
-        unresolved_plugin_sources: frozenset[str],
+        tools: ToolRegistry,
     ) -> None:
-        """Validate one authored tool entry against the resolved validation snapshot."""
+        """Validate one authored tool entry against the validation snapshot of the tools this config can build."""
         # why-lazy: module-top catalog import pulls runtime tool registry paths and loads agents+tools at config import.
         from mindroom.tool_system.catalog import (  # noqa: PLC0415
             ToolConfigOverrideError,
             validate_authored_tool_entry_overrides,
         )
 
+        tool_validation_snapshot = tools.validation_snapshot
         validation_info = tool_validation_snapshot.get(entry.name)
         if entry.name not in tool_validation_snapshot and not self.is_tool_preset(entry.name):
-            if unresolved_plugin_sources:
+            if tools.unresolved_plugin_sources:
                 logger.warning(
                     "Unknown tool may belong to a plugin whose tool names could not be resolved; "
                     "disabling it for this run (verify the tool name is not a typo)",
                     config_path=config_path_prefix,
                     tool_name=entry.name,
-                    unresolved_plugin_sources=sorted(unresolved_plugin_sources),
+                    unresolved_plugin_sources=sorted(tools.unresolved_plugin_sources),
                 )
                 return
             msg = f"{config_path_prefix}.{entry.name}: Unknown tool '{entry.name}'."
@@ -1539,7 +1539,7 @@ class Config(BaseModel):
         self,
         runtime_paths: RuntimePaths,
         *,
-        tolerate_plugin_load_errors: bool = False,
+        tolerate_plugin_load_errors: bool,
     ) -> None:
         """Validate authored tool references against the tools this candidate config can build.
 
@@ -1552,7 +1552,6 @@ class Config(BaseModel):
         tools, skipped = candidate_tool_registry(self, runtime_paths)
         if skipped and not tolerate_plugin_load_errors:
             raise skipped[0].error
-        tool_validation_snapshot = tools.validation_snapshot
         entries = [(f"defaults.tools[{index}]", entry) for index, entry in enumerate(self.defaults.tools)] + [
             (f"agents.{agent_name}.tools[{index}]", entry)
             for agent_name, agent_config in self.agents.items()
@@ -1562,8 +1561,7 @@ class Config(BaseModel):
             self._validate_authored_tool_entry(
                 entry,
                 config_path_prefix=config_path_prefix,
-                tool_validation_snapshot=tool_validation_snapshot,
-                unresolved_plugin_sources=tools.unresolved_plugin_sources,
+                tools=tools,
             )
 
     def get_entities_referencing_tools(self, tool_names: set[str]) -> set[str]:

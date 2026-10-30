@@ -81,17 +81,13 @@ class AgentTools:
             for name in tool_names
         )
 
-    def available(self, tool_name: str) -> bool:
-        """Return whether this runtime can build ``tool_name`` for the agent's config.
+    @property
+    def tool_names(self) -> tuple[str, ...]:
+        """Every available toolkit the agent's entries name, presets and implied toolkits expanded, initial and deferred.
 
         An authored tool whose plugin did not load, or one this runtime cannot run, is not offered, yet stays authored.
         """
-        return self.tools.available(tool_name)
-
-    @property
-    def tool_names(self) -> tuple[str, ...]:
-        """Every available toolkit the agent's entries name, presets and implied toolkits expanded, initial and deferred."""
-        return tuple(name for name in self.facts.tool_names if self.available(name))
+        return tuple(name for name in self.facts.tool_names if self.tools.available(name))
 
     def _owner_precedence(self, entry: EffectiveToolConfig) -> tuple[int, int, int]:
         directly_authored = entry.name == (entry.authored_name or entry.name)
@@ -103,7 +99,7 @@ class AgentTools:
         return tuple(
             entry
             for entry in self.facts.authored
-            if self.config.is_tool_preset(entry.name) or self.available(entry.name)
+            if self.config.is_tool_preset(entry.name) or self.tools.available(entry.name)
         )
 
     def _visible_authored(self, attached: set[str]) -> list[EffectiveToolConfig]:
@@ -112,7 +108,7 @@ class AgentTools:
         for authored in self._available_authored():
             owners = visible if not authored.defer or authored.name in attached else hidden_deferred
             for tool_name in expanded_tool_names(self.config, [authored.name], self.facts.disabled):
-                if not self.available(tool_name):
+                if not self.tools.available(tool_name):
                     continue
                 expanded = _expanded_entry(authored, tool_name)
                 current = owners.get(tool_name)

@@ -99,9 +99,7 @@ def register_tool_with_metadata(
     return decorator
 
 
-def register_builtin_tool_metadata(metadata: ToolMetadata) -> None:
-    """Register one built-in tool, including a metadata-only one MindRoom constructs itself."""
-    register_tool(metadata)
+register_builtin_tool_metadata = register_tool
 
 
 __all__ = ["register_builtin_tool_metadata", "register_tool_with_metadata"]

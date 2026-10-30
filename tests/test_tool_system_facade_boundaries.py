@@ -37,7 +37,6 @@ EXPECTED_PUBLIC_CATALOG_SYMBOLS = [
     "ToolManagedInitArg",
     "ToolMetadata",
     "ToolMetadataValidationError",
-    "ToolRegistry",
     "ToolStatus",
     "ToolValidationInfo",
     "apply_authored_overrides",

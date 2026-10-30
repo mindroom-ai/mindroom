@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 from mindroom.constants import ROUTER_AGENT_NAME
+from mindroom.tool_system.agent_tools import resolve_agent_tools
 
 if TYPE_CHECKING:
     from mindroom.config.main import Config
@@ -41,8 +42,7 @@ def describe_agent(agent_name: str, config: Config, tools: ToolRegistry) -> str:
     if agent_config.role:
         parts.append(f"- {agent_config.role}")
 
-    # Only the tools this runtime can build for it; a tool whose plugin did not load is not advertised.
-    effective_tools = [name for name in config.resolve_agent(agent_name).tools.tool_names if tools.available(name)]
+    effective_tools = resolve_agent_tools(config, agent_name, tools).tool_names
     if effective_tools:
         parts.append(f"- Tools: {', '.join(effective_tools)}")
 

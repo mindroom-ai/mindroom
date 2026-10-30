@@ -24,6 +24,7 @@ from mindroom.oauth.credential_lifecycle import (
 from mindroom.oauth.service import oauth_public_base_url
 from mindroom.oauth.state import consume_opaque_oauth_state, issue_opaque_oauth_state, read_opaque_oauth_state
 from mindroom.runtime_resolution import resolve_agent_execution
+from mindroom.tool_system.agent_tools import resolve_agent_tools
 from mindroom.tool_system.plugins import config_plugins
 
 if TYPE_CHECKING:
@@ -95,9 +96,8 @@ def resolve_oauth_reset_target(
     plugins = config_plugins(config, runtime_paths)
     allowed_provider_ids = {
         metadata.auth_provider
-        for tool_name in config.resolve_agent(agent_name).tools.tool_names
-        if plugins.tools.available(tool_name)
-        and (metadata := plugins.tools.entries[tool_name]).auth_provider is not None
+        for tool_name in resolve_agent_tools(config, agent_name, plugins.tools).tool_names
+        if (metadata := plugins.tools.entries[tool_name]).auth_provider is not None
     }
     if provider_id not in allowed_provider_ids:
         available = ", ".join(sorted(allowed_provider_ids)) or "none"

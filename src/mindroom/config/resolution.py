@@ -238,7 +238,7 @@ def authored_tool_entries(config: Config, agent_name: str) -> tuple[EffectiveToo
     """Return an agent's tool entries in authored order: its own, then the defaults it takes, settings merged.
 
     These are what the config asks for; which of them a runtime can build is the tool registry's answer
-    (`AgentTools.available`). The approved-egress switch adds its tool to the defaults of every agent that takes them.
+    (`AgentTools.tool_names`). The approved-egress switch adds its tool to the defaults of every agent that takes them.
     """
     # why-lazy: module-top catalog import pulls runtime tool registry paths and loads agents+tools at config import.
     from mindroom.tool_system.catalog import apply_authored_overrides  # noqa: PLC0415

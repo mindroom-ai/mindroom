@@ -16984,13 +16984,13 @@ Each call is one request with no tools and no conversation history.
 A tool that builds other registered tools while handling a call, for example a sub-toolkit from `mindroom.plugin_api.get_tool_by_name`, should use the same worker target as agent toolkit construction so scoped credentials and OAuth MCP sessions resolve identically, and the tools the call's config can build:
 
 ```python
-from mindroom.plugin_api import config_plugins, get_tool_by_name, get_tool_runtime_context
+from mindroom.plugin_api import get_tool_by_name, get_tool_runtime_context
 
 context = get_tool_runtime_context()
 toolkit = get_tool_by_name(
     "github",
     context.runtime_paths,
-    tools=config_plugins(context.config, context.runtime_paths).tools,
+    tools=context.plugins.tools,
     runtime_config=context.config,
     worker_target=context.resolve_worker_target(),
 )

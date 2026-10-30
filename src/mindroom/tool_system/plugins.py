@@ -14,7 +14,7 @@ import sys
 import threading
 import tokenize
 import weakref
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from functools import cached_property
 from pathlib import Path
 from types import MappingProxyType
@@ -73,8 +73,6 @@ class _LoadedPlugin:
 
     name: str
     root: Path
-    tools_module_path: Path | None
-    hooks_module_path: Path | None
     skill_dirs: tuple[Path, ...]
     # The modules' paths and mtimes when they executed, so validation knows when the source changed.
     source: tuple[tuple[Path, float], ...]
@@ -205,14 +203,11 @@ class ConfigPlugins:
             unavailable=unavailable,
             unresolved_plugin_sources=frozenset(unresolved),
         )
-        runtime_unavailable = frozenset(name for name in registry if egress_tool_unavailable(name, self.runtime_paths))
-        if not runtime_unavailable:
-            return registry
-        return ToolRegistry(
-            registry.entries,
-            registry.unavailable,
-            registry.unresolved_plugin_sources,
-            runtime_unavailable,
+        return replace(
+            registry,
+            runtime_unavailable=frozenset(
+                name for name in registry if egress_tool_unavailable(name, self.runtime_paths)
+            ),
         )
 
     @cached_property
@@ -413,7 +408,7 @@ def dispose_plugins(generation: PluginGeneration) -> None:
 def refresh_plugins(config: Config, runtime_paths: RuntimePaths) -> ConfigPlugins:
     """Load ``config``'s plugins into this process's generation and return ``config``'s view; the worker's publisher.
 
-    Unchanged modules stay as installed and edited ones execute again, as before every worker request. The generation
+    Unchanged modules stay as installed and edited ones execute again, on every worker request. The generation
     only grows or refreshes, so another request's config keeps the plugins it loaded; a plugin that fails to load
     leaves it until it loads again.
     """
@@ -462,7 +457,7 @@ def candidate_tool_registry(
     unresolved = {plugin.path for plugin in skipped}
     plugin_tools: dict[str, tuple[str, ToolMetadata]] = {}
     unavailable: dict[str, ToolMetadata] = {}
-    for plugin_base, plugin_entry, _ in plugin_bases:
+    for plugin_base, plugin_entry in plugin_bases:
         loaded = published.plugins.get(plugin_base.root)
         if loaded is not None and loaded.name == plugin_base.name and loaded.source == _plugin_source(plugin_base):
             tools: Mapping[str, ToolMetadata] = loaded.tools
@@ -577,7 +572,7 @@ def _load_plugins(
     plugin_bases, skipped = plugin_imports._collect_plugin_bases(config.plugins, runtime_paths)
     plugin_imports._reject_duplicate_plugin_manifest_names(plugin_bases)
     plugins: dict[Path, _LoadedPlugin] = {}
-    for plugin_base, plugin_entry, _ in plugin_bases:
+    for plugin_base, plugin_entry in plugin_bases:
         package_name = plugin_imports._plugin_package_name(plugin_base.name, plugin_base.root)
         installed_modules = _modules_under(package_name)
         installed_cache = {
@@ -651,8 +646,6 @@ def _materialize_plugin(plugin: plugin_imports._PluginBase, previous: _LoadedPlu
     return _LoadedPlugin(
         name=plugin.name,
         root=plugin.root,
-        tools_module_path=plugin.tools_module_path,
-        hooks_module_path=plugin.hooks_module_path,
         skill_dirs=tuple(plugin.skill_dirs),
         source=tuple(source.items()),
         # A plugin's tools are the ones its tools module registers.

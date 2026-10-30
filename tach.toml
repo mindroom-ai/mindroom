@@ -971,7 +971,7 @@ depends_on = [
 
 [[modules]]
 path = "mindroom.agent_descriptions"
-depends_on = ["mindroom.constants"]
+depends_on = ["mindroom.constants", "mindroom.tool_system.agent_tools"]
 visibility = [
     "mindroom.agents",
     "mindroom.custom_tools.delegate",
@@ -1669,6 +1669,7 @@ depends_on = [
     "mindroom.oauth.service",
     "mindroom.oauth.state",
     "mindroom.runtime_resolution",
+    "mindroom.tool_system.agent_tools",
     "mindroom.tool_system.worker_routing",
     "mindroom.tool_system.plugins",
 ]
@@ -5470,6 +5471,7 @@ depends_on = [
     "mindroom.matrix.event_info",
     "mindroom.scheduling.tasks",
     "mindroom.thread_utils",
+    "mindroom.tool_system.agent_tools",
     "mindroom.tool_system.plugins",
 ]
 
@@ -7327,7 +7329,6 @@ expose = [
     "ToolManagedInitArg",
     "ToolMetadata",
     "ToolMetadataValidationError",
-    "ToolRegistry",
     "ToolStatus",
     "ToolValidationInfo",
     "apply_authored_overrides",
@@ -8049,7 +8050,7 @@ depends_on = ["mindroom.api.auth", "mindroom.api.config_lifecycle", "mindroom.mc
 
 [[modules]]
 path = "mindroom.api.mcp_selection"
-depends_on = ["mindroom.api.auth", "mindroom.api.config_lifecycle", "mindroom.api.connection_agents", "mindroom.api.mcp_identity", "mindroom.mcp_gateway.selection", "mindroom.mcp_gateway.server", "mindroom.mcp_gateway.store", "mindroom.tool_system.plugins"]
+depends_on = ["mindroom.api.auth", "mindroom.api.config_lifecycle", "mindroom.api.connection_agents", "mindroom.api.mcp_identity", "mindroom.mcp_gateway.selection", "mindroom.mcp_gateway.server", "mindroom.mcp_gateway.store", "mindroom.tool_system.agent_tools", "mindroom.tool_system.plugins"]
 
 [[modules]]
 path = "mindroom.mcp_gateway.selection"

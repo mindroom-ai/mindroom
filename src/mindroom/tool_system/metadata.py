@@ -1,4 +1,4 @@
-"""Runtime tool catalog resolution, validation, and instance construction."""
+"""Tool construction from a `ToolRegistry`, authored override validation, and tool metadata export."""
 
 from __future__ import annotations
 
@@ -681,7 +681,7 @@ def get_tool_by_name(
             )
             raise ToolMetadataValidationError(msg)
 
-        # Imported on first tool construction so importing the registry stays free
+        # Imported on first tool construction so importing this module stays free
         # of the agno runtime import chain (#1436).
         from mindroom.tool_system.agno_toolkits import (  # noqa: PLC0415
             configure_toolkit_functions,

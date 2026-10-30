@@ -99,14 +99,14 @@ def _warn_once(message: str, *, path: Path) -> None:
 def _collect_plugin_bases(
     plugin_entries: list[PluginEntryConfig],
     runtime_paths: RuntimePaths,
-) -> tuple[list[tuple[_PluginBase, PluginEntryConfig, int]], list[SkippedPlugin]]:
+) -> tuple[list[tuple[_PluginBase, PluginEntryConfig]], list[SkippedPlugin]]:
     """Resolve the enabled plugin roots and manifests of one config, skipping and logging the entries that fail.
 
     The skipped entries are the ones whose tool names cannot even be inspected.
     """
-    plugin_bases: list[tuple[_PluginBase, PluginEntryConfig, int]] = []
+    plugin_bases: list[tuple[_PluginBase, PluginEntryConfig]] = []
     skipped: list[SkippedPlugin] = []
-    for plugin_order, plugin_entry in enumerate(plugin_entries):
+    for plugin_entry in plugin_entries:
         if not plugin_entry.enabled:
             continue
 
@@ -119,7 +119,7 @@ def _collect_plugin_bases(
             skipped.append(SkippedPlugin(plugin_entry.path, exc, root))
             continue
 
-        plugin_bases.append((plugin_base, plugin_entry, plugin_order))
+        plugin_bases.append((plugin_base, plugin_entry))
     return plugin_bases, skipped
 
 
@@ -146,11 +146,11 @@ def _log_skipped_plugin_entry(
 
 
 def _reject_duplicate_plugin_manifest_names(
-    plugin_bases: list[tuple[_PluginBase, PluginEntryConfig, int]],
+    plugin_bases: list[tuple[_PluginBase, PluginEntryConfig]],
 ) -> None:
     """Fail plugin loading when configured manifests reuse the same plugin name."""
     manifest_paths_by_name: dict[str, list[Path]] = {}
-    for plugin_base, _, _ in plugin_bases:
+    for plugin_base, _ in plugin_bases:
         manifest_paths_by_name.setdefault(plugin_base.name, []).append(plugin_base.manifest_path)
 
     duplicates = {name: paths for name, paths in manifest_paths_by_name.items() if len(paths) > 1}

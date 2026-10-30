@@ -20,6 +20,7 @@ from mindroom.api.mcp_identity import resolve_gateway_connections_owner
 from mindroom.mcp_gateway.selection import SelectionAccessDeniedError
 from mindroom.mcp_gateway.server import read_gateway_body
 from mindroom.mcp_gateway.store import GatewayOAuthCapacityError
+from mindroom.tool_system.agent_tools import resolve_agent_tools
 from mindroom.tool_system.plugins import config_plugins
 
 if TYPE_CHECKING:
@@ -81,8 +82,8 @@ def _available_choices(
             continue
         available = {
             tool
-            for tool in context.config.resolve_agent(name).tools.tool_names
-            if registry.available(tool) and registry.entries[tool].mcp_available
+            for tool in resolve_agent_tools(context.config, name, registry).tool_names
+            if registry.entries[tool].mcp_available
         }
         previous_tools = previous.get(name, ()) if previous is not None else None
         if previous_tools is not None and set(tools) - available - set(previous_tools):

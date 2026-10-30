@@ -53,6 +53,7 @@ from mindroom.tool_jobs.client_cancel import (
     person_may_cancel,
 )
 from mindroom.tool_jobs.runtime import get_background_runtime
+from mindroom.tool_system.agent_tools import resolve_agent_tools
 from mindroom.tool_system.plugins import config_plugins
 from mindroom.turn_record import TurnRecord
 
@@ -211,7 +212,7 @@ def _format_agent_description(agent_name: str, config: Config, tools: ToolRegist
     """Format a concise agent description for the welcome message."""
     if agent_name in config.agents:
         agent_config = config.agents[agent_name]
-        tool_names = [name for name in config.resolve_agent(agent_name).tools.tool_names if tools.available(name)]
+        tool_names = resolve_agent_tools(config, agent_name, tools).tool_names
         desc_parts = []
 
         # Add role first
