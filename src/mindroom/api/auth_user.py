@@ -50,7 +50,7 @@ class AuthUser:
         platform) acts as the configured owner, else as its own login id.
         """
         if self.source in {AuthSource.TRUSTED_UPSTREAM, AuthSource.MATRIX_OPENID}:
-            return try_parse_historical_matrix_user_id(self.matrix_user_id) if self.matrix_user_id else None
+            return try_parse_historical_matrix_user_id(self.matrix_user_id)
         return runtime_paths.env_value(OWNER_MATRIX_USER_ID_ENV) or self.user_id
 
 

@@ -154,10 +154,9 @@ async def _connection_user(request: Request, response: Response) -> ConnectionUs
     snapshot = config_lifecycle.bind_current_request_snapshot(request)
     if request.query_params:
         raise HTTPException(400, "Connection target overrides are not accepted", headers=CONNECTIONS_HEADERS)
-    requester_id = auth_user.matrix_user_id
     user = resolve_connection_user(
         snapshot,
-        requester_id,
+        auth_user.matrix_user_id,
         membership_index=config_lifecycle.app_state(request.app).agent_reply_memberships,
     )
     if not user.visible_agent_names:
@@ -271,21 +270,20 @@ async def _connection_status(
     request: Request,
     context: _Connections,
     agent_name: str,
-    provider_id: str,
+    service: ConnectionService,
     *,
-    can_manage: bool,
     listing: bool = False,
 ) -> oauth.OAuthStatusResponse:
     """Read the connection a viewer sees: the managed scope for a manager, else the agent's scope for this user.
 
     `listing` skips the token refresh and the OAuth client bootstrap.
     """
-    if can_manage:
-        credential_context = oauth.dashboard_oauth_context(request, provider_id, agent_name=agent_name)
+    if service.can_manage:
+        credential_context = oauth.dashboard_oauth_context(request, service.provider, agent_name=agent_name)
     else:
         agent = resolve_connection_agent(context.user, agent_name)
         credential_context = resolve_oauth_credential_context(
-            context.providers[provider_id],
+            context.providers[service.provider],
             context.runtime_paths,
             get_runtime_credentials_manager(context.runtime_paths),
             agent.worker_target,
@@ -309,14 +307,7 @@ async def _service_connected(
     unreadable service must not fail the agent's state.
     """
     try:
-        result = await _connection_status(
-            request,
-            context,
-            agent_name,
-            service.provider,
-            can_manage=service.can_manage,
-            listing=True,
-        )
+        result = await _connection_status(request, context, agent_name, service, listing=True)
     except Exception as exc:
         logger.warning(
             "connection_state_status_unavailable",
@@ -376,11 +367,10 @@ async def me(request: Request, response: Response) -> ConnectionsIdentity:
         raise HTTPException(400, "Query parameters are not accepted", headers=CONNECTIONS_HEADERS)
     snapshot = config_lifecycle.bind_current_request_snapshot(request)
     matrix_user_id = auth_user.matrix_user_id
-    email = auth_user.email
     return ConnectionsIdentity(
         matrix_user_id=matrix_user_id,
         display_name=await _matrix_display_name(matrix_user_id, snapshot.runtime_paths),
-        email=email if isinstance(email, str) and email else None,
+        email=auth_user.email,
         is_administrator=is_administrator(matrix_user_id, snapshot),
         egress_enabled=egress_broker_enabled(snapshot.runtime_paths),
         dashboard_url=dashboard_link(request),
@@ -469,7 +459,7 @@ async def status(agent_name: str, provider_id: str, request: Request, context: _
     """Load status for one authorized agent and provider."""
     service = _service(context, agent_name, provider_id)
     result = await masked_oauth_call(
-        _connection_status(request, context, agent_name, provider_id, can_manage=service.can_manage),
+        _connection_status(request, context, agent_name, service),
         "Connection status is unavailable",
     )
     view = oauth.personal_connection_view(result, can_manage=service.can_manage)
@@ -518,13 +508,6 @@ async def disconnect(
     require_connections_same_origin(request, context.runtime_paths)
     _require_management(context, agent_name, provider_id)
     return await masked_oauth_call(
-        _reset_connection(request, provider_id, agent_name),
+        oauth.reset_connection(request, provider_id, agent_name=agent_name),
         "Could not disconnect account",
-    )
-
-
-async def _reset_connection(request: Request, provider_id: str, agent_name: str) -> dict[str, str]:
-    return await oauth.reset_connection(
-        request,
-        oauth.dashboard_oauth_context(request, provider_id, agent_name=agent_name),
     )

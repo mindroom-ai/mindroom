@@ -10,7 +10,7 @@ from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal, Never
-from unittest.mock import AsyncMock, MagicMock, Mock, patch
+from unittest.mock import AsyncMock, Mock, patch
 from urllib.parse import parse_qs, urlparse
 
 import httpx
@@ -1052,13 +1052,10 @@ def test_connect_returns_an_authorize_url_for_an_eligible_manager(oauth_egress_p
         assert "no-store" in response.headers["cache-control"]
 
 
-def _fail_account_flow(monkeypatch: pytest.MonkeyPatch, action: str, failure: Exception) -> MagicMock:
-    """Make the first OAuth step of an account action fail and return its mock.
-
-    Connect starts the flow; disconnect first resolves the connection it resets.
-    """
-    flow = AsyncMock(side_effect=failure) if action == "connect" else MagicMock(side_effect=failure)
-    monkeypatch.setattr(oauth, "start_connect" if action == "connect" else "dashboard_oauth_context", flow)
+def _fail_account_flow(monkeypatch: pytest.MonkeyPatch, action: str, failure: Exception) -> AsyncMock:
+    """Make the OAuth operation an account action calls fail and return its mock."""
+    flow = AsyncMock(side_effect=failure)
+    monkeypatch.setattr(oauth, "start_connect" if action == "connect" else "reset_connection", flow)
     return flow
 
 

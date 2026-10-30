@@ -571,8 +571,7 @@ async def request_has_frontend_access(request: Request) -> bool:
         if exc.status_code not in {401, 403}:
             raise
         return False
-    if _request_auth_state(request).settings.trusted_upstream.enabled:
-        _require_connections_route_authorized(request, auth_user)
+    _require_connections_route_authorized(request, auth_user)
     return True
 
 
@@ -827,8 +826,7 @@ def _connections_session_auth_user(request: Request) -> SignedMatrixUser | None:
     to this deployment, outside hosted platform mode and never on OAuth callbacks.
     """
     auth_state = _request_auth_state(request)
-    public_url = auth_state.settings.public_url
-    cookie = connections_session_cookie(deployment_origin(public_url, str(request.base_url)))
+    cookie = connections_session_cookie(deployment_origin(auth_state.settings.public_url, str(request.base_url)))
     token = request.cookies.get(cookie)
     session = read_connections_session(token, now=time.time()) if token else None
     if session is None:
@@ -852,7 +850,7 @@ def _connections_session_auth_user(request: Request) -> SignedMatrixUser | None:
 def is_administrator(matrix_user_id: str | None, snapshot: config_lifecycle.ApiSnapshot) -> bool:
     """Return whether a signed Matrix user is a platform administrator in the snapshot's config."""
     return (
-        isinstance(matrix_user_id, str)
+        matrix_user_id is not None
         and snapshot.runtime_config is not None
         and is_platform_administrator(matrix_user_id, snapshot.runtime_config, snapshot.runtime_paths)
     )
@@ -860,6 +858,8 @@ def is_administrator(matrix_user_id: str | None, snapshot: config_lifecycle.ApiS
 
 def _require_connections_route_authorized(request: Request, auth_user: AuthUser) -> None:
     """Keep trusted personal users outside administrator routes while `MINDROOM_CONNECTIONS_AGENT` is set."""
+    if not _request_auth_state(request).settings.trusted_upstream.enabled:
+        return
     snapshot = config_lifecycle.bind_current_request_snapshot(request)
     if not _env_text(snapshot.runtime_paths, "MINDROOM_CONNECTIONS_AGENT"):
         return
@@ -1005,10 +1005,7 @@ async def _require_signed_matrix_user(request: Request, *, label: str) -> Signed
     if not settings.enabled:
         raise HTTPException(status_code=403, detail=f"{label} require trusted signed authentication")
     auth_user = await _trusted_upstream_auth_user(request, settings, auth_state.trusted_upstream_jwt_client)
-    if (
-        not isinstance(auth_user, SignedMatrixUser)
-        or try_parse_historical_matrix_user_id(auth_user.matrix_user_id) is None
-    ):
+    if not isinstance(auth_user, SignedMatrixUser):
         raise HTTPException(status_code=403, detail=f"{label} require a verified Matrix identity")
     return bind_request_auth_user(request, auth_user)
 
@@ -1116,8 +1113,7 @@ async def authenticate_user(request: Request, authorization: str | None = Header
 async def verify_user(request: Request, authorization: str | None = Header(None)) -> AuthUser:
     """Authenticate a dashboard request and enforce its route access policy."""
     auth_user = await authenticate_user(request, authorization)
-    if _request_auth_state(request).settings.trusted_upstream.enabled:
-        _require_connections_route_authorized(request, auth_user)
+    _require_connections_route_authorized(request, auth_user)
     return auth_user
 
 

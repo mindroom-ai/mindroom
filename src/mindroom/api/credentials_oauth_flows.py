@@ -56,12 +56,13 @@ def issue_pending_oauth_state(
     tells how the flow ended. `credential_service` is the name the callback stores the connection under instead of the
     provider's own, for an Agent Keys service's own account.
     """
-    auth_user = require_request_auth_user(request) if browser_user_required else None
     if browser_user_required:
+        auth_user = require_request_auth_user(request)
         execution_scope_override_provided, execution_scope_override = resolve_dashboard_execution_scope_override(
             request,
         )
     else:
+        auth_user = None
         execution_scope_override_provided, execution_scope_override = False, None
     runtime_paths = config_lifecycle.bind_current_request_snapshot(request).runtime_paths
     return issue_opaque_oauth_state(

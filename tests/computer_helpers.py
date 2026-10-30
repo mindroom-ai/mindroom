@@ -142,7 +142,7 @@ def computer_app(peer: ComputerPeer, tmp_path: Path) -> FastAPI:
         state = config_lifecycle.ensure_app_state(app)
         state.api_state = config_lifecycle.ApiState(
             threading.Lock(),
-            config_lifecycle.ApiSnapshot(1, paths, config.model_dump(), runtime_config=config),
+            config_lifecycle.ApiSnapshot(1, paths, runtime_config=config),
         )
         state.computer_sessions = ComputerSessionStore(clock=lambda: peer.now, capacity=2)
 

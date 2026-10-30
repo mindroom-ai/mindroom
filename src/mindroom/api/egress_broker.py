@@ -333,10 +333,7 @@ async def disconnect_service_account(
     Raises 404 like the connect route, and 409 where the scope's sandbox is shared by several requesters.
     """
     *_scope, provider = _config_service_provider(request, name, agent_name, connecting=False)
-    return await oauth.reset_connection(
-        request,
-        oauth.dashboard_oauth_context(request, provider.id, agent_name=agent_name),
-    )
+    return await oauth.reset_connection(request, provider.id, agent_name=agent_name)
 
 
 @router.put("/services/{name}/oauth-reuse", status_code=204)

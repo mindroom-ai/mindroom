@@ -32,8 +32,8 @@ if TYPE_CHECKING:
 class ConfigComposedFromIncludesError(ConfigRuntimeValidationError):
     """A structured write would replace a config composed from include files with one flat file."""
 
-
-_COMPOSED_FROM_INCLUDES_MESSAGE = "configuration uses !include; edit the source files instead"
+    def __init__(self) -> None:
+        super().__init__("configuration uses !include; edit the source files instead")
 
 
 @dataclass(frozen=True)
@@ -119,9 +119,9 @@ def _raise_when_composed_from_includes(runtime_paths: RuntimePaths, committed_us
     Empty included directories need the same protection as populated ones.
     """
     if committed_uses_includes:
-        raise ConfigComposedFromIncludesError(_COMPOSED_FROM_INCLUDES_MESSAGE)
+        raise ConfigComposedFromIncludesError
     try:
-        _, _source_digests, uses_includes = load_yaml_config_source_with_digests(runtime_paths.config_path)
+        _, _, uses_includes = load_yaml_config_source_with_digests(runtime_paths.config_path)
     except CONFIG_LOAD_USER_ERROR_TYPES as exc:
         uses_includes = partial_source_uses_includes(exc)
         if uses_includes is None and not isinstance(exc, FileNotFoundError):
@@ -130,7 +130,7 @@ def _raise_when_composed_from_includes(runtime_paths: RuntimePaths, committed_us
             msg = "could not determine whether configuration uses !include; edit the source files instead"
             raise ConfigRuntimeValidationError(msg) from exc
     if uses_includes:
-        raise ConfigComposedFromIncludesError(_COMPOSED_FROM_INCLUDES_MESSAGE)
+        raise ConfigComposedFromIncludesError
 
 
 def _raise_when_roster_names_collide(runtime_paths: RuntimePaths, authored_payload: dict[str, Any]) -> None:

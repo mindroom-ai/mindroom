@@ -724,7 +724,12 @@ async def disconnect_egress_account(
         connecting=False,
     )
     return await masked_oauth_call(
-        _reset_account(request, agent_name, provider, _account_credential_service(egress_service, provider)),
+        oauth.reset_connection(
+            request,
+            provider.id,
+            agent_name=agent_name,
+            credential_service=_account_credential_service(egress_service, provider),
+        ),
         "Could not disconnect account",
     )
 
@@ -732,21 +737,6 @@ async def disconnect_egress_account(
 def _account_credential_service(egress_service: EgressService, provider: OAuthProvider) -> str | None:
     """A service's own account is stored under its own name; the tools' connection keeps the provider's."""
     return provider.credential_service if egress_service.oauth_separate_account else None
-
-
-async def _reset_account(
-    request: Request,
-    agent_name: str,
-    provider: OAuthProvider,
-    credential_service: str | None,
-) -> dict[str, str]:
-    context = oauth.dashboard_oauth_context(
-        request,
-        provider.id,
-        agent_name=agent_name,
-        credential_service=credential_service,
-    )
-    return await oauth.reset_connection(request, context)
 
 
 @router.put("/agents/{agent_name}/{service}/oauth-reuse", status_code=204)

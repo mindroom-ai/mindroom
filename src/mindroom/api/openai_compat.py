@@ -391,8 +391,6 @@ def _api_key_requester(token: str, runtime_paths: RuntimePaths) -> JSONResponse 
 def _parse_chat_request(
     request: Request,
     body: bytes,
-    *,
-    runtime_paths: RuntimePaths | None = None,
 ) -> tuple[ChatCompletionRequest, Config, RuntimePaths, str, list[ResolvedVisibleMessage] | None] | JSONResponse:
     """Parse and validate a chat completion request body.
 
@@ -617,7 +615,7 @@ async def chat_completions(
     if isinstance(caller, JSONResponse):
         return caller
 
-    parsed = _parse_chat_request(request, await request.body(), runtime_paths=runtime_paths)
+    parsed = _parse_chat_request(request, await request.body())
     if isinstance(parsed, JSONResponse):
         return parsed
     req, config, runtime_paths, prompt, thread_history = parsed

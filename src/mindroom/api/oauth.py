@@ -23,7 +23,7 @@ from mindroom.api.auth import (
     oauth_callback_hostname,
     verify_user,
 )
-from mindroom.api.auth_user import AuthUser  # noqa: TC001 - FastAPI resolves route annotations.
+from mindroom.api.auth_user import AuthSource, AuthUser
 from mindroom.api.credentials_oauth_flows import (
     consume_pending_oauth_request,
     issue_pending_oauth_state,
@@ -121,7 +121,6 @@ _OAUTH_BROWSER_SECURITY_HEADERS = {
     "Cache-Control": "no-store",
     "Referrer-Policy": "no-referrer",
 }
-# Only shared credentials permit delegation through a single-use capability.
 
 
 class OAuthConnectResponse(BaseModel):
@@ -1025,9 +1024,13 @@ async def reset_and_authorize(
 
 
 @router.get("/{provider_id}/success", response_class=HTMLResponse)
-async def success(provider_id: str, request: Request, opener_origin: str | None = None) -> HTMLResponse:
+async def success(
+    provider_id: str,
+    request: Request,
+    _user: Annotated[AuthUser, Depends(verify_user)],
+    opener_origin: str | None = None,
+) -> HTMLResponse:
     """Signal OAuth completion to the dashboard popup opener, at `opener_origin` when it is an allowed origin."""
-    await _require_oauth_api_user(request)
     provider, runtime_paths = _load_provider(request, provider_id)
     return _oauth_success_response(provider, _validated_opener_origin(opener_origin, provider, runtime_paths))
 
@@ -1172,7 +1175,7 @@ async def _handle_callback(provider_id: str, request: Request, notice: _OpenerNo
     if issuing_auth_source is not None:
         # Finish under the identity that started the flow, even if the browser holds both a dashboard login
         # and a Connections session.
-        if issuing_auth_source == "matrix_openid":
+        if issuing_auth_source == AuthSource.MATRIX_OPENID:
             allow_connections_session_for_oauth_callback(request)
         await _require_oauth_api_user(request)
     try:
@@ -1339,11 +1342,26 @@ async def disconnect(
     agent_name: str | None = None,
 ) -> dict[str, str]:
     """Remove scoped OAuth credentials for one provider while preserving tool settings."""
-    return await reset_connection(request, dashboard_oauth_context(request, provider_id, agent_name=agent_name))
+    return await reset_connection(request, provider_id, agent_name=agent_name)
 
 
-async def reset_connection(request: Request, context: OAuthCredentialContext) -> dict[str, str]:
-    """Remove the connection an authorized request resolved, keeping the tool settings."""
+async def reset_connection(
+    request: Request,
+    provider_id: str,
+    *,
+    agent_name: str | None,
+    credential_service: str | None = None,
+) -> dict[str, str]:
+    """Remove the connection an authorized request's login manages for one provider, keeping the tool settings.
+
+    The connection is the one stored under `credential_service` when given (Agent Keys).
+    """
+    context = dashboard_oauth_context(
+        request,
+        provider_id,
+        agent_name=agent_name,
+        credential_service=credential_service,
+    )
     provider = context.provider
     config = config_lifecycle.last_good_runtime_config(request)
     try:

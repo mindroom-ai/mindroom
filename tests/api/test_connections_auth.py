@@ -478,7 +478,7 @@ def test_oauth_and_connections_routes_are_untouched_by_the_html_redirect(
     connections_auth_client: Callable[..., TestClient],
     signed_connections_headers: Callable[[str], dict[str, str]],
 ) -> None:
-    """Callback, success, and reset routes behave as before for a browser request."""
+    """Callback, success, and reset routes answer a browser request without the administrator-page redirect."""
     headers = {**signed_connections_headers("alice"), **_BROWSER_ACCEPT}
     response = connections_auth_client().get(path, headers=headers, follow_redirects=False)
     assert response.status_code == 200

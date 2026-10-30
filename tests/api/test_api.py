@@ -596,7 +596,6 @@ def test_initialize_api_app_initializes_fresh_app_state(tmp_path: Path) -> None:
     assert main._app_runtime_paths(fresh_app) == runtime_paths
     assert main._app_context(fresh_app).runtime_config is None
     assert hasattr(config_lifecycle.require_api_state(fresh_app).config_lock, "acquire")
-    assert auth._app_auth_state(fresh_app, runtime_paths).runtime_paths == runtime_paths
 
 
 def test_app_auth_state_refreshes_after_runtime_swap(tmp_path: Path) -> None:
@@ -1417,9 +1416,6 @@ def test_cleanup_workers_endpoint_runs_the_backend_maintenance_pass_off_the_even
 
     class _MaintainingManager:
         idle_timeout_seconds = 60.0
-
-        def touch_worker(self, _worker_key: str) -> None:
-            pass
 
         def cleanup_idle_workers(self) -> list[WorkerHandle]:
             msg = "The manual pass must run the backend's maintenance, not only idle cleanup"

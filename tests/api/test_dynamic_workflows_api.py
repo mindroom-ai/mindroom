@@ -10,7 +10,7 @@ from starlette.requests import Request
 
 from mindroom import constants
 from mindroom.api import config_lifecycle, main
-from mindroom.api.auth_user import AuthSource, AuthUser
+from mindroom.api.auth_user import AuthSource, AuthUser, bind_request_auth_user
 from mindroom.api.dynamic_workflows import _authorize_private_report_request
 from mindroom.dynamic_workflows.service import DynamicWorkflowService
 from mindroom.dynamic_workflows.store import DynamicWorkflowStore
@@ -206,9 +206,9 @@ def test_private_dynamic_workflow_report_accepts_standalone_owner_matrix_user(te
             "path": f"/reports/private/agent/general/competitor-research-report/{run.run_id}",
             "query_string": b"",
             "headers": [],
-            "auth_user": AuthUser(user_id="standalone", email=None, source=AuthSource.STANDALONE),
         },
     )
+    bind_request_auth_user(request, AuthUser(user_id="standalone", email=None, source=AuthSource.STANDALONE))
 
     _authorize_private_report_request(request, run, owner_runtime_paths)
 

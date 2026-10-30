@@ -7,7 +7,7 @@ import weakref
 from contextlib import ExitStack
 from dataclasses import dataclass, field, replace
 from enum import Enum, auto
-from typing import TYPE_CHECKING, Any, NoReturn
+from typing import TYPE_CHECKING, Any
 
 from fastapi import FastAPI, HTTPException, Request
 
@@ -19,7 +19,7 @@ from mindroom.config.load_attempt import (
     config_error_detail,
     load_config_attempt,
 )
-from mindroom.config.main import CONFIG_LOAD_USER_ERROR_TYPES, Config
+from mindroom.config.main import CONFIG_LOAD_USER_ERROR_TYPES, Config, ConfigRuntimeValidationError
 from mindroom.event_journal.opening import pending_event_journal_restart
 from mindroom.knowledge.status import reconcile_knowledge_mode_transition_states
 from mindroom.logging_config import get_logger
@@ -160,21 +160,6 @@ def require_api_state(api_app: FastAPI) -> ApiState:
     return api_state
 
 
-def _raise_for_config_load_result(result: ConfigLoadResult | None) -> None:
-    """Raise HTTPException when the cached config state reflects a failed load."""
-    if result is None or result.success:
-        return
-    raise HTTPException(
-        status_code=result.error_status_code or 500,
-        detail=result.error_detail or "Failed to load configuration",
-    )
-
-
-def _raise_missing_loaded_config() -> NoReturn:
-    """Raise the shared missing-config HTTP error used by cached API reads and writes."""
-    raise HTTPException(status_code=500, detail="Failed to load configuration")
-
-
 _CONFIG_COMPOSED_FROM_INCLUDES_ERROR_CODE = "config_composed_from_includes"
 
 
@@ -224,9 +209,9 @@ def bind_current_request_snapshot(request: Request) -> ApiSnapshot:
     existing = request_snapshot(request)
     if existing is not None:
         return existing
-    app_state = require_api_state(request.app)
-    with app_state.config_lock:
-        return _store_request_snapshot(request, app_state.snapshot)
+    state = require_api_state(request.app)
+    with state.config_lock:
+        return _store_request_snapshot(request, state.snapshot)
 
 
 def rebind_current_request_snapshot(request: Request) -> ApiSnapshot:
@@ -234,9 +219,9 @@ def rebind_current_request_snapshot(request: Request) -> ApiSnapshot:
 
     A request whose app moved to another runtime meanwhile is stale: its auth state names the old one.
     """
-    app_state = require_api_state(request.app)
-    with app_state.config_lock:
-        current = app_state.snapshot
+    state = require_api_state(request.app)
+    with state.config_lock:
+        current = state.snapshot
     pinned = request_snapshot(request)
     if pinned is not None and pinned.runtime_paths != current.runtime_paths:
         raise _stale_snapshot_error()
@@ -321,12 +306,20 @@ def commit_dashboard_config(
     if expected_generation is not None and pinned.generation != expected_generation:
         raise _stale_snapshot_error()
     try:
-        published = _commit(pinned.runtime_paths, build(pinned.runtime_paths), loaded=None, writer=(state, pinned))
+        commit = build(pinned.runtime_paths)
+    except HTTPException:
+        raise
+    except CONFIG_LOAD_USER_ERROR_TYPES as exc:
+        raise HTTPException(status_code=422, detail=config_error_detail(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Failed to save configuration: {exc!s}") from exc
+    try:
+        published = _commit(pinned.runtime_paths, commit, loaded=None, writer=(state, pinned))
     except HTTPException:
         raise
     except ConfigComposedFromIncludesError as exc:
         raise _composed_from_includes_http_error(exc) from exc
-    except CONFIG_LOAD_USER_ERROR_TYPES as exc:
+    except ConfigRuntimeValidationError as exc:
         raise HTTPException(status_code=422, detail=config_error_detail(exc)) from exc
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"Failed to save configuration: {exc!s}") from exc
@@ -365,7 +358,7 @@ def _commit(
             loaded=loaded,
             committed_uses_includes=any(state.snapshot.uses_includes for state in targets),
         )
-        transitions = [(state.snapshot.runtime_config, commit.config) for state in targets]
+        previous_configs = [state.snapshot.runtime_config for state in targets]
         for state in targets:
             state.snapshot = _published_snapshot(
                 state.snapshot,
@@ -376,17 +369,18 @@ def _commit(
                 uses_includes=commit.config.uses_includes,
             )
         published = writer[0].snapshot if writer is not None else None
-    _reconcile_knowledge_modes(transitions, runtime_paths)
+    _reconcile_knowledge_modes(previous_configs, commit.config, runtime_paths)
     return published
 
 
 def _reconcile_knowledge_modes(
-    transitions: list[tuple[Config | None, Config]],
+    previous_configs: list[Config | None],
+    current: Config,
     runtime_paths: constants.RuntimePaths,
 ) -> None:
-    """Mark semantic indexes stale for each published config that moved a knowledge base across modes."""
+    """Mark semantic indexes stale where `current` moved a knowledge base across modes from a config it replaced."""
     seen: set[int] = set()
-    for previous, current in transitions:
+    for previous in previous_configs:
         if previous is None or previous is current or id(previous) in seen:
             continue
         seen.add(id(previous))
@@ -434,15 +428,20 @@ def load_config_into_app(runtime_paths: constants.RuntimePaths, api_app: FastAPI
             uses_includes=published_uses_includes,
         )
     if attempt.config is not None:
-        _reconcile_knowledge_modes([(current.runtime_config, attempt.config)], runtime_paths)
+        _reconcile_knowledge_modes([current.runtime_config], attempt.config, runtime_paths)
     return attempt
 
 
 def _loaded_runtime_config(snapshot: ApiSnapshot) -> tuple[Config, constants.RuntimePaths]:
     """Return the snapshot's validated runtime config and runtime, or raise its load failure or the missing-config error."""
-    _raise_for_config_load_result(snapshot.config_load_result)
+    result = snapshot.config_load_result
+    if result is not None and not result.success:
+        raise HTTPException(
+            status_code=result.error_status_code or 500,
+            detail=result.error_detail or "Failed to load configuration",
+        )
     if snapshot.runtime_config is None:
-        _raise_missing_loaded_config()
+        raise HTTPException(status_code=500, detail="Failed to load configuration")
     return snapshot.runtime_config, snapshot.runtime_paths
 
 

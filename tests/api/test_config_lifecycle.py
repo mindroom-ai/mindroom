@@ -475,8 +475,8 @@ class TestFileWatcherReload:
 class TestExternalWriterPublishing:
     """External config writers publishing into registered API apps."""
 
-    def test_validate_and_persist_publishes_to_registered_apps(self, loaded_app: FastAPI) -> None:
-        """validate_and_persist_config_payload advances every matching registered app snapshot."""
+    def test_tool_commit_publishes_to_registered_apps(self, loaded_app: FastAPI) -> None:
+        """A tool's commit advances every matching registered app snapshot."""
         before = _snapshot(loaded_app)
         payload = copy.deepcopy(VALID_CONFIG)
         payload["agents"]["test_agent"]["role"] = "Updated by an external writer"
@@ -600,3 +600,11 @@ class TestConcurrencySmoke:
         on_disk = yaml.safe_load(after.runtime_paths.config_path.read_text(encoding="utf-8"))
         assert on_disk == after.runtime_config.authored_model_dump()
         assert after.config_load_result == config_lifecycle.ConfigLoadResult(success=True)
+
+
+def test_reads_require_an_initialized_app() -> None:
+    """A committed-config read fails fast on an app MindRoom never initialized."""
+    request = Request({"type": "http", "app": type("_App", (), {"state": type("_State", (), {})()})()})
+
+    with pytest.raises(TypeError, match="MindRoom app state is not initialized"):
+        config_lifecycle.read_committed_runtime_config(request)

@@ -912,7 +912,7 @@ class TestStructuredWritesRejected:
         assert "!include" in detail["message"]
         assert runtime_paths.config_path.read_text(encoding="utf-8") == top_before
 
-    def test_replace_committed_config_is_rejected_with_409(self, split_app: FastAPI) -> None:
+    def test_dashboard_structured_save_is_rejected_with_409(self, split_app: FastAPI) -> None:
         """Whole-config structured replacement returns 409 for include-based configs."""
         replacement = copy.deepcopy(_snapshot(split_app).runtime_config.authored_model_dump())
         replacement["agents"]["test_agent"]["role"] = "Flattened"
@@ -944,7 +944,7 @@ class TestStructuredWritesRejected:
         assert runtime_paths.config_path.read_text(encoding="utf-8") == SPLIT_TOP_SOURCE
 
     def test_external_writer_persist_is_rejected(self, split_app: FastAPI) -> None:
-        """validate_and_persist_config_payload raises the include-aware config error."""
+        """A tool commit raises the include-aware config error."""
         snapshot = _snapshot(split_app)
         payload = copy.deepcopy(snapshot.runtime_config.authored_model_dump())
         top_before = snapshot.runtime_paths.config_path.read_text(encoding="utf-8")

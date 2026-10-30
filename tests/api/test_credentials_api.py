@@ -12,7 +12,7 @@ from fastapi.testclient import TestClient
 import mindroom.credentials.manager as credential_runtime
 from mindroom import constants
 from mindroom.api import config_lifecycle, credentials_oauth_policy, credentials_target, main
-from mindroom.api.auth_user import AuthSource, AuthUser
+from mindroom.api.auth_user import AuthSource, AuthUser, bind_request_auth_user
 from mindroom.api.main import app, initialize_api_app
 from mindroom.config.main import Config
 from mindroom.credentials.manager import get_runtime_credentials_manager
@@ -1638,9 +1638,9 @@ class TestCredentialsAPI:
                 "app": app,
                 "headers": [],
                 "query_string": b"",
-                "auth_user": AuthUser(user_id="dashboard-user", email=None, source=AuthSource.PLATFORM),
             },
         )
+        bind_request_auth_user(request, AuthUser(user_id="dashboard-user", email=None, source=AuthSource.PLATFORM))
         config = _config_with_worker_scope("shared", worker_grantable_credentials=["weather"])
         base_manager = credential_runtime.CredentialsManager(runtime_a.storage_root / "credentials")
         base_manager.save_credentials("weather", {"api_key": "original-shared-key"})

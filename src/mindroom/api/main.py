@@ -19,7 +19,7 @@ from mindroom.agent_policy import PolicyInputs, build_agent_policy_seeds, resolv
 from mindroom.agent_reply_membership import AgentReplyMembershipIndex
 from mindroom.api import config_lifecycle
 from mindroom.api.agent_cli import router as agent_cli_router
-from mindroom.api.auth import ApiAuthState, authenticate_user, dashboard_cors_origins, verify_user  # noqa: F401
+from mindroom.api.auth import authenticate_user, dashboard_cors_origins, verify_user
 from mindroom.api.auth import router as auth_router
 from mindroom.api.auth_user import AuthUser  # noqa: TC001 - FastAPI resolves route annotations.
 from mindroom.api.budgets import router as budgets_router
@@ -232,7 +232,7 @@ def _cleanup_workers_once(
     touch_live_workers: Callable[[WorkerBackend], None] | None = None,
     computer_worker_keys: frozenset[str] = frozenset(),
 ) -> int:
-    """Run one idle-worker cleanup pass when a backend is configured."""
+    """Run one worker maintenance pass when a backend is configured; return how many idle workers it cleaned."""
     worker_lease = lease_configured_primary_worker_manager(runtime_paths)
     if worker_lease is None:
         return 0
@@ -995,7 +995,7 @@ async def delete_team(
 @app.get("/api/config/models")
 async def get_models(request: Request, _user: Annotated[AuthUser, Depends(verify_user)]) -> dict[str, Any]:
     """Get all model configurations."""
-    return dict(_authored_config(request).get("models") or {})
+    return _authored_config(request).get("models") or {}
 
 
 @app.put("/api/config/models/{model_id}")
@@ -1017,7 +1017,7 @@ async def update_model(
 @app.get("/api/config/room-models")
 async def get_room_models(request: Request, _user: Annotated[AuthUser, Depends(verify_user)]) -> dict[str, Any]:
     """Get room-specific model overrides."""
-    return dict(_authored_config(request).get("room_models") or {})
+    return _authored_config(request).get("room_models") or {}
 
 
 @app.put("/api/config/room-models")

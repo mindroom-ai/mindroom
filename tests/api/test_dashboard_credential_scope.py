@@ -6,7 +6,7 @@ import pytest
 from fastapi import FastAPI, HTTPException, Request
 
 from mindroom.api import config_lifecycle
-from mindroom.api.auth_user import AuthSource, AuthUser, SignedMatrixUser
+from mindroom.api.auth_user import AuthSource, AuthUser, SignedMatrixUser, bind_request_auth_user
 from mindroom.api.dashboard_credential_scope import (
     require_agent_credential_management_authorized,
     require_agent_oauth_connection_authorized,
@@ -29,9 +29,10 @@ def _request(auth_user: AuthUser | None = None, query_string: bytes = b"") -> Re
         "query_string": query_string,
         "app": app,
     }
+    request = Request(scope)
     if auth_user is not None:
-        scope["auth_user"] = auth_user
-    return Request(scope)
+        bind_request_auth_user(request, auth_user)
+    return request
 
 
 def _trusted_user(user_id: str, matrix_user_id: str) -> SignedMatrixUser:

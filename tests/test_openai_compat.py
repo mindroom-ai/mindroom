@@ -9,7 +9,7 @@ import json
 import re
 import tempfile
 from concurrent.futures import CancelledError as FutureCancelledError
-from contextlib import contextmanager, suppress
+from contextlib import AbstractContextManager, contextmanager, suppress
 from contextvars import Context
 from dataclasses import dataclass, replace
 from pathlib import Path
@@ -103,6 +103,15 @@ from tests.turn_model_helpers import turn_model
 
 _QUEUED_NOTICE_MARKER_KEY = "mindroom_queued_message_notice"
 _QUEUED_NOTICE_RESPONSE_TURN_ID_KEY = "mindroom_queued_message_notice_response_turn_id"
+
+
+def _committed_config(config: Config, runtime_paths: RuntimePaths) -> AbstractContextManager[object]:
+    """Serve `config` as the committed config every OpenAI-compatible route reads."""
+    return patch.object(
+        openai_compat.config_lifecycle,
+        "read_committed_runtime_config",
+        return_value=(config, runtime_paths),
+    )
 
 
 def _runtime_paths(process_env: dict[str, str] | None = None) -> RuntimePaths:
@@ -304,11 +313,7 @@ def app_client(test_config: Config) -> Iterator[TestClient]:
     initialize_api_app(app, runtime_paths)
 
     with (
-        patch.object(
-            openai_compat.config_lifecycle,
-            "read_committed_runtime_config",
-            return_value=(test_config, runtime_paths),
-        ),
+        _committed_config(test_config, runtime_paths),
         TestClient(app, base_url="http://localhost") as client,
     ):
         yield client
@@ -328,52 +333,10 @@ def authed_client(test_config: Config) -> Iterator[TestClient]:
     initialize_api_app(app, runtime_paths)
 
     with (
-        patch.object(
-            openai_compat.config_lifecycle,
-            "read_committed_runtime_config",
-            return_value=(test_config, runtime_paths),
-        ),
+        _committed_config(test_config, runtime_paths),
         TestClient(app) as client,
     ):
         yield client
-
-
-def test_load_config_uses_dynamic_runtime_config_path(
-    tmp_path: Path,
-) -> None:
-    """OpenAI-compatible config loading should follow the active runtime config path."""
-    config_path = tmp_path / "alt-config.yaml"
-    config_path.write_text(
-        "models:\n  default:\n    provider: openai\n    id: gpt-6-astra\n"
-        "agents:\n  only_alt:\n    display_name: OnlyAlt\n    role: alt\n    rooms: []\n"
-        "router:\n  model: default\n",
-        encoding="utf-8",
-    )
-    runtime_paths = constants.resolve_runtime_paths(config_path=config_path)
-    from fastapi import FastAPI  # noqa: PLC0415
-
-    app = FastAPI()
-    initialize_api_app(app, runtime_paths)
-    assert openai_compat.config_lifecycle.load_config_into_app(runtime_paths, app).loaded
-    request = Request({"type": "http", "app": app})
-
-    config, resolved_runtime_paths = openai_compat.config_lifecycle.read_committed_runtime_config(request)
-
-    assert resolved_runtime_paths.config_path == config_path.resolve()
-    assert "only_alt" in config.agents
-
-
-def test_load_config_requires_runtime_paths() -> None:
-    """OpenAI-compatible config loading should fail fast without app runtime paths."""
-    request = Request(
-        {
-            "type": "http",
-            "app": type("_App", (), {"state": type("_State", (), {})()})(),
-        },
-    )
-
-    with pytest.raises(TypeError, match="MindRoom app state is not initialized"):
-        openai_compat.config_lifecycle.read_committed_runtime_config(request)
 
 
 def test_list_models_uses_committed_snapshot_until_reload(tmp_path: Path) -> None:
@@ -452,7 +415,7 @@ def test_list_models_keeps_auth_runtime_bound_across_runtime_swap(test_config: C
         initialize_api_app(app, runtime_b)
         return openai_compat._AuthenticatedCaller(session_namespace="old-key-namespace", requester_id=None)
 
-    def _capture_load_config(request: Request) -> tuple[Config, RuntimePaths]:
+    def _capture_config_read(request: Request) -> tuple[Config, RuntimePaths]:
         runtime_paths = openai_compat.config_lifecycle.api_runtime_paths(request)
         captured_runtime_paths.append(runtime_paths)
         return test_config, runtime_paths
@@ -462,7 +425,7 @@ def test_list_models_keeps_auth_runtime_bound_across_runtime_swap(test_config: C
         patch.object(
             openai_compat.config_lifecycle,
             "read_committed_runtime_config",
-            side_effect=_capture_load_config,
+            side_effect=_capture_config_read,
         ),
         TestClient(app) as client,
     ):
@@ -722,10 +685,10 @@ def test_chat_completions_keeps_auth_runtime_bound_across_runtime_swap(tmp_path:
         initialize_api_app(app, runtime_b)
         return openai_compat._AuthenticatedCaller(session_namespace="old-key-namespace", requester_id=None)
 
-    real_load_config = openai_compat.config_lifecycle.read_committed_runtime_config
+    real_config_read = openai_compat.config_lifecycle.read_committed_runtime_config
 
-    def _capture_load_config(request: Request) -> tuple[Config, RuntimePaths]:
-        config, runtime_paths = real_load_config(request)
+    def _capture_config_read(request: Request) -> tuple[Config, RuntimePaths]:
+        config, runtime_paths = real_config_read(request)
         captured_runtime_paths.append(runtime_paths)
         return config, runtime_paths
 
@@ -734,7 +697,7 @@ def test_chat_completions_keeps_auth_runtime_bound_across_runtime_swap(tmp_path:
         patch.object(
             openai_compat.config_lifecycle,
             "read_committed_runtime_config",
-            side_effect=_capture_load_config,
+            side_effect=_capture_config_read,
         ),
         patch(
             "mindroom.api.openai_compat._non_stream_completion",
@@ -959,11 +922,7 @@ class TestListModels:
         initialize_api_app(app, runtime_paths)
 
         with (
-            patch.object(
-                openai_compat.config_lifecycle,
-                "read_committed_runtime_config",
-                return_value=(test_config, runtime_paths),
-            ),
+            _committed_config(test_config, runtime_paths),
             TestClient(app, base_url="http://localhost") as client,
         ):
             response = client.get("/v1/models")
@@ -989,11 +948,7 @@ class TestListModels:
         initialize_api_app(app, runtime_paths)
 
         with (
-            patch.object(
-                openai_compat.config_lifecycle,
-                "read_committed_runtime_config",
-                return_value=(test_config, runtime_paths),
-            ),
+            _committed_config(test_config, runtime_paths),
             TestClient(app, base_url="http://localhost") as client,
         ):
             response = client.get("/v1/models")
@@ -1019,11 +974,7 @@ class TestListModels:
         initialize_api_app(app, runtime_paths)
 
         with (
-            patch.object(
-                openai_compat.config_lifecycle,
-                "read_committed_runtime_config",
-                return_value=(test_config, runtime_paths),
-            ),
+            _committed_config(test_config, runtime_paths),
             TestClient(app, base_url="http://localhost") as client,
         ):
             response = client.get("/v1/models")
@@ -1073,11 +1024,7 @@ class TestListModels:
             router=RouterConfig(model="default"),
         )
         with (
-            patch.object(
-                openai_compat.config_lifecycle,
-                "read_committed_runtime_config",
-                return_value=(empty_config, runtime_paths),
-            ),
+            _committed_config(empty_config, runtime_paths),
             TestClient(app, base_url="http://localhost") as client,
         ):
             response = client.get("/v1/models")
@@ -1345,11 +1292,7 @@ class TestChatCompletions:
 
         install_model_providers(monkeypatch, {"default": ScriptedModel([answer("Agent reply")])})
         with (
-            patch.object(
-                openai_compat.config_lifecycle,
-                "read_committed_runtime_config",
-                return_value=(config, runtime_paths),
-            ),
+            _committed_config(config, runtime_paths),
             patch("mindroom.ai.build_memory_prompt_parts", new=AsyncMock(return_value=MemoryPromptParts())),
             TestClient(app, base_url="http://localhost") as client,
         ):
@@ -1398,11 +1341,7 @@ class TestChatCompletions:
         model = ScriptedModel([[TextDelta("Checking."), Await(lose_the_provider)]])
         install_model_providers(monkeypatch, {"default": model})
         with (
-            patch.object(
-                openai_compat.config_lifecycle,
-                "read_committed_runtime_config",
-                return_value=(config, runtime_paths),
-            ),
+            _committed_config(config, runtime_paths),
             patch("mindroom.ai.build_memory_prompt_parts", new=AsyncMock(return_value=MemoryPromptParts())),
             TestClient(app, base_url="http://localhost") as client,
             capture_logs() as logs,
@@ -1461,11 +1400,7 @@ class TestChatCompletions:
 
         install_model_providers(monkeypatch, {"default": ScriptedModel([[Await(no_key)]])})
         with (
-            patch.object(
-                openai_compat.config_lifecycle,
-                "read_committed_runtime_config",
-                return_value=(config, runtime_paths),
-            ),
+            _committed_config(config, runtime_paths),
             patch("mindroom.ai.build_memory_prompt_parts", new=AsyncMock(return_value=MemoryPromptParts())),
             TestClient(app, base_url="http://localhost") as client,
         ):
@@ -1540,11 +1475,7 @@ class TestChatCompletions:
         initialize_api_app(app, runtime_paths)
 
         with (
-            patch.object(
-                openai_compat.config_lifecycle,
-                "read_committed_runtime_config",
-                return_value=(test_config, runtime_paths),
-            ),
+            _committed_config(test_config, runtime_paths),
             TestClient(app, base_url="http://localhost") as client,
         ):
             response = client.post(
@@ -1582,11 +1513,7 @@ class TestChatCompletions:
         initialize_api_app(app, runtime_paths)
 
         with (
-            patch.object(
-                openai_compat.config_lifecycle,
-                "read_committed_runtime_config",
-                return_value=(test_config, runtime_paths),
-            ),
+            _committed_config(test_config, runtime_paths),
             TestClient(app, base_url="http://localhost") as client,
         ):
             response = client.post(
@@ -1618,11 +1545,7 @@ class TestChatCompletions:
         initialize_api_app(app, runtime_paths)
 
         with (
-            patch.object(
-                openai_compat.config_lifecycle,
-                "read_committed_runtime_config",
-                return_value=(test_config, runtime_paths),
-            ),
+            _committed_config(test_config, runtime_paths),
             TestClient(app, base_url="http://localhost") as client,
         ):
             response = client.post(
@@ -1654,11 +1577,7 @@ class TestChatCompletions:
         initialize_api_app(app, runtime_paths)
 
         with (
-            patch.object(
-                openai_compat.config_lifecycle,
-                "read_committed_runtime_config",
-                return_value=(test_config, runtime_paths),
-            ),
+            _committed_config(test_config, runtime_paths),
             TestClient(app, base_url="http://localhost") as client,
         ):
             response = client.post(
@@ -1881,11 +1800,7 @@ def _post_to_a_real_turn(
     initialize_api_app(app, runtime_paths)
     install_model_providers(monkeypatch, {"default": ScriptedModel([list(script)])})
     with (
-        patch.object(
-            openai_compat.config_lifecycle,
-            "read_committed_runtime_config",
-            return_value=(config, runtime_paths),
-        ),
+        _committed_config(config, runtime_paths),
         patch("mindroom.ai.build_memory_prompt_parts", new=AsyncMock(return_value=MemoryPromptParts())),
         TestClient(app, base_url="http://localhost") as client,
     ):
@@ -2478,11 +2393,7 @@ class TestAuthentication:
         )
         initialize_api_app(app, runtime_paths)
         with (
-            patch.object(
-                openai_compat.config_lifecycle,
-                "read_committed_runtime_config",
-                return_value=(test_config, runtime_paths),
-            ),
+            _committed_config(test_config, runtime_paths),
             TestClient(app) as client,
         ):
             response = client.get("/v1/models")
@@ -3464,11 +3375,7 @@ class TestAutoRouting:
         runtime_paths = _runtime_paths({"OPENAI_COMPAT_ALLOW_UNAUTHENTICATED": "true"})
         initialize_api_app(app, runtime_paths)
         with (
-            patch.object(
-                openai_compat.config_lifecycle,
-                "read_committed_runtime_config",
-                return_value=(empty_config, runtime_paths),
-            ),
+            _committed_config(empty_config, runtime_paths),
             patch("mindroom.api.openai_compat.suggest_responder", new_callable=AsyncMock) as mock_route,
             TestClient(app, base_url="http://localhost") as client,
         ):
@@ -3577,11 +3484,7 @@ def team_app_client(team_config: Config) -> Iterator[TestClient]:
     persist_entity_accounts(team_config, runtime_paths)
     initialize_api_app(app, runtime_paths)
     with (
-        patch.object(
-            openai_compat.config_lifecycle,
-            "read_committed_runtime_config",
-            return_value=(team_config, runtime_paths),
-        ),
+        _committed_config(team_config, runtime_paths),
         TestClient(app, base_url="http://localhost") as client,
     ):
         yield client
@@ -3746,11 +3649,7 @@ def test_team_run_uses_mapped_requester_instead_of_request_body_user(team_config
     app.include_router(openai_compat.router)
     initialize_api_app(app, runtime_paths)
     with (
-        patch.object(
-            openai_compat.config_lifecycle,
-            "read_committed_runtime_config",
-            return_value=(team_config, runtime_paths),
-        ),
+        _committed_config(team_config, runtime_paths),
         TestClient(app, base_url="http://localhost") as client,
     ):
         ctx = _post_team_completion_capturing_run_user(
@@ -3787,11 +3686,7 @@ def test_agent_turn_names_the_mapped_keys_requester(test_config: Config, stream:
         yield TextDelta("Response")
 
     with (
-        patch.object(
-            openai_compat.config_lifecycle,
-            "read_committed_runtime_config",
-            return_value=(test_config, runtime_paths),
-        ),
+        _committed_config(test_config, runtime_paths),
         patch("mindroom.api.openai_compat.ai_response", new=completing(respond)),
         patch("mindroom.api.openai_compat.stream_agent_response", new=stream_response),
         TestClient(app, base_url="http://localhost") as client,
@@ -4817,11 +4712,7 @@ class TestTeamCompletion:
         team = _scripted_team(answer("First answer", chunk=99), answer("Second answer", chunk=99), team_id="super_team")
 
         with (
-            patch.object(
-                openai_compat.config_lifecycle,
-                "read_committed_runtime_config",
-                return_value=(team_config, runtime_paths),
-            ),
+            _committed_config(team_config, runtime_paths),
             patch("mindroom.api.openai_compat._build_team", return_value=team),
             _recorded_team_runs() as runs,
             TestClient(app, base_url="http://localhost") as client,
@@ -4885,11 +4776,7 @@ class TestTeamCompletion:
         )
 
         with (
-            patch.object(
-                openai_compat.config_lifecycle,
-                "read_committed_runtime_config",
-                return_value=(team_config, runtime_paths),
-            ),
+            _committed_config(team_config, runtime_paths),
             patch("mindroom.api.openai_compat._build_team", return_value=replace(built, spec=spec)),
             _recorded_team_runs() as runs,
             TestClient(app, base_url="http://localhost") as client,
@@ -5393,11 +5280,7 @@ def knowledge_app_client(knowledge_config: Config) -> Iterator[TestClient]:
     runtime_paths = _runtime_paths({"OPENAI_COMPAT_ALLOW_UNAUTHENTICATED": "true"})
     initialize_api_app(app, runtime_paths)
     with (
-        patch.object(
-            openai_compat.config_lifecycle,
-            "read_committed_runtime_config",
-            return_value=(knowledge_config, runtime_paths),
-        ),
+        _committed_config(knowledge_config, runtime_paths),
         TestClient(app, base_url="http://localhost") as client,
     ):
         yield client
@@ -5458,11 +5341,7 @@ class TestKnowledgeIntegration:
             return _knowledge_lookup(mock_reader, base_id=base_id)
 
         with (
-            patch.object(
-                openai_compat.config_lifecycle,
-                "read_committed_runtime_config",
-                return_value=(knowledge_config, runtime_paths),
-            ),
+            _committed_config(knowledge_config, runtime_paths),
             patch("mindroom.api.openai_compat.ai_response", new_callable=completed_ai_response_mock) as mock_ai,
             patch("mindroom.knowledge.utils._lookup_knowledge_for_base", side_effect=fake_lookup_knowledge_for_base),
             TestClient(app, base_url="http://localhost") as client,
@@ -5620,11 +5499,7 @@ class TestKnowledgeIntegration:
             return _knowledge_lookup(reader, base_id=base_id) if reader is not None else None
 
         with (
-            patch.object(
-                openai_compat.config_lifecycle,
-                "read_committed_runtime_config",
-                return_value=(knowledge_config, runtime_paths),
-            ),
+            _committed_config(knowledge_config, runtime_paths),
             patch("mindroom.api.openai_compat.ai_response", new_callable=completed_ai_response_mock) as mock_ai,
             patch("mindroom.knowledge.utils._lookup_knowledge_for_base", side_effect=fake_lookup_knowledge_for_base),
             TestClient(app, base_url="http://localhost") as client,

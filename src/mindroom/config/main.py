@@ -271,7 +271,7 @@ def format_invalid_config_message(
     *,
     footer: str | None = None,
 ) -> str:
-    """Return one shared invalid-configuration message for user-facing surfaces."""
+    """Return one shared message for a refused config change: invalid, or the file changed since it was read."""
     if isinstance(exc, ConfigFileChangedError):
         response = f"❌ {exc}"
     else:
