@@ -28,7 +28,7 @@ from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
 from mindroom import runtime_env_policy as _runtime_env_policy
 from mindroom.atomic_file import atomic_write_bytes_at
-from mindroom.credentials.policy import credential_service_policy
+from mindroom.credentials.policy import CredentialPlacement, CredentialServicePolicy, credential_service_policy
 from mindroom.durable_write import create_directory_durable
 from mindroom.logging_config import get_logger
 from mindroom.path_confinement import open_directory_within_root, open_regular_file_within_root
@@ -77,9 +77,11 @@ logger = get_logger(__name__)
 __all__ = [
     "SERVICE_NAME_CHARACTERS",
     "SERVICE_NAME_PATTERN",
+    "CredentialLayers",
     "CredentialsManager",
     "StoredCredentialsUpdate",
     "WorkerCredentialPathError",
+    "credential_layers",
     "delete_scoped_credentials",
     "get_runtime_credentials_manager",
     "get_runtime_shared_credentials_manager",
@@ -918,45 +920,20 @@ def _reset_credentials_manager_cache() -> None:
 
 
 def _resolve_worker_credentials_manager(
-    *,
     credentials_manager: CredentialsManager,
-    worker_target: ResolvedWorkerTarget | None,
-) -> CredentialsManager | None:
-    """Return the worker-scoped credentials manager for the current execution, if any."""
-    if worker_target is None or worker_target.worker_scope is None:
-        return None
-
-    worker_key = worker_target.worker_key
-    if worker_key is None:
-        return None
-
+    worker_key: str,
+) -> CredentialsManager:
+    """Return the store of one worker, reusing the manager when this runtime is that worker."""
     current_storage_root = credentials_manager.storage_root.expanduser().resolve()
-    current_worker_key = credentials_manager.current_worker_key
-    current_worker_root = credentials_manager.current_worker_root
     if (
-        current_worker_key == worker_key
-        and current_worker_root is not None
-        and current_storage_root == current_worker_root
+        credentials_manager.current_worker_key == worker_key
+        and credentials_manager.current_worker_root is not None
+        and current_storage_root == credentials_manager.current_worker_root
     ):
         return credentials_manager
-
-    expected_worker_root = worker_root_path(credentials_manager.storage_root, worker_key)
-    if current_storage_root == expected_worker_root:
+    if current_storage_root == worker_root_path(credentials_manager.storage_root, worker_key):
         return credentials_manager
-
     return credentials_manager.for_worker(worker_key)
-
-
-def _merge_unscoped_credentials(
-    service: str,
-    *,
-    shared_manager: CredentialsManager,
-    local_manager: CredentialsManager,
-) -> dict[str, Any] | None:
-    """Merge mirrored shared credentials with local worker overrides for unscoped workers."""
-    shared_credentials = shared_manager.load_credentials(service)
-    local_credentials = local_manager.load_credentials(service)
-    return _merge_credential_layers(shared_credentials, local_credentials)
 
 
 def _merge_credential_layers(
@@ -978,16 +955,18 @@ def load_worker_grantable_shared_credentials(
     allowed_services: frozenset[str],
 ) -> dict[str, Any] | None:
     """Return one shared credential only when the worker allowlist permits mirroring it."""
-    if service not in allowed_services:
+    if service not in allowed_services or not credential_service_policy(service, None).grantable:
         return None
-    if not credential_service_policy(service, None).worker_grantable_supported:
+    return _grantable_document(shared_manager.load_credentials(service))
+
+
+def _grantable_document(credentials: Mapping[str, Any] | None) -> dict[str, Any] | None:
+    """Return a shared document a grant may pass on: one saved in the dashboard or declared by the environment."""
+    if not isinstance(credentials, Mapping):
         return None
-    shared_credentials = shared_manager.load_credentials(service)
-    if not isinstance(shared_credentials, Mapping):
+    if credentials.get("_source") not in _WORKER_GRANTABLE_SHARED_CREDENTIAL_SOURCES:
         return None
-    if shared_credentials.get("_source") not in _WORKER_GRANTABLE_SHARED_CREDENTIAL_SOURCES:
-        return None
-    return dict(shared_credentials)
+    return dict(credentials)
 
 
 def list_worker_grantable_shared_services(
@@ -1018,7 +997,7 @@ def sync_shared_credentials_to_worker(
 
     The worker's override store remains separate. Only ``allowed_services`` may be
     mirrored into the worker's shared credential layer, regardless of whether the
-    shared credential originated from env sync or the dashboard/API.
+    shared credential was declared by the environment or saved through the dashboard/API.
     """
     manager = credentials_manager
     worker_shared_manager = manager.for_worker(worker_key).shared_manager()
@@ -1058,66 +1037,112 @@ def sync_shared_credentials_to_worker(
         worker_shared_manager.delete_credentials(service)
 
 
-def _primary_runtime_scoped_credentials_manager(
-    service: str,
-    *,
-    manager: CredentialsManager,
-    worker_target: ResolvedWorkerTarget,
-    primary_built_tool: bool = False,
-) -> CredentialsManager | None:
-    policy = credential_service_policy(service, worker_target.worker_scope, primary_built_tool=primary_built_tool)
-    if policy.uses_primary_runtime_agent_scoped_credentials:
-        agent_name = worker_target.routing_agent_name
-        if not agent_name:
-            msg = f"Agent-scoped credentials for {service} require an agent name"
-            raise ValueError(msg)
-        return manager.for_primary_runtime_agent_scope(agent_name)
-    if not policy.uses_primary_runtime_scoped_credentials:
-        return None
-    identity = worker_target.execution_identity
-    if identity is None or identity.requester_id is None:
-        if policy.primary_built_tool:
-            # Without a requester there is no requester store, so only shared settings apply.
-            return None
-        msg = f"Primary-runtime scoped credentials for {service} require a requester identity"
-        raise ValueError(msg)
-    agent_name = worker_target.routing_agent_name if worker_target.worker_scope == "user_agent" else None
-    return manager.for_primary_runtime_scope(identity.requester_id, agent_name)
+@dataclass(frozen=True, slots=True)
+class CredentialLayers:
+    """Where one service's credentials live for one target: one store over an optional shared layer."""
+
+    # The store saves and deletes go to; None when the target has no store for the service.
+    store: CredentialsManager | None
+    # Read under the store, its fields overridden by the store's.
+    shared: CredentialsManager | None
+    # The shared layer passes on only documents a grant may pass on.
+    granted_only: bool
+    # Why saves and deletes are refused when there is no store.
+    refusal: str = ""
+
+    def load(self, service: str) -> dict[str, Any] | None:
+        """Return the service's document: the store's fields over the shared layer's."""
+        shared = self.shared.load_credentials(service) if self.shared is not None else None
+        if self.granted_only:
+            shared = _grantable_document(shared)
+        own = self.store.load_credentials(service) if self.store is not None else None
+        return _merge_credential_layers(shared, own)
+
+    def writable_store(self) -> CredentialsManager:
+        """Return the store saves and deletes go to, refusing a target that has none."""
+        if self.store is None:
+            raise ValueError(self.refusal)
+        return self.store
 
 
-def _scoped_credentials_target_manager(
+def credential_layers(
     service: str,
     *,
     credentials_manager: CredentialsManager,
     worker_target: ResolvedWorkerTarget | None,
-    worker_credentials_manager: CredentialsManager | None = None,
+    allowed_shared_services: frozenset[str] | None = None,
     primary_built_tool: bool = False,
-) -> CredentialsManager:
+) -> CredentialLayers:
+    """Return the stores one service's credentials are read from and written to for one target.
+
+    ``worker_target=None`` is a global call. A target may be unscoped yet carry a requester and an agent.
+    ``allowed_shared_services`` is the configured worker grant; ``primary_built_tool`` marks the settings of a tool
+    the primary builds for this agent, which never come from a store worker code can write.
+    """
     manager = credentials_manager
-    if worker_target is None or worker_target.worker_scope is None:
-        return manager if manager.shared_base_path != manager.base_path else manager.shared_manager()
-
-    policy = credential_service_policy(service, worker_target.worker_scope, primary_built_tool=primary_built_tool)
-    if policy.uses_local_shared_credentials:
-        return manager.shared_manager()
-
-    primary_runtime_manager = _primary_runtime_scoped_credentials_manager(
-        service,
-        manager=manager,
-        worker_target=worker_target,
-        primary_built_tool=primary_built_tool,
+    worker_scope = worker_target.worker_scope if worker_target is not None else None
+    policy = credential_service_policy(service, worker_scope, primary_built_tool=primary_built_tool)
+    # A dedicated worker's runtime reads a mirror that holds only its grants, under its own store.
+    worker_runtime = manager.shared_base_path != manager.base_path
+    reads_shared = (
+        policy.reads_shared and (service in (allowed_shared_services or frozenset()) and policy.grantable)
+    ) or (worker_runtime and (policy.reads_shared or policy.placement is CredentialPlacement.GLOBAL))
+    store, refusal = _placement_store(service, policy, manager, worker_target)
+    return CredentialLayers(
+        store=store,
+        shared=_shared_credentials_manager(manager) if reads_shared else None,
+        granted_only=not worker_runtime,
+        refusal=refusal,
     )
-    if primary_runtime_manager is not None:
-        return primary_runtime_manager
-    if policy.primary_built_tool:
-        msg = f"Settings for {service} require a requester identity"
+
+
+def _placement_store(
+    service: str,
+    policy: CredentialServicePolicy,
+    manager: CredentialsManager,
+    worker_target: ResolvedWorkerTarget | None,
+) -> tuple[CredentialsManager | None, str]:
+    """Return the store a placement names for one target, or None and why the target has none."""
+    placement = policy.placement
+    if placement is CredentialPlacement.GLOBAL:
+        return manager, ""
+    if placement is CredentialPlacement.SHARED:
+        return _shared_credentials_manager(manager), ""
+    if worker_target is None or placement in {CredentialPlacement.REQUESTER, CredentialPlacement.REQUESTER_AGENT}:
+        return _requester_store(service, policy, manager, worker_target)
+    if placement is CredentialPlacement.AGENT:
+        if not worker_target.routing_agent_name:
+            msg = f"Agent-scoped credentials for {service} require an agent name"
+            raise ValueError(msg)
+        return manager.for_primary_runtime_agent_scope(worker_target.routing_agent_name), ""
+    if worker_target.worker_key is None:
+        return None, f"Credentials for {service} in a {worker_target.worker_scope} scope require a requester identity"
+    return _resolve_worker_credentials_manager(manager, worker_target.worker_key), ""
+
+
+def _requester_store(
+    service: str,
+    policy: CredentialServicePolicy,
+    manager: CredentialsManager,
+    worker_target: ResolvedWorkerTarget | None,
+) -> tuple[CredentialsManager | None, str]:
+    """Return the primary store of the target's requester, alone or with its agent, as the placement names."""
+    agent_name = worker_target.routing_agent_name if worker_target is not None else None
+    identity = worker_target.execution_identity if worker_target is not None else None
+    requester_id = identity.requester_id if identity is not None else None
+    if policy.placement is CredentialPlacement.REQUESTER_AGENT:
+        if requester_id is None or not agent_name:
+            return None, f"Credentials for {service} require a requester and an agent"
+        return manager.for_primary_runtime_scope(requester_id, agent_name), ""
+    if requester_id is None:
+        if policy.reads_shared:
+            # Without a requester there is no requester store, so only shared settings apply.
+            return None, f"Settings for {service} require a requester identity"
+        msg = f"Primary-runtime scoped credentials for {service} require a requester identity"
         raise ValueError(msg)
-
-    worker_manager = worker_credentials_manager or _resolve_worker_credentials_manager(
-        credentials_manager=manager,
-        worker_target=worker_target,
-    )
-    return worker_manager or manager.shared_manager()
+    assert worker_target is not None
+    scoped_agent = agent_name if worker_target.worker_scope == "user_agent" else None
+    return manager.for_primary_runtime_scope(requester_id, scoped_agent), ""
 
 
 def scoped_credentials_path(
@@ -1128,11 +1153,8 @@ def scoped_credentials_path(
 ) -> Path:
     """Return the file path that scoped credential writes target for one service."""
     normalized_service = validate_service_name(service)
-    return _scoped_credentials_target_manager(
-        normalized_service,
-        credentials_manager=credentials_manager,
-        worker_target=worker_target,
-    ).get_credentials_path(normalized_service)
+    layers = credential_layers(normalized_service, credentials_manager=credentials_manager, worker_target=worker_target)
+    return layers.writable_store().get_credentials_path(normalized_service)
 
 
 def load_scoped_credentials(
@@ -1141,55 +1163,16 @@ def load_scoped_credentials(
     credentials_manager: CredentialsManager,
     worker_target: ResolvedWorkerTarget | None,
     allowed_shared_services: frozenset[str] | None = None,
-    worker_credentials_manager: CredentialsManager | None = None,
-    allow_shared_mirror: bool = True,
     primary_built_tool: bool = False,
 ) -> dict[str, Any] | None:
-    """Load scoped overrides over the service's permitted shared credential layer.
-
-    Callers with an authorized worker store can supply it without resolving it
-    again. Dashboard reads disable ``allow_shared_mirror`` so their committed
-    allowlist still applies when the base manager has a separate shared layer.
-    Settings of a tool the primary builds (``primary_built_tool``) never come from the worker store.
-    """
-    manager = credentials_manager
-    shared_manager = _shared_credentials_manager(manager)
-    if worker_target is None or worker_target.worker_scope is None:
-        if manager.shared_base_path != manager.base_path:
-            return _merge_unscoped_credentials(
-                service,
-                shared_manager=shared_manager,
-                local_manager=manager,
-            )
-        return shared_manager.load_credentials(service)
-
-    primary_runtime_manager = _primary_runtime_scoped_credentials_manager(
+    """Load the service's scoped store over its permitted shared layer."""
+    return credential_layers(
         service,
-        manager=manager,
+        credentials_manager=credentials_manager,
         worker_target=worker_target,
+        allowed_shared_services=allowed_shared_services,
         primary_built_tool=primary_built_tool,
-    )
-    policy = credential_service_policy(service, worker_target.worker_scope, primary_built_tool=primary_built_tool)
-    uses_local_shared_credentials = policy.uses_local_shared_credentials
-    worker_manager = None
-    if primary_runtime_manager is None and not uses_local_shared_credentials and not policy.primary_built_tool:
-        worker_manager = worker_credentials_manager or _resolve_worker_credentials_manager(
-            credentials_manager=manager,
-            worker_target=worker_target,
-        )
-    if primary_runtime_manager is not None and not policy.primary_built_tool:
-        shared_credentials = None
-    elif uses_local_shared_credentials or (allow_shared_mirror and manager.shared_base_path != manager.base_path):
-        shared_credentials = shared_manager.load_credentials(service)
-    else:
-        shared_credentials = load_worker_grantable_shared_credentials(
-            service,
-            shared_manager=shared_manager,
-            allowed_services=allowed_shared_services or frozenset(),
-        )
-    scoped_manager = primary_runtime_manager or worker_manager
-    worker_credentials = scoped_manager.load_credentials(service) if scoped_manager is not None else None
-    return _merge_credential_layers(shared_credentials, worker_credentials)
+    ).load(service)
 
 
 def save_scoped_credentials(
@@ -1198,19 +1181,16 @@ def save_scoped_credentials(
     *,
     credentials_manager: CredentialsManager,
     worker_target: ResolvedWorkerTarget | None,
-    worker_credentials_manager: CredentialsManager | None = None,
     primary_built_tool: bool = False,
 ) -> None:
-    """Save to the service's scope, reusing an already authorized worker store when supplied."""
+    """Save to the store the service's credentials live in for this target."""
     normalized_service = validate_service_name(service)
-    target_manager = _scoped_credentials_target_manager(
+    credential_layers(
         normalized_service,
         credentials_manager=credentials_manager,
         worker_target=worker_target,
-        worker_credentials_manager=worker_credentials_manager,
         primary_built_tool=primary_built_tool,
-    )
-    target_manager.save_credentials(normalized_service, credentials)
+    ).writable_store().save_credentials(normalized_service, credentials)
 
 
 def delete_scoped_credentials(
@@ -1218,16 +1198,13 @@ def delete_scoped_credentials(
     *,
     credentials_manager: CredentialsManager,
     worker_target: ResolvedWorkerTarget | None,
-    worker_credentials_manager: CredentialsManager | None = None,
     primary_built_tool: bool = False,
 ) -> None:
-    """Delete from the service's scope, reusing an already authorized worker store when supplied."""
+    """Delete from the store the service's credentials live in for this target."""
     normalized_service = validate_service_name(service)
-    target_manager = _scoped_credentials_target_manager(
+    credential_layers(
         normalized_service,
         credentials_manager=credentials_manager,
         worker_target=worker_target,
-        worker_credentials_manager=worker_credentials_manager,
         primary_built_tool=primary_built_tool,
-    )
-    target_manager.delete_credentials(normalized_service)
+    ).writable_store().delete_credentials(normalized_service)

@@ -226,9 +226,9 @@ def test_save_accepts_exactly_16_kib(manager: CredentialsManager) -> None:
 def test_worker_grantable_copy_skips_egress() -> None:
     """defaults.worker_grantable_credentials with egress service should not copy into worker store."""
     # This will be tested via credential_policy integration
-    # The policy should mark egress services as worker_grantable_supported=False
+    # The policy should mark egress services as not grantable
     policy = credential_service_policy("egress_github", "user_agent", primary_built_tool=False)
-    assert not policy.worker_grantable_supported
+    assert not policy.grantable
 
 
 def test_egress_credential_service() -> None:

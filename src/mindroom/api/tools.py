@@ -22,7 +22,7 @@ from mindroom.credentials.manager import (
     load_scoped_credentials,
     load_worker_grantable_shared_credentials,
 )
-from mindroom.credentials.policy import credential_service_policy
+from mindroom.credentials.policy import CredentialPlacement, credential_service_policy
 from mindroom.oauth import OAuthProviderError
 from mindroom.oauth.credential_lifecycle import (
     load_oauth_credentials_snapshot,
@@ -81,7 +81,7 @@ def _effective_allowed_shared_services(
 ) -> frozenset[str] | None:
     """Return the worker allowlist that applies to one dashboard credential lookup."""
     policy = credential_service_policy(service, context.execution_scope)
-    if policy.uses_local_shared_credentials:
+    if policy.placement is CredentialPlacement.SHARED:
         return frozenset({service})
     return context.allowed_shared_services
 

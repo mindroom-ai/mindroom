@@ -793,71 +793,6 @@ class TestCredentialsManager:
 
         assert loaded_credentials == {"api_key": "global-ui-key", "_source": "ui"}
 
-    @pytest.mark.parametrize("worker_scope", ["shared", "user", "user_agent"])
-    def test_scoped_helpers_keep_resolved_worker_manager(
-        self,
-        temp_credentials_dir: Path,
-        worker_scope: str,
-    ) -> None:
-        """An already resolved worker store must survive subsequent credential operations."""
-        manager = CredentialsManager(temp_credentials_dir)
-        pinned_manager = manager.for_worker("authorized-worker")
-        identity = ToolExecutionIdentity("matrix", "general", "@alice:example.org", None, None, None, None)
-        worker_target = _worker_target(worker_scope, "general", identity)
-        manager.save_credentials("weather", {"api_key": "shared-key", "shared_only": True})
-        pinned_manager.save_credentials("weather", {"api_key": "pinned-key"})
-
-        assert load_scoped_credentials(
-            "weather",
-            credentials_manager=manager,
-            worker_target=worker_target,
-            worker_credentials_manager=pinned_manager,
-            allowed_shared_services=frozenset({"weather"}),
-        ) == {"api_key": "pinned-key", "shared_only": True}
-
-        save_scoped_credentials(
-            "weather",
-            {"api_key": "updated-key"},
-            credentials_manager=manager,
-            worker_target=worker_target,
-            worker_credentials_manager=pinned_manager,
-        )
-        assert pinned_manager.load_credentials("weather") == {"api_key": "updated-key"}
-
-        credentials_module.delete_scoped_credentials(
-            "weather",
-            credentials_manager=manager,
-            worker_target=worker_target,
-            worker_credentials_manager=pinned_manager,
-        )
-        assert pinned_manager.load_credentials("weather") is None
-        assert manager.load_credentials("weather") == {"api_key": "shared-key", "shared_only": True}
-
-    @pytest.mark.parametrize("allow_shared", [False, True])
-    def test_scoped_load_can_filter_shared_mirror(
-        self,
-        temp_credentials_dir: Path,
-        allow_shared: bool,
-    ) -> None:
-        """Dashboard reads must filter a shared layer even when the runtime uses a mirror."""
-        manager = CredentialsManager(temp_credentials_dir, shared_base_path=temp_credentials_dir / "mirror")
-        identity = ToolExecutionIdentity("matrix", "general", "@alice:example.org", None, None, None, None)
-        worker_target = _worker_target("shared", "general", identity)
-        manager.shared_manager().save_credentials("weather", {"api_key": "shared-key", "shared_only": True})
-        assert worker_target.worker_key is not None
-        manager.for_worker(worker_target.worker_key).save_credentials("weather", {"api_key": "worker-key"})
-
-        credentials = load_scoped_credentials(
-            "weather",
-            credentials_manager=manager,
-            worker_target=worker_target,
-            allowed_shared_services=frozenset({"weather"}) if allow_shared else None,
-            allow_shared_mirror=False,
-        )
-
-        expected = {"api_key": "worker-key", "shared_only": True} if allow_shared else {"api_key": "worker-key"}
-        assert credentials == expected
-
     def test_load_scoped_credentials_shared_scope_keeps_env_fallback(
         self,
         temp_credentials_dir: Path,
@@ -1883,7 +1818,6 @@ class TestSharedIntegrationCredentialTagging:
                 storage_path=temp_credentials_dir,
             ),
             base_manager=manager,
-            target_manager=manager,
             worker_scope=None,
             agent_name=None,
             execution_identity=None,
@@ -2088,7 +2022,7 @@ def test_primary_built_tool_without_requester_uses_only_shared_settings(
 
 
 @pytest.mark.parametrize("worker_scope", ["shared", "user", "user_agent"])
-@pytest.mark.parametrize("shared_layer", ["grant", "denied", "mirror", "mirror_disabled"])
+@pytest.mark.parametrize("shared_layer", ["grant", "denied", "mirror"])
 def test_primary_built_tool_settings_preserve_shared_layer(
     tmp_path: Path,
     worker_scope: str,
@@ -2098,7 +2032,7 @@ def test_primary_built_tool_settings_preserve_shared_layer(
     shared_path = tmp_path / "shared"
     manager = CredentialsManager(
         tmp_path / "credentials",
-        shared_base_path=shared_path if shared_layer.startswith("mirror") else None,
+        shared_base_path=shared_path if shared_layer == "mirror" else None,
     )
     shared_manager = CredentialsManager(manager.shared_base_path)
     shared_config = {"api_key": "shared-key", "project_id": "shared-project", "_source": "ui"}
@@ -2112,7 +2046,6 @@ def test_primary_built_tool_settings_preserve_shared_layer(
         "credentials_manager": manager,
         "worker_target": target,
         "allowed_shared_services": allowed,
-        "allow_shared_mirror": shared_layer != "mirror_disabled",
         "primary_built_tool": True,
     }
     expected = shared_config if shared_layer in {"grant", "mirror"} else None
@@ -2126,6 +2059,10 @@ def test_primary_built_tool_settings_preserve_shared_layer(
         primary_built_tool=True,
     )
     assert load_scoped_credentials("browserbase", **kwargs) == {**(expected or {}), **primary_config}
+
+
+# The dashboard's identity carries the tenant that names agent `alpha`'s shared worker.
+_ALPHA_IDENTITY = ToolExecutionIdentity("matrix", "alpha", None, None, None, None, None, tenant_id="test-tenant")
 
 
 def test_dashboard_saves_tool_settings_where_the_runtime_reads_them(tmp_path: Path) -> None:
@@ -2142,10 +2079,9 @@ def test_dashboard_saves_tool_settings_where_the_runtime_reads_them(tmp_path: Pa
     target = RequestCredentialsTarget(
         runtime_paths=runtime_paths,
         base_manager=manager,
-        target_manager=worker_manager,
         worker_scope="shared",
         agent_name="alpha",
-        execution_identity=None,
+        execution_identity=_ALPHA_IDENTITY,
     )
     settings = {"host": "alpha-db.example.test", "db_name": "demo", "user": "alpha"}
 
@@ -2178,10 +2114,9 @@ def test_dashboard_delete_also_removes_the_worker_copy_of_tool_settings(tmp_path
     target = RequestCredentialsTarget(
         runtime_paths=runtime_paths,
         base_manager=manager,
-        target_manager=worker_manager,
         worker_scope="shared",
         agent_name="alpha",
-        execution_identity=None,
+        execution_identity=_ALPHA_IDENTITY,
     )
     worker_manager.save_credentials("openweather", {"api_key": "old-worker-key"})
     save_credentials_for_target("openweather", {"api_key": "new-key"}, target)

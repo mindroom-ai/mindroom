@@ -3563,7 +3563,6 @@ async def test_callback_maps_locked_connection_generation_race_to_conflict(
     target = RequestCredentialsTarget(
         runtime_paths=runtime_paths,
         base_manager=manager,
-        target_manager=manager,
         worker_scope=None,
         agent_name=None,
         execution_identity=None,
@@ -3617,7 +3616,6 @@ async def test_callback_hides_provider_controlled_exchange_error(
     target = RequestCredentialsTarget(
         runtime_paths=runtime_paths,
         base_manager=manager,
-        target_manager=manager,
         worker_scope=None,
         agent_name=None,
         execution_identity=None,
@@ -4450,7 +4448,6 @@ async def test_callback_saves_exchanged_credentials_before_propagating_cancellat
     target = RequestCredentialsTarget(
         runtime_paths=runtime_paths,
         base_manager=manager,
-        target_manager=manager,
         worker_scope=None,
         agent_name=None,
         execution_identity=None,
@@ -4532,7 +4529,6 @@ async def test_callback_finishes_target_verification_after_state_consumption_bef
     target = RequestCredentialsTarget(
         runtime_paths=runtime_paths,
         base_manager=manager,
-        target_manager=manager,
         worker_scope=None,
         agent_name=None,
         execution_identity=None,

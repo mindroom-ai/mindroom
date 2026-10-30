@@ -18,7 +18,7 @@ import httpx
 from pydantic import ValidationError
 
 from mindroom.credentials.manager import load_scoped_credentials
-from mindroom.credentials.policy import is_egress_broker_service
+from mindroom.credentials.policy import credential_service_policy
 from mindroom.logging_config import get_logger
 from mindroom.runtime_env_policy import SANDBOX_RUNTIME_ENV_BY_KEY
 from mindroom.tool_jobs.control import job_owns_execution
@@ -586,8 +586,7 @@ def _collect_credential_overrides(
 
     merged_overrides: dict[str, object] = {}
     for service in services:
-        # The one place that loads leased credentials, so it alone keeps egress broker secrets out of workers.
-        if is_egress_broker_service(service):
+        if not credential_service_policy(service, None).leasable:
             continue
 
         credentials = load_scoped_credentials(

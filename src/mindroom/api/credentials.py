@@ -26,17 +26,16 @@ from mindroom.api.credentials_oauth_policy import (
 )
 from mindroom.api.credentials_target import (
     RequestCredentialsTarget,
+    dashboard_candidate_services,
     delete_credentials_for_target,
     load_credentials_for_target,
     loaded_runtime_config_for_credentials_request,
-    primary_runtime_scoped_services_for_target,
     request_may_target_scoped_credentials,
     resolve_request_credentials_target,
     save_credentials_for_target,
-    target_primary_owns_tool_settings,
 )
-from mindroom.credentials.manager import list_worker_grantable_shared_services, validate_service_name
-from mindroom.credentials.policy import credential_service_policy, is_egress_broker_service, is_oauth_token_service
+from mindroom.credentials.manager import validate_service_name
+from mindroom.credentials.policy import is_egress_broker_service, is_oauth_token_service
 from mindroom.credentials.sync import canonical_provider_service, resolve_provider_service_api_key
 from mindroom.embeddings.embedder_health import handle_embedder_credential_change
 from mindroom.embeddings.factory import embedder_client_signature
@@ -165,7 +164,10 @@ class _DashboardCredentialAccess:
     def load(self, service: str) -> dict[str, Any] | None:
         """Load dashboard-visible credentials for one service."""
         self.reject_token_service(service)
-        return load_credentials_for_target(service, self.target)
+        try:
+            return load_credentials_for_target(service, self.target)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     def save(self, service: str, credentials: dict[str, Any]) -> None:
         """Save dashboard-visible credentials for one service."""
@@ -178,7 +180,10 @@ class _DashboardCredentialAccess:
     def delete(self, service: str) -> None:
         """Delete dashboard-visible credentials for one service."""
         self.reject_token_service(service)
-        delete_credentials_for_target(service, self.target)
+        try:
+            delete_credentials_for_target(service, self.target)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     def response_credentials(self, service: str, credentials: dict[str, Any]) -> dict[str, Any]:
         """Return credentials filtered for dashboard responses."""
@@ -211,39 +216,21 @@ class _DashboardCredentialAccess:
         return not is_egress_broker_service(service) and self.oauth_services.dashboard_may_show_service(service)
 
     def list_services(self) -> list[str]:
-        """List dashboard-visible services for the resolved target."""
-        if self.target.worker_scope is None:
-            return [
-                service for service in self.target.target_manager.list_services() if self._dashboard_may_list(service)
-            ]
-        # Worker copies of primary-built tool settings are ignored, so they are not listed.
-        worker_services = {
+        """List dashboard-visible services stored where the resolved target reads them."""
+        services = {
             service
-            for service in self.target.target_manager.list_services()
-            if not target_primary_owns_tool_settings(service, self.target)
+            for service in dashboard_candidate_services(self.target)
+            if self._dashboard_may_list(service) and self._target_reads(service)
         }
-        primary_runtime_global_services = {
-            service
-            for service in self.target.base_manager.list_services()
-            if credential_service_policy(service, self.target.worker_scope).uses_primary_runtime_global_credentials
-        }
-        primary_runtime_services = primary_runtime_scoped_services_for_target(self.target)
-        shared_manager = self.target.base_manager.shared_manager()
-        shared_services = set(
-            list_worker_grantable_shared_services(
-                shared_manager=shared_manager,
-                allowed_services=self.target.allowed_shared_services or frozenset(),
-            ),
-        )
-        if self.target.worker_scope == "shared":
-            shared_services |= {
-                service
-                for service in shared_manager.list_services()
-                if credential_service_policy(service, self.target.worker_scope).uses_local_shared_credentials
-            }
-        services = worker_services | primary_runtime_global_services | primary_runtime_services | shared_services
         services -= set(unsupported_shared_only_integration_names(sorted(services), self.target.worker_scope))
-        return sorted(service for service in services if self._dashboard_may_list(service))
+        return sorted(services)
+
+    def _target_reads(self, service: str) -> bool:
+        try:
+            return load_credentials_for_target(service, self.target) is not None
+        except ValueError:
+            # The service has no store for this target, such as a requester's store without a requester.
+            return False
 
 
 class SetApiKeyRequest(BaseModel):
