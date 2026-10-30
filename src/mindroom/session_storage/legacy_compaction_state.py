@@ -6,12 +6,6 @@ import json
 import time
 from typing import TYPE_CHECKING, Any
 
-from mindroom.history.legacy_scope_metadata import (
-    LEGACY_COMPACTION_METADATA_KEY,
-    LEGACY_MATRIX_HISTORY_METADATA_KEY,
-    legacy_seen_event_ids,
-    scope_states,
-)
 from mindroom.session_storage.legacy_agno2_runs import (
     has_blob_column,
     insert_run_entry,
@@ -24,6 +18,12 @@ from mindroom.session_storage.legacy_agno3_schema import (
     agno_runs_sql,
     agno_summary_rows_sql,
     delete_run_subtrees_in_transaction,
+)
+from mindroom.session_storage.legacy_scope_metadata import (
+    LEGACY_COMPACTION_METADATA_KEY,
+    LEGACY_MATRIX_HISTORY_METADATA_KEY,
+    legacy_seen_event_ids,
+    scope_states,
 )
 from mindroom.session_storage.schema import quote_identifier, table_names
 from mindroom.session_storage.store import decoded_mapping
@@ -46,7 +46,7 @@ if TYPE_CHECKING:
 # copies of tombstoned runs are dropped, with their member rows but for one whose run id is not text, which the
 # conversion leaves out. The retired keys are stripped. Runs deleted by those releases stay lost;
 # ``history/storage.py`` owns redaction of the summary.
-# Coverage: tests/test_legacy_compaction_state.py, including
+# Coverage: tests/session_storage/test_legacy_compaction_state.py, including
 # ::test_a_member_row_whose_id_is_not_text_below_a_tombstoned_run_does_not_stop_the_conversion.
 _LEGACY_STATE_KEYS = frozenset(
     {"compacted_run_ids", "last_compacted_at", "last_summary_model", "last_compacted_run_count"},

@@ -84,7 +84,7 @@ from mindroom.tool_system.events import StructuredStreamChunk
 from mindroom.turn_model import ModelScope, TurnModel, resolve_team_turn_models, resolve_turn_model
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncGenerator, AsyncIterator, Mapping, Sequence
+    from collections.abc import AsyncGenerator, AsyncIterator, Callable, Mapping, Sequence
 
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
@@ -382,7 +382,6 @@ class _TeamTurn:
     spec: TeamTurnSpec
     config: Config
     requested_agent_names: list[str]
-    run_metadata_collector: dict[str, Any] | None
     holder: _TeamTurnHolder
     # The zone of the entity whose bot runs the turn, which dates all of it.
     timezone: str
@@ -591,7 +590,7 @@ class _TeamTurn:
             yield AttemptResolved(
                 HandledAttempt(
                     self.error_text(error),
-                    metadata_content=self.run_metadata_content(attempt, RunStatus.error),
+                    build_run_metadata=self.run_metadata_builder(attempt, RunStatus.error),
                     error=error,
                 ),
             )
@@ -634,11 +633,12 @@ class _TeamTurn:
             and not any((member.handover_content or "").strip() for member in record.ended_member_runs)
         )
 
-    def run_metadata_content(self, attempt: TeamAttempt, status: RunStatus) -> dict[str, Any] | None:
-        """Return the attempt's run metadata when the caller collects metadata and the run stored its record."""
-        if self.run_metadata_collector is None or attempt.records.record is None:
+    def run_metadata_builder(self, attempt: TeamAttempt, status: RunStatus) -> Callable[[], dict[str, Any]] | None:
+        """Return how to build the attempt's run metadata, or None when the run stored no record."""
+        if attempt.records.record is None:
             return None
-        return attempt.metadata_content(
+        return partial(
+            attempt.metadata_content,
             self.config,
             runtime_paths=self.runtime_paths,
             session_id=self.session_id,
@@ -717,7 +717,7 @@ class _TeamTurn:
             output_tokens=record.metrics.tokens.output_tokens if record.metrics is not None else None,
             tool_executions=tuple(tool_executions),
             completed_tools=tuple(attempt.presentation.tool_tracker.completed_tools),
-            metadata_content=self.run_metadata_content(attempt, record.status),
+            build_run_metadata=self.run_metadata_builder(attempt, record.status),
         )
 
     def error_text(self, error: Exception) -> str:
@@ -755,7 +755,7 @@ class _TeamTurn:
         )
 
 
-def _team_turn(spec: TeamTurnSpec, ctx: ResponseTurnContext, sinks: TurnSinks) -> _TeamTurn | str:
+def _team_turn(spec: TeamTurnSpec, ctx: ResponseTurnContext) -> _TeamTurn | str:
     """Resolve the team's members and return the turn's constants, or the text that explains why it cannot run.
 
     Resolving the members' knowledge and models reads the filesystem, so the caller runs this off the event loop
@@ -813,7 +813,6 @@ def _team_turn(spec: TeamTurnSpec, ctx: ResponseTurnContext, sinks: TurnSinks) -
         spec=spec,
         config=config,
         requested_agent_names=requested_agent_names,
-        run_metadata_collector=sinks.run_metadata_collector,
         holder=_TeamTurnHolder(members=team_members),
         # ``ctx`` still names the entity whose bot runs the turn; the turn's own context took the team's label above.
         timezone=entity_timezone(config, ctx.entity_label),
@@ -837,7 +836,7 @@ async def team_response_stream(
     inputs (``prompt`` is the team's message); this entry refines its ``entity_label`` to the materialized team label
     and appends the knowledge-availability enrichment before the turn runs.
     """
-    turn = await asyncio.to_thread(_team_turn, spec, ctx, sinks)
+    turn = await asyncio.to_thread(_team_turn, spec, ctx)
     if isinstance(turn, str):
         # A turn whose members cannot run ran nothing to record; its message and this reply stay in the thread.
         yield turn

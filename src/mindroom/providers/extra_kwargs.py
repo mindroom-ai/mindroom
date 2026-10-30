@@ -1,5 +1,7 @@
 """Parse a model's ``extra_kwargs`` into the settings dataclass of its provider adapter, and report its parameters.
 
+``sdk_request_body`` is the body an OpenAI or Anthropic SDK call sends for the arguments an adapter passes it.
+
 Settings fields keep the Agno model field names that authored configs already use.
 Keys an adapter does not accept fail with the accepted list instead of being passed through, at config load and
 again when the model is built.
@@ -106,9 +108,20 @@ def settings_params(settings: DataclassInstance) -> dict[str, Any]:
     return cast("dict[str, Any]", redact_sensitive_data(params))
 
 
+def sdk_request_body(kwargs: Mapping[str, Any], option_keys: Collection[str]) -> dict[str, Any]:
+    """Return the JSON body an OpenAI or Anthropic SDK call sends for ``kwargs``.
+
+    Both SDKs take request options, named by ``option_keys`` (such as headers, query parameters, and the timeout),
+    beside the body fields, and merge ``extra_body`` over those fields.
+    """
+    body = {key: value for key, value in kwargs.items() if key not in option_keys}
+    return {**body, **(kwargs.get("extra_body") or {})}
+
+
 __all__ = [
     "SECRET",
     "reject_unsupported_extra_kwargs",
+    "sdk_request_body",
     "settings_from_extra_kwargs",
     "settings_keys",
     "settings_params",

@@ -255,7 +255,7 @@ async def remove_history_of_redacted_events(
 
 
 # LEGACY_COMPAT: Redaction of history compacted before the archive existed.
-# Legacy format: A legacy summary row (see ``history/legacy_compaction_state.py``) whose summary
+# Legacy format: A legacy summary row (see ``session_storage/legacy_compaction_state.py``) whose summary
 # is still in force and whose provenance is only the seen ids the migration captured.
 # Last legacy release: v2026.9.314; replacement: v2026.9.315 recorded exact per-run provenance.
 # Handling: That summary cannot be split by run, and every later summary includes it. An event it

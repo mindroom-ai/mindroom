@@ -25,7 +25,7 @@ _UNKNOWN: _Model = ("unknown", "unknown")
 # ``details``, that every run save added up, beside the ledger's run snapshots; usage reports read the session's totals
 # there, so they also counted history compacted away before the ledger began (v2026.9.191), which no snapshot holds.
 # Last legacy release: v2026.10.696; replacement: the next release, whose reports total a session's ledger rows.
-# Handling: ``add_pre_ledger_baselines`` runs in the step to layout version 6, on both routes a database reaches it by
+# Handling: ``add_pre_ledger_baselines`` runs in the step to layout version 7, on both routes a database reaches it by
 # (``upgrade_layout``, ``convert_conversation_database``). A session whose readable totals exceed what its run rows
 # count by the reporter's rules (helper usage was never part of the totals; a member run counts in a team's database
 # only) gets one undated ``pre_ledger`` row holding each counter's positive residual, by model when the stored details

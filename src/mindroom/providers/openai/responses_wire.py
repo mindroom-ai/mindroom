@@ -385,7 +385,7 @@ def responses_request_kwargs(
     wire: ResponsesWire,
     provider: str,
 ) -> dict[str, Any]:
-    """Return the ``responses.create`` keyword arguments for one request.
+    """Return the ``responses.create`` keyword arguments for one streamed request.
 
     Fields the SDK names are its keywords and the rest travel in ``extra_body`` (``sdk_call_kwargs``).
     """
@@ -417,7 +417,7 @@ def responses_request_kwargs(
         explicit_breakpoint=wire.explicit_breakpoint,
         provider=provider,
     )
-    return sdk_call_kwargs({"model": model_id, "input": formatted_input, **params}, "responses")
+    return sdk_call_kwargs({"model": model_id, "input": formatted_input, **params, "stream": True}, "responses")
 
 
 # --- Responses ------------------------------------------------------------------------------------------------

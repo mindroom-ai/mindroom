@@ -42,7 +42,7 @@ Flush notes carry the `seq` of their batch's last turn; a note in the released f
 
 ### The usage ledger is the only usage owner
 
-Stored session totals counted ordinary runs only, so layout version 6 writes one `pre_ledger` ledger row per session whose stored run totals exceed what its run snapshots count, holding the positive residual, with per-model residuals only when they are nonnegative and sum to the residual.
+Stored session totals counted ordinary runs only, so layout version 7 writes one `pre_ledger` ledger row per session whose stored run totals exceed what its run snapshots count, holding the positive residual, with per-model residuals only when they are nonnegative and sum to the residual.
 The report keeps its schema-1 shape, because an external consumer reads the export and `docs/usage.md` documents an ownership formula over its fields.
 Named report changes: the ledger's model attribution wins over contradictory stored session attribution; a counter whose stored total was below the ledger's sum reports the ledger's count; dated admin totals report the dated ledger rows instead of 0.
 
@@ -59,7 +59,7 @@ Consumers render the ordinary messages themselves, since the summarizer samples 
 
 ### History metadata is one owner value
 
-Layout version 6 moves the owner's entries into one `mindroom_history` value on both routes a database reaches the current layout by, after the Agno conversion's tombstone adoption has read other scopes' entries.
+Layout version 7 moves the owner's entries into one `mindroom_history` value on both routes a database reaches the current layout by, after the Agno conversion's tombstone adoption has read other scopes' entries.
 
 ## Rejected alternatives
 

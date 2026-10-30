@@ -597,9 +597,7 @@ class LiveTurnTools(TurnToolBridge):
         parent: str,
         authorize: Callable[[], Awaitable[None]],
     ) -> AsyncIterator[AgentToolCallStep]:
-        decisions = None
-        denial_reasons = None
-        approval_calls = ()
+        approval_calls = None
         started = False
         child_toolkits: dict[str, str | None] = {}
 
@@ -620,8 +618,6 @@ class LiveTurnTools(TurnToolBridge):
                     parent_bash_call_id=parent,
                     delegation_depth=self._delegation_depth,
                     refresh_scheduler=self._refresh_scheduler,
-                    decisions=decisions,
-                    denial_reasons=denial_reasons,
                     approval_calls=approval_calls,
                     on_event=on_child_event,
                 )
@@ -643,9 +639,7 @@ class LiveTurnTools(TurnToolBridge):
                 presentation.start_tool(tool.call, origin=ToolCallOrigin(parent, child_toolkit))
             paused = replace(result, response_text=presentation.final_text(), tool_trace=tuple(presentation.tool_trace))
             resolved = await handler(paused)
-            approval_calls = approval_calls_for_cli_pause(paused, self.catalog.runtime_context.agent_name)
-            decisions = {item.tool_execution.tool_call_id: bool(item.confirmation) for item in resolved}
-            denial_reasons = {item.tool_execution.tool_call_id: item.confirmation_note for item in resolved}
+            approval_calls = approval_calls_for_cli_pause(paused, self.catalog.runtime_context.agent_name, resolved)
 
     def _check_control(self, event: AgentToolCallEvent) -> None:
         if isinstance(event, AgentToolCallStep) and event.kind == "continuation_required":

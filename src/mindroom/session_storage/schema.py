@@ -35,11 +35,12 @@ SESSION_COLUMNS = tuple(_SESSION_COLUMN_TYPES)
 _SESSION_COLUMN_SQL = ", ".join(f"{column} {column_type}" for column, column_type in _SESSION_COLUMN_TYPES.items())
 # The layout version ``<sessions>_log_meta`` records: 2 for storage v2, 3 once an agent's session rows name that agent
 # (``legacy_agent_session_owners``), 4 once the meta row names the database's owner and each session row holds its
-# state in a column of its own (``legacy_session_columns``), 5 once every delegation child its runs' metadata holds
-# has the current shape (``delegation.legacy_snapshots``), and 6 once each session row holds its owner's history state in
-# one metadata value (``history.legacy_scope_metadata``) and the usage ledger holds the usage each session's stored
-# totals counted beyond it (``legacy_usage_totals``).
-LOG_VERSION = 6
+# state in a column of its own (``legacy_session_columns``), 5 once every delegation child its runs' metadata holds has
+# the current shape (``delegation.legacy_snapshots``), 6 once the paused runs earlier releases stored are rewritten
+# (``legacy_paused_runs``), and 7 once each session row holds its owner's history state in one metadata value
+# (``legacy_scope_metadata``) and the usage ledger holds the usage each session's stored totals counted beyond it
+# (``legacy_usage_totals``).
+LOG_VERSION = 7
 # The first version whose meta row names the database's owner.
 OWNER_VERSION = 4
 _TEAM_STORAGE_NAME_PATTERN = re.compile(r"[^a-zA-Z0-9_]+")

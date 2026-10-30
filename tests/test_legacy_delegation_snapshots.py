@@ -47,6 +47,7 @@ _OWNER = ToolExecutionIdentity(
     session_id="parent-session",
 )
 _CHILD_FIELDS = {field.name for field in fields(DelegationChild)}
+_PAUSED_NOTICE = "I have tools to execute, but I need confirmation."
 _PERSONA_FIELDS = {field.name for field in fields(SubagentPersona)}
 
 
@@ -283,8 +284,12 @@ async def test_a_session_file_the_reader_rejects_stays_as_stored(tmp_path: Path)
 
 
 @pytest.mark.asyncio
-async def test_the_startup_sweep_takes_a_version_4_team_databases_owner_from_its_meta_row(tmp_path: Path) -> None:
-    """A team database at version 4, whose rows no longer name the team, converts at startup without a warning."""
+@pytest.mark.parametrize("version", [4, 5])
+async def test_the_startup_sweep_takes_a_team_databases_owner_from_its_meta_row(
+    version: int,
+    tmp_path: Path,
+) -> None:
+    """A team database at version 4 or 5, whose rows no longer name the team, converts at startup without a warning."""
     paths = _paths(tmp_path)
     scope = HistoryScope(kind="team", scope_id="crew")
     names = TableNames.of_team(scope)
@@ -292,7 +297,7 @@ async def test_the_startup_sweep_takes_a_version_4_team_databases_owner_from_its
     create_state_storage(names.storage_name, team_root, scope)
     database = names.database_path(team_root)
     with closing(sqlite3.connect(database)) as connection, connection:
-        connection.execute(f'UPDATE "{names.log_meta}" SET version = 4')  # noqa: S608
+        connection.execute(f'UPDATE "{names.log_meta}" SET version = ?', (version,))  # noqa: S608
 
     with capture_logs() as logs:
         await migrate_conversation_storage(paths)
@@ -301,6 +306,77 @@ async def test_the_startup_sweep_takes_a_version_4_team_databases_owner_from_its
     assert _query(database, f'SELECT version, owner_kind, owner_id FROM "{names.log_meta}"') == [  # noqa: S608
         (LOG_VERSION, "team", "crew"),
     ]
+
+
+def _store_paused_notice(database: Path) -> None:
+    """Store, as the paused parent run's content, the notice releases through v2026.10.661 stored there."""
+    with closing(sqlite3.connect(database)) as connection, connection:
+        tables = {name for (name,) in connection.execute("SELECT name FROM sqlite_master WHERE type = 'table'")}
+        table, column = (
+            ("leader_sessions_log_runs", "record")
+            if "leader_sessions_log_runs" in tables
+            else (
+                "leader_sessions_runs",
+                "run_data",
+            )
+        )
+        connection.execute(
+            f"UPDATE {table} SET {column} = json_set({column}, '$.content', ?) WHERE run_id = 'parent-run'",  # noqa: S608
+            (_PAUSED_NOTICE,),
+        )
+
+
+def _parent_content(paths: RuntimePaths) -> str | None:
+    run = create_session_storage("leader", _CONFIG, paths, _OWNER).get_run("parent-run")
+    assert run is not None
+    return run.content
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("release", _RELEASES)
+@pytest.mark.parametrize("swept", [True, False], ids=["startup", "store_open"])
+async def test_a_database_from_any_older_layout_takes_the_paused_run_rewrite_too(
+    release: str,
+    swept: bool,
+    tmp_path: Path,
+) -> None:
+    """One upgrade rewrites the snapshots (version 5) and then the paused run (version 6), and a second one nothing.
+
+    The paused parent run holds the notice the releases through v2026.10.661 stored as a paused run's content.
+    """
+    paths = _restore(release, tmp_path)
+    _store_paused_notice(_database(paths))
+
+    await migrate_subagent_sessions(paths)
+    if swept:
+        await migrate_conversation_storage(paths)
+
+    assert _parent_content(paths) is None
+    assert _views(paths) == _fixture(release)["views"]
+    first = _stored(paths)
+    await _start(paths)
+    assert _stored(paths) == first
+    assert _query(_database(paths), 'SELECT version FROM "leader_sessions_log_meta"') == [(LOG_VERSION,)]
+
+
+@pytest.mark.asyncio
+async def test_a_database_at_version_5_takes_only_the_paused_run_rewrite(tmp_path: Path) -> None:
+    """The snapshot step ran when the database reached version 5, so the step to version 6 runs only its own rewrite.
+
+    v2026.10.683's children hold a null requested model, which only the snapshot step fills.
+    """
+    paths = _restore("v2026.10.683", tmp_path)
+    database = _database(paths)
+    _store_paused_notice(database)
+    with closing(sqlite3.connect(database)) as connection, connection:
+        connection.execute('UPDATE "leader_sessions_log_meta" SET version = 5')
+    metadata = _query(database, 'SELECT metadata FROM "leader_sessions_log_runs"')
+
+    await migrate_conversation_storage(paths)
+
+    assert _query(database, 'SELECT metadata FROM "leader_sessions_log_runs"') == metadata
+    assert _parent_content(paths) is None
+    assert _query(database, 'SELECT version FROM "leader_sessions_log_meta"') == [(LOG_VERSION,)]
 
 
 @pytest.mark.asyncio

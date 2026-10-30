@@ -24,7 +24,6 @@ from hypothesis import HealthCheck, example, given, settings
 from hypothesis import strategies as st
 
 from mindroom import constants
-from mindroom.history.legacy_scope_metadata import LEGACY_COMPACTION_METADATA_KEY, LEGACY_MATRIX_HISTORY_METADATA_KEY
 from mindroom.history.replay import current_summary_text
 from mindroom.history.storage import (
     _remove_redacted_event_from_history,
@@ -40,6 +39,10 @@ from mindroom.llm.runs import RunRecord, RunStatus
 from mindroom.session_storage import summary_rows
 from mindroom.session_storage.agent_storage import create_agent_state_storage
 from mindroom.session_storage.legacy_agno3_schema import AgnoTableNames, agno_runs_sql
+from mindroom.session_storage.legacy_scope_metadata import (
+    LEGACY_COMPACTION_METADATA_KEY,
+    LEGACY_MATRIX_HISTORY_METADATA_KEY,
+)
 from mindroom.session_storage.types import ConversationSession, session_state_snapshot
 from tests.conftest import seed_session, seed_session_state
 from tests.history_helpers import folded_run_ids, stored_run_ids

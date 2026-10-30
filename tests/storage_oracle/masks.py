@@ -27,11 +27,14 @@ from typing import TYPE_CHECKING, Any, override
 from mindroom.ai_runtime import _finalize_queued_notice_in_runs, _recover_prior_queued_notices
 from mindroom.constants import MATRIX_RESPONSE_EVENT_ID_METADATA_KEY, MINDROOM_HISTORY_METADATA_KEY
 from mindroom.delegation.state import DELEGATION_STATE_KEY
-from mindroom.history.legacy_scope_metadata import LEGACY_COMPACTION_METADATA_KEY, LEGACY_MATRIX_HISTORY_METADATA_KEY
 from mindroom.history.storage import has_queued_force_compaction
 from mindroom.llm.messages import Message
 from mindroom.llm.runs import RunRecord, RunStatus, TeamRunRecord
 from mindroom.llm.usage import ModelMetrics, RunMetrics, TokenCounts
+from mindroom.session_storage.legacy_scope_metadata import (
+    LEGACY_COMPACTION_METADATA_KEY,
+    LEGACY_MATRIX_HISTORY_METADATA_KEY,
+)
 from mindroom.session_storage.schema import NON_VISIBLE_RUN_STATUS_VALUES, quote_identifier
 from mindroom.session_storage.store import ConversationStore
 from mindroom.session_storage.summary_rows import folded_tool_call_ids, history_event_ids, latest_row
@@ -110,7 +113,7 @@ MASKS: dict[str, Mask] = {
         ),
         Mask(
             "history_state_is_the_owners_one_value",
-            "layout version 6: the owner's force flag and preserved seen ids are one metadata value, not maps keyed "
+            "layout version 7: the owner's force flag and preserved seen ids are one metadata value, not maps keyed "
             "by scope",
         ),
         Mask(

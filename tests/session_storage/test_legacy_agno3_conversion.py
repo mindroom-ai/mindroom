@@ -21,7 +21,6 @@ from structlog.testing import capture_logs
 
 from mindroom import constants
 from mindroom.constants import resolve_runtime_paths
-from mindroom.history.legacy_scope_metadata import LEGACY_COMPACTION_METADATA_KEY
 from mindroom.history.storage import has_queued_force_compaction
 from mindroom.history.types import HistoryScope
 from mindroom.llm.messages import Message
@@ -36,6 +35,7 @@ from mindroom.session_storage.legacy_agno3_conversion import (
 )
 from mindroom.session_storage.legacy_agno3_schema import AgnoTableNames, agno_schema_sql
 from mindroom.session_storage.legacy_conversion_backup import ConversionSpaceError
+from mindroom.session_storage.legacy_scope_metadata import LEGACY_COMPACTION_METADATA_KEY
 from mindroom.session_storage.schema import LOG_VERSION, SESSION_COLUMNS, TableNames, table_names
 from mindroom.session_storage.store import ConversationStore, connect_by_name
 from mindroom.session_storage.summary_rows import folded_tool_call_ids, history_event_ids, legacy_event_ids, retire

@@ -330,19 +330,19 @@ Matrix sync callback
 | `session_storage/legacy_agno3_conversion.py` | The one-way conversion of an Agno-layout conversation database to storage v2, run by a store open that finds an older layout and by the startup sweep over the session state root |
 | `session_storage/legacy_agent_session_owners.py` | Agent session rows and runs that name an id other than their agent, set to the agent once, as layout version 3, by the agent's store open and the startup sweep |
 | `session_storage/legacy_session_columns.py` | The layout version upgrade: session rows that named their kind and owner and held their state inside `session_data` convert once to layout version 4, whose meta row names the owner, with the team owner the startup sweep reads from the rows, and every database then takes the later steps to the current version |
+| `session_storage/legacy_paused_runs.py` | Paused runs earlier releases stored with a paused notice as their content, Agno's summary block in their system message, or delegation calls that do not name the member run they wait on, rewritten once at layout version 6 and at the end of the Agno-layout conversion |
 | `session_storage/legacy_conversion_backup.py` | The `<name>.db.pre-storage-v2` and `<name>.db.pre-storage-v4` copies a database gets before its conversions, after a free-space check, through no-follow descriptors |
 | `session_storage/legacy_agno3_schema.py` | The Agno layout's table names, DDL, run-row decoder, and member-subtree delete, read only by the conversion and its Agno-era steps |
 | `session_storage/legacy_usage_ledger.py` | The conversion's step that seeds the usage ledger of an Agno-layout database without one from its run rows and Agno 2 blobs |
-| `session_storage/legacy_usage_totals.py` | The layout version 6 step that keeps the usage stored session totals held beyond their run rows as one undated `pre_ledger` ledger row |
-| `history/legacy_compaction_state.py` | The conversion's step that turns earlier compaction state, the compaction archive, and unpositioned run rows into summary rows and positioned runs before they convert |
+| `session_storage/legacy_usage_totals.py` | The layout version 7 step that keeps the usage stored session totals held beyond their run rows as one undated `pre_ledger` ledger row |
+| `session_storage/legacy_compaction_state.py` | The conversion's step that turns earlier compaction state, the compaction archive, and unpositioned run rows into summary rows and positioned runs before they convert |
 | `history/mid_turn_compaction.py` | Compaction between the model requests of one reply: request sizing, folding, and the scoped or run-local summary |
 | `history/turn_recorder.py` | `TurnRecorder`: what one turn did, which the turn driver writes, and the interrupted-replay snapshot the driver stores when the turn stops |
-| `history/legacy_summary_system_prompt.py` | Approval resume of runs paused with the summary inside their saved system message |
 | `history/legacy_stored_tool_calls.py` | Tool-call shapes earlier releases stored, which the conversion to storage v2 stores in the current shape in every message a converted run replays |
 | `history/summary_message.py` | The compaction summary as a user message: its text, its scope or run-local marker, and the marker that replays the scope's summary after a mid-turn compacted prompt |
 | `history/session_runs.py` | The follower background readers share: a conversation's Matrix turns in log order, read in one snapshot with what a redaction would cut, the due scan, backoff, and where a conversation never read starts |
 | `history/legacy_session_cursors.py` | Progress entries and note tags the released background readers wrote in creation order, read as log positions when a reader next reads the conversation |
-| `history/legacy_scope_metadata.py` | The layout version 6 step that moves the owner's per-scope force-compaction flag and preserved seen ids into one metadata value |
+| `session_storage/legacy_scope_metadata.py` | The layout version 7 step that moves the owner's per-scope force-compaction flag and preserved seen ids into one metadata value |
 | `history/` | Persisted history: what a request replays from stored runs, the replay budget, compaction before and during a reply, summary rows, and interrupted-turn replay |
 | `history/request_messages.py` | A model request assembled from a scope's stored runs, its compaction summary, and the current turn |
 | `history/replay.py` | Materializes, estimates, and fits persisted history within one replay budget |
@@ -476,7 +476,7 @@ Matrix sync callback
 | `tool_system/tool_hooks.py` | MindRoom's tool-call policy as middleware around every call: plugin before-call, environment, and after-call hooks, the background-script approval gate, job and authority checkpoints, durable call recording, and failure records |
 | `tool_system/tool_environment.py` | The environment one tool call gives its shell commands, local or worker-routed: the plugin hooks' changes with the response's CLI grant over them |
 | `llm/` | Provider-neutral values the runtime shares: messages, media, usage, run records and their pause requirements, run events, the `ModelProvider` protocol, and normalized provider errors, with the dict keys stored runs carry |
-| `llm/legacy_run_content.py` | Run contents earlier releases stored: a paused notice in place of the model's text, read as none, and a failed run's failure text, handed over redacted |
+| `llm/legacy_run_content.py` | The content a failed run earlier releases stored: its failure text in place of the model's, handed over redacted |
 | `llm/tool_search.py` | Portable deferred tool search for routes the build marks portable: the pipeline stage that leaves deferred schemas off the request and shows stored deferred calls as `call_tool` calls, the loop's rewrite of a model's `call_tool` calls to the functions they name, and the argument parsing both share, which every wire that sends tool-call arguments as an object uses to replay a call another provider stored |
 | `agent_loop/model_loop.py` | `run_model_loop`, the request and tool loop agents, team leaders, and skill reviews share: send the messages, append the answer, run its tool calls, and stop on a final answer, a stopping tool, a pause, a hook, or the request cap |
 | `agent_loop/run.py` | `run_agent` and `resume_agent`: agent runs and approval resumes over the model loop, each ending in one terminal record handed to the persist callback before the run ends |

@@ -113,7 +113,7 @@ def _run(
 
 
 def _baseline(metrics: Mapping[str, object], *models: UsageModelMetrics) -> UsageRunNode:
-    """Return the row holding what a session's stored totals counted beyond its runs, as layout version 6 keeps it."""
+    """Return the row holding what a session's stored totals counted beyond its runs, as layout version 7 keeps it."""
     return UsageRunNode(
         team_id=None,
         requester_id=None,
@@ -177,7 +177,7 @@ def test_admin_exports_reconciled_cumulative_models_separately_from_retained_run
         "audio_output_tokens": 7,
         "audio_total_tokens": 15,
     }
-    # What the session's stored totals counted beyond its run, as layout version 6 keeps it: the run's model-a
+    # What the session's stored totals counted beyond its run, as layout version 7 keeps it: the run's model-a
     # 17/3/20 subtracted from the first model-a entry.
     baseline_models = (
         _model_metrics(

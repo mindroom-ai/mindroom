@@ -23,7 +23,6 @@ from mindroom.conversation_state_writer import ConversationStateWriter, Conversa
 from mindroom.event_journal import journal, turn_rows
 from mindroom.event_journal.identity import journal_principal_id
 from mindroom.event_journal.models import ResponseRecoveryState
-from mindroom.history.legacy_scope_metadata import LEGACY_COMPACTION_METADATA_KEY, LEGACY_MATRIX_HISTORY_METADATA_KEY
 from mindroom.history.request_messages import TurnMessages, build_request, scope_history_messages
 from mindroom.history.storage import (
     read_scope_seen_event_ids,
@@ -41,6 +40,10 @@ from mindroom.response_runner import ResponseRequest, ResponseRunner
 from mindroom.response_sources import ResponseSources
 from mindroom.session_storage.agent_storage import create_agent_state_storage, create_state_storage
 from mindroom.session_storage.legacy_agno3_schema import AgnoTableNames
+from mindroom.session_storage.legacy_scope_metadata import (
+    LEGACY_COMPACTION_METADATA_KEY,
+    LEGACY_MATRIX_HISTORY_METADATA_KEY,
+)
 from mindroom.session_storage.types import ConversationSession
 from mindroom.teams.formation import TeamIntent, TeamMemberStatus, TeamResolution, TeamResolutionMember
 from mindroom.teams.spec import TeamMode

@@ -11,7 +11,6 @@ import pytest
 
 from mindroom import constants
 from mindroom.history.compaction import summarize_runs
-from mindroom.history.legacy_scope_metadata import LEGACY_COMPACTION_METADATA_KEY, LEGACY_MATRIX_HISTORY_METADATA_KEY
 from mindroom.history.storage import (
     _read_scope_history_event_ids,
     _remove_redacted_event_from_history,
@@ -25,6 +24,10 @@ from mindroom.llm.runs import RunRecord, RunStatus
 from mindroom.native_compaction import replay_basis
 from mindroom.session_storage.agent_storage import create_agent_state_storage
 from mindroom.session_storage.legacy_agno3_schema import AgnoTableNames
+from mindroom.session_storage.legacy_scope_metadata import (
+    LEGACY_COMPACTION_METADATA_KEY,
+    LEGACY_MATRIX_HISTORY_METADATA_KEY,
+)
 from mindroom.session_storage.store import ConversationStore
 from mindroom.session_storage.types import ConversationSession
 from tests.conftest import seed_session

@@ -26,7 +26,7 @@ _VERSIONS = {LEGACY_COMPACTION_METADATA_KEY: 2, LEGACY_MATRIX_HISTORY_METADATA_K
 # {"seen_event_ids": [...]}}}``, keyed by scope, although every reader read only the database owner's entry.
 # Last legacy release: v2026.10.696; replacement: the next release, one ``mindroom_history`` value holding the owner's
 # ``force_compact_before_next_run`` and ``seen_event_ids``.
-# Handling: ``flatten_history_metadata`` runs in ``upgrade_layout`` (layout version 6), after every older step, so the
+# Handling: ``flatten_history_metadata`` runs in the step to layout version 7, after every older step, so the
 # Agno conversion's adoption of other scopes' tombstones has already read them. The owner's force flag and seen ids move
 # into the new value, merged with one the conversion's force-request fold already wrote; other scopes' entries, which no
 # release read, and values in a version no reader accepted are dropped with both keys. A row without either key keeps

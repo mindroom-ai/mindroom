@@ -18,7 +18,6 @@ from uuid import uuid4
 
 from mindroom.agent_loop.model_loop import SendRequest
 from mindroom.helper_usage import get_helper_usage_owner
-from mindroom.history.legacy_summary_system_prompt import strip_embedded_summary
 from mindroom.history.policy import context_budget_after_reserve
 from mindroom.history.prompt_tokens import tool_definition_tokens
 from mindroom.history.replay import HistorySummaryBudgetError, estimate_request_messages_tokens
@@ -692,8 +691,6 @@ def _rewrite(messages: list[Message], layout: _Layout, summary_message: Message)
     turns replay the scope's summary in the same place; a run-local summary is stored in place with its run.
     """
     leading = messages[: layout.leading]
-    for message in leading:
-        strip_embedded_summary(message)
     after_prompt = next((index + 1 for index, message in enumerate(layout.kept) if message is layout.prompt), 0)
     if after_prompt and is_scope_summary(summary_message):
         mark_summary_follows(layout.kept[after_prompt - 1])

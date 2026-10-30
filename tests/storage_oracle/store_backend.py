@@ -21,7 +21,6 @@ from mindroom.ai_runtime import _finalize_queued_notice_in_runs, _recover_prior_
 from mindroom.constants import MATRIX_RESPONSE_EVENT_ID_METADATA_KEY
 from mindroom.delegation.execution import persist_delegation_state
 from mindroom.history.interrupted_replay import persist_interrupted_replay_snapshot
-from mindroom.history.legacy_scope_metadata import LEGACY_COMPACTION_METADATA_KEY, LEGACY_MATRIX_HISTORY_METADATA_KEY
 from mindroom.history.storage import (
     append_compaction_chunk,
     append_fold,
@@ -36,6 +35,10 @@ from mindroom.llm.runs import RunStatus
 from mindroom.session_storage.agent_storage import create_state_storage, save_compaction_usage
 from mindroom.session_storage.codec import run_kind
 from mindroom.session_storage.legacy_agno3_schema import AgnoTableNames, agno_runs_sql
+from mindroom.session_storage.legacy_scope_metadata import (
+    LEGACY_COMPACTION_METADATA_KEY,
+    LEGACY_MATRIX_HISTORY_METADATA_KEY,
+)
 from mindroom.session_storage.schema import quote_identifier, usage_table_sql
 from mindroom.session_storage.store import connect_conversation_database
 from mindroom.session_storage.summary_rows import Fold, latest_row
