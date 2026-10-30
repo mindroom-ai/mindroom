@@ -1542,8 +1542,8 @@ class TestSetManualThreadSummary:
             membership_index=AgentReplyMembershipIndex(),
         )
 
-    async def test_sets_summary_and_updates_reader(self, thread_summary_baselines: _ThreadSummaryBaselines) -> None:
-        """Manual summary writes should normalize text, count non-summary messages, and update the cache."""
+    async def test_sets_summary_and_updates_baseline(self, thread_summary_baselines: _ThreadSummaryBaselines) -> None:
+        """Manual summary writes should normalize text, count non-summary messages, and update the baseline."""
         seeded_history = [
             *_make_thread_history(3),
             _make_summary_notice_message("$root1", message_count=2),
@@ -1585,6 +1585,14 @@ class TestSetManualThreadSummary:
         with pytest.raises(ThreadSummaryWriteError, match=r"Failed to fetch thread history for the target thread\."):
             await self._set("done")
 
+        self.client.room_send.assert_not_awaited()
+
+    async def test_markdown_only_summary_raises_before_reading_history(self) -> None:
+        """A summary with no plain text left after normalization should raise without a read or send."""
+        with pytest.raises(ThreadSummaryWriteError, match=r"summary must be a non-empty string\."):
+            await self._set("![](diagram.png)")
+
+        self.conversation_reader.read_strict.assert_not_awaited()
         self.client.room_send.assert_not_awaited()
 
 
