@@ -423,7 +423,7 @@ def _parse_annotation_int(annotations: Mapping[str, str], key: str) -> int:
         return 0
 
 
-def lifecycle_annotations(state: WorkerLifecycleState) -> dict[str, str]:
+def _lifecycle_annotations(state: WorkerLifecycleState) -> dict[str, str]:
     """Serialize every lifecycle field of one worker to Deployment annotations.
 
     An unset value is written blank rather than omitted, so a merge patch clears the old value
@@ -449,7 +449,7 @@ def usage_annotations(state: WorkerLifecycleState) -> dict[str, str]:
     Start and failure history stay with the writers that read the Deployment first, so a manager whose cached view
     is older, such as one replaced after a kubeconfig rotation, never rolls back another manager's restart.
     """
-    return {name: value for name, value in lifecycle_annotations(state).items() if name in _USAGE_ANNOTATIONS}
+    return {name: value for name, value in _lifecycle_annotations(state).items() if name in _USAGE_ANNOTATIONS}
 
 
 def metadata_annotations(*, worker_key: str, state_subpath: str, state: WorkerLifecycleState) -> dict[str, str]:
@@ -457,8 +457,18 @@ def metadata_annotations(*, worker_key: str, state_subpath: str, state: WorkerLi
     return {
         ANNOTATION_WORKER_KEY: worker_key,
         ANNOTATION_STATE_SUBPATH: state_subpath,
-        **lifecycle_annotations(state),
+        **_lifecycle_annotations(state),
     }
+
+
+def with_lifecycle_transition(
+    annotations: Mapping[str, str],
+    transition: Callable[[WorkerLifecycleState], WorkerLifecycleState],
+    *,
+    now: float,
+) -> dict[str, str]:
+    """Return ``annotations`` with the lifecycle they record replaced by its ``transition``."""
+    return {**annotations, **_lifecycle_annotations(transition(lifecycle_from_annotations(annotations, now=now)))}
 
 
 def lifecycle_from_annotations(annotations: Mapping[str, str], *, now: float) -> WorkerLifecycleState:

@@ -408,14 +408,10 @@ class KubernetesWorkerBackend:
             if deployment is None:
                 return None
 
-            annotations = dict(deployment.metadata.annotations or {})
-            annotations.update(
-                resources.lifecycle_annotations(
-                    touch_worker_lifecycle(
-                        resources.lifecycle_from_annotations(annotations, now=timestamp),
-                        now=timestamp,
-                    ),
-                ),
+            annotations = resources.with_lifecycle_transition(
+                deployment.metadata.annotations or {},
+                lambda state: touch_worker_lifecycle(state, now=timestamp),
+                now=timestamp,
             )
             self._resources.patch_deployment(worker_id, annotations=annotations)
             return self._handle_from_deployment(
@@ -504,15 +500,12 @@ class KubernetesWorkerBackend:
                 handle = self._handle_from_deployment(live, now=now)
                 if handle.status != "idle" or int(live.spec.replicas or 0) == 0:
                     continue
-                annotations = dict(live.metadata.annotations or {})
-                annotations.update(
-                    resources.lifecycle_annotations(
-                        mark_worker_idle(resources.lifecycle_from_annotations(annotations, now=now)),
-                    ),
+                annotations = resources.with_lifecycle_transition(
+                    live.metadata.annotations or {},
+                    mark_worker_idle,
+                    now=now,
                 )
-                self._resources.patch_deployment(handle.worker_id, replicas=0, annotations=annotations)
-                self._resources.delete_service(handle.worker_id)
-                self._resources.delete_secret(handle.worker_id)
+                self._stop_worker_resources(handle.worker_id, annotations=annotations)
                 self._invalidate_ready_worker(handle.worker_key)
                 cleaned.append(
                     self._handle_from_deployment(
@@ -707,21 +700,12 @@ class KubernetesWorkerBackend:
             return current
         self._invalidate_ready_worker(worker_key)
 
-        annotations = dict(deployment.metadata.annotations or {})
-        if annotations_override is not None:
-            annotations.update(annotations_override)
-        annotations.update(
-            resources.lifecycle_annotations(
-                mark_worker_failed(
-                    resources.lifecycle_from_annotations(annotations, now=now),
-                    now=now,
-                    failure_reason=failure_reason,
-                ),
-            ),
+        annotations = resources.with_lifecycle_transition(
+            {**(deployment.metadata.annotations or {}), **(annotations_override or {})},
+            lambda state: mark_worker_failed(state, now=now, failure_reason=failure_reason),
+            now=now,
         )
-        self._resources.patch_deployment(worker_id, replicas=0, annotations=annotations)
-        self._resources.delete_service(worker_id)
-        self._resources.delete_secret(worker_id)
+        self._stop_worker_resources(worker_id, annotations=annotations)
         return self._handle_from_deployment(
             deployment,
             now=now,
@@ -878,6 +862,12 @@ class KubernetesWorkerBackend:
                 )
         elif auth_secret_applied:
             self._resources.delete_secret(worker_id)
+
+    def _stop_worker_resources(self, worker_id: str, *, annotations: dict[str, str]) -> None:
+        """Scale one worker to zero with ``annotations``, then delete its Service and auth Secret."""
+        self._resources.patch_deployment(worker_id, replicas=0, annotations=annotations)
+        self._resources.delete_service(worker_id)
+        self._resources.delete_secret(worker_id)
 
     def _worker_id(self, worker_key: str) -> str:
         return worker_id_for_key(worker_key, prefix=self.config.name_prefix)

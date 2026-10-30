@@ -3754,6 +3754,7 @@ def test_kubernetes_backend_cleanup_scales_idle_workers_to_zero() -> None:
     assert cleaned[0].worker_key == _TEST_SCOPED_WORKER_KEY_A
     assert cleaned[0].status == "idle"
     assert deployment.spec.replicas == 0
+    assert apps_api.deployments[handle.worker_id].metadata.annotations["mindroom.ai/worker-status"] == "idle"
     assert handle.worker_id not in core_api.services
     assert handle.worker_id not in core_api.secrets
 

@@ -16,8 +16,7 @@ from mindroom.workers.backends.kubernetes_resources import (
     ANNOTATION_TEMPLATE_HASH,
     ANNOTATION_WORKSPACE_TEMPLATE_HASH,
     LABEL_WORKER_ID,
-    lifecycle_annotations,
-    lifecycle_from_annotations,
+    with_lifecycle_transition,
 )
 
 if TYPE_CHECKING:
@@ -117,8 +116,7 @@ def _stop_kubernetes_workers_mounting_state_roots(resources: KubernetesResourceM
     for deployment in legacy:
         if not deployment.spec.replicas:
             continue
-        annotations = dict(deployment.metadata.annotations or {})
-        annotations.update(lifecycle_annotations(mark_worker_idle(lifecycle_from_annotations(annotations, now=now))))
+        annotations = with_lifecycle_transition(deployment.metadata.annotations or {}, mark_worker_idle, now=now)
         try:
             apps_api.patch_namespaced_deployment(
                 deployment.metadata.name,
