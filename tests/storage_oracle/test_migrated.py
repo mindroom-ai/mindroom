@@ -18,12 +18,17 @@ from typing import TYPE_CHECKING, Any
 
 import pytest
 
+from mindroom.constants import MINDROOM_HISTORY_METADATA_KEY
 from mindroom.history.summary_message import is_scope_summary
 from mindroom.history.types import HistoryScope
 from mindroom.llm.messages import Message
 from mindroom.llm.runs import RunRecord, RunStatus
 from mindroom.session_storage.agent_storage import create_state_storage
 from mindroom.session_storage.legacy_agno3_schema import AgnoTableNames, agno_schema_sql, run_from_row
+from mindroom.session_storage.legacy_scope_metadata import (
+    LEGACY_COMPACTION_METADATA_KEY,
+    LEGACY_MATRIX_HISTORY_METADATA_KEY,
+)
 from mindroom.session_storage.schema import TableNames, quote_identifier, table_names
 from mindroom.session_storage.summary_rows import cut_at_event
 from mindroom.session_storage.types import ConversationSession
@@ -445,28 +450,28 @@ def _force_requests_in_metadata(recorded: dict[str, Any], observed: dict[str, An
     if not requested:
         return
     metadata = recorded["session"]["metadata"] or {}
-    compaction = metadata.get("mindroom_compaction", {"version": 2, "states": {}})
+    compaction = metadata.get(LEGACY_COMPACTION_METADATA_KEY, {"version": 2, "states": {}})
     flags = {scope_key: {"force_compact_before_next_run": True} for scope_key in requested[0]}
     states = {**compaction["states"], **flags}
-    recorded["session"]["metadata"] = {**metadata, "mindroom_compaction": {**compaction, "states": states}}
+    recorded["session"]["metadata"] = {**metadata, LEGACY_COMPACTION_METADATA_KEY: {**compaction, "states": states}}
     used.add("force_request_moves_into_metadata")
 
 
 def _history_state_in_one_value(recorded: dict[str, Any], owner_key: str, used: set[str]) -> None:
     """Show the per-scope history state an older release kept in session metadata as the owner's one value."""
     metadata = recorded["session"]["metadata"] if isinstance(recorded["session"], dict) else None
-    if not isinstance(metadata, dict) or not {"mindroom_compaction", "mindroom_matrix_history"} & metadata.keys():
+    legacy_keys = {LEGACY_COMPACTION_METADATA_KEY, LEGACY_MATRIX_HISTORY_METADATA_KEY}
+    if not isinstance(metadata, dict) or not legacy_keys & metadata.keys():
         return
-    compaction = metadata.get("mindroom_compaction", {}).get("states", {}).get(owner_key, {})
-    seen = metadata.get("mindroom_matrix_history", {}).get("states", {}).get(owner_key, {}).get("seen_event_ids", [])
+    compaction = metadata.get(LEGACY_COMPACTION_METADATA_KEY, {}).get("states", {}).get(owner_key, {})
+    history = metadata.get(LEGACY_MATRIX_HISTORY_METADATA_KEY, {})
+    seen = history.get("states", {}).get(owner_key, {}).get("seen_event_ids", [])
     state = {
         **({"force_compact_before_next_run": True} if compaction.get("force_compact_before_next_run") is True else {}),
         **({"seen_event_ids": sorted(set(seen))} if seen else {}),
     }
-    kept = {
-        key: value for key, value in metadata.items() if key not in {"mindroom_compaction", "mindroom_matrix_history"}
-    }
-    recorded["session"]["metadata"] = {**kept, **({"mindroom_history": state} if state else {})}
+    kept = {key: value for key, value in metadata.items() if key not in legacy_keys}
+    recorded["session"]["metadata"] = {**kept, **({MINDROOM_HISTORY_METADATA_KEY: state} if state else {})}
     used.add("history_state_is_the_owners_one_value")
 
 
@@ -561,9 +566,10 @@ def test_a_converted_end_state_shows_its_last_recorded_observables_but_for_named
     recorded = decode(path.read_text(encoding="utf-8"))
     dump = path.with_suffix(".sql").read_text(encoding="utf-8")
     final = recorded["final"]
-    observed = _end_state(dump, Scenario.from_json(recorded["scenario"]), tmp_path)
+    scenario = Scenario.from_json(recorded["scenario"])
+    observed = _end_state(dump, scenario, tmp_path)
     used: set[str] = set()
-    owner_key = HistoryScope(kind=Scenario.from_json(recorded["scenario"]).kind, scope_id=storage_name_of(dump)).key
+    owner_key = HistoryScope(kind=scenario.kind, scope_id=storage_name_of(dump)).key
     _mask_session(final, observed, _input_facts(dump), SESSION_ID, owner_key, used)
     _unminted(final)
     _unminted(observed)
