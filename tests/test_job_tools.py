@@ -14,7 +14,7 @@ from mindroom.agents import create_agent
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import BackgroundToolJobsConfig
-from mindroom.custom_tools.job import JobTools
+from mindroom.custom_tools.job import JobTools, is_job_function
 from mindroom.delegation.background import delegation_outcome
 from mindroom.event_journal import ToolJobStore
 from mindroom.history.types import HistoryScope
@@ -30,8 +30,10 @@ from mindroom.tool_jobs.resources import execution_resources
 from mindroom.tool_jobs.results import ToolResultPayload, encode_result_payload
 from mindroom.tool_jobs.runtime import BackgroundOutcome, register_background_runtime
 from mindroom.tool_system.agno_toolkits import Toolkit
+from mindroom.tool_system.output_files import OUTPUT_PATH_ARGUMENT, ToolOutputFilePolicy
 from mindroom.tool_system.runtime_context import build_execution_identity_from_runtime_context, tool_runtime_context
 from mindroom.tool_system.tool_function import ToolValue
+from tests.agent_tool_helpers import toolkit_offers
 from tests.conftest import bind_runtime_paths
 from tests.delegation_helpers import _delegate_runtime_context, _runtime_paths
 from tests.fakes.scripted_model import ScriptedModel, answer, calls, tool_call
@@ -131,6 +133,40 @@ async def test_enabling_jobs_reserves_the_function_name_job(tmp_path: Path, *, f
 
 
 @pytest.mark.asyncio
+async def test_job_controls_built_with_output_files_offer_the_output_path_and_stay_recognized(tmp_path: Path) -> None:
+    """Job controls a caller with a workspace builds take the output path, and are still told apart as job controls."""
+    paths = _runtime_paths(tmp_path)
+    config = Config(
+        background_tool_jobs=BackgroundToolJobsConfig(enabled=True),
+        agents={"leader": AgentConfig(display_name="Leader", tools=["calculator"])},
+        models={"default": {"provider": "openai", "id": "gpt-6-astra"}},
+        memory={"backend": "none"},
+        defaults={"tools": []},
+    )
+    bind_runtime_paths(config, runtime_paths=paths)
+    owner = build_execution_identity_from_runtime_context(_delegate_runtime_context(config, paths))
+    runtime = await tool_job_runtime(tmp_path)
+    pin_background_tool_jobs(config, paths)
+    register_background_runtime(paths, runtime)
+    try:
+        controls = JobTools.build(
+            (),
+            paths,
+            owner,
+            depth=0,
+            enabled=True,
+            output_file_policy=ToolOutputFilePolicy(workspace_root=tmp_path),
+        )
+        assert controls is not None
+        job = toolkit_offers(controls, "job")
+    finally:
+        await runtime.shutdown()
+
+    assert OUTPUT_PATH_ARGUMENT in job.parameters["properties"]
+    assert is_job_function(job)
+
+
+@pytest.mark.asyncio
 async def test_job_wait_waits_and_restores_rich_result(tmp_path: Path) -> None:
     """Job wait waits and restores rich result."""
     paths = _runtime_paths(tmp_path)
@@ -164,7 +200,7 @@ async def test_job_wait_waits_and_restores_rich_result(tmp_path: Path) -> None:
             assert [image.content for image in result.images] == [b"proof"]
             assert result.content == "answer"
             assert json.loads(await tools.job("list"))[0]["job_id"] == "ordinary"
-            assert set(tools.get_async_functions()) == {"job"}
+            assert set(tools.functions) == {"job"}
     finally:
         await runtime.shutdown()
 

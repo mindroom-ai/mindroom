@@ -8,12 +8,12 @@ from typing import TYPE_CHECKING, Any
 
 import httpx
 import pytest
-from agno.tools.function import Function
 
 from mindroom.custom_tools.microsoft_people import MicrosoftPeopleTools
 from mindroom.oauth.microsoft import microsoft_oauth_provider
 from mindroom.tool_system.catalog import TOOL_METADATA
 from mindroom.tool_system.declarations import SetupType, ToolCategory, ToolFileAccess
+from tests.agent_tool_helpers import toolkit_offers
 from tests.microsoft_graph_test_support import (
     FakeGraph,
     publish_grant,
@@ -111,7 +111,7 @@ def _raw_path(request: httpx.Request) -> str:
 
 def _description(tools: MicrosoftPeopleTools, name: str) -> str:
     """Return the description the model sees; deferred toolkits do not show toolkit instructions."""
-    return " ".join(Function.from_callable(getattr(tools, name)).to_dict()["description"].split())
+    return " ".join((toolkit_offers(tools, name).description or "").split())
 
 
 def test_registered_metadata_declares_a_read_only_requester_scoped_tool() -> None:
@@ -577,7 +577,7 @@ def test_descriptions_point_the_agent_at_the_ids_and_addresses_it_needs(
     tools, _graph = _tools(tmp_path, monkeypatch, _answer({}))
 
     assert "ask the requester which one they mean" in _description(tools, "microsoft_people_search")
-    person = Function.from_callable(tools.microsoft_people_get_profile).to_dict()["parameters"]["properties"]["person"]
+    person = toolkit_offers(tools, "microsoft_people_get_profile").parameters["properties"]["person"]
     assert "email address" in person["description"]
     assert '"me" for the requester' in person["description"]
 

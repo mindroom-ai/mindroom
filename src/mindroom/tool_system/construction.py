@@ -12,7 +12,7 @@ from weakref import WeakKeyDictionary
 if TYPE_CHECKING:
     from collections.abc import Callable, Mapping
 
-    from mindroom.tool_system.agno_toolkits import Toolkit
+    from mindroom.tool_system.agno_toolkits import AnyToolkit
 
 
 def tool_config_signature(overrides: Mapping[str, object] | None) -> str:
@@ -40,7 +40,7 @@ class ToolConstruction:
     def from_factory(
         cls,
         name: str,
-        factory: Callable[[], type[Toolkit]],
+        factory: Callable[[], type[AnyToolkit]],
         *,
         tool_config_overrides: Mapping[str, object] | None = None,
     ) -> ToolConstruction:
@@ -49,15 +49,15 @@ class ToolConstruction:
         return cls(name, origin, tool_config_signature(tool_config_overrides))
 
 
-_CONSTRUCTIONS: WeakKeyDictionary[Toolkit, ToolConstruction] = WeakKeyDictionary()
+_CONSTRUCTIONS: WeakKeyDictionary[AnyToolkit, ToolConstruction] = WeakKeyDictionary()
 
 
-def bind_toolkit_construction(toolkit: Toolkit, construction: ToolConstruction) -> Toolkit:
+def bind_toolkit_construction[T: AnyToolkit](toolkit: T, construction: ToolConstruction) -> T:
     """Retain selected construction evidence on the final returned wrapper's lifetime."""
     _CONSTRUCTIONS[toolkit] = construction
     return toolkit
 
 
-def get_toolkit_construction(toolkit: Toolkit) -> ToolConstruction | None:
+def get_toolkit_construction(toolkit: AnyToolkit) -> ToolConstruction | None:
     """Read evidence captured by construction without looking at the current registry."""
     return _CONSTRUCTIONS.get(toolkit)

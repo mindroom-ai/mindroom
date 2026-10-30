@@ -52,9 +52,12 @@ def install_scripted_shell(monkeypatch: pytest.MonkeyPatch, run_shell_command: C
     original = agents.get_tool_by_name
 
     def build(name: str, *args: object, **kwargs: object) -> object:
-        toolkit = original(name, *args, **kwargs)
-        if name == "shell" and "run_shell_command" in toolkit.async_functions:
-            toolkit.async_functions["run_shell_command"].entrypoint = run_shell_command
+        if name != "shell":
+            return original(name, *args, **kwargs)
+        # The scripted body runs here, so no call of it is sent to a worker.
+        toolkit = original(name, *args, **{**kwargs, "runs_in_worker": False})
+        if "run_shell_command" in toolkit.functions:
+            toolkit.functions["run_shell_command"] = run_shell_command
         return toolkit
 
     monkeypatch.setattr(agents, "get_tool_by_name", build)

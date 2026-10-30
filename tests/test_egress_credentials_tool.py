@@ -466,7 +466,7 @@ def test_registers_and_builds_via_metadata(tmp_path: Path) -> None:
     tool = get_tool_by_name("egress_credentials", _runtime_paths(tmp_path), worker_target=worker_target())
 
     assert isinstance(tool, EgressCredentialsTools)
-    assert [function.__name__ for function in tool.tools] == ["list_egress_credentials"]
+    assert [function.__name__ for function in tool.functions.values()] == ["list_egress_credentials"]
 
 
 @pytest.mark.parametrize("broker_on", [False, True])

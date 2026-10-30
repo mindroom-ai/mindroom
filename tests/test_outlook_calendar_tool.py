@@ -8,13 +8,13 @@ from typing import TYPE_CHECKING, Any
 
 import httpx
 import pytest
-from agno.tools.function import Function
 
 from mindroom.custom_tools import outlook_calendar
 from mindroom.custom_tools.outlook_calendar import OutlookCalendarTools
 from mindroom.oauth.microsoft import microsoft_oauth_provider
 from mindroom.tool_system.catalog import TOOL_METADATA
 from mindroom.tool_system.declarations import SetupType, ToolFileAccess
+from tests.agent_tool_helpers import toolkit_offers
 from tests.microsoft_graph_test_support import (
     FakeGraph,
     publish_grant,
@@ -148,7 +148,7 @@ def _body(request: httpx.Request) -> dict[str, Any]:
 
 def _description(tools: OutlookCalendarTools, name: str) -> str:
     """Return the description the model sees; deferred toolkits do not show toolkit instructions."""
-    return " ".join(Function.from_callable(getattr(tools, name)).to_dict()["description"].split())
+    return " ".join((toolkit_offers(tools, name).description or "").split())
 
 
 def test_registered_metadata_declares_a_primary_runtime_oauth_tool() -> None:
@@ -1019,7 +1019,7 @@ def test_only_the_calendar_functions_take_a_calendar_owner(tmp_path: Path, monke
     tools, _graph = _tools(tmp_path, monkeypatch)
 
     for name in TOOL_METADATA["outlook_calendar"].function_names:
-        parameters = Function.from_callable(getattr(tools, name)).to_dict()["parameters"]["properties"]
+        parameters = toolkit_offers(tools, name).parameters["properties"]
         assert ("calendar_owner" in parameters) == (name in OWNER_FUNCTIONS), name
         if name in OWNER_FUNCTIONS:
             description = " ".join(parameters["calendar_owner"]["description"].split())

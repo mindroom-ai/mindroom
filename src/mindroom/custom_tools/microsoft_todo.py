@@ -7,8 +7,6 @@ from dataclasses import dataclass
 from datetime import date
 from typing import TYPE_CHECKING, Any, Literal, cast
 
-from agno.tools import Toolkit
-
 from mindroom.config.main import Config  # noqa: TC001  # resolved by tool contract introspection
 from mindroom.credentials.manager import CredentialsManager  # noqa: TC001  # resolved by tool contract introspection
 from mindroom.custom_tools.microsoft_graph import (
@@ -24,6 +22,7 @@ from mindroom.custom_tools.microsoft_graph import (
     time_zone_name,
 )
 from mindroom.oauth.microsoft import microsoft_oauth_provider
+from mindroom.tool_system.authoring import Toolkit
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Mapping

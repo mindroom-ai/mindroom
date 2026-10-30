@@ -22,6 +22,7 @@ from googleapiclient.errors import HttpError
 from mindroom.custom_tools.google_service import ThreadLocalGoogleServiceMixin
 from mindroom.file_access import resolve_agent_file
 from mindroom.logging_config import get_logger
+from mindroom.oauth.agno_compat_google_auth import AgnoGoogleAuthBindingMixin
 from mindroom.oauth.client import ScopedOAuthClientMixin
 from mindroom.oauth.google import google_oauth_provider
 
@@ -110,7 +111,7 @@ def _stage_attachments(
     return staged_paths
 
 
-class GmailTools(ScopedOAuthClientMixin, ThreadLocalGoogleServiceMixin, AgnoGmailTools):
+class GmailTools(ScopedOAuthClientMixin, AgnoGoogleAuthBindingMixin, ThreadLocalGoogleServiceMixin, AgnoGmailTools):
     """Gmail tools wrapper that uses MindRoom's credential management."""
 
     _oauth_provider = google_oauth_provider("google_gmail")

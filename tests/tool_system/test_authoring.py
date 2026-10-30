@@ -11,17 +11,40 @@ from unittest.mock import Mock
 
 import pytest
 
+from mindroom.constants import resolve_runtime_paths
 from mindroom.history.types import HistoryScope
-from mindroom.tool_system.agno_toolkits import Function, adapt_toolkit
+from mindroom.tool_system.agno_toolkits import (
+    Function,
+    adapt_toolkit,
+    configure_toolkit_functions,
+    requires_connect,
+    toolkit_function,
+    toolkit_function_names,
+)
 from mindroom.tool_system.agno_toolkits import Toolkit as AgnoToolkit
-from mindroom.tool_system.authoring import CurrentCall, Toolkit, current_call, tool, toolkit_functions
+from mindroom.tool_system.authoring import (
+    CurrentCall,
+    Toolkit,
+    current_call,
+    passthrough_tool,
+    tool,
+    toolkit_functions,
+)
+from mindroom.tool_system.declarations import ToolCategory, ToolFileAccess
 from mindroom.tool_system.invocation import ToolCallContext, execute_tool_call
+from mindroom.tool_system.metadata import get_tool_by_name
+from mindroom.tool_system.output_files import OUTPUT_PATH_ARGUMENT, ToolOutputFilePolicy
+from mindroom.tool_system.registration import register_tool_with_metadata
+from mindroom.tool_system.registry_state import capture_tool_registry_snapshot, restore_tool_registry_snapshot
 from mindroom.tool_system.runtime_context import ToolRuntimeContext, tool_runtime_context
+from mindroom.tool_system.tool_schema import closed_parameters
 from tests.tool_system import agno_parity_support as support
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Callable, Iterator
+    from pathlib import Path
 
+    from mindroom.constants import RuntimePaths
     from mindroom.tool_system.tool_function import ToolFunction
 
 
@@ -392,7 +415,7 @@ async def test_current_call_names_the_call_a_function_runs_for() -> None:
 
 
 def test_toolkit_functions_returns_one_callable_per_name() -> None:
-    """An owned toolkit gives its functions as authored; an Agno toolkit its async variant where it has one."""
+    """Each function a run offers, by name; of an Agno toolkit, its async variant where it has one."""
 
     def lookup() -> str:
         return "sync"
@@ -403,11 +426,17 @@ def test_toolkit_functions_returns_one_callable_per_name() -> None:
     owned = GreeterTools(tools=[shout])
     agno = AgnoToolkit(name="dual", tools=[lookup])
     agno.async_functions["lookup"] = Function(name="lookup", entrypoint=alookup)
-    # A function rebuilt from its stored definition has nothing to call.
-    agno.async_functions["described_only"] = Function(name="described_only")
 
-    assert toolkit_functions(owned) == {"greet": owned.greet, "farewell": owned.bye, "shout": shout}
-    assert toolkit_functions(agno) == {"lookup": alookup}
+    owned_functions = toolkit_functions(owned)
+    agno_functions = toolkit_functions(agno)
+
+    # The callables validate their arguments, so each wraps the function it calls.
+    assert {name: inspect.unwrap(function) for name, function in owned_functions.items()} == {
+        "farewell": owned.bye,
+        "shout": shout,
+        "greet": owned.greet,
+    }
+    assert {name: inspect.unwrap(function) for name, function in agno_functions.items()} == {"lookup": alookup}
 
 
 def test_an_owned_toolkit_adapts_to_what_its_agno_authored_twin_adapts_to() -> None:
@@ -442,3 +471,224 @@ def test_an_owned_toolkit_adapts_to_what_its_agno_authored_twin_adapts_to() -> N
     agno = AgnoToolkit(name="twin", tools=[owned.count_words, owned.shout_text], instructions="Count and shout words.")
 
     assert support.golden_entry(adapt_toolkit(owned)) == support.golden_entry(adapt_toolkit(agno))
+
+
+class _CountShoutTools(Toolkit):
+    """An owned toolkit registered as a tool for ``get_tool_by_name`` to build."""
+
+    name = "twin"
+    instructions = "Count and shout words."
+
+    @tool
+    def count_words(self, text: str, limit: int | None = None) -> str:
+        """Count the words of a text.
+
+        Args:
+            text: The text.
+            limit: The most words to count.
+
+        """
+        return str(len(text.split()[:limit]))
+
+    @tool
+    def shout_text(self, text: str) -> str:
+        """Shout a text.
+
+        Args:
+            text: The text.
+
+        """
+        return text.upper()
+
+
+class _AgnoCountShoutTools(AgnoToolkit):
+    """The Agno-authored twin of ``_CountShoutTools``."""
+
+    def __init__(self) -> None:
+        owned = _CountShoutTools()
+        super().__init__(name="twin", tools=[owned.count_words, owned.shout_text], instructions=owned.instructions)
+
+
+@pytest.fixture
+def registered_twins(tmp_path: Path) -> Iterator[RuntimePaths]:
+    """Register the owned toolkit and its Agno twin as tools, and return the runtime that builds them."""
+    snapshot = capture_tool_registry_snapshot()
+    for tool_name, toolkit_class in (("owned_twin", _CountShoutTools), ("agno_twin", _AgnoCountShoutTools)):
+        register_tool_with_metadata(
+            name=tool_name,
+            file_access=ToolFileAccess.NONE,
+            display_name=tool_name,
+            description="Test-only toolkit for owned authoring.",
+            category=ToolCategory.DEVELOPMENT,
+        )(lambda toolkit_class=toolkit_class: toolkit_class)
+    try:
+        yield resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path / "storage")
+    finally:
+        restore_tool_registry_snapshot(snapshot)
+
+
+def test_a_registered_owned_toolkit_builds_with_output_files_as_its_agno_twin(
+    registered_twins: RuntimePaths,
+    tmp_path: Path,
+) -> None:
+    """``get_tool_by_name`` builds an owned toolkit with output files, and it adapts to its Agno twin's functions."""
+    owned, agno = (
+        adapt_toolkit(
+            get_tool_by_name(tool_name, registered_twins, tool_output_workspace_root=tmp_path, worker_target=None),
+        )
+        for tool_name in ("owned_twin", "agno_twin")
+    )
+
+    assert support.golden_entry(owned) == support.golden_entry(agno)
+    shout = _by_name(owned.functions)["shout_text"]
+    assert shout.parameters["properties"]["text"] == {"type": "string", "description": "The text."}
+    assert OUTPUT_PATH_ARGUMENT in shout.parameters["properties"]
+    assert shout.strict is False
+
+
+@pytest.mark.parametrize("tool_name", ["owned_twin", "agno_twin"])
+def test_the_function_filters_leave_the_built_toolkit_and_hide_its_functions(
+    registered_twins: RuntimePaths,
+    tool_name: str,
+) -> None:
+    """An include filter offers only the functions it names, while the toolkit keeps every function it built."""
+    toolkit = get_tool_by_name(
+        tool_name,
+        registered_twins,
+        tool_config_overrides={"include_tools": ["shout_text"]},
+        worker_target=None,
+    )
+
+    assert toolkit_function_names(toolkit) == ("shout_text",)
+    assert [function.name for function in adapt_toolkit(toolkit).functions] == ["shout_text"]
+    assert toolkit_function(toolkit, "count_words") is None
+    assert list(toolkit_functions(toolkit)) == ["shout_text"]
+    with pytest.raises(ValueError, match="Included tool"):
+        get_tool_by_name(
+            tool_name,
+            registered_twins,
+            tool_config_overrides={"include_tools": ["missing"]},
+            worker_target=None,
+        )
+
+
+@pytest.mark.asyncio
+async def test_a_registered_owned_function_writes_its_result_where_the_model_asks(
+    registered_twins: RuntimePaths,
+    tmp_path: Path,
+) -> None:
+    """The output files an owned toolkit is built with save a call's result under the workspace."""
+    toolkit = get_tool_by_name("owned_twin", registered_twins, tool_output_workspace_root=tmp_path, worker_target=None)
+    function = toolkit_function(toolkit, "shout_text")
+    assert function is not None
+
+    outcome = await execute_tool_call(
+        function,
+        {"text": "hi", OUTPUT_PATH_ARGUMENT: "out/shout.txt"},
+        _CONTEXT,
+        middleware=(),
+    )
+
+    assert not outcome.is_error
+    assert (tmp_path / "out" / "shout.txt").read_text(encoding="utf-8") == "HI"
+
+
+_TAG_SCHEMA = {
+    "type": "object",
+    "properties": {"tag": {"type": "string", "description": "A tag."}},
+    "required": ["tag"],
+}
+
+
+class _TaggerTools(Toolkit):
+    """A toolkit with one function its schema defines and one its instance fits."""
+
+    name = "tagger"
+
+    def __init__(self, *, room: str) -> None:
+        self.room = room
+        super().__init__()
+
+    @passthrough_tool(description="Tag the thread.", parameters=_TAG_SCHEMA)
+    async def tag(self, **arguments: object) -> str:
+        return repr(arguments)
+
+    @tool
+    def untag(self, tag: str) -> str:
+        """Remove a tag.
+
+        Args:
+            tag: The tag.
+
+        """
+        return tag
+
+    def offered_function(self, function: ToolFunction) -> ToolFunction:
+        if function.name != "untag":
+            return function
+        return replace(
+            function,
+            description=f"Remove a tag in {self.room}.",
+            parameters={**function.parameters, "required": []},
+            requires_confirmation=True,
+        )
+
+
+@pytest.mark.asyncio
+async def test_a_passthrough_function_keeps_its_schema_and_takes_its_arguments_as_sent() -> None:
+    """The authored schema reaches the model as written, unvalidated, and leaves the flags no option set unset."""
+    tag = _by_name(adapt_toolkit(_TaggerTools(room="#lab")).functions)["tag"]
+
+    outcome = await execute_tool_call(tag, {"tag": 7, "extra": True}, _CONTEXT, middleware=())
+
+    assert (tag.description, tag.parameters) == ("Tag the thread.", _TAG_SCHEMA)
+    assert tag.parameters is not _TAG_SCHEMA
+    assert outcome.content == "{'tag': 7, 'extra': True}"
+    assert not tag.entrypoint_processed
+    assert (tag.requires_confirmation, tag.external_execution, tag.strict) == (False, False, None)
+
+
+def test_a_toolkit_fits_a_derived_function_to_its_instance_before_the_output_path_joins(tmp_path: Path) -> None:
+    """``offered_function`` replaces what its instance decides, and the output path joins the schema it returns."""
+    toolkit = configure_toolkit_functions(
+        _TaggerTools(room="#lab"),
+        output_files=ToolOutputFilePolicy(workspace_root=tmp_path),
+    )
+
+    untag = _by_name(adapt_toolkit(toolkit).functions)["untag"]
+
+    assert untag.description == "Remove a tag in #lab."
+    assert untag.requires_confirmation is True
+    assert list(untag.parameters["properties"]) == ["tag", OUTPUT_PATH_ARGUMENT]
+    assert untag.parameters["required"] == []
+    assert untag.parameters["properties"][OUTPUT_PATH_ARGUMENT]["default"] is None
+    assert untag.strict is False
+
+
+def test_an_authored_schema_requires_the_arguments_without_a_default_and_admits_no_other() -> None:
+    """A toolkit's schema in place of the derived one is completed the way Agno completes one it validates."""
+
+    def lookup(city: str, country: str = "NL", *args: object, **kwargs: object) -> str:
+        return city + country + str(args) + str(kwargs)
+
+    parameters = closed_parameters(
+        lookup,
+        {"type": "object", "properties": {"city": {"type": "string"}, "country": {"type": "string"}}},
+    )
+
+    assert parameters == {
+        "type": "object",
+        "properties": {"city": {"type": "string"}, "country": {"type": "string"}},
+        "required": ["city"],
+        "additionalProperties": False,
+    }
+
+
+def test_only_an_agno_toolkit_holds_a_connection_for_its_run() -> None:
+    """An owned toolkit never connects; an Agno toolkit connects when it says so."""
+    connecting = AgnoToolkit(name="db")
+    connecting._requires_connect = True
+
+    assert not requires_connect(GreeterTools())
+    assert not requires_connect(AgnoToolkit(name="plain"))
+    assert requires_connect(connecting)

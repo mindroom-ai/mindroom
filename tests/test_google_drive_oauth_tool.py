@@ -21,7 +21,7 @@ from mindroom.config.main import Config
 from mindroom.credentials.manager import CredentialsManager, get_runtime_credentials_manager
 from mindroom.custom_tools.google_drive import GoogleDriveTools
 from mindroom.oauth.google import GOOGLE_DRIVE_READ_OAUTH_SCOPES, google_oauth_provider
-from mindroom.tool_system.agno_toolkits import adapt_toolkit
+from mindroom.tool_system.agno_toolkits import adapt_toolkit, configure_toolkit_functions, toolkit_function_names
 from mindroom.tool_system.metadata import get_tool_by_name
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity, resolve_worker_target
 from tests.oauth_test_utils import publish_oauth_credentials
@@ -1083,6 +1083,28 @@ def test_google_drive_read_refuses_binary_content_and_names_enabled_download_fun
 
     assert result["error"] == f"Cannot read {mime_type} as text. Use google_drive_download_file instead."
     assert "content" not in result
+
+
+def test_google_drive_read_names_no_download_function_its_filters_leave_out(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A Drive toolkit whose function filters leave out the download function names none when it refuses a read."""
+    tool, service = _google_drive_download_tool(tmp_path, monkeypatch)
+    assert "google_drive_download_file" in toolkit_function_names(tool)
+    offered = [name for name in toolkit_function_names(tool) if name != "google_drive_download_file"]
+    configure_toolkit_functions(tool, offered=offered)
+    content = b"%PDF-1.7\n%\xe2\xe3\xcf\xd3\n1 0 obj\nstream\nx\x9c\x00\x01"
+    service.files_resource.file_metadata = {
+        "name": "report.pdf",
+        "mimeType": "application/pdf",
+        "size": str(len(content)),
+    }
+    tool._download_bytes = lambda _request: content
+
+    result = json.loads(tool.read_file("shared-drive-file-id"))
+
+    assert result["error"] == "Cannot read application/pdf as text."
 
 
 @pytest.mark.parametrize(

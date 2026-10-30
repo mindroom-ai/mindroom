@@ -8,15 +8,14 @@ from typing import TYPE_CHECKING, Any
 
 import httpx
 import pytest
-from agno.tools.function import Function
 
 from mindroom.custom_tools import microsoft_sharepoint
 from mindroom.custom_tools.microsoft_sharepoint import MicrosoftSharePointTools
 from mindroom.oauth.microsoft import microsoft_oauth_provider
-from mindroom.tool_system.agno_toolkits import adapt_function
 from mindroom.tool_system.catalog import TOOL_METADATA
 from mindroom.tool_system.declarations import SetupType, ToolCategory, ToolFileAccess
 from mindroom.tool_system.tool_access import validate_tool_arguments
+from tests.agent_tool_helpers import toolkit_offers
 from tests.microsoft_graph_test_support import (
     FakeGraph,
     publish_grant,
@@ -138,7 +137,7 @@ def _raw_path(request: httpx.Request) -> str:
 
 def _description(tools: MicrosoftSharePointTools, name: str) -> str:
     """Return the description the model sees; deferred toolkits do not show toolkit instructions."""
-    return " ".join(Function.from_callable(getattr(tools, name)).to_dict()["description"].split())
+    return " ".join((toolkit_offers(tools, name).description or "").split())
 
 
 def test_registered_metadata_declares_a_requester_scoped_tool_without_file_access() -> None:
@@ -478,7 +477,7 @@ def test_write_schemas_accept_column_values(
 ) -> None:
     tools, _graph = _tools(tmp_path, monkeypatch, _answer({}))
 
-    validate_tool_arguments(dict(adapt_function(tools.functions[function]).parameters), arguments)
+    validate_tool_arguments(dict(toolkit_offers(tools, function).parameters), arguments)
 
 
 def test_create_item_posts_the_fields(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

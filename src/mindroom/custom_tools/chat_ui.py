@@ -12,7 +12,6 @@ from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Literal, get_args
 
 import nio
-from agno.tools import Toolkit
 from nio.api import RelationshipType
 
 from mindroom.constants import UI_ACTION_CONTENT_KEY
@@ -30,6 +29,7 @@ from mindroom.matrix.large_messages import EDIT_MESSAGE_SIZE_LIMIT, calculate_ev
 from mindroom.matrix.message_builder import build_message_content
 from mindroom.matrix.message_content import resolve_event_source_content
 from mindroom.path_confinement import read_regular_file_within_root
+from mindroom.tool_system.authoring import Toolkit
 from mindroom.tool_system.runtime_context import ToolRuntimeContext, get_tool_runtime_context
 
 if TYPE_CHECKING:
@@ -184,12 +184,8 @@ class ChatUITools(Toolkit):
 
     @property
     def instructions(self) -> str:
-        """Map only the functions this toolkit was built with; include_tools and exclude_tools remove the others."""
-        return self.instructions_for({*self.functions, *self.async_functions})
-
-    @instructions.setter
-    def instructions(self, _value: str | None) -> None:
-        """Ignore Agno's constructor assignment; the map is derived from the enabled functions."""
+        """Map the built functions; ``with_offered_instructions`` narrows them to the ones an agent is offered."""
+        return self.instructions_for(self.functions)
 
     def instructions_for(self, function_names: Collection[str]) -> str:
         """Map only ``function_names``, the functions an agent is offered of this toolkit once its filters ran."""

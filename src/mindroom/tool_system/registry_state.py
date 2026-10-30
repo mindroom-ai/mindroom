@@ -16,12 +16,12 @@ if TYPE_CHECKING:
     from contextlib import AbstractContextManager
     from types import ModuleType
 
-    from mindroom.tool_system.agno_toolkits import Toolkit
+    from mindroom.tool_system.agno_toolkits import AnyToolkit
     from mindroom.tool_system.declarations import ToolMetadata
 
 TOOL_METADATA: dict[str, ToolMetadata] = {}
-TOOL_REGISTRY: dict[str, Callable[[], type[Toolkit]]] = {}
-BUILTIN_TOOL_REGISTRY: dict[str, Callable[[], type[Toolkit]]] = {}
+TOOL_REGISTRY: dict[str, Callable[[], type[AnyToolkit]]] = {}
+BUILTIN_TOOL_REGISTRY: dict[str, Callable[[], type[AnyToolkit]]] = {}
 _PLUGIN_TOOL_METADATA_BY_MODULE: dict[str, dict[str, ToolMetadata]] = {}
 BUILTIN_TOOL_METADATA: dict[str, ToolMetadata] = {}
 PLUGIN_MODULE_PREFIX = "mindroom_plugin_"
@@ -36,9 +36,9 @@ class ToolMetadataValidationError(ValueError):
 
 @dataclass(frozen=True)
 class _ToolRegistrySnapshot:
-    registry: dict[str, Callable[[], type[Toolkit]]]
+    registry: dict[str, Callable[[], type[AnyToolkit]]]
     metadata: dict[str, ToolMetadata]
-    builtin_registry: dict[str, Callable[[], type[Toolkit]]]
+    builtin_registry: dict[str, Callable[[], type[AnyToolkit]]]
     builtin_metadata: dict[str, ToolMetadata]
     module_import_cache: dict[str, plugin_imports._ModuleCacheEntry]
     plugin_tool_metadata_by_module: dict[str, dict[str, ToolMetadata]]
@@ -111,7 +111,7 @@ def locked_tool_registry_state() -> Iterator[None]:
 def resolved_tool_state(
     active_plugins: list[tuple[str, str]],
     plugin_metadata_by_module: dict[str, dict[str, ToolMetadata]],
-) -> tuple[dict[str, Callable[[], type[Toolkit]]], dict[str, ToolMetadata]]:
+) -> tuple[dict[str, Callable[[], type[AnyToolkit]]], dict[str, ToolMetadata]]:
     """Build one complete tool registry state from built-ins plus active plugin overlays."""
     desired_metadata = BUILTIN_TOOL_METADATA.copy()
     desired_registry = BUILTIN_TOOL_REGISTRY.copy()
@@ -125,7 +125,7 @@ def resolved_tool_state(
                 raise ToolMetadataValidationError(msg)
             plugin_owner_by_tool_name[tool_name] = plugin_name
             desired_metadata[tool_name] = plugin_metadata
-            factory = cast("Callable[[], type[Toolkit]] | None", plugin_metadata.factory)
+            factory = cast("Callable[[], type[AnyToolkit]] | None", plugin_metadata.factory)
             if factory is None:
                 desired_registry.pop(tool_name, None)
             else:
@@ -135,9 +135,9 @@ def resolved_tool_state(
 
 
 def reconcile_dynamic_tool_state(
-    current_registry: dict[str, Callable[[], type[Toolkit]]],
+    current_registry: dict[str, Callable[[], type[AnyToolkit]]],
     current_metadata: dict[str, ToolMetadata],
-    desired_registry: Mapping[str, Callable[[], type[Toolkit]]],
+    desired_registry: Mapping[str, Callable[[], type[AnyToolkit]]],
     desired_metadata: Mapping[str, ToolMetadata],
     *,
     owned_tool_names: Iterable[str],
@@ -192,7 +192,7 @@ def _reject_plugin_builtin_tool_collision(tool_name: str) -> None:
 
 def register_builtin_tool_metadata(metadata: ToolMetadata) -> None:
     """Store one built-in tool or metadata-only built-in entry in the durable registry."""
-    factory = cast("Callable[[], type[Toolkit]] | None", metadata.factory)
+    factory = cast("Callable[[], type[AnyToolkit]] | None", metadata.factory)
     BUILTIN_TOOL_METADATA[metadata.name] = metadata
     TOOL_METADATA[metadata.name] = metadata
     if factory is None:

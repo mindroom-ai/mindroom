@@ -9,12 +9,12 @@ from typing import TYPE_CHECKING, Any
 
 import httpx
 import pytest
-from agno.tools.function import Function
 
 from mindroom.custom_tools.microsoft_onenote import MicrosoftOneNoteTools
 from mindroom.oauth.microsoft import microsoft_oauth_provider
 from mindroom.tool_system.catalog import TOOL_METADATA
 from mindroom.tool_system.declarations import SetupType, ToolCategory, ToolFileAccess
+from tests.agent_tool_helpers import toolkit_offers
 from tests.microsoft_graph_test_support import (
     FakeGraph,
     publish_grant,
@@ -192,7 +192,7 @@ def _raw_path(request: httpx.Request) -> str:
 
 def _description(tools: MicrosoftOneNoteTools, name: str) -> str:
     """Return the description the model sees; deferred toolkits do not show toolkit instructions."""
-    return " ".join(Function.from_callable(getattr(tools, name)).to_dict()["description"].split())
+    return " ".join((toolkit_offers(tools, name).description or "").split())
 
 
 def test_registered_metadata_declares_a_requester_scoped_tool_without_file_access() -> None:
@@ -655,7 +655,7 @@ def test_every_function_takes_a_container(tmp_path: Path, monkeypatch: pytest.Mo
     tools, _graph = _tools(tmp_path, monkeypatch, _ok({}))
 
     for name in (*READ_FUNCTIONS, *WRITE_FUNCTIONS):
-        parameters = Function.from_callable(getattr(tools, name)).to_dict()["parameters"]
+        parameters = toolkit_offers(tools, name).parameters
         assert "container" in parameters["properties"], name
         assert "container" not in parameters.get("required", []), name
 

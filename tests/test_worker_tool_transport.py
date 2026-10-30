@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import inspect
 import json
 from types import SimpleNamespace
 from typing import TYPE_CHECKING
@@ -609,7 +610,9 @@ async def test_browser_host_override_keeps_worker_transport_schema_and_hooks(
         require_approval=True,
     )
     function = offered_function(agent, "browser_control")
-    assert isinstance(source_toolkit(function), BrowserTools)
+    toolkit = source_toolkit(function)
+    assert isinstance(toolkit, BrowserTools)
+    assert inspect.unwrap(function.entrypoint) == toolkit.browser
     schema = json.loads(json.dumps(function.parameters))
     assert function.requires_confirmation is True
     assert function.approval_type == "mindroom_policy"

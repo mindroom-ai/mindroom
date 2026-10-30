@@ -9,8 +9,6 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from agno.tools import Toolkit
-
 from mindroom.embeddings.errors import classified_embedder_error, is_embedder_auth_failure_detail
 from mindroom.failure_text import failure_text
 from mindroom.logging_config import get_logger
@@ -23,6 +21,7 @@ from mindroom.memory import (
     update_agent_memory,
 )
 from mindroom.redaction import redact_sensitive_text
+from mindroom.tool_system.authoring import Toolkit
 
 if TYPE_CHECKING:
     from pathlib import Path

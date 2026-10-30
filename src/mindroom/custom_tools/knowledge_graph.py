@@ -5,8 +5,6 @@ from __future__ import annotations
 from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING
 
-from agno.tools import Toolkit
-
 from mindroom.config.knowledge_graph import KNOWLEDGE_GRAPH_SOURCE_ID
 from mindroom.config.resolution import edits_knowledge_graph
 from mindroom.knowledge.read_protocol import SearchHit
@@ -14,6 +12,7 @@ from mindroom.knowledge.search import AgentKnowledge, KnowledgeSource, Knowledge
 from mindroom.knowledge_graph.scope import graph_scope
 from mindroom.knowledge_graph.store import knowledge_graph_store
 from mindroom.logging_config import get_logger
+from mindroom.tool_system.authoring import Toolkit
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
