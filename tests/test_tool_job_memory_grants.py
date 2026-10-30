@@ -130,7 +130,6 @@ async def test_memory_disabled_after_acceptance_cannot_write_retained_store(
                 await coordinator.runtime.release_wait("accepted-memory", waited.claim)
                 memories = await list_all_agent_memories(
                     "leader",
-                    paths.storage_root,
                     config,
                     paths,
                     execution_identity=owner,

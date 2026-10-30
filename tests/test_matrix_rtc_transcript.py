@@ -395,7 +395,7 @@ async def test_private_transcripts_and_memory_are_requester_scoped(
     await alice.finalize(config=config, runtime_paths=runtime_paths)
 
     assert add_memory.await_args.kwargs["execution_identity"] is alice_identity
-    assert add_memory.await_args.args[2] == runtime_paths.storage_root
+    assert add_memory.await_args.args[1:] == (AGENT, config, runtime_paths)
     assert "Transcript: calls/" in add_memory.await_args.args[0]
 
 

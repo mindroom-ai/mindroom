@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from functools import partial
-from typing import TYPE_CHECKING, ClassVar, TypeVar, cast
+from typing import TYPE_CHECKING, ClassVar, cast
 
 from mindroom.embeddings.embedder_health import (
     EmbedderHealthRecorder,
@@ -15,30 +15,21 @@ from mindroom.embeddings.errors import EmbedderRequestError, classified_embedder
 from mindroom.helper_usage import HelperUsageOwner, get_helper_usage_owner, record_helper_usage, record_system_usage
 from mindroom.logging_config import get_logger
 from mindroom.memory_scope_ids import agent_scope_user_id
+from mindroom.runtime_resolution import resolve_agent_storage
 from mindroom.session_storage.agent_storage import create_session_storage
 from mindroom.timing import timed
 
 from ._mem0_usage import counted_mem0_usage, mem0_usage
-from ._policy import (
-    allowed_scope_storage_paths,
-    build_team_user_id,
-    effective_storage_paths_for_context,
-    get_allowed_memory_user_ids,
-    get_team_ids_for_agent,
-    storage_paths_for_scope_user_id,
-)
+from ._policy import MemoryScope, team_memory_root, team_user_id, team_user_ids
 from ._prompting import build_memory_messages
 from ._shared import (
-    MEM0_REPLICA_KEY,
     MemoryEntrypointContext,
     MemoryNotFoundError,
     MemoryResult,
     MemorySearchOutcome,
     ScopedMemoryCrud,
-    ScopedMemoryWriter,
-    new_memory_id,
 )
-from .config import recorded_embedder_failures
+from .config import mem0_store_exists, recorded_embedder_failures
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -51,7 +42,6 @@ if TYPE_CHECKING:
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 
 _MemoryFactory = Callable[..., Awaitable[ScopedMemoryCrud]]
-_T = TypeVar("_T")
 
 logger = get_logger(__name__)
 
@@ -73,36 +63,34 @@ def _record_classified_embedder_failure(
 
 
 async def _run_mem0_embedder_mutation(
-    operation: Callable[[], Awaitable[_T]],
+    operation: Callable[[], Awaitable[None]],
     health_recorder: EmbedderHealthRecorder,
-) -> _T:
+) -> None:
     """Run a Mem0 write, recording a classified embedder failure as embedder health and raising it alone.
 
     A raw provider failure, such as one from Mem0's memory model, propagates as raised and records no embedder health.
     """
     try:
-        result = await operation()
+        await operation()
     except EmbedderRequestError as error:
         health_recorder.record(str(error))
         # Raise the classified error itself, so it keeps its retry judgment, without the raw provider exception.
         raise error from None
     health_recorder.record(None)
-    return result
 
 
 async def _strict_mem0_add(
-    memory: ScopedMemoryWriter,
+    memory: ScopedMemoryCrud,
     messages: list[dict],
     *,
     user_id: str,
     metadata: dict[str, object],
-) -> object:
+) -> None:
     """Add through Mem0 and raise the add's first embedding failure, which Mem0 may have caught."""
     with recorded_embedder_failures() as failures:
-        result = await memory.add(messages, user_id=user_id, metadata=metadata)
+        await memory.add(messages, user_id=user_id, metadata=metadata)
     if failures:
         raise failures[0]
-    return result
 
 
 def _mem0_results(payload: object) -> list[MemoryResult]:
@@ -114,250 +102,42 @@ def _mem0_results(payload: object) -> list[MemoryResult]:
     return []
 
 
-def _scope_filter(scope_user_id: str) -> dict[str, object]:
-    return {"user_id": scope_user_id}
+@dataclass(frozen=True)
+class _Mem0Store:
+    """One Mem0 store and the scopes in it an agent reads."""
 
-
-def _primary_mem0_storage_path(
-    agent_name: str,
-    storage_path: Path,
-    config: Config,
-    runtime_paths: RuntimePaths,
-    execution_identity: ToolExecutionIdentity | None = None,
-) -> Path:
-    """Return the canonical mem0 storage root for one agent in the active scope."""
-    return effective_storage_paths_for_context(
-        agent_name,
-        storage_path,
-        config,
-        runtime_paths,
-        execution_identity=execution_identity,
-    )[0]
+    root: Path
+    user_ids: tuple[str, ...]
 
 
 @timed("system_prompt_assembly.memory_search.mem0.create_memory_instance")
 async def _create_mem0_memory_instance(
-    resolved_storage_path: Path,
+    store_root: Path,
     config: Config,
     create_memory: _MemoryFactory,
 ) -> ScopedMemoryCrud:
-    return await create_memory(resolved_storage_path, config)
+    return await create_memory(store_root, config)
 
 
-async def _search_mem0_scope(
-    memory: ScopedMemoryCrud,
+@timed("system_prompt_assembly.memory_search.mem0.store_search")
+async def _search_mem0_store(
+    store: _Mem0Store,
     query: str,
-    scope_user_id: str,
+    config: Config,
+    create_memory: _MemoryFactory,
     limit: int,
-) -> list[MemoryResult]:
-    return _mem0_results(
-        await memory.search(
+    results: list[MemoryResult],
+) -> None:
+    """Build one store and add each of its scopes' hits to ``results``; the store, and a local model it loaded, go after."""
+    memory = await _create_mem0_memory_instance(store.root, config, create_memory)
+    for user_id in store.user_ids:
+        payload = await memory.search(
             query,
-            filters=_scope_filter(scope_user_id),
+            filters={"user_id": user_id},
             top_k=limit,
             threshold=_MEM0_SEARCH_THRESHOLD,
-        ),
-    )
-
-
-@timed("system_prompt_assembly.memory_search.mem0.agent_search")
-async def _search_mem0_agent_scope(
-    memory: ScopedMemoryCrud,
-    query: str,
-    agent_name: str,
-    limit: int,
-) -> list[MemoryResult]:
-    return await _search_mem0_scope(memory, query, agent_scope_user_id(agent_name), limit)
-
-
-@timed("system_prompt_assembly.memory_search.mem0.team_search")
-async def _search_mem0_team_scope(
-    memory: ScopedMemoryCrud,
-    query: str,
-    team_id: str,
-    limit: int,
-) -> list[MemoryResult]:
-    return await _search_mem0_scope(memory, query, team_id, limit)
-
-
-async def _get_scoped_memory_by_id(
-    memory: ScopedMemoryCrud,
-    memory_id: str,
-    caller_context: str | list[str],
-    config: Config,
-) -> MemoryResult | None:
-    result = await memory.get(memory_id)
-    if not isinstance(result, dict):
-        allowed_user_ids = get_allowed_memory_user_ids(caller_context, config)
-        for scope_user_id in sorted(allowed_user_ids):
-            for entry in _mem0_results(await memory.get_all(filters=_scope_filter(scope_user_id), top_k=1000)):
-                if not isinstance(entry, dict):
-                    continue
-                metadata = entry.get("metadata")
-                if not isinstance(metadata, dict):
-                    continue
-                if metadata.get(MEM0_REPLICA_KEY) == memory_id:
-                    return cast("MemoryResult", entry)
-        return None
-
-    allowed_user_ids = get_allowed_memory_user_ids(caller_context, config)
-    memory_user_id = result.get("user_id")
-    if memory_user_id not in allowed_user_ids:
-        logger.warning(
-            "Memory access denied",
-            memory_id=memory_id,
-            memory_user_id=memory_user_id,
-            allowed_user_ids=sorted(allowed_user_ids),
         )
-        return None
-
-    return cast("MemoryResult", result)
-
-
-def _mem0_replica_key(result: MemoryResult) -> str | None:
-    metadata = result.get("metadata")
-    if not isinstance(metadata, dict):
-        return None
-    replica_key = metadata.get(MEM0_REPLICA_KEY)
-    return replica_key if isinstance(replica_key, str) and replica_key else None
-
-
-async def _find_mem0_replica_memory_ids(
-    *,
-    memory: ScopedMemoryCrud,
-    scope_user_id: str,
-    anchor_result: MemoryResult,
-) -> list[str]:
-    replica_key = _mem0_replica_key(anchor_result)
-
-    matches: list[str] = []
-    for entry in _mem0_results(await memory.get_all(filters=_scope_filter(scope_user_id), top_k=1000)):
-        if not isinstance(entry, dict):
-            continue
-        if entry.get("user_id") != scope_user_id:
-            continue
-        entry_id = entry.get("id")
-        if not isinstance(entry_id, str):
-            continue
-
-        if replica_key is not None:
-            metadata = entry.get("metadata")
-            if isinstance(metadata, dict) and metadata.get(MEM0_REPLICA_KEY) == replica_key:
-                matches.append(entry_id)
-            continue
-
-        if entry.get("memory") == anchor_result.get("memory") and entry.get("metadata") == anchor_result.get(
-            "metadata",
-        ):
-            matches.append(entry_id)
-
-    if replica_key is None and len(matches) != 1:
-        return []
-    return matches
-
-
-async def _find_mem0_anchor_memory_result(
-    memory_id: str,
-    caller_context: str | list[str],
-    storage_path: Path,
-    config: Config,
-    runtime_paths: RuntimePaths,
-    *,
-    create_memory: _MemoryFactory,
-    execution_identity: ToolExecutionIdentity | None = None,
-) -> MemoryResult | None:
-    for _scope_user_id, target_storage_path in allowed_scope_storage_paths(
-        caller_context,
-        storage_path,
-        config,
-        runtime_paths,
-        execution_identity=execution_identity,
-    ):
-        memory = await create_memory(target_storage_path, config)
-        if result := await _get_scoped_memory_by_id(memory, memory_id, caller_context, config):
-            return result
-    return None
-
-
-async def _mem0_mutation_target_ids(
-    memory: ScopedMemoryCrud,
-    memory_id: str,
-    scope_user_id: str,
-    caller_context: str | list[str],
-    anchor_result: MemoryResult,
-    config: Config,
-) -> list[str]:
-    direct_match = await _get_scoped_memory_by_id(memory, memory_id, caller_context, config)
-    if direct_match is not None and isinstance(direct_match.get("id"), str):
-        return [direct_match["id"]]
-    return await _find_mem0_replica_memory_ids(
-        memory=memory,
-        scope_user_id=scope_user_id,
-        anchor_result=anchor_result,
-    )
-
-
-async def _mutate_mem0_memory_targets(
-    *,
-    memory_id: str,
-    content: str | None,
-    operation: str,
-    caller_context: str | list[str],
-    storage_path: Path,
-    config: Config,
-    runtime_paths: RuntimePaths,
-    anchor_result: MemoryResult,
-    create_memory: _MemoryFactory,
-    execution_identity: ToolExecutionIdentity | None = None,
-) -> int:
-    mutated_targets = 0
-    scope_user_id = anchor_result["user_id"]
-    for target_storage_path in storage_paths_for_scope_user_id(
-        scope_user_id,
-        storage_path,
-        config,
-        runtime_paths,
-        execution_identity=execution_identity,
-    ):
-        memory = await create_memory(target_storage_path, config)
-        target_ids = await _mem0_mutation_target_ids(
-            memory,
-            memory_id,
-            scope_user_id,
-            caller_context,
-            anchor_result,
-            config,
-        )
-        for target_id in dict.fromkeys(target_ids):
-            if operation == "update":
-                await memory.update(target_id, cast("str", content))
-            else:
-                await memory.delete(target_id)
-            mutated_targets += 1
-    return mutated_targets
-
-
-async def _add_mem0_scope_messages(
-    *,
-    memory: ScopedMemoryWriter,
-    messages: list[dict],
-    user_id: str,
-    metadata: dict[str, object],
-    failure_log: str,
-    failure_context: dict[str, object],
-    health_recorder: EmbedderHealthRecorder,
-) -> bool:
-    """Write one Mem0 replica and report whether it actually succeeded."""
-    try:
-        await _strict_mem0_add(memory, messages, user_id=user_id, metadata=metadata)
-    except Exception as error:
-        if (detail := _record_classified_embedder_failure(error, health_recorder)) is not None:
-            logger.warning(failure_log, error=detail, **failure_context)
-            return False
-        logger.exception(failure_log, error_type=type(error).__name__, **failure_context)
-        return False
-    health_recorder.record(None)
-    return True
+        results.extend(_mem0_results(payload))
 
 
 @dataclass(frozen=True)
@@ -367,6 +147,56 @@ class Mem0MemoryBackend:
     runtime_paths: RuntimePaths
     create_memory: _MemoryFactory
     context_label: ClassVar[str] = "agent"
+
+    def _agent_scope(
+        self,
+        agent_name: str,
+        config: Config,
+        execution_identity: ToolExecutionIdentity | None,
+    ) -> MemoryScope:
+        state_root = resolve_agent_storage(agent_name, config, self.runtime_paths, execution_identity).state_root
+        return MemoryScope(agent_scope_user_id(agent_name), state_root)
+
+    def _visible_stores(
+        self,
+        agent_name: str,
+        config: Config,
+        execution_identity: ToolExecutionIdentity | None,
+    ) -> list[_Mem0Store]:
+        """Return the agent's store, then the team store with the agent's teams' scopes, unless none is written yet."""
+        agent_scope = self._agent_scope(agent_name, config, execution_identity)
+        stores = [_Mem0Store(agent_scope.root, (agent_scope.user_id,))]
+        team_root = team_memory_root(self.runtime_paths)
+        # Reads never create the team store.
+        if (team_ids := team_user_ids(agent_name, config)) and mem0_store_exists(team_root):
+            stores.append(_Mem0Store(team_root, tuple(team_ids)))
+        return stores
+
+    async def _find(
+        self,
+        memory_id: str,
+        agent_name: str,
+        config: Config,
+        execution_identity: ToolExecutionIdentity | None,
+    ) -> tuple[ScopedMemoryCrud, MemoryResult] | None:
+        """Return the store holding one memory of a scope the agent reads, with that memory."""
+        for store in self._visible_stores(agent_name, config, execution_identity):
+            if (found := await self._get_in(store, memory_id, config)) is not None:
+                return found
+        return None
+
+    async def _get_in(
+        self,
+        store: _Mem0Store,
+        memory_id: str,
+        config: Config,
+    ) -> tuple[ScopedMemoryCrud, MemoryResult] | None:
+        """Return a store with one memory of a scope the agent reads in it; a store without one goes when this returns."""
+        memory = await self.create_memory(store.root, config)
+        result = await memory.get(memory_id)
+        if isinstance(result, dict) and result.get("user_id") in store.user_ids:
+            return memory, cast("MemoryResult", result)
+        return None
 
     async def _record_extraction_usage(
         self,
@@ -390,33 +220,21 @@ class Mem0MemoryBackend:
         self,
         content: str,
         agent_name: str,
-        storage_path: Path,
         config: Config,
         *,
         metadata: dict | None = None,
         execution_identity: ToolExecutionIdentity | None = None,
     ) -> None:
         """Add one mem0 memory for an agent scope."""
-        resolved_storage_path = _primary_mem0_storage_path(
-            agent_name,
-            storage_path,
-            config,
-            self.runtime_paths,
-            execution_identity=execution_identity,
-        )
+        scope = self._agent_scope(agent_name, config, execution_identity)
         metadata = dict(metadata or {})
         metadata["agent"] = agent_name
         messages = [{"role": "user", "content": content}]
         health_recorder = capture_embedder_health_recorder()
 
         async def add_memory() -> None:
-            memory = await self.create_memory(resolved_storage_path, config)
-            await _strict_mem0_add(
-                memory,
-                messages,
-                user_id=agent_scope_user_id(agent_name),
-                metadata=metadata,
-            )
+            memory = await self.create_memory(scope.root, config)
+            await _strict_mem0_add(memory, messages, user_id=scope.user_id, metadata=metadata)
 
         with counted_mem0_usage() as calls:
             try:
@@ -436,203 +254,111 @@ class Mem0MemoryBackend:
         self,
         query: str,
         agent_name: str,
-        storage_path: Path,
         config: Config,
         *,
         limit: int,
         execution_identity: ToolExecutionIdentity | None = None,
         editable: bool = False,  # noqa: ARG002 - every mem0 ID is editable
     ) -> MemorySearchOutcome:
-        """Search mem0 memories visible to an agent.
+        """Search mem0 memories visible to an agent: its own store, then its teams' scopes in the one team store.
 
         Mem0 builds its own internal embedder, so passive health recording in
         MindRoom's embedder never sees this traffic: the backend records the
         outcome itself. Mem0's search embeds the query without swallowing
         (verified against mem0ai 2.2.1), so a completed search proves the
         embedder round-tripped and a propagated provider error classifies
-        into a degraded outcome instead of raising.
+        into a degraded outcome instead of raising. Every scope's search embeds
+        the query with the same embedder, so the first failure ends the search
+        with the hits found so far. The two stores are searched one at a time,
+        each released before the next is built, because each Mem0 instance builds
+        its own embedder, which for a local model is a full copy of that model.
         """
-        resolved_storage_path = _primary_mem0_storage_path(
-            agent_name,
-            storage_path,
-            config,
-            self.runtime_paths,
-            execution_identity=execution_identity,
-        )
         health_recorder = capture_embedder_health_recorder()
-        try:
-            memory = await _create_mem0_memory_instance(
-                resolved_storage_path,
-                config,
-                self.create_memory,
-            )
-            results = await _search_mem0_agent_scope(memory, query, agent_name, limit)
-        except Exception as exc:
-            degraded_reason = _record_classified_embedder_failure(exc, health_recorder)
-            if degraded_reason is None:
-                raise
-            logger.warning("Mem0 memory search degraded by embedder failure", agent=agent_name, error=degraded_reason)
-            return MemorySearchOutcome(results=[], degraded_reason=degraded_reason)
-
+        results: list[MemoryResult] = []
         degraded_reason: str | None = None
-        for team_id in get_team_ids_for_agent(agent_name, config):
+        for store in self._visible_stores(agent_name, config, execution_identity):
             try:
-                team_memories = await _search_mem0_team_scope(memory, query, team_id, limit)
+                await _search_mem0_store(store, query, config, self.create_memory, limit, results)
             except Exception as exc:
-                scope_failure = _record_classified_embedder_failure(exc, health_recorder)
-                if scope_failure is None:
+                if (degraded_reason := _record_classified_embedder_failure(exc, health_recorder)) is None:
                     raise
-                degraded_reason = degraded_reason or scope_failure
                 logger.warning(
-                    "Mem0 team memory search degraded by embedder failure",
+                    "Mem0 memory search degraded by embedder failure",
                     agent=agent_name,
-                    team_id=team_id,
-                    error=scope_failure,
+                    store=str(store.root),
+                    error=degraded_reason,
                 )
-                continue
-            results.extend(team_memories)
-            logger.debug("Team memories found", team_id=team_id, count=len(team_memories))
-
-        logger.debug("Total memories found", count=len(results), agent=agent_name)
-        if degraded_reason is None:
+                break
+        else:
             health_recorder.record(None)
-        # Both scopes share one Mem0 collection and score scale, so the limit keeps the best hits of either scope, and
-        # a memory both scopes return keeps its better-scored copy.
-        best_by_text: dict[str, MemoryResult] = {}
-        for result in sorted(results, key=lambda result: result.get("score", 0.0), reverse=True):
-            best_by_text.setdefault(result.get("memory", ""), result)
-        return MemorySearchOutcome(results=list(best_by_text.values())[:limit], degraded_reason=degraded_reason)
+        logger.debug("Total memories found", count=len(results), agent=agent_name)
+        # Every scope's store uses one embedder and score scale, so the limit keeps the best hits of any scope.
+        results.sort(key=lambda result: result.get("score", 0.0), reverse=True)
+        return MemorySearchOutcome(results=results[:limit], degraded_reason=degraded_reason)
 
     async def list_all(
         self,
         agent_name: str,
-        storage_path: Path,
         config: Config,
         *,
         limit: int,
         execution_identity: ToolExecutionIdentity | None = None,
     ) -> list[MemoryResult]:
         """List mem0 memories stored for an agent."""
-        resolved_storage_path = _primary_mem0_storage_path(
-            agent_name,
-            storage_path,
-            config,
-            self.runtime_paths,
-            execution_identity=execution_identity,
-        )
-        result = await self.create_memory(resolved_storage_path, config)
-        return _mem0_results(await result.get_all(filters=_scope_filter(agent_scope_user_id(agent_name)), top_k=limit))
+        scope = self._agent_scope(agent_name, config, execution_identity)
+        memory = await self.create_memory(scope.root, config)
+        return _mem0_results(await memory.get_all(filters={"user_id": scope.user_id}, top_k=limit))
 
     async def get(
         self,
         memory_id: str,
-        caller_context: str | list[str],
-        storage_path: Path,
+        agent_name: str,
         config: Config,
         *,
         execution_identity: ToolExecutionIdentity | None = None,
     ) -> MemoryResult | None:
-        """Return one mem0 memory visible to the caller."""
-        return await _find_mem0_anchor_memory_result(
-            memory_id,
-            caller_context,
-            storage_path,
-            config,
-            self.runtime_paths,
-            create_memory=self.create_memory,
-            execution_identity=execution_identity,
-        )
+        """Return one mem0 memory of a scope the agent reads."""
+        found = await self._find(memory_id, agent_name, config, execution_identity)
+        return found[1] if found is not None else None
 
     async def update(
         self,
         memory_id: str,
         content: str,
-        caller_context: str | list[str],
-        storage_path: Path,
+        agent_name: str,
         config: Config,
         *,
         execution_identity: ToolExecutionIdentity | None = None,
     ) -> None:
-        """Update one mem0 memory across its replica targets."""
+        """Update one mem0 memory of a scope the agent reads."""
         health_recorder = capture_embedder_health_recorder()
 
-        async def update_targets() -> int:
-            if (
-                anchor_result := await _find_mem0_anchor_memory_result(
-                    memory_id,
-                    caller_context,
-                    storage_path,
-                    config,
-                    self.runtime_paths,
-                    create_memory=self.create_memory,
-                    execution_identity=execution_identity,
-                )
-            ) is None:
+        async def update_memory() -> None:
+            if (found := await self._find(memory_id, agent_name, config, execution_identity)) is None:
                 raise MemoryNotFoundError(memory_id)
-            return await _mutate_mem0_memory_targets(
-                memory_id=memory_id,
-                content=content,
-                operation="update",
-                caller_context=caller_context,
-                storage_path=storage_path,
-                config=config,
-                runtime_paths=self.runtime_paths,
-                anchor_result=anchor_result,
-                create_memory=self.create_memory,
-                execution_identity=execution_identity,
-            )
+            await found[0].update(memory_id, content)
 
-        updated_targets = await _run_mem0_embedder_mutation(update_targets, health_recorder)
-        if updated_targets > 0:
-            logger.info("Memory updated", memory_id=memory_id, storage_targets=updated_targets)
-            return
-        raise MemoryNotFoundError(memory_id)
+        await _run_mem0_embedder_mutation(update_memory, health_recorder)
+        logger.info("Memory updated", memory_id=memory_id)
 
     async def delete(
         self,
         memory_id: str,
-        caller_context: str | list[str],
-        storage_path: Path,
+        agent_name: str,
         config: Config,
         *,
         execution_identity: ToolExecutionIdentity | None = None,
     ) -> None:
-        """Delete one mem0 memory across its replica targets."""
-        if (
-            anchor_result := await _find_mem0_anchor_memory_result(
-                memory_id,
-                caller_context,
-                storage_path,
-                config,
-                self.runtime_paths,
-                create_memory=self.create_memory,
-                execution_identity=execution_identity,
-            )
-        ) is None:
+        """Delete one mem0 memory of a scope the agent reads."""
+        if (found := await self._find(memory_id, agent_name, config, execution_identity)) is None:
             raise MemoryNotFoundError(memory_id)
-
-        deleted_targets = await _mutate_mem0_memory_targets(
-            memory_id=memory_id,
-            content=None,
-            operation="delete",
-            caller_context=caller_context,
-            storage_path=storage_path,
-            config=config,
-            runtime_paths=self.runtime_paths,
-            anchor_result=anchor_result,
-            create_memory=self.create_memory,
-            execution_identity=execution_identity,
-        )
-        if deleted_targets > 0:
-            logger.info("Memory deleted", memory_id=memory_id, storage_targets=deleted_targets)
-            return
-        raise MemoryNotFoundError(memory_id)
+        await found[0].delete(memory_id)
+        logger.info("Memory deleted", memory_id=memory_id)
 
     async def store_conversation(
         self,
         prompt: str,
-        agent_name: str | list[str],
-        storage_path: Path,
+        caller: str | Sequence[str],
         session_id: str,
         config: Config,
         *,
@@ -640,117 +366,64 @@ class Mem0MemoryBackend:
         user_id: str | None = None,
         execution_identity: ToolExecutionIdentity | None = None,
     ) -> None:
-        """Persist conversation messages to mem0-backed memory scopes."""
+        """Extract one conversation turn's memories into the agent's scope or the team's."""
         messages = build_memory_messages(prompt, thread_history, user_id)
         if not messages:
             return
-        replica_key = new_memory_id() if isinstance(agent_name, list) else None
-
-        target_storage_paths = effective_storage_paths_for_context(
-            agent_name,
-            storage_path,
-            config,
-            self.runtime_paths,
-            execution_identity=execution_identity,
-        )
-
-        metadata: dict[str, object]
-        failure_context: dict[str, object]
-        if isinstance(agent_name, list):
-            scope_user_id = build_team_user_id(agent_name)
-            metadata = {
-                "type": "conversation",
-                "session_id": session_id,
-                "is_team": True,
-                "team_members": agent_name,
-            }
-            if replica_key is not None:
-                metadata[MEM0_REPLICA_KEY] = replica_key
-            failure_log = "Failed to add team memory"
-            failure_context = {"team_id": scope_user_id}
-        else:
-            scope_user_id = agent_scope_user_id(agent_name)
-            metadata = {
-                "type": "conversation",
-                "session_id": session_id,
-                "agent": agent_name,
-            }
-            failure_log = "Failed to add memory"
-            failure_context = {"agent": agent_name}
-
-        # A team's conversation has no single agent session, so its extraction counts as internal work.
-        owner = (
-            None
-            if isinstance(agent_name, list)
-            else HelperUsageOwner(
+        metadata: dict[str, object] = {"type": "conversation", "session_id": session_id}
+        owner: HelperUsageOwner | None
+        log_context: dict[str, object]
+        if isinstance(caller, str):
+            scope = self._agent_scope(caller, config, execution_identity)
+            metadata["agent"] = caller
+            log_context = {"agent": caller}
+            owner = HelperUsageOwner(
                 storage_factory=partial(
                     create_session_storage,
-                    agent_name,
+                    caller,
                     config,
                     self.runtime_paths,
                     execution_identity=execution_identity,
                 ),
                 session_id=session_id,
             )
-        )
-        stored_targets = 0
+        else:
+            scope = MemoryScope(team_user_id(caller), team_memory_root(self.runtime_paths))
+            metadata.update(is_team=True, team_members=list(caller))
+            log_context = {"team_id": scope.user_id}
+            # A team's conversation has no single agent session, so its extraction counts as internal work.
+            owner = None
+        health_recorder = capture_embedder_health_recorder()
+        try:
+            memory = await self.create_memory(scope.root, config)
+        except Exception as exc:
+            if (detail := _record_classified_embedder_failure(exc, health_recorder)) is None:
+                raise
+            logger.warning("Failed to add memory", error=detail, **log_context)
+            return
         with counted_mem0_usage() as calls:
             try:
-                for target_storage_path in target_storage_paths:
-                    health_recorder = capture_embedder_health_recorder()
-                    try:
-                        memory = await self.create_memory(target_storage_path, config)
-                    except Exception as exc:
-                        if (detail := _record_classified_embedder_failure(exc, health_recorder)) is None:
-                            raise
-                        logger.warning(failure_log, error=detail, **failure_context)
-                        continue
-                    if await _add_mem0_scope_messages(
-                        memory=memory,
-                        messages=messages,
-                        user_id=scope_user_id,
-                        metadata=metadata,
-                        failure_log=failure_log,
-                        failure_context=failure_context,
-                        health_recorder=health_recorder,
-                    ):
-                        stored_targets += 1
+                await _strict_mem0_add(memory, messages, user_id=scope.user_id, metadata=metadata)
+            except Exception as error:
+                if (detail := _record_classified_embedder_failure(error, health_recorder)) is None:
+                    logger.exception("Failed to add memory", error_type=type(error).__name__, **log_context)
+                else:
+                    logger.warning("Failed to add memory", error=detail, **log_context)
+                return
+            else:
+                health_recorder.record(None)
             finally:
-                # Extraction tokens are spent even when a later store fails.
+                # Extraction tokens are spent even when storing the extracted facts fails afterwards.
                 await self._record_extraction_usage(calls, owner, user_id)
-
-        if stored_targets == 0:
-            logger.warning(
-                "Conversation memory was not stored in any target",
-                requested_targets=len(target_storage_paths),
-                **failure_context,
-            )
-            return
-
-        if isinstance(agent_name, list):
-            logger.info(
-                "Team memory added",
-                team_id=scope_user_id,
-                members=agent_name,
-                storage_targets=stored_targets,
-                requested_targets=len(target_storage_paths),
-            )
-        else:
-            logger.info(
-                "Memory added",
-                agent=agent_name,
-                storage_targets=stored_targets,
-                requested_targets=len(target_storage_paths),
-            )
+        logger.info("Memory added", **log_context)
 
     def load_entrypoint_context(
         self,
         agent_name: str,
-        storage_path: Path,
         config: Config,
         *,
         execution_identity: ToolExecutionIdentity | None = None,
     ) -> MemoryEntrypointContext:
         """Return no stable entrypoint context; mem0 has no curated `MEMORY.md`."""
-        del agent_name, storage_path, config, execution_identity
+        del agent_name, config, execution_identity
         return MemoryEntrypointContext()

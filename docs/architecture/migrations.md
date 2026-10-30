@@ -20,6 +20,8 @@ Paths below are relative to `src/mindroom/` unless they start with `scripts/` or
 - `knowledge/indexing_config.py` owns knowledge index compatibility: a change to what the vectors mean (`_VECTOR_STORE_FORMAT`, the embedder, chunking, or corpus filters) rebuilds the index rather than migrating it, while a change to the collection file's table layout (`vector_store.SCHEMA_VERSION`) is migrated in place, so no vector is embedded again.
 - Mem0 owns its history-table rewrite; `memory/config.py` puts each storage root's history database beside its Chroma store.
   The shared default-path history database that earlier releases left to Mem0 is not carried over: MindRoom never reads its operation history, and its recent-message rows are keyed by agent or team scope without the requester, so they cannot be assigned to one private instance.
+  The merge of per-member team memory copies (`memory/legacy_team_memory.py`) leaves each member's history database in place, because it also holds the member's own history, so a team store's recent-message context starts empty once.
+  It does not carry over Mem0's entity rows either: Mem0 writes them only when spaCy is installed, which MindRoom does not install, so where they exist a merged team fact ranks without the entity boost until an update links it again.
 
 ## Decisions and invariants
 

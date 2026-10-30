@@ -1,0 +1,46 @@
+# Keep the local history to notes, skills, and text written here.
+
+# Caches, environments, and installed tools
+.cache/
+.local/
+.venv/
+__pycache__/
+*.pyc
+node_modules/
+mindroom_tool_outputs/
+.mindroom/scheduled_runs/
+
+# Secrets
+.env
+.env.*
+*.key
+*.pem
+*.p12
+*.pfx
+secrets/
+credentials.json
+*.secret
+
+# Binaries, archives, and large documents
+*.bin
+*.exe
+*.so
+*.dylib
+*.db
+*.sqlite
+*.sqlite3
+*.zip
+*.tar
+*.tar.gz
+*.tgz
+*.7z
+*.pdf
+*.png
+*.jpg
+*.jpeg
+*.gif
+*.mp3
+*.mp4
+*.docx
+*.xlsx
+*.pptx

@@ -1979,8 +1979,8 @@ class TestAgentBot(AgentBotTestBase):
         assert len(stored_calls) == 1
         store_args, _ = stored_calls[0]
         assert store_args[0] == "What time is it?"
-        assert store_args[6] == thread_history
-        assert store_args[7] == "@alice:localhost"
+        assert store_args[5] == thread_history
+        assert store_args[6] == "@alice:localhost"
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize(

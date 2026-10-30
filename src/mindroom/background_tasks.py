@@ -11,7 +11,7 @@ from mindroom.logging_config import get_logger
 from mindroom.runtime_shutdown import GENERIC_SHUTDOWN, RuntimeShutdownIntent
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable, Coroutine
+    from collections.abc import Awaitable, Callable, Collection, Coroutine
     from contextvars import Context
 
 logger = get_logger(__name__)
@@ -97,6 +97,16 @@ async def run_blocking_or_compensate[Result](
         if running.exception() is None:
             await run_blocking_until_complete(compensate, running.result())
         raise
+
+
+async def drain_tasks(tasks: Collection[asyncio.Future[Any]]) -> None:
+    """Wait, without cancelling or raising them, until no task in ``tasks`` runs, including tasks added meanwhile.
+
+    A done callback that discards a finished task from ``tasks`` runs only once this coroutine yields, and gathering
+    finished tasks never yields, so whether a task still runs is read from the task, not from ``tasks``.
+    """
+    while running := [task for task in tasks if not task.done()]:
+        await asyncio.gather(*(asyncio.shield(task) for task in running), return_exceptions=True)
 
 
 def retry_delay_seconds(
