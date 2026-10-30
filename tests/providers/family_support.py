@@ -7,6 +7,8 @@ pipeline for the behavior every family must share, and ``tests/test_agent_mode_h
 
 from __future__ import annotations
 
+import base64
+import json
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
@@ -219,6 +221,31 @@ class Family:
         if self.config["provider"] in {"google", "ollama"}:
             return build_adapter(self.config, root, wire.respond)
         return _openai_family_adapter(self.config, root, wire)
+
+
+def user_parts(body: dict[str, Any]) -> list[Any]:
+    """Return the parts of a request's last user message in every wire's shape; Ollama's text and images count as parts."""
+    if "contents" in body:
+        return body["contents"][-1]["parts"]
+    message = body["messages"][-1] if "messages" in body else body["input"][-1]
+    content = message["content"]
+    return [{"text": content}, *message.get("images", [])] if isinstance(content, str) else content
+
+
+def prompt_text(body: dict[str, Any]) -> str:
+    """Return the text of a request's last user message, the part every wire sends first."""
+    return user_parts(body)[0]["text"]
+
+
+def sends(body: dict[str, Any], data: bytes) -> bool:
+    """Return whether a request's last user message sends ``data``, base64 encoded as any wire encodes it, or as text."""
+    sent = json.dumps(user_parts(body))
+    encoded = (
+        base64.b64encode(data).decode(),
+        base64.urlsafe_b64encode(data).decode(),
+        json.dumps(data.decode())[1:-1],
+    )
+    return any(form in sent for form in encoded)
 
 
 def _chat_tools(body: dict[str, Any]) -> dict[str, dict[str, Any]]:

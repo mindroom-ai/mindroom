@@ -27,6 +27,7 @@ from mindroom.llm.messages import Message
 from mindroom.llm.provider import DeferredTools, ModelRequest, ToolSpec, TurnCompleted, UsageReported, complete
 from mindroom.media_inputs import MediaInputs
 from mindroom.prompts import INLINE_MEDIA_FALLBACK_PROMPT
+from mindroom.providers.gemini import wire as gemini_wire
 from mindroom.providers.pipeline import retry as retry_stage
 from mindroom.providers.pipeline.guidance_retry import MALFORMED_FUNCTION_CALL_GUIDANCE
 from mindroom.providers.pipeline.media import FALLBACK_MARKER
@@ -42,6 +43,8 @@ from tests.providers.family_support import (
     claude_events,
     gemini_chunk,
     ollama_chunk,
+    prompt_text,
+    sends,
 )
 from tests.providers.gemini_ollama_support import runtime_paths_for
 from tests.providers.golden_support import (
@@ -548,6 +551,74 @@ async def test_every_family_notes_an_attachment_file_it_cannot_read(family: str,
 
     assert (turn.content, len(wire.requests)) == ("ok", 1)
     assert spec.user_text(wire.body()) == f"Look\n\n{FALLBACK_MARKER}\n{INLINE_MEDIA_FALLBACK_PROMPT}"
+
+
+_KEPT_PROMPT = "Plan my packing."
+# A readable attachment of each kind, and the bytes that show a request sent it.
+_READABLE = {
+    "image": ("images", Image(id="att_kept", content=b"PNG photo", mime_type="image/png"), b"PNG photo"),
+    "file": ("files", File(id="att_kept", content=b"%PDF-1.4 report", filename="kept.pdf"), b"%PDF-1.4 report"),
+    "audio": ("audio", Audio(id="att_kept", content=b"RIFF clip", format="wav"), b"RIFF clip"),
+}
+
+
+def _named_note(label: str) -> str:
+    return f"{_KEPT_PROMPT}\n\n{FALLBACK_MARKER}\nNot sent: {label}.\n{INLINE_MEDIA_FALLBACK_PROMPT}"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("kind", ["image", "file", "audio"])
+@pytest.mark.parametrize("family", sorted(FAMILIES))
+async def test_every_family_sends_the_rest_of_the_media_beside_an_attachment_it_cannot_read(
+    family: str,
+    kind: str,
+    tmp_path: Path,
+) -> None:
+    """The unreadable attachment's own failure names it, so the provider gets one request with the readable one.
+
+    A route that omits the kind replaces both up front with the plain note.
+    """
+    spec = FAMILIES[family]
+    wire = Wire(spec.reply())
+    adapter = spec.adapter(tmp_path, wire)
+    field, readable, data = _READABLE[kind]
+    [unreadable] = _unreadable_media(kind, tmp_path)[field]
+    message = Message(role="user", content=_KEPT_PROMPT, **{field: [replace(unreadable, id="att_gone"), readable]})
+
+    turn = await complete(pipeline_provider(adapter), ModelRequest(messages=[message]))
+
+    assert (turn.content, len(wire.requests)) == ("ok", 1)
+    if kind in adapter.capabilities.omitted_media:
+        assert prompt_text(wire.body()) == f"{_KEPT_PROMPT}\n\n{FALLBACK_MARKER}\n{INLINE_MEDIA_FALLBACK_PROMPT}"
+        return
+    assert prompt_text(wire.body()) == _named_note(f"{kind} (att_gone)")
+    assert sends(wire.body(), data)
+
+
+@pytest.mark.asyncio
+async def test_vertex_ai_sends_the_rest_of_the_media_beside_a_file_too_large_to_inline(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Vertex AI has no Files API, so the large file is left out by name and the small image still goes inline."""
+    monkeypatch.setattr(gemini_wire, "_INLINE_MEDIA_LIMIT_BYTES", 12)
+    large = tmp_path / "large.pdf"
+    large.write_bytes(b"%PDF-1.4 " + bytes(32))
+    _field, image, _data = _READABLE["image"]
+    message = Message(
+        role="user",
+        content=_KEPT_PROMPT,
+        images=[image],
+        files=[File(id="att_large", filepath=str(large), filename="large.pdf", mime_type="application/pdf")],
+    )
+    spec = FAMILIES["gemini_vertexai"]
+    wire = Wire(spec.reply())
+
+    await complete(pipeline_provider(spec.adapter(tmp_path, wire)), ModelRequest(messages=[message]))
+
+    assert len(wire.requests) == 1
+    assert prompt_text(wire.body()) == _named_note("large.pdf (att_large)")
+    assert sends(wire.body(), b"PNG photo")
 
 
 # Keys that only a media part of some wire carries.
