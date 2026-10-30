@@ -1,11 +1,13 @@
-"""Drive agent replies with the scripted provider: read their runs and text, register a probe toolkit, stop a turn.
+"""Drive agent replies with the scripted provider: read their runs, text, and usage, register a probe toolkit.
 
-A test can also end the process right after a run's terminal record is stored (``crash_after_first_terminal_store``).
+A test can also stop a turn (``stop_turn``), or end the process right after a run's terminal record is stored
+(``crash_after_first_terminal_store``).
 """
 
 from __future__ import annotations
 
 import asyncio
+import json
 from contextlib import contextmanager
 from typing import TYPE_CHECKING, Any, ClassVar
 
@@ -16,6 +18,7 @@ from mindroom.cancellation import request_task_cancel
 from mindroom.custom_tools.tool_payloads import custom_tool_payload
 from mindroom.llm.events import TextDelta
 from mindroom.session_storage.agent_storage import create_session_storage
+from mindroom.session_storage.schema import quote_identifier
 from mindroom.tool_system.declarations import ToolFileAccess
 from mindroom.tool_system.metadata import ToolCategory
 from mindroom.tool_system.registration import register_tool_with_metadata
@@ -32,6 +35,7 @@ if TYPE_CHECKING:
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
     from mindroom.llm.runs import AnyRunRecord
+    from mindroom.session_storage.store import ConversationStore
 
 
 def stored_runs(
@@ -45,6 +49,26 @@ def stored_runs(
     storage = create_session_storage(agent_name, config, runtime_paths, execution_identity=None)
     session = storage.load_session(session_id)
     return [] if session is None else session.runs
+
+
+def session_usage(storage: ConversationStore, session_id: str) -> tuple[list[tuple[int, int]], tuple[int, int]]:
+    """Return the input and output tokens of the session's usage snapshots, and of its stored session totals."""
+    names = storage.names
+    with storage.transaction(write=False) as connection:
+        snapshots = connection.execute(
+            f"SELECT usage_data FROM {quote_identifier(names.usage)} WHERE session_id = ?",  # noqa: S608
+            (session_id,),
+        ).fetchall()
+        (session_data,) = connection.execute(
+            f"SELECT session_data FROM {quote_identifier(names.sessions)} WHERE session_id = ?",  # noqa: S608
+            (session_id,),
+        ).fetchone()
+    counted = sorted(
+        (metrics["input_tokens"], metrics["output_tokens"])
+        for metrics in (json.loads(snapshot)["metrics"] for (snapshot,) in snapshots)
+    )
+    totals = json.loads(session_data)["session_metrics"]
+    return counted, (totals["input_tokens"], totals["output_tokens"])
 
 
 def streamed_text(chunks: Iterable[AIStreamChunk]) -> list[str]:
@@ -235,6 +259,7 @@ __all__ = [
     "raising",
     "registered_probe_tools",
     "registered_toolkit",
+    "session_usage",
     "stop_turn",
     "stored_runs",
     "streamed_text",

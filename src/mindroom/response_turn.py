@@ -303,16 +303,24 @@ class TurnContinuationRunState:
     ) -> TurnContinuationRunState:
         """Return the continuation state for one more same-turn attempt."""
         return replace(
-            self,
+            self.next_attempt(previous_run_id=previous_run_id),
             active_prompt=continuation_prompt,
             active_model_prompt=self.continuation_model_prompt_tail or None,
             active_current_timestamp_ms=None,
             active_current_prompt_is_structured=False,
             active_current_event_id=None,
-            active_run_id=None if previous_run_id is None else str(uuid4()),
             active_model_name=active_model_name,
             apply_model_to_team_members=apply_model_to_team_members,
         )
+
+    def next_attempt(self, *, previous_run_id: str | None) -> TurnContinuationRunState:
+        """Return the state for one more attempt at the active prompt, which runs under a run id of its own.
+
+        A save under a stored run's id replaces that run's record and usage, which only the run itself may do, as when
+        it resumes after a pause, so no attempt reuses the run id of the attempt before it. When that attempt named
+        none, the next one chooses its own.
+        """
+        return replace(self, active_run_id=None if previous_run_id is None else str(uuid4()))
 
 
 @dataclass(frozen=True)
@@ -809,8 +817,8 @@ async def _record_interrupted(
         return
     snapshot = run.partial_snapshot()
     run.record.record_interrupted(
-        # Between a continuation's attempts, the attempt it was about to start names the turn, so the record does not
-        # replace a run an earlier attempt stored.
+        # Between two attempts, such as a continuation's or an empty run's retry, the attempt about to start names the
+        # turn, so the record does not replace a run an earlier attempt stored.
         run_id=snapshot.attempt_run_id or continuation.active_run_id or ctx.run_id,
         run_metadata=_interrupted_run_metadata(ctx, run),
         assistant_text=snapshot.assistant_text,
@@ -1047,7 +1055,10 @@ def _settle_completed_attempt(
         return _CompletionSettle(keep_going=False, continuation=continuation)
     if resolution.is_empty:
         if _settle_empty_run(ctx, run, resolution, continuation_count=continuation_count):
-            return _CompletionSettle(keep_going=True, continuation=continuation)
+            return _CompletionSettle(
+                keep_going=True,
+                continuation=continuation.next_attempt(previous_run_id=resolution.attempt_run_id),
+            )
         # The notice falls through: run metadata and recorder completion
         # still apply to this notice-only turn.
         return _CompletionSettle(

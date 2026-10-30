@@ -10,26 +10,31 @@ runtime seam (``tests/team_turn_helpers.py``).
 from __future__ import annotations
 
 import time
-from typing import TYPE_CHECKING
+from datetime import UTC, datetime
+from typing import TYPE_CHECKING, Any
 from unittest.mock import patch
 
 import pytest
 
 from mindroom import ai_runtime
 from mindroom.agents import create_agent
-from mindroom.constants import SILENT_SCHEDULE_NO_REPLY_TOKEN
+from mindroom.budgets.pricing import PricedModel
+from mindroom.budgets.spend import collect_monthly_spend
+from mindroom.config.models import ModelPricing
+from mindroom.constants import AI_RUN_METADATA_KEY, SILENT_SCHEDULE_NO_REPLY_TOKEN
 from mindroom.llm.errors import ProviderError
 from mindroom.llm.messages import Message
 from mindroom.llm.runs import TeamRunRecord
 from mindroom.timing import DispatchPipelineTiming
 from mindroom.turn_continuation import TURN_CONTINUATION_LIMIT
 from tests.conftest import seed_session
-from tests.fakes.scripted_model import Await, ScriptStep, answer, calls, tool_call
+from tests.fakes.scripted_model import Await, ScriptStep, answer, calls, tool_call, usage
 from tests.history_helpers import _completed_team_run, _team_session
-from tests.scripted_agent_helpers import ProcessCrash, crash_after_first_terminal_store
+from tests.scripted_agent_helpers import ProcessCrash, crash_after_first_terminal_store, session_usage
 from tests.team_turn_helpers import (
     EVENT_ID,
     PROBE_TOOL,
+    REQUESTER_ID,
     ROOM_ID,
     SESSION_ID,
     ProbeToolkit,
@@ -98,20 +103,45 @@ def _failing(message: str) -> list[ScriptStep]:
 
 
 @pytest.mark.asyncio
-async def test_an_empty_completed_attempt_is_left_out_of_history_and_retried_once(
+async def test_an_empty_completed_attempt_is_left_out_of_history_and_retried_once_under_a_run_id_of_its_own(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The empty run is never stored; the retry is a fresh model request the pipeline timing marks."""
+    """The empty run is never stored; the retry is a fresh model request the pipeline timing marks.
+
+    The retry's run is the turn's final run, which the turn's record and its run metadata name.
+    """
     team = _team(tmp_path, monkeypatch, leader=[answer(""), answer("Recovered answer")])
     timing = DispatchPipelineTiming(source_event_id=EVENT_ID, room_id=ROOM_ID)
+    run_metadata: dict[str, Any] = {}
 
-    text = await team.respond(pipeline_timing=timing)
+    text = await team.respond(pipeline_timing=timing, run_metadata_collector=run_metadata)
 
     assert text.endswith("Recovered answer")
     assert len(team.models["default"].requests) == 2
-    assert _team_run_ids(team) == ["run-1"]
+    [run_id] = _team_run_ids(team)
+    assert run_id != "run-1"
+    assert (team.recorder.outcome, team.recorder.run_id) == ("completed", run_id)
+    assert run_metadata[AI_RUN_METADATA_KEY]["run_id"] == run_id
     assert 0 < timing.marks["first_model_request_sent"] < timing.marks["model_request_sent"]
+
+
+@pytest.mark.asyncio
+async def test_an_empty_attempt_s_retry_leaves_its_usage_in_the_ledger_the_totals_and_the_budget(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Under the turn's run id, the retry's run does not replace the empty run's usage: both attempts count."""
+    team = _team(tmp_path, monkeypatch, leader=[answer("", usage(100, 5)), answer("Recovered answer", usage(120, 9))])
+
+    await team.respond()
+
+    assert session_usage(team.storage, SESSION_ID) == ([(100, 5), (120, 9)], (220, 14))
+    priced = PricedModel(pricing=ModelPricing(input=2, output=10), input_includes_cache=False)
+    identity = team.models["default"].identity
+    prices = {(identity.provider_name, identity.id): priced}
+    spend = collect_monthly_spend(team.config, team.runtime_paths, datetime.now(UTC), prices)
+    assert spend.spend_usd == {REQUESTER_ID: pytest.approx((220 * 2 + 14 * 10) / 1_000_000)}
 
 
 @pytest.mark.asyncio
