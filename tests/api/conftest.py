@@ -1,12 +1,11 @@
 """Pytest configuration and fixtures for dashboard backend tests."""
 
-# Import the app after we can mock the config path
 import asyncio
 import json
 import threading
-from collections.abc import Callable, Generator
+from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
-from functools import cache
+from functools import cache, partial
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -22,6 +21,9 @@ from starlette.requests import Request
 from mindroom import constants
 from mindroom.api import config_lifecycle
 from mindroom.api.app_state import ensure_app_state
+from mindroom.config.commit import ConfigCommit
+from mindroom.config.load_attempt import ConfigLoadResult
+from mindroom.config.main import Config, load_config
 from tests.runtime_fakes import bind_test_embedded_runtime
 
 if TYPE_CHECKING:
@@ -132,7 +134,6 @@ def trusted_upstream_env(
 
 def use_trusted_upstream_runtime(api_app: object) -> "RuntimePaths":
     """Reinitialize one API app with trusted-upstream auth that accepts `trusted_upstream_headers`."""
-    from mindroom import constants  # noqa: PLC0415
     from mindroom.api import main  # noqa: PLC0415
 
     runtime_paths = main._app_runtime_paths(api_app)
@@ -146,7 +147,7 @@ def use_trusted_upstream_runtime(api_app: object) -> "RuntimePaths":
 
 
 @pytest.fixture
-def temp_config_file(tmp_path: Path) -> Generator[Path, None, None]:
+def temp_config_file(tmp_path: Path) -> Path:
     """Create a temporary config file for testing."""
     config_dir = tmp_path / "api-runtime"
     config_dir.mkdir()
@@ -166,17 +167,12 @@ def temp_config_file(tmp_path: Path) -> Generator[Path, None, None]:
     }
     temp_path = config_dir / "config.yaml"
     temp_path.write_text(yaml.dump(config_data), encoding="utf-8")
-
-    yield temp_path
-
-    # Cleanup
-    temp_path.unlink(missing_ok=True)
+    return temp_path
 
 
 @pytest.fixture
 def test_client(temp_config_file: Path) -> TestClient:
     """Create a test client with mocked config file."""
-    from mindroom import constants  # noqa: PLC0415
     from mindroom.api import main  # noqa: PLC0415
 
     runtime_paths = constants.resolve_primary_runtime_paths(
@@ -191,18 +187,6 @@ def test_client(temp_config_file: Path) -> TestClient:
 
     # Create test client
     return TestClient(main.app, base_url="http://localhost")
-
-
-@pytest.fixture
-def sample_agent_data() -> dict[str, Any]:
-    """Sample agent data for testing."""
-    return {
-        "display_name": "New Test Agent",
-        "role": "A new test agent for testing",
-        "tools": ["file", "shell"],
-        "instructions": ["Do something", "Do something else"],
-        "rooms": ["lobby", "dev"],
-    }
 
 
 @pytest.fixture
@@ -228,7 +212,7 @@ def calls_on_event_loop(monkeypatch: pytest.MonkeyPatch) -> Callable[[object, st
     return record
 
 
-def make_api_app(runtime_paths: constants.RuntimePaths) -> FastAPI:
+def make_api_app(runtime_paths: "RuntimePaths") -> FastAPI:
     """Build one API app with a fresh published snapshot, mirroring main.initialize_api_app."""
     api_app = FastAPI()
     state = ensure_app_state(api_app)
@@ -237,7 +221,6 @@ def make_api_app(runtime_paths: constants.RuntimePaths) -> FastAPI:
         snapshot=config_lifecycle.ApiSnapshot(
             generation=0,
             runtime_paths=runtime_paths,
-            config_data={},
         ),
     )
     config_lifecycle.register_api_app(api_app)
@@ -245,7 +228,7 @@ def make_api_app(runtime_paths: constants.RuntimePaths) -> FastAPI:
 
 
 def request_for(api_app: FastAPI) -> Request:
-    """Return a request served by ``api_app``, as a route handler receives it."""
+    """Return a dashboard GET request against `api_app`."""
     return Request(
         {
             "type": "http",
@@ -259,5 +242,97 @@ def request_for(api_app: FastAPI) -> Request:
 
 
 def api_snapshot(api_app: FastAPI) -> config_lifecycle.ApiSnapshot:
-    """Return the snapshot ``api_app`` currently publishes."""
+    """Return the snapshot `api_app` currently publishes."""
     return config_lifecycle.require_api_state(api_app).snapshot
+
+
+def publish_api_config(api_app: FastAPI, config: Config) -> None:
+    """Serve `config` as the app's committed config without loading or committing a file."""
+    snapshot = api_snapshot(api_app)
+    snapshot.runtime_config = config
+    snapshot.config_load_result = ConfigLoadResult(success=True)
+
+
+def save_config(request: Request, payload: dict[str, Any], *, expected_generation: int | None = None) -> int:
+    """Commit a dashboard structured save and return its generation."""
+    build = partial(ConfigCommit.from_payload, payload)
+    return config_lifecycle.commit_dashboard_config(request, build, expected_generation=expected_generation).generation
+
+
+def save_edited_config(request: Request, edit: Callable[[dict[str, Any]], object]) -> int:
+    """Save the config the request pinned after `edit` changes its authored payload, as the dashboard editor does."""
+    config_lifecycle.bind_current_request_snapshot(request)
+    config, _ = config_lifecycle.read_committed_runtime_config(request)
+    payload = config.authored_model_dump()
+    edit(payload)
+    return save_config(request, payload)
+
+
+def save_raw_config(request: Request, source: str, *, expected_generation: int | None = None) -> int:
+    """Commit a dashboard raw save and return its generation."""
+    build = partial(ConfigCommit.from_source, source)
+    return config_lifecycle.commit_dashboard_config(request, build, expected_generation=expected_generation).generation
+
+
+def commit_tool_change(
+    payload: dict[str, Any],
+    runtime_paths: "RuntimePaths",
+    *,
+    loaded: Config | None = None,
+) -> Config:
+    """Commit a change the way a tool does: validated, and refused when the file changed since `loaded` was read.
+
+    Without `loaded`, the tool loads the file right before committing.
+    """
+    if loaded is None:
+        loaded = load_config(runtime_paths, tolerate_plugin_load_errors=True)
+    commit = ConfigCommit.from_payload(payload, runtime_paths)
+    config_lifecycle.commit_config(runtime_paths, commit, loaded=loaded)
+    return commit.config
+
+
+PLATFORM_SSO_SECRET = "instance-platform-sso-secret-for-tests-0001"  # noqa: S105
+
+
+def set_platform_auth(
+    *,
+    valid_tokens: set[str],
+    platform_sso_url: str = "https://platform.example.com/instance-sso/authorize",
+    public_url: str | None = None,
+    account_id: str | None = None,
+    user_id: str = "user-123",
+    platform_sso_secret: str | None = PLATFORM_SSO_SECRET,
+) -> None:
+    """Configure the API module for platform-managed login tests."""
+    from mindroom.api import auth, main  # noqa: PLC0415
+
+    class _FakeUser:
+        id = user_id
+        email = "user@example.com"
+
+    class _FakeResponse:
+        user = _FakeUser()
+
+    class _FakeAuth:
+        @staticmethod
+        def get_user(token: str) -> _FakeResponse | None:
+            if token not in valid_tokens:
+                return None
+            return _FakeResponse()
+
+    class _FakeClient:
+        auth = _FakeAuth()
+
+    config_lifecycle.app_state(main.app).api_auth_state = auth.ApiAuthState(
+        runtime_paths=main._app_runtime_paths(main.app),
+        settings=auth._ApiAuthSettings(
+            supabase_url="https://supabase.example.com",
+            supabase_anon_key="anon-key",
+            account_id=account_id,
+            mindroom_api_key=None,
+            public_url=public_url,
+            platform_sso_url=platform_sso_url,
+            platform_sso_secret=platform_sso_secret,
+        ),
+        supabase_auth=_FakeClient(),
+    )

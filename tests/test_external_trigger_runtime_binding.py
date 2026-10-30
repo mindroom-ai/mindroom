@@ -13,6 +13,7 @@ from mindroom.config.main import Config, load_config
 from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.external_triggers.store import ExternalTriggerTarget, TriggerDeliverySnapshot
 from mindroom.orchestration.external_trigger_runtime import ExternalTriggerRuntimeCoordinator
+from tests.api.conftest import request_for, save_config
 from tests.conftest import test_runtime_paths
 
 if TYPE_CHECKING:
@@ -91,7 +92,7 @@ def test_runtime_coordinator_leaves_delivery_unavailable_until_the_bots_run_the_
     assert config_lifecycle.load_config_into_app(runtime_paths, api_main.app).loaded
     running_config = load_config(runtime_paths)
     saved_payload = {**running_config.authored_model_dump(), "timezone": "Europe/Amsterdam"}
-    config_lifecycle._build_and_commit_replacement(api_main.app, saved_payload, error_prefix="save")
+    save_config(request_for(api_main.app), saved_payload)
     router_bot = MagicMock()
     router_bot.running = True
     router_bot.client = object()

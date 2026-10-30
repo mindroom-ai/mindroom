@@ -63,6 +63,7 @@ def test_builtin_oauth_registry_lists_every_builtin_provider_once_in_order() -> 
         "microsoft_onenote",
         "microsoft_people",
         "slack",
+        "spotify",
     ]
 
 
@@ -177,7 +178,6 @@ def test_load_oauth_providers_for_snapshot_uses_runtime_config_and_cache_key(
     snapshot = ApiSnapshot(
         generation=7,
         runtime_paths=runtime_paths,
-        config_data={"agents": {}},
         runtime_config=runtime_config,
     )
     expected_providers = {"provider": _provider("provider")}
@@ -210,7 +210,6 @@ def test_load_oauth_providers_for_pre_load_snapshot_falls_back_to_empty_config(
     snapshot = ApiSnapshot(
         generation=0,
         runtime_paths=runtime_paths,
-        config_data={},
         runtime_config=None,
     )
     expected_providers = {"provider": _provider("provider")}
