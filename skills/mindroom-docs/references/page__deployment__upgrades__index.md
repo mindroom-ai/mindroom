@@ -15,7 +15,8 @@ Only Mem0 team memories of the configured embedder merge; those an earlier embed
 A storage error while writing team memory stops startup before any member's Mem0 copy is removed, and the next start merges the rest.
 The first start installs Chroma for this when any agent the config lists has a Mem0 store; with `MINDROOM_NO_AUTO_INSTALL_TOOLS=1` and no `chromadb` extra, the Mem0 copies stay until the first start with Chroma.
 The Mem0 copies also wait for a start whose embedder answers, since the first start asks it once for the size of its embeddings; after fixing the embedder, restart MindRoom to merge them.
-An older release does not read `team_memory/`; after going back and upgrading again, delete `tracking/team_memory_merged.json` before the start so the copies that release wrote merge too; copies a `Left` warning named merge again then, so first remove any of them whose memories you do not want back.
+An older release does not read `team_memory/`; after going back and upgrading again, delete `tracking/team_memory_merged.json` before the start so the copies that release wrote merge too.
+That start also checks again every copy a `Left` warning named, so first remove any of them whose memories you do not want back.
 
 ## Upgrading to progress kept in conversation order
 
