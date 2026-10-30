@@ -20,7 +20,6 @@ from mindroom.api.credentials_target import (
     resolve_request_credentials_target,
     save_credentials_for_target,
 )
-from mindroom.credentials.manager import EnvironmentCredentialError
 from mindroom.spotify_tokens import current_spotify_credentials
 from mindroom.tool_system.dependencies import ensure_tool_deps, optional_dependency_environment
 
@@ -232,9 +231,6 @@ async def spotify_callback(request: Request, code: str) -> RedirectResponse:
 async def disconnect_spotify(request: Request, agent_name: str | None = None) -> dict[str, str]:
     """Disconnect Spotify by removing stored credentials."""
     target = resolve_request_credentials_target(request, agent_name=agent_name, service_names=("spotify",))
-    try:
-        delete_credentials_for_target("spotify", target)
-    except EnvironmentCredentialError as e:
-        raise HTTPException(status_code=409, detail=str(e)) from e
+    delete_credentials_for_target("spotify", target)
 
     return {"status": "disconnected"}

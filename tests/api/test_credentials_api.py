@@ -1,6 +1,5 @@
 """Tests for the credentials API endpoints."""
 
-import json
 from collections.abc import Generator
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -103,7 +102,6 @@ def mock_credentials_manager() -> Generator[MagicMock, None, None]:
     """Mock the credentials manager."""
     with patch("mindroom.api.credentials_target.get_runtime_credentials_manager") as mock:
         mock_manager = MagicMock()
-        mock_manager.declared_variable.return_value = None
         mock.return_value = mock_manager
         yield mock_manager
 
@@ -332,7 +330,7 @@ class TestCredentialsAPI:
         response = client.get("/api/credentials/openai/api-key?agent_name=general")
 
         assert response.status_code == 200
-        assert {call.args[0] for call in mock_credentials_manager.for_worker.call_args_list} == {expected_worker_key}
+        mock_credentials_manager.for_worker.assert_called_once_with(expected_worker_key)
 
     def test_credentials_target_worker_resolver_matches_worker_routing(
         self,
@@ -1948,21 +1946,6 @@ class TestCredentialsAPI:
 
         mock_credentials_manager.delete_credentials.assert_called_once_with("email")
 
-    def test_deleting_a_credential_only_the_environment_supplies_names_its_variable(
-        self,
-        client: TestClient,
-        mock_credentials_manager: MagicMock,
-    ) -> None:
-        """A key the environment supplies cannot be deleted here, so the route says where it comes from."""
-        mock_credentials_manager.load_credentials.return_value = {"api_key": "sk-env"}
-        mock_credentials_manager.declared_variable.return_value = "OPENAI_API_KEY"
-
-        response = client.delete("/api/credentials/openai")
-
-        assert response.status_code == 409
-        assert "OPENAI_API_KEY" in response.json()["detail"]
-        mock_credentials_manager.delete_credentials.assert_not_called()
-
     def test_list_services(
         self,
         client: TestClient,
@@ -1983,9 +1966,11 @@ class TestCredentialsAPI:
         client: TestClient,
         mock_credentials_manager: MagicMock,
     ) -> None:
-        """A key the environment declares carries no source tag; the endpoint reports it as `env`."""
-        mock_credentials_manager.load_credentials.return_value = {"api_key": "sk-test-long-key-value"}
-        mock_credentials_manager.declared_variable.return_value = "OPENAI_API_KEY"
+        """Test that get_api_key returns source field for env-sourced keys."""
+        mock_credentials_manager.load_credentials.return_value = {
+            "api_key": "sk-test-long-key-value",
+            "_source": "env",
+        }
 
         response = client.get("/api/credentials/openai/api-key")
 
@@ -2390,50 +2375,3 @@ def test_oauth_client_config_keeps_base_store_with_separate_shared_layer(
     assert manager.load_credentials(service) is None
     assert manager.shared_manager().load_credentials(service) == {"client_id": "shared-client"}
     assert worker_manager.load_credentials(service) == {"client_id": "worker-client"}
-
-
-@pytest.mark.parametrize(
-    ("worker_scope", "service", "variable"),
-    [
-        (None, "openai", "OPENAI_API_KEY"),
-        ("shared", "google_oauth_client", "MINDROOM_CREDENTIAL_SEEDS_JSON"),
-        ("shared", "homeassistant", "MINDROOM_CREDENTIAL_SEEDS_JSON"),
-        ("user", "google_oauth_client", "MINDROOM_CREDENTIAL_SEEDS_JSON"),
-        ("shared", "weather", None),
-    ],
-)
-def test_the_environment_variable_of_a_target_follows_the_store_deletes_reach(
-    tmp_path: Path,
-    worker_scope: WorkerScope | None,
-    service: str,
-    variable: str | None,
-) -> None:
-    """A delete is refused for a credential the environment supplies in the store the delete reaches, in any scope."""
-    seeds = json.dumps(
-        [
-            {"service": "google_oauth_client", "credentials": {"client_id": "id", "client_secret": "secret"}},
-            {"service": "homeassistant", "credentials": {"instance_url": "http://ha", "long_lived_token": "t"}},
-            {"service": "weather", "credentials": {"api_key": "seeded"}},
-        ],
-    )
-    runtime_paths = constants.resolve_primary_runtime_paths(
-        config_path=tmp_path / "config.yaml",
-        storage_path=tmp_path,
-        process_env={"OPENAI_API_KEY": "sk-env", "MINDROOM_CREDENTIAL_SEEDS_JSON": seeds},
-    )
-    manager = get_runtime_credentials_manager(runtime_paths)
-    identity = ToolExecutionIdentity("matrix", "general", "@alice:example.org", None, None, None, None)
-    target = credentials_target.RequestCredentialsTarget(
-        runtime_paths=runtime_paths,
-        base_manager=manager,
-        worker_scope=worker_scope,
-        agent_name="general" if worker_scope is not None else None,
-        execution_identity=identity if worker_scope is not None else None,
-        allowed_shared_services=frozenset(),
-    )
-
-    assert credentials_target.environment_variable_for_target(service, target) == variable
-    if variable is not None:
-        manager.save_credentials(service, {"saved": True, "_source": "ui"})
-        # A saved override can still be deleted, which reveals the variable again.
-        assert credentials_target.environment_variable_for_target(service, target) is None

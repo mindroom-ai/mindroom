@@ -21,7 +21,6 @@ from mindroom.api.dashboard_credential_scope import (
 )
 from mindroom.credentials.manager import (
     CredentialsManager,
-    credential_layers,
     delete_scoped_credentials,
     get_runtime_credentials_manager,
     load_scoped_credentials,
@@ -318,17 +317,6 @@ def delete_credentials_for_target(service: str, target: RequestCredentialsTarget
         # Handling: deleting the settings also deletes that worker copy, so a deleted value stops reaching worker code.
         # Coverage: tests/test_credentials.py::test_dashboard_delete_also_removes_the_worker_copy_of_tool_settings.
         target.base_manager.for_worker(worker_target.worker_key).delete_credentials(service)
-
-
-def environment_variable_for_target(service: str, target: RequestCredentialsTarget) -> str | None:
-    """Return the variable that supplies a service in the store this target's saves and deletes reach, if any."""
-    store = credential_layers(
-        service,
-        credentials_manager=target.base_manager,
-        worker_target=worker_target_for_credentials_target(target),
-        primary_built_tool=_target_primary_owns_tool_settings(service, target),
-    ).store
-    return store.declared_variable(service) if store is not None else None
 
 
 def dashboard_candidate_services(target: RequestCredentialsTarget) -> set[str]:

@@ -82,7 +82,6 @@ __all__ = [
     "SERVICE_NAME_PATTERN",
     "CredentialLayers",
     "CredentialsManager",
-    "EnvironmentCredentialError",
     "StoredCredentialsUpdate",
     "WorkerCredentialPathError",
     "credential_layers",
@@ -118,14 +117,6 @@ _credentials_manager_lock = threading.Lock()
 
 class WorkerCredentialPathError(RuntimeError):
     """Raised when a worker credential directory is not a real directory."""
-
-
-class EnvironmentCredentialError(ValueError):
-    """Raised when deleting a credential that only the environment supplies, which no delete can remove."""
-
-    def __init__(self, service: str, variable: str) -> None:
-        super().__init__(f"{service} comes from {variable} in the environment; remove it there and restart MindRoom.")
-        self.variable = variable
 
 
 def validate_service_name(service: str) -> str:
@@ -1216,18 +1207,11 @@ def delete_scoped_credentials(
     worker_target: ResolvedWorkerTarget | None,
     primary_built_tool: bool = False,
 ) -> None:
-    """Delete from the store the service's credentials live in for this target.
-
-    A credential that only the environment supplies there is refused, since deleting would change nothing.
-    """
+    """Delete from the store the service's credentials live in for this target."""
     normalized_service = validate_service_name(service)
-    store = credential_layers(
+    credential_layers(
         normalized_service,
         credentials_manager=credentials_manager,
         worker_target=worker_target,
         primary_built_tool=primary_built_tool,
-    ).writable_store()
-    variable = store.declared_variable(normalized_service)
-    if variable is not None:
-        raise EnvironmentCredentialError(normalized_service, variable)
-    store.delete_credentials(normalized_service)
+    ).writable_store().delete_credentials(normalized_service)

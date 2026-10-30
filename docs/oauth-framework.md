@@ -16,7 +16,7 @@ Every one of these except `GOOGLE_APPLICATION_CREDENTIALS` also accepts a `_FILE
 Services declared through [Credential Seeds](#credential-seeds) are supplied the same way.
 A credential saved for the same service in the dashboard wins over the variable; deleting that saved credential makes the variable apply again.
 MindRoom stores no copy: changes to these variables, their `_FILE` files, and seed declarations apply when MindRoom restarts, and a removed variable stops supplying its credential, including to workers granted it through `worker_grantable_credentials`.
-A credential that only the environment supplies cannot be deleted in the dashboard, which names the variable instead; remove it there and restart.
+Deleting a credential that only the environment supplies changes nothing; remove the variable and restart instead.
 `mindroom doctor` reports which variable supplies each model provider's key.
 
 ### Credential Seeds
