@@ -105,6 +105,7 @@ from tests.conftest import (
     runtime_paths_for,
     seed_session,
     serve_conversation_reader,
+    summarized_lines,
     test_runtime_paths,
     unwrap_extracted_collaborator,
     wrap_extracted_collaborators,
@@ -119,7 +120,6 @@ if TYPE_CHECKING:
 
     from mindroom.bot import AgentBot
     from mindroom.delivery_gateway import FinalDeliveryRequest
-    from mindroom.llm.provider import ModelRequest
     from mindroom.turn_origin import TurnOrigin
 
 
@@ -910,13 +910,6 @@ async def test_post_response_effects_skip_buttons_when_prompt_membership_ended(t
     client.room_send.assert_not_awaited()
 
 
-def _summarized_lines(request: ModelRequest) -> list[str]:
-    """Return the thread lines one summary request asked the model to summarize."""
-    prompt = request.messages[-1].get_content_string()
-    start = prompt.index("<thread_messages>\n") + len("<thread_messages>\n")
-    return prompt[start : prompt.index("\n</thread_messages>")].splitlines()
-
-
 @pytest.mark.asyncio
 @pytest.mark.usefixtures("thread_summary_baselines")
 async def test_post_response_effects_queues_summary_with_stale_hint_inside_margin(
@@ -1025,7 +1018,7 @@ async def test_post_response_effects_queues_summary_with_stale_hint_inside_margi
     # messages plus the answer it was queued for, and counts that answer -- the
     # same number the pre-queue gate above already used.
     (request,) = model.requests
-    assert _summarized_lines(request) == [
+    assert summarized_lines(request) == [
         *(f"{message.sender}: {message.body}" for message in thread_history),
         f"{client.user_id}: response",
     ]
@@ -1122,7 +1115,7 @@ async def test_post_response_effects_queues_summary_with_entity_model_for_adhoc_
         await asyncio.gather(*scheduled_tasks)
 
     (request,) = model.requests
-    assert _summarized_lines(request) == [
+    assert summarized_lines(request) == [
         *(f"{message.sender}: {message.body}" for message in thread_history),
         f"{client.user_id}: response",
     ]

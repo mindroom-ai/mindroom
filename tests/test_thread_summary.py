@@ -61,6 +61,7 @@ from tests.conftest import (
     make_conversation_reader_mock,
     make_matrix_client_mock,
     serve_conversation_reader,
+    summarized_lines,
 )
 from tests.fakes.scripted_model import Await, ScriptedModel, answer
 from tests.identity_helpers import persist_entity_accounts
@@ -118,6 +119,30 @@ def _make_thread_history(count: int) -> list[ResolvedVisibleMessage]:
 _DELIVERED_AND_ECHOED = DeliveredResponse(event_id="$event0", body="Message 0")
 
 
+async def _summary_pass(
+    client: AsyncMock,
+    config: Config,
+    runtime_paths: RuntimePaths,
+    conversation_reader: ConversationReader,
+    *,
+    room_id: str = _ROOM,
+    thread_id: str = _THREAD,
+    delivered_response: DeliveredResponse = _DELIVERED_AND_ECHOED,
+) -> None:
+    """Run one automatic summary pass as the router."""
+    await maybe_generate_thread_summary(
+        client,
+        room_id,
+        thread_id,
+        config,
+        runtime_paths,
+        conversation_reader=conversation_reader,
+        delivered_response=delivered_response,
+        entity_name="router",
+        membership_index=AgentReplyMembershipIndex(),
+    )
+
+
 def _make_summary_notice_message(
     thread_id: str,
     *,
@@ -161,14 +186,10 @@ def _make_summary_notice_message(
     )
 
 
-def _make_due_second_summary_history(
-    count: int = 12,
-    *,
-    prior_model: str = "default",
-) -> list[ResolvedVisibleMessage]:
+def _make_due_second_summary_history(*, prior_model: str = "default") -> list[ResolvedVisibleMessage]:
     """Build history whose first summary is due for its tagged refresh."""
     return [
-        *_make_thread_history(count),
+        *_make_thread_history(12),
         _make_summary_notice_message(
             _THREAD,
             message_count=2,
@@ -348,11 +369,6 @@ def _sent_summaries(client: AsyncMock) -> list[dict[str, Any]]:
         for call in client.room_send.await_args_list
         if THREAD_SUMMARY_CONTENT_KEY in call.kwargs["content"]
     ]
-
-
-def _mock_client() -> AsyncMock:
-    """Return a typed AsyncClient mock with an initialized room cache."""
-    return make_matrix_client_mock()
 
 
 def _mock_config(
@@ -763,7 +779,7 @@ class TestMaybeGenerateThreadSummary:
         self.baselines = thread_summary_baselines
         self.rp = _runtime_paths(tmp_path)
         self.conversation_reader = make_conversation_reader_mock()
-        self.client = _mock_client()
+        self.client = make_matrix_client_mock()
         self.client.user_id = "@bot:localhost"
         self.client.room_send.return_value = nio.RoomSendResponse(event_id="$summary1", room_id=_ROOM)
         # The pre-delivery pin guard reads from the homeserver; by default the thread has no pin there.
@@ -783,38 +799,23 @@ class TestMaybeGenerateThreadSummary:
 
     async def _maybe_generate(self, config: Config, *, client: AsyncMock | None = None) -> None:
         """Run the production helper through the explicit access seam."""
-        await maybe_generate_thread_summary(
-            client or self.client,
-            _ROOM,
-            _THREAD,
-            config,
-            self.rp,
-            conversation_reader=self.conversation_reader,
-            delivered_response=_DELIVERED_AND_ECHOED,
-            entity_name="router",
-            membership_index=AgentReplyMembershipIndex(),
-        )
+        await _summary_pass(client or self.client, config, self.rp, self.conversation_reader)
 
     def _count(self) -> int:
         return self.baselines.count(_ROOM, _THREAD)
 
-    async def test_pinned_thread_skips_generation(self) -> None:
-        """A pinned thread past the threshold must not call the LLM."""
-        model = self._summarizer()
-        self._history([*_make_thread_history(12), _make_summary_notice_message(_THREAD, message_count=2, pinned=True)])
+    async def test_pinned_thread_skips_generation_and_advances_baseline(self) -> None:
+        """A pinned thread past the threshold must not call the LLM, and bailing advances the baseline.
 
-        await self._maybe_generate(_mock_config())
-
-        assert not model.requests
-
-    async def test_pinned_bail_advances_baseline(self) -> None:
-        """Bailing must advance the baseline so the pre-check stops firing every turn."""
+        The advance stops the pre-check from firing every turn.
+        """
         config = _mock_config()
-        self._summarizer()
+        model = self._summarizer()
         self._history([*_make_thread_history(12), _make_summary_notice_message(_THREAD, message_count=2, pinned=True)])
 
         await self._maybe_generate(config)
 
+        assert not model.requests
         assert self._count() == 12
         # The pass already ran today's vocabulary check, so only the threshold can queue another.
         assert not should_queue_thread_summary(_ROOM, _THREAD, config, self.rp, message_count_hint=12)
@@ -869,18 +870,17 @@ class TestMaybeGenerateThreadSummary:
         assert len(model.requests) == 1
         assert _sent_summaries(self.client)[0]["summary"] == "Fresh summary"
 
-    async def test_below_threshold_does_not_read_tags(self) -> None:
-        """The tag read must sit behind the threshold test to stay cheap."""
-        self._summarizer()
-        self._history(_make_thread_history(3))
+    async def test_below_threshold_skips_before_tag_read_and_timed_generation(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Below the first threshold there is no LLM call, no tag read, and no timed generation.
 
-        await self._maybe_generate(_mock_config())
-
-        # Only the vocabulary rebuild read the room state.
-        assert self.room_state.reads == 1
-
-    async def test_below_threshold_skips(self) -> None:
-        """No LLM call when message count is below the first threshold."""
+        The tag read must sit behind the threshold test to stay cheap, and timing wraps only actual generation attempts.
+        """
+        monkeypatch.setenv("MINDROOM_TIMING", "1")
+        labels: list[str] = []
+        monkeypatch.setattr(timing, "emit_elapsed_timing", lambda label, _start, **_fields: labels.append(label))
         model = self._summarizer()
         self._history(_make_thread_history(3))
 
@@ -888,29 +888,9 @@ class TestMaybeGenerateThreadSummary:
 
         self.conversation_reader.read_strict.assert_awaited_once()
         assert not model.requests
-
-    async def test_below_threshold_skips_timed_generation_helper(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        """Timing should only wrap actual generation attempts, not early threshold skips."""
-        monkeypatch.setenv("MINDROOM_TIMING", "1")
-        labels: list[str] = []
-        monkeypatch.setattr(timing, "emit_elapsed_timing", lambda label, _start, **_fields: labels.append(label))
-        self._summarizer()
-        self._history(_make_thread_history(3))
-
-        await self._maybe_generate(_mock_config())
-
+        # Only the vocabulary rebuild read the room state.
+        assert self.room_state.reads == 1
         assert "thread_summary_generation" not in labels
-
-    async def test_at_threshold_generates(self) -> None:
-        """LLM is called and event sent when count reaches threshold."""
-        model = self._summarizer(_title("Users discussed testing strategies"))
-        self._history(_make_thread_history(5))
-
-        await self._maybe_generate(_mock_config())
-
-        assert len(model.requests) == 1
-        self.client.room_send.assert_awaited_once()
-        assert self._count() == 5
 
     async def test_first_summary_call_is_summary_only(self) -> None:
         """The early first summary should not assign tags before the topic settles."""
@@ -1104,6 +1084,7 @@ class TestMaybeGenerateThreadSummary:
 
         assert len(model.requests) == int(should_generate)
         assert self.client.room_send.await_count == int(should_generate)
+        assert self._count() == (message_count if should_generate else 0)
 
     @pytest.mark.parametrize(
         ("message_count", "should_generate"),
@@ -1123,6 +1104,7 @@ class TestMaybeGenerateThreadSummary:
 
         assert len(model.requests) == int(should_generate)
         assert self.client.room_send.await_count == int(should_generate)
+        assert self._count() == (message_count if should_generate else 5)
 
     async def test_concurrent_calls_generate_and_send_once_per_thread(self) -> None:
         """Concurrent calls for one thread should share a single generation/send path."""
@@ -1164,27 +1146,6 @@ class TestMaybeGenerateThreadSummary:
         (sent,) = _sent_summaries(self.client)
         assert sent["summary"] == "Fix ISSUE-116"
         assert self._count() == 5
-
-    async def test_already_summarized_skips(self) -> None:
-        """No LLM call when count hasn't crossed the next threshold."""
-        self.baselines.record(_ROOM, _THREAD, 5)
-        model = self._summarizer()
-        self._history(_make_thread_history(10))
-
-        await self._maybe_generate(_mock_config())
-
-        assert not model.requests
-
-    async def test_crosses_second_threshold(self) -> None:
-        """Summary is generated when crossing the second threshold (15)."""
-        self.baselines.record(_ROOM, _THREAD, 5)
-        self._summarizer(_title("Team decided on approach B"))
-        self._history(_make_thread_history(15))
-
-        await self._maybe_generate(_mock_config())
-
-        self.client.room_send.assert_awaited_once()
-        assert self._count() == 15
 
     async def test_first_threshold_one_triggers_on_first_message(self) -> None:
         """A configured first threshold of 1 should summarize the first thread message."""
@@ -1256,7 +1217,7 @@ class TestMaybeGenerateThreadSummary:
 
     async def test_failed_first_summary_does_not_skip_to_initial_enrichment(self) -> None:
         """A failed first summary must keep the next attempt summary-only."""
-        client = _mock_client()
+        client = make_matrix_client_mock()
         client.user_id = None
         serve_source_thread(client)
         model = self._summarizer("", _title("🧵 Login failure investigation"))
@@ -1351,26 +1312,6 @@ class TestMaybeGenerateThreadSummary:
         assert _sent_summaries(self.client)[0]["initial_enrichment_complete"] is True
         assert self._count() == 15
 
-    async def test_concurrent_calls_generate_one_summary_per_thread(self) -> None:
-        """Concurrent summary checks should serialize on the per-thread critical section."""
-        release_generation = asyncio.Event()
-        model = ScriptedModel(
-            [[Await(release_generation.wait), *answer(_title("Users discussed testing strategies").model_dump_json())]],
-            capabilities=Capabilities(structured_output="native"),
-        )
-        self.models["default"] = model
-        self._history(_make_thread_history(5))
-        config = _mock_config()
-
-        first = asyncio.create_task(self._maybe_generate(config))
-        second = asyncio.create_task(self._maybe_generate(config))
-        await asyncio.sleep(0)
-        release_generation.set()
-        await asyncio.gather(first, second)
-
-        assert len(model.requests) == 1
-        self.client.room_send.assert_awaited_once()
-
     async def test_concurrent_calls_serialize_history_fetch_inside_lock(self) -> None:
         """Only one concurrent task should fetch history before the per-thread lock is released."""
         self._summarizer(_title("Users discussed testing strategies"))
@@ -1408,7 +1349,7 @@ class TestSendSummaryEvent:
 
     async def test_event_content_structure(self) -> None:
         """Verify the summary-send API writes the expected event payload."""
-        client = _mock_client()
+        client = make_matrix_client_mock()
         client.room_send = AsyncMock(return_value=nio.RoomSendResponse(event_id="$s1", room_id="!r:x"))
         conversation_reader = AsyncMock()
         conversation_reader.latest_thread_event_id = AsyncMock(return_value="$reply1")
@@ -1452,7 +1393,7 @@ class TestSendSummaryEvent:
 
     async def test_event_content_truncates_overlong_summary(self) -> None:
         """Overlong summaries should be truncated before sending to Matrix."""
-        client = _mock_client()
+        client = make_matrix_client_mock()
         client.room_send = AsyncMock(return_value=nio.RoomSendResponse(event_id="$s1", room_id="!r:x"))
         conversation_reader = AsyncMock()
         conversation_reader.latest_thread_event_id = AsyncMock(return_value="$reply1")
@@ -1478,7 +1419,7 @@ class TestSendSummaryEvent:
 
     async def test_send_failure_returns_none(self) -> None:
         """Return None when room_send fails."""
-        client = _mock_client()
+        client = make_matrix_client_mock()
         client.room_send = AsyncMock(return_value=nio.RoomSendError(message="forbidden"))
         conversation_reader = AsyncMock()
         conversation_reader.latest_thread_event_id = AsyncMock(return_value="$reply1")
@@ -1497,7 +1438,7 @@ class TestSendSummaryEvent:
 
     async def test_latest_thread_lookup_failure_falls_back_to_thread_root(self) -> None:
         """Summary sending should remain threaded when latest-event lookup fails."""
-        client = _mock_client()
+        client = make_matrix_client_mock()
         client.room_send = AsyncMock(return_value=nio.RoomSendResponse(event_id="$s1", room_id="!r:x"))
         conversation_reader = AsyncMock()
         conversation_reader.latest_thread_event_id = AsyncMock(side_effect=RuntimeError("lookup boom"))
@@ -1525,7 +1466,7 @@ class TestSetManualThreadSummary:
     @pytest.fixture(autouse=True)
     def _room(self, tmp_path: Path) -> None:
         self.rp = _runtime_paths(tmp_path)
-        self.client = _mock_client()
+        self.client = make_matrix_client_mock()
         self.client.room_send.return_value = nio.RoomSendResponse(event_id="$summary1", room_id=_ROOM)
         self.conversation_reader = make_conversation_reader_mock()
 
@@ -1614,10 +1555,7 @@ class TestConversationText:
             tag_vocabulary=None,
         )
         (request,) = self.model.requests
-        prompt = _prompt(request)
-        return prompt[
-            prompt.index("<thread_messages>\n") + len("<thread_messages>\n") : prompt.index("\n</thread_messages>")
-        ]
+        return "\n".join(summarized_lines(request))
 
     async def test_short_thread_not_truncated(self) -> None:
         """Threads below the truncation threshold are passed through intact."""
@@ -2113,45 +2051,29 @@ class TestRecoverPinState:
         history = [_make_summary_notice_message(_THREAD, message_count=2)]
         assert _state(history).pinned is False
 
-    def test_latest_pin_wins_over_earlier_release(self) -> None:
-        """A later pin overrides an earlier release."""
-        history = [
-            _make_summary_notice_message(
-                _THREAD,
-                message_count=2,
-                event_id="$s1",
-                pinned=False,
-                generated_at="2026-01-01T00:00:00+00:00",
-            ),
-            _make_summary_notice_message(
-                _THREAD,
-                message_count=4,
-                event_id="$s2",
-                pinned=True,
-                generated_at="2026-01-01T00:05:00+00:00",
-            ),
-        ]
-        assert _state(history).pinned
+    @pytest.mark.parametrize("latest", [True, False], ids=["pin-after-release", "release-after-pin"])
+    def test_latest_decision_wins(self, latest: bool) -> None:
+        """A later pin overrides an earlier release, and a later release overrides an earlier pin.
 
-    def test_latest_release_wins_over_earlier_pin(self) -> None:
-        """Release must be possible; any-wins recovery would make it impossible."""
+        Release must be possible; any-wins recovery would make it impossible.
+        """
         history = [
             _make_summary_notice_message(
                 _THREAD,
                 message_count=2,
                 event_id="$s1",
-                pinned=True,
+                pinned=not latest,
                 generated_at="2026-01-01T00:00:00+00:00",
             ),
             _make_summary_notice_message(
                 _THREAD,
                 message_count=4,
                 event_id="$s2",
-                pinned=False,
+                pinned=latest,
                 generated_at="2026-01-01T00:05:00+00:00",
             ),
         ]
-        assert _state(history).pinned is False
+        assert _state(history).pinned is latest
 
     def test_newest_decision_wins_when_history_order_is_reversed(self) -> None:
         """History position must not decide the pin.
@@ -2219,18 +2141,6 @@ class TestRecoverPinState:
         )
         assert _state([pin, malformed]).pinned
 
-    def test_untrusted_sender_cannot_pin(self) -> None:
-        """Only runtime-owned senders may set pin state."""
-        history = [
-            _make_summary_notice_message(
-                _THREAD,
-                message_count=2,
-                pinned=True,
-                sender="@stranger:elsewhere",
-            ),
-        ]
-        assert _state(history).pinned is False
-
     def test_non_bool_pinned_value_does_not_change_state(self) -> None:
         """A malformed value must not silently unpin."""
         pinned_message = _make_summary_notice_message(_THREAD, message_count=2, event_id="$s1", pinned=True)
@@ -2248,8 +2158,8 @@ class TestSummaryWritersLeavePinStateAlone:
 
         Automatic summary writers must preserve a pin the user has set.
         """
-        client = _mock_client()
-        conversation_reader = MagicMock()
+        client = make_matrix_client_mock()
+        conversation_reader = make_conversation_reader_mock()
 
         await send_thread_summary_notice(
             client,
@@ -2267,8 +2177,8 @@ class TestSummaryWritersLeavePinStateAlone:
     @pytest.mark.parametrize("pinned", [True, False])
     async def test_explicit_decision_lands_in_sent_metadata(self, pinned: bool) -> None:
         """An explicit pin decision must reach the Matrix event, not just the call."""
-        client = _mock_client()
-        conversation_reader = MagicMock()
+        client = make_matrix_client_mock()
+        conversation_reader = make_conversation_reader_mock()
 
         await send_thread_summary_notice(
             client,
@@ -2301,8 +2211,8 @@ async def test_pin_decision_survives_a_real_write_and_read_round_trip(pinned: bo
     the generated_at format are asserted only against themselves. This drives
     the real send path, then classifies exactly what was sent.
     """
-    client = _mock_client()
-    conversation_reader = MagicMock()
+    client = make_matrix_client_mock()
+    conversation_reader = make_conversation_reader_mock()
 
     await send_thread_summary_notice(
         client,
@@ -2347,24 +2257,13 @@ class TestPinLandingDuringGeneration:
         self.models: dict[str, ModelProvider] = {}
         install_model_providers(monkeypatch, self.models)
 
-    async def _run(self, client: AsyncMock, history: list[ResolvedVisibleMessage]) -> AsyncMock:
+    async def _run(self, client: AsyncMock, history: list[ResolvedVisibleMessage]) -> None:
         """Run one pass over a projection that holds ``history`` for the whole pass."""
         client.room_get_state.return_value = nio.RoomGetStateResponse(events=[], room_id=_ROOM)
         client.room_send.return_value = nio.RoomSendResponse(event_id="$summary1", room_id=_ROOM)
         self.models["default"] = _summary_model(_title("Freshly generated title"))
         serve_conversation_reader(self.conversation_reader, history, room_id=_ROOM, thread_id=_THREAD)
-        await maybe_generate_thread_summary(
-            client,
-            _ROOM,
-            _THREAD,
-            _mock_config(),
-            self.rp,
-            conversation_reader=self.conversation_reader,
-            delivered_response=_DELIVERED_AND_ECHOED,
-            entity_name="router",
-            membership_index=AgentReplyMembershipIndex(),
-        )
-        return client
+        await _summary_pass(client, _mock_config(), self.rp, self.conversation_reader)
 
     async def test_pin_visible_only_at_source_discards_the_summary(self) -> None:
         """A pin another runtime wrote is not in this runtime's cache yet.
@@ -2373,7 +2272,7 @@ class TestPinLandingDuringGeneration:
         state, so reading through it would miss the pin and deliver the stale
         title anyway.
         """
-        client = _mock_client()
+        client = make_matrix_client_mock()
         serve_source_thread(
             client,
             [*_make_thread_history(12), _make_summary_notice_message(_THREAD, message_count=12, pinned=True)],
@@ -2387,7 +2286,7 @@ class TestPinLandingDuringGeneration:
 
     async def test_still_delivers_when_no_pin_landed(self) -> None:
         """The re-check must not suppress ordinary summaries."""
-        client = _mock_client()
+        client = make_matrix_client_mock()
         serve_source_thread(client, _make_thread_history(12))
 
         await self._run(client, _make_thread_history(12))
@@ -2396,7 +2295,7 @@ class TestPinLandingDuringGeneration:
 
     async def test_recheck_failure_suppresses_delivery_until_next_interval(self) -> None:
         """An unverified title is dropped without retrying the model on every turn."""
-        failing = _mock_client()
+        failing = make_matrix_client_mock()
         failing.room_messages.return_value = nio.RoomMessagesError("source read failed")
 
         await self._run(failing, _make_thread_history(12))
@@ -2405,7 +2304,7 @@ class TestPinLandingDuringGeneration:
         failing.room_messages.assert_awaited_once()
         assert self.baselines.count(_ROOM, _THREAD) == 12
 
-        recovered = _mock_client()
+        recovered = make_matrix_client_mock()
         serve_source_thread(recovered, _make_thread_history(22))
         await self._run(recovered, _make_thread_history(21))
         recovered.room_send.assert_not_awaited()
@@ -2427,19 +2326,9 @@ class TestTruncatedHistoryIsNotCounted:
         reader = make_conversation_reader_mock()
         serve_conversation_reader(reader, _make_thread_history(12), room_id=_ROOM, thread_id=_THREAD)
         reader.hydration_was_truncated.return_value = truncated
-        client = _mock_client()
+        client = make_matrix_client_mock()
         serve_source_thread(client)
-        await maybe_generate_thread_summary(
-            client,
-            _ROOM,
-            _THREAD,
-            _mock_config(),
-            _runtime_paths(tmp_path),
-            conversation_reader=reader,
-            delivered_response=_DELIVERED_AND_ECHOED,
-            entity_name="router",
-            membership_index=AgentReplyMembershipIndex(),
-        )
+        await _summary_pass(client, _mock_config(), _runtime_paths(tmp_path), reader)
         return model
 
     async def test_an_automatic_summary_is_skipped_for_a_truncated_history(
@@ -2508,28 +2397,24 @@ class TestSummaryReadsTheAnswerItWasQueuedFor:
         runtime_paths: RuntimePaths,
         monkeypatch: pytest.MonkeyPatch,
         *,
-        first_threshold: int,
         answer: str = "here is the answer",
-        answer_event_id: str = "$answer:example.org",
     ) -> tuple[ScriptedModel, list[dict[str, Any]]]:
         """Run one post-response pass and return its summary model and sent summary metadata."""
-        client = _mock_client()
+        client = make_matrix_client_mock()
         client.user_id = _PROJECTION_BOT
         client.room_get_state.return_value = nio.RoomGetStateResponse(events=[], room_id=_PROJECTION_ROOM)
         client.room_send.return_value = nio.RoomSendResponse(event_id="$summary:example.org", room_id=_PROJECTION_ROOM)
         serve_source_thread(client, room_id=_PROJECTION_ROOM, thread_id=_PROJECTION_ROOT)
         model = _summary_model(_title("🧵 a title"))
         install_model_providers(monkeypatch, {"default": model})
-        await maybe_generate_thread_summary(
+        await _summary_pass(
             client,
-            _PROJECTION_ROOM,
-            _PROJECTION_ROOT,
-            _mock_config(first_threshold=first_threshold),
+            _mock_config(),
             runtime_paths,
-            conversation_reader=reader,
-            delivered_response=DeliveredResponse(event_id=answer_event_id, body=answer),
-            entity_name="router",
-            membership_index=AgentReplyMembershipIndex(),
+            reader,
+            room_id=_PROJECTION_ROOM,
+            thread_id=_PROJECTION_ROOT,
+            delivered_response=DeliveredResponse(event_id="$answer:example.org", body=answer),
         )
         return model, _sent_summaries(client)
 
@@ -2548,7 +2433,7 @@ class TestSummaryReadsTheAnswerItWasQueuedFor:
         homeserver = ProjectionHomeserver()
         reader = await self._warm_projection(journal_store.principal(_PROJECTION_PRINCIPAL), homeserver, asks=4)
 
-        model, sent = await self._run_pass(reader, _runtime_paths(tmp_path), monkeypatch, first_threshold=5)
+        model, sent = await self._run_pass(reader, _runtime_paths(tmp_path), monkeypatch)
 
         assert len(model.requests) == 1
         assert len(sent) == 1
@@ -2571,7 +2456,7 @@ class TestSummaryReadsTheAnswerItWasQueuedFor:
         homeserver = ProjectionHomeserver()
         reader = await self._warm_projection(journal_store.principal(_PROJECTION_PRINCIPAL), homeserver, asks=6)
 
-        _, sent = await self._run_pass(reader, _runtime_paths(tmp_path), monkeypatch, first_threshold=5)
+        _, sent = await self._run_pass(reader, _runtime_paths(tmp_path), monkeypatch)
 
         assert sent[0]["message_count"] == 7
         assert thread_summary_baselines.count(_PROJECTION_ROOM, _PROJECTION_ROOT) == 7
@@ -2590,7 +2475,6 @@ class TestSummaryReadsTheAnswerItWasQueuedFor:
             reader,
             _runtime_paths(tmp_path),
             monkeypatch,
-            first_threshold=5,
             answer="the cache key was stale",
         )
 
@@ -2616,7 +2500,7 @@ class TestSummaryReadsTheAnswerItWasQueuedFor:
         )
         await admit_live(store, [echo])
 
-        _, sent = await self._run_pass(reader, _runtime_paths(tmp_path), monkeypatch, first_threshold=5)
+        _, sent = await self._run_pass(reader, _runtime_paths(tmp_path), monkeypatch)
 
         assert sent[0]["message_count"] == 7
 

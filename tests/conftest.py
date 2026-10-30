@@ -215,7 +215,7 @@ if TYPE_CHECKING:
     from mindroom.event_journal import ApprovalDeliveryView, EventJournalStore
     from mindroom.event_journal.backend import Backend, Operation
     from mindroom.history.request_messages import TurnMessages
-    from mindroom.llm.provider import ModelProvider
+    from mindroom.llm.provider import ModelProvider, ModelRequest
     from mindroom.llm.runs import AnyRunRecord
     from mindroom.matrix_rtc.call_manager import CallManager
     from mindroom.orchestrator import _MultiAgentOrchestrator
@@ -1581,6 +1581,13 @@ def delivered_matrix_side_effect(event_id: str) -> Callable[..., Awaitable[Deliv
         return delivered_matrix_event(event_id, content_mapping)
 
     return _deliver
+
+
+def summarized_lines(request: "ModelRequest") -> list[str]:
+    """Return the thread lines one summary request asked the model to summarize."""
+    prompt = request.messages[-1].get_content_string()
+    start = prompt.index("<thread_messages>\n") + len("<thread_messages>\n")
+    return prompt[start : prompt.index("\n</thread_messages>")].splitlines()
 
 
 def serve_conversation_reader(
