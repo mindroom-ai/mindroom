@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import multiprocessing
 import sqlite3
 import stat
@@ -952,3 +953,112 @@ async def test_public_url_with_a_path_is_rejected(runtime_paths: RuntimePaths) -
     """The public URL must be an origin, not a URL below one."""
     with pytest.raises(ValueError, match="origin"):
         GatewayOAuthProvider(runtime_paths, public_url="https://example.org/gateway")
+
+
+async def test_private_network_http_public_url_is_rejected(runtime_paths: RuntimePaths) -> None:
+    """Plain HTTP on a private-network address is not an OAuth origin; loopback HTTP still is."""
+    with pytest.raises(ValueError, match="HTTPS origin or loopback HTTP origin"):
+        GatewayOAuthProvider(runtime_paths, public_url="http://192.168.1.10:8765")
+    loopback = GatewayOAuthProvider(runtime_paths, public_url="http://127.0.0.1:8765")
+    assert loopback.resource_url == "http://127.0.0.1:8765/mcp"
+    named = GatewayOAuthProvider(runtime_paths, public_url="http://localhost:8765")
+    assert named.resource_url == "http://localhost:8765/mcp"
+
+
+def _rewrite_stored_resources(runtime_paths: RuntimePaths, resource: str) -> None:
+    """Rewrite every stored resource to `resource`, as the pre-normalization provider wrote it."""
+    path = runtime_paths.storage_root / "mcp_gateway" / "oauth.sqlite3"
+    with sqlite3.connect(path) as connection:
+        for table, key in (("grants", "grant_id"), ("capabilities", "token_hash"), ("pending", "state_hash")):
+            rows = connection.execute(f"SELECT {key}, payload FROM {table}").fetchall()  # noqa: S608
+            for row_key, payload in rows:
+                data = json.loads(payload)
+                if table == "pending":
+                    data["params"]["resource"] = resource
+                elif "resource" in data:
+                    data["resource"] = resource
+                else:
+                    continue
+                connection.execute(f"UPDATE {table} SET payload = ? WHERE {key} = ?", (json.dumps(data), row_key))  # noqa: S608
+
+
+async def test_grants_stored_with_the_configured_spelling_still_load(
+    provider: GatewayOAuthProvider,
+    client: OAuthClientInformationFull,
+    runtime_paths: RuntimePaths,
+) -> None:
+    """Grants written before normalization keep working when the same origin is configured respelled."""
+    tokens = await provider.exchange_authorization_code(client, await issue_code(provider, client))
+    _rewrite_stored_resources(runtime_paths, "https://Example.org:443/mcp")
+    reopened = GatewayOAuthProvider(runtime_paths, public_url="https://Example.org:443")
+    assert await reopened.load_access_token(tokens.access_token) is not None
+    refresh = await reopened.load_refresh_token(client, tokens.refresh_token)
+    assert refresh is not None
+    grants = await reopened.list_grants(
+        requester_id="@alice:example.org",
+        authenticated_user_id="@alice:example.org",
+    )
+    assert len(grants) == 1
+    rotated = await reopened.exchange_refresh_token(client, refresh, ["mcp:tools"])
+    rotated_access = await reopened.load_access_token(rotated.access_token)
+    assert rotated_access is not None
+    assert rotated_access.resource == "https://example.org/mcp"
+
+
+async def test_pending_consent_stored_with_the_configured_spelling_still_completes(
+    provider: GatewayOAuthProvider,
+    client: OAuthClientInformationFull,
+    runtime_paths: RuntimePaths,
+) -> None:
+    """A consent request opened before the respelling can still be approved and exchanged after it."""
+    state = await pending(provider, client)
+    _rewrite_stored_resources(runtime_paths, "https://Example.org:443/mcp")
+    reopened = GatewayOAuthProvider(runtime_paths, public_url="https://Example.org:443")
+    consent = await reopened.begin_consent(
+        state,
+        requester_id="@alice:example.org",
+        authenticated_user_id="@alice:example.org",
+    )
+    callback = await reopened.finish_consent(
+        state,
+        requester_id="@alice:example.org",
+        authenticated_user_id="@alice:example.org",
+        csrf_token=consent.csrf_token,
+        allow=True,
+    )
+    raw_code = parse_qs(urlsplit(callback).query)["code"][0]
+    code = await reopened.load_authorization_code(client, raw_code)
+    assert code is not None
+    tokens = await reopened.exchange_authorization_code(client, code)
+    assert await reopened.load_access_token(tokens.access_token) is not None
+
+
+async def test_revoke_all_covers_grants_and_pending_stored_with_the_configured_spelling(
+    provider: GatewayOAuthProvider,
+    client: OAuthClientInformationFull,
+    runtime_paths: RuntimePaths,
+) -> None:
+    """Revoke-all still finds grants and pending consent whose stored resource uses the old spelling."""
+    await provider.exchange_authorization_code(client, await issue_code(provider, client))
+    state = await pending(provider, client)
+    await provider.begin_consent(
+        state,
+        requester_id="@alice:example.org",
+        authenticated_user_id="@alice:example.org",
+    )
+    _rewrite_stored_resources(runtime_paths, "https://Example.org:443/mcp")
+    reopened = GatewayOAuthProvider(runtime_paths, public_url="https://Example.org:443")
+    assert await reopened.revoke_grants(
+        requester_id="@alice:example.org",
+        authenticated_user_id="@alice:example.org",
+    )
+    assert (
+        await reopened.list_grants(
+            requester_id="@alice:example.org",
+            authenticated_user_id="@alice:example.org",
+        )
+        == []
+    )
+    counts = _row_counts(runtime_paths)
+    assert counts["grants"] == 0
+    assert counts["pending"] == 0

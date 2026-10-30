@@ -21,6 +21,73 @@ _PRIVATE_NETWORKS = tuple(
     ipaddress.ip_network(network) for network in ("10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "fc00::/7")
 )
 _HOSTED_CHAT_ORIGIN = "https://chat.mindroom.chat"
+_IPV4_DIGITS = {
+    8: frozenset("01234567"),
+    10: frozenset("0123456789"),
+    16: frozenset("0123456789abcdefABCDEF"),
+}
+
+
+def _parse_ipv4_number(piece: str) -> int | None:
+    """Parse one WHATWG IPv4 number piece: decimal, 0-prefixed octal, or 0x-prefixed hex."""
+    radix = 10
+    digits = piece
+    if piece[:2].lower() == "0x":
+        radix, digits = 16, piece[2:]
+    elif len(piece) > 1 and piece.startswith("0"):
+        radix, digits = 8, piece[1:]
+    if not digits:
+        return 0 if radix != 10 else None
+    if any(character not in _IPV4_DIGITS[radix] for character in digits):
+        return None
+    return int(digits, radix)
+
+
+def _parse_ipv4(host: str) -> str | None:
+    """Return the canonical dotted quad for a WHATWG IPv4 host spelling, or None when it is not one."""
+    pieces = host.split(".")
+    if pieces[-1] == "":
+        pieces.pop()
+    if not pieces or len(pieces) > 4:
+        return None
+    values: list[int] = []
+    for piece in pieces:
+        number = _parse_ipv4_number(piece)
+        if number is None:
+            return None
+        values.append(number)
+    if any(number > 255 for number in values[:-1]) or values[-1] >= 256 ** (5 - len(values)):
+        return None
+    address = values[-1] + sum(number * 256 ** (3 - index) for index, number in enumerate(values[:-1]))
+    return str(ipaddress.IPv4Address(address))
+
+
+def _ends_in_a_number(host: str) -> bool:
+    """Return whether the host's last piece is numeric, which makes browsers parse the host as an IPv4 address."""
+    pieces = host.split(".")
+    piece = pieces[-1]
+    if not piece and len(pieces) > 1:
+        piece = pieces[-2]
+    if not piece:
+        return False
+    return (piece.isascii() and piece.isdigit()) or _parse_ipv4_number(piece) is not None
+
+
+def _canonical_host(host: str) -> str | None:
+    """Return the host as a browser writes it in an origin, or None when it has no canonical form."""
+    if ":" in host:
+        try:
+            return f"[{ipaddress.ip_address(host.split('%', maxsplit=1)[0])}]"
+        except ValueError:
+            return None
+    if _ends_in_a_number(host):
+        # Browsers parse a host ending in a number as an IPv4 address (127.1, 0x7f.1, 2130706433)
+        # and reject it when the pieces do not form one; canonicalize or fail the same way.
+        return _parse_ipv4(host)
+    if not host.isascii():
+        # Python's idna codec is IDNA2003, browsers use UTS 46; require the explicit xn-- form.
+        return None
+    return host
 
 
 def normalized_origin(url: str | None) -> str | None:
@@ -34,15 +101,10 @@ def normalized_origin(url: str | None) -> str | None:
         return None
     if parsed.username is not None or parsed.password is not None:
         return None
-    if ":" in host:
-        try:
-            host = f"[{ipaddress.ip_address(host.split('%')[0])}]"
-        except ValueError:
-            return None
-    elif not host.isascii():
-        # Python's idna codec is IDNA2003, browsers use UTS 46; require the explicit xn-- form.
+    canonical = _canonical_host(host)
+    if canonical is None:
         return None
-    return f"{scheme}://{host}" + ("" if port in {None, _DEFAULT_PORTS[scheme]} else f":{port}")
+    return f"{scheme}://{canonical}" + ("" if port in {None, _DEFAULT_PORTS[scheme]} else f":{port}")
 
 
 def _is_local_host(host: str) -> bool:
@@ -86,10 +148,11 @@ def parse_browser_origin(value: str) -> str:
     """Validate one explicit HTTPS origin, or HTTP origin on a local address, and return it normalized."""
     origin = normalized_origin(value)
     parsed = urlsplit(value)
+    host = urlsplit(origin).hostname if origin is not None else ""
     if (
         origin is None
         or parsed.path not in {"", "/"}
-        or not (origin.startswith("https://") or _is_local_host(parsed.hostname or ""))
+        or not (origin.startswith("https://") or _is_local_host(host or ""))
         or any(c in "*?#" or c.isspace() or ord(c) < 32 for c in value)
     ):
         msg = f"Browser origin must be explicit HTTPS, or HTTP on a local address: {value!r}"

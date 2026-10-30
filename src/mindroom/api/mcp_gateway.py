@@ -100,9 +100,14 @@ def _browser_origins(paths: RuntimePaths) -> tuple[str, ...]:
 
 
 def _configured_public_origin(paths: RuntimePaths) -> str | None:
-    """Return the configured public origin normalized, or None when it is not a valid origin."""
+    """Return the configured public origin normalized, or None when it is not a valid origin.
+
+    The value goes to parse_browser_origin unstripped, exactly as GatewayOAuthProvider receives it, so
+    both paths reach the same verdict on the same configuration: whitespace padding is invalid here too,
+    not a respelling that keeps a stale runtime alive.
+    """
     try:
-        return parse_browser_origin((paths.env_value("MINDROOM_PUBLIC_URL") or "").strip())
+        return parse_browser_origin(paths.env_value("MINDROOM_PUBLIC_URL") or "")
     except ValueError:
         return None
 

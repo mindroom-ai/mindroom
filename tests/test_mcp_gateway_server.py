@@ -1053,3 +1053,14 @@ async def test_public_url_spelling_is_normalized_for_host_checks() -> None:
     async with _client(dispatch, public_url="https://Portal.example.org:443") as client:
         response = await client.post("/mcp", json=_call())
     assert response.status_code == 200
+
+
+async def test_explicit_default_port_host_is_accepted() -> None:
+    """A client that keeps the configured explicit default port in its Host is still admitted."""
+
+    async def dispatch(_request: Request, _name: str, _arguments: dict[str, object]) -> dict[str, object]:
+        return {"result": "ok"}
+
+    async with _client(dispatch, public_url="https://Portal.example.org:443") as client:
+        response = await client.post("/mcp", json=_call(), headers={"Host": "portal.example.org:443"})
+    assert response.status_code == 200

@@ -7751,7 +7751,7 @@ depends_on = ["mindroom.matrix.identity"]
 
 [[modules]]
 path = "mindroom.mcp_gateway.lifecycle"
-depends_on = []
+depends_on = ["mindroom.origins"]
 
 [[modules]]
 path = "mindroom.mcp_gateway.legacy_schema"
