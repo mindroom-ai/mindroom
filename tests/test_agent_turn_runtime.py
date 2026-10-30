@@ -76,6 +76,7 @@ from mindroom.session_storage.agent_storage import create_session_storage
 from mindroom.session_storage.types import ConversationSession
 from mindroom.skill_learning.capture import SkillReviewCapture
 from mindroom.tool_system.call_record import recording_tool_calls
+from mindroom.tool_system.events import FailedReply
 from mindroom.tool_system.runtime_context import tool_runtime_context
 from mindroom.usage.storage import COMPACTED_REQUESTS_METADATA_KEY
 from tests.access_schema_support import with_current_room_member_access
@@ -854,6 +855,24 @@ async def test_only_a_reply_whose_attempt_started_hands_its_session_to_queued_no
     with queued_message_signal_context(None) as notices:
         assert await _respond(reply, run_id="run-2") == "[assistant] ⚠️ Error: history unavailable"
     assert notices.storage_targets == {}
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("probe")
+async def test_a_reply_whose_preparation_fails_ends_with_a_failed_reply_that_carries_the_error(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The reply's last chunk is its failed reply, which carries the error it reports for readers such as the API."""
+    reply = _reply(tmp_path, monkeypatch, [answer("Done.")])
+    error = RuntimeError("history unavailable")
+
+    async def history_unavailable(*_args: object, **_kwargs: object) -> None:
+        raise error
+
+    monkeypatch.setattr(ai, "_prepare_agent_run_context", history_unavailable)
+
+    assert await _stream(reply) == [FailedReply("[assistant] ⚠️ Error: history unavailable", error)]
 
 
 @pytest.mark.asyncio

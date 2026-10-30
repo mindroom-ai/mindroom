@@ -54,6 +54,7 @@ from mindroom.teams.members import build_team_spec, resolve_team_members
 from mindroom.teams.presentation import TeamStreamPresentation
 from mindroom.teams.spec import TeamMode
 from mindroom.timing import DispatchPipelineTiming
+from mindroom.tool_system.events import FailedReply
 from mindroom.turn_model import ModelScope, resolve_turn_model
 from tests.conftest import install_model_providers, make_visible_message, seed_session, unstored_team_scope_context
 from tests.fakes.scripted_model import Await, ScriptedModel, ScriptStep, answer, calls, tool_call
@@ -206,6 +207,23 @@ async def test_a_team_with_a_member_that_is_not_running_answers_why_without_runn
 
     assert text == "Team request includes agent 'research' that could not be materialized for this request."
     assert all(model.requests == [] for model in team.models.values())
+
+
+@pytest.mark.asyncio
+async def test_a_team_that_cannot_run_ends_its_stream_with_a_failed_reply(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A team refused before it runs streams a failed reply, as a refused agent turn does, never an answer chunk."""
+    team = _team(tmp_path, monkeypatch, members=("general", "research"))
+    team.orchestrator.running_entity_names = lambda: frozenset({"general"})
+
+    [refusal] = await team.stream()
+
+    assert isinstance(refusal, FailedReply)
+    assert refusal.text == "Team request includes agent 'research' that could not be materialized for this request."
+    assert isinstance(refusal.error, ValueError)
+    assert str(refusal.error) == refusal.text
 
 
 def _research_fails_to_build(agent_name: str, *args: Any, **kwargs: Any) -> Any:  # noqa: ANN401
@@ -1219,6 +1237,20 @@ async def test_a_failed_leader_request_answers_with_the_friendly_error(
     assert record.status is RunStatus.completed
     assert record.metadata is not None
     assert record.metadata["mindroom_original_status"] == "error"
+
+
+@pytest.mark.asyncio
+async def test_a_failed_streamed_team_reply_ends_with_a_failed_reply_that_carries_the_error(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A streamed team reply that fails ends with its failed reply, which carries the error the reply reports."""
+    error = ProviderError("validation failed in team", provider="Synthetic")
+    team = _team(tmp_path, monkeypatch, leader=[_raises(error)])
+
+    chunks = await team.stream()
+
+    assert chunks[-1] == FailedReply("[Team (GeneralAgent)] ⚠️ Error: validation failed in team", error)
 
 
 @pytest.mark.asyncio

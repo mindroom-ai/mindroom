@@ -51,7 +51,7 @@ from mindroom.streaming import StreamingLifecycleSuspensionError, StreamingPrese
 from mindroom.tool_jobs.consumption import finalize_consumption, set_consumption_storage
 from mindroom.tool_jobs.execution_scope import owned_tool_execution
 from mindroom.tool_system.context_bound_streams import closing_async_stream, context_bound_async_stream
-from mindroom.tool_system.events import CollectedStreamPresentation, StructuredStreamChunk
+from mindroom.tool_system.events import CollectedStreamPresentation, FailedReply, StructuredStreamChunk
 from mindroom.turn_continuation import TURN_CONTINUATION_LIMIT, continuation_decision_from_tools, stopped_calls
 
 if TYPE_CHECKING:
@@ -557,6 +557,8 @@ def _apply_collected_chunk(presentation: CollectedStreamPresentation, chunk: Str
         presentation.show_text(chunk)
     elif isinstance(chunk, TextDelta):
         presentation.append_text(chunk.text)
+    elif isinstance(chunk, FailedReply):
+        presentation.show_text(chunk.text)
     elif isinstance(chunk, StructuredStreamChunk):
         presentation.show_document(chunk)
     elif isinstance(chunk, RunFinished):
@@ -730,11 +732,9 @@ def _paused_attempt_from_pause(
 
 @dataclass(frozen=True)
 class HandledAttempt:
-    """One attempt that failed: the reply text that says so, which the driver emits once it recorded the failure."""
+    """One attempt that failed: the reply that says so, which the driver yields once it recorded the failure."""
 
-    text: str
-    # The failure the text reports.
-    error: Exception
+    reply: FailedReply
     # Builds the run metadata the attempt publishes, as ``CompletedAttempt.build_run_metadata`` does.
     build_run_metadata: Callable[[], dict[str, Any]] | None = None
 
@@ -868,13 +868,13 @@ async def _settle_failure(
     run: TurnRunState,
     continuation: TurnContinuationRunState,
     failure: HandledAttempt,
-) -> str:
+) -> FailedReply:
     """Record a failed turn as interrupted and report its failure to the caller; return its error reply."""
     _publish_run_metadata(sinks, failure.build_run_metadata)
     await _record_interrupted(ctx, adapter, sinks, run, continuation, RunStatus.error)
     if sinks.on_failed is not None:
         sinks.on_failed(failure)
-    return failure.text
+    return failure.reply
 
 
 def _settle_empty_run(
@@ -1135,12 +1135,8 @@ async def stream_response_turn[ChunkT](
     *,
     continuation: TurnContinuationRunState,
     resume: TurnResume | None = None,
-) -> AsyncGenerator[ChunkT | str, None]:
-    """Own the whole response while binding context only during pulls and close.
-
-    A failed turn's reply is a bare string, never the adapter's text chunk: for an agent, whose text is ``TextDelta``,
-    that is how the OpenAI-compatible API tells a failed run's reply from its answer.
-    """
+) -> AsyncGenerator[ChunkT | FailedReply, None]:
+    """Own the whole response while binding context only during pulls and close; a failed turn ends with its reply."""
     lifetime = CliTurnLifetime()
     stream = context_bound_async_stream(
         context_factory=lifetime.bind,
@@ -1169,7 +1165,7 @@ async def _stream_response_turn[ChunkT](  # noqa: C901, PLR0912, PLR0915
     continuation: TurnContinuationRunState,
     cli_lifetime: CliTurnLifetime,
     resume: TurnResume,
-) -> AsyncGenerator[ChunkT | str, None]:
+) -> AsyncGenerator[ChunkT | FailedReply, None]:
     """Run one response turn, yielding the attempt chunks as they arrive.
 
     The driver is the only writer of the turn's record: it settles the record before it yields the text that ends the
@@ -1251,7 +1247,7 @@ async def _stream_response_turn[ChunkT](  # noqa: C901, PLR0912, PLR0915
             run.record.mark_skipped()
             logger.exception("Response turn skipped before participation", entity=ctx.entity_label)
             return
-        failure = HandledAttempt(adapter.unexpected_error_text(e), error=e)
-        text = await _settle_failure(ctx, adapter, sinks, run, continuation, failure)
+        failure = HandledAttempt(FailedReply(adapter.unexpected_error_text(e), e))
+        reply = await _settle_failure(ctx, adapter, sinks, run, continuation, failure)
         logger.exception("Response turn failed", entity=ctx.entity_label)
-        yield text
+        yield reply

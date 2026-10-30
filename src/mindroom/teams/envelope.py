@@ -80,7 +80,7 @@ from mindroom.teams.runtime import leader_tool_specs, team_usage
 from mindroom.tool_jobs.notices import append_turn_start_job_note
 from mindroom.tool_jobs.settings import background_tool_jobs_enabled
 from mindroom.tool_system.context_bound_streams import closing_async_stream
-from mindroom.tool_system.events import StructuredStreamChunk
+from mindroom.tool_system.events import FailedReply, StructuredStreamChunk
 from mindroom.turn_model import ModelScope, TurnModel, resolve_turn_model
 
 if TYPE_CHECKING:
@@ -114,7 +114,7 @@ _MATRIX_TEAM_THREAD_HISTORY_RENDER_LIMITS = ThreadHistoryRenderLimits(
     max_message_length=200,
     missing_sender_label="Unknown",
 )
-type TeamStreamChunk = str | StructuredStreamChunk
+type TeamStreamChunk = str | StructuredStreamChunk | FailedReply
 
 
 # ---------------------------------------------------------------------------
@@ -576,9 +576,8 @@ class _TeamTurn:
             logger.exception("team_response_failed", agents=attempt.members.display_names)
             yield AttemptResolved(
                 HandledAttempt(
-                    self.error_text(error),
+                    FailedReply(self.error_text(error), error),
                     build_run_metadata=self.run_metadata_builder(attempt, RunStatus.error, run.prior_usage),
-                    error=error,
                 ),
             )
             return
@@ -742,8 +741,8 @@ class _TeamTurn:
         )
 
 
-def _team_turn(spec: TeamTurnSpec, ctx: ResponseTurnContext) -> _TeamTurn | str:
-    """Resolve the team's members and return the turn's constants, or the text that explains why it cannot run.
+def _team_turn(spec: TeamTurnSpec, ctx: ResponseTurnContext) -> _TeamTurn | FailedReply:
+    """Resolve the team's members and return the turn's constants, or the reply that explains why it cannot run.
 
     Resolving the members' knowledge reads the filesystem, so the caller runs this off the event loop
     (#1260); the members themselves build on their first delegation.
@@ -768,7 +767,7 @@ def _team_turn(spec: TeamTurnSpec, ctx: ResponseTurnContext) -> _TeamTurn | str:
             active_model_names=spec.member_model_names,
         )
     except ValueError as exc:
-        return str(exc)
+        return FailedReply(str(exc), exc)
     return _TeamTurn(
         ctx=replace(
             ctx,
@@ -806,7 +805,7 @@ async def team_response_stream(
     and appends the knowledge-availability enrichment before the turn runs.
     """
     turn = await asyncio.to_thread(_team_turn, spec, ctx)
-    if isinstance(turn, str):
+    if isinstance(turn, FailedReply):
         # A turn whose members cannot run ran nothing to record; its message and this reply stay in the thread.
         yield turn
         return

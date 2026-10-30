@@ -87,7 +87,7 @@ from mindroom.response_turn import (
 from mindroom.session_storage.agent_storage import create_session_storage
 from mindroom.session_storage.types import ConversationSession
 from mindroom.tool_system.context_bound_streams import context_bound_async_stream
-from mindroom.tool_system.events import CollectedStreamPresentation
+from mindroom.tool_system.events import CollectedStreamPresentation, FailedReply
 from mindroom.tool_system.plugins import config_plugins
 from mindroom.tool_system.runtime_context import (
     ToolRuntimeContext,
@@ -1638,8 +1638,8 @@ class TestUserIdPassthrough:
                 )
             ]
 
-        assert chunks == ["friendly-error"]
         error = mock_friendly_error.call_args.args[0]
+        assert chunks == [FailedReply("friendly-error", error)]
         assert isinstance(error, ValueError)
         assert "configured team" in str(error)
         assert "team/ultimate" in str(error)
