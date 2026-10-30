@@ -48,6 +48,7 @@ from tests.authorization_helpers import (
     make_test_command_handler_context,
 )
 from tests.conftest import (
+    assert_refused_for_concurrent_edit,
     make_conversation_reader_mock,
     make_matrix_client_mock,
     write_concurrent_edit_while_validating,
@@ -131,17 +132,11 @@ async def test_apply_config_change_refuses_a_file_edited_while_it_validated(
         },
     )
     write_config_yaml(config, config_path)
-    concurrent = config.authored_model_dump()
-    concurrent["agents"]["writer"]["display_name"] = "Saved from the dashboard"
-    concurrent_source = yaml.safe_dump(concurrent, sort_keys=True)
-    write_concurrent_edit_while_validating(monkeypatch, config_path, concurrent_source)
+    concurrent_source = write_concurrent_edit_while_validating(monkeypatch, config_path, "writer")
 
     result = await apply_config_change("agents.writer.role", "Agent change", runtime_paths)
 
-    assert "configuration file changed" in result
-    assert "NOT applied" in result
-    assert "Invalid configuration" not in result
-    assert config_path.read_text(encoding="utf-8") == concurrent_source
+    assert_refused_for_concurrent_edit(result, config_path, concurrent_source)
 
 
 @pytest.mark.asyncio

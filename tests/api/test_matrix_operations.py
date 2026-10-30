@@ -590,16 +590,9 @@ class TestMatrixOperations:
     async def test_leave_room(
         self,
         test_client: TestClient,
-        mock_matrix_client: Any,  # noqa: ANN401
     ) -> None:
         """Test leaving a room."""
-        with (
-            patch(
-                "mindroom.api.matrix_operations.create_agent_http_client",
-                return_value=mock_matrix_client,
-            ),
-            patch.object(config_lifecycle.app_state(main.app), "leave_matrix_room", AsyncMock(return_value=True)),
-        ):
+        with patch.object(config_lifecycle.app_state(main.app), "leave_matrix_room", AsyncMock(return_value=True)):
             response = test_client.post(
                 "/api/matrix/rooms/leave",
                 json={"agent_id": "test_agent", "room_id": "!room_to_leave:localhost"},
@@ -630,16 +623,9 @@ class TestMatrixOperations:
     async def test_leave_room_failure(
         self,
         test_client: TestClient,
-        mock_matrix_client: Any,  # noqa: ANN401
     ) -> None:
         """Test failing to leave a room."""
-        with (
-            patch(
-                "mindroom.api.matrix_operations.create_agent_http_client",
-                return_value=mock_matrix_client,
-            ),
-            patch.object(config_lifecycle.app_state(main.app), "leave_matrix_room", AsyncMock(return_value=False)),
-        ):
+        with patch.object(config_lifecycle.app_state(main.app), "leave_matrix_room", AsyncMock(return_value=False)):
             response = test_client.post(
                 "/api/matrix/rooms/leave",
                 json={"agent_id": "test_agent", "room_id": "!room_to_leave:localhost"},
@@ -652,18 +638,11 @@ class TestMatrixOperations:
     async def test_leave_room_for_team(
         self,
         test_client: TestClient,
-        mock_matrix_client: Any,  # noqa: ANN401
     ) -> None:
         """Test leaving a room for a configured team."""
         _add_test_team_to_runtime_config()
 
-        with (
-            patch(
-                "mindroom.api.matrix_operations.create_agent_http_client",
-                return_value=mock_matrix_client,
-            ),
-            patch.object(config_lifecycle.app_state(main.app), "leave_matrix_room", AsyncMock(return_value=True)),
-        ):
+        with patch.object(config_lifecycle.app_state(main.app), "leave_matrix_room", AsyncMock(return_value=True)):
             response = test_client.post(
                 "/api/matrix/rooms/leave",
                 json={"agent_id": "test_team", "room_id": "!room_to_leave:localhost"},
@@ -687,16 +666,9 @@ class TestMatrixOperations:
     async def test_leave_rooms_bulk(
         self,
         test_client: TestClient,
-        mock_matrix_client: Any,  # noqa: ANN401
     ) -> None:
         """Test bulk leaving rooms."""
-        with (
-            patch(
-                "mindroom.api.matrix_operations.create_agent_http_client",
-                return_value=mock_matrix_client,
-            ),
-            patch.object(config_lifecycle.app_state(main.app), "leave_matrix_room", AsyncMock(return_value=True)),
-        ):
+        with patch.object(config_lifecycle.app_state(main.app), "leave_matrix_room", AsyncMock(return_value=True)):
             requests = [
                 {"agent_id": "test_agent", "room_id": "!room1:localhost"},
                 {"agent_id": "test_agent", "room_id": "!room2:localhost"},
@@ -714,20 +686,13 @@ class TestMatrixOperations:
     async def test_leave_rooms_bulk_partial_failure(
         self,
         test_client: TestClient,
-        mock_matrix_client: Any,  # noqa: ANN401
     ) -> None:
         """Test bulk leaving rooms with partial failure."""
         # Mock different behaviors for different calls
         leave_room_results = [True, False]
         leave_room_mock = AsyncMock(side_effect=leave_room_results)
 
-        with (
-            patch(
-                "mindroom.api.matrix_operations.create_agent_http_client",
-                return_value=mock_matrix_client,
-            ),
-            patch.object(config_lifecycle.app_state(main.app), "leave_matrix_room", leave_room_mock),
-        ):
+        with patch.object(config_lifecycle.app_state(main.app), "leave_matrix_room", leave_room_mock):
             requests = [
                 {"agent_id": "test_agent", "room_id": "!room1:localhost"},
                 {"agent_id": "test_agent", "room_id": "!room2:localhost"},
@@ -788,7 +753,6 @@ class TestMatrixOperations:
         self,
         test_client: TestClient,
         tmp_path: Path,
-        mock_matrix_client: Any,  # noqa: ANN401
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """A runtime path swap clears the old membership owner before a leave can run."""
@@ -804,13 +768,7 @@ class TestMatrixOperations:
 
         monkeypatch.setattr("mindroom.api.matrix_operations.read_committed_runtime_config", _fake_snapshot_read)
 
-        with (
-            patch(
-                "mindroom.api.matrix_operations.create_agent_http_client",
-                return_value=mock_matrix_client,
-            ),
-            patch.object(config_lifecycle.app_state(main.app), "leave_matrix_room", AsyncMock(return_value=True)),
-        ):
+        with patch.object(config_lifecycle.app_state(main.app), "leave_matrix_room", AsyncMock(return_value=True)):
             response = test_client.post(
                 "/api/matrix/rooms/leave",
                 json={"agent_id": "old_agent", "room_id": "!room:localhost"},

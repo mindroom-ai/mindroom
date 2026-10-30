@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import errno
-import fcntl
 from pathlib import Path
 
 import pytest
@@ -623,6 +622,7 @@ def test_load_config_migrates_under_the_config_write_lock(
     from mindroom.config.main import load_config  # noqa: PLC0415
     from mindroom.config.personal_agents import personal_agent_roster_lock_path  # noqa: PLC0415
     from mindroom.constants import resolve_runtime_paths  # noqa: PLC0415
+    from mindroom.file_locks import file_lock_is_held  # noqa: PLC0415
 
     config_path = Path(tmp_path) / "config.yaml"
     config_path.write_text("authorization:\n  global_users:\n    - '@owner:example.com'\n", encoding="utf-8")
@@ -631,14 +631,7 @@ def test_load_config_migrates_under_the_config_write_lock(
     held: list[bool] = []
 
     def replace_while_probing_the_lock(path: Path, content: str) -> None:
-        with personal_agent_roster_lock_path(runtime_paths).open("a") as probe:
-            try:
-                fcntl.flock(probe.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-            except BlockingIOError:
-                held.append(True)
-            else:
-                fcntl.flock(probe.fileno(), fcntl.LOCK_UN)
-                held.append(False)
+        held.append(file_lock_is_held(personal_agent_roster_lock_path(runtime_paths)))
         write_text_atomic(path, content)
 
     monkeypatch.setattr(yaml_io, "write_text_atomic", replace_while_probing_the_lock)

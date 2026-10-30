@@ -36,12 +36,14 @@ from tests.authorization_helpers import (
     make_test_tool_runtime_context,
 )
 from tests.conftest import (
+    assert_refused_for_concurrent_edit,
     load_config_yaml,
     make_conversation_reader_mock,
     make_relation_lookup,
     test_runtime_paths,
     write_concurrent_edit_while_validating,
     write_config_yaml,
+    write_demo_tool_plugin,
 )
 from tests.identity_helpers import persist_entity_accounts
 from tests.test_generated_agents import BASE as GENERATED_BASE
@@ -118,31 +120,7 @@ def _invalid_plugin_config_path(tmp_path: Path, *, with_agent: bool = True) -> P
 
 def _plugin_tool_config_path(tmp_path: Path, *, tool_name: str = "config_manager_plugin_tool") -> Path:
     """Write one config that enables a plugin-defined tool."""
-    plugin_root = tmp_path / "plugins" / "demo"
-    plugin_root.mkdir(parents=True)
-    (plugin_root / "mindroom.plugin.json").write_text(
-        json.dumps({"name": "demo_plugin", "tools_module": "tools.py", "skills": []}),
-        encoding="utf-8",
-    )
-    (plugin_root / "tools.py").write_text(
-        "from agno.tools import Toolkit\n"
-        "from mindroom.tool_system.declarations import ToolCategory, ToolFileAccess\nfrom mindroom.tool_system.registration import register_tool_with_metadata\n"
-        "\n"
-        "class DemoTool(Toolkit):\n"
-        "    def __init__(self) -> None:\n"
-        "        super().__init__(name='demo', tools=[])\n"
-        "\n"
-        "@register_tool_with_metadata(\n"
-        f"    name='{tool_name}',\n"
-        "    file_access=ToolFileAccess.NONE,\n"
-        "    display_name='Plugin Tool',\n"
-        "    description='Plugin-defined tool',\n"
-        "    category=ToolCategory.DEVELOPMENT,\n"
-        ")\n"
-        "def demo_plugin_tools():\n"
-        "    return DemoTool\n",
-        encoding="utf-8",
-    )
+    write_demo_tool_plugin(tmp_path / "plugins" / "demo", tool_name)
     config_path = tmp_path / "config.yaml"
     write_config_yaml(
         Config(
@@ -517,11 +495,12 @@ class TestConsolidatedConfigManager:
         cm = _config_manager(_minimal_config_path(tmp_path))
         assert cm.config_path is not None
         assert cm.name == "config_manager"
-        assert len(cm.tools) == 4
-        assert any(tool.__name__ == "get_info" for tool in cm.tools)
-        assert any(tool.__name__ == "manage_config" for tool in cm.tools)
-        assert any(tool.__name__ == "manage_agent" for tool in cm.tools)
-        assert any(tool.__name__ == "manage_team" for tool in cm.tools)
+        assert sorted(tool.__name__ for tool in cm.tools) == [
+            "get_info",
+            "manage_agent",
+            "manage_config",
+            "manage_team",
+        ]
 
     def test_manage_config_inspects_authored_subtree_with_redaction(self, tmp_path: Path) -> None:
         """Inspection should be path-scoped, authored-only, and centrally redacted."""
@@ -2138,39 +2117,6 @@ class TestConsolidatedConfigManager:
                 # Should not error for valid types without name
                 assert "Error: Unknown info_type" not in result
 
-    def test_reduced_tool_count(self, tmp_path: Path) -> None:
-        """Verify the toolkit remains consolidated into four functions."""
-        cm = _config_manager(_minimal_config_path(tmp_path))
-
-        assert len(cm.tools) == 4
-
-        # Check the specific tools
-        tool_names = [tool.__name__ for tool in cm.tools]
-        assert "get_info" in tool_names
-        assert "manage_config" in tool_names
-        assert "manage_agent" in tool_names
-        assert "manage_team" in tool_names
-
-        # Old tool names should NOT be present
-        old_tools = [
-            "get_mindroom_info",
-            "get_config_schema",
-            "get_available_models",
-            "list_agents",
-            "list_teams",
-            "list_available_tools",
-            "get_tool_details",
-            "suggest_tools_for_task",
-            "create_agent_config",
-            "update_agent_config",
-            "create_team_config",
-            "validate_agent_config",
-            "get_agent_config",
-            "generate_agent_template",
-        ]
-        for old_tool in old_tools:
-            assert old_tool not in tool_names
-
     def test_agent_template_generation(self, tmp_path: Path) -> None:
         """Test agent template generation through get_info."""
         cm = _config_manager(_minimal_config_path(tmp_path))
@@ -2320,10 +2266,7 @@ def test_config_write_refuses_a_file_edited_while_it_validated(
         },
     )
     write_config_yaml(config, config_path)
-    concurrent = config.authored_model_dump()
-    concurrent["agents"]["talent"]["display_name"] = "Saved from the dashboard"
-    concurrent_source = yaml.safe_dump(concurrent, sort_keys=True)
-    write_concurrent_edit_while_validating(monkeypatch, config_path, concurrent_source)
+    concurrent_source = write_concurrent_edit_while_validating(monkeypatch, config_path, "talent")
     config_manager = _config_manager(config_path)
     writers = {
         "patch": lambda: config_manager.manage_config(
@@ -2354,7 +2297,4 @@ def test_config_write_refuses_a_file_edited_while_it_validated(
     ):
         result = writers[writer]()
 
-    assert "configuration file changed" in result
-    assert "NOT applied" in result
-    assert "Invalid configuration" not in result
-    assert config_path.read_text(encoding="utf-8") == concurrent_source
+    assert_refused_for_concurrent_edit(result, config_path, concurrent_source)

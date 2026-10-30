@@ -1,9 +1,9 @@
 """Pytest configuration and fixtures for dashboard backend tests."""
 
-# Import the app after we can mock the config path
 import asyncio
 import json
-from collections.abc import Callable, Generator
+import threading
+from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from functools import cache, partial
 from pathlib import Path
@@ -13,8 +13,10 @@ import jwt
 import pytest
 import yaml
 from cryptography.hazmat.primitives.asymmetric import rsa
+from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from jwt.algorithms import RSAAlgorithm
+from starlette.requests import Request
 
 from mindroom.api import config_lifecycle
 from mindroom.config.commit import ConfigCommit
@@ -22,9 +24,6 @@ from mindroom.config.load_attempt import ConfigLoadResult
 from mindroom.config.main import Config, load_config
 
 if TYPE_CHECKING:
-    from fastapi import FastAPI
-    from starlette.requests import Request
-
     from mindroom.constants import RuntimePaths
 
 
@@ -146,7 +145,7 @@ def use_trusted_upstream_runtime(api_app: object) -> "RuntimePaths":
 
 
 @pytest.fixture
-def temp_config_file(tmp_path: Path) -> Generator[Path, None, None]:
+def temp_config_file(tmp_path: Path) -> Path:
     """Create a temporary config file for testing."""
     config_dir = tmp_path / "api-runtime"
     config_dir.mkdir()
@@ -166,11 +165,7 @@ def temp_config_file(tmp_path: Path) -> Generator[Path, None, None]:
     }
     temp_path = config_dir / "config.yaml"
     temp_path.write_text(yaml.dump(config_data), encoding="utf-8")
-
-    yield temp_path
-
-    # Cleanup
-    temp_path.unlink(missing_ok=True)
+    return temp_path
 
 
 @pytest.fixture
@@ -215,20 +210,54 @@ def calls_on_event_loop(monkeypatch: pytest.MonkeyPatch) -> Callable[[object, st
     return record
 
 
-def publish_api_config(api_app: "FastAPI", config: Config) -> None:
+def make_api_app(runtime_paths: "RuntimePaths") -> FastAPI:
+    """Build one API app with a fresh published snapshot, mirroring main.initialize_api_app."""
+    api_app = FastAPI()
+    state = config_lifecycle.ensure_app_state(api_app)
+    state.api_state = config_lifecycle.ApiState(
+        config_lock=threading.Lock(),
+        snapshot=config_lifecycle.ApiSnapshot(
+            generation=0,
+            runtime_paths=runtime_paths,
+        ),
+    )
+    config_lifecycle.register_api_app(api_app)
+    return api_app
+
+
+def request_for(api_app: FastAPI) -> Request:
+    """Return a dashboard GET request against `api_app`."""
+    return Request(
+        {
+            "type": "http",
+            "method": "GET",
+            "path": "/api/config",
+            "query_string": b"",
+            "headers": [],
+            "app": api_app,
+        },
+    )
+
+
+def api_snapshot(api_app: FastAPI) -> config_lifecycle.ApiSnapshot:
+    """Return the snapshot `api_app` currently publishes."""
+    return config_lifecycle.require_api_state(api_app).snapshot
+
+
+def publish_api_config(api_app: FastAPI, config: Config) -> None:
     """Serve `config` as the app's committed config without loading or committing a file."""
-    snapshot = config_lifecycle.require_api_state(api_app).snapshot
+    snapshot = api_snapshot(api_app)
     snapshot.runtime_config = config
     snapshot.config_load_result = ConfigLoadResult(success=True)
 
 
-def save_config(request: "Request", payload: dict[str, Any], *, expected_generation: int | None = None) -> int:
+def save_config(request: Request, payload: dict[str, Any], *, expected_generation: int | None = None) -> int:
     """Commit a dashboard structured save and return its generation."""
     build = partial(ConfigCommit.from_payload, payload)
     return config_lifecycle.commit_dashboard_config(request, build, expected_generation=expected_generation).generation
 
 
-def save_edited_config(request: "Request", edit: Callable[[dict[str, Any]], object]) -> int:
+def save_edited_config(request: Request, edit: Callable[[dict[str, Any]], object]) -> int:
     """Save the config the request pinned after `edit` changes its authored payload, as the dashboard editor does."""
     config_lifecycle.bind_current_request_snapshot(request)
     config, _ = config_lifecycle.read_committed_runtime_config(request)
@@ -237,7 +266,7 @@ def save_edited_config(request: "Request", edit: Callable[[dict[str, Any]], obje
     return save_config(request, payload)
 
 
-def save_raw_config(request: "Request", source: str, *, expected_generation: int | None = None) -> int:
+def save_raw_config(request: Request, source: str, *, expected_generation: int | None = None) -> int:
     """Commit a dashboard raw save and return its generation."""
     build = partial(ConfigCommit.from_source, source)
     return config_lifecycle.commit_dashboard_config(request, build, expected_generation=expected_generation).generation
