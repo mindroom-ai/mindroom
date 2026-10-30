@@ -372,6 +372,7 @@ Each `ConfigField` describes one constructor parameter that users can set throug
 | `options` | list | `None` | For `select`: a list of `{"label": "...", "value": "..."}` dicts |
 | `validation` | dict | `None` | Validation rules such as min, max, or pattern |
 | `authored_override` | bool | `True` | Set to `False` to forbid setting the field inline in `config.yaml`; `password` fields are never allowed inline (see [Per-Agent Tool Configuration](https://docs.mindroom.chat/tools/#per-agent-tool-configuration)) |
+| `env` | tuple of strings | `()` | Environment variables the field falls back to, in order, when nothing else sets it (see [How Settings Combine](https://docs.mindroom.chat/tools/#how-settings-combine)) |
 
 A `ConfigField` `default` only pre-fills the dashboard form and is not passed to the constructor.
 When no value is stored or configured, the constructor's Python default applies, so give optional parameters matching defaults, such as `units: str = "metric"` below.
