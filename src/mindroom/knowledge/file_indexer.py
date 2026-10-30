@@ -539,15 +539,8 @@ class FileIndexer:
             logger.warning("Indexing produced no vectors for file", base_id=self.base_id, path=prepared.relative_path)
             return None
         missing = [text for text in dict.fromkeys(chunk.text for chunk in prepared.chunks) if text not in batch_vectors]
-        embedder = self.embedder
         try:
-            own_vectors = await run_with_embedding_retry(
-                partial(asyncio.to_thread, lambda: dict(zip(missing, embedder.embed_each(missing), strict=True))),
-                policy=_EMBEDDING_RETRY_POLICY,
-                sleep=_EMBEDDING_RETRY_SLEEP,
-                on_retry=self._record_embedding_retry,
-            )
-            vectors = {**batch_vectors, **own_vectors}
+            vectors = {**batch_vectors, **(await self._embed_each(missing) if missing else {})}
             await run_blocking_until_complete(
                 write_file_rows,
                 self.collection,
@@ -569,6 +562,16 @@ class FileIndexer:
                 path=prepared.relative_path,
             )
         return prepared.signature
+
+    async def _embed_each(self, texts: list[str]) -> dict[str, list[float]]:
+        """Embed one file's chunk texts the batch left out, one request per text, retrying transient failures."""
+        embedder = self.embedder
+        return await run_with_embedding_retry(
+            partial(asyncio.to_thread, lambda: dict(zip(texts, embedder.embed_each(texts), strict=True))),
+            policy=_EMBEDDING_RETRY_POLICY,
+            sleep=_EMBEDDING_RETRY_SLEEP,
+            on_retry=self._record_embedding_retry,
+        )
 
     def _record_file_failure(self, file_path: Path, exc: Exception) -> None:
         """Record why one file failed to index, for the refresh summary and the global-failure evidence."""

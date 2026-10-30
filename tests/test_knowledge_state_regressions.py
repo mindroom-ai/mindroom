@@ -234,6 +234,19 @@ async def test_a_refresh_that_only_restamps_files_builds_no_embedder(
     assert embedder_builds == []
 
 
+@pytest.mark.asyncio
+async def test_a_refresh_of_only_empty_files_builds_no_embedder(tmp_path: Path, embedder_builds: list[str]) -> None:
+    """An empty file is claimed without vectors, so a refresh that indexes only empty files has nothing to embed."""
+    config = _config(tmp_path)
+    runtime_paths = runtime_paths_for(config)
+    (tmp_path / "docs" / "empty.md").write_text("", encoding="utf-8")
+
+    result = await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)
+
+    assert result.published
+    assert embedder_builds == []
+
+
 def test_a_config_change_replaces_the_bindings_cached_read_handle(tmp_path: Path, embedder_builds: list[str]) -> None:
     """Each settings change gives a binding a new key, so only the newest key keeps a cached handle."""
     del embedder_builds
