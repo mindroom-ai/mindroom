@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING, Literal
 
 from mindroom.knowledge import registry
 from mindroom.knowledge.availability import KnowledgeAvailability
+from mindroom.knowledge.collection_lifetime import collection_lifetime_lock
 from mindroom.knowledge.collections import CollectionSpace, working_collections
 from mindroom.knowledge.index_metadata import (
     load_publication,
@@ -76,22 +77,26 @@ def _candidate_status_for_key(
         knowledge_path=Path(key.knowledge_path),
         storage_path=registry.published_index_storage_path(key),
     )
+    if not space.storage_path.is_dir():
+        return None
     found: list[KnowledgeCandidateStatus] = []
-    for collection, meta in working_collections(space, published=published, settings=key.indexing_settings):
-        if meta.stage != "building":
-            continue
-        completed, failed = collection.claim_counts()
-        found.append(
-            KnowledgeCandidateStatus(
-                status="failed" if failed else "building",
-                completed_count=completed,
-                failed_count=failed,
-                total_files=meta.total_files,
-                target_revision=meta.revision,
-                created_at=meta.created_at,
-                updated_at=meta.updated_at,
-            ),
-        )
+    # Shared, so no cleanup deletes a listed collection before its claims are counted.
+    with collection_lifetime_lock(space.storage_path, exclusive=False):
+        for collection, meta in working_collections(space, published=published, settings=key.indexing_settings):
+            if meta.stage != "building":
+                continue
+            completed, failed = collection.claim_counts()
+            found.append(
+                KnowledgeCandidateStatus(
+                    status="failed" if failed else "building",
+                    completed_count=completed,
+                    failed_count=failed,
+                    total_files=meta.total_files,
+                    target_revision=meta.revision,
+                    created_at=meta.created_at,
+                    updated_at=meta.updated_at,
+                ),
+            )
     return max(found, key=lambda candidate: candidate.updated_at, default=None)
 
 

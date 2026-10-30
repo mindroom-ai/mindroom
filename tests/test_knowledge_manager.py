@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import contextvars
+import fcntl
 import gc
 import json
 import os
@@ -44,6 +45,7 @@ import mindroom.knowledge.refresh_locks as knowledge_refresh_locks
 import mindroom.knowledge.refresh_runner as knowledge_refresh_runner
 import mindroom.knowledge.refresh_scheduler as knowledge_refresh_scheduler
 import mindroom.knowledge.registry as knowledge_registry
+import mindroom.knowledge.status as knowledge_status_module
 import mindroom.knowledge.utils as knowledge_utils
 from mindroom import file_locks
 from mindroom.agent_policy import PRIVATE_KNOWLEDGE_BASE_ID_PREFIX
@@ -66,7 +68,13 @@ from mindroom.embeddings.batching import RefreshEmbedder
 from mindroom.embeddings.errors import EmbedderRequestError, openai_embedder_error
 from mindroom.git_invocation import hardened_git_command, hardened_git_env
 from mindroom.knowledge.availability import KnowledgeAvailability
-from mindroom.knowledge.collections import _owned_collection_names, open_collection
+from mindroom.knowledge.collections import (
+    CollectionSpace,
+    _owned_collection_names,
+    cleanup_superseded_collections,
+    open_collection,
+    working_collections,
+)
 from mindroom.knowledge.corpus_signature import corpus_signature, scan_corpus
 from mindroom.knowledge.file_indexer import FileIndexer, _PreparedFile, max_concurrent_file_indexes
 from mindroom.knowledge.file_listing import (
@@ -5447,6 +5455,50 @@ def _embedder_rejection_error() -> EmbedderRequestError:
     request = httpx.Request("POST", "http://embeddings.local/v1/embeddings")
     response = httpx.Response(422, request=request, json={"error": {"message": "Input could not be embedded"}})
     return openai_embedder_error(UnprocessableEntityError("Error code: 422", response=response, body=None))
+
+
+@pytest.mark.skipif(os.name == "nt", reason="flock probe requires POSIX")
+@pytest.mark.asyncio
+async def test_a_candidate_cleanup_during_a_status_read_does_not_fail_the_status(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A forced rebuild deleting the failed candidate a status read just listed leaves that read's counts intact."""
+    docs_path = tmp_path / "docs"
+    docs_path.mkdir()
+    (docs_path / "good.md").write_text("good", encoding="utf-8")
+    (docs_path / "bad.md").write_text("bad", encoding="utf-8")
+    config = _config(tmp_path, bases={"docs": docs_path}, agent_bases=["docs"])
+    runtime_paths = runtime_paths_for(config)
+    original_index_file = FileIndexer._index_file
+
+    async def _skip_bad_file(self: FileIndexer, prepared: _PreparedFile, **kwargs: object) -> FileSignature | None:
+        if prepared.path.name == "bad.md":
+            return None
+        return await original_index_file(self, prepared, **kwargs)
+
+    monkeypatch.setattr(FileIndexer, "_index_file", _skip_bad_file)
+    await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)
+    assert len(_working_collections(config, runtime_paths)) == 1
+
+    def _list_then_clean_up(space: CollectionSpace, *, published: str | None, settings: IndexingSettings) -> object:
+        listed = working_collections(space, published=published, settings=settings)
+        with (space.storage_path / "collection_lifetime.lock").open("a", encoding="utf-8") as handle:
+            try:
+                fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                # The read holds the collections, so the cleanup would wait for it to finish.
+                return listed
+            fcntl.flock(handle, fcntl.LOCK_UN)
+        cleanup_superseded_collections(space, preserved=frozenset(), candidates_only=True)
+        return listed
+
+    monkeypatch.setattr(knowledge_status_module, "working_collections", _list_then_clean_up)
+
+    candidate_status = get_knowledge_index_status("docs", config=config, runtime_paths=runtime_paths).candidate
+
+    assert candidate_status is not None
+    assert (candidate_status.completed_count, candidate_status.failed_count) == (1, 1)
 
 
 @pytest.mark.asyncio

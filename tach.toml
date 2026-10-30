@@ -6652,6 +6652,7 @@ depends_on = []
 path = "mindroom.knowledge.status"
 depends_on = [
     "mindroom.knowledge.availability",
+    "mindroom.knowledge.collection_lifetime",
     "mindroom.knowledge.collections",
     "mindroom.knowledge.index_metadata",
     "mindroom.knowledge.indexing_config",
@@ -9193,7 +9194,7 @@ visibility = ["mindroom.tool_jobs.results"]
 [[modules]]
 path = "mindroom.knowledge.collection_lifetime"
 depends_on = ["mindroom.file_locks", "mindroom.knowledge.index_metadata", "mindroom.knowledge.indexing_config"]
-visibility = ["mindroom.knowledge.collections", "mindroom.knowledge.index_reader"]
+visibility = ["mindroom.knowledge.collections", "mindroom.knowledge.index_reader", "mindroom.knowledge.status"]
 
 [[modules]]
 path = "mindroom.tool_system.agent_tool_calls"
