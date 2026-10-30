@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import re
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
@@ -18,6 +19,8 @@ if TYPE_CHECKING:
 
 _TEAM_MEMORY_DIRNAME = "team_memory"
 TEAM_SCOPE_PREFIX = "team_"
+# Most filesystems allow a directory name of at most 255 bytes, and a scope directory name is ASCII.
+_MAX_SCOPE_DIR_NAME = 255
 
 
 @dataclass(frozen=True)
@@ -34,8 +37,16 @@ def team_user_id(member_names: Sequence[str]) -> str:
 
 
 def _scope_dir_name(scope_user_id: str) -> str:
-    """Return the filesystem-safe directory name of one memory scope."""
-    return re.sub(r"[^a-zA-Z0-9._+-]+", "_", scope_user_id).strip("_") or "default"
+    """Return the directory name of one team scope: its ID, with a long one shortened and told apart by a hash.
+
+    A configured scope ID is already a valid name; replacing other characters keeps a planted record's scope ID, which
+    the startup merge reads, from reaching outside the team memory root.
+    """
+    name = re.sub(r"[^a-zA-Z0-9._+-]+", "_", scope_user_id)
+    if len(name) <= _MAX_SCOPE_DIR_NAME:
+        return name
+    digest = hashlib.sha256(scope_user_id.encode()).hexdigest()[:16]
+    return f"{name[: _MAX_SCOPE_DIR_NAME - len(digest) - 1]}-{digest}"
 
 
 def team_scope(scope_user_id: str, runtime_paths: RuntimePaths) -> MemoryScope:

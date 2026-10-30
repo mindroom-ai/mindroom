@@ -7,6 +7,7 @@ It records reasons, rejected alternatives, and accepted limitations; the code sh
 
 - A team scope is still its member set (`team_<sorted members>`), not its team name, so which conversations share team memory does not change: two configured teams with the same members share one scope, and renaming a team keeps its memory.
   The scope's store lives at `team_memory/<team scope>/`, apart from the team's conversation database under `teams/`, which is keyed by team name.
+  The directory name is the scope ID itself, which agent names keep a valid name, shortened with a hash of the whole ID past 255 bytes: Mem0 team scopes used to live only in record metadata, so a large team had no name-length limit to hit.
 - Each scope has exactly one store, so a memory ID names one record and an edit or delete changes only that record.
   The copies were the second owner of every team fact: each member's Mem0 add ran its own extraction, and Mem0 copies an add's metadata onto every fact it extracts, so the replica key that was meant to name one fact named the whole turn, and editing one team fact through one member rewrote every fact of that turn in the other members' stores.
 - A member reads every configured team it belongs to through its own backend, with no filter on the team's current backend, because a teammate switching backend changes where the team's new memories go, not whether the member may read the older ones.

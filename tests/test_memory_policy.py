@@ -75,6 +75,26 @@ def test_team_scope_root_is_one_store_no_requester_or_worker_scope_partitions(tm
             assert team_scopes("calculator", config, runtime_paths) == [expected]
 
 
+def test_each_team_scope_has_its_own_store_directory_within_the_name_limit(tmp_path: Path, config: Config) -> None:
+    """Scopes differing only in a trailing underscore, or late in a long member list, keep separate usable stores."""
+    runtime_paths = runtime_paths_for(config)
+    members = [f"research_agent_{index:02d}" for index in range(1, 21)]
+    scopes = [
+        team_user_id(["alpha", "beta"]),
+        team_user_id(["alpha", "beta_"]),
+        team_user_id(members),
+        team_user_id([*members[:-1], "research_agent_99"]),
+    ]
+
+    roots = [team_scope(scope, runtime_paths).root for scope in scopes]
+
+    assert len(set(roots)) == len(roots)
+    assert roots[0] == tmp_path / "team_memory" / "team_alpha+beta"
+    for root in roots:
+        assert root.parent == tmp_path / "team_memory"
+        root.mkdir(parents=True)
+
+
 def test_team_scopes_lists_each_member_set_of_the_agent_s_teams_once_whatever_their_backends(
     tmp_path: Path,
     config: Config,

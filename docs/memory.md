@@ -228,6 +228,7 @@ Agent file memory lives in the agent workspace, `agents/<agent>/workspace/` in t
 - `memory/YYYY-MM-DD.md`, where auto-flush writes
 
 Team file memory lives once per team, in `team_memory/team_<sorted_members>/MEMORY.md` in the storage directory.
+A team whose directory name would pass 255 characters gets a shortened one ending in a hash.
 
 Memory files must be regular files; symlinks, FIFOs, and device nodes are ignored when reading and rejected when writing.
 Each file is read up to 1 MiB, cut at its last complete line, and updating a truncated or non-UTF-8 file fails so the rest of it is preserved.
