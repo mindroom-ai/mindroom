@@ -23,7 +23,14 @@ from mindroom.config.memory import MemoryConfig, _MemoryEmbedderConfig, _MemoryL
 from mindroom.config.models import EmbedderConfig
 from mindroom.constants import resolve_runtime_paths
 from mindroom.custom_tools.memory import MemoryTools
-from mindroom.memory import add_agent_memory, list_all_agent_memories, search_agent_memories, store_conversation_memory
+from mindroom.memory import (
+    add_agent_memory,
+    delete_agent_memory,
+    list_all_agent_memories,
+    search_agent_memories,
+    store_conversation_memory,
+    update_agent_memory,
+)
 from mindroom.runtime_resolution import resolve_agent_storage
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 from tests.conftest import bind_runtime_paths, runtime_paths_for
@@ -181,7 +188,7 @@ async def _remember(
 ) -> None:
     claude_reply[0] = _claude_reply(facts=facts, thinking_first=thinking_first)
     runtime_paths = runtime_paths_for(config)
-    await add_agent_memory("Remember my notes.", "general", runtime_paths.storage_root, config, runtime_paths)
+    await add_agent_memory("Remember my notes.", "general", config, runtime_paths)
 
 
 async def _search(config: Config, *, limit: int = 5) -> list[tuple[str, float]]:
@@ -189,7 +196,6 @@ async def _search(config: Config, *, limit: int = 5) -> list[tuple[str, float]]:
     outcome = await search_agent_memories(
         _QUERY,
         "general",
-        runtime_paths.storage_root,
         config,
         runtime_paths,
         limit=limit,
@@ -225,7 +231,6 @@ async def test_an_exact_team_memory_outranks_the_agents_loosely_related_memories
     await store_conversation_memory(
         "Our checklist for PR review.",
         ["general", "calculator"],
-        runtime_paths.storage_root,
         "session-pair",
         config,
         runtime_paths,
@@ -241,6 +246,62 @@ async def test_an_exact_team_memory_outranks_the_agents_loosely_related_memories
     assert [memory for memory, _ in search] == [_TEAM_MEMORY, "Recipe one", "Recipe two", "Recipe three"]
 
 
+async def _team_facts(config: Config, member: str) -> dict[str, str]:
+    """Return the team facts ``member`` finds, by text, with their IDs; unknown texts all embed as one vector."""
+    runtime_paths = runtime_paths_for(config)
+    outcome = await search_agent_memories(
+        "Team notes",
+        member,
+        config,
+        runtime_paths,
+        limit=20,
+    )
+    assert outcome.degraded_reason is None
+    return {
+        result["memory"]: result["id"] for result in outcome.results if result["user_id"] == "team_calculator+general"
+    }
+
+
+@pytest.mark.asyncio
+async def test_editing_or_deleting_one_team_fact_through_a_member_changes_only_that_fact_for_every_member(
+    config: Config,
+    claude_reply: list[AnthropicMessage | Exception],
+) -> None:
+    """One team fact edited or deleted through one member leaves every other fact of its turn, for both members."""
+    runtime_paths = runtime_paths_for(config)
+    for prompt, facts in (
+        ("Our team notes.", ["Team fact one", "Team fact two", "Team fact three"]),
+        ("More team notes.", ["Team fact four", "Team fact five"]),
+    ):
+        claude_reply[0] = _claude_reply(facts=facts, thinking_first=False)
+        await store_conversation_memory(
+            prompt,
+            ["general", "calculator"],
+            "session-pair",
+            config,
+            runtime_paths,
+        )
+    seen_by_general = await _team_facts(config, "general")
+
+    await delete_agent_memory(
+        seen_by_general["Team fact one"],
+        "general",
+        config,
+        runtime_paths,
+    )
+    await update_agent_memory(
+        seen_by_general["Team fact four"],
+        "Team fact four, revised",
+        "general",
+        config,
+        runtime_paths,
+    )
+
+    expected = {"Team fact two", "Team fact three", "Team fact four, revised", "Team fact five"}
+    assert set(await _team_facts(config, "general")) == expected
+    assert set(await _team_facts(config, "calculator")) == expected
+
+
 @pytest.mark.asyncio
 async def test_claude_reply_that_starts_with_thinking_stores_its_extracted_memories(
     config: Config,
@@ -251,7 +312,7 @@ async def test_claude_reply_that_starts_with_thinking_stores_its_extracted_memor
     await _remember(config, claude_reply, facts, thinking_first=True)
     runtime_paths = runtime_paths_for(config)
 
-    stored = await list_all_agent_memories("general", runtime_paths.storage_root, config, runtime_paths)
+    stored = await list_all_agent_memories("general", config, runtime_paths)
 
     assert sorted(memory["memory"] for memory in stored) == sorted(facts)
 
@@ -267,7 +328,7 @@ async def test_a_failed_memory_model_call_reaches_the_memory_tool_without_the_re
     response = httpx.Response(401, request=httpx.Request("POST", "https://api.anthropic.com/v1/messages"))
     claude_reply[0] = AuthenticationError(message, response=response, body=None)
     runtime_paths = runtime_paths_for(config)
-    tools = MemoryTools("general", runtime_paths.storage_root, config, runtime_paths)
+    tools = MemoryTools("general", config, runtime_paths)
 
     result = await tools.add_memory("Remember my notes.")
 
@@ -335,7 +396,6 @@ async def test_one_requesters_messages_never_reach_another_requesters_private_me
         await store_conversation_memory(
             prompt,
             "mind",
-            runtime_paths.storage_root,
             identity.session_id,
             config,
             runtime_paths,

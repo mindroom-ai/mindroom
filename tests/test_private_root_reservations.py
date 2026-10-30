@@ -11,7 +11,6 @@ from mindroom.constants import resolve_runtime_paths
 from mindroom.custom_tools.browser import BrowserTools, _profile_dir
 from mindroom.knowledge.manager import KnowledgeManager
 from mindroom.matrix_rtc import transcript as transcript_module
-from mindroom.memory._shared import FILE_MEMORY_DEFAULT_DIRNAME
 from mindroom.memory.config import _get_memory_config
 from mindroom.session_storage.agent_storage import create_agent_state_storage
 from mindroom.session_storage.preflight import session_storage_preflight
@@ -34,16 +33,15 @@ def test_primary_state_written_beside_a_private_workspace_is_reserved(tmp_path: 
     with session_storage_preflight(state_root, TableNames("mind"), timeout_seconds=1):
         pass
     create_agent_state_storage("mind", state_root)
-    # Retired Agno Learning left its databases here, and a worker must never mount them.
+    # Retired Agno Learning left its databases here, and file memory without a workspace its files; a worker must never
+    # mount either.
     (state_root / "learning").mkdir()
+    (state_root / "memory_files").mkdir()
     _get_memory_config(state_root, config, runtime_paths)
     KnowledgeManager("notes", config=config, runtime_paths=runtime_paths, storage_path=state_root)
     browser = BrowserTools(runtime_paths, agent_state_root=state_root)
     _profile_dir(browser._profiles_root, "mindroom")
     browser._publish_browser_artifact(browser._next_output_path("png"), b"capture")
 
-    written = {entry.name for entry in state_root.iterdir()} | {
-        transcript_module._TRANSCRIPT_DIRNAME,
-        FILE_MEMORY_DEFAULT_DIRNAME,
-    }
+    written = {entry.name for entry in state_root.iterdir()} | {transcript_module._TRANSCRIPT_DIRNAME}
     assert written <= _RESERVED_PRIVATE_ROOT_FIRST_PARTS

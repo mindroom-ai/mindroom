@@ -388,7 +388,6 @@ def _build_response_runner(
             runtime=runtime,
             logger=bot.logger,
             runtime_paths=runtime_paths,
-            storage_path=storage_path,
             agent_name=bot.agent_name,
             matrix_full_id=bot.matrix_id.full_id,
             resolver=bot._conversation_resolver,

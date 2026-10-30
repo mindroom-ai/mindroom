@@ -251,7 +251,6 @@ class CallTranscript:
             await add_agent_memory(
                 memory_content,
                 self.agent_name,
-                runtime_paths.storage_root,
                 config,
                 runtime_paths,
                 metadata={"source": "matrix_rtc_call", "transcript_path": transcript_path},

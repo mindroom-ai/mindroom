@@ -646,7 +646,6 @@ async def test_a_released_note_keeps_its_turn_from_being_flushed_again(tmp_path:
     append_agent_daily_memory(
         f"[auto_flush:{session}:P] P's fact",
         "general",
-        tmp_path,
         config,
         runtime_paths_for(config),
     )
@@ -681,7 +680,6 @@ async def test_a_turn_completed_after_a_released_note_is_flushed_once(tmp_path: 
     append_agent_daily_memory(
         f"[auto_flush:{session}:Z] Z's fact",
         "general",
-        tmp_path,
         config,
         runtime_paths_for(config),
     )
@@ -885,7 +883,6 @@ async def test_giving_up_moves_past_the_failing_turns_not_ones_already_written(
     append_agent_daily_memory(
         f"[auto_flush:{session}@1] written before its progress was saved",
         "general",
-        tmp_path,
         config,
         runtime_paths_for(config),
     )
@@ -1123,10 +1120,9 @@ async def test_only_agents_whose_effective_backend_is_file_are_flushed(tmp_path:
 
 @pytest.mark.asyncio
 async def test_a_shared_agent_note_lands_in_its_canonical_workspace(tmp_path: Path, extractor: _Extractor) -> None:
-    """A shared agent's notes go to its workspace's daily file whatever its worker scope or memory.file.path."""
+    """A shared agent's notes go to its workspace's daily file whatever its worker scope."""
     config = _config(tmp_path)
     config.agents["general"].worker_scope = "user"
-    config.memory.file.path = str(tmp_path / "shared-memory")
     worker = await _started(config)
     session = _thread("t1")
     _seed(config, session, [_run("r1", session, T0 + 10)])
@@ -1135,7 +1131,6 @@ async def test_a_shared_agent_note_lands_in_its_canonical_workspace(tmp_path: Pa
 
     assert [call["execution_identity"] for call in extractor.calls] == [None]
     assert len(_general_notes(tmp_path)) == 1
-    assert not list((tmp_path / "shared-memory").rglob("*.md"))
 
 
 @pytest.mark.asyncio
@@ -1176,8 +1171,8 @@ async def test_existing_memories_reach_the_extractor(tmp_path: Path, extractor: 
         session_id="session-alice",
     )
     with detached_tool_scope(alice):
-        await add_agent_memory("Alice-authored shared memory", "general", tmp_path, config, runtime_paths_for(config))
-    append_agent_daily_memory("Shared daily memory", "general", tmp_path, config, runtime_paths_for(config))
+        await add_agent_memory("Alice-authored shared memory", "general", config, runtime_paths_for(config))
+    append_agent_daily_memory("Shared daily memory", "general", config, runtime_paths_for(config))
     worker = await _started(config)
     session = _thread("t1")
     _seed(config, session, [_run("r1", session, T0 + 10)])

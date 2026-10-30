@@ -51,7 +51,6 @@ from mindroom.turn_origin import TurnIntent
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Coroutine, Mapping, Sequence
-    from pathlib import Path
 
     import nio
     import structlog
@@ -110,7 +109,6 @@ class ReplyTurnDeps:
     runtime: BotRuntimeView
     logger: structlog.stdlib.BoundLogger
     runtime_paths: RuntimePaths
-    storage_path: Path
     agent_name: str
     matrix_full_id: str
     resolver: ConversationResolver
@@ -219,7 +217,6 @@ class LockedTurns:
                 store_conversation_memory(
                     prompt,
                     agent_name,
-                    self.deps.storage_path,
                     session_id,
                     self.deps.runtime.config,
                     self.deps.runtime_paths,

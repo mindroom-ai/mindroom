@@ -690,7 +690,6 @@ async def _prepare_turn_memory(
     return await build_memory_prompt_parts(
         ctx.prompt,
         ctx.entity_label,
-        runtime_paths.storage_root,
         config,
         runtime_paths,
         execution_identity=ctx.execution_identity,
@@ -717,7 +716,6 @@ async def _system_messages_after_compaction(
         return system_messages
     fresh = await conversation_entrypoint_preamble(
         ctx.entity_label,
-        runtime_paths.storage_root,
         config,
         runtime_paths,
         ctx.execution_identity,

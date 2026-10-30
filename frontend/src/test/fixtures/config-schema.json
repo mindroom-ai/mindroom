@@ -3402,12 +3402,6 @@
           "title": "Backend",
           "type": "string"
         },
-        "team_reads_member_memory": {
-          "default": false,
-          "description": "When true, team-context memory reads can access member agent memories in addition to the shared team scope",
-          "title": "Team Reads Member Memory",
-          "type": "boolean"
-        },
         "embedder": {
           "$ref": "#/$defs/_MemoryEmbedderConfig",
           "default": {
@@ -3439,7 +3433,6 @@
         "file": {
           "$ref": "#/$defs/_MemoryFileConfig",
           "default": {
-            "path": null,
             "max_entrypoint_lines": 200,
             "max_entrypoint_tokens": 50000
           },
@@ -5291,19 +5284,6 @@
       "additionalProperties": false,
       "description": "File-backed memory configuration.",
       "properties": {
-        "path": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null,
-          "description": "Optional fallback root for direct file-memory paths. Relative paths resolve from the config directory. Canonical agent and team file memory live under their canonical workspace or scope roots.",
-          "title": "Path"
-        },
         "max_entrypoint_lines": {
           "default": 200,
           "description": "Maximum number of lines to preload from MEMORY.md",
@@ -5535,7 +5515,6 @@
       "$ref": "#/$defs/MemoryConfig",
       "default": {
         "backend": "mem0",
-        "team_reads_member_memory": false,
         "embedder": {
           "config": {
             "api_key": null,
@@ -5551,8 +5530,7 @@
         "llm": null,
         "file": {
           "max_entrypoint_lines": 200,
-          "max_entrypoint_tokens": 50000,
-          "path": null
+          "max_entrypoint_tokens": 50000
         },
         "search": {
           "include": [

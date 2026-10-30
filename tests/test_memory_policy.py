@@ -1,7 +1,8 @@
-"""Tests for memory scope and storage policy helpers."""
+"""Tests for memory scope policy: team scope IDs, team store roots, and caller backends."""
 
 from __future__ import annotations
 
+import re
 from typing import TYPE_CHECKING
 
 import pytest
@@ -9,56 +10,30 @@ import pytest
 from mindroom.config.agent import AgentConfig, AgentPrivateConfig
 from mindroom.config.main import Config
 from mindroom.constants import resolve_runtime_paths
-from mindroom.memory._policy import (
-    allowed_scope_storage_paths,
-    effective_storage_paths_for_context,
-    get_allowed_memory_user_ids,
-    get_team_ids_for_agent,
-    storage_paths_for_scope_user_id,
-)
+from mindroom.memory._policy import caller_memory_backend, team_scope, team_scopes, team_user_id
 from mindroom.memory_scope_ids import agent_scope_user_id
-from mindroom.tool_system.runtime_context import detached_tool_scope
-from mindroom.tool_system.worker_routing import ToolExecutionIdentity, agent_state_root_path
 from tests.conftest import bind_runtime_paths, runtime_paths_for
 from tests.memory_test_support import MockTeamConfig
 
 if TYPE_CHECKING:
     from pathlib import Path
 
+    from mindroom.config.memory import MemoryBackend
+
 
 @pytest.fixture
 def config(tmp_path: Path) -> Config:
     """Build the minimal config needed for policy tests."""
     runtime_paths = resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path)
-    return bind_runtime_paths(Config(), runtime_paths)
-
-
-def test_get_team_ids_for_agent(config: Config) -> None:
-    """Team scope IDs stay stable and include each matching team."""
-    config.agents = {
-        "calculator": AgentConfig(display_name="Calculator"),
-        "data_analyst": AgentConfig(display_name="Data Analyst"),
-        "finance": AgentConfig(display_name="Finance"),
-        "researcher": AgentConfig(display_name="Researcher"),
-        "general": AgentConfig(display_name="General"),
-        "assistant": AgentConfig(display_name="Assistant"),
-    }
-    config.teams = {
-        "finance_team": MockTeamConfig(agents=["calculator", "data_analyst", "finance"]),
-        "science_team": MockTeamConfig(agents=["calculator", "researcher"]),
-        "other_team": MockTeamConfig(agents=["general", "assistant"]),
-    }
-
-    team_ids = get_team_ids_for_agent("calculator", config)
-    assert len(team_ids) == 2
-    assert "team_calculator+data_analyst+finance" in team_ids
-    assert "team_calculator+researcher" in team_ids
-
-    team_ids = get_team_ids_for_agent("general", config)
-    assert len(team_ids) == 1
-    assert "team_assistant+general" in team_ids
-
-    assert get_team_ids_for_agent("unknown", config) == []
+    return bind_runtime_paths(
+        Config(
+            agents={
+                "general": AgentConfig(display_name="General"),
+                "calculator": AgentConfig(display_name="Calculator"),
+            },
+        ),
+        runtime_paths,
+    )
 
 
 def test_scope_user_id_helpers() -> None:
@@ -66,137 +41,144 @@ def test_scope_user_id_helpers() -> None:
     assert agent_scope_user_id("general") == "agent_general"
 
 
-def test_get_allowed_memory_user_ids_for_team_context(config: Config) -> None:
-    """Team callers only gain member scopes when that option is enabled."""
-    config.agents = {
-        "general": AgentConfig(display_name="General"),
-        "calculator": AgentConfig(display_name="Calculator"),
-    }
-    config.memory.team_reads_member_memory = False
-    assert get_allowed_memory_user_ids(["general", "calculator"], config) == {"team_calculator+general"}
-
-    config.memory.team_reads_member_memory = True
-    assert get_allowed_memory_user_ids(["general", "calculator"], config) == {
-        "agent_calculator",
-        "agent_general",
-        "team_calculator+general",
-    }
+def test_team_user_id_is_the_same_for_every_member_order() -> None:
+    """A team scope is named by its member set, so member order never splits it."""
+    assert team_user_id(["general", "calculator"]) == "team_calculator+general"
+    assert team_user_id(["calculator", "general"]) == "team_calculator+general"
 
 
-def test_allowed_scope_storage_paths_orders_scopes_and_expands_storage_roots(
-    tmp_path: Path,
-    config: Config,
-) -> None:
-    """Allowed scope traversal is sorted and expands each scope to its storage roots."""
-    config.agents = {
-        "general": AgentConfig(display_name="General"),
-        "calculator": AgentConfig(display_name="Calculator"),
-    }
-    config.teams = {"pair": MockTeamConfig(agents=["general", "calculator"])}
-
-    assert list(allowed_scope_storage_paths("general", tmp_path, config, runtime_paths_for(config))) == [
-        ("agent_general", agent_state_root_path(tmp_path, "general")),
-        ("team_calculator+general", agent_state_root_path(tmp_path, "general")),
-        ("team_calculator+general", agent_state_root_path(tmp_path, "calculator")),
+def test_team_scope_directories_keep_earlier_names_within_the_name_limit(tmp_path: Path, config: Config) -> None:
+    """A scope keeps the directory name its file copies had, and scopes differing late in a long member list stay apart."""
+    runtime_paths = runtime_paths_for(config)
+    members = [f"research_agent_{index:02d}" for index in range(1, 21)]
+    long_roots = [
+        team_scope(team_user_id(members), runtime_paths).root,
+        team_scope(team_user_id([*members[:-1], "research_agent_99"]), runtime_paths).root,
     ]
 
-
-def test_effective_storage_paths_for_mixed_private_team_is_rejected(tmp_path: Path, config: Config) -> None:
-    """Private agents are no longer supported in team memory contexts."""
-    config.agents = {
-        "general": AgentConfig(display_name="General", private=AgentPrivateConfig(per="user", root="mind_data")),
-        "calculator": AgentConfig(display_name="Calculator"),
-    }
-    identity = ToolExecutionIdentity(
-        channel="matrix",
-        agent_name="general",
-        requester_id="@alice:example.org",
-        room_id="!room:example.org",
-        thread_id=None,
-        resolved_thread_id=None,
-        session_id="session-alice",
+    assert team_scope(team_user_id(["_alpha", "beta_"]), runtime_paths).root == (
+        tmp_path / "team_memory" / "team__alpha+beta"
     )
-    with (
-        detached_tool_scope(identity),
-        pytest.raises(
-            ValueError,
-            match="private agents are only supported in explicit Matrix ad hoc teams with requester identity",
-        ),
-    ):
-        effective_storage_paths_for_context(["general", "calculator"], tmp_path, config, runtime_paths_for(config))
+    assert long_roots[0] != long_roots[1]
+    for root in long_roots:
+        assert root.parent == tmp_path / "team_memory"
+        root.mkdir(parents=True)
 
 
-def test_storage_paths_for_scope_user_id_rejects_mixed_private_team(
+def test_team_scopes_lists_each_member_set_of_the_agent_s_teams_once_whatever_their_backends(
     tmp_path: Path,
     config: Config,
 ) -> None:
-    """Team scope lookups should reject private team members."""
+    """An agent reads every configured team it belongs to, one scope per member set, in config order.
+
+    Neither the members' backends nor their worker scopes partition a team's scope.
+    """
     config.agents = {
-        "general": AgentConfig(display_name="General", private=AgentPrivateConfig(per="user", root="mind_data")),
-        "calculator": AgentConfig(display_name="Calculator"),
+        "calculator": AgentConfig(display_name="Calculator", memory_backend="file", worker_scope="user"),
+        "data_analyst": AgentConfig(display_name="Data Analyst", memory_backend="mem0"),
+        "finance": AgentConfig(display_name="Finance"),
+        "researcher": AgentConfig(display_name="Researcher", memory_backend="none", worker_scope="user_agent"),
+        "general": AgentConfig(display_name="General"),
+        "assistant": AgentConfig(display_name="Assistant"),
     }
-    identity = ToolExecutionIdentity(
-        channel="matrix",
-        agent_name="general",
-        requester_id="@alice:example.org",
-        room_id="!room:example.org",
-        thread_id=None,
-        resolved_thread_id=None,
-        session_id="session-alice",
-    )
-    with (
-        detached_tool_scope(identity),
-        pytest.raises(
-            ValueError,
-            match="private agents are only supported in explicit Matrix ad hoc teams with requester identity",
+    config.teams = {
+        "finance_team": MockTeamConfig(agents=["calculator", "data_analyst", "finance"]),
+        "science_team": MockTeamConfig(agents=["calculator", "researcher"]),
+        "science_team_again": MockTeamConfig(agents=["researcher", "calculator"]),
+        "other_team": MockTeamConfig(agents=["general", "assistant"]),
+    }
+    runtime_paths = runtime_paths_for(config)
+
+    def scope_ids(agent_name: str) -> list[str]:
+        scopes = team_scopes(agent_name, config, runtime_paths)
+        assert all(scope.root == tmp_path / "team_memory" / scope.user_id for scope in scopes)
+        return [scope.user_id for scope in scopes]
+
+    assert scope_ids("calculator") == ["team_calculator+data_analyst+finance", "team_calculator+researcher"]
+    assert scope_ids("researcher") == ["team_calculator+researcher"]
+    assert scope_ids("general") == ["team_assistant+general"]
+    assert scope_ids("unknown") == []
+
+
+@pytest.mark.parametrize(
+    ("agents", "members", "rejection"),
+    [
+        pytest.param(
+            {
+                "general": AgentConfig(display_name="General", private=AgentPrivateConfig(per="user", root="mind")),
+                "calculator": AgentConfig(display_name="Calculator"),
+            },
+            ["general", "calculator"],
+            "includes private agent 'general'; private agents are only supported in explicit Matrix ad hoc teams "
+            "with requester identity",
+            id="private-member",
         ),
-    ):
-        storage_paths_for_scope_user_id("team_calculator+general", tmp_path, config, runtime_paths_for(config))
-    with detached_tool_scope(identity):
-        assert storage_paths_for_scope_user_id("agent_calculator", tmp_path, config, runtime_paths_for(config)) == [
-            agent_state_root_path(tmp_path, "calculator"),
-        ]
-
-
-def test_effective_storage_paths_for_team_rejects_transitive_private_delegate_target(
-    tmp_path: Path,
+        pytest.param(
+            {
+                "calculator": AgentConfig(display_name="Calculator", delegate_to=["mind"]),
+                "general": AgentConfig(display_name="General"),
+                "mind": AgentConfig(display_name="Mind", private=AgentPrivateConfig(per="user", root="mind")),
+            },
+            ["calculator", "general"],
+            "includes agent 'calculator' which reaches private agent 'mind' via delegation; private delegation is "
+            "not supported for teams",
+            id="private-delegate",
+        ),
+        pytest.param(
+            {"calculator": AgentConfig(display_name="Calculator")},
+            ["calculator", "ghost"],
+            "references unknown agent 'ghost'",
+            id="unknown-member",
+        ),
+    ],
+)
+def test_team_memory_rejects_the_members_team_validation_rejects(
     config: Config,
+    agents: dict[str, AgentConfig],
+    members: list[str],
+    rejection: str,
 ) -> None:
-    """Team memory contexts should reject shared members that reach private agents via delegation."""
-    config.agents = {
-        "leader": AgentConfig(display_name="Leader", delegate_to=["mind"]),
-        "helper": AgentConfig(display_name="Helper"),
-        "mind": AgentConfig(display_name="Mind", private=AgentPrivateConfig(per="user", root="mind_data")),
-    }
-    identity = ToolExecutionIdentity(
-        channel="matrix",
-        agent_name="leader",
-        requester_id="@alice:example.org",
-        room_id="!room:example.org",
-        thread_id=None,
-        resolved_thread_id=None,
-        session_id="session-alice",
-    )
-    with (
-        detached_tool_scope(identity),
-        pytest.raises(
-            ValueError,
-            match="reaches private agent 'mind' via delegation; private delegation is not supported for teams",
-        ),
-    ):
-        effective_storage_paths_for_context(["leader", "helper"], tmp_path, config, runtime_paths_for(config))
+    """A team with a private, privately delegating, or unknown member has no memory scope or backend."""
+    config.agents = agents
+    config.teams = {"mixed_team": MockTeamConfig(agents=members)}
+
+    with pytest.raises(ValueError, match=re.escape(f"Team 'mixed_team' {rejection}")):
+        team_scopes("calculator", config, runtime_paths_for(config))
+    with pytest.raises(ValueError, match=re.escape(f"Team request {rejection}")):
+        caller_memory_backend(config, members)
 
 
-def test_get_team_ids_for_agent_rejects_private_team_members(config: Config) -> None:
-    """Configured private teams should be rejected if they reach memory policy helpers."""
-    config.agents = {
-        "general": AgentConfig(display_name="General", private=AgentPrivateConfig(per="user", root="mind_data")),
-        "calculator": AgentConfig(display_name="Calculator"),
-    }
-    config.teams = {"mixed_team": MockTeamConfig(agents=["general", "calculator"])}
+@pytest.mark.parametrize(
+    ("general_backend", "calculator_backend", "team_backend"),
+    [
+        ("file", "file", "file"),
+        ("none", "none", "none"),
+        ("mem0", "mem0", "mem0"),
+        ("file", "none", "mem0"),
+        ("file", "mem0", "mem0"),
+        ("none", "mem0", "mem0"),
+    ],
+)
+def test_caller_memory_backend_of_a_team_is_file_or_none_only_when_every_member_agrees(
+    config: Config,
+    general_backend: MemoryBackend,
+    calculator_backend: MemoryBackend,
+    team_backend: MemoryBackend,
+) -> None:
+    """A team uses file memory when all members do, none when all do, and Mem0 otherwise; agents use their own."""
+    config.memory.backend = "mem0"
+    config.agents["general"].memory_backend = general_backend
+    config.agents["calculator"].memory_backend = calculator_backend
 
-    with pytest.raises(
-        ValueError,
-        match="private agents are only supported in explicit Matrix ad hoc teams with requester identity",
-    ):
-        get_team_ids_for_agent("general", config)
+    assert caller_memory_backend(config, "general") == general_backend
+    assert caller_memory_backend(config, "calculator") == calculator_backend
+    assert caller_memory_backend(config, ["general", "calculator"]) == team_backend
+
+
+def test_caller_memory_backend_of_an_agent_without_its_own_backend_is_the_global_one(config: Config) -> None:
+    """An agent that sets no memory backend uses the global one, alone or in a team."""
+    config.memory.backend = "file"
+    config.agents["general"].memory_backend = "none"
+
+    assert caller_memory_backend(config, "calculator") == "file"
+    assert caller_memory_backend(config, ["general", "calculator"]) == "mem0"
