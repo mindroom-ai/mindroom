@@ -206,6 +206,7 @@ __all__ = [
     "DockerWorkerBackend",
     "check_docker_workers_absent_for_storage_upgrade",
     "configure_docker_worker_backend",
+    "container_config_labels",
     "ensure_docker_dependencies",
     "list_docker_worker_containers",
 ]
@@ -226,6 +227,26 @@ def _protected_runtime_env_names(runtime_paths: RuntimePaths) -> frozenset[str]:
 def _runtime_namespace_for_workers_root(workers_root: Path) -> str:
     resolved_workers_root = workers_root.expanduser().resolve()
     return hashlib.sha256(str(resolved_workers_root).encode("utf-8")).hexdigest()[:12]
+
+
+def _runtime_namespace_filters(workers_root: Path) -> dict[str, list[str]]:
+    """Return the ``containers.list`` filters that select every container in one runtime's namespace."""
+    return {"label": [f"{LABEL_RUNTIME_NAMESPACE}={_runtime_namespace_for_workers_root(workers_root)}"]}
+
+
+def container_config_labels(container: _DockerContainer) -> dict[str, str]:
+    """Return the string labels recorded on one container."""
+    config = container.attrs.get("Config")
+    if not isinstance(config, dict):
+        return {}
+    labels = cast("dict[str, object]", config).get("Labels")
+    if not isinstance(labels, dict):
+        return {}
+    return {
+        name: value
+        for name, value in cast("dict[str, object]", labels).items()
+        if isinstance(name, str) and isinstance(value, str)
+    }
 
 
 def _container_name_prefix(prefix: str) -> str:
@@ -347,7 +368,6 @@ def check_docker_workers_absent_for_storage_upgrade(
         return value
 
     workers_root = docker_workers_root(runtime_paths.storage_root.expanduser().resolve())
-    runtime_namespace = _runtime_namespace_for_workers_root(workers_root)
     client, _docker_errors = _load_docker_client_and_errors(
         runtime_paths=runtime_paths,
         timeout_seconds=remaining(),
@@ -358,7 +378,7 @@ def check_docker_workers_absent_for_storage_upgrade(
         containers = client.containers.list(
             all=True,
             sparse=True,
-            filters={"label": [f"{LABEL_RUNTIME_NAMESPACE}={runtime_namespace}"]},
+            filters=_runtime_namespace_filters(workers_root),
         )
     except Exception as exc:
         msg = f"Failed to verify Docker worker absence: {exc}"
@@ -378,7 +398,7 @@ def list_docker_worker_containers(runtime_paths: RuntimePaths) -> Sequence[_Dock
     client, _docker_errors = _load_docker_client_and_errors(runtime_paths=runtime_paths)
     return client.containers.list(
         all=True,
-        filters={"label": [f"{LABEL_RUNTIME_NAMESPACE}={_runtime_namespace_for_workers_root(workers_root)}"]},
+        filters=_runtime_namespace_filters(workers_root),
     )
 
 
@@ -831,7 +851,7 @@ class DockerWorkerBackend:
         answers to the same name is foreign and must never be started, stopped,
         removed or reused as this worker.
         """
-        labels = self._container_config_labels(container)
+        labels = container_config_labels(container)
         return (
             labels.get(LABEL_RUNTIME_NAMESPACE) == self._runtime_namespace
             and labels.get(LABEL_WORKER_ID) == container_name
@@ -899,7 +919,7 @@ class DockerWorkerBackend:
         current = (
             mounts is not None
             and render_image_id is not None
-            and self._container_config_labels(container).get(LABEL_LAUNCH_CONFIG_HASH)
+            and container_config_labels(container).get(LABEL_LAUNCH_CONFIG_HASH)
             == self._render_launch(
                 spec.worker_key,
                 image_id=render_image_id,
@@ -1286,20 +1306,6 @@ class DockerWorkerBackend:
             duplicate_label="Docker mount",
         )
         return mount_specs
-
-    def _container_config_labels(self, container: _DockerContainer) -> dict[str, str]:
-        """Return the string labels recorded on one container."""
-        config = container.attrs.get("Config")
-        if not isinstance(config, dict):
-            return {}
-        labels = cast("dict[str, object]", config).get("Labels")
-        if not isinstance(labels, dict):
-            return {}
-        return {
-            name: value
-            for name, value in cast("dict[str, object]", labels).items()
-            if isinstance(name, str) and isinstance(value, str)
-        }
 
     def _container_image_id(self, container: _DockerContainer) -> str | None:
         image_id = container.attrs.get("Image")

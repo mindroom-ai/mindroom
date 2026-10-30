@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 import time
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING
 
 from mindroom.logging_config import get_logger
 from mindroom.workers.backend import WorkerBackendError
@@ -69,8 +69,7 @@ def _remove_docker_workers_mounting_state_roots(runtime_paths: RuntimePaths) -> 
     removed: list[str] = []
     failed: list[str] = []
     for container in docker.list_docker_worker_containers(runtime_paths):
-        labels = cast("dict[str, dict[str, str] | None]", container.attrs.get("Config") or {}).get("Labels") or {}
-        if labels.get(LABEL_STORAGE_LAYOUT) == LABEL_STORAGE_LAYOUT_VALUE:
+        if docker.container_config_labels(container).get(LABEL_STORAGE_LAYOUT) == LABEL_STORAGE_LAYOUT_VALUE:
             continue
         try:
             container.remove(force=True)
