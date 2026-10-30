@@ -68,8 +68,8 @@ from mindroom.workers.backends.docker import (
     ensure_docker_dependencies,
 )
 from mindroom.workers.backends.docker_config import (
+    DockerWorkerBackendConfig,
     _default_docker_user_for_os,
-    _DockerWorkerBackendConfig,
     _read_docker_user,
 )
 from mindroom.workers.backends.docker_projection import (
@@ -736,7 +736,7 @@ def _backend(
     host_config_path: Path | None = None,
     name_prefix: str = "mindroom-worker",
 ) -> tuple[DockerWorkerBackend, _FakeDockerClient, list[tuple[str, frozenset[str]]]]:
-    config = _DockerWorkerBackendConfig(
+    config = DockerWorkerBackendConfig(
         image="ghcr.io/mindroom-ai/mindroom:latest",
         worker_port=8766,
         storage_mount_path="/app/worker",
@@ -1191,7 +1191,7 @@ def test_docker_worker_host_config_path_resolves_relative_to_runtime_config_dir(
         },
     )
 
-    config = _DockerWorkerBackendConfig.from_runtime(runtime_paths)
+    config = DockerWorkerBackendConfig.from_runtime(runtime_paths)
 
     assert config.host_config_path == host_config_path.resolve()
 
@@ -1213,7 +1213,7 @@ def test_docker_worker_host_config_path_rejects_directories(tmp_path: Path) -> N
     )
 
     with pytest.raises(WorkerBackendError, match="points to a directory"):
-        _DockerWorkerBackendConfig.from_runtime(runtime_paths)
+        DockerWorkerBackendConfig.from_runtime(runtime_paths)
 
 
 def test_runtime_paths_with_storage_root_updates_primary_path_env(tmp_path: Path) -> None:
@@ -1309,7 +1309,7 @@ def test_docker_backend_host_config_path_reanchors_projection_and_runtime_env(
             "MINDROOM_DOCKER_WORKER_HOST_CONFIG_PATH": str(host_config_path),
         },
     )
-    config = _DockerWorkerBackendConfig.from_runtime(runtime_paths)
+    config = DockerWorkerBackendConfig.from_runtime(runtime_paths)
     fake_client = _FakeDockerClient()
     fake_client.images.by_name[config.image] = _FakeImage("sha256:image-v1")
     monkeypatch.setattr(
@@ -1368,7 +1368,7 @@ def test_docker_backend_config_signature_supports_nested_relative_host_config_pa
         },
     )
 
-    assert _DockerWorkerBackendConfig.from_runtime(runtime_paths).host_config_path == host_config_path.resolve()
+    assert DockerWorkerBackendConfig.from_runtime(runtime_paths).host_config_path == host_config_path.resolve()
     signature = configure_docker_worker_backend(
         runtime_paths,
         auth_token=_TEST_AUTH_TOKEN,
@@ -1426,7 +1426,7 @@ def test_docker_worker_config_rejects_wildcard_endpoint_host_from_publish_host(t
     )
 
     with pytest.raises(WorkerBackendError, match=r"endpoint_host cannot be 0\.0\.0\.0"):
-        _DockerWorkerBackendConfig.from_runtime(runtime_paths)
+        DockerWorkerBackendConfig.from_runtime(runtime_paths)
 
 
 def test_docker_worker_config_allows_explicit_endpoint_host_with_wildcard_publish_host(tmp_path: Path) -> None:
@@ -1445,7 +1445,7 @@ def test_docker_worker_config_allows_explicit_endpoint_host_with_wildcard_publis
         },
     )
 
-    config = _DockerWorkerBackendConfig.from_runtime(runtime_paths)
+    config = DockerWorkerBackendConfig.from_runtime(runtime_paths)
 
     assert config.publish_host == "0.0.0.0"  # noqa: S104 - wildcard bind is the scenario under test
     assert config.endpoint_host == "127.0.0.1"
@@ -1467,7 +1467,7 @@ def test_docker_worker_backend_rejects_reserved_extra_labels(
 ) -> None:
     """Reserved Docker labels must fail fast instead of overriding backend-owned metadata."""
     with pytest.raises(WorkerBackendError, match="extra labels cannot override reserved labels"):
-        _DockerWorkerBackendConfig(
+        DockerWorkerBackendConfig(
             image="ghcr.io/mindroom-ai/mindroom:latest",
             worker_port=8766,
             storage_mount_path="/app/worker",
@@ -1511,7 +1511,7 @@ def test_docker_worker_config_rejects_reserved_extra_labels_from_env(
     )
 
     with pytest.raises(WorkerBackendError, match="extra labels cannot override reserved labels"):
-        _DockerWorkerBackendConfig.from_runtime(runtime_paths)
+        DockerWorkerBackendConfig.from_runtime(runtime_paths)
 
 
 def test_docker_worker_config_rejects_malformed_json_mapping_env(tmp_path: Path) -> None:
@@ -1529,7 +1529,7 @@ def test_docker_worker_config_rejects_malformed_json_mapping_env(tmp_path: Path)
     )
 
     with pytest.raises(WorkerBackendError, match="MINDROOM_DOCKER_WORKER_ENV_JSON must contain a JSON object"):
-        _DockerWorkerBackendConfig.from_runtime(runtime_paths)
+        DockerWorkerBackendConfig.from_runtime(runtime_paths)
 
 
 @pytest.mark.parametrize(
@@ -1547,7 +1547,7 @@ def test_docker_worker_backend_rejects_overlapping_config_mount_targets(
 ) -> None:
     """Projected config mounts must stay disjoint from the writable worker state root."""
     with pytest.raises(WorkerBackendError, match="config_path must mount outside the worker storage root"):
-        _DockerWorkerBackendConfig(
+        DockerWorkerBackendConfig(
             image="ghcr.io/mindroom-ai/mindroom:latest",
             worker_port=8766,
             storage_mount_path=storage_mount_path,
@@ -1593,7 +1593,7 @@ def test_docker_worker_config_rejects_overlapping_config_mount_targets_from_env(
     )
 
     with pytest.raises(WorkerBackendError, match="config_path must mount outside the worker storage root"):
-        _DockerWorkerBackendConfig.from_runtime(runtime_paths)
+        DockerWorkerBackendConfig.from_runtime(runtime_paths)
 
 
 def _projection_signature_for_hash_seed(hash_seed: str, workspace_root: Path) -> dict[str, object]:
@@ -1612,14 +1612,14 @@ def _projection_signature_for_hash_seed(hash_seed: str, workspace_root: Path) ->
 
         from mindroom.config.main import load_config
         from mindroom.constants import resolve_runtime_paths
-        from mindroom.workers.backends.docker_config import _DockerWorkerBackendConfig
+        from mindroom.workers.backends.docker_config import DockerWorkerBackendConfig
         from mindroom.workers.backends.docker_projection import DockerProjectionManager
         from mindroom.workers.backends.local import local_worker_state_paths_for_root
         from mindroom.workers.runtime import build_worker_launch_config
 
         tmp_path = Path(__WORKSPACE_ROOT__)
         runtime_paths = resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path)
-        config = _DockerWorkerBackendConfig(
+        config = DockerWorkerBackendConfig(
             image="ghcr.io/mindroom-ai/mindroom:latest",
             worker_port=8766,
             storage_mount_path="/app/worker",
@@ -1883,7 +1883,7 @@ def test_docker_worker_runtime_reads_from_env(
         },
     )
 
-    assert _DockerWorkerBackendConfig.from_runtime(runtime_paths).runtime == expected_runtime
+    assert DockerWorkerBackendConfig.from_runtime(runtime_paths).runtime == expected_runtime
 
 
 def test_docker_workers_reach_the_docker_host_by_name(
@@ -2878,7 +2878,7 @@ def test_docker_backend_preserves_container_config_path_without_host_projection(
         encoding="utf-8",
     )
     runtime_paths = resolve_primary_runtime_paths(config_path=config_path, storage_path=tmp_path / "storage")
-    config = _DockerWorkerBackendConfig(
+    config = DockerWorkerBackendConfig(
         image="ghcr.io/mindroom-ai/mindroom:latest",
         worker_port=8766,
         storage_mount_path="/app/worker",
@@ -3219,29 +3219,20 @@ def test_read_docker_user_defaults_to_current_posix_uid_gid(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Unset Docker worker user should follow the current POSIX runtime user."""
-    monkeypatch.delenv("MINDROOM_DOCKER_WORKER_USER", raising=False)
     monkeypatch.setattr("mindroom.workers.backends.docker_config.os.getuid", lambda: 501)
     monkeypatch.setattr("mindroom.workers.backends.docker_config.os.getgid", lambda: 20)
 
     assert _default_docker_user_for_os("posix") == "501:20"
 
 
-def test_read_docker_user_defaults_to_image_user_on_windows(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+def test_read_docker_user_defaults_to_image_user_on_windows() -> None:
     """Windows should leave the container user unset and use the image default."""
-    monkeypatch.delenv("MINDROOM_DOCKER_WORKER_USER", raising=False)
-
     assert _default_docker_user_for_os("nt") is None
 
 
-def test_read_docker_user_env_override_wins(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+def test_read_docker_user_env_override_wins() -> None:
     """Explicit Docker worker user config should override platform defaults."""
-    monkeypatch.setenv("MINDROOM_DOCKER_WORKER_USER", "2001:3001")
-
-    assert _read_docker_user() == "2001:3001"
+    assert _read_docker_user({"MINDROOM_DOCKER_WORKER_USER": "2001:3001"}) == "2001:3001"
 
 
 def test_docker_backend_cleanup_stops_idle_workers(
@@ -4119,7 +4110,7 @@ def test_docker_worker_config_rejects_reserved_extra_env_names_from_env(tmp_path
         WorkerBackendError,
         match="MINDROOM_SANDBOX_PROXY_TOKEN, MINDROOM_STORAGE_PATH",
     ):
-        _DockerWorkerBackendConfig.from_runtime(runtime_paths)
+        DockerWorkerBackendConfig.from_runtime(runtime_paths)
 
 
 def test_docker_backend_rejects_extra_env_overriding_secret_path_handoff(
@@ -4187,7 +4178,7 @@ router:
         encoding="utf-8",
     )
     runtime_paths = resolve_runtime_paths(config_path=config_path, storage_path=tmp_path)
-    config = _DockerWorkerBackendConfig(
+    config = DockerWorkerBackendConfig(
         image="ghcr.io/mindroom-ai/mindroom:latest",
         worker_port=8766,
         storage_mount_path="/app/worker",
@@ -4483,7 +4474,7 @@ def test_docker_backend_uses_distinct_container_names_for_different_storage_root
     tmp_path: Path,
 ) -> None:
     """Separate runtimes should not share Docker worker identities."""
-    config = _DockerWorkerBackendConfig(
+    config = DockerWorkerBackendConfig(
         image="ghcr.io/mindroom-ai/mindroom:latest",
         worker_port=8766,
         storage_mount_path="/app/worker",
@@ -5676,7 +5667,7 @@ router:
     )
     runtime_paths = resolve_runtime_paths(config_path=host_config_path, storage_path=tmp_path)
     paths = local_worker_state_paths_for_root(tmp_path / "workers" / "projection-test")
-    base_config = _DockerWorkerBackendConfig(
+    base_config = DockerWorkerBackendConfig(
         image="ghcr.io/mindroom-ai/mindroom:latest",
         worker_port=8766,
         storage_mount_path="/app/worker",
@@ -5737,7 +5728,7 @@ router:
     )
     runtime_paths = resolve_runtime_paths(config_path=host_config_path, storage_path=tmp_path)
     paths = local_worker_state_paths_for_root(tmp_path / "workers" / "projection-test")
-    config = _DockerWorkerBackendConfig(
+    config = DockerWorkerBackendConfig(
         image="ghcr.io/mindroom-ai/mindroom:latest",
         worker_port=8766,
         storage_mount_path="/app/worker",
@@ -5796,7 +5787,7 @@ router:
     )
     runtime_paths = resolve_runtime_paths(config_path=host_config_path, storage_path=tmp_path)
     paths = local_worker_state_paths_for_root(tmp_path / "workers" / "projection-test")
-    config = _DockerWorkerBackendConfig(
+    config = DockerWorkerBackendConfig(
         image="ghcr.io/mindroom-ai/mindroom:latest",
         worker_port=8766,
         storage_mount_path="/app/worker",
@@ -5925,7 +5916,7 @@ def test_docker_backend_reuses_container_after_first_run_pulls_missing_image(
     tmp_path: Path,
 ) -> None:
     """The first run pulls a missing image, and the next ensure reuses the container it started."""
-    config = _DockerWorkerBackendConfig(
+    config = DockerWorkerBackendConfig(
         image="ghcr.io/mindroom-ai/mindroom:latest",
         worker_port=8766,
         storage_mount_path="/app/worker",
@@ -6180,7 +6171,7 @@ def test_docker_computer_requires_explicit_security_policy(
         env["MINDROOM_DOCKER_WORKER_SECURITY_POLICY"] = policy
     paths = resolve_primary_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path, process_env=env)
     with pytest.raises(WorkerBackendError, match="MINDROOM_DOCKER_WORKER_SECURITY_POLICY=computer"):
-        _DockerWorkerBackendConfig.from_runtime(paths)
+        DockerWorkerBackendConfig.from_runtime(paths)
 
 
 @pytest.mark.parametrize("direct", [False, True])
@@ -6205,7 +6196,7 @@ def test_docker_security_policy_rejects_unknown_choice(
             replace(backend.config, security_policy="unconfined")
     else:
         with pytest.raises(WorkerBackendError, match="MINDROOM_DOCKER_WORKER_SECURITY_POLICY"):
-            _DockerWorkerBackendConfig.from_runtime(paths)
+            DockerWorkerBackendConfig.from_runtime(paths)
 
 
 @pytest.mark.parametrize("worker_override", [False, True])
@@ -6267,7 +6258,7 @@ def test_docker_security_policy_resolution(
     if policy is not None:
         env["MINDROOM_DOCKER_WORKER_SECURITY_POLICY"] = policy
     paths = resolve_primary_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path, process_env=env)
-    assert _DockerWorkerBackendConfig.from_runtime(paths).security_policy == expected
+    assert DockerWorkerBackendConfig.from_runtime(paths).security_policy == expected
 
 
 @pytest.mark.parametrize("user", ["0", "0:0", "000:1000", "+0:0", "-0:0", "root", "root:users"])
@@ -6284,7 +6275,7 @@ def test_docker_computer_rejects_root_user(tmp_path: Path, user: str, *, worker_
         env["MINDROOM_DOCKER_WORKER_ENV_JSON"] = json.dumps({WORKER_COMPUTER_ENABLED_ENV: "true"})
     paths = resolve_primary_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path, process_env=env)
     with pytest.raises(WorkerBackendError, match="non-root"):
-        _DockerWorkerBackendConfig.from_runtime(paths)
+        DockerWorkerBackendConfig.from_runtime(paths)
 
 
 def test_docker_computer_rejects_inherited_root_user(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -6297,7 +6288,7 @@ def test_docker_computer_rejects_inherited_root_user(tmp_path: Path, monkeypatch
     }
     paths = resolve_primary_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path, process_env=env)
     with pytest.raises(WorkerBackendError, match="non-root"):
-        _DockerWorkerBackendConfig.from_runtime(paths)
+        DockerWorkerBackendConfig.from_runtime(paths)
 
 
 @pytest.mark.parametrize("user", ["0:0", "root"])
@@ -6351,7 +6342,7 @@ def test_docker_computer_identity_validation_preserves_supported_users(
             WORKER_COMPUTER_ENABLED_ENV: str(enabled).lower(),
         },
     )
-    assert _DockerWorkerBackendConfig.from_runtime(paths).user == (user or None)
+    assert DockerWorkerBackendConfig.from_runtime(paths).user == (user or None)
 
 
 def _shared_worker_key(agent_name: str) -> str:

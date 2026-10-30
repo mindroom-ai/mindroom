@@ -15,7 +15,7 @@ from mindroom.workers.backends._config_helpers import (
     read_int_env,
     read_json_mapping_env,
 )
-from mindroom.workers.backends.docker_config import _DockerWorkerBackendConfig
+from mindroom.workers.backends.docker_config import DockerWorkerBackendConfig
 from mindroom.workers.backends.kubernetes_config import KubernetesWorkerBackendConfig
 
 if TYPE_CHECKING:
@@ -126,7 +126,7 @@ def test_docker_config_rejects_malformed_labels_json(tmp_path: Path) -> None:
     )
 
     with pytest.raises(WorkerBackendError, match="MINDROOM_DOCKER_WORKER_LABELS_JSON must contain a JSON object"):
-        _DockerWorkerBackendConfig.from_runtime(runtime_paths)
+        DockerWorkerBackendConfig.from_runtime(runtime_paths)
 
 
 @pytest.mark.parametrize(
