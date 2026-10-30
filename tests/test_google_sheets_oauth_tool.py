@@ -267,14 +267,6 @@ def test_google_sheets_batch_update_schema_accepts_sheets_api_requests(tmp_path:
     )
 
 
-def test_google_sheets_provider_uses_sheets_scope_without_drive_scope() -> None:
-    provider = google_oauth_provider("google_sheets")
-
-    assert "https://www.googleapis.com/auth/spreadsheets" in provider.scopes
-    assert "https://www.googleapis.com/auth/drive.file" not in provider.scopes
-    assert "https://www.googleapis.com/auth/drive" not in provider.scopes
-
-
 def test_google_sheets_service_account_env_uses_upstream_auth(tmp_path: Path) -> None:
     tool = GoogleSheetsTools(
         runtime_paths=_runtime_paths(

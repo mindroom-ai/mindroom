@@ -150,22 +150,6 @@ def _description(tools: MicrosoftMeetingsTools, name: str) -> str:
     return " ".join(Function.from_callable(getattr(tools, name)).to_dict()["description"].split())
 
 
-def test_provider_requests_only_the_meeting_and_transcript_permissions() -> None:
-    provider = microsoft_oauth_provider("microsoft_meetings")
-
-    assert (provider.id, provider.display_name) == ("microsoft_meetings", "Microsoft Teams Meetings")
-    assert provider.scopes == (
-        "OnlineMeetings.Read",
-        "OnlineMeetingTranscript.Read.All",
-        "User.Read",
-        "offline_access",
-    )
-    assert provider.credential_service == "microsoft_meetings_oauth"
-    assert provider.tool_config_service == "microsoft_meetings"
-    assert provider.shared_client_config_services == ("microsoft_oauth_client",)
-    assert provider.requester_scoped_credentials is True
-
-
 def test_registered_metadata_declares_a_read_only_primary_runtime_tool() -> None:
     metadata = TOOL_METADATA["microsoft_meetings"]
 

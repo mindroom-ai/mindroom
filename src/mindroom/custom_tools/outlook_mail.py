@@ -342,7 +342,7 @@ class OutlookMailTools(Toolkit):
         if credentials_manager is None:
             msg = "OutlookMailTools requires an explicit credentials_manager"
             raise RuntimeError(msg)
-        self._provider = microsoft_oauth_provider("outlook_mail")
+        self._provider = microsoft_oauth_provider(_TOOL_NAME)
         self._runtime_paths = runtime_paths
         self._credentials_manager = credentials_manager
         self._worker_target = worker_target

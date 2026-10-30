@@ -12,7 +12,7 @@ from typing import TYPE_CHECKING, Any, Literal, get_args
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
-from mindroom.oauth.google import google_oauth_providers
+from mindroom.oauth.google import google_oauth_providers, with_google_account_picker
 from mindroom.tool_system.catalog import TOOL_METADATA
 from mindroom.tool_system.registration import register_tool_with_metadata
 from mindroom.tool_system.toolkit_aliases import apply_toolkit_function_aliases
@@ -71,7 +71,7 @@ def google_workspace_oauth_providers(workspace: GoogleWorkspaceConfig) -> tuple[
         base = _PROVIDERS[service]
         providers.append(
             replace(
-                base,
+                with_google_account_picker(base),
                 id=f"{workspace.name}_{base.id}",
                 display_name=f"{workspace.display_name} {base.display_name}",
                 credential_service=f"{workspace.name}_{base.credential_service}",
@@ -82,7 +82,6 @@ def google_workspace_oauth_providers(workspace: GoogleWorkspaceConfig) -> tuple[
                 allowed_email_domains_env=None,
                 allowed_hosted_domains_env=None,
                 allowed_hosted_domains=workspace.allowed_hosted_domains,
-                extra_auth_params={**base.extra_auth_params, "prompt": "consent select_account"},
             ),
         )
     return tuple(providers)

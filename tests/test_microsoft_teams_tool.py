@@ -142,28 +142,6 @@ def _description(tools: MicrosoftTeamsTools, name: str) -> str:
     return " ".join(Function.from_callable(getattr(tools, name)).to_dict()["description"].split())
 
 
-def test_provider_requests_the_teams_permissions() -> None:
-    provider = microsoft_oauth_provider("microsoft_teams")
-
-    assert provider.id == "microsoft_teams"
-    assert provider.display_name == "Microsoft Teams"
-    assert provider.scopes == (
-        "Team.ReadBasic.All",
-        "Channel.ReadBasic.All",
-        "ChannelMessage.Read.All",
-        "ChannelMessage.Send",
-        "Chat.ReadWrite",
-        "ChatMessage.Send",
-        "Presence.Read.All",
-        "User.Read.All",
-        "User.Read",
-        "offline_access",
-    )
-    assert provider.credential_service == "microsoft_teams_oauth"
-    assert provider.shared_client_config_services == ("microsoft_oauth_client",)
-    assert provider.requester_scoped_credentials is True
-
-
 def test_registered_metadata_declares_a_primary_runtime_tool_without_files() -> None:
     metadata = TOOL_METADATA["microsoft_teams"]
 

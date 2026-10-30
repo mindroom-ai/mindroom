@@ -343,3 +343,16 @@ def test_wrong_workspace_identity_is_rejected(tmp_path: Path, bad_domain: str | 
             OAuthTokenResult(token_data={}, claims={"hd": bad_domain}, claims_verified=True),
             paths,
         )
+
+
+def test_workspace_providers_ask_google_for_the_account_picker() -> None:
+    """A workspace connection opens Google's account picker, so it can connect an account other than the signed-in one."""
+    config = GoogleWorkspaceConfig(
+        name="secondary",
+        display_name="Secondary",
+        client_config_service="secondary_oauth_client",
+        allowed_hosted_domains=("secondary.example",),
+        services=("gmail",),
+    )
+
+    assert google_workspace_oauth_providers(config)[0].extra_auth_params["prompt"] == "consent select_account"

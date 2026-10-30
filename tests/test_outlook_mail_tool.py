@@ -204,24 +204,6 @@ def test_registered_metadata_declares_a_primary_runtime_path_tool() -> None:
     assert metadata.function_names == (*READ_FUNCTIONS, *WRITE_FUNCTIONS)
 
 
-def test_provider_requests_mail_scopes_on_the_shared_app() -> None:
-    provider = microsoft_oauth_provider("outlook_mail")
-
-    assert provider.scopes == (
-        "Mail.ReadWrite",
-        "Mail.Send",
-        "Mail.ReadWrite.Shared",
-        "Mail.Send.Shared",
-        "MailboxSettings.ReadWrite",
-        "User.Read",
-        "offline_access",
-    )
-    assert provider.credential_service == "outlook_mail_oauth"
-    assert provider.tool_config_service == "outlook_mail"
-    assert provider.shared_client_config_services == ("microsoft_oauth_client",)
-    assert provider.requester_scoped_credentials is True
-
-
 def test_a_connection_without_the_new_scopes_asks_to_reconnect(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

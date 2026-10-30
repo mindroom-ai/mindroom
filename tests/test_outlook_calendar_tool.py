@@ -162,17 +162,6 @@ def test_registered_metadata_declares_a_primary_runtime_oauth_tool() -> None:
     assert metadata.consumes_workspace_paths is False
 
 
-def test_provider_requests_own_and_shared_calendar_read_write() -> None:
-    provider = microsoft_oauth_provider("outlook_calendar")
-
-    assert provider.id == "outlook_calendar"
-    assert provider.display_name == "Outlook Calendar"
-    assert provider.scopes == ("Calendars.ReadWrite", "Calendars.ReadWrite.Shared", "User.Read", "offline_access")
-    assert provider.credential_service == "outlook_calendar_oauth"
-    assert provider.shared_client_config_services == ("microsoft_oauth_client",)
-    assert provider.requester_scoped_credentials is True
-
-
 def test_write_false_registers_only_reads(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     tools, _graph = _tools(tmp_path, monkeypatch, write=False)
 

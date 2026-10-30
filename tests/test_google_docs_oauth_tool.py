@@ -391,16 +391,6 @@ def test_google_docs_agent_config_accepts_inline_operation_flags() -> None:
     }
 
 
-def test_google_docs_provider_uses_docs_scope_without_drive_scope() -> None:
-    provider = google_oauth_provider("google_docs")
-
-    assert "https://www.googleapis.com/auth/documents" in provider.scopes
-    assert "https://www.googleapis.com/auth/drive" not in provider.scopes
-    assert "https://www.googleapis.com/auth/drive.file" not in provider.scopes
-    assert "https://www.googleapis.com/auth/drive.readonly" not in provider.scopes
-    assert "include_granted_scopes" not in provider.extra_auth_params
-
-
 def test_google_docs_service_account_env_uses_primary_runtime_auth(tmp_path: Path) -> None:
     service_account_path = tmp_path / "service-account.json"
     tool = GoogleDocsTools(

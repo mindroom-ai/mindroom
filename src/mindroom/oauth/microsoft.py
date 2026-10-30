@@ -136,7 +136,7 @@ async def _microsoft_runtime_endpoints(provider: OAuthProvider, runtime_paths: R
     tenant = _microsoft_tenant(runtime_paths)
     return OAuthRuntimeEndpoints(
         authorization_url=_endpoint(tenant, "authorize"),
-        token_url=microsoft_token_url(runtime_paths),
+        token_url=_endpoint(tenant, "token"),
         token_endpoint_auth_method=provider.token_endpoint_auth_method,
     )
 

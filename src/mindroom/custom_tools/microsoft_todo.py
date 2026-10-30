@@ -171,7 +171,7 @@ class MicrosoftTodoTools(Toolkit):
         if credentials_manager is None:
             msg = "MicrosoftTodoTools requires an explicit credentials_manager"
             raise RuntimeError(msg)
-        self._provider = microsoft_oauth_provider("microsoft_todo")
+        self._provider = microsoft_oauth_provider(_TOOL_NAME)
         self._runtime_paths = runtime_paths
         self._credentials_manager = credentials_manager
         self._worker_target = worker_target

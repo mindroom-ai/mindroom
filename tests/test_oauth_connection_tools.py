@@ -340,7 +340,7 @@ async def test_reset_oauth_connection_denies_provider_not_backing_agent_tool(tmp
     tool, context, _worker_target = _tool_and_context(tmp_path, worker_scope="user_agent")
 
     with tool_runtime_context(context):
-        result = await tool.reset_oauth_connection(google_oauth_provider("google_calendar").id)
+        result = await tool.reset_oauth_connection("google_calendar")
 
     assert "is not available to this agent" in result
 
