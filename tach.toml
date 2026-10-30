@@ -5858,6 +5858,7 @@ depends_on = [
     "mindroom.background_tasks",
     "mindroom.logging_config",
     "mindroom.tool_system.agno_toolkits",
+    "mindroom.tool_system.tool_hooks",
 ]
 
 [[modules]]
@@ -7768,13 +7769,11 @@ path = "mindroom.mcp_gateway.toolkits"
 depends_on = [
     "mindroom.agents",
     "mindroom.credentials.manager",
-    "mindroom.logging_config",
     "mindroom.mcp.toolkit",
     "mindroom.mcp_gateway.execution",
     "mindroom.mcp_gateway.types",
     "mindroom.runtime_resolution",
     "mindroom.tool_system.agno_toolkits",
-    "mindroom.tool_system.tool_hooks",
     "mindroom.tool_system.toolkit_connections",
     "mindroom.tool_system.agent_tools",
     "mindroom.tool_system.sandbox_proxy",

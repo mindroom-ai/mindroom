@@ -99,33 +99,21 @@ def _runtime_paths(tmp_path: Path) -> RuntimePaths:
     )
 
 
-async def _cancel_cleanup_owner(
-    broker: ScriptToolBroker,
-    owner: asyncio.Task[None],
-) -> asyncio.Task[None]:
-    """Cancel one retained owner and return its explicit replacement."""
-    replacement_ready = asyncio.Event()
-    replacement: list[asyncio.Task[None]] = []
-
-    def capture_replacement(_completed: asyncio.Task[None]) -> None:
-        replacement.extend(task for task in broker._cleanup_tasks if task is not owner and not task.done())
-        replacement_ready.set()
-
-    owner.add_done_callback(capture_replacement)
-    owner.cancel()
+async def _cancel_a_drain(broker: ScriptToolBroker) -> None:
+    """Start a drain of the broker's retained cleanup and cancel it while it waits, as a cancelled shutdown does."""
+    drain = asyncio.create_task(drain_script_tool_cleanup(broker, timeout_seconds=SETTLE_TIMEOUT_SECONDS))
+    await asyncio.sleep(0)
+    drain.cancel()
     with pytest.raises(asyncio.CancelledError):
-        await owner
-    await asyncio.wait_for(replacement_ready.wait(), timeout=SETTLE_TIMEOUT_SECONDS)
-    assert len(replacement) == 1
-    return replacement[0]
+        await drain
 
 
 async def _assert_cleanup_forgotten(broker: ScriptToolBroker) -> None:
-    """Assert the broker keeps no cleanup owner once every owner has finished."""
-    # A finished owner leaves the set from its done callback one loop pass later, and a drain that finds every
-    # owner already done returns without yielding.
+    """Assert the broker keeps no cleanup once every retained task has finished."""
+    # A finished task leaves the set from its done callback one loop pass later, and a drain that finds every
+    # task already done returns without yielding.
     await asyncio.sleep(0)
-    assert broker._cleanup_tasks == set()
+    assert broker._cleanups.tasks == set()
 
 
 def _hook_registry(events: list[str], *, decline: str | None = None) -> HookRegistry:
@@ -832,7 +820,7 @@ async def test_cancel_run_settles_pending_exact_approval(tmp_path: Path) -> None
 
     receipt = broker.get_call(request.run_id, request.call_id)
     assert receipt.state is ScriptCallState.INDETERMINATE
-    assert broker._cleanup_tasks == set()
+    assert broker._cleanups.tasks == set()
     [(run_id, reason)] = resolver.settled_runs
     assert run_id == request.run_id
     assert reason == "Background script ownership was cancelled."
@@ -1274,7 +1262,7 @@ async def test_cancelled_sync_connect_closes_only_after_connect_returns(
 
     assert body_called is False
     assert close_started.is_set() is False
-    cleanup_retained = bool(broker._cleanup_tasks)
+    cleanup_retained = bool(broker._cleanups.tasks)
     release_connect.set()
     close_after_connect = await asyncio.to_thread(close_started.wait, SETTLE_TIMEOUT_SECONDS)
     cleanup_drained = await drain_script_tool_cleanup(broker, timeout_seconds=SETTLE_TIMEOUT_SECONDS)
@@ -1615,11 +1603,11 @@ async def test_failed_call_keeps_its_toolkit_until_a_sibling_body_returns(
 
 
 @pytest.mark.asyncio
-async def test_cancelled_sync_close_keeps_one_owner_through_repeated_cancellation(
+async def test_cancelled_sync_close_stays_retained_through_cancelled_drains(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Repeated owner cancellation cannot make a blocking sync close appear drained."""
+    """Cancelled and timed-out drains cannot make a blocking sync close appear drained, nor run it twice."""
     body_entered = threading.Event()
     release_body = threading.Event()
     close_started = threading.Event()
@@ -1656,18 +1644,18 @@ async def test_cancelled_sync_close_keeps_one_owner_through_repeated_cancellatio
     broker.store.request_cancel(request.run_id)
     await broker.cancel_run(request.run_id)
 
-    [body_owner] = broker._cleanup_tasks
-    first_close_owner = await _cancel_cleanup_owner(broker, body_owner)
+    [cleanup] = broker._cleanups.tasks
+    await _cancel_a_drain(broker)
     release_body.set()
     assert await asyncio.to_thread(close_started.wait, SETTLE_TIMEOUT_SECONDS)
 
     try:
-        second_close_owner = await _cancel_cleanup_owner(broker, first_close_owner)
-        owned_after_first_cancel = bool(broker._cleanup_tasks)
+        await _cancel_a_drain(broker)
+        owned_after_first_cancel = broker._cleanups.tasks == {cleanup}
         first_drain = await drain_script_tool_cleanup(broker, timeout_seconds=0)
 
-        await _cancel_cleanup_owner(broker, second_close_owner)
-        owned_after_second_cancel = bool(broker._cleanup_tasks)
+        await _cancel_a_drain(broker)
+        owned_after_second_cancel = broker._cleanups.tasks == {cleanup}
         second_drain = await drain_script_tool_cleanup(broker, timeout_seconds=0)
         close_finished_before_release = close_finished.is_set()
     finally:
@@ -1686,11 +1674,11 @@ async def test_cancelled_sync_close_keeps_one_owner_through_repeated_cancellatio
 
 
 @pytest.mark.asyncio
-async def test_cancelled_async_tool_close_keeps_one_owner_through_repeated_cancellation(
+async def test_cancelled_async_tool_close_stays_retained_through_cancelled_drains(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Async-body cancellation cannot leave a blocking synchronous close unowned."""
+    """Async-body cancellation, then cancelled drains, cannot leave a blocking synchronous close unowned."""
     body_entered = asyncio.Event()
     close_started = threading.Event()
     release_close = threading.Event()
@@ -1726,10 +1714,10 @@ async def test_cancelled_async_tool_close_keeps_one_owner_through_repeated_cance
     assert await asyncio.to_thread(close_started.wait, SETTLE_TIMEOUT_SECONDS)
     try:
         await asyncio.wait_for(cancellation, timeout=SETTLE_TIMEOUT_SECONDS)
-        [first_close_owner] = broker._cleanup_tasks
-        second_close_owner = await _cancel_cleanup_owner(broker, first_close_owner)
-        await _cancel_cleanup_owner(broker, second_close_owner)
-        cleanup_retained = bool(broker._cleanup_tasks)
+        [cleanup] = broker._cleanups.tasks
+        await _cancel_a_drain(broker)
+        await _cancel_a_drain(broker)
+        cleanup_retained = broker._cleanups.tasks == {cleanup}
         drained_before_release = await drain_script_tool_cleanup(broker, timeout_seconds=0)
         close_finished_before_release = close_finished.is_set()
     finally:
@@ -1777,7 +1765,7 @@ async def test_lifecycle_shutdown_bounds_and_preserves_cancelled_sync_cleanup(
     assert await asyncio.to_thread(body_entered.wait, SETTLE_TIMEOUT_SECONDS)
     broker.store.request_cancel(request.run_id)
     await broker.cancel_run(request.run_id)
-    [original_cleanup] = broker._cleanup_tasks
+    [original_cleanup] = broker._cleanups.tasks
 
     lifecycle = ScriptRuntimeLifecycle(
         runtime_paths=_runtime_paths(tmp_path),
@@ -1824,12 +1812,12 @@ async def test_lifecycle_shutdown_bounds_and_preserves_cancelled_sync_cleanup(
     shutdown = asyncio.create_task(lifecycle.shutdown(timeout_seconds=shutdown_budget_seconds))
     try:
         await asyncio.wait_for(drain_started.wait(), timeout=SETTLE_TIMEOUT_SECONDS)
-        await _cancel_cleanup_owner(broker, original_cleanup)
+        await _cancel_a_drain(broker)
         close_started_before_body_returned = close_started.is_set()
         # The body stays blocked until the finally below, so shutdown returns only if its drain is bounded, and this
         # bound sits below shutdown's default budget, so a shutdown that drops its explicit budget fails.
         await asyncio.wait_for(shutdown, timeout=_DEFAULT_SHUTDOWN_TIMEOUT_SECONDS / 2)
-        cleanup_owned_after_shutdown = bool(broker._cleanup_tasks)
+        cleanup_owned_after_shutdown = broker._cleanups.tasks == {original_cleanup}
     finally:
         release_body.set()
 

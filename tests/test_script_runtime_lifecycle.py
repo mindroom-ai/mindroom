@@ -66,6 +66,7 @@ from mindroom.script_runs.worker_client import (
     WorkerScriptCancel,
     WorkerScriptStatus,
 )
+from mindroom.tool_system.toolkit_connections import RetainedToolkitCleanups
 from mindroom.tool_system.worker_routing import (
     build_agent_toolkit_worker_target,
     build_tool_execution_identity,
@@ -439,9 +440,14 @@ def _worker(run: ScriptRunRecord) -> WorkerHandle:
     )
 
 
+def _mock_broker() -> MagicMock:
+    """A broker whose calls the test does not drive, with a real cleanup registry for shutdown to drain."""
+    return MagicMock(_cleanups=RetainedToolkitCleanups(failure_event="script_tool_cleanup_failed"))
+
+
 def _broker_lifecycle_stub() -> SimpleNamespace:
     return SimpleNamespace(
-        _cleanup_tasks=set(),
+        _cleanups=RetainedToolkitCleanups(failure_event="script_tool_cleanup_failed"),
         close_call_admission=MagicMock(),
         open_call_admission=MagicMock(),
     )
@@ -810,7 +816,7 @@ async def test_lifecycle_activates_after_both_agent_registry_and_api_are_ready(t
     runtime = ScriptRuntimeLifecycle(
         runtime_paths=runtime_paths,
         store=ScriptRunStore(runtime_paths),
-        broker=MagicMock(),
+        broker=_mock_broker(),
         manager=manager,
         resolver=SimpleNamespace(resolve=MagicMock(), is_authorized=MagicMock(return_value=True)),
         config_provider=_config,
@@ -1602,7 +1608,7 @@ async def test_removed_agent_revokes_and_cancels_running_scripts(tmp_path: Path)
     runtime = ScriptRuntimeLifecycle(
         runtime_paths=runtime_paths,
         store=store,
-        broker=MagicMock(),
+        broker=_mock_broker(),
         manager=manager,
         resolver=resolver,
         config_provider=lambda: old_config,
@@ -1649,7 +1655,7 @@ async def test_removing_script_tool_revokes_and_cancels_running_scripts(tmp_path
     runtime = ScriptRuntimeLifecycle(
         runtime_paths=runtime_paths,
         store=store,
-        broker=MagicMock(),
+        broker=_mock_broker(),
         manager=manager,
         resolver=SimpleNamespace(resolve=MagicMock(), is_authorized=MagicMock(return_value=True)),
         config_provider=lambda: old_config,
@@ -1687,7 +1693,7 @@ async def test_isolation_change_interrupts_running_script_without_replacing_serv
     )
     resolver = SimpleNamespace(resolve=MagicMock(return_value=context))
     old_config = _config()
-    broker = MagicMock()
+    broker = _mock_broker()
     runtime = ScriptRuntimeLifecycle(
         runtime_paths=runtime_paths,
         store=store,
@@ -1726,7 +1732,7 @@ async def test_ordinary_agent_restart_keeps_running_script_retryable(tmp_path: P
     runtime = ScriptRuntimeLifecycle(
         runtime_paths=runtime_paths,
         store=store,
-        broker=MagicMock(),
+        broker=_mock_broker(),
         manager=manager,
         resolver=SimpleNamespace(resolve=MagicMock(), is_authorized=MagicMock(return_value=True)),
         config_provider=lambda: old_config,
@@ -1773,7 +1779,7 @@ async def test_plugin_reload_interrupts_running_scripts_before_code_replacement(
     runtime = ScriptRuntimeLifecycle(
         runtime_paths=runtime_paths,
         store=store,
-        broker=MagicMock(),
+        broker=_mock_broker(),
         manager=manager,
         resolver=SimpleNamespace(resolve=MagicMock(), is_authorized=MagicMock(return_value=True)),
         config_provider=lambda: config,
@@ -1803,7 +1809,7 @@ async def test_plugin_reload_fails_closed_while_any_script_remains_unfinished(tm
     runtime = ScriptRuntimeLifecycle(
         runtime_paths=runtime_paths,
         store=store,
-        broker=MagicMock(),
+        broker=_mock_broker(),
         manager=SimpleNamespace(
             begin_startup_reconciliation=AsyncMock(),
             end_startup_reconciliation=AsyncMock(),
@@ -1845,7 +1851,7 @@ async def test_reload_releases_only_its_fence_while_startup_cleanup_remains_pend
     runtime = ScriptRuntimeLifecycle(
         runtime_paths=runtime_paths,
         store=ScriptRunStore(runtime_paths),
-        broker=MagicMock(),
+        broker=_mock_broker(),
         manager=manager,
         resolver=SimpleNamespace(resolve=MagicMock(), is_authorized=MagicMock(return_value=True)),
         config_provider=lambda: config,
@@ -1921,7 +1927,7 @@ async def test_maintenance_interrupts_run_after_live_authorization_loss(tmp_path
     runtime = ScriptRuntimeLifecycle(
         runtime_paths=runtime_paths,
         store=store,
-        broker=MagicMock(),
+        broker=_mock_broker(),
         manager=manager,
         resolver=resolver,
         config_provider=_config,
@@ -1960,7 +1966,7 @@ async def test_maintenance_interrupts_run_when_its_agent_was_removed(tmp_path: P
     runtime = ScriptRuntimeLifecycle(
         runtime_paths=runtime_paths,
         store=store,
-        broker=MagicMock(),
+        broker=_mock_broker(),
         manager=manager,
         resolver=resolver,
         config_provider=lambda: Config(agents={}, defaults={"tools": []}),
@@ -2065,7 +2071,7 @@ async def test_authorization_config_change_interrupts_unconfirmed_owner_before_c
     runtime = ScriptRuntimeLifecycle(
         runtime_paths=runtime_paths,
         store=store,
-        broker=MagicMock(),
+        broker=_mock_broker(),
         manager=manager,
         resolver=resolver,
         config_provider=lambda: current,
@@ -2158,7 +2164,7 @@ async def test_reload_aborts_before_every_run_has_durable_revocation(tmp_path: P
     runtime = ScriptRuntimeLifecycle(
         runtime_paths=runtime_paths,
         store=store,
-        broker=MagicMock(),
+        broker=_mock_broker(),
         manager=manager,
         resolver=SimpleNamespace(resolve=MagicMock(), is_authorized=MagicMock(return_value=True)),
         config_provider=lambda: old_config,
@@ -2285,7 +2291,7 @@ async def test_reload_fails_while_a_revoked_run_stays_unfinalized(tmp_path: Path
     runtime = ScriptRuntimeLifecycle(
         runtime_paths=runtime_paths,
         store=store,
-        broker=MagicMock(),
+        broker=_mock_broker(),
         manager=manager,
         resolver=SimpleNamespace(resolve=MagicMock(), is_authorized=MagicMock(return_value=True)),
         config_provider=lambda: config,
@@ -2519,7 +2525,7 @@ async def test_reconciliation_touches_live_worker_before_status_check(tmp_path: 
     runtime = ScriptRuntimeLifecycle(
         runtime_paths=runtime_paths,
         store=store,
-        broker=MagicMock(),
+        broker=_mock_broker(),
         manager=SimpleNamespace(reconcile_durable=reconcile_durable),
         resolver=SimpleNamespace(
             is_authorized=MagicMock(return_value=True),
@@ -2545,7 +2551,7 @@ async def test_failed_nested_preparation_keeps_the_earlier_reload_fence(
     store = ScriptRunStore(runtime_paths)
     manager = ScriptRunManager(
         store=store,
-        broker=MagicMock(),
+        broker=_mock_broker(),
         worker_client=MagicMock(),
         worker_backend=None,
         gateway_url="http://primary.test/api/script-gateway",
@@ -2554,7 +2560,7 @@ async def test_failed_nested_preparation_keeps_the_earlier_reload_fence(
     runtime = ScriptRuntimeLifecycle(
         runtime_paths=runtime_paths,
         store=store,
-        broker=MagicMock(),
+        broker=_mock_broker(),
         manager=manager,
         resolver=SimpleNamespace(resolve=MagicMock(), is_authorized=MagicMock(return_value=True)),
         config_provider=_config,
@@ -2594,7 +2600,7 @@ async def test_reconciliation_leaves_worker_transport_ambiguity_retryable_and_co
     runtime = ScriptRuntimeLifecycle(
         runtime_paths=runtime_paths,
         store=store,
-        broker=MagicMock(),
+        broker=_mock_broker(),
         manager=SimpleNamespace(reconcile_durable=reconcile_durable),
         resolver=SimpleNamespace(
             is_authorized=MagicMock(return_value=True),
@@ -2630,7 +2636,7 @@ async def test_backend_failure_isolated_from_later_run_reconciliation(tmp_path: 
     runtime = ScriptRuntimeLifecycle(
         runtime_paths=runtime_paths,
         store=store,
-        broker=MagicMock(),
+        broker=_mock_broker(),
         manager=SimpleNamespace(reconcile_durable=reconcile_durable),
         resolver=SimpleNamespace(resolve=MagicMock(), is_authorized=MagicMock(return_value=True)),
         config_provider=_config,
@@ -2661,7 +2667,7 @@ async def test_backend_provider_failure_does_not_abort_run_reconciliation(tmp_pa
     runtime = ScriptRuntimeLifecycle(
         runtime_paths=runtime_paths,
         store=store,
-        broker=MagicMock(),
+        broker=_mock_broker(),
         manager=SimpleNamespace(reconcile_durable=reconcile_durable),
         resolver=SimpleNamespace(resolve=MagicMock(), is_authorized=MagicMock(return_value=True)),
         config_provider=_config,
@@ -2690,7 +2696,7 @@ async def test_worker_touch_failure_does_not_abort_run_reconciliation(tmp_path: 
     runtime = ScriptRuntimeLifecycle(
         runtime_paths=runtime_paths,
         store=store,
-        broker=MagicMock(),
+        broker=_mock_broker(),
         manager=SimpleNamespace(reconcile_durable=reconcile_durable),
         resolver=SimpleNamespace(resolve=MagicMock(), is_authorized=MagicMock(return_value=True)),
         config_provider=_config,
@@ -2719,7 +2725,7 @@ async def test_reconciliation_pass_has_one_overall_deadline(tmp_path: Path) -> N
     runtime = ScriptRuntimeLifecycle(
         runtime_paths=runtime_paths,
         store=store,
-        broker=MagicMock(),
+        broker=_mock_broker(),
         manager=SimpleNamespace(reconcile_durable=reconcile_durable),
         resolver=SimpleNamespace(resolve=MagicMock(), is_authorized=MagicMock(return_value=True)),
         config_provider=_config,
@@ -2748,7 +2754,7 @@ async def test_blocking_backend_provider_cannot_stall_the_event_loop_past_pass_d
     runtime = ScriptRuntimeLifecycle(
         runtime_paths=_runtime_paths(tmp_path),
         store=ScriptRunStore(_runtime_paths(tmp_path)),
-        broker=MagicMock(),
+        broker=_mock_broker(),
         manager=SimpleNamespace(reconcile_durable=AsyncMock()),
         resolver=SimpleNamespace(resolve=MagicMock(), is_authorized=MagicMock(return_value=True)),
         config_provider=_config,
@@ -2782,7 +2788,7 @@ async def test_timed_out_backend_acquisition_is_reused_instead_of_leaking_its_le
     runtime = ScriptRuntimeLifecycle(
         runtime_paths=runtime_paths,
         store=ScriptRunStore(runtime_paths),
-        broker=MagicMock(),
+        broker=_mock_broker(),
         manager=SimpleNamespace(reconcile_durable=AsyncMock()),
         resolver=SimpleNamespace(resolve=MagicMock(), is_authorized=MagicMock(return_value=True)),
         config_provider=_config,
@@ -2843,7 +2849,7 @@ async def test_cancelled_late_backend_build_cannot_publish_after_final_shutdown(
     runtime = ScriptRuntimeLifecycle(
         runtime_paths=runtime_paths,
         store=ScriptRunStore(runtime_paths),
-        broker=MagicMock(),
+        broker=_mock_broker(),
         manager=manager,
         resolver=SimpleNamespace(
             is_authorized=MagicMock(return_value=True),
@@ -2947,7 +2953,7 @@ async def test_cancelled_published_worker_lease_handoff_releases_after_final_shu
     runtime = ScriptRuntimeLifecycle(
         runtime_paths=runtime_paths,
         store=ScriptRunStore(runtime_paths),
-        broker=MagicMock(),
+        broker=_mock_broker(),
         manager=manager,
         resolver=SimpleNamespace(
             is_authorized=MagicMock(return_value=True),
@@ -3501,7 +3507,7 @@ async def test_blocking_retired_lease_release_cannot_stall_reconciliation(tmp_pa
     runtime = ScriptRuntimeLifecycle(
         runtime_paths=runtime_paths,
         store=store,
-        broker=MagicMock(),
+        broker=_mock_broker(),
         manager=SimpleNamespace(reconcile_durable=AsyncMock(return_value=run)),
         resolver=SimpleNamespace(resolve=MagicMock(), is_authorized=MagicMock(return_value=True)),
         config_provider=_config,
@@ -3556,7 +3562,7 @@ async def test_cancelled_reload_preserves_completed_durable_and_broker_revocatio
     runtime = ScriptRuntimeLifecycle(
         runtime_paths=runtime_paths,
         store=store,
-        broker=MagicMock(),
+        broker=_mock_broker(),
         manager=SimpleNamespace(
             begin_startup_reconciliation=AsyncMock(),
             end_startup_reconciliation=end_startup_reconciliation,
@@ -3616,7 +3622,7 @@ async def test_reload_timeout_aborts_when_durable_revocation_exceeds_the_overall
     runtime = ScriptRuntimeLifecycle(
         runtime_paths=runtime_paths,
         store=store,
-        broker=MagicMock(),
+        broker=_mock_broker(),
         manager=SimpleNamespace(
             begin_startup_reconciliation=AsyncMock(),
             end_startup_reconciliation=AsyncMock(),
@@ -3697,7 +3703,7 @@ async def test_startup_pruning_is_inside_one_complete_pass_deadline(tmp_path: Pa
     runtime = ScriptRuntimeLifecycle(
         runtime_paths=runtime_paths,
         store=store,
-        broker=MagicMock(),
+        broker=_mock_broker(),
         manager=manager,
         resolver=SimpleNamespace(is_authorized=MagicMock(return_value=True), prune_approvals=prune_approvals),
         config_provider=_config,
@@ -3731,7 +3737,7 @@ async def test_pruning_has_an_overall_deadline(tmp_path: Path) -> None:
     runtime = ScriptRuntimeLifecycle(
         runtime_paths=runtime_paths,
         store=store,
-        broker=MagicMock(),
+        broker=_mock_broker(),
         manager=SimpleNamespace(),
         resolver=SimpleNamespace(is_authorized=MagicMock(return_value=True), prune_approvals=prune_approvals),
         config_provider=_config,
@@ -3779,7 +3785,7 @@ async def test_maintenance_retries_after_an_unexpected_cycle_failure(
     runtime = ScriptRuntimeLifecycle(
         runtime_paths=runtime_paths,
         store=store,
-        broker=MagicMock(),
+        broker=_mock_broker(),
         manager=manager,
         resolver=SimpleNamespace(
             is_authorized=MagicMock(return_value=True),
@@ -3832,7 +3838,7 @@ async def test_started_lifecycle_periodically_enforces_run_limits(
     runtime = ScriptRuntimeLifecycle(
         runtime_paths=runtime_paths,
         store=store,
-        broker=MagicMock(),
+        broker=_mock_broker(),
         manager=manager,
         resolver=SimpleNamespace(resolve=MagicMock(), is_authorized=MagicMock(return_value=True)),
         config_provider=_config,
@@ -3869,7 +3875,7 @@ async def test_terminal_run_is_pruned_only_after_retention_and_approval_cleanup(
     runtime = ScriptRuntimeLifecycle(
         runtime_paths=runtime_paths,
         store=store,
-        broker=MagicMock(),
+        broker=_mock_broker(),
         manager=SimpleNamespace(),
         resolver=SimpleNamespace(
             is_authorized=MagicMock(return_value=True),
