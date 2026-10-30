@@ -31,6 +31,7 @@ from tests.api.test_mcp_gateway_api import (
     signed_headers,  # noqa: F401
 )
 from tests.conftest import bind_runtime_paths
+from tests.runtime_fakes import bind_test_embedded_runtime
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -64,7 +65,7 @@ def test_room_membership_grants_require_room_independent_access(
         ),
     )
     memberships = asyncio.run(membership_index(config, {"project": {"@alice:example.org"}}))
-    config_lifecycle.app_state(gateway_client.app).agent_reply_memberships = memberships
+    bind_test_embedded_runtime(gateway_client.app, agent_reply_memberships=memberships)
     alice = signed_headers("alice")
     token = _connect(gateway_client, alice)["access_token"]
     response = gateway_client.post(SELECTION, headers={**alice, "Origin": ORIGIN}, json={"agents": {"shared": None}})
@@ -113,7 +114,7 @@ def test_membership_revocation_during_preparation_stops_tool_body(
     snapshot.runtime_config = config
     config.agents["personal"].access = ResponderAccessConfig(members_of_rooms=["project"])
     memberships = asyncio.run(membership_index(config, {"project": {"@alice:example.org"}}))
-    config_lifecycle.app_state(gateway_client.app).agent_reply_memberships = memberships
+    bind_test_embedded_runtime(gateway_client.app, agent_reply_memberships=memberships)
     token = _connect(gateway_client, signed_headers("alice"))["access_token"]
     paused, release = threading.Event(), threading.Event()
     events: list[str] = []

@@ -4,10 +4,11 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import json
 import threading
 import time
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 from unittest.mock import patch
 
 import pytest
@@ -16,7 +17,9 @@ from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
 from mindroom.constants import MATRIX_EVENT_ID_METADATA_KEY, resolve_runtime_paths
+from mindroom.history import session_runs
 from mindroom.knowledge_graph import ingestion
+from mindroom.knowledge_graph.episodes import RUN_DONE
 from mindroom.knowledge_graph.ingestion import KnowledgeGraphIngestionWorker, wake_knowledge_graph_ingestion
 from mindroom.knowledge_graph.scope import graph_scope
 from mindroom.knowledge_graph.store import (
@@ -31,6 +34,7 @@ from mindroom.session_storage.agent_storage import create_session_storage
 from mindroom.session_storage.schema import quote_identifier
 from mindroom.session_storage.types import ConversationSession
 from tests.conftest import delete_runs, seed_session
+from tests.history_helpers import unreadable_conversations
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Coroutine, Iterator
@@ -386,18 +390,99 @@ async def test_zero_backfill_ingests_conversations_after_the_graph_started(tmp_p
 
 
 @pytest.mark.asyncio
-async def test_a_paused_turn_holds_back_later_turns_until_it_finishes(tmp_path: Path) -> None:
-    """A turn waiting for approval is ingested when it finishes, even after later turns."""
-    config, paths, store = _config(), _paths(tmp_path), _FakeStore()
+async def test_a_turn_approved_after_the_turns_after_it_were_ingested_is_ingested_once(tmp_path: Path) -> None:
+    """A turn that completes after its approval is ingested once, even when the turns after it were ingested first.
+
+    It keeps its creation time, which is older than theirs, so reading turns in creation order would leave it behind.
+    The approval here outlives the window the current settings give it, as when `timeout_days` was lowered meanwhile.
+    """
+    config, paths, store = _config(backfill_days=30), _paths(tmp_path), _FakeStore()
     _seed(config, paths, "!room:x:$t1", ["r1", "r2"], paused=frozenset({"r1"}))
     worker = _worker(config, paths, store)
+    await _pass(worker, config, now=T0 + 8 * DAY)
+    assert _answers(store) == ["Mind: answer r2"]
 
-    await _pass(worker, config, now=T0 + 10)
-    assert store.episodes == []
-    _seed(config, paths, "!room:x:$t1", ["r1", "r2"], updated_at=T0 + 15)
-    await _pass(worker, config, now=T0 + 20)
+    _seed(config, paths, "!room:x:$t1", ["r1", "r2"], updated_at=T0 + 8 * DAY + 10)
+    await _pass(worker, config, now=T0 + 8 * DAY + 20)
+    _seed(config, paths, "!room:x:$t1", ["r1", "r2"], updated_at=T0 + 8 * DAY + 30)
+    await _pass(worker, config, now=T0 + 8 * DAY + 40)
 
-    assert _answers(store) == ["Mind: answer r1", "Mind: answer r2"]
+    assert _answers(store) == ["Mind: answer r2", "Mind: answer r1"]
+
+
+def _state_path(config: Config, paths: RuntimePaths) -> Path:
+    graph_name = graph_scope("mind", config, paths, None).graph_name
+    return paths.storage_root / "knowledge_graph" / "ingestion" / f"{graph_name}.json"
+
+
+def _state(config: Config, paths: RuntimePaths) -> dict[str, Any]:
+    return json.loads(_state_path(config, paths).read_text(encoding="utf-8"))
+
+
+def _save_released_state(
+    config: Config,
+    paths: RuntimePaths,
+    session_id: str,
+    markers: dict[str, list[object]],
+) -> None:
+    """Save the graph's progress as the released ingestion wrote it, with a conversation it already read."""
+    path = _state_path(config, paths)
+    released = {
+        "updated_at": 0,
+        "markers": markers,
+        "failures": 0,
+        "bad_outputs": 0,
+        "failing_since": 0,
+        "failing_piece": [],
+        "retry_at": 0,
+        "recheck_at": 0,
+    }
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps({"started_at": T0, "sessions": {session_id: released}}), encoding="utf-8")
+
+
+@pytest.mark.asyncio
+async def test_released_progress_ingests_only_the_turns_after_its_markers(tmp_path: Path) -> None:
+    """A marker past ``R`` converts to its place, so ``P``, approved after ``R``, and ``R`` stay done and ``N`` is added."""
+    config, paths, store = _config(backfill_days=30), _paths(tmp_path), _FakeStore()
+    session = "!room:x:$t1"
+    _seed(config, paths, session, ["P", "R"], paused=frozenset({"P"}))
+    _seed(config, paths, session, ["P", "R", "N"])
+    marker: list[object] = [T0 + 1, "R", RUN_DONE]
+    _save_released_state(config, paths, session, {"conversation": marker, "tool_results": marker})
+
+    await _pass(_worker(config, paths, store), config, now=T0 + 10)
+
+    assert _answers(store) == ["Mind: answer N"]
+    entry = _state(config, paths)["sessions"][session]
+    assert entry["markers"] == {"conversation": [4, RUN_DONE], "tool_results": [4, RUN_DONE]}
+    assert "recheck_at" not in entry
+
+
+def _eight_results(runs: list[RunRecord]) -> None:
+    """Give the last run eight large tool results, so its tool-results episode splits into pieces."""
+    runs[-1].tools = [
+        ToolExecution(tool_call_id=f"c{index}", tool_name=f"fetch_{index}", tool_args={}, result="x" * 380)
+        for index in range(8)
+    ]
+
+
+@pytest.mark.asyncio
+async def test_released_progress_part_way_through_a_run_renders_it_again(tmp_path: Path) -> None:
+    """A run split into pieces and ingested part-way is rendered again from its start; a kind without a marker starts over."""
+    config, paths, store = _config(max_episode_chars=1000, max_tool_result_chars=400), _paths(tmp_path), _FakeStore()
+
+    session = "!room:x:$t1"
+    _seed(config, paths, session, ["r1", "split"], edit=_eight_results)
+    _save_released_state(config, paths, session, {"tool_results": [T0 + 1, "split", 2]})
+
+    await _pass(_worker(config, paths, store), config, now=T0 + 10)
+
+    assert _answers(store) == ["Mind: answer r1", "Mind: answer split"]
+    tool_results = [episode.body for _, episode, _ in store.episodes if episode.kind == "tool_results"]
+    assert tool_results[0].startswith("call fetch_0(")
+    assert "fetch_7" in tool_results[-1]
+    assert not any("Issue for r1" in body for body in tool_results)
 
 
 @pytest.mark.asyncio
@@ -524,17 +609,6 @@ async def test_a_long_backlog_spreads_over_passes(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_a_turn_resuming_right_after_its_approval_expires_is_still_waited_for(tmp_path: Path) -> None:
-    """An expired approval resumes its turn a little after the window, so the turns after it wait a while longer."""
-    config, paths, store = _config(backfill_days=30), _paths(tmp_path), _FakeStore()
-    _seed(config, paths, "!room:x:$t1", ["r1", "r2"], paused=frozenset({"r1"}))
-
-    await _pass(_worker(config, paths, store), config, now=T0 + 7 * DAY + 600)
-
-    assert store.episodes == []
-
-
-@pytest.mark.asyncio
 async def test_an_episode_failing_for_days_is_dropped(tmp_path: Path) -> None:
     """A rejection that never clears, such as a request the provider always refuses, stops costing calls."""
     config, paths = _config(), _paths(tmp_path)
@@ -552,31 +626,11 @@ async def test_an_episode_failing_for_days_is_dropped(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_a_conversation_held_back_by_an_approval_is_ingested_once_it_expires(tmp_path: Path) -> None:
-    """Turns after an abandoned approval are ingested once its window passes, without another message."""
-    config, paths, store = _config(backfill_days=30), _paths(tmp_path), _FakeStore()
-    _seed(config, paths, "!room:x:$t1", ["r1", "r2"], paused=frozenset({"r1"}))
-    worker = _worker(config, paths, store)
-
-    await _pass(worker, config, now=T0 + 10)
-    assert store.episodes == []
-    await _pass(worker, config, now=T0 + 8 * DAY)
-
-    assert _answers(store) == ["Mind: answer r2"]
-
-
-@pytest.mark.asyncio
 async def test_two_failing_pieces_of_a_split_run_still_let_it_finish(tmp_path: Path) -> None:
     """Dropped pieces stay done, so earlier pieces are not extracted again and the run completes."""
     config, paths = _config(max_episode_chars=1000, max_tool_result_chars=400), _paths(tmp_path)
 
-    def eight_results(runs: list[RunRecord]) -> None:
-        runs[0].tools = [
-            ToolExecution(tool_call_id=f"c{index}", tool_name=f"fetch_{index}", tool_args={}, result="x" * 380)
-            for index in range(8)
-        ]
-
-    _seed(config, paths, "!room:x:$t1", ["r1"], edit=eight_results)
+    _seed(config, paths, "!room:x:$t1", ["r1"], edit=_eight_results)
     store = _FakeStore()
     first_pieces: list[str] = []
     real_add = store.add_episode
@@ -601,35 +655,14 @@ async def test_two_failing_pieces_of_a_split_run_still_let_it_finish(tmp_path: P
 
 
 @pytest.mark.asyncio
-async def test_a_turn_waiting_on_a_recent_approval_still_holds_back(tmp_path: Path) -> None:
-    """An approval asked for days into a turn expires counting from when it was asked, not from the turn's start."""
-    config, paths, store = _config(backfill_days=30), _paths(tmp_path), _FakeStore()
-
-    def asked_on_day_six(runs: list[RunRecord]) -> None:
-        runs[0].messages[-1].created_at = T0 + 6 * DAY
-
-    _seed(config, paths, "!room:x:$t1", ["r1", "r2"], paused=frozenset({"r1"}), edit=asked_on_day_six)
-
-    await _pass(_worker(config, paths, store), config, now=T0 + 8 * DAY)
-
-    assert store.episodes == []
-
-
-@pytest.mark.asyncio
 async def test_an_unreadable_conversation_does_not_block_the_agents_others(tmp_path: Path) -> None:
     """A conversation whose turns cannot be read is reported, and the agent's other conversations are still added."""
     config, paths, store = _config(), _paths(tmp_path), _FakeStore()
     _seed(config, paths, "!room:x:$bad", ["b1"], at=T0 - 5)
     _seed(config, paths, "!room:x:$good", ["g1"])
-    real = ingestion.session_runs
+    runs = unreadable_conversations(lambda session_id: session_id == "!room:x:$bad")
 
-    def runs(storage: object, session_id: str) -> list[RunRecord]:
-        if session_id == "!room:x:$bad":
-            msg = "corrupt session row"
-            raise ValueError(msg)
-        return real(storage, session_id)
-
-    with patch.object(ingestion, "session_runs", runs):
+    with patch.object(session_runs, "_read_conversation", runs):
         await _pass(_worker(config, paths, store), config, now=T0 + 10)
 
     assert store.sessions() == ["!room:x:$good"]
@@ -674,7 +707,7 @@ async def test_conversations_without_matrix_turns_take_no_place_in_a_pass(tmp_pa
     # A pass that only sees such a conversation still records it, so it is not read again until it changes.
     _seed(config, paths, "api-2", ["x2"], at=T0 + 15, matrix=False)
     await _pass(worker, config, now=T0 + 20)
-    with patch.object(ingestion, "session_runs", wraps=ingestion.session_runs) as read:
+    with patch.object(session_runs, "_read_conversation", wraps=session_runs._read_conversation) as read:
         await _pass(worker, config, now=T0 + 30)
     read.assert_not_called()
 
@@ -687,7 +720,6 @@ async def test_a_failed_conversation_keeps_health_failing_until_it_succeeds(tmp_
     _seed(config, paths, "!room:x:$t1", ["a1"], at=T0 - 5)
     _seed(config, paths, "!room:x:$t2", ["b1"])
     failing = True
-    real = ingestion.session_runs
 
     async def redacted(agent_name: str, room_id: str, event_ids: tuple[str, ...]) -> frozenset[str] | None:
         del agent_name, room_id
@@ -696,14 +728,11 @@ async def test_a_failed_conversation_keeps_health_failing_until_it_succeeds(tmp_
             raise RuntimeError(msg)
         return frozenset()
 
-    def runs(storage: object, session_id: str) -> list[RunRecord]:
-        if failure == "unreadable" and failing and session_id == "!room:x:$t1":
-            msg = "corrupt session row"
-            raise ValueError(msg)
-        return real(storage, session_id)
-
+    runs = unreadable_conversations(
+        lambda session_id: failure == "unreadable" and failing and session_id == "!room:x:$t1",
+    )
     worker = _worker(config, paths, store, redacted)
-    with patch.object(ingestion, "session_runs", runs):
+    with patch.object(session_runs, "_read_conversation", runs):
         await _pass(worker, config, now=T0 + 10)
         # A new turn sorts the failed conversation last, so the next passes spend their budget before reaching it.
         _seed(config, paths, "!room:x:$t1", ["a1", "a2"], at=T0 - 5, updated_at=T0 + 25)
@@ -1239,7 +1268,6 @@ async def test_a_failure_holds_health_while_its_graph_is_still_in_its_pass(tmp_p
     _seed(config, paths, "!room:x:$bad", ["b1"], at=T0)
     _seed(config, paths, "!room:x:$slow", ["s1"], at=T0 + 5)
     _seed(config, paths, "!room:x:$good", ["g1"], agent="pal")
-    real = ingestion.session_runs
 
     async def redacted(agent_name: str, room_id: str, event_ids: tuple[str, ...]) -> frozenset[str] | None:
         del agent_name, room_id
@@ -1248,14 +1276,9 @@ async def test_a_failure_holds_health_while_its_graph_is_still_in_its_pass(tmp_p
             raise RuntimeError(msg)
         return frozenset()
 
-    def runs(storage: object, session_id: str) -> list[RunRecord]:
-        if failure == "unreadable" and session_id == "!room:x:$bad":
-            msg = "corrupt session row"
-            raise ValueError(msg)
-        return real(storage, session_id)
-
+    runs = unreadable_conversations(lambda session_id: failure == "unreadable" and session_id == "!room:x:$bad")
     worker = _worker(config, paths, store, redacted)
-    with patch.object(ingestion, "session_runs", runs):
+    with patch.object(session_runs, "_read_conversation", runs):
         mind_scope = graph_scope("mind", config, paths, None)
         mind = asyncio.create_task(worker._ingest_graph(config, mind_scope, now=T0 + 100))
         try:
@@ -1406,6 +1429,26 @@ async def test_a_failing_conversation_left_without_matrix_turns_stops_keeping_he
 
     assert store.episodes == []
     assert knowledge_graph_failure() is None
+    # The failing episode's counts go with it, so a later episode at the same place starts its own.
+    entry = _state(config, paths)["sessions"]["!room:x:$t1"]
+    assert (entry["failures"], entry["bad_outputs"], entry["failing_piece"]) == (0, 0, [])
+
+
+@pytest.mark.asyncio
+async def test_turns_that_render_no_episode_of_a_kind_still_move_its_place(tmp_path: Path) -> None:
+    """A turn without tool results is not rendered again for them once its conversation was ingested."""
+    config, paths, store = _config(), _paths(tmp_path), _FakeStore()
+
+    def no_tools(runs: list[RunRecord]) -> None:
+        runs[-1].tools = []
+
+    _seed(config, paths, "!room:x:$t1", ["r1", "r2"], edit=no_tools)
+    await _pass(_worker(config, paths, store), config, now=T0 + 10)
+
+    assert _state(config, paths)["sessions"]["!room:x:$t1"]["markers"] == {
+        "conversation": [2, RUN_DONE],
+        "tool_results": [2, RUN_DONE],
+    }
 
 
 @pytest.mark.asyncio

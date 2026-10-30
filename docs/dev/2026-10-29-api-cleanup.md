@@ -14,8 +14,8 @@ This record holds the decisions behind one write protocol for the config file, o
 - The commit lock order is the app registry lock, then every registered API state lock (in id order, before filtering by runtime), then the personal-agent roster lock, which config writes share with personal-agent provisioning.
   Locking every state before filtering keeps a state that rebinds onto the runtime mid-commit from missing the publication.
 - The one-time access migration's compare-and-replace takes the same roster lock, because it runs on any load that sees the old format, including an old file restored while MindRoom runs.
-- The API reconciles knowledge modes only for the configs it publishes on its own: each dashboard save, against the pinned config its revision check proved it replaced, and each load of the standalone dashboard's file watcher.
-  The embedded runtime reconciles every config it applies, which covers its own load and every tool or `!config set` commit, so those leave it to the runtime.
+- The API reconciles knowledge modes only for the configs it publishes on its own, its dashboard saves, each against the pinned config its revision check proved it replaced.
+  The runtime reconciles every config it applies, which covers its own load and every tool or `!config set` commit, so those leave it to the runtime.
 - A commit publishes the config it validated with the personal-agent roster it read; a roster entry settled meanwhile reaches the API views through the reload that provisioning requests and through the runtime's reload of the committed file.
 - The request identity is a frozen `AuthUser`; one `requester_id()` rule maps a signed-in Matrix user to themselves and an operator login (standalone or hosted platform) to the configured owner.
   A platform login without `ACCOUNT_ID` accepts any user of its Supabase project; it already acts as the owner for the owner's private credentials and can edit the whole config, so letting it open the owner's reports adds no authority.

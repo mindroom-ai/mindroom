@@ -83,13 +83,11 @@ from tests.conftest import (
     message_origin,
     patch_response_runner_module,
     push_stream_chunk,
-    replace_response_runner_deps,
     request_envelope,
     runtime_paths_for,
     test_runtime_paths,
     unwrap_extracted_collaborator,
 )
-from tests.identity_helpers import persist_entity_accounts
 from tests.response_attempt_helpers import install_direct_response_admission
 from tests.streaming_helpers import FakeReplyRecords, reply_hooks
 
@@ -130,14 +128,25 @@ def _render_cleaned_interrupted_replay(body: str) -> str:
 
 
 def _make_matrix_client_mock() -> AsyncMock:
-    client = make_matrix_client_mock(user_id="@mindroom_streaming:localhost")
-    client.room_get_event_relations = MagicMock(return_value=_aiter())
-    return client
+    return make_matrix_client_mock(user_id="@mindroom_streaming:localhost")
 
 
 @asynccontextmanager
 async def _noop_typing_indicator(*_args: object, **_kwargs: object) -> AsyncIterator[None]:
     yield
+
+
+class ImmediateStreamingResponse(StreamingResponse):
+    """A streaming response that sends every update as soon as it arrives."""
+
+    def __init__(self, **kwargs: object) -> None:
+        super().__init__(**kwargs)
+        self.update_interval = 0.0
+        self.min_update_interval = 0.0
+        self.progress_update_interval = 0.0
+        self.min_char_update_interval = 0.0
+        self.update_char_threshold = 1
+        self.min_update_char_threshold = 1
 
 
 def _make_bot_with_shared_knowledge(
@@ -166,10 +175,8 @@ def _make_bot_with_shared_knowledge(
         ),
         runtime_paths,
     )
-    persist_entity_accounts(config, runtime_paths_for(config))
     bot = make_test_agent_bot(
         agent,
-        tmp_path,
         rooms=["!test:localhost"],
         config=config,
         runtime_paths=runtime_paths_for(config),
@@ -334,7 +341,6 @@ class TestStreamingBehavior:
             ),
             runtime_paths,
         )
-        persist_entity_accounts(self.config, runtime_paths_for(self.config))
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize("streaming", [True, False], ids=["streamed", "not_streamed"])
@@ -346,7 +352,6 @@ class TestStreamingBehavior:
         mock_stream_agent_response: MagicMock,
         mock_helper_agent: AgentMatrixUser,
         mock_calculator_agent: AgentMatrixUser,
-        tmp_path: Path,
         streaming: bool,
     ) -> None:
         """Test complete flow of one agent replying, streamed or not, and mentioning another."""
@@ -369,7 +374,6 @@ class TestStreamingBehavior:
 
         helper_bot = make_test_agent_bot(
             mock_helper_agent,
-            tmp_path,
             rooms=["!test:localhost"],
             config=config,
             runtime_paths=runtime_paths_for(config),
@@ -378,18 +382,12 @@ class TestStreamingBehavior:
         install_runtime_journal_support(helper_bot)
         helper_bot.client = _make_matrix_client_mock()
 
-        # Mock orchestrator
-        mock_orchestrator = MagicMock()
-        mock_orchestrator.current_config = config
-        helper_bot.orchestrator = mock_orchestrator
-
         # Set up calculator bot (the one that will be mentioned) with its own non-streaming config
         config = bind_runtime_paths(self.config, runtime_paths_for(self.config))
         config.defaults.enable_streaming = False
 
         calc_bot = make_test_agent_bot(
             mock_calculator_agent,
-            tmp_path,
             rooms=["!test:localhost"],
             config=config,
             runtime_paths=runtime_paths_for(config),
@@ -397,11 +395,6 @@ class TestStreamingBehavior:
         install_direct_response_admission(calc_bot)
         install_runtime_journal_support(calc_bot)
         calc_bot.client = _make_matrix_client_mock()
-
-        # Mock orchestrator
-        mock_orchestrator = MagicMock()
-        mock_orchestrator.current_config = config
-        calc_bot.orchestrator = mock_orchestrator
 
         # Mock successful room_send responses
         mock_send_response = MagicMock()
@@ -492,9 +485,7 @@ class TestStreamingBehavior:
     async def test_agent_responds_only_to_final_message(
         self,
         mock_stream_agent_response: MagicMock,
-        mock_helper_agent: AgentMatrixUser,  # noqa: ARG002
         mock_calculator_agent: AgentMatrixUser,
-        tmp_path: Path,
     ) -> None:
         """Test that agents respond to the final complete message, not edits."""
         # Set up calculator bot
@@ -503,7 +494,6 @@ class TestStreamingBehavior:
 
         calc_bot = make_test_agent_bot(
             mock_calculator_agent,
-            tmp_path,
             rooms=["!test:localhost"],
             config=config,
             runtime_paths=runtime_paths_for(config),
@@ -511,11 +501,6 @@ class TestStreamingBehavior:
         install_direct_response_admission(calc_bot)
         install_runtime_journal_support(calc_bot)
         calc_bot.client = _make_matrix_client_mock()
-
-        # Mock orchestrator
-        mock_orchestrator = MagicMock()
-        mock_orchestrator.current_config = config
-        calc_bot.orchestrator = mock_orchestrator
 
         # Mock successful room_send response
         mock_send_response = MagicMock()
@@ -574,11 +559,7 @@ class TestStreamingBehavior:
         assert mock_stream_agent_response.call_count == 0
 
     @pytest.mark.asyncio
-    async def test_streaming_response_flow(
-        self,
-        mock_helper_agent: AgentMatrixUser,  # noqa: ARG002
-        tmp_path: Path,  # noqa: ARG002
-    ) -> None:
+    async def test_streaming_response_flow(self) -> None:
         """Test the StreamingResponse class behavior."""
         # Create a mock client
         mock_client = _make_matrix_client_mock()
@@ -2293,13 +2274,8 @@ class TestStreamingBehavior:
     async def test_streaming_first_send_uses_resolved_thread_root(
         self,
         mock_helper_agent: AgentMatrixUser,
-        tmp_path: Path,
     ) -> None:
         """A streamed reply to a plain reply in a started thread keeps the original thread root on its first event."""
-
-        @asynccontextmanager
-        async def noop_typing(*_args: object, **_kwargs: object) -> AsyncIterator[None]:
-            yield
 
         async def response_stream() -> AsyncIterator[str]:
             yield "Hello from the original thread"
@@ -2308,18 +2284,12 @@ class TestStreamingBehavior:
         config = self.config
         bot = make_test_agent_bot(
             mock_helper_agent,
-            tmp_path,
             rooms=["!test:localhost"],
             config=config,
             runtime_paths=runtime_paths_for(config),
         )
         install_runtime_journal_support(bot)
         bot.client = make_matrix_client_mock(user_id=mock_helper_agent.user_id)
-        bot._knowledge_access_support.for_agent = MagicMock(return_value=None)
-        replace_response_runner_deps(
-            bot,
-            knowledge_access=bot._knowledge_access_support,
-        )
         envelope = MessageEnvelope(
             source_event_id="$reply_plain:localhost",
             target=MessageTarget.resolve(
@@ -2365,7 +2335,7 @@ class TestStreamingBehavior:
             patch_response_runner_module(
                 stream_agent_response=MagicMock(return_value=response_stream()),
                 should_use_streaming=AsyncMock(return_value=True),
-                typing_indicator=noop_typing,
+                typing_indicator=_noop_typing_indicator,
             ),
         ):
             event_id = await runner.generate_response(request)
@@ -2560,11 +2530,7 @@ class TestStreamingBehavior:
         assert reindex_all.await_count == 0
 
     @pytest.mark.asyncio
-    async def test_streaming_in_progress_marker(
-        self,
-        mock_helper_agent: AgentMatrixUser,  # noqa: ARG002
-        tmp_path: Path,  # noqa: ARG002
-    ) -> None:
+    async def test_streaming_in_progress_marker(self) -> None:
         """Test that in-progress marker is shown during streaming but not in final message."""
         # Create a mock client
         mock_client = _make_matrix_client_mock()
@@ -2952,16 +2918,6 @@ class TestStreamingBehavior:
         warmup_edit_started = asyncio.Event()
         edited_texts: list[str] = []
 
-        class ImmediateStreamingResponse(StreamingResponse):
-            def __init__(self, **kwargs: object) -> None:
-                super().__init__(**kwargs)
-                self.update_interval = 0.0
-                self.min_update_interval = 0.0
-                self.progress_update_interval = 0.0
-                self.min_char_update_interval = 0.0
-                self.update_char_threshold = 1
-                self.min_update_char_threshold = 1
-
         async def record_edit(
             _client: object,
             _room_id: str,
@@ -3022,16 +2978,6 @@ class TestStreamingBehavior:
         mock_client = _make_matrix_client_mock()
         stream_finished = asyncio.Event()
 
-        class ImmediateStreamingResponse(StreamingResponse):
-            def __init__(self, **kwargs: object) -> None:
-                super().__init__(**kwargs)
-                self.update_interval = 0.0
-                self.min_update_interval = 0.0
-                self.progress_update_interval = 0.0
-                self.min_char_update_interval = 0.0
-                self.update_char_threshold = 1
-                self.min_update_char_threshold = 1
-
         edited_statuses: list[object] = []
 
         async def record_edit(
@@ -3075,16 +3021,6 @@ class TestStreamingBehavior:
     async def test_streaming_edit_returning_none_raises_delivery_error(self) -> None:
         """A Matrix edit failure returning None must not be treated as a successful non-terminal send."""
         mock_client = _make_matrix_client_mock()
-
-        class ImmediateStreamingResponse(StreamingResponse):
-            def __init__(self, **kwargs: object) -> None:
-                super().__init__(**kwargs)
-                self.update_interval = 0.0
-                self.min_update_interval = 0.0
-                self.progress_update_interval = 0.0
-                self.min_char_update_interval = 0.0
-                self.update_char_threshold = 1
-                self.min_update_char_threshold = 1
 
         terminal_texts: list[str] = []
         edit_results = [None, DeliveredMatrixEvent(event_id="$terminal", content_sent={})]
@@ -3569,16 +3505,6 @@ class TestStreamingBehavior:
         release_warmup_edit = asyncio.Event()
         max_in_flight = 0
         in_flight = 0
-
-        class ImmediateStreamingResponse(StreamingResponse):
-            def __init__(self, **kwargs: object) -> None:
-                super().__init__(**kwargs)
-                self.update_interval = 0.0
-                self.min_update_interval = 0.0
-                self.progress_update_interval = 0.0
-                self.min_char_update_interval = 0.0
-                self.update_char_threshold = 1
-                self.min_update_char_threshold = 1
 
         async def record_edit(
             _client: object,
@@ -4470,7 +4396,7 @@ class TestStreamingConfig:
         assert sc.max_idle == sr["max_idle"].default
 
     @pytest.mark.asyncio
-    async def test_streaming_config_applied(self) -> None:
+    async def test_streaming_config_applied(self, tmp_path: Path) -> None:
         """Custom StreamingConfig values should propagate to the StreamingResponse instance."""
         sc = StreamingConfig(update_interval=2.0, min_update_interval=0.3, interval_ramp_seconds=10.0, max_idle=0.7)
         config = Config(
@@ -4479,9 +4405,8 @@ class TestStreamingConfig:
             router=RouterConfig(model="default"),
             defaults={"streaming": sc.model_dump()},
         )
-        runtime_paths = test_runtime_paths(Path(tempfile.mkdtemp()))
+        runtime_paths = test_runtime_paths(tmp_path)
         config = bind_runtime_paths(config, runtime_paths)
-        persist_entity_accounts(config, runtime_paths)
 
         mock_client = _make_matrix_client_mock()
         mock_response = MagicMock()
@@ -4493,9 +4418,8 @@ class TestStreamingConfig:
             yield "hello"
 
         captured: list[StreamingResponse] = []
-        original_cls = StreamingResponse
 
-        class CapturingStreamingResponse(original_cls):
+        class CapturingStreamingResponse(StreamingResponse):
             def __init__(self, **kwargs: object) -> None:
                 super().__init__(**kwargs)
                 captured.append(self)

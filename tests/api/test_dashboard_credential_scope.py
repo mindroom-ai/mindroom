@@ -1,11 +1,13 @@
 """Tests for dashboard credential scope resolution and authorization checks."""
 
+from pathlib import Path
 from typing import Any, ClassVar
 
 import pytest
 from fastapi import FastAPI, HTTPException, Request
 
-from mindroom.api import config_lifecycle
+from mindroom.api import main
+from mindroom.api.app_state import ensure_app_state
 from mindroom.api.auth_user import AuthSource, AuthUser, SignedMatrixUser, bind_request_auth_user
 from mindroom.api.dashboard_credential_scope import (
     require_agent_credential_management_authorized,
@@ -15,12 +17,13 @@ from mindroom.api.dashboard_credential_scope import (
 )
 from mindroom.config.main import Config
 from mindroom.constants import RuntimePaths, resolve_runtime_paths
+from tests.runtime_fakes import bind_test_embedded_runtime
 
 
 def _request(auth_user: AuthUser | None = None, query_string: bytes = b"") -> Request:
     """Build a dashboard request served by an app with MindRoom state, as every production request is."""
     app = FastAPI()
-    config_lifecycle.ensure_app_state(app)
+    ensure_app_state(app)
     scope: dict[str, Any] = {
         "type": "http",
         "method": "GET",
@@ -43,6 +46,19 @@ def _trusted_user(user_id: str, matrix_user_id: str) -> SignedMatrixUser:
         source=AuthSource.TRUSTED_UPSTREAM,
         matrix_user_id=matrix_user_id,
     )
+
+
+def _request_under_a_runtime(auth_user: AuthUser, tmp_path: Path) -> Request:
+    """Build a dashboard request whose app `mindroom run` lent its runtime, as a membership-based decision reads it."""
+    request = _request(auth_user)
+    runtime_paths = resolve_runtime_paths(
+        config_path=tmp_path / "config.yaml",
+        storage_path=tmp_path / "data",
+        process_env={},
+    )
+    main.initialize_api_app(request.app, runtime_paths)
+    bind_test_embedded_runtime(request.app)
+    return request
 
 
 def _config(
@@ -301,9 +317,13 @@ class TestRequireAgentCredentialManagementAuthorized:
         assert exc_info.value.status_code == 403
 
     @pytest.mark.parametrize("private_per", ["user", "user_agent"])
-    def test_requester_can_manage_own_private_agent_oauth_without_allowlist(self, private_per: str) -> None:
+    def test_requester_can_manage_own_private_agent_oauth_without_allowlist(
+        self,
+        private_per: str,
+        tmp_path: Path,
+    ) -> None:
         """Private-agent OAuth authority is separate from generic credential management."""
-        request = _request(_trusted_user("alice", "@alice:example.org"))
+        request = _request_under_a_runtime(_trusted_user("alice", "@alice:example.org"), tmp_path)
         config = _config(private_per=private_per)
         runtime_paths = self._runtime_paths()
 

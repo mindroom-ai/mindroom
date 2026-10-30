@@ -2,8 +2,8 @@
 
 These pin the response-execution seam directly (lifecycle lock, attempt
 mechanics, cancellation, streaming vs non-streaming delivery, queued-notice
-state, and post-response effects) with mocked collaborators instead of a full
-orchestrator/bot boot, so shrinking ``response_runner.py`` has a safety net.
+state, and post-response effects) on a bot built in a ready test runtime,
+without booting an orchestrator or syncing with Matrix.
 """
 
 from __future__ import annotations
@@ -42,6 +42,7 @@ from mindroom.approval.response import plan_approval_calls, require_ordered_paus
 from mindroom.approval.tool_approval import NO_APPROVER_REASON, POLICY_CONFIRMATION_APPROVAL_TYPE
 from mindroom.authorization import ReplyMembershipPendingError
 from mindroom.background_tasks import wait_for_background_tasks
+from mindroom.bot_runtime_view import BotRuntimeState
 from mindroom.cancellation import current_task_is_process_shutdown, request_task_cancel
 from mindroom.config.access import ResponderAccessConfig
 from mindroom.config.agent import AgentConfig, TeamConfig
@@ -63,7 +64,6 @@ from mindroom.constants import (
 from mindroom.conversation_resolver import ConversationResolver, MessageContext
 from mindroom.delivery_gateway import (
     DeliveryGateway,
-    EditTextRequest,
     SendTextRequest,
     StreamingDeliveryRequest,
 )
@@ -105,7 +105,6 @@ from mindroom.message_target import MessageTarget, ResponseLifecycleKey
 from mindroom.mid_turn import MidTurnGate, QueuedMessage
 from mindroom.post_response_effects import PostResponseEffectsDeps, ResponseOutcome, apply_post_response_effects
 from mindroom.reply_presentation import Presentation, Segment, encode_presentation
-from mindroom.reply_scope import SpanHandle
 from mindroom.reply_turn.enrichment import prepare_memory_and_model_context
 from mindroom.response_admission import ResponseAdmissionRefusedError
 from mindroom.response_attempt import ResponseAttemptDeps, ResponseAttemptRequest, ResponseAttemptRunner, SpanAttempt
@@ -153,7 +152,7 @@ from mindroom.streaming import (
 from mindroom.teams.presentation import TeamStreamPresentation
 from mindroom.teams.resume import continue_paused_team_run
 from mindroom.thread_models import set_thread_model_override
-from mindroom.thread_summary import thread_summary_message_count_hint
+from mindroom.thread_summary.schedule import thread_summary_message_count_hint
 from mindroom.timing import DispatchPipelineTiming
 from mindroom.tool_jobs.conversation import ConversationKey
 from mindroom.tool_jobs.follow_ups import follow_up_envelope
@@ -275,10 +274,11 @@ def _completed_outcome(event_id: str = "$response", body: str = "ok") -> FinalDe
 
 
 @pytest.mark.asyncio
-async def test_process_shutdown_refuses_new_response_owners_until_admissions_resume() -> None:
-    """Orderly shutdown must close the owner set before concurrent producers run."""
-    runner = ResponseRunner(deps=MagicMock())
-    runner.inbox.begin_process_shutdown()
+async def test_process_shutdown_refuses_new_response_owners_for_good() -> None:
+    """Orderly shutdown must close the owner set before concurrent producers run, and nothing reopens it."""
+    runtime = BotRuntimeState(orchestrator=MagicMock())
+    runner = ResponseRunner(deps=MagicMock(runtime=runtime))
+    runtime.begin_process_shutdown()
     refused_response = asyncio.sleep(0)
     accidentally_owned: asyncio.Task[None] | None = None
 
@@ -298,14 +298,16 @@ async def test_process_shutdown_refuses_new_response_owners_until_admissions_res
     assert refused_response.cr_frame is None
     assert runner.inbox.pending_inbox_response_count == 0
 
-    runner.resume_pending_admissions()
-    resumed_response = runner.inbox.track_inbox_response(
-        asyncio.sleep(0),
-        name="test_resumed_response",
-        recovery_proof_ready=lambda: True,
-        room_id=_target().room_id,
-    )
-    await resumed_response
+    assert runtime.resume() is False
+    late_response = asyncio.sleep(0)
+    with pytest.raises(ResponseAdmissionRefusedError):
+        runner.inbox.track_inbox_response(
+            late_response,
+            name="test_response_after_resume_attempt",
+            recovery_proof_ready=lambda: True,
+            room_id=_target().room_id,
+        )
+    assert late_response.cr_frame is None
     assert runner.inbox.pending_inbox_response_count == 0
 
 
@@ -392,8 +394,9 @@ async def test_inbox_response_releases_its_claim_before_its_sources_return_to_th
 @pytest.mark.asyncio
 async def test_inbox_response_refused_at_shutdown_releases_its_claim() -> None:
     """A response refused because shutdown began never runs, so the claim handed to it goes back at once."""
-    runner = ResponseRunner(deps=MagicMock())
-    runner.inbox.begin_process_shutdown()
+    runtime = BotRuntimeState(orchestrator=MagicMock())
+    runner = ResponseRunner(deps=MagicMock(runtime=runtime))
+    runtime.begin_process_shutdown()
     claim = live_turn_claim("$source")
     response = asyncio.sleep(0)
 
@@ -447,20 +450,13 @@ async def test_response_typing_supplies_complete_attribution(monkeypatch: pytest
 def _through_the_gateway(runner: ResponseRunner) -> Iterator[tuple[AsyncMock, AsyncMock]]:
     """Record the edits and sends the runner makes, which still go through the real gateway to a patched Matrix."""
     gateway = unwrap_extracted_collaborator(runner.deps.delivery_gateway)
-    real_edit_text, real_send_text = DeliveryGateway.edit_text, DeliveryGateway.send_text
-
-    async def edit_through(request: EditTextRequest) -> bool:
-        return await real_edit_text(gateway, request)
-
-    async def send_through(request: SendTextRequest) -> str | None:
-        return await real_send_text(gateway, request)
 
     async def transport(_client: object, _room_id: str, content: dict[str, Any], **_kwargs: object) -> object:
         replaced = content.get("m.relates_to", {}).get("event_id")
         return DeliveredMatrixEvent(replaced or "$sent", content)
 
-    edit_text = AsyncMock(side_effect=edit_through)
-    send_text = AsyncMock(side_effect=send_through)
+    edit_text = AsyncMock(wraps=gateway.edit_text)
+    send_text = AsyncMock(wraps=gateway.send_text)
     with (
         patch.object(DeliveryGateway, "edit_text", new=edit_text),
         patch.object(DeliveryGateway, "send_text", new=send_text),
@@ -2068,76 +2064,6 @@ async def test_recovery_fails_an_approval_whose_resume_already_failed(tmp_path: 
     release_to_replay.assert_not_awaited()
 
 
-def _visible_event_response(*, sender: str, body: str) -> nio.RoomGetEventResponse:
-    """Return one complete visible Matrix event response."""
-    response = nio.RoomGetEventResponse.from_dict(
-        {
-            "event_id": "$waiting",
-            "sender": sender,
-            "origin_server_ts": 1_000,
-            "type": "m.room.message",
-            "content": {"msgtype": "m.text", "body": body},
-        },
-    )
-    assert isinstance(response, nio.RoomGetEventResponse)
-    return response
-
-
-def _encrypted_event(*, sender: str, event_id: str = "$edit") -> nio.MegolmEvent:
-    """Return one encrypted Matrix event."""
-    event = nio.MegolmEvent.from_dict(
-        {
-            "event_id": event_id,
-            "sender": sender,
-            "origin_server_ts": 2_000,
-            "type": "m.room.encrypted",
-            "content": {
-                "algorithm": "m.megolm.v1.aes-sha2",
-                "ciphertext": "ciphertext",
-                "device_id": "DEVICE",
-                "sender_key": "sender-key",
-                "session_id": "session",
-            },
-        },
-    )
-    assert isinstance(event, nio.MegolmEvent)
-    return event
-
-
-def _decrypted_edit(*, sender: str, target_event_id: str = "$waiting") -> nio.RoomMessage:
-    """Return the visible edit corresponding to `_encrypted_event`."""
-    event = nio.Event.parse_event(
-        {
-            "event_id": "$edit",
-            "sender": sender,
-            "origin_server_ts": 2_000,
-            "type": "m.room.message",
-            "content": {
-                "msgtype": "m.text",
-                "body": "latest partial",
-                "m.new_content": {"msgtype": "m.text", "body": "latest partial"},
-                "m.relates_to": {"rel_type": "m.replace", "event_id": target_event_id},
-            },
-        },
-    )
-    assert isinstance(event, nio.RoomMessage)
-    return event
-
-
-def _sidecar_preview_content() -> dict[str, Any]:
-    """Return one unresolved v2 long-text preview."""
-    return {
-        "msgtype": "m.file",
-        "body": "Preview partial...",
-        "info": {"mimetype": "application/json"},
-        "io.mindroom.long_text": {
-            "version": 2,
-            "encoding": "matrix_event_content_json",
-        },
-        "url": "mxc://server/recovery-sidecar",
-    }
-
-
 @pytest.mark.asyncio
 @pytest.mark.parametrize("cancelled", [False, True], ids=("error", "cancellation"))
 async def test_final_recovery_error_fences_current_claim(tmp_path: Path, *, cancelled: bool) -> None:
@@ -2300,7 +2226,7 @@ async def test_lifecycle_identity_uses_canonical_requester_before_lock_wait(
     if is_team:
         bot.config.teams["helpers"] = TeamConfig(display_name="Helpers", role="Help users", agents=["general"])
         runner = ResponseRunner(replace(runner.deps, agent_name="helpers"))
-    gate = bot.admission_gate
+    gate = bot.orchestrator.response_admission_gate
     request = _plain_request(_target())
     envelope = request.response_envelope
     request = replace(
@@ -2867,7 +2793,7 @@ async def test_approval_collaborators_read_live_config_after_hot_reload(tmp_path
     bot = _bot(tmp_path)
     runner = unwrap_extracted_collaborator(bot._response_runner)
     reloaded = bot.config.model_copy(deep=True)
-    bot.config = reloaded
+    bot.orchestrator.config = reloaded
     tool = ToolExecution(tool_call_id="call-1", tool_name="dangerous", tool_args={})
 
     def resolve_approver(config: object, *_args: object) -> None:
@@ -6569,7 +6495,6 @@ async def test_terminal_settlement_records_landed_interruption_before_rethrowing
     """A deferred sync-restart cancel whose note landed should finalize once, run post-response effects, then re-raise."""
     bot = _bot(tmp_path)
     coordinator = unwrap_extracted_collaborator(bot._response_runner)
-    order: list[str] = []
     request = _plain_request(_target(thread_id="$thread"))
     delivery_outcome = FinalDeliveryOutcome(
         terminal_status="cancelled",
@@ -6582,7 +6507,7 @@ async def test_terminal_settlement_records_landed_interruption_before_rethrowing
     progress = response_runner.DeliveryProgress()
     progress.note_delivery_started("$response")
     progress.settle(delivery_outcome)
-    post_effects = AsyncMock(side_effect=lambda *_args: order.append("post_effects"))
+    post_effects = AsyncMock(return_value=None)
     lifecycle = coordinator.build_lifecycle(
         identity=coordinator.response_identity(request, response_kind="ai"),
         request=request,
@@ -6611,7 +6536,6 @@ async def test_terminal_settlement_records_landed_interruption_before_rethrowing
                 post_response_deps=PostResponseEffectsDeps(logger=get_logger("tests.post_response")),
             )
 
-    assert order == ["post_effects"]
     assert progress.delivery_outcome is delivery_outcome
     finalize.assert_awaited_once()
     post_effects.assert_awaited_once()
@@ -6725,7 +6649,6 @@ async def test_process_shutdown_skips_terminal_settlement_for_durable_replay(
 async def test_uncommitted_interruption_rethrows_cancel_without_marking_source_handled(tmp_path: Path) -> None:
     """Checkpoint replay must remain actionable when no terminal recovery note landed."""
     coordinator = unwrap_extracted_collaborator(_bot(tmp_path)._response_runner)
-    order: list[str] = []
     request = _plain_request(_target(thread_id="$thread"))
     progress = response_runner.DeliveryProgress()
     progress.note_delivery_started("$response")
@@ -6742,7 +6665,7 @@ async def test_uncommitted_interruption_rethrows_cancel_without_marking_source_h
         identity=coordinator.response_identity(request, response_kind="ai"),
         request=request,
     )
-    post_effects = AsyncMock(side_effect=lambda *_args: order.append("post_effects"))
+    post_effects = AsyncMock(return_value=None)
 
     with (
         patch.object(
@@ -6764,7 +6687,7 @@ async def test_uncommitted_interruption_rethrows_cancel_without_marking_source_h
             post_response_deps=PostResponseEffectsDeps(logger=get_logger("tests.post_response")),
         )
 
-    assert order == ["post_effects"]
+    post_effects.assert_awaited_once()
 
 
 @pytest.mark.asyncio
@@ -6960,12 +6883,11 @@ async def test_terminal_settlement_late_cancel_keeps_settled_outcome_canonical(
     """A late cancel records an existing terminal outcome without queueing a duplicate retry."""
     bot = _bot(tmp_path)
     coordinator = unwrap_extracted_collaborator(bot._response_runner)
-    order: list[str] = []
     request = _plain_request(_target())
     progress = response_runner.DeliveryProgress()
     progress.note_delivery_started("$response")
     progress.settle(delivery_outcome)
-    post_effects = AsyncMock(side_effect=lambda *_args: order.append("post_effects"))
+    post_effects = AsyncMock(return_value=None)
     lifecycle = coordinator.build_lifecycle(
         identity=coordinator.response_identity(request, response_kind="ai"),
         request=request,
@@ -6993,7 +6915,6 @@ async def test_terminal_settlement_late_cancel_keeps_settled_outcome_canonical(
             post_response_deps=PostResponseEffectsDeps(logger=get_logger("tests.post_response")),
         )
 
-    assert order == ["post_effects"]
     assert progress.delivery_outcome is delivery_outcome
     finalize.assert_awaited_once()
     post_effects.assert_awaited_once()
@@ -8527,7 +8448,7 @@ async def _respond_with_skill_learning(
     bot.client.room_send.return_value = nio.RoomSendResponse(event_id="$response", room_id="!room:localhost")
     coordinator.deps.runtime.config.agents["general"].skill_learning.enabled = True
     reviews = _RecordedSkillReviews(fail=fail)
-    coordinator.deps.runtime.orchestrator = MagicMock(knowledge_refresh_scheduler=None, skill_reviews=reviews)
+    monkeypatch.setattr(bot.orchestrator, "_skill_reviews", reviews)
     model = ScriptedModel([answer("The scripted answer to the request.")])
     install_model_providers(monkeypatch, {"default": model})
     with patch_response_runner_module(
@@ -8674,7 +8595,7 @@ async def test_a_finished_response_tells_automations_its_source_events(
     assert bot.client is not None
     bot.client.room_send.return_value = nio.RoomSendResponse(event_id="$response", room_id="!room:localhost")
     automations = _RecordedAutomations()
-    coordinator.deps.runtime.orchestrator = MagicMock(knowledge_refresh_scheduler=None, automations=automations)
+    monkeypatch.setattr(bot.orchestrator, "_automations", automations)
     model = ScriptedModel([answer("The scripted answer to the request.")])
     install_model_providers(monkeypatch, {"default": model})
     request = _plain_request(_target())
@@ -8690,12 +8611,15 @@ async def test_a_finished_response_tells_automations_its_source_events(
     assert "The scripted answer to the request." in bot.client.room_send.await_args.kwargs["content"]["body"]
 
 
-def test_a_finished_approval_continuation_tells_automations_its_source_events(tmp_path: Path) -> None:
+def test_a_finished_approval_continuation_tells_automations_its_source_events(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """A run that paused for approval is verified when its continuation ends, not after the hourly fallback."""
     bot = _bot(tmp_path)
     coordinator = unwrap_extracted_collaborator(bot._response_runner)
     automations = _RecordedAutomations()
-    coordinator.deps.runtime.orchestrator = MagicMock(knowledge_refresh_scheduler=None, automations=automations)
+    monkeypatch.setattr(bot.orchestrator, "_automations", automations)
     identity = ToolExecutionIdentity(
         channel="matrix",
         agent_name="general",

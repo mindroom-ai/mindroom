@@ -40,6 +40,7 @@ from tests.api.test_oauth_api import (
     _stored_oauth_credentials,
     _use_runtime_auth_settings,
 )
+from tests.runtime_fakes import bind_test_embedded_runtime
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -80,6 +81,7 @@ def portal(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, enforce_turn_authori
         },
     }
     main.initialize_api_app(main.app, paths)
+    bind_test_embedded_runtime(main.app)
     _publish_config(main.app, paths, payload)
     _use_runtime_auth_settings(main.app)
     provider = _fake_provider(provider_id="google_drive", credential_service="google_drive_oauth")
@@ -114,6 +116,7 @@ def _enable_egress_broker(portal: dict[str, Any]) -> None:
     paths = replace(portal["paths"], process_env={**portal["paths"].process_env, "MINDROOM_EGRESS_BROKER_PORT": "8768"})
     portal["paths"] = paths
     main.initialize_api_app(main.app, paths)
+    bind_test_embedded_runtime(main.app)
     _publish_config(main.app, paths, portal["payload"])
     _use_runtime_auth_settings(main.app)
 
@@ -463,6 +466,7 @@ def test_personal_mutations_reject_cleartext_public_origin(
         env.pop("MINDROOM_PUBLIC_URL")
     paths = replace(portal["paths"], process_env=env)
     main.initialize_api_app(main.app, paths)
+    bind_test_embedded_runtime(main.app)
     _publish_config(main.app, paths, portal["payload"])
     _use_runtime_auth_settings(main.app)
     client = TestClient(main.app, base_url="http://portal.example.org")
@@ -617,6 +621,7 @@ def test_shared_service_account_is_not_a_personal_connection(portal: dict[str, A
         process_env={**portal["paths"].process_env, "GOOGLE_SERVICE_ACCOUNT_FILE": "service-account.json"},
     )
     main.initialize_api_app(main.app, paths)
+    bind_test_embedded_runtime(main.app)
     _publish_config(main.app, paths, portal["payload"])
     _use_runtime_auth_settings(main.app)
     response = portal["client"].get(
@@ -1057,7 +1062,11 @@ def _connected(portal: dict[str, Any], user: str, agent: str, provider: str = "g
 
 
 def _sqlite_stores(portal: dict[str, Any]) -> list[Path]:
-    return sorted(portal["paths"].storage_root.rglob("*.sqlite3"))
+    """Return the credential stores under the storage root, leaving out the runtime's own control state."""
+    storage_root = portal["paths"].storage_root
+    return sorted(
+        path for path in storage_root.rglob("*.sqlite3") if not path.is_relative_to(storage_root / "control_state")
+    )
 
 
 def test_catalog_reads_no_connection_state(portal: dict[str, Any], monkeypatch: pytest.MonkeyPatch) -> None:

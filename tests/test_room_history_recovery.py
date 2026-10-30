@@ -30,6 +30,7 @@ from mindroom.matrix.conversation_hydration import (
 from mindroom.matrix.users import AgentMatrixUser
 from tests.bot_helpers import make_test_agent_bot
 from tests.conftest import TEST_PASSWORD, bind_runtime_paths, runtime_paths_for, test_runtime_paths
+from tests.journal_helpers import record_room_history_recovery
 from tests.journal_membership_helpers import admit_room_membership
 
 if TYPE_CHECKING:
@@ -368,7 +369,7 @@ async def test_repair_streams_twenty_thousand_edit_heavy_events_in_page_batches(
     CountingProjectedEvent.live = 0
     CountingProjectedEvent.peak = 0
     monkeypatch.setattr(conversation_hydration, "ProjectedEvent", CountingProjectedEvent)
-    recovery = await principal.record_room_history_recovery(ROOM)
+    recovery = await record_room_history_recovery(principal, ROOM)
     assert recovery is not None
     client = LazyEditedHistoryClient(total_events=20_000)
     recording = RecordingRecoveryStore(principal)
@@ -396,7 +397,7 @@ async def test_recovery_crash_keeps_obligation_open_and_retry_converges(
     principal: PrincipalStore,
 ) -> None:
     """Committed recovery pages are safe to re-fetch after an interrupted walk."""
-    recovery = await principal.record_room_history_recovery(ROOM)
+    recovery = await record_room_history_recovery(principal, ROOM)
     assert recovery is not None
     crashing_store = RecordingRecoveryStore(principal, fail_before_chunk=4)
     crashing_client = LazyEditedHistoryClient(total_events=500)
@@ -443,7 +444,7 @@ async def test_membership_epoch_change_stops_recovery_before_final_settlement(
         if page_number == 2:
             await admit_room_membership(principal, ROOM, "leave", source=DepartureSource.LOCAL)
 
-    recovery = await principal.record_room_history_recovery(ROOM)
+    recovery = await record_room_history_recovery(principal, ROOM)
     assert recovery is not None
     client = LazyEditedHistoryClient(total_events=300, before_page=fence_before_second_page)
     recording = RecordingRecoveryStore(principal)
@@ -473,9 +474,9 @@ async def test_new_recovery_revision_stops_stale_walk_before_final_settlement(
     async def supersede_before_second_page(page_number: int) -> None:
         nonlocal newer
         if page_number == 2:
-            newer = await principal.record_room_history_recovery(ROOM)
+            newer = await record_room_history_recovery(principal, ROOM)
 
-    recovery = await principal.record_room_history_recovery(ROOM)
+    recovery = await record_room_history_recovery(principal, ROOM)
     assert recovery is not None
     client = LazyEditedHistoryClient(total_events=300, before_page=supersede_before_second_page)
     recording = RecordingRecoveryStore(principal)
@@ -508,7 +509,7 @@ async def test_repair_ignores_a_post_gap_first_page_and_walks_to_server_exhausti
             ([raw("$missing", "missing", ts=2_000)], None),
         ],
     )
-    await principal.record_room_history_recovery(ROOM)
+    await record_room_history_recovery(principal, ROOM)
 
     await hydrator(principal, client, prompt_window_messages=1).ensure_hydrated(room_id=ROOM, thread_id=None)
 
@@ -525,7 +526,7 @@ async def test_concurrent_room_and_thread_readers_share_one_recovery_walk(
     thread_id = "$root"
     await mark_complete(principal, None)
     await mark_complete(principal, thread_id)
-    await principal.record_room_history_recovery(ROOM)
+    await record_room_history_recovery(principal, ROOM)
     client = PagedClient(
         pages=[
             (
@@ -554,7 +555,7 @@ async def test_reader_holding_a_settled_recovery_does_not_walk_again(
     principal: PrincipalStore,
 ) -> None:
     """The exact durable obligation stops a late reader from paying twice."""
-    recovery = await principal.record_room_history_recovery(ROOM)
+    recovery = await record_room_history_recovery(principal, ROOM)
     client = PagedClient(pages=[([raw("$one", "one", ts=1_000)], None)])
     repair = hydrator(principal, client)
 
@@ -588,7 +589,7 @@ async def test_unreadable_server_exhaustion_settles_the_repair(
     threads that hold such an event.
     """
     client = PagedClient(pages=[([raw("$readable", "readable", ts=2_000), UNDECRYPTABLE], "older"), ([], None)])
-    await principal.record_room_history_recovery(ROOM)
+    await record_room_history_recovery(principal, ROOM)
 
     await caller_hydrator(principal, client, require_complete=require_complete).ensure_hydrated(
         room_id=ROOM,
@@ -626,7 +627,7 @@ async def test_bad_event_at_server_exhaustion_settles_without_completeness(
             self.calls += 1
             return nio.RoomMessagesResponse(ROOM, [malformed], "start", None)  # type: ignore[list-item]
 
-    await principal.record_room_history_recovery(ROOM)
+    await record_room_history_recovery(principal, ROOM)
 
     await caller_hydrator(principal, BadEventClient(pages=[]), require_complete=require_complete).ensure_hydrated(
         room_id=ROOM,
@@ -659,7 +660,7 @@ async def test_repair_accepts_encrypted_attachments_and_cleared_avatars(
     else:
         old.update(type="m.room.avatar", state_key="", content={"url": None})
     client = PagedClient(pages=[([raw("$new", "new message", ts=2_000), old], None)])
-    await principal.record_room_history_recovery(ROOM)
+    await record_room_history_recovery(principal, ROOM)
 
     await hydrator(principal, client).ensure_hydrated(room_id=ROOM, thread_id=None)
 
@@ -681,7 +682,7 @@ async def test_repair_pagination_error_leaves_the_obligation_repairable(principa
             nio.RoomMessagesError("M_FORBIDDEN"),
         ],
     )
-    recovery = await principal.record_room_history_recovery(ROOM)
+    recovery = await record_room_history_recovery(principal, ROOM)
 
     with pytest.raises(_HydrationError, match="Could not fetch history"):
         await hydrator(principal, client).ensure_hydrated(room_id=ROOM, thread_id=None)
@@ -694,7 +695,7 @@ async def test_repair_pagination_error_leaves_the_obligation_repairable(principa
 async def test_repair_repeated_token_leaves_the_obligation_repairable(principal: PrincipalStore) -> None:
     """A stalled continuation token is not server exhaustion."""
     client = PagedClient(pages=[([], "same"), ([], "same")])
-    recovery = await principal.record_room_history_recovery(ROOM)
+    recovery = await record_room_history_recovery(principal, ROOM)
 
     with pytest.raises(_HydrationError, match="repeated pagination token"):
         await hydrator(principal, client).ensure_hydrated(room_id=ROOM, thread_id=None)
@@ -714,7 +715,7 @@ async def test_repair_ceiling_truncates_and_a_fresh_hydrator_does_not_walk_again
             ([raw("$must-not-fetch", "older", ts=2_000)], None),
         ],
     )
-    await principal.record_room_history_recovery(ROOM)
+    await record_room_history_recovery(principal, ROOM)
 
     await hydrator(principal, client, max_requests=1).ensure_hydrated(room_id=ROOM, thread_id=None)
 
@@ -744,7 +745,7 @@ async def test_repair_raw_event_ceiling_stops_inside_a_page(principal: Principal
             ),
         ],
     )
-    await principal.record_room_history_recovery(ROOM)
+    await record_room_history_recovery(principal, ROOM)
 
     await hydrator(principal, client, max_fetched_events=1).ensure_hydrated(room_id=ROOM, thread_id=None)
 
@@ -774,7 +775,7 @@ async def test_membership_movement_during_repair_installs_nothing(principal: Pri
             return await super().room_messages(room_id, start, direction, limit)
 
     client = MovingMembershipClient(pages=[([raw("$stale", "stale", ts=1_000)], None)])
-    recovery = await principal.record_room_history_recovery(ROOM)
+    recovery = await record_room_history_recovery(principal, ROOM)
 
     await hydrator(principal, client)._repair(recovery)
 
@@ -793,7 +794,7 @@ async def test_late_unknown_signal_after_departure_repairs_the_next_membership(
     assert await principal.membership_epoch(ROOM) == old_epoch + 1
     await admit_room_membership(principal, ROOM, "join")
 
-    recovery = await principal.record_room_history_recovery(ROOM)
+    recovery = await record_room_history_recovery(principal, ROOM)
     client = PagedClient(pages=[([raw("$current", "current", ts=2_000)], None)])
 
     await hydrator(principal, client).ensure_hydrated(room_id=ROOM, thread_id=None)
@@ -811,15 +812,18 @@ async def test_unknown_signal_while_departure_is_fenced_is_a_no_op(
     """A gap from an ended membership cannot create work until a join is confirmed."""
     await admit_room_membership(principal, ROOM, "leave", source=DepartureSource.LOCAL)
 
-    recovery = await principal.record_room_history_recovery(ROOM)
+    recovery = await record_room_history_recovery(principal, ROOM)
 
     assert recovery is None
     assert await principal.room_history_recovery(ROOM) is None
 
 
 async def test_recording_creates_a_repairable_unknown_obligation(principal: PrincipalStore) -> None:
-    """Classic sync can honestly persist only the fact that a room gap exists."""
-    recovery = await principal.record_room_history_recovery(ROOM)
+    """Classic sync can honestly persist only the fact that a room gap exists.
+
+    An empty projection creates one too: no visible rows cannot prove that a skipped interval contained no state.
+    """
+    recovery = await record_room_history_recovery(principal, ROOM)
 
     assert recovery == RoomHistoryRecovery(
         room_id=ROOM,
@@ -834,14 +838,6 @@ async def test_recording_creates_a_repairable_unknown_obligation(principal: Prin
     }
 
 
-async def test_an_empty_projection_still_creates_an_obligation(principal: PrincipalStore) -> None:
-    """No visible rows cannot prove that a skipped interval contained no state."""
-    recovery = await principal.record_room_history_recovery(ROOM)
-
-    assert recovery.state is HistoryRecoveryState.REPAIRABLE
-    assert await principal.room_history_recovery(ROOM) == recovery
-
-
 async def test_recording_retracts_completeness_for_the_room_and_all_threads(
     principal: PrincipalStore,
 ) -> None:
@@ -851,7 +847,7 @@ async def test_recording_retracts_completeness_for_the_room_and_all_threads(
         await mark_complete(principal, thread_id)
         assert await principal.conversation_is_complete(room_id=ROOM, thread_id=thread_id)
 
-    recovery = await principal.record_room_history_recovery(ROOM)
+    recovery = await record_room_history_recovery(principal, ROOM)
 
     for thread_id in conversations:
         assert not await principal.conversation_is_hydrated(room_id=ROOM, thread_id=thread_id)
@@ -879,7 +875,7 @@ async def test_truncated_obligation_leaves_bounded_context_readable_but_incomple
 ) -> None:
     """A spent recovery ceiling exposes context without certifying completeness."""
     await mark_complete(principal, None)
-    recovery = await principal.record_room_history_recovery(ROOM)
+    recovery = await record_room_history_recovery(principal, ROOM)
     assert await install_recovery_events(
         principal,
         recovery,
@@ -910,7 +906,7 @@ async def test_truncated_obligation_leaves_bounded_context_readable_but_incomple
 
 async def test_a_new_abandonment_resets_truncated_to_repairable(principal: PrincipalStore) -> None:
     """A new skipped interval needs a new walk even when its cause repeats."""
-    recovery = await principal.record_room_history_recovery(ROOM)
+    recovery = await record_room_history_recovery(principal, ROOM)
     assert (
         await principal.settle_room_history_recovery(
             recovery,
@@ -922,7 +918,7 @@ async def test_a_new_abandonment_resets_truncated_to_repairable(principal: Princ
         is HistoryRecoveryOutcome.TRUNCATED
     )
 
-    repeated = await principal.record_room_history_recovery(ROOM)
+    repeated = await record_room_history_recovery(principal, ROOM)
 
     assert repeated == RoomHistoryRecovery(
         room_id=ROOM,
@@ -937,7 +933,7 @@ async def test_settlement_publishes_only_after_paginated_events_and_repairs_obli
     principal: PrincipalStore,
 ) -> None:
     """Only the final commit publishes coverage and clears the exact obligation."""
-    recovery = await principal.record_room_history_recovery(ROOM)
+    recovery = await record_room_history_recovery(principal, ROOM)
     events = tuple(projected(f"${index}", str(index), ts=index) for index in range(1, 6))
     assert await install_recovery_events(principal, recovery, events)
 
@@ -970,7 +966,7 @@ async def test_successful_room_repair_restores_existing_thread_completeness(
     """A room-wide proof makes pre-gap thread coverage trustworthy again."""
     thread_id = "$thread"
     await mark_complete(principal, thread_id)
-    recovery = await principal.record_room_history_recovery(ROOM)
+    recovery = await record_room_history_recovery(principal, ROOM)
     assert recovery is not None
     assert not await principal.conversation_is_hydrated(room_id=ROOM, thread_id=thread_id)
     assert await install_recovery_events(
@@ -1004,7 +1000,7 @@ async def test_unreadable_room_repair_revokes_every_marker_in_the_room(principal
     thread_id = "$thread"
     await mark_complete(principal, None)
     await mark_complete(principal, thread_id)
-    recovery = await principal.record_room_history_recovery(ROOM)
+    recovery = await record_room_history_recovery(principal, ROOM)
     assert recovery is not None
 
     outcome = await principal.settle_room_history_recovery(
@@ -1026,7 +1022,7 @@ async def test_truncated_settlement_keeps_markers_despite_unreadable_events(prin
     """A truncated obligation already withholds completeness, so its bounded context stays readable."""
     thread_id = "$thread"
     await mark_complete(principal, thread_id)
-    recovery = await principal.record_room_history_recovery(ROOM)
+    recovery = await record_room_history_recovery(principal, ROOM)
     assert recovery is not None
 
     outcome = await principal.settle_room_history_recovery(
@@ -1042,36 +1038,12 @@ async def test_truncated_settlement_keeps_markers_despite_unreadable_events(prin
     assert not await principal.conversation_is_complete(room_id=ROOM, thread_id=thread_id)
 
 
-async def test_exact_object_mismatch_publishes_nothing(principal: PrincipalStore) -> None:
-    """An older walk can neither add facts nor publish over a newer abandonment."""
-    stale = await principal.record_room_history_recovery(ROOM)
-    current = await principal.record_room_history_recovery(ROOM)
-    assert not await install_recovery_events(
-        principal,
-        stale,
-        (projected("$stale", "stale", ts=1),),
-    )
-
-    outcome = await principal.settle_room_history_recovery(
-        stale,
-        exhausted_server=True,
-        unreadable=False,
-        attempted_policy_rank=4,
-        expected_membership_epoch=await principal.membership_epoch(ROOM),
-    )
-
-    assert outcome is HistoryRecoveryOutcome.SUPERSEDED
-    assert await principal.room_history_recovery(ROOM) == current
-    assert (await principal.read_conversation(room_id=ROOM, thread_id=None, limit=10)).messages == ()
-    assert not await principal.conversation_is_hydrated(room_id=ROOM, thread_id=None)
-
-
 async def test_repeated_recovery_supersedes_an_in_flight_settlement(
     principal: PrincipalStore,
 ) -> None:
-    """A later identical abandonment cannot be discharged by an older walk."""
-    old = await principal.record_room_history_recovery(ROOM)
-    newer = await principal.record_room_history_recovery(ROOM)
+    """A later identical abandonment cannot be discharged by an older walk, which publishes nothing."""
+    old = await record_room_history_recovery(principal, ROOM)
+    newer = await record_room_history_recovery(principal, ROOM)
     assert not await install_recovery_events(
         principal,
         old,
@@ -1095,7 +1067,7 @@ async def test_repeated_recovery_supersedes_an_in_flight_settlement(
 
 async def test_repaired_revision_is_not_reused_by_a_later_gap(principal: PrincipalStore) -> None:
     """Deleting a repaired row must not let a stale walk consume a new gap."""
-    first = await principal.record_room_history_recovery(ROOM)
+    first = await record_room_history_recovery(principal, ROOM)
     assert first is not None
     assert await install_recovery_events(
         principal,
@@ -1112,7 +1084,7 @@ async def test_repaired_revision_is_not_reused_by_a_later_gap(principal: Princip
         )
         is HistoryRecoveryOutcome.REPAIRED
     )
-    current = await principal.record_room_history_recovery(ROOM)
+    current = await record_room_history_recovery(principal, ROOM)
     assert current is not None
     assert not await install_recovery_events(
         principal,
@@ -1138,7 +1110,7 @@ async def test_expected_membership_mismatch_installs_neither_events_nor_settleme
     principal: PrincipalStore,
 ) -> None:
     """A recovery walk from the wrong membership cannot leave either of its effects."""
-    recovery = await principal.record_room_history_recovery(ROOM)
+    recovery = await record_room_history_recovery(principal, ROOM)
     assert not await install_recovery_events(
         principal,
         recovery,
@@ -1170,7 +1142,7 @@ async def test_redaction_lookup_repairs_a_room_whose_sync_skipped_a_gap(
         test_runtime_paths(tmp_path),
     )
     agent_user = AgentMatrixUser(agent_name="general", password=TEST_PASSWORD, display_name="General", user_id=BOT)
-    bot = make_test_agent_bot(agent_user, tmp_path, config, runtime_paths_for(config), journal_store=journal_store)
+    bot = make_test_agent_bot(agent_user, config, runtime_paths_for(config), journal_store=journal_store)
     await bot._turn_store.warm()
     redaction = {
         "event_id": "$redaction",
@@ -1182,7 +1154,7 @@ async def test_redaction_lookup_repairs_a_room_whose_sync_skipped_a_gap(
     }
     client = PagedClient(pages=[([redaction], None)])
     bot.client = client  # type: ignore[assignment]
-    await bot.journal_principal().record_room_history_recovery(ROOM)
+    await record_room_history_recovery(bot.journal_principal(), ROOM)
 
     assert await bot.redacted_event_ids(ROOM, ("$kept", "$secret")) == frozenset({"$secret"})
     assert await bot.journal_principal().room_history_recovery(ROOM) is None

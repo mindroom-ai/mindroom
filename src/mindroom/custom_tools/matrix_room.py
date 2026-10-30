@@ -23,7 +23,7 @@ from mindroom.matrix.client_visible_messages import (
     trusted_visible_sender_ids,
 )
 from mindroom.matrix.room_history_reads import RoomThreadsPageError, get_room_threads_page
-from mindroom.thread_summary import current_thread_summary
+from mindroom.thread_summary.state import current_thread_summary
 from mindroom.tool_system.authoring import Toolkit
 from mindroom.tool_system.runtime_context import ToolRuntimeContext, get_tool_runtime_context
 

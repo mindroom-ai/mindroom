@@ -141,13 +141,20 @@ class FakeMatrix:
 
 
 @dataclass
+class FakeRuntime:
+    """The runtime part Slack delivery reads: its response admission gate."""
+
+    response_admission_gate: ResponseAdmissionGate = field(default_factory=ResponseAdmissionGate)
+
+
+@dataclass
 class FakeBot:
     """The parts of a running agent bot that Slack delivery uses."""
 
     client: nio.AsyncClient | AsyncMock
     latest_thread_event_id_if_needed: AsyncMock = field(default_factory=AsyncMock)
     running: bool = True
-    admission_gate: ResponseAdmissionGate = field(default_factory=ResponseAdmissionGate)
+    orchestrator: FakeRuntime = field(default_factory=FakeRuntime)
 
 
 def runtime_for(

@@ -97,10 +97,10 @@ async def test_failed_retirement_fails_startup_before_anything_serves(tmp_path: 
     with (
         patch("mindroom.orchestrator.setup_logging"),
         patch(
-            "mindroom.orchestrator.retire_state_root_worker_mounts",
+            "mindroom.orchestration.storage_preparation.retire_state_root_worker_mounts",
             side_effect=WorkerBackendError("Could not stop workers that mount whole state roots: old-worker"),
         ),
-        patch("mindroom.orchestrator.migrate_conversation_storage") as convert,
+        patch("mindroom.orchestration.storage_preparation.migrate_conversation_storage") as convert,
         patch("mindroom.orchestrator._MultiAgentOrchestrator") as orchestrator,
         pytest.raises(WorkerBackendError, match="old-worker"),
     ):

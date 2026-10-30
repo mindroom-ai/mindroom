@@ -13,7 +13,6 @@ from typing import TYPE_CHECKING, Literal
 from pydantic import BaseModel, Field
 
 from mindroom.agent_loop.helper import complete_prompt
-from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.entity_resolution import entity_identity_registry
 from mindroom.helper_usage import record_system_usage
 from mindroom.logging_config import get_logger
@@ -189,12 +188,7 @@ def resolve_live_shared_agent_names(
 ) -> set[str]:
     """Return the running shared agent names."""
     active_config = config or orchestrator.config
-    assert active_config is not None
-    return {
-        name
-        for name, bot in orchestrator.agent_bots.items()
-        if name != ROUTER_AGENT_NAME and name in active_config.agents and bot.running
-    }
+    return {name for name in orchestrator.running_entity_names() if name in active_config.agents}
 
 
 def resolve_team_materializable_agent_names(

@@ -32,6 +32,7 @@ from tests.api.test_oauth_api import (
     _stored_oauth_credentials,
     _use_runtime_auth_settings,
 )
+from tests.runtime_fakes import bind_test_embedded_runtime
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -129,6 +130,7 @@ def workspace_portal(
         },
     }
     main.initialize_api_app(main.app, paths)
+    bind_test_embedded_runtime(main.app)
     _publish_config(main.app, paths, payload)
     _use_runtime_auth_settings(main.app)
     config = main._app_context(main.app).runtime_config

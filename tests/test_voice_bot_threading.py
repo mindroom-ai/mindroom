@@ -51,6 +51,7 @@ from tests.conftest import (
     unwrap_extracted_collaborator,
     wrap_extracted_collaborators,
 )
+from tests.runtime_fakes import ready_runtime
 from tests.turn_dispatch_helpers import prepared_turn_recorder
 
 if TYPE_CHECKING:
@@ -59,16 +60,12 @@ if TYPE_CHECKING:
     from mindroom.turn_record import TurnRecord
 
 
-def _agent_bot(*, agent_user: AgentMatrixUser, storage_path: Path, config: Config, rooms: list[str]) -> AgentBot:
-    """Construct an agent bot with the explicit runtime bound to the test config."""
+def _agent_bot(*, agent_user: AgentMatrixUser, config: Config, rooms: list[str]) -> AgentBot:
+    """Construct an agent bot in a runtime whose router has not finished its first sync, so no voice echo is expected."""
+    runtime = ready_runtime(config, runtime_paths_for(config))
+    runtime.not_ready.add(ROUTER_AGENT_NAME)
     return install_runtime_journal_support(
-        make_test_agent_bot(
-            agent_user=agent_user,
-            storage_path=storage_path,
-            config=config,
-            runtime_paths=runtime_paths_for(config),
-            rooms=rooms,
-        ),
+        make_test_agent_bot(agent_user=agent_user, rooms=rooms, orchestrator=runtime),
     )
 
 
@@ -97,7 +94,7 @@ def mock_home_bot(generate_response_mock: AsyncMock) -> AgentBot:
         ),
     )
     config = bind_runtime_paths(config, test_runtime_paths(tmpdir))
-    bot = _agent_bot(agent_user=agent_user, storage_path=tmpdir, config=config, rooms=["!test:server"])
+    bot = _agent_bot(agent_user=agent_user, config=config, rooms=["!test:server"])
     wrap_extracted_collaborators(bot)
     bot.client = AsyncMock()
     bot.client.rooms = {}

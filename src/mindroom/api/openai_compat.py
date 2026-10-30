@@ -150,17 +150,16 @@ def _release_openai_completion_lock(completion_lock: asyncio.Lock) -> None:
         completion_lock.release()
 
 
-async def _finish_openai_completion(completion_lock: asyncio.Lock, budget_monitor: BudgetMonitor | None) -> None:
+async def _finish_openai_completion(completion_lock: asyncio.Lock, budget_monitor: BudgetMonitor) -> None:
     """Release the session lock and let budgets count the spend of the finished completion."""
     _release_openai_completion_lock(completion_lock)
-    if budget_monitor is not None:
-        budget_monitor.response_finished()
+    budget_monitor.response_finished()
 
 
 def _attach_openai_completion_lock_release(
     response: JSONResponse | StreamingResponse,
     completion_lock: asyncio.Lock,
-    budget_monitor: BudgetMonitor | None,
+    budget_monitor: BudgetMonitor,
 ) -> JSONResponse | StreamingResponse:
     if not isinstance(response, (OpenAIJSONResponse, OpenAIStreamingResponse)):
         _release_openai_completion_lock(completion_lock)
@@ -420,7 +419,6 @@ def _requester_authority(
     requester_id = resolve_human_requester_alias(requester_id, config, runtime_paths)
     if not is_human_requester_id(requester_id, config, runtime_paths):
         return error_response(403, "API requester must be a human identity", code="permission_denied")
-    app_state = config_lifecycle.app_state(request.app)
 
     def current_config() -> Config | None:
         api_state = config_lifecycle.require_api_state(request.app)
@@ -428,13 +426,14 @@ def _requester_authority(
             snapshot = api_state.snapshot
             return snapshot.runtime_config if snapshot.runtime_paths == runtime_paths else None
 
+    runtime = config_lifecycle.app_state(request.app).runtime
     return DetachedRequesterContext(
         requester_id=requester_id,
         config=config,
         runtime_paths=runtime_paths,
-        agent_reply_memberships=app_state.agent_reply_memberships,
+        agent_reply_memberships=runtime.agent_reply_memberships,
         config_provider=current_config,
-        budget_monitor=app_state.budget_monitor,
+        budget_monitor=runtime.budget_monitor,
     )
 
 
@@ -695,8 +694,9 @@ async def _chat_completions(
         thread_id=None,
         resolved_thread_id=None,
     )
-    knowledge_refresh_scheduler = config_lifecycle.app_state(request.app).knowledge_refresh_scheduler
-    budget_monitor = config_lifecycle.app_state(request.app).budget_monitor
+    runtime = config_lifecycle.app_state(request.app).runtime
+    knowledge_refresh_scheduler = runtime.knowledge_refresh_scheduler
+    budget_monitor = runtime.budget_monitor
     budget = TurnBudget(monitor=budget_monitor, requester_id=execution_identity.requester_id)
     completion_lock = _openai_completion_lock(
         runtime_paths=runtime_paths,

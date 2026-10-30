@@ -12,6 +12,7 @@ from aiohttp import web
 from fastapi import FastAPI
 
 from mindroom.api import computers, config_lifecycle
+from mindroom.api.app_state import ensure_app_state
 from mindroom.api.main import _RuntimeDashboardCorsMiddleware
 from mindroom.config.main import Config
 from mindroom.constants import resolve_runtime_paths
@@ -138,7 +139,7 @@ def computer_app(peer: ComputerPeer, tmp_path: Path) -> FastAPI:
             },
         )
         config = Config()
-        state = config_lifecycle.ensure_app_state(app)
+        state = ensure_app_state(app)
         state.api_state = config_lifecycle.ApiState(
             threading.Lock(),
             config_lifecycle.ApiSnapshot(1, paths, runtime_config=config),

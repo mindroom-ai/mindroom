@@ -68,6 +68,7 @@ from tests.api.test_oauth_api import (
 )
 from tests.conftest import SETTLE_TIMEOUT_SECONDS
 from tests.oauth_test_utils import corrupt_oauth_credential_payload
+from tests.runtime_fakes import bind_test_embedded_runtime
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterator
@@ -163,6 +164,7 @@ def egress_portal(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, enforce_turn_
         },
     }
     main.initialize_api_app(main.app, paths)
+    bind_test_embedded_runtime(main.app)
     _publish_config(main.app, paths, payload)
     _use_runtime_auth_settings(main.app)
     headers = {name: _signed_headers(key, name) for name in ("alice", "bob", "carol", "admin")}
@@ -266,6 +268,7 @@ def _restart_with_env(portal: dict[str, Any], **env: str) -> None:
     """Restart the API with `env` added to the portal's process environment, then republish its config."""
     portal["paths"] = replace(portal["paths"], process_env={**portal["paths"].process_env, **env})
     main.initialize_api_app(main.app, portal["paths"])
+    bind_test_embedded_runtime(main.app)
     _republish(portal)
 
 
@@ -1600,7 +1603,11 @@ def test_listing_accounts_never_connected_creates_no_credential_store(oauth_egre
         _listing(portal, user)
         for agent in ("personal", "shared_dev"):
             assert _state(portal, user, agent).status_code == 200
-    assert list(portal["paths"].storage_root.rglob("*.sqlite3")) == []
+    storage_root = portal["paths"].storage_root
+    # The runtime's own control state is not a credential store.
+    assert [
+        path for path in storage_root.rglob("*.sqlite3") if not path.is_relative_to(storage_root / "control_state")
+    ] == []
 
 
 def test_key_status_is_read_off_the_event_loop(

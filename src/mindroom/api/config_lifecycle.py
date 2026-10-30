@@ -5,13 +5,13 @@ from __future__ import annotations
 import threading
 import weakref
 from contextlib import ExitStack
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, replace
 from enum import Enum, auto
 from typing import TYPE_CHECKING
 
 from fastapi import FastAPI, HTTPException, Request
 
-from mindroom.agent_reply_membership import AgentReplyMembershipIndex
+from mindroom.api.app_state import app_state
 from mindroom.config.commit import ConfigCommit, ConfigComposedFromIncludesError, write_config_commit
 from mindroom.config.load_attempt import (
     ConfigLoad,
@@ -30,26 +30,9 @@ from mindroom.logging_config import get_logger
 from mindroom.tool_jobs.settings import pending_background_tool_jobs_restart
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable
-    from pathlib import Path
+    from collections.abc import Callable
 
     from mindroom import constants
-    from mindroom.agent_cli.session import TurnToolRegistry
-    from mindroom.api.auth import ApiAuthState
-    from mindroom.api.computers import ComputerRuntime
-    from mindroom.api.mcp_gateway import GatewayRuntime
-    from mindroom.api.usage_export import UsageExportRunner
-    from mindroom.budgets.monitor import BudgetMonitor
-    from mindroom.config.reload_status import ConfigReloadStatus
-    from mindroom.external_triggers.store import TriggerDeliverySnapshot
-    from mindroom.knowledge.refresh_scheduler import KnowledgeRefreshScheduler
-    from mindroom.knowledge.watch import KnowledgeSourceWatcher
-    from mindroom.response_activity import ActiveResponseIdentity, ActiveScriptRunInfo
-    from mindroom.response_admission import ResponseAdmissionGate
-    from mindroom.scheduling.runtime import ScheduledTaskRuntime
-    from mindroom.thread_export.workspace_sync import WorkspaceThreadExportRunner
-    from mindroom.worker_computer.sessions import ComputerSessionStore
-    from mindroom.workers.backend import WorkerBackend
 
 logger = get_logger(__name__)
 _REQUEST_SNAPSHOT_SCOPE_KEY = "api_snapshot"
@@ -79,7 +62,6 @@ class ApiSnapshot:
     runtime_config: Config | None = None
     config_load_result: ConfigLoadResult | None = None
     source_fingerprint: str | None = None
-    source_files: frozenset[Path] | None = None
     uses_includes: bool | None = None
 
 
@@ -89,70 +71,6 @@ class ApiState:
 
     config_lock: threading.Lock
     snapshot: ApiSnapshot
-
-
-@dataclass(frozen=True)
-class ExternalTriggerRuntime:
-    """Runtime objects needed to deliver accepted external triggers."""
-
-    client: object
-    conversation_reader: object
-    config_generation: int
-    is_trigger_snapshot_ready: Callable[[TriggerDeliverySnapshot], Awaitable[bool]]
-    agent_reply_memberships: AgentReplyMembershipIndex
-    response_admission_gate: ResponseAdmissionGate
-    wait_for_admission_or_shutdown: Callable[[], Awaitable[bool]]
-
-
-@dataclass
-class _MindroomAppState:
-    """Single typed namespace for FastAPI ``app.state`` attributes used across the API."""
-
-    api_state: ApiState | None = None
-    # The auth clients of the runtime the app last authenticated a request for.
-    api_auth_state: ApiAuthState | None = None
-    orchestrator_knowledge_refresh_scheduler: KnowledgeRefreshScheduler | None = None
-    knowledge_source_watcher: KnowledgeSourceWatcher | None = None
-    knowledge_refresh_scheduler: KnowledgeRefreshScheduler | None = None
-    thread_export_runner: WorkspaceThreadExportRunner | None = None
-    leave_matrix_room: Callable[[str, str], Awaitable[bool]] | None = None
-    external_trigger_runtime: ExternalTriggerRuntime | None = None
-    # Each bound integration's runtime by integration name; the integration's own routes read its entry.
-    integration_runtimes: dict[str, object] = field(default_factory=dict)
-    agent_reply_memberships: AgentReplyMembershipIndex = field(default_factory=AgentReplyMembershipIndex)
-    response_admission_gate: ResponseAdmissionGate | None = None
-    budget_monitor: BudgetMonitor | None = None
-    # The embedded runtime's scheduled-task owner, whose bots back schedule edits the router may not write.
-    scheduled_tasks: ScheduledTaskRuntime | None = None
-    openai_responses: set[ActiveResponseIdentity] = field(default_factory=set)
-    active_calls: Callable[[], list[ActiveResponseIdentity]] | None = None
-    active_script_runs: Callable[[], Awaitable[list[ActiveScriptRunInfo]]] | None = None
-    config_reload_status: Callable[[], ConfigReloadStatus] | None = None
-    script_worker_keepalive: Callable[[WorkerBackend], None] | None = None
-    mcp_gateway_runtime: GatewayRuntime | None = None
-    computer_runtime: ComputerRuntime | None = None
-    computer_sessions: ComputerSessionStore | None = None
-    agent_cli_registry: TurnToolRegistry | None = None
-    usage_export_runner: UsageExportRunner | None = None
-
-
-def ensure_app_state(api_app: FastAPI) -> _MindroomAppState:
-    """Bind (or return) the :class:`MindroomAppState` for ``api_app``."""
-    existing = getattr(api_app.state, "mindroom_app_state", None)
-    if isinstance(existing, _MindroomAppState):
-        return existing
-    state = _MindroomAppState()
-    api_app.state.mindroom_app_state = state
-    return state
-
-
-def app_state(api_app: FastAPI) -> _MindroomAppState:
-    """Return the :class:`MindroomAppState` bound to ``api_app``."""
-    state = getattr(api_app.state, "mindroom_app_state", None)
-    if not isinstance(state, _MindroomAppState):
-        msg = "MindRoom app state is not initialized"
-        raise TypeError(msg)
-    return state
 
 
 def require_api_state(api_app: FastAPI) -> ApiState:
@@ -239,7 +157,6 @@ def _published_snapshot(
     runtime_config: Config | None | _Keep = _Keep.FIELD,
     config_load_result: ConfigLoadResult | None | _Keep = _Keep.FIELD,
     source_fingerprint: str | None | _Keep = _Keep.FIELD,
-    source_files: frozenset[Path] | None | _Keep = _Keep.FIELD,
     uses_includes: bool | None | _Keep = _Keep.FIELD,
 ) -> ApiSnapshot:
     """Return ``snapshot`` with the given fields as one new publication, always with a fresh commit revision."""
@@ -251,9 +168,28 @@ def _published_snapshot(
         runtime_config=snapshot.runtime_config if runtime_config is _Keep.FIELD else runtime_config,
         config_load_result=snapshot.config_load_result if config_load_result is _Keep.FIELD else config_load_result,
         source_fingerprint=snapshot.source_fingerprint if source_fingerprint is _Keep.FIELD else source_fingerprint,
-        source_files=snapshot.source_files if source_files is _Keep.FIELD else source_files,
         uses_includes=snapshot.uses_includes if uses_includes is _Keep.FIELD else uses_includes,
     )
+
+
+def publish_runtime_paths(state: ApiState, runtime_paths: constants.RuntimePaths) -> bool:
+    """Publish the snapshot again for ``runtime_paths``, dropping what was loaded for other paths; return whether they changed."""
+    with state.config_lock:
+        current = state.snapshot
+        changed = current.runtime_paths != runtime_paths
+        state.snapshot = (
+            _published_snapshot(
+                current,
+                runtime_paths=runtime_paths,
+                runtime_config=None,
+                config_load_result=None,
+                source_fingerprint=None,
+                uses_includes=None,
+            )
+            if changed
+            else _published_snapshot(current)
+        )
+    return changed
 
 
 def _stale_snapshot_error() -> HTTPException:
@@ -371,7 +307,6 @@ def _commit(
                 runtime_config=commit.config,
                 config_load_result=ConfigLoadResult(success=True),
                 source_fingerprint=commit.config.source_fingerprint,
-                source_files=commit.config.source_files,
                 uses_includes=commit.config.uses_includes,
             )
         return writer.state.snapshot if writer is not None else None
@@ -384,24 +319,15 @@ def _reconcile_knowledge_mode(
 ) -> None:
     """Mark semantic indexes stale where `current` moved a knowledge base across modes from the config it replaced.
 
-    The API reconciles only what it publishes on its own: dashboard saves and the standalone watcher's loads. The
-    embedded runtime reconciles each config it applies, which covers its own load and every tool commit.
+    The API reconciles only what it publishes on its own, its dashboard saves; the runtime reconciles each config it
+    applies, which covers its own load and every tool commit.
     """
     if previous is not None:
         reconcile_knowledge_mode_transition_states(previous, current, runtime_paths)
 
 
-def load_config_into_app(
-    runtime_paths: constants.RuntimePaths,
-    api_app: FastAPI,
-    *,
-    reconcile_knowledge: bool = False,
-) -> ConfigLoad:
-    """Load config from disk into one API app's committed config cache unless a newer commit wins.
-
-    `reconcile_knowledge` marks indexes stale for the knowledge-mode changes this load publishes; only the standalone
-    dashboard's file watcher asks for it (see `_reconcile_knowledge_mode`).
-    """
+def load_config_into_app(runtime_paths: constants.RuntimePaths, api_app: FastAPI) -> ConfigLoad:
+    """Load config from disk into one API app's committed config cache unless a newer commit wins."""
     state = require_api_state(api_app)
     snapshot = state.snapshot
     attempt = load_config_attempt(runtime_paths)
@@ -418,15 +344,6 @@ def load_config_into_app(
         same_source = (
             attempt.source_fingerprint is not None and attempt.source_fingerprint == current.source_fingerprint
         )
-        # A failed load publishes the union of the last good source set and the
-        # files the failed attempt read, so the watcher never loses last-good
-        # coverage while still covering newly added include files whose edit
-        # broke the config; the next successful load replaces the union with
-        # the real set, shrinking it back.
-        source_files = attempt.source_files
-        published_source_files = source_files if source_files is not None else current.source_files
-        if not result.success and source_files is not None and current.source_files is not None:
-            published_source_files = source_files | current.source_files
         published_uses_includes = result.uses_includes if result.uses_includes is not None else current.uses_includes
         if not result.success and current.uses_includes:
             published_uses_includes = True
@@ -436,11 +353,8 @@ def load_config_into_app(
             runtime_config=attempt.config if attempt.config is not None else current.runtime_config,
             config_load_result=result,
             source_fingerprint=attempt.source_fingerprint,
-            source_files=published_source_files,
             uses_includes=published_uses_includes,
         )
-    if reconcile_knowledge and attempt.config is not None:
-        _reconcile_knowledge_mode(current.runtime_config, attempt.config, runtime_paths)
     return attempt
 
 

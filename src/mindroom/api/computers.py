@@ -16,6 +16,7 @@ from nio.exceptions import ProtocolError
 from pydantic import BaseModel, ConfigDict, Field
 
 from mindroom.api import config_lifecycle
+from mindroom.api.app_state import ensure_app_state
 from mindroom.background_tasks import run_coroutine_until_complete
 from mindroom.constants import RuntimePaths, runtime_env_flag
 from mindroom.logging_config import get_logger
@@ -89,7 +90,7 @@ class _Control(BaseModel):
 
 
 def _store(app: FastAPI) -> ComputerSessionStore:
-    state = config_lifecycle.ensure_app_state(app)
+    state = ensure_app_state(app)
     if state.computer_sessions is None:
         state.computer_sessions = ComputerSessionStore()
     return state.computer_sessions
@@ -278,6 +279,14 @@ async def delete_session(request: Request, session_id: str) -> Response:
         with suppress(ComputerError):
             await computer_request(session.handle, "release", session.session_id, generation=session.generation)
     return Response(status_code=204)
+
+
+def withdraw_computer_runtime(app: FastAPI) -> None:
+    """Withdraw the computer runtime bound to ``app`` and close every viewer session it served."""
+    state = ensure_app_state(app)
+    state.computer_runtime = None
+    if state.computer_sessions is not None:
+        state.computer_sessions.close_all()
 
 
 def active_computer_worker_keys(app: FastAPI) -> frozenset[str]:

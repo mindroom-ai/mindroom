@@ -40,7 +40,10 @@ def _plain(value: object) -> object:
 
 
 def _usage_rows(store: ConversationStore, owner: HistoryScope) -> list[object]:
-    """Return the usage report's rows of the database, for each read mode and with and without a start time."""
+    """Return the usage report's rows of the database, with and without a start time.
+
+    Each read is listed under both read modes the release had, whose rows a read without one now gives alike.
+    """
     scopes: dict[str, _UsageScope] = {"agent": "shared_agent", "team": "team"}
     scope = "system" if owner.scope_id == SYSTEM_USAGE_ENTITY else scopes[owner.kind]
     source = UsageStorageSource(
@@ -55,7 +58,7 @@ def _usage_rows(store: ConversationStore, owner: HistoryScope) -> list[object]:
         {"mode": mode, "since": since, "row": _plain(row)}
         for mode in ("runs", "both")
         for since in (None, 0)
-        for row in iter_usage_storage_rows(source, mode=mode, since=since)
+        for row in iter_usage_storage_rows(source, since=since)
     ]
 
 

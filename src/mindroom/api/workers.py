@@ -61,15 +61,14 @@ async def list_workers(request: Request, include_idle: bool = True) -> SandboxWo
 def maintain_leased_workers(
     manager: WorkerBackend,
     *,
-    touch_live_workers: Callable[[WorkerBackend], None] | None,
+    touch_live_workers: Callable[[WorkerBackend], None],
     computer_worker_keys: frozenset[str],
 ) -> WorkerMaintenanceResult:
     """Mark every worker still in use as active, then run the backend's maintenance pass on a leased manager.
 
     The pass cleans idle workers and, on Kubernetes, reconciles drifted pod templates.
     """
-    if touch_live_workers is not None:
-        touch_live_workers(manager)
+    touch_live_workers(manager)
     for worker_key in computer_worker_keys:
         manager.touch_worker(worker_key)
     touch_workers_in_flight(manager)
@@ -79,7 +78,7 @@ def maintain_leased_workers(
 @router.post("/cleanup", response_model=SandboxWorkerCleanupResponse)
 async def cleanup_idle_workers(request: Request) -> SandboxWorkerCleanupResponse:
     """Run one worker maintenance pass on the configured backend, like the background cleanup does."""
-    touch_live_workers = config_lifecycle.app_state(request.app).script_worker_keepalive
+    touch_live_workers = config_lifecycle.app_state(request.app).runtime.script_worker_keepalive
     # Computer sessions live on the app's event loop, so their keys are read here before the pass leaves it.
     computer_worker_keys = active_computer_worker_keys(request.app)
 

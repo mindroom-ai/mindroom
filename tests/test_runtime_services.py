@@ -106,7 +106,7 @@ class _RecordingService:
 @pytest.mark.asyncio
 async def test_orchestrator_syncs_services_in_order_and_stops_them_in_reverse(tmp_path: Path) -> None:
     """A later service may use an earlier one, so shutdown stops them in the reverse of their sync order."""
-    orchestrator = _MultiAgentOrchestrator(runtime_paths=orchestrator_runtime_paths(tmp_path))
+    orchestrator = _MultiAgentOrchestrator(runtime_paths=orchestrator_runtime_paths(tmp_path), config=Config())
     names = [service.name for service in orchestrator._services]
     calls: list[str] = []
     orchestrator._services = tuple(_RecordingService(name, calls) for name in names)

@@ -473,13 +473,14 @@ async def test_unresolved_router_command_waits_for_reload_and_rechecks_authoriza
         message = "unproven root"
         raise ThreadMembershipLookupError(message)
 
+    wait_for_admission_or_shutdown = bot._runtime_view.wait_for_admission_or_shutdown
+
     async def wait_for_replacement() -> bool:
         gate_wait_started.set()
-        await admission_gate.wait_until_open()
-        return True
+        return await wait_for_admission_or_shutdown()
 
-    replace_turn_deps(bot, wait_for_admission_or_shutdown=wait_for_replacement)
     with (
+        patch.object(bot._runtime_view, "wait_for_admission_or_shutdown", new=wait_for_replacement),
         patch.object(bot._conversation_resolver, "coalescing_thread_id", side_effect=unresolved_thread),
         patch.object(bot._delivery_gateway, "send_text", new_callable=AsyncMock, return_value="$notice") as send_text,
         patch.object(TurnDispatcher, "dispatch_turn", new_callable=AsyncMock) as dispatch,
@@ -487,7 +488,7 @@ async def test_unresolved_router_command_waits_for_reload_and_rechecks_authoriza
         command_task = asyncio.create_task(bot._turn_ingress.handle_text_event(room, command_event))
         await asyncio.wait_for(lookup_started.wait(), timeout=1)
         assert admission_gate.close_if_idle()
-        bot.config = replacement_config
+        bot.orchestrator.config = replacement_config
         fail_lookup.set()
         await asyncio.wait_for(gate_wait_started.wait(), timeout=1)
 

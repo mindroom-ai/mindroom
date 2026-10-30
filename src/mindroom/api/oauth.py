@@ -384,7 +384,7 @@ def _conversation_connect_context(
         agent_name,
         config,
         runtime_paths,
-        config_lifecycle.app_state(request.app).agent_reply_memberships,
+        config_lifecycle.app_state(request.app).runtime.agent_reply_memberships,
         requester_owned=binding.requester_owned,
     ):
         raise HTTPException(status_code=403, detail="The link requester cannot manage this agent's credentials")
@@ -507,7 +507,7 @@ def _verify_browser_reset_intent(
             config=config,
             runtime_paths=runtime_paths,
             execution_identity=identity,
-            membership_index=config_lifecycle.app_state(request.app).agent_reply_memberships,
+            membership_index=config_lifecycle.app_state(request.app).runtime.agent_reply_memberships,
         )
     except OAuthResetTargetError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc

@@ -39,6 +39,7 @@ from tests.api.test_egress_credentials_api import (
     track_concurrent_calls,
 )
 from tests.api.test_oauth_api import _fail_connection_status
+from tests.runtime_fakes import bind_test_embedded_runtime
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Generator, Iterator
@@ -112,6 +113,7 @@ def _admin_client(egress_config_file: Path, *, broker_on: bool = True, **env: st
         process_env={"MINDROOM_OWNER_USER_ID": "@owner:example.org", **(_BROKER_ON if broker_on else {}), **env},
     )
     main.initialize_api_app(main.app, runtime_paths)
+    bind_test_embedded_runtime(main.app)
     config_lifecycle.load_config_into_app(main._app_runtime_paths(main.app), main.app)
     return TestClient(main.app, base_url="http://localhost")
 
@@ -697,6 +699,7 @@ def oauth_broker_client(egress_config_file: Path, monkeypatch: pytest.MonkeyPatc
     )
     _use_fake_oauth_providers(monkeypatch, runtime_paths)
     main.initialize_api_app(main.app, runtime_paths)
+    bind_test_embedded_runtime(main.app)
     config_lifecycle.load_config_into_app(main._app_runtime_paths(main.app), main.app)
     return TestClient(main.app, base_url="http://localhost")
 
@@ -1004,6 +1007,7 @@ def _enable_service_account() -> None:
     paths = main._app_runtime_paths(main.app)
     paths = replace(paths, process_env={**paths.process_env, "GOOGLE_SERVICE_ACCOUNT_FILE": "service-account.json"})
     main.initialize_api_app(main.app, paths)
+    bind_test_embedded_runtime(main.app)
     config_lifecycle.load_config_into_app(main._app_runtime_paths(main.app), main.app)
 
 

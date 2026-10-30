@@ -28,7 +28,6 @@ class DeferredStopPhase(StrEnum):
     RECOVERY_PROOF = "recovery_proof"
     JOURNAL_DISPATCHER = "journal_dispatcher"
     INGESTION_SESSION = "ingestion_session"
-    JOURNAL_STORE = "journal_store"
     MATRIX_CLIENT = "matrix_client"
 
 

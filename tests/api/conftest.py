@@ -18,10 +18,13 @@ from fastapi.testclient import TestClient
 from jwt.algorithms import RSAAlgorithm
 from starlette.requests import Request
 
+from mindroom import constants
 from mindroom.api import config_lifecycle
+from mindroom.api.app_state import ensure_app_state
 from mindroom.config.commit import ConfigCommit
 from mindroom.config.load_attempt import ConfigLoadResult
 from mindroom.config.main import Config, load_config
+from tests.runtime_fakes import bind_test_embedded_runtime
 
 if TYPE_CHECKING:
     from mindroom.constants import RuntimePaths
@@ -131,7 +134,6 @@ def trusted_upstream_env(
 
 def use_trusted_upstream_runtime(api_app: object) -> "RuntimePaths":
     """Reinitialize one API app with trusted-upstream auth that accepts `trusted_upstream_headers`."""
-    from mindroom import constants  # noqa: PLC0415
     from mindroom.api import main  # noqa: PLC0415
 
     runtime_paths = main._app_runtime_paths(api_app)
@@ -171,7 +173,6 @@ def temp_config_file(tmp_path: Path) -> Path:
 @pytest.fixture
 def test_client(temp_config_file: Path) -> TestClient:
     """Create a test client with mocked config file."""
-    from mindroom import constants  # noqa: PLC0415
     from mindroom.api import main  # noqa: PLC0415
 
     runtime_paths = constants.resolve_primary_runtime_paths(
@@ -182,6 +183,7 @@ def test_client(temp_config_file: Path) -> TestClient:
 
     # Force reload of config
     config_lifecycle.load_config_into_app(main._app_runtime_paths(main.app), main.app)
+    bind_test_embedded_runtime(main.app)
 
     # Create test client
     return TestClient(main.app, base_url="http://localhost")
@@ -213,7 +215,7 @@ def calls_on_event_loop(monkeypatch: pytest.MonkeyPatch) -> Callable[[object, st
 def make_api_app(runtime_paths: "RuntimePaths") -> FastAPI:
     """Build one API app with a fresh published snapshot, mirroring main.initialize_api_app."""
     api_app = FastAPI()
-    state = config_lifecycle.ensure_app_state(api_app)
+    state = ensure_app_state(api_app)
     state.api_state = config_lifecycle.ApiState(
         config_lock=threading.Lock(),
         snapshot=config_lifecycle.ApiSnapshot(

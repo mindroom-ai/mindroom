@@ -33,7 +33,7 @@ if TYPE_CHECKING:
     from mindroom.tool_system.tool_function import AdaptedToolkit
 
 import pytest
-from fastapi import FastAPI, Request
+from fastapi import Request
 from fastapi.responses import JSONResponse, StreamingResponse
 from fastapi.testclient import TestClient
 from starlette.background import BackgroundTask
@@ -50,6 +50,7 @@ from mindroom.api.main import initialize_api_app
 from mindroom.api.openai_request_parsing import ChatMessage, _extract_content_text, convert_messages, derive_session_id
 from mindroom.api.openai_streaming_protocol import _is_error_response
 from mindroom.approval.tool_approval import shutdown_approval_runtime
+from mindroom.budgets.monitor import BudgetMonitor
 from mindroom.config.access import ResponderAccessConfig
 from mindroom.config.agent import AgentConfig, AgentPrivateConfig, TeamConfig
 from mindroom.config.judgment import TypeSafeJudgmentConfig
@@ -101,6 +102,7 @@ from tests.agent_loop.helpers import toolkit
 from tests.api.conftest import publish_api_config
 from tests.fakes.scripted_model import SYNTHETIC, Await, ScriptedModel, ScriptStep, answer, calls, tool_call, usage
 from tests.identity_helpers import persist_entity_accounts
+from tests.runtime_fakes import bind_test_embedded_runtime, openai_compat_app
 from tests.teams.squad import built_team, resolved_members, team_spec
 from tests.teams.squad import member as team_member
 from tests.turn_model_helpers import turn_model
@@ -112,9 +114,7 @@ _QUEUED_NOTICE_RESPONSE_TURN_ID_KEY = "mindroom_queued_message_notice_response_t
 @contextmanager
 def _openai_client(config: Config | None, runtime_paths: RuntimePaths) -> Iterator[TestClient]:
     """Serve the OpenAI-compatible routes for `runtime_paths`, with `config` as their committed config when given."""
-    app = FastAPI()
-    app.include_router(openai_compat.router)
-    initialize_api_app(app, runtime_paths)
+    app = openai_compat_app(runtime_paths)
     if config is not None:
         publish_api_config(app, config)
     with TestClient(app, base_url="http://localhost") as client:
@@ -2415,7 +2415,11 @@ async def test_openai_completion_lock_releases_after_response_background() -> No
         background=BackgroundTask(existing_background),
     )
 
-    wrapped = openai_compat._attach_openai_completion_lock_release(response, completion_lock, None)
+    wrapped = openai_compat._attach_openai_completion_lock_release(
+        response,
+        completion_lock,
+        MagicMock(spec=BudgetMonitor),
+    )
 
     async def receive() -> dict[str, str]:
         return {"type": "http.request"}
@@ -2519,7 +2523,11 @@ async def test_openai_stream_response_skips_background_when_client_closes_before
         background=BackgroundTask(background),
     )
     streaming_response.completion_predicate = lambda: done_sent
-    response = openai_compat._attach_openai_completion_lock_release(streaming_response, completion_lock, None)
+    response = openai_compat._attach_openai_completion_lock_release(
+        streaming_response,
+        completion_lock,
+        MagicMock(spec=BudgetMonitor),
+    )
 
     async def receive() -> dict[str, str]:
         return {"type": "http.request"}
@@ -2562,7 +2570,11 @@ async def test_a_stream_the_client_left_closes_while_its_session_is_still_held(s
 
     streaming_response = openai_compat.OpenAIStreamingResponse(body(), media_type="text/event-stream")
     streaming_response.completion_predicate = lambda: False
-    response = openai_compat._attach_openai_completion_lock_release(streaming_response, completion_lock, None)
+    response = openai_compat._attach_openai_completion_lock_release(
+        streaming_response,
+        completion_lock,
+        MagicMock(spec=BudgetMonitor),
+    )
 
     async def receive() -> dict[str, str]:
         await partial_sent.wait()
@@ -2598,7 +2610,11 @@ async def test_a_stream_whose_headers_never_reached_the_client_closes_while_its_
     streaming_response = openai_compat.OpenAIStreamingResponse(body(), media_type="text/event-stream")
     streaming_response.completion_predicate = lambda: False
     streaming_response.close_stream = close_stream
-    response = openai_compat._attach_openai_completion_lock_release(streaming_response, completion_lock, None)
+    response = openai_compat._attach_openai_completion_lock_release(
+        streaming_response,
+        completion_lock,
+        MagicMock(spec=BudgetMonitor),
+    )
 
     async def receive() -> dict[str, str]:
         return {"type": "http.request"}
@@ -2641,7 +2657,11 @@ async def test_openai_stream_response_skips_background_on_asgi20_disconnect_befo
         background=BackgroundTask(background),
     )
     streaming_response.completion_predicate = lambda: done_sent
-    response = openai_compat._attach_openai_completion_lock_release(streaming_response, completion_lock, None)
+    response = openai_compat._attach_openai_completion_lock_release(
+        streaming_response,
+        completion_lock,
+        MagicMock(spec=BudgetMonitor),
+    )
 
     async def receive() -> dict[str, str]:
         await partial_sent.wait()
@@ -2678,7 +2698,7 @@ async def test_openai_json_response_skips_background_when_send_fails() -> None:
             background=BackgroundTask(background),
         ),
         completion_lock,
-        None,
+        MagicMock(spec=BudgetMonitor),
     )
 
     async def receive() -> dict[str, str]:
@@ -2708,7 +2728,7 @@ async def test_openai_error_response_releases_lock_when_send_fails() -> None:
     response = openai_compat._attach_openai_completion_lock_release(
         openai_compat.error_response(500, "failed", error_type="server_error"),
         completion_lock,
-        None,
+        MagicMock(spec=BudgetMonitor),
     )
 
     async def receive() -> dict[str, str]:
@@ -3189,26 +3209,6 @@ class TestAutoRouting:
             session_id = mock_ai.call_args.args[0].session_id
             assert session_id.endswith(":conv-abc:code")
             assert "auto" not in session_id
-
-    def test_auto_routing_none_falls_back(self, app_client: TestClient) -> None:
-        """If routing returns no match, auto should still fall back gracefully."""
-        with (
-            patch("mindroom.api.openai_compat.suggest_responder", new_callable=AsyncMock) as mock_route,
-            patch("mindroom.api.openai_compat.ai_response", new_callable=completed_ai_response_mock) as mock_ai,
-        ):
-            mock_route.return_value = None
-            mock_ai.return_value = "Fallback response"
-
-            response = app_client.post(
-                "/v1/chat/completions",
-                json={
-                    "model": "auto",
-                    "messages": [{"role": "user", "content": "Hello"}],
-                },
-            )
-
-        assert response.status_code == 200
-        assert response.json()["model"] == "general"
 
 
 # ---------------------------------------------------------------------------
@@ -3830,7 +3830,9 @@ class TestTeamCompletion:
             refresh_scheduler = kwargs["refresh_scheduler"]
             assert unavailable_bases is not None
             assert isinstance(refresh_scheduler, _FakeRefreshScheduler)
-            assert refresh_scheduler is config_lifecycle.app_state(team_app_client.app).knowledge_refresh_scheduler
+            assert (
+                refresh_scheduler is config_lifecycle.app_state(team_app_client.app).runtime.knowledge_refresh_scheduler
+            )
             unavailable_bases["docs"] = KnowledgeAvailabilityDetail(
                 availability=availability,
                 search_available=search_available,
@@ -3839,7 +3841,7 @@ class TestTeamCompletion:
             assert requested_agent_names == members.requested_agent_names
             return members
 
-        config_lifecycle.app_state(team_app_client.app).knowledge_refresh_scheduler = _FakeRefreshScheduler()
+        bind_test_embedded_runtime(team_app_client.app, knowledge_refresh_scheduler=_FakeRefreshScheduler())
         with (
             patch("mindroom.api.openai_compat.resolve_exact_team_members", side_effect=fake_materialize),
             patch("mindroom.api.openai_compat.build_team_spec", return_value=built),
@@ -5166,7 +5168,7 @@ class TestKnowledgeIntegration:
                 on_availability(KnowledgeAvailability.INITIALIZING)
             return _knowledge_lookup(None, base_id=base_id, availability=KnowledgeAvailability.INITIALIZING)
 
-        config_lifecycle.app_state(knowledge_app_client.app).knowledge_refresh_scheduler = _FakeRefreshScheduler()
+        bind_test_embedded_runtime(knowledge_app_client.app, knowledge_refresh_scheduler=_FakeRefreshScheduler())
         with (
             patch("mindroom.api.openai_compat.ai_response", new_callable=completed_ai_response_mock) as mock_ai,
             patch("mindroom.knowledge.utils._lookup_knowledge_for_base", side_effect=fake_lookup_knowledge_for_base),

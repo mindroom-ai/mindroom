@@ -578,7 +578,7 @@ def test_reads_require_an_initialized_app() -> None:
 
 @pytest.mark.parametrize(
     ("writer", "reconciles"),
-    [("dashboard", True), ("watcher", True), ("tool", False), ("runtime", False)],
+    [("dashboard", True), ("tool", False), ("runtime", False)],
 )
 def test_the_api_reconciles_knowledge_modes_only_for_what_it_publishes_on_its_own(
     loaded_app: FastAPI,
@@ -586,9 +586,9 @@ def test_the_api_reconciles_knowledge_modes_only_for_what_it_publishes_on_its_ow
     writer: str,
     reconciles: bool,
 ) -> None:
-    """The API reconciles a dashboard save and a standalone watcher load once, against the config each replaced.
+    """The API reconciles a dashboard save once, against the config it replaced.
 
-    Tool commits and the embedded runtime's own load leave it to the runtime, which reconciles each config it applies.
+    Tool commits and the runtime's own load leave it to the runtime, which reconciles each config it applies.
     """
     before = api_snapshot(loaded_app)
     payload = copy.deepcopy(VALID_CONFIG)
@@ -606,11 +606,7 @@ def test_the_api_reconciles_knowledge_modes_only_for_what_it_publishes_on_its_ow
         save_config(request_for(loaded_app), payload)
     else:
         _write_config(before.runtime_paths.config_path, payload)
-        assert config_lifecycle.load_config_into_app(
-            before.runtime_paths,
-            loaded_app,
-            reconcile_knowledge=writer == "watcher",
-        ).loaded
+        assert config_lifecycle.load_config_into_app(before.runtime_paths, loaded_app).loaded
 
     assert pairs == ([(before.runtime_config, api_snapshot(loaded_app).runtime_config)] if reconciles else [])
 

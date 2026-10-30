@@ -129,7 +129,7 @@ async def sign_in(body: _SignIn, request: Request, response: Response, paths: _P
     # Any homeserver user can obtain a valid token, so only users with portal access get a session.
     app_state = config_lifecycle.app_state(request.app)
     snapshot = config_lifecycle.bind_current_request_snapshot(request)
-    user = resolve_connection_user(snapshot, matrix_user_id, membership_index=app_state.agent_reply_memberships)
+    user = resolve_connection_user(snapshot, matrix_user_id, membership_index=app_state.runtime.agent_reply_memberships)
     if not user.visible_agent_names:
         raise HTTPException(403, "No connections are available for this account", headers=CONNECTIONS_HEADERS)
     token = issue_connections_session(

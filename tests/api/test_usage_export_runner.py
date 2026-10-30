@@ -18,6 +18,7 @@ from mindroom.api.usage_export import (
     UsageExportStatus,
     usage_export_runner,
 )
+from tests.runtime_fakes import bind_test_embedded_runtime
 
 if TYPE_CHECKING:
     import asyncio
@@ -387,11 +388,11 @@ def test_api_lifespan_shutdown_retires_export_runner(
     runner = UsageExportRunner(start_worker=ManualWorkers().start)
     config_state.usage_export_runner = runner
 
-    async def idle_until_shutdown(stop_event: asyncio.Event, _app: FastAPI) -> None:
+    async def idle_until_shutdown(stop_event: asyncio.Event, _app: FastAPI, **_kwargs: object) -> None:
         await stop_event.wait()
 
-    monkeypatch.setattr(main, "_watch_config", idle_until_shutdown)
     monkeypatch.setattr(main, "_worker_cleanup_loop", idle_until_shutdown)
+    bind_test_embedded_runtime(main.app)
 
     with TestClient(main.app):
         assert config_state.usage_export_runner is runner

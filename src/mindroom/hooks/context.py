@@ -52,7 +52,7 @@ if TYPE_CHECKING:
     from mindroom.tool_system.events import ToolTraceEntry
     from mindroom.turn_origin import TurnOrigin
 
-    from .registry import HookRegistry, HookRegistryState
+    from .registry import HookRegistry, HookRegistrySource
     from .sender import HookMessageSender
     from .types import HookMatrixAdmin, HookRoomStatePutter, HookRoomStateQuerier
 
@@ -150,7 +150,7 @@ class HookContextSupport:
     runtime: SupportsClientConfigOrchestrator
     runtime_paths: RuntimePaths
     agent_name: str
-    hook_registry_state: HookRegistryState
+    hook_registry_state: HookRegistrySource
     hook_send_message: HookMessageSender
     agent_message_snapshot_reader: HookAgentMessageSnapshotReader | None = None
 
@@ -163,38 +163,25 @@ class HookContextSupport:
         """Return the current sender bound into hook contexts."""
         if self.runtime.client is not None:
             return self.hook_send_message
-        orchestrator = self.runtime.orchestrator
-        if orchestrator is not None:
-            sender = orchestrator.hook_message_sender()
-            if sender is not None:
-                return sender
-        return None
+        return self.runtime.orchestrator.hook_message_sender()
 
     def room_state_querier(self) -> HookRoomStateQuerier | None:
         """Return the room-state querier bound into hook contexts."""
         primary = build_hook_room_state_querier(self.runtime.client) if self.runtime.client is not None else None
-        fallback = None
-        orchestrator = self.runtime.orchestrator
-        if self.agent_name != ROUTER_AGENT_NAME and orchestrator is not None:
-            fallback = orchestrator.hook_room_state_querier()
+        fallback = self.runtime.orchestrator.hook_room_state_querier() if self.agent_name != ROUTER_AGENT_NAME else None
         return chain_hook_room_state_queriers(primary, fallback)
 
     def room_state_putter(self) -> HookRoomStatePutter | None:
         """Return the room-state putter bound into hook contexts."""
         primary = build_hook_room_state_putter(self.runtime.client) if self.runtime.client is not None else None
-        fallback = None
-        orchestrator = self.runtime.orchestrator
-        if self.agent_name != ROUTER_AGENT_NAME and orchestrator is not None:
-            fallback = orchestrator.hook_room_state_putter()
+        fallback = self.runtime.orchestrator.hook_room_state_putter() if self.agent_name != ROUTER_AGENT_NAME else None
         return chain_hook_room_state_putters(primary, fallback)
 
     def matrix_admin(self) -> HookMatrixAdmin | None:
         """Return the router-backed Matrix admin helper bound into hook contexts."""
-        orchestrator = self.runtime.orchestrator
-        if orchestrator is not None:
-            admin = orchestrator.hook_matrix_admin()
-            if admin is not None:
-                return admin
+        admin = self.runtime.orchestrator.hook_matrix_admin()
+        if admin is not None:
+            return admin
         if self.agent_name == ROUTER_AGENT_NAME and self.runtime.client is not None:
             # Imported on first use so the tool-registry import chain stays free
             # of the nio matrix-client import (#1436).
@@ -302,7 +289,7 @@ class ResponseResult:
 class _HookLifecycleContext:
     """Track whether a bound hook still belongs to the active registry."""
 
-    _hook_registry_state: HookRegistryState | None = field(
+    _hook_registry_state: HookRegistrySource | None = field(
         default=None,
         repr=False,
         compare=False,
@@ -949,18 +936,13 @@ def _requester_id_for_hook_send(
 
 
 def _message_received_depth_for_hook_send(context: object) -> int:
-    """Return the synthetic hook-chain depth to preserve on hook sends."""
-    return _next_message_received_depth(_current_message_received_depth(context))
-
-
-def _current_message_received_depth(context: object) -> int:
-    """Return the inbound synthetic hook-chain depth for one hook context."""
+    """Return the synthetic hook-chain depth to preserve on hook sends: one hop past the context's inbound depth."""
     envelope = message_envelope_for_hook_context(context)
     if envelope is not None:
-        return envelope.message_received_depth
+        return envelope.message_received_depth + 1
     if isinstance(context, CustomEventContext | ToolBeforeCallContext | ToolAfterCallContext):
-        return context.message_received_depth
-    return 0
+        return context.message_received_depth + 1
+    return 1
 
 
 def message_envelope_for_hook_context(context: object) -> MessageEnvelope | None:
@@ -974,8 +956,3 @@ def message_envelope_for_hook_context(context: object) -> MessageEnvelope | None
     if isinstance(context, CancelledResponseContext):
         return context.info.envelope
     return None
-
-
-def _next_message_received_depth(current_depth: int) -> int:
-    """Return the next synthetic-chain depth after one downstream hook hop."""
-    return current_depth + 1

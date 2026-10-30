@@ -29,7 +29,7 @@ from mindroom.dispatch_source import (
     VOICE_SOURCE_KIND,
 )
 from mindroom.event_journal import EventClass, EventKind
-from mindroom.final_delivery import FinalDeliveryOutcome, StreamTransportOutcome
+from mindroom.final_delivery import FinalDeliveryOutcome
 from mindroom.history.types import HistoryScope
 from mindroom.hooks import (
     EnrichmentItem,
@@ -38,7 +38,6 @@ from mindroom.hooks import (
 from mindroom.knowledge.indexing_config import IndexingSettings
 from mindroom.knowledge.utils import _KnowledgeResolution
 from mindroom.matrix.client import ResolvedVisibleMessage
-from mindroom.matrix.thread_history_result import ThreadHistoryResult
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.message_target import MessageTarget
 from mindroom.response_runner import (
@@ -64,14 +63,16 @@ from tests.conftest import (
 from tests.conftest import replace_turn_policy_deps as shared_replace_turn_policy_deps
 from tests.identity_helpers import entity_ids, persist_entity_accounts
 from tests.journal_helpers import admit_dispatch_event
+from tests.runtime_fakes import ReadyRuntime, ready_runtime
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncGenerator, Awaitable, Callable, Sequence
+    from collections.abc import AsyncGenerator, Sequence
 
     from mindroom.bot import AgentBot
     from mindroom.coalescing.gate import ReadyPendingEvent
     from mindroom.config.knowledge import KnowledgeBaseConfig
     from mindroom.conversation_resolver import MessageContext
+    from mindroom.event_journal import EventJournalStore
     from mindroom.inbound_turn_normalizer import DispatchPayload
     from mindroom.knowledge.read_protocol import SearchHit
     from mindroom.media_inputs import MediaInputs
@@ -81,32 +82,29 @@ if TYPE_CHECKING:
     from mindroom.turn_store import TurnStore
 
 
-def make_test_agent_bot(*args: Any, **kwargs: Any) -> AgentBot:  # noqa: ANN401
-    """Build a standalone test bot with an explicit real membership index."""
-    from mindroom.agent_reply_membership import AgentReplyMembershipIndex  # noqa: PLC0415
+def make_test_agent_bot(
+    agent_user: AgentMatrixUser,
+    config: Config | None = None,
+    runtime_paths: RuntimePaths | None = None,
+    rooms: list[str] | None = None,
+    *,
+    orchestrator: ReadyRuntime | None = None,
+    journal_store: EventJournalStore | None = None,
+) -> AgentBot:
+    """Build one bot through the production constructor, in a ready test runtime of its own unless one is given."""
     from mindroom.bot import AgentBot as RuntimeAgentBot  # noqa: PLC0415
 
-    if "agent_reply_memberships" not in kwargs:
-        membership_sync = kwargs.get("agent_reply_membership_sync")
-        kwargs["agent_reply_memberships"] = (
-            membership_sync.memberships if membership_sync is not None else AgentReplyMembershipIndex()
+    if orchestrator is None:
+        assert config is not None
+        orchestrator = ready_runtime(
+            config,
+            runtime_paths if runtime_paths is not None else runtime_paths_for(config),
+            journal_store=journal_store,
         )
-    return RuntimeAgentBot(*args, **kwargs)
-
-
-def _stream_outcome(
-    event_id: str | None,
-    body: str,
-    *,
-    visible_body_state: str = "visible_body",
-    failure_reason: str | None = None,
-) -> StreamTransportOutcome:
-    return StreamTransportOutcome(
-        last_physical_stream_event_id=event_id,
-        rendered_body=body,
-        visible_body_state=visible_body_state,
-        failure_reason=failure_reason,
-    )
+    bot = RuntimeAgentBot(agent_user, rooms=[] if rooms is None else rooms, orchestrator=orchestrator)
+    if bot.agent_name not in orchestrator.agent_bots:
+        orchestrator.fleet.add(bot.agent_name, bot)
+    return bot
 
 
 def _outcome(
@@ -196,12 +194,8 @@ async def _run_orchestrator_start_until_ready(
     orchestrator: _MultiAgentOrchestrator,
     *,
     wait_for_startup_maintenance: bool = False,
-    startup_config: Config | None = None,
 ) -> None:
-    """Run start() until readiness, then explicitly shut the runtime down.
-
-    ``startup_config`` stands in for the config startup loaded; it defaults to the orchestrator's current config.
-    """
+    """Run start() until readiness, then explicitly shut the runtime down."""
     ready = asyncio.Event()
     start_sync = orchestrator.fleet.start_sync
 
@@ -218,7 +212,7 @@ async def _run_orchestrator_start_until_ready(
         patch("mindroom.orchestrator.set_runtime_ready", side_effect=mark_ready),
         patch.object(orchestrator.fleet, "start_sync", side_effect=start_sync_and_publish_router_readiness),
     ):
-        runtime_task = asyncio.create_task(orchestrator.start(startup_config or orchestrator._require_config()))
+        runtime_task = asyncio.create_task(orchestrator.start())
         try:
             await asyncio.wait_for(ready.wait(), timeout=SETTLE_TIMEOUT_SECONDS)
             if wait_for_startup_maintenance:
@@ -260,11 +254,6 @@ def _wrap_extracted_collaborators(bot: AgentBot) -> AgentBot:
         state_writer=wrapped_bot._conversation_state_writer,
     )
     return wrapped_bot
-
-
-def _empty_full_thread_history() -> ThreadHistoryResult:
-    """Return a fully hydrated empty thread history for tests that bypass Matrix fetches."""
-    return ThreadHistoryResult([], is_full_history=True)
 
 
 def _replace_turn_policy_deps(bot: AgentBot, **changes: object) -> TurnPolicy:
@@ -538,48 +527,12 @@ def _configured_team_user(config: Config, runtime_paths: RuntimePaths) -> AgentM
     )
 
 
-def _mock_managed_bot(config: Config) -> MagicMock:
+def _mock_managed_bot() -> MagicMock:
     """Return a lightweight managed-bot double for orchestrator reload tests."""
     bot = MagicMock()
-    bot.config = config
-    bot._set_presence_with_model_info = AsyncMock()
+    bot.refresh_presence = AsyncMock()
     bot.recover_pending_turn_journal_events = AsyncMock()
     return bot
-
-
-def _approval_reload_config(tmp_path: Path, *, include_code: bool) -> Config:
-    """Return one minimal config for approval reload tests."""
-    agents: dict[str, dict[str, object]] = {
-        "general": {
-            "display_name": "GeneralAgent",
-            "role": "General assistant",
-            "model": "default",
-            "rooms": ["lobby"],
-        },
-    }
-    if include_code:
-        agents["code"] = {
-            "display_name": "CodeAgent",
-            "role": "Writes code",
-            "model": "default",
-            "rooms": ["lobby"],
-        }
-    return _runtime_bound_config(
-        Config(
-            agents=agents,
-            models={"default": {"provider": "openai", "id": "test-model"}},
-        ),
-        tmp_path,
-    )
-
-
-def _cleanup_recorder(event_order: list[str]) -> Callable[[], Awaitable[None]]:
-    """Return one async cleanup side effect that records teardown ordering."""
-
-    async def _cleanup() -> None:
-        event_order.append("cleanup")
-
-    return _cleanup
 
 
 def _hook_plugin(name: str, callbacks: list[object]) -> SimpleNamespace:

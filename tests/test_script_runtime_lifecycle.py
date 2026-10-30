@@ -1881,7 +1881,7 @@ def test_live_resolver_uses_current_reply_membership_authorization(tmp_path: Pat
     bot = SimpleNamespace(
         running=True,
         config=config,
-        _runtime_view=SimpleNamespace(agent_reply_memberships=memberships),
+        orchestrator=SimpleNamespace(agent_reply_memberships=memberships),
     )
     resolver = _LiveScriptRuntimeResolver(
         runtime_paths=runtime_paths,
@@ -3908,7 +3908,7 @@ async def test_live_resolver_rebuilds_exact_context_and_worker_authority(
         runtime_paths=runtime_paths,
     )
     support = SimpleNamespace(build_context=MagicMock(return_value=expected_context))
-    bot = SimpleNamespace(agent_name="watcher", running=True, _tool_runtime_support=support)
+    bot = SimpleNamespace(agent_name="watcher", running=True, tool_runtime_support=support)
     backend = _Backend([_worker(run)])
     approvals = SimpleNamespace(
         request_background_approval=AsyncMock(

@@ -679,16 +679,18 @@ async def test_ensure_root_space_returns_none_when_child_link_fails(tmp_path) ->
 @pytest.mark.asyncio
 async def test_orchestrator_ensure_root_space_uses_effective_room_invite_users(tmp_path) -> None:  # noqa: ANN001
     """The root Space should use effective room invitations without implicit users."""
-    orchestrator = _MultiAgentOrchestrator(runtime_paths=orchestrator_runtime_paths(tmp_path))
-    orchestrator.config = _config_with_runtime_paths(
-        tmp_path,
-        agents={"general": {"display_name": "General", "rooms": ["lobby"]}},
-        matrix_space={"enabled": True},
-        mindroom_user={"username": "mindroom_user", "display_name": "MindRoomUser"},
-        room_defaults={"invite_users": ["@owner:example.com"]},
-        rooms={
-            "lobby": {"invite_users": ["@collaborator:example.com"]},
-        },
+    orchestrator = _MultiAgentOrchestrator(
+        runtime_paths=orchestrator_runtime_paths(tmp_path),
+        config=_config_with_runtime_paths(
+            tmp_path,
+            agents={"general": {"display_name": "General", "rooms": ["lobby"]}},
+            matrix_space={"enabled": True},
+            mindroom_user={"username": "mindroom_user", "display_name": "MindRoomUser"},
+            room_defaults={"invite_users": ["@owner:example.com"]},
+            rooms={
+                "lobby": {"invite_users": ["@collaborator:example.com"]},
+            },
+        ),
     )
     router_bot = MagicMock()
     router_bot.client = AsyncMock()
@@ -721,11 +723,13 @@ async def test_orchestrator_ensure_root_space_uses_effective_room_invite_users(t
 @pytest.mark.asyncio
 async def test_orchestrator_ensure_root_space_invites_authorized_user_without_internal_user(tmp_path) -> None:  # noqa: ANN001
     """The root Space should still invite the owner when no internal user exists."""
-    orchestrator = _MultiAgentOrchestrator(runtime_paths=orchestrator_runtime_paths(tmp_path))
-    orchestrator.config = Config(
-        agents={"general": {"display_name": "General", "rooms": ["lobby"]}},
-        matrix_space={"enabled": True},
-        room_defaults={"invite_users": ["@owner:example.com"]},
+    orchestrator = _MultiAgentOrchestrator(
+        runtime_paths=orchestrator_runtime_paths(tmp_path),
+        config=Config(
+            agents={"general": {"display_name": "General", "rooms": ["lobby"]}},
+            matrix_space={"enabled": True},
+            room_defaults={"invite_users": ["@owner:example.com"]},
+        ),
     )
     router_bot = MagicMock()
     router_bot.client = AsyncMock()
@@ -761,13 +765,15 @@ async def test_orchestrator_ensure_root_space_invites_authorized_user_without_in
 @pytest.mark.asyncio
 async def test_orchestrator_ensure_root_space_skips_existing_members(tmp_path) -> None:  # noqa: ANN001
     """Root Space invitations should skip users already in the Space."""
-    orchestrator = _MultiAgentOrchestrator(runtime_paths=orchestrator_runtime_paths(tmp_path))
-    orchestrator.config = _config_with_runtime_paths(
-        tmp_path,
-        agents={"general": {"display_name": "General", "rooms": ["lobby"]}},
-        matrix_space={"enabled": True},
-        mindroom_user={"username": "mindroom_user", "display_name": "MindRoomUser"},
-        room_defaults={"invite_users": ["@owner:example.com"]},
+    orchestrator = _MultiAgentOrchestrator(
+        runtime_paths=orchestrator_runtime_paths(tmp_path),
+        config=_config_with_runtime_paths(
+            tmp_path,
+            agents={"general": {"display_name": "General", "rooms": ["lobby"]}},
+            matrix_space={"enabled": True},
+            mindroom_user={"username": "mindroom_user", "display_name": "MindRoomUser"},
+            room_defaults={"invite_users": ["@owner:example.com"]},
+        ),
     )
     router_bot = MagicMock()
     router_bot.client = AsyncMock()
@@ -787,10 +793,12 @@ async def test_orchestrator_ensure_root_space_skips_existing_members(tmp_path) -
 @pytest.mark.asyncio
 async def test_setup_rooms_and_memberships_reconciles_root_space_once(tmp_path) -> None:  # noqa: ANN001
     """Space reconciliation should happen as a post-room phase during startup."""
-    orchestrator = _MultiAgentOrchestrator(runtime_paths=orchestrator_runtime_paths(tmp_path))
-    orchestrator.config = Config(
-        agents={"general": {"display_name": "General", "rooms": ["lobby"]}},
-        matrix_space={"enabled": True},
+    orchestrator = _MultiAgentOrchestrator(
+        runtime_paths=orchestrator_runtime_paths(tmp_path),
+        config=Config(
+            agents={"general": {"display_name": "General", "rooms": ["lobby"]}},
+            matrix_space={"enabled": True},
+        ),
     )
 
     router_bot = AsyncMock()
@@ -835,18 +843,15 @@ async def test_update_config_matrix_space_change_reconciles_without_room_members
         matrix_space={"enabled": True, "name": "Workspace"},
     )
 
-    orchestrator = _MultiAgentOrchestrator(runtime_paths=orchestrator_runtime_paths(tmp_path))
-    orchestrator.config = initial_config
+    orchestrator = _MultiAgentOrchestrator(runtime_paths=orchestrator_runtime_paths(tmp_path), config=initial_config)
 
     general_bot = MagicMock()
-    general_bot.config = initial_config
-    general_bot._set_presence_with_model_info = AsyncMock()
+    general_bot.refresh_presence = AsyncMock()
     orchestrator.fleet.add("general", general_bot)
 
     router_bot = MagicMock()
-    router_bot.config = initial_config
     router_bot.running = True
-    router_bot._set_presence_with_model_info = AsyncMock()
+    router_bot.refresh_presence = AsyncMock()
     router_bot.recover_pending_turn_journal_events = AsyncMock()
     orchestrator.fleet.add(ROUTER_AGENT_NAME, router_bot)
 
@@ -864,8 +869,9 @@ async def test_update_config_matrix_space_change_reconciles_without_room_members
         updated = await orchestrator.config_reload._update_config()
 
     assert updated is False
-    assert general_bot.config == updated_config
-    assert router_bot.config == updated_config
+    assert orchestrator.config == updated_config
+    general_bot.apply_published_config.assert_called_once_with()
+    router_bot.apply_published_config.assert_called_once_with()
     mock_setup.assert_not_awaited()
     mock_rooms.assert_awaited_once_with()
     mock_root_space.assert_awaited_once_with({"lobby": "!room1:localhost"})

@@ -44,7 +44,6 @@ from tests.conftest import (
     replace_turn_deps,
     replace_turn_policy_deps,
     runtime_paths_for,
-    sync_bot_runtime_state,
     test_runtime_paths,
     unwrap_extracted_collaborator,
     wrap_extracted_collaborators,
@@ -104,18 +103,13 @@ def _message_context(
     )
 
 
-def _replace_turn_policy_deps(bot: AgentBot, **changes: object) -> None:
-    """Rebuild the planner after swapping captured collaborators on the bot."""
-    replace_turn_policy_deps(bot, **changes)
-
-
 def _sync_turn_policy_runtime(bot: AgentBot) -> None:
     """Rebind planner deps after tests replace the bot logger or ledger."""
     install_runtime_journal_support(bot)
     turn_store = unwrap_extracted_collaborator(bot._turn_store)
     turn_store.is_handled = AsyncMock(return_value=False)
     turn_store.record_turn = AsyncMock()
-    _replace_turn_policy_deps(bot, logger=bot.logger)
+    replace_turn_policy_deps(bot, logger=bot.logger)
     replace_turn_deps(bot, logger=bot.logger)
 
 
@@ -164,10 +158,8 @@ def mock_agent_bot(send_response_mock: AsyncMock) -> AgentBot:
         access_token=TEST_ACCESS_TOKEN,
     )
     config = _runtime_bound_config(Config())
-    tmpdir = Path(tempfile.mkdtemp())
     bot = make_test_agent_bot(
         agent_user=agent_user,
-        storage_path=tmpdir,
         config=config,
         runtime_paths=runtime_paths_for(config),
         rooms=["!test:server"],
@@ -176,8 +168,6 @@ def mock_agent_bot(send_response_mock: AsyncMock) -> AgentBot:
     bot.client = AsyncMock()
     bot.client.add_event_callback = MagicMock()
     bot.client.user_id = bot.agent_user.user_id
-    install_runtime_journal_support(bot)
-    sync_bot_runtime_state(bot)
     bot.logger = MagicMock()
     _sync_turn_policy_runtime(bot)
     install_send_response_mock(bot, send_response_mock)
@@ -316,7 +306,7 @@ class TestBotScheduleCommands:
                 room_id="!test:server",
                 task_id="task123",
                 runtime_paths=mock_agent_bot.runtime_paths,
-                task_runtime=None,
+                task_runtime=mock_agent_bot.orchestrator.scheduled_tasks,
             )
 
     @pytest.mark.asyncio
@@ -350,7 +340,7 @@ class TestBotScheduleCommands:
                 client=mock_agent_bot.client,
                 room_id="!test:server",
                 runtime_paths=mock_agent_bot.runtime_paths,
-                task_runtime=None,
+                task_runtime=mock_agent_bot.orchestrator.scheduled_tasks,
             )
 
         send_response_mock.assert_called_once()
@@ -492,7 +482,6 @@ class TestBotTaskRestoration:
             config = _runtime_bound_config(Config(), Path(tmpdir))  # Empty config for testing
             bot = make_test_agent_bot(
                 agent_user=agent_user,
-                storage_path=Path(tmpdir),
                 config=config,
                 runtime_paths=runtime_paths_for(config),
                 rooms=["!test:server"],
@@ -501,7 +490,7 @@ class TestBotTaskRestoration:
 
             with (
                 patch("mindroom.bot.login_agent_owned_session") as mock_login,
-                patch("mindroom.bot.AgentBot._set_presence_with_model_info", new_callable=AsyncMock),
+                patch("mindroom.bot.AgentBot.refresh_presence", new_callable=AsyncMock),
             ):
                 mock_client = AsyncMock()
                 mock_client.add_event_callback = MagicMock()
@@ -517,12 +506,11 @@ class TestBotTaskRestoration:
                 mock_client.join.return_value = mock_join_response
 
                 await bot.start()
-                orchestrator = MagicMock()
-                orchestrator.scheduled_tasks.restore_room = AsyncMock(return_value=2)
-                bot.orchestrator = orchestrator
-                await bot.join_configured_rooms()
+                restore_room = AsyncMock(return_value=2)
+                with patch.object(bot.orchestrator.scheduled_tasks, "restore_room", restore_room):
+                    await bot.join_configured_rooms()
 
-                orchestrator.scheduled_tasks.restore_room.assert_awaited_once_with(bot, "!test:server")
+                restore_room.assert_awaited_once_with(bot, "!test:server")
 
 
 class TestCommandHandling:
@@ -543,7 +531,7 @@ class TestCommandHandling:
         )
 
     @pytest.mark.asyncio
-    async def test_non_router_agent_ignores_commands(self, tmp_path: Path) -> None:
+    async def test_non_router_agent_ignores_commands(self) -> None:
         """Test that non-router agents ignore command messages."""
         # Create a calculator agent (not router)
         agent_user = AgentMatrixUser(
@@ -558,7 +546,6 @@ class TestCommandHandling:
 
         bot = make_test_agent_bot(
             agent_user=agent_user,
-            storage_path=tmp_path,
             config=config,
             runtime_paths=runtime_paths_for(config),
             rooms=["!test:server"],
@@ -566,7 +553,6 @@ class TestCommandHandling:
         wrap_extracted_collaborators(bot)
         bot.client = AsyncMock()
         bot.client.user_id = bot.agent_user.user_id
-        sync_bot_runtime_state(bot)
         bot.logger = MagicMock()
         generate_response = AsyncMock()
         _sync_turn_policy_runtime(bot)
@@ -614,51 +600,49 @@ class TestCommandHandling:
 
         config = _runtime_bound_config(Config(router=RouterConfig(model="default")))
 
-        with tempfile.TemporaryDirectory() as tmpdir:
-            bot = make_test_agent_bot(
-                agent_user=agent_user,
-                storage_path=Path(tmpdir),
-                config=config,
-                runtime_paths=runtime_paths_for(config),
-                rooms=["!test:server"],
-            )
-            bot.client = make_matrix_client_mock(user_id=bot.agent_user.user_id)
-            bot.logger = MagicMock()
-            wrap_extracted_collaborators(bot, "_turn_policy")
-            _sync_turn_policy_runtime(bot)
-            unwrap_extracted_collaborator(bot._command_turn_executor).execute = AsyncMock()
-            bot._turn_ingress.deps.resolver.dispatch_thread_snapshot = AsyncMock(
-                return_value=thread_history_result([], is_full_history=False),
-            )
+        bot = make_test_agent_bot(
+            agent_user=agent_user,
+            config=config,
+            runtime_paths=runtime_paths_for(config),
+            rooms=["!test:server"],
+        )
+        bot.client = make_matrix_client_mock(user_id=bot.agent_user.user_id)
+        bot.logger = MagicMock()
+        wrap_extracted_collaborators(bot, "_turn_policy")
+        _sync_turn_policy_runtime(bot)
+        unwrap_extracted_collaborator(bot._command_turn_executor).execute = AsyncMock()
+        bot._turn_ingress.deps.resolver.dispatch_thread_snapshot = AsyncMock(
+            return_value=thread_history_result([], is_full_history=False),
+        )
 
-            # Create a room and event with thread info
-            room = nio.MatrixRoom(room_id="!test:server", own_user_id=bot.client.user_id)
-            event = nio.RoomMessageText.from_dict(
-                {
-                    "event_id": "$event123",
-                    "sender": "@user:server",
-                    "origin_server_ts": 1234567890,
-                    "content": {
-                        "msgtype": "m.text",
-                        "body": "!schedule in 5 minutes test",
-                        "m.relates_to": {"event_id": "$thread123", "rel_type": "m.thread"},
-                    },
+        # Create a room and event with thread info
+        room = nio.MatrixRoom(room_id="!test:server", own_user_id=bot.client.user_id)
+        event = nio.RoomMessageText.from_dict(
+            {
+                "event_id": "$event123",
+                "sender": "@user:server",
+                "origin_server_ts": 1234567890,
+                "content": {
+                    "msgtype": "m.text",
+                    "body": "!schedule in 5 minutes test",
+                    "m.relates_to": {"event_id": "$thread123", "rel_type": "m.thread"},
                 },
-            )
+            },
+        )
 
-            with patch("mindroom.constants.ROUTER_AGENT_NAME", "router"):
-                await bot._on_message(room, event)
-                await drain_coalescing(bot)
+        with patch("mindroom.constants.ROUTER_AGENT_NAME", "router"):
+            await bot._on_message(room, event)
+            await drain_coalescing(bot)
 
-            # Verify the command was handled
-            unwrap_extracted_collaborator(bot._command_turn_executor).execute.assert_called_once()
-            bot.logger.info.assert_any_call(
-                "Received message",
-                event_id="$event123",
-                room_id="!test:server",
-                sender="@user:server",
-                thread_id="$thread123",
-            )
+        # Verify the command was handled
+        unwrap_extracted_collaborator(bot._command_turn_executor).execute.assert_called_once()
+        bot.logger.info.assert_any_call(
+            "Received message",
+            event_id="$event123",
+            room_id="!test:server",
+            sender="@user:server",
+            thread_id="$thread123",
+        )
 
     @pytest.mark.asyncio
     async def test_router_agent_logs_canonical_thread_scope_for_plain_reply_commands(self) -> None:
@@ -673,50 +657,48 @@ class TestCommandHandling:
 
         config = _runtime_bound_config(Config(router=RouterConfig(model="default")))
 
-        with tempfile.TemporaryDirectory() as tmpdir:
-            bot = make_test_agent_bot(
-                agent_user=agent_user,
-                storage_path=Path(tmpdir),
-                config=config,
-                runtime_paths=runtime_paths_for(config),
-                rooms=["!test:server"],
-            )
-            bot.client = make_matrix_client_mock(user_id=bot.agent_user.user_id)
-            bot.logger = MagicMock()
-            wrap_extracted_collaborators(bot, "_turn_policy")
-            _sync_turn_policy_runtime(bot)
-            unwrap_extracted_collaborator(bot._command_turn_executor).execute = AsyncMock()
-            bot._conversation_resolver.coalescing_thread_id = AsyncMock(return_value="$thread-root")
-            bot._turn_ingress.deps.resolver.dispatch_thread_snapshot = AsyncMock(
-                return_value=thread_history_result([], is_full_history=False),
-            )
+        bot = make_test_agent_bot(
+            agent_user=agent_user,
+            config=config,
+            runtime_paths=runtime_paths_for(config),
+            rooms=["!test:server"],
+        )
+        bot.client = make_matrix_client_mock(user_id=bot.agent_user.user_id)
+        bot.logger = MagicMock()
+        wrap_extracted_collaborators(bot, "_turn_policy")
+        _sync_turn_policy_runtime(bot)
+        unwrap_extracted_collaborator(bot._command_turn_executor).execute = AsyncMock()
+        bot._conversation_resolver.coalescing_thread_id = AsyncMock(return_value="$thread-root")
+        bot._turn_ingress.deps.resolver.dispatch_thread_snapshot = AsyncMock(
+            return_value=thread_history_result([], is_full_history=False),
+        )
 
-            room = nio.MatrixRoom(room_id="!test:server", own_user_id=bot.client.user_id)
-            event = nio.RoomMessageText.from_dict(
-                {
-                    "event_id": "$event123",
-                    "sender": "@user:server",
-                    "origin_server_ts": 1234567890,
-                    "content": {
-                        "msgtype": "m.text",
-                        "body": "!schedule in 5 minutes test",
-                        "m.relates_to": {"m.in_reply_to": {"event_id": "$reply123"}},
-                    },
+        room = nio.MatrixRoom(room_id="!test:server", own_user_id=bot.client.user_id)
+        event = nio.RoomMessageText.from_dict(
+            {
+                "event_id": "$event123",
+                "sender": "@user:server",
+                "origin_server_ts": 1234567890,
+                "content": {
+                    "msgtype": "m.text",
+                    "body": "!schedule in 5 minutes test",
+                    "m.relates_to": {"m.in_reply_to": {"event_id": "$reply123"}},
                 },
-            )
+            },
+        )
 
-            with patch("mindroom.constants.ROUTER_AGENT_NAME", "router"):
-                await bot._on_message(room, event)
-                await drain_coalescing(bot)
+        with patch("mindroom.constants.ROUTER_AGENT_NAME", "router"):
+            await bot._on_message(room, event)
+            await drain_coalescing(bot)
 
-            unwrap_extracted_collaborator(bot._command_turn_executor).execute.assert_called_once()
-            bot.logger.info.assert_any_call(
-                "Received message",
-                event_id="$event123",
-                room_id="!test:server",
-                sender="@user:server",
-                thread_id="$thread-root",
-            )
+        unwrap_extracted_collaborator(bot._command_turn_executor).execute.assert_called_once()
+        bot.logger.info.assert_any_call(
+            "Received message",
+            event_id="$event123",
+            room_id="!test:server",
+            sender="@user:server",
+            thread_id="$thread-root",
+        )
 
     @pytest.mark.asyncio
     @pytest.mark.usefixtures("enforce_turn_authorization")
@@ -739,38 +721,36 @@ class TestCommandHandling:
             ),
         )
 
-        with tempfile.TemporaryDirectory() as tmpdir:
-            bot = make_test_agent_bot(
-                agent_user=agent_user,
-                storage_path=Path(tmpdir),
-                config=config,
-                runtime_paths=runtime_paths_for(config),
-                rooms=["!test:server"],
-            )
-            bot.client = AsyncMock()
-            bot.client.user_id = bot.agent_user.user_id
-            bot.logger = MagicMock()
-            wrap_extracted_collaborators(bot, "_turn_policy")
-            _sync_turn_policy_runtime(bot)
-            unwrap_extracted_collaborator(bot._command_turn_executor).execute = AsyncMock()
+        bot = make_test_agent_bot(
+            agent_user=agent_user,
+            config=config,
+            runtime_paths=runtime_paths_for(config),
+            rooms=["!test:server"],
+        )
+        bot.client = AsyncMock()
+        bot.client.user_id = bot.agent_user.user_id
+        bot.logger = MagicMock()
+        wrap_extracted_collaborators(bot, "_turn_policy")
+        _sync_turn_policy_runtime(bot)
+        unwrap_extracted_collaborator(bot._command_turn_executor).execute = AsyncMock()
 
-            room = nio.MatrixRoom(room_id="!test:server", own_user_id=bot.client.user_id)
-            event = nio.RoomMessageText.from_dict(
-                {
-                    "event_id": "$event123",
-                    "sender": "@bob:server",
-                    "origin_server_ts": 1234567890,
-                    "content": {
-                        "msgtype": "m.text",
-                        "body": "!help",
-                    },
+        room = nio.MatrixRoom(room_id="!test:server", own_user_id=bot.client.user_id)
+        event = nio.RoomMessageText.from_dict(
+            {
+                "event_id": "$event123",
+                "sender": "@bob:server",
+                "origin_server_ts": 1234567890,
+                "content": {
+                    "msgtype": "m.text",
+                    "body": "!help",
                 },
-            )
+            },
+        )
 
-            await bot._on_message(room, event)
-            await drain_coalescing(bot)
+        await bot._on_message(room, event)
+        await drain_coalescing(bot)
 
-            unwrap_extracted_collaborator(bot._command_turn_executor).execute.assert_not_called()
+        unwrap_extracted_collaborator(bot._command_turn_executor).execute.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_router_removed_skill_command_returns_unknown_response(self) -> None:
@@ -800,52 +780,49 @@ class TestCommandHandling:
             ),
         )
 
-        with tempfile.TemporaryDirectory() as tmpdir:
-            bot = make_test_agent_bot(
-                agent_user=agent_user,
-                storage_path=Path(tmpdir),
-                config=config,
-                runtime_paths=runtime_paths_for(config),
-                rooms=["!test:server"],
-            )
-            wrap_extracted_collaborators(bot)
-            bot.client = AsyncMock()
-            bot.client.user_id = bot.agent_user.user_id
-            sync_bot_runtime_state(bot)
-            bot.logger = MagicMock()
-            send_response = AsyncMock(return_value="$router_reply")
-            _sync_turn_policy_runtime(bot)
-            install_send_response_mock(bot, send_response)
+        bot = make_test_agent_bot(
+            agent_user=agent_user,
+            config=config,
+            runtime_paths=runtime_paths_for(config),
+            rooms=["!test:server"],
+        )
+        wrap_extracted_collaborators(bot)
+        bot.client = AsyncMock()
+        bot.client.user_id = bot.agent_user.user_id
+        bot.logger = MagicMock()
+        send_response = AsyncMock(return_value="$router_reply")
+        _sync_turn_policy_runtime(bot)
+        install_send_response_mock(bot, send_response)
 
-            room = nio.MatrixRoom(room_id="!test:server", own_user_id=bot.client.user_id)
-            room.users = {
-                "@mindroom_router:localhost": nio.MatrixUser("@mindroom_router:localhost"),
-                "@mindroom_code:localhost": nio.MatrixUser("@mindroom_code:localhost"),
-                "@bob:localhost": nio.MatrixUser("@bob:localhost"),
-            }
-            event = nio.RoomMessageText.from_dict(
-                {
-                    "event_id": "$event_skill",
-                    "sender": "@bob:localhost",
-                    "origin_server_ts": 1234567890,
-                    "content": {
-                        "msgtype": "m.text",
-                        "body": "!skill audit",
-                        "m.mentions": {"user_ids": ["@mindroom_code:localhost"]},
-                    },
+        room = nio.MatrixRoom(room_id="!test:server", own_user_id=bot.client.user_id)
+        room.users = {
+            "@mindroom_router:localhost": nio.MatrixUser("@mindroom_router:localhost"),
+            "@mindroom_code:localhost": nio.MatrixUser("@mindroom_code:localhost"),
+            "@bob:localhost": nio.MatrixUser("@bob:localhost"),
+        }
+        event = nio.RoomMessageText.from_dict(
+            {
+                "event_id": "$event_skill",
+                "sender": "@bob:localhost",
+                "origin_server_ts": 1234567890,
+                "content": {
+                    "msgtype": "m.text",
+                    "body": "!skill audit",
+                    "m.mentions": {"user_ids": ["@mindroom_code:localhost"]},
                 },
-            )
+            },
+        )
 
-            await bot._on_message(room, event)
-            await drain_coalescing(bot)
+        await bot._on_message(room, event)
+        await drain_coalescing(bot)
 
-            send_response.assert_called_once()
-            assert send_response.await_args.kwargs["response_text"] == (
-                "❌ Unknown command. Try !help for available commands."
-            )
+        send_response.assert_called_once()
+        assert send_response.await_args.kwargs["response_text"] == (
+            "❌ Unknown command. Try !help for available commands."
+        )
 
     @pytest.mark.asyncio
-    async def test_non_router_agent_responds_to_non_commands(self, tmp_path: Path) -> None:
+    async def test_non_router_agent_responds_to_non_commands(self) -> None:
         """Test that non-router agents still respond to regular messages."""
         # Create a calculator agent (not router)
         agent_user = AgentMatrixUser(
@@ -867,7 +844,6 @@ class TestCommandHandling:
 
         bot = make_test_agent_bot(
             agent_user=agent_user,
-            storage_path=tmp_path,
             config=config,
             runtime_paths=runtime_paths_for(config),
             rooms=["!test:server"],
@@ -875,7 +851,6 @@ class TestCommandHandling:
         wrap_extracted_collaborators(bot)
         bot.client = AsyncMock()
         bot.client.user_id = bot.agent_user.user_id
-        sync_bot_runtime_state(bot)
         bot.logger = MagicMock()
         send_response = AsyncMock(return_value="$placeholder")
         generate_response = AsyncMock(return_value="$response")
@@ -932,56 +907,53 @@ class TestCommandHandling:
 
         config = _runtime_bound_config(Config(router=RouterConfig(model="default")))
 
-        with tempfile.TemporaryDirectory() as tmpdir:
-            bot = make_test_agent_bot(
-                agent_user=agent_user,
-                storage_path=Path(tmpdir),
-                config=config,
-                runtime_paths=runtime_paths_for(config),
-                rooms=["!test:server"],
-            )
-            wrap_extracted_collaborators(bot)
-            bot.client = AsyncMock()
-            bot.client.user_id = "@mindroom_general:localhost"  # Set the bot's user ID
-            sync_bot_runtime_state(bot)
-            bot.logger = MagicMock()
-            generate_response = AsyncMock()
-            _sync_turn_policy_runtime(bot)
-            install_generate_response_mock(bot, generate_response)
+        bot = make_test_agent_bot(
+            agent_user=agent_user,
+            config=config,
+            runtime_paths=runtime_paths_for(config),
+            rooms=["!test:server"],
+        )
+        wrap_extracted_collaborators(bot)
+        bot.client = AsyncMock()
+        bot.client.user_id = "@mindroom_general:localhost"  # Set the bot's user ID
+        bot.logger = MagicMock()
+        generate_response = AsyncMock()
+        _sync_turn_policy_runtime(bot)
+        install_generate_response_mock(bot, generate_response)
 
-            # Mock context extraction
-            mock_context = _message_context(
-                am_i_mentioned=False,
-                is_thread=True,
-                thread_id="$thread123",
-            )
-            bot._conversation_resolver.extract_dispatch_context = AsyncMock(
-                return_value=dispatch_context_result(mock_context),
-            )
+        # Mock context extraction
+        mock_context = _message_context(
+            am_i_mentioned=False,
+            is_thread=True,
+            thread_id="$thread123",
+        )
+        bot._conversation_resolver.extract_dispatch_context = AsyncMock(
+            return_value=dispatch_context_result(mock_context),
+        )
 
-            # Create a room and event with error message from router agent
-            room = nio.MatrixRoom(room_id="!test:server", own_user_id=bot.client.user_id)
-            event = nio.RoomMessageText.from_dict(
-                {
-                    "event_id": "$event123",
-                    "sender": "@mindroom_router:localhost",  # From router agent
-                    "origin_server_ts": 1234567890,
-                    "content": {
-                        "msgtype": "m.text",
-                        "body": "❌ Unable to parse the schedule request\n\n💡 Try something like 'in 5 minutes Check the deployment'",
-                    },
+        # Create a room and event with error message from router agent
+        room = nio.MatrixRoom(room_id="!test:server", own_user_id=bot.client.user_id)
+        event = nio.RoomMessageText.from_dict(
+            {
+                "event_id": "$event123",
+                "sender": "@mindroom_router:localhost",  # From router agent
+                "origin_server_ts": 1234567890,
+                "content": {
+                    "msgtype": "m.text",
+                    "body": "❌ Unable to parse the schedule request\n\n💡 Try something like 'in 5 minutes Check the deployment'",
                 },
-            )
+            },
+        )
 
-            await bot._on_message(room, event)
-            await drain_coalescing(bot)
+        await bot._on_message(room, event)
+        await drain_coalescing(bot)
 
-            # Verify the agent didn't try to process the error message
-            generate_response.assert_not_called()
-            bot._turn_store.record_turn.assert_not_called()
-            # Check log calls - should be caught by the general agent message check
-            debug_calls = [call[0][0] for call in bot.logger.debug.call_args_list]
-            assert "ignore_unmentioned_agent_event" in debug_calls
+        # Verify the agent didn't try to process the error message
+        generate_response.assert_not_called()
+        bot._turn_store.record_turn.assert_not_called()
+        # Check log calls - should be caught by the general agent message check
+        debug_calls = [call[0][0] for call in bot.logger.debug.call_args_list]
+        assert "ignore_unmentioned_agent_event" in debug_calls
 
     @pytest.mark.asyncio
     async def test_router_error_without_mentions_ignored_by_other_agents(self) -> None:
@@ -1058,18 +1030,15 @@ class TestCommandHandling:
 
         config = _runtime_bound_config(Config(router=RouterConfig(model="default")))
 
-        with tempfile.TemporaryDirectory() as tmpdir:
-            bot = make_test_agent_bot(
-                agent_user=agent_user,
-                storage_path=Path(tmpdir),
-                config=config,
-                runtime_paths=runtime_paths_for(config),
-                rooms=["!test:server"],
-            )
+        bot = make_test_agent_bot(
+            agent_user=agent_user,
+            config=config,
+            runtime_paths=runtime_paths_for(config),
+            rooms=["!test:server"],
+        )
         wrap_extracted_collaborators(bot)
         bot.client = AsyncMock()
         bot.client.user_id = "@mindroom_finance:localhost"
-        sync_bot_runtime_state(bot)
         bot.logger = MagicMock()
         generate_response = AsyncMock()
         _sync_turn_policy_runtime(bot)
@@ -1126,53 +1095,50 @@ class TestCommandHandling:
             ),
         )
 
-        with tempfile.TemporaryDirectory() as tmpdir:
-            bot = make_test_agent_bot(
-                agent_user=agent_user,
-                storage_path=Path(tmpdir),
-                config=config,
-                runtime_paths=runtime_paths_for(config),
-                rooms=["!test:server"],
-            )
-            wrap_extracted_collaborators(bot)
-            bot.client = AsyncMock()
-            bot.client.user_id = "@mindroom_general:localhost"
-            sync_bot_runtime_state(bot)
-            bot.logger = MagicMock()
-            _sync_turn_policy_runtime(bot)
+        bot = make_test_agent_bot(
+            agent_user=agent_user,
+            config=config,
+            runtime_paths=runtime_paths_for(config),
+            rooms=["!test:server"],
+        )
+        wrap_extracted_collaborators(bot)
+        bot.client = AsyncMock()
+        bot.client.user_id = "@mindroom_general:localhost"
+        bot.logger = MagicMock()
+        _sync_turn_policy_runtime(bot)
 
-            mock_context = _message_context(
-                am_i_mentioned=False,
-                is_thread=True,
-                thread_id="$thread123",
-            )
-            bot._conversation_resolver.extract_dispatch_context = AsyncMock(
-                return_value=dispatch_context_result(mock_context),
-            )
+        mock_context = _message_context(
+            am_i_mentioned=False,
+            is_thread=True,
+            thread_id="$thread123",
+        )
+        bot._conversation_resolver.extract_dispatch_context = AsyncMock(
+            return_value=dispatch_context_result(mock_context),
+        )
 
-            room = nio.MatrixRoom(room_id="!test:server", own_user_id=bot.client.user_id)
-            event = nio.RoomMessageText.from_dict(
-                {
-                    "event_id": "$scheduled_task",
-                    "sender": "@mindroom_general:localhost",
-                    "origin_server_ts": 1234567890,
-                    "content": {
-                        "msgtype": "m.text",
-                        "body": "⏰ [Automated Task]\nCheck the workloop status",
-                        SOURCE_KIND_KEY: SCHEDULED_SOURCE_KIND,
-                        ORIGINAL_SENDER_KEY: "@mindroom_router:localhost",
-                    },
+        room = nio.MatrixRoom(room_id="!test:server", own_user_id=bot.client.user_id)
+        event = nio.RoomMessageText.from_dict(
+            {
+                "event_id": "$scheduled_task",
+                "sender": "@mindroom_general:localhost",
+                "origin_server_ts": 1234567890,
+                "content": {
+                    "msgtype": "m.text",
+                    "body": "⏰ [Automated Task]\nCheck the workloop status",
+                    SOURCE_KIND_KEY: SCHEDULED_SOURCE_KIND,
+                    ORIGINAL_SENDER_KEY: "@mindroom_router:localhost",
                 },
-            )
+            },
+        )
 
-            result = await bot._turn_dispatcher._prepare_dispatch(
-                make_test_turn(
-                    room,
-                    event,
-                    facts=replace(bot._ingress_validator.classify(event), source_kind=SCHEDULED_SOURCE_KIND),
-                    handled_turn=TurnRecord.create([event.event_id]),
-                ),
-            )
+        result = await bot._turn_dispatcher._prepare_dispatch(
+            make_test_turn(
+                room,
+                event,
+                facts=replace(bot._ingress_validator.classify(event), source_kind=SCHEDULED_SOURCE_KIND),
+                handled_turn=TurnRecord.create([event.event_id]),
+            ),
+        )
 
         assert result is not None
         assert result.dispatch.requester_user_id == "@mindroom_router:localhost"
@@ -1200,38 +1166,35 @@ class TestCommandHandling:
             ),
         )
 
-        with tempfile.TemporaryDirectory() as tmpdir:
-            bot = make_test_agent_bot(
-                agent_user=agent_user,
-                storage_path=Path(tmpdir),
-                config=config,
-                runtime_paths=runtime_paths_for(config),
-                rooms=["!test:server"],
-            )
-            wrap_extracted_collaborators(bot)
-            bot.client = AsyncMock()
-            bot.client.user_id = "@mindroom_general:localhost"
-            sync_bot_runtime_state(bot)
-            bot.logger = MagicMock()
-            _sync_turn_policy_runtime(bot)
+        bot = make_test_agent_bot(
+            agent_user=agent_user,
+            config=config,
+            runtime_paths=runtime_paths_for(config),
+            rooms=["!test:server"],
+        )
+        wrap_extracted_collaborators(bot)
+        bot.client = AsyncMock()
+        bot.client.user_id = "@mindroom_general:localhost"
+        bot.logger = MagicMock()
+        _sync_turn_policy_runtime(bot)
 
-            room = nio.MatrixRoom(room_id="!test:server", own_user_id=bot.client.user_id)
-            event = nio.RoomMessageText.from_dict(
-                {
-                    "event_id": "$scheduled_task",
-                    "sender": "@mindroom_general:localhost",
-                    "origin_server_ts": 1234567890,
-                    "content": {
-                        "msgtype": "m.text",
-                        "body": "⏰ [Automated Task]\nCheck the workloop status",
-                        SOURCE_KIND_KEY: SCHEDULED_SOURCE_KIND,
-                        ORIGINAL_SENDER_KEY: "@mindroom_router:localhost",
-                    },
+        room = nio.MatrixRoom(room_id="!test:server", own_user_id=bot.client.user_id)
+        event = nio.RoomMessageText.from_dict(
+            {
+                "event_id": "$scheduled_task",
+                "sender": "@mindroom_general:localhost",
+                "origin_server_ts": 1234567890,
+                "content": {
+                    "msgtype": "m.text",
+                    "body": "⏰ [Automated Task]\nCheck the workloop status",
+                    SOURCE_KIND_KEY: SCHEDULED_SOURCE_KIND,
+                    ORIGINAL_SENDER_KEY: "@mindroom_router:localhost",
                 },
-            )
+            },
+        )
 
-            facts = bot._ingress_validator.classify(event)
-            passed = await bot._turn_ingress._precheck_dispatch_event(room, event, facts)
+        facts = bot._ingress_validator.classify(event)
+        passed = await bot._turn_ingress._precheck_dispatch_event(room, event, facts)
 
         assert passed is True
         assert facts.lane_requester_id == "@mindroom_router:localhost"
@@ -1259,26 +1222,21 @@ class TestCommandHandling:
         )
 
         config = _runtime_bound_config(Config(router=RouterConfig(model="default")))
-        with tempfile.TemporaryDirectory() as tmpdir:
-            bot = make_test_agent_bot(
-                agent_user=agent_user,
-                storage_path=Path(tmpdir),
-                config=config,
-                runtime_paths=runtime_paths_for(config),
-                rooms=["!test:server"],
-            )
+        bot = make_test_agent_bot(
+            agent_user=agent_user,
+            config=config,
+            runtime_paths=runtime_paths_for(config),
+            rooms=["!test:server"],
+        )
         wrap_extracted_collaborators(bot)
         bot.client = AsyncMock()
         bot.client.user_id = "@mindroom_news:localhost"
-        sync_bot_runtime_state(bot)
         bot.logger = MagicMock()
         generate_response = AsyncMock()
         send_response = AsyncMock()
         _sync_turn_policy_runtime(bot)
         install_send_response_mock(bot, send_response)
         install_generate_response_mock(bot, generate_response)
-        bot.orchestrator = MagicMock()
-        sync_bot_runtime_state(bot)
 
         # Create thread history with multiple agents mentioned
         thread_history = [
@@ -1367,18 +1325,15 @@ class TestCommandHandling:
         )
 
         config = _runtime_bound_config(Config(router=RouterConfig(model="default")))
-        with tempfile.TemporaryDirectory() as tmpdir:
-            bot = make_test_agent_bot(
-                agent_user=agent_user,
-                storage_path=Path(tmpdir),
-                config=config,
-                runtime_paths=runtime_paths_for(config),
-                rooms=["!test:server"],
-            )
+        bot = make_test_agent_bot(
+            agent_user=agent_user,
+            config=config,
+            runtime_paths=runtime_paths_for(config),
+            rooms=["!test:server"],
+        )
         wrap_extracted_collaborators(bot)
         bot.client = AsyncMock()
         bot.client.user_id = "@mindroom_finance:localhost"
-        sync_bot_runtime_state(bot)
         bot.logger = MagicMock()
         generate_response = AsyncMock()
         _sync_turn_policy_runtime(bot)
@@ -1486,17 +1441,14 @@ class TestCommandHandling:
         )
 
         config = _runtime_bound_config(Config(router=RouterConfig(model="default")))
-        with tempfile.TemporaryDirectory() as tmpdir:
-            bot = make_test_agent_bot(
-                agent_user=agent_user,
-                storage_path=Path(tmpdir),
-                config=config,
-                runtime_paths=runtime_paths_for(config),
-                rooms=["!test:server"],
-            )
+        bot = make_test_agent_bot(
+            agent_user=agent_user,
+            config=config,
+            runtime_paths=runtime_paths_for(config),
+            rooms=["!test:server"],
+        )
         bot.client = AsyncMock()
         bot.client.user_id = "@mindroom_general:localhost"
-        sync_bot_runtime_state(bot)
         bot.logger = MagicMock()
         generate_response = AsyncMock()
         _sync_turn_policy_runtime(bot)
@@ -1556,14 +1508,12 @@ class TestRouterSkipsSingleAgent:
                 },
             ),
         )
-        with tempfile.TemporaryDirectory() as tmpdir:
-            bot = make_test_agent_bot(
-                agent_user=agent_user,
-                storage_path=Path(tmpdir),
-                config=config,
-                runtime_paths=runtime_paths_for(config),
-                rooms=["!test:server"],
-            )
+        bot = make_test_agent_bot(
+            agent_user=agent_user,
+            config=config,
+            runtime_paths=runtime_paths_for(config),
+            rooms=["!test:server"],
+        )
         bot.client = AsyncMock()
         bot.client.user_id = bot.agent_user.user_id
         bot.logger = MagicMock()
@@ -1621,14 +1571,12 @@ class TestRouterSkipsSingleAgent:
                 },
             ),
         )
-        with tempfile.TemporaryDirectory() as tmpdir:
-            bot = make_test_agent_bot(
-                agent_user=agent_user,
-                storage_path=Path(tmpdir),
-                config=config,
-                runtime_paths=runtime_paths_for(config),
-                rooms=["!test:server"],
-            )
+        bot = make_test_agent_bot(
+            agent_user=agent_user,
+            config=config,
+            runtime_paths=runtime_paths_for(config),
+            rooms=["!test:server"],
+        )
         bot.client = AsyncMock()
         bot.client.user_id = bot.agent_user.user_id
         bot.logger = MagicMock()
@@ -1694,14 +1642,12 @@ class TestRouterSkipsSingleAgent:
                 agents={"general": AgentConfig(display_name="General Agent", role="General assistant")},
             ),
         )
-        with tempfile.TemporaryDirectory() as tmpdir:
-            bot = make_test_agent_bot(
-                agent_user=agent_user,
-                storage_path=Path(tmpdir),
-                config=config,
-                runtime_paths=runtime_paths_for(config),
-                rooms=["!test:server"],
-            )
+        bot = make_test_agent_bot(
+            agent_user=agent_user,
+            config=config,
+            runtime_paths=runtime_paths_for(config),
+            rooms=["!test:server"],
+        )
         bot.client = AsyncMock()
         bot.client.user_id = bot.agent_user.user_id
         bot.logger = MagicMock()
@@ -1782,14 +1728,12 @@ class TestRouterSkipsSingleAgent:
                 },
             ),
         )
-        with tempfile.TemporaryDirectory() as tmpdir:
-            bot = make_test_agent_bot(
-                agent_user=agent_user,
-                storage_path=Path(tmpdir),
-                config=config,
-                runtime_paths=runtime_paths_for(config),
-                rooms=["!test:server"],
-            )
+        bot = make_test_agent_bot(
+            agent_user=agent_user,
+            config=config,
+            runtime_paths=runtime_paths_for(config),
+            rooms=["!test:server"],
+        )
         bot.client = AsyncMock()
         bot.client.user_id = bot.agent_user.user_id
         bot.logger = MagicMock()
@@ -1870,7 +1814,7 @@ class TestRouterSkipsSingleAgent:
         assert "Skipping routing: only one responder candidate" not in info_calls
 
     @pytest.mark.asyncio
-    async def test_router_requires_mention_with_multiple_non_agent_users_in_thread(self, tmp_path: Path) -> None:
+    async def test_router_requires_mention_with_multiple_non_agent_users_in_thread(self) -> None:
         """Router should not auto-route when multiple non-agent users posted in the thread."""
         agent_user = AgentMatrixUser(
             agent_name=ROUTER_AGENT_NAME,
@@ -1891,7 +1835,6 @@ class TestRouterSkipsSingleAgent:
         )
         bot = make_test_agent_bot(
             agent_user=agent_user,
-            storage_path=tmp_path,
             config=config,
             runtime_paths=runtime_paths_for(config),
             rooms=["!test:server"],
@@ -1984,14 +1927,12 @@ class TestRouterSkipsSingleAgent:
                 agents={"general": AgentConfig(display_name="General Agent", role="General assistant")},
             ),
         )
-        with tempfile.TemporaryDirectory() as tmpdir:
-            bot = make_test_agent_bot(
-                agent_user=agent_user,
-                storage_path=Path(tmpdir),
-                config=config,
-                runtime_paths=runtime_paths_for(config),
-                rooms=["!test:server"],
-            )
+        bot = make_test_agent_bot(
+            agent_user=agent_user,
+            config=config,
+            runtime_paths=runtime_paths_for(config),
+            rooms=["!test:server"],
+        )
         bot.client = AsyncMock()
         bot.client.user_id = bot.agent_user.user_id
         bot.logger = MagicMock()
@@ -2057,14 +1998,12 @@ class TestRouterSkipsSingleAgent:
                 agents={"general": AgentConfig(display_name="General Agent", role="General assistant")},
             ),
         )
-        with tempfile.TemporaryDirectory() as tmpdir:
-            bot = make_test_agent_bot(
-                agent_user=agent_user,
-                storage_path=Path(tmpdir),
-                config=config,
-                runtime_paths=runtime_paths_for(config),
-                rooms=["!test:server"],
-            )
+        bot = make_test_agent_bot(
+            agent_user=agent_user,
+            config=config,
+            runtime_paths=runtime_paths_for(config),
+            rooms=["!test:server"],
+        )
         bot.client = AsyncMock()
         bot.client.user_id = bot.agent_user.user_id
         bot.logger = MagicMock()
@@ -2128,14 +2067,12 @@ class TestRouterSkipsSingleAgent:
                 agents={"general": AgentConfig(display_name="General Agent", role="General assistant")},
             ),
         )
-        with tempfile.TemporaryDirectory() as tmpdir:
-            bot = make_test_agent_bot(
-                agent_user=agent_user,
-                storage_path=Path(tmpdir),
-                config=config,
-                runtime_paths=runtime_paths_for(config),
-                rooms=["!test:server"],
-            )
+        bot = make_test_agent_bot(
+            agent_user=agent_user,
+            config=config,
+            runtime_paths=runtime_paths_for(config),
+            rooms=["!test:server"],
+        )
         bot.client = AsyncMock()
         bot.client.user_id = bot.agent_user.user_id
         bot.logger = MagicMock()
@@ -2219,14 +2156,12 @@ class TestRouterSkipsSingleAgent:
                 },
             ),
         )
-        with tempfile.TemporaryDirectory() as tmpdir:
-            bot = make_test_agent_bot(
-                agent_user=agent_user,
-                storage_path=Path(tmpdir),
-                config=config,
-                runtime_paths=runtime_paths_for(config),
-                rooms=["!test:server"],
-            )
+        bot = make_test_agent_bot(
+            agent_user=agent_user,
+            config=config,
+            runtime_paths=runtime_paths_for(config),
+            rooms=["!test:server"],
+        )
         bot.client = AsyncMock()
         bot.client.user_id = bot.agent_user.user_id
         bot.logger = MagicMock()

@@ -24,6 +24,7 @@ from mindroom.agent_reply_membership import AgentReplyMembershipIndex
 from mindroom.api import computers, config_lifecycle
 from mindroom.api import main as api_main
 from mindroom.api import workers as workers_api
+from mindroom.api.app_state import ensure_app_state
 from mindroom.api.computers import router
 from mindroom.constants import resolve_runtime_paths
 from mindroom.orchestration.computer_runtime import ComputerRuntimeCoordinator
@@ -41,7 +42,7 @@ type Gateway = tuple[TestClient, ComputerPeer, FastAPI]
 def test_public_control_requires_session_bearer_and_returns_no_store() -> None:
     """Public control requires session bearer and returns no store."""
     app = FastAPI()
-    config_lifecycle.ensure_app_state(app)
+    ensure_app_state(app)
     app.include_router(router)
     with TestClient(app) as client:
         response = client.post("/api/computers/sessions/missing/control", json={"action": "take"})
@@ -558,6 +559,7 @@ def test_worker_maintenance_touches_computer_stream_before_cleanup(
         assert websocket.receive_bytes() == b"screen"
         api_main._cleanup_workers_once(
             config_lifecycle.require_api_state(app).snapshot.runtime_paths,
+            touch_live_workers=lambda _manager: None,
             computer_worker_keys=computers.active_computer_worker_keys(app),
         )
         assert actions == ["touch:worker", "maintain"]
@@ -581,6 +583,11 @@ def test_orchestrator_unbind_revokes_active_stream(gateway: Gateway, monkeypatch
         assert websocket.receive_bytes() == b"screen"
         assert client.portal is not None
         client.portal.call(coordinator.unbind)
+        # The sessions close at once, not only once the stream's maintenance notices the runtime is gone.
+        sessions = config_lifecycle.app_state(app).computer_sessions
+        assert sessions is not None
+        with pytest.raises(ComputerError):
+            sessions.get(session["session_id"])
         with pytest.raises(WebSocketDisconnect):
             websocket.receive_bytes()
     assert client.get(path, headers=headers).status_code == 401
@@ -598,7 +605,7 @@ async def test_stream_maintenance_bounds_complete_checks_with_virtual_time(
     monkeypatch.setattr(loop, "time", lambda: now)
     app = FastAPI()
     store = ComputerSessionStore(clock=lambda: now)
-    config_lifecycle.ensure_app_state(app).computer_sessions = store
+    ensure_app_state(app).computer_sessions = store
     session = store.create(authorized_target())
     stream_closed = asyncio.Event()
     session.stream = stream_closed
@@ -862,7 +869,10 @@ async def test_background_maintenance_snapshots_computers_on_owning_loop(
             lambda *_args, **_kwargs: nullcontext(manager),
         )
         monkeypatch.setattr(workers_api, "maintain_workers", maintain)
-        await asyncio.wait_for(api_main._worker_cleanup_loop(stop, app), timeout=1)
+        await asyncio.wait_for(
+            api_main._worker_cleanup_loop(stop, app, touch_live_workers=lambda _manager: None),
+            timeout=1,
+        )
     assert collected == [owner]
     assert actions == ["touch:worker", "maintain"]
 
