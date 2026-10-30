@@ -20,7 +20,7 @@ from mindroom.config.knowledge_graph import KNOWLEDGE_GRAPH_EDIT_FUNCTIONS, KNOW
 from mindroom.constants import HOOK_SOURCE_RUN_METADATA_KEY
 from mindroom.delegation.state import DELEGATION_FUNCTIONS
 from mindroom.history.conversation_text import one_line, run_requester, utterances
-from mindroom.history.session_runs import DELEGATION_SESSION_PREFIX, run_key
+from mindroom.history.session_runs import DELEGATION_SESSION_PREFIX
 from mindroom.knowledge.search import KNOWLEDGE_SEARCH_TOOL_NAME
 from mindroom.knowledge_graph.store import EpisodeInput, EpisodeKind
 from mindroom.redaction import redact_sensitive_data, redact_sensitive_text
@@ -30,10 +30,11 @@ if TYPE_CHECKING:
 
     from mindroom.config.knowledge_graph import KnowledgeGraphIngestConfig
     from mindroom.knowledge_graph.names import EntityNames, KnownEntity
-    from mindroom.llm.runs import RunRecord, ToolExecution
+    from mindroom.llm.runs import AnyRunRecord, ToolExecution
+    from mindroom.session_storage.store import LoggedRun
 
 type _ThreadKind = Literal["conversation", "exploration", "delegation", "automation"]
-type Progress = tuple[int, str, int]
+type Progress = tuple[int, int]
 
 # The progress of a run that is fully covered, larger than any count of lines a split covers.
 RUN_DONE = 1 << 30
@@ -60,7 +61,7 @@ class RenderedEpisode:
     """One episode, how far into its conversation it reaches, and whose turns it holds."""
 
     episode: EpisodeInput
-    # `(created_at, run_id, lines)`: how many lines of its newest run it covers, or RUN_DONE once it covers them all.
+    # `(seq, lines)`: its newest run's place in the log and how many of its lines it covers, or RUN_DONE once all.
     progress: Progress
     requester_id: str | None
 
@@ -95,11 +96,12 @@ def _observed(execution: ToolExecution) -> str:
     return json.dumps(documents, indent=2, ensure_ascii=False) if documents else ""
 
 
-def classify_thread(runs: Sequence[RunRecord], automation_thread_ids: set[str]) -> _ThreadKind:
+def classify_thread(turns: Sequence[LoggedRun], automation_thread_ids: set[str]) -> _ThreadKind:
     """Return what a thread is, from its session, its root run's trusted hook source, or the threads automations recorded."""
-    if not runs:
+    if not turns:
         return "conversation"
-    root = min(runs, key=run_key)
+    # The first turn created; a root that waited for an approval keeps its creation time but not its place in the log.
+    root = min((turn.run for turn in turns), key=lambda run: (run.created_at, run.run_id))
     if (root.session_id or "").startswith(DELEGATION_SESSION_PREFIX):
         return "delegation"
     metadata = root.metadata or {}
@@ -119,7 +121,7 @@ def classify_thread(runs: Sequence[RunRecord], automation_thread_ids: set[str]) 
 
 
 def render_episodes(
-    runs: Sequence[RunRecord],
+    turns: Sequence[LoggedRun],
     *,
     thread_kind: _ThreadKind,
     episode_kind: EpisodeKind,
@@ -128,7 +130,7 @@ def render_episodes(
     names: EntityNames,
     display_names: Mapping[str, str],
 ) -> list[RenderedEpisode]:
-    """Render one kind of episode from runs, oldest first, at most ``max_episode_chars`` each, split at run boundaries.
+    """Render one kind of episode from turns in log order, at most ``max_episode_chars`` each, split at run boundaries.
 
     ``names`` names each agent and person, so each speaks under one name and agents never as people, and
     ``display_names`` holds each person's newest display name in the whole conversation, so a turn stored without one,
@@ -141,7 +143,7 @@ def render_episodes(
     lines: list[str] = []
     calls: list[str] = []
     speakers: list[KnownEntity] = []
-    newest: RunRecord | None = None
+    newest: AnyRunRecord | None = None
     progress: Progress | None = None
 
     def flush() -> None:
@@ -155,7 +157,7 @@ def render_episodes(
 
     speaker = partial(names.speaker, display_names=display_names, own_agent=agent_name)
     cap = settings.max_episode_chars
-    for run in sorted(runs, key=run_key):
+    for seq, run in turns:
         items = _episode_items(run, episode_kind, settings, speaker)
         if not items:
             continue
@@ -175,34 +177,34 @@ def render_episodes(
             # Only a run larger than the cap is split; each piece records how many of the run's lines it reaches, so
             # pieces cut at another size after a settings change resume where the old ones stopped.
             if lines and _size(lines) + len(line) + 1 > cap:
-                progress = (*run_key(run), covered)
+                progress = (seq, covered)
                 flush()
             lines.append(line)
             if call is not None:
                 calls.append(call)
             speakers.append(said_by)
             newest = run
-        progress = (*run_key(run), RUN_DONE)
+        progress = (seq, RUN_DONE)
     flush()
     return rendered
 
 
-def newest_display_names(runs: Sequence[RunRecord]) -> dict[str, str]:
-    """Return the newest display name each sender's messages in ``runs`` carry."""
+def newest_display_names(turns: Sequence[LoggedRun]) -> dict[str, str]:
+    """Return the newest display name each sender's messages in ``turns``, in log order, carry."""
     return {
         said.sender: said.display_name
-        for run in sorted(runs, key=run_key)
-        for said in utterances(run)
+        for turn in turns
+        for said in utterances(turn.run)
         if said.sender is not None and said.display_name is not None
     }
 
 
-def _day(run: RunRecord) -> str:
+def _day(run: AnyRunRecord) -> str:
     return datetime.fromtimestamp(run.created_at, UTC).date().isoformat()
 
 
 def _episode_items(
-    run: RunRecord,
+    run: AnyRunRecord,
     episode_kind: EpisodeKind,
     settings: KnowledgeGraphIngestConfig,
     speaker: Callable[[str | None], KnownEntity],
@@ -222,7 +224,7 @@ def _episode_items(
 def _episode(
     kind: EpisodeKind,
     lines: list[str],
-    last_run: RunRecord,
+    last_run: AnyRunRecord,
     settings: KnowledgeGraphIngestConfig,
     calls: Sequence[str],
     known_entities: tuple[KnownEntity, ...],

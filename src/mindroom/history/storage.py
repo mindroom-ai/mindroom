@@ -35,7 +35,7 @@ from typing import TYPE_CHECKING, Any
 
 from mindroom.background_tasks import run_blocking_until_complete
 from mindroom.constants import MINDROOM_HISTORY_METADATA_KEY
-from mindroom.history.run_visibility import is_model_history_visible_run, replays_in_scope, run_in_scope
+from mindroom.history.run_visibility import replays_in_scope, run_in_scope
 from mindroom.history.types import HistoryScope, HistoryScopeState, owner_scope, replayed_summary_text
 from mindroom.session_storage import summary_rows
 from mindroom.session_storage.agent_storage import save_compaction_usage
@@ -133,13 +133,6 @@ def has_queued_force_compaction(storage: ConversationStore, session_id: str) -> 
     stored run, which takes seconds on a long session.
     """
     return _scope_state(storage.read_session_metadata(session_id)).force_compact_before_next_run
-
-
-def run_event_ids(run: AnyRunRecord) -> set[str]:
-    """Return every Matrix event id one model-visible run consumed or answered, as redaction matches them."""
-    if not is_model_history_visible_run(run):
-        return set()
-    return seen_event_ids(run.metadata) | source_event_ids(run.metadata)
 
 
 def read_scope_seen_event_ids(storage: ConversationStore, session: ConversationSession) -> set[str]:

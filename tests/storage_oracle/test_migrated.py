@@ -31,6 +31,7 @@ from tests.llm.agno_dict_helpers import PAUSED_NOTICE_OPENINGS
 from tests.storage_oracle.actions import Scenario
 from tests.storage_oracle.backend import SESSION_ID
 from tests.storage_oracle.determinism import deterministic
+from tests.storage_oracle.masks import readers_in_creation_order
 from tests.storage_oracle.observe import observe
 from tests.storage_oracle.record import (
     FIXTURES,
@@ -72,6 +73,7 @@ MASKS: dict[str, str] = {
     "(``mindroom.session_storage.legacy_agent_session_owners``)",
     "paused_notice_reads_as_no_content": "#3106: a run whose content is a paused notice reads with no content "
     "(``mindroom.llm.legacy_run_content``)",
+    "readers_follow_the_log": "background readers list a conversation's turns in log order, not in creation order",
     "history_state_is_the_owners_one_value": "layout version 6: the owner's force flag and preserved seen ids, kept per "
     "scope, become one metadata value, and other scopes' entries go (``mindroom.history.legacy_scope_metadata``)",
 }
@@ -140,19 +142,20 @@ _END_STATE_PINS: dict[str, frozenset[str]] = {
         {"history_state_is_the_owners_one_value", "fold_stores_cancelled_row", "history_copies_not_stored"},
     ),
     "generated/20": frozenset({"embedded_members_become_member_rows"}),
-    "generated/39": frozenset({"history_copies_not_stored"}),
+    "generated/39": frozenset({"history_copies_not_stored", "readers_follow_the_log"}),
     "generated/8": frozenset({"history_state_is_the_owners_one_value", "force_request_moves_into_metadata"}),
     "generated/19": frozenset({"history_state_is_the_owners_one_value", "force_request_moves_into_metadata"}),
     "generated/0": frozenset({"history_state_is_the_owners_one_value"}),
     "generated/15": frozenset({"fold_stores_cancelled_row", "history_state_is_the_owners_one_value"}),
-    "generated/16": frozenset({"history_state_is_the_owners_one_value"}),
+    "generated/16": frozenset({"history_state_is_the_owners_one_value", "readers_follow_the_log"}),
     "generated/18": frozenset({"history_state_is_the_owners_one_value"}),
     "generated/21": frozenset({"history_state_is_the_owners_one_value"}),
     "generated/23": frozenset({"fold_stores_cancelled_row", "history_state_is_the_owners_one_value"}),
-    "generated/27": frozenset({"history_state_is_the_owners_one_value"}),
+    "generated/27": frozenset({"history_state_is_the_owners_one_value", "readers_follow_the_log"}),
     "generated/28": frozenset({"fold_stores_cancelled_row", "history_state_is_the_owners_one_value"}),
     "generated/32": frozenset({"history_state_is_the_owners_one_value"}),
     "generated/9": frozenset({"history_state_is_the_owners_one_value"}),
+    "named/interrupted_voice_playout": frozenset({"readers_follow_the_log"}),
 }
 # Where an older release also queued a manual compaction request: the scope keys listed in the session state.
 _PENDING_KEY = "mindroom_pending_compaction_scope_keys"
@@ -460,6 +463,7 @@ def _mask_session(
     _session_columns_encoded_once(recorded, observed, used)
     _force_requests_in_metadata(recorded, observed, used)
     _history_state_in_one_value(recorded, owner_key, used)
+    readers_in_creation_order(observed, used)
     _drop_history_copies(recorded, observed, used)
     _hide_folded(recorded, facts, used)
     created = _hide_fold_rows(observed, facts, used)

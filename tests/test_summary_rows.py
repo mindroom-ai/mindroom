@@ -761,6 +761,53 @@ def test_a_cut_takes_a_run_that_folded_on_both_sides_of_its_pause_whole(store: C
     assert _removed(store) == {"r2", "r3", "approval"}
 
 
+def _redaction_basis(store: ConversationStore) -> summary_rows.RedactionBasis:
+    with store.transaction(write=False) as connection:
+        return summary_rows.read_redaction_basis(connection, store.names, session_id="s1", scope_key=_AGENT)
+
+
+def test_a_redaction_cut_names_the_first_run_the_cut_removes(store: ConversationStore) -> None:
+    """The read-only cut starts where a redaction's cut does, so a run that folded before its pause goes whole.
+
+    A cut at a fold row keeps the run that row sorts after, and an event no element holds cuts nothing.
+    """
+    _save(store, _run("r1"))
+    running = _run("approval", RunStatus.running)
+    assert _fold(store, running, "S1") is not None
+    running.status = RunStatus.paused
+    assert _save(store, running) == ["written"]
+    _save(store, _run("r2"), _run("r3"))
+    assert _fold(store, running, "S2") is not None
+
+    def cut(*event_ids: str) -> int | None:
+        return _redaction_basis(store).first_removed_seq(event_ids)
+
+    assert cut("$r3") == 2
+    assert cut("$r1", "$r3") == 1
+    assert cut("$unknown") is None
+    assert _log(store) == ["run:r1", "row:S1", "run:r2", "run:r3", "row:S2", "run:approval"]
+
+    assert _redact(store, "$r3")
+    assert _log(store) == ["run:r1"]
+
+
+def test_redaction_candidates_are_every_event_an_element_holds_for_a_cut(store: ConversationStore) -> None:
+    """Runs of every status and fold rows after the latest barrier hold events; what the barrier retired does not."""
+    _save(store, _run("old", seen=["$old-context"]))
+    assert _chunk(store, ["old"], "S0") is not None
+    summary_rows.retire(store, session=_session(), scope_key=_AGENT)
+    _save(store, _run("done"), _run("asks", RunStatus.paused, seen=["$asked"]), _run("failed", RunStatus.error))
+    _save(store, _run("member", parent="done"))
+    assert _fold(store, _run("live", seen=["$context"]), "S") is not None
+    assert store.delete_runs(["live"], session_id="s1") == {"live"}
+
+    basis = _redaction_basis(store)
+    candidates = basis.candidates()
+
+    assert candidates == {"$done", "$asks", "$asked", "$failed", "$live", "$context"}
+    assert all(basis.first_removed_seq([event]) for event in candidates)
+
+
 def test_editing_a_turn_an_older_resumed_run_folded_removes_that_run(store: ConversationStore) -> None:
     """The resumed run's fold summarized the edited turn, so the run built on it goes; the runs before both stay."""
     paused = _run("paused", RunStatus.paused)

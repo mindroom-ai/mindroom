@@ -1,18 +1,26 @@
-"""Read the finished Matrix turns of an agent's conversations, live and compacted, for background workers."""
+"""Follow an agent's conversations in their log order, live and compacted, for background readers.
+
+Every reader shares which turns it may read and how it finds conversations with news; each keeps its own progress. A
+turn that completes after the turns it waited for, such as one approved later, takes the next place in its log, so a
+reader that follows places reads it once it completes.
+"""
 
 from __future__ import annotations
 
-from itertools import takewhile
-from typing import TYPE_CHECKING
+from dataclasses import dataclass, field
+from typing import TYPE_CHECKING, TypedDict
 
-from mindroom.history.storage import run_event_ids
+from mindroom.history.types import HistoryScope
 from mindroom.llm.runs import RunRecord, RunStatus
+from mindroom.session_storage.store import logged_runs_after
+from mindroom.session_storage.summary_rows import read_redaction_basis
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable
+    from collections.abc import Awaitable, Callable, Mapping, Sequence
 
-    from mindroom.config.main import Config
-    from mindroom.session_storage.store import ConversationStore
+    from mindroom.llm.runs import AnyRunRecord
+    from mindroom.session_storage.store import ConversationStore, LoggedRun
+    from mindroom.session_storage.summary_rows import RedactionBasis
 
 # Which of a room's events an agent saw redacted, or None until that agent's running bot has finished its first sync.
 type RedactedEventIds = Callable[[str, str, tuple[str, ...]], Awaitable[frozenset[str] | None]]
@@ -21,13 +29,50 @@ type RedactedEventIds = Callable[[str, str, tuple[str, ...]], Awaitable[frozense
 DELEGATION_SESSION_PREFIX = "delegate:"
 # Dynamic-workflow participants keep sessions of their own beside the conversation that started them.
 _WORKFLOW_SESSION_MARKER = ":dynamic_workflow:"
-_DAY_SECONDS = 86_400
-_APPROVAL_GRACE_SECONDS = 3600
 
 
-def run_key(run: RunRecord) -> tuple[int, str]:
-    """Return a run's position in its session."""
-    return (run.created_at, run.run_id)
+class Cursor(TypedDict):
+    """What every reader keeps of one conversation besides its own progress; each reader extends it."""
+
+    # The conversation's update time once every new turn in it was read.
+    updated_at: int
+    # Consecutive failures, which set the backoff.
+    failures: int
+    # When the current failures began, so a reader can give up on turns that keep failing.
+    failing_since: float
+    retry_at: float
+
+
+@dataclass(frozen=True)
+class DueConversation:
+    """A quiet conversation updated since its reader last caught up: its Matrix turns and what a redaction would cut.
+
+    Both come from one snapshot of the conversation's log, so a cut that lands after it cannot make them disagree.
+    """
+
+    session_id: str
+    updated_at: int
+    turns: list[LoggedRun]
+    redaction: RedactionBasis
+
+
+@dataclass(frozen=True)
+class _UnreadableConversation:
+    """A due conversation whose turns could not be read, for its reader to back off."""
+
+    session_id: str
+    updated_at: int
+    error: Exception
+
+
+@dataclass
+class _DueScan:
+    """The conversations one listing found for a reader."""
+
+    due: list[DueConversation] = field(default_factory=list)
+    # ``(session_id, updated_at)`` of due conversations without Matrix turns, which the reader records as caught up.
+    empty: list[tuple[str, int]] = field(default_factory=list)
+    unreadable: list[_UnreadableConversation] = field(default_factory=list)
 
 
 def updated_sessions(storage: ConversationStore, *, since: int) -> list[tuple[str, int]]:
@@ -39,72 +84,132 @@ def updated_sessions(storage: ConversationStore, *, since: int) -> list[tuple[st
     ]
 
 
-def session_runs(storage: ConversationStore, session_id: str) -> list[RunRecord]:
-    """Return the session's top-level Matrix turns that finished or wait for approval, live and compacted, oldest first.
+def matrix_turns(storage: ConversationStore, session_id: str) -> list[LoggedRun]:
+    """Return the session's top-level Matrix turns that completed or wait for approval, live and compacted, in log order.
 
-    A turn waiting for approval finishes in place later, so callers stop at it rather than skip it.
+    Readers read completed turns only; a turn waiting for approval takes a later place once it completes.
     """
     # A loaded session holds only the runs after the latest summary row, so the whole run log is read instead.
-    return sorted(
-        (
-            run
-            for run in storage.list_runs(session_id)
-            if isinstance(run, RunRecord)
-            and run.parent_run_id is None
-            and run.status in (RunStatus.completed, RunStatus.paused)
-            and (run.metadata or {}).get("room_id")
-        ),
-        key=run_key,
-    )
+    return _matrix_turns(storage.runs_after(session_id, 0))
 
 
-def _approval_window_seconds(config: Config) -> float:
-    """Return how long a turn can wait for approval before every approval it could get has expired and resumed it."""
-    approval = config.tool_approval
-    days = max([approval.timeout_days, *(rule.timeout_days for rule in approval.rules if rule.timeout_days)])
-    # The card's expiry counts from when it was posted, a little after the newest message, and then resumes the turn.
-    return days * _DAY_SECONDS + _APPROVAL_GRACE_SECONDS
+def _read_conversation(
+    storage: ConversationStore,
+    session_id: str,
+    *,
+    agent_name: str,
+    updated_at: int = 0,
+) -> DueConversation:
+    """Read a conversation's Matrix turns and what a redaction would cut of the agent's history, in one snapshot."""
+    with storage.transaction(write=False) as connection:
+        logged = logged_runs_after(connection, storage.names, session_id, 0)
+        redaction = read_redaction_basis(
+            connection,
+            storage.names,
+            session_id=session_id,
+            scope_key=HistoryScope(kind="agent", scope_id=agent_name).key,
+        )
+    return DueConversation(session_id, updated_at, _matrix_turns(logged), redaction)
 
 
-def finished_runs(runs: list[RunRecord], config: Config, *, now: float) -> tuple[list[RunRecord], float | None]:
-    """Return the finished runs before the first one that can still finish later, and when that one stops waiting.
+def _matrix_turns(logged: Sequence[LoggedRun]) -> list[LoggedRun]:
+    return [
+        turn
+        for turn in logged
+        if isinstance(turn.run, RunRecord)
+        and turn.run.status in (RunStatus.completed, RunStatus.paused)
+        and (turn.run.metadata or {}).get("room_id")
+    ]
 
-    A turn waiting for approval finishes in place with its original, earlier creation time, so nothing after it is
-    read yet; once its approval window has passed it can no longer finish and is skipped.
+
+def start_seq(turns: Sequence[LoggedRun], older: Callable[[AnyRunRecord], bool]) -> int:
+    """Return the place a conversation never read starts after, so its completed turns that are not ``older`` are read.
+
+    A turn that is ``older`` but completes later, such as one approved after the start, takes a later place and is read.
     """
-    approval_window = _approval_window_seconds(config)
-    finished: list[RunRecord] = []
-    for run in runs:
-        if run.status == RunStatus.paused:
-            # Its newest message is the call waiting for approval, whose card expires counting from when it was posted.
-            asked_at = max([run.created_at, *(message.created_at for message in run.messages)])
-            expires_at = asked_at + approval_window
-            if now < expires_at:
-                return finished, expires_at
+    newer = [turn.seq for turn in turns if turn.run.status == RunStatus.completed and not older(turn.run)]
+    if newer:
+        return min(newer) - 1
+    return turns[-1].seq if turns else 0
+
+
+def due_conversations(
+    storage: ConversationStore,
+    cursors: Mapping[str, Cursor],
+    *,
+    agent_name: str,
+    since: int,
+    now: float,
+    idle_seconds: float,
+    limit: int,
+    skip: Callable[[str], bool] = lambda _session_id: False,
+) -> _DueScan:
+    """Return up to ``limit`` conversations updated after ``since`` and quiet for ``idle_seconds`` that have news.
+
+    A conversation has news when it was updated after its cursor caught up and its cursor waits for no retry.
+    Conversations ``skip`` names are left out, and ones without Matrix turns, such as conversations through the
+    OpenAI-compatible API, take no place among the ``limit``.
+    """
+    scan = _DueScan()
+    # At least a second, so a conversation updated after a pass always carries a later update time than it had then.
+    idle_seconds = max(idle_seconds, 1)
+    for session_id, updated_at in updated_sessions(storage, since=since):
+        if len(scan.due) >= limit:
+            break
+        cursor = cursors.get(session_id)
+        if (
+            skip(session_id)
+            or now - updated_at < idle_seconds
+            or (cursor is not None and (cursor["retry_at"] > now or updated_at <= cursor["updated_at"]))
+        ):
             continue
-        finished.append(run)
-    return finished, None
+        try:
+            conversation = _read_conversation(storage, session_id, agent_name=agent_name, updated_at=updated_at)
+        except Exception as exc:
+            # One conversation that cannot be read must not stop the reader's others.
+            scan.unreadable.append(_UnreadableConversation(session_id, updated_at, exc))
+            continue
+        if conversation.turns:
+            scan.due.append(conversation)
+        else:
+            scan.empty.append((session_id, updated_at))
+    return scan
 
 
-async def unredacted_runs(
-    runs: list[RunRecord],
+def back_off(cursor: Cursor, now: float, *, first_seconds: float, max_seconds: float) -> None:
+    """Count one more consecutive failure and wait twice as long as after the last one, up to ``max_seconds``."""
+    cursor["failing_since"] = cursor["failing_since"] or now
+    cursor["failures"] += 1
+    cursor["retry_at"] = now + min(max_seconds, first_seconds * 2 ** (cursor["failures"] - 1))
+
+
+def caught_up(cursor: Cursor, updated_at: int) -> None:
+    """Record every new turn of a conversation updated at ``updated_at`` as read, so it waits for news."""
+    cursor.update(updated_at=updated_at, failures=0, failing_since=0, retry_at=0)
+
+
+async def unredacted(
+    conversation: DueConversation,
     agent_name: str,
     redacted_event_ids: RedactedEventIds,
-) -> list[RunRecord] | None:
-    """Return the runs before the first that derives from a redacted event, or None while the agent cannot tell.
+) -> list[LoggedRun] | None:
+    """Return the completed turns a redaction the agent saw leaves in its history, or None while it cannot tell.
 
-    ``runs`` are one conversation's, oldest first. A redaction removes that turn and every later one, which may build
-    on it, from stored history only when the agent next replies there, so readers skip them here.
+    A redaction removes the first element of the agent's history holding the event, of any status, and everything
+    after it, only when the agent next replies there, so readers skip those turns here. The cut is decided from the
+    conversation's snapshot, so a reply that removed them while the journal was asked still keeps them out.
     """
-    by_room: dict[str, set[str]] = {}
-    for run in runs:
-        by_room.setdefault(str((run.metadata or {}).get("room_id")), set()).update(run_event_ids(run))
-    redacted: set[str] = set()
-    for room_id, event_ids in by_room.items():
-        if not event_ids:
-            continue
-        found = await redacted_event_ids(agent_name, room_id, tuple(sorted(event_ids)))
-        if found is None:
-            return None
-        redacted |= found
-    return list(takewhile(lambda run: not run_event_ids(run) & redacted, runs))
+    # Old-format history only: a legacy summary row (before v2026.9.315) is not consulted, so neither its removal of the
+    # whole history when it may hold the event nor the retirement of legacy summaries when another element holds it
+    # (which deletes the runs that folded mid-turn) is mirrored; the agent's next reply removes those turns from history.
+    completed = [turn for turn in conversation.turns if turn.run.status == RunStatus.completed]
+    candidates = conversation.redaction.candidates()
+    if not conversation.turns or not candidates:
+        return completed
+    # A conversation's turns all name the room its session belongs to.
+    room_id = str((conversation.turns[0].run.metadata or {}).get("room_id"))
+    redacted = await redacted_event_ids(agent_name, room_id, tuple(sorted(candidates)))
+    if redacted is None:
+        return None
+    cut = conversation.redaction.first_removed_seq(redacted) if redacted else None
+    return [turn for turn in completed if cut is None or turn.seq < cut]

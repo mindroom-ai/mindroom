@@ -20,7 +20,7 @@ from mindroom.automations.threads import automation_threads
 from mindroom.config.automations import ExplorationAutomation
 from mindroom.config.resolution import edits_knowledge_graph
 from mindroom.durable_write import write_json_file_durable
-from mindroom.history.session_runs import session_runs, updated_sessions
+from mindroom.history.session_runs import matrix_turns, start_seq, updated_sessions
 from mindroom.knowledge_graph.episodes import classify_thread, is_evidence, tool_arguments
 from mindroom.knowledge_graph.ingestion import wake_knowledge_graph_ingestion
 from mindroom.llm.runs import RunStatus
@@ -49,10 +49,18 @@ class _Lead:
     last_seen: int
 
 
-def _collect_leads(ctx: AutomationContext, *, since: int, limit: int) -> tuple[list[_Lead], bool]:
-    """Return distinct tool calls from conversations updated after ``since``, newest first, at most ``limit``.
+def _collect_leads(
+    ctx: AutomationContext,
+    *,
+    since: int,
+    read_through: dict[str, int],
+    limit: int,
+) -> tuple[list[_Lead], bool]:
+    """Return distinct tool calls of new turns in conversations updated after ``since``, newest first, at most ``limit``.
 
-    Also return whether any conversation was updated after ``since``.
+    A turn is new once it completes after the place ``read_through`` holds for its conversation, which moves to the
+    conversation's last place read; a conversation without one starts with the turns created after ``since``. Also
+    return whether any conversation was updated after ``since``.
     """
     storage = create_session_storage(
         ctx.agent_name,
@@ -65,24 +73,29 @@ def _collect_leads(ctx: AutomationContext, *, since: int, limit: int) -> tuple[l
     active = False
     for session_id, _updated_at in updated_sessions(storage, since=since):
         try:
-            runs = session_runs(storage, session_id)
+            turns = matrix_turns(storage, session_id)
         except Exception as exc:
             # One conversation that cannot be read must not stop every later check.
             logger.warning("Exploration skipped an unreadable conversation", agent=ctx.agent_name, error=str(exc))
             continue
-        if classify_thread(runs, automation_thread_ids) != "conversation":
+        if classify_thread(turns, automation_thread_ids) != "conversation":
             continue
         active = True
-        for run in runs:
+        start = read_through.get(session_id)
+        if start is None:
+            start = start_seq(turns, older=lambda run: run.created_at <= since)
+        # A turn waiting for approval takes a later place once it completes, so the next check reads it.
+        read_through[session_id] = max(start, turns[-1].seq) if turns else start
+        for seq, run in turns:
             # An updated conversation's earlier turns were listed by an earlier run.
-            if run.status != RunStatus.completed or (run.created_at or 0) <= since:
+            if run.status != RunStatus.completed or seq <= start:
                 continue
             for execution in run.tools or []:
                 if not is_evidence(execution):
                     continue
                 key = (execution.tool_name, tool_arguments(execution)[:_MAX_ARGUMENT_CHARS])
                 count, last_seen = seen.get(key, (0, 0))
-                seen[key] = (count + 1, max(last_seen, run.created_at or 0))
+                seen[key] = (count + 1, max(last_seen, run.created_at))
     leads = [_Lead(function, arguments, count, last_seen) for (function, arguments), (count, last_seen) in seen.items()]
     leads.sort(key=lambda lead: lead.last_seen, reverse=True)
     return leads[:limit], active
@@ -103,12 +116,20 @@ def _without_mentions(text: str) -> str:
     return text.replace("@", "\uff20")
 
 
-def _last_run_at(ctx: AutomationContext) -> float | None:
+def _state(ctx: AutomationContext) -> tuple[float | None, dict[str, int]]:
+    """Return when the last run ended, and the place each conversation was read through for it."""
     try:
         state = json.loads((ctx.state_dir / _STATE_FILE).read_text(encoding="utf-8"))
     except FileNotFoundError:
-        return None
-    return float(state["last_run_at"])
+        return None, {}
+    # LEGACY_COMPAT: Exploration state without conversation places.
+    # Legacy format: `exploration.json` holding only `last_run_at`, the time of the check whose run ended last.
+    # Last legacy release: v2026.10.696; replacement: the next release also keeps `sessions`, each conversation's place.
+    # Handling: Every conversation starts as one without a place does, with its completed turns created after the last
+    # check; a turn created before that check and approved after it is offered only when it completed after one of
+    # those turns.
+    # Coverage: tests/test_exploration_automation.py::test_a_state_file_without_places_offers_turns_created_since_the_check.
+    return float(state["last_run_at"]), {session_id: int(seq) for session_id, seq in state.get("sessions", {}).items()}
 
 
 @automation("exploration")
@@ -122,11 +143,11 @@ def check_exploration(ctx: AutomationContext) -> Ask | None:
         msg = f"exploration cannot run the {entry.name} entry"
         raise ValueError(msg)  # noqa: TRY004 - the runner turns ValueError into a visible notice
     now = time.time()
-    last_run_at = _last_run_at(ctx)
+    last_run_at, read_through = _state(ctx)
     revisit_due = last_run_at is None or now - last_run_at >= entry.revisit_days * _DAY_SECONDS
     # Update times are whole seconds, so the second of the last check is listed again rather than missed.
     since = int(last_run_at) - 1 if last_run_at is not None else int(now) - entry.revisit_days * _DAY_SECONDS
-    leads, active = _collect_leads(ctx, since=since, limit=entry.max_leads)
+    leads, active = _collect_leads(ctx, since=since, read_through=read_through, limit=entry.max_leads)
     # A revisit catches changes in the sources people use; an agent or instance nobody talked to since needs none.
     if not leads and not (revisit_due and active):
         return None
@@ -138,15 +159,22 @@ def check_exploration(ctx: AutomationContext) -> Ask | None:
         fix_step=ctx.config.get_prompt("EXPLORATION_FIX_STEP") if fixes else "",
         fix_exception=ctx.config.get_prompt("EXPLORATION_FIX_EXCEPTION") if fixes else "",
     )
-    return Ask(prompt, new_thread=True, then=partial(_after_run, ctx.state_dir, now))
+    return Ask(prompt, new_thread=True, then=partial(_after_run, ctx.state_dir, now, read_through))
 
 
-def _after_run(state_dir: Path, checked_at: float, config: Config, thread_id: str, timed_out: bool) -> Done:
-    """Record the run, resolve its thread, and ingest its tool results once the conversation counts as idle.
+def _after_run(
+    state_dir: Path,
+    checked_at: float,
+    read_through: dict[str, int],
+    config: Config,
+    thread_id: str,
+    timed_out: bool,
+) -> Done:
+    """Record the run and what its check read, resolve its thread, and ingest its tool results once it counts as idle.
 
     The run is recorded only once it ends, so a prompt that never posted offers the same leads next time.
     """
-    write_json_file_durable(state_dir / _STATE_FILE, {"last_run_at": checked_at})
+    write_json_file_durable(state_dir / _STATE_FILE, {"last_run_at": checked_at, "sessions": read_through})
     notice = "⚠️ Exploration did not finish within an hour." if timed_out else "🔭 Exploration ended."
     return Done(
         notice,

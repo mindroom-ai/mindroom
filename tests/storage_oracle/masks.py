@@ -28,7 +28,6 @@ from mindroom.ai_runtime import _finalize_queued_notice_in_runs, _recover_prior_
 from mindroom.constants import MATRIX_RESPONSE_EVENT_ID_METADATA_KEY, MINDROOM_HISTORY_METADATA_KEY
 from mindroom.delegation.state import DELEGATION_STATE_KEY
 from mindroom.history.legacy_scope_metadata import LEGACY_COMPACTION_METADATA_KEY, LEGACY_MATRIX_HISTORY_METADATA_KEY
-from mindroom.history.session_runs import session_runs
 from mindroom.history.storage import has_queued_force_compaction
 from mindroom.llm.messages import Message
 from mindroom.llm.runs import RunRecord, RunStatus, TeamRunRecord
@@ -92,6 +91,11 @@ MASKS: dict[str, Mask] = {
             "force_request_only_in_metadata",
             "decision 5 (W9): a manual compaction request is only the metadata flag, with no copy in the session state "
             "that the next reply moves into the flag",
+        ),
+        Mask(
+            "readers_follow_the_log",
+            "background readers list a conversation's turns in log order, where a turn finished after an approval "
+            "comes after the turns that finished meanwhile, not in creation order",
         ),
         Mask(
             "a_finished_interrupted_record_is_news",
@@ -203,15 +207,29 @@ def _segment_call_ids(fold: FoldInput) -> frozenset[str]:
     return frozenset(calls)
 
 
-class _Listed:
-    """A stand-in store that lists given runs, so ``session_runs`` reads the Agno-layout store's view of them."""
+def _old_reader_view(runs: Sequence[AnyRunRecord]) -> list[str]:
+    """Return what the Agno-layout store's background readers listed: its finished or paused Matrix turns by creation."""
+    turns = [
+        run
+        for run in runs
+        if isinstance(run, RunRecord)
+        and run.parent_run_id is None
+        and run.status in (RunStatus.completed, RunStatus.paused)
+        and (run.metadata or {}).get("room_id")
+    ]
+    return [run.run_id for run in sorted(turns, key=lambda run: (run.created_at, run.run_id))]
 
-    def __init__(self, runs: list[AnyRunRecord]) -> None:
-        self._runs = runs
 
-    def list_runs(self, session_id: str) -> list[AnyRunRecord]:
-        del session_id
-        return self._runs
+def readers_in_creation_order(observed: dict[str, Any], used: set[str]) -> None:
+    """Show the turns readers list, which follow the log, in the creation order the old readers sorted them in."""
+    turns, listed = observed["session_runs"], observed["list_runs"]
+    if not (isinstance(turns, list) and isinstance(listed, list)):
+        return
+    created = {run["run_id"]: (run["created_at"], run["run_id"]) for run in listed}
+    ordered = sorted(turns, key=created.__getitem__)
+    if ordered != turns:
+        observed["session_runs"] = ordered
+        used.add("readers_follow_the_log")
 
 
 class MaskedBackend(StoreBackend):
@@ -770,13 +788,14 @@ class MaskedBackend(StoreBackend):
             view["row"] = {"error": f"OperationalError: no such table: {self.names.sessions}"}
             view["ledger"] = {"error": f"OperationalError: no such table: {self.names.usage}"}
             self.used.add("tables_exist_at_open")
+        readers_in_creation_order(view, self.used)
         if isinstance(view["loaded_runs"], list):
             view["loaded_runs"] = self._old_loaded(view["loaded_runs"])
         if isinstance(view["list_runs"], list):
             view["list_runs"] = self._old_listed(view["list_runs"])
             if self.replaced_covered:
                 runs = [_decoded(run) for run in view["list_runs"]]
-                view["session_runs"] = [run.run_id for run in session_runs(_Listed(runs), SESSION_ID)]  # type: ignore[arg-type]
+                view["session_runs"] = _old_reader_view(runs)
         replies = {f"$reply-{run_id}" for run_id in self.link_only}
         for key in ("seen_event_ids", "redaction_candidates"):
             if isinstance(view[key], list):

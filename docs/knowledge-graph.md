@@ -60,7 +60,7 @@ The old graphs keep their memory until you stop MindRoom and delete `knowledge_g
 
 Not added: threads started by other automations such as `dreaming`, graph lookups and edits, including those through a shell, the graph facts that `search_knowledge_base` returns, knowledge searches through a shell, the `reasoning` tool's thoughts, answers from subagents, workflows, and Claude Code, results collected from background jobs, conversations through the OpenAI-compatible API, team conversations, and context that hooks attach to messages, such as location.
 Credential-like values are removed on a best-effort basis before anything is sent for extraction.
-A turn waiting for tool approval holds back the later turns of its conversation until it finishes or its approval expires.
+A turn waiting for tool approval is added once it finishes, and the later turns of its conversation are added meanwhile.
 
 Extraction asks the model to sort what it finds into people, agents, organizations, locations, events, projects, products, documents, and accounts, to leave out what fits none of them, and to keep file paths, URLs, and the like inside the facts that mention them, so pets, foods, hobbies, and topics get no entity of their own.
 It records what the agent reports as facts about their subjects and leaves out the agent's own lookups and housekeeping, such as what it searched, read, or saved, its access, accounts, tools, and configuration, and the counts and progress of its own tasks; what the agent did for others, such as filing an issue or sending a message, is kept.

@@ -3486,7 +3486,7 @@ It applies only to agents whose effective backend is `file`, including each requ
 Compacted turns and voice-call turns are included.
 Not auto-flushed: turns that [automations](https://docs.mindroom.chat/scheduling/#automations) start, tasks another agent delegated, team conversations, conversations through the OpenAI-compatible API, and context that hooks attach to messages, such as location.
 A message redacted before its turn is flushed stays out of memory, and so do the turn that read it and every later turn its redaction removes from [history](https://docs.mindroom.chat/configuration/history/#compacted-history-and-redaction).
-A turn waiting for tool approval holds back the later turns of its conversation until it finishes or its approval expires.
+A turn waiting for tool approval is flushed once it finishes, and the later turns of its conversation are flushed meanwhile.
 Enabling auto-flush starts with the turns after that; earlier conversation is not flushed, and turning it off and on again flushes the turns in between.
 An agent switched to `file` memory later starts with its turns from about one `flush_interval_seconds` before auto-flush first sees it, and its private instances, including new ones, keep all their turns since then.
 
@@ -4182,7 +4182,7 @@ The old graphs keep their memory until you stop MindRoom and delete `knowledge_g
 
 Not added: threads started by other automations such as `dreaming`, graph lookups and edits, including those through a shell, the graph facts that `search_knowledge_base` returns, knowledge searches through a shell, the `reasoning` tool's thoughts, answers from subagents, workflows, and Claude Code, results collected from background jobs, conversations through the OpenAI-compatible API, team conversations, and context that hooks attach to messages, such as location.
 Credential-like values are removed on a best-effort basis before anything is sent for extraction.
-A turn waiting for tool approval holds back the later turns of its conversation until it finishes or its approval expires.
+A turn waiting for tool approval is added once it finishes, and the later turns of its conversation are added meanwhile.
 
 Extraction asks the model to sort what it finds into people, agents, organizations, locations, events, projects, products, documents, and accounts, to leave out what fits none of them, and to keep file paths, URLs, and the like inside the facts that mention them, so pets, foods, hobbies, and topics get no entity of their own.
 It records what the agent reports as facts about their subjects and leaves out the agent's own lookups and housekeeping, such as what it searched, read, or saved, its access, accounts, tools, and configuration, and the counts and progress of its own tasks; what the agent did for others, such as filing an issue or sending a message, is kept.

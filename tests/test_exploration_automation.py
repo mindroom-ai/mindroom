@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import time
 from typing import TYPE_CHECKING
 from unittest.mock import patch
@@ -23,6 +24,7 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from mindroom.constants import RuntimePaths
+    from mindroom.session_storage.store import ConversationStore, LoggedRun
 
 DAY = 86_400
 
@@ -183,7 +185,7 @@ def test_leads_are_distinct_counted_newest_first_and_capped(tmp_path: Path) -> N
     _seed(config, paths, "!room:x:$c", [_tool("list_issues", repo="acme/beacon")], created_at=300)
     _seed(config, paths, "!room:x:$d", [_tool("search", query="atlas")], created_at=50)
 
-    leads, _ = _collect_leads(_context(config, paths, tmp_path), since=0, limit=2)
+    leads, _ = _collect_leads(_context(config, paths, tmp_path), since=0, read_through={}, limit=2)
 
     assert [(lead.function, lead.count, lead.last_seen) for lead in leads] == [
         ("list_issues", 1, 300),
@@ -204,7 +206,7 @@ def test_leads_skip_graph_lookups_and_exploration_threads(tmp_path: Path) -> Non
         hook_source="automation/exploration",
     )
 
-    assert _collect_leads(_context(config, paths, tmp_path), since=0, limit=10)[0] == []
+    assert _collect_leads(_context(config, paths, tmp_path), since=0, read_through={}, limit=10)[0] == []
 
 
 def test_lead_arguments_are_redacted(tmp_path: Path) -> None:
@@ -213,7 +215,7 @@ def test_lead_arguments_are_redacted(tmp_path: Path) -> None:
     token = "ghp_" + "A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6Q7r8"
     _seed(config, paths, "!room:x:$a", [_tool("call_api", token=token)], created_at=100)
 
-    [lead], _ = _collect_leads(_context(config, paths, tmp_path), since=0, limit=10)
+    [lead], _ = _collect_leads(_context(config, paths, tmp_path), since=0, read_through={}, limit=10)
 
     assert token not in lead.arguments
 
@@ -287,7 +289,7 @@ def test_old_runs_of_an_updated_conversation_are_not_leads(tmp_path: Path) -> No
     config, paths = _config(), _paths(tmp_path)
     _seed(config, paths, "!room:x:$a", [_tool("get_repository", repo="acme/atlas")], created_at=100, updated_at=200)
 
-    assert _collect_leads(_context(config, paths, tmp_path), since=150, limit=10) == ([], True)
+    assert _collect_leads(_context(config, paths, tmp_path), since=150, read_through={}, limit=10) == ([], True)
 
 
 def test_a_prompt_that_was_never_answered_keeps_its_leads(tmp_path: Path) -> None:
@@ -309,16 +311,16 @@ def test_an_unreadable_conversation_does_not_stop_exploration(tmp_path: Path) ->
     config, paths = _config(), _paths(tmp_path)
     _seed(config, paths, "!room:x:$bad", [_tool("get_repository", repo="acme/bad")], created_at=100)
     _seed(config, paths, "!room:x:$good", [_tool("get_repository", repo="acme/atlas")], created_at=200)
-    real = exploration.session_runs
+    real = exploration.matrix_turns
 
-    def runs(storage: object, session_id: str) -> list[RunRecord]:
+    def runs(storage: ConversationStore, session_id: str) -> list[LoggedRun]:
         if session_id == "!room:x:$bad":
             msg = "corrupt session row"
             raise ValueError(msg)
         return real(storage, session_id)
 
-    with patch.object(exploration, "session_runs", runs):
-        leads, _ = _collect_leads(_context(config, paths, tmp_path), since=0, limit=10)
+    with patch.object(exploration, "matrix_turns", runs):
+        leads, _ = _collect_leads(_context(config, paths, tmp_path), since=0, read_through={}, limit=10)
 
     assert [lead.arguments for lead in leads] == ['{"repo": "acme/atlas"}']
 
@@ -343,7 +345,10 @@ def test_a_turn_approved_after_a_check_is_a_lead_at_the_next(tmp_path: Path) -> 
         tools=[_tool("get_repository", repo="acme/late")],
     )
     storage = create_session_storage("mind", config, paths, execution_identity=None)
-    session = seed_session(storage, ConversationSession(kind="agent", session_id=session_id, owner_id="mind", runs=[run]))
+    session = seed_session(
+        storage,
+        ConversationSession(kind="agent", session_id=session_id, owner_id="mind", runs=[run]),
+    )
     _finish(check_exploration(context), config)
 
     run.status = RunStatus.completed
@@ -362,3 +367,30 @@ def test_a_turn_approved_after_a_check_is_a_lead_at_the_next(tmp_path: Path) -> 
         again = check_exploration(context)
 
     assert again is None or "acme/late" not in again.text
+
+
+def test_a_state_file_without_places_offers_turns_created_since_the_check(tmp_path: Path) -> None:
+    """A conversation the state names no place for starts with its turns created after the last check."""
+    config, paths = _config(), _paths(tmp_path)
+    context = _context(config, paths, tmp_path)
+    checked_at = int(time.time()) - 100
+    context.state_dir.mkdir(parents=True)
+    (context.state_dir / "exploration.json").write_text(json.dumps({"last_run_at": checked_at}), encoding="utf-8")
+    _seed(
+        config,
+        paths,
+        "!room:x:$old",
+        [_tool("get_repository", repo="acme/old")],
+        created_at=checked_at - 50,
+        updated_at=checked_at + 10,
+    )
+    _seed(config, paths, "!room:x:$new", [_tool("get_repository", repo="acme/new")], created_at=checked_at + 20)
+
+    ask = check_exploration(context)
+
+    assert ask is not None
+    assert "acme/new" in ask.text
+    assert "acme/old" not in ask.text
+    _finish(ask, config)
+    state = json.loads((context.state_dir / "exploration.json").read_text(encoding="utf-8"))
+    assert state["sessions"] == {"!room:x:$old": 1, "!room:x:$new": 2}

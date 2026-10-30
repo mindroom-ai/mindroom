@@ -44,6 +44,8 @@ if TYPE_CHECKING:
     from mindroom.session_storage.types import ConversationSession
 
 type _Key = tuple[int, int]
+# An element of a scope's log a cut can start at, with the event ids it answered and read.
+type _Holder = tuple[_Key, frozenset[str], frozenset[str]]
 
 
 @dataclass(frozen=True, slots=True)
@@ -261,28 +263,57 @@ def cut_at_event(
     """
     names = storage.names
     with storage.log_transaction(session_id, session=session) as connection:
-        rows = _rows(connection, names, session_id=session_id, scope_key=scope_key)
-        retired_through, barrier_id = _barrier_key(rows)
-        runs = connection.execute(
-            f"SELECT seq, metadata FROM {quote_identifier(names.log_runs)} WHERE session_id = ? "  # noqa: S608
-            "AND parent_run_id IS NULL AND scope_key = ? "
-            f"AND (status IN ({NON_VISIBLE_RUN_STATUS_SQL}) OR seq > ?) ORDER BY seq",
-            (session_id, scope_key, retired_through),
-        ).fetchall()
-        holders = [
-            row.key
-            for row in rows
-            if row.id > barrier_id and _holds(row.fold_event_ids, row.fold_seen_event_ids, event_id, match)
-        ]
-        for seq, raw_metadata in runs:
-            metadata = decoded_mapping(raw_metadata)
-            if _holds(source_event_ids(metadata), seen_event_ids(metadata), event_id, match):
-                holders.append((seq, 0))
-                break
-        if not holders:
+        basis = read_redaction_basis(connection, names, session_id=session_id, scope_key=scope_key)
+        holder = _first_holder(basis.holders, {event_id}, match)
+        if holder is None:
             return False
-        _cut(connection, names, session_id, scope_key, rows, min(holders))
+        _cut(connection, names, session_id, scope_key, basis.rows, holder)
     return True
+
+
+@dataclass(frozen=True, slots=True)
+class RedactionBasis:
+    """What a redaction cut of one scope's log is decided from, read in one transaction.
+
+    A reader that asks the journal which events were redacted between reading this and deciding keeps deciding from
+    this snapshot, so a cut that removed the history meanwhile cannot hide the turns it removed.
+    """
+
+    rows: tuple[_SummaryRow, ...]
+    holders: tuple[_Holder, ...]
+    runs: tuple[tuple[str, int], ...]
+
+    def candidates(self) -> set[str]:
+        """Return every event id an element of the log holds for a redaction, so ``cut_at_event`` can cut at it."""
+        return set().union(*(answered | seen for _, answered, seen in self.holders))
+
+    def first_removed_seq(self, event_ids: Collection[str]) -> int | None:
+        """Return the ``seq`` of the first run a redaction of any of ``event_ids`` removes, or None when none is held.
+
+        The cut starts where ``cut_at_event`` starts it, so a run goes whole; a cut at a fold row keeps the run that
+        row sorts after. Runs placed from the returned ``seq`` on are removed; the scope's earlier runs stay.
+        """
+        holder = _first_holder(self.holders, event_ids, "any")
+        if holder is None:
+            return None
+        through, row_id = _expanded(self.rows, self.runs, holder).start
+        return through + 1 if row_id else through
+
+
+def read_redaction_basis(
+    connection: sqlite3.Connection,
+    names: TableNames,
+    *,
+    session_id: str,
+    scope_key: str,
+) -> RedactionBasis:
+    """Read what a redaction cut of the scope's log is decided from, in the caller's transaction."""
+    rows = _rows(connection, names, session_id=session_id, scope_key=scope_key)
+    return RedactionBasis(
+        rows=tuple(rows),
+        holders=tuple(_holders(connection, names, session_id, scope_key, rows)),
+        runs=tuple(_scope_runs(connection, names, session_id, scope_key)),
+    )
 
 
 # LEGACY_COMPAT: Content-free summaries of history compacted before the archive existed.
@@ -351,30 +382,94 @@ def _cut(
 ) -> None:
     """Delete every top-level run and non-barrier row at or after ``cut``, with member runs, and record the removed runs.
 
-    A run goes whole: when a deleted run, or the running run of a deleted fold row, owns a fold row earlier in the
-    log, the cut starts at that row instead. Every deleted run and the running run of every deleted fold row count as
-    removed, which also fences a running run whose row is gone.
+    A run goes whole (``_expanded``). Every deleted run and the running run of every deleted fold row count as removed,
+    which also fences a running run whose row is gone.
     """
-    runs = connection.execute(
-        f"SELECT run_id, seq FROM {quote_identifier(names.log_runs)} "  # noqa: S608
-        "WHERE session_id = ? AND parent_run_id IS NULL AND scope_key = ?",
-        (session_id, scope_key),
-    ).fetchall()
+    expanded = _expanded(rows, _scope_runs(connection, names, session_id, scope_key), cut)
+    removed = delete_runs_in_transaction(connection, names, expanded.run_ids, session_id=session_id)
+    _record_removed(connection, names, session_id, expanded.owners | removed)
+    connection.execute(
+        f"DELETE FROM {quote_identifier(names.log_summaries)} "  # noqa: S608
+        "WHERE id IN (SELECT value FROM json_each(?))",
+        (json.dumps([row.id for row in expanded.rows]),),
+    )
+
+
+@dataclass(frozen=True, slots=True)
+class _Expanded:
+    """Where a cut starts once it takes every run whole, and the top-level runs, rows, and running runs it removes."""
+
+    start: _Key
+    run_ids: set[str]
+    rows: list[_SummaryRow]
+    owners: set[str]
+
+
+def _expanded(rows: Sequence[_SummaryRow], runs: Sequence[tuple[str, int]], cut: _Key) -> _Expanded:
+    """Return the cut at ``cut`` taken back to the earliest fold row of a run it removes.
+
+    When a removed top-level run of ``runs``, or the running run of a removed fold row, owns a fold row earlier in the
+    log, the cut starts at that row instead, so no run keeps part of what it built on.
+    """
     while True:
         top_level = {run_id for run_id, seq in runs if (seq, 0) >= cut}
         deleted_rows = [row for row in rows if row.summary is not None and row.key >= cut]
         owners = top_level | {row.fold_run_id for row in deleted_rows if row.fold_run_id is not None}
         earlier = [row.key for row in rows if row.fold_run_id in owners and row.key < cut]
         if not earlier:
-            break
+            return _Expanded(cut, top_level, deleted_rows, owners)
         cut = min(earlier)
-    removed = delete_runs_in_transaction(connection, names, top_level, session_id=session_id)
-    _record_removed(connection, names, session_id, owners | removed)
-    connection.execute(
-        f"DELETE FROM {quote_identifier(names.log_summaries)} "  # noqa: S608
-        "WHERE id IN (SELECT value FROM json_each(?))",
-        (json.dumps([row.id for row in deleted_rows]),),
-    )
+
+
+def _scope_runs(
+    connection: sqlite3.Connection,
+    names: TableNames,
+    session_id: str,
+    scope_key: str,
+) -> list[tuple[str, int]]:
+    """Return ``(run_id, seq)`` of every top-level run of the scope."""
+    return connection.execute(
+        f"SELECT run_id, seq FROM {quote_identifier(names.log_runs)} "  # noqa: S608
+        "WHERE session_id = ? AND parent_run_id IS NULL AND scope_key = ?",
+        (session_id, scope_key),
+    ).fetchall()
+
+
+def _holders(
+    connection: sqlite3.Connection,
+    names: TableNames,
+    session_id: str,
+    scope_key: str,
+    rows: Sequence[_SummaryRow],
+) -> list[_Holder]:
+    """Return each element of the scope's log a cut can start at, in log order, with what it answered and read.
+
+    A top-level run of any status holds events through its stored metadata unless the latest barrier retired it, and
+    a fold's row through its provenance, so the fold's summary is cut even once its run's row is gone.
+    """
+    retired_through, barrier_id = _barrier_key(rows)
+    runs = connection.execute(
+        f"SELECT seq, metadata FROM {quote_identifier(names.log_runs)} WHERE session_id = ? "  # noqa: S608
+        "AND parent_run_id IS NULL AND scope_key = ? "
+        f"AND (status IN ({NON_VISIBLE_RUN_STATUS_SQL}) OR seq > ?)",
+        (session_id, scope_key, retired_through),
+    ).fetchall()
+    holders: list[_Holder] = [
+        (row.key, row.fold_event_ids, row.fold_seen_event_ids) for row in rows if row.id > barrier_id
+    ]
+    for seq, raw_metadata in runs:
+        metadata = decoded_mapping(raw_metadata)
+        holders.append(((seq, 0), frozenset(source_event_ids(metadata)), frozenset(seen_event_ids(metadata))))
+    return sorted(holders, key=lambda holder: holder[0])
+
+
+def _first_holder(
+    holders: Iterable[_Holder],
+    event_ids: Collection[str],
+    match: Literal["answered", "any"],
+) -> _Key | None:
+    """Return the key of the first of ``holders`` that holds any of ``event_ids``, for an edit or a redaction."""
+    return next((key for key, answered, seen in holders if _holds(answered, seen, event_ids, match)), None)
 
 
 def _record_removed(
@@ -390,9 +485,14 @@ def _record_removed(
     )
 
 
-def _holds(answered: Collection[str], seen: Collection[str], event_id: str, match: Literal["answered", "any"]) -> bool:
-    """Return whether what answered ``answered`` and read ``seen`` holds the event, for an edit or a redaction."""
-    return event_id in answered or (match == "any" and event_id in seen)
+def _holds(
+    answered: frozenset[str],
+    seen: frozenset[str],
+    event_ids: Collection[str],
+    match: Literal["answered", "any"],
+) -> bool:
+    """Return whether what answered ``answered`` and read ``seen`` holds any of the events, for an edit or a redaction."""
+    return not answered.isdisjoint(event_ids) or (match == "any" and not seen.isdisjoint(event_ids))
 
 
 def _barrier_key(rows: Sequence[_SummaryRow]) -> _Key:
