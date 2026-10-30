@@ -1,0 +1,33 @@
+agents:
+  "__AGENT_NAME__":
+    display_name: Legal Helper
+    role: Private legal-information helper for one person, reading their contracts, leases, and letters, explaining them in plain language, drafting replies, and tracking deadlines.
+    model: default
+    memory_backend: file
+    # Each person gets a private copy of the template the first time they talk to the agent.
+    private:
+      per: user
+      template_dir: templates/__AGENT_NAME__
+      context_files:
+        - AGENTS.md
+        - SOUL.md
+        - USER.md
+    delegate_to:
+      - "__AGENT_NAME__"
+    # No shell or python, not even from deployment defaults: unless they run in dedicated workers, they run as MindRoom itself and could read every person's copy.
+    # file stays inside this person's copy whatever defaults.file_access says.
+    include_default_tools: false
+    file_access: workspace
+    tools:
+      - file
+      - attachments
+      - memory
+      - scheduler
+      - name: website
+        defer: true
+      - name: duckduckgo
+        defer: true
+    # To let everyone on your homeserver use it, replace example.org and uncomment:
+    # access:
+    #   users:
+    #     - "@*:example.org"
