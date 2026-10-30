@@ -25,6 +25,7 @@ from mindroom.config.approval import ApprovalRuleConfig, ToolApprovalConfig
 from mindroom.constants import AI_RUN_METADATA_KEY, ROUTER_AGENT_NAME
 from mindroom.event_journal import ApprovalCall, approval_arguments_digest
 from mindroom.execution_preparation import render_prepared_messages_text
+from mindroom.history.interrupted_replay import is_interrupted
 from mindroom.history.request_messages import replayable_messages
 from mindroom.history.session_context import load_bound_scope_session
 from mindroom.history.storage import read_scope_seen_event_ids, update_scope_seen_event_ids
@@ -1025,9 +1026,9 @@ async def test_a_notice_delivered_before_the_team_run_failed_is_not_left_live(
     ]
     session = team.storage.load_session(SESSION_ID)
     assert session is not None
-    assert [(run.run_id, run.status) for run in session.runs if isinstance(run, TeamRunRecord)] == [
-        ("run-earlier", RunStatus.completed),
-        ("run-1", RunStatus.interrupted),
+    assert [(run.run_id, is_interrupted(run)) for run in session.runs if isinstance(run, TeamRunRecord)] == [
+        ("run-earlier", False),
+        ("run-1", True),
     ]
 
 
@@ -1105,7 +1106,7 @@ async def test_a_stop_after_a_member_s_finished_call_keeps_each_run_s_own_record
 
     assert [rendered(chunk) for chunk in live[-1:]] == [f"{HEADER}**GeneralAgent**: Half done"]
     record, [member] = team.stored_runs()
-    assert (record.status, member.status) == (RunStatus.interrupted, RunStatus.cancelled)
+    assert (is_interrupted(record), member.status) == (True, RunStatus.cancelled)
     assert record.metadata is not None
     assert record.metadata["matrix_seen_event_ids"] == [EVENT_ID, "$event-2"]
     assert _replayed(record)[-1] == ("assistant", "(turn stopped before completion; 1 tool call(s) had not finished)")
@@ -1211,7 +1212,7 @@ async def test_a_failed_leader_request_answers_with_the_friendly_error(
     assert text == "[Team (GeneralAgent)] ⚠️ Error: validation failed in team"
     record, _members = team.stored_runs()
     # The turn driver marks the failed run as the turn's interrupted record.
-    assert (record.status, record.error) == (RunStatus.interrupted, "validation failed in team")
+    assert (is_interrupted(record), record.error) == (True, "validation failed in team")
 
 
 @pytest.mark.asyncio

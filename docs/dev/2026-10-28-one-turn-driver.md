@@ -49,4 +49,4 @@ A non-success reply ending was decided by the streamer (a terminal row with the 
 
 ## Open
 
-- Resolved in `2026-10-30-stopped-turn-records.md`: an interrupted turn's record is its run's own, stored as an `INTERRUPTED` run (#3108).
+- Resolved in `2026-10-30-stopped-turn-records.md`: an interrupted turn's record is its run's own, stored completed and marked interrupted (#3108).

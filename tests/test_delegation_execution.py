@@ -30,6 +30,7 @@ from mindroom.delegation.lifecycle import authorize_delegation
 from mindroom.delegation.records import DelegationRecordLocator, DelegationRecordOwner
 from mindroom.delegation.recovery import cancel_approval_delegations
 from mindroom.delegation.state import DELEGATION_STATE_KEY, DelegationState, child_execution_identity
+from mindroom.history.interrupted_replay import is_interrupted
 from mindroom.history.request_messages import replayable_messages
 from mindroom.history.storage import new_scope_session
 from mindroom.history.types import HistoryScope
@@ -584,7 +585,7 @@ async def test_a_reply_whose_continuation_fails_records_every_delegation_it_answ
     assert isinstance(text, str)
     assert "provider connection lost" in text
     stored = _parent_record(config, paths, identity, "parent-run")
-    assert stored.status is RunStatus.interrupted
+    assert is_interrupted(stored)
     replayed = replayable_messages([stored])
     assert [message.tool_call_id for message in replayed if message.role == "tool"] == ["delegate-0", "delegate-1"]
     assert replayed[-1].content == "(turn failed before completion)"

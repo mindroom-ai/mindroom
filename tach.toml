@@ -842,6 +842,7 @@ depends_on = [
     "mindroom.delegation.state",
     "mindroom.failure_text",
     "mindroom.helper_usage",
+    "mindroom.history.interrupted_replay",
     "mindroom.history.mid_turn_compaction",
     "mindroom.history.storage",
     "mindroom.history.turn_recorder",
@@ -2866,6 +2867,7 @@ depends_on = [
 [[modules]]
 path = "mindroom.history.request_messages"
 depends_on = [
+    "mindroom.history.interrupted_replay",
     "mindroom.history.message_content",
     "mindroom.history.summary_message",
     "mindroom.llm",
@@ -3109,6 +3111,17 @@ depends_on = []
 path = "mindroom.history.legacy_interrupted_replay"
 depends_on = []
 visibility = ["mindroom.history.conversation_text"]
+
+[[modules]]
+path = "mindroom.history.interrupted_replay"
+depends_on = ["mindroom.llm"]
+visibility = [
+    "mindroom.agent_cli.cli_approval_recovery",
+    "mindroom.history.conversation_text",
+    "mindroom.history.request_messages",
+    "mindroom.matrix_rtc.call_tools",
+    "mindroom.response_turn",
+]
 
 [[modules]]
 path = "mindroom.history.turn_recorder"
@@ -4911,6 +4924,7 @@ depends_on = [
 [[modules]]
 path = "mindroom.matrix_rtc.call_tools"
 depends_on = [
+    "mindroom.history.interrupted_replay",
     "mindroom.session_storage.agent_storage",
     "mindroom.agent_loop",
     "mindroom.agent_loop.build",
@@ -8434,6 +8448,7 @@ depends_on = [
     "mindroom.agent_loop",
     "mindroom.automations.steps",
     "mindroom.constants",
+    "mindroom.history.interrupted_replay",
     "mindroom.history.legacy_interrupted_replay",
     "mindroom.history.run_visibility",
     "mindroom.history.summary_message",
@@ -9332,6 +9347,7 @@ depends_on = [
     "mindroom.agent_cli.projection",
     "mindroom.approval.tool_owners",
     "mindroom.delegation.state",
+    "mindroom.history.interrupted_replay",
     "mindroom.turn_continuation",
     "mindroom.hooks",
     "mindroom.response_turn",

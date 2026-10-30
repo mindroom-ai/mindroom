@@ -42,6 +42,7 @@ from mindroom.constants import (
 from mindroom.delegation.state import DelegationState
 from mindroom.failure_text import failure_text
 from mindroom.helper_usage import helper_usage_context
+from mindroom.history.interrupted_replay import mark_interrupted
 from mindroom.history.mid_turn_compaction import without_run_usage
 from mindroom.history.storage import remove_history_of_redacted_events
 from mindroom.history.turn_recorder import TurnRecorder
@@ -412,7 +413,7 @@ class TurnSinks:
     on_failed: Callable[[HandledAttempt], None] | None = None
     # Receives each attempt's run id and configured model name before the attempt starts.
     on_attempt_start: Callable[[str, str], None] | None = None
-    # Whether the driver marks an interrupted turn's run ``INTERRUPTED``, which history replays; a delegated child's
+    # Whether the driver marks an interrupted turn's run as its record, which history replays; a delegated child's
     # interruption belongs to delegation recovery, and a voice call keeps in its run what it spoke.
     persist_interrupted: bool = True
 
@@ -795,10 +796,10 @@ async def _record_interrupted(
 ) -> None:
     """Record the turn a cancellation (``failure`` None) or a failure cut short, and mark its run as its record.
 
-    The run's loop stored the run first, stopped, failed, completed, or paused; marking it ``INTERRUPTED`` makes it the
-    turn's record, which history replays, with the failure's text. A process shutdown records nothing: the turn stays
-    pending, and the successor's replay continues its reply. A turn that already settled (completed, skipped, paused,
-    or interrupted) is never recorded again.
+    The run's loop stored the run first, stopped, failed, completed, or paused; marking it (``mark_interrupted``)
+    makes it the turn's record, which history replays, with the failure's text. A process shutdown records nothing:
+    the turn stays pending, and the successor's replay continues its reply. A turn that already settled (completed,
+    skipped, paused, or interrupted) is never recorded again.
     """
     if run.record.outcome != "pending" or current_task_is_process_shutdown():
         return
@@ -824,7 +825,7 @@ def _mark_interrupted(
     run_id: str,
     error: str | None,
 ) -> None:
-    """Make the run the turn's loop stored, in the turn's scope, the turn's ``INTERRUPTED`` record.
+    """Make the run the turn's loop stored, in the turn's scope, the record of the interrupted turn.
 
     The run keeps what it stored, and ``error``, when given, is its failure's text. A run its loop left paused, which
     nothing resumes now, first stops waiting as a run cut short does (``stop_paused``). A run no save stored is left
@@ -837,8 +838,7 @@ def _mark_interrupted(
             return
         if record.status is RunStatus.paused:
             stop_paused(record)
-        record.status = RunStatus.interrupted
-        record.error = error or record.error
+        mark_interrupted(record, error=error)
         storage.save_interrupted_record(scope_context.stored_or_first_session(), record)
     except Exception:
         # A run left unmarked is the lesser harm; the turn's own exit must still run.

@@ -39,8 +39,8 @@ class RunStatus(StrEnum):
     """Lifecycle state of a run; the values are the stored ``status`` strings.
 
     The loop ends a run a stop cut short ``CANCELLED`` and one a failure cut short ``ERROR``, which history skips; the
-    owner of a top-level turn that ended there marks its run ``INTERRUPTED``, which history replays, the failure's text
-    in ``error`` when a failure ended it.
+    owner of a top-level turn that ended there marks its run as the turn's ``COMPLETED`` record
+    (``history/interrupted_replay.py``), which history replays.
     """
 
     running = "RUNNING"
@@ -48,7 +48,6 @@ class RunStatus(StrEnum):
     paused = "PAUSED"
     cancelled = "CANCELLED"
     error = "ERROR"
-    interrupted = "INTERRUPTED"
 
 
 # LEGACY_COMPAT: Run rows stored with Agno's PENDING or REGENERATED status.

@@ -1,7 +1,7 @@
 """An interrupted turn's own run replays as history: its finished calls, its streamed text, and a note.
 
-The loop stores the run stopped or failed, its turn's owner marks it ``INTERRUPTED``, and history replays it from the
-store; a rendered summary an earlier release stored in its place keeps replaying as stored.
+The loop stores the run stopped or failed, its turn's owner marks it as the turn's completed record, and history
+replays it from the store; a rendered summary an earlier release stored in its place keeps replaying as stored.
 """
 
 from __future__ import annotations
@@ -13,6 +13,7 @@ from structlog.testing import capture_logs
 
 from mindroom import response_turn
 from mindroom.history.conversation_text import utterances
+from mindroom.history.interrupted_replay import is_interrupted, mark_interrupted
 from mindroom.history.request_messages import replayable_messages, scope_history_messages
 from mindroom.history.session_context import ScopeSessionContext
 from mindroom.history.types import HistoryScope
@@ -67,11 +68,17 @@ def _replayed(tmp_path: Path, *runs: AnyRunRecord) -> list[tuple[str, object, li
     return [(message.role, message.content, [call["id"] for call in message.tool_calls or ()]) for message in history]
 
 
+def _interrupted(run_id: str, *messages: Message, error: str | None = None) -> RunRecord:
+    """Return the record the loop stored of a run a stop (``error`` None) or a failure ended, marked as its turn's."""
+    record = _run(run_id, RunStatus.cancelled if error is None else RunStatus.error, *messages, error=error)
+    mark_interrupted(record, error=error)
+    return record
+
+
 def test_a_stopped_run_replays_its_finished_calls_and_streamed_text_then_says_it_stopped(tmp_path: Path) -> None:
     """A call no result answers did not finish, so it leaves its message; the text the run streamed is its answer."""
-    stopped = _run(
+    stopped = _interrupted(
         "stopped",
-        RunStatus.interrupted,
         Message(role="user", content="List the files, then the processes."),
         Message(role="assistant", content="Looking.", tool_calls=[_call("c1"), _call("c2")]),
         Message(role="tool", tool_call_id="c1", tool_name="shell", content="listing"),
@@ -88,9 +95,8 @@ def test_a_stopped_run_replays_its_finished_calls_and_streamed_text_then_says_it
 
 def test_a_failed_run_replays_what_it_did_then_says_it_failed(tmp_path: Path) -> None:
     """A run that failed after its calls finished, which holds the failure's text, ends its replay with its own note."""
-    failed = _run(
+    failed = _interrupted(
         "failed",
-        RunStatus.interrupted,
         Message(role="user", content="List the files."),
         Message(role="assistant", tool_calls=[_call("c1")]),
         Message(role="tool", tool_call_id="c1", tool_name="shell", content="listing"),
@@ -107,9 +113,8 @@ def test_a_failed_run_replays_what_it_did_then_says_it_failed(tmp_path: Path) ->
 
 def test_a_run_stopped_before_it_answered_replays_its_prompt_and_the_note(tmp_path: Path) -> None:
     """An assistant message left with no call and no text replays as nothing, as the cut-off usage message does."""
-    stopped = _run(
+    stopped = _interrupted(
         "stopped",
-        RunStatus.interrupted,
         Message(role="user", content="Run it."),
         Message(role="assistant", tool_calls=[_call("c9")]),
         Message(role="assistant", metrics=usage(9, 1)),
@@ -119,6 +124,29 @@ def test_a_run_stopped_before_it_answered_replays_its_prompt_and_the_note(tmp_pa
         ("user", "Run it.", []),
         ("assistant", "(turn stopped before completion; 1 tool call(s) had not finished)", []),
     ]
+
+
+def test_an_interrupted_record_is_a_finished_turn_every_stored_call_of_which_has_its_result(tmp_path: Path) -> None:
+    """The stored row is a completed run whose calls all have results, so a release without the marker replays it."""
+    stopped = _interrupted(
+        "stopped",
+        Message(role="user", content="Run both."),
+        Message(role="assistant", tool_calls=[_call("c1"), _call("c2")], metrics=usage(9, 1)),
+        Message(role="tool", tool_call_id="c1", tool_name="shell", content="first"),
+    )
+    storage = create_agent_state_storage("test_agent", tmp_path)
+    seed_session(storage, ConversationSession(kind="agent", session_id="session-1", owner_id="test_agent"))
+    storage.save_interrupted_record(
+        ConversationSession(kind="agent", session_id="session-1", owner_id="test_agent"),
+        stopped,
+    )
+
+    stored = storage.get_run("stopped")
+    assert stored is not None
+    assert (stored.status, is_interrupted(stored)) == (RunStatus.completed, True)
+    assert [call["id"] for message in stored.messages for call in message.tool_calls or ()] == ["c1"]
+    # The emptied message keeps the usage its request billed.
+    assert stored.messages[1].metrics == usage(9, 1)
 
 
 @pytest.mark.parametrize("pending", [RunStatus.paused, RunStatus.cancelled, RunStatus.error])
@@ -131,7 +159,7 @@ def test_a_run_no_turn_settled_does_not_replay(tmp_path: Path, pending: RunStatu
         Message(role="assistant", content="Hi"),
     )
     waiting = _run("waiting", pending, Message(role="user", content="Delete it."))
-    stopped = _run("stopped", RunStatus.interrupted, Message(role="user", content="Stop."))
+    stopped = _interrupted("stopped", Message(role="user", content="Stop."))
 
     assert _replayed(tmp_path, answered, waiting, stopped) == [
         ("user", "Hello", []),
@@ -171,9 +199,8 @@ def test_a_stored_rendered_summary_still_replays_as_it_did(tmp_path: Path) -> No
 
 def test_neither_a_stopped_reply_nor_a_rendered_summary_is_the_agents_words() -> None:
     """Background readers read what was said in a stopped turn but leave its cut-off reply out, as a rendered summary."""
-    stopped = _run(
+    stopped = _interrupted(
         "stopped",
-        RunStatus.interrupted,
         Message(role="user", content="List the files."),
         Message(role="assistant", content="Here are the files"),
     )
@@ -237,9 +264,9 @@ def test_marking_a_stopped_run_interrupted_replays_it_after_the_turns_that_finis
 
     session = _mark(tmp_path, "stopped", stopped, later)
 
-    assert [(run.run_id, run.status) for run in session.runs] == [
-        ("later", RunStatus.completed),
-        ("stopped", RunStatus.interrupted),
+    assert [(run.run_id, run.status, is_interrupted(run)) for run in session.runs] == [
+        ("later", RunStatus.completed, False),
+        ("stopped", RunStatus.completed, True),
     ]
     assert session.runs[-1].messages == stopped.messages
 
@@ -257,8 +284,11 @@ def test_marking_a_completed_run_interrupted_keeps_its_place_and_records_the_fai
     session = _mark(tmp_path, "answered", answered, later, error="delivery failed")
 
     marked = session.runs[0]
-    assert (marked.run_id, marked.status, marked.error) == ("answered", RunStatus.interrupted, "delivery failed")
-    assert replayable_messages([marked])[-1].content == "Hi\n\n(turn failed before completion)"
+    assert (marked.run_id, is_interrupted(marked), marked.error) == ("answered", True, "delivery failed")
+    assert [message.content for message in replayable_messages([marked])] == [
+        "Hello",
+        "Hi\n\n(turn failed before completion)",
+    ]
 
 
 def test_marking_a_paused_run_ends_its_pause_first(tmp_path: Path) -> None:
@@ -277,7 +307,8 @@ def test_marking_a_paused_run_ends_its_pause_first(tmp_path: Path) -> None:
     session = _mark(tmp_path, "waiting", waiting, error="nothing can resume it")
 
     [marked] = session.runs
-    assert (marked.status, marked.error, marked.requirements) == (RunStatus.interrupted, "nothing can resume it", [])
+    assert (marked.status, is_interrupted(marked), marked.error) == (RunStatus.completed, True, "nothing can resume it")
+    assert marked.requirements == []
     assert [message.content for message in marked.messages] == ["Delete it.", None]
     assert [tool.requires_confirmation for tool in marked.tools or ()] == [False]
     assert (

@@ -634,7 +634,6 @@ def test_run_statuses_are_stored_by_value() -> None:
         ["paused", "PAUSED"],
         ["cancelled", "CANCELLED"],
         ["error", "ERROR"],
-        ["interrupted", "INTERRUPTED"],
     ]
     for status in RunStatus:
         assert status == str(status)

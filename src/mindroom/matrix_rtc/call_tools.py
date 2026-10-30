@@ -35,13 +35,14 @@ from mindroom.approval.tool_approval import tool_may_require_approval
 from mindroom.background_tasks import drain_tasks, wait_for_future_until_complete
 from mindroom.failure_text import failure_text
 from mindroom.helper_usage import HelperUsageOwner, helper_usage_owner_context, record_helper_usage
+from mindroom.history.interrupted_replay import mark_interrupted
 from mindroom.history.storage import new_scope_session
 from mindroom.history.turn_recorder import TurnRecorder
 from mindroom.history.types import HistoryScope
 from mindroom.hooks import EnrichmentItem
 from mindroom.knowledge.utils import knowledge_runtime_identity, resolve_agent_knowledge_access_async
 from mindroom.llm.messages import Message, ModelProvenance, system_text
-from mindroom.llm.runs import RunRecord, RunStatus
+from mindroom.llm.runs import RunRecord
 from mindroom.llm.usage import HelperUsage, MessageMetrics, ModelMetrics, RequestUsage, RunMetrics, VoiceDuration
 from mindroom.logging_config import get_logger
 from mindroom.matrix_rtc.voice_agent import CallAgentResponse
@@ -343,20 +344,16 @@ def _spoken_record(record: RunRecord, spoken_text: str, *, error: str | None) ->
     """Return ``record`` holding, of its answer, only ``spoken_text``: what the call spoke of it.
 
     Its calls and their results stay; its text becomes one assistant message of ``spoken_text`` after them. It is the
-    record of a turn cut short (``INTERRUPTED``), failed when it or ``error``, the turn's failure, says why.
+    record of a turn cut short (``mark_interrupted``), failed when it or ``error``, the turn's failure, says why.
     """
     messages = [
         replace(message, content=None) if message.role == "assistant" else message for message in record.messages
     ]
     if spoken_text:
         messages.append(Message(role="assistant", content=spoken_text))
-    return replace(
-        record,
-        messages=messages,
-        content=spoken_text or None,
-        status=RunStatus.interrupted,
-        error=record.error or error,
-    )
+    spoken = replace(record, messages=messages, content=spoken_text or None)
+    mark_interrupted(spoken, error=error)
+    return spoken
 
 
 @dataclass

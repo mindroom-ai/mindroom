@@ -11,9 +11,9 @@ from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
 from mindroom.final_delivery import Cancelled, Completed, FinalDeliveryOutcome, StreamTransportOutcome
+from mindroom.history.interrupted_replay import is_interrupted
 from mindroom.history.request_messages import replayable_messages
 from mindroom.hooks import MessageEnvelope
-from mindroom.llm.runs import RunStatus
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.message_target import MessageTarget
 from mindroom.reply_lifecycle import SpanOutcome
@@ -233,7 +233,7 @@ def assert_interrupted_messages(run: AnyRunRecord, *, replayed: Sequence[tuple[s
 
     ``replayed`` holds the role and content of each message history replays of the run after that prompt.
     """
-    assert run.status is RunStatus.interrupted
+    assert is_interrupted(run)
     prompt, *rest = replayable_messages([run])
     assert prompt.role == "user"
     assert 'event_id="$user_msg"' in cast("str", prompt.content)

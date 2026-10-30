@@ -17,9 +17,9 @@ from mindroom.agent_loop.run import stop_paused
 from mindroom.agent_loop.spec import RunContext
 from mindroom.approval.tool_owners import validate_approval_tool_owners
 from mindroom.delegation.state import DelegationState
+from mindroom.history.interrupted_replay import mark_interrupted
 from mindroom.hooks import EnrichmentItem
 from mindroom.llm.events import ToolCallOrigin, ToolCompleted, ToolStarted
-from mindroom.llm.runs import RunStatus
 from mindroom.media_inputs import MediaInputs
 from mindroom.response_turn import (
     CompletedApprovalRun,
@@ -295,7 +295,7 @@ async def continue_cli_approval(  # noqa: C901, PLR0912, PLR0915 - one claimed r
     # which history replays; the follow-up turn reports the recovered call.
     ended = deepcopy(persisted)
     stop_paused(ended)
-    ended.status = RunStatus.interrupted
+    mark_interrupted(ended, error=None)
     # The ended run and the state the recovered call left commit together.
     await write_with_session_state(
         store,

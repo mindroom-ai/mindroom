@@ -29,6 +29,7 @@ from mindroom.config.budgets import BudgetsConfig
 from mindroom.config.main import Config
 from mindroom.config.models import BackgroundToolJobsConfig, ModelConfig, ModelPricing
 from mindroom.helper_usage import HelperUsageOwner, get_helper_usage_owner, record_helper_usage
+from mindroom.history.interrupted_replay import is_interrupted
 from mindroom.hooks import EnrichmentItem
 from mindroom.knowledge.availability import KnowledgeAvailability
 from mindroom.knowledge.search import AgentKnowledge, KnowledgeSource, KnowledgeSourceDescription
@@ -997,7 +998,7 @@ async def test_call_responder_uses_normal_agent_turn_and_refuses_unsafe_function
         [(session, spoken)] = persisted_interruptions
         assert session == ("!room:example.org:call:one", "agent", AGENT)
         # The run the turn stored keeps, of its answer, only what playout spoke.
-        assert (spoken.run_id, spoken.status, spoken.error) == ("call-run-1", RunStatus.interrupted, None)
+        assert (spoken.run_id, is_interrupted(spoken), spoken.error) == ("call-run-1", True, None)
         assert [(message.role, message.content) for message in spoken.messages] == [
             ("user", "What is the weather?"),
             ("assistant", None),
@@ -1018,9 +1019,10 @@ async def test_call_responder_uses_normal_agent_turn_and_refuses_unsafe_function
         await tooling.responder("Never speak this", recorded_tool_uses.append)
     # No run was stored, so the call stores the transcript it answered, stopped, with nothing spoken.
     _session, unspoken = persisted_interruptions[-1]
-    assert (unspoken.run_id, unspoken.status, unspoken.error) == ("call-run-2", RunStatus.interrupted, None)
+    assert (unspoken.run_id, is_interrupted(unspoken), unspoken.error) == ("call-run-2", True, None)
     assert [(message.role, message.content) for message in unspoken.messages] == [("user", "Never speak this")]
-    assert unspoken.metadata == {"model": "same-chat-model"}
+    # The turn's run metadata, besides the mark.
+    assert (unspoken.metadata or {})["model"] == "same-chat-model"
 
     async def return_error_without_run_id(_turn: ResponseTurnContext, *_args: object, sinks: TurnSinks) -> TurnResult:
         recorder = sinks.turn_recorder
@@ -1042,7 +1044,7 @@ async def test_call_responder_uses_normal_agent_turn_and_refuses_unsafe_function
         assert error_response.turn_id is None
     _session, failed = persisted_interruptions[-1]
     assert failed.run_id.startswith("!room:example.org:call:one:turn:")
-    assert (failed.status, failed.error) == (RunStatus.interrupted, "provider failed")
+    assert (is_interrupted(failed), failed.error) == (True, "provider failed")
     assert [message.content for message in failed.messages if message.role == "assistant"] == (
         ["provider failed"] if reconcile_spoken_response else []
     )
@@ -1175,7 +1177,7 @@ async def test_cascaded_responder_records_effective_selected_model_metadata(
     assert create_agent_mock.call_args.kwargs["model"].model_name == expected_model_name
     # The run the selected model answered is the one playout rewrites to what it spoke.
     [spoken] = saved
-    assert (spoken.model, spoken.status) == (expected_model_id, RunStatus.interrupted)
+    assert (spoken.model, is_interrupted(spoken)) == (expected_model_id, True)
     assert [(message.role, message.content) for message in spoken.messages][-1] == ("assistant", "It is")
 
 
@@ -1265,7 +1267,7 @@ async def test_cascaded_cancellation_during_knowledge_resolution_persists_transc
         await response_task
 
     [persisted] = saved
-    assert (persisted.session_id, persisted.status, persisted.error) == ("call-session", RunStatus.interrupted, None)
+    assert (persisted.session_id, is_interrupted(persisted), persisted.error) == ("call-session", True, None)
     assert [(message.role, message.content) for message in persisted.messages] == [("user", "Never speak this")]
 
 
@@ -2267,7 +2269,7 @@ def test_a_spoken_record_keeps_the_runs_calls_and_only_the_text_the_call_spoke()
 
     spoken = _spoken_record(record, "Checking. It is", error=None)
 
-    assert (spoken.status, spoken.content, spoken.error) == (RunStatus.interrupted, "Checking. It is", None)
+    assert (is_interrupted(spoken), spoken.content, spoken.error) == (True, "Checking. It is", None)
     assert [(message.role, message.content) for message in spoken.messages] == [
         ("user", "Weather?"),
         ("assistant", None),

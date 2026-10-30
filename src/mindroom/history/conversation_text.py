@@ -14,12 +14,12 @@ from typing import TYPE_CHECKING, Literal
 from mindroom.agent_loop.tools import is_media_follow_up
 from mindroom.automations.steps import is_automation_hook_source
 from mindroom.constants import HOOK_SOURCE_RUN_METADATA_KEY, TURN_INTENT_RUN_METADATA_KEY
+from mindroom.history.interrupted_replay import is_interrupted
 from mindroom.history.legacy_interrupted_replay import is_rendered_interruption_summary
 from mindroom.history.run_visibility import is_model_history_visible_run, is_queued_notice_message
 from mindroom.history.summary_message import is_compaction_summary
 from mindroom.hooks.enrichment import strip_enrichment_blocks
 from mindroom.llm.messages import Message
-from mindroom.llm.runs import RunStatus
 from mindroom.prompt_message_tags import parse_msg_tags
 from mindroom.turn_origin import TurnIntent
 
@@ -100,7 +100,7 @@ def utterances(run: AnyRunRecord, *, agent_work: bool = False) -> list[Utterance
     if automation and not agent_work:
         return []
     runtime_prompt = automation or metadata.get(TURN_INTENT_RUN_METADATA_KEY) == TurnIntent.JOB_FOLLOW_UP
-    keeps_reply = agent_work or not (run.status is RunStatus.interrupted or is_rendered_interruption_summary(run))
+    keeps_reply = agent_work or not (is_interrupted(run) or is_rendered_interruption_summary(run))
     requester = run_requester(run) or "unknown"
     said: list[Utterance] = []
     for message in run.messages:

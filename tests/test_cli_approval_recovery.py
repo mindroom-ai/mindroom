@@ -40,6 +40,7 @@ from mindroom.config.agent import AgentConfig
 from mindroom.config.approval import ApprovalRuleConfig, ToolApprovalConfig
 from mindroom.constants import AI_RUN_METADATA_KEY
 from mindroom.event_journal import ApprovalCall, ApprovalDecision, approval_arguments_digest
+from mindroom.history.interrupted_replay import is_interrupted
 from mindroom.history.request_messages import replayable_messages
 from mindroom.history.types import HistoryScope
 from mindroom.knowledge.read_protocol import SearchHit
@@ -624,7 +625,7 @@ async def test_restart_resolves_hidden_call_and_never_replays_parent(
     saved = store.get_run("run")
     assert saved is not None
     # The paused run ends stopped, as its turn's interrupted record: its unanswered Bash call does not replay.
-    assert saved.status is RunStatus.interrupted
+    assert is_interrupted(saved)
     replayed = replayable_messages([saved])
     assert all(not message.tool_calls for message in replayed)
     assert "turn stopped before completion" in replayed[-1].get_content_string()
@@ -1269,7 +1270,7 @@ async def test_minimal_recovery_keeps_mode_media_and_uses_fresh_shell_grant(  # 
     assert saved is not None
     # The paused run ends stopped, as its turn's interrupted record: its finished sibling Bash replays with its result,
     # and the unanswered outer one does not.
-    assert saved.status is RunStatus.interrupted
+    assert is_interrupted(saved)
     replayed = replayable_messages([saved])
     assert [call["id"] for message in replayed for call in message.tool_calls or ()] == ["call_completed"]
     assert "completed sibling result" in str(replayed)

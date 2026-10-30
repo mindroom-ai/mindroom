@@ -36,6 +36,7 @@ from mindroom.constants import AI_RUN_METADATA_KEY, MINDROOM_HISTORY_METADATA_KE
 from mindroom.delegation.state import DelegationState, child_execution_identity
 from mindroom.dispatch_source import MESSAGE_SOURCE_KIND
 from mindroom.event_journal import ApprovalDecision
+from mindroom.history.interrupted_replay import is_interrupted
 from mindroom.history.request_messages import replayable_messages
 from mindroom.history.storage import read_scope_seen_event_ids
 from mindroom.hooks import EVENT_TOOL_BEFORE_CALL, EnrichmentItem, MessageEnvelope, ToolBeforeCallContext, hook
@@ -1845,7 +1846,7 @@ async def test_a_team_reply_that_fails_mid_turn_reports_its_stored_run_in_the_me
 
     record, _ = team.stored_runs()
     payload = metadata[AI_RUN_METADATA_KEY]
-    assert (record.status, payload["run_id"], payload["status"]) == (RunStatus.interrupted, record.run_id, "error")
+    assert (is_interrupted(record), payload["run_id"], payload["status"]) == (True, record.run_id, "error")
     assert record.error == "provider connection lost"
     assert payload["tools"] == {"count": 1}
 
@@ -1886,7 +1887,7 @@ async def test_a_failed_team_turn_keeps_its_leader_s_record_and_why_it_failed(
 
     record, _ = team.stored_runs()
     assert team.recorder.outcome == "interrupted"
-    assert (record.status, record.error) == (RunStatus.interrupted, "provider connection lost")
+    assert (is_interrupted(record), record.error) == (True, "provider connection lost")
     _prompt, *rest = replayable_messages([record])
     assert [message.role for message in rest] == replayed
     assert str(rest[-1].content).endswith("(turn failed before completion)")
@@ -2188,7 +2189,7 @@ async def test_two_members_approvals_under_one_call_id_are_refused_and_neither_c
     assert chunks[-1].text.endswith("Paused approval requirements contain duplicate tool-call IDs")
     assert ProbeToolkit.calls == []
     record, members = team.stored_runs()
-    assert record.status is RunStatus.interrupted
+    assert is_interrupted(record)
     assert "Paused approval requirements contain duplicate tool-call IDs" in str(record.error)
     assert sorted((member.agent_id or "", member.status) for member in members) == [
         ("checker", RunStatus.paused),
@@ -2550,7 +2551,7 @@ async def test_a_stopped_member_keeps_its_usage_and_its_row_ends_cancelled(
         await task
 
     record, [member] = team.stored_runs()
-    assert (record.status, member.status) == (RunStatus.interrupted, RunStatus.cancelled)
+    assert (is_interrupted(record), member.status) == (True, RunStatus.cancelled)
     assert member.parent_run_id == record.run_id
     [member_usage] = usage_rows(team.storage, member.run_id)
     assert member_usage["metrics"]["input_tokens"] == 30
@@ -2586,7 +2587,8 @@ async def test_a_stopped_team_turn_records_its_member_runs_in_configured_order(
         await task
 
     record, members = team.stored_runs()
-    assert [run.status for run in (record, *members)] == [RunStatus.interrupted, RunStatus.error, RunStatus.cancelled]
+    assert is_interrupted(record)
+    assert [run.status for run in members] == [RunStatus.error, RunStatus.cancelled]
     assert team.recorder.outcome == "interrupted"
     assert [message.content for message in members[1].messages if message.role == "assistant"] == ["Drafting."]
 
@@ -2629,7 +2631,7 @@ async def test_a_stopped_team_turn_records_what_its_leader_wrote_before_its_memb
 
     record, _, _ = _delegation_state(team)
     assert team.recorder.outcome == "interrupted"
-    assert record.status is RunStatus.interrupted
+    assert is_interrupted(record)
     _prompt, *rest = replayable_messages([record])
     assert (rest[0].role, rest[0].content) == ("assistant", "Asking the writer.")
     assert rest[-1].content == "(turn stopped before completion)"
@@ -2667,7 +2669,7 @@ async def test_a_team_turn_stopped_after_its_run_ended_records_the_finished_docu
         await task
 
     record, [member] = team.stored_runs()
-    assert (record.status, member.status) == (RunStatus.interrupted, RunStatus.error)
+    assert (is_interrupted(record), member.status) == (True, RunStatus.error)
     assert team.recorder.outcome == "interrupted"
     assert replayable_messages([record])[-1].content == "Done.\n\n(turn stopped before completion)"
 
@@ -2701,7 +2703,8 @@ async def test_a_team_turn_that_fails_after_its_run_ended_records_the_document_i
 
     assert "without an approval to ask for" in reply
     record, members = team.stored_runs()
-    assert [run.status for run in (record, *members)] == [RunStatus.interrupted, RunStatus.error, RunStatus.paused]
+    assert is_interrupted(record)
+    assert [run.status for run in members] == [RunStatus.error, RunStatus.paused]
     assert str(record.error).endswith("without an approval to ask for")
     assert not record.requirements
     assert team.recorder.outcome == "interrupted"
@@ -2914,7 +2917,7 @@ async def test_the_driver_writes_the_interrupted_record_after_the_loop_stored_th
     session = team.storage.load_session(SESSION_ID)
     assert session is not None
     [record] = [run for run in session.runs if isinstance(run, TeamRunRecord)]
-    assert record.status is RunStatus.interrupted
+    assert is_interrupted(record)
     [member] = [run for run in session.runs if isinstance(run, RunRecord)]
     assert member.status is RunStatus.cancelled
     [row] = usage_rows(team.storage, member.run_id)
@@ -2986,7 +2989,7 @@ async def test_a_stopped_team_turn_cancelled_again_while_its_record_is_stored_en
     with pytest.raises(asyncio.CancelledError):
         await asyncio.wait_for(task, timeout=5)
     record, _members = team.stored_runs()
-    assert record.status is RunStatus.interrupted
+    assert is_interrupted(record)
 
 
 @asynccontextmanager

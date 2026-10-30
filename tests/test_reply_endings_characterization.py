@@ -41,6 +41,7 @@ from mindroom.constants import STREAM_STATUS_KEY
 from mindroom.dispatch_source import SILENT_SCHEDULE_SOURCE_KIND
 from mindroom.event_journal import DeliveryStage, EventClass, EventKind, InboundEvent
 from mindroom.final_delivery import Owed, Suppressed, Suppression
+from mindroom.history.interrupted_replay import is_interrupted
 from mindroom.history.request_messages import replayable_messages
 from mindroom.history.session_context import create_scope_session_storage, resolve_bound_team_scope
 from mindroom.hooks import (
@@ -505,7 +506,7 @@ async def _explode() -> None:
 
 def _interrupted(runs: Sequence[AnyRunRecord]) -> AnyRunRecord:
     """Return the one run among ``runs`` its turn driver marked as an interrupted turn's record."""
-    [run] = [run for run in runs if run.status is RunStatus.interrupted]
+    [run] = [run for run in runs if is_interrupted(run)]
     return run
 
 
@@ -1063,7 +1064,7 @@ async def test_a_process_shutdown_mid_stream_leaves_the_reply_for_replay(
     assert await turn.final() is None
     assert turn.hooks.fired == []
     runs = turn.agent_runs()
-    assert not any(run.status is RunStatus.interrupted for run in runs)
+    assert not any(is_interrupted(run) for run in runs)
     # The agent loop stores its own cancelled run, with the text it streamed, which no history replays.
     [run] = runs
     assert run.status is RunStatus.cancelled
@@ -1134,7 +1135,7 @@ async def test_a_team_leader_failure_shows_the_error_in_place_of_the_document(
     assert "model exploded" in body
     assert "Writer fact." not in body
     [team_run] = [run for run in turn.team_runs() if isinstance(run, TeamRunRecord)]
-    assert (team_run.status, team_run.error) == (RunStatus.interrupted, "model exploded")
+    assert (is_interrupted(team_run), team_run.error) == (True, "model exploded")
 
 
 async def test_a_user_stop_mid_stream_cancels_the_team_reply(

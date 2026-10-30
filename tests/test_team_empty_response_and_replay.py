@@ -21,9 +21,10 @@ from mindroom.budgets.pricing import format_cost_usd
 from mindroom.config.approval import ApprovalRuleConfig, ToolApprovalConfig
 from mindroom.config.models import ModelPricing
 from mindroom.constants import AI_RUN_METADATA_KEY, SILENT_SCHEDULE_NO_REPLY_TOKEN
+from mindroom.history.interrupted_replay import is_interrupted
 from mindroom.llm.errors import ProviderError
 from mindroom.llm.messages import Message
-from mindroom.llm.runs import RunStatus, TeamRunRecord
+from mindroom.llm.runs import TeamRunRecord
 from mindroom.providers.identity import model_identity
 from mindroom.response_turn import CompletedApprovalRun, ResponsePausedForApproval
 from mindroom.timing import DispatchPipelineTiming
@@ -551,7 +552,7 @@ async def test_a_team_turn_failing_after_a_member_answered_records_the_answer_in
     assert team.recorder.outcome == "interrupted"
     # The team run's own record keeps the member's answer, as the result of the delegation that produced it.
     record, _members = team.stored_runs()
-    assert record.status is RunStatus.interrupted
+    assert is_interrupted(record)
     assert record.error == str(error)
     assert [message.content for message in record.messages if message.role == "tool"] == ["Member answer"]
 

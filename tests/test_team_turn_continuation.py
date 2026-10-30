@@ -18,6 +18,7 @@ import pytest
 from mindroom.agent_loop.build import tool_owners_by_agent
 from mindroom.agents import create_agent
 from mindroom.config.approval import ApprovalRuleConfig, ToolApprovalConfig
+from mindroom.history.interrupted_replay import is_interrupted
 from mindroom.llm.provider import TextDelta
 from mindroom.llm.request_context import current_llm_request_log_context
 from mindroom.llm.runs import RunRecord, RunStatus, TeamRunRecord
@@ -369,7 +370,7 @@ async def test_a_stop_during_the_continuation_records_only_its_text_and_the_firs
         await task
 
     stopped, _members = team.stored_runs(run_id=team.recorder.run_id)
-    assert stopped.status is RunStatus.interrupted
+    assert is_interrupted(stopped)
     assert [message.content for message in stopped.messages if message.role == "assistant"] == ["Half"]
     session = team.storage.load_session(SESSION_ID)
     assert session is not None

@@ -18,7 +18,7 @@ class TurnRecorder:
     """How one top-level turn ended: the run that holds its record, the Matrix metadata it ran with, and its calls.
 
     Only the turn driver writes it; callers read it once the turn ended. An interrupted turn's history is the run its
-    loop stored, which ``run_id`` names and the driver marks ``INTERRUPTED``.
+    loop stored, which ``run_id`` names and the driver marks as the turn's record (``mark_interrupted``).
     """
 
     run_metadata: dict[str, Any] | None = None

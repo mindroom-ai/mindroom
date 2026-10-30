@@ -47,6 +47,7 @@ from mindroom.constants import (
 )
 from mindroom.error_handling import get_user_friendly_error_message
 from mindroom.execution_preparation import _PreparedExecutionContext
+from mindroom.history.interrupted_replay import is_interrupted
 from mindroom.history.request_messages import TurnMessages, replayable_messages
 from mindroom.history.run_visibility import is_model_history_visible_run
 from mindroom.history.turn_recorder import TurnRecorder
@@ -1370,11 +1371,14 @@ class TestUserIdPassthrough:
             )
 
         [persisted_run] = stored_runs(config, runtime_paths, "session1")
-        assert persisted_run.status is RunStatus.interrupted
+        assert is_interrupted(persisted_run)
         assert persisted_run.metadata is not None
         prepared_context = persisted_run.metadata[AI_RUN_METADATA_KEY].pop("prepared_context")
         assert isinstance(prepared_context["tokens"], int)
-        assert persisted_run.metadata == {
+        # The turn's run metadata, besides the mark.
+        metadata = dict(persisted_run.metadata)
+        assert metadata.pop("mindroom_interrupted") == {"unfinished_tool_calls": 0}
+        assert metadata == {
             AI_RUN_METADATA_KEY: {
                 "version": 1,
                 "compaction": {
@@ -1457,7 +1461,7 @@ class TestUserIdPassthrough:
 
         # The attempt the turn continued past keeps the failed call in its own completed run.
         runs = stored_runs(config, runtime_paths, "session1")
-        assert [run.status for run in runs] == [RunStatus.completed, RunStatus.interrupted]
+        assert [is_interrupted(run) for run in runs] == [False, True]
         replayed = replayable_messages([run for run in runs if is_model_history_visible_run(run)])
         [failed] = [message for message in replayed if message.role == "tool" and message.tool_call_id == "call-1"]
         assert (failed.tool_call_error, failed.content) == (True, "report.txt is unreadable")
@@ -1581,7 +1585,7 @@ class TestUserIdPassthrough:
             )
 
         [stored] = stored_runs(config, runtime_paths, "session1")
-        assert (stored.status, stored.error) == (RunStatus.interrupted, None)
+        assert (is_interrupted(stored), stored.error) == (True, None)
         assert (stored.run_id, recorder.outcome) == (recorder.run_id, "interrupted")
         assert [tool.tool_name for tool in stored.tools or ()] == ["run_shell_command"]
         assert stored.metadata is not None
@@ -1607,7 +1611,7 @@ class TestUserIdPassthrough:
 
         assert response.text == get_user_friendly_error_message(error, "general", runtime_paths=runtime_paths)
         [stored] = stored_runs(config, runtime_paths, "session1")
-        assert (stored.status, stored.error) == (RunStatus.interrupted, "validation failed upstream")
+        assert (is_interrupted(stored), stored.error) == (True, "validation failed upstream")
 
     @pytest.mark.asyncio
     async def test_ai_response_rejects_configured_team_targets(self, tmp_path: Path) -> None:
@@ -1969,7 +1973,7 @@ class TestUserIdPassthrough:
             )
 
         switched, stopped = stored_runs(config, runtime_paths, "session1")
-        assert (switched.status, stopped.status) == (RunStatus.completed, RunStatus.interrupted)
+        assert (switched.status, is_interrupted(stopped)) == (RunStatus.completed, True)
         assert stopped.run_id == recorder.run_id
         assert [tool.tool_name for tool in switched.tools or ()] == ["switch_thread_model"]
         assert [tool.tool_name for tool in stopped.tools or ()] == ["run_shell_command"]
@@ -2393,7 +2397,7 @@ class TestUserIdPassthrough:
             await reply
 
         [persisted_run] = stored_runs(config, runtime_paths, "session1")
-        assert persisted_run.status is RunStatus.interrupted
+        assert is_interrupted(persisted_run)
         name, _preview = running_preview
         assert [(tool.tool_call_id, tool.tool_name) for tool in persisted_run.tools or ()] == [
             ("call-1", "run_shell_command"),
@@ -2443,7 +2447,7 @@ class TestUserIdPassthrough:
             await task
 
         [persisted_run] = stored_runs(config, runtime_paths, "session1")
-        assert persisted_run.status is RunStatus.interrupted
+        assert is_interrupted(persisted_run)
         assert _replayed(persisted_run) == [
             ("user", "test\n\n<mindroom_message_context>persist me</mindroom_message_context>"),
             ("assistant", "Half done\n\n(turn stopped before completion)"),

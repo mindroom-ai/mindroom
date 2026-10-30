@@ -257,8 +257,8 @@ class ConversationStore:
         """Save an interrupted turn's record as ``save_run`` does, over a final run too, without its usage.
 
         Its owner rewrites what the run's own save stored: a turn driver marks the run of a turn a stop or a failure
-        cut short ``INTERRUPTED``, a voice call keeps the part of its answer it spoke, and CLI approval recovery ends the
-        paused run it does not resume. A visible run keeps its ``seq``, so replay order does not change.
+        cut short as the turn's record, a voice call keeps the part of its answer it spoke, and CLI approval recovery
+        ends the paused run it does not resume. A visible run keeps its ``seq``, so replay order does not change.
         """
         kind = run_kind(record)
         outcome = self._save(session, record.to_dict(), kind, usage=None, state=state, interrupted=True)

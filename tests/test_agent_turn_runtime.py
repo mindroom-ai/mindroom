@@ -32,6 +32,7 @@ from mindroom.constants import AI_RUN_METADATA_KEY
 from mindroom.dispatch_source import ScheduledHistoryBudget
 from mindroom.entity_resolution import entity_identity_registry
 from mindroom.final_delivery import AwaitingApproval, Cancelled, Completed, FinalDeliveryOutcome
+from mindroom.history.interrupted_replay import is_interrupted
 from mindroom.history.run_visibility import (
     QUEUED_MESSAGE_NOTICE_MARKER_KEY,
     is_queued_notice_message,
@@ -468,9 +469,9 @@ async def test_a_pause_with_no_approval_to_ask_for_fails_the_reply(
     ]
     assert probe.calls == []
     failure = "agent run 'run-1' paused on ['touch'] without an approval to ask for"
-    assert writes == [("run-1", "PAUSED"), ("run-1", "INTERRUPTED")]
+    assert writes == [("run-1", "PAUSED"), ("run-1", "COMPLETED")]
     record = _stored(reply)
-    assert record.status is RunStatus.interrupted
+    assert is_interrupted(record)
     assert record.error == failure
     assert not record.requirements
     assert reply.recorder.outcome == "interrupted"
@@ -556,8 +557,8 @@ async def test_a_stop_mid_stream_stores_the_runs_own_record_once_and_marks_it_in
     assert isinstance(outcome[0], asyncio.CancelledError)
 
     record = _stored(reply)
-    assert writes == [("run-1", "CANCELLED"), ("run-1", "INTERRUPTED")]
-    assert (record.status, record.error) == (RunStatus.interrupted, None)
+    assert writes == [("run-1", "CANCELLED"), ("run-1", "COMPLETED")]
+    assert (is_interrupted(record), record.error) == (True, None)
     assert _contents(record.messages)[-1] == ("assistant", "Partial ")
     if with_recorder:
         assert (reply.recorder.outcome, reply.recorder.run_id) == ("interrupted", "run-1")
@@ -589,7 +590,7 @@ async def test_a_stopped_reply_records_the_text_and_tool_calls_it_had_shown(
     assert isinstance(outcome, asyncio.CancelledError)
     assert reply.recorder.outcome == "interrupted"
     record = _stored(reply)
-    assert record.status is RunStatus.interrupted
+    assert is_interrupted(record)
     assert [(tool.tool_name, tool.result) for tool in record.tools or ()] == [("touch", "touched a")]
     assert [message.role for message in record.messages][-3:] == ["assistant", "tool", "assistant"]
     assert _contents(record.messages)[-1] == ("assistant", "Partial ")
@@ -645,9 +646,9 @@ async def test_a_provider_error_stores_an_error_record_and_streams_the_friendly_
 
     [text] = streamed_text(chunks)
     assert "Rate limited" in text
-    assert writes == [("run-1", "ERROR"), ("run-1", "INTERRUPTED")]
+    assert writes == [("run-1", "ERROR"), ("run-1", "COMPLETED")]
     record = _stored(reply)
-    assert (record.status, record.content, record.error) == (RunStatus.interrupted, None, "slow down")
+    assert (is_interrupted(record), record.content, record.error) == (True, None, "slow down")
 
 
 @pytest.mark.asyncio
@@ -677,7 +678,7 @@ async def test_an_error_record_never_repeats_an_earlier_answer(
 
     assert "Rate limited" in text
     record = _stored(reply)
-    assert (record.status, record.content, record.error) == (RunStatus.interrupted, None, "slow down")
+    assert (is_interrupted(record), record.content, record.error) == (True, None, "slow down")
     # The earlier answer was history, not this reply's.
     assert [message.role for message in record.messages] == ["user"]
     assert reply.recorder.outcome == "interrupted"
@@ -803,7 +804,7 @@ async def test_a_failed_reply_keeps_its_notice_persisted_at_the_response_boundar
     with queued_message_signal_context(_QueuedState(pending=True)) as notice_context:
         await _respond(reply)
         failed = _stored(reply)
-        assert failed.status == RunStatus.interrupted
+        assert is_interrupted(failed)
         assert _notice_markers(failed.messages) == [True]
         await ai_runtime.finalize_queued_notice_response_turn_async(notice_context)
 
@@ -1447,7 +1448,7 @@ async def test_a_third_cut_off_response_fails_the_run(
     assert len(reply.model.requests) == 3
     assert streamed_text(chunks)
     failed = _stored(reply)
-    assert failed.status is RunStatus.interrupted
+    assert is_interrupted(failed)
     assert "output limit" in str(failed.error)
 
 
@@ -1467,7 +1468,7 @@ async def test_a_safeguard_refusal_is_stored_and_reported_as_an_error(
 
     assert streamed_text(chunks)
     failed = _stored(reply)
-    assert failed.status is RunStatus.interrupted
+    assert is_interrupted(failed)
     assert (failed.content, failed.error) == (None, MODEL_SAFEGUARD_REFUSAL_MESSAGE)
 
 
@@ -1636,10 +1637,10 @@ async def test_the_runner_marks_the_cancelled_run_the_loop_stored_interrupted(
     assert outcome.run_succeeded is False
     run_id = outcome.response_run_id
     assert run_id is not None
-    assert writes == [(run_id, "CANCELLED"), (run_id, "INTERRUPTED")]
+    assert writes == [(run_id, "CANCELLED"), (run_id, "COMPLETED")]
     record = reply.storage.get_run(run_id)
     assert record is not None
-    assert record.status is RunStatus.interrupted
+    assert is_interrupted(record)
     [row] = usage_rows(reply.storage, run_id)
     assert row["metrics"]["input_tokens"] == 10
 
@@ -1717,6 +1718,6 @@ async def test_the_runner_records_the_failure_over_a_pause_with_no_approval_to_a
     session = reply.storage.load_session(SESSION_ID)
     assert session is not None
     [record] = session.runs
-    assert record.status is RunStatus.interrupted
+    assert is_interrupted(record)
     assert str(record.error).endswith(" paused on ['touch'] without an approval to ask for")
     assert not record.requirements

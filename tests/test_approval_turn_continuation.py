@@ -24,6 +24,7 @@ from mindroom.constants import AI_RUN_METADATA_KEY, PRIOR_USAGE_RUN_METADATA_KEY
 from mindroom.custom_tools.calculator import CalculatorTools
 from mindroom.custom_tools.sleep import SleepTools
 from mindroom.event_journal import ApprovalCall, ApprovalDecision, approval_arguments_digest
+from mindroom.history.interrupted_replay import is_interrupted
 from mindroom.history.mid_turn_compaction import without_run_usage
 from mindroom.history.request_messages import replayable_messages
 from mindroom.history.run_visibility import is_model_history_visible_run
@@ -874,7 +875,7 @@ async def test_a_stopped_attempt_after_an_approved_run_records_none_of_the_pause
     with pytest.raises(asyncio.CancelledError):
         await _approve_add(tmp_path, config, paths, identity, paused, "approved")
 
-    [stopped] = [run for run in stored_runs(config, paths, identity.session_id) if run.status is RunStatus.interrupted]
+    [stopped] = [run for run in stored_runs(config, paths, identity.session_id) if is_interrupted(run)]
     assert stopped.run_id != paused.run_id
     assert [(usage.tokens.input_tokens, usage.tokens.output_tokens) for usage in prior_usage_of(stopped)] in (
         [],
@@ -1357,7 +1358,7 @@ async def test_a_call_that_failed_before_an_approval_replays_as_failed_when_the_
         )
 
     runs = stored_runs(config, paths, identity.session_id)
-    assert [run.status for run in runs].count(RunStatus.interrupted) == 1
+    assert [is_interrupted(run) for run in runs].count(True) == 1
     replayed = replayable_messages([run for run in runs if is_model_history_visible_run(run)])
     [failed] = [message for message in replayed if message.role == "tool" and message.tool_call_id == "failed"]
     assert failed.tool_call_error is True
