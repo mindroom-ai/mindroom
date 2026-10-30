@@ -31,6 +31,7 @@ if TYPE_CHECKING:
 
     from mindroom import constants
     from mindroom.agent_cli.session import TurnToolRegistry
+    from mindroom.api.auth import ApiAuthState
     from mindroom.api.computers import ComputerRuntime
     from mindroom.api.mcp_gateway import GatewayRuntime
     from mindroom.api.usage_export import UsageExportRunner
@@ -76,7 +77,6 @@ class ApiSnapshot:
     source_fingerprint: str | None = None
     source_files: frozenset[Path] | None = None
     uses_includes: bool | None = None
-    auth_state: Any | None = None
 
 
 @dataclass
@@ -105,7 +105,8 @@ class _MindroomAppState:
     """Single typed namespace for FastAPI ``app.state`` attributes used across the API."""
 
     api_state: ApiState | None = None
-    api_auth_account_id: str | None = None
+    # The auth clients of the runtime the app last authenticated a request for.
+    api_auth_state: ApiAuthState | None = None
     orchestrator_knowledge_refresh_scheduler: KnowledgeRefreshScheduler | None = None
     knowledge_source_watcher: KnowledgeSourceWatcher | None = None
     knowledge_refresh_scheduler: KnowledgeRefreshScheduler | None = None
@@ -212,7 +213,7 @@ def request_snapshot(request: Request) -> ApiSnapshot | None:
     return snapshot if isinstance(snapshot, ApiSnapshot) else None
 
 
-def store_request_snapshot(request: Request, snapshot: ApiSnapshot) -> ApiSnapshot:
+def _store_request_snapshot(request: Request, snapshot: ApiSnapshot) -> ApiSnapshot:
     """Pin one API snapshot to the current request."""
     request.scope[_REQUEST_SNAPSHOT_SCOPE_KEY] = snapshot
     return snapshot
@@ -225,14 +226,21 @@ def bind_current_request_snapshot(request: Request) -> ApiSnapshot:
         return existing
     app_state = require_api_state(request.app)
     with app_state.config_lock:
-        return store_request_snapshot(request, app_state.snapshot)
+        return _store_request_snapshot(request, app_state.snapshot)
 
 
 def rebind_current_request_snapshot(request: Request) -> ApiSnapshot:
-    """Replace a request's pinned snapshot with the app's current publication."""
+    """Move a request to the app's newest publication of the runtime it authenticated against.
+
+    A request whose app moved to another runtime meanwhile is stale: its auth state names the old one.
+    """
     app_state = require_api_state(request.app)
     with app_state.config_lock:
-        return store_request_snapshot(request, app_state.snapshot)
+        current = app_state.snapshot
+    pinned = request_snapshot(request)
+    if pinned is not None and pinned.runtime_paths != current.runtime_paths:
+        raise _stale_snapshot_error()
+    return _store_request_snapshot(request, current)
 
 
 def _request_or_current_snapshot(request: Request) -> ApiSnapshot:
@@ -259,7 +267,6 @@ def _published_snapshot(
     source_fingerprint: str | None | _Keep = _Keep.FIELD,
     source_files: frozenset[Path] | None | _Keep = _Keep.FIELD,
     uses_includes: bool | None | _Keep = _Keep.FIELD,
-    auth_state: object = _Keep.FIELD,
 ) -> ApiSnapshot:
     """Return ``snapshot`` with the given fields as one new publication, always with a fresh commit revision."""
     return replace(
@@ -272,7 +279,6 @@ def _published_snapshot(
         source_fingerprint=snapshot.source_fingerprint if source_fingerprint is _Keep.FIELD else source_fingerprint,
         source_files=snapshot.source_files if source_files is _Keep.FIELD else source_files,
         uses_includes=snapshot.uses_includes if uses_includes is _Keep.FIELD else uses_includes,
-        auth_state=snapshot.auth_state if auth_state is _Keep.FIELD else auth_state,
     )
 
 

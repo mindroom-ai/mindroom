@@ -6,15 +6,16 @@ import asyncio
 from typing import TYPE_CHECKING
 
 import pytest
-from fastapi import HTTPException
 from starlette.requests import Request
 
 from mindroom import constants
 from mindroom.api import config_lifecycle, main
+from mindroom.api.auth_user import AuthSource, AuthUser
 from mindroom.api.dynamic_workflows import _authorize_private_report_request
 from mindroom.dynamic_workflows.service import DynamicWorkflowService
 from mindroom.dynamic_workflows.store import DynamicWorkflowStore
 from tests.api.conftest import trusted_upstream_env, trusted_upstream_headers, use_trusted_upstream_runtime
+from tests.api.test_api import _set_platform_auth
 
 if TYPE_CHECKING:
     from fastapi import FastAPI
@@ -23,6 +24,8 @@ if TYPE_CHECKING:
     from mindroom.constants import RuntimePaths
     from mindroom.dynamic_workflows.store import DynamicWorkflowRun
 
+# Shaped like the Supabase access token JWT the platform issues.
+_PLATFORM_TOKEN = "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJ1c2VyLTEyMyJ9.c2lnbmF0dXJl"  # noqa: S105
 _BROWSER_ACCEPT = {"Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"}
 
 
@@ -111,7 +114,8 @@ def test_private_dynamic_workflow_report_served_from_runtime_storage(test_client
         scope="agent",
         owner_id="general",
         input_data={"topic": "Agno factories"},
-        requested_by="standalone",
+        # The standalone dashboard login acts as the configured owner, who asked for this run in Matrix.
+        requested_by="@owner:example.org",
         base_url="https://acme.mindroom.chat",
     )
 
@@ -202,7 +206,7 @@ def test_private_dynamic_workflow_report_accepts_standalone_owner_matrix_user(te
             "path": f"/reports/private/agent/general/competitor-research-report/{run.run_id}",
             "query_string": b"",
             "headers": [],
-            "auth_user": {"user_id": "standalone", "email": None},
+            "auth_user": AuthUser(user_id="standalone", email=None, source=AuthSource.STANDALONE),
         },
     )
 
@@ -425,77 +429,27 @@ def test_private_dynamic_workflow_report_requires_sign_in_when_dashboard_is_admi
     assert response.status_code == 401
 
 
-def test_private_dynamic_workflow_report_rejects_other_platform_user(test_client: TestClient) -> None:
-    """Private report auth should deny Supabase users that do not match the run requester."""
+@pytest.mark.parametrize(
+    ("requested_by", "expected_status"),
+    [("@owner:example.org", 200), ("@alice:example.org", 403)],
+)
+def test_private_dynamic_workflow_report_admits_the_platform_owner_only(
+    test_client: TestClient,
+    requested_by: str,
+    expected_status: int,
+) -> None:
+    """A hosted platform login acts as the instance owner, so it opens the owner's reports and no one else's."""
     runtime_paths = main._app_runtime_paths(test_client.app)
-    store = DynamicWorkflowStore(runtime_paths.storage_root)
-    service = DynamicWorkflowService(store)
-    store.create_workflow(
-        spec=_workflow_spec(),
-        scope="agent",
-        owner_id="general",
-        created_by="general",
-        reason="initial design",
-    )
-    run = _run(
-        service,
-        workflow_id="competitor-research-report",
-        scope="agent",
-        owner_id="general",
-        input_data={"topic": "Agno factories"},
-        requested_by="user-alice",
-        base_url="https://acme.mindroom.chat",
-    )
-    request = Request(
-        {
-            "type": "http",
-            "method": "GET",
-            "path": f"/reports/private/agent/general/competitor-research-report/{run.run_id}",
-            "query_string": b"",
-            "headers": [],
-            "auth_user": {"user_id": "user-bob", "email": "bob@example.com"},
-        },
+    _set_platform_auth(valid_tokens={_PLATFORM_TOKEN}, account_id="user-123")
+    run = _completed_run(runtime_paths, requested_by=requested_by)
+
+    response = test_client.get(
+        f"/reports/private/agent/general/competitor-research-report/{run.run_id}",
+        headers={"Authorization": f"Bearer {_PLATFORM_TOKEN}"},
+        follow_redirects=False,
     )
 
-    with pytest.raises(HTTPException) as exc_info:
-        _authorize_private_report_request(request, run, runtime_paths)
-
-    assert exc_info.value.status_code == 403
-
-
-def test_private_dynamic_workflow_report_accepts_matching_platform_user(test_client: TestClient) -> None:
-    """Private report auth should allow platform users that match the run requester."""
-    runtime_paths = main._app_runtime_paths(test_client.app)
-    store = DynamicWorkflowStore(runtime_paths.storage_root)
-    service = DynamicWorkflowService(store)
-    store.create_workflow(
-        spec=_workflow_spec(),
-        scope="agent",
-        owner_id="general",
-        created_by="general",
-        reason="initial design",
-    )
-    run = _run(
-        service,
-        workflow_id="competitor-research-report",
-        scope="agent",
-        owner_id="general",
-        input_data={"topic": "Agno factories"},
-        requested_by="user-alice",
-        base_url="https://acme.mindroom.chat",
-    )
-    request = Request(
-        {
-            "type": "http",
-            "method": "GET",
-            "path": f"/reports/private/agent/general/competitor-research-report/{run.run_id}",
-            "query_string": b"",
-            "headers": [],
-            "auth_user": {"user_id": "user-alice", "email": "alice@example.com"},
-        },
-    )
-
-    _authorize_private_report_request(request, run, runtime_paths)
+    assert response.status_code == expected_status, response.text
 
 
 def test_private_dynamic_workflow_report_rejects_unscoped_run_id(test_client: TestClient) -> None:

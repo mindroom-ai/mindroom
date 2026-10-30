@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass, replace
-from typing import TYPE_CHECKING, Annotated, cast
+from typing import TYPE_CHECKING, Annotated
 
 import nio
 from aiohttp import ClientError
@@ -154,7 +154,7 @@ async def _connection_user(request: Request, response: Response) -> ConnectionUs
     snapshot = config_lifecycle.bind_current_request_snapshot(request)
     if request.query_params:
         raise HTTPException(400, "Connection target overrides are not accepted", headers=CONNECTIONS_HEADERS)
-    requester_id = cast("str", auth_user["matrix_user_id"])
+    requester_id = auth_user.matrix_user_id
     user = resolve_connection_user(
         snapshot,
         requester_id,
@@ -370,8 +370,8 @@ async def me(request: Request, response: Response) -> ConnectionsIdentity:
     if request.query_params:
         raise HTTPException(400, "Query parameters are not accepted", headers=CONNECTIONS_HEADERS)
     snapshot = config_lifecycle.bind_current_request_snapshot(request)
-    matrix_user_id = cast("str", auth_user["matrix_user_id"])
-    email = auth_user.get("email")
+    matrix_user_id = auth_user.matrix_user_id
+    email = auth_user.email
     return ConnectionsIdentity(
         matrix_user_id=matrix_user_id,
         display_name=await _matrix_display_name(matrix_user_id, snapshot.runtime_paths),

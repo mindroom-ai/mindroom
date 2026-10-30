@@ -1794,6 +1794,7 @@ depends_on = []
 [[modules]]
 path = "mindroom.api.auth"
 depends_on = [
+    "mindroom.api.auth_user",
     "mindroom.authorization",
     "mindroom.api.config_lifecycle",
     "mindroom.api.connections_session_cookie",
@@ -1802,6 +1803,10 @@ depends_on = [
     "mindroom.origins",
     "mindroom.tool_system.dependencies",
 ]
+
+[[modules]]
+path = "mindroom.api.auth_user"
+depends_on = ["mindroom.constants", "mindroom.matrix.identity"]
 
 [[modules]]
 path = "mindroom.api.open_access"
@@ -1829,6 +1834,7 @@ depends_on = [
 [[modules]]
 path = "mindroom.api.dynamic_workflows"
 depends_on = [
+    "mindroom.api.auth_user",
     "mindroom.api.config_lifecycle",
     "mindroom.api.report_headers",
     "mindroom.constants",
@@ -2107,6 +2113,7 @@ depends_on = [
 [[modules]]
 path = "mindroom.api.main"
 depends_on = [
+    "mindroom.api.auth_user",
     "mindroom.config.commit",
     "mindroom.origins",
     "mindroom.api.agent_cli",
@@ -2202,6 +2209,7 @@ depends_on = [
 [[modules]]
 path = "mindroom.api.credentials_oauth_flows"
 depends_on = [
+    "mindroom.api.auth_user",
     "mindroom.api.config_lifecycle",
     "mindroom.api.dashboard_credential_scope",
     "mindroom.oauth.providers",
@@ -2232,6 +2240,7 @@ depends_on = [
 [[modules]]
 path = "mindroom.api.dashboard_credential_scope"
 depends_on = [
+    "mindroom.api.auth_user",
     "mindroom.api.config_lifecycle",
     "mindroom.authorization",
     "mindroom.config.resolution",
@@ -2462,6 +2471,7 @@ depends_on = [
 [[modules]]
 path = "mindroom.api.usage"
 depends_on = [
+    "mindroom.api.auth_user",
     "mindroom.api.auth",
     "mindroom.api.config_lifecycle",
     "mindroom.api.usage_export",
@@ -8044,7 +8054,8 @@ depends_on = [
 
 [[modules]]
 path = "mindroom.api.mcp_identity"
-depends_on = ["mindroom.api.auth", "mindroom.api.config_lifecycle", "mindroom.mcp_gateway.accounts", "mindroom.mcp_gateway.types", "mindroom.requester_identity"]
+depends_on = [
+    "mindroom.api.auth_user","mindroom.api.auth", "mindroom.api.config_lifecycle", "mindroom.mcp_gateway.accounts", "mindroom.mcp_gateway.types", "mindroom.requester_identity"]
 
 [[modules]]
 path = "mindroom.api.mcp_selection"

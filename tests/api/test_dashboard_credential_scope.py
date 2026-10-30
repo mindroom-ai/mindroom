@@ -6,6 +6,7 @@ import pytest
 from fastapi import FastAPI, HTTPException, Request
 
 from mindroom.api import config_lifecycle
+from mindroom.api.auth_user import AuthSource, AuthUser, SignedMatrixUser
 from mindroom.api.dashboard_credential_scope import (
     require_agent_credential_management_authorized,
     require_agent_oauth_connection_authorized,
@@ -16,7 +17,7 @@ from mindroom.config.main import Config
 from mindroom.constants import RuntimePaths, resolve_runtime_paths
 
 
-def _request(auth_user: dict[str, Any] | None = None, query_string: bytes = b"") -> Request:
+def _request(auth_user: AuthUser | None = None, query_string: bytes = b"") -> Request:
     """Build a dashboard request served by an app with MindRoom state, as every production request is."""
     app = FastAPI()
     config_lifecycle.ensure_app_state(app)
@@ -31,6 +32,16 @@ def _request(auth_user: dict[str, Any] | None = None, query_string: bytes = b"")
     if auth_user is not None:
         scope["auth_user"] = auth_user
     return Request(scope)
+
+
+def _trusted_user(user_id: str, matrix_user_id: str) -> SignedMatrixUser:
+    """Return a login a trusted gateway signed with a Matrix ID."""
+    return SignedMatrixUser(
+        user_id=user_id,
+        email=None,
+        source=AuthSource.TRUSTED_UPSTREAM,
+        matrix_user_id=matrix_user_id,
+    )
 
 
 def _config(
@@ -223,7 +234,7 @@ class TestRequireAgentCredentialManagementAuthorized:
     def test_allowlisted_trusted_upstream_matrix_user_is_authorized(self) -> None:
         """A trusted-upstream Matrix user on the credential-manager allowlist is authorized as that user."""
         identity = require_agent_credential_management_authorized(
-            _request({"user_id": "alice", "auth_source": "trusted_upstream", "matrix_user_id": "@alice:example.org"}),
+            _request(_trusted_user("alice", "@alice:example.org")),
             config=_config(credential_managers=self._credential_managers),
             runtime_paths=self._runtime_paths(),
             agent_name="general",
@@ -239,13 +250,7 @@ class TestRequireAgentCredentialManagementAuthorized:
         config.authorization.aliases = {owner_id: [bridge_id]}
 
         identity = require_agent_credential_management_authorized(
-            _request(
-                {
-                    "user_id": "bridge",
-                    "auth_source": "trusted_upstream",
-                    "matrix_user_id": bridge_id,
-                },
-            ),
+            _request(_trusted_user("bridge", bridge_id)),
             config=config,
             runtime_paths=self._runtime_paths(),
             agent_name="general",
@@ -263,13 +268,7 @@ class TestRequireAgentCredentialManagementAuthorized:
 
         with pytest.raises(HTTPException) as exc_info:
             require_agent_credential_management_authorized(
-                _request(
-                    {
-                        "user_id": "bridgebot",
-                        "auth_source": "trusted_upstream",
-                        "matrix_user_id": bot_id,
-                    },
-                ),
+                _request(_trusted_user("bridgebot", bot_id)),
                 config=config,
                 runtime_paths=self._runtime_paths(),
                 agent_name="general",
@@ -281,13 +280,7 @@ class TestRequireAgentCredentialManagementAuthorized:
         """A non-allowlisted trusted-upstream Matrix user is rejected with 403."""
         with pytest.raises(HTTPException) as exc_info:
             require_agent_credential_management_authorized(
-                _request(
-                    {
-                        "user_id": "mallory",
-                        "auth_source": "trusted_upstream",
-                        "matrix_user_id": "@mallory:example.org",
-                    },
-                ),
+                _request(_trusted_user("mallory", "@mallory:example.org")),
                 config=_config(credential_managers=self._credential_managers),
                 runtime_paths=self._runtime_paths(),
                 agent_name="general",
@@ -298,7 +291,7 @@ class TestRequireAgentCredentialManagementAuthorized:
         """A dashboard user without a Matrix identity fails a Matrix-ID allowlist."""
         with pytest.raises(HTTPException) as exc_info:
             require_agent_credential_management_authorized(
-                _request({"user_id": "alice"}),
+                _request(AuthUser(user_id="alice", email=None, source=AuthSource.PLATFORM)),
                 config=_config(credential_managers=self._credential_managers),
                 runtime_paths=self._runtime_paths(),
                 agent_name="general",
@@ -309,7 +302,7 @@ class TestRequireAgentCredentialManagementAuthorized:
         """An authenticated dashboard user still needs explicit credential authority."""
         with pytest.raises(HTTPException) as exc_info:
             require_agent_credential_management_authorized(
-                _request({"user_id": "alice"}),
+                _request(AuthUser(user_id="alice", email=None, source=AuthSource.PLATFORM)),
                 config=_config(),
                 runtime_paths=self._runtime_paths(),
                 agent_name="general",
@@ -319,13 +312,7 @@ class TestRequireAgentCredentialManagementAuthorized:
     @pytest.mark.parametrize("private_per", ["user", "user_agent"])
     def test_requester_can_manage_own_private_agent_oauth_without_allowlist(self, private_per: str) -> None:
         """Private-agent OAuth authority is separate from generic credential management."""
-        request = _request(
-            {
-                "user_id": "alice",
-                "auth_source": "trusted_upstream",
-                "matrix_user_id": "@alice:example.org",
-            },
-        )
+        request = _request(_trusted_user("alice", "@alice:example.org"))
         config = _config(private_per=private_per)
         runtime_paths = self._runtime_paths()
 
@@ -352,7 +339,13 @@ class TestRequireAgentCredentialManagementAuthorized:
         """Requests without a resolvable requester identity are rejected with 403."""
         with pytest.raises(HTTPException) as exc_info:
             require_agent_credential_management_authorized(
-                _request({"auth_source": "trusted_upstream"}),
+                _request(
+                    AuthUser(
+                        user_id="alice@example.org",
+                        email="alice@example.org",
+                        source=AuthSource.TRUSTED_UPSTREAM,
+                    ),
+                ),
                 config=_config(),
                 runtime_paths=self._runtime_paths(),
                 agent_name="general",

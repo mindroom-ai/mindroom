@@ -21,6 +21,7 @@ from mindroom.api import config_lifecycle
 from mindroom.api.agent_cli import router as agent_cli_router
 from mindroom.api.auth import ApiAuthState, authenticate_user, dashboard_cors_origins, verify_user  # noqa: F401
 from mindroom.api.auth import router as auth_router
+from mindroom.api.auth_user import AuthUser  # noqa: TC001 - FastAPI resolves route annotations.
 from mindroom.api.budgets import router as budgets_router
 from mindroom.api.computers import active_computer_worker_keys
 from mindroom.api.computers import router as computers_router
@@ -302,7 +303,6 @@ def _app_runtime_paths(api_app: FastAPI) -> constants.RuntimePaths:
 def initialize_api_app(api_app: FastAPI, runtime_paths: constants.RuntimePaths) -> None:
     """Initialize one API app instance with explicit runtime-bound state."""
     app_state = config_lifecycle.ensure_app_state(api_app)
-    app_state.api_auth_account_id = runtime_paths.env_value("ACCOUNT_ID")
     previous_state = app_state.api_state
     if previous_state is None:
         app_state.thread_export_runner = None
@@ -318,7 +318,6 @@ def initialize_api_app(api_app: FastAPI, runtime_paths: constants.RuntimePaths) 
                 runtime_paths=runtime_paths,
                 runtime_config=None,
                 config_load_result=None,
-                auth_state=None,
             ),
         )
         config_lifecycle.register_api_app(api_app)
@@ -326,7 +325,6 @@ def initialize_api_app(api_app: FastAPI, runtime_paths: constants.RuntimePaths) 
 
     with previous_state.config_lock:
         current_snapshot = previous_state.snapshot
-        auth_state = current_snapshot.auth_state if current_snapshot.runtime_paths == runtime_paths else None
         runtime_config = current_snapshot.runtime_config if current_snapshot.runtime_paths == runtime_paths else None
         config_load_result = (
             current_snapshot.config_load_result if current_snapshot.runtime_paths == runtime_paths else None
@@ -350,7 +348,6 @@ def initialize_api_app(api_app: FastAPI, runtime_paths: constants.RuntimePaths) 
             current_snapshot,
             runtime_paths=runtime_paths,
             runtime_config=runtime_config,
-            auth_state=auth_state,
             config_load_result=config_load_result,
             source_fingerprint=source_fingerprint,
             source_files=source_files,
@@ -780,7 +777,7 @@ async def readiness_check() -> JSONResponse:
 async def load_config(
     request: Request,
     response: Response,
-    _user: Annotated[dict, Depends(verify_user)],
+    _user: Annotated[AuthUser, Depends(verify_user)],
 ) -> dict[str, Any]:
     """Load configuration from file."""
     generation = config_lifecycle.committed_generation(request)
@@ -803,7 +800,7 @@ async def save_config(
     request: Request,
     response: Response,
     new_config: dict[str, Any],
-    _user: Annotated[dict, Depends(verify_user)],
+    _user: Annotated[AuthUser, Depends(verify_user)],
     x_mindroom_config_generation: Annotated[int | None, Header()] = None,
 ) -> dict[str, bool]:
     """Save configuration to file."""
@@ -821,7 +818,7 @@ async def save_config(
 async def get_raw_config_source(
     request: Request,
     response: Response,
-    _user: Annotated[dict, Depends(verify_user)],
+    _user: Annotated[AuthUser, Depends(verify_user)],
 ) -> dict[str, Any]:
     """Return the raw config source text for recovery editing."""
     generation = config_lifecycle.committed_generation(request)
@@ -838,7 +835,7 @@ async def save_raw_config_source(
     request: Request,
     response: Response,
     payload: RawConfigSourceRequest,
-    _user: Annotated[dict, Depends(verify_user)],
+    _user: Annotated[AuthUser, Depends(verify_user)],
     x_mindroom_config_generation: Annotated[int | None, Header()] = None,
 ) -> dict[str, bool]:
     """Replace the raw config source text after validating it against the active runtime."""
@@ -855,7 +852,7 @@ async def save_raw_config_source(
 @app.post("/api/config/agent-policies")
 async def get_agent_policies(
     payload: AgentPoliciesRequest,
-    _user: Annotated[dict, Depends(verify_user)],
+    _user: Annotated[AuthUser, Depends(verify_user)],
 ) -> dict[str, dict[str, dict[str, Any]]]:
     """Return backend-derived policies for the current draft agent config."""
     default_worker_scope = payload.defaults.worker_scope if payload.defaults is not None else None
@@ -874,7 +871,7 @@ async def get_agent_policies(
 
 
 @app.get("/api/config/agents")
-async def get_agents(request: Request, _user: Annotated[dict, Depends(verify_user)]) -> list[dict[str, Any]]:
+async def get_agents(request: Request, _user: Annotated[AuthUser, Depends(verify_user)]) -> list[dict[str, Any]]:
     """Get all agents."""
     return _list_entities(_authored_config(request), "agents")
 
@@ -882,7 +879,7 @@ async def get_agents(request: Request, _user: Annotated[dict, Depends(verify_use
 @app.get("/api/config/personal-agents")
 async def get_personal_agents(
     request: Request,
-    _user: Annotated[dict, Depends(verify_user)],
+    _user: Annotated[AuthUser, Depends(verify_user)],
 ) -> list[PersonalAgentResponse]:
     """List every generated personal agent, including pending ones and those whose template was removed."""
     config, runtime_paths = config_lifecycle.read_committed_runtime_config(request)
@@ -913,7 +910,7 @@ async def update_agent(
     request: Request,
     agent_id: str,
     agent_data: dict[str, Any],
-    _user: Annotated[dict, Depends(verify_user)],
+    _user: Annotated[AuthUser, Depends(verify_user)],
 ) -> dict[str, bool]:
     """Update a specific agent."""
     await _write_config(
@@ -927,7 +924,7 @@ async def update_agent(
 async def create_agent(
     request: Request,
     agent_data: dict[str, Any],
-    _user: Annotated[dict, Depends(verify_user)],
+    _user: Annotated[AuthUser, Depends(verify_user)],
 ) -> dict[str, Any]:
     """Create a new agent."""
     agent_id = await _write_config(
@@ -941,7 +938,7 @@ async def create_agent(
 async def delete_agent(
     request: Request,
     agent_id: str,
-    _user: Annotated[dict, Depends(verify_user)],
+    _user: Annotated[AuthUser, Depends(verify_user)],
 ) -> dict[str, bool]:
     """Delete an agent."""
     await _write_config(
@@ -952,7 +949,7 @@ async def delete_agent(
 
 
 @app.get("/api/config/teams")
-async def get_teams(request: Request, _user: Annotated[dict, Depends(verify_user)]) -> list[dict[str, Any]]:
+async def get_teams(request: Request, _user: Annotated[AuthUser, Depends(verify_user)]) -> list[dict[str, Any]]:
     """Get all teams."""
     return _list_entities(_authored_config(request), "teams")
 
@@ -962,7 +959,7 @@ async def update_team(
     request: Request,
     team_id: str,
     team_data: dict[str, Any],
-    _user: Annotated[dict, Depends(verify_user)],
+    _user: Annotated[AuthUser, Depends(verify_user)],
 ) -> dict[str, bool]:
     """Update a specific team."""
     await _write_config(request, partial(_upsert_section_entity, "teams", team_id, team_data))
@@ -973,7 +970,7 @@ async def update_team(
 async def create_team(
     request: Request,
     team_data: dict[str, Any],
-    _user: Annotated[dict, Depends(verify_user)],
+    _user: Annotated[AuthUser, Depends(verify_user)],
 ) -> dict[str, Any]:
     """Create a new team."""
     team_id = await _write_config(
@@ -987,7 +984,7 @@ async def create_team(
 async def delete_team(
     request: Request,
     team_id: str,
-    _user: Annotated[dict, Depends(verify_user)],
+    _user: Annotated[AuthUser, Depends(verify_user)],
 ) -> dict[str, bool]:
     """Delete a team."""
     await _write_config(
@@ -998,7 +995,7 @@ async def delete_team(
 
 
 @app.get("/api/config/models")
-async def get_models(request: Request, _user: Annotated[dict, Depends(verify_user)]) -> dict[str, Any]:
+async def get_models(request: Request, _user: Annotated[AuthUser, Depends(verify_user)]) -> dict[str, Any]:
     """Get all model configurations."""
     return dict(_authored_config(request).get("models") or {})
 
@@ -1008,7 +1005,7 @@ async def update_model(
     request: Request,
     model_id: str,
     model_data: dict[str, Any],
-    _user: Annotated[dict, Depends(verify_user)],
+    _user: Annotated[AuthUser, Depends(verify_user)],
 ) -> dict[str, bool]:
     """Update a model configuration."""
 
@@ -1020,7 +1017,7 @@ async def update_model(
 
 
 @app.get("/api/config/room-models")
-async def get_room_models(request: Request, _user: Annotated[dict, Depends(verify_user)]) -> dict[str, Any]:
+async def get_room_models(request: Request, _user: Annotated[AuthUser, Depends(verify_user)]) -> dict[str, Any]:
     """Get room-specific model overrides."""
     return dict(_authored_config(request).get("room_models") or {})
 
@@ -1029,7 +1026,7 @@ async def get_room_models(request: Request, _user: Annotated[dict, Depends(verif
 async def update_room_models(
     request: Request,
     room_models: dict[str, str],
-    _user: Annotated[dict, Depends(verify_user)],
+    _user: Annotated[AuthUser, Depends(verify_user)],
 ) -> dict[str, bool]:
     """Update room-specific model overrides."""
 
@@ -1041,7 +1038,7 @@ async def update_room_models(
 
 
 @app.get("/api/rooms")
-async def get_available_rooms(request: Request, _user: Annotated[dict, Depends(verify_user)]) -> list[str]:
+async def get_available_rooms(request: Request, _user: Annotated[AuthUser, Depends(verify_user)]) -> list[str]:
     """Get list of available rooms."""
     config_data = _authored_config(request)
     rooms: set[str] = set(config_data.get("rooms", {}))

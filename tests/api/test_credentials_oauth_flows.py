@@ -5,6 +5,7 @@ from pathlib import Path
 from fastapi import FastAPI, Request
 from fastapi.testclient import TestClient
 
+from mindroom.api.auth_user import AuthSource, AuthUser, bind_request_auth_user
 from mindroom.api.credentials_oauth_flows import consume_pending_oauth_request, issue_pending_oauth_state
 from mindroom.api.main import initialize_api_app
 from mindroom.constants import resolve_runtime_paths
@@ -16,12 +17,12 @@ def _oauth_state_test_client(tmp_path: Path) -> TestClient:
 
     @app.post("/issue/{service}")
     async def issue(service: str, request: Request, user_id: str, agent_name: str | None = None) -> dict[str, str]:
-        request.scope["auth_user"] = {"user_id": user_id}
+        bind_request_auth_user(request, AuthUser(user_id=user_id, email=None, source=AuthSource.PLATFORM))
         return {"state": issue_pending_oauth_state(request, service, agent_name)}
 
     @app.post("/consume/{service}")
     async def consume(service: str, request: Request, state: str, user_id: str) -> dict[str, str | None]:
-        request.scope["auth_user"] = {"user_id": user_id}
+        bind_request_auth_user(request, AuthUser(user_id=user_id, email=None, source=AuthSource.PLATFORM))
         return {"agent_name": consume_pending_oauth_request(request, service, state).agent_name}
 
     return TestClient(app)

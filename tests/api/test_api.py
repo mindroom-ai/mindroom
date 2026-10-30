@@ -9,7 +9,7 @@ import time
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import nullcontext
-from dataclasses import replace
+from dataclasses import asdict, replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace, TracebackType
@@ -31,6 +31,7 @@ from mindroom.api import auth, config_lifecycle, frontend, homeassistant_integra
 from mindroom.api import sandbox_runner as sandbox_runner_api
 from mindroom.api import tools as tools_api
 from mindroom.api import workers as workers_api
+from mindroom.api.auth_user import AuthSource, AuthUser
 from mindroom.api.credentials_target import RequestCredentialsTarget
 from mindroom.commands.config_commands import apply_config_change
 from mindroom.config.load_attempt import ConfigLoad
@@ -172,7 +173,7 @@ def _publish_committed_runtime_config(
     runtime_config = Config.validate_with_runtime(authored_payload, runtime_paths)
     context.runtime_config = runtime_config
     context.config_load_result = config_lifecycle.ConfigLoadResult(success=True)
-    context.auth_state = None
+    config_lifecycle.app_state(api_app).api_auth_state = None
 
 
 def test_api_main_does_not_reexport_config_lifecycle_pass_through_helpers() -> None:
@@ -201,14 +202,12 @@ def test_config_lifecycle_published_snapshot_owns_optional_runtime_fields(tmp_pa
     )
     runtime_config = Config.validate_with_runtime(_authored_config_payload("old"), first_runtime)
     load_result = config_lifecycle.ConfigLoadResult(success=True)
-    auth_state = cast("auth.ApiAuthState", object())
     snapshot = main.ApiSnapshot(
         generation=7,
         runtime_paths=first_runtime,
         runtime_config=runtime_config,
         config_load_result=load_result,
         source_fingerprint="old-source",
-        auth_state=auth_state,
     )
 
     preserved = config_lifecycle._published_snapshot(snapshot, increment_generation=False)
@@ -218,7 +217,6 @@ def test_config_lifecycle_published_snapshot_owns_optional_runtime_fields(tmp_pa
     assert preserved.runtime_config is runtime_config
     assert preserved.config_load_result is load_result
     assert preserved.source_fingerprint == "old-source"
-    assert preserved.auth_state is auth_state
 
     cleared = config_lifecycle._published_snapshot(
         snapshot,
@@ -226,7 +224,6 @@ def test_config_lifecycle_published_snapshot_owns_optional_runtime_fields(tmp_pa
         runtime_config=None,
         config_load_result=None,
         source_fingerprint=None,
-        auth_state=None,
     )
 
     assert cleared.generation == 8
@@ -234,7 +231,6 @@ def test_config_lifecycle_published_snapshot_owns_optional_runtime_fields(tmp_pa
     assert cleared.runtime_config is None
     assert cleared.config_load_result is None
     assert cleared.source_fingerprint is None
-    assert cleared.auth_state is None
 
 
 class _ContextSwapLock:
@@ -433,11 +429,10 @@ async def test_supabase_bearer_check_skips_malformed_tokens_and_leaves_event_loo
         ),
         supabase_auth=_FakeClient(),
     )
-    request = Request({"type": "http", "method": "GET", "path": "/api/config/agents", "headers": []})
-    config_lifecycle.store_request_snapshot(
-        request,
-        config_lifecycle.ApiSnapshot(generation=1, runtime_paths=runtime_paths, auth_state=auth_state),
-    )
+    api_app = FastAPI()
+    main.initialize_api_app(api_app, runtime_paths)
+    config_lifecycle.app_state(api_app).api_auth_state = auth_state
+    request = Request({"type": "http", "method": "GET", "path": "/api/config/load", "headers": [], "app": api_app})
 
     for malformed in ("x", "header.payload", "a.b.c.d", "a.b." + "c" * 16 * 1024):
         with pytest.raises(HTTPException) as rejected:
@@ -451,7 +446,7 @@ async def test_supabase_bearer_check_skips_malformed_tokens_and_leaves_event_loo
     token = "header.payload.signature"  # noqa: S105
     auth_user, _ = await asyncio.gather(auth.authenticate_user(request, f"Bearer {token}"), mark_loop_free())
 
-    assert auth_user == {"user_id": "user-123", "email": "user@example.com"}
+    assert auth_user == AuthUser(user_id="user-123", email="user@example.com", source=AuthSource.PLATFORM)
     assert checked_tokens == [token]
     assert loop_stayed_free == [True]
 
@@ -601,7 +596,7 @@ def test_initialize_api_app_initializes_fresh_app_state(tmp_path: Path) -> None:
     assert main._app_runtime_paths(fresh_app) == runtime_paths
     assert main._app_context(fresh_app).runtime_config is None
     assert hasattr(config_lifecycle.require_api_state(fresh_app).config_lock, "acquire")
-    assert auth._app_auth_state(fresh_app).runtime_paths == runtime_paths
+    assert auth._app_auth_state(fresh_app, runtime_paths).runtime_paths == runtime_paths
 
 
 def test_app_auth_state_refreshes_after_runtime_swap(tmp_path: Path) -> None:
@@ -614,11 +609,13 @@ def test_app_auth_state_refreshes_after_runtime_swap(tmp_path: Path) -> None:
     )
 
     main.initialize_api_app(fresh_app, initial_runtime)
-    assert auth._app_auth_state(fresh_app).settings.mindroom_api_key is None
+    assert auth._app_auth_state(fresh_app, main._app_runtime_paths(fresh_app)).settings.mindroom_api_key is None
 
     main.initialize_api_app(fresh_app, refreshed_runtime)
 
-    assert auth._app_auth_state(fresh_app).settings.mindroom_api_key == "updated-key"
+    assert (
+        auth._app_auth_state(fresh_app, main._app_runtime_paths(fresh_app)).settings.mindroom_api_key == "updated-key"
+    )
 
 
 def test_runtime_path_swap_clears_script_broker_and_worker_keepalive(tmp_path: Path) -> None:
@@ -3022,7 +3019,7 @@ def test_spotify_connect_uses_pending_oauth_state(
             },
         ),
     )
-    main._app_context(main.app).auth_state = auth.ApiAuthState(
+    config_lifecycle.app_state(main.app).api_auth_state = auth.ApiAuthState(
         runtime_paths=main._app_runtime_paths(main.app),
         settings=auth._ApiAuthSettings(
             supabase_url=None,
@@ -3072,7 +3069,7 @@ def test_spotify_connect_rejects_draft_execution_scope_override(api_key_client: 
             },
         ),
     )
-    main._app_context(main.app).auth_state = auth.ApiAuthState(
+    config_lifecycle.app_state(main.app).api_auth_state = auth.ApiAuthState(
         runtime_paths=main._app_runtime_paths(main.app),
         settings=auth._ApiAuthSettings(
             supabase_url=None,
@@ -3145,7 +3142,7 @@ def test_spotify_callback_preserves_runtime_validation_error(
             },
         ),
     )
-    main._app_context(main.app).auth_state = auth.ApiAuthState(
+    config_lifecycle.app_state(main.app).api_auth_state = auth.ApiAuthState(
         runtime_paths=main._app_runtime_paths(main.app),
         settings=auth._ApiAuthSettings(
             supabase_url=None,
@@ -4622,7 +4619,7 @@ def test_frontend_login_propagates_trusted_upstream_auth_misconfiguration(
 ) -> None:
     """Trusted-upstream setup errors should stay visible on frontend auth checks."""
     runtime_paths = main._app_runtime_paths(api_key_client.app)
-    main._app_context(api_key_client.app).auth_state = auth.ApiAuthState(
+    config_lifecycle.app_state(api_key_client.app).api_auth_state = auth.ApiAuthState(
         runtime_paths=runtime_paths,
         settings=auth._ApiAuthSettings(
             supabase_url=None,
@@ -4679,8 +4676,9 @@ def test_cookie_mutations_use_configured_public_origin(
     expected: int,
 ) -> None:
     """A configured origin overrides the request host and must fail closed when invalid."""
-    state = main._app_context(api_key_client.app)
-    state.auth_state = replace(state.auth_state, settings=replace(state.auth_state.settings, public_url=public_url))
+    app_state = config_lifecycle.app_state(api_key_client.app)
+    auth_state = auth._app_auth_state(api_key_client.app, main._app_runtime_paths(api_key_client.app))
+    app_state.api_auth_state = replace(auth_state, settings=replace(auth_state.settings, public_url=public_url))
     api_key_client.cookies.set("mindroom_api_key", "test-key")
     response = api_key_client.post("/api/config/load", headers={"Origin": origin})
     assert response.status_code == expected, response.text
@@ -5070,7 +5068,7 @@ def api_key_client(temp_config_file: Path) -> TestClient:
         process_env={"MINDROOM_OWNER_USER_ID": "@owner:example.org"},
     )
     main.initialize_api_app(main.app, runtime_paths)
-    main._app_context(main.app).auth_state = auth.ApiAuthState(
+    config_lifecycle.app_state(main.app).api_auth_state = auth.ApiAuthState(
         runtime_paths=runtime_paths,
         settings=auth._ApiAuthSettings(
             supabase_url=None,
@@ -5376,8 +5374,8 @@ def _trusted_auth_test_app(runtime_paths: constants.RuntimePaths) -> FastAPI:
     main.initialize_api_app(api_app, runtime_paths)
 
     @api_app.get("/whoami")
-    async def _whoami(auth_user: Annotated[dict[str, Any], Depends(auth.verify_user)]) -> dict[str, Any]:
-        return auth_user
+    async def _whoami(auth_user: Annotated[AuthUser, Depends(auth.verify_user)]) -> dict[str, Any]:
+        return asdict(auth_user)
 
     return api_app
 
@@ -5443,7 +5441,7 @@ def test_trusted_upstream_assertion_ignored_when_disabled(tmp_path: Path) -> Non
         response = client.get("/whoami", headers={"X-Trusted-Jwt": trusted_upstream_headers()["X-Trusted-Jwt"]})
 
     assert response.status_code == 200
-    assert response.json() == {"user_id": "standalone", "email": None}
+    assert response.json() == {"user_id": "standalone", "email": None, "source": "standalone", "matrix_user_id": None}
 
 
 def _signed_whoami(
@@ -5473,7 +5471,8 @@ def test_trusted_upstream_jwt_accepts_valid_token(monkeypatch: pytest.MonkeyPatc
     assert response.json() == {
         "user_id": "user_123",
         "email": "alice@example.com",
-        "auth_source": "trusted_upstream",
+        "source": "trusted_upstream",
+        "matrix_user_id": None,
     }
 
 
@@ -5501,7 +5500,8 @@ def test_trusted_upstream_jwt_accepts_email_claim_as_user_id_without_user_id_cla
     assert response.json() == {
         "user_id": "alice@example.com",
         "email": "alice@example.com",
-        "auth_source": "trusted_upstream",
+        "source": "trusted_upstream",
+        "matrix_user_id": None,
     }
 
 
@@ -5521,7 +5521,8 @@ def test_trusted_upstream_jwt_ignores_identity_headers(monkeypatch: pytest.Monke
     assert response.json() == {
         "user_id": "user_123",
         "email": "alice@example.com",
-        "auth_source": "trusted_upstream",
+        "source": "trusted_upstream",
+        "matrix_user_id": None,
     }
 
 
@@ -5538,7 +5539,7 @@ def test_trusted_upstream_jwt_accepts_signed_matrix_claim(monkeypatch: pytest.Mo
     assert response.json() == {
         "user_id": "user_123",
         "email": "alice@example.com",
-        "auth_source": "trusted_upstream",
+        "source": "trusted_upstream",
         "matrix_user_id": "@alice:example.org",
     }
 
@@ -5800,7 +5801,7 @@ def _set_platform_auth(
     class _FakeClient:
         auth = _FakeAuth()
 
-    main._app_context(main.app).auth_state = auth.ApiAuthState(
+    config_lifecycle.app_state(main.app).api_auth_state = auth.ApiAuthState(
         runtime_paths=main._app_runtime_paths(main.app),
         settings=auth._ApiAuthSettings(
             supabase_url="https://supabase.example.com",

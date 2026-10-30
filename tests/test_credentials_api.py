@@ -9,6 +9,7 @@ from fastapi import FastAPI, Request
 from fastapi.testclient import TestClient
 
 from mindroom.api import credentials_oauth_flows
+from mindroom.api.auth_user import AuthSource, AuthUser, bind_request_auth_user
 from mindroom.api.main import initialize_api_app
 from mindroom.config.main import Config
 from mindroom.config.models import RouterConfig
@@ -489,12 +490,12 @@ def test_pending_oauth_state_binds_agent_name_and_user(tmp_path: Path) -> None:
 
     @app.post("/issue/{service}")
     async def issue(service: str, request: Request, user_id: str, agent_name: str | None = None) -> dict[str, str]:
-        request.scope["auth_user"] = {"user_id": user_id}
+        bind_request_auth_user(request, AuthUser(user_id=user_id, email=None, source=AuthSource.PLATFORM))
         return {"state": credentials_oauth_flows.issue_pending_oauth_state(request, service, agent_name)}
 
     @app.post("/consume/{service}")
     async def consume(service: str, request: Request, state: str, user_id: str) -> dict[str, str | None]:
-        request.scope["auth_user"] = {"user_id": user_id}
+        bind_request_auth_user(request, AuthUser(user_id=user_id, email=None, source=AuthSource.PLATFORM))
         return {"agent_name": credentials_oauth_flows.consume_pending_oauth_request(request, service, state).agent_name}
 
     client = TestClient(app)
@@ -513,12 +514,12 @@ def test_pending_oauth_state_rejects_different_user(tmp_path: Path) -> None:
 
     @app.post("/issue/{service}")
     async def issue(service: str, request: Request, user_id: str, agent_name: str | None = None) -> dict[str, str]:
-        request.scope["auth_user"] = {"user_id": user_id}
+        bind_request_auth_user(request, AuthUser(user_id=user_id, email=None, source=AuthSource.PLATFORM))
         return {"state": credentials_oauth_flows.issue_pending_oauth_state(request, service, agent_name)}
 
     @app.post("/consume/{service}")
     async def consume(service: str, request: Request, state: str, user_id: str) -> dict[str, str | None]:
-        request.scope["auth_user"] = {"user_id": user_id}
+        bind_request_auth_user(request, AuthUser(user_id=user_id, email=None, source=AuthSource.PLATFORM))
         return {"agent_name": credentials_oauth_flows.consume_pending_oauth_request(request, service, state).agent_name}
 
     client = TestClient(app)
@@ -540,7 +541,7 @@ def test_pending_oauth_request_preserves_payload(tmp_path: Path) -> None:
 
     @app.post("/issue/{service}")
     async def issue(service: str, request: Request) -> dict[str, str]:
-        request.scope["auth_user"] = {"user_id": "alice"}
+        bind_request_auth_user(request, AuthUser(user_id="alice", email=None, source=AuthSource.PLATFORM))
         return {
             "state": credentials_oauth_flows.issue_pending_oauth_state(
                 request,
@@ -552,7 +553,7 @@ def test_pending_oauth_request_preserves_payload(tmp_path: Path) -> None:
 
     @app.post("/consume/{service}")
     async def consume(service: str, request: Request, state: str) -> dict[str, str | dict[str, str] | None]:
-        request.scope["auth_user"] = {"user_id": "alice"}
+        bind_request_auth_user(request, AuthUser(user_id="alice", email=None, source=AuthSource.PLATFORM))
         pending = credentials_oauth_flows.consume_pending_oauth_request(request, service, state)
         return {
             "agent_name": pending.agent_name,

@@ -2,6 +2,7 @@
 
 import gzip
 from collections.abc import Callable
+from dataclasses import asdict
 from pathlib import Path
 from typing import Annotated, Any
 
@@ -12,6 +13,7 @@ from fastapi.testclient import TestClient
 
 from mindroom import constants
 from mindroom.api import auth, config_lifecycle, frontend, main
+from mindroom.api.auth_user import AuthUser
 from tests.api.conftest import trusted_upstream_jwks, trusted_upstream_jwt, trusted_upstream_jwt_key
 
 
@@ -70,11 +72,11 @@ def connections_auth_client(
 
         @api_app.get("/api/connections/identity")
         async def personal_identity(request: Request) -> dict[str, Any]:
-            return await auth.require_connections_user(request)
+            return asdict(await auth.require_connections_user(request))
 
         @api_app.api_route("/api/{path:path}", methods=["GET", "POST"])
-        async def protected_route(user: Annotated[dict[str, Any], Depends(auth.verify_user)]) -> dict[str, Any]:
-            return user
+        async def protected_route(user: Annotated[AuthUser, Depends(auth.verify_user)]) -> dict[str, Any]:
+            return asdict(user)
 
         api_app.include_router(frontend.router)
         return TestClient(api_app)

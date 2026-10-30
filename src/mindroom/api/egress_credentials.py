@@ -106,7 +106,7 @@ def _egress_user_accepting(*query_names: str) -> Callable[[Request, Response], A
                 else "Query parameters are not accepted"
             )
             raise HTTPException(400, detail, headers=CONNECTIONS_HEADERS)
-        return str(auth_user["matrix_user_id"])
+        return auth_user.matrix_user_id
 
     return dependency
 

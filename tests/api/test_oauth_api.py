@@ -28,7 +28,7 @@ from starlette.requests import Request as StarletteRequest
 
 from mindroom import constants
 from mindroom.agent_reply_membership import AgentReplyMembershipIndex
-from mindroom.api import auth, main
+from mindroom.api import auth, config_lifecycle, main
 from mindroom.api import oauth as oauth_api
 from mindroom.api.credentials_target import RequestCredentialsTarget
 from mindroom.api.oauth import router as oauth_router
@@ -253,7 +253,7 @@ def _publish_config(
     runtime_config = Config.validate_with_runtime(payload, runtime_paths)
     context.runtime_config = runtime_config
     context.config_load_result = main.ConfigLoadResult(success=True)
-    context.auth_state = auth.ApiAuthState(
+    config_lifecycle.app_state(api_app).api_auth_state = auth.ApiAuthState(
         runtime_paths=runtime_paths,
         settings=auth._ApiAuthSettings(
             supabase_url=None,
@@ -266,7 +266,7 @@ def _publish_config(
 
 
 def _use_runtime_auth_settings(api_app: FastAPI) -> None:
-    main._app_context(api_app).auth_state = None
+    config_lifecycle.app_state(api_app).api_auth_state = None
 
 
 def _fake_provider(

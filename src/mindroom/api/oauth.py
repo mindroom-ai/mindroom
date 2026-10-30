@@ -177,7 +177,7 @@ def _load_provider(
 
 
 async def _require_oauth_api_user(request: Request) -> None:
-    await verify_user(request, request.headers.get("authorization"), allow_public_paths=False)
+    await verify_user(request, request.headers.get("authorization"))
 
 
 async def _require_oauth_browser_user(
@@ -190,7 +190,7 @@ async def _require_oauth_browser_user(
             await _require_oauth_api_user(request)
         else:
             # The validated capability grants access to this flow, not administrator routes.
-            await authenticate_user(request, request.headers.get("authorization"), allow_public_paths=False)
+            await authenticate_user(request, request.headers.get("authorization"))
     except HTTPException as exc:
         if exc.status_code == 401:
             login_redirect = login_redirect_for_request(request)

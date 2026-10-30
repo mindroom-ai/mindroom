@@ -165,4 +165,4 @@ async def current_session(request: Request, response: Response) -> _SignedIn:
             headers={**(error.headers or {}), **CONNECTIONS_HEADERS},
         ) from error
     response.headers.update(CONNECTIONS_HEADERS)
-    return _SignedIn(matrix_user_id=auth_user["matrix_user_id"])
+    return _SignedIn(matrix_user_id=auth_user.matrix_user_id)

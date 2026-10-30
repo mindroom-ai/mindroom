@@ -1,13 +1,14 @@
 """Dashboard API for content-free retained token usage."""
 
 from datetime import UTC, datetime
-from typing import Annotated, Any
+from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
 from fastapi.responses import JSONResponse
 
 from mindroom.api import config_lifecycle
 from mindroom.api.auth import require_personal_user, require_usage_service, verify_user
+from mindroom.api.auth_user import SignedMatrixUser
 from mindroom.api.usage_export import (
     RETRY_AFTER_SECONDS,
     UsageExportContext,
@@ -94,7 +95,7 @@ def _get_organization_usage(
 def get_private_usage(
     request: Request,
     response: Response,
-    user: Annotated[dict[str, Any], Depends(require_personal_user)],
+    user: Annotated[SignedMatrixUser, Depends(require_personal_user)],
     include_daily: bool = False,
 ) -> dict[str, object]:
     """Return only the signed requester's private-agent usage, without target overrides."""
@@ -102,7 +103,7 @@ def get_private_usage(
         raise HTTPException(status_code=400, detail="Usage target overrides are not accepted")
     config, runtime_paths = config_lifecycle.read_committed_runtime_config(request)
     report = collect_private_usage(
-        requester_id=user["matrix_user_id"],
+        requester_id=user.matrix_user_id,
         config=config,
         runtime_paths=runtime_paths,
         include_daily=include_daily,
