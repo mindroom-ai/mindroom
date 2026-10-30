@@ -26,20 +26,17 @@ from typing import TYPE_CHECKING, Any
 from unittest.mock import patch
 
 import nio
-from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from graphiti_core.prompts.extract_nodes import ExtractedEntities
 from graphiti_core.prompts.models import Message as GraphitiMessage
 
 from mindroom import ai
 from mindroom.agent_cli.session import TurnToolRegistry
-from mindroom.api import openai_compat
-from mindroom.api.main import initialize_api_app
 from mindroom.budgets.monitor import BudgetMonitor
 from mindroom.config.main import Config
 from mindroom.constants import resolve_runtime_paths
 from mindroom.custom_tools.dynamic_workflow import _execute_room_agent_participant
-from mindroom.entity_resolution import current_internal_sender_ids, entity_identity_registry
+from mindroom.entity_resolution import entity_identity_registry
 from mindroom.history.turn_recorder import TurnRecorder
 from mindroom.hooks import EnrichmentItem
 from mindroom.knowledge.search import AgentKnowledge, KnowledgeSource, KnowledgeSourceDescription
@@ -67,7 +64,7 @@ from mindroom.skill_learning.tools import ReviewProgress
 from mindroom.teams.envelope import TeamTurnSpec, team_response_stream
 from mindroom.teams.formation import select_ad_hoc_team_mode
 from mindroom.teams.spec import TeamMode
-from mindroom.thread_summary import _generate_summary, _resolve_thread_summary_model_name, _ThreadEnrichment
+from mindroom.thread_summary.generation import GeneratedSummary, generate_summary, resolve_thread_summary_model_name
 from mindroom.tool_system.runtime_context import (
     build_execution_identity_from_runtime_context,
     tool_runtime_context,
@@ -89,6 +86,7 @@ from tests.conftest import (
     test_runtime_paths,
 )
 from tests.identity_helpers import entity_ids
+from tests.runtime_fakes import openai_compat_app
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Awaitable, Callable, Iterator
@@ -222,13 +220,10 @@ class Recorder:
         self.calls.append(call)
         return self.responder(call)
 
-    def _next_index(self) -> int:
+    def _bind_adapter(self, adapter: ModelProvider) -> _RecordingAdapter:
         index = self._built_models
         self._built_models += 1
-        return index
-
-    def _bind_adapter(self, adapter: ModelProvider) -> _RecordingAdapter:
-        return _RecordingAdapter(adapter, partial(self._respond_to_request, adapter, self._next_index()))
+        return _RecordingAdapter(adapter, partial(self._respond_to_request, adapter, index))
 
     @contextmanager
     def installed(self) -> Iterator[None]:
@@ -672,7 +667,7 @@ async def _run_team(root: Path, mode: TeamMode) -> ScenarioOutput:
     orchestrator = SimpleNamespace(
         config=config,
         runtime_paths=runtime_paths,
-        agent_bots={name: SimpleNamespace(running=True) for name in ("planner", "writer")},
+        running_entity_names=lambda: frozenset({"planner", "writer"}),
         knowledge_refresh_scheduler=None,
     )
     prompt = "Plan the launch and draft the announcement."
@@ -817,26 +812,25 @@ async def _summarize(
     config: Config,
     runtime_paths: RuntimePaths,
     tag_vocabulary: str | None,
-) -> str | _ThreadEnrichment | None:
-    """Generate the helper thread's summary as the automatic pass does, with its model and trusted senders."""
-    return await _generate_summary(
+) -> GeneratedSummary | None:
+    """Summarize the helper thread with the summary model the automatic pass resolves."""
+    return await generate_summary(
         _helper_history(),
         config,
         runtime_paths,
-        model_name=_resolve_thread_summary_model_name(config, runtime_paths, None),
+        model_name=resolve_thread_summary_model_name(config, runtime_paths, None),
         tag_vocabulary=tag_vocabulary,
-        trusted_sender_ids=current_internal_sender_ids(config, runtime_paths),
     )
 
 
 async def _thread_summary(config: Config, runtime_paths: RuntimePaths) -> None:
     summary = await _summarize(config, runtime_paths, None)
-    assert summary == _SUMMARY, summary
+    assert summary == GeneratedSummary(summary=_SUMMARY), summary
 
 
 async def _thread_enrichment(config: Config, runtime_paths: RuntimePaths) -> None:
     enrichment = await _summarize(config, runtime_paths, _TAG_VOCABULARY)
-    assert enrichment == _ThreadEnrichment(summary=_SUMMARY, tags=["travel"]), enrichment
+    assert enrichment == GeneratedSummary(summary=_SUMMARY, tags=("travel",)), enrichment
 
 
 async def _room_topic(config: Config, runtime_paths: RuntimePaths) -> None:
@@ -1297,9 +1291,7 @@ def _media_turn(root: Path) -> AgentTurn:
 
 def _post_openai_compat(config: Config, runtime_paths: RuntimePaths, body: dict[str, Any]) -> None:
     """Send one request to the OpenAI-compatible API, as a chat client such as LibreChat does."""
-    app = FastAPI()
-    app.include_router(openai_compat.router)
-    initialize_api_app(app, runtime_paths)
+    app = openai_compat_app(runtime_paths)
     with (
         patch("mindroom.api.openai_compat._load_config", return_value=(config, runtime_paths)),
         TestClient(app, base_url="http://localhost") as client,
@@ -1418,13 +1410,13 @@ SCENARIOS: dict[str, Scenario] = {
     ),
     **_structured_helper(
         "thread_summary",
-        "mindroom.thread_summary._generate_summary",
+        "mindroom.thread_summary.generation.generate_summary",
         _thread_summary,
         json.dumps({"summary": _SUMMARY}),
     ),
     **_structured_helper(
         "thread_enrichment",
-        "mindroom.thread_summary._generate_summary",
+        "mindroom.thread_summary.generation.generate_summary",
         _thread_enrichment,
         json.dumps({"summary": _SUMMARY, "tags": ["travel"]}),
     ),
@@ -1495,7 +1487,7 @@ def load_golden(name: str) -> dict[str, Any]:
 
 @dataclass(frozen=True)
 class RecordedScenario:
-    """What one scenario ran and handed out, and every request it sent, grouped by model in build order."""
+    """What one scenario ran and handed out, and every request it sent, in ``Recorder.ordered_calls`` order."""
 
     output: ScenarioOutput
     calls: list[ModelCall]

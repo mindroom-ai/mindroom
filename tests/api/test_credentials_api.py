@@ -26,6 +26,7 @@ from mindroom.tool_system.worker_routing import (
     resolve_worker_target,
 )
 from tests.api.conftest import trusted_upstream_headers, use_trusted_upstream_runtime
+from tests.runtime_fakes import bind_test_embedded_runtime
 
 
 def _config_with_worker_scope(
@@ -79,6 +80,7 @@ def _use_owner_runtime(api_app: object, matrix_user_id: str = "@alice:example.or
         process_env={constants.OWNER_MATRIX_USER_ID_ENV: matrix_user_id},
     )
     initialize_api_app(api_app, owner_runtime_paths)
+    bind_test_embedded_runtime(api_app)
     return owner_runtime_paths
 
 
@@ -93,6 +95,7 @@ def client(tmp_path: Path) -> TestClient:
             process_env={constants.OWNER_MATRIX_USER_ID_ENV: "@alice:example.org"},
         ),
     )
+    bind_test_embedded_runtime(app)
     _publish_committed_runtime_config(app, _config_with_worker_scope(None))
     return TestClient(app, base_url="http://localhost")
 
@@ -308,6 +311,7 @@ class TestCredentialsAPI:
                 },
             ),
         )
+        bind_test_embedded_runtime(client.app)
         main._app_context(client.app).auth_state = None
 
         expected_worker_key = resolve_worker_key(
@@ -1603,6 +1607,7 @@ class TestCredentialsAPI:
             },
         )
         initialize_api_app(app, runtime_a)
+        bind_test_embedded_runtime(app)
         request = Request(
             {
                 "type": "http",
@@ -1620,6 +1625,7 @@ class TestCredentialsAPI:
         def _swap_runtime_on_manager_lookup(runtime_paths: object) -> credential_runtime.CredentialsManager:
             assert runtime_paths == runtime_a
             initialize_api_app(app, runtime_b)
+            bind_test_embedded_runtime(app)
             _publish_committed_runtime_config(
                 app,
                 _config_with_worker_scope("shared", administrators=[], credential_managers=[]),

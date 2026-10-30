@@ -198,8 +198,8 @@ async def _list_managed_file_paths(
     return set(paths), None
 
 
-def _request_refresh_scheduler(request: Request) -> KnowledgeRefreshScheduler | None:
-    return config_lifecycle.app_state(request.app).knowledge_refresh_scheduler
+def _request_refresh_scheduler(request: Request) -> KnowledgeRefreshScheduler:
+    return config_lifecycle.app_state(request.app).runtime.knowledge_refresh_scheduler
 
 
 def _schedule_refreshes(
@@ -210,8 +210,6 @@ def _schedule_refreshes(
     request: Request,
 ) -> None:
     refresh_scheduler = _request_refresh_scheduler(request)
-    if refresh_scheduler is None:
-        return
     for base_id in dict.fromkeys(base_ids):
         if config.get_knowledge_base_config(base_id).mode == "semantic":
             refresh_scheduler.schedule_refresh(base_id, config=config, runtime_paths=runtime_paths)
@@ -830,11 +828,8 @@ async def reindex_knowledge(base_id: str, request: Request) -> dict[str, Any]:
     config, runtime_paths = config_lifecycle.read_committed_runtime_config(request)
     _ensure_base_exists(config, base_id)
 
-    refresh_scheduler = _request_refresh_scheduler(request)
-    if refresh_scheduler is None:
-        raise HTTPException(status_code=503, detail="Knowledge refresh is not running")
     try:
-        result = await refresh_scheduler.refresh_now(
+        result = await _request_refresh_scheduler(request).refresh_now(
             base_id,
             config=config,
             runtime_paths=runtime_paths,

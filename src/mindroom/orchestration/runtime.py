@@ -244,7 +244,7 @@ class _MatrixSyncStalledError(RuntimeError):
 
 def _matrix_sync_receive_loop_active(bot: AgentBot) -> bool:
     """Return whether the supervisor still owns an active receive loop."""
-    return bot.running and not bot._matrix_ingestion_quiesce_requested
+    return bot.running and not bot.ingestion_quiesced
 
 
 @dataclass(slots=True)
@@ -349,7 +349,7 @@ class _SyncIteration:
             msg = f"Matrix sync loop stalled for {bot.agent_name}"
             raise _MatrixSyncStalledError(msg)
 
-        if bot._matrix_ingestion_quiesce_requested:
+        if bot.ingestion_quiesced:
             await sync_task
 
     @classmethod

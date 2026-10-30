@@ -55,9 +55,7 @@ async def list_workers(request: Request, include_idle: bool = True) -> SandboxWo
 async def cleanup_idle_workers(request: Request) -> SandboxWorkerCleanupResponse:
     """Run one idle-worker cleanup pass on the configured backend."""
     with _worker_manager_lease(request) as worker_manager:
-        touch_live_workers = config_lifecycle.app_state(request.app).script_worker_keepalive
-        if touch_live_workers is not None:
-            touch_live_workers(worker_manager)
+        config_lifecycle.app_state(request.app).runtime.script_worker_keepalive(worker_manager)
         touch_computer_workers(request.app, worker_manager)
         touch_workers_in_flight(worker_manager)
         cleaned_workers = [

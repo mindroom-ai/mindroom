@@ -220,7 +220,6 @@ async def test_approval_resumed_helpers_keep_caller_usage_and_reset_context(  # 
         execution_identity=identity,
     )
     orchestrator = team_orchestrator(config, paths)
-    orchestrator.agent_bots = {name: SimpleNamespace(running=True) for name in ("general", "second")}
 
     async def pause() -> None:
         with tool_runtime_context(context):

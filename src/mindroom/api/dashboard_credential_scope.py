@@ -267,7 +267,7 @@ def require_agent_oauth_connection_authorized(
         agent_name,
         config,
         runtime_paths,
-        config_lifecycle.app_state(request.app).agent_reply_memberships,
+        config_lifecycle.app_state(request.app).runtime.agent_reply_memberships,
         requester_owned=requester_owned,
     ):
         raise AgentNotConnectableError(

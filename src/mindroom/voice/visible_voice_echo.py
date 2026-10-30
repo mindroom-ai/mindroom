@@ -27,11 +27,10 @@ from mindroom.dispatch_source import TRUSTED_INTERNAL_RELAY_SOURCE_KIND
 from mindroom.event_journal import turn_rows
 from mindroom.matrix.room_history_reads import find_response_event_ids_via_room_messages
 from mindroom.matrix.room_membership import cached_member_ids
-from mindroom.response_admission import admitted_response_decision
 from mindroom.turn_origin import original_sender_for_router_relay
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Awaitable, Callable
+    from collections.abc import AsyncIterator
 
     import nio
     import structlog
@@ -204,7 +203,6 @@ class VisibleVoiceEchoDeps:
     turn_store: TurnStore
     router_turn_records: TurnRecordStore
     ingress: IngressValidator
-    wait_for_admission_or_shutdown: Callable[[], Awaitable[bool]]
 
 
 @dataclass
@@ -290,21 +288,25 @@ class VisibleVoiceEchoLifecycle:
         config = self.deps.runtime.config
         if not config.voice.visible_router_echo:
             return False
-        orchestrator = self.deps.runtime.orchestrator
-        if orchestrator is None or orchestrator.entity_first_sync_complete(ROUTER_AGENT_NAME) is not True:
+        if self.deps.runtime.orchestrator.entity_first_sync_complete(ROUTER_AGENT_NAME) is not True:
             return False
         if not any(
             self.deps.ingress.managed_entity_name_for_sender(user_id) == ROUTER_AGENT_NAME
             for user_id in cached_member_ids(room)
         ):
             return False
+        return self._reply_allowed(requester_user_id, ROUTER_AGENT_NAME, room.room_id)
+
+    def _reply_allowed(self, requester_user_id: str, agent_name: str, room_id: str) -> bool:
+        """Return whether the current reply policy lets this entity answer the requester in the room."""
+        runtime = self.deps.runtime
         return is_sender_allowed_for_agent_reply_in_room(
             requester_user_id,
-            ROUTER_AGENT_NAME,
-            config,
-            room.room_id,
-            self.deps.runtime.runtime_paths,
-            self.deps.runtime.agent_reply_memberships,
+            agent_name,
+            runtime.config,
+            room_id,
+            runtime.runtime_paths,
+            runtime.agent_reply_memberships,
         )
 
     async def finish(
@@ -334,13 +336,10 @@ class VisibleVoiceEchoLifecycle:
 
     def _publication_required(self, room_id: str, requester_user_id: str) -> bool:
         """Recheck configuration and authorization when an initial publication fails."""
-        return self.deps.runtime.config.voice.visible_router_echo and is_sender_allowed_for_agent_reply_in_room(
+        return self.deps.runtime.config.voice.visible_router_echo and self._reply_allowed(
             requester_user_id,
             ROUTER_AGENT_NAME,
-            self.deps.runtime.config,
             room_id,
-            self.deps.runtime.runtime_paths,
-            self.deps.runtime.agent_reply_memberships,
         )
 
     def finish_after_cancellation(
@@ -424,10 +423,7 @@ class VisibleVoiceEchoLifecycle:
     ) -> str | None:
         async with (
             _serialize_update(self._update_key(request)),
-            admitted_response_decision(
-                self.deps.runtime.response_admission_gate,
-                self.deps.wait_for_admission_or_shutdown,
-            ),
+            self.deps.runtime.admission_fence(),
         ):
             if not self._sender_is_authorized(request):
                 return None
@@ -481,10 +477,7 @@ class VisibleVoiceEchoLifecycle:
             return None
         async with (
             _serialize_update(self._update_key(request)),
-            admitted_response_decision(
-                self.deps.runtime.response_admission_gate,
-                self.deps.wait_for_admission_or_shutdown,
-            ),
+            self.deps.runtime.admission_fence(),
         ):
             if not self._sender_is_authorized(request):
                 return None
@@ -544,14 +537,7 @@ class VisibleVoiceEchoLifecycle:
 
     def _sender_is_authorized(self, request: VisibleVoiceEchoRequest) -> bool:
         """Return whether the current router policy permits this echo requester."""
-        return is_sender_allowed_for_agent_reply_in_room(
-            request.requester_user_id,
-            self.deps.agent_name,
-            self.deps.runtime.config,
-            request.target.room_id,
-            self.deps.runtime.runtime_paths,
-            self.deps.runtime.agent_reply_memberships,
-        )
+        return self._reply_allowed(request.requester_user_id, self.deps.agent_name, request.target.room_id)
 
     async def _recover_visible_echo_event_id(self, request: VisibleVoiceEchoRequest) -> str | None:
         """Adopt one untracked marked echo before replay can send another."""

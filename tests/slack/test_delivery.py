@@ -40,6 +40,7 @@ from tests.conftest import (
     runtime_paths_for,
     test_runtime_paths,
 )
+from tests.runtime_fakes import ready_runtime
 from tests.slack.delivery_fakes import (
     ADA,
     ALICE,
@@ -504,7 +505,7 @@ async def test_unresolved_membership_retries_without_a_notice(harness: Harness) 
 
     assert harness.matrix.sent == []
     assert harness.slack.calls("chat.postEphemeral") == []
-    assert harness.bots["launch"].admission_gate.in_flight_response_count == 0
+    assert harness.bots["launch"].orchestrator.response_admission_gate.in_flight_response_count == 0
 
 
 @pytest.mark.asyncio
@@ -590,7 +591,7 @@ async def test_second_event_in_pending_new_thread_releases_claim(harness: Harnes
 @pytest.mark.asyncio
 async def test_closed_admission_gate_answers_retry(harness: Harness) -> None:
     """While a runtime replacement holds admission, Slack retries later with the replaced config."""
-    gate = harness.bots["launch"].admission_gate
+    gate = harness.bots["launch"].orchestrator.response_admission_gate
     gate.close()
 
     assert await harness.deliver(event_payload()) == "retry"
@@ -1054,13 +1055,7 @@ async def test_slack_turn_reaches_the_agent_with_its_hook_source_and_requester(h
             "content": content,
         },
     )
-    runtime = BotRuntimeState(
-        client=None,
-        config=harness.config,
-        runtime_paths=harness.paths,
-        agent_reply_memberships=AgentReplyMembershipIndex(),
-        orchestrator=None,
-    )
+    runtime = BotRuntimeState(orchestrator=ready_runtime(harness.config, harness.paths))
     validator = IngressValidator(
         IngressValidatorDeps(
             runtime=runtime,
@@ -1068,7 +1063,6 @@ async def test_slack_turn_reaches_the_agent_with_its_hook_source_and_requester(h
             matrix_id=matrix_id,
             turn_store=MagicMock(),
             turn_policy=MagicMock(),
-            wait_for_admission_or_shutdown=AsyncMock(return_value=True),
             settle_ignored_sources=AsyncMock(),
         ),
     )

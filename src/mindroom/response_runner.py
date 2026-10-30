@@ -98,7 +98,7 @@ from mindroom.teams.envelope import TeamTurnSpec, team_response_stream
 from mindroom.teams.members import requested_team_agent_names
 from mindroom.teams.spec import TeamMode
 from mindroom.thread_models import set_thread_model_override
-from mindroom.thread_summary import thread_summary_message_count_hint
+from mindroom.thread_summary.schedule import thread_summary_message_count_hint
 from mindroom.timing import DispatchPipelineTiming, timed
 from mindroom.tool_jobs.follow_ups import follow_up_envelope, follow_up_jobs, follow_up_key
 from mindroom.tool_jobs.runtime import get_background_runtime
@@ -182,7 +182,6 @@ if TYPE_CHECKING:
     from mindroom.turn_origin import TurnOrigin
     from mindroom.turn_store import SourcePreparation
 
-    from .response_admission import ResponseAdmissionGate
 
 _ToolContextResult = TypeVar("_ToolContextResult")
 _ToolStreamChunk = TypeVar("_ToolStreamChunk")
@@ -714,8 +713,9 @@ def _requested_by_a_person(origin: TurnOrigin) -> bool:
     )
 
 
-# TODO(simplify): ResponseRunner still builds InboxResponses, which bot.py, turn_controller.py, and
-# text_ingress_dispatch.py reach through it; build it in bot.py with the refactors that own that wiring.
+# TODO(simplify): ResponseRunner still builds InboxResponses, which bot.py, edit_regenerator.py, turns/dispatch.py,
+# turns/interactive_selection.py, and approval/continuation_runner.py reach through it; build it in bot.py with
+# the refactors that own that wiring.
 # Contributors only; no behavior change (#3075).
 @dataclass
 class ResponseRunner:
@@ -729,7 +729,6 @@ class ResponseRunner:
         default_factory=ResponseLifecycleCoordinator,
         init=False,
     )
-    _admission_shutdown_requested: asyncio.Event = field(default_factory=asyncio.Event, init=False, repr=False)
     inbox: InboxResponses = field(init=False, repr=False)
     _approvals: ApprovalContinuationRunner = field(init=False, repr=False)
 
@@ -742,13 +741,13 @@ class ResponseRunner:
             logger=self.deps.logger,
             replies=self.deps.replies,
             retry_approval_sources=self.deps.retry_approval_sources,
+            runtime=self.deps.runtime,
         )
         self._approvals = ApprovalContinuationRunner(host=self, lifecycle_coordinator=self._lifecycle_coordinator)
 
-    def knowledge_refresh_scheduler(self) -> KnowledgeRefreshScheduler | None:
-        """Return the current orchestrator scheduler when this runner is managed."""
-        orchestrator = self.deps.runtime.orchestrator
-        return orchestrator.knowledge_refresh_scheduler if orchestrator is not None else None
+    def knowledge_refresh_scheduler(self) -> KnowledgeRefreshScheduler:
+        """Return the runtime's knowledge refresh scheduler."""
+        return self.deps.runtime.orchestrator.knowledge_refresh_scheduler
 
     def _post_response_deps(
         self,
@@ -770,17 +769,14 @@ class ResponseRunner:
 
     def _turn_budget(self, request: ResponseRequest) -> TurnBudget:
         """Return the budget this request's requester spends."""
-        orchestrator = self.deps.runtime.orchestrator
         return TurnBudget(
-            monitor=orchestrator.budgets if orchestrator is not None else None,
+            monitor=self.deps.runtime.orchestrator.budgets,
             requester_id=request.response_envelope.requester_id,
         )
 
-    def response_finished_notifier(self, source_event_ids: Sequence[str]) -> Callable[[], None] | None:
+    def response_finished_notifier(self, source_event_ids: Sequence[str]) -> Callable[[], None]:
         """Return the callback that lets automations verify their runs and budgets count the new spend."""
         orchestrator = self.deps.runtime.orchestrator
-        if orchestrator is None:
-            return None
 
         def notify() -> None:
             orchestrator.budgets.response_finished()
@@ -815,38 +811,6 @@ class ResponseRunner:
         """Return the number of active response lifecycles for this entity."""
         return self._in_flight_response_count
 
-    @property
-    def _admission_gate(self) -> ResponseAdmissionGate:
-        """Return the orchestrator-owned gate deciding whether responses may start."""
-        return self.deps.runtime.response_admission_gate
-
-    def resume_pending_admissions(self) -> None:
-        """Let a fresh sync-loop generation wait for config apply completion."""
-        self.inbox.reopen_admission()
-        self._admission_shutdown_requested.clear()
-
-    def refuse_pending_admissions(self) -> None:
-        """Wake pre-admission responses whose owning runtime is shutting down."""
-        self._admission_shutdown_requested.set()
-
-    async def wait_for_admission_or_shutdown(self) -> bool:
-        """Return whether admission reopened before this runtime started shutdown."""
-        if self._admission_shutdown_requested.is_set():
-            return False
-        admission_opened = asyncio.create_task(self._admission_gate.wait_until_open())
-        shutdown_requested = asyncio.create_task(self._admission_shutdown_requested.wait())
-        try:
-            await asyncio.wait(
-                (admission_opened, shutdown_requested),
-                return_when=asyncio.FIRST_COMPLETED,
-            )
-            return not self._admission_shutdown_requested.is_set()
-        finally:
-            for task in (admission_opened, shutdown_requested):
-                if not task.done():
-                    task.cancel()
-            await asyncio.gather(admission_opened, shutdown_requested, return_exceptions=True)
-
     def _show_tool_calls(self) -> bool:
         """Return tool-call visibility for this agent."""
         return show_tool_calls(self.deps.runtime.config, self.deps.agent_name)
@@ -858,7 +822,7 @@ class ResponseRunner:
         return handle.base.show_tool_calls
 
     def thread_summary_message_count_hint(self, request: ResponseRequest) -> int:
-        """Return a lower bound on the thread's size after this reply, counted from the request's visible history."""
+        """Return the thread's size after this reply, counted from the request's visible history; it can over-count."""
         return thread_summary_message_count_hint(
             request.thread_history,
             trusted_sender_ids=current_internal_sender_ids(self.deps.runtime.config, self.deps.runtime_paths),
@@ -878,11 +842,10 @@ class ResponseRunner:
         response's final request for the review to fork.
         """
         config = self.deps.runtime.config
-        orchestrator = self.deps.runtime.orchestrator
         agent = config.agents.get(self.deps.agent_name)
-        if orchestrator is None or agent is None or not agent.skill_learning.enabled:
+        if agent is None or not agent.skill_learning.enabled:
             return None, runtime
-        reviews = orchestrator.skill_reviews
+        reviews = self.deps.runtime.orchestrator.skill_reviews
         agent_name = self.deps.agent_name
         reviews.cancel(config, agent_name=agent_name, session_id=session_id, identity=execution_identity)
         if not _requested_by_a_person(request.response_envelope.origin):
@@ -1038,8 +1001,9 @@ class ResponseRunner:
         signal_queued_message: bool = True,
     ) -> str | None:
         """Admit one response before lifecycle locking or visible placeholder work."""
+        gate = self.deps.runtime.response_admission_gate
         admission_deferred = False
-        while not self._admission_gate.admit():
+        while not gate.admit():
             if not admission_deferred:
                 admission_deferred = True
                 self.deps.logger.info(
@@ -1047,7 +1011,7 @@ class ResponseRunner:
                     response_kind=response_kind,
                     **request.response_envelope.target.log_context,
                 )
-            if not await self.wait_for_admission_or_shutdown():
+            if not await self.deps.runtime.wait_for_admission_or_shutdown():
                 self.deps.logger.warning(
                     "response_refused_after_runtime_replacement",
                     response_kind=response_kind,
@@ -1062,7 +1026,7 @@ class ResponseRunner:
             ),
             requester_id=request.response_envelope.requester_id,
         )
-        self._admission_gate.response_identities.add(identity)
+        gate.response_identities.add(identity)
         self._in_flight_response_count += 1
 
         async def acknowledge_deferred(key: str, event_id: str) -> None:
@@ -1087,9 +1051,9 @@ class ResponseRunner:
                     acknowledge_deferred=acknowledge_deferred,
                 )
         finally:
-            self._admission_gate.response_identities.remove(identity)
+            gate.response_identities.remove(identity)
             self._in_flight_response_count -= 1
-            self._admission_gate.release()
+            gate.release()
 
     async def _run_locked_response_in_span(
         self,
@@ -1457,7 +1421,7 @@ class ResponseRunner:
     ) -> bool:
         try:
             storage = self.deps.state_writer.create_storage(execution_identity, scope=scope)
-            return has_queued_force_compaction(storage, session_id, scope)
+            return has_queued_force_compaction(storage, session_id)
         except Exception as error:
             self.deps.logger.warning(
                 "forced_compaction_placeholder_check_failed",
@@ -2426,9 +2390,6 @@ class ResponseRunner:
             ),
         )
         orchestrator = self.deps.runtime.orchestrator
-        if orchestrator is None:
-            msg = "Orchestrator is not set"
-            raise RuntimeError(msg)
         show_tool_calls = self._turn_show_tool_calls()
         runtime = PreparedResponseRuntime(
             resolved_target=target,

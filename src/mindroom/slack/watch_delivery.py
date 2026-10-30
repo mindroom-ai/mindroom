@@ -135,7 +135,7 @@ async def _deliver_to_watch(
     else:
         kind = "mention" if watch.slack_user_id in mentioned_user_ids(event.text) else "thread reply"
         where = f" in {await conversation_label(attempt)}"
-    async with admitted_response_decision(bot.admission_gate, refuse_while_closed):
+    async with admitted_response_decision(bot.orchestrator.response_admission_gate, refuse_while_closed):
         problem = await watch_problem(
             watch,
             await _owner_credentials(attempt, watch),

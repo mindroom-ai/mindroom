@@ -31,9 +31,7 @@ async def export_threads(body: ThreadExportRequest, request: Request) -> ThreadE
             status_code=409,
             detail="The running MindRoom instance uses a different config or storage path",
         )
-    runner = config_lifecycle.app_state(request.app).thread_export_runner
-    if runner is None:
-        raise HTTPException(status_code=503, detail="Thread export requires a running MindRoom instance")
+    runner = config_lifecycle.app_state(request.app).runtime.thread_export_runner
     try:
         return await runner.export_once(
             output_dir=body.output_dir,

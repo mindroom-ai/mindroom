@@ -30,9 +30,9 @@ This record explains why file memory is the primary backend and why auto-flush e
 
 - Cross-thread memory is eventually consistent: a fact reaches other threads once its conversation has been quiet for `idle_seconds` and the next pass runs.
 - Each extraction sees only new turns plus a few existing memories, not the already-flushed turns before them, so a reply that only makes sense with earlier context can be extracted with less of it.
-- Turns are ordered by creation time and run ID, so two turns of one conversation created in the same second can be ordered wrongly, and a turn regenerated in place under the same ID is not flushed again.
+- Turns are read in the order they take their places in the conversation log ([persistence owners](2026-10-29-persistence-owners.md)), so a turn regenerated in place under the same ID is not flushed again.
 - Flushing waits while the agent's bot is not running, because only its event journal can say which messages were redacted.
-- A turn already waiting for approval when its agent's start is set counts as earlier history once it finishes, so it is not flushed, like the turns the old queue held at the upgrade.
+- A turn already waiting for approval when its agent's start is set is flushed only when a pass read its conversation before it finished; otherwise it counts as earlier history, like the turns the old queue held at the upgrade.
 
 ## Not implemented
 

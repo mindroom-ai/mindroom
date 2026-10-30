@@ -9,12 +9,11 @@ from typing import TYPE_CHECKING
 
 from mindroom.constants import resolve_session_state_root
 from mindroom.history.storage import new_scope_session
-from mindroom.llm.messages import is_own_model_message, read_model_provenance, usage_sums_attempts
-from mindroom.llm.usage import HelperUsage, RequestUsage
+from mindroom.llm.usage import HelperUsage
 from mindroom.logging_config import get_logger
 from mindroom.session_storage.agent_storage import create_state_storage
 from mindroom.session_storage.lanes import run_session_storage_operation
-from mindroom.usage.storage import SYSTEM_USAGE_OWNER, SYSTEM_USAGE_STORAGE_NAME
+from mindroom.usage.storage import SYSTEM_USAGE_OWNER, SYSTEM_USAGE_STORAGE_NAME, request_usage
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterator
@@ -102,22 +101,14 @@ async def record_run_usage(
 
 
 def _run_usage(run: RunRecord) -> HelperUsage:
-    """Return the usage of ``run``: its model, time, and metrics, with a request for each answer of its own model."""
+    """Return the usage of ``run``: its model, time, and metrics, with each request its messages answered."""
     assert run.metrics is not None
     return HelperUsage(
         run_id=run.run_id,
         model=run.model,
         provider=run.model_provider,
         metrics=run.metrics,
-        requests=tuple(
-            RequestUsage(
-                created_at=message.created_at,
-                metrics=message.metrics,
-                model=read_model_provenance(message.provider_data),
-            )
-            for message in run.messages
-            if is_own_model_message(message) and not usage_sums_attempts(message.provider_data)
-        ),
+        requests=tuple(request for message in run.messages if (request := request_usage(message)) is not None),
         created_at=run.created_at,
     )
 

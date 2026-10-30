@@ -32,7 +32,6 @@ from mindroom.requester_identity import (
     is_human_requester_id,
     resolve_human_requester_alias,
 )
-from mindroom.response_admission import admitted_response_decision
 from mindroom.turn_origin import requester_id_from_trusted_original_sender
 from mindroom.turn_record import TurnRecord
 from mindroom.turns.facts import IngressFacts
@@ -78,7 +77,6 @@ class IngressValidatorDeps:
     matrix_id: MatrixID
     turn_store: TurnStore
     turn_policy: _SenderReplyPolicy
-    wait_for_admission_or_shutdown: Callable[[], Awaitable[bool]]
     # Settles sources nothing will answer, as the room's lane does for an event it ignores.
     settle_ignored_sources: Callable[[tuple[str, ...]], Awaitable[None]]
 
@@ -261,10 +259,7 @@ class IngressValidator:
         ``unanswered`` before the fence opens, so what was decided under the old
         authorization is durable before the change applies.
         """
-        async with admitted_response_decision(
-            self.deps.runtime.response_admission_gate,
-            self.deps.wait_for_admission_or_shutdown,
-        ):
+        async with self.deps.runtime.admission_fence():
             if self.deps.turn_policy.can_reply_to_sender_in_room(requester_id, room_id):
                 yield True
                 return

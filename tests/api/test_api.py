@@ -3,7 +3,6 @@
 import asyncio
 import copy
 import json
-import os
 import threading
 import time
 from collections.abc import Callable
@@ -27,6 +26,7 @@ from fastapi.testclient import TestClient
 from pydantic import ValidationError
 
 from mindroom import constants, frontend_assets
+from mindroom.agent_cli.session import TurnToolRegistry
 from mindroom.api import auth, config_lifecycle, frontend, homeassistant_integration, main
 from mindroom.api import sandbox_runner as sandbox_runner_api
 from mindroom.api import tools as tools_api
@@ -36,7 +36,6 @@ from mindroom.commands.config_commands import apply_config_change
 from mindroom.config.load_attempt import ConfigLoad
 from mindroom.config.main import Config, dashboard_config_schema, iter_config_validation_messages
 from mindroom.credentials.manager import (
-    CredentialsManager,
     get_runtime_credentials_manager,
     save_scoped_credentials,
 )
@@ -64,9 +63,8 @@ from tests.api.conftest import (
     trusted_upstream_jwt_key,
     use_trusted_upstream_runtime,
 )
-from tests.conftest import failed_config_load
-from tests.file_watcher_helpers import record_watcher_scans
 from tests.oauth_test_utils import publish_oauth_credentials
+from tests.runtime_fakes import bind_test_embedded_runtime
 from tests.test_personal_agents_config import _entry as personal_agent_entry
 
 TEST_WORKER_AUTH = "token"
@@ -556,40 +554,8 @@ def test_ensure_writable_config_path_seeds_from_template(
     assert writable_config.read_text(encoding="utf-8") == template_config.read_text(encoding="utf-8")
 
 
-def test_api_startup_removes_copies_an_earlier_release_imported_from_the_environment(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> None:
-    """A standalone API opens the credential store at startup, so a copy of a removed variable stops working."""
-    watch_calls: list[str] = []
-    runtime_paths = constants.resolve_primary_runtime_paths(
-        config_path=tmp_path / "config.yaml",
-        storage_path=tmp_path / "mindroom_data",
-        process_env={},
-    )
-    copy_path = runtime_paths.storage_root / "credentials" / "openai_credentials.json"
-    CredentialsManager(copy_path.parent).save_credentials("openai", {"api_key": "sk-old", "_source": "env"})
-    main.initialize_api_app(main.app, runtime_paths)
-
-    async def _fake_watch_config(
-        stop_event: asyncio.Event,
-        _app: FastAPI,
-    ) -> None:
-        assert main._app_runtime_paths(_app) == main._app_runtime_paths(main.app)
-        watch_calls.append("watch")
-        await stop_event.wait()
-
-    monkeypatch.setattr(main, "_watch_config", _fake_watch_config)
-
-    with TestClient(main.app) as client:
-        assert client.get("/api/health").status_code == 200
-        assert not copy_path.exists()
-
-    assert watch_calls == ["watch"]
-
-
 def test_exported_api_app_has_initialized_runtime_paths() -> None:
-    """The exported module app should be runnable without separate initialization."""
+    """The exported module app has runtime paths from import, before `mindroom run` initializes it."""
     assert isinstance(main._app_runtime_paths(main.app), constants.RuntimePaths)
 
 
@@ -623,22 +589,29 @@ def test_app_auth_state_refreshes_after_runtime_swap(tmp_path: Path) -> None:
     assert auth._app_auth_state(fresh_app).settings.mindroom_api_key == "updated-key"
 
 
-def test_runtime_path_swap_clears_script_broker_and_worker_keepalive(tmp_path: Path) -> None:
-    """An API app cannot retain script capabilities from another runtime root."""
+def test_unbinding_embedded_runtime_withdraws_script_capabilities(tmp_path: Path) -> None:
+    """An API app keeps no script capabilities or agent CLI registry once its runtime stops lending them."""
     fresh_app = FastAPI()
-    initial_runtime = _runtime_paths(tmp_path / "first")
-    refreshed_runtime = _runtime_paths(tmp_path / "second")
-    main.initialize_api_app(fresh_app, initial_runtime)
-    main.bind_script_runtime(
+    main.initialize_api_app(fresh_app, _runtime_paths(tmp_path))
+    broker = MagicMock()
+    keepalive = MagicMock()
+    registry = TurnToolRegistry()
+    bind_test_embedded_runtime(
         fresh_app,
-        broker=MagicMock(),
-        touch_live_workers=MagicMock(),
+        script_broker=broker,
+        script_worker_keepalive=keepalive,
+        agent_cli_registry=registry,
     )
+    state = config_lifecycle.app_state(fresh_app)
+    assert fresh_app.state.script_tool_broker is broker
+    assert state.runtime.script_worker_keepalive is keepalive
+    assert state.agent_cli_registry is registry
 
-    main.initialize_api_app(fresh_app, refreshed_runtime)
+    main.unbind_embedded_runtime(fresh_app)
 
     assert fresh_app.state.script_tool_broker is None
-    assert config_lifecycle.app_state(fresh_app).script_worker_keepalive is None
+    assert state.agent_cli_registry is None
+    assert state.embedded is None
 
 
 def test_initialize_api_app_clears_config_cache_when_config_path_changes(tmp_path: Path) -> None:
@@ -828,96 +801,6 @@ def test_load_config_into_app_ignores_runtime_mismatches_after_api_runtime_swap(
     assert main._app_context(fresh_app).config_load_result == config_lifecycle.ConfigLoadResult(success=True)
 
 
-def test_api_lifespan_loads_config_from_injected_runtime(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> None:
-    """Bundled API startup should load config from the runtime injected before lifespan starts."""
-    config_path = tmp_path / "custom-config.yaml"
-    config_path.write_text(
-        yaml.dump(
-            {
-                "models": {"default": {"provider": "openai", "id": "gpt-6-astra"}},
-                "router": {"model": "default"},
-                "agents": {"only_alt": {"display_name": "OnlyAlt", "role": "alt", "rooms": []}},
-            },
-        ),
-        encoding="utf-8",
-    )
-    runtime_paths = constants.resolve_primary_runtime_paths(
-        config_path=config_path,
-        storage_path=tmp_path / "storage",
-    )
-    main.initialize_api_app(main.app, runtime_paths)
-    main._app_context(main.app).config_data = {"agents": {"wrong": {"display_name": "Wrong"}}}
-
-    async def _idle_watch_config(
-        stop_event: asyncio.Event,
-        _app: FastAPI,
-    ) -> None:
-        await stop_event.wait()
-
-    async def _idle_worker_cleanup(stop_event: asyncio.Event, _app: FastAPI) -> None:
-        await stop_event.wait()
-
-    monkeypatch.setattr(main, "_watch_config", _idle_watch_config)
-    monkeypatch.setattr(main, "_worker_cleanup_loop", _idle_worker_cleanup)
-
-    with TestClient(main.app, base_url="http://localhost") as client:
-        response = client.post("/api/config/load")
-
-    assert response.status_code == 200
-    assert set(response.json()["agents"]) == {"only_alt"}
-
-
-@pytest.mark.asyncio
-async def test_watch_config_follows_runtime_swaps(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    """Config watching should follow the app's current runtime paths."""
-    loop = asyncio.get_running_loop()
-    loaded_paths: list[Path] = []
-    load_event = asyncio.Event()
-    stop_event = asyncio.Event()
-    first_config_path = tmp_path / "first.yaml"
-    second_config_path = tmp_path / "second.yaml"
-    first_config_path.write_text("models: {}\n", encoding="utf-8")
-    second_config_path.write_text("models: {}\n", encoding="utf-8")
-    first_runtime = constants.resolve_primary_runtime_paths(config_path=first_config_path, process_env={})
-    second_runtime = constants.resolve_primary_runtime_paths(config_path=second_config_path, process_env={})
-    main.initialize_api_app(main.app, first_runtime)
-
-    # The watcher loads in a worker thread, so the load reaches the loop through call_soon_threadsafe.
-    def _record_load(runtime_paths: constants.RuntimePaths, _app: FastAPI) -> ConfigLoad:
-        loaded_paths.append(runtime_paths.config_path)
-        loop.call_soon_threadsafe(load_event.set)
-        return failed_config_load(OSError("this test only records the load"))
-
-    monkeypatch.setattr(config_lifecycle, "load_config_into_app", _record_load)
-    scans = record_watcher_scans(monkeypatch)
-
-    watch_task = asyncio.create_task(main._watch_config(stop_event, main.app, poll_interval_seconds=0.01))
-
-    await scans.wait_for_scan_of(first_config_path)
-    first_timestamp = time.time() + 1
-    first_config_path.write_text("models: {default: {provider: openai, id: gpt-6-astra}}\n", encoding="utf-8")
-    os.utime(first_config_path, (first_timestamp, first_timestamp))
-    await asyncio.wait_for(load_event.wait(), timeout=1)
-    assert loaded_paths == [first_config_path]
-
-    main.initialize_api_app(main.app, second_runtime)
-    load_event.clear()
-    await scans.wait_for_scan_of(second_config_path)
-    second_timestamp = first_timestamp + 1
-    second_config_path.write_text("models: {default: {provider: openai, id: gpt-6-astra}}\n", encoding="utf-8")
-    os.utime(second_config_path, (second_timestamp, second_timestamp))
-    await asyncio.wait_for(load_event.wait(), timeout=1)
-    assert loaded_paths == [first_config_path, second_config_path]
-
-    stop_event.set()
-    await watch_task
-
-    assert loaded_paths == [first_config_path, second_config_path]
-
-
 @pytest.mark.asyncio
 async def test_worker_cleanup_loop_uses_current_runtime_after_runtime_swap(
     monkeypatch: pytest.MonkeyPatch,
@@ -929,13 +812,16 @@ async def test_worker_cleanup_loop_uses_current_runtime_after_runtime_swap(
     second_runtime = constants.resolve_primary_runtime_paths(config_path=tmp_path / "second.yaml", process_env={})
     cleanup_paths: list[Path] = []
 
+    def touch_live_workers_of_the_runtime(_backend: WorkerBackend) -> None:
+        pass
+
     def _fake_cleanup(
         runtime_paths: constants.RuntimePaths,
         *,
-        touch_live_workers: Callable[[WorkerBackend], None] | None = None,
+        touch_live_workers: Callable[[WorkerBackend], None],
         computer_worker_keys: frozenset[str] = frozenset(),
     ) -> int:
-        assert touch_live_workers is None
+        assert touch_live_workers is touch_live_workers_of_the_runtime
         assert computer_worker_keys == frozenset()
         cleanup_paths.append(runtime_paths.config_path)
         if len(cleanup_paths) == 1:
@@ -952,7 +838,12 @@ async def test_worker_cleanup_loop_uses_current_runtime_after_runtime_swap(
     monkeypatch.setattr(main, "_cleanup_workers_once", _fake_cleanup)
     monkeypatch.setattr(main.asyncio, "to_thread", _fake_to_thread)
 
-    await main._worker_cleanup_loop(stop_event, main.app, idle_poll_interval_seconds=0.01)
+    await main._worker_cleanup_loop(
+        stop_event,
+        main.app,
+        touch_live_workers=touch_live_workers_of_the_runtime,
+        idle_poll_interval_seconds=0.01,
+    )
 
     assert cleanup_paths == [first_runtime.config_path, second_runtime.config_path]
 
@@ -1004,8 +895,8 @@ def test_worker_cleanup_touches_workers_with_a_call_in_flight_before_maintenance
     )
 
     with worker_call_in_flight(worker_manager, "agent:busy"):
-        main._cleanup_workers_once(main._app_runtime_paths(main.app))
-    main._cleanup_workers_once(main._app_runtime_paths(main.app))
+        main._cleanup_workers_once(main._app_runtime_paths(main.app), touch_live_workers=lambda _backend: None)
+    main._cleanup_workers_once(main._app_runtime_paths(main.app), touch_live_workers=lambda _backend: None)
 
     assert actions == ["touch agent:busy", "maintain", "maintain"]
 
@@ -1257,7 +1148,7 @@ def test_worker_cleanup_once_skips_when_backend_unavailable(monkeypatch: pytest.
     """Background worker cleanup should no-op when no backend is configured."""
     monkeypatch.setattr(main, "lease_configured_primary_worker_manager", lambda *_args, **_kwargs: None)
 
-    assert main._cleanup_workers_once(main._app_runtime_paths(main.app)) == 0
+    assert main._cleanup_workers_once(main._app_runtime_paths(main.app), touch_live_workers=lambda _backend: None) == 0
 
 
 def test_worker_cleanup_once_cleans_workers(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1291,7 +1182,7 @@ def test_worker_cleanup_once_cleans_workers(monkeypatch: pytest.MonkeyPatch) -> 
         lambda *_args, **_kwargs: nullcontext(worker_manager),
     )
 
-    assert main._cleanup_workers_once(main._app_runtime_paths(main.app)) == 1
+    assert main._cleanup_workers_once(main._app_runtime_paths(main.app), touch_live_workers=lambda _backend: None) == 1
 
 
 def test_worker_cleanup_once_reconciles_drifted_worker_templates(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1315,7 +1206,7 @@ def test_worker_cleanup_once_reconciles_drifted_worker_templates(monkeypatch: py
         "lease_configured_primary_worker_manager",
         lambda *_args, **_kwargs: nullcontext(worker_manager),
     )
-    main._cleanup_workers_once(main._app_runtime_paths(main.app))
+    main._cleanup_workers_once(main._app_runtime_paths(main.app), touch_live_workers=lambda _backend: None)
 
     assert maintained_managers == [worker_manager]
 
@@ -1393,10 +1284,8 @@ def test_cleanup_workers_endpoint(test_client: TestClient, monkeypatch: pytest.M
         "lease_configured_primary_worker_manager",
         lambda *_args, **_kwargs: lease,
     )
-    config_lifecycle.ensure_app_state(cast("FastAPI", test_client.app)).script_worker_keepalive = lambda manager: (
-        actions.append(("touch", manager))
-    )
-
+    api_app = cast("FastAPI", test_client.app)
+    bind_test_embedded_runtime(api_app, script_worker_keepalive=lambda manager: actions.append(("touch", manager)))
     response = test_client.post("/api/workers/cleanup")
 
     assert response.status_code == 200
@@ -3619,10 +3508,7 @@ def test_save_config_preserves_explicit_compaction_model_null_clear(
     assert loaded_config["agents"]["new_agent"]["compaction"] == {"model": None}
 
 
-def test_save_config_rejects_runtime_sensitive_invalid_payload(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> None:
+def test_save_config_rejects_runtime_sensitive_invalid_payload(tmp_path: Path) -> None:
     """API save should validate against the request runtime before writing to disk."""
     config_path = tmp_path / "config.yaml"
     config_path.write_text(
@@ -3643,29 +3529,17 @@ def test_save_config_rejects_runtime_sensitive_invalid_payload(
     matrix_state.add_account("agent_assistant", "mindroom_assistant_prod1", "pw", domain="localhost")
     matrix_state.save(runtime_paths=runtime_paths)
     main.initialize_api_app(main.app, runtime_paths)
+    config_lifecycle.load_config_into_app(runtime_paths, main.app)
 
-    async def _idle_watch_config(
-        stop_event: asyncio.Event,
-        _app: FastAPI,
-    ) -> None:
-        await stop_event.wait()
-
-    async def _idle_worker_cleanup(stop_event: asyncio.Event, _app: FastAPI) -> None:
-        await stop_event.wait()
-
-    monkeypatch.setattr(main, "_watch_config", _idle_watch_config)
-    monkeypatch.setattr(main, "_worker_cleanup_loop", _idle_worker_cleanup)
-
-    with TestClient(main.app, base_url="http://localhost") as client:
-        response = client.put(
-            "/api/config/save",
-            json={
-                "models": {"default": {"provider": "openai", "id": "gpt-6-astra"}},
-                "router": {"model": "default"},
-                "agents": {"assistant": {"display_name": "Assistant", "role": "test", "rooms": []}},
-                "mindroom_user": {"username": "mindroom_assistant_prod1", "display_name": "Owner"},
-            },
-        )
+    response = TestClient(main.app, base_url="http://localhost").put(
+        "/api/config/save",
+        json={
+            "models": {"default": {"provider": "openai", "id": "gpt-6-astra"}},
+            "router": {"model": "default"},
+            "agents": {"assistant": {"display_name": "Assistant", "role": "test", "rooms": []}},
+            "mindroom_user": {"username": "mindroom_assistant_prod1", "display_name": "Owner"},
+        },
+    )
 
     assert response.status_code == 422
     saved_config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
@@ -4397,21 +4271,21 @@ def test_exported_app_cors_uses_reinitialized_runtime(tmp_path: Path) -> None:
     )
     main.initialize_api_app(main.app, runtime_paths)
 
-    with TestClient(main.app) as test_client:
-        allowed_response = test_client.options(
-            "/api/health",
-            headers={
-                "Origin": "https://dashboard.example.test",
-                "Access-Control-Request-Method": "GET",
-            },
-        )
-        default_origin_response = test_client.options(
-            "/api/health",
-            headers={
-                "Origin": "http://localhost:5173",
-                "Access-Control-Request-Method": "GET",
-            },
-        )
+    test_client = TestClient(main.app)
+    allowed_response = test_client.options(
+        "/api/health",
+        headers={
+            "Origin": "https://dashboard.example.test",
+            "Access-Control-Request-Method": "GET",
+        },
+    )
+    default_origin_response = test_client.options(
+        "/api/health",
+        headers={
+            "Origin": "http://localhost:5173",
+            "Access-Control-Request-Method": "GET",
+        },
+    )
 
     assert allowed_response.status_code == 200
     assert allowed_response.headers["access-control-allow-origin"] == "https://dashboard.example.test"
@@ -5041,6 +4915,7 @@ def api_key_client(temp_config_file: Path) -> TestClient:
         process_env={"MINDROOM_OWNER_USER_ID": "@owner:example.org"},
     )
     main.initialize_api_app(main.app, runtime_paths)
+    bind_test_embedded_runtime(main.app)
     main._app_context(main.app).auth_state = auth.ApiAuthState(
         runtime_paths=runtime_paths,
         settings=auth._ApiAuthSettings(
@@ -5121,10 +4996,8 @@ def test_protected_read_keeps_auth_time_snapshot_after_runtime_swap(tmp_path: Pa
         _publish_committed_runtime_config(main.app, runtime_b, payload_b)
         return original_read(request, reader)
 
-    with (
-        patch.object(config_lifecycle, "read_committed_config", side_effect=_swap_then_read),
-        TestClient(main.app) as client,
-    ):
+    client = TestClient(main.app)
+    with patch.object(config_lifecycle, "read_committed_config", side_effect=_swap_then_read):
         _publish_committed_runtime_config(main.app, runtime_a, payload_a)
         response = client.get(
             "/api/rooms",
@@ -5167,10 +5040,8 @@ def test_protected_write_rejects_runtime_swap_after_auth(tmp_path: Path) -> None
             expected_generation=expected_generation,
         )
 
-    with (
-        patch.object(config_lifecycle, "replace_committed_config", side_effect=_swap_then_replace),
-        TestClient(main.app) as client,
-    ):
+    client = TestClient(main.app)
+    with patch.object(config_lifecycle, "replace_committed_config", side_effect=_swap_then_replace):
         _publish_committed_runtime_config(main.app, runtime_a, payload_a)
         response = client.put(
             "/api/config/save",
@@ -5207,10 +5078,8 @@ def test_protected_raw_read_keeps_auth_time_snapshot_after_runtime_swap(tmp_path
         _publish_committed_runtime_config(main.app, runtime_b, payload_b)
         return original_read(request)
 
-    with (
-        patch.object(config_lifecycle, "read_raw_config_source", side_effect=_swap_then_read),
-        TestClient(main.app) as client,
-    ):
+    client = TestClient(main.app)
+    with patch.object(config_lifecycle, "read_raw_config_source", side_effect=_swap_then_read):
         _publish_committed_runtime_config(main.app, runtime_a, payload_a)
         response = client.get(
             "/api/config/raw",
@@ -5254,10 +5123,8 @@ def test_protected_raw_write_rejects_runtime_swap_after_auth(tmp_path: Path) -> 
             expected_generation=expected_generation,
         )
 
-    with (
-        patch.object(config_lifecycle, "replace_raw_config_source", side_effect=_swap_then_replace),
-        TestClient(main.app) as client,
-    ):
+    client = TestClient(main.app)
+    with patch.object(config_lifecycle, "replace_raw_config_source", side_effect=_swap_then_replace):
         _publish_committed_runtime_config(main.app, runtime_a, payload_a)
         response = client.put(
             "/api/config/raw",
@@ -5295,10 +5162,8 @@ def test_protected_crud_write_rejects_runtime_swap_after_auth(tmp_path: Path) ->
         _publish_committed_runtime_config(main.app, runtime_b, payload_b)
         return original_write(request, mutate, error_prefix=error_prefix)
 
-    with (
-        patch.object(config_lifecycle, "write_committed_config", side_effect=_swap_then_write),
-        TestClient(main.app) as client,
-    ):
+    client = TestClient(main.app)
+    with patch.object(config_lifecycle, "write_committed_config", side_effect=_swap_then_write):
         _publish_committed_runtime_config(main.app, runtime_a, payload_a)
         response = client.put(
             "/api/config/agents/assistant",
@@ -6255,6 +6120,7 @@ def test_health_repeated_restarts_do_not_extend_first_sync_grace(test_client: Te
 
 def test_response_activity_probe_stays_open(api_key_client: TestClient) -> None:
     """Aggregate activity has the same unauthenticated probe access as readiness."""
+    reset_runtime_state()
     response = api_key_client.get("/api/responses/activity")
     assert response.status_code == 503
     assert response.json()["status"] == "unavailable"
@@ -6263,6 +6129,7 @@ def test_response_activity_probe_stays_open(api_key_client: TestClient) -> None:
 def test_response_activity_probe_needs_no_trusted_proxy_identity(test_client: TestClient) -> None:
     """In-container checks must not need proxy identity headers."""
     use_trusted_upstream_runtime(main.app)
+    reset_runtime_state()
     response = test_client.get("/api/responses/activity")
     assert response.status_code == 503
     assert response.json()["status"] == "unavailable"

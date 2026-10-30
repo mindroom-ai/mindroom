@@ -166,7 +166,7 @@ async def test_one_refresh_child_runs_at_a_time_across_the_runtime_api_and_file_
         return object()
 
     monkeypatch.setattr("mindroom.knowledge.refresh_runner.refresh_knowledge_binding_in_subprocess", _refresh)
-    scheduler = _MultiAgentOrchestrator(runtime_paths=runtime_paths).knowledge_refresh_scheduler
+    scheduler = _MultiAgentOrchestrator(runtime_paths=runtime_paths, config=config).knowledge_refresh_scheduler
     scheduler.schedule_refresh("docs", config=config, runtime_paths=runtime_paths)
     reindex = asyncio.create_task(
         scheduler.refresh_now("api", config=config, runtime_paths=runtime_paths, force_reindex=True),

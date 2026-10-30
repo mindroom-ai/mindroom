@@ -44,13 +44,16 @@ _REPLACEMENT_DRAIN_FORCE_AFTER_SECONDS = 600.0
 class _ReplacementDrainState:
     """Track response-drain state for one replacement apply."""
 
-    waiting_for_idle: bool = False
     wait_started_at: float | None = None
     last_warning_at: float | None = None
 
+    @property
+    def waiting_for_idle(self) -> bool:
+        """Return whether a response-drain window has started."""
+        return self.wait_started_at is not None
+
     def begin_wait(self, *, now: float) -> None:
         """Start a fresh response-drain window."""
-        self.waiting_for_idle = True
         self.wait_started_at = now
         self.last_warning_at = None
 
@@ -92,8 +95,9 @@ def load_published_config(runtime_paths: RuntimePaths, *, api_enabled: bool) -> 
     if not api_enabled:
         return load_config_attempt(runtime_paths)
     from mindroom.api import main as api_main  # noqa: PLC0415
+    from mindroom.api.config_lifecycle import load_config_into_app  # noqa: PLC0415
 
-    return api_main.config_lifecycle.load_config_into_app(runtime_paths, api_main.app)
+    return load_config_into_app(runtime_paths, api_main.app)
 
 
 async def load_startup_config(runtime_paths: RuntimePaths, *, api_enabled: bool) -> Config:
@@ -125,7 +129,6 @@ class ConfigReloadLifecycle:
 
     runtime_paths: RuntimePaths
     is_running: Callable[[], bool]
-    # Reloads run only once startup published its config, so a config always exists here.
     current_config: Callable[[], Config]
     agent_bots: Callable[[], Mapping[str, AgentBot]]
     load_config: Callable[[], ConfigLoad]

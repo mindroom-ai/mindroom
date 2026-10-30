@@ -77,7 +77,7 @@ from mindroom.matrix_rtc.events import (  # noqa: E402
     membership_state_key,
 )
 from mindroom.matrix_rtc.focus import OpenIDToken, request_sfu_grant  # noqa: E402
-from mindroom.response_admission import ResponseAdmissionGate  # noqa: E402
+from mindroom.response_admission import ResponseAdmissionGate, admitted_response_decision  # noqa: E402
 from mindroom.runtime_env_policy import CREDENTIALS_ENCRYPTION_KEY_ENV  # noqa: E402
 from mindroom.tool_system.runtime_context import ToolRuntimeContext, tool_runtime_context  # noqa: E402
 from mindroom.tool_system.worker_routing import agent_workspace_root_path, build_tool_execution_identity  # noqa: E402
@@ -615,7 +615,10 @@ async def main() -> int:  # noqa: C901, PLR0915
                 get_invited_rooms_by_agent=dict,
                 agent_reply_memberships=AgentReplyMembershipIndex(),
                 response_admission_gate=response_admission_gate,
-                wait_for_admission_or_shutdown=wait_for_admission_or_shutdown,
+                admission_fence=lambda: admitted_response_decision(
+                    response_admission_gate,
+                    wait_for_admission_or_shutdown,
+                ),
             )
 
             room_obj = nio.MatrixRoom(room_id=room_id, own_user_id=bot.user_id)

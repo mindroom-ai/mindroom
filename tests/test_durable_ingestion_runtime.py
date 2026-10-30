@@ -8,8 +8,8 @@ import sqlite3
 from contextlib import asynccontextmanager, closing
 from dataclasses import replace
 from pathlib import Path
-from typing import TYPE_CHECKING
-from unittest.mock import AsyncMock, MagicMock, Mock
+from typing import TYPE_CHECKING, cast
+from unittest.mock import AsyncMock, Mock
 from urllib.parse import parse_qs, unquote, urlparse
 from uuid import uuid4
 
@@ -33,11 +33,12 @@ from mindroom.matrix.durable_ingestion import consume_one_ingestion_batch
 from mindroom.matrix.personal_rooms import PersonalRoomService
 from mindroom.matrix.state import MatrixState
 from mindroom.orchestration import entity_fleet
-from mindroom.orchestrator import _MultiAgentOrchestrator
 from mindroom.personal_room_lifecycle import PersonalRoomTarget
 from mindroom.runtime_shutdown import ShutdownBudget
+from mindroom.scheduling.runtime import ScheduledTaskRuntime
 from tests.bot_helpers import make_matrix_client_mock
 from tests.conftest import SETTLE_TIMEOUT_SECONDS
+from tests.journal_helpers import membership_position
 from tests.test_bot_ready_hook import _agent_bot
 from tests.test_durable_ingestion_admission import ROOM, Session
 from tests.test_event_journal_store import admit, interactive_edit, interactive_prompt, projection
@@ -49,12 +50,19 @@ if TYPE_CHECKING:
     from nio.durable import DurableSync
 
     from mindroom.event_journal.store import PrincipalStore
+    from tests.runtime_fakes import ReadyRuntime
 
 
 @pytest.fixture(autouse=True)
 def _no_server_state_publication(monkeypatch: pytest.MonkeyPatch) -> None:
     """These bots join through real Matrix clients pointed at no homeserver; the published server is tested elsewhere."""
     monkeypatch.setattr(bot_module, "publish_server_state", AsyncMock())
+
+
+@pytest.fixture(autouse=True)
+def _no_scheduled_task_restore(monkeypatch: pytest.MonkeyPatch) -> None:
+    """These rooms hold no scheduled tasks; restoring a joined room's schedules reads room state no homeserver serves."""
+    monkeypatch.setattr(ScheduledTaskRuntime, "restore_room", AsyncMock(return_value=0))
 
 
 @pytest.mark.asyncio
@@ -282,7 +290,11 @@ async def _consume_repaired_frame(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("rejoined", [False, True])
-async def test_repaired_gap_fences_grants_until_authoritative_refresh(tmp_path: Path, rejoined: bool) -> None:
+async def test_repaired_gap_fences_grants_until_authoritative_refresh(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    rejoined: bool,
+) -> None:
     """Recovered membership closes stale grants without granting from historical joins."""
     bot = _agent_bot(tmp_path, agent_name=ROUTER_AGENT_NAME)
     bot.config.router.access = ResponderAccessConfig(members_of_rooms=["grant"])
@@ -310,7 +322,8 @@ async def test_repaired_gap_fences_grants_until_authoritative_refresh(tmp_path: 
     if rejoined:
         recovered.append({**join, "event_id": "$rejoin", "origin_server_ts": 3})
     index = bot._runtime_view.agent_reply_memberships
-    bot._schedule_reply_authorized_call_revocation = MagicMock()
+    revoke_denied_calls = AsyncMock()
+    monkeypatch.setattr(bot.orchestrator, "revoke_reply_authorized_calls", revoke_denied_calls)
     async with _owned_session(bot) as session:
         await _consume_frame(bot, session, _joined_frame([join]))
         client = make_matrix_client_mock(user_id=bot.agent_user.user_id)
@@ -341,12 +354,13 @@ async def test_repaired_gap_fences_grants_until_authoritative_refresh(tmp_path: 
         assert [record.provenance for record in seen if record.source.get("event_id") == "$leave"] == [
             nio.TimelineEventProvenance.RECOVERED,
         ]
-        bot._schedule_reply_authorized_call_revocation.assert_called()
+        await wait_for_background_tasks(timeout=1, owner=bot._runtime_view)
+        revoke_denied_calls.assert_awaited()
         client.joined_members.return_value = nio.JoinedMembersResponse(
             members=[control, member] if rejoined else [control],
             room_id=ROOM,
         )
-        await bot._router_reply_membership_sync.refresh_if_needed(
+        await bot.orchestrator.agent_reply_membership_sync.refresh_if_needed(
             bot.config,
             lambda: index.refresh(bot.config, bot.runtime_paths, client),
         )
@@ -404,20 +418,14 @@ async def test_invite_authorization_is_rechecked_after_membership_waits(
         session._transport.request = request
         if wait_at == "lock":
             await bot._local_membership_lock.acquire()
-        elif wait_at == "producer":
-
-            async def wait_for_producer() -> None:
-                reached.set()
-                await release.wait()
-
-            monkeypatch.setattr(session, "wait_for_membership_idle", wait_for_producer)
         else:
 
-            async def wait_for_admission() -> None:
+            async def wait_for_release() -> None:
                 reached.set()
                 await release.wait()
 
-            monkeypatch.setattr(session, "next_batch", wait_for_admission)
+            waiting = "wait_for_membership_idle" if wait_at == "producer" else "next_batch"
+            monkeypatch.setattr(session, waiting, wait_for_release)
         task = asyncio.create_task(_handle_invite(bot, room, event))
         try:
             await asyncio.wait_for(reached.wait(), 2)
@@ -430,7 +438,7 @@ async def test_invite_authorization_is_rechecked_after_membership_waits(
             release.set()
             await asyncio.wait_for(task, 2)
             request.assert_not_awaited()
-            assert room.room_id not in bot._room_lifecycle.invited_rooms
+            assert room.room_id not in bot._room_lifecycle.invited_room_ids()
             assert not bot._room_lifecycle.decrypt_notice_is_fenced(room.room_id)
         finally:
             release.set()
@@ -457,7 +465,7 @@ async def test_joined_invitation_recovers_without_an_invite_cache(
     )
     failure = OSError("interrupted invitation completion")
     if failure_at == "persistence":
-        monkeypatch.setattr(bot._room_lifecycle, "_remember_invited_room", MagicMock(side_effect=failure))
+        monkeypatch.setattr(bot._room_lifecycle, "_remember_invited_room", AsyncMock(side_effect=failure))
     else:
         monkeypatch.setattr(bot._room_lifecycle, "_send_invite_welcome", AsyncMock(side_effect=failure))
     monkeypatch.setattr(bot, "_on_ingestion_frame_completion", AsyncMock())
@@ -482,7 +490,7 @@ async def test_joined_invitation_recovers_without_an_invite_cache(
         assert await bot._room_lifecycle._rooms_to_leave() == ([] if policy_allows_recovery else [room.room_id])
         welcome.assert_not_awaited()
         await bot._room_lifecycle.reconcile_pending_invites()
-        assert (room.room_id in bot._room_lifecycle.invited_rooms) is policy_allows_recovery
+        assert (room.room_id in bot._room_lifecycle.invited_room_ids()) is policy_allows_recovery
         assert welcome.await_count == int(policy_allows_recovery)
         assert (room.room_id not in _pending_room_invites(config, ROUTER_AGENT_NAME)) is policy_allows_recovery
         request.assert_not_awaited()
@@ -620,7 +628,7 @@ async def test_quiesce_retains_projection_ownership_until_drain_or_timeout(  # n
             assert source is not None
             if process_shutdown:
                 bot.begin_process_shutdown()
-            quiescing = asyncio.create_task(bot._quiesce_matrix_ingestion())
+            quiescing = asyncio.create_task(bot.quiesce_matrix_ingestion())
             await asyncio.sleep(0)
             release_recovery.set()
             await asyncio.wait_for(quiescing, timeout=1)
@@ -634,7 +642,7 @@ async def test_quiesce_retains_projection_ownership_until_drain_or_timeout(  # n
                 assert not sync.done()
         finally:
             release_recovery.set()
-            bot._sync_shutting_down = True
+            bot._runtime_view.begin_draining()
             bot._delivery_recovery_wake.set()
             sync.cancel()
             await asyncio.gather(sync, return_exceptions=True)
@@ -728,8 +736,10 @@ async def test_upgrade_keeps_old_history_silent_and_preserves_crypto(
         assert [event.event_id for event in await principal.pending()] == ["$new-request"]
         await principal.settle("$new-request")
 
-    assert bot._own_journal is not None
-    await bot._own_journal.close()
+    # The process restarts: its runtime closes the journal every bot borrowed, and the next runtime reopens it.
+    opened_journal = cast("ReadyRuntime", bot.orchestrator)._open_journal
+    assert opened_journal is not None
+    await opened_journal.close()
     bot = _agent_bot(tmp_path)
     principal = bot.journal_principal()
     async with _owned_session(bot) as session:
@@ -778,7 +788,7 @@ async def test_startup_cleanup_leaves_room_before_first_membership_observation(
             assert len(leave_requests) == 1
             facts = await consume_one_ingestion_batch(session, principal, account_id=bot.agent_user.user_id)
             assert facts is not None
-            assert await principal.membership_position(ROOM) == RoomMembershipPosition("leave", 0)
+            assert await membership_position(principal, ROOM) == RoomMembershipPosition("leave", 0)
             assert await principal.ingestion_membership_position(ROOM) == RoomMembershipPosition("leave", 0)
         finally:
             runner.cancel()
@@ -835,8 +845,7 @@ async def test_entity_removal_leaves_with_retained_input_before_closing_stores(
         monkeypatch.setattr(bot.client, "joined_rooms", AsyncMock(return_value=nio.JoinedRoomsResponse(rooms=[ROOM])))
         session._transport.request = request
         session._maintain_crypto = AsyncMock()
-        orchestrator = _MultiAgentOrchestrator(runtime_paths=bot.runtime_paths)
-        orchestrator.fleet.add(bot.agent_name, bot)
+        orchestrator = cast("ReadyRuntime", bot.orchestrator)
         monkeypatch.setattr(
             orchestrator._approval_recovery,
             "reconcile_removed_entities",
@@ -844,7 +853,6 @@ async def test_entity_removal_leaves_with_retained_input_before_closing_stores(
         )
         # Failing the removed agent's schedules reads room state this transport does not serve.
         monkeypatch.setattr(orchestrator.scheduled_tasks, "fail_removed", AsyncMock())
-        monkeypatch.setattr(orchestrator, "_shared_journal_store", lambda: MagicMock(end_entity_replies=AsyncMock()))
         sync_tasks: list[asyncio.Task[object]] = []
 
         async def run_source(source_bot: AgentBot) -> None:

@@ -212,7 +212,7 @@ Rejected: deleting old graphs automatically, because a name is a one-way hash of
 
 ## Ingestion invariants
 
-- Only finished turns are ingested, and a turn waiting for approval holds back every later turn of its conversation, because it finishes in place with its original, earlier creation time and a marker past it would skip it.
+- Only finished turns are ingested, in the order they take their places in the conversation log, so a turn that waited for approval is read once it finishes; the creation-time markers that made such a turn hold back the later ones were replaced ([persistence owners](2026-10-29-persistence-owners.md)).
 - Runs are read from the whole run log rather than the loaded session, because a loaded session holds only the runs after the latest compaction summary.
 - Episodes are rendered from full messages and tool results, not the skill-learning digest, which shortens older messages and drops older tool results.
 - Each episode kind has its own marker, so a kind that keeps failing never repeats the other kind's episodes.
@@ -222,12 +222,11 @@ Rejected: deleting old graphs automatically, because a name is a one-way hash of
 - Failure counts belong to the failing episode, named by its kind and where that kind stopped, so new turns of the other kind that extract fine never keep a failing one from being dropped.
 - Turns share an episode only with turns of the same day and requester, so relative dates resolve against the day they were said and each episode's extraction is charged to one person.
 - A newly seen conversation starts at the backfill cutoff, and one conversation adds at most twenty completed episodes per pass, so a long history spreads over passes instead of holding up every other conversation.
-- A paused turn stops holding back its conversation once the approval it waits for has expired, counted from its newest message, which is the call waiting for approval; the conversation is looked at again then even without new messages.
 - A new graph's start is saved when it is first seen, so the backfill window stays anchored even with `backfill_days: 0`.
 
 ## Exploration invariants
 
-- Leads come only from completed conversation turns created after the last run, so a reply in an old thread does not bring back that thread's earlier calls.
+- Leads come only from conversation turns that completed after the last run's check, each conversation read on from where that check left it, so a reply in an old thread does not bring back that thread's earlier calls ([persistence owners](2026-10-29-persistence-owners.md)).
 - Every `@` in lead arguments becomes `＠`, which no mention parser reads, because the posted prompt is parsed for mentions and a mentioned agent would answer the trusted automation prompt.
 - The last-run time is saved only when a run ends, so a prompt that never posted offers the same leads again.
 

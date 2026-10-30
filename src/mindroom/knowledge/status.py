@@ -160,15 +160,13 @@ def reconcile_knowledge_mode_transition_states(
 
 
 def knowledge_base_refreshing(
-    refresh_scheduler: KnowledgeRefreshScheduler | None,
+    refresh_scheduler: KnowledgeRefreshScheduler,
     base_id: str,
     *,
     config: Config,
     runtime_paths: RuntimePaths,
 ) -> bool:
     """Return whether the runtime's scheduler is refreshing one base; a base whose binding cannot resolve is not."""
-    if refresh_scheduler is None:
-        return False
     try:
         target = registry.resolve_refresh_target(base_id, config=config, runtime_paths=runtime_paths)
     except ValueError:

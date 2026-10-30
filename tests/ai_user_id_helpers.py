@@ -12,11 +12,11 @@ import nio
 
 from mindroom.agent_reply_membership import AgentReplyMembershipIndex
 from mindroom.bot import AgentBot
+from mindroom.bot_runtime_view import RunPhase
 from mindroom.budgets.monitor import BudgetMonitor
 from mindroom.config.agent import AgentConfig, TeamConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
-from mindroom.config.plugin import PluginEntryConfig
 from mindroom.constants import (
     RuntimePaths,
     resolve_runtime_paths,
@@ -38,6 +38,7 @@ from mindroom.matrix.thread_history_result import thread_history_result
 from mindroom.message_target import MessageTarget
 from mindroom.post_response_effects import PostResponseEffectsDeps, PostResponseEffectsSupport
 from mindroom.reply_scope import ReplyRuntime
+from mindroom.response_admission import ResponseAdmissionGate
 from mindroom.response_payload_preparation import ResponsePayloadPreparer
 from mindroom.response_runner import (
     ResponseRequest,
@@ -58,6 +59,7 @@ from tests.conftest import (
     request_envelope,
 )
 from tests.identity_helpers import persist_entity_accounts
+from tests.runtime_fakes import ready_runtime
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
@@ -159,16 +161,6 @@ def _metadata_config(provider: str, model_id: str) -> Config:
     )
 
 
-def _plugin(name: str, callbacks: list[object]) -> SimpleNamespace:
-    return SimpleNamespace(
-        name=name,
-        discovered_hooks=tuple(callbacks),
-        discovered_automations=(),
-        entry_config=PluginEntryConfig(path=f"./plugins/{name}"),
-        plugin_order=0,
-    )
-
-
 def _mark_requester_online(client: AsyncMock, user_id: str, room_id: str = "!test:localhost") -> None:
     """Make the requester show as online in the client's synced room cache.
 
@@ -204,13 +196,6 @@ def _knowledge_access_support(
     unavailable: dict[str, KnowledgeAvailabilityDetail] | None = None,
 ) -> SimpleNamespace:
     return SimpleNamespace(
-        for_agent=MagicMock(return_value=knowledge),
-        resolve_for_agent=MagicMock(
-            return_value=_KnowledgeResolution(
-                knowledge=cast("AgentKnowledge | None", knowledge),
-                unavailable=unavailable or {},
-            ),
-        ),
         resolve_for_agent_async=AsyncMock(
             return_value=_KnowledgeResolution(
                 knowledge=cast("AgentKnowledge | None", knowledge),
@@ -235,6 +220,8 @@ def team_orchestrator(config: Config, runtime_paths: RuntimePaths) -> SimpleName
         hook_room_state_querier=lambda: None,
         hook_room_state_putter=lambda: None,
         budgets=BudgetMonitor(runtime_paths=runtime_paths, config_provider=lambda: config),
+        running_entity_names=lambda: frozenset({*config.agents, *config.teams}),
+        response_admission_gate=ResponseAdmissionGate(),
     )
 
 
@@ -258,7 +245,6 @@ def _build_response_runner(
     config: Config,
     runtime_paths: RuntimePaths,
     storage_path: Path,
-    requester_id: str,  # noqa: ARG001
     hook_registry: HookRegistry | None = None,
     history_storage: object | None = None,
     team_history_storage: object | None = None,
@@ -272,7 +258,7 @@ def _build_response_runner(
         return storage if storage is not None else MagicMock()
 
     bot.matrix_id = MagicMock(full_id="@mindroom_general:localhost", domain="localhost")
-    bot.orchestrator = orchestrator
+    bot.orchestrator = orchestrator if orchestrator is not None else ready_runtime(config, runtime_paths)
     bot._conversation_resolver = MagicMock()
     bot._conversation_resolver.build_message_target = MagicMock(
         return_value=message_target or MessageTarget.resolve("!test:localhost", None, "$user_msg", room_mode=True),
@@ -313,16 +299,15 @@ def _build_response_runner(
         )
 
     bot._conversation_state_writer.team_history_scope = MagicMock(side_effect=_team_history_scope_for_test)
-    bot._edit_message = AsyncMock(return_value=True)
     agent_reply_memberships = AgentReplyMembershipIndex()
-    bot.agent_reply_memberships = agent_reply_memberships
     runtime = SimpleNamespace(
         client=bot.client,
         config=config,
         agent_reply_memberships=agent_reply_memberships,
         orchestrator=bot.orchestrator,
-        response_admission_gate=bot.admission_gate,
+        response_admission_gate=bot.orchestrator.response_admission_gate,
         runtime_started_at=0.0,
+        phase=RunPhase.ACCEPTING,
     )
     hook_context = HookContextSupport(
         runtime=runtime,
@@ -434,15 +419,6 @@ def _build_response_runner(
             ),
         ),
     )
-
-
-@asynccontextmanager
-async def _claimed_reply_span(runner: ResponseRunner, request: ResponseRequest) -> AsyncIterator[ResponseRequest]:
-    """Claim the reply span the locked generation claims for ``request``, for calls made below that claim."""
-    async with runner.deps.replies.span_scope():
-        claimed = await runner._claim_reply_span(request, history_scope=runner.deps.state_writer.history_scope())
-        assert claimed is not None
-        yield claimed
 
 
 def _response_request(

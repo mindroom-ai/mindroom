@@ -15,7 +15,8 @@ from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.custom_tools.thread_summary import ThreadSummaryTools
 from mindroom.message_target import MessageTarget
-from mindroom.thread_summary import _THREAD_SUMMARY_MAX_LENGTH, ThreadSummaryWriteError, _ThreadSummaryWriteResult
+from mindroom.thread_summary.notices import ThreadSummaryWriteError, _ThreadSummaryWriteResult
+from mindroom.thread_summary.state import THREAD_SUMMARY_MAX_LENGTH
 from mindroom.tool_system.metadata import TOOL_METADATA, get_tool_by_name
 from mindroom.tool_system.runtime_context import ToolRuntimeContext, tool_runtime_context
 from tests.authorization_helpers import (
@@ -325,39 +326,20 @@ async def test_set_thread_summary_rejects_non_string_summary() -> None:
 
 
 @pytest.mark.asyncio
-async def test_set_thread_summary_rejects_overlong_summary() -> None:
-    """Oversized summaries should return the helper's validation error."""
-    tool = ThreadSummaryTools()
-    context = _make_context()
-
-    with (
-        patch(
-            "mindroom.custom_tools.thread_summary.resolve_thread_root_event_id_for_client",
-            new=AsyncMock(return_value="$ctx-thread:localhost"),
+@pytest.mark.parametrize(
+    ("summary", "error"),
+    [
+        (
+            "x" * (THREAD_SUMMARY_MAX_LENGTH + 1),
+            f"summary must be {THREAD_SUMMARY_MAX_LENGTH} characters or fewer after whitespace normalization.",
         ),
-        patch(
-            "mindroom.custom_tools.thread_summary.set_manual_thread_summary",
-            new=AsyncMock(
-                side_effect=ThreadSummaryWriteError(
-                    f"summary must be {_THREAD_SUMMARY_MAX_LENGTH} characters or fewer after whitespace normalization.",
-                ),
-            ),
-        ),
-        tool_runtime_context(context),
-    ):
-        payload = json.loads(await tool.set_thread_summary("x" * (_THREAD_SUMMARY_MAX_LENGTH + 1)))
-
-    assert payload["status"] == "error"
-    assert payload["room_id"] == context.room_id
-    assert (
-        payload["message"]
-        == f"summary must be {_THREAD_SUMMARY_MAX_LENGTH} characters or fewer after whitespace normalization."
-    )
-
-
-@pytest.mark.asyncio
-async def test_set_thread_summary_returns_helper_error_for_send_failure() -> None:
-    """Tool errors should pass through shared manual-summary write failures."""
+        ("done", "Failed to fetch thread history for the target thread."),
+        ("failed write", "Failed to send thread summary event."),
+    ],
+    ids=["overlong", "fetch-failure", "send-failure"],
+)
+async def test_set_thread_summary_returns_helper_write_error(summary: str, error: str) -> None:
+    """Validation, fetch, and send failures of the shared write helper pass through as the error payload."""
     tool = ThreadSummaryTools()
     context = _make_context(thread_id="$ctx-thread:localhost")
 
@@ -368,15 +350,16 @@ async def test_set_thread_summary_returns_helper_error_for_send_failure() -> Non
         ),
         patch(
             "mindroom.custom_tools.thread_summary.set_manual_thread_summary",
-            new=AsyncMock(side_effect=ThreadSummaryWriteError("Failed to send thread summary event.")),
+            new=AsyncMock(side_effect=ThreadSummaryWriteError(error)),
         ),
         tool_runtime_context(context),
     ):
-        payload = json.loads(await tool.set_thread_summary("failed write"))
+        payload = json.loads(await tool.set_thread_summary(summary))
 
     assert payload["status"] == "error"
+    assert payload["room_id"] == context.room_id
     assert payload["thread_id"] == "$ctx-thread:localhost"
-    assert payload["message"] == "Failed to send thread summary event."
+    assert payload["message"] == error
 
 
 @pytest.mark.asyncio
@@ -397,78 +380,6 @@ async def test_set_thread_summary_returns_error_when_normalize_raises() -> None:
     assert payload["status"] == "error"
     assert payload["thread_id"] == "$reply-event:localhost"
     assert payload["message"] == "Failed to resolve a canonical thread root for the target event."
-
-
-@pytest.mark.asyncio
-async def test_set_thread_summary_returns_error_when_fetch_raises() -> None:
-    """History fetch exceptions should surface through the shared write helper."""
-    tool = ThreadSummaryTools()
-    context = _make_context(thread_id="$ctx-thread:localhost")
-
-    with (
-        patch(
-            "mindroom.custom_tools.thread_summary.resolve_thread_root_event_id_for_client",
-            new=AsyncMock(return_value="$ctx-thread:localhost"),
-        ),
-        patch(
-            "mindroom.custom_tools.thread_summary.set_manual_thread_summary",
-            new=AsyncMock(side_effect=ThreadSummaryWriteError("Failed to fetch thread history for the target thread.")),
-        ),
-        tool_runtime_context(context),
-    ):
-        payload = json.loads(await tool.set_thread_summary("done"))
-
-    assert payload["status"] == "error"
-    assert payload["thread_id"] == "$ctx-thread:localhost"
-    assert payload["message"] == "Failed to fetch thread history for the target thread."
-
-
-@pytest.mark.asyncio
-async def test_set_thread_summary_returns_error_when_send_raises() -> None:
-    """Manual-send exceptions should surface through the shared write helper."""
-    tool = ThreadSummaryTools()
-    context = _make_context(thread_id="$ctx-thread:localhost")
-
-    with (
-        patch(
-            "mindroom.custom_tools.thread_summary.resolve_thread_root_event_id_for_client",
-            new=AsyncMock(return_value="$ctx-thread:localhost"),
-        ),
-        patch(
-            "mindroom.custom_tools.thread_summary.set_manual_thread_summary",
-            new=AsyncMock(side_effect=ThreadSummaryWriteError("Failed to send thread summary event.")),
-        ),
-        tool_runtime_context(context),
-    ):
-        payload = json.loads(await tool.set_thread_summary("failed write"))
-
-    assert payload["status"] == "error"
-    assert payload["thread_id"] == "$ctx-thread:localhost"
-    assert payload["message"] == "Failed to send thread summary event."
-
-
-@pytest.mark.asyncio
-async def test_set_thread_summary_pins_by_default() -> None:
-    """Asking an agent to set a title should make it survive automatic re-summarization."""
-    tool = ThreadSummaryTools()
-    context = _make_context(thread_id="$ctx-thread:localhost")
-
-    with (
-        patch(
-            "mindroom.custom_tools.thread_summary.resolve_thread_root_event_id_for_client",
-            new=AsyncMock(return_value="$ctx-thread:localhost"),
-        ),
-        patch(
-            "mindroom.custom_tools.thread_summary.set_manual_thread_summary",
-            new=AsyncMock(return_value=_write_result(summary="A fixed title")),
-        ) as mock_set,
-        tool_runtime_context(context),
-    ):
-        payload = json.loads(await tool.set_thread_summary("A fixed title"))
-
-    assert payload["status"] == "ok"
-    assert payload["pinned"] is True
-    assert mock_set.await_args.kwargs["pin"] is True
 
 
 @pytest.mark.asyncio

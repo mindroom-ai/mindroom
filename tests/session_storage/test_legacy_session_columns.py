@@ -34,7 +34,6 @@ from mindroom.session_storage.legacy_session_columns import BACKUP_SUFFIX
 from mindroom.session_storage.preflight import session_storage_preflight
 from mindroom.session_storage.schema import LOG_VERSION, SESSION_COLUMNS, TableNames
 from mindroom.session_storage.store import decoded_mapping
-from mindroom.usage.stats_storage import _decode_session_usage
 from mindroom.usage.storage import SYSTEM_USAGE_OWNER, SYSTEM_USAGE_STORAGE_NAME
 from tests.session_storage.layout_3_readers import observe_database
 from tests.storage_oracle.determinism import deterministic
@@ -108,8 +107,18 @@ def _query(database: Path, sql: str, *parameters: object) -> list[tuple[Any, ...
         return connection.execute(sql, parameters).fetchall()
 
 
+# What the release's usage rows also carried: the session totals stored beside the ledger, which the ledger alone now
+# holds. A recorded session's ledger rows sum to those totals, so its runs read alike and it gets no pre-ledger row.
+_RETIRED_USAGE_ROW_FIELDS = ("session_metrics", "session_model_metrics", "session_metrics_available")
+
+
 def _recorded(name: str) -> dict[str, Any]:
-    return json.loads((_FIXTURES / f"{name}.json").read_text(encoding="utf-8"))
+    recorded = json.loads((_FIXTURES / f"{name}.json").read_text(encoding="utf-8"))
+    for entry in recorded["usage_rows"]:
+        for field in _RETIRED_USAGE_ROW_FIELDS:
+            entry["row"].pop(field)
+        entry["row"]["totals_available"] = True
+    return recorded
 
 
 def _observed(name: str, root: Path) -> dict[str, Any]:
@@ -472,18 +481,10 @@ def _state_as_layout_3_loaded_it(raw: object) -> dict[str, Any]:
     return state if isinstance(state, dict) else {}
 
 
-def _usage_as_read(raw: object) -> object:
-    """Return what the usage report reads of a row's totals, or the error it reports."""
-    try:
-        return _decode_session_usage(raw)
-    except (RecursionError, TypeError, ValueError) as error:
-        return type(error)
-
-
 @settings(max_examples=80, deadline=None, suppress_health_check=[HealthCheck.too_slow])
 @given(rows=st.lists(_SESSION_DATA, min_size=1, max_size=6))
 def test_every_row_converts_to_what_its_readers_read_before(rows: list[str | None]) -> None:
-    """Each reader of a converted row reads its state, its totals, and the rest of ``session_data`` as before."""
+    """Each reader of a converted row reads its state and the rest of ``session_data``, its totals too, as before."""
     with tempfile.TemporaryDirectory() as directory:
         root = Path(directory)
         database = _restore("agent_code", root)
@@ -521,11 +522,10 @@ def test_every_row_converts_to_what_its_readers_read_before(rows: list[str | Non
         session = loaded[f"s{index}"]
         assert session is not None
         assert session.session_state == _state_as_layout_3_loaded_it(raw)
-        assert _usage_as_read(data) == _usage_as_read(raw)
-        held = decoded_mapping(raw, null={})
+        held = decoded_mapping(raw)
         if held is None:
             assert data == raw
         else:
             held.pop("session_state", None)
-            assert (decoded_mapping(data, null={}) or {}) == held
+            assert (decoded_mapping(data) or {}) == held
         assert rest == [f"@u{index}:x", json.dumps({"n": index}), index, 2 * index]

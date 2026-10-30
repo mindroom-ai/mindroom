@@ -29,7 +29,6 @@ from mindroom.budgets.pricing import format_cost_usd
 from mindroom.config.approval import ApprovalRuleConfig, ToolApprovalConfig
 from mindroom.config.main import Config
 from mindroom.config.models import CompactionConfig, ModelConfig, ModelPricing
-from mindroom.config.plugin import PluginEntryConfig
 from mindroom.constants import AI_RUN_METADATA_KEY
 from mindroom.dispatch_source import ScheduledHistoryBudget
 from mindroom.entity_resolution import entity_identity_registry
@@ -82,7 +81,7 @@ from mindroom.usage.storage import COMPACTED_REQUESTS_METADATA_KEY
 from tests.access_schema_support import with_current_room_member_access
 from tests.approval_continuation_helpers import RECEIPT_CALLS, RECEIPT_TEXT
 from tests.authorization_helpers import make_test_tool_runtime_context
-from tests.bot_helpers import make_test_agent_bot, unique_room_send_responses
+from tests.bot_helpers import _hook_plugin, make_test_agent_bot, unique_room_send_responses
 from tests.conftest import (
     TEST_PASSWORD,
     bind_runtime_paths,
@@ -361,16 +360,6 @@ def _cut_off(call: dict[str, Any]) -> list[ScriptStep]:
     ]
 
 
-def _plugin(name: str, callbacks: Sequence[object]) -> SimpleNamespace:
-    return SimpleNamespace(
-        name=name,
-        discovered_hooks=tuple(callbacks),
-        discovered_automations=(),
-        entry_config=PluginEntryConfig(path=f"./plugins/{name}", settings={}),
-        plugin_order=0,
-    )
-
-
 class _QueuedState:
     def __init__(self, *, pending: bool) -> None:
         self.pending = pending
@@ -532,7 +521,7 @@ async def test_plugin_hooks_gate_and_observe_every_tool_call_and_the_call_is_rec
             calls(tool_call("touch", "call_a", label="a"), tool_call("touch", "call_b", label="b")),
             answer("Both handled."),
         ],
-        plugins=[_plugin("policy", [block_b, observe])],
+        plugins=[_hook_plugin("policy", [block_b, observe])],
     )
 
     with recording_tool_calls(_Recorder()):
@@ -909,7 +898,7 @@ async def test_a_reply_that_is_no_turn_still_counts_toward_usage_and_budgets(
     ending: str,
     run_id: str | None,
 ) -> None:
-    """Its tokens stay in the usage ledger, the session totals, the usage report, and the requester's monthly spend."""
+    """Its tokens stay in the usage ledger, the usage report's session totals, and the requester's monthly spend."""
     if ending == "empty":
         script = [answer("", usage(100, 5)), answer("Recovered.", usage(120, 9))]
         expected_snapshots, stored = [(100, 5), (120, 9)], ["Recovered."]
@@ -1475,7 +1464,7 @@ async def test_the_skill_review_capture_keeps_the_final_request(
     assert {"remember", "touch"} <= {tool.name for tool in capture.latest.request.tools}
 
 
-def _runner(reply: _Reply, tmp_path: Path) -> ResponseRunner:
+def _runner(reply: _Reply) -> ResponseRunner:
     """Build the agent's bot on the reply's config, with a mocked Matrix client, and return its response runner."""
     with_current_room_member_access(reply.config)
     agent_user = AgentMatrixUser(
@@ -1484,7 +1473,7 @@ def _runner(reply: _Reply, tmp_path: Path) -> ResponseRunner:
         display_name="Assistant",
         user_id="@mindroom_assistant:localhost",
     )
-    bot = make_test_agent_bot(agent_user, tmp_path, reply.config, reply.runtime_paths, rooms=[ROOM_ID])
+    bot = make_test_agent_bot(agent_user, reply.config, reply.runtime_paths, rooms=[ROOM_ID])
     install_direct_response_admission(bot)
     bot.client = make_matrix_client_mock(user_id="@mindroom_assistant:localhost")
     unique_room_send_responses(bot.client)
@@ -1561,7 +1550,7 @@ async def test_the_runner_delivers_an_empty_attempt_s_retry_as_the_turn_s_final_
     Both attempts' usage counts: the retry's run does not replace the empty one's usage.
     """
     reply = _reply(tmp_path, monkeypatch, [answer("", usage(100, 5)), answer("Recovered.", usage(120, 9))])
-    runner = _runner(reply, tmp_path)
+    runner = _runner(reply)
 
     delivery, outcome = await _respond_through_runner(runner, _request(), streaming=streaming)
 
@@ -1594,7 +1583,7 @@ async def test_the_runner_writes_the_interrupted_record_after_the_loop_stored_th
         monkeypatch,
         [[TextDelta("Partial "), UsageReported(usage(10, 2), final=False), Await(_cancel_current_task)]],
     )
-    runner = _runner(reply, tmp_path)
+    runner = _runner(reply)
     replaced = _runs_under_interrupted_records(monkeypatch, reply.storage)
 
     task = asyncio.create_task(_respond_through_runner(runner, _request(), streaming=streaming))
@@ -1631,7 +1620,7 @@ async def test_the_runner_leaves_a_paused_run_as_the_loop_stored_it(
         [calls(tool_call("touch", "call_1", label="dangerous"), metrics=usage(7, 1))],
         approval_rules=[ApprovalRuleConfig(match="touch", action="require_approval")],
     )
-    runner = unwrap_extracted_collaborator(_runner(reply, tmp_path))
+    runner = unwrap_extracted_collaborator(_runner(reply))
     replaced = _runs_under_interrupted_records(monkeypatch, reply.storage)
     suspend = AsyncMock(
         return_value=FinalDeliveryOutcome(terminal_status="suspended", event_id=None, is_visible_response=False),
@@ -1674,7 +1663,7 @@ async def test_the_runner_records_the_failure_over_a_pause_with_no_approval_to_a
         [calls(tool_call("touch", "call_1", label="outside"), metrics=usage(7, 1))],
         tools=(EXTERNAL_PROBE_TOOL,),
     )
-    runner = _runner(reply, tmp_path)
+    runner = _runner(reply)
     presence = MagicMock(spec=nio.PresenceGetResponse)
     presence.presence = "online" if streaming else "offline"
     presence.last_active_ago = 0

@@ -41,6 +41,7 @@ from tests.api.test_oauth_api import (
     _use_runtime_auth_settings,
 )
 from tests.computer_helpers import ComputerPeer
+from tests.runtime_fakes import bind_test_embedded_runtime
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Coroutine, Iterator
@@ -95,6 +96,7 @@ def signin(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, enforce_turn_authori
         },
     }
     main.initialize_api_app(main.app, paths)
+    bind_test_embedded_runtime(main.app)
     _publish_config(main.app, paths, payload)
     _use_runtime_auth_settings(main.app)
     return {
@@ -133,6 +135,7 @@ def _serve(signin: dict[str, Any], payload: dict[str, Any] | None = None, **env:
     """Republish the fixture app with environment or config overrides."""
     paths = replace(signin["paths"], process_env={**signin["paths"].process_env, **env})
     main.initialize_api_app(main.app, paths)
+    bind_test_embedded_runtime(main.app)
     _publish_config(main.app, paths, payload or signin["payload"])
     _use_runtime_auth_settings(main.app)
 
@@ -666,6 +669,7 @@ def _serve_with_trusted_upstream(
     env.update(trusted_upstream_env())
     paths = replace(signin["paths"], process_env=env)
     main.initialize_api_app(main.app, paths)
+    bind_test_embedded_runtime(main.app)
     _publish_config(main.app, paths, payload)
     _use_runtime_auth_settings(main.app)
 

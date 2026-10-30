@@ -19,8 +19,6 @@ from mindroom.config.matrix import MatrixSyncConfig
 from mindroom.matrix.state import MatrixState
 from mindroom.matrix.sync_loop import bot_ingestion_config, subscribe_sliding_rooms
 from mindroom.orchestration.config_updates import ConfigUpdatePlan
-from mindroom.orchestrator import _MultiAgentOrchestrator
-from tests.conftest import install_bots
 from tests.threading_helpers import ThreadingBehaviorTestBase
 
 if TYPE_CHECKING:
@@ -225,9 +223,7 @@ class TestSlidingBot(ThreadingBehaviorTestBase):
         state.save(runtime_paths=bot.runtime_paths)
         bot.rooms = ["!old:example.org"]
         bot.running = True
-        orchestrator = _MultiAgentOrchestrator(runtime_paths=bot.runtime_paths)
-        orchestrator.config = bot.config
-        install_bots(orchestrator, {"general": bot})
+        orchestrator = bot.orchestrator
         client = nio.AsyncClient("https://example.org", bot.agent_user.user_id, device_id="DEVICE")
         client.restore_login(bot.agent_user.user_id, "DEVICE", "token")
         session = open_durable_sync(

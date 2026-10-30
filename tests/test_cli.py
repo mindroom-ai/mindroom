@@ -169,10 +169,10 @@ class TestUserAccountManagement:
             patch("mindroom.constants.runtime_matrix_homeserver", return_value="http://localhost:8008"),
         ):
             runtime_paths = _runtime_paths(tmp_path)
-            orchestrator = _MultiAgentOrchestrator(runtime_paths=runtime_paths)
             _config = Config(
                 mindroom_user={"username": DEFAULT_INTERNAL_USERNAME, "display_name": DEFAULT_INTERNAL_DISPLAY_NAME},
             )
+            orchestrator = _MultiAgentOrchestrator(runtime_paths=runtime_paths, config=_config)
             await orchestrator._ensure_user_account(_config)
 
             # Check that user was created
@@ -208,13 +208,13 @@ class TestUserAccountManagement:
             patch("mindroom.matrix.users.matrix_client", return_value=mock_context),
             patch("mindroom.constants.runtime_matrix_homeserver", return_value="http://localhost:8008"),
         ):
-            orchestrator = _MultiAgentOrchestrator(runtime_paths=runtime_paths)
             _config = Config(
                 mindroom_user={
                     "username": DEFAULT_INTERNAL_USERNAME,
                     "display_name": DEFAULT_INTERNAL_DISPLAY_NAME,
                 },
             )
+            orchestrator = _MultiAgentOrchestrator(runtime_paths=runtime_paths, config=_config)
             await orchestrator._ensure_user_account(_config)
 
             # Should use existing account
@@ -246,13 +246,13 @@ class TestUserAccountManagement:
             patch("mindroom.matrix.users.matrix_client", return_value=mock_context),
             patch("mindroom.constants.runtime_matrix_homeserver", return_value="http://localhost:8008"),
         ):
-            orchestrator = _MultiAgentOrchestrator(runtime_paths=runtime_paths)
             _config = Config(
                 mindroom_user={
                     "username": DEFAULT_INTERNAL_USERNAME,
                     "display_name": DEFAULT_INTERNAL_DISPLAY_NAME,
                 },
             )
+            orchestrator = _MultiAgentOrchestrator(runtime_paths=runtime_paths, config=_config)
             await orchestrator._ensure_user_account(_config)
 
             # Should have kept the existing account credentials
@@ -288,7 +288,7 @@ class TestUserAccountManagement:
             patch("mindroom.constants.runtime_matrix_homeserver", return_value="http://localhost:8008"),
         ):
             runtime_paths = _runtime_paths(tmp_path)
-            orchestrator = _MultiAgentOrchestrator(runtime_paths=runtime_paths)
+            orchestrator = _MultiAgentOrchestrator(runtime_paths=runtime_paths, config=custom_config)
             await orchestrator._ensure_user_account(custom_config)
 
             state = MatrixState.load(runtime_paths=runtime_paths)
@@ -328,7 +328,7 @@ class TestUserAccountManagement:
             patch("mindroom.matrix.users.matrix_client", return_value=mock_context),
             patch("mindroom.constants.runtime_matrix_homeserver", return_value="http://localhost:8008"),
         ):
-            orchestrator = _MultiAgentOrchestrator(runtime_paths=runtime_paths)
+            orchestrator = _MultiAgentOrchestrator(runtime_paths=runtime_paths, config=custom_config)
 
             await orchestrator._ensure_user_account(custom_config)
 

@@ -1,15 +1,11 @@
 """One exported thread's body, read from the journal's visible-message projection.
 
-Export used to own a second Matrix event reducer: its own backward ``/messages``
-walk, its own edit and redaction rules, its own sidecar resolution, its own
-thread-membership resolution. That is the projection's job, and having it twice
-meant an exported thread and the history a model was shown could disagree about
-which edit won or what a redaction left behind.
-
-So export reads what prompts read, through the same ``ConversationReader``. The
+Export reads what prompts read, through the same ``ConversationReader``, so an
+exported thread and the history a model was shown agree about which edit won
+and what a redaction left behind. Nothing here interprets a Matrix event: a
+second Matrix event reducer is the thing this module exists to prevent. The
 only thing that differs is how much: a prompt asks for its window and stops,
-export pages until the conversation runs out. Nothing here interprets a Matrix
-event.
+export pages until the conversation runs out.
 
 The reader is bound to an *active* bot's principal, because a projection is
 only warm for a principal something is syncing. A warm thread therefore costs
@@ -17,41 +13,34 @@ zero Matrix history calls; a thread nobody has read yet costs exactly one
 hydration, and never again under the same membership.
 
 Prompts and export want opposite things from that hydration: a prompt wants a
-bounded window, export wants the whole thread. There is still one walk and one
-reducer -- a second Matrix interpreter is the thing this module exists to
-prevent -- but the two callers do not share its *bounds*, and an earlier version
-of this made them, which was a regression rather than a simplification. The
-prompt window sizes a model's context; imposed on export it turns "export this
-thread" into "refuse any thread longer than a prompt", because hydration records
+bounded window, export wants the whole thread. There is one walk and one
+reducer, but the two callers do not share its *bounds*. The prompt window sizes
+a model's context; imposed on export it would turn "export this thread" into
+"refuse any thread longer than a prompt", because hydration records
 `complete=False` and this module then rightly declines to write a suffix as
-though it were the whole thread. Before the cutover an export paginated Matrix
-directly and had no such limit.
+though it were the whole thread.
 
 So export walks with its own, far larger bounds. They are bounds and not
 infinities on purpose: a runaway guard that never fires is not a guard, and a
 thread past even these is reported as too large to write honestly rather than
-silently truncated. The two callers still differ in how they react to hitting a
-bound -- a prompt accepts a shorter conversation, export refuses -- which is the
-part that was right all along.
+silently truncated. The two callers differ in how they react to hitting a
+bound: a prompt accepts a shorter conversation, export refuses.
 
-Owning the bounds was not enough on its own, because the two callers share a
-principal as well as a walk. Hydration runs once per membership and stops at the
-first marker, so the prompt path -- which reaches every thread the bot has
-answered in, long before anyone exports it -- installed a marker for its own
-window and the larger bounds here were never once used. Every warm thread past
-the prompt window was unexportable until a rejoin moved the epoch. The hydrator
-is therefore told that this caller needs the whole conversation, and a marker
-left by a walk that gave up early no longer satisfies it.
+The two callers share a principal as well as a walk. Hydration runs once per
+membership and stops at the first marker, and the prompt path reaches every
+thread the bot has answered in long before anyone exports it, so its marker
+alone would leave the larger bounds unused. The hydrator is therefore told that
+this caller needs the whole conversation, and a marker left by a walk that gave
+up early does not satisfy it.
 """
 
 from __future__ import annotations
 
 import json
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Protocol
+from typing import TYPE_CHECKING
 
 from mindroom.event_journal import HydrationPolicy
-from mindroom.event_journal.views import ConversationReadView, HydrationView
 from mindroom.matrix.conversation_hydration import ConversationHydrator
 from mindroom.matrix.conversation_reads import ConversationReader, projected_visible_messages
 from mindroom.path_confinement import MAX_READ_BYTES
@@ -62,6 +51,7 @@ if TYPE_CHECKING:
     import nio
 
     from mindroom.config.main import Config
+    from mindroom.event_journal.views import ExportProjectionView
     from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
 
 # One page is a store round trip, not a homeserver one, so this trades a little
@@ -83,33 +73,6 @@ EXPORT_MAX_MESSAGES_REQUESTS = 20_000
 
 class ThreadExportIncompleteError(RuntimeError):
     """A thread could not be read whole within the export's ceilings."""
-
-
-class SupportsConversationCompleteness(Protocol):
-    """Asking whether a conversation's one hydration walk reached its end.
-
-    The narrow slice export needs and no other reader does, declared here
-    rather than widened into the shared read protocol: a prompt has no use for
-    it, and a protocol every collaborator satisfies is how a boundary stops
-    being one.
-    """
-
-    async def conversation_is_complete(self, *, room_id: str, thread_id: str | None) -> bool:
-        """Return whether the walk that hydrated this conversation ran to its end."""
-        ...
-
-
-class ExportProjectionView(ConversationReadView, HydrationView, SupportsConversationCompleteness, Protocol):
-    """Everything export reads from one principal's projection, and nothing else.
-
-    Export is the one caller that needs all three slices at once -- it reads
-    pages, it triggers the hydration behind the first of them, and it asks
-    whether that hydration finished -- so this is where the union is written
-    down. Naming it keeps the factory from taking the whole ``PrincipalStore``
-    for want of a type: an export that reached for ``enqueue_matrix_delivery`` or
-    ``admit`` would fail the type checker rather than typecheck and be caught,
-    if at all, in review.
-    """
 
 
 @dataclass(frozen=True, slots=True)
@@ -135,7 +98,7 @@ class ProjectedThreadReader:
     """
 
     reader: ConversationReader
-    completeness: SupportsConversationCompleteness
+    completeness: ExportProjectionView
 
 
 def export_conversation_reader(
@@ -159,14 +122,6 @@ def export_conversation_reader(
                 store=store,
                 runtime=_ExportClientRuntime(client=client, config=config),
                 self_sender=self_sender,
-                # An export asks a different question than a prompt, so it
-                # cannot inherit the prompt's bounds. The message window exists
-                # to size a model's context; applied here it silently converts
-                # "export this thread" into "refuse any thread longer than a
-                # prompt", because hydration records `complete=False` and this
-                # module then correctly declines to write a suffix as if it were
-                # the whole thread. Before this cutover an export paginated
-                # Matrix directly and had no such limit.
                 # The three ceilings and the name they go by. The name is what
                 # a walk writes into the marker, so these must be changed
                 # together: a policy is the whole set, and recording one of
@@ -176,13 +131,6 @@ def export_conversation_reader(
                 prompt_window_messages=EXPORT_WINDOW_MESSAGES,
                 max_fetched_events=EXPORT_MAX_FETCHED_EVENTS,
                 max_requests=EXPORT_MAX_MESSAGES_REQUESTS,
-                # Larger bounds alone were not enough, because hydration runs
-                # once per membership and this reader shares the running bot's
-                # principal. The prompt path reaches every thread the bot has
-                # answered in first, and its marker satisfied the short-circuit,
-                # so the bounds above were dead code for exactly the warm
-                # threads an export is for. A marker that vouches for a walk
-                # which gave up early does not vouch for a whole thread.
                 require_complete=True,
             ),
         ),
@@ -272,9 +220,7 @@ __all__ = [
     "EXPORT_MAX_MESSAGES_REQUESTS",
     "EXPORT_PAGE_MESSAGES",
     "EXPORT_WINDOW_MESSAGES",
-    "ExportProjectionView",
     "ProjectedThreadReader",
-    "SupportsConversationCompleteness",
     "ThreadExportIncompleteError",
     "export_conversation_reader",
     "fetch_projected_thread_history",
