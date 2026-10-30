@@ -405,20 +405,14 @@ async def test_invite_authorization_is_rechecked_after_membership_waits(
         session._transport.request = request
         if wait_at == "lock":
             await bot._local_membership_lock.acquire()
-        elif wait_at == "producer":
-
-            async def wait_for_producer() -> None:
-                reached.set()
-                await release.wait()
-
-            monkeypatch.setattr(session, "wait_for_membership_idle", wait_for_producer)
         else:
 
-            async def wait_for_admission() -> None:
+            async def wait_for_release() -> None:
                 reached.set()
                 await release.wait()
 
-            monkeypatch.setattr(session, "next_batch", wait_for_admission)
+            waiting = "wait_for_membership_idle" if wait_at == "producer" else "next_batch"
+            monkeypatch.setattr(session, waiting, wait_for_release)
         task = asyncio.create_task(_handle_invite(bot, room, event))
         try:
             await asyncio.wait_for(reached.wait(), 2)
