@@ -16,7 +16,6 @@ import pytest
 
 import mindroom.knowledge.corpus_signature as knowledge_corpus_signature
 import mindroom.knowledge.index_metadata as knowledge_index_metadata
-import mindroom.knowledge.manager as knowledge_manager_module
 import mindroom.knowledge.registry as knowledge_registry
 from mindroom.config.agent import AgentConfig
 from mindroom.config.knowledge import KnowledgeBaseConfig
@@ -36,6 +35,7 @@ from mindroom.knowledge.vector_store import KnowledgeCollection
 from mindroom.memory._semantic_file_search import schedule_semantic_file_memory_refresh
 from mindroom.orchestrator import _MultiAgentOrchestrator
 from tests.conftest import bind_runtime_paths, runtime_paths_for, test_runtime_paths
+from tests.knowledge_test_support import install_knowledge_embedder
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -63,9 +63,7 @@ def embedder_builds(monkeypatch: pytest.MonkeyPatch) -> list[str]:
         builds.append("built")
         return embedder
 
-    monkeypatch.setattr(knowledge_manager_module, "create_configured_embedder", _build)
-    monkeypatch.setattr(knowledge_registry, "create_configured_embedder", _build)
-    knowledge_registry._published_indexes.clear()
+    install_knowledge_embedder(monkeypatch, _build)
     return builds
 
 

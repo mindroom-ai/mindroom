@@ -12,10 +12,9 @@ import pytest
 
 from mindroom.knowledge import registry, utils
 from mindroom.knowledge.collection_lifetime import collection_lifetime_lock
-from mindroom.knowledge.index_metadata import new_publication, save_publication
 from mindroom.knowledge.vector_store import KnowledgeCollection
 from tests.conftest import runtime_paths_for
-from tests.knowledge_test_support import _config, seed_collection
+from tests.knowledge_test_support import _config, publish, seed_collection
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -56,16 +55,7 @@ def published_metadata(
     key = registry.resolve_published_index_key("docs", config=config, runtime_paths=runtime_paths)
     storage = registry.published_index_storage_path(key)
     seed_collection(KnowledgeCollection(path=storage, name="published"), [{"content": "one document"}])
-    save_publication(
-        storage,
-        new_publication(
-            settings=key.indexing_settings,
-            collection="published",
-            indexed_count=1,
-            source_signature="one-document",
-            published_revision=None,
-        ),
-    )
+    publish(key, collection="published", source_signature="one-document")
     monkeypatch.setattr(registry, "create_configured_embedder", lambda *_args: _Embedder())
     return config, runtime_paths, storage
 

@@ -27,7 +27,7 @@ from mindroom.knowledge.index_metadata import (
 )
 from mindroom.knowledge.search import AgentKnowledge, KnowledgeSource, KnowledgeSourceDescription
 from tests.conftest import runtime_paths_for
-from tests.knowledge_test_support import _config, _FakeEmbedder, seed_collection
+from tests.knowledge_test_support import _config, _FakeEmbedder, publish, seed_collection
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
@@ -58,16 +58,7 @@ def _publish(space: CollectionSpace, key: registry.PublishedIndexKey, content: s
     """Publish a new collection holding ``content`` and delete every other one, as a forced rebuild does."""
     name = candidate_collection_name(space)
     seed_collection(open_collection(space, name), [{"id": content, "content": content}])
-    save_publication(
-        space.storage_path,
-        new_publication(
-            settings=key.indexing_settings,
-            collection=name,
-            indexed_count=1,
-            source_signature=content,
-            published_revision=None,
-        ),
-    )
+    publish(key, collection=name, source_signature=content)
     cleanup_superseded_collections(space, preserved=frozenset({name}))
     return name
 

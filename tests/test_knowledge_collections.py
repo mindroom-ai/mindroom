@@ -21,7 +21,6 @@ from mindroom.knowledge.collections import (
     open_collection,
     write_file_rows,
 )
-from mindroom.knowledge.index_metadata import load_publication, new_publication, save_publication
 from mindroom.knowledge.manager import KnowledgeManager
 from mindroom.knowledge.registry import (
     get_published_index,
@@ -30,7 +29,13 @@ from mindroom.knowledge.registry import (
 )
 from mindroom.knowledge.utils import resolve_knowledge_base_access_async
 from mindroom.knowledge.vector_store import CollectionMeta, KnowledgeCollection, StoredRow, list_collection_names
-from tests.knowledge_test_support import collection_meta, seed_collection, stored_rows
+from tests.knowledge_test_support import (
+    collection_meta,
+    publish,
+    published_collection,
+    seed_collection,
+    stored_rows,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Iterator, Sequence
@@ -212,18 +217,8 @@ def published_lookup(
     (tmp_path / "docs").mkdir()
     config, runtime_paths = _docs_config(tmp_path)
     key = resolve_published_index_key("docs", config=config, runtime_paths=runtime_paths)
-    storage_path = published_index_storage_path(key)
-    seed_collection(KnowledgeCollection(path=storage_path, name="present"), [])
-    save_publication(
-        storage_path,
-        new_publication(
-            settings=key.indexing_settings,
-            collection="present",
-            indexed_count=0,
-            source_signature="empty",
-            published_revision=None,
-        ),
-    )
+    seed_collection(KnowledgeCollection(path=published_index_storage_path(key), name="present"), [])
+    publish(key, collection="present", indexed_count=0, source_signature="empty")
     return config, runtime_paths
 
 
@@ -333,10 +328,7 @@ async def test_real_refreshes_resume_the_retired_collection_and_serve_exactly_th
     async def _refresh() -> str:
         manager = KnowledgeManager("docs", config=config, runtime_paths=runtime_paths)
         assert (await manager.reindex_all()).published
-        publication = load_publication(manager._base_storage_path)
-        assert publication is not None
-        assert publication.collection is not None
-        published = open_collection(manager._collections, publication.collection)
+        published = published_collection(manager)
         served = sorted((row["metadata"]["source_path"], row["content"]) for row in stored_rows(published))
         assert served == sorted((path.name, path.read_text(encoding="utf-8")) for path in docs.iterdir())
         assert set(published.files()) == {path.name for path in docs.iterdir()}

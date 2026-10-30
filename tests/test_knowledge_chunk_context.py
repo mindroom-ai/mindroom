@@ -11,10 +11,9 @@ import mindroom.knowledge.chunk_context as chunk_context_module
 import mindroom.knowledge.file_indexer as file_indexer_module
 from mindroom.knowledge.chunk_context import _document_window, chunk_contexts
 from mindroom.knowledge.collections import _owned_collection_names, open_collection
-from mindroom.knowledge.index_metadata import load_publication
 from mindroom.knowledge.manager import KnowledgeManager
 from tests.conftest import runtime_paths_for
-from tests.knowledge_test_support import _config, patch_vector_store, stored_rows  # noqa: F401
+from tests.knowledge_test_support import _config, patch_vector_store, published_collection, stored_rows  # noqa: F401
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -110,11 +109,8 @@ async def test_refresh_prefixes_multi_chunk_files_with_their_contexts(
 
     assert outcome.published
     assert requests == [2]
-    publication = load_publication(manager._base_storage_path)
-    assert publication is not None
-    assert publication.collection is not None
     documents: dict[str, list[str]] = {}
-    for row in stored_rows(open_collection(manager._collections, publication.collection)):
+    for row in stored_rows(published_collection(manager)):
         documents.setdefault(row["metadata"]["source_path"], []).append(row["content"])
     assert documents["note.md"] == ["one chunk only"]
     assert [document.split("\n\n", 1)[0] for document in documents["guide.md"]] == ["Context 0.", "Context 1."]

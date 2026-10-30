@@ -14,15 +14,16 @@ from mindroom.knowledge.collections import (
     cleanup_superseded_collections,
     open_collection,
 )
-from mindroom.knowledge.index_metadata import load_publication, new_publication, save_publication
+from mindroom.knowledge.index_metadata import new_publication, save_publication
 from mindroom.knowledge.manager import KnowledgeManager
 from mindroom.knowledge.registry import get_published_index
-from mindroom.knowledge.vector_store import KnowledgeCollection, list_collection_names
+from mindroom.knowledge.vector_store import list_collection_names
 from tests.conftest import runtime_paths_for
 from tests.knowledge_test_support import (  # noqa: F401
     _config,
     _FakeEmbedder,
     patch_vector_store,
+    published_collection,
     seed_collection,
     stored_rows,
 )
@@ -30,13 +31,6 @@ from tests.knowledge_test_support import (  # noqa: F401
 if TYPE_CHECKING:
     from collections.abc import Sequence
     from pathlib import Path
-
-
-def _published_collection(manager: KnowledgeManager) -> KnowledgeCollection:
-    publication = load_publication(manager._base_storage_path)
-    assert publication is not None
-    assert publication.collection is not None
-    return open_collection(manager._collections, publication.collection)
 
 
 def test_cleanup_removes_legacy_chroma_storage_and_leaves_other_files(tmp_path: Path) -> None:
@@ -126,7 +120,7 @@ async def test_a_chroma_era_index_rebuilds_and_its_files_go_only_after_publicati
     assert get_published_index("docs", config=config, runtime_paths=runtime_paths).availability is (
         KnowledgeAvailability.READY
     )
-    assert [row["content"] for row in stored_rows(_published_collection(upgraded))] == [
+    assert [row["content"] for row in stored_rows(published_collection(upgraded))] == [
         "Travel policy and hotel limits.",
     ]
     assert not (storage / "chroma.sqlite3").exists()
@@ -149,7 +143,7 @@ async def test_a_chroma_era_index_is_copied_without_embedding_again(
     runtime_paths = runtime_paths_for(config)
     first = KnowledgeManager("docs", config=config, runtime_paths=runtime_paths)
     assert (await first.reindex_all()).published
-    rows = stored_rows(_published_collection(first))
+    rows = stored_rows(published_collection(first))
     storage = first._base_storage_path
     client = chromadb.PersistentClient(path=str(storage), settings=chromadb.Settings(anonymized_telemetry=False))
     chroma = client.create_collection(first._collections._default_collection, metadata={"hnsw:space": "cosine"})
@@ -186,7 +180,7 @@ async def test_a_chroma_era_index_is_copied_without_embedding_again(
     assert (await upgraded.reindex_all()).published
 
     assert embedded == ["Expense reports are due weekly."]
-    published = _published_collection(upgraded)
+    published = published_collection(upgraded)
     assert sorted(row["content"] for row in stored_rows(published)) == [
         "Expense reports are due weekly.",
         "Travel policy and hotel limits.",

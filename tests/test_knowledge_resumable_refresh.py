@@ -75,19 +75,22 @@ from mindroom.llm.errors import ProviderUnavailable
 from mindroom.model_defaults import SENTENCE_TRANSFORMERS_DEFAULT
 from mindroom.providers.errors import classify_provider_error
 from tests.conftest import bind_runtime_paths, runtime_paths_for, test_runtime_paths
-from tests.knowledge_test_support import collection_meta, seed_collection, stored_rows
+from tests.knowledge_test_support import (
+    collection_meta,
+    install_knowledge_embedder,
+    run_refresh_child_in_process,
+    seed_collection,
+    stored_rows,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterator, Mapping, Sequence
 
-    from mindroom.constants import RuntimePaths
     from mindroom.embeddings.base import Embedder
     from mindroom.knowledge.corpus_signature import FileSignature
     from mindroom.knowledge.index_metadata import Publication
-    from mindroom.knowledge.refresh_runner import KnowledgeRefreshResult, _RefreshChildResult
-    from mindroom.knowledge.registry import PublishedIndexKey
+    from mindroom.knowledge.refresh_runner import KnowledgeRefreshResult
     from mindroom.knowledge.vector_store import CollectionMeta
-    from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 
 
 # --------------------------------------------------------------------------
@@ -193,14 +196,12 @@ def recording_embedder_everywhere(
     embedder: _RecordingEmbedder,
 ) -> Iterator[None]:
     """Index and search with the recording embedder; vectors go to the real store under each test's storage root."""
-    monkeypatch.setattr(knowledge_manager_module, "create_configured_embedder", lambda *_a, **_k: embedder)
-    monkeypatch.setattr(knowledge_registry, "create_configured_embedder", lambda *_a, **_k: embedder)
+    install_knowledge_embedder(monkeypatch, lambda *_a, **_k: embedder)
 
     async def _no_sleep(_seconds: float) -> None:
         return
 
     monkeypatch.setattr(knowledge_file_indexer, "_EMBEDDING_RETRY_SLEEP", _no_sleep)
-    knowledge_registry._published_indexes.clear()
     yield
     knowledge_registry._published_indexes.clear()
 
@@ -212,24 +213,7 @@ class _RuntimeRefresh(Protocol):
 @pytest.fixture
 def runtime_refresh(monkeypatch: pytest.MonkeyPatch) -> _RuntimeRefresh:
     """Refresh the way the runtime does, which records the child's result, with the child run in this process."""
-
-    async def _child_in_process(
-        key: PublishedIndexKey,
-        *,
-        config: Config,
-        runtime_paths: RuntimePaths,
-        execution_identity: ToolExecutionIdentity | None,
-        force_reindex: bool,
-    ) -> _RefreshChildResult:
-        return await refresh_knowledge_binding(
-            key.base_id,
-            config=config,
-            runtime_paths=runtime_paths,
-            execution_identity=execution_identity,
-            force_reindex=force_reindex,
-        )
-
-    monkeypatch.setattr(knowledge_refresh_runner, "_run_refresh_child", _child_in_process)
+    monkeypatch.setattr(knowledge_refresh_runner, "_run_refresh_child", run_refresh_child_in_process)
     # The provider health probe a refresh schedules is not what these tests pin, and it would build a real embedder.
     monkeypatch.setattr(knowledge_refresh_runner, "_schedule_refresh_health_check", lambda *_a, **_k: None)
 

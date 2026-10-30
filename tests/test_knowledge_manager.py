@@ -151,6 +151,9 @@ from tests.knowledge_test_support import (
     _FakeEmbedder,
     collection_meta,
     patch_vector_store,  # noqa: F401  # requested via pytestmark below
+    publish,
+    published_collection,
+    run_refresh_child_in_process,
     seed_collection,
     stored_rows,
 )
@@ -168,31 +171,10 @@ if TYPE_CHECKING:
 _REAL_RUN_REFRESH_CHILD = knowledge_refresh_runner._run_refresh_child
 
 
-async def _run_refresh_child_in_process(
-    key: knowledge_registry.PublishedIndexKey,
-    *,
-    config: Config,
-    runtime_paths: RuntimePaths,
-    execution_identity: ToolExecutionIdentity | None,
-    force_reindex: bool,
-) -> _RefreshChildResult:
-    """Run the refresh child's job in this process, reporting an exception as the child's entry point does."""
-    try:
-        return await run_refresh_child(
-            key.base_id,
-            config=config,
-            runtime_paths=runtime_paths,
-            execution_identity=execution_identity,
-            force_reindex=force_reindex,
-        )
-    except Exception as exc:
-        return knowledge_refresh_runner._failed_child_result(exc)
-
-
 @pytest.fixture(autouse=True)
 def _in_process_refresh_child(monkeypatch: pytest.MonkeyPatch) -> None:
     """Run every refresh child the runtime starts in this process, unless a test asks for ``real_refresh_child``."""
-    monkeypatch.setattr(knowledge_refresh_runner, "_run_refresh_child", _run_refresh_child_in_process)
+    monkeypatch.setattr(knowledge_refresh_runner, "_run_refresh_child", run_refresh_child_in_process)
 
 
 @pytest.fixture
@@ -249,27 +231,6 @@ def _refresh_state_for_key(key: knowledge_registry.PublishedIndexKey) -> str:
     )
 
 
-def _publish(
-    key: knowledge_registry.PublishedIndexKey,
-    *,
-    collection: str | None,
-    settings: IndexingSettings | None = None,
-    indexed_count: int = 1,
-    source_signature: str = "source-signature",
-    published_revision: str | None = None,
-) -> Publication:
-    """Write a publication for ``key`` the way a refresh child does, and return it."""
-    publication = new_publication(
-        settings=key.indexing_settings if settings is None else settings,
-        collection=collection,
-        indexed_count=indexed_count,
-        source_signature=source_signature,
-        published_revision=published_revision,
-    )
-    save_publication(published_index_storage_path(key), publication)
-    return publication
-
-
 def _backdate_last_refresh(key: knowledge_registry.PublishedIndexKey, when: str = "2000-01-01T00:00:00+00:00") -> None:
     """Make the base's publication and its last refresh look ``when`` old, so its poll interval has passed."""
     storage = published_index_storage_path(key)
@@ -306,14 +267,6 @@ async def _fail_candidate(self: FileIndexer, prepared: _PreparedFile, **kwargs: 
     raise RuntimeError(msg)
 
 
-def _published_collection(manager: KnowledgeManager) -> KnowledgeCollection:
-    """Return the collection the manager's base publishes."""
-    publication = load_publication(manager._base_storage_path)
-    assert publication is not None
-    assert publication.collection is not None
-    return open_collection(manager._collections, publication.collection)
-
-
 def _working_collections(
     config: Config,
     runtime_paths: RuntimePaths,
@@ -332,7 +285,7 @@ def _working_collections(
 
 def _source_has_vectors(manager: KnowledgeManager, relative_path: str) -> bool:
     """Return whether the manager's published collection holds a row for one source path."""
-    published = _published_collection(manager)
+    published = published_collection(manager)
     return published.exists() and any(
         row["metadata"].get("source_path") == relative_path for row in stored_rows(published)
     )
@@ -970,7 +923,7 @@ def test_failed_knowledge_still_warns_alongside_unpublished_scope(tmp_path: Path
         metadata_path.parent.mkdir(parents=True)
         metadata_path.write_text("{", encoding="utf-8")
     elif failure == "config_mismatch":
-        _publish(key, collection="broken_collection", settings=replace(key.indexing_settings, chunk_size="1"))
+        publish(key, collection="broken_collection", settings=replace(key.indexing_settings, chunk_size="1"))
     else:
         record_refresh_failed(key, error="refresh failed")
 
@@ -1123,7 +1076,7 @@ async def test_file_mode_git_refresh_marks_same_source_semantic_alias_stale(
         KnowledgeCollection(path=published_index_storage_path(semantic_key), name=semantic_collection),
         [{"content": "Use grep for this source.", "metadata": {"source_path": "guide.md"}}],
     )
-    _publish(semantic_key, collection=semantic_collection, source_signature="old-source-signature")
+    publish(semantic_key, collection=semantic_collection, source_signature="old-source-signature")
 
     async def _sync_updated(self: GitKnowledgeSource) -> GitSyncResult:
         assert self.base_id == "file_docs"
@@ -1166,7 +1119,7 @@ async def test_file_mode_refresh_cancelled_after_its_publication_records_success
         key: knowledge_registry.PublishedIndexKey,
         **kwargs: object,
     ) -> _RefreshChildResult:
-        await _run_refresh_child_in_process(key, **kwargs)
+        await run_refresh_child_in_process(key, **kwargs)
         published.set()
         await asyncio.Event().wait()
         raise AssertionError
@@ -1331,7 +1284,7 @@ async def test_shared_local_watch_index_refreshes_on_access_without_blocking_rea
         # The refresh stays in flight until the read below returns, so that read cannot see its publication.
         refresh_started.set()
         await release_refresh.wait()
-        return await _run_refresh_child_in_process(key, **kwargs)
+        return await run_refresh_child_in_process(key, **kwargs)
 
     monkeypatch.setattr(knowledge_refresh_runner, "_run_refresh_child", held_refresh)
     scheduler = KnowledgeRefreshScheduler()
@@ -2923,7 +2876,7 @@ def test_source_changed_updates_refresh_state_without_changing_index(tmp_path: P
     default_collection = manager._collections._default_collection
     published = open_collection(manager._collections, default_collection)
     seed_collection(published, [{"content": "published old", "metadata": {"source_path": "guide.md"}}])
-    publication = _publish(key, collection=default_collection, source_signature="test-source-signature")
+    publication = publish(key, collection=default_collection, source_signature="test-source-signature")
 
     marked_base_ids = knowledge_registry._mark_knowledge_source_changed(
         "docs",
@@ -3457,7 +3410,7 @@ def test_raw_git_url_index_metadata_is_config_mismatch(tmp_path: Path) -> None:
     )
     stale = IndexingSettings.from_metadata(stale_settings)
     assert stale is not None
-    _publish(key, collection=collection, settings=stale)
+    publish(key, collection=collection, settings=stale)
 
     lookup = get_published_index("docs", config=config, runtime_paths=runtime_paths)
 
@@ -3483,7 +3436,7 @@ def test_passwordless_ssh_username_change_invalidates_published_index(tmp_path: 
         KnowledgeCollection(path=published_index_storage_path(key), name=collection),
         [{"content": "git user index", "metadata": {"source_path": "doc.md"}}],
     )
-    _publish(key, collection=collection)
+    publish(key, collection=collection)
     changed_config = _config(
         tmp_path,
         bases={"docs": docs_path},
@@ -3516,7 +3469,7 @@ def test_a_publication_alone_serves_its_index(tmp_path: Path) -> None:
         KnowledgeCollection(path=published_index_storage_path(key), name=collection),
         [{"content": "metadata index", "metadata": {"source_path": "doc.md"}}],
     )
-    _publish(key, collection=collection)
+    publish(key, collection=collection)
     lookup = get_published_index("docs", config=config, runtime_paths=runtime_paths)
 
     assert _refresh_state_for_key(key) == "none"
@@ -5036,7 +4989,7 @@ def test_stale_metadata_without_collection_returns_unavailable_index(tmp_path: P
     config = _config(tmp_path, bases={"docs": docs_path}, agent_bases=["docs"])
     runtime_paths = runtime_paths_for(config)
     key = resolve_published_index_key("docs", config=config, runtime_paths=runtime_paths)
-    _publish(key, collection="missing_collection")
+    publish(key, collection="missing_collection")
 
     lookup = get_published_index("docs", config=config, runtime_paths=runtime_paths)
 
@@ -5051,7 +5004,7 @@ def test_lookup_failure_after_binding_resolution_schedules_repair_refresh(tmp_pa
     config = _config(tmp_path, bases={"docs": docs_path}, agent_bases=["docs"])
     runtime_paths = runtime_paths_for(config)
     key = resolve_published_index_key("docs", config=config, runtime_paths=runtime_paths)
-    _publish(key, collection="broken_collection")
+    publish(key, collection="broken_collection")
     scheduler = _RecordingScheduler(refreshing=False)
     resolution = resolve_agent_knowledge_access("helper", config, runtime_paths, refresh_scheduler=scheduler)
     knowledge = resolution.knowledge
@@ -5071,7 +5024,7 @@ def test_published_index_handle_open_failure_degrades_and_schedules_repair_refre
     runtime_paths = runtime_paths_for(config)
     key = resolve_published_index_key("docs", config=config, runtime_paths=runtime_paths)
     collection = "broken_collection"
-    _publish(key, collection=collection)
+    publish(key, collection=collection)
     seed_collection(
         KnowledgeCollection(path=published_index_storage_path(key), name=collection),
         [{"content": "last good content", "metadata": {"path": "guide.md"}}],
@@ -5261,7 +5214,7 @@ def test_refresh_failure_counter_increments_and_resets_preserving_last_good(tmp_
     runtime_paths = runtime_paths_for(config)
     key = resolve_published_index_key("docs", config=config, runtime_paths=runtime_paths)
     storage = published_index_storage_path(key)
-    publication = _publish(key, collection="docs_live", source_signature="sig")
+    publication = publish(key, collection="docs_live", source_signature="sig")
 
     record_refresh_failed(key, error="boom 1")
     first = load_refresh_status(storage)
@@ -5331,7 +5284,7 @@ async def test_a_failed_refresh_keeps_the_source_change_it_did_not_publish(
     config = _config(tmp_path, bases={"docs": docs_path}, agent_bases=["docs"])
     runtime_paths = runtime_paths_for(config)
     key = resolve_published_index_key("docs", config=config, runtime_paths=runtime_paths, create=True)
-    publication = _publish(key, collection="old", source_signature="old-source")
+    publication = publish(key, collection="old", source_signature="old-source")
     mark_published_index_stale(key, reason="source_changed")
 
     async def _died(*_args: object, **_kwargs: object) -> NoReturn:
@@ -7081,7 +7034,7 @@ async def test_a_crashed_refresh_subprocess_is_recorded_as_failed(
 
 def _publish_as_child(key: knowledge_registry.PublishedIndexKey) -> Publication:
     """Publish a newer collection the way a refresh child does just before it dies."""
-    return _publish(
+    return publish(
         key,
         collection="newer-success",
         source_signature="newer-source",
@@ -7691,7 +7644,7 @@ def test_private_index_read_path_cache_insertion_is_bounded(tmp_path: Path) -> N
             KnowledgeCollection(path=published_index_storage_path(key), name=collection),
             [{"content": f"private read {index}", "metadata": {"source_path": "note.md"}}],
         )
-        _publish(key, collection=collection, source_signature=f"sig-{index}")
+        publish(key, collection=collection, source_signature=f"sig-{index}")
 
     for index in range(count):
         lookup = get_published_index(
@@ -7716,7 +7669,7 @@ def _write_queryable_index_state(
     KnowledgeCollection(path=published_index_storage_path(key), name=collection).create(
         collection_meta(key.indexing_settings.to_metadata(), stage="complete"),
     )
-    _publish(key, collection=collection, indexed_count=0, source_signature="credential-rotation-test")
+    publish(key, collection=collection, indexed_count=0, source_signature="credential-rotation-test")
 
 
 def test_cached_handle_rebuilds_after_dashboard_embedder_credential_rotation(
@@ -9892,7 +9845,7 @@ async def test_an_empty_publication_of_an_emptied_source_stays_deferred(tmp_path
     )
     runtime_paths = runtime_paths_for(config)
     key = resolve_published_index_key("docs", config=config, runtime_paths=runtime_paths, create=True)
-    publication = _publish(key, collection="mindroom_knowledge_probe", indexed_count=0)
+    publication = publish(key, collection="mindroom_knowledge_probe", indexed_count=0)
     manager = KnowledgeManager("docs", config=config, runtime_paths=runtime_paths)
     assert await _should_defer_cold_empty_publication(manager, publication)
 

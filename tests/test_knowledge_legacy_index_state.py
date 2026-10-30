@@ -16,8 +16,6 @@ from typing import TYPE_CHECKING
 import pytest
 
 import mindroom.knowledge.legacy_index_state as legacy_module
-import mindroom.knowledge.manager as knowledge_manager_module
-import mindroom.knowledge.registry as knowledge_registry
 from mindroom.config.agent import AgentConfig
 from mindroom.config.knowledge import KnowledgeBaseConfig
 from mindroom.config.main import Config
@@ -29,6 +27,7 @@ from mindroom.knowledge.refresh_runner import _refresh_knowledge_binding as refr
 from mindroom.knowledge.registry import get_published_index, published_index_storage_path, resolve_published_index_key
 from mindroom.knowledge.vector_store import KnowledgeCollection, list_collection_names
 from tests.conftest import bind_runtime_paths, runtime_paths_for, test_runtime_paths
+from tests.knowledge_test_support import install_knowledge_embedder, row_paths
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -68,9 +67,7 @@ class _RecordingEmbedder:
 def embedder(monkeypatch: pytest.MonkeyPatch) -> _RecordingEmbedder:
     """Index and search with one recording embedder."""
     recording = _RecordingEmbedder()
-    monkeypatch.setattr(knowledge_manager_module, "create_configured_embedder", lambda *_a, **_k: recording)
-    monkeypatch.setattr(knowledge_registry, "create_configured_embedder", lambda *_a, **_k: recording)
-    knowledge_registry._published_indexes.clear()
+    install_knowledge_embedder(monkeypatch, lambda *_a, **_k: recording)
     return recording
 
 
@@ -116,11 +113,6 @@ def _schema_version(collection: KnowledgeCollection) -> int:
         return connection.execute("PRAGMA user_version").fetchone()[0]
 
 
-def _row_paths(collection: KnowledgeCollection) -> set[str]:
-    with closing(sqlite3.connect(collection.file)) as connection:
-        return {path for (path,) in connection.execute("SELECT DISTINCT source_path FROM chunks")}
-
-
 @pytest.mark.asyncio
 async def test_a_published_base_with_its_retired_collection_converts_and_refreshes_without_embedding(
     tmp_path: Path,
@@ -142,7 +134,7 @@ async def test_a_published_base_with_its_retired_collection_converts_and_refresh
         collection = KnowledgeCollection(path=storage, name=name)
         assert _schema_version(collection) == 2
         assert collection.meta().stage == "complete"
-        assert set(collection.files()) == _row_paths(collection)
+        assert set(collection.files()) == row_paths(collection)
     resolution = get_published_index("docs", config=config, runtime_paths=runtime_paths)
     assert resolution.availability is KnowledgeAvailability.READY
     assert resolution.reader is not None

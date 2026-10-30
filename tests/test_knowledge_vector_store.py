@@ -25,7 +25,7 @@ from mindroom.knowledge.vector_store import (
     _KnowledgeIndexTooLargeError,
     list_collection_names,
 )
-from tests.knowledge_test_support import collection_meta, stored_rows
+from tests.knowledge_test_support import collection_meta, row_paths, stored_rows
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -51,10 +51,6 @@ def _write(
     signature: FileSignature = _SIGNATURE,
 ) -> None:
     collection.write_file(relative_path, signature, rows)
-
-
-def _row_paths(collection: KnowledgeCollection) -> set[str]:
-    return {row["metadata"]["source_path"] for row in stored_rows(collection)}
 
 
 def _crash_mid_write(collection: KnowledgeCollection) -> None:
@@ -177,7 +173,7 @@ def test_a_recorded_failure_keeps_no_rows_and_no_claim(collection: KnowledgeColl
     collection.record_failure("a.md")
     collection.record_failure("a.md")
 
-    assert _row_paths(collection) == {"b.md"}
+    assert row_paths(collection) == {"b.md"}
     assert collection.files() == {"b.md": _SIGNATURE}
     assert collection.claim_counts() == (1, 1)
 
@@ -207,7 +203,7 @@ def test_reconcile_drops_rows_claims_and_failures_together(collection: Knowledge
         paths[1100]: (99, 1, "d1100"),
         **{path: (index, 1, f"d{index}") for index, path in enumerate(paths) if index > 1100},
     }
-    assert _row_paths(collection) == set(paths[1100:])
+    assert row_paths(collection) == set(paths[1100:])
     assert collection.claim_counts() == (100, 1)
     meta = collection.meta()
     assert (meta.stage, meta.revision, meta.total_files) == ("building", "rev", 101)
@@ -467,7 +463,7 @@ def test_a_write_killed_mid_transaction_rolls_back_on_the_next_open(collection: 
     _crash_mid_write(collection)
 
     assert collection.files() == {"a.md": _SIGNATURE}
-    assert _row_paths(collection) == {"a.md"}
+    assert row_paths(collection) == {"a.md"}
     assert [hit.content for hit in collection.search([1.0, 0.0], limit=5)] == ["kept"]
 
 
@@ -481,7 +477,7 @@ def test_writes_reject_vectors_of_another_width(collection: KnowledgeCollection)
         _write(collection, "c.md", [_row("c1", "c.md", "c", [1.0]), _row("c2", "c.md", "c", [1.0, 0.0])])
     _write(collection, "a.md", [_row("a2", "a.md", "alpha again", [0.0, 1.0])])
 
-    assert _row_paths(collection) == {"a.md"}
+    assert row_paths(collection) == {"a.md"}
     assert collection.files() == {"a.md": _SIGNATURE}
 
 
@@ -742,4 +738,4 @@ def test_a_created_file_ignores_the_journal_its_predecessor_left(
     _crash_mid_write(collection)
     collection.create(collection_meta())
     assert collection.files() == {}
-    assert _row_paths(collection) == set()
+    assert row_paths(collection) == set()
