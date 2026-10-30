@@ -1180,7 +1180,7 @@ def test_openai_speech_with_custom_host_uses_named_credential(
     """OpenAI speech resolves only its explicitly selected credential."""
     service_lookup = MagicMock(return_value="openai-call-key")
     monkeypatch.setattr("mindroom.matrix_rtc.call_backends.get_api_key_for_service", service_lookup)
-    manager = _manager(_client(), FakeBridge(), tmp_path, _cascaded_config())
+    runtime_paths = test_runtime_paths(tmp_path)
 
     service = _resolve_speech_service(
         SpeechServiceConfig(
@@ -1189,16 +1189,17 @@ def test_openai_speech_with_custom_host_uses_named_credential(
             credentials_service="openai-realtime",
             host="https://proxy.example.test",
         ),
-        manager._runtime_paths,
+        runtime_paths,
         agent_name="helper",
         component="stt",
         room_id=ROOM_ID,
+        warn_if_unavailable=True,
     )
 
     assert service is not None
     assert service.api_key == "openai-call-key"
     assert service.base_url == "https://proxy.example.test/v1"
-    service_lookup.assert_called_once_with("openai-realtime", manager._runtime_paths)
+    service_lookup.assert_called_once_with("openai-realtime", runtime_paths)
 
 
 def test_each_speech_service_selects_its_own_credential(
@@ -1208,7 +1209,7 @@ def test_each_speech_service_selects_its_own_credential(
     """Each cascaded speech leg may select its own named credential."""
     lookup = MagicMock(return_value="speech-key")
     monkeypatch.setattr("mindroom.matrix_rtc.call_backends.get_api_key_for_service", lookup)
-    manager = _manager(_client(), FakeBridge(), tmp_path, _cascaded_config())
+    runtime_paths = test_runtime_paths(tmp_path)
 
     service = _resolve_speech_service(
         SpeechServiceConfig(
@@ -1216,15 +1217,16 @@ def test_each_speech_service_selects_its_own_credential(
             model="gpt-4o-mini-tts",
             credentials_service="speech-override",
         ),
-        manager._runtime_paths,
+        runtime_paths,
         agent_name="helper",
         component="tts",
         room_id=ROOM_ID,
+        warn_if_unavailable=True,
     )
 
     assert service is not None
     assert service.api_key == "speech-key"
-    lookup.assert_called_once_with("speech-override", manager._runtime_paths)
+    lookup.assert_called_once_with("speech-override", runtime_paths)
 
 
 def test_missing_speech_credential_does_not_fall_back(
@@ -1234,7 +1236,7 @@ def test_missing_speech_credential_does_not_fall_back(
     """A missing named speech credential cannot silently use another service."""
     service_lookup = MagicMock(return_value=None)
     monkeypatch.setattr("mindroom.matrix_rtc.call_backends.get_api_key_for_service", service_lookup)
-    manager = _manager(_client(), FakeBridge(), tmp_path, _cascaded_config())
+    runtime_paths = test_runtime_paths(tmp_path)
 
     service = _resolve_speech_service(
         SpeechServiceConfig(
@@ -1242,7 +1244,7 @@ def test_missing_speech_credential_does_not_fall_back(
             model="gpt-4o-mini-tts",
             credentials_service="openai-realtime",
         ),
-        manager._runtime_paths,
+        runtime_paths,
         agent_name="helper",
         component="tts",
         room_id=ROOM_ID,
@@ -1250,7 +1252,7 @@ def test_missing_speech_credential_does_not_fall_back(
     )
 
     assert service is None
-    service_lookup.assert_called_once_with("openai-realtime", manager._runtime_paths)
+    service_lookup.assert_called_once_with("openai-realtime", runtime_paths)
 
 
 def test_openai_cloud_speech_uses_explicit_endpoint(
@@ -1259,14 +1261,15 @@ def test_openai_cloud_speech_uses_explicit_endpoint(
 ) -> None:
     """A process-wide local OpenAI base URL cannot redirect cloud speech."""
     monkeypatch.setenv("OPENAI_BASE_URL", "http://127.0.0.1:9292/v1")
-    manager = _manager(_client(), FakeBridge(), tmp_path, _cascaded_config())
+    runtime_paths = test_runtime_paths(tmp_path)
 
     service = _resolve_speech_service(
         SpeechServiceConfig(provider="openai", model="gpt-transcribe", api_key="cloud-key"),
-        manager._runtime_paths,
+        runtime_paths,
         agent_name="helper",
         component="stt",
         room_id=ROOM_ID,
+        warn_if_unavailable=True,
     )
 
     assert service is not None
@@ -4257,7 +4260,7 @@ async def test_frame_key_floods_share_background_state_reads(
 
 
 @pytest.mark.asyncio
-async def test_manager_rejects_participant_selected_remote_focus() -> None:
+async def test_livekit_service_rejects_participant_selected_remote_focus() -> None:
     """A server-hosted agent never dials a participant-selected remote focus."""
     config = Config(
         agents={"helper": AgentConfig(display_name="Helper")},
@@ -4285,7 +4288,7 @@ async def test_manager_rejects_participant_selected_remote_focus() -> None:
 
 
 @pytest.mark.asyncio
-async def test_manager_rejects_unconfigured_same_server_focus() -> None:
+async def test_livekit_service_rejects_unconfigured_same_server_focus() -> None:
     """A local participant cannot redirect the server-hosted agent to another focus."""
     config = Config(
         agents={"helper": AgentConfig(display_name="Helper")},
@@ -4372,7 +4375,7 @@ async def test_manager_does_not_retry_invalid_sfu_grant(
 
 
 @pytest.mark.asyncio
-async def test_manager_recovers_inherited_focus_after_founder_leaves() -> None:
+async def test_livekit_service_recovers_inherited_focus_after_founder_leaves() -> None:
     """A remote follower may inherit and advertise the trusted local focus."""
     config = Config(
         agents={"helper": AgentConfig(display_name="Helper")},
@@ -4424,7 +4427,7 @@ async def test_active_session_keeps_pinned_focus_after_founder_leaves(tmp_path: 
 
 
 @pytest.mark.asyncio
-async def test_manager_fetches_grant_with_local_network_trust(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_sfu_grant_fetch_uses_local_network_trust(monkeypatch: pytest.MonkeyPatch) -> None:
     """The operator-selected authorization service may resolve to local infrastructure."""
     seen: dict[str, object] = {}
 
@@ -4441,7 +4444,7 @@ async def test_manager_fetches_grant_with_local_network_trust(monkeypatch: pytes
 
 
 @pytest.mark.asyncio
-async def test_manager_rejects_insecure_remote_focus() -> None:
+async def test_livekit_service_rejects_insecure_remote_focus() -> None:
     """A remote plaintext focus cannot receive the bot's OpenID token."""
     config = Config(
         agents={"helper": AgentConfig(display_name="Helper")},
@@ -5730,7 +5733,7 @@ def test_speech_config_normalizes_blank_optional_fields() -> None:
 
 def test_compatible_speech_blank_key_uses_local_placeholder(tmp_path: Path) -> None:
     """A blank local key cannot suppress the non-secret compatibility placeholder."""
-    manager = _manager(_client(), FakeBridge(), tmp_path, _cascaded_config(local=True))
+    runtime_paths = test_runtime_paths(tmp_path)
 
     service = _resolve_speech_service(
         SpeechServiceConfig(
@@ -5739,10 +5742,11 @@ def test_compatible_speech_blank_key_uses_local_placeholder(tmp_path: Path) -> N
             host="http://127.0.0.1:9000",
             api_key=" ",
         ),
-        manager._runtime_paths,
+        runtime_paths,
         agent_name="helper",
         component="stt",
         room_id=ROOM_ID,
+        warn_if_unavailable=True,
     )
 
     assert service is not None

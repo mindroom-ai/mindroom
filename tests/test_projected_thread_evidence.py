@@ -18,7 +18,7 @@ from mindroom.matrix.thread_membership import (
     resolve_related_event_thread_membership,
     thread_messages_thread_membership_access,
 )
-from mindroom.matrix.thread_mutation_impact import MutationThreadImpactState, resolve_event_thread_impact
+from mindroom.matrix.thread_mutation_impact import event_thread_membership_known
 from tests.journal_membership_helpers import admit_room_membership
 from tests.test_conversation_hydration import ROOM, FakeClient, encrypted, hydrator, raw
 
@@ -77,10 +77,10 @@ class TestIncompleteHistoryIsNotAbsence:
         assert not history.is_full_history
 
     async def test_a_send_replying_to_that_root_is_refused(self, principal: PrincipalStore) -> None:
-        """Mutation impact reports UNKNOWN, which the send refuses, rather than ROOM_LEVEL."""
+        """Thread membership is reported unknown, which the send refuses, rather than room level."""
         client = _root_with_only_unreadable_replies()
 
-        impact = await resolve_event_thread_impact(
+        known = await event_thread_membership_known(
             _reader(principal, client),
             _relations(principal, client),
             ROOM,
@@ -88,7 +88,7 @@ class TestIncompleteHistoryIsNotAbsence:
             content={"body": "hi", "msgtype": "m.text", "m.relates_to": {"m.in_reply_to": {"event_id": "$root"}}},
         )
 
-        assert impact is MutationThreadImpactState.UNKNOWN
+        assert not known
 
     @pytest.mark.parametrize(
         ("absence_needs_full_history", "expected"),

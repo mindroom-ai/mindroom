@@ -536,75 +536,6 @@ def _create_preview(
     return _prefix_by_bytes(text, target_bytes) + continuation_indicator
 
 
-async def _upload_text_as_mxc(
-    client: nio.AsyncClient,
-    text: str,
-    room_id: str | None = None,
-    *,
-    mimetype: str = "text/plain",
-    room_encrypted: bool,
-) -> tuple[str | None, dict[str, Any] | None]:
-    """Upload text content as an MXC file.
-
-    Args:
-        client: The Matrix client
-        text: The text content to upload
-        room_id: Optional room ID for failure logs
-        mimetype: MIME type for the uploaded content (default: "text/plain")
-        room_encrypted: Authoritative room encryption state, which decides whether the upload is encrypted
-
-    Returns:
-        Tuple of (mxc_uri, file_info_dict) or (None, None) on failure
-
-    """
-    text_bytes = text.encode("utf-8")
-
-    if mimetype == "text/html":
-        filename = "message.html"
-    elif mimetype == "application/json":
-        filename = "message-content.json"
-    else:
-        filename = "message.txt"
-
-    try:
-        prepared = prepare_media_upload(text_bytes, filename=filename, mimetype=mimetype, encrypt=room_encrypted)
-        file_info = prepared.encrypted_file_content(url="") or prepared.info()
-    except Exception:
-        logger.exception("Failed to encrypt attachment")
-        return None, None
-
-    try:
-        # nio.upload returns Tuple[Union[UploadResponse, UploadError], Optional[Dict[str, Any]]]
-        upload_result, _encryption_dict = await upload_media_bytes(
-            client,
-            prepared.data,
-            content_type=prepared.content_type,
-            filename=prepared.filename,
-        )
-
-        # Check if upload was successful
-        if not isinstance(upload_result, nio.UploadResponse):
-            logger.error(
-                "large_message_sidecar_upload_failed",
-                room_id=room_id,
-                error=str(upload_result),
-            )
-            return None, None
-
-        mxc_uri = upload_content_uri(upload_result)
-        if mxc_uri is None:
-            logger.error("Upload response missing content_uri")
-            return None, None
-
-        file_info["url"] = mxc_uri
-
-    except Exception:
-        logger.exception("Failed to upload text")
-        return None, None
-    else:
-        return mxc_uri, file_info
-
-
 async def _build_file_content(
     client: nio.AsyncClient,
     room_id: str,
@@ -695,15 +626,54 @@ async def upload_json_sidecar(
     *,
     room_encrypted: bool,
 ) -> tuple[str | None, dict[str, Any] | None]:
-    """Upload one JSON payload as an MXC sidecar and return ``(mxc_uri, file_info)``."""
-    text = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
-    return await _upload_text_as_mxc(
-        client,
-        text,
-        room_id,
-        mimetype="application/json",
-        room_encrypted=room_encrypted,
-    )
+    """Upload one JSON payload as an MXC sidecar and return ``(mxc_uri, file_info)``.
+
+    ``room_encrypted`` is the authoritative room encryption state and decides whether the upload is encrypted.
+    Returns ``(None, None)`` on failure.
+    """
+    text_bytes = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    try:
+        prepared = prepare_media_upload(
+            text_bytes,
+            filename="message-content.json",
+            mimetype="application/json",
+            encrypt=room_encrypted,
+        )
+        file_info = prepared.encrypted_file_content(url="") or prepared.info()
+    except Exception:
+        logger.exception("Failed to encrypt attachment")
+        return None, None
+
+    try:
+        # nio.upload returns Tuple[Union[UploadResponse, UploadError], Optional[Dict[str, Any]]]
+        upload_result, _encryption_dict = await upload_media_bytes(
+            client,
+            prepared.data,
+            content_type=prepared.content_type,
+            filename=prepared.filename,
+        )
+
+        # Check if upload was successful
+        if not isinstance(upload_result, nio.UploadResponse):
+            logger.error(
+                "large_message_sidecar_upload_failed",
+                room_id=room_id,
+                error=str(upload_result),
+            )
+            return None, None
+
+        mxc_uri = upload_content_uri(upload_result)
+        if mxc_uri is None:
+            logger.error("Upload response missing content_uri")
+            return None, None
+
+        file_info["url"] = mxc_uri
+
+    except Exception:
+        logger.exception("Failed to upload text")
+        return None, None
+    else:
+        return mxc_uri, file_info
 
 
 def _build_text_fallback_content(

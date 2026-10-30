@@ -27,15 +27,15 @@ def _space_config(tmp_path: Path) -> Config:
     )
 
 
-def _persist_new_device(runtime_paths: RuntimePaths) -> None:
-    """Persist the device and token a bot that just logged in would write."""
+def _persist_login(runtime_paths: RuntimePaths, *, device_id: str, access_token: str) -> None:
+    """Persist the device and token a bot writes when it logs in."""
     matrix_users._persist_agent_session(
         "general",
         "mindroom_general",
         "secret",
         domain="localhost",
-        device_id="NEWDEVICE",
-        access_token="new-token",  # noqa: S106
+        device_id=device_id,
+        access_token=access_token,
         runtime_paths=runtime_paths,
     )
 
@@ -45,22 +45,14 @@ async def test_root_space_setup_keeps_a_login_persisted_while_it_awaited(tmp_pat
     """A bot that logs in while the root space is being created keeps its new device after a restart."""
     config = _space_config(tmp_path)
     runtime_paths = runtime_paths_for(config)
-    matrix_users._persist_agent_session(
-        "general",
-        "mindroom_general",
-        "secret",
-        domain="localhost",
-        device_id="OLDDEVICE",
-        access_token="old-token",  # noqa: S106
-        runtime_paths=runtime_paths,
-    )
+    _persist_login(runtime_paths, device_id="OLDDEVICE", access_token="old-token")  # noqa: S106
     client = AsyncMock()
     client.homeserver = "http://localhost:8008"
     client.rooms = {}
     client.room_resolve_alias.return_value = nio.RoomResolveAliasError("not found", status_code="M_NOT_FOUND")
 
     async def create_space_while_a_bot_logs_in(**_kwargs: object) -> str:
-        _persist_new_device(runtime_paths)
+        _persist_login(runtime_paths, device_id="NEWDEVICE", access_token="new-token")  # noqa: S106
         return "!space:localhost"
 
     with (
@@ -87,7 +79,7 @@ async def test_resolved_root_space_keeps_a_login_persisted_while_it_awaited(tmp_
     client.rooms = {}
 
     async def resolve_alias_while_a_bot_logs_in(*_args: object, **_kwargs: object) -> str:
-        _persist_new_device(runtime_paths)
+        _persist_login(runtime_paths, device_id="NEWDEVICE", access_token="new-token")  # noqa: S106
         return "!space:localhost"
 
     with (

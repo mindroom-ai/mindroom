@@ -30,9 +30,8 @@ from mindroom.matrix.thread_membership import (
     thread_messages_thread_membership_access,
 )
 from mindroom.matrix.thread_mutation_impact import (
-    MutationThreadImpactState,
-    resolve_event_thread_impact,
-    resolve_redaction_thread_impact,
+    event_thread_membership_known,
+    redaction_thread_membership_known,
 )
 from mindroom.message_target import MessageTarget
 from tests.authorization_helpers import (
@@ -204,10 +203,10 @@ async def test_thread_root_proof_from_degraded_history_is_indeterminate() -> Non
 
 
 @pytest.mark.asyncio
-async def test_resolve_event_thread_impact_returns_threaded_impact() -> None:
-    """Message classification exposes the canonical threaded impact, not only a bool."""
+async def test_event_thread_membership_known_for_a_reply_into_a_thread() -> None:
+    """A reply whose target is in a thread has known membership."""
     relations = make_relation_lookup(threads={"$thread-reply:localhost": "$thread-root:localhost"})
-    impact = await resolve_event_thread_impact(
+    known = await event_thread_membership_known(
         make_conversation_reader_mock(),
         relations,
         "!room:localhost",
@@ -219,7 +218,7 @@ async def test_resolve_event_thread_impact_returns_threaded_impact() -> None:
         },
     )
 
-    assert impact is MutationThreadImpactState.THREADED
+    assert known
 
 
 @pytest.mark.parametrize(
@@ -230,7 +229,7 @@ async def test_resolve_event_thread_impact_returns_threaded_impact() -> None:
     ],
 )
 @pytest.mark.asyncio
-async def test_resolve_event_thread_impact_rejects_non_message_ancestors(
+async def test_event_thread_membership_unknown_through_non_message_ancestors(
     relation: dict[str, object],
 ) -> None:
     """Reply and reference walks must enforce the conversation-family boundary."""
@@ -249,7 +248,7 @@ async def test_resolve_event_thread_impact_rejects_non_message_ancestors(
         ),
     )
 
-    impact = await resolve_event_thread_impact(
+    known = await event_thread_membership_known(
         make_conversation_reader_mock(),
         relations,
         "!room:localhost",
@@ -261,17 +260,17 @@ async def test_resolve_event_thread_impact_rejects_non_message_ancestors(
         },
     )
 
-    assert impact is MutationThreadImpactState.UNKNOWN
+    assert not known
 
 
 @pytest.mark.asyncio
-async def test_resolve_event_thread_impact_preserves_unknown_lookup_failures() -> None:
-    """Lookup failures must stay explicit in the authoritative impact API."""
+async def test_event_thread_membership_unknown_on_lookup_failure() -> None:
+    """A failed lookup leaves membership unknown instead of room level."""
     relations_client = MagicMock()
     relations_client.room_get_event = AsyncMock(side_effect=RuntimeError("boom"))
     relations = make_relation_lookup(client=relations_client)
 
-    impact = await resolve_event_thread_impact(
+    known = await event_thread_membership_known(
         make_conversation_reader_mock(),
         relations,
         "!room:localhost",
@@ -283,12 +282,12 @@ async def test_resolve_event_thread_impact_preserves_unknown_lookup_failures() -
         },
     )
 
-    assert impact is MutationThreadImpactState.UNKNOWN
+    assert not known
 
 
 @pytest.mark.asyncio
-async def test_resolve_redaction_thread_impact_returns_room_level_for_reactions() -> None:
-    """Redaction classification exposes room-level reaction handling directly."""
+async def test_redaction_thread_membership_known_for_reactions() -> None:
+    """Redacting a reaction cannot affect thread membership, so it is known."""
     relations = make_relation_lookup(
         client=_serving_client(
             "$reaction:localhost",
@@ -303,14 +302,14 @@ async def test_resolve_redaction_thread_impact_returns_room_level_for_reactions(
         ),
     )
 
-    impact = await resolve_redaction_thread_impact(
+    known = await redaction_thread_membership_known(
         make_conversation_reader_mock(),
         relations,
         "!room:localhost",
         event_id="$reaction:localhost",
     )
 
-    assert impact is MutationThreadImpactState.ROOM_LEVEL
+    assert known
 
 
 @pytest.mark.asyncio

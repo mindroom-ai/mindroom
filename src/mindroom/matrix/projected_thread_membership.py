@@ -3,8 +3,7 @@
 Tools normalizing a thread target and outbound mutations classifying their
 thread ask the same question a turn asks, so they get the same answer: a
 candidate root is proven by reading its thread strictly from the projection,
-which hydrates the conversation once and then follows sync. There is no
-second reader that rebuilds threads from room scans.
+which hydrates the conversation once and then follows sync.
 """
 
 from __future__ import annotations
@@ -89,7 +88,7 @@ async def resolve_thread_root_event_id(
     event_id: str,
 ) -> str | None:
     """Resolve one event ID into a canonical thread root when thread membership can prove one."""
-    normalized_event_id = event_id.strip() if isinstance(event_id, str) else ""
+    normalized_event_id = event_id.strip()
     if not normalized_event_id:
         return None
 

@@ -929,21 +929,6 @@ class TestJoinRoom:
         assert outcome is expected
 
 
-class TestSendFileMessageMsgtype:
-    """Tests for send_file_message msgtype selection."""
-
-    @pytest.mark.asyncio
-    async def test_video_uses_m_video_msgtype(self, tmp_path: Path) -> None:
-        """Video files should be sent as m.video."""
-        client = _delivering_client(encrypted=False)
-        file = tmp_path / "clip.mp4"
-        file.write_bytes(b"\x00\x00\x00\x1cftyp")
-
-        await send_file_message(client, "!room:localhost", file)
-
-        assert _wire_content(client)["msgtype"] == "m.video"
-
-
 class TestMediaWireContent:
     """Pin the complete content each media send puts on the wire."""
 

@@ -132,7 +132,6 @@ async def resolve_canonical_tool_thread_target(
     thread_id: str | None,
     allow_context_fallback: bool = True,
     fail_closed_on_normalization_error: bool = False,
-    room_timeline_sentinel: str | None = None,
 ) -> _CanonicalToolThreadTarget:
     """Resolve one tool thread target into the canonical thread root or a stable error."""
     requested_thread_id = resolve_context_thread_id(
@@ -140,7 +139,6 @@ async def resolve_canonical_tool_thread_target(
         room_id=room_id,
         thread_id=thread_id,
         allow_context_fallback=allow_context_fallback,
-        room_timeline_sentinel=room_timeline_sentinel,
     )
     if requested_thread_id is None:
         return _CanonicalToolThreadTarget(

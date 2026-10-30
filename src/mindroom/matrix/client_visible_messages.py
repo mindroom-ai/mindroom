@@ -265,19 +265,14 @@ def message_preview(body: object, max_length: int = 120) -> str:
 def bundled_replacement_candidates(event_source: Mapping[str, Any]) -> list[dict[str, Any]]:
     """Return bundled replacement candidates in preference order.
 
-    One order, shared by every reader, because the alternative is what this
-    replaced: a preview and a reconstructed history disagreeing about which
-    edit a message currently shows, for a source carrying both keys.
-
     ``latest_event`` before ``event`` is the order that is correct when they
     differ. ``event`` is whichever replacement the server chose to bundle;
     ``latest_event`` is the statement that this is the most recent one, which
     is the question a reader is asking. The bare aggregation is last because it
     is a stub rather than an event and only sometimes carries enough to parse.
 
-    Whether a candidate may be trusted is not decided here. Consumers differ on that
-    -- a preview validates the sender, a history read parses and type-checks --
-    so this yields candidates and each reader refuses the ones it cannot use.
+    Whether a candidate may be trusted is not decided here: the caller validates
+    each candidate's sender and skips the ones it cannot use.
     """
     candidates: list[dict[str, Any]] = []
     unsigned = event_source.get("unsigned")
@@ -324,7 +319,7 @@ async def bundled_replacement_body(
     return None
 
 
-def room_message_fallback_body(event: nio.Event) -> str:
+def _room_message_fallback_body(event: nio.Event) -> str:
     """Return one best-effort Matrix body for a room message event."""
     if is_visible_room_message(event):
         return event.body
@@ -362,7 +357,7 @@ async def thread_root_body_preview(
     resolved_event_source, visible_body = await resolve_visible_event_source(
         event_source,
         client,
-        fallback_body=room_message_fallback_body(event),
+        fallback_body=_room_message_fallback_body(event),
         config=config,
         runtime_paths=runtime_paths,
         trusted_sender_ids=trusted_sender_ids,
@@ -450,11 +445,11 @@ def _edit_payload_rank(event: VisibleRoomMessage) -> tuple[bool, int, str]:
 
 @dataclass(slots=True)
 class ThreadEditCandidates:
-    """Replacement candidates for one reconstruction, kept per original and per sender.
+    """Replacement candidates among raw message events, kept per original and per sender.
 
-    Matrix replacement events are only legitimate from the sender of the event they replace, but a
-    thread is reconstructed from raw timeline events rather than from the homeserver's bundled
-    relations, so nothing upstream has applied that rule. Candidates are therefore kept per sender
+    Matrix replacement events are only legitimate from the sender of the event they replace, but
+    raw timeline events carry no homeserver-applied bundled relations, so nothing upstream has
+    applied that rule. Candidates are therefore kept per sender
     and the sender check is applied when an edit is matched to its original, which is the first
     point where the original's sender is known. Keeping only a single global newest candidate
     would let one foreign edit hide the newest legitimate one.
@@ -490,10 +485,6 @@ class ThreadEditCandidates:
         """Return every original event ID some candidate claims to replace."""
         return list(self._by_original_and_sender)
 
-    def __len__(self) -> int:
-        """Return how many candidates are kept, one per original and sender."""
-        return sum(len(by_sender) for by_sender in self._by_original_and_sender.values())
-
     def winner_for(
         self,
         original_event_id: str,
@@ -523,23 +514,11 @@ async def apply_latest_edits_to_messages(
     *,
     messages_by_event_id: dict[str, ResolvedVisibleMessage],
     edit_candidates: ThreadEditCandidates,
-    synthesize_unseen_originals: bool = True,
     trusted_sender_ids: Collection[str] = (),
 ) -> None:
-    """Apply latest edits to message records, reconstructing unseen originals when allowed.
-
-    ``synthesize_unseen_originals=False`` is for a read scoped to one thread. Such a read has no
-    way to place a message it never saw: the original carries the relation, the replacement
-    inherits it rather than restating it, and applying ``m.new_content`` ignores any relation
-    written inside the replacement. Nothing left could admit the reconstruction except the
-    replacement's own claim to belong here, so the read declines to contain it at all - saying its
-    placement is unknown would not undo it having been published into this thread's answer.
-    """
+    """Apply latest edits to message records, reconstructing originals that were never seen."""
     for original_event_id in edit_candidates.original_event_ids():
         existing_message = messages_by_event_id.get(original_event_id)
-        # Bail out before resolving potentially large edit payloads from sidecar storage.
-        if existing_message is None and not synthesize_unseen_originals:
-            continue
         edit_event = edit_candidates.winner_for(
             original_event_id,
             sender=None if existing_message is None else existing_message.sender,
@@ -645,7 +624,6 @@ __all__ = [
     "replace_visible_message",
     "resolve_latest_visible_messages",
     "resolve_visible_event_source",
-    "room_message_fallback_body",
     "thread_root_body_preview",
     "trusted_visible_sender_ids",
 ]

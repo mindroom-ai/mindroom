@@ -88,7 +88,7 @@ def _resolve_speech_service(
     agent_name: str,
     component: str,
     room_id: str | None,
-    warn_if_unavailable: bool = True,
+    warn_if_unavailable: bool,
 ) -> SpeechServiceOptions | None:
     """Resolve one independently credentialed cloud or local speech service."""
     base_url = normalize_speech_base_url(service.host)
@@ -100,16 +100,16 @@ def _resolve_speech_service(
             api_key = get_api_key_for_service(service.credentials_service, runtime_paths)
         elif service.provider == "openai_compatible":
             api_key = LOCAL_OPENAI_API_KEY_DEFAULT
-    if not api_key and warn_if_unavailable:
-        logger.warning(
-            "call_join_skipped_no_speech_key",
-            room_id=room_id,
-            agent=agent_name,
-            component=component,
-            provider=service.provider,
-            credentials_service=service.credentials_service,
-        )
     if not api_key:
+        if warn_if_unavailable:
+            logger.warning(
+                "call_join_skipped_no_speech_key",
+                room_id=room_id,
+                agent=agent_name,
+                component=component,
+                provider=service.provider,
+                credentials_service=service.credentials_service,
+            )
         return None
     return SpeechServiceOptions(
         provider=service.provider,

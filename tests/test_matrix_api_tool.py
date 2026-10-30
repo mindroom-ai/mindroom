@@ -27,7 +27,6 @@ from mindroom.custom_tools.matrix_api import MatrixApiTools, _MatrixSearchRespon
 from mindroom.custom_tools.matrix_helpers import check_rate_limit
 from mindroom.dispatch_source import TRUSTED_INTERNAL_RELAY_SOURCE_KIND
 from mindroom.entity_resolution import entity_identity_registry
-from mindroom.matrix.thread_mutation_impact import MutationThreadImpactState
 from mindroom.message_target import MessageTarget
 from mindroom.tool_system.metadata import TOOL_METADATA, get_tool_by_name
 from mindroom.tool_system.runtime_context import ToolRuntimeContext, tool_runtime_context
@@ -545,9 +544,9 @@ async def test_matrix_api_send_event_delegates_thread_classification_to_shared_h
 
     with (
         patch(
-            "mindroom.custom_tools.matrix_api.resolve_event_thread_impact",
-            new=AsyncMock(return_value=MutationThreadImpactState.THREADED),
-        ) as mock_resolve_thread_impact,
+            "mindroom.custom_tools.matrix_api.event_thread_membership_known",
+            new=AsyncMock(return_value=True),
+        ) as mock_thread_membership_known,
         tool_runtime_context(ctx),
     ):
         payload = json.loads(
@@ -559,7 +558,7 @@ async def test_matrix_api_send_event_delegates_thread_classification_to_shared_h
         )
 
     assert payload["status"] == "ok"
-    mock_resolve_thread_impact.assert_awaited_once()
+    mock_thread_membership_known.assert_awaited_once()
 
 
 @pytest.mark.asyncio
@@ -860,9 +859,9 @@ async def test_matrix_api_redact_delegates_thread_classification_to_shared_helpe
 
     with (
         patch(
-            "mindroom.custom_tools.matrix_api.resolve_redaction_thread_impact",
-            new=AsyncMock(return_value=MutationThreadImpactState.THREADED),
-        ) as mock_resolve_thread_impact,
+            "mindroom.custom_tools.matrix_api.redaction_thread_membership_known",
+            new=AsyncMock(return_value=True),
+        ) as mock_thread_membership_known,
         tool_runtime_context(ctx),
     ):
         payload = json.loads(
@@ -874,7 +873,7 @@ async def test_matrix_api_redact_delegates_thread_classification_to_shared_helpe
         )
 
     assert payload["status"] == "ok"
-    mock_resolve_thread_impact.assert_awaited_once()
+    mock_thread_membership_known.assert_awaited_once()
 
 
 @pytest.mark.asyncio

@@ -32,11 +32,11 @@ from mindroom.matrix.large_messages import (
     _calculate_delivery_event_size,
     _create_preview,
     _oversized_nonterminal_streaming_edit_next_allowed_at,
-    _upload_text_as_mxc,
     calculate_event_size,
     is_edit_message,
     prepare_large_message,
     should_send_oversized_nonterminal_streaming_edit,
+    upload_json_sidecar,
 )
 from mindroom.matrix.media import parse_matrix_media_event_source
 from mindroom.matrix.message_builder import markdown_to_html
@@ -72,17 +72,20 @@ def _large_text_content(prefix: str) -> dict[str, str]:
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("encrypted", [False, True])
-@pytest.mark.parametrize(
-    ("mimetype", "filename"),
-    [("text/plain", "message.txt"), ("text/html", "message.html"), ("application/json", "message-content.json")],
-)
-async def test_text_upload_preserves_bytes_and_metadata(encrypted: bool, mimetype: str, filename: str) -> None:
+async def test_json_sidecar_upload_preserves_bytes_and_metadata(encrypted: bool) -> None:
     """Sidecars retain plaintext size and type while uploading decryptable bytes under the right name."""
     client = MagicMock(spec=nio.AsyncClient)
     client.upload.return_value = (nio.UploadResponse("mxc://server/sidecar"), None)
-    text = "Sidecar with UTF-8: café"
+    text = '{"body":"Sidecar with UTF-8: café"}'
+    mimetype = "application/json"
+    filename = "message-content.json"
 
-    uri, info = await _upload_text_as_mxc(client, text, mimetype=mimetype, room_encrypted=encrypted)
+    uri, info = await upload_json_sidecar(
+        client,
+        "!room:localhost",
+        {"body": "Sidecar with UTF-8: café"},
+        room_encrypted=encrypted,
+    )
 
     assert uri == "mxc://server/sidecar"
     assert info is not None
@@ -113,7 +116,7 @@ async def test_text_upload_preserves_bytes_and_metadata(encrypted: bool, mimetyp
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("missing_field", ["key", "iv", "hashes"])
-async def test_text_upload_rejects_incomplete_encryption_metadata(missing_field: str) -> None:
+async def test_json_sidecar_upload_rejects_incomplete_encryption_metadata(missing_field: str) -> None:
     """Sidecars handle malformed SDK metadata as an encryption failure before uploading."""
     client = _UploadClient(nio.UploadResponse("mxc://server/sidecar"))
     encryption = {
@@ -125,7 +128,10 @@ async def test_text_upload_rejects_incomplete_encryption_metadata(missing_field:
     del encryption[missing_field]
 
     with patch("mindroom.matrix.media.crypto.attachments.encrypt_attachment", return_value=(b"encrypted", encryption)):
-        assert await _upload_text_as_mxc(client, "secret", room_encrypted=True) == (None, None)
+        assert await upload_json_sidecar(client, "!room:localhost", {"body": "secret"}, room_encrypted=True) == (
+            None,
+            None,
+        )
 
     assert client.uploaded_data is None
 

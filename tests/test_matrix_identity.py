@@ -468,12 +468,12 @@ class TestHelperFunctions:
         assert state.accounts["agent_general"].domain == self.config.get_domain(runtime_paths)
         assert not state_file.with_name("matrix_state.yaml.lock").exists()
 
-    def test_matrix_state_save_is_atomic_without_advisory_lock(
+    def test_matrix_state_update_is_atomic_without_advisory_lock(
         self,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        """Matrix state saves should use temp-file replacement, not blocking file locks."""
+        """Matrix state updates should use temp-file replacement, not blocking file locks."""
         self.config = _bind_runtime_paths(self.config, tmp_path)
         runtime_paths = runtime_paths_for(self.config)
         state_file = constants_mod.matrix_state_file(runtime_paths=runtime_paths)
@@ -484,9 +484,10 @@ class TestHelperFunctions:
 
         monkeypatch.setattr(fcntl, "flock", _fail_flock)
 
-        state = MatrixState.load(runtime_paths=runtime_paths)
-        state.add_account("agent_general", "mindroom_general", "pw", domain=domain)
-        save_matrix_state(state, runtime_paths)
+        update_matrix_state(
+            runtime_paths,
+            lambda state: state.add_account("agent_general", "mindroom_general", "pw", domain=domain),
+        )
 
         assert yaml.safe_load(state_file.read_text(encoding="utf-8"))["accounts"]["agent_general"]["domain"] == domain
         assert not state_file.with_name("matrix_state.yaml.lock").exists()

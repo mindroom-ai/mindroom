@@ -116,7 +116,7 @@ class MatrixState(BaseModel):
         return aliases
 
     def set_space_room_id(self, room_id: str | None) -> None:
-        """Persist the root Matrix Space room ID."""
+        """Set the root Matrix Space room ID."""
         self.space_room_id = room_id
 
 

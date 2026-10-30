@@ -28,21 +28,6 @@ if TYPE_CHECKING:
     from mindroom.tool_system.runtime_context import ToolRuntimeContext
 
 
-class _FilteredHistoryClient(FakeClient):
-    """A homeserver that also accepts the event-type filter room scans send."""
-
-    async def room_messages(
-        self,
-        room_id: str,
-        start: str | None = None,
-        direction: object = None,
-        limit: int = 10,
-        message_filter: object = None,
-    ) -> nio.RoomMessagesResponse | nio.RoomMessagesError:
-        del message_filter
-        return await super().room_messages(room_id, start=start, direction=direction, limit=limit)
-
-
 @pytest.fixture
 def principal(journal_store: EventJournalStore) -> PrincipalStore:
     """Return the general agent's projection."""
@@ -67,29 +52,24 @@ def _context(tmp_path: Path, principal: PrincipalStore, client: FakeClient) -> T
     )
 
 
-def _thread_with_one_reply(**client_fields: object) -> FakeClient:
+def _thread_with_one_reply() -> FakeClient:
     root = raw("$root", "what should we do?", ts=1_000)
     reply = raw("$reply", "this", ts=2_000, thread_id="$root")
-    return _FilteredHistoryClient(
-        events={"$root": root, "$reply": reply},
-        relations={"$root": [reply]},
-        **client_fields,
-    )
+    return FakeClient(events={"$root": root, "$reply": reply}, relations={"$root": [reply]})
 
 
 @pytest.mark.asyncio
-async def test_root_proof_survives_an_empty_history_page_that_has_more_after_it(
+async def test_a_root_with_a_threaded_reply_is_proven_without_reading_room_history(
     tmp_path: Path,
     principal: PrincipalStore,
 ) -> None:
-    """An empty `/messages` page with an `end` token is not the end of the room, so the thread is still proven."""
-    root = raw("$root", "what should we do?", ts=1_000)
-    reply = raw("$reply", "this", ts=2_000, thread_id="$root")
-    client = _thread_with_one_reply(pages=[([], "token-1"), ([reply, root], None)])
+    """A relation-free message with a threaded reply is its thread's root, proven from its thread alone."""
+    client = _thread_with_one_reply()
 
     root_id, error = await resolve_current_room_thread_root(_context(tmp_path, principal, client), "$root")
 
     assert (root_id, error) == ("$root", None)
+    assert client.history_pages == 0
 
 
 @pytest.mark.asyncio
@@ -99,7 +79,7 @@ async def test_a_message_nobody_replied_to_in_a_thread_is_not_a_thread_root(
 ) -> None:
     """A relation-free message without threaded replies resolves to no thread, and the tool says so."""
     root = raw("$root", "what should we do?", ts=1_000)
-    client = _FilteredHistoryClient(events={"$root": root}, pages=[([root], None)])
+    client = FakeClient(events={"$root": root})
 
     root_id, error = await resolve_current_room_thread_root(_context(tmp_path, principal, client), "$root")
 
@@ -197,21 +177,6 @@ async def test_a_blank_event_id_resolves_to_no_thread_without_asking_the_homeser
 
     assert await _resolve(principal, client, event_id) is None
     assert client.fetched == []
-
-
-@pytest.mark.asyncio
-async def test_a_plain_reply_to_a_thread_reply_resolves_to_that_thread(principal: PrincipalStore) -> None:
-    """A bridge's plain reply to a threaded message belongs to the thread it answers, with no proof read."""
-    thread_reply = raw("$thread-reply", "reply", ts=2_000, thread_id="$root")
-    client = _thread(
-        "$root",
-        thread_reply,
-        events={"$thread-reply": thread_reply, "$plain-reply": _reply("$plain-reply", to="$thread-reply", ts=3_000)},
-    )
-
-    assert await _resolve(principal, client, "$plain-reply") == "$root"
-    assert client.fetched == ["$plain-reply", "$thread-reply"]
-    assert client.relation_calls == 0
 
 
 @pytest.mark.asyncio

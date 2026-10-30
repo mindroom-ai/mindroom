@@ -187,11 +187,6 @@ def _add_room(
     update_matrix_state(runtime_paths, lambda state: state.add_room(room_key, room_id, alias, name))
 
 
-def _remove_room(room_key: str, runtime_paths: RuntimePaths) -> bool:
-    """Remove a room from the state."""
-    return update_matrix_state(runtime_paths, lambda state: state.rooms.pop(room_key, None) is not None)
-
-
 async def _reconcile_joined_existing_room(
     client: nio.AsyncClient,
     room_key: str,
@@ -390,7 +385,7 @@ async def _ensure_room_exists(
     if existing_room is not None:
         # Remove stale entry from state
         logger.debug("managed_room_state_entry_removed", room_key=room_key)
-        _remove_room(room_key, runtime_paths=runtime_paths)
+        update_matrix_state(runtime_paths, lambda state: state.rooms.pop(room_key, None))
 
     topic = configured_room_topic(room_key, config) or await generate_room_topic_ai(
         room_key,
@@ -552,9 +547,6 @@ async def _ensure_root_space_exists(
     if not config.matrix_space.enabled:
         return None
 
-    # Read once and write only after the awaits below, through the one writer:
-    # a copy saved after them would overwrite whatever another writer, such as
-    # a bot logging in, saved meanwhile.
     known_space_room_id = matrix_state.matrix_state_for_runtime(runtime_paths).space_room_id
     joined_room_ids = await get_joined_rooms(client) or []
     if known_space_room_id and known_space_room_id in joined_room_ids:
