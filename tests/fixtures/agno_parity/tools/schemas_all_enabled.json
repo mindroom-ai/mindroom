@@ -3264,10 +3264,13 @@
     "functions": [
       {
         "name": "generate_image",
-        "description": null,
+        "description": "Generate an image through the Gemini content-generation API.",
         "parameters": {
           "type": "object",
           "properties": {
+            "prompt": {
+              "type": "string"
+            },
             "mindroom_output_path": {
               "anyOf": [
                 {
@@ -3281,7 +3284,9 @@
               "description": "Optional MindRoom-managed workspace-relative path. If set, the full supported tool output is written to this file in your workspace and the tool returns only a compact receipt. Use this for large output you plan to inspect later with file, coding, python, or shell tools."
             }
           },
-          "required": []
+          "required": [
+            "prompt"
+          ]
         },
         "strict": false,
         "requires_confirmation": false,
