@@ -37,6 +37,6 @@
 
 - A plaintext file, audio, or canvas upload is rechecked before its event is sent, but encryption enabled in the moment between that recheck and the send still sends the plaintext reference; the window holds no network round trip except the send itself.
   Approval cards are frozen and sent later, so their argument sidecars are always encrypted instead.
-- A redaction or reply whose target has an edit this bot cannot decrypt is refused, because that thread's walk is incomplete.
+- A tool or `matrix_api` mutation that needs a negative root proof is refused when its target message, or any event related to it in its thread (a reply, an edit, a reaction), is one this bot cannot decrypt or read, because that thread's walk is incomplete.
 - A thread longer than one projected page (2,000 messages) is never summarized automatically.
 - The room timeline read of the `matrix_message` tool still folds edits client-side over raw `/messages` pages; it answers "what was said in this room lately" across threads, which the projection has no read for.
