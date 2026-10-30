@@ -60,6 +60,7 @@ from mindroom.matrix.large_messages import (
 )
 from mindroom.message_target import MessageTarget
 from mindroom.reply_presentation import NoteKind, Presentation, Segment, note_segment
+from mindroom.reply_scope import current_span
 from mindroom.response_sources import ResponseSources
 from mindroom.runtime_shutdown import ORDERLY_SHUTDOWN
 from mindroom.tool_system.events import ToolTraceEntry
@@ -878,6 +879,36 @@ class TestTurnDeliveryGoesThroughTheOutbox:
         assert outcome.ending == Failed(FailureCause.HOOK_FAILED)
         assert outcome.event_id is None
         send_text.assert_not_awaited()
+
+    async def test_a_stop_recorded_while_a_silent_schedule_s_hook_fails_ends_it_cancelled(
+        self,
+        tmp_path: Path,
+        alice: PrincipalStore,
+    ) -> None:
+        """A Stop that lands while a failing hook runs turns the failure note into the cancellation, and the ending too."""
+        gateway = _gateway(tmp_path, alice)
+
+        async def stop_then_fail(**_kwargs: object) -> ResponseDraft:
+            handle = current_span()
+            assert handle is not None
+            assert await alice.replies.stop(handle.reply_id, receipt_order=1, now_ns=time.time_ns()) is not None
+            msg = "hook failed"
+            raise RuntimeError(msg)
+
+        gateway.deps.response_hooks.apply_before_response = AsyncMock(side_effect=stop_then_fail)
+        send = AsyncMock(return_value=DeliveredMatrixEvent("$note", {"body": "stopped"}))
+
+        with patch("mindroom.delivery_gateway.send_message_outcome", send):
+            outcome = await final_in_span(
+                gateway,
+                alice,
+                self._final_request("answer", source_kind=SILENT_SCHEDULE_SOURCE_KIND),
+            )
+
+        assert outcome.ending == Cancelled("user_stop")
+        reply = await alice.replies.for_sources(("$cause",))
+        assert reply is not None
+        assert reply.state is rl.ReplyState.CANCELLED
 
     async def test_a_final_answer_is_enqueued_before_it_is_sent(
         self,
@@ -3601,34 +3632,3 @@ async def test_compaction_failure_notice_says_the_reply_continues_without_compac
     assert mock_edit.await_args.args[3]["body"] == (
         "Compaction failed; continuing without compaction. summary model unavailable"
     )
-
-
-async def test_a_stop_recorded_before_a_failure_note_turns_the_note_into_the_cancellation(
-    tmp_path: Path,
-    alice: PrincipalStore,
-) -> None:
-    """A span ending with a failure note after its reply recorded a Stop shows the cancellation and reports the Stop."""
-    gateway = _gateway(tmp_path, alice)
-    target = MessageTarget.resolve(_ROOM_ID, None, None, room_mode=True)
-    send = AsyncMock(return_value=DeliveredMatrixEvent("$placeholder", {"body": "stopped"}))
-
-    with patch("mindroom.delivery_gateway.send_message_outcome", send):
-        async with reply_span(
-            alice,
-            source_event_id="$cause",
-            room_id=_ROOM_ID,
-            placeholder_event_id="$placeholder",
-        ) as handle:
-            assert await alice.replies.stop(handle.reply_id, receipt_order=1, now_ns=time.time_ns()) is not None
-            outcome = await gateway._end_reply_span_with_note(
-                handle,
-                target,
-                state=rl.ReplyState.FAILED,
-                note=note_segment(NoteKind.ERROR, "boom"),
-                ending=Failed(FailureCause.ERROR, "boom"),
-            )
-
-    assert outcome.ending == Cancelled("user_stop")
-    reply = await alice.replies.load(handle.reply_id)
-    assert reply is not None
-    assert reply.state is rl.ReplyState.CANCELLED
