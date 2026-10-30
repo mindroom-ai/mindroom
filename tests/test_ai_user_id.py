@@ -311,13 +311,18 @@ def test_reply_usage_publishes_its_keys_in_order_with_fractions_as_decimal_strin
         ("duration", "0.333333333333"),
         ("uncached_input_tokens", 0),
     ]
-    nothing_reported = ReplyUsage(
-        tokens=TokenCounts(),
-        time_to_first_token=None,
-        duration=None,
-        uncached_input_tokens=5,
-    )
+    nothing_reported = ReplyUsage.of(RunMetrics(), provider="OpenAI Chat", configured_provider="openai", model_id="m")
     assert nothing_reported.to_wire() == {}
+
+
+def test_reply_usage_publishes_no_uncached_input_when_the_provider_reported_no_usage() -> None:
+    """A request whose provider reported no usage still counts under its model, timed, but splits no input."""
+    metrics = RunMetrics(duration=1.5)
+    metrics.add(MessageMetrics(duration=1.5), model_id="m", provider="OpenAI Chat")
+
+    usage = ReplyUsage.of(metrics, provider="OpenAI Chat", configured_provider="openai", model_id="m")
+
+    assert usage.to_wire() == {"duration": "1.5"}
 
 
 def test_reply_usage_publishes_a_counter_its_order_omits(monkeypatch: pytest.MonkeyPatch) -> None:

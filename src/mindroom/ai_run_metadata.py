@@ -48,6 +48,7 @@ class ReplyUsage:
     tokens: TokenCounts
     time_to_first_token: float | None
     duration: float | None
+    # None when the provider reported no usage, whose input then has no split to publish.
     uncached_input_tokens: int | None
 
     @classmethod
@@ -60,16 +61,20 @@ class ReplyUsage:
         model_id: str | None,
     ) -> ReplyUsage:
         """Return the usage a run's metrics publish, for the model that answered when ``metrics`` has no breakdown."""
-        uncached_input_tokens = _uncached_input_tokens(
-            metrics,
-            provider=provider,
-            configured_provider=configured_provider,
-            model_id=model_id,
+        uncached_input_tokens = (
+            _uncached_input_tokens(
+                metrics,
+                provider=provider,
+                configured_provider=configured_provider,
+                model_id=model_id,
+            )
+            if metrics.reported
+            else None
         )
         return cls(metrics.tokens, metrics.time_to_first_token, metrics.duration, uncached_input_tokens)
 
     def to_wire(self) -> dict[str, Any]:
-        """Return the published object, empty when nothing was reported; the uncached input is published as given."""
+        """Return the published object; the uncached input is published as given, zero included."""
         values = {
             **self.tokens.to_dict(first=_PUBLISHED_COUNTERS),
             "time_to_first_token": self.time_to_first_token,
@@ -80,7 +85,7 @@ class ReplyUsage:
             for key, value in values.items()
             if isinstance(value, (float, str)) or (isinstance(value, int) and value != 0)
         }
-        if wire and self.uncached_input_tokens is not None:
+        if self.uncached_input_tokens is not None:
             wire["uncached_input_tokens"] = self.uncached_input_tokens
         return wire
 
