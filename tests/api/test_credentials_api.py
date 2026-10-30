@@ -1947,6 +1947,21 @@ class TestCredentialsAPI:
 
         mock_credentials_manager.delete_credentials.assert_called_once_with("email")
 
+    def test_deleting_a_credential_only_the_environment_supplies_names_its_variable(
+        self,
+        client: TestClient,
+        mock_credentials_manager: MagicMock,
+    ) -> None:
+        """A key the environment supplies cannot be deleted here, so the route says where it comes from."""
+        mock_credentials_manager.load_credentials.return_value = {"api_key": "sk-env"}
+        mock_credentials_manager.declared_variable.return_value = "OPENAI_API_KEY"
+
+        response = client.delete("/api/credentials/openai")
+
+        assert response.status_code == 409
+        assert "OPENAI_API_KEY" in response.json()["detail"]
+        mock_credentials_manager.delete_credentials.assert_not_called()
+
     def test_list_services(
         self,
         client: TestClient,

@@ -485,6 +485,12 @@ async def delete_credentials(
     existing_credentials = access.load(service)
     if existing_credentials:
         access.reject_stored_oauth_credentials(existing_credentials)
+    variable = access.target.base_manager.declared_variable(service) if access.target.worker_scope is None else None
+    if variable is not None:
+        raise HTTPException(
+            status_code=409,
+            detail=f"{service} comes from {variable} in the environment; remove it there and restart MindRoom.",
+        )
     previous_embedder_runtime = _active_embedder_runtime(request, access)
     access.delete(service)
     _handle_runtime_credential_change(request, access, previous_embedder_runtime)

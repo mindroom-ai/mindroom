@@ -1867,12 +1867,15 @@ def test_get_tools_unknown_agent_previews_draft_scope(test_client: TestClient) -
 
 
 @pytest.mark.parametrize("agent_name", ["draft_agent", "general"], ids=["unknown-agent", "scope-override"])
-def test_get_tools_draft_scope_preview_ignores_ungranted_global_credentials(
+@pytest.mark.parametrize(("granted", "expected"), [(False, "requires_config"), (True, "available")])
+def test_get_tools_draft_scope_preview_reads_what_the_scope_reads(
     test_client: TestClient,
     agent_name: str,
+    granted: bool,
+    expected: str,
 ) -> None:
-    """A draft scope previews what that scope would read, so an ungranted global key does not make a tool available."""
-    config = _config_with_worker_scope("shared")
+    """A draft scope previews what that scope would read: a global key makes a tool available only when granted."""
+    config = _config_with_worker_scope("shared", worker_grantable_credentials=["weather"] if granted else None)
     runtime_paths = main._app_runtime_paths(main.app)
     get_runtime_credentials_manager(runtime_paths).save_credentials(
         "weather",
@@ -1898,7 +1901,7 @@ def test_get_tools_draft_scope_preview_ignores_ungranted_global_credentials(
 
     assert response.status_code == 200
     assert response.json()["status_authoritative"] is False
-    assert response.json()["tools"][0]["status"] == "requires_config"
+    assert response.json()["tools"][0]["status"] == expected
 
 
 def test_get_tools_requires_agent_reply_permission_for_agent_scoped_status(test_client: TestClient) -> None:

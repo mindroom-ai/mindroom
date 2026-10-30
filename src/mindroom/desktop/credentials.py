@@ -20,7 +20,15 @@ def _desktop_credentials_manager(
     agent_name: str,
 ) -> CredentialsManager:
     """Return the store the credential policy names for one requester's Desktop identity with one agent."""
-    identity = ToolExecutionIdentity("matrix", agent_name, requester_id, None, None, None, None)
+    identity = ToolExecutionIdentity(
+        channel="matrix",
+        agent_name=agent_name,
+        requester_id=requester_id,
+        room_id=None,
+        thread_id=None,
+        resolved_thread_id=None,
+        session_id=None,
+    )
     target = resolve_worker_target(None, agent_name, execution_identity=identity)
     layers = credential_layers(_DESKTOP_SERVICE, credentials_manager=credentials_manager, worker_target=target)
     return layers.writable_store()
