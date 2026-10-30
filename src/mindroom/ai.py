@@ -30,7 +30,6 @@ from mindroom.delegation.lifecycle import (
     delegation_grant,
     note_child_run_id,
     observe_child_event,
-    observe_child_record,
 )
 from mindroom.delegation.state import child_execution_identity
 from mindroom.error_handling import get_user_friendly_error_message
@@ -79,8 +78,10 @@ from mindroom.response_turn import (
     build_llm_request_log_context,
     build_matrix_run_metadata,
     collect_streamed_response_content,
+    is_empty_reply,
     pause_without_approval_error,
     paused_attempt_from_response,
+    replays_as_turn,
     skip_unapproved_attempt,
     stream_response_turn,
     stream_with_llm_request_log_context,
@@ -123,10 +124,7 @@ if TYPE_CHECKING:
     from mindroom.llm.provider import ModelRequest
     from mindroom.llm.runs import AnyRunRecord, ToolExecution
     from mindroom.llm.usage import RunMetrics
-    from mindroom.response_turn import (
-        EmptyRunDiscard,
-        TurnRunState,
-    )
+    from mindroom.response_turn import TurnRunState
     from mindroom.tool_system.events import ToolTraceEntry
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 
@@ -296,19 +294,9 @@ def _agent_turn_adapter(
             entity_name=agent_name,
         )
 
-    def _discard_empty_run(scope_context: ScopeSessionContext | None, discard: EmptyRunDiscard) -> None:
-        ai_runtime.discard_empty_completed_run(
-            scope_context=scope_context,
-            session_id=discard.session_id or session_id,
-            run_id=discard.run_id,
-            entity_name=agent_name,
-            output_tokens=discard.output_tokens,
-        )
-
     return TurnAdapter[AIStreamChunk](
         load_scope=_load_scope,
         run_attempt=run_attempt,
-        discard_empty_run=_discard_empty_run,
         on_scope_loaded=_on_scope_loaded,
         finalize_attempt=finalize_attempt,
         make_text_chunk=TextDelta,
@@ -423,6 +411,18 @@ def _stream_completed_without_visible_output(state: _StreamingAttemptState, reco
     return not visible_text and state.observed_tool_calls == 0
 
 
+def _is_empty_reply(state: _StreamingAttemptState, record: AnyRunRecord) -> bool:
+    """Whether the attempt's run is an empty reply (``is_empty_reply``) whose stream showed no text either.
+
+    A provider's final message can hold less than it streamed, and the user saw what streamed. A run whose events reach
+    the attempt directly hands its record to its persist callback once they have passed the attempt, so the store
+    reads what the resolution reads; a queue between the run and the attempt, such as the agent CLI's merged stream or
+    the delegation driver's continuation stream, can still hold the last of them, and then the record's content, which
+    holds every text an adapter finished with, decides.
+    """
+    return is_empty_reply(record) and _stream_completed_without_visible_output(state, record)
+
+
 def _attempt_request_log_context(run_context: _AgentRunContext) -> dict[str, object]:
     """Build request-log context for the exact prompt used by one provider attempt."""
     ctx = run_context.turn
@@ -454,7 +454,14 @@ def _begin_attempt(
     """Record one prepared attempt on the turn's run state, and return where it is stored and its request."""
     prepared_run = run_context.prepared_run
     run.run_metadata = run_context.metadata
-    storage = bind_turn_session(run)
+    storage = bind_turn_session(
+        run,
+        replays=lambda record: replays_as_turn(
+            run_context.turn,
+            record,
+            is_empty=_is_empty_reply(stream_state, record),
+        ),
+    )
     attempt = run.attempt = _AgentAttempt(
         run_input=prepared_run.run_input(media),
         run_id=continuation.active_run_id or str(uuid4()),
@@ -1297,15 +1304,7 @@ async def stream_agent_response(  # noqa: C901, PLR0915
 
         record = state.terminal.record
         if state.error is not None:
-            if record is not None:
-                # A failed run stored its record and raised; a delegated child's observer learns the failure from it.
-                observe_child_record(record)
-            if skipped := skip_unapproved_attempt(
-                ctx.participation,
-                reason="run_failed_before_decision",
-                session_id=session_id,
-                run_id=attempt.run_id,
-            ):
+            if skipped := skip_unapproved_attempt(ctx.participation, reason="run_failed_before_decision"):
                 yield AttemptResolved(skipped)
             else:
                 error_text = get_user_friendly_error_message(state.error, agent_name, runtime_paths=runtime_paths)
@@ -1327,13 +1326,7 @@ async def stream_agent_response(  # noqa: C901, PLR0915
         if record is None or not state.finished:
             raise without_terminal_record(RunRecord, attempt.run_id)
 
-        if skipped := skip_unapproved_attempt(
-            ctx.participation,
-            reason="participation_declined",
-            session_id=session_id,
-            run_id=attempt.run_id,
-            output_tokens=_reported_tokens(record.metrics).output_tokens or None,
-        ):
+        if skipped := skip_unapproved_attempt(ctx.participation, reason="participation_declined"):
             yield AttemptResolved(skipped)
             return
 
@@ -1367,8 +1360,7 @@ async def stream_agent_response(  # noqa: C901, PLR0915
                 status=final_status,
                 replayable_text=state.assistant_text or final_text,
                 has_visible_content=bool(state.assistant_text or final_text),
-                is_empty=completed_without_output and not record.tools,
-                session_id=record.session_id,
+                is_empty=_is_empty_reply(state, record),
                 run_id=record.run_id,
                 attempt_run_id=attempt.run_id,
                 runtime_model_name=prepared_run.runtime_model_name,

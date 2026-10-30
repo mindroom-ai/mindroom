@@ -1,14 +1,18 @@
-"""OpenAI media toolkit whose transcription input follows the agent's ``file_access``."""
+"""OpenAI media toolkit whose transcription input follows the agent's ``file_access`` and whose speech uses Realtime."""
 
 from __future__ import annotations
 
 from pathlib import Path  # noqa: TC003 - toolkit introspection evaluates constructor annotations.
 from typing import TYPE_CHECKING, Any, Literal, override
+from uuid import uuid4
 
+from agno.media import Audio
+from agno.tools.function import ToolResult
 from agno.tools.openai import OpenAIClient, OpenAITools, OpenAITTSFormat, OpenAITTSModel, OpenAIVoice
 from agno.utils.log import log_error
 
 from mindroom.file_access import resolve_agent_file
+from mindroom.voice.openai_realtime_speech import is_realtime_speech_model, pcm_to_wav, synthesize_realtime_speech
 
 if TYPE_CHECKING:
     from mindroom.config.models import FileAccess
@@ -27,7 +31,7 @@ class MindRoomOpenAITools(OpenAITools):
         transcription_model: str = "whisper-1",
         text_to_speech_voice: OpenAIVoice = "alloy",
         text_to_speech_model: OpenAITTSModel = "tts-1",
-        text_to_speech_format: OpenAITTSFormat = "mp3",
+        text_to_speech_format: OpenAITTSFormat = "wav",
         image_model: str | None = "dall-e-3",
         image_quality: str | None = None,
         image_size: Literal["256x256", "512x512", "1024x1024", "1792x1024", "1024x1792"] | None = None,
@@ -39,6 +43,9 @@ class MindRoomOpenAITools(OpenAITools):
     ) -> None:
         self._workspace_root = tool_output_workspace_root
         self._file_access = file_access
+        if (enable_speech_generation or all) and is_realtime_speech_model(text_to_speech_model):
+            # An async variant of a tool takes its place wherever MindRoom runs the toolkit.
+            kwargs["async_tools"] = [(self._generate_speech, "generate_speech")]
         super().__init__(
             api_key=api_key,
             enable_transcription=enable_transcription,
@@ -91,3 +98,45 @@ class MindRoomOpenAITools(OpenAITools):
             log_error(f"Failed to transcribe audio: {e}")
             return f"Failed to transcribe audio: {e}"
         return transcript
+
+    # AGNO_COMPAT: OpenAITools.generate_speech speaks only through /v1/audio/speech.
+    # Reason: Agno 3.0.9 sends every text-to-speech model to the speech endpoint, whose OpenAI models
+    # (tts-1, tts-1-hd, gpt-4o-mini-tts) shut down on 2027-01-06; their gpt-realtime replacement is served
+    # only over the Realtime API, so the toolkit's default speech would stop working.
+    # Upstream issue: Tracking gap; a search of agno-agi/agno issues and PRs on 2026-10-29 found none.
+    # Upstream PR: None identified.
+    # Remove when: OpenAITools synthesizes gpt-realtime models through the Realtime API, reading the text
+    # verbatim rather than replying to it; keep WAV or PCM output for those models.
+    # Coverage: tests/test_openai_toolkit_speech.py.
+    async def _generate_speech(self, text_input: str) -> ToolResult:
+        """Generate speech from text using OpenAI's Text-to-Speech API.
+        Args:
+            text_input (str): The text to synthesize into speech.
+
+        """  # noqa: D205, D411 - Agno's docstring, so the tool schema stays the same
+        if self.tts_format not in {"wav", "pcm"}:
+            return ToolResult(
+                content=(
+                    f"Failed to generate speech: {self.tts_model} produces only wav or pcm audio, "
+                    f"not {self.tts_format}; set text_to_speech_format to wav or pcm."
+                ),
+            )
+        # OpenAITools refuses to construct without a key.
+        assert self.api_key is not None
+        try:
+            pcm = await synthesize_realtime_speech(
+                text_input,
+                model=self.tts_model,
+                voice=self.tts_voice,
+                api_key=self.api_key,
+            )
+        except Exception as e:
+            log_error(f"Failed to generate speech: {e}")
+            return ToolResult(content=f"Failed to generate speech: {e}")
+        media_id = str(uuid4())
+        audio = Audio(
+            id=media_id,
+            content=pcm_to_wav(pcm) if self.tts_format == "wav" else pcm,
+            mime_type=f"audio/{self.tts_format}",
+        )
+        return ToolResult(content=f"Speech generated successfully with ID: {media_id}", audios=[audio])

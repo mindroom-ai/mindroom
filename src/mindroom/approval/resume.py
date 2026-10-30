@@ -197,7 +197,10 @@ async def forward_resume[R: AnyRunRecord](
     *,
     paused: R,
 ) -> R:
-    """Drain the resume of ``paused``, handing every event but the last to ``on_event``; return its terminal record."""
+    """Drain the resume of ``paused``, handing ``on_event`` every event but a completed or paused record; return it.
+
+    A failed resume's record reaches ``on_event`` before its failure propagates, as its stream ended with it.
+    """
     finished = TerminalRecord(type(paused))
     async with closing_async_stream(events):
         async for event in events:

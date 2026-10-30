@@ -4031,8 +4031,8 @@ class TestMultiAgentOrchestrator:
                 # Only the Matrix login trust accepts the certificate; httpx's default trust does not.
                 monkeypatch.setattr(
                     client_session,
-                    "_verifying_ssl_context",
-                    lambda _runtime_paths: ssl.create_default_context(cafile=certificate_path),
+                    "verifying_ssl_context",
+                    lambda _env: ssl.create_default_context(cafile=certificate_path),
                 )
             runtime_paths = resolve_runtime_paths(
                 config_path=tmp_path / "config.yaml",

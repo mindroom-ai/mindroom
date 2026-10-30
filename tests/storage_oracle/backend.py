@@ -250,7 +250,7 @@ class Driver(ABC):
 
     @abstractmethod
     def discard_run(self, session: ConversationSession, run_id: str) -> object:
-        """Discard an empty or skipped run."""
+        """Delete an empty or skipped run's rows after its save, as earlier releases discarded it."""
 
     @abstractmethod
     def chunk_basis(self, session: ConversationSession, run_ids: Sequence[str], previous_summary: str | None) -> object:
@@ -983,7 +983,11 @@ class Driver(ABC):
         return outcome
 
     def _discard(self, action: Action) -> object:
-        """An empty completed run, or a skipped attempt (the running turn's, when one runs), is discarded."""
+        """An empty completed run, or a skipped attempt (the running turn's, when one runs), is saved, then deleted.
+
+        The action replays earlier releases' save-then-delete, as recorded from the Agno-layout store; the usage-only
+        save a turn now makes of such a run (``ConversationStore._save_usage``) reaches the same rows.
+        """
         if action.index % 2 == 0:
             turn = self._new_turn(action)
             record = deepcopy(turn.record)
