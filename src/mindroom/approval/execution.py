@@ -531,7 +531,10 @@ class AgentApprovalExecution:
                                 recovered.presentation,
                                 prompt=recovered.prompt,
                                 reusable_build=recovered.reusable_build,
-                                resume=TurnResume(continuation_count=recovered.initial_continuation_count),
+                                resume=TurnResume(
+                                    continuation_count=recovered.initial_continuation_count,
+                                    prior_usage=prior_usage_of(persisted),
+                                ),
                                 delegation_depth=recovered.delegation_depth,
                                 media=recovered.media,
                                 config=config,
