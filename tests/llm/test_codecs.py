@@ -463,14 +463,7 @@ def test_stored_fixture_dicts_round_trip_minus_dropped_keys(fixture: str) -> Non
     assert mismatches == {}
 
 
-_METRIC_CODECS: dict[str, Callable[[dict[str, Any]], Any]] = {
-    "message_metrics": MessageMetrics.from_dict,
-    "run_metrics": RunMetrics.from_dict,
-    "model_metrics": ModelMetrics.from_dict,
-}
-
-
-@pytest.mark.parametrize("fixture", sorted(_METRIC_CODECS))
+@pytest.mark.parametrize("fixture", ["message_metrics", "model_metrics", "run_metrics"])
 def test_stored_metrics_keep_agno_key_order_at_every_level(fixture: str) -> None:
     """The counters sit first in Agno's order, in run totals and in each per-model entry alike."""
     stored = list(json.loads((FIXTURE_RUNS / f"{fixture}.json").read_text()).values())
@@ -481,4 +474,4 @@ def test_stored_metrics_keep_agno_key_order_at_every_level(fixture: str) -> None
             )
 
     for value in stored:
-        assert json.dumps(_METRIC_CODECS[fixture](value).to_dict()) == json.dumps(value)
+        assert json.dumps(FIXTURE_CODECS[fixture][0](value).to_dict()) == json.dumps(value)
