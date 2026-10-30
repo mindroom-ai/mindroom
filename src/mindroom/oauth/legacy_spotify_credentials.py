@@ -2,7 +2,7 @@
 
 # LEGACY_COMPAT: Spotify tokens saved by the former `/api/integrations/spotify` routes.
 # Legacy format: a `spotify` credential document holding `access_token`, `refresh_token`, `expires_at`, `username`, and `_source: "ui"` in the store of the unscoped or `shared` scope the dashboard selected (Spotify only ever ran on those); tests/fixtures/legacy_spotify_credentials.json records one.
-# Last legacy release: v2026.10.713, whose Spotify routes wrote it; replacement: the next release connects Spotify through the `spotify` OAuth provider, which stores tokens under `spotify_oauth` and the client under `spotify_oauth_client`.
+# Last legacy release: v2026.10.729, whose Spotify routes wrote it; replacement: the next release connects Spotify through the `spotify` OAuth provider, which stores tokens under `spotify_oauth` and the client under `spotify_oauth_client`.
 # Handling: a scope's `spotify_oauth` store starts with the converted tokens when it is created, read from the exact store the old routes wrote; the issuing client is recorded from `SPOTIFY_CLIENT_ID`, the client the old routes renewed those tokens with, read here only and only while it is still set.
 # After the new store commits, the token fields leave the `spotify` document, which keeps any tool settings, so the conversion runs once per scope; a removal that fails leaves a copy nothing reads.
 # A connection whose client is unknown, or differs from the configured `spotify_oauth_client`, reads as not connected and needs a reconnect.
