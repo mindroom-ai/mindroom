@@ -252,8 +252,17 @@ async def respond(
 ) -> str | PausedAttempt:
     """Run one reply of ``agent_name`` as the response runner does: its text, or the pause it suspended on, as it shows.
 
-    A ``correlation_id`` is the turn's and its tool context's, as a production turn's is.
+    A ``correlation_id`` is the turn's and its tool context's, as a production turn's is. The turn runs as its tool
+    context's identity, as a production turn does.
     """
+    runtime = _delegate_runtime_context(
+        config,
+        runtime_paths,
+        execution_identity=identity,
+        agent_name=agent_name,
+        hook_registry=hook_registry,
+        correlation_id=correlation_id,
+    )
     ctx = replace(
         make_turn_context(
             agent_name,
@@ -265,16 +274,8 @@ async def respond(
             requester_id=identity.requester_id,
         ),
         prompt=prompt,
-        execution_identity=identity,
+        execution_identity=runtime.execution_identity,
         supports_native_tool_approval=True,
-    )
-    runtime = _delegate_runtime_context(
-        config,
-        runtime_paths,
-        execution_identity=identity,
-        agent_name=agent_name,
-        hook_registry=hook_registry,
-        correlation_id=correlation_id,
     )
     with tool_runtime_context(runtime):
         try:
@@ -454,15 +455,14 @@ def _team_runtime(
     identity: ToolExecutionIdentity,
     correlation_id: str | None = None,
 ) -> tuple[ToolExecutionIdentity, ToolRuntimeContext]:
-    team_identity = replace(identity, agent_name=team_name)
     runtime = _delegate_runtime_context(
         config,
         runtime_paths,
-        execution_identity=team_identity,
+        execution_identity=replace(identity, agent_name=team_name),
         agent_name=team_name,
         correlation_id=correlation_id,
     )
-    return team_identity, runtime
+    return runtime.execution_identity, runtime
 
 
 async def respond_team(

@@ -36,13 +36,13 @@ from mindroom.config.main import Config
 from mindroom.constants import resolve_primary_runtime_paths
 from mindroom.tool_system.media_transport import decode_media_result
 from mindroom.tool_system.metadata import get_tool_by_name
+from mindroom.tool_system.runtime_context import detached_tool_scope
 from mindroom.tool_system.tool_function import ToolValue
 from mindroom.tool_system.worker_routing import (
     ToolExecutionIdentity,
     build_agent_toolkit_worker_target,
     resolve_worker_key,
     serialize_tool_execution_identity,
-    tool_execution_identity,
 )
 from mindroom.worker_computer.sessions import ComputerError, ComputerTarget
 from mindroom.workers.backends.docker_config import DockerWorkerBackendConfig
@@ -340,7 +340,7 @@ class Fixture:
             execution_identity=identity,
             runtime_paths=self.paths,
         )
-        with tool_execution_identity(identity):
+        with detached_tool_scope(identity):
             toolkit = get_tool_by_name(
                 "browser_mcp",
                 self.paths,

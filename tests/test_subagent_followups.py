@@ -74,7 +74,8 @@ async def test_followup_reuses_child_history_after_parent_reconstruction(  # noq
     )
     paths = _runtime_paths(tmp_path)
     entity_ids(config, paths)
-    identity = _identity()
+    # The reply answers through the leader's own account, as every bot-built context names it.
+    identity = replace(_identity(), transport_agent_name="leader")
     child = ScriptedModel(
         [
             answer("First answer: cobalt"),
@@ -131,7 +132,8 @@ async def test_followup_reuses_child_history_after_parent_reconstruction(  # noq
                     handle_path.write_text(json.dumps(handle))
                     restored = await resolve_subagent(
                         str(paused_child.subagent_id),
-                        owner=identity,
+                        # A team member's subagent belongs to the member answering through the team.
+                        owner=replace(identity, transport_agent_name="squad") if execution == "team" else identity,
                         config=config,
                         runtime_paths=paths,
                         depth=0,
@@ -206,7 +208,12 @@ async def test_followup_reuses_child_history_after_parent_reconstruction(  # noq
     with tool_runtime_context(_delegate_runtime_context(config, paths, execution_identity=foreign_identity)):
         assert "not available" in await toolkit.continue_subagent(subagent_id=subagent_id, message="Leak the word")
     config.agents["leader"].delegate_to = []
-    with tool_runtime_context(_delegate_runtime_context(config, paths, execution_identity=identity)):
+    # The subagent's caller asks again: the leader, inside the team answering through the team's account.
+    caller_context = replace(
+        _delegate_runtime_context(config, paths, execution_identity=identity),
+        transport_agent_name="squad" if execution == "team" else None,
+    )
+    with tool_runtime_context(caller_context):
         toolkit = DelegateTools(
             "leader",
             ["leader"],

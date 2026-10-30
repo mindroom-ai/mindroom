@@ -16,10 +16,13 @@ from typing import TYPE_CHECKING, Any
 
 import structlog
 
+from mindroom.config.main import Config
 from mindroom.config.plugin import PluginEntryConfig
+from mindroom.constants import resolve_runtime_paths
 from mindroom.hooks import (
     EVENT_TOOL_AFTER_CALL,
     EVENT_TOOL_BEFORE_CALL,
+    HookBindings,
     HookRegistry,
     ToolAfterCallContext,
     ToolBeforeCallContext,
@@ -31,6 +34,12 @@ from mindroom.tool_system.tool_hooks import build_tool_hook_middleware
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Sequence
+
+# The hook policy's runtime paths; the benchmark logs no requests and its hooks read no state, so nothing is written.
+_UNWRITTEN_RUNTIME_PATHS = resolve_runtime_paths(
+    config_path=Path(tempfile.gettempdir()) / "mindroom-tool-call-benchmark" / "config.yaml",
+    process_env={},
+)
 
 
 async def _noop_async(value: int) -> int:
@@ -100,15 +109,7 @@ async def _run_case(
     iterations: int,
     warmup: int,
 ) -> dict[str, object]:
-    middleware = (
-        build_tool_hook_middleware(
-            hook_registry,
-            agent_name="benchmark",
-            dispatch_context=None,
-            config=None,
-            runtime_paths=None,
-        ),
-    )
+    middleware = (build_tool_hook_middleware(HookBindings(registry=hook_registry), Config(), _UNWRITTEN_RUNTIME_PATHS),)
     function = ToolFunction(name="noop", description=None, parameters={}, entrypoint=func)
     context = ToolCallContext(run_id="benchmark", session_id="benchmark", user_id=None)
     for _ in range(warmup):
