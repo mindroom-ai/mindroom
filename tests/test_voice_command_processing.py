@@ -1582,7 +1582,7 @@ async def test_router_visible_voice_echo_keeps_multi_agent_handoff(tmp_path) -> 
         patch("mindroom.voice.handler._download_audio", new_callable=AsyncMock) as mock_download_audio,
         patch("mindroom.voice.handler._handle_voice_message", new_callable=AsyncMock) as mock_voice,
         patch("mindroom.turn_policy.TurnPolicy.can_reply_to_sender_in_room", return_value=True),
-        patch("mindroom.router_relay.suggest_responder_for_message", new_callable=AsyncMock, return_value="home"),
+        patch("mindroom.router.relay.suggest_responder_for_message", new_callable=AsyncMock, return_value="home"),
     ):
         mock_download_audio.return_value = Audio(content=b"voice-bytes", mime_type="audio/ogg")
         mock_voice.return_value = f"{VOICE_PREFIX}summarize this audio"
@@ -1658,7 +1658,7 @@ async def test_router_visible_voice_echo_is_not_duplicated_when_handoff_retries(
         patch("mindroom.voice.handler._download_audio", new_callable=AsyncMock) as mock_download_audio,
         patch("mindroom.voice.handler._handle_voice_message", new_callable=AsyncMock) as mock_voice,
         patch("mindroom.turn_policy.TurnPolicy.can_reply_to_sender_in_room", return_value=True),
-        patch("mindroom.router_relay.suggest_responder_for_message", new_callable=AsyncMock, return_value="home"),
+        patch("mindroom.router.relay.suggest_responder_for_message", new_callable=AsyncMock, return_value="home"),
         patch(
             "mindroom.visible_response_reconciliation.find_response_event_ids_via_room_messages",
             new_callable=AsyncMock,
@@ -1707,7 +1707,7 @@ async def test_router_visible_voice_echo_is_not_duplicated_when_handoff_retries_
         patch("mindroom.voice.handler._download_audio", new_callable=AsyncMock) as mock_download_audio,
         patch("mindroom.voice.handler._handle_voice_message", new_callable=AsyncMock) as mock_voice,
         patch("mindroom.turn_policy.TurnPolicy.can_reply_to_sender_in_room", return_value=True),
-        patch("mindroom.router_relay.suggest_responder_for_message", new_callable=AsyncMock, return_value="home"),
+        patch("mindroom.router.relay.suggest_responder_for_message", new_callable=AsyncMock, return_value="home"),
     ):
         mock_download_audio.return_value = Audio(content=b"voice-bytes", mime_type="audio/ogg")
         mock_voice.return_value = f"{VOICE_PREFIX}summarize this audio"
@@ -1730,7 +1730,7 @@ async def test_router_visible_voice_echo_is_not_duplicated_when_handoff_retries_
         patch("mindroom.voice.handler._download_audio", new_callable=AsyncMock) as mock_download_audio,
         patch("mindroom.voice.handler._handle_voice_message", new_callable=AsyncMock) as mock_voice,
         patch("mindroom.turn_policy.TurnPolicy.can_reply_to_sender_in_room", return_value=True),
-        patch("mindroom.router_relay.suggest_responder_for_message", new_callable=AsyncMock, return_value="home"),
+        patch("mindroom.router.relay.suggest_responder_for_message", new_callable=AsyncMock, return_value="home"),
         patch(
             "mindroom.visible_response_reconciliation.find_response_event_ids_via_room_messages",
             new_callable=AsyncMock,
@@ -1798,7 +1798,7 @@ async def test_router_routes_transcribed_audio_when_multiple_agents_are_present(
         patch("mindroom.voice.handler._download_audio", new_callable=AsyncMock) as mock_download_audio,
         patch("mindroom.voice.handler._handle_voice_message", new_callable=AsyncMock) as mock_voice,
         patch("mindroom.turn_policy.TurnPolicy.can_reply_to_sender_in_room", return_value=True),
-        patch("mindroom.router_relay.suggest_responder_for_message", new_callable=AsyncMock, return_value="home"),
+        patch("mindroom.router.relay.suggest_responder_for_message", new_callable=AsyncMock, return_value="home"),
     ):
         mock_download_audio.return_value = Audio(content=b"voice-bytes", mime_type="audio/ogg")
         mock_voice.return_value = f"{VOICE_PREFIX}summarize this audio"

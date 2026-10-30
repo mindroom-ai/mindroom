@@ -83,7 +83,10 @@ async def test_configured_join_restores_schedules_for_every_bot(tmp_path: Path, 
             new_callable=AsyncMock,
             return_value=0,
         ) as mock_restore_configs,
-        patch("mindroom.bot.AgentBot._send_welcome_message_if_empty", new_callable=AsyncMock) as mock_welcome,
+        patch(
+            "mindroom.bot_room_lifecycle.BotRoomLifecycle.send_welcome_message_if_empty",
+            new_callable=AsyncMock,
+        ) as mock_welcome,
     ):
         await bot.join_configured_rooms()
 
@@ -108,7 +111,10 @@ async def test_router_restores_tasks_without_rejoining_existing_room(tmp_path: P
             new_callable=AsyncMock,
             return_value=1,
         ) as mock_restore_configs,
-        patch("mindroom.bot.AgentBot._send_welcome_message_if_empty", new_callable=AsyncMock) as mock_welcome,
+        patch(
+            "mindroom.bot_room_lifecycle.BotRoomLifecycle.send_welcome_message_if_empty",
+            new_callable=AsyncMock,
+        ) as mock_welcome,
     ):
         await bot.join_configured_rooms()
 

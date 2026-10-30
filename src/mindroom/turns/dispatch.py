@@ -41,7 +41,7 @@ from mindroom.response_payload_preparation import (
 )
 from mindroom.response_runner import PostLockRequestPreparationError, ResponseRequest
 from mindroom.response_sources import ResponseSources
-from mindroom.router_relay import execute_router_relay
+from mindroom.router.relay import execute_router_relay
 from mindroom.teams.formation import TeamIntent, select_ad_hoc_team_mode
 from mindroom.timestamp_formatting import normalize_timestamp_ms
 from mindroom.timing import (

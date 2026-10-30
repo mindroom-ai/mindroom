@@ -58,7 +58,8 @@ Matrix sync callback
 | `turns/queued_notice.py` | The queued notice and approval-wait reaction that text, media, and voice ingress share |
 | `voice/ingress.py` | VoiceIngress - fixes a voice message's conversation, then readies it behind its sender's lane |
 | `voice/readiness.py` | Voice preparation and checkpointing, gated on the router's visible echo |
-| `router_relay.py` | Router relay delivery: target readiness, handoff metadata, and visible delivery |
+| `router/duties.py` | What only the router bot does: keep room-backed reply grants current from its sync, set up and welcome the rooms it joins, clean orphaned bot accounts, and emit room-membership hooks |
+| `router/relay.py` | Router relay delivery: target readiness, handoff metadata, and visible delivery |
 | `ingress_validation.py` | Ingress boundary validation: classify each event's provenance once against the entity registry, handled-id dedup, reply access at the first gate and again under the admission fence |
 | `turns/facts.py` | One inbound event's classified provenance (`IngressFacts`), the turn origin derived from it, and the one command rule |
 | `inbound_turn_normalizer.py` | Raw input shaping (text, voice, sidecars, media) into canonical turn inputs |

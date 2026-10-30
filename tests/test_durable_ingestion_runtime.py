@@ -317,7 +317,8 @@ async def test_repaired_gap_fences_grants_until_authoritative_refresh(tmp_path: 
     if rejoined:
         recovered.append({**join, "event_id": "$rejoin", "origin_server_ts": 3})
     index = bot._runtime_view.agent_reply_memberships
-    bot._schedule_reply_authorized_call_revocation = MagicMock()
+    revoke_denied_calls = AsyncMock()
+    bot._router._revoke_denied_calls = revoke_denied_calls
     async with _owned_session(bot) as session:
         await _consume_frame(bot, session, _joined_frame([join]))
         client = make_matrix_client_mock(user_id=bot.agent_user.user_id)
@@ -348,12 +349,13 @@ async def test_repaired_gap_fences_grants_until_authoritative_refresh(tmp_path: 
         assert [record.provenance for record in seen if record.source.get("event_id") == "$leave"] == [
             nio.TimelineEventProvenance.RECOVERED,
         ]
-        bot._schedule_reply_authorized_call_revocation.assert_called()
+        await wait_for_background_tasks(timeout=1, owner=bot._runtime_view)
+        revoke_denied_calls.assert_awaited()
         client.joined_members.return_value = nio.JoinedMembersResponse(
             members=[control, member] if rejoined else [control],
             room_id=ROOM,
         )
-        await bot._router_reply_membership_sync.refresh_if_needed(
+        await bot.orchestrator.agent_reply_membership_sync.refresh_if_needed(
             bot.config,
             lambda: index.refresh(bot.config, bot.runtime_paths, client),
         )

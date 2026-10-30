@@ -178,7 +178,7 @@ async def test_live_grant_reconciliation_does_not_wait_for_a_local_join(tmp_path
 
     orchestrator.reconcile_pending_invites = AsyncMock(side_effect=pending_invites)
     try:
-        await asyncio.wait_for(bot._reconcile_reply_membership_effects(), timeout=1)
+        await asyncio.wait_for(bot._router._reconcile_membership_effects(), timeout=1)
         await asyncio.wait_for(join_started.wait(), timeout=1)
         orchestrator.reconcile_reply_authorized_calls.assert_awaited_once()
     finally:
@@ -204,7 +204,7 @@ async def test_live_grant_reconciliation_does_not_wait_for_call_admission(tmp_pa
 
     with patch.object(bot, "schedule_pending_invite_reconciliation"):
         try:
-            await asyncio.wait_for(bot._reconcile_reply_membership_effects(), timeout=1)
+            await asyncio.wait_for(bot._router._reconcile_membership_effects(), timeout=1)
             revoke.assert_awaited_once_with()
             await asyncio.wait_for(call_started.wait(), timeout=1)
             assert not release_call.is_set()

@@ -1855,9 +1855,9 @@ async def test_router_welcome_send_is_idempotent_for_concurrent_empty_room_check
     install_send_response_mock(bot, send_response)
 
     await asyncio.gather(
-        bot._send_welcome_message_if_empty("!empty:localhost"),
-        bot._send_welcome_message_if_empty("!empty:localhost"),
-        bot._send_welcome_message_if_empty("!empty:localhost"),
+        bot._room_lifecycle.send_welcome_message_if_empty("!empty:localhost"),
+        bot._room_lifecycle.send_welcome_message_if_empty("!empty:localhost"),
+        bot._room_lifecycle.send_welcome_message_if_empty("!empty:localhost"),
     )
 
     bot.client.room_messages.assert_awaited_once()
@@ -1925,7 +1925,7 @@ async def test_router_welcome_send_retries_after_delivery_failure(
     install_send_response_mock(bot, send_response)
 
     assert not await bot._room_lifecycle.send_welcome_message_if_empty("!empty:localhost")
-    await bot._send_welcome_message_if_empty("!empty:localhost")
+    await bot._room_lifecycle.send_welcome_message_if_empty("!empty:localhost")
 
     assert bot.client.room_messages.await_count == 2
     assert send_response.await_count == 2
@@ -2001,7 +2001,7 @@ async def test_router_auto_welcome_lists_ad_hoc_present_responder(tmp_path: Path
     send_response = AsyncMock(return_value="$welcome")
     install_send_response_mock(bot, send_response)
 
-    await bot._send_welcome_message_if_empty("!adhoc:localhost", "@alice:localhost")
+    await bot._room_lifecycle.send_welcome_message_if_empty("!adhoc:localhost", "@alice:localhost")
 
     response_text = send_response.await_args.kwargs["response_text"]
     assert "\u2022 **Code** (alias `code`): Writes code" in response_text
@@ -2045,7 +2045,7 @@ async def test_router_startup_welcome_without_requester_omits_responder_list(tmp
     send_response = AsyncMock(return_value="$welcome")
     install_send_response_mock(bot, send_response)
 
-    await bot._send_welcome_message_if_empty("!startup:localhost")
+    await bot._room_lifecycle.send_welcome_message_if_empty("!startup:localhost")
 
     response_text = send_response.await_args.kwargs["response_text"]
     assert "\U0001f9e0 **Available agents and teams in this room:**" not in response_text
@@ -2163,7 +2163,7 @@ async def test_router_invite_welcome_requires_current_reply_authorization(
     install_send_response_mock(bot, send_response)
     room = MagicMock(room_id="!adhoc:localhost", canonical_alias=None)
 
-    await bot._send_welcome_message_if_empty(room.room_id, sender_id)
+    await bot._room_lifecycle.send_welcome_message_if_empty(room.room_id, sender_id)
 
     send_response.assert_not_awaited()
 

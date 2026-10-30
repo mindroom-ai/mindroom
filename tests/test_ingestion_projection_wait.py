@@ -197,10 +197,7 @@ async def test_bot_projection_wait_reuses_recovery_and_shields_pump_cancellation
         await release.wait()
         return True
 
-    with (
-        patch.object(bot, "_recover_unacknowledged_matrix_deliveries", AsyncMock(side_effect=recover)),
-        patch.object(bot, "_refresh_agent_reply_memberships_if_needed", AsyncMock()) as refresh,
-    ):
+    with patch.object(bot, "_recover_unacknowledged_matrix_deliveries", AsyncMock(side_effect=recover)):
         bot._schedule_delivery_recovery()
         await asyncio.wait_for(entered.wait(), timeout=2)
         recovery_task = bot._delivery_recovery_task
@@ -215,7 +212,6 @@ async def test_bot_projection_wait_reuses_recovery_and_shields_pump_cancellation
             assert not recovery_task.done()
             release.set()
             await asyncio.wait_for(recovery_task, timeout=2)
-            refresh.assert_not_awaited()
         finally:
             release.set()
             waiting.cancel()

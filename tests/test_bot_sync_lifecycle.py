@@ -314,7 +314,6 @@ class TestBotSyncLifecycle(ThreadingBehaviorTestBase):
             await wait_for_background_tasks(timeout=1.0, owner=bot._runtime_view)
 
         with (
-            patch.object(bot, "_refresh_agent_reply_memberships_if_needed", AsyncMock()),
             patch.object(bot, "_schedule_delivery_recovery"),
         ):
             await publish_frame()
@@ -341,7 +340,6 @@ class TestBotSyncLifecycle(ThreadingBehaviorTestBase):
                 raise
 
         with (
-            patch.object(bot, "_refresh_agent_reply_memberships_if_needed", AsyncMock()),
             patch.object(bot, "_schedule_delivery_recovery"),
             patch.object(bot._turn_store, "cleanup", side_effect=blocked_cleanup) as cleanup,
         ):

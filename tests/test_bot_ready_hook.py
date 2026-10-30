@@ -549,8 +549,8 @@ async def test_failed_membership_refresh_is_backed_off_between_sync_responses(tm
     bot._runtime_view.agent_reply_memberships.invalidate(bot.config, reason="test")
 
     with patch("mindroom.agent_reply_membership_sync.time.monotonic", return_value=100.0):
-        await bot._refresh_agent_reply_memberships_if_needed()
-        await bot._refresh_agent_reply_memberships_if_needed()
+        await bot._router.refresh_memberships_if_needed()
+        await bot._router.refresh_memberships_if_needed()
 
     orchestrator.refresh_agent_reply_memberships.assert_awaited_once_with()
 
@@ -563,9 +563,9 @@ async def test_repeated_membership_invalidation_preserves_refresh_backoff(tmp_pa
     bot._runtime_view.agent_reply_memberships.invalidate(bot.config, reason="test")
 
     with patch("mindroom.agent_reply_membership_sync.time.monotonic", return_value=100.0):
-        await bot._refresh_agent_reply_memberships_if_needed()
-        bot._invalidate_agent_reply_memberships(reason="uncertain_sync_response")
-        await bot._refresh_agent_reply_memberships_if_needed()
+        await bot._router.refresh_memberships_if_needed()
+        bot.invalidate_agent_reply_memberships(reason="uncertain_sync_response")
+        await bot._router.refresh_memberships_if_needed()
 
     orchestrator.refresh_agent_reply_memberships.assert_awaited_once_with()
 
@@ -599,13 +599,13 @@ async def test_detached_router_invalidation_during_post_refresh_effects_revokes_
     bot.revoke_reply_authorized_calls = AsyncMock(side_effect=block_post_refresh_effects)  # type: ignore[method-assign]
     bot.schedule_reply_authorized_call_revocation = MagicMock()  # type: ignore[method-assign]
     bot.schedule_reply_authorized_call_reconciliation = MagicMock()  # type: ignore[method-assign]
-    bot._invalidate_agent_reply_memberships(reason="initial_gap")
+    bot.invalidate_agent_reply_memberships(reason="initial_gap")
     bot.schedule_reply_authorized_call_revocation.reset_mock()
 
-    refresh_task = asyncio.create_task(bot._refresh_agent_reply_memberships_if_needed())
+    refresh_task = asyncio.create_task(bot._router.refresh_memberships_if_needed())
     try:
         await asyncio.wait_for(effects_started.wait(), timeout=1.0)
-        bot._invalidate_agent_reply_memberships(reason="uncertain_sync_response")
+        bot.invalidate_agent_reply_memberships(reason="uncertain_sync_response")
     finally:
         release_effects.set()
         await refresh_task

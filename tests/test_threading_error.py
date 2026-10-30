@@ -14,7 +14,7 @@ from mindroom.config.models import ModelConfig, RouterConfig
 from mindroom.delivery_gateway import SendTextRequest
 from mindroom.matrix.client import DeliveredMatrixEvent
 from mindroom.matrix.users import AgentMatrixUser
-from mindroom.router_relay import execute_router_relay
+from mindroom.router.relay import execute_router_relay
 from tests.bot_helpers import make_test_agent_bot
 from tests.conftest import (
     TEST_PASSWORD,
@@ -489,7 +489,7 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
         )
 
         with (
-            patch("mindroom.router_relay.suggest_responder_for_message", AsyncMock(return_value="general")),
+            patch("mindroom.router.relay.suggest_responder_for_message", AsyncMock(return_value="general")),
             patch(
                 "mindroom.delivery_gateway.send_message_outcome",
                 AsyncMock(

@@ -19,7 +19,7 @@ from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.message_target import MessageTarget
-from mindroom.router_relay import execute_router_relay
+from mindroom.router.relay import execute_router_relay
 from mindroom.turn_record import TurnRecord
 from tests.bot_helpers import make_test_agent_bot
 from tests.conftest import (
@@ -242,7 +242,7 @@ class TestResponseTrackingRegression:
         )
 
     @pytest.mark.asyncio
-    @patch("mindroom.router_relay.suggest_responder_for_message")
+    @patch("mindroom.router.relay.suggest_responder_for_message")
     async def test_router_ai_routing_response_tracking(
         self,
         mock_suggest_responder: AsyncMock,

@@ -23,7 +23,7 @@ from mindroom.entity_resolution import entity_identity_registry, mindroom_user_i
 from mindroom.llm.errors import ProviderError
 from mindroom.matrix.identity import MatrixID
 from mindroom.matrix.users import AgentMatrixUser
-from mindroom.router_relay import execute_router_relay
+from mindroom.router.relay import execute_router_relay
 from tests.bot_helpers import make_test_agent_bot
 from tests.conftest import (
     TEST_ACCESS_TOKEN,
@@ -392,7 +392,7 @@ class TestAIRouting:
         mock_event = MagicMock()
         mock_event.body = "Test message"
 
-        with patch("mindroom.router_relay.suggest_responder_for_message") as mock_suggest:
+        with patch("mindroom.router.relay.suggest_responder_for_message") as mock_suggest:
             # Should raise AssertionError since general is not the router agent
             with pytest.raises(AssertionError):
                 await execute_router_relay(

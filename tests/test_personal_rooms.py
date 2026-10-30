@@ -1200,7 +1200,7 @@ async def test_invalid_retained_room_does_not_block_router_sync_or_other_user(
     server.set_member(alice_room, "@outsider:localhost", "invite")
     ready = AsyncMock()
     router.orchestrator.handle_bot_ready = ready
-    monkeypatch.setattr(router, "_refresh_agent_reply_memberships_if_needed", AsyncMock())
+    monkeypatch.setattr(router._router, "refresh_memberships_if_needed", AsyncMock())
     monkeypatch.setattr(router, "_schedule_delivery_recovery", lambda: None)
 
     await router._run_sync_response_side_effects(first_sync_response=False)

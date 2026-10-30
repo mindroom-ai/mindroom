@@ -26,7 +26,7 @@ from mindroom.dispatch_source import SCHEDULED_SOURCE_KIND
 from mindroom.matrix.thread_history_result import ThreadHistoryResult
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.message_target import MessageTarget
-from mindroom.router_relay import execute_router_relay
+from mindroom.router.relay import execute_router_relay
 from mindroom.teams.formation import TeamResolution
 from mindroom.thread_utils import AgentResponseDecision
 from mindroom.turn_record import TurnRecord
@@ -450,7 +450,7 @@ class TestAgentBot(AgentBotTestBase):
 
         with (
             patch(
-                "mindroom.router_relay.suggest_responder_for_message",
+                "mindroom.router.relay.suggest_responder_for_message",
                 new_callable=AsyncMock,
                 return_value="general",
             ),
@@ -672,7 +672,7 @@ class TestAgentBot(AgentBotTestBase):
                 return_value=TeamResolution.none(),
             ),
             patch(
-                "mindroom.router_relay.suggest_responder_for_message",
+                "mindroom.router.relay.suggest_responder_for_message",
                 new_callable=AsyncMock,
                 return_value="general",
             ),
@@ -852,7 +852,7 @@ class TestAgentBot(AgentBotTestBase):
                 ),
             ),
             patch(
-                "mindroom.router_relay.suggest_responder_for_message",
+                "mindroom.router.relay.suggest_responder_for_message",
                 new_callable=AsyncMock,
                 return_value="general",
             ),
