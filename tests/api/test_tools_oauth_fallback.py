@@ -170,6 +170,28 @@ async def test_environment_oauth_fallback_reads_the_env_file_past_a_blank_export
 
 
 @pytest.mark.asyncio
+async def test_environment_oauth_fallback_needs_every_fallback_field(tmp_path: Path) -> None:
+    """The environment configures a tool only when it sets every manual fallback field."""
+    runtime_paths = resolve_runtime_paths(
+        config_path=tmp_path / "config.yaml",
+        storage_path=tmp_path / "mindroom_data",
+        process_env={"PROBE_KEY_ID": "key-id"},
+    )
+    manager = get_runtime_credentials_manager(runtime_paths)
+    target = _worker_target("@alice:example.test")
+    tool = _github_tool()
+    tool["config_fields"] = [
+        {"name": "key_id", "required": False, "env": ["PROBE_KEY_ID"]},
+        {"name": "key_secret", "required": False, "env": ["PROBE_KEY_SECRET"]},
+    ]
+    tool["oauth_fallback_fields"] = ["key_id", "key_secret"]
+
+    await tools_api._update_tools_statuses([tool], _context(runtime_paths, manager, target))
+
+    assert tool["environment_auth_configured"] is False
+
+
+@pytest.mark.asyncio
 async def test_tool_status_reads_settings_from_primary_stores(tmp_path: Path) -> None:
     runtime_paths = resolve_runtime_paths(
         config_path=tmp_path / "config.yaml",
