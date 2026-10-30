@@ -177,7 +177,8 @@ Authoring errors:
 
 Each child turn writes `run.json`, `events.jsonl`, and `transcript.md` to `.mindroom/delegations/YYYY-MM-DD/<delegation-id>/` in the child's workspace, dated by the delegation's start in UTC.
 `run.json` and `events.jsonl` update as the child runs, and `transcript.md` is written when the turn finishes.
-The `usage` in `run.json` and in each `usage` event of `events.jsonl` reports the child turn's token counts (`input_tokens`, `output_tokens`, `total_tokens`, `cache_read_tokens`, `cache_write_tokens`, `reasoning_tokens`, and the audio counts), `uncached_input_tokens` (input not read from the provider's cache), a `cost` when the provider reports one, and `time_to_first_token` and `duration` in seconds.
+The `usage` in `run.json` reports the child turn's token counts, summed over every model run of the turn (`input_tokens`, `output_tokens`, `total_tokens`, `cache_read_tokens`, `cache_write_tokens`, `reasoning_tokens`, and the audio counts), `uncached_input_tokens` (input not read from the provider's cache), a `cost` when the provider reports one, and `time_to_first_token` and `duration` in seconds.
+Each `usage` event of `events.jsonl` reports the same values for one model run as it stood when the event was written, so a run's last `usage` event is that run's total.
 Fractional values are decimal strings; a token count of zero and an unreported value are left out, while `uncached_input_tokens` and a reported cost or timing appear even when zero once the turn reported any usage.
 The caller receives a receipt at `.mindroom/delegation_receipts/YYYY-MM-DD/<delegation-id>.json` in its own workspace.
 Sensitive fields are redacted, and large outputs are stored as referenced artifacts.
