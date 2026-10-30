@@ -1552,6 +1552,71 @@ async def test_a_tool_call_that_returned_media_is_recorded_as_the_text_it_answer
     )
 
 
+def test_a_restart_account_counts_finished_failed_and_running_calls_apart() -> None:
+    """The status line counts finished calls, failed calls, and calls still running, each only when there is one."""
+    finished = ToolTraceEntry(type="tool_call_completed", tool_name="read", result_preview="ok")
+    failed = ToolTraceEntry(type="tool_call_completed", tool_name="write", result_preview="denied", is_error=True)
+    running = ToolTraceEntry(type="tool_call_started", tool_name="wait", args_preview="seconds=5")
+
+    account = _render_stopped_attempt(
+        partial_text="Half done",
+        completed_tools=(finished, failed, finished),
+        interrupted_tools=(running,),
+    )
+
+    lines = account.splitlines()
+    assert lines[:3] == [
+        "Half done",
+        "",
+        "(turn stopped before completion; 2 tool call(s) had finished; 1 tool call(s) had failed; "
+        "1 tool call(s) were still running)",
+    ]
+    assert lines[-1] == (
+        '- The `wait` tool was still running with input preview "seconds=5"; no output was available before interruption.'
+    )
+
+
+def test_a_restart_account_redacts_previews_and_says_which_were_truncated() -> None:
+    """A preview's credentials never reach the account, and a truncated preview says so."""
+    request = ToolTraceEntry(
+        type="tool_call_completed",
+        tool_name="request",
+        args_preview="api_key=secret-value",
+        result_preview="Authorization: Bearer secret-token",
+        truncated=True,
+    )
+
+    account = _render_stopped_attempt(partial_text="", completed_tools=(request,), interrupted_tools=())
+
+    assert "secret-value" not in account
+    assert "secret-token" not in account
+    assert "***redacted***" in account
+    assert account.endswith("The stored preview was truncated.")
+
+
+def test_a_restart_account_is_bounded_and_counts_the_calls_it_leaves_out(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Many calls never grow the account past its limit; the calls that do not fit are counted instead."""
+    limit = 400
+    monkeypatch.setattr("mindroom.reply_turn.enrichment._MAX_RETAINED_TOOL_CONTEXT_CHARS", limit)
+    calls = tuple(
+        ToolTraceEntry(
+            type="tool_call_completed",
+            tool_name=f"tool_{index}",
+            args_preview="x=" + "a" * 120,
+            result_preview="b" * 120,
+        )
+        for index in range(10)
+    )
+
+    account = _render_stopped_attempt(partial_text="", completed_tools=calls, interrupted_tools=())
+
+    context = account.split("\n\n", maxsplit=1)[1]
+    assert len(context) <= limit
+    assert context.splitlines()[-1].endswith(
+        "additional tool call(s) omitted from retained context because the replay size limit was reached.",
+    )
+
+
 async def test_a_tool_result_stands_when_recording_its_finish_fails(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

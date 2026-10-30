@@ -406,6 +406,7 @@ async def test_restart_resolves_hidden_call_and_never_replays_parent(
             status=RunStatus.cancelled,
             metadata={"source": "original"},
             messages=[
+                Message(role="user", content="memory notes", add_to_agent_memory=False),
                 Message(
                     role="assistant",
                     tool_calls=[
@@ -529,6 +530,8 @@ async def test_restart_resolves_hidden_call_and_never_replays_parent(
     replayed = replayable_messages([saved])
     assert all(not message.tool_calls for message in replayed)
     assert "turn stopped before completion" in replayed[-1].get_content_string()
+    # Context the paused request sent but no history keeps leaves with the pause.
+    assert "memory notes" not in [message.content for message in replayed]
 
 
 @pytest.mark.asyncio

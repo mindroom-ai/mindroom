@@ -9,6 +9,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 import pytest
+from structlog.testing import capture_logs
 
 from mindroom import response_turn
 from mindroom.history.conversation_text import utterances
@@ -212,7 +213,10 @@ def _mark(tmp_path: Path, run_id: str, *runs: AnyRunRecord, error: str | None = 
         requester_id=None,
         matrix_run_metadata=None,
     )
-    response_turn._mark_interrupted(turn, scope_context, run_id, error)
+    with capture_logs() as logs:
+        response_turn._mark_interrupted(turn, scope_context, run_id, error)
+    # Each case marks the run or finds none to mark; neither is a failure the driver logs.
+    assert [log["event"] for log in logs if log["log_level"] == "error"] == []
     loaded = storage.load_session("session-1")
     assert loaded is not None
     assert [(run.run_id, run.status) for run in loaded.runs] == [(run.run_id, run.status) for run in session.runs]
