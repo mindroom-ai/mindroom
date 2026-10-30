@@ -2,22 +2,21 @@
 
 from __future__ import annotations
 
-from typing import Protocol
+from typing import TYPE_CHECKING
 
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import FileResponse
 
+from mindroom.api.auth_user import STANDALONE_USER_ID, AuthSource, AuthUser, request_auth_user
 from mindroom.api.config_lifecycle import api_runtime_paths
 from mindroom.api.report_headers import set_report_headers
-from mindroom.constants import OWNER_MATRIX_USER_ID_ENV
 from mindroom.dynamic_workflows.spec import DynamicWorkflowError
 from mindroom.dynamic_workflows.store import DynamicWorkflowRun, DynamicWorkflowStore
 
+if TYPE_CHECKING:
+    from mindroom.constants import RuntimePaths
+
 router = APIRouter(tags=["dynamic-workflows"])
-
-
-class _RuntimePathsProtocol(Protocol):
-    def env_value(self, name: str, *, default: str | None = None) -> str | None: ...
 
 
 @router.get("/reports/private/{run_id}", include_in_schema=False)
@@ -62,36 +61,23 @@ async def private_dynamic_workflow_report(
 def _authorize_private_report_request(
     request: Request,
     run: DynamicWorkflowRun,
-    runtime_paths: _RuntimePathsProtocol,
+    runtime_paths: RuntimePaths,
 ) -> None:
-    auth_user = request.scope.get("auth_user")
-    if not isinstance(auth_user, dict):
+    """Admit the login that requested the run: as the Matrix user it acts as, or as an identity it carries."""
+    auth_user = request_auth_user(request)
+    if auth_user is None or run.requested_by not in {
+        auth_user.requester_id(runtime_paths),
+        auth_user.matrix_user_id,
+        _carried_user_id(auth_user),
+    }:
         raise HTTPException(status_code=403, detail="Private Dynamic Workflow report access denied.")
-    if run.requested_by in _private_report_auth_principals(auth_user, runtime_paths):
-        return
-    raise HTTPException(status_code=403, detail="Private Dynamic Workflow report access denied.")
 
 
-def _private_report_auth_principals(
-    auth_user: dict[str, object],
-    runtime_paths: _RuntimePathsProtocol,
-) -> set[str]:
-    principals: set[str] = set()
-    matrix_user_id = auth_user.get("matrix_user_id")
-    if isinstance(matrix_user_id, str) and matrix_user_id:
-        principals.add(matrix_user_id)
+def _carried_user_id(auth_user: AuthUser) -> str | None:
+    """Return the login's own user ID when it can name a requester: a gateway's claim can itself be the Matrix ID.
 
-    user_id = auth_user.get("user_id")
-    if not isinstance(user_id, str) or not user_id:
-        return principals
-    if user_id != "standalone":
-        principals.add(user_id)
-        return principals
-    if auth_user.get("auth_source") == "trusted_upstream":
-        return principals
-
-    principals.add(user_id)
-    owner_user_id = runtime_paths.env_value(OWNER_MATRIX_USER_ID_ENV)
-    if owner_user_id:
-        principals.add(owner_user_id)
-    return principals
+    A gateway user whose claim is the standalone sentinel is not the standalone operator.
+    """
+    if auth_user.source is AuthSource.TRUSTED_UPSTREAM and auth_user.user_id == STANDALONE_USER_ID:
+        return None
+    return auth_user.user_id

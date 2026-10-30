@@ -94,7 +94,7 @@ def context(tmp_path: Path) -> AgentToolContext:
         },
     )
     user = resolve_connection_user(
-        ApiSnapshot(generation=1, runtime_paths=paths, config_data=config.model_dump(), runtime_config=config),
+        ApiSnapshot(generation=1, runtime_paths=paths, runtime_config=config),
         "@alice:example.org",
     )
     return resolve_connection_agent(user, "personal")
@@ -131,7 +131,6 @@ async def test_agent_query_finds_later_selection_after_default_result_limit(cont
         ApiSnapshot(
             generation=1,
             runtime_paths=context.runtime_paths,
-            config_data=config.model_dump(),
             runtime_config=config,
         ),
         context.requester_id,
@@ -224,7 +223,7 @@ async def test_egress_credentials_is_offered_only_while_the_broker_is_on(tmp_pat
         },
         paths,
     )
-    snapshot = ApiSnapshot(generation=1, runtime_paths=paths, config_data=config.model_dump(), runtime_config=config)
+    snapshot = ApiSnapshot(generation=1, runtime_paths=paths, runtime_config=config)
     context = resolve_connection_agent(resolve_connection_user(snapshot, "@alice:example.org"), "personal")
 
     searched = await gateway.search_tools(context)
@@ -840,7 +839,6 @@ async def test_a_tool_named_like_a_disabled_mcp_server_is_the_tool_not_the_serve
     snapshot = ApiSnapshot(
         generation=1,
         runtime_paths=context.runtime_paths,
-        config_data=config.model_dump(),
         runtime_config=config,
     )
     local = resolve_connection_agent(resolve_connection_user(snapshot, context.requester_id), "personal")
@@ -866,7 +864,6 @@ async def test_gateway_leaves_a_worker_routed_toolkit_s_connection_to_the_worker
     snapshot = ApiSnapshot(
         generation=1,
         runtime_paths=context.runtime_paths,
-        config_data=config.model_dump(),
         runtime_config=config,
     )
     routed = resolve_connection_agent(resolve_connection_user(snapshot, context.requester_id), "personal")
@@ -1017,7 +1014,6 @@ async def test_native_credentials_follow_authored_agent_scope(
     snapshot = ApiSnapshot(
         generation=1,
         runtime_paths=context.runtime_paths,
-        config_data=config.model_dump(),
         runtime_config=config,
     )
     context = resolve_connection_agent(resolve_connection_user(snapshot, "@alice:example.org"), agent_name)

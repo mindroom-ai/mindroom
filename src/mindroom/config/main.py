@@ -72,6 +72,7 @@ from mindroom.config.personal_agents import (
     PersonalAgentInstance,
     PersonalAgentTemplateConfig,
     expand_personal_agents,
+    personal_agent_roster_lock_path,
     read_personal_agent_roster_file,
 )
 from mindroom.config.personal_rooms import PersonalRoomsConfig  # noqa: TC001
@@ -116,6 +117,7 @@ from mindroom.constants import (
     runtime_matrix_homeserver,
 )
 from mindroom.credentials.manager import SERVICE_NAME_CHARACTERS, SERVICE_NAME_PATTERN
+from mindroom.file_locks import advisory_file_lock
 from mindroom.git_urls import credential_free_repo_url
 
 # config layer loads BEFORE the history runtime; import leaf types so config load does not drag in agents+tools.
@@ -208,6 +210,13 @@ class ConfigRuntimeValidationError(ValueError):
     """Runtime-aware config validation failed after Pydantic schema validation."""
 
 
+class ConfigFileChangedError(ConfigRuntimeValidationError):
+    """The config file changed after a writer loaded the config its change came from."""
+
+    def __init__(self) -> None:
+        super().__init__("The configuration file changed after this change read it; retry the change.")
+
+
 type ConfigLoadUserError = (
     ValidationError | ConfigRuntimeValidationError | AccessMigrationError | yaml.YAMLError | OSError | UnicodeError
 )
@@ -262,9 +271,12 @@ def format_invalid_config_message(
     *,
     footer: str | None = None,
 ) -> str:
-    """Return one shared invalid-configuration message for user-facing surfaces."""
-    errors = [f"• {location}: {message}" for location, message in iter_config_validation_messages(exc)]
-    response = f"❌ Invalid configuration:\n{'\n'.join(errors)}"
+    """Return one shared message for a refused config change: invalid, or the file changed since it was read."""
+    if isinstance(exc, ConfigFileChangedError):
+        response = f"❌ {exc}"
+    else:
+        errors = [f"• {location}: {message}" for location, message in iter_config_validation_messages(exc)]
+        response = f"❌ Invalid configuration:\n{'\n'.join(errors)}"
     if footer:
         response = f"{response}\n\n{footer}"
     return response
@@ -1919,7 +1931,9 @@ def validate_loaded_config_source(
             tolerate_plugin_load_errors=tolerate_plugin_load_errors,
         )
         if migration.changed:
-            persisted = persist_access_migration(path, original, migration.data)
+            # Config commits write under this lock, so the migration's compare-and-replace cannot lose one.
+            with advisory_file_lock(personal_agent_roster_lock_path(runtime_paths)):
+                persisted = persist_access_migration(path, original, migration.data)
             source_digests = {path.resolve(): hashlib.sha256(persisted).hexdigest()}
     except CONFIG_LOAD_USER_ERROR_TYPES as exc:
         # Parsing succeeded, so the full file set is known; expose it the same

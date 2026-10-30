@@ -16,7 +16,6 @@ import pytest
 import yaml
 
 from mindroom import constants as constants_mod
-from mindroom.api import config_lifecycle
 from mindroom.commands import config_confirmation
 from mindroom.commands.config_commands import (
     _format_value,
@@ -35,7 +34,7 @@ from mindroom.commands.config_confirmation import (
 from mindroom.commands.handler import handle_command
 from mindroom.commands.parsing import Command, CommandType, _CommandParser
 from mindroom.config.auth import AuthorizationConfig
-from mindroom.config.main import Config, ConfigRuntimeValidationError, load_config
+from mindroom.config.main import Config, load_config
 from mindroom.constants import resolve_runtime_paths
 from mindroom.delivery_gateway import SendTextRequest
 from mindroom.event_journal.opening import record_opened_event_journal
@@ -48,7 +47,13 @@ from mindroom.turn_record import TurnRecord
 from tests.authorization_helpers import (
     make_test_command_handler_context,
 )
-from tests.conftest import make_conversation_reader_mock, make_matrix_client_mock, write_config_yaml
+from tests.conftest import (
+    assert_refused_for_concurrent_edit,
+    make_conversation_reader_mock,
+    make_matrix_client_mock,
+    write_concurrent_edit_while_validating,
+    write_config_yaml,
+)
 from tests.matrix_state_helpers import save_matrix_state
 
 
@@ -113,30 +118,49 @@ def test_committed_config_decision_does_not_expire_with_its_preview() -> None:
     assert pending_change.is_expired() is False
 
 
-def test_validate_and_persist_config_payload_validates_and_writes_authored_payload(tmp_path: Path) -> None:
-    """Runtime config payload persistence should validate before writing."""
+@pytest.mark.asyncio
+async def test_apply_config_change_refuses_a_file_edited_while_it_validated(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A dashboard save or hand edit landing while a confirmed change validates is kept, and the change is refused."""
     config_path = tmp_path / "config.yaml"
     runtime_paths = _runtime_paths_for_config(config_path)
-    config = Config(models={"default": {"provider": "openai", "id": "gpt-6-astra"}})
-    write_config_yaml(config, config_path)
-    payload = config.authored_model_dump()
-    payload["agents"] = {
-        "writer": {
-            "display_name": "Writer",
-            "role": "Write docs",
-            "rooms": ["Lab"],
+    config = Config.model_validate(
+        {
+            "models": {"default": {"provider": "openai", "id": "gpt-6-astra"}},
+            "agents": {"writer": {"display_name": "Writer", "role": "Original"}},
         },
-    }
+    )
+    write_config_yaml(config, config_path)
+    concurrent_source = write_concurrent_edit_while_validating(monkeypatch, config_path, "writer")
 
-    validated = config_lifecycle.validate_and_persist_config_payload(payload, runtime_paths)
+    result = await apply_config_change("agents.writer.role", "Agent change", runtime_paths)
 
-    assert validated.agents["writer"].display_name == "Writer"
+    assert_refused_for_concurrent_edit(result, config_path, concurrent_source)
+
+
+@pytest.mark.asyncio
+async def test_apply_config_change_validates_and_writes_authored_payload(tmp_path: Path) -> None:
+    """A confirmed change is validated and written as the authored config."""
+    config_path = tmp_path / "config.yaml"
+    runtime_paths = _runtime_paths_for_config(config_path)
+    write_config_yaml(Config(models={"default": {"provider": "openai", "id": "gpt-6-astra"}}), config_path)
+
+    result = await apply_config_change(
+        "agents.writer",
+        {"display_name": "Writer", "role": "Write docs", "rooms": ["Lab"]},
+        runtime_paths,
+    )
+
+    assert "Configuration updated successfully" in result
     saved = yaml.safe_load(config_path.read_text(encoding="utf-8"))
     assert saved["agents"]["writer"]["rooms"] == ["Lab"]
 
 
-def test_validate_and_persist_config_payload_rejects_without_overwriting(tmp_path: Path) -> None:
-    """Runtime config payload persistence should leave the file untouched on validation failure."""
+@pytest.mark.asyncio
+async def test_apply_config_change_rejects_without_overwriting(tmp_path: Path) -> None:
+    """A confirmed change that fails runtime validation leaves the file untouched."""
     plugin_root = tmp_path / "plugins" / "bad-name"
     plugin_root.mkdir(parents=True)
     (plugin_root / "mindroom.plugin.json").write_text(
@@ -145,15 +169,12 @@ def test_validate_and_persist_config_payload_rejects_without_overwriting(tmp_pat
     )
     config_path = tmp_path / "config.yaml"
     runtime_paths = _runtime_paths_for_config(config_path)
-    config = Config(models={"default": {"provider": "openai", "id": "gpt-6-astra"}})
-    write_config_yaml(config, config_path)
+    write_config_yaml(Config(models={"default": {"provider": "openai", "id": "gpt-6-astra"}}), config_path)
     original_source = config_path.read_text(encoding="utf-8")
-    payload = config.authored_model_dump()
-    payload["plugins"] = ["./plugins/bad-name"]
 
-    with pytest.raises(ConfigRuntimeValidationError):
-        config_lifecycle.validate_and_persist_config_payload(payload, runtime_paths)
+    result = await apply_config_change("plugins", ["./plugins/bad-name"], runtime_paths)
 
+    assert "Invalid configuration" in result
     assert config_path.read_text(encoding="utf-8") == original_source
 
 

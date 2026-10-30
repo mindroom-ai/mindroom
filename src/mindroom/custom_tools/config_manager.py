@@ -12,7 +12,7 @@ from typing import TYPE_CHECKING, Any, Literal
 import yaml
 from pydantic import BaseModel, ConfigDict, JsonValue, ValidationError, model_validator
 
-from mindroom.api.config_lifecycle import persist_runtime_validated_config, validate_and_persist_config_payload
+from mindroom.api.config_lifecycle import commit_config
 from mindroom.authorization import (
     is_platform_administrator,
     is_sender_allowed_for_agent_credential_management,
@@ -20,6 +20,7 @@ from mindroom.authorization import (
 )
 from mindroom.commands.parsing import get_command_help
 from mindroom.config.agent import AgentConfig, TeamConfig
+from mindroom.config.commit import ConfigCommit
 from mindroom.config.main import (
     Config,
     ConfigRuntimeValidationError,
@@ -474,6 +475,24 @@ class _InfoType(str, Enum):
     AGENT_TEMPLATE = "agent_template"
 
 
+# Each agent template's tool category and role.
+_AGENT_TEMPLATES: dict[str, tuple[ToolCategory, str]] = {
+    "researcher": (ToolCategory.RESEARCH, "Research specialist focused on finding and analyzing information"),
+    "developer": (ToolCategory.DEVELOPMENT, "Software development expert for coding and technical tasks"),
+    "social": (ToolCategory.SOCIAL, "Social interaction specialist for community engagement"),
+    "communicator": (ToolCategory.COMMUNICATION, "Communication expert for messaging and collaboration"),
+    "analyst": (ToolCategory.INFORMATION, "Information analyst for data processing and insights"),
+    "productivity": (ToolCategory.PRODUCTIVITY, "Productivity specialist for task and workflow management"),
+}
+
+
+def commit_authored_config(config: Config, runtime_paths: RuntimePaths) -> Config:
+    """Commit an in-place edit of the loaded `config`, refused when the file changed since; return what runs."""
+    commit = ConfigCommit.from_payload(config.authored_model_dump(), runtime_paths)
+    commit_config(runtime_paths, commit, loaded=config)
+    return commit.config
+
+
 class ConfigManagerTools(Toolkit):
     """Consolidated tools for inspecting and controlling the MindRoom configuration.
 
@@ -629,10 +648,10 @@ class ConfigManagerTools(Toolkit):
             normalized_changes = _normalize_patch_changes(changes)
             _reject_redaction_markers(normalized_changes)
             candidate, changed_paths = _apply_config_patch(authored, normalized_changes)
-            validated_config = Config.validate_with_runtime(candidate, self.runtime_paths)
-            _reject_normalized_root_nulls(normalized_changes, validated_config.authored_model_dump())
+            commit = ConfigCommit.from_payload(candidate, self.runtime_paths)
+            _reject_normalized_root_nulls(normalized_changes, commit.config.authored_model_dump())
             if not dry_run:
-                persist_runtime_validated_config(validated_config, self.runtime_paths)
+                commit_config(self.runtime_paths, commit, loaded=config)
         except _ConfigPatchError as exc:
             return f"Error: {exc}\n\n{_CONFIG_CHANGE_REJECTED_MESSAGE}"
         except (ValidationError, ConfigRuntimeValidationError) as exc:
@@ -1120,14 +1139,15 @@ class ConfigManagerTools(Toolkit):
             available = ", ".join(sorted(tool_metadata.keys()))
             return f"Unknown tool: {tool_name}\n\nAvailable tools: {available}"
 
-        output = [f"## Tool: {tool_name}\n"]
-
         metadata = tool_metadata[tool_name]
-        output.append(f"**Display Name**: {metadata.display_name}")
-        output.append(f"**Description**: {metadata.description}")
-        output.append(f"**Category**: {metadata.category.value}")
-        output.append(f"**Status**: {metadata.status.value}")
-        output.append(f"**Setup Type**: {metadata.setup_type.value}")
+        output = [
+            f"## Tool: {tool_name}\n",
+            f"**Display Name**: {metadata.display_name}",
+            f"**Description**: {metadata.description}",
+            f"**Category**: {metadata.category.value}",
+            f"**Status**: {metadata.status.value}",
+            f"**Setup Type**: {metadata.setup_type.value}",
+        ]
 
         if metadata.config_fields:
             output.append("\n**Configuration Fields**:")
@@ -1193,11 +1213,7 @@ class ConfigManagerTools(Toolkit):
             # Add to config
             config.agents[agent_name] = new_agent
 
-            # Save config
-            persisted_config = validate_and_persist_config_payload(
-                config.authored_model_dump(),
-                self.runtime_paths,
-            )
+            persisted_config = commit_authored_config(config, self.runtime_paths)
 
             oauth_guidance = _oauth_onboarding_guidance(
                 persisted_config,
@@ -1306,11 +1322,7 @@ class ConfigManagerTools(Toolkit):
             if not changes:
                 return "No changes made. All provided values are the same as current configuration."
 
-            # Save config
-            persisted_config = validate_and_persist_config_payload(
-                config.authored_model_dump(),
-                self.runtime_paths,
-            )
+            persisted_config = commit_authored_config(config, self.runtime_paths)
 
             oauth_guidance = _oauth_onboarding_guidance(
                 persisted_config,
@@ -1363,8 +1375,7 @@ class ConfigManagerTools(Toolkit):
             # Add to config
             config.teams[team_name] = new_team
 
-            # Save config
-            validate_and_persist_config_payload(config.authored_model_dump(), self.runtime_paths)
+            commit_authored_config(config, self.runtime_paths)
 
             return (
                 f"✅ Successfully created team '{team_name}'!\n\n"
@@ -1466,21 +1477,11 @@ class ConfigManagerTools(Toolkit):
             return load_error
         assert tool_metadata is not None
 
-        # Map agent types to tool categories
-        type_to_category = {
-            "researcher": ToolCategory.RESEARCH,
-            "developer": ToolCategory.DEVELOPMENT,
-            "social": ToolCategory.SOCIAL,
-            "communicator": ToolCategory.COMMUNICATION,
-            "analyst": ToolCategory.INFORMATION,
-            "productivity": ToolCategory.PRODUCTIVITY,
-        }
-
-        if agent_type not in type_to_category:
-            available = ", ".join(type_to_category.keys())
+        if agent_type not in _AGENT_TEMPLATES:
+            available = ", ".join(_AGENT_TEMPLATES)
             return f"Unknown template type: {agent_type}\n\nAvailable templates: {available}"
 
-        category = type_to_category[agent_type]
+        category, role = _AGENT_TEMPLATES[agent_type]
 
         # Get tools from this category that are available
         tools = [
@@ -1488,18 +1489,6 @@ class ConfigManagerTools(Toolkit):
             for name, metadata in tool_metadata.items()
             if metadata.category == category and metadata.status == ToolStatus.AVAILABLE
         ][:5]  # Limit to 5 tools
-
-        # Generate role based on category
-        role_descriptions = {
-            ToolCategory.RESEARCH: "Research specialist focused on finding and analyzing information",
-            ToolCategory.DEVELOPMENT: "Software development expert for coding and technical tasks",
-            ToolCategory.SOCIAL: "Social interaction specialist for community engagement",
-            ToolCategory.COMMUNICATION: "Communication expert for messaging and collaboration",
-            ToolCategory.INFORMATION: "Information analyst for data processing and insights",
-            ToolCategory.PRODUCTIVITY: "Productivity specialist for task and workflow management",
-        }
-
-        role = role_descriptions.get(category, f"Specialist in {category.value} tasks")
 
         # Generic instructions
         instructions = [

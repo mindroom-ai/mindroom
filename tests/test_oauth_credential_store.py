@@ -45,6 +45,7 @@ class _Provider:
     id = "demo_provider"
     credential_service = "demo_oauth"
     requester_scoped_credentials = True
+    legacy_credentials = None
 
 
 def _hold_sqlite_transaction(

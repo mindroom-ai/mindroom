@@ -33,6 +33,7 @@ from mindroom.teams.envelope import PreparedTeamExecution
 from mindroom.tool_system.runtime_context import tool_runtime_context
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity, agent_workspace_root_path
 from mindroom.turn_model import TeamTurnModelSelection
+from tests.api.conftest import publish_api_config
 from tests.budget_helpers import budget_monitor_with_spend
 from tests.conftest import (
     SETTLE_TIMEOUT_SECONDS,
@@ -144,13 +145,7 @@ def _delegation_config() -> Config:
             "child": AgentConfig(display_name="Child"),
         },
     )
-    config.models["default"].pricing = ModelPricing(input=5, output=30)
-    config.models["luna"] = ModelConfig(
-        provider="openai",
-        id="gpt-6-luna",
-        pricing=ModelPricing(input=0.2, output=1.25),
-    )
-    config.budgets = BudgetsConfig(fallback_model="luna", monthly_limit_usd=10)
+    _budget(config, monthly_limit_usd=10)
     return config
 
 
@@ -338,10 +333,8 @@ def _openai_client(tmp_path: Path, config: Config, *, authenticated: bool) -> It
     )
     persist_entity_accounts(config, runtime_paths)
     app = openai_compat_app(runtime_paths)
-    with (
-        patch("mindroom.api.openai_compat._load_config", return_value=(config, runtime_paths)),
-        TestClient(app, base_url="http://localhost") as client,
-    ):
+    publish_api_config(app, config)
+    with TestClient(app, base_url="http://localhost") as client:
         yield client
 
 

@@ -64,6 +64,7 @@ def test_builtin_oauth_registry_lists_every_builtin_provider_once_in_order() -> 
         "microsoft_onenote",
         "microsoft_people",
         "slack",
+        "spotify",
     ]
 
 
@@ -126,7 +127,6 @@ def test_snapshot_providers_are_the_snapshot_config_s_providers(tmp_path: Path) 
     snapshot = ApiSnapshot(
         generation=7,
         runtime_paths=runtime_paths,
-        config_data={"agents": {}},
         runtime_config=runtime_config,
     )
 
@@ -141,7 +141,6 @@ def test_a_snapshot_before_the_first_config_load_has_the_built_in_providers(tmp_
     snapshot = ApiSnapshot(
         generation=0,
         runtime_paths=runtime_paths,
-        config_data={},
         runtime_config=None,
     )
 

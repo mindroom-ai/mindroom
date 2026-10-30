@@ -22,8 +22,8 @@ from mindroom.oauth.credential_store import (
     OAuthCredentialTransaction,
     OAuthCredentialUnreadableError,
     oauth_credential_reader,
-    oauth_credential_store_exists,
     oauth_credential_transaction,
+    oauth_credentials_may_exist,
 )
 from mindroom.oauth.providers import (
     OAuthClaimValidationError,
@@ -420,9 +420,9 @@ async def load_oauth_credentials_status(
     """Load credentials or classify an unreadable payload as requiring reset.
 
     `create_store=False` reads a scope without a store as having no credentials instead of creating an empty store,
-    so a listing of many scopes writes nothing.
+    so a listing of many scopes writes nothing, except for a scope whose legacy tokens its new store adopts.
     """
-    if not create_store and not await asyncio.to_thread(oauth_credential_store_exists, context):
+    if not create_store and not await asyncio.to_thread(oauth_credentials_may_exist, context):
         return OAuthCredentialsStatus(credentials=None, reset_required=False)
     try:
         snapshot = await load_oauth_credentials_snapshot(context)

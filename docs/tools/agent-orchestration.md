@@ -577,6 +577,7 @@ Redacted output masks every value inside fields the config schema marks secret, 
 It also masks free-form map entries whose key names look like credentials, and credential patterns such as URL credentials and bearer tokens in any text.
 A write whose value contains the `***redacted***` marker or masked URL credentials such as `***@host` is refused, so copying redacted output back cannot overwrite a hidden real value.
 Every write is validated against the full runtime config before `config.yaml` is saved, and an invalid change saves nothing.
+A write is refused and saves nothing when `config.yaml` changed after the tool read it, for example through a dashboard save or a hand edit; the agent can read the configuration again and retry.
 Saved changes take effect through the normal config hot reload after the current response.
 When a plain list of tool names replaces an agent's tools, inline overrides for tools that stay in the list are kept.
 

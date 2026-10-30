@@ -8,7 +8,7 @@ from dataclasses import asdict, dataclass
 from functools import partial
 from typing import TYPE_CHECKING, Annotated, Any, Literal
 
-from fastapi import Depends, FastAPI, Header, HTTPException, Request
+from fastapi import Depends, FastAPI, Header, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, Response
@@ -20,12 +20,13 @@ from mindroom.api import config_lifecycle
 from mindroom.api.agent_cli import bind_agent_cli_registry
 from mindroom.api.agent_cli import router as agent_cli_router
 from mindroom.api.app_state import EmbeddedRuntime, ExternalTriggerRuntime, ensure_app_state
-from mindroom.api.auth import ApiAuthState, authenticate_user, dashboard_cors_origins, verify_user  # noqa: F401
+from mindroom.api.auth import authenticate_user, dashboard_cors_origins, verify_user
 from mindroom.api.auth import router as auth_router
+from mindroom.api.auth_user import AuthUser  # noqa: TC001 - FastAPI resolves route annotations.
 from mindroom.api.budgets import router as budgets_router
 from mindroom.api.computers import active_computer_worker_keys, withdraw_computer_runtime
 from mindroom.api.computers import router as computers_router
-from mindroom.api.config_lifecycle import ApiSnapshot, ApiState, ConfigLoadResult  # noqa: F401
+from mindroom.api.config_lifecycle import ApiSnapshot, ApiState
 from mindroom.api.config_reload import router as config_reload_router
 from mindroom.api.config_schema import router as config_schema_router
 from mindroom.api.connections import router as connections_router
@@ -39,7 +40,6 @@ from mindroom.api.egress_credentials import router as egress_credentials_router
 from mindroom.api.external_triggers import router as external_triggers_router
 from mindroom.api.frontend import router as frontend_router
 from mindroom.api.homeassistant_integration import router as homeassistant_router
-from mindroom.api.integrations import router as integrations_router
 from mindroom.api.knowledge import router as knowledge_router
 from mindroom.api.matrix_operations import router as matrix_router
 from mindroom.api.mcp_gateway import gateway_cors_origins, gateway_lifespan, install_gateway_routes
@@ -58,11 +58,12 @@ from mindroom.api.tools import router as tools_router
 from mindroom.api.usage import router as usage_router
 from mindroom.api.usage_export import close_usage_export_runner
 from mindroom.api.validation_errors import validation_error_response
+from mindroom.api.workers import maintain_leased_workers
 from mindroom.api.workers import router as workers_router
+from mindroom.config.commit import ConfigCommit
 from mindroom.config.personal_agents import personal_agent_data
 from mindroom.embeddings.embedder_health import get_embedder_failure
 from mindroom.integrations import integration_routers
-from mindroom.knowledge.status import reconcile_knowledge_mode_transition_states
 from mindroom.knowledge_graph.store import knowledge_graph_failure
 from mindroom.logging_config import get_logger
 from mindroom.matrix.decrypt_failure import e2ee_stats
@@ -72,8 +73,6 @@ from mindroom.origins import allowed_client_origins
 from mindroom.personal_agents import read_personal_agent_user_ids
 from mindroom.runtime_env_policy import COMPUTER_ALLOWED_ORIGINS_ENV
 from mindroom.runtime_state import get_runtime_state
-from mindroom.workers.backend import maintain_workers
-from mindroom.workers.in_flight import touch_workers_in_flight
 from mindroom.workers.runtime import (
     lease_configured_primary_worker_manager,
 )
@@ -219,16 +218,16 @@ def _cleanup_workers_once(
     touch_live_workers: Callable[[WorkerBackend], None],
     computer_worker_keys: frozenset[str] = frozenset(),
 ) -> int:
-    """Run one idle-worker cleanup pass when a backend is configured."""
+    """Run one worker maintenance pass when a backend is configured; return how many idle workers it cleaned."""
     worker_lease = lease_configured_primary_worker_manager(runtime_paths)
     if worker_lease is None:
         return 0
     with worker_lease as worker_manager:
-        touch_live_workers(worker_manager)
-        for worker_key in computer_worker_keys:
-            worker_manager.touch_worker(worker_key)
-        touch_workers_in_flight(worker_manager)
-        maintenance = maintain_workers(worker_manager)
+        maintenance = maintain_leased_workers(
+            worker_manager,
+            touch_live_workers=touch_live_workers,
+            computer_worker_keys=computer_worker_keys,
+        )
     if maintenance.cleaned:
         logger.info(
             "Cleaned idle workers",
@@ -289,15 +288,10 @@ def _app_runtime_paths(api_app: FastAPI) -> constants.RuntimePaths:
 def initialize_api_app(api_app: FastAPI, runtime_paths: constants.RuntimePaths) -> None:
     """Bind one API app to a runtime's paths; per-generation bindings made for other paths end with them."""
     app_state = ensure_app_state(api_app)
-    app_state.api_auth_account_id = runtime_paths.env_value("ACCOUNT_ID")
     if app_state.api_state is None:
         app_state.api_state = ApiState(
             config_lock=threading.Lock(),
-            snapshot=ApiSnapshot(
-                generation=0,
-                runtime_paths=runtime_paths,
-                config_data={},
-            ),
+            snapshot=ApiSnapshot(generation=0, runtime_paths=runtime_paths),
         )
     elif config_lifecycle.publish_runtime_paths(app_state.api_state, runtime_paths):
         app_state.external_trigger_runtime = None
@@ -317,26 +311,6 @@ def unbind_embedded_runtime(api_app: FastAPI) -> None:
     bind_script_tool_broker(api_app, None)
     bind_agent_cli_registry(api_app, None)
     ensure_app_state(api_app).embedded = None
-
-
-def _read_request_runtime_config_or_none(request: Request) -> tuple[Config, constants.RuntimePaths] | None:
-    try:
-        return config_lifecycle.read_committed_runtime_config(request)
-    except HTTPException:
-        return None
-
-
-def _reconcile_knowledge_mode_transitions(
-    previous: tuple[Config, constants.RuntimePaths] | None,
-    api_app: FastAPI,
-) -> None:
-    if previous is None:
-        return
-    previous_config, previous_runtime_paths = previous
-    current_config, current_runtime_paths = config_lifecycle.read_app_committed_runtime_config(api_app)
-    if current_runtime_paths != previous_runtime_paths:
-        return
-    reconcile_knowledge_mode_transition_states(previous_config, current_config, current_runtime_paths)
 
 
 @asynccontextmanager
@@ -445,70 +419,26 @@ app.add_middleware(RequestBodyLimitMiddleware)
 _add_dashboard_cors_middleware(app, _runtime_paths)
 
 
-def _sanitize_entity_payload(entity_data: dict[str, Any]) -> dict[str, Any]:
-    """Return a copy of entity data without API-only ID fields."""
-    payload = entity_data.copy()
-    payload.pop("id", None)
-    return payload
-
-
-def _resolve_unique_entity_id(base_id: str, entities: dict[str, Any]) -> str:
-    """Return a unique ID, appending a numeric suffix when needed."""
-    if base_id not in entities:
-        return base_id
-    counter = 1
-    while f"{base_id}_{counter}" in entities:
-        counter += 1
-    return f"{base_id}_{counter}"
-
-
-def _list_entities(config_data: dict[str, Any], section: str) -> list[dict[str, Any]]:
-    return [{"id": entity_id, **entity_data} for entity_id, entity_data in config_data.get(section, {}).items()]
-
-
-# The entity mutations take the config last, so a route binds the rest with `partial`.
-def _upsert_section_entity(
-    section: str,
-    entity_id: str,
-    entity_data: dict[str, Any],
-    candidate_config: dict[str, Any],
-) -> None:
-    candidate_config.setdefault(section, {})[entity_id] = _sanitize_entity_payload(entity_data)
-
-
-def _create_section_entity(
-    section: str,
-    default_entity_id: str,
-    entity_data: dict[str, Any],
-    candidate_config: dict[str, Any],
-) -> str:
-    base_entity_id = entity_data.get("display_name", default_entity_id).lower().replace(" ", "_")
-    entity_id = _resolve_unique_entity_id(base_entity_id, candidate_config.setdefault(section, {}))
-    _upsert_section_entity(section, entity_id, entity_data, candidate_config)
-    return entity_id
-
-
-def _delete_section_entity(
-    section: str,
-    entity_id: str,
-    not_found_detail: str,
-    candidate_config: dict[str, Any],
-) -> None:
-    if section not in candidate_config or entity_id not in candidate_config[section]:
-        raise HTTPException(status_code=404, detail=not_found_detail)
-    del candidate_config[section][entity_id]
-
-
-async def _write_config[T](request: Request, mutate: Callable[[dict[str, Any]], T], error_prefix: str) -> T:
-    """Apply one mutation to the committed config off the event loop."""
-    return await asyncio.to_thread(
-        lambda: config_lifecycle.write_committed_config(request, mutate, error_prefix=error_prefix),
-    )
-
-
 def _set_config_generation_header(response: Response, generation: int) -> None:
     """Attach the committed config generation to one API response."""
     response.headers[config_lifecycle.CONFIG_GENERATION_HEADER] = str(generation)
+
+
+async def _commit_dashboard_save(
+    request: Request,
+    response: Response,
+    build: Callable[[constants.RuntimePaths], ConfigCommit],
+    expected_generation: int | None,
+) -> dict[str, bool]:
+    """Commit one dashboard save off the event loop, which validation would block, and attach its generation."""
+    published = await asyncio.to_thread(
+        config_lifecycle.commit_dashboard_config,
+        request,
+        build,
+        expected_generation=expected_generation,
+    )
+    _set_config_generation_header(response, published.generation)
+    return {"success": True}
 
 
 # Include routers
@@ -521,7 +451,6 @@ app.include_router(credentials_router, dependencies=[Depends(verify_user)])
 app.include_router(egress_broker_router, dependencies=[Depends(verify_user)])
 app.include_router(provider_setup_router, dependencies=[Depends(verify_user)])
 app.include_router(homeassistant_router, dependencies=[Depends(verify_user)])
-app.include_router(integrations_router, dependencies=[Depends(verify_user)])
 app.include_router(matrix_router, dependencies=[Depends(verify_user)])
 app.include_router(thread_exports_router, dependencies=[Depends(verify_user)])
 app.include_router(response_activity_router)  # Aggregate operational probe, like health/readiness.
@@ -597,11 +526,11 @@ async def readiness_check() -> JSONResponse:
 async def load_config(
     request: Request,
     response: Response,
-    _user: Annotated[dict, Depends(verify_user)],
+    _user: Annotated[AuthUser, Depends(verify_user)],
 ) -> dict[str, Any]:
-    """Load configuration from file."""
+    """Return the committed configuration as authored, with its generation and state headers."""
     generation = config_lifecycle.committed_generation(request)
-    payload = config_lifecycle.read_committed_config(request, lambda config_data: dict(config_data))
+    config, _ = config_lifecycle.read_committed_runtime_config(request)
     _set_config_generation_header(response, generation)
     # The payload is the config itself, so the includes flag rides in a header
     # like the generation does, and so does the notice that the saved
@@ -612,7 +541,7 @@ async def load_config(
     response.headers[config_lifecycle.CONFIG_PENDING_RESTART_HEADER] = (
         "true" if config_lifecycle.config_pending_restart(request) else "false"
     )
-    return payload
+    return config.authored_model_dump()
 
 
 @app.put("/api/config/save")
@@ -620,28 +549,19 @@ async def save_config(
     request: Request,
     response: Response,
     new_config: dict[str, Any],
-    _user: Annotated[dict, Depends(verify_user)],
+    _user: Annotated[AuthUser, Depends(verify_user)],
     x_mindroom_config_generation: Annotated[int | None, Header()] = None,
 ) -> dict[str, bool]:
     """Save configuration to file."""
-    previous = _read_request_runtime_config_or_none(request)
-    generation = await asyncio.to_thread(
-        config_lifecycle.replace_committed_config,
-        request,
-        new_config,
-        error_prefix="Failed to save configuration",
-        expected_generation=x_mindroom_config_generation,
-    )
-    _reconcile_knowledge_mode_transitions(previous, request.app)
-    _set_config_generation_header(response, generation)
-    return {"success": True}
+    build = partial(ConfigCommit.from_payload, new_config)
+    return await _commit_dashboard_save(request, response, build, x_mindroom_config_generation)
 
 
 @app.get("/api/config/raw")
 async def get_raw_config_source(
     request: Request,
     response: Response,
-    _user: Annotated[dict, Depends(verify_user)],
+    _user: Annotated[AuthUser, Depends(verify_user)],
 ) -> dict[str, Any]:
     """Return the raw config source text for recovery editing."""
     generation = config_lifecycle.committed_generation(request)
@@ -658,26 +578,18 @@ async def save_raw_config_source(
     request: Request,
     response: Response,
     payload: RawConfigSourceRequest,
-    _user: Annotated[dict, Depends(verify_user)],
+    _user: Annotated[AuthUser, Depends(verify_user)],
     x_mindroom_config_generation: Annotated[int | None, Header()] = None,
 ) -> dict[str, bool]:
     """Replace the raw config source text after validating it against the active runtime."""
-    previous = _read_request_runtime_config_or_none(request)
-    generation = config_lifecycle.replace_raw_config_source(
-        request,
-        payload.source,
-        error_prefix="Failed to save raw configuration",
-        expected_generation=x_mindroom_config_generation,
-    )
-    _reconcile_knowledge_mode_transitions(previous, request.app)
-    _set_config_generation_header(response, generation)
-    return {"success": True}
+    build = partial(ConfigCommit.from_source, payload.source)
+    return await _commit_dashboard_save(request, response, build, x_mindroom_config_generation)
 
 
 @app.post("/api/config/agent-policies")
 async def get_agent_policies(
     payload: AgentPoliciesRequest,
-    _user: Annotated[dict, Depends(verify_user)],
+    _user: Annotated[AuthUser, Depends(verify_user)],
 ) -> dict[str, dict[str, dict[str, Any]]]:
     """Return backend-derived policies for the current draft agent config."""
     default_worker_scope = payload.defaults.worker_scope if payload.defaults is not None else None
@@ -695,16 +607,10 @@ async def get_agent_policies(
     }
 
 
-@app.get("/api/config/agents")
-async def get_agents(request: Request, _user: Annotated[dict, Depends(verify_user)]) -> list[dict[str, Any]]:
-    """Get all agents."""
-    return config_lifecycle.read_committed_config(request, lambda config_data: _list_entities(config_data, "agents"))
-
-
 @app.get("/api/config/personal-agents")
 async def get_personal_agents(
     request: Request,
-    _user: Annotated[dict, Depends(verify_user)],
+    _user: Annotated[AuthUser, Depends(verify_user)],
 ) -> list[PersonalAgentResponse]:
     """List every generated personal agent, including pending ones and those whose template was removed."""
     config, runtime_paths = config_lifecycle.read_committed_runtime_config(request)
@@ -728,163 +634,6 @@ async def get_personal_agents(
         )
         for entry, matrix_user_id in roster
     ]
-
-
-@app.put("/api/config/agents/{agent_id}")
-async def update_agent(
-    request: Request,
-    agent_id: str,
-    agent_data: dict[str, Any],
-    _user: Annotated[dict, Depends(verify_user)],
-) -> dict[str, bool]:
-    """Update a specific agent."""
-    await _write_config(
-        request,
-        partial(_upsert_section_entity, "agents", agent_id, agent_data),
-        "Failed to save agent",
-    )
-    return {"success": True}
-
-
-@app.post("/api/config/agents")
-async def create_agent(
-    request: Request,
-    agent_data: dict[str, Any],
-    _user: Annotated[dict, Depends(verify_user)],
-) -> dict[str, Any]:
-    """Create a new agent."""
-    agent_id = await _write_config(
-        request,
-        partial(_create_section_entity, "agents", "new_agent", agent_data),
-        "Failed to create agent",
-    )
-    return {"id": agent_id, "success": True}
-
-
-@app.delete("/api/config/agents/{agent_id}")
-async def delete_agent(
-    request: Request,
-    agent_id: str,
-    _user: Annotated[dict, Depends(verify_user)],
-) -> dict[str, bool]:
-    """Delete an agent."""
-    await _write_config(
-        request,
-        partial(_delete_section_entity, "agents", agent_id, "Agent not found"),
-        "Failed to delete agent",
-    )
-    return {"success": True}
-
-
-@app.get("/api/config/teams")
-async def get_teams(request: Request, _user: Annotated[dict, Depends(verify_user)]) -> list[dict[str, Any]]:
-    """Get all teams."""
-    return config_lifecycle.read_committed_config(request, lambda config_data: _list_entities(config_data, "teams"))
-
-
-@app.put("/api/config/teams/{team_id}")
-async def update_team(
-    request: Request,
-    team_id: str,
-    team_data: dict[str, Any],
-    _user: Annotated[dict, Depends(verify_user)],
-) -> dict[str, bool]:
-    """Update a specific team."""
-    await _write_config(request, partial(_upsert_section_entity, "teams", team_id, team_data), "Failed to save team")
-    return {"success": True}
-
-
-@app.post("/api/config/teams")
-async def create_team(
-    request: Request,
-    team_data: dict[str, Any],
-    _user: Annotated[dict, Depends(verify_user)],
-) -> dict[str, Any]:
-    """Create a new team."""
-    team_id = await _write_config(
-        request,
-        partial(_create_section_entity, "teams", "new_team", team_data),
-        "Failed to create team",
-    )
-    return {"id": team_id, "success": True}
-
-
-@app.delete("/api/config/teams/{team_id}")
-async def delete_team(
-    request: Request,
-    team_id: str,
-    _user: Annotated[dict, Depends(verify_user)],
-) -> dict[str, bool]:
-    """Delete a team."""
-    await _write_config(
-        request,
-        partial(_delete_section_entity, "teams", team_id, "Team not found"),
-        "Failed to delete team",
-    )
-    return {"success": True}
-
-
-@app.get("/api/config/models")
-async def get_models(request: Request, _user: Annotated[dict, Depends(verify_user)]) -> dict[str, Any]:
-    """Get all model configurations."""
-    return config_lifecycle.read_committed_config(
-        request,
-        lambda config_data: dict(config_data.get("models") or {}),
-    )
-
-
-@app.put("/api/config/models/{model_id}")
-async def update_model(
-    request: Request,
-    model_id: str,
-    model_data: dict[str, Any],
-    _user: Annotated[dict, Depends(verify_user)],
-) -> dict[str, bool]:
-    """Update a model configuration."""
-
-    def mutate(candidate_config: dict[str, Any]) -> None:
-        candidate_config.setdefault("models", {})[model_id] = model_data
-
-    await _write_config(request, mutate, "Failed to save model")
-    return {"success": True}
-
-
-@app.get("/api/config/room-models")
-async def get_room_models(request: Request, _user: Annotated[dict, Depends(verify_user)]) -> dict[str, Any]:
-    """Get room-specific model overrides."""
-    return config_lifecycle.read_committed_config(
-        request,
-        lambda config_data: dict(config_data.get("room_models") or {}),
-    )
-
-
-@app.put("/api/config/room-models")
-async def update_room_models(
-    request: Request,
-    room_models: dict[str, str],
-    _user: Annotated[dict, Depends(verify_user)],
-) -> dict[str, bool]:
-    """Update room-specific model overrides."""
-
-    def mutate(candidate_config: dict[str, Any]) -> None:
-        candidate_config["room_models"] = room_models
-
-    await _write_config(request, mutate, "Failed to save room models")
-    return {"success": True}
-
-
-@app.get("/api/rooms")
-async def get_available_rooms(request: Request, _user: Annotated[dict, Depends(verify_user)]) -> list[str]:
-    """Get list of available rooms."""
-
-    def read_rooms(config_data: dict[str, Any]) -> list[str]:
-        rooms: set[str] = set(config_data.get("rooms", {}))
-        for section in ("agents", "teams"):
-            for entity_data in config_data.get(section, {}).values():
-                rooms.update(entity_data.get("rooms", []))
-        return sorted(rooms)
-
-    return config_lifecycle.read_committed_config(request, read_rooms)
 
 
 app.include_router(frontend_router)

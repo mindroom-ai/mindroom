@@ -578,7 +578,7 @@ async def _consent(request: Request) -> Response:
             redirect = await runtime.provider.finish_consent(
                 fields["state"],
                 requester_id=context.owner.requester_id,
-                authenticated_user_id=user["matrix_user_id"],
+                authenticated_user_id=user.matrix_user_id,
                 account_id=context.owner.account_id,
                 csrf_token=fields["csrf_token"],
                 allow=fields["decision"] == "allow",
@@ -590,7 +590,7 @@ async def _consent(request: Request) -> Response:
         consent = await runtime.provider.begin_consent(
             state,
             requester_id=context.owner.requester_id,
-            authenticated_user_id=user["matrix_user_id"],
+            authenticated_user_id=user.matrix_user_id,
             account_id=context.owner.account_id,
         )
         defaults = (context.personal_agent_name,) if context.personal_agent_name is not None else ()

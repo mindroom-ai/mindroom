@@ -43,12 +43,15 @@ from tests.authorization_helpers import (
     make_test_tool_runtime_context,
 )
 from tests.conftest import (
+    assert_refused_for_concurrent_edit,
     load_config_yaml,
     make_conversation_reader_mock,
     make_relation_lookup,
     publish_test_plugins,
     test_runtime_paths,
+    write_concurrent_edit_while_validating,
     write_config_yaml,
+    write_demo_tool_plugin,
 )
 from tests.identity_helpers import persist_entity_accounts
 from tests.matrix_state_helpers import save_matrix_state
@@ -129,31 +132,7 @@ def _invalid_plugin_config_path(tmp_path: Path, *, with_agent: bool = True) -> P
 
 def _plugin_tool_config_path(tmp_path: Path, *, tool_name: str = "config_manager_plugin_tool") -> Path:
     """Write one config that enables a plugin-defined tool."""
-    plugin_root = tmp_path / "plugins" / "demo"
-    plugin_root.mkdir(parents=True)
-    (plugin_root / "mindroom.plugin.json").write_text(
-        json.dumps({"name": "demo_plugin", "tools_module": "tools.py", "skills": []}),
-        encoding="utf-8",
-    )
-    (plugin_root / "tools.py").write_text(
-        "from agno.tools import Toolkit\n"
-        "from mindroom.tool_system.declarations import ToolCategory, ToolFileAccess\nfrom mindroom.tool_system.registration import register_tool_with_metadata\n"
-        "\n"
-        "class DemoTool(Toolkit):\n"
-        "    def __init__(self) -> None:\n"
-        "        super().__init__(name='demo', tools=[])\n"
-        "\n"
-        "@register_tool_with_metadata(\n"
-        f"    name='{tool_name}',\n"
-        "    file_access=ToolFileAccess.NONE,\n"
-        "    display_name='Plugin Tool',\n"
-        "    description='Plugin-defined tool',\n"
-        "    category=ToolCategory.DEVELOPMENT,\n"
-        ")\n"
-        "def demo_plugin_tools():\n"
-        "    return DemoTool\n",
-        encoding="utf-8",
-    )
+    write_demo_tool_plugin(tmp_path / "plugins" / "demo", tool_name)
     config_path = tmp_path / "config.yaml"
     write_config_yaml(
         Config(
@@ -532,11 +511,12 @@ class TestConsolidatedConfigManager:
         cm = _config_manager(_minimal_config_path(tmp_path))
         assert cm.config_path is not None
         assert cm.name == "config_manager"
-        assert len(cm.functions) == 4
-        assert any(tool.__name__ == "get_info" for tool in cm.functions.values())
-        assert any(tool.__name__ == "manage_config" for tool in cm.functions.values())
-        assert any(tool.__name__ == "manage_agent" for tool in cm.functions.values())
-        assert any(tool.__name__ == "manage_team" for tool in cm.functions.values())
+        assert sorted(tool.__name__ for tool in cm.functions.values()) == [
+            "get_info",
+            "manage_agent",
+            "manage_config",
+            "manage_team",
+        ]
 
     def test_manage_config_inspects_authored_subtree_with_redaction(self, tmp_path: Path) -> None:
         """Inspection should be path-scoped, authored-only, and centrally redacted."""
@@ -2162,6 +2142,11 @@ class TestConsolidatedConfigManager:
         result = cm.get_info(info_type="agent_template", name="researcher")
         assert "Template for 'researcher' agent" in result
         assert "Research specialist" in result
+        assert "**Available tools in research category:**" in result
+
+        result = cm.get_info(info_type="tool_details", name="calculator")
+        assert result.startswith("## Tool: calculator\n")
+        assert "**Category**: development" in result
 
         # Test invalid template type
         result = cm.get_info(info_type="agent_template", name="invalid_type")
@@ -2305,3 +2290,53 @@ def test_a_json_pointer_names_where_it_leaves_the_authored_document(
 
     with pytest.raises(_ConfigPatchError, match=error):
         resolve(document, path)
+
+
+@pytest.mark.parametrize("writer", ["patch", "update_agent", "create_agent", "create_team"])
+def test_config_write_refuses_a_file_edited_while_it_validated(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    writer: str,
+) -> None:
+    """A dashboard save or hand edit landing while a tool change validates is kept, and the tool change is refused."""
+    config_path = tmp_path / "config.yaml"
+    config = Config.model_validate(
+        {
+            "administrators": ["@admin:example.org"],
+            "models": {"default": {"provider": "openai", "id": "test-model"}},
+            "agents": {"talent": {"display_name": "Talent", "role": "Original"}},
+        },
+    )
+    write_config_yaml(config, config_path)
+    concurrent_source = write_concurrent_edit_while_validating(monkeypatch, config_path, "talent")
+    config_manager = _config_manager(config_path)
+    writers = {
+        "patch": lambda: config_manager.manage_config(
+            operation="patch",
+            changes=[{"op": "replace", "path": "/agents/talent/role", "value": "Agent change"}],
+        ),
+        "update_agent": lambda: config_manager.manage_agent(
+            operation="update",
+            agent_name="talent",
+            role="Agent change",
+        ),
+        "create_agent": lambda: config_manager.manage_agent(
+            operation="create",
+            agent_name="helper",
+            display_name="Helper",
+            role="Agent change",
+        ),
+        "create_team": lambda: config_manager.manage_team(
+            team_name="reviewers",
+            display_name="Reviewers",
+            role="Agent change",
+            agents=["talent"],
+        ),
+    }
+
+    with tool_runtime_context(
+        _caller_context(config_manager, config, agent_name="talent", requester_id="@admin:example.org"),
+    ):
+        result = writers[writer]()
+
+    assert_refused_for_concurrent_edit(result, config_path, concurrent_source)

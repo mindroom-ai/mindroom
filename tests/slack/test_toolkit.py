@@ -1231,7 +1231,6 @@ def _gateway_context(tmp_path: Path) -> AgentToolContext:
     snapshot = ApiSnapshot(
         generation=1,
         runtime_paths=runtime_paths,
-        config_data=config.model_dump(),
         runtime_config=config,
     )
     return resolve_connection_agent(resolve_connection_user(snapshot, ALICE), "mind")

@@ -17,6 +17,7 @@ from urllib.parse import parse_qs, urlsplit
 
 import jwt
 import pytest
+import yaml
 from agno.tools import Toolkit
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
@@ -27,13 +28,12 @@ from mindroom import agents, constants
 from mindroom.api import config_lifecycle, main
 from mindroom.api.connections_session_cookie import connections_session_cookie, issue_connections_session
 from mindroom.api.mcp_gateway import GatewayRuntime, gateway_cors_origins, gateway_lifespan, install_gateway_routes
-from mindroom.config.main import Config
 from mindroom.config.plugin import PluginEntryConfig
 from mindroom.hooks import EVENT_TOOL_BEFORE_CALL, HookRegistry, ToolBeforeCallContext, hook
 from mindroom.mcp_gateway import admission
 from mindroom.tool_system.plugins import ConfigPlugins
 from mindroom.tool_system.runtime_context import current_execution_identity
-from tests.api.conftest import trusted_upstream_jwks, trusted_upstream_jwt, trusted_upstream_jwt_key
+from tests.api.conftest import commit_tool_change, trusted_upstream_jwks, trusted_upstream_jwt, trusted_upstream_jwt_key
 from tests.runtime_fakes import bind_test_embedded_runtime
 
 if TYPE_CHECKING:
@@ -105,26 +105,28 @@ def gateway_app(tmp_path: Path, enforce_turn_authorization: None) -> FastAPI:  #
         storage_path=tmp_path / "storage",
         process_env=env,
     )
-    config = Config.model_validate(
-        {
-            "agents": {
-                "personal": {
-                    "display_name": "Personal assistant",
-                    "role": "Help",
-                    "tools": ["calculator"],
-                    "private": {"per": "user_agent"},
-                    "access": {"users": ["@alice:example.org", "@bob:example.org"]},
+    paths.config_path.write_text(
+        yaml.safe_dump(
+            {
+                "models": {"default": {"provider": "openai", "id": "gpt-6-astra"}},
+                "agents": {
+                    "personal": {
+                        "display_name": "Personal assistant",
+                        "role": "Help",
+                        "tools": ["calculator"],
+                        "private": {"per": "user_agent"},
+                        "access": {"users": ["@alice:example.org", "@bob:example.org"]},
+                    },
                 },
             },
-        },
+        ),
+        encoding="utf-8",
     )
     app = FastAPI(lifespan=gateway_lifespan)
     main.initialize_api_app(app, paths)
     bind_test_embedded_runtime(app)
     main._add_dashboard_cors_middleware(app, paths)
-    snapshot = config_lifecycle.require_api_state(app).snapshot
-    snapshot.runtime_config = config
-    snapshot.config_data = config.model_dump()
+    assert config_lifecycle.load_config_into_app(paths, app).loaded
     install_gateway_routes(app)
     return app
 
@@ -256,7 +258,6 @@ def test_initialize_identifies_configured_personal_agent(
     snapshot = config_lifecycle.require_api_state(gateway_app).snapshot
     assert snapshot.runtime_config is not None
     snapshot.runtime_config.agents[personal_agent] = snapshot.runtime_config.agents.pop("personal")
-    snapshot.config_data = snapshot.runtime_config.model_dump()
     snapshot.runtime_paths = replace(
         snapshot.runtime_paths,
         process_env={**snapshot.runtime_paths.process_env, "MINDROOM_CONNECTIONS_AGENT": personal_agent},
@@ -466,7 +467,7 @@ def test_native_dispatch_rejects_changed_publication(
                 updated["agents"]["personal"]["private"]["per"] = "user"
             elif change == "access":
                 updated["agents"]["personal"]["access"]["users"] = ["@bob:example.org"]
-            config_lifecycle.persist_runtime_validated_config(Config.model_validate(updated), original.runtime_paths)
+            commit_tool_change(updated, original.runtime_paths)
             assert state.snapshot is not original
         finally:
             release.set()

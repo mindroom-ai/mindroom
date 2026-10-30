@@ -34,11 +34,14 @@ from mindroom.tool_system.runtime_context import tool_runtime_context
 from tests.agent_tool_helpers import offered_function, source_toolkit
 from tests.authorization_helpers import make_test_tool_runtime_context
 from tests.conftest import (
+    assert_refused_for_concurrent_edit,
     load_config_yaml,
     make_conversation_reader_mock,
     make_relation_lookup,
     publish_test_plugins,
+    write_concurrent_edit_while_validating,
     write_config_yaml,
+    write_demo_tool_plugin,
 )
 from tests.identity_helpers import persist_entity_accounts
 from tests.turn_model_helpers import turn_model
@@ -77,14 +80,8 @@ def _make_config(
     return bound, config_path
 
 
-def _runtime_paths_for(config: Config, config_path: Path | None = None) -> RuntimePaths:
-    runtime_paths = _BOUND_RUNTIME_PATHS.get(id(config))
-    if runtime_paths is not None:
-        return runtime_paths
-    if config_path is None:
-        msg = "Test config is missing bound RuntimePaths"
-        raise KeyError(msg)
-    return resolve_runtime_paths(config_path=config_path)
+def _runtime_paths_for(config: Config) -> RuntimePaths:
+    return _BOUND_RUNTIME_PATHS[id(config)]
 
 
 def _create_agent_for_test(agent_name: str, config: Config) -> AgentBuild:
@@ -123,7 +120,7 @@ def _as_requester(tool: SelfConfigTools, requester_id: str = _ADMIN_USER_ID) -> 
         yield
 
 
-def _invalid_plugin_config_path(tmp_path: Path, *, with_agent: bool = True) -> Path:
+def _invalid_plugin_config_path(tmp_path: Path) -> Path:
     """Write one config whose plugin manifest fails runtime validation."""
     plugin_root = tmp_path / "plugins" / "bad-name"
     plugin_root.mkdir(parents=True)
@@ -134,7 +131,7 @@ def _invalid_plugin_config_path(tmp_path: Path, *, with_agent: bool = True) -> P
     config_path = tmp_path / "config.yaml"
     write_config_yaml(
         Config(
-            agents={"writer": AgentConfig(display_name="Writer", role="Write things")} if with_agent else {},
+            agents={"writer": AgentConfig(display_name="Writer", role="Write things")},
             models=_DEFAULT_MODELS,
             plugins=["./plugins/bad-name"],
             administrators=[_ADMIN_USER_ID],
@@ -144,33 +141,9 @@ def _invalid_plugin_config_path(tmp_path: Path, *, with_agent: bool = True) -> P
     return config_path
 
 
-def _plugin_tool_config_path(tmp_path: Path, *, tool_name: str = "self_config_plugin_tool") -> Path:
+def _plugin_tool_config_path(tmp_path: Path) -> Path:
     """Write one config that enables a plugin-defined tool for self-config tests."""
-    plugin_root = tmp_path / "plugins" / "demo"
-    plugin_root.mkdir(parents=True)
-    (plugin_root / "mindroom.plugin.json").write_text(
-        json.dumps({"name": "demo_plugin", "tools_module": "tools.py", "skills": []}),
-        encoding="utf-8",
-    )
-    (plugin_root / "tools.py").write_text(
-        "from agno.tools import Toolkit\n"
-        "from mindroom.tool_system.declarations import ToolCategory, ToolFileAccess\nfrom mindroom.tool_system.registration import register_tool_with_metadata\n"
-        "\n"
-        "class DemoTool(Toolkit):\n"
-        "    def __init__(self) -> None:\n"
-        "        super().__init__(name='demo', tools=[])\n"
-        "\n"
-        "@register_tool_with_metadata(\n"
-        f"    name='{tool_name}',\n"
-        "    file_access=ToolFileAccess.NONE,\n"
-        "    display_name='Plugin Tool',\n"
-        "    description='Plugin-defined tool',\n"
-        "    category=ToolCategory.DEVELOPMENT,\n"
-        ")\n"
-        "def demo_plugin_tools():\n"
-        "    return DemoTool\n",
-        encoding="utf-8",
-    )
+    write_demo_tool_plugin(tmp_path / "plugins" / "demo", "self_config_plugin_tool")
     config_path = tmp_path / "config.yaml"
     write_config_yaml(
         Config(
@@ -385,6 +358,39 @@ class TestUpdateOwnConfig:
         finally:
             config_path.unlink(missing_ok=True)
 
+    def test_update_writes_only_the_fields_the_agent_had_or_changed(self) -> None:
+        """Changing one field must not spell out every default of the agent's entry in config.yaml."""
+        _, config_path = _make_config(
+            agents={"coder": AgentConfig(display_name="Coder", role="Old role")},
+        )
+        try:
+            before = set(yaml.safe_load(config_path.read_text(encoding="utf-8"))["agents"]["coder"])
+            tool = _self_config_tools(agent_name="coder", config_path=config_path)
+            with _as_requester(tool):
+                result = tool.update_own_config(role="New role")
+
+            assert "Successfully" in result
+            saved = yaml.safe_load(config_path.read_text(encoding="utf-8"))["agents"]["coder"]
+            assert set(saved) == before
+            assert saved["role"] == "New role"
+        finally:
+            config_path.unlink(missing_ok=True)
+
+    def test_update_refuses_a_file_edited_while_it_validated(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """A dashboard save or hand edit landing while the update validates is kept, and the update is refused."""
+        _, config_path = _make_config(
+            agents={"coder": AgentConfig(display_name="Coder", role="Old role")},
+        )
+        try:
+            concurrent_source = write_concurrent_edit_while_validating(monkeypatch, config_path, "coder")
+            tool = _self_config_tools(agent_name="coder", config_path=config_path)
+            with _as_requester(tool):
+                result = tool.update_own_config(role="Agent change")
+
+            assert_refused_for_concurrent_edit(result, config_path, concurrent_source)
+        finally:
+            config_path.unlink(missing_ok=True)
+
     def test_update_own_config_advances_registered_api_snapshot_generation(self) -> None:
         """Tool-side self-config writes should advance the in-process API generation immediately."""
         _, config_path = _make_config(
@@ -402,7 +408,7 @@ class TestUpdateOwnConfig:
 
             assert "Successfully" in result
             assert main._app_context(main.app).generation > initial_generation
-            assert main._app_context(main.app).config_data["agents"]["coder"]["role"] == "New role"
+            assert main._app_context(main.app).runtime_config.agents["coder"].role == "New role"
         finally:
             config_path.unlink(missing_ok=True)
 
@@ -671,6 +677,7 @@ class TestUpdateOwnConfig:
                     markdown=False,
                 )
             assert "Successfully" in result
+            assert all(field in result for field in ("Display Name", "Role", "Markdown"))
 
             reloaded = load_config_yaml(config_path)
             assert reloaded.agents["coder"].display_name == "Super Coder"

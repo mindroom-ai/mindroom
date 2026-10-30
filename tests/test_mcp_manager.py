@@ -497,6 +497,7 @@ class _FakeMcpOAuthProvider:
     scopes: tuple[str, ...] = ()
     claim_validator = None
     requester_scoped_credentials = True
+    legacy_credentials = None
 
     def __init__(self, refresh: Callable[[Mapping[str, Any]], Awaitable[dict[str, Any] | None]]) -> None:
         self._refresh = refresh

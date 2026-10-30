@@ -41,7 +41,7 @@ def personal_snapshot(tmp_path: Path, enforce_turn_authorization: None) -> ApiSn
             },
         },
     )
-    return ApiSnapshot(generation=1, runtime_paths=paths, config_data=config.model_dump(), runtime_config=config)
+    return ApiSnapshot(generation=1, runtime_paths=paths, runtime_config=config)
 
 
 @pytest.mark.parametrize("scope", [None, "shared", "user", "user_agent"])

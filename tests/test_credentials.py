@@ -20,7 +20,6 @@ from mindroom.api.credentials_target import (
     load_credentials_for_target,
     save_credentials_for_target,
 )
-from mindroom.api.integrations import _save_spotify_credentials
 from mindroom.credentials.manager import (
     CredentialsManager,
     WorkerCredentialPathError,
@@ -1630,32 +1629,8 @@ class TestGlobalCredentialsManager:
         assert loaded_credentials == {"api_key": "shared-key", "_source": "ui"}
 
 
-class TestSharedIntegrationCredentialTagging:
-    """Regression tests for shared-only integration credential saves."""
-
-    def test_spotify_credentials_saved_from_dashboard_are_tagged_as_ui_source(
-        self,
-        temp_credentials_dir: Path,
-    ) -> None:
-        """Spotify OAuth saves should mark credentials as UI-managed so unscoped workers mirror them."""
-        manager = CredentialsManager(temp_credentials_dir)
-        target = RequestCredentialsTarget(
-            runtime_paths=constants_mod.resolve_primary_runtime_paths(
-                config_path=temp_credentials_dir / "config.yaml",
-                storage_path=temp_credentials_dir,
-            ),
-            base_manager=manager,
-            worker_scope=None,
-            agent_name=None,
-            execution_identity=None,
-        )
-
-        _save_spotify_credentials({"access_token": "spotify-token"}, target)
-
-        assert manager.load_credentials("spotify") == {
-            "access_token": "spotify-token",
-            "_source": "ui",
-        }
+class TestDedicatedWorkerCredentialRoots:
+    """Dedicated workers read and write credentials under the root they are mounted at."""
 
     def test_dedicated_worker_manager_uses_current_worker_root_for_shared_scope(
         self,
