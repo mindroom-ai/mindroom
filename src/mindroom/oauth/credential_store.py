@@ -349,7 +349,8 @@ def _oauth_credential_database_path(context: OAuthCredentialStoreContext) -> Pat
 def oauth_credentials_may_exist(context: OAuthCredentialStoreContext) -> bool:
     """Return whether the scope has a store, or legacy tokens its store adopts when created; blocks on the filesystem.
 
-    It opens and creates nothing, so a listing of many scopes writes nothing.
+    It opens and creates nothing itself; a caller that then reads a scope holding legacy tokens creates its store,
+    which adopts them, so a listing writes only for such a scope.
     """
     legacy = context.provider.legacy_credentials
     return _oauth_credential_database_path(context).exists() or (

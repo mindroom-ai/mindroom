@@ -287,3 +287,50 @@ def commit_tool_change(
     commit = ConfigCommit.from_payload(payload, runtime_paths)
     config_lifecycle.commit_config(runtime_paths, commit, loaded=loaded)
     return commit.config
+
+
+PLATFORM_SSO_SECRET = "instance-platform-sso-secret-for-tests-0001"  # noqa: S105
+
+
+def set_platform_auth(
+    *,
+    valid_tokens: set[str],
+    platform_sso_url: str = "https://platform.example.com/instance-sso/authorize",
+    public_url: str | None = None,
+    account_id: str | None = None,
+    user_id: str = "user-123",
+    platform_sso_secret: str | None = PLATFORM_SSO_SECRET,
+) -> None:
+    """Configure the API module for platform-managed login tests."""
+    from mindroom.api import auth, main  # noqa: PLC0415
+
+    class _FakeUser:
+        id = user_id
+        email = "user@example.com"
+
+    class _FakeResponse:
+        user = _FakeUser()
+
+    class _FakeAuth:
+        @staticmethod
+        def get_user(token: str) -> _FakeResponse | None:
+            if token not in valid_tokens:
+                return None
+            return _FakeResponse()
+
+    class _FakeClient:
+        auth = _FakeAuth()
+
+    config_lifecycle.app_state(main.app).api_auth_state = auth.ApiAuthState(
+        runtime_paths=main._app_runtime_paths(main.app),
+        settings=auth._ApiAuthSettings(
+            supabase_url="https://supabase.example.com",
+            supabase_anon_key="anon-key",
+            account_id=account_id,
+            mindroom_api_key=None,
+            public_url=public_url,
+            platform_sso_url=platform_sso_url,
+            platform_sso_secret=platform_sso_secret,
+        ),
+        supabase_auth=_FakeClient(),
+    )

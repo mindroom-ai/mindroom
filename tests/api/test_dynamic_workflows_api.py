@@ -11,8 +11,12 @@ from mindroom import constants
 from mindroom.api import config_lifecycle, main
 from mindroom.dynamic_workflows.service import DynamicWorkflowService
 from mindroom.dynamic_workflows.store import DynamicWorkflowStore
-from tests.api.conftest import trusted_upstream_env, trusted_upstream_headers, use_trusted_upstream_runtime
-from tests.api.test_api import _set_platform_auth
+from tests.api.conftest import (
+    set_platform_auth,
+    trusted_upstream_env,
+    trusted_upstream_headers,
+    use_trusted_upstream_runtime,
+)
 
 if TYPE_CHECKING:
     from fastapi import FastAPI
@@ -317,7 +321,7 @@ def test_private_dynamic_workflow_report_admits_the_platform_owner_only(
 ) -> None:
     """A hosted platform login acts as the instance owner, so it opens the owner's reports and no one else's."""
     runtime_paths = main._app_runtime_paths(test_client.app)
-    _set_platform_auth(valid_tokens={_PLATFORM_TOKEN}, account_id="user-123")
+    set_platform_auth(valid_tokens={_PLATFORM_TOKEN}, account_id="user-123")
     run = _completed_run(runtime_paths, requested_by=requested_by)
 
     response = test_client.get(

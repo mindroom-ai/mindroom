@@ -54,7 +54,9 @@ from mindroom.workers.backend import WorkerBackend
 from mindroom.workers.in_flight import worker_call_in_flight
 from mindroom.workers.models import WorkerHandle, WorkerMaintenanceResult
 from tests.api.conftest import (
+    PLATFORM_SSO_SECRET,
     publish_api_config,
+    set_platform_auth,
     trusted_upstream_env,
     trusted_upstream_headers,
     trusted_upstream_jwks,
@@ -4445,51 +4447,7 @@ def test_homeassistant_callback_refuses_an_unauthenticated_request(api_key_clien
     assert api_key_client.get("/api/homeassistant/callback?code=test-code&state=missing").status_code == 401
 
 
-_PLATFORM_SSO_SECRET = "instance-platform-sso-secret-for-tests-0001"  # noqa: S105
 _OTHER_INSTANCE_SSO_SECRET = "another-instance-platform-sso-secret-0002"  # noqa: S105
-
-
-def _set_platform_auth(
-    *,
-    valid_tokens: set[str],
-    platform_sso_url: str = "https://platform.example.com/instance-sso/authorize",
-    public_url: str | None = None,
-    account_id: str | None = None,
-    user_id: str = "user-123",
-    platform_sso_secret: str | None = _PLATFORM_SSO_SECRET,
-) -> None:
-    """Configure the API module for platform-managed login tests."""
-
-    class _FakeUser:
-        id = user_id
-        email = "user@example.com"
-
-    class _FakeResponse:
-        user = _FakeUser()
-
-    class _FakeAuth:
-        @staticmethod
-        def get_user(token: str) -> _FakeResponse | None:
-            if token not in valid_tokens:
-                return None
-            return _FakeResponse()
-
-    class _FakeClient:
-        auth = _FakeAuth()
-
-    config_lifecycle.app_state(main.app).api_auth_state = auth.ApiAuthState(
-        runtime_paths=main._app_runtime_paths(main.app),
-        settings=auth._ApiAuthSettings(
-            supabase_url="https://supabase.example.com",
-            supabase_anon_key="anon-key",
-            account_id=account_id,
-            mindroom_api_key=None,
-            public_url=public_url,
-            platform_sso_url=platform_sso_url,
-            platform_sso_secret=platform_sso_secret,
-        ),
-        supabase_auth=_FakeClient(),
-    )
 
 
 def _platform_sso_token(
@@ -4497,7 +4455,7 @@ def _platform_sso_token(
     *,
     audience: str = "http://localhost",
     subject: str = "user-123",
-    secret: str = _PLATFORM_SSO_SECRET,
+    secret: str = PLATFORM_SSO_SECRET,
     lifetime_seconds: int = 60,
 ) -> str:
     """Sign a platform login ticket or session the way the platform and runtime do."""
@@ -4532,7 +4490,7 @@ def _use_platform_session(test_client: TestClient, session_token: str) -> None:
 
 def test_platform_sso_ticket_exchange_sets_host_only_session(test_client: TestClient) -> None:
     """A valid ticket becomes a host-only session cookie that authenticates dashboard calls."""
-    _set_platform_auth(valid_tokens=set(), account_id="user-123")
+    set_platform_auth(valid_tokens=set(), account_id="user-123")
 
     response = test_client.get(
         "/api/auth/platform-sso",
@@ -4558,7 +4516,7 @@ def test_platform_sso_ticket_exchange_sets_host_only_session(test_client: TestCl
 
 def test_platform_sso_ticket_is_single_use(test_client: TestClient) -> None:
     """A captured ticket cannot be exchanged a second time."""
-    _set_platform_auth(valid_tokens=set())
+    set_platform_auth(valid_tokens=set())
     ticket = _platform_ticket()
 
     first = test_client.get("/api/auth/platform-sso", params={"ticket": ticket}, follow_redirects=False)
@@ -4575,7 +4533,7 @@ def test_platform_sso_prunes_expired_ticket_ids_and_keeps_redirects_in_app(
     """The replay cache drops expired IDs, and a ticket exchange never redirects off the instance."""
     used_ticket_ids = {"expired-ticket": int(time.time()) - 3600}
     monkeypatch.setattr(auth, "_used_platform_sso_ticket_ids", used_ticket_ids)
-    _set_platform_auth(valid_tokens=set())
+    set_platform_auth(valid_tokens=set())
 
     response = test_client.get(
         "/api/auth/platform-sso",
@@ -4603,7 +4561,7 @@ def test_platform_sso_rejects_tickets_for_other_instances(
     ticket_kwargs: dict[str, Any],
 ) -> None:
     """Tickets signed for another instance, naming another instance, or expired are rejected."""
-    _set_platform_auth(valid_tokens=set())
+    set_platform_auth(valid_tokens=set())
 
     response = test_client.get(
         "/api/auth/platform-sso",
@@ -4617,7 +4575,7 @@ def test_platform_sso_rejects_tickets_for_other_instances(
 
 def test_platform_sso_tickets_and_sessions_are_not_interchangeable(test_client: TestClient) -> None:
     """A ticket is not a session, and a session is not a ticket."""
-    _set_platform_auth(valid_tokens=set())
+    set_platform_auth(valid_tokens=set())
 
     _use_platform_session(test_client, _platform_ticket())
     assert test_client.post("/api/config/load", headers={"Origin": "http://localhost"}).status_code == 401
@@ -4633,7 +4591,7 @@ def test_platform_sso_tickets_and_sessions_are_not_interchangeable(test_client: 
 
 def test_platform_sso_rejects_other_account_ticket(test_client: TestClient) -> None:
     """The instance only admits its configured account."""
-    _set_platform_auth(valid_tokens=set(), account_id="account-owner")
+    set_platform_auth(valid_tokens=set(), account_id="account-owner")
 
     response = test_client.get(
         "/api/auth/platform-sso",
@@ -4647,7 +4605,7 @@ def test_platform_sso_rejects_other_account_ticket(test_client: TestClient) -> N
 
 def test_platform_sso_is_disabled_without_instance_secret(test_client: TestClient) -> None:
     """Without the instance SSO key the runtime neither exchanges tickets nor trusts sessions."""
-    _set_platform_auth(valid_tokens=set(), platform_sso_secret=None)
+    set_platform_auth(valid_tokens=set(), platform_sso_secret=None)
 
     response = test_client.get(
         "/api/auth/platform-sso",
@@ -4663,7 +4621,7 @@ def test_platform_sso_is_disabled_without_instance_secret(test_client: TestClien
 def test_platform_runtime_ignores_platform_api_cookie(test_client: TestClient) -> None:
     """Tenant runtimes must not treat the platform's Supabase cookie as a dashboard credential."""
     supabase_token = "valid-supabase-token"  # noqa: S105
-    _set_platform_auth(valid_tokens={supabase_token})
+    set_platform_auth(valid_tokens={supabase_token})
     test_client.cookies.set("mindroom_jwt", supabase_token)
 
     response = test_client.post("/api/config/load", headers={"Origin": "http://localhost"})
@@ -4673,7 +4631,7 @@ def test_platform_runtime_ignores_platform_api_cookie(test_client: TestClient) -
 
 def test_platform_session_mutations_require_same_origin(test_client: TestClient) -> None:
     """Cookie sessions remain subject to the browser mutation origin check."""
-    _set_platform_auth(valid_tokens=set())
+    set_platform_auth(valid_tokens=set())
     _use_platform_session(test_client, _platform_session())
 
     response = test_client.post("/api/config/load", headers={"Origin": "https://evil.example.test"})
@@ -4687,20 +4645,20 @@ def test_platform_auth_settings_read_sso_environment(tmp_path: Path) -> None:
         tmp_path,
         process_env={
             "MINDROOM_PLATFORM_SSO_URL": "https://api.example.test/instance-sso/authorize",
-            "MINDROOM_PLATFORM_SSO_SECRET": _PLATFORM_SSO_SECRET,
+            "MINDROOM_PLATFORM_SSO_SECRET": PLATFORM_SSO_SECRET,
         },
     )
 
     settings = auth._build_auth_settings(runtime_paths)
 
     assert settings.platform_sso_url == "https://api.example.test/instance-sso/authorize"
-    assert settings.platform_sso_secret == _PLATFORM_SSO_SECRET
+    assert settings.platform_sso_secret == PLATFORM_SSO_SECRET
 
 
 @pytest.mark.usefixtures("frontend_dist")
 def test_platform_frontend_redirects_to_login_when_cookie_missing(test_client: TestClient) -> None:
     """Platform deployments should redirect unauthenticated dashboard requests to platform SSO."""
-    _set_platform_auth(
+    set_platform_auth(
         valid_tokens=set(),
         platform_sso_url="https://api.example.com/instance-sso/authorize",
     )
@@ -4713,7 +4671,7 @@ def test_platform_frontend_redirects_to_login_when_cookie_missing(test_client: T
 @pytest.mark.usefixtures("frontend_dist")
 def test_platform_frontend_skips_sso_redirect_without_instance_secret(test_client: TestClient) -> None:
     """Without the instance key, a platform redirect would only end in an unusable ticket."""
-    _set_platform_auth(
+    set_platform_auth(
         valid_tokens=set(),
         platform_sso_url="https://api.example.com/instance-sso/authorize",
         platform_sso_secret=None,
@@ -4728,7 +4686,7 @@ def test_platform_frontend_skips_sso_redirect_without_instance_secret(test_clien
 @pytest.mark.usefixtures("frontend_dist")
 def test_platform_frontend_redirect_uses_public_url_for_redirect_to(test_client: TestClient) -> None:
     """Hosted redirects must use the public dashboard URL, not ingress-internal HTTP."""
-    _set_platform_auth(
+    set_platform_auth(
         valid_tokens=set(),
         platform_sso_url="https://api.example.com/instance-sso/authorize",
         public_url="https://tenant42.example.test",
@@ -4778,7 +4736,7 @@ def test_platform_runtime_restricts_cors_origins(tmp_path: Path) -> None:
 @pytest.mark.usefixtures("frontend_dist")
 def test_platform_frontend_redirects_to_login_when_cookie_invalid(test_client: TestClient) -> None:
     """Invalid platform sessions must redirect to login instead of serving the SPA shell."""
-    _set_platform_auth(
+    set_platform_auth(
         valid_tokens=set(),
         platform_sso_url="https://api.example.com/instance-sso/authorize",
     )
@@ -4795,7 +4753,7 @@ def test_platform_frontend_redirects_to_login_when_cookie_invalid(test_client: T
 @pytest.mark.usefixtures("frontend_dist")
 def test_platform_frontend_serves_dashboard_with_valid_cookie(test_client: TestClient) -> None:
     """Valid platform sessions should grant access to the bundled dashboard."""
-    _set_platform_auth(
+    set_platform_auth(
         valid_tokens=set(),
         platform_sso_url="https://api.example.com/instance-sso/authorize",
     )
@@ -4809,7 +4767,7 @@ def test_platform_frontend_serves_dashboard_with_valid_cookie(test_client: TestC
 @pytest.mark.usefixtures("frontend_dist")
 def test_platform_frontend_redirects_when_cookie_account_mismatches(test_client: TestClient) -> None:
     """Platform frontend access must enforce the instance account id."""
-    _set_platform_auth(
+    set_platform_auth(
         valid_tokens=set(),
         platform_sso_url="https://api.example.com/instance-sso/authorize",
         account_id="account-owner",
