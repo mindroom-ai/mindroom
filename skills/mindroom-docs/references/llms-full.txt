@@ -3254,7 +3254,7 @@ OpenClaw-compatible agents use this same backend selection.
 | Agent | `agent_<name>` | The agent's preferences and durable user context |
 | Team | `team_<agent1>+<agent2>+...` (member names sorted) | Shared memory from team conversations |
 
-Each team scope is one store: a team fact one member changes or deletes with the `memory` tool changes for every member that reads it.
+Each team fact is kept once: a team fact one member changes or deletes with the `memory` tool changes for every member that reads it.
 An agent's memory reads cover its own scope and the scopes of the configured teams it belongs to, searched through the agent's own backend.
 A team's replies are not given recalled memories; the team scope is filled from the conversations the team answers, and its members recall it in their own replies.
 

@@ -71,6 +71,7 @@ It records reasons, rejected alternatives, and accepted limitations; the code sh
 ## Accepted limitations
 
 - One corrupt or unreadable team store affects every team's Mem0 memory, where a store per team confined it to one team.
+- Building the team store's Mem0 instance holds that store's lock, so concurrent recalls by members of different teams build it one after another, where a store per team built in parallel; a build takes tens of milliseconds warm, measured one recall at a time.
 - Mem0 team copies an earlier embedder wrote stay in member stores, so switching back to that embedder does not bring them back.
 - Mem0 copies in the store of an agent not on Mem0 at the upgrade stay unmerged, so switching it back to Mem0 later does not bring them back; merging such a store later would need a ledger of the turns already merged, since the team store cannot tell which merged facts users edited or deleted since.
 - The merge checks a member's Mem0 store for links before Chroma opens it by path, so a link swapped in between is followed, as every Mem0 open of an agent's store below `agents/` already follows one.

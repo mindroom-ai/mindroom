@@ -224,7 +224,7 @@ def _assert_merged(storage: Path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_member_copies_merge_into_one_store_per_team_once(storage: Path) -> None:
+async def test_member_copies_merge_into_team_memory_once(storage: Path) -> None:
     """Every turn any member holds survives once, as one extraction, member stores keep only their own memories."""
     await _migrate(storage)
 

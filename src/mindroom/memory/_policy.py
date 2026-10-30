@@ -39,8 +39,7 @@ def team_user_id(member_names: Sequence[str]) -> str:
 def _scope_dir_name(scope_user_id: str) -> str:
     """Return the directory name of one team scope, with a long one shortened and told apart by a hash.
 
-    Replacing characters outside the allowed set keeps a planted record's scope ID, which the startup merge reads, from
-    reaching outside the team memory root.
+    Replacing characters outside the allowed set keeps each team's directory name to one path component.
     """
     # LEGACY_COMPAT: Team file copies named after their scope ID without a trailing underscore.
     # Legacy format: each member's `agents/<member>/memory_files/<dir>/` team copy, `<dir>` being the scope ID with

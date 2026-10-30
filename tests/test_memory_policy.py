@@ -69,9 +69,9 @@ def test_team_scopes_lists_each_member_set_of_the_agent_s_teams_once_whatever_th
     tmp_path: Path,
     config: Config,
 ) -> None:
-    """An agent reads every configured team it belongs to, one store per member set, in config order.
+    """An agent reads every configured team it belongs to, one scope per member set, in config order.
 
-    Neither the members' backends nor their worker scopes partition a team's store.
+    Neither the members' backends nor their worker scopes partition a team's scope.
     """
     config.agents = {
         "calculator": AgentConfig(display_name="Calculator", memory_backend="file", worker_scope="user"),
