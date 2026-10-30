@@ -294,6 +294,42 @@ async def test_a_provider_error_stores_an_error_record_with_the_error_text_and_r
 
 
 @pytest.mark.asyncio
+async def test_a_failed_run_ends_its_stream_with_its_stored_record_then_raises() -> None:
+    """A failed run's record ends its stream as a finished run's does: stored first, then the failure is raised."""
+    log: list[str] = []
+
+    async def persist(record: RunRecord) -> None:
+        log.append(f"stored {record.status.value}")
+
+    async def throttle() -> None:
+        msg = "Rate limited"
+        raise RateLimited(msg, provider="Synthetic")
+
+    events = run_agent(
+        spec(ScriptedModel([[Await(throttle)]])),
+        _prompt(),
+        ctx=context(),
+        persist=persist,
+        request_template=EMPTY_REQUEST,
+    )
+    finished: list[RunRecord] = []
+
+    async def consume() -> None:
+        async for event in events:
+            assert isinstance(event, RunFinished)
+            log.append("finished")
+            assert isinstance(event.record, RunRecord)
+            finished.append(event.record)
+
+    with pytest.raises(RateLimited, match="Rate limited"):
+        await consume()
+
+    assert log == ["stored ERROR", "finished"]
+    [record] = finished
+    assert (record.status, record.error) == (RunStatus.error, "Rate limited")
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("error", "text"),
     [(RuntimeError("store unavailable"), "store unavailable"), (TimeoutError(), "TimeoutError")],
