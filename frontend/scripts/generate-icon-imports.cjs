@@ -64,25 +64,6 @@ export function getIconForTool(
     createElement(LazyLucideIcon, { name: iconName, className, fallback }),
   );
 }
-
-// Export specific lucide icons that might be needed elsewhere
-export {
-  Calculator,
-  Folder,
-  Terminal,
-  Code,
-  Book,
-  Globe,
-  Search,
-  Newspaper,
-  TrendingUp,
-  FileText,
-  Database,
-  Mail,
-  Film,
-  VolumeX,
-  Volume2,
-} from "lucide-react";
 `;
 
 /** Return every icon the tools declare, as `[library, icons]` pairs in `LIBRARIES` order. */
