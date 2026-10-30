@@ -26,6 +26,7 @@ from mindroom.history.session_context import ScopeSessionContext
 from mindroom.history.turn_recorder import TurnRecorder
 from mindroom.history.types import HistoryScope
 from mindroom.llm.runs import RunRecord, RunRequirement, RunStatus, TeamRunRecord, ToolExecution
+from mindroom.llm.usage import RunMetrics, TokenCounts
 from mindroom.participation import ParticipationGate
 from mindroom.response_turn import (
     AttemptResolved,
@@ -1210,6 +1211,38 @@ def test_a_stop_between_continuation_attempts_records_the_turn_under_the_attempt
     assert stored == [starting]
 
 
+def test_an_empty_run_s_retry_runs_under_a_run_id_of_its_own() -> None:
+    """The retry never reuses the empty attempt's run id, whose usage the retry's save would replace.
+
+    The turn records the retry's run, the run that answered.
+    """
+    recorder = _FakeTurnRecorder()
+    run_ids: list[str | None] = []
+
+    async def _attempt(_run: TurnRunState, continuation: TurnContinuationRunState) -> CompletedAttempt:
+        run_ids.append(continuation.active_run_id)
+        if len(run_ids) == 1:
+            return CompletedAttempt(is_empty=True, attempt_run_id=continuation.active_run_id)
+        return CompletedAttempt(response_text="Answer.", attempt_run_id=continuation.active_run_id)
+
+    chunks = asyncio.run(
+        _collect(
+            stream_response_turn(
+                _ctx(),
+                _streaming_adapter(_AdapterLog(), _streamed(_attempt)),
+                TurnSinks(turn_recorder=recorder),
+                continuation=_continuation(),
+            ),
+        ),
+    )
+
+    assert chunks == ["notice:Answer."]
+    [first, retry] = run_ids
+    assert first == "run-1"
+    assert retry not in (None, "run-1")
+    assert recorder.run_id == retry
+
+
 @pytest.mark.parametrize("hidden", [False, True])
 def test_after_toolcall_switch_selects_new_continuation_model(hidden: bool) -> None:
     """Dropping the requested alias during continuation would rebuild the old model."""
@@ -1291,7 +1324,11 @@ def test_empty_run_grants_one_retry_then_notice() -> None:
         attempts += 1
         live_at_start.append(run.attempt)
         run.attempt = _FixedAttempt()
-        return CompletedAttempt(is_empty=True, run_id=f"run-{attempts}", output_tokens=attempts)
+        return CompletedAttempt(
+            is_empty=True,
+            run_id=f"run-{attempts}",
+            usage=RunMetrics(tokens=TokenCounts(output_tokens=attempts)),
+        )
 
     with capture_logs() as logs:
         chunks = asyncio.run(

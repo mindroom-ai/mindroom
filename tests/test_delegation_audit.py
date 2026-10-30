@@ -42,7 +42,7 @@ from mindroom.tool_system.worker_routing import (
     serialize_tool_execution_identity,
 )
 from tests.approval_continuation_helpers import answered_calls
-from tests.conftest import test_runtime_paths
+from tests.conftest import record_store_threads, test_runtime_paths
 
 if TYPE_CHECKING:
     from mindroom.constants import RuntimePaths
@@ -294,6 +294,41 @@ async def test_a_child_recovery_stops_keeps_its_text_and_stores_why_it_stopped_a
 
 
 @pytest.mark.asyncio
+async def test_a_child_recovery_reads_and_rewrites_its_run_in_the_database_s_lane(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Recovery reads the child's paused run and saves its stopped run in the database's lane, behind its other work."""
+    config = _config()
+    paths = test_runtime_paths(tmp_path)
+    child = _child()
+    await start_child_turn(
+        child,
+        parent_run_id="parent-run",
+        config=config,
+        runtime_paths=paths,
+        caller_execution_identity=_identity("leader", "parent-session"),
+    )
+    storage = create_session_storage("child", config, paths, _identity("child", "child-session"))
+    session = new_scope_session(session_id=child.session_id, scope=HistoryScope(kind="agent", scope_id="child"))
+    paused = RunRecord(
+        run_id=child.run_id,
+        session_id=child.session_id,
+        user_id="@alice:localhost",
+        agent_id="child",
+        status=RunStatus.paused,
+    )
+    assert storage.save_run(session, paused, record_usage=False) == "written"
+    threads = record_store_threads(monkeypatch, "get_run", "save_run")
+
+    await interrupt_child(child, config=config, runtime_paths=paths, reason="Restarted", status="failed")
+
+    assert threads["get_run"]
+    assert threads["save_run"]
+    assert all(name.startswith("conversation-store") for names in threads.values() for name in names), threads
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("status", "result"),
     [
@@ -465,6 +500,34 @@ async def test_record_child_response_orders_tools_approval_output_usage_and_fini
     assert child.result == "final response"
     assert run["usage"]["input_tokens"] == 8
     assert run["usage"]["output_tokens"] == 4
+
+
+@pytest.mark.asyncio
+async def test_a_child_paused_on_no_approval_records_its_pause_as_a_status(tmp_path: Path) -> None:
+    """A child that paused on something other than an approval, such as its own delegation, records the pause itself."""
+    config = _config()
+    runtime_paths = test_runtime_paths(tmp_path)
+    child = _child()
+    await start_child_turn(
+        child,
+        parent_run_id="parent-run",
+        config=config,
+        runtime_paths=runtime_paths,
+        caller_execution_identity=_identity("leader", "parent-session"),
+    )
+    delegation = ToolExecution(
+        tool_call_id="nested",
+        tool_name="run_subagent",
+        tool_args={"agent_name": "code"},
+        external_execution_required=True,
+    )
+    paused = RunRecord(run_id=child.run_id, session_id=child.session_id, status=RunStatus.paused, tools=[delegation])
+
+    await settle_child_response(child, paused, config=config, runtime_paths=runtime_paths)
+
+    events = _events(await _record_dir(child, config, runtime_paths))
+    assert [event["kind"] for event in events] == ["delegation_started", "tool_call", "status"]
+    assert (events[-1]["status"], events[-1]["data"]) == ("paused", {"status": "paused"})
 
 
 @pytest.mark.asyncio

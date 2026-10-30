@@ -195,7 +195,7 @@ Matrix sync callback
 | `orchestration/tool_job_runtime.py` | Managed job lifecycle: recovery, revocation, published jobs state, follow-ups, and retention |
 | `workspaces.py` | Agent workspace scaffolding, template seeding, and context file resolution |
 | `worker_computer/worker_browser.py` | Serializes dedicated-worker headless browser calls, retains browser resources, and owns configuration/environment retirement and shutdown cleanup |
-| `agents.py` | `create_agent`: builds one configured agent's toolkits, prompt, model provider, store, and surface into an `AgentBuild` |
+| `agents.py` | `create_agent`: builds one configured agent's toolkits, prompt, model provider, and surface into an `AgentBuild` |
 | `config/` | Pydantic models for YAML config parsing (root model in `config/main.py`) |
 | `config/resolution.py` | What one agent, team, or scope gets from the config, every inherited value filled in (`resolve_scope`, `resolve_agent`, and one function per fact) |
 | `config/personal_rooms.py` | Opt-in personal-room settings and validation for commands, aliases, and message templates |
@@ -304,7 +304,7 @@ Matrix sync callback
 | `providers/errors.py` | One classification of provider statuses, context-window wording, and transport failures into the normalized provider errors, shared by every adapter |
 | `providers/assistant_turn.py` | What adapters share to build a turn: the `mindroom_model` provenance stamp and timings, the progress event of a provider chunk without events, the events that end a finished turn, and the split of a leading inline `<think>` block into reasoning |
 | `llm/request_context.py` | The per-request logging context (agent, session, correlation id) bound around a model request and read by request telemetry |
-| `providers/media_files.py` | Reads the attachment files every wire sends; a file that cannot be read raises `InvalidRequest`, so the media fallback replaces the request's media with its note |
+| `providers/media_files.py` | Reads the attachment files every wire sends; a file that cannot be read raises `InvalidRequest`, so the media fallback replaces that file with its note |
 | `budgets/pricing.py` | Per-model USD pricing of token counters, keyed by the provider and model ID usage records |
 | `budgets/spend.py` | Month-to-date per-requester spend derived from retained usage |
 | `budgets/caps.py` | Per-user monthly caps kept as runtime state under the storage root, written atomically and read lock-free |
@@ -465,7 +465,7 @@ Matrix sync callback
 | `tool_system/runtime_context.py` | Shared runtime ContextVar for tool calls (including attachment scope) |
 | `tool_system/tool_function.py` | The tool values, free of Agno: `ToolFunction`, the only tool shape the agent loop sees (finished schema, loop flags, entrypoint, what each injected parameter receives) and the owner of how a call of it pauses, `AdaptedToolkit`, `ToolValue`, a finished tool value's text and media, and `ToolOutcome`, a call's value with its stop and failure flags |
 | `tool_system/authoring.py` | MindRoom's Agno-free tool authoring API, which MindRoom's own tools use and plugins import: `Toolkit`, `@tool`, `passthrough_tool` for a function offered with the schema it authors, `current_call()` for the call a function runs for, and `toolkit_functions()` for a toolkit's callables by name as a run calls them |
-| `tool_system/tool_schema.py` | Derives a tool function's description and parameter schema from its docstring and annotations, as Agno derives them for the annotations in use, and validates a call's arguments against them |
+| `tool_system/tool_schema.py` | Derives the description and parameter schema of every tool function whose signature gives them, MindRoom's own and Agno toolkits' alike, from its docstring and annotations, as Agno derives them for the annotations in use except that `Any` and `object` take any JSON value and `*args` and `**kwargs` stay out of the schema, and validates a call's arguments against them |
 | `tool_system/agno_toolkits.py` | Adapts Agno and owned toolkits and functions to `ToolFunction`, applying the function filters, output files, and worker stand-ins their builder configured, and, besides the vendor toolkit subclasses and the Google auth binding in `oauth/agno_compat_google_auth.py`, is the only module that looks inside an Agno toolkit: its function names, one function by name, renames, and connection; builds the Agno-shaped call-time arguments (run context, actor stand-in) vendor entrypoints expect, and reads the Agno `ToolResult` a vendor tool returns or streams as a `ToolValue` |
 | `tool_system/toolkit_connections.py` | Connects the `requires_connect` toolkits, such as Postgres, around each run that offers them, and holds the cancellation-safe connect and close helpers the script broker and MCP gateway share |
 | `tool_system/invocation.py` | Decodes a model's tool-call arguments, runs one call through middleware to its outcome for the loop or to the tool's own value for runners outside it (injection, synchronous offload, generator draining, error text), and reads that value as the text and media references a runner hands its client |

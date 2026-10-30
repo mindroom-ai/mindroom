@@ -33,6 +33,7 @@ if TYPE_CHECKING:
     config_fields=[
         ConfigField(
             name="api_key",
+            env=("E2B_API_KEY",),
             label="API Key",
             type="password",
             required=False,

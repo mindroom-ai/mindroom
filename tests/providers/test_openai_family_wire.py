@@ -759,7 +759,11 @@ async def test_attachments_deleted_since_their_turn_are_sent_as_the_media_note(
     model_config: dict[str, Any],
     reply: dict[str, Any],
 ) -> None:
-    """A turn whose attachment files were cleaned up still runs: its text is sent with the media fallback's note."""
+    """A turn whose attachment files were cleaned up still runs: its text is sent with the media fallback's note.
+
+    The first attempt finds the photo gone and the retry without it the report, so neither attempt reaches the
+    provider, and the request goes once without any of the media.
+    """
     gone = tmp_path / "cleaned-up"
     photo, report = gone / "att_photo.png", gone / "att_report.pdf"
     earlier = Message(
@@ -776,7 +780,8 @@ async def test_attachments_deleted_since_their_turn_are_sent_as_the_media_note(
     body = built.body()
     sent = body["messages"][0] if "messages" in body else body["input"][0]
     assert sent["content"] == f"Compare these.\n\n{FALLBACK_MARKER}\n{INLINE_MEDIA_FALLBACK_PROMPT}"
-    assert [log["path"] for log in logs if log["event"] == "media_file_unreadable"] == [str(photo)]
+    assert [log["path"] for log in logs if log["event"] == "media_file_unreadable"] == [str(photo), str(report)]
+    assert len(built.requests) == 1
 
 
 # --- Errors ---------------------------------------------------------------------------------------------------

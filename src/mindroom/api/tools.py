@@ -135,16 +135,14 @@ def _check_manual_oauth_fallback_configured(
     return True
 
 
-def _check_environment_oauth_fallback_configured(
-    provider: OAuthProvider | None,
-    runtime_paths: RuntimePaths,
-) -> bool:
-    """Return whether a provider's complete runtime fallback is present without exposing values."""
-    if provider is None:
+def _check_environment_oauth_fallback_configured(tool: dict[str, Any], runtime_paths: RuntimePaths) -> bool:
+    """Return whether the environment sets every manual OAuth fallback field, the way the tool reads it."""
+    fallback_fields = tool.get("oauth_fallback_fields")
+    if not fallback_fields:
         return False
-    env_vars = provider.tool_config_oauth_fallback_env_vars
-    return bool(env_vars) and all(
-        isinstance(value := runtime_paths.env_value(env_var), str) and bool(value.strip()) for env_var in env_vars
+    env_by_field = {field["name"]: field["env"] for field in tool["config_fields"]}
+    return all(
+        runtime_paths.first_env_value(env_by_field.get(field_name, ())) is not None for field_name in fallback_fields
     )
 
 
@@ -378,10 +376,7 @@ async def _update_tools_statuses(
             )
             if tool.get("oauth_fallback_fields"):
                 tool["manual_auth_configured"] = manual_auth_configured
-            environment_auth_configured = _check_environment_oauth_fallback_configured(
-                provider,
-                context.runtime_paths,
-            )
+            environment_auth_configured = _check_environment_oauth_fallback_configured(tool, context.runtime_paths)
             tool["environment_auth_configured"] = environment_auth_configured
             credential_service = context.auth_provider_credential_services.get(auth_provider, auth_provider)
             provider_creds = (

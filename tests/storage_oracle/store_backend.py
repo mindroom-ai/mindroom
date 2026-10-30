@@ -10,7 +10,6 @@ from __future__ import annotations
 
 import asyncio
 import json
-import sqlite3
 from contextlib import closing
 from copy import deepcopy
 from dataclasses import dataclass, field
@@ -44,6 +43,7 @@ from mindroom.session_storage.store import connect_conversation_database
 from mindroom.session_storage.summary_rows import Fold, latest_row
 from mindroom.session_storage.types import session_state_snapshot
 from tests.conftest import delete_runs, seed_session_state
+from tests.session_storage.agno_layout import replacing_database
 from tests.storage_oracle.backend import (
     REQUESTER_ID,
     SESSION_ID,
@@ -55,6 +55,7 @@ from tests.storage_oracle.backend import (
 from tests.storage_oracle.observe import observe
 
 if TYPE_CHECKING:
+    import sqlite3
     from collections.abc import Callable, Collection, Mapping, Sequence
     from pathlib import Path
 
@@ -281,7 +282,7 @@ class StoreBackend(Driver):
 
     @override
     def finalize_notice(self, response_turn_id: str) -> object:
-        # As ``_finalize_queued_notice_in_new_session_storage`` does.
+        # As ``_finalize_queued_notice_in_session`` does.
         if self.store.load_session(SESSION_ID) is None:
             return "no-session"
         return _rewritten(self._rewrite(partial(_finalize_queued_notice_in_runs, response_turn_id=response_turn_id)))
@@ -451,8 +452,7 @@ class StoreBackend(Driver):
     def seed_legacy(self, variant: int) -> None:
         # The opened database has no session row yet, so the older one replaces it.
         names = AgnoTableNames(self.owner)
-        self.database.unlink()
-        with closing(sqlite3.connect(self.database)) as connection, connection:
+        with replacing_database(self.database) as connection:
             for statement in (*agno_runs_sql(names), usage_table_sql(names)):
                 connection.execute(statement)
             if variant == 0:

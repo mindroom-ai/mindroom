@@ -28,9 +28,11 @@ The owned code takes the extension points MindRoom needs as plain parameters ins
 
 Agno stays for the parts that touch no loop, model, or storage, all called through public API:
 
-- `Toolkit`, `Function`, and the `@tool` decorator remain the authoring API for vendor tools and for plugins written against them, including signature-and-docstring schema generation and pydantic argument coercion.
+- `Toolkit`, `Function`, and the `@tool` decorator remain the authoring API for vendor tools and for plugins written against them.
   They were MindRoom's authoring API at first too; once the replacement had shipped, MindRoom's tools moved to an owned `Toolkit`, `@tool`, and `current_call()`, which `mindroom.plugin_api` also offers plugins, with an owned schema generator that reproduces Agno's schemas, because Agno's containers made every MindRoom step edit a built toolkit's function maps (filters, output files, worker routes, a sync and an async copy of each function) and handed a tool its call only as an injected Agno `RunContext` or agent.
   `ToolResult` stayed in Agno's API at first; once the replacement had shipped, MindRoom's tools moved to returning text or MindRoom's `ToolValue`, and the adapter reads a plugin or vendor `ToolResult` as one, because keeping it left MindRoom's media tools and the worker media wire on Agno's pydantic media, converted again wherever they were read, and saved job results tagged with Agno's name.
+  Agno's signature-and-docstring schema generation and pydantic argument coercion served those toolkits at first too; once the replacement had shipped, every Agno function whose signature gives its schema moved to MindRoom's generator and its coercion, because Agno rendered a value annotated `Any` or `object` as a closed empty object and a `**kwargs` catch-all as a required `kwargs` property, which refused real arguments, and one generator should own every schema.
+  Agno still finishes a schema a function authored, such as one Agno's `@tool` derives, or a strict one, which MindRoom's generator does not derive.
 - Its vendor toolkits stay as dependencies, with MindRoom's existing per-toolkit overrides.
 - Its knowledge file readers and chunkers stay.
 
@@ -50,7 +52,7 @@ This keeps prompt caches warm across the upgrade, keeps paused approvals resumab
 - Conversation databases keep their paths and table names; no table is rebuilt.
   Agno merged the Agno 2 `runs` blob on every read, so the owned store moves those runs into the runs table once when a database opens.
 - System prompts, team-leader prompts, helper prompts, tool schemas, and provider request bodies match what Agno 3.0.9 plus MindRoom's patches produce.
-  Tool schemas still come from Agno's generator; the goldens prove that the adapter and MindRoom's tool wrappers preserve them.
+  Tool schemas still came from Agno's generator during the replacement, and the goldens proved that the adapter and MindRoom's tool wrappers preserved them; the move to MindRoom's generator came later, as recorded above.
 - Approval-card ids, tool-job saved events, and the `io.mindroom.ai_run` metadata that MindRoom Chat reads keep their shapes.
 
 Parity is proven by golden fixtures captured while Agno 3.0.9 still runs the loop: Agno-written databases, run and message dicts, rendered prompts, tool schemas for every registered function, tool-argument coercion results, provider request bodies for canonical conversations, and parsed provider responses.

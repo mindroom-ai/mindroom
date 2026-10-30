@@ -24,6 +24,7 @@ if TYPE_CHECKING:
     config_fields=[
         ConfigField(
             name="username",
+            env=("BITBUCKET_USERNAME",),
             label="Username",
             type="text",
             required=True,
@@ -32,6 +33,7 @@ if TYPE_CHECKING:
         ),
         ConfigField(
             name="password",
+            env=("BITBUCKET_PASSWORD",),
             label="Password",
             type="password",
             required=False,
@@ -39,6 +41,7 @@ if TYPE_CHECKING:
         ),
         ConfigField(
             name="token",
+            env=("BITBUCKET_TOKEN",),
             label="Token",
             type="password",
             required=False,

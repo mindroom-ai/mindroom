@@ -24,6 +24,7 @@ if TYPE_CHECKING:
     config_fields=[
         ConfigField(
             name="api_key",
+            env=("BRANDFETCH_API_KEY",),
             label="API Key",
             type="password",
             required=False,
@@ -31,6 +32,7 @@ if TYPE_CHECKING:
         ),
         ConfigField(
             name="client_id",
+            env=("BRANDFETCH_CLIENT_ID",),
             label="Client ID",
             type="text",
             required=False,

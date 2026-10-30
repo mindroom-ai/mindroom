@@ -13,7 +13,6 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock, Mock, patch
 
 import pytest
-from agno.tools.function import FunctionCall
 from agno.tools.google.gmail import GmailTools as AgnoGmailTools
 from googleapiclient.errors import HttpError
 
@@ -26,6 +25,8 @@ from mindroom.oauth.credential_lifecycle import load_oauth_credentials_snapshot_
 from mindroom.oauth.google import google_oauth_provider
 from mindroom.oauth.providers import OAuthConnectionRequired
 from mindroom.path_confinement import resolve_path_within_root
+from mindroom.tool_system.invocation import ToolCallContext, execute_tool_call
+from tests.agent_tool_helpers import toolkit_offers
 from tests.oauth_test_utils import publish_oauth_credentials
 from tests.tool_approval_helpers import gated_functions
 
@@ -881,28 +882,26 @@ def test_gmail_attachment_tests_cover_every_upstream_attachment_function(
     )
 
 
-def test_gmail_attachment_confinement_runs_on_agno_function_call_path(
+@pytest.mark.asyncio
+async def test_gmail_attachment_confinement_holds_on_the_tool_call_path(
     mock_credentials_manager: CredentialsManager,
     runtime_paths: RuntimePaths,
     tmp_path: Path,
 ) -> None:
-    """Confinement must hold when Agno validates and executes the model's tool call."""
+    """Confinement must hold when the offered function validates and runs the model's tool call."""
     workspace = tmp_path / "workspace"
     workspace.mkdir()
     gmail_tools, service = _gmail_attachment_tool(runtime_paths, mock_credentials_manager, workspace)
-    function = gmail_tools.functions["send_email"]
-    function.process_entrypoint(strict=False)
 
-    execution = FunctionCall(
-        function=function,
-        arguments={
-            **_ATTACHMENT_CALLS["send_email"],
-            "attachments": [str(runtime_paths.storage_root / "config.yaml")],
-        },
-    ).execute()
+    outcome = await execute_tool_call(
+        toolkit_offers(gmail_tools, "send_email"),
+        {**_ATTACHMENT_CALLS["send_email"], "attachments": [str(runtime_paths.storage_root / "config.yaml")]},
+        ToolCallContext(run_id="run", session_id="session", user_id=None),
+        middleware=(),
+    )
 
-    assert execution.status == "success"
-    assert json.loads(execution.result)["error"].startswith("Gmail attachment must be a regular file")
+    assert not outcome.is_error
+    assert json.loads(outcome.content)["error"].startswith("Gmail attachment must be a regular file")
     for api_call in _gmail_api_calls(service):
         api_call.assert_not_called()
 

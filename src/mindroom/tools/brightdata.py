@@ -25,6 +25,7 @@ if TYPE_CHECKING:
     config_fields=[
         ConfigField(
             name="api_key",
+            env=("BRIGHT_DATA_API_KEY",),
             label="API Key",
             type="password",
             required=False,
@@ -67,6 +68,7 @@ if TYPE_CHECKING:
         ),
         ConfigField(
             name="serp_zone",
+            env=("BRIGHT_DATA_SERP_ZONE",),
             label="Serp Zone",
             type="text",
             required=False,
@@ -74,6 +76,7 @@ if TYPE_CHECKING:
         ),
         ConfigField(
             name="web_unlocker_zone",
+            env=("BRIGHT_DATA_WEB_UNLOCKER_ZONE",),
             label="Web Unlocker Zone",
             type="text",
             required=False,

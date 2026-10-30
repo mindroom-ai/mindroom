@@ -24,6 +24,7 @@ if TYPE_CHECKING:
     config_fields=[
         ConfigField(
             name="username",
+            env=("ZENDESK_USERNAME",),
             label="Username",
             type="text",
             required=False,
@@ -31,6 +32,7 @@ if TYPE_CHECKING:
         ),
         ConfigField(
             name="password",
+            env=("ZENDESK_PASSWORD",),
             label="Password",
             type="password",
             required=False,
@@ -38,6 +40,7 @@ if TYPE_CHECKING:
         ),
         ConfigField(
             name="company_name",
+            env=("ZENDESK_COMPANY_NAME",),
             label="Company Name",
             type="text",
             required=False,

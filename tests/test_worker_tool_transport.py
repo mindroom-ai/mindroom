@@ -425,7 +425,6 @@ def _context_agent(
         runtime_paths,
         execution_identity=None if roomless else build_execution_identity_from_runtime_context(context),
         include_interactive_questions=False,
-        persist_runtime_state=False,
         supports_native_tool_approval=True,
         knowledge=None,
         model=turn_model(config, runtime_paths, "routing"),

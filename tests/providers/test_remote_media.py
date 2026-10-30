@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import base64
 import json
+from dataclasses import replace
 from typing import TYPE_CHECKING, Any
 
 import httpx
@@ -288,6 +289,41 @@ async def test_media_a_url_cannot_supply_reaches_every_family_as_the_media_note(
 
     assert (turn.content, len(wire.requests)) == ("ok", 1)
     assert spec.user_text(wire.body()) == f"Look\n\n{_NOTE}"
+
+
+# Media of each kind that needs no download, beside a URL that cannot supply one, and the text that marks it sent.
+_KEPT_BESIDE = {
+    "image": (Image(id="kept", content=_PNG, mime_type="image/png"), _b64(_PNG)),
+    "file": (File(id="kept", content=_PDF, filename="kept.pdf", mime_type="application/pdf"), _b64(_PDF)),
+    "audio": (Audio(id="kept", content=b"RIFF-kept", format="wav"), _b64(b"RIFF-kept")),
+}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("source", ["unreachable", "empty"])
+@pytest.mark.parametrize(("family", "kind"), _DOWNLOADED)
+async def test_a_url_that_cannot_be_downloaded_leaves_the_rest_of_the_media_in_the_request(
+    family: str,
+    kind: str,
+    source: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The failed or empty download names its own item, so only that item is left out and the note names it."""
+    _media_server(monkeypatch, {"https://media.test/empty": httpx.Response(200, content=b"")})
+    spec = FAMILIES[family]
+    wire = Wire(spec.reply())
+    field = {"image": "images", "file": "files", "audio": "audio"}[kind]
+    [unreachable] = _url_media(kind, f"https://media.test/{source}")[field]
+    kept, kept_marker = _KEPT_BESIDE[kind]
+    message = Message(role="user", content="Look", **{field: [replace(unreachable, id="att_gone"), kept]})
+
+    turn = await complete(_provider(family, tmp_path, wire), ModelRequest(messages=[message]))
+
+    assert (turn.content, len(wire.requests)) == ("ok", 1)
+    sent = json.dumps(wire.body())
+    assert f"Look\\n\\n{FALLBACK_MARKER}\\nNot sent: {kind} (att_gone)." in sent
+    assert kept_marker in sent or kept_marker.replace("+", "-").replace("/", "_") in sent
 
 
 # Each URL a tool may return and the form the log keeps: scheme, masked userinfo, host and port, and path.

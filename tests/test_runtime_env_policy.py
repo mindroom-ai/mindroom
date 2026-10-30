@@ -25,7 +25,7 @@ _POLICY_OWNED_ENV_PREFIXES = (
 )
 _POLICY_OWNED_ENV_EXTRA_NAMES = frozenset(
     {
-        *runtime_env_policy.AWS_BEDROCK_CLAUDE_ENV_BY_KEY.values(),
+        *runtime_env_policy.AWS_ENV_BY_KEY.values(),
         *runtime_env_policy.VERTEXAI_CLAUDE_ENV_BY_KEY.values(),
     },
 )
@@ -75,42 +75,42 @@ _PROJECTION_MATRIX_EXPECTATIONS = {
         "execution_tool_runtime_paths": False,
         "shell_passthrough_env": False,
     },
-    runtime_env_policy.AWS_BEDROCK_CLAUDE_ENV_BY_KEY["access_key"]: {
+    runtime_env_policy.AWS_ENV_BY_KEY["access_key"]: {
         "public_worker_startup_env": False,
         "isolated_worker_runtime_env": False,
         "trusted_tool_runtime_paths": True,
         "execution_tool_runtime_paths": False,
         "shell_passthrough_env": True,
     },
-    runtime_env_policy.AWS_BEDROCK_CLAUDE_ENV_BY_KEY["secret_key"]: {
+    runtime_env_policy.AWS_ENV_BY_KEY["secret_key"]: {
         "public_worker_startup_env": False,
         "isolated_worker_runtime_env": False,
         "trusted_tool_runtime_paths": True,
         "execution_tool_runtime_paths": False,
         "shell_passthrough_env": True,
     },
-    runtime_env_policy.AWS_BEDROCK_CLAUDE_ENV_BY_KEY["session_token"]: {
+    runtime_env_policy.AWS_ENV_BY_KEY["session_token"]: {
         "public_worker_startup_env": False,
         "isolated_worker_runtime_env": False,
         "trusted_tool_runtime_paths": True,
         "execution_tool_runtime_paths": False,
         "shell_passthrough_env": True,
     },
-    runtime_env_policy.AWS_BEDROCK_CLAUDE_ENV_BY_KEY["region"]: {
+    runtime_env_policy.AWS_ENV_BY_KEY["region"]: {
         "public_worker_startup_env": True,
         "isolated_worker_runtime_env": False,
         "trusted_tool_runtime_paths": True,
         "execution_tool_runtime_paths": False,
         "shell_passthrough_env": True,
     },
-    runtime_env_policy.AWS_BEDROCK_CLAUDE_ENV_BY_KEY["default_region"]: {
+    runtime_env_policy.AWS_ENV_BY_KEY["default_region"]: {
         "public_worker_startup_env": True,
         "isolated_worker_runtime_env": False,
         "trusted_tool_runtime_paths": True,
         "execution_tool_runtime_paths": False,
         "shell_passthrough_env": True,
     },
-    runtime_env_policy.AWS_BEDROCK_CLAUDE_ENV_BY_KEY["profile"]: {
+    runtime_env_policy.AWS_ENV_BY_KEY["profile"]: {
         "public_worker_startup_env": True,
         "isolated_worker_runtime_env": False,
         "trusted_tool_runtime_paths": True,

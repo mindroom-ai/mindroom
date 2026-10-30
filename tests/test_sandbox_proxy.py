@@ -2053,6 +2053,73 @@ def test_static_runner_proxy_leases_the_tool_own_saved_settings(
     assert captured_calls[1][1]["lease_id"] == "lease-123"
 
 
+def test_a_setting_from_the_primary_env_file_never_reaches_the_runner(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The primary builds a routed tool with its `.env` setting, but only saved settings travel with the call."""
+    captured_calls: list[tuple[str, dict[str, Any]]] = []
+    tool_name = "test_env_file_setting_tool"
+
+    class _EnvSettingToolkit(Toolkit):
+        def __init__(self, token: str | None = None, label: str | None = None) -> None:
+            self.token = token
+            self.label = label
+            super().__init__(name=tool_name, tools=[self.ping])
+
+        def ping(self) -> str:
+            return "local"
+
+    snapshot = capture_tool_registry_snapshot()
+
+    @register_tool_with_metadata(
+        name=tool_name,
+        file_access=ToolFileAccess.NONE,
+        display_name="Env File Setting Tool",
+        description="Test-only coverage of `.env` settings on routed calls.",
+        category=ToolCategory.DEVELOPMENT,
+        config_fields=[
+            ConfigField(name="token", label="Token", type="password", required=False, env=("PROBE_TOOL_TOKEN",)),
+            ConfigField(name="label", label="Label", type="text", required=False),
+        ],
+    )
+    def _env_setting_tool_factory() -> type[_EnvSettingToolkit]:
+        return _EnvSettingToolkit
+
+    monkeypatch.delenv("MINDROOM_WORKER_BACKEND", raising=False)
+    monkeypatch.delenv("PROBE_TOOL_TOKEN", raising=False)
+    runtime_paths = replace(
+        _configure_proxy_runtime(
+            monkeypatch,
+            proxy_url="http://sandbox-runner:8765",
+            execution_mode="selective",
+            proxy_tools={tool_name},
+            credential_policy={},
+        ),
+        env_file_values={"PROBE_TOOL_TOKEN": "env-file-secret"},
+    )
+    monkeypatch.setattr(
+        "mindroom.tool_system.sandbox_proxy.httpx.Client",
+        _recording_client_class(
+            captured_calls=captured_calls,
+            responder=lambda url, _json: (
+                {"lease_id": "lease-123", "expires_at": 123.0, "max_uses": 1}
+                if url.endswith("/leases")
+                else {"ok": True, "result": "proxied"}
+            ),
+        ),
+    )
+    credentials = FakeCredentialsManager({tool_name: {"label": "saved-label", "_source": "ui"}})
+
+    try:
+        tool = get_tool_by_name(tool_name, runtime_paths, credentials_manager=credentials, worker_target=None)
+        assert (tool.token, tool.label) == ("env-file-secret", "saved-label")
+        assert blocking_entrypoint(tool, "ping")() == "proxied"
+    finally:
+        restore_tool_registry_snapshot(snapshot)
+
+    assert [url.rsplit("/", 1)[-1] for url, _payload in captured_calls] == ["leases", "execute"]
+    assert captured_calls[0][1]["credential_overrides"] == {"label": "saved-label"}
+    assert "env-file-secret" not in json.dumps(captured_calls)
+
+
 def test_a_refused_lease_reports_the_runner_own_reason(monkeypatch: pytest.MonkeyPatch) -> None:
     """A runner that refuses a lease in its typed answer fails the call with its reason, and no call runs."""
     captured_calls: list[tuple[str, dict[str, Any]]] = []
@@ -3060,26 +3127,6 @@ def test_a_worker_routed_browser_toolkit_is_collected_once_its_functions_are_rel
 
     assert released() is None
     assert released_function() is None
-
-
-def test_get_tool_by_name_requires_explicit_clickup_config(tmp_path: Path) -> None:
-    """Runtime-scoped env values should not configure ClickUp during toolkit construction."""
-    config_dir = tmp_path / "cfg"
-    config_dir.mkdir(parents=True, exist_ok=True)
-    config_path = config_dir / "config.yaml"
-    config_path.write_text("models: {}\nagents: {}\n", encoding="utf-8")
-    (config_dir / ".env").write_text(
-        "CLICKUP_API_KEY=clickup-test\nMASTER_SPACE_ID=space-123\n",
-        encoding="utf-8",
-    )
-    runtime_paths = resolve_runtime_paths(
-        config_path=config_path,
-        storage_path=tmp_path / "storage",
-        process_env={},
-    )
-
-    with pytest.raises(ValueError, match="CLICKUP_API_KEY not set"):
-        get_tool_by_name("clickup", runtime_paths, worker_target=None)
 
 
 def test_get_tool_by_name_does_not_expose_runtime_env_to_direct_python_execution(tmp_path: Path) -> None:

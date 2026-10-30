@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
 from contextlib import contextmanager
 from contextvars import ContextVar
 from copy import deepcopy
@@ -11,6 +10,7 @@ from functools import partial
 from typing import TYPE_CHECKING, Protocol
 from uuid import uuid4
 
+from mindroom.background_tasks import run_coroutine_until_complete
 from mindroom.history.run_visibility import (
     QUEUED_MESSAGE_NOTICE_MARKER_KEY,
     QUEUED_MESSAGE_NOTICE_PERSISTED_MARKER,
@@ -20,6 +20,7 @@ from mindroom.history.run_visibility import (
 )
 from mindroom.llm.messages import Message
 from mindroom.logging_config import get_logger
+from mindroom.session_storage.lanes import run_session_storage_operation
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Generator, Sequence
@@ -350,13 +351,10 @@ def _finalize_queued_notice_in_runs(
     return list(edited.values())
 
 
-def _finalize_queued_notice_in_new_session_storage(
-    target: _QueuedNoticeStorageTarget,
-    response_turn_id: str,
-) -> None:
-    """Finalize one response in a worker-owned session storage handle, editing the messages of a fresh load."""
-    target.storage_factory().rewrite_run_messages(
-        target.session_id,
+def _finalize_queued_notice_in_session(storage: ConversationStore, *, session_id: str, response_turn_id: str) -> None:
+    """Finalize one response in session ``session_id``, editing the messages of a fresh load."""
+    storage.rewrite_run_messages(
+        session_id,
         partial(_finalize_queued_notice_in_runs, response_turn_id=response_turn_id),
     )
 
@@ -382,16 +380,20 @@ def register_scope_notice_storage(*, scope_context: ScopeSessionContext | None, 
     )
 
 
-def _finalize_queued_notice_storage_targets(
+async def _finalize_queued_notice_storage_targets(
     targets: Sequence[_QueuedNoticeStorageTarget],
     response_turn_id: str,
 ) -> None:
-    """Finalize all durable targets for one response from a worker thread."""
+    """Finalize all durable targets for one response, each in its database's lane."""
     for target in targets:
         try:
-            _finalize_queued_notice_in_new_session_storage(
-                target,
-                response_turn_id,
+            await run_session_storage_operation(
+                target.storage_factory,
+                partial(
+                    _finalize_queued_notice_in_session,
+                    session_id=target.session_id,
+                    response_turn_id=response_turn_id,
+                ),
             )
         except Exception:
             logger.exception(
@@ -406,26 +408,18 @@ def _finalize_queued_notice_storage_targets(
 async def finalize_queued_notice_response_turn_async(
     notice_context: _QueuedMessageNoticeContext,
 ) -> None:
-    """Finalize one delivered notice at the user-visible response boundary."""
+    """Finalize one delivered notice at the user-visible response boundary.
+
+    Cancelling the caller waits for every target to finish before the cancellation propagates.
+    """
     if not notice_context.notice_fired or not notice_context.storage_targets:
         return
-    storage_task = asyncio.create_task(
-        asyncio.to_thread(
-            _finalize_queued_notice_storage_targets,
+    await run_coroutine_until_complete(
+        _finalize_queued_notice_storage_targets(
             tuple(notice_context.storage_targets.values()),
             notice_context.response_turn_id,
         ),
     )
-    try:
-        await asyncio.shield(storage_task)
-    except asyncio.CancelledError:
-        while not storage_task.done():
-            try:
-                await asyncio.shield(storage_task)
-            except asyncio.CancelledError:
-                continue
-        storage_task.result()
-        raise
 
 
 def _queued_notice_response_turn_ids(
