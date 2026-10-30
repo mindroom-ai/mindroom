@@ -1060,13 +1060,12 @@ async def test_call_responder_uses_normal_agent_turn_and_refuses_unsafe_function
     assert persisted_interruptions[-1]["original_status"] is RunStatus.error
 
     # Delegated children and script runs still hide these functions through the turn's runtime context.
-    tool_filter = cast("Callable[[Function], bool]", turn_contexts[0].tool_function_filter)
-    confirm_again = _function(lambda: "confirm", _EMPTY_SCHEMA, name="confirm")
-    confirm_again.requires_confirmation = True
-    assert tool_filter(_function(lambda: "safe", _EMPTY_SCHEMA, name="safe")) is True
-    assert tool_filter(confirm_again) is False
-    assert tool_filter(_function(lambda: "policy", _EMPTY_SCHEMA, name="policy_approval")) is False
-    assert tool_filter(_function(lambda: "workflow", _EMPTY_SCHEMA, name="run_workflow")) is False
+    tool_filter = turn_contexts[0].tool_function_filter
+    assert tool_filter is not None
+    assert tool_filter(cached["safe"]) is True
+    assert tool_filter(cached["confirm"]) is False
+    assert tool_filter(cached["policy_approval"]) is False
+    assert tool_filter(cached["run_workflow"]) is False
     assert contexts[0].tool_function_filter is None
     assert tooling.close is not None
     await tooling.close()

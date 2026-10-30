@@ -7272,7 +7272,6 @@ exclusive = true
 [[interfaces]]
 expose = [
     "ConfigField",
-    "MATRIX_ROOM_RUNTIME_APPROVAL_TYPE",
     "MATRIX_ROOM_RUNTIME_TOOL_NAMES",
     "SetupType",
     "SupportsPrimaryCallPlacement",
@@ -7284,6 +7283,7 @@ expose = [
     "ToolMetadata",
     "ToolStatus",
     "ToolValidationInfo",
+    "is_matrix_room_runtime_function",
 ]
 from = ["mindroom.tool_system.declarations"]
 

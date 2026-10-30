@@ -16955,7 +16955,7 @@
         "strict": false,
         "requires_confirmation": false,
         "external_execution": false,
-        "approval_type": "mindroom_matrix_room_runtime",
+        "approval_type": null,
         "stop_after_tool_call": false
       }
     ]

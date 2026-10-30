@@ -53,10 +53,7 @@ from mindroom.session_storage.lanes import run_session_storage_operation
 from mindroom.session_storage.types import ConversationSession
 from mindroom.tool_jobs.execution import agent_tool_middleware
 from mindroom.tool_system.agent_tools import room_turn_offers
-from mindroom.tool_system.declarations import (
-    MATRIX_ROOM_RUNTIME_APPROVAL_TYPE,
-    MATRIX_ROOM_RUNTIME_TOOL_NAMES,
-)
+from mindroom.tool_system.declarations import is_matrix_room_runtime_function
 from mindroom.tool_system.invocation import CallResult, ToolCallContext, client_tool_result, run_tool_call
 from mindroom.tool_system.runtime_context import tool_runtime_context
 from mindroom.tool_system.tool_function import close_toolkits, connect_toolkits
@@ -864,15 +861,13 @@ def _normalize_tool_result(result: object) -> str:
 
 def _function_requires_text_chat(function: ToolFunction, config: Config) -> bool:
     """Return whether a function needs text-chat UI that a voice call lacks."""
-    is_matrix_room_runtime_function = (
-        function.name in MATRIX_ROOM_RUNTIME_TOOL_NAMES and function.approval_type == MATRIX_ROOM_RUNTIME_APPROVAL_TYPE
-    )
+    room_runtime = is_matrix_room_runtime_function(function.registered_toolkit, function.name)
     return bool(
         function.requires_confirmation
         or function.external_execution
         or function.approval_type == "required"
         or function.name in _CALL_UNAVAILABLE_COMPOSITE_FUNCTIONS
-        or (not is_matrix_room_runtime_function and tool_may_require_approval(config, function.name)),
+        or (not room_runtime and tool_may_require_approval(config, function.name)),
     )
 
 

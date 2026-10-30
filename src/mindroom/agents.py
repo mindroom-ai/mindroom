@@ -71,9 +71,9 @@ from mindroom.tool_system.construction import (
     tool_config_signature,
 )
 from mindroom.tool_system.declarations import (
-    MATRIX_ROOM_RUNTIME_APPROVAL_TYPE,
     MATRIX_ROOM_RUNTIME_TOOL_NAMES,
     ToolFileAccess,
+    is_matrix_room_runtime_function,
 )
 from mindroom.tool_system.dynamic_toolkits import DeferredToolkit, ToolDeferral, defer_toolkit
 from mindroom.tool_system.output_files import ToolOutputFilePolicy
@@ -975,22 +975,12 @@ def _keep_functions(toolkit: AdaptedToolkit, keep: Callable[[ToolFunction], bool
     return replace(toolkit, functions=tuple(function for function in toolkit.functions if keep(function)))
 
 
-def _approval_may_gate(
-    config: Config,
-    function_name: str,
-    approval_type: str | None,
-    registered_tool_name: str,
-) -> bool:
+def _approval_may_gate(config: Config, function_name: str, registered_tool_name: str) -> bool:
     """Return whether a config approval rule may gate one function of the toolkit registered as this name."""
-    is_matrix_room_runtime_function = (
-        registered_tool_name == function_name
-        and function_name in MATRIX_ROOM_RUNTIME_TOOL_NAMES
-        and approval_type == MATRIX_ROOM_RUNTIME_APPROVAL_TYPE
-    )
     # A scheduled call runs only with the approval its requester gave when it was scheduled.
     is_scheduled_call_runner = registered_tool_name == "scheduler" and function_name == "run_scheduled_call"
     return (
-        not is_matrix_room_runtime_function
+        not is_matrix_room_runtime_function(registered_tool_name, function_name)
         and not is_scheduled_call_runner
         and tool_may_require_approval(config, function_name)
     )
@@ -1016,7 +1006,7 @@ def apply_tool_approval_capability(
     def offered(function: ToolFunction) -> ToolFunction | None:
         # A function that asks for its own confirmation keeps its flags; a rule may gate any other.
         confirms = function.requires_confirmation is True
-        may_gate = _approval_may_gate(config, function.name, function.approval_type, registered_tool_name)
+        may_gate = _approval_may_gate(config, function.name, registered_tool_name)
         if not resumable:
             return None if confirms or may_gate else function
         if registered_tool_name == "delegate" and function.name in DELEGATION_FUNCTIONS:

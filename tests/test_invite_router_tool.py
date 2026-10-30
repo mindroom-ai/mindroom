@@ -516,6 +516,25 @@ async def test_same_named_external_function_does_not_bypass_approval(tmp_path: P
     assert requires_approval
 
 
+def test_a_function_named_after_its_registered_tool_stays_gated(tmp_path: Path) -> None:
+    """Only the reserved recovery function skips approval rules, not any function its own registered tool offers."""
+    config = bind_runtime_paths(
+        Config(
+            agents={"code": AgentConfig(display_name="Code", role="Write code")},
+            models={"default": ModelConfig(provider="openai", id="gpt-6-astra")},
+            tool_approval={"default": "require_approval"},
+        ),
+        test_runtime_paths(tmp_path),
+    )
+
+    def lookup() -> str:
+        return "found"
+
+    functions = gated_functions(Toolkit(name="lookup", tools=[lookup]), config)
+
+    assert functions["lookup"].requires_confirmation is True
+
+
 @pytest.mark.asyncio
 async def test_invite_router_reports_matrix_invite_failure(tmp_path: Path) -> None:
     """A refused invite must not tell the agent that router recovery is underway."""
