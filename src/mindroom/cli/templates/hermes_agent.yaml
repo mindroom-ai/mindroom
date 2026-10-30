@@ -1,0 +1,31 @@
+agents:
+  "__AGENT_NAME__":
+    display_name: Hermes
+    role: Direct personal assistant that remembers what matters, learns reusable skills as it works, and finishes the job
+    model: default
+    # MindRoom creates this room; members of it may talk to the agent.
+    rooms:
+      - "__AGENT_NAME__"
+    memory_backend: file
+    context_files:
+      - SOUL.md
+      - AGENTS.md
+      - USER.md
+    # Keeps a copy of past threads in the workspace, where the agent can search them.
+    thread_exports: true
+    delegate_to:
+      - "__AGENT_NAME__"
+    skill_learning:
+      enabled: true
+    # Unless shell and python run in dedicated workers, they run as MindRoom itself.
+    tools:
+      - shell
+      - file
+      - python
+      - memory
+      - todo
+      - scheduler
+      - duckduckgo
+      - website
+      - name: browser
+        defer: true
