@@ -14,9 +14,7 @@ from mindroom.event_journal import DeliveryStage
 from mindroom.event_journal.matrix_delivery import MatrixDeliveryWorker
 from mindroom.logging_config import get_logger
 from mindroom.matrix.client_delivery import (
-    MatrixDeliveryFailure,
     can_send_to_encrypted_room,
-    resolve_room_encryption_outcome,
     send_room_event_result,
 )
 from mindroom.matrix.large_messages import content_fits_normal_event, sidecar_upload_is_usable, upload_json_sidecar
@@ -81,35 +79,12 @@ async def _offload_oversized_full_arguments(
     ):
         return send_content
     offloaded = {key: value for key, value in send_content.items() if key != "full_arguments"}
-    room_encrypted = await resolve_room_encryption_outcome(
-        client,
-        room_id,
-        operation="offload_approval_full_arguments",
-    )
-    if isinstance(room_encrypted, MatrixDeliveryFailure):
-        offloaded["approvable"] = False
-        return offloaded
-    mxc_uri, file_info = await upload_json_sidecar(
-        client,
-        room_id,
-        full_arguments,
-        room_encrypted=room_encrypted,
-    )
-    if not room_encrypted:
-        # Encryption can turn on while a plaintext upload is in flight, and an
-        # encrypted room must never point at plaintext bytes. Matrix room
-        # encryption cannot later be disabled, so one encrypted upload settles it.
-        room_encrypted = await resolve_room_encryption_outcome(
-            client,
-            room_id,
-            operation="offload_approval_full_arguments",
-        )
-        if isinstance(room_encrypted, MatrixDeliveryFailure):
-            offloaded["approvable"] = False
-            return offloaded
-        if room_encrypted:
-            mxc_uri, file_info = await upload_json_sidecar(client, room_id, full_arguments, room_encrypted=True)
-    if not sidecar_upload_is_usable(mxc_uri, file_info, room_encrypted=room_encrypted):
+    # The card is frozen here and sent later, perhaps after a retry or a
+    # restart, by which time the room may have turned encrypted. So the
+    # arguments are always encrypted, as every deferred delivery's sidecars are;
+    # clients read an encrypted file in any room.
+    mxc_uri, file_info = await upload_json_sidecar(client, room_id, full_arguments, room_encrypted=True)
+    if not sidecar_upload_is_usable(mxc_uri, file_info, room_encrypted=True):
         logger.warning(
             "approval_full_arguments_sidecar_unavailable",
             room_id=room_id,
@@ -118,11 +93,7 @@ async def _offload_oversized_full_arguments(
         )
         offloaded["approvable"] = False
         return offloaded
-    if room_encrypted:
-        offloaded["full_arguments_file"] = file_info
-    else:
-        offloaded["full_arguments_url"] = mxc_uri
-        offloaded["full_arguments_info"] = file_info
+    offloaded["full_arguments_file"] = file_info
     return offloaded
 
 

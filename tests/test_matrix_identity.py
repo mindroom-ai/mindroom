@@ -442,7 +442,7 @@ class TestHelperFunctions:
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        """Matrix state loads should stay lock-free even when normalizing old files."""
+        """Matrix state loads take no file lock even when normalizing old files."""
         self.config = _bind_runtime_paths(self.config, tmp_path)
         runtime_paths = runtime_paths_for(self.config)
         state_file = constants_mod.matrix_state_file(runtime_paths=runtime_paths)

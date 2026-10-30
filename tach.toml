@@ -7004,7 +7004,6 @@ exclusive = true
 expose = [
     "EventInfo",
     "event_type_supports_thread_relations",
-    "is_thread_affecting_relation",
     "origin_server_ts_from_event_source",
     "reply_to_event_id_from_content",
 ]
@@ -7134,7 +7133,6 @@ from = ["mindroom.matrix.client_visible_messages"]
 expose = [
     "RoomThreadsPageError",
     "enumerate_room_thread_root_ids",
-    "find_approval_card_event_id_via_room_messages",
     "find_outbox_delivery_event_id_via_room_messages",
     "find_response_event_ids_via_room_messages",
     "get_room_threads_page",

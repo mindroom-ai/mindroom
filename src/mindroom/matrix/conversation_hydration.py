@@ -1149,7 +1149,8 @@ class ConversationHydrator:
         ]
         reached_reply_edits = not replies or await self._walk_reached_reply_edits(room_id, thread_id, events)
         requested = [message for message in replies if message.event_id in edits_of]
-        lookups = [*unfinished, *(requested if reached_reply_edits else replies)]
+        others = [] if reached_reply_edits else [message for message in replies if message.event_id not in edits_of]
+        lookups = [*unfinished, *requested, *others]
         seen = {event.event_id for event in events}
         found: list[ProjectedEvent] = []
         complete = True

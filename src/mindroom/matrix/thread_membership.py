@@ -41,9 +41,9 @@ Invariants enforced here (every resolver in the repo must go through this module
    A related event the homeserver will not serve, or one that is not a message, carries
    ``RelatedEventUnavailableError``, which no retry changes.
 
-5. Child proof and relation ancestry accept only ``m.room.message`` and ``m.room.encrypted`` events.
-   Child proof also excludes the candidate root itself and edits of the root: an ``m.replace`` of a
-   relation-free event does not make that event a thread root.
+5. Relation ancestry accepts only ``m.room.message`` and ``m.room.encrypted`` events.
+   Child proof counts only readable messages the candidate's thread holds other than the root itself;
+   an edit of the root is folded into the root, so it never proves the root has a thread.
 
 6. A root proof built from thread history whose read source is the explicit degraded fallback
    (``THREAD_HISTORY_SOURCE_DEGRADED``, i.e. an empty fail-open read) is PROOF_UNAVAILABLE, never
