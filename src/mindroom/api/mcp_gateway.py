@@ -99,6 +99,14 @@ def _browser_origins(paths: RuntimePaths) -> tuple[str, ...]:
     return tuple(dict.fromkeys(origins))
 
 
+def _configured_public_origin(paths: RuntimePaths) -> str | None:
+    """Return the configured public origin normalized, or None when it is not a valid origin."""
+    try:
+        return parse_browser_origin((paths.env_value("MINDROOM_PUBLIC_URL") or "").strip())
+    except ValueError:
+        return None
+
+
 def gateway_cors_origins(paths: RuntimePaths, path: str) -> tuple[str, ...] | None:
     """Separate public OAuth and bearer MCP CORS from dashboard cookie policy."""
     if path == "/mcp/scim/v2" or path.startswith("/mcp/scim/v2/"):
@@ -414,7 +422,7 @@ def _runtime(request: Request, *, paths: RuntimePaths | None = None) -> GatewayR
         runtime is None
         or runtime.external_settings != external_settings
         or not _enabled(paths)
-        or (paths.env_value("MINDROOM_PUBLIC_URL") or "").rstrip("/") != runtime.origin
+        or _configured_public_origin(paths) != runtime.origin
         or (paths.env_value("MINDROOM_MCP_SCIM_TOKEN") or "") != runtime.scim_token
     ):
         raise HTTPException(404, "MCP gateway is disabled", headers=CONNECTIONS_HEADERS)

@@ -924,6 +924,19 @@ def test_disabled_or_invalid_gateway_does_not_start(gateway_app: FastAPI, settin
         assert client.get("/.well-known/oauth-authorization-server/mcp/oauth").status_code == 404
 
 
+def test_respelled_public_url_keeps_the_gateway_enabled(gateway_app: FastAPI) -> None:
+    """Respelling the same public origin (host case, default port) is not a configuration change."""
+    snapshot = config_lifecycle.require_api_state(gateway_app).snapshot
+    snapshot.runtime_paths = replace(
+        snapshot.runtime_paths,
+        process_env={**snapshot.runtime_paths.process_env, "MINDROOM_PUBLIC_URL": "https://Assistant.example.org:443"},
+    )
+    with TestClient(gateway_app, base_url=ORIGIN) as client:
+        metadata = client.get("/.well-known/oauth-authorization-server/mcp/oauth")
+        assert metadata.status_code == 200
+        assert metadata.json()["issuer"] == ORIGIN + "/mcp/oauth"
+
+
 def test_chat_session_approves_clients_without_trusted_upstream_auth(gateway_app: FastAPI) -> None:
     """Without trusted upstream auth, a Connections session from MindRoom Chat approves clients and nothing else does."""
     snapshot = config_lifecycle.require_api_state(gateway_app).snapshot

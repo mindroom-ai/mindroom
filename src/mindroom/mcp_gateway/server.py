@@ -31,6 +31,7 @@ from mindroom.mcp_gateway.types import (
     GatewayErrorResponse,
     GatewayPrincipal,
 )
+from mindroom.origins import normalized_origin
 from mindroom.timing import elapsed_ms_since
 
 if TYPE_CHECKING:
@@ -371,21 +372,22 @@ class GatewayServer:
         self._timeout = timeout_seconds
         self._closing = False
         self._active: dict[tuple[GatewayPrincipal, type, int | str], ExecutionLease] = {}
+        origin = normalized_origin(public_url)
+        if origin is None:
+            msg = "MCP gateway public URL must be an HTTP or HTTPS origin"
+            raise ValueError(msg)
         self._server: Server[dict[str, Any]] = Server(
             "MindRoom gateway",
-            instructions=_instructions(public_url, personal_agent_name),
+            instructions=_instructions(origin, personal_agent_name),
             get_tool_input_schema=_input_schema,
             on_list_tools=self._list_tools,
             on_call_tool=self._handle_call_request,
         )
         # The default tracing middleware parses client `_meta` trace fields and logs malformed ones verbatim.
         self._server.middleware.clear()
-        origin = urlsplit(public_url)
         security = TransportSecuritySettings(
-            allowed_hosts=[origin.netloc],
-            allowed_origins=list(allowed_origins)
-            if allowed_origins is not None
-            else [f"{origin.scheme}://{origin.netloc}"],
+            allowed_hosts=[urlsplit(origin).netloc],
+            allowed_origins=list(allowed_origins) if allowed_origins is not None else [origin],
         )
         self._security = TransportSecurityMiddleware(security)
         self._manager = StreamableHTTPSessionManager(

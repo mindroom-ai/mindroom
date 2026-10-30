@@ -938,3 +938,17 @@ async def test_revocation_loaded_before_concurrent_refresh_still_revokes_family(
     await provider.revoke_token(access)
     assert await provider.load_access_token(rotated.access_token) is None
     assert await provider.load_refresh_token(client, rotated.refresh_token) is None
+
+
+async def test_public_url_spelling_is_normalized(runtime_paths: RuntimePaths) -> None:
+    """Advertised OAuth URLs use the normalized origin, not the configured spelling."""
+    provider = GatewayOAuthProvider(runtime_paths, public_url="https://Example.org:443/")
+    assert provider.resource_url == "https://example.org/mcp"
+    assert provider.issuer_url == "https://example.org/mcp/oauth"
+    assert provider.consent_url == "https://example.org/connections/mcp/authorize"
+
+
+async def test_public_url_with_a_path_is_rejected(runtime_paths: RuntimePaths) -> None:
+    """The public URL must be an origin, not a URL below one."""
+    with pytest.raises(ValueError, match="origin"):
+        GatewayOAuthProvider(runtime_paths, public_url="https://example.org/gateway")

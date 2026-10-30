@@ -55,11 +55,12 @@ async def _client(
     max_user_calls: int = 32,
     max_grant_calls: int = 16,
     record_activity: Callable[[Request], Awaitable[None]] | None = None,
+    public_url: str = "https://portal.example.org",
 ) -> AsyncIterator[httpx.AsyncClient]:
     server = GatewayServer(
         authenticate=_authenticate,
         dispatch=dispatch,
-        public_url="https://portal.example.org",
+        public_url=public_url,
         timeout_seconds=deadline_seconds,
         max_active_calls=max_active_calls,
         max_user_calls=max_user_calls,
@@ -1041,3 +1042,14 @@ async def test_request_id_must_be_serializable_as_utf8(method: str) -> None:
         response = await client.post("/mcp", content=body, headers={"Content-Type": "application/json"})
         assert response.status_code == 400
         assert response.json() == {"error": "request_rejected"}
+
+
+async def test_public_url_spelling_is_normalized_for_host_checks() -> None:
+    """A public URL spelled with mixed case and a default port still admits the client's Host."""
+
+    async def dispatch(_request: Request, _name: str, _arguments: dict[str, object]) -> dict[str, object]:
+        return {"result": "ok"}
+
+    async with _client(dispatch, public_url="https://Portal.example.org:443") as client:
+        response = await client.post("/mcp", json=_call())
+    assert response.status_code == 200
