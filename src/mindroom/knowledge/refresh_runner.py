@@ -612,7 +612,9 @@ async def _refresh_locked(
     )
     if config.get_knowledge_base_config(base_id).mode == "files":
         return await _refresh_files_mode(manager, key)
-    if await _should_defer_cold_empty_publication(manager, key):
+    # Read once: only this child, under the source-root lock, publishes the base until it returns.
+    publication = await asyncio.to_thread(load_publication, published_index_storage_path(key))
+    if await _should_defer_cold_empty_publication(manager, publication):
         return _RefreshChildResult(deferred=True)
     source_changed: str | None = None
     git_head: str | None = None
@@ -622,14 +624,10 @@ async def _refresh_locked(
             source_changed = "git_source_updated"
         else:
             git_head = git_sync_result.head
-    if not force_reindex and source_changed is None:
-        unchanged = await _publish_unchanged(manager, key, git_head=git_head)
+    if not force_reindex and source_changed is None and publication is not None:
+        unchanged = await _publish_unchanged(manager, key, publication, git_head=git_head)
         if unchanged:
-            publication = await asyncio.to_thread(load_publication, published_index_storage_path(key))
-            return _RefreshChildResult(
-                indexed_count=0 if publication is None else publication.indexed_count,
-                published=True,
-            )
+            return _RefreshChildResult(indexed_count=publication.indexed_count, published=True)
         if unchanged is False and not manager.git_source.is_configured():
             source_changed = "source_changed"
     outcome = await manager.reindex_all(force_reindex=force_reindex)
@@ -665,17 +663,22 @@ def _knowledge_manager(
     )
 
 
-async def _should_defer_cold_empty_publication(manager: KnowledgeManager, key: PublishedIndexKey) -> bool:
+async def _should_defer_cold_empty_publication(manager: KnowledgeManager, publication: Publication | None) -> bool:
     """Return whether a content-gated cold index has no corpus to publish yet."""
     if not manager.config.get_knowledge_base_config(manager.base_id).require_content_before_publish:
         return False
     if await asyncio.to_thread(manager.list_files):
         return False
-    publication = await asyncio.to_thread(load_publication, published_index_storage_path(key))
     return publication is None or not publication.indexed_count
 
 
-async def _publish_unchanged(manager: KnowledgeManager, key: PublishedIndexKey, *, git_head: str | None) -> bool | None:
+async def _publish_unchanged(
+    manager: KnowledgeManager,
+    key: PublishedIndexKey,
+    publication: Publication,
+    *,
+    git_head: str | None,
+) -> bool | None:
     """Republish an index whose source has not changed, without opening a candidate or building an embedder.
 
     Returns True when it did, False when the corpus changed, and None when the publication cannot be republished as
@@ -686,10 +689,8 @@ async def _publish_unchanged(manager: KnowledgeManager, key: PublishedIndexKey, 
     corpus, reading only the files whose stamp or size no longer match the published collection's claims.
     """
     storage = published_index_storage_path(key)
-    publication = await asyncio.to_thread(load_publication, storage)
     if (
-        publication is None
-        or publication.collection is None
+        publication.collection is None
         or publication.settings != key.indexing_settings
         or not await asyncio.to_thread(published_collection_exists, key, publication)
         or await manager.has_unfinished_rebuild(publication)

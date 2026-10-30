@@ -10506,7 +10506,7 @@ async def test_an_empty_publication_of_an_emptied_source_stays_deferred(tmp_path
         ),
     )
     manager = KnowledgeManager("docs", config=config, runtime_paths=runtime_paths)
-    assert await _should_defer_cold_empty_publication(manager, key)
+    assert await _should_defer_cold_empty_publication(manager, load_publication(published_index_storage_path(key)))
 
 
 def test_a_mode_change_of_an_unpublished_base_marks_nothing(tmp_path: Path) -> None:

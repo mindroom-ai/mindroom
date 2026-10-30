@@ -82,7 +82,7 @@ class _CandidateRun:
     #: A forced rebuild, which neither reuses nor keeps the publication it replaces.
     rebuild: bool
     #: The publication this refresh started from, which publishing its candidate retires.
-    retired: Publication | None
+    started_from: Publication | None
     #: Revision the candidate's claims describe, when known.
     baseline_revision: str | None
     #: The store's claims, mirrored after each committed write.
@@ -380,7 +380,7 @@ class KnowledgeManager:
         return _CandidateRun(
             collection=collection,
             rebuild=self._unpublished_rebuild(meta, publication),
-            retired=publication,
+            started_from=publication,
             baseline_revision=meta.revision,
             completed=await asyncio.to_thread(collection.files),
             failed=await asyncio.to_thread(collection.failed_paths),
@@ -465,7 +465,7 @@ class KnowledgeManager:
         return _CandidateRun(
             collection=collection,
             rebuild=rebuild,
-            retired=publication,
+            started_from=publication,
             baseline_revision=revision,
             completed=completed,
             failed=failed,
@@ -711,10 +711,10 @@ class KnowledgeManager:
         interrupted cleanup spared is never mistaken for it.
         """
         storage = self._base_storage_path
-        retired = run.retired
+        started_from = run.started_from
         kept = (
-            retired.collection
-            if retired is not None and not run.rebuild and retired.settings == self._indexing_settings
+            started_from.collection
+            if started_from is not None and not run.rebuild and started_from.settings == self._indexing_settings
             else None
         )
         await run_blocking_until_complete(run.collection.mark_complete)

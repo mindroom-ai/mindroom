@@ -33,7 +33,8 @@ Rows and claims now change in one transaction, so every collection is a correct 
 ## Limitations
 
 - A retired collection taken over by the next refresh re-embeds the files its successor already embedded, as before: copying those rows from the publication instead would save the embeddings but is a separate optimization.
-- The corpus signature includes each file's stamp, as before, and a file signed within two seconds of its last change is claimed without one; so a later refresh finds the corpus changed though no content did, takes over the retired collection, embeds that file again, and marks the source's other bases stale. Hashing content only would change every stored signature and make a checkout that rewrites timestamps rehash the corpus on every check, so it is left for its own change.
+- The corpus signature includes each file's stamp, as before, and a file signed within two seconds of its last change is claimed without one; so a later refresh finds the corpus changed though no content did, takes over the retired collection, embeds that file again, and marks the source's other bases stale.
+  Hashing content only would change every stored signature and make a checkout that rewrites timestamps rehash the corpus on every check, so it is left for its own change.
 - A child cancelled after its Git sync moved a shared checkout does not report the move, so other bases on that checkout notice it at their own next poll or access.
 - A first build whose publication write fails after it was marked complete is resumed from its claims; a later build in the same window is deleted as a leftover and costs one copy plus the files it had embedded.
 - While a failing file-memory index retries, memory search still reports the last failure, because file memory resolves its index without the scheduler.
