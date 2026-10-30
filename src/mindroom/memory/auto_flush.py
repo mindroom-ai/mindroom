@@ -87,7 +87,8 @@ class _ConversationState(Cursor):
 
 class _FlushState(TypedDict):
     started_at: int
-    # Each file-memory agent's start; turns created before it are never flushed, in any of the agent's scopes.
+    # Each file-memory agent's start; in any of the agent's scopes, turns created before it that had finished when their
+    # conversation was first read are never flushed.
     agents: dict[str, int]
     # Each scope's conversations by session ID.
     scopes: dict[str, dict[str, _ConversationState]]

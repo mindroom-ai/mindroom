@@ -116,10 +116,11 @@ def upgrade_layout(
 
 
 def finish_layout(connection: sqlite3.Connection, names: TableNames, version: int) -> None:
-    """Take the rows of a database at ``version``, 4 or later, through the steps every conversion ends with.
+    """Take a database's rows, already in version 4's shape, through the steps every conversion ends with.
 
-    The delegation snapshots' rewrite of version 5 (``rewrite_run_snapshots``) and the paused-run rewrite of version 6
-    (``rewrite_paused_runs``) run below their version, then the history metadata (``flatten_history_metadata``) and
+    ``version`` is the layout version the file started at, 2 or later, or 4 for an Agno database just converted. The
+    delegation snapshots' rewrite of version 5 (``rewrite_run_snapshots``) and the paused-run rewrite of version 6
+    (``rewrite_paused_runs``) run when it is below theirs, then the history metadata (``flatten_history_metadata``) and
     pre-ledger usage (``add_pre_ledger_baselines``) of version 7. The caller records the version.
     """
     if version < _SNAPSHOTS_VERSION:
