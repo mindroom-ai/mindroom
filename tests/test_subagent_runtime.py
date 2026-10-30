@@ -650,22 +650,18 @@ async def test_factory_replaced_during_constructor_cannot_relabel_old_tool(
 
 
 @pytest.mark.asyncio
-async def test_initialize_reads_the_journal_only_once_configured(tmp_path: Path) -> None:
-    """An initialize before configuration needs no journal; a disabled instance leaves saved jobs untouched."""
-    config: Config | None = None
+async def test_a_disabled_instance_leaves_saved_jobs_untouched(tmp_path: Path) -> None:
+    """A sync without background jobs opens the journal once and never reads its saved jobs."""
     paths = test_runtime_paths(tmp_path)
     journal = MagicMock()
     journal_provider = MagicMock(return_value=journal)
     coordinator = ToolJobRuntimeCoordinator(
         paths,
-        lambda: config,
+        Config,
         lambda _name: None,
         AgentReplyMembershipIndex(),
         journal_provider,
     )
-    await coordinator.initialize()
-    journal_provider.assert_not_called()
-    config = Config()
     await coordinator.sync()
     try:
         journal_provider.assert_called_once()

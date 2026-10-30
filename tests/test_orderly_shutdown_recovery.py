@@ -4,14 +4,13 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import replace
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import aiohttp
 import nio
 import pytest
 
-from mindroom.agent_reply_membership_sync import AgentReplyMembershipSync
 from mindroom.cancellation import current_task_is_process_shutdown
 from mindroom.config.access import ResponderAccessConfig
 from mindroom.dispatch_callback_outcome import TurnDispatchOutcome
@@ -24,7 +23,6 @@ from mindroom.matrix.client_session import MindRoomAsyncClient
 from mindroom.matrix.event_info import EventInfo
 from mindroom.matrix.state import MatrixState
 from mindroom.orchestration.runtime import sync_forever_with_restart
-from mindroom.orchestrator import _MultiAgentOrchestrator
 from mindroom.response_attempt import ResponseAttemptDeps, ResponseAttemptRequest, ResponseAttemptRunner
 from mindroom.runtime_shutdown import (
     ORDERLY_SHUTDOWN,
@@ -33,7 +31,7 @@ from mindroom.runtime_shutdown import (
     RuntimeShutdownIntent,
 )
 from mindroom.session_storage.agent_storage import create_state_storage
-from tests.conftest import install_bots, make_ingress_facts, unwrap_extracted_collaborator
+from tests.conftest import make_ingress_facts, unwrap_extracted_collaborator
 from tests.journal_helpers import admit_dispatch_event
 from tests.matrix_state_helpers import save_matrix_state
 from tests.response_runner_helpers import _bot, _plain_request, _target
@@ -56,6 +54,7 @@ if TYPE_CHECKING:
 
     from mindroom.event_journal import EventJournalStore, PrincipalStore
     from mindroom.response_runner import ResponseRequest
+    from tests.runtime_fakes import ReadyRuntime
 
 pytestmark = pytest.mark.usefixtures("enforce_turn_authorization")
 
@@ -190,7 +189,7 @@ async def test_orderly_shutdown_preserves_edit_callback_and_revision(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("revoked", [False, True], ids=["shutdown", "revocation"])
-async def test_shutdown_closes_callbacks_before_membership_invalidation(  # noqa: PLR0915
+async def test_shutdown_closes_callbacks_before_membership_invalidation(
     tmp_path: Path,
     journal_store: EventJournalStore,
     revoked: bool,
@@ -253,11 +252,7 @@ async def test_shutdown_closes_callbacks_before_membership_invalidation(  # noqa
     dispatcher.release_turn_replay()
     dispatcher.start()
     await asyncio.wait_for(entered.wait(), timeout=2)
-    orchestrator = _MultiAgentOrchestrator(runtime_paths=bot.runtime_paths)
-    orchestrator.config = bot.config
-    orchestrator.agent_reply_memberships = memberships
-    orchestrator.agent_reply_membership_sync = AgentReplyMembershipSync(memberships)
-    install_bots(orchestrator, {"general": bot})
+    orchestrator = cast("ReadyRuntime", bot.orchestrator)
 
     async def release_callback() -> None:
         release.set()
@@ -362,7 +357,7 @@ async def test_shutdown_retains_slow_callback_cleanup_within_budgets(  # noqa: P
 ) -> None:
     """A callback resisting cancellation retains its resources without extending either budget."""
     principal = journal_store.principal("agent@alice")
-    bot = _bot(tmp_path)
+    bot = _bot(tmp_path, journal_store=journal_store)
     client = MindRoomAsyncClient("https://example.org", "@mindroom_general:localhost")
     session = aiohttp.ClientSession()
     client.client_session = session
@@ -394,9 +389,7 @@ async def test_shutdown_retains_slow_callback_cleanup_within_budgets(  # noqa: P
     dispatcher.start()
     await asyncio.wait_for(entered.wait(), timeout=2)
     monkeypatch.setattr("mindroom.bot.SYNC_SHUTDOWN_PREPARATION_TIMEOUT_SECONDS", 0.02)
-    orchestrator = _MultiAgentOrchestrator(runtime_paths=bot.runtime_paths)
-    orchestrator.config = bot.config
-    install_bots(orchestrator, {"general": bot})
+    orchestrator = cast("ReadyRuntime", bot.orchestrator)
     opened_journal = MagicMock(spec=OpenEventJournal, store=journal_store, close=AsyncMock())
     orchestrator._open_journal = opened_journal
     monkeypatch.setattr("mindroom.orchestration.entity_fleet.RESPONSE_FINALIZATION_TIMEOUT_SECONDS", 0.02)
@@ -439,7 +432,7 @@ async def test_orderly_shutdown_upgrades_callback_already_stopping(  # noqa: PLR
 ) -> None:
     """An upgraded callback retains its actual response child and shared resources."""
     principal = journal_store.principal("agent@alice")
-    bot = _bot(tmp_path)
+    bot = _bot(tmp_path, journal_store=journal_store)
     bot.client = MindRoomAsyncClient("https://example.org", "@mindroom_general:localhost")
     session = aiohttp.ClientSession()
     client = bot.client
@@ -493,9 +486,7 @@ async def test_orderly_shutdown_upgrades_callback_already_stopping(  # noqa: PLR
     await asyncio.wait_for(entered.wait(), timeout=2)
     generic_stop = asyncio.create_task(dispatcher.stop())
     await asyncio.wait_for(unwinding.wait(), timeout=2)
-    orchestrator = _MultiAgentOrchestrator(runtime_paths=bot.runtime_paths)
-    orchestrator.config = bot.config
-    install_bots(orchestrator, {"general": bot})
+    orchestrator = cast("ReadyRuntime", bot.orchestrator)
     opened_journal = MagicMock(spec=OpenEventJournal, store=journal_store, close=AsyncMock())
     orchestrator._open_journal = opened_journal
     monkeypatch.setattr("mindroom.bot.SYNC_SHUTDOWN_PREPARATION_TIMEOUT_SECONDS", 0.02)
@@ -539,9 +530,7 @@ async def test_process_shutdown_fence_survives_late_sync_start(  # noqa: C901, P
 
     dispatcher = _dispatcher(principal, callback)
     bot._journal_dispatcher = dispatcher
-    orchestrator = _MultiAgentOrchestrator(runtime_paths=bot.runtime_paths)
-    orchestrator.config = bot.config
-    install_bots(orchestrator, {"general": bot})
+    orchestrator = cast("ReadyRuntime", bot.orchestrator)
     teardown_entered = asyncio.Event()
     release_teardown = asyncio.Event()
     retry_entered = asyncio.Event()
@@ -579,7 +568,7 @@ async def test_process_shutdown_fence_survives_late_sync_start(  # noqa: C901, P
             patch.object(bot, "ensure_user_account", AsyncMock()),
             patch.object(bot, "_open_owned_matrix_client", AsyncMock(return_value=bot.client)),
             patch.object(bot, "_set_avatar_if_available", AsyncMock()),
-            patch.object(bot, "_set_presence_with_model_info", side_effect=pause_startup),
+            patch.object(bot, "refresh_presence", side_effect=pause_startup),
         ):
             await bot.start()
 
@@ -618,7 +607,7 @@ async def test_process_shutdown_fence_survives_late_sync_start(  # noqa: C901, P
             assert attempted == []
             assert receive_starts == [1]
             assert invalidations == before_shutdown_invalidations
-            assert not await bot._response_runner.wait_for_admission_or_shutdown()
+            assert not await bot._runtime_view.wait_for_admission_or_shutdown()
         finally:
             release_retry.set()
             release_startup.set()

@@ -19,7 +19,6 @@ from structlog.testing import capture_logs
 from mindroom import ai_runtime
 from mindroom.agent_loop.model_loop import EMPTY_REQUEST, LoopHooks
 from mindroom.agent_loop.run import run_agent
-from mindroom.agent_reply_membership import AgentReplyMembershipIndex
 from mindroom.ai_runtime import (
     queued_message_signal_context,
     queued_notice_after_tool_batch,
@@ -113,6 +112,7 @@ from tests.conftest import (
 )
 from tests.fakes.scripted_model import ScriptedModel, answer, calls, tool_call
 from tests.response_runner_helpers import streamed_answer
+from tests.runtime_fakes import ready_runtime
 from tests.turn_dispatch_helpers import dispatch_test_turn, nothing_else_queued, prepared_turn_recorder
 
 if TYPE_CHECKING:
@@ -158,7 +158,7 @@ def _bot(tmp_path: Path) -> AgentBot:
         display_name="General",
         user_id="@mindroom_general:localhost",
     )
-    bot = make_test_agent_bot(agent_user, tmp_path, config, runtime_paths_for(config), rooms=["!room:localhost"])
+    bot = make_test_agent_bot(agent_user, config, runtime_paths_for(config), rooms=["!room:localhost"])
     bot.client = AsyncMock(spec=nio.AsyncClient)
     bot.client.rooms = {}
     install_runtime_journal_support(bot)
@@ -859,13 +859,7 @@ async def test_post_response_effects_skip_buttons_when_prompt_membership_ended(t
     runtime_paths = runtime_paths_for(config)
     client = make_matrix_client_mock()
     config.defaults.enable_streaming = False
-    runtime = BotRuntimeState(
-        client=client,
-        config=config,
-        runtime_paths=runtime_paths,
-        agent_reply_memberships=AgentReplyMembershipIndex(),
-        orchestrator=None,
-    )
+    runtime = BotRuntimeState(orchestrator=ready_runtime(config, runtime_paths), client=client)
     membership = make_membership_stub()
     membership.interactive_prompt_is_current.return_value = False
     support = PostResponseEffectsSupport(
@@ -925,13 +919,7 @@ async def _run_queued_summary(
     """
     config.defaults.enable_streaming = False
     runtime_paths = runtime_paths_for(config)
-    runtime = BotRuntimeState(
-        client=client,
-        config=config,
-        runtime_paths=runtime_paths,
-        agent_reply_memberships=AgentReplyMembershipIndex(),
-        orchestrator=None,
-    )
+    runtime = BotRuntimeState(orchestrator=ready_runtime(config, runtime_paths), client=client)
     conversation_reader = make_conversation_reader_mock()
     support = PostResponseEffectsSupport(
         runtime=runtime,
@@ -1669,7 +1657,6 @@ async def test_generate_team_response_uses_post_lock_reproof_target(tmp_path: Pa
     bot.client.rooms = {"!room:localhost": cached_room}
     bot.client.room_send = AsyncMock()
     bot.client.room_typing = AsyncMock()
-    bot.orchestrator = MagicMock()
     coordinator = unwrap_extracted_collaborator(bot._response_runner)
     stable_target = MessageTarget.resolve("!room:localhost", None, "$event", room_mode=True)
     lifecycle = _NoopResponseLifecycle()
@@ -1743,7 +1730,6 @@ async def test_generate_team_response_keeps_locked_target_when_payload_preparati
     bot.client.rooms = {"!room:localhost": cached_room}
     bot.client.room_send = AsyncMock()
     bot.client.room_typing = AsyncMock()
-    bot.orchestrator = MagicMock()
     coordinator = unwrap_extracted_collaborator(bot._response_runner)
     stable_target = MessageTarget.resolve("!room:localhost", None, "$event", room_mode=True)
     retarget = MessageTarget.resolve("!room:localhost", "$other_thread", "$event")

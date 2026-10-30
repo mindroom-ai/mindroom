@@ -158,7 +158,7 @@ async def _connection_user(request: Request, response: Response) -> ConnectionUs
     user = resolve_connection_user(
         snapshot,
         requester_id,
-        membership_index=config_lifecycle.app_state(request.app).agent_reply_memberships,
+        membership_index=config_lifecycle.app_state(request.app).runtime.agent_reply_memberships,
     )
     if not user.visible_agent_names:
         raise HTTPException(403, "No connections are available for this account", headers=CONNECTIONS_HEADERS)

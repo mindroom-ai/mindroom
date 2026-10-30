@@ -2,9 +2,8 @@
 
 from __future__ import annotations
 
-from contextlib import nullcontext
 from typing import TYPE_CHECKING, cast
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock
 
 import nio
 import pytest_asyncio
@@ -401,52 +400,17 @@ class ThreadingBehaviorTestBase:
 
         bot = make_test_agent_bot(
             agent_user=agent_user,
-            storage_path=tmp_path,
             rooms=["!test:localhost"],
             config=config,
             runtime_paths=runtime_paths_for(config),
         )
         wrap_extracted_collaborators(bot)
 
-        # Mock the orchestrator
-        mock_orchestrator = MagicMock()
-        mock_orchestrator.current_config = config
-        mock_orchestrator.handle_bot_ready = AsyncMock()
-        mock_orchestrator.send_approval_notice = AsyncMock()
-        bot.orchestrator = mock_orchestrator
+        # Keep the runtime's first-sync recovery and approval notices out of these tests.
+        bot.orchestrator.handle_bot_ready = AsyncMock()
+        bot.orchestrator.send_approval_notice = AsyncMock()
 
         # Create a mock client
         bot.client = _make_client_mock(user_id="@mindroom_general:localhost")
         # Initialize components that depend on client
         yield bot
-
-    @staticmethod
-    def _sync_response(joined_rooms: dict[str, nio.RoomInfo]) -> nio.SyncResponse:
-        return nio.SyncResponse(
-            next_batch="",
-            rooms=nio.Rooms(invite={}, join=joined_rooms, leave={}),
-            device_key_count=nio.DeviceOneTimeKeyCount(
-                curve25519=None,
-                signed_curve25519=None,
-            ),
-            device_list=nio.DeviceList(changed=[], left=[]),
-            to_device_events=[],
-            presence_events=[],
-        )
-
-    async def _run_sync_response_without_startup_side_effects(
-        self,
-        bot: AgentBot,
-        sync_response: nio.SyncResponse,
-    ) -> None:
-        if bot.client is not None and not sync_response.next_batch:
-            sync_response.next_batch = bot.client.next_batch
-        orchestrator = bot.orchestrator
-        bot_ready_context = (
-            patch.object(orchestrator, "handle_bot_ready", AsyncMock()) if orchestrator is not None else nullcontext()
-        )
-        with (
-            patch.object(bot, "_emit_agent_lifecycle_event", AsyncMock()),
-            bot_ready_context,
-        ):
-            await bot._on_sync_response(sync_response)

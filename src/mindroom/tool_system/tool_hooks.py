@@ -60,7 +60,7 @@ if TYPE_CHECKING:
         HookMatrixAdmin,
         HookMessageSender,
         HookRegistry,
-        HookRegistryState,
+        HookRegistrySource,
         HookRoomStatePutter,
         HookRoomStateQuerier,
     )
@@ -202,7 +202,7 @@ class _ResolvedToolContext:
     room_state_querier: HookRoomStateQuerier | None = None
     room_state_putter: HookRoomStatePutter | None = None
     message_received_depth: int = 0
-    hook_registry_state: HookRegistryState | None = None
+    hook_registry_state: HookRegistrySource | None = None
 
     @property
     def room_id(self) -> str | None:

@@ -177,7 +177,7 @@ def _make_bot(
         display_name="TestAgent",
         user_id=f"@mindroom_{agent_name}:localhost",
     )
-    bot = make_test_agent_bot(agent_user, tmp_path, config, runtime_paths_for(config), rooms=["!room:localhost"])
+    bot = make_test_agent_bot(agent_user, config, runtime_paths_for(config), rooms=["!room:localhost"])
     bot.client = make_matrix_client_mock(user_id=agent_user.user_id)
     wrap_extracted_collaborators(bot)
     replace_turn_deps(
@@ -4211,7 +4211,7 @@ async def test_dispatch_payload_registers_unregistered_image_from_thread_history
     assert payload.media.audio == ()
     assert payload.media.files == ()
     assert payload.media.videos == ()
-    record = load_attachment(tmp_path, attachment_id)
+    record = load_attachment(bot.storage_path, attachment_id)
     assert record is not None
     assert record.source_event_id == "$img-history"
     assert record.thread_id == "$thread"
@@ -4224,7 +4224,7 @@ async def test_trusted_current_attachment_ids_bypass_final_thread_filter(tmp_pat
     media_path = tmp_path / "voice.ogg"
     media_path.write_bytes(b"voice-bytes")
     attachment = register_local_attachment(
-        tmp_path,
+        bot.storage_path,
         media_path,
         kind="audio",
         attachment_id="voice-attachment",
@@ -7731,6 +7731,29 @@ async def test_router_early_skip_only_honors_joined_non_agent_mentions(
     )
 
     assert should_skip is expected
+
+
+@pytest.mark.asyncio
+async def test_router_early_skip_keeps_a_question_to_the_router_itself(tmp_path: Path) -> None:
+    """A message mentioning only the router reaches its dispatch plan, which answers it with guidance."""
+    bot = _make_bot(tmp_path, agent_name=ROUTER_AGENT_NAME)
+    room = nio.MatrixRoom("!room:localhost", bot.matrix_id.full_id)
+    room.add_member(bot.matrix_id.full_id, "Router", None)
+    room.add_member("@user:localhost", "User", None)
+    room.members_synced = True
+    event = _text_event(event_id="$router-mention", body=f"hello {bot.matrix_id.full_id}")
+    content = event.source["content"]
+    assert isinstance(content, dict)
+    content["m.mentions"] = {"user_ids": [bot.matrix_id.full_id]}
+
+    should_skip = await bot._turn_ingress._should_skip_router_before_shared_ingress_work(
+        room,
+        event,
+        facts=make_ingress_facts(event.sender, requester_user_id="@user:localhost"),
+        thread_id=None,
+    )
+
+    assert should_skip is False
 
 
 @pytest.mark.asyncio

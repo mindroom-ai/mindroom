@@ -23,7 +23,7 @@ from mindroom.entity_resolution import entity_identity_registry, mindroom_user_i
 from mindroom.llm.errors import ProviderError
 from mindroom.matrix.identity import MatrixID
 from mindroom.matrix.users import AgentMatrixUser
-from mindroom.router_relay import execute_router_relay
+from mindroom.router.relay import execute_router_relay
 from tests.bot_helpers import make_test_agent_bot
 from tests.conftest import (
     TEST_ACCESS_TOKEN,
@@ -357,7 +357,7 @@ class TestAIRouting:
         assert len(failing.requests) == 1
 
     @pytest.mark.asyncio
-    async def test_only_router_agent_routes(self, tmp_path: Path) -> None:
+    async def test_only_router_agent_routes(self) -> None:
         """Test that only the router agent handles routing."""
         # Create general agent (not router)
         agent = AgentMatrixUser(
@@ -370,7 +370,7 @@ class TestAIRouting:
 
         config = _runtime_bound_config(Config(router=RouterConfig(model="default")))
 
-        bot = make_test_agent_bot(agent, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
+        bot = make_test_agent_bot(agent, config=config)
 
         mock_room = MagicMock()
         mock_room.users = MagicMock()
@@ -383,7 +383,7 @@ class TestAIRouting:
         mock_event = MagicMock()
         mock_event.body = "Test message"
 
-        with patch("mindroom.router_relay.suggest_responder_for_message") as mock_suggest:
+        with patch("mindroom.router.relay.suggest_responder_for_message") as mock_suggest:
             # Should raise AssertionError since general is not the router agent
             with pytest.raises(AssertionError):
                 await execute_router_relay(

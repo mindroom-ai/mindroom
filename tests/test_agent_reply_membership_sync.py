@@ -11,7 +11,7 @@ import pytest
 from mindroom.agent_reply_membership import AgentReplyMembershipIndex
 from mindroom.agent_reply_membership_sync import (
     AgentReplyMembershipSync,
-    ReplyMembershipPreAdmission,
+    _ReplyMembershipPreAdmission,
 )
 from mindroom.config.access import ResponderAccessConfig
 from mindroom.config.agent import AgentConfig
@@ -65,7 +65,7 @@ def test_history_loss_invalidates_all_reply_membership_grants(tmp_path: Path) ->
         None,
     )
 
-    assert effects == ReplyMembershipPreAdmission(invalidate_reason="uncertain_sync_response")
+    assert effects == _ReplyMembershipPreAdmission(invalidate_reason="uncertain_sync_response")
     memberships.invalidate.assert_not_called()
     memberships.mark_room_unready.assert_not_called()
 
@@ -132,7 +132,7 @@ def test_reported_control_departure_fences_room_before_admission(tmp_path: Path)
         None,
     )
 
-    assert effects == ReplyMembershipPreAdmission(authorization_changed=True)
+    assert effects == _ReplyMembershipPreAdmission(authorization_changed=True)
     memberships.mark_room_unready.assert_called_once_with(
         config,
         runtime_paths,
@@ -176,7 +176,7 @@ def test_non_reported_departure_carriers_do_not_change_reply_memberships(
         None,
     )
 
-    assert effects == ReplyMembershipPreAdmission()
+    assert effects == _ReplyMembershipPreAdmission()
     memberships.invalidate.assert_not_called()
     memberships.mark_room_unready.assert_not_called()
 

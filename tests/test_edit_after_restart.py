@@ -65,7 +65,6 @@ async def test_bot_handles_redelivered_edit_after_restart(tmp_path: Path) -> Non
     # Create the bot
     bot = make_test_agent_bot(
         agent_user=agent_user,
-        storage_path=tmp_path,
         config=config,
         runtime_paths=runtime_paths,
         rooms=["!test:example.com"],
@@ -176,7 +175,6 @@ async def test_bot_skips_duplicate_regular_message_after_restart(tmp_path: Path)
     # Create the bot
     bot = make_test_agent_bot(
         agent_user=agent_user,
-        storage_path=tmp_path,
         config=config,
         runtime_paths=runtime_paths,
         rooms=["!test:example.com"],

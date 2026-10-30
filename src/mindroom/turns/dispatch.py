@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING, Any
 
 from mindroom.attachments.storage import parse_attachment_ids_from_event_source
 from mindroom.authorization import is_requester_joined_to_room
+from mindroom.bot_runtime_view import RunPhase
 from mindroom.constants import (
     ATTACHMENT_IDS_KEY,
     ORIGINAL_SENDER_KEY,
@@ -34,14 +35,14 @@ from mindroom.matrix.media import is_matrix_media_dispatch_event
 from mindroom.matrix.member_display_names import room_member_display_names
 from mindroom.matrix.thread_diagnostics import is_thread_history_degraded
 from mindroom.matrix.thread_history_result import ThreadHistoryResult
-from mindroom.response_admission import ResponseAdmissionRefusedError, admitted_response_decision
+from mindroom.response_admission import ResponseAdmissionRefusedError
 from mindroom.response_payload_preparation import (
     DispatchPayloadInputs,
     ResponsePayloadPreparation,
 )
 from mindroom.response_runner import PostLockRequestPreparationError, ResponseRequest
 from mindroom.response_sources import ResponseSources
-from mindroom.router_relay import execute_router_relay
+from mindroom.router.relay import execute_router_relay
 from mindroom.teams.formation import TeamIntent, select_ad_hoc_team_mode
 from mindroom.timestamp_formatting import normalize_timestamp_ms
 from mindroom.timing import (
@@ -471,7 +472,7 @@ class TurnDispatcher:
         response_action = plan.response_action
         assert response_action is not None
         # Orderly shutdown has closed task ownership, so no response is planned after it.
-        if self.deps.response_runner.inbox.process_shutdown_started:
+        if self.deps.runtime.phase is RunPhase.SHUTTING_DOWN:
             raise ResponseAdmissionRefusedError
         response_history_scope = (
             self.deps.turn_store.response_history_scope(
@@ -570,10 +571,7 @@ class TurnDispatcher:
             else None
         )
         # Config application waits until the router's selection and its relay delivery finish.
-        async with admitted_response_decision(
-            self.deps.runtime.response_admission_gate,
-            self.deps.response_runner.wait_for_admission_or_shutdown,
-        ):
+        async with self.deps.runtime.admission_fence():
             await execute_router_relay(
                 self.deps,
                 room,

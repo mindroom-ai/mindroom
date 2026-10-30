@@ -190,7 +190,6 @@ async def test_handle_interactive_selection_threaded_streaming_keeps_reply_targe
     )
     bot = make_test_agent_bot(
         agent_user=agent_user,
-        storage_path=tmp_path,
         config=config,
         runtime_paths=runtime_paths_for(config),
         rooms=["!test:localhost"],
@@ -327,7 +326,6 @@ async def test_handle_interactive_selection_does_not_mark_handled_when_runner_re
     )
     bot = make_test_agent_bot(
         agent_user=agent_user,
-        storage_path=tmp_path,
         config=config,
         runtime_paths=runtime_paths_for(config),
         rooms=["!test:localhost"],
@@ -391,7 +389,6 @@ async def test_on_message_claims_interactive_text_by_durable_source_event(
     )
     bot = make_test_agent_bot(
         agent_user=agent_user,
-        storage_path=tmp_path,
         config=config,
         runtime_paths=runtime_paths_for(config),
         rooms=["!test:localhost"],
@@ -476,7 +473,6 @@ async def test_sidecar_preview_claims_interactive_text_by_durable_source_event(
     )
     bot = make_test_agent_bot(
         agent_user=agent_user,
-        storage_path=tmp_path,
         config=config,
         runtime_paths=runtime_paths_for(config),
         rooms=["!test:localhost"],

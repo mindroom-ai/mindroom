@@ -14,12 +14,13 @@ from __future__ import annotations
 
 import tempfile
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 from unittest.mock import MagicMock, patch
 
 import pytest
 
 from mindroom.authorization import ResponderCandidatePermissions
+from mindroom.bot_runtime_view import BotRuntimeState
 from mindroom.config.access import ResponderAccessConfig
 from mindroom.config.agent import AgentConfig, AgentPrivateConfig, TeamConfig
 from mindroom.config.main import Config
@@ -45,6 +46,11 @@ from tests.conftest import (
     test_runtime_paths,
 )
 from tests.identity_helpers import entity_ids, persist_entity_accounts
+from tests.runtime_fakes import ready_runtime
+
+if TYPE_CHECKING:
+    from mindroom.constants import RuntimePaths
+    from mindroom.matrix.identity import MatrixID
 
 
 def _bind_runtime_config(config: Config) -> Config:
@@ -66,6 +72,25 @@ def _message(
         body=body,
         event_id=f"${sender}-{body}".replace(" ", "_"),
         content=content,
+    )
+
+
+def _policy(
+    config: Config,
+    runtime_paths: RuntimePaths,
+    agent_name: str,
+    matrix_id: MatrixID,
+    logger: MagicMock | None = None,
+) -> TurnPolicy:
+    """Build one entity's turn policy in a ready test runtime."""
+    return TurnPolicy(
+        make_test_turn_policy_deps(
+            runtime=BotRuntimeState(orchestrator=ready_runtime(config, runtime_paths_for(config))),
+            logger=logger if logger is not None else MagicMock(),
+            runtime_paths=runtime_paths,
+            agent_name=agent_name,
+            matrix_id=matrix_id,
+        ),
     )
 
 
@@ -168,22 +193,11 @@ class TestAgentResponseLogic:
         persist_entity_accounts(config, runtime_paths_for(config))
         runtime_paths = runtime_paths_for(config)
         team_id = entity_ids(config, runtime_paths)["ops"]
-        runtime = MagicMock()
-        runtime.config = config
-        runtime.orchestrator = None
-        policy = TurnPolicy(
-            make_test_turn_policy_deps(
-                runtime=runtime,
-                logger=MagicMock(),
-                runtime_paths=runtime_paths,
-                agent_name="ops",
-                matrix_id=team_id,
-            ),
-        )
+        policy = _policy(config, runtime_paths, "ops", team_id)
 
         responder_pool = policy._filter_materializable_responders(
             [team_id],
-            _ResponderAvailability(materializable_agent_names={"alpha", "beta"}, live_entity_names=None),
+            _ResponderAvailability(materializable_agent_names={"alpha", "beta"}, live_entity_names=frozenset({"ops"})),
         )
         action = policy._team_response_action(
             TeamResolution(
@@ -222,18 +236,7 @@ class TestAgentResponseLogic:
         persist_entity_accounts(config, runtime_paths_for(config))
         runtime_paths = runtime_paths_for(config)
         ids = entity_ids(config, runtime_paths)
-        runtime = MagicMock()
-        runtime.config = config
-        runtime.orchestrator = None
-        policy = TurnPolicy(
-            make_test_turn_policy_deps(
-                runtime=runtime,
-                logger=MagicMock(),
-                runtime_paths=runtime_paths,
-                agent_name="shared",
-                matrix_id=ids["shared"],
-            ),
-        )
+        policy = _policy(config, runtime_paths, "shared", ids["shared"])
 
         team_resolution = TeamResolution(
             intent=TeamIntent.EXPLICIT_MEMBERS,
@@ -285,18 +288,7 @@ class TestAgentResponseLogic:
         persist_entity_accounts(config, runtime_paths_for(config))
         runtime_paths = runtime_paths_for(config)
         ids = entity_ids(config, runtime_paths)
-        runtime = MagicMock()
-        runtime.config = config
-        runtime.orchestrator = None
-        policy = TurnPolicy(
-            make_test_turn_policy_deps(
-                runtime=runtime,
-                logger=MagicMock(),
-                runtime_paths=runtime_paths,
-                agent_name="shared",
-                matrix_id=ids["shared"],
-            ),
-        )
+        policy = _policy(config, runtime_paths, "shared", ids["shared"])
 
         team_resolution = TeamResolution(
             intent=TeamIntent.EXPLICIT_MEMBERS,
@@ -326,18 +318,11 @@ class TestAgentResponseLogic:
     async def test_single_visible_responder_replies_when_planning_history_degraded(self) -> None:
         """A degraded dispatch read must not silence the sole visible responder in a thread."""
         room = create_mock_room("!room:localhost", ["calculator", "general"], self.config)
-        runtime = MagicMock()
-        runtime.client = None
-        runtime.config = self.config
-        runtime.orchestrator = None
-        policy = TurnPolicy(
-            make_test_turn_policy_deps(
-                runtime=runtime,
-                logger=MagicMock(),
-                runtime_paths=self.runtime_paths,
-                agent_name="calculator",
-                matrix_id=entity_ids(self.config, self.runtime_paths)["calculator"],
-            ),
+        policy = _policy(
+            self.config,
+            self.runtime_paths,
+            "calculator",
+            entity_ids(self.config, self.runtime_paths)["calculator"],
         )
         context = MessageContext(
             am_i_mentioned=False,
@@ -402,19 +387,13 @@ class TestAgentResponseLogic:
     async def test_response_policy_logs_multi_agent_thread_skip(self) -> None:
         """A multi-agent thread skip should leave a useful policy diagnostic."""
         room = create_mock_room("!room:localhost", ["calculator", "general"], self.config)
-        runtime = MagicMock()
-        runtime.client = None
-        runtime.config = self.config
-        runtime.orchestrator = None
         logger = MagicMock()
-        policy = TurnPolicy(
-            make_test_turn_policy_deps(
-                runtime=runtime,
-                logger=logger,
-                runtime_paths=self.runtime_paths,
-                agent_name="calculator",
-                matrix_id=entity_ids(self.config, self.runtime_paths)["calculator"],
-            ),
+        policy = _policy(
+            self.config,
+            self.runtime_paths,
+            "calculator",
+            entity_ids(self.config, self.runtime_paths)["calculator"],
+            logger,
         )
         context = MessageContext(
             am_i_mentioned=False,
@@ -488,19 +467,13 @@ class TestAgentResponseLogic:
     async def test_response_policy_does_not_log_multi_agent_skip_for_multi_human_thread(self) -> None:
         """Multi-human thread suppression should not be misreported as multi-agent suppression."""
         room = create_mock_room("!room:localhost", ["calculator", "general"], self.config)
-        runtime = MagicMock()
-        runtime.client = None
-        runtime.config = self.config
-        runtime.orchestrator = None
         logger = MagicMock()
-        policy = TurnPolicy(
-            make_test_turn_policy_deps(
-                runtime=runtime,
-                logger=logger,
-                runtime_paths=self.runtime_paths,
-                agent_name="calculator",
-                matrix_id=entity_ids(self.config, self.runtime_paths)["calculator"],
-            ),
+        policy = _policy(
+            self.config,
+            self.runtime_paths,
+            "calculator",
+            entity_ids(self.config, self.runtime_paths)["calculator"],
+            logger,
         )
         context = MessageContext(
             am_i_mentioned=False,
@@ -560,18 +533,11 @@ class TestAgentResponseLogic:
     async def test_response_policy_continues_after_router_handoff(self) -> None:
         """The main turn policy should ignore router handoff as conversational participation."""
         room = create_mock_room("!room:localhost", ["calculator", "general"], self.config)
-        runtime = MagicMock()
-        runtime.client = None
-        runtime.config = self.config
-        runtime.orchestrator = None
-        policy = TurnPolicy(
-            make_test_turn_policy_deps(
-                runtime=runtime,
-                logger=MagicMock(),
-                runtime_paths=self.runtime_paths,
-                agent_name="general",
-                matrix_id=entity_ids(self.config, self.runtime_paths)["general"],
-            ),
+        policy = _policy(
+            self.config,
+            self.runtime_paths,
+            "general",
+            entity_ids(self.config, self.runtime_paths)["general"],
         )
         context = MessageContext(
             am_i_mentioned=False,
@@ -655,18 +621,7 @@ class TestAgentResponseLogic:
         persist_entity_accounts(config, runtime_paths_for(config))
         runtime_paths = runtime_paths_for(config)
         team_id = entity_ids(config, runtime_paths)["ops"]
-        runtime = MagicMock()
-        runtime.config = config
-        runtime.orchestrator = None
-        policy = TurnPolicy(
-            make_test_turn_policy_deps(
-                runtime=runtime,
-                logger=MagicMock(),
-                runtime_paths=runtime_paths,
-                agent_name="ops",
-                matrix_id=team_id,
-            ),
-        )
+        policy = _policy(config, runtime_paths, "ops", team_id)
         rejection = ResponseAction(
             kind="reject",
             form_team=TeamResolution(

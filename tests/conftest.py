@@ -103,10 +103,8 @@ from mindroom.event_journal import (
     EventKind,
     FinalAnswerEnqueue,
     InboundEvent,
-    JournalEvent,
     MatrixDelivery,
     MatrixDeliveryView,
-    PendingTurnView,
     PermanentDeliveryFailure,
     PrincipalStore,
     ProjectedEvent,
@@ -2168,34 +2166,6 @@ async def ignore_delivered_projection(
 
 
 @dataclass
-class FakePendingTurnStore:
-    """A journal holding no unfinished work, for tests that are not about the replay guard.
-
-    The empty answer is the one that changes nothing: the degraded replay
-    guard acts only on positive proof, so a store with nothing pending never
-    suppresses a turn. Tests that are about the guard admit into a real journal
-    instead, because the filtering they exercise happens in SQL.
-    """
-
-    async def pending_thread_events_after(
-        self,
-        *,
-        room_id: str,  # noqa: ARG002 - part of the view's shape
-        thread_id: str,  # noqa: ARG002 - part of the view's shape
-        after_origin_server_ts: int,  # noqa: ARG002 - part of the view's shape
-        excluding_event_id: str,  # noqa: ARG002 - part of the view's shape
-        limit: int = 256,  # noqa: ARG002 - part of the view's shape
-    ) -> tuple[JournalEvent, ...]:
-        """Return no unsettled events in this thread."""
-        return ()
-
-
-def make_pending_turn_view() -> PendingTurnView:
-    """Return a journal view that reports no unfinished work in any conversation."""
-    return cast("PendingTurnView", FakePendingTurnStore())
-
-
-@dataclass
 class FakeRelationStore:
     """The journal's answer about which events it admitted, and their threads."""
 
@@ -2580,22 +2550,14 @@ def published_config_load(config: Config) -> ConfigLoad:
     )
 
 
-async def initialize_from_config_file(orchestrator: "_MultiAgentOrchestrator") -> Config:
-    """Load the orchestrator's config file the way `mindroom run` startup does, then initialize from that load."""
-    config = await load_startup_config(orchestrator.runtime_paths, api_enabled=orchestrator.api_enabled)
-    await orchestrator.initialize(config)
-    return config
+async def initialize_from_config_file(runtime_paths: RuntimePaths) -> "_MultiAgentOrchestrator":
+    """Load the config file the way `mindroom run` startup does, then build and initialize the runtime from that load."""
+    from mindroom.orchestrator import _MultiAgentOrchestrator  # noqa: PLC0415
 
-
-def failed_config_load(error: Exception) -> ConfigLoad:
-    """Return a load that failed with ``error`` and that no newer API commit superseded."""
-    return ConfigLoad(
-        result=ConfigLoadResult(success=False, error_status_code=422, error_detail=str(error)),
-        config=None,
-        source_fingerprint=None,
-        source_files=None,
-        error=error,
-    )
+    config = await load_startup_config(runtime_paths, api_enabled=True)
+    orchestrator = _MultiAgentOrchestrator(runtime_paths=runtime_paths, config=config)
+    await orchestrator.initialize()
+    return orchestrator
 
 
 def make_config_reload_lifecycle(
@@ -2884,14 +2846,10 @@ async def prepare_payload_via_seam(bot: RuntimeBot, execute_args: tuple[object, 
 
 
 def sync_bot_runtime_state(bot: RuntimeBot) -> None:
-    """Update the extracted runtime state after tests mutate bot internals."""
-    runtime = bot._runtime_view
+    """Give a client a test swapped in the bot's user id, as a logged-in client has."""
     client = bot.client
     if client is not None and getattr(client, "user_id", None) is None:
         client.user_id = bot.matrix_id.full_id
-    runtime.client = bot.client
-    runtime.config = bot.config
-    runtime.orchestrator = bot.orchestrator
 
 
 def replace_turn_policy_deps(bot: RuntimeBot, **changes: object) -> TurnPolicy:
@@ -3103,11 +3061,7 @@ def replace_turn_deps(bot: RuntimeBot, **changes: object) -> None:
                 validator_deps,
                 turn_store=rebuilt_changes["turn_store"],
                 turn_policy=rebuilt_changes["turn_policy"],
-                **{
-                    name: changes[name]
-                    for name in ("wait_for_admission_or_shutdown", "settle_ignored_sources")
-                    if name in changes
-                },
+                **{name: changes[name] for name in ("settle_ignored_sources",) if name in changes},
             ),
         )
     bot._ingress_validator = rebuilt_changes["ingress"]
@@ -3486,6 +3440,15 @@ def _pin_matrix_homeserver(monkeypatch: pytest.MonkeyPatch) -> None:
 def _reset_memory_entrypoint_snapshots(monkeypatch: pytest.MonkeyPatch) -> None:
     """Keep a conversation's kept MEMORY.md copy from leaking into later tests."""
     monkeypatch.setattr(memory_entrypoint_snapshots_module, "_snapshots", {})
+
+
+@pytest.fixture(autouse=True)
+def _withdraw_embedded_runtime_from_the_shared_api_app() -> Generator[None, None, None]:
+    """Withdraw a runtime a test lent the shared dashboard app, so each test binds the runtime it needs."""
+    yield
+    api_main = sys.modules.get("mindroom.api.main")
+    if api_main is not None:
+        api_main.unbind_embedded_runtime(api_main.app)
 
 
 @pytest.fixture(autouse=True)
@@ -3875,7 +3838,7 @@ def _reset_approval_manager_runtime() -> Generator[None, None, None]:
     The manager is module-global and outlives the test that initialized it. It
     holds Matrix transport hooks, including the approval-card store every
     inbound message consults to recover a click on a card this process has
-    forgotten. A test that builds a bot without an orchestrator never sets
+    forgotten. A test that builds a bot without starting its runtime never sets
     those hooks, so it inherits whichever ones the previous test on this
     worker left behind -- and awaiting a previous test's mock raises inside a
     message callback nothing is watching, which surfaces as an unrelated test

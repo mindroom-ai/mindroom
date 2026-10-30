@@ -121,6 +121,7 @@ if TYPE_CHECKING:
     from mindroom.tool_system.runtime_context import ToolRuntimeContext
 
 HEADER = "🤝 **Team Response** (Writer, Checker):\n\n"
+_TOUCH_NEEDS_APPROVAL = [ApprovalRuleConfig(match="touch", action="require_approval")]
 
 # Every test registers the members' probe toolkit.
 pytestmark = pytest.mark.usefixtures("squad_probe")
@@ -732,7 +733,7 @@ async def _pause_on_the_checker(
         monkeypatch,
         leader=[delegate("call-team", "checker", "Touch it")],
         checker=[calls(tool_call("touch", "call-touch", label="dangerous"), metrics=usage(10, 1))],
-        approval_rules=[ApprovalRuleConfig(match="touch", action="require_approval")],
+        approval_rules=_TOUCH_NEEDS_APPROVAL,
     )
     with pytest.raises(ResponsePausedForApproval) as raised:
         await team.stream(show_tool_calls=show_tool_calls)
@@ -862,7 +863,7 @@ async def test_an_approved_member_call_resumes_the_stored_team_run_and_renders_t
     assert isinstance(result, CompletedApprovalRun)
     assert ProbeToolkit.calls == ["dangerous"]
     assert result.response_text == HEADER + body
-    assert result.metadata_content["io.mindroom.ai_run"]["status"] == "completed"
+    assert result.metadata_content[AI_RUN_METADATA_KEY]["status"] == "completed"
     record, [member] = team.stored_runs()
     assert (record.status, member.status) == (RunStatus.completed, RunStatus.completed)
     assert record.requirements == []
@@ -1069,7 +1070,7 @@ async def test_an_approval_resume_repeats_the_request_the_leader_and_the_member_
         monkeypatch,
         leader=[delegate("call-team", "checker", "Touch it")],
         checker=[calls(tool_call("touch", "call-touch", label="dangerous"), metrics=usage(10, 1))],
-        approval_rules=[ApprovalRuleConfig(match="touch", action="require_approval")],
+        approval_rules=_TOUCH_NEEDS_APPROVAL,
     )
     location = EnrichmentItem(key="location", text="Alice is in Lisbon.", persist=False)
     with pytest.raises(ResponsePausedForApproval) as raised:
@@ -1118,7 +1119,7 @@ async def test_a_member_continued_after_its_own_delegation_in_an_approval_resume
         leader=[delegate("call-team", "checker", "Touch it")],
         checker=[calls(tool_call("touch", "call-touch", label="dangerous"), metrics=usage(10, 1))],
         helper=[],
-        approval_rules=[ApprovalRuleConfig(match="touch", action="require_approval")],
+        approval_rules=_TOUCH_NEEDS_APPROVAL,
     )
     with pytest.raises(ResponsePausedForApproval) as raised:
         await team.stream(show_tool_calls=False)
@@ -1493,7 +1494,7 @@ async def test_a_team_pause_shows_a_failed_member_run_s_reason_after_the_text_it
         leader=[delegate("call-check", "checker", "Check"), delegate("call-write", "writer", "Touch it")],
         checker=[[TextDelta("Checking it"), Await(_checker_leaks_its_key)]],
         writer=[calls(tool_call("touch", "call-touch", label="dangerous"))],
-        approval_rules=[ApprovalRuleConfig(match="touch", action="require_approval")],
+        approval_rules=_TOUCH_NEEDS_APPROVAL,
     )
 
     with pytest.raises(ResponsePausedForApproval) as raised:
@@ -1525,7 +1526,7 @@ async def test_a_team_reply_shows_the_no_consensus_note_only_once_it_finishes(
         monkeypatch,
         leader=[delegate("call-team", "checker", "Touch it")],
         checker=[calls(tool_call("touch", "call-touch", label="dangerous"), content="Let me touch it.")],
-        approval_rules=[ApprovalRuleConfig(match="touch", action="require_approval")],
+        approval_rules=_TOUCH_NEEDS_APPROVAL,
     )
     live: list[TeamStreamChunk] = []
     with pytest.raises(ResponsePausedForApproval) as raised:
@@ -1593,7 +1594,7 @@ async def _pause_after_the_checker_wrote(
             ),
         ],
         checker=[calls(tool_call("touch", "call-touch", label="dangerous"), content="Let me touch it.")],
-        approval_rules=[ApprovalRuleConfig(match="touch", action="require_approval")],
+        approval_rules=_TOUCH_NEEDS_APPROVAL,
     )
     with pytest.raises(ResponsePausedForApproval) as raised:
         await team.stream(show_tool_calls=False)
@@ -1635,7 +1636,7 @@ async def test_a_member_asked_again_after_an_approval_resume_starts_a_new_paragr
         leader=[delegate("call-draft", "writer", "Draft"), delegate("call-check", "checker", "Touch it")],
         writer=[answer("Draft one.")],
         checker=[calls(tool_call("touch", "call-touch", label="dangerous"))],
-        approval_rules=[ApprovalRuleConfig(match="touch", action="require_approval")],
+        approval_rules=_TOUCH_NEEDS_APPROVAL,
     )
     with pytest.raises(ResponsePausedForApproval) as raised:
         await team.stream(show_tool_calls=False)
@@ -1713,9 +1714,6 @@ async def test_a_chained_approval_shows_the_text_each_run_wrote_once(
     assert isinstance(result, CompletedApprovalRun)
     assert ProbeToolkit.calls == ["dangerous", "again"]
     assert result.response_text == _WROTE_BEFORE_THE_PAUSE
-
-
-_TOUCH_NEEDS_APPROVAL = [ApprovalRuleConfig(match="touch", action="require_approval")]
 
 
 @pytest.mark.asyncio
@@ -1816,6 +1814,11 @@ async def test_a_chained_team_approval_hands_the_leader_each_member_s_result(
     assert [message.content for message in request.messages if message.role == "tool"] == answered
 
 
+async def _lose_the_provider() -> None:
+    msg = "provider connection lost"
+    raise ProviderError(msg, provider="Synthetic")
+
+
 @pytest.mark.asyncio
 async def test_a_failed_resume_stores_the_error_over_the_paused_row_and_ran_the_approved_tool_once(
     tmp_path: Path,
@@ -1862,11 +1865,6 @@ async def test_a_team_reply_that_fails_mid_turn_reports_its_stored_run_in_the_me
     assert record.metadata is not None
     assert record.metadata["mindroom_original_status"] == "error"
     assert payload["tools"] == {"count": 1}
-
-
-async def _lose_the_provider() -> None:
-    msg = "provider connection lost"
-    raise ProviderError(msg, provider="Synthetic")
 
 
 @pytest.mark.asyncio
@@ -2202,7 +2200,7 @@ async def test_two_members_approvals_under_one_call_id_are_refused_and_neither_c
         ],
         writer=[calls(tool_call("touch", "call-touch", label="a"), metrics=usage(10, 1))],
         checker=[calls(tool_call("touch", "call-touch", label="b"), metrics=usage(10, 1))],
-        approval_rules=[ApprovalRuleConfig(match="touch", action="require_approval")],
+        approval_rules=_TOUCH_NEEDS_APPROVAL,
     )
 
     chunks = await team.stream(show_tool_calls=False)
@@ -2322,7 +2320,7 @@ async def test_a_team_paused_on_its_child_s_approval_resumes_through_the_delegat
         leader=[delegate("call-team", "writer", "Research it"), answer("Consensus.", usage(50, 5))],
         writer=[_delegate_to_helper("Dig"), answer("Writer: dug.")],
         helper=[calls(tool_call("touch", "call-helper", label="deep"), metrics=usage(5, 1)), answer("Dug deep.")],
-        approval_rules=[ApprovalRuleConfig(match="touch", action="require_approval")],
+        approval_rules=_TOUCH_NEEDS_APPROVAL,
     )
     with pytest.raises(ResponsePausedForApproval) as raised:
         await team.stream(show_tool_calls=False)
@@ -2377,7 +2375,7 @@ async def test_a_child_that_pauses_again_after_its_approval_shows_the_leader_s_e
             calls(tool_call("touch", "call-helper-again", label="deeper"), metrics=usage(5, 1)),
             answer("Dug deeper."),
         ],
-        approval_rules=[ApprovalRuleConfig(match="touch", action="require_approval")],
+        approval_rules=_TOUCH_NEEDS_APPROVAL,
     )
     with pytest.raises(ResponsePausedForApproval) as raised:
         await team.stream(show_tool_calls=False)
@@ -2742,7 +2740,7 @@ async def test_a_team_turn_that_fails_after_its_run_ended_records_the_document_i
     assert team.recorder.assistant_text == "**Writer**: Let me touch it.\n\n**Checker**: Checker overloaded"
 
 
-def _team_bot(team: TeamTurn, tmp_path: Path, entity: str = "squad") -> AgentBot:
+def _team_bot(team: TeamTurn, entity: str = "squad") -> AgentBot:
     """Build the squad's team bot on the team's config, with a mocked Matrix client and inert post-response effects.
 
     A completed reply would otherwise queue a thread summary on the config's real ``default`` model. An agent
@@ -2755,7 +2753,6 @@ def _team_bot(team: TeamTurn, tmp_path: Path, entity: str = "squad") -> AgentBot
             display_name=entity.title(),
             user_id=f"@mindroom_{entity}:localhost",
         ),
-        tmp_path,
         team.config,
         team.runtime_paths,
         rooms=[ROOM_ID],
@@ -2765,7 +2762,6 @@ def _team_bot(team: TeamTurn, tmp_path: Path, entity: str = "squad") -> AgentBot
     unique_room_send_responses(bot.client)
     install_runtime_journal_support(bot)
     _install_inert_post_response_effects(bot._response_runner)
-    bot.orchestrator = team.orchestrator
     return bot
 
 
@@ -2825,7 +2821,7 @@ async def test_an_ad_hoc_team_turn_is_dated_in_the_zone_of_the_agent_whose_bot_r
     """
     team = squad_turn(tmp_path, monkeypatch, leader=[], writer=[answer("Done.")])
     team.config.agents["writer"].timezone = "America/Los_Angeles"
-    bot = _team_bot(team, tmp_path, "writer")
+    bot = _team_bot(team, "writer")
     room = nio.MatrixRoom(ROOM_ID, "@mindroom_writer:localhost")
     messages = [
         ("$first:localhost", "first", _OLDER_MESSAGE_MS + 900_000),
@@ -2887,7 +2883,7 @@ async def test_a_configured_team_turn_is_dated_in_the_global_zone(
     team = squad_turn(tmp_path, monkeypatch, leader=[answer("Done.")])
     team.config.agents["writer"].timezone = "America/Los_Angeles"
     request = replace(_request("What changed?"), current_timestamp_ms=_OLDER_MESSAGE_MS + 960_000)
-    bot = _team_bot(team, tmp_path)
+    bot = _team_bot(team)
 
     with _older_thread_history(bot), patch_response_runner_module(should_use_streaming=AsyncMock(return_value=False)):
         await bot._response_runner.generate_team_response_helper(
@@ -2926,7 +2922,7 @@ async def test_the_driver_writes_the_interrupted_record_after_the_loop_stored_th
         leader=[delegate("call-team", "writer", "Write")],
         writer=[[TextDelta("Dra"), UsageReported(usage(30, 2), final=False), Await(wait_to_be_cancelled)]],
     )
-    runner = _team_bot(team, tmp_path)._response_runner
+    runner = _team_bot(team)._response_runner
     statuses_when_interrupted_record_written: list[RunStatus | None] = []
     original = response_turn.persist_interrupted_replay_snapshot
 
@@ -3031,12 +3027,11 @@ async def test_a_stopped_team_turn_cancelled_again_while_its_record_is_stored_en
 @asynccontextmanager
 async def _approving_team_bot(
     team: TeamTurn,
-    tmp_path: Path,
     *,
     streaming: bool = True,
 ) -> AsyncIterator[tuple[AgentBot, list[MatrixDelivery]]]:
     """Yield the squad's team bot with its approval cards published into the yielded list, the n-th as ``$card-n``."""
-    bot = _team_bot(team, tmp_path)
+    bot = _team_bot(team)
     cards: list[MatrixDelivery] = []
 
     async def prepare_event(_room_id: str, _thread_id: str | None, content: dict[str, Any]) -> dict[str, Any]:
@@ -3112,7 +3107,7 @@ async def test_a_member_s_gated_delegation_posts_its_card_and_the_approved_reply
         helper=[answer("Dug.")],
         approval_rules=[ApprovalRuleConfig(match="run_subagent", action="require_approval")],
     )
-    async with _approving_team_bot(team, tmp_path, streaming=streaming) as (bot, cards):
+    async with _approving_team_bot(team, streaming=streaming) as (bot, cards):
         await bot._response_runner.generate_team_response_helper(
             _request(),
             member_names=team.member_names,
@@ -3157,7 +3152,7 @@ async def test_a_member_s_next_gated_delegation_during_the_resume_posts_the_next
         helper=[answer("Dug."), answer("Dug more.")],
         approval_rules=[ApprovalRuleConfig(match="run_subagent", action="require_approval")],
     )
-    async with _approving_team_bot(team, tmp_path) as (bot, cards):
+    async with _approving_team_bot(team) as (bot, cards):
         await bot._response_runner.generate_team_response_helper(
             _request(),
             member_names=team.member_names,
@@ -3205,7 +3200,7 @@ async def test_a_member_s_child_s_gated_delegation_posts_its_card_in_the_team_sl
         approval_rules=[ApprovalRuleConfig(match="run_subagent", action="require_approval")],
     )
     team.config.agents["helper"].delegate_to = ["checker"]
-    async with _approving_team_bot(team, tmp_path) as (bot, cards):
+    async with _approving_team_bot(team) as (bot, cards):
         await bot._response_runner.generate_team_response_helper(
             _request(),
             member_names=team.member_names,

@@ -6,8 +6,7 @@ are properly tracked to prevent re-processing after restart.
 
 from __future__ import annotations
 
-import tempfile
-from pathlib import Path
+from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import nio
@@ -20,7 +19,7 @@ from mindroom.config.models import ModelConfig
 from mindroom.conversation_resolver import MessageContext
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.message_target import MessageTarget
-from mindroom.router_relay import execute_router_relay
+from mindroom.router.relay import execute_router_relay
 from mindroom.turn_record import TurnRecord
 from tests.bot_helpers import make_test_agent_bot
 from tests.conftest import (
@@ -35,6 +34,9 @@ from tests.conftest import (
     wrap_extracted_collaborators,
 )
 
+if TYPE_CHECKING:
+    from pathlib import Path
+
 
 @pytest.fixture
 def mock_router_agent() -> AgentMatrixUser:
@@ -48,9 +50,9 @@ def mock_router_agent() -> AgentMatrixUser:
 
 
 @pytest.fixture
-def mock_config() -> Config:
+def mock_config(tmp_path: Path) -> Config:
     """Create a mock config with some agents."""
-    runtime_paths = test_runtime_paths(Path(tempfile.mkdtemp()))
+    runtime_paths = test_runtime_paths(tmp_path)
     return bind_runtime_paths(
         Config(
             agents={
@@ -73,7 +75,6 @@ class TestResponseTrackingRegression:
         self,
         mock_router_agent: AgentMatrixUser,
         mock_config: Config,
-        tmp_path: Path,
     ) -> None:
         """Test that commands are tracked in response tracker.
 
@@ -87,13 +88,11 @@ class TestResponseTrackingRegression:
         bot = make_test_agent_bot(
             agent_user=mock_router_agent,
             config=mock_config,
-            storage_path=tmp_path,
             runtime_paths=runtime_paths_for(mock_config),
             rooms=[test_room_id],
         )
         wrap_extracted_collaborators(bot)
         bot.client = make_matrix_client_mock(user_id=mock_router_agent.user_id)
-        bot.client.user_id = mock_router_agent.user_id
         install_runtime_journal_support(bot)
 
         # Mock successful room_send
@@ -163,7 +162,6 @@ class TestResponseTrackingRegression:
         self,
         mock_router_agent: AgentMatrixUser,
         mock_config: Config,
-        tmp_path: Path,
     ) -> None:
         """Test that unknown commands are tracked in response tracker.
 
@@ -177,7 +175,6 @@ class TestResponseTrackingRegression:
         bot = make_test_agent_bot(
             agent_user=mock_router_agent,
             config=mock_config,
-            storage_path=tmp_path,
             runtime_paths=runtime_paths_for(mock_config),
             rooms=[test_room_id],
         )
@@ -236,13 +233,12 @@ class TestResponseTrackingRegression:
         )
 
     @pytest.mark.asyncio
-    @patch("mindroom.router_relay.suggest_responder_for_message")
+    @patch("mindroom.router.relay.suggest_responder_for_message")
     async def test_router_ai_routing_response_tracking(
         self,
         mock_suggest_responder: AsyncMock,
         mock_router_agent: AgentMatrixUser,
         mock_config: Config,
-        tmp_path: Path,
     ) -> None:
         """Test that router AI routing is tracked in the turn rows.
 
@@ -256,13 +252,11 @@ class TestResponseTrackingRegression:
         bot = make_test_agent_bot(
             agent_user=mock_router_agent,
             config=mock_config,
-            storage_path=tmp_path,
             runtime_paths=runtime_paths_for(mock_config),
             rooms=[test_room_id],
         )
         wrap_extracted_collaborators(bot)
         bot.client = make_matrix_client_mock(user_id=mock_router_agent.user_id)
-        bot.client.user_id = mock_router_agent.user_id
         install_runtime_journal_support(bot)
 
         # Mock successful room_send

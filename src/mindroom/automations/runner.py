@@ -193,7 +193,7 @@ class AutomationRunner:
 
     name = "automations"
     runtime_paths: RuntimePaths
-    config_provider: Callable[[], Config | None]
+    config_provider: Callable[[], Config]
     bot_provider: Callable[[str], AgentBot | None]
     # The automations the active plugin snapshot provides, beside the built-ins, by name.
     definition_provider: Callable[[str], AutomationDefinition | None]
@@ -229,8 +229,6 @@ class AutomationRunner:
     async def _tick(self, now: datetime) -> None:
         """Fire every automation that is due at ``now`` and continue prompts whose run never reported back."""
         config = self.config_provider()
-        if config is None:
-            return
         instances = await asyncio.to_thread(_instances, config, self.runtime_paths)
         enabled: set[str] = set()
         # ``now`` is the loop's clock; prompts measure their hour on it from the moment they are delivered.
@@ -367,7 +365,7 @@ class AutomationRunner:
         try:
             config = self.config_provider()
             bot = self.bot_provider(chain.agent_name)
-            if pending.ask.then is None or config is None or bot is None:
+            if pending.ask.then is None or bot is None:
                 return
             name = chain.settings.name
             try:
@@ -396,7 +394,7 @@ class AutomationRunner:
 
     async def _notify(self, bot: AgentBot, chain: _Chain, thread_id: str | None, text: str) -> None:
         """Post ``text`` as a notice whose mentions no agent acts on, so it starts no run."""
-        await bot._hook_send_message(chain.room_id, text, thread_id, chain.hook_source, {SKIP_MENTIONS_KEY: True})
+        await bot.hook_send_message(chain.room_id, text, thread_id, chain.hook_source, {SKIP_MENTIONS_KEY: True})
 
     async def _post(
         self,
@@ -475,7 +473,7 @@ class AutomationRunner:
             extra_content[ORIGINAL_SENDER_KEY] = original_sender
         if chain.settings.model is not None:
             extra_content[SCHEDULED_MODEL_KEY] = chain.settings.model
-        return await bot._hook_send_message(
+        return await bot.hook_send_message(
             chain.room_id,
             # Only a mentioned agent answers a message in a room with other responders.
             f"@{chain.agent_name} {text}",

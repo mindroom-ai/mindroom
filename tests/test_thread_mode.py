@@ -32,7 +32,7 @@ from mindroom.matrix.conversation_reads import ConversationReader
 from mindroom.matrix.thread_history_result import ThreadHistoryResult, thread_history_result
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.message_target import MessageTarget
-from mindroom.router_relay import execute_router_relay
+from mindroom.router.relay import execute_router_relay
 from mindroom.session_ids import create_session_id
 from mindroom.streaming import StreamingResponse, send_streaming_response
 from mindroom.turn_record import TurnRecord
@@ -88,14 +88,12 @@ def _agent_bot(
     *,
     config: Config,
     agent_user: AgentMatrixUser,
-    storage_path: Path,
     rooms: list[str] | None = None,
 ) -> AgentBot:
     """Construct an agent bot with the test config's bound runtime context."""
     bot = make_test_agent_bot(
         config=config,
         agent_user=agent_user,
-        storage_path=storage_path,
         runtime_paths=runtime_paths_for(config),
         rooms=[] if rooms is None else rooms,
     )
@@ -452,10 +450,9 @@ class TestRouterHandoffThreadMode:
         self,
         room_mode_config: Config,
         router_user: AgentMatrixUser,
-        tmp_path: Path,
     ) -> None:
         """Router should send handoff in-room when the suggested agent is room-mode."""
-        bot = _agent_bot(config=room_mode_config, agent_user=router_user, storage_path=tmp_path)
+        bot = _agent_bot(config=room_mode_config, agent_user=router_user)
         bot.client = AsyncMock()
         captured_content: dict[str, object] = {}
 
@@ -470,7 +467,7 @@ class TestRouterHandoffThreadMode:
         assert _entity_thread_mode(bot.config, ROUTER_AGENT_NAME, room_id=room.room_id) == "thread"
 
         with (
-            patch("mindroom.router_relay.suggest_responder_for_message", AsyncMock(return_value="assistant")),
+            patch("mindroom.router.relay.suggest_responder_for_message", AsyncMock(return_value="assistant")),
             patch("mindroom.delivery_gateway.send_message_outcome", side_effect=mock_send),
             patch(
                 "mindroom.matrix.conversation_reads.ConversationReader.latest_thread_event_id",
@@ -493,10 +490,9 @@ class TestRouterHandoffThreadMode:
         self,
         room_mode_config: Config,
         router_user: AgentMatrixUser,
-        tmp_path: Path,
     ) -> None:
         """Router should keep thread replies when the suggested agent is thread-mode."""
-        bot = _agent_bot(config=room_mode_config, agent_user=router_user, storage_path=tmp_path)
+        bot = _agent_bot(config=room_mode_config, agent_user=router_user)
         bot.client = AsyncMock()
         captured_content: dict[str, object] = {}
 
@@ -508,7 +504,7 @@ class TestRouterHandoffThreadMode:
         room = _matrix_room("!room:localhost")
 
         with (
-            patch("mindroom.router_relay.suggest_responder_for_message", AsyncMock(return_value="coder")),
+            patch("mindroom.router.relay.suggest_responder_for_message", AsyncMock(return_value="coder")),
             patch("mindroom.delivery_gateway.send_message_outcome", side_effect=mock_send),
             patch(
                 "mindroom.matrix.conversation_reads.ConversationReader.latest_thread_event_id",
@@ -638,10 +634,9 @@ class TestRoomModeThreadDecision:
         self,
         room_mode_config: Config,
         assistant_user: AgentMatrixUser,
-        tmp_path: Path,
     ) -> None:
         """In room mode, a threaded message is decided room-level and gets empty thread context."""
-        bot = _agent_bot(config=room_mode_config, agent_user=assistant_user, storage_path=tmp_path)
+        bot = _agent_bot(config=room_mode_config, agent_user=assistant_user)
         bot.client = MagicMock()
 
         room = _matrix_room("!room:localhost", name="Test Room")
@@ -674,7 +669,6 @@ class TestRoomModeThreadDecision:
     async def test_room_override_skips_derive_only_for_matching_room(
         self,
         assistant_user: AgentMatrixUser,
-        tmp_path: Path,
     ) -> None:
         """Room-specific mode overrides should only affect matching rooms."""
         config = _runtime_bound_config(
@@ -693,7 +687,7 @@ class TestRoomModeThreadDecision:
                 router=RouterConfig(model="default"),
             ),
         )
-        bot = _agent_bot(config=config, agent_user=assistant_user, storage_path=tmp_path)
+        bot = _agent_bot(config=config, agent_user=assistant_user)
         bot.client = MagicMock()
 
         room = _matrix_room("!room:localhost", name="Room Override")
@@ -756,14 +750,14 @@ class TestRoomModeThreadDecision:
             ),
             tmp_path,
         )
-        bot = _agent_bot(config=initial_config, agent_user=assistant_user, storage_path=tmp_path)
+        bot = _agent_bot(config=initial_config, agent_user=assistant_user)
 
         threaded_target = bot._conversation_resolver.build_message_target(
             room_id="!room:localhost",
             thread_id="$thread123",
             reply_to_event_id="$event123",
         )
-        bot.config = updated_config
+        bot.orchestrator.config = updated_config
         sync_bot_runtime_state(bot)
         room_mode_target = bot._conversation_resolver.build_message_target(
             room_id="!room:localhost",
@@ -798,7 +792,7 @@ class TestRoomModeThreadDecision:
             ),
             tmp_path,
         )
-        bot = _agent_bot(config=config, agent_user=assistant_user, storage_path=tmp_path)
+        bot = _agent_bot(config=config, agent_user=assistant_user)
 
         target = bot._conversation_resolver.build_message_target(
             room_id="!room:localhost",
@@ -838,7 +832,7 @@ class TestRoomModeThreadDecision:
             ),
             tmp_path,
         )
-        bot = _agent_bot(config=config, agent_user=assistant_user, storage_path=tmp_path)
+        bot = _agent_bot(config=config, agent_user=assistant_user)
 
         target = bot._conversation_resolver.build_message_target(
             room_id="!room:localhost",
@@ -876,7 +870,7 @@ class TestRoomModeThreadDecision:
             ),
             tmp_path,
         )
-        bot = _agent_bot(config=config, agent_user=assistant_user, storage_path=tmp_path)
+        bot = _agent_bot(config=config, agent_user=assistant_user)
         bot.client = AsyncMock()
         room = _matrix_room("!room:localhost")
         event = nio.RoomMessageText.from_dict(
@@ -957,7 +951,7 @@ class TestRoomModeThreadDecision:
             ),
             tmp_path,
         )
-        bot = _agent_bot(config=config, agent_user=assistant_user, storage_path=tmp_path)
+        bot = _agent_bot(config=config, agent_user=assistant_user)
 
         target = bot._conversation_resolver.build_message_target(
             room_id="!room:localhost",
@@ -989,11 +983,10 @@ class TestRoomModeThreadDecision:
         self,
         room_mode_config: Config,
         assistant_user: AgentMatrixUser,
-        tmp_path: Path,
         source_kind: str,
     ) -> None:
         """A trusted scheduled fire or automation prompt roots its own thread and session even in room mode."""
-        bot = _agent_bot(config=room_mode_config, agent_user=assistant_user, storage_path=tmp_path)
+        bot = _agent_bot(config=room_mode_config, agent_user=assistant_user)
         registry = entity_identity_registry(room_mode_config, runtime_paths_for(room_mode_config))
 
         target = bot._conversation_resolver.build_message_target(
@@ -1022,10 +1015,9 @@ class TestRoomModeThreadDecision:
         self,
         room_mode_config: Config,
         assistant_user: AgentMatrixUser,
-        tmp_path: Path,
     ) -> None:
         """An automation's follow-up prompt in its thread keeps that thread's session even in room mode."""
-        bot = _agent_bot(config=room_mode_config, agent_user=assistant_user, storage_path=tmp_path)
+        bot = _agent_bot(config=room_mode_config, agent_user=assistant_user)
         registry = entity_identity_registry(room_mode_config, runtime_paths_for(room_mode_config))
 
         target = bot._conversation_resolver.build_message_target(
@@ -1055,10 +1047,9 @@ class TestRoomModeThreadDecision:
         self,
         room_mode_config: Config,
         assistant_user: AgentMatrixUser,
-        tmp_path: Path,
     ) -> None:
         """A scheduled source-kind marker from a non-managed sender must not force a thread."""
-        bot = _agent_bot(config=room_mode_config, agent_user=assistant_user, storage_path=tmp_path)
+        bot = _agent_bot(config=room_mode_config, agent_user=assistant_user)
 
         target = bot._conversation_resolver.build_message_target(
             room_id="!room:localhost",
@@ -1092,10 +1083,9 @@ class TestSendResponseRoomMode:
         self,
         room_mode_config: Config,
         assistant_user: AgentMatrixUser,
-        tmp_path: Path,
     ) -> None:
         """In room mode, send_text should not add thread relation metadata."""
-        bot = _agent_bot(config=room_mode_config, agent_user=assistant_user, storage_path=tmp_path)
+        bot = _agent_bot(config=room_mode_config, agent_user=assistant_user)
         bot.client = AsyncMock()
 
         captured_content: dict = {}
@@ -1282,7 +1272,7 @@ class TestCommandThreadContextRoomMode:
             display_name="Router",
             user_id="@mindroom_router:localhost",
         )
-        bot = _agent_bot(config=config, agent_user=router_user, storage_path=tmp_path)
+        bot = _agent_bot(config=config, agent_user=router_user)
         bot.client = AsyncMock()
         send_response = AsyncMock(return_value="$reply")
         install_send_response_mock(bot, send_response)
@@ -1343,7 +1333,7 @@ class TestCommandThreadContextRoomMode:
             display_name="Router",
             user_id="@mindroom_router:localhost",
         )
-        bot = _agent_bot(config=config, agent_user=router_user, storage_path=tmp_path)
+        bot = _agent_bot(config=config, agent_user=router_user)
         bot.client = AsyncMock()
         send_response = AsyncMock(return_value="$reply")
         install_send_response_mock(bot, send_response)
@@ -1406,7 +1396,7 @@ class TestExtractedModuleLoggerRebinding:
             ),
             tmp_path,
         )
-        bot = _agent_bot(config=config, agent_user=assistant_user, storage_path=tmp_path)
+        bot = _agent_bot(config=config, agent_user=assistant_user)
         bot.client = AsyncMock()
         original_logger = MagicMock()
         rebound_logger = MagicMock()
@@ -1451,7 +1441,7 @@ class TestExtractedModuleLoggerRebinding:
             ),
             tmp_path,
         )
-        bot = _agent_bot(config=config, agent_user=assistant_user, storage_path=tmp_path)
+        bot = _agent_bot(config=config, agent_user=assistant_user)
         bot.client = AsyncMock()
         original_logger = MagicMock()
         rebound_logger = MagicMock()
@@ -1500,7 +1490,7 @@ class TestExtractedModuleLoggerRebinding:
             ),
             tmp_path,
         )
-        bot = _agent_bot(config=config, agent_user=assistant_user, storage_path=tmp_path)
+        bot = _agent_bot(config=config, agent_user=assistant_user)
         bot.client = MagicMock()
         sync_bot_runtime_state(bot)
         room = _matrix_room("!room:localhost")
@@ -1559,7 +1549,7 @@ class TestExtractedModuleLoggerRebinding:
             ),
             tmp_path,
         )
-        bot = _agent_bot(config=config, agent_user=assistant_user, storage_path=tmp_path)
+        bot = _agent_bot(config=config, agent_user=assistant_user)
         bot.client = AsyncMock()
         sync_bot_runtime_state(bot)
         room = _matrix_room("!room:localhost", name="Direct Thread Room")

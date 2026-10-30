@@ -192,7 +192,7 @@ class GatewayRuntime:
                 snapshot,
                 identity.matrix_user_id,
                 account_id=account_id,
-                membership_index=app_state(request.app).agent_reply_memberships,
+                membership_index=app_state(request.app).runtime.agent_reply_memberships,
             )
         except HTTPException as exc:
             raise HTTPException(401, "External principal is no longer authorized", headers=headers) from exc
@@ -234,7 +234,7 @@ class GatewayRuntime:
                 snapshot,
                 token.authenticated_user_id,
                 account_id=token.account_id,
-                membership_index=app_state(request.app).agent_reply_memberships,
+                membership_index=app_state(request.app).runtime.agent_reply_memberships,
             )
         except HTTPException as exc:
             raise HTTPException(401, "Gateway grant is no longer authorized", headers=headers) from exc
@@ -295,7 +295,7 @@ class GatewayRuntime:
                         current,
                         user.owner.authenticated_user_id,
                         account_id=user.owner.account_id,
-                        membership_index=app_state(request.app).agent_reply_memberships,
+                        membership_index=app_state(request.app).runtime.agent_reply_memberships,
                     )
                     if agent_name not in current_user.gateway_agent_names:
                         raise GatewayError(GatewayErrorCode.UNAUTHORIZED)
@@ -559,7 +559,7 @@ async def _consent(request: Request) -> Response:
         rebind_current_request_snapshot(request),
         owner.authenticated_user_id,
         account_id=owner.account_id,
-        membership_index=app_state(request.app).agent_reply_memberships,
+        membership_index=app_state(request.app).runtime.agent_reply_memberships,
     )
     if not context.agent_names:
         raise HTTPException(403, "Agent access is required", headers=CONNECTIONS_HEADERS)

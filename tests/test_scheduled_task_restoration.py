@@ -3,11 +3,10 @@
 from __future__ import annotations
 
 from typing import TYPE_CHECKING
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, patch
 
 import pytest
 
-from mindroom.agent_reply_membership_sync import AgentReplyMembershipSync
 from mindroom.config.main import Config
 from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.matrix.client_room_admin import RoomJoinOutcome
@@ -34,7 +33,6 @@ def _bind_runtime(config: Config, tmp_path: Path) -> Config:
 def _bot_with_scheduled_task_runtime(
     agent_name: str,
     config: Config,
-    tmp_path: Path,
     joined_rooms: dict[str, object],
 ) -> tuple[AgentBot, AsyncMock]:
     """Return a bot whose orchestrator's scheduled-task runtime records each restored room."""
@@ -46,21 +44,16 @@ def _bot_with_scheduled_task_runtime(
     )
     bot = make_test_agent_bot(
         agent_user=user,
-        storage_path=tmp_path,
         config=config,
         runtime_paths=runtime_paths_for(config),
         rooms=["lobby"],
     )
     bot.client = make_matrix_client_mock(user_id=user.user_id)
     bot.client.rooms = joined_rooms
-    if agent_name == ROUTER_AGENT_NAME:
-        bot._reply_membership_sync = AgentReplyMembershipSync(bot._runtime_view.agent_reply_memberships)
     install_runtime_journal_support(bot)
-    orchestrator = MagicMock()
-    orchestrator.config = config
-    orchestrator.scheduled_tasks.restore_room = AsyncMock(return_value=2)
-    bot.orchestrator = orchestrator
-    return bot, orchestrator.scheduled_tasks.restore_room
+    restore_room = AsyncMock(return_value=2)
+    bot.orchestrator.scheduled_tasks.restore_room = restore_room
+    return bot, restore_room
 
 
 @pytest.mark.asyncio
@@ -74,7 +67,7 @@ async def test_configured_join_restores_schedules_for_every_bot(tmp_path: Path, 
         ),
         tmp_path,
     )
-    bot, restore_room = _bot_with_scheduled_task_runtime(agent_name, config, tmp_path, {})
+    bot, restore_room = _bot_with_scheduled_task_runtime(agent_name, config, {})
 
     with (
         patch("mindroom.bot_room_lifecycle.get_joined_rooms", new_callable=AsyncMock, return_value=[]),
@@ -88,7 +81,10 @@ async def test_configured_join_restores_schedules_for_every_bot(tmp_path: Path, 
             new_callable=AsyncMock,
             return_value=0,
         ) as mock_restore_configs,
-        patch("mindroom.bot.AgentBot._send_welcome_message_if_empty", new_callable=AsyncMock) as mock_welcome,
+        patch(
+            "mindroom.bot_room_lifecycle.BotRoomLifecycle.send_welcome_message_if_empty",
+            new_callable=AsyncMock,
+        ) as mock_welcome,
     ):
         await bot.join_configured_rooms()
 
@@ -103,7 +99,7 @@ async def test_configured_join_restores_schedules_for_every_bot(tmp_path: Path, 
 async def test_router_restores_tasks_without_rejoining_existing_room(tmp_path: Path) -> None:
     """Restart setup runs even when the room is already joined."""
     config = _bind_runtime(Config(models={"default": {"provider": "openai", "id": "test-model"}}), tmp_path)
-    bot, restore_room = _bot_with_scheduled_task_runtime(ROUTER_AGENT_NAME, config, tmp_path, {"lobby": object()})
+    bot, restore_room = _bot_with_scheduled_task_runtime(ROUTER_AGENT_NAME, config, {"lobby": object()})
 
     with (
         patch("mindroom.bot_room_lifecycle.get_joined_rooms", new_callable=AsyncMock, return_value=["lobby"]),
@@ -113,7 +109,10 @@ async def test_router_restores_tasks_without_rejoining_existing_room(tmp_path: P
             new_callable=AsyncMock,
             return_value=1,
         ) as mock_restore_configs,
-        patch("mindroom.bot.AgentBot._send_welcome_message_if_empty", new_callable=AsyncMock) as mock_welcome,
+        patch(
+            "mindroom.bot_room_lifecycle.BotRoomLifecycle.send_welcome_message_if_empty",
+            new_callable=AsyncMock,
+        ) as mock_welcome,
     ):
         await bot.join_configured_rooms()
 

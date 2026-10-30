@@ -15,7 +15,6 @@ from mindroom.matrix.event_info import EventInfo
 from mindroom.matrix.identity import MatrixID
 from mindroom.matrix.thread_history_result import thread_history_result
 from mindroom.matrix.users import AgentMatrixUser
-from mindroom.orchestrator import _MultiAgentOrchestrator
 from tests.bot_helpers import make_test_agent_bot
 from tests.conftest import (
     TEST_PASSWORD,
@@ -24,7 +23,6 @@ from tests.conftest import (
     drain_coalescing,
     install_generate_response_mock,
     install_runtime_journal_support,
-    orchestrator_runtime_paths,
     runtime_paths_for,
     test_runtime_paths,
 )
@@ -216,7 +214,6 @@ class TestDMMessageContext:
         )
         bot = make_test_agent_bot(
             agent_user=agent_user,
-            storage_path=tmp_path,
             config=config,
             runtime_paths=runtime_paths_for(config),
             rooms=[],  # Not configured for any rooms
@@ -280,7 +277,6 @@ class TestDMIntegration:
 
         bot = make_test_agent_bot(
             agent_user=agent_user,
-            storage_path=tmp_path,
             config=config,
             runtime_paths=runtime_paths_for(config),
             rooms=[],
@@ -314,8 +310,6 @@ class TestDMIntegration:
     async def test_dm_response_flow(self, tmp_path: Path) -> None:
         """Test the complete flow of responding in a DM."""
         # This is a more complex integration test
-        orchestrator = _MultiAgentOrchestrator(runtime_paths=orchestrator_runtime_paths(tmp_path))
-
         config = _config(tmp_path, agents={"researcher": AgentConfig(display_name="Researcher")})
 
         # Create and configure a bot
@@ -335,7 +329,6 @@ class TestDMIntegration:
         # Important: bot is NOT configured for the DM room
         bot = make_test_agent_bot(
             agent_user=agent_user,
-            storage_path=tmp_path,
             config=config,
             runtime_paths=runtime_paths_for(config),
             rooms=[],  # Empty rooms list - not configured for any room
@@ -347,7 +340,6 @@ class TestDMIntegration:
             if "researcher" in entity_ids(config, runtime_paths_for(config))
             else "@mindroom_researcher:localhost"
         )
-        bot.orchestrator = orchestrator
         generate_response = AsyncMock()
         install_generate_response_mock(bot, generate_response)
 
@@ -431,7 +423,6 @@ class TestDMIntegration:
         # Agent is NOT configured for any rooms
         bot = make_test_agent_bot(
             agent_user=agent_user,
-            storage_path=tmp_path,
             config=config,
             runtime_paths=runtime_paths_for(config),
             rooms=[],  # Empty - not configured for any room

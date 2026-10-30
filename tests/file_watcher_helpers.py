@@ -52,7 +52,7 @@ def record_watcher_scans(monkeypatch: pytest.MonkeyPatch) -> WatcherScans:
     """Record every config file scan; call it from the test's event loop."""
     loop = asyncio.get_running_loop()
     scans = WatcherScans()
-    scan_mtimes = file_watcher.paths_mtime_snapshot
+    scan_mtimes = file_watcher._paths_mtime_snapshot
 
     def recording_scan(paths: Iterable[Path | str]) -> dict[Path, int]:
         mtimes = scan_mtimes(paths)
@@ -60,5 +60,5 @@ def record_watcher_scans(monkeypatch: pytest.MonkeyPatch) -> WatcherScans:
         loop.call_soon_threadsafe(scans._record, frozenset(path.resolve() for path in mtimes))
         return mtimes
 
-    monkeypatch.setattr(file_watcher, "paths_mtime_snapshot", recording_scan)
+    monkeypatch.setattr(file_watcher, "_paths_mtime_snapshot", recording_scan)
     return scans

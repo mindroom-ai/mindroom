@@ -104,7 +104,6 @@ class TestDMPreservationDuringCleanup:
 
         bot = make_test_agent_bot(
             agent_user=agent_user,
-            storage_path=tmp_path,
             config=config,
             runtime_paths=runtime_paths_for(config),
             rooms=["!regular:server", "!another:server"],
@@ -160,7 +159,6 @@ class TestDMPreservationDuringCleanup:
 
         bot = make_test_agent_bot(
             agent_user=agent_user,
-            storage_path=tmp_path,
             config=config,
             runtime_paths=runtime_paths_for(config),
             rooms=["!configured:server"],  # Only one configured room

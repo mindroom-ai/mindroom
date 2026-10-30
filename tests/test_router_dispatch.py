@@ -11,6 +11,7 @@ import pytest
 
 from mindroom.attachments.storage import _attachment_id_for_event, register_local_attachment
 from mindroom.authorization import ResponderCandidatePermissions
+from mindroom.bot_runtime_view import BotRuntimeState
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.constants import (
@@ -20,12 +21,13 @@ from mindroom.constants import (
     SOURCE_KIND_KEY,
 )
 from mindroom.conversation_resolver import MessageContext
+from mindroom.delivery_gateway import SendTextRequest
 from mindroom.dispatch_handoff import prepare_media_ingress
 from mindroom.dispatch_source import SCHEDULED_SOURCE_KIND
 from mindroom.matrix.thread_history_result import ThreadHistoryResult
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.message_target import MessageTarget
-from mindroom.router_relay import execute_router_relay
+from mindroom.router.relay import _send_router_relay_after_readiness_recheck, execute_router_relay
 from mindroom.teams.formation import TeamResolution
 from mindroom.thread_utils import AgentResponseDecision
 from mindroom.turn_record import TurnRecord
@@ -50,6 +52,7 @@ from tests.conftest import (
     runtime_paths_for,
 )
 from tests.identity_helpers import entity_ids
+from tests.runtime_fakes import ready_runtime
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -79,7 +82,7 @@ class TestAgentBot(AgentBotTestBase):
         )
 
         config = self._config_for_storage(tmp_path)
-        bot = make_test_agent_bot(agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
+        bot = make_test_agent_bot(agent_user, config=config, runtime_paths=runtime_paths_for(config))
         _wrap_extracted_collaborators(bot)
         bot.client = AsyncMock()
         bot.logger = MagicMock()
@@ -152,7 +155,7 @@ class TestAgentBot(AgentBotTestBase):
             access_token="mock_test_token",  # noqa: S106
         )
         config = self._config_for_storage(tmp_path)
-        bot = make_test_agent_bot(agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
+        bot = make_test_agent_bot(agent_user, config=config, runtime_paths=runtime_paths_for(config))
         install_runtime_journal_support(bot)
         bot.rooms = ["!welcome:localhost"]
         bot.client = AsyncMock()
@@ -203,7 +206,7 @@ class TestAgentBot(AgentBotTestBase):
         )
 
         config = self._config_for_storage(tmp_path)
-        bot = make_test_agent_bot(agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
+        bot = make_test_agent_bot(agent_user, config=config, runtime_paths=runtime_paths_for(config))
         _wrap_extracted_collaborators(bot)
         bot.client = AsyncMock()
         bot.logger = MagicMock()
@@ -294,7 +297,7 @@ class TestAgentBot(AgentBotTestBase):
         config = self._config_for_storage(tmp_path)
         # A top-level caption joins its upload only when sent within the debounce window of it.
         config.defaults.coalescing.debounce_ms = 1000
-        bot = make_test_agent_bot(agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
+        bot = make_test_agent_bot(agent_user, config=config, runtime_paths=runtime_paths_for(config))
         _wrap_extracted_collaborators(bot)
         bot.client = make_matrix_client_mock(user_id=agent_user.user_id)
         bot.logger = MagicMock()
@@ -391,7 +394,7 @@ class TestAgentBot(AgentBotTestBase):
             ),
             tmp_path,
         )
-        bot = make_test_agent_bot(agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
+        bot = make_test_agent_bot(agent_user, config=config, runtime_paths=runtime_paths_for(config))
         bot.client = AsyncMock()
         send_response = AsyncMock(return_value="$route")
         install_send_response_mock(bot, send_response)
@@ -429,7 +432,7 @@ class TestAgentBot(AgentBotTestBase):
 
         with (
             patch(
-                "mindroom.router_relay.suggest_responder_for_message",
+                "mindroom.router.relay.suggest_responder_for_message",
                 new_callable=AsyncMock,
                 return_value="general",
             ),
@@ -515,7 +518,7 @@ class TestAgentBot(AgentBotTestBase):
 
         await execute_router_relay(
             SimpleNamespace(
-                runtime=MagicMock(config=config, orchestrator=None),
+                runtime=BotRuntimeState(orchestrator=ready_runtime(config, runtime_paths)),
                 runtime_paths=runtime_paths,
                 logger=MagicMock(),
                 agent_name="router",
@@ -566,7 +569,6 @@ class TestAgentBot(AgentBotTestBase):
                 password=TEST_PASSWORD,
                 access_token="mock_test_token",  # noqa: S106
             ),
-            tmp_path,
             config=config,
             runtime_paths=runtime_paths_for(config),
         )
@@ -578,7 +580,6 @@ class TestAgentBot(AgentBotTestBase):
                 password=TEST_PASSWORD,
                 access_token="mock_test_token",  # noqa: S106
             ),
-            tmp_path,
             config=config,
             runtime_paths=runtime_paths_for(config),
         )
@@ -640,7 +641,7 @@ class TestAgentBot(AgentBotTestBase):
                 return_value=TeamResolution.none(),
             ),
             patch(
-                "mindroom.router_relay.suggest_responder_for_message",
+                "mindroom.router.relay.suggest_responder_for_message",
                 new_callable=AsyncMock,
                 return_value="general",
             ),
@@ -681,7 +682,7 @@ class TestAgentBot(AgentBotTestBase):
             ),
             tmp_path,
         )
-        bot = make_test_agent_bot(agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
+        bot = make_test_agent_bot(agent_user, config=config, runtime_paths=runtime_paths_for(config))
         _wrap_extracted_collaborators(bot)
         bot.client = AsyncMock()
 
@@ -756,7 +757,7 @@ class TestAgentBot(AgentBotTestBase):
             ),
             tmp_path,
         )
-        bot = make_test_agent_bot(agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
+        bot = make_test_agent_bot(agent_user, config=config, runtime_paths=runtime_paths_for(config))
         _wrap_extracted_collaborators(bot)
         bot.client = AsyncMock()
 
@@ -800,7 +801,7 @@ class TestAgentBot(AgentBotTestBase):
                 ),
             ),
             patch(
-                "mindroom.router_relay.suggest_responder_for_message",
+                "mindroom.router.relay.suggest_responder_for_message",
                 new_callable=AsyncMock,
                 return_value="general",
             ),
@@ -836,7 +837,7 @@ class TestAgentBot(AgentBotTestBase):
             ),
             tmp_path,
         )
-        bot = make_test_agent_bot(agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
+        bot = make_test_agent_bot(agent_user, config=config, runtime_paths=runtime_paths_for(config))
         _wrap_extracted_collaborators(bot)
         bot.client = AsyncMock()
         send_response = AsyncMock(return_value="$handoff")
@@ -887,7 +888,7 @@ class TestAgentBot(AgentBotTestBase):
             ),
             tmp_path,
         )
-        bot = make_test_agent_bot(agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
+        bot = make_test_agent_bot(agent_user, config=config, runtime_paths=runtime_paths_for(config))
         _wrap_extracted_collaborators(bot)
         bot.client = AsyncMock()
         install_send_response_mock(bot, AsyncMock(return_value=None))
@@ -934,7 +935,7 @@ class TestAgentBot(AgentBotTestBase):
             ),
             tmp_path,
         )
-        bot = make_test_agent_bot(agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
+        bot = make_test_agent_bot(agent_user, config=config, runtime_paths=runtime_paths_for(config))
         _wrap_extracted_collaborators(bot)
         bot.client = AsyncMock()
 
@@ -983,7 +984,7 @@ class TestAgentBot(AgentBotTestBase):
             access_token="mock_test_token",  # noqa: S106
         )
         config = self._config_for_storage(tmp_path)
-        bot = make_test_agent_bot(agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
+        bot = make_test_agent_bot(agent_user, config=config, runtime_paths=runtime_paths_for(config))
         _wrap_extracted_collaborators(bot)
         bot.client = AsyncMock()
         bot.client.room_send.return_value = _room_send_response("$router_guidance")
@@ -1035,7 +1036,7 @@ class TestAgentBot(AgentBotTestBase):
     ) -> None:
         """After router routes an image, the selected agent should resolve it via attachments."""
         config = self._config_for_storage(tmp_path)
-        bot = make_test_agent_bot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
+        bot = make_test_agent_bot(mock_agent_user, config=config, runtime_paths=runtime_paths_for(config))
         bot.client = AsyncMock()
 
         generate_response = AsyncMock(return_value="$response")
@@ -1102,3 +1103,28 @@ class TestAgentBot(AgentBotTestBase):
         assert list(call_kwargs["media"].images) == []
         assert call_kwargs["attachment_ids"] == ["att_img_root"]
         assert call_kwargs["model_prompt"] is None
+
+
+@pytest.mark.asyncio
+async def test_a_relay_that_selected_no_agent_sends_its_reply_unchanged() -> None:
+    """With no agent selected there is no readiness to recheck, so the router's reply goes out as built."""
+    orchestrator = MagicMock()
+    delivery_gateway = MagicMock()
+    delivery_gateway.send_text = AsyncMock(return_value="$relay")
+    request = SendTextRequest(
+        target=MessageTarget.resolve("!room:localhost", None, "$event"),
+        response_text="No agent fits this request.",
+        extra_content={ORIGINAL_SENDER_KEY: "@alice:localhost"},
+    )
+
+    delivery = await _send_router_relay_after_readiness_recheck(
+        orchestrator=orchestrator,
+        delivery_gateway=delivery_gateway,
+        selected_entity=None,
+        suggested_entity=None,
+        delivery_request=request,
+    )
+
+    delivery_gateway.send_text.assert_awaited_once_with(request)
+    orchestrator.entity_first_sync_complete.assert_not_called()
+    assert delivery.event_id == "$relay"

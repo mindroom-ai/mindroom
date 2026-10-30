@@ -2,8 +2,8 @@
 
 These pin the response-execution seam directly (lifecycle lock, attempt
 mechanics, cancellation, streaming vs non-streaming delivery, queued-notice
-state, and post-response effects) with mocked collaborators instead of a full
-orchestrator/bot boot, so shrinking ``response_runner.py`` has a safety net.
+state, and post-response effects) on a bot built in a ready test runtime,
+without booting an orchestrator or syncing with Matrix.
 """
 
 from __future__ import annotations
@@ -42,6 +42,7 @@ from mindroom.approval.response import plan_approval_calls, require_ordered_paus
 from mindroom.approval.tool_approval import NO_APPROVER_REASON, POLICY_CONFIRMATION_APPROVAL_TYPE
 from mindroom.authorization import ReplyMembershipPendingError
 from mindroom.background_tasks import wait_for_background_tasks
+from mindroom.bot_runtime_view import BotRuntimeState
 from mindroom.cancellation import current_task_is_process_shutdown, request_task_cancel
 from mindroom.config.access import ResponderAccessConfig
 from mindroom.config.agent import AgentConfig, TeamConfig
@@ -274,10 +275,11 @@ def _completed_outcome(event_id: str = "$response", body: str = "ok") -> FinalDe
 
 
 @pytest.mark.asyncio
-async def test_process_shutdown_refuses_new_response_owners_until_admissions_resume() -> None:
-    """Orderly shutdown must close the owner set before concurrent producers run."""
-    runner = ResponseRunner(deps=MagicMock())
-    runner.inbox.begin_process_shutdown()
+async def test_process_shutdown_refuses_new_response_owners_for_good() -> None:
+    """Orderly shutdown must close the owner set before concurrent producers run, and nothing reopens it."""
+    runtime = BotRuntimeState(orchestrator=MagicMock())
+    runner = ResponseRunner(deps=MagicMock(runtime=runtime))
+    runtime.begin_process_shutdown()
     refused_response = asyncio.sleep(0)
     accidentally_owned: asyncio.Task[None] | None = None
 
@@ -297,14 +299,16 @@ async def test_process_shutdown_refuses_new_response_owners_until_admissions_res
     assert refused_response.cr_frame is None
     assert runner.inbox.pending_inbox_response_count == 0
 
-    runner.resume_pending_admissions()
-    resumed_response = runner.inbox.track_inbox_response(
-        asyncio.sleep(0),
-        name="test_resumed_response",
-        recovery_proof_ready=lambda: True,
-        room_id=_target().room_id,
-    )
-    await resumed_response
+    assert runtime.resume() is False
+    late_response = asyncio.sleep(0)
+    with pytest.raises(ResponseAdmissionRefusedError):
+        runner.inbox.track_inbox_response(
+            late_response,
+            name="test_response_after_resume_attempt",
+            recovery_proof_ready=lambda: True,
+            room_id=_target().room_id,
+        )
+    assert late_response.cr_frame is None
     assert runner.inbox.pending_inbox_response_count == 0
 
 
@@ -391,8 +395,9 @@ async def test_inbox_response_releases_its_claim_before_its_sources_return_to_th
 @pytest.mark.asyncio
 async def test_inbox_response_refused_at_shutdown_releases_its_claim() -> None:
     """A response refused because shutdown began never runs, so the claim handed to it goes back at once."""
-    runner = ResponseRunner(deps=MagicMock())
-    runner.inbox.begin_process_shutdown()
+    runtime = BotRuntimeState(orchestrator=MagicMock())
+    runner = ResponseRunner(deps=MagicMock(runtime=runtime))
+    runtime.begin_process_shutdown()
     claim = live_turn_claim("$source")
     response = asyncio.sleep(0)
 
@@ -2222,7 +2227,7 @@ async def test_lifecycle_identity_uses_canonical_requester_before_lock_wait(
     if is_team:
         bot.config.teams["helpers"] = TeamConfig(display_name="Helpers", role="Help users", agents=["general"])
         runner = ResponseRunner(replace(runner.deps, agent_name="helpers"))
-    gate = bot.admission_gate
+    gate = bot.orchestrator.response_admission_gate
     request = _plain_request(_target())
     envelope = request.response_envelope
     request = replace(
@@ -2789,7 +2794,7 @@ async def test_approval_collaborators_read_live_config_after_hot_reload(tmp_path
     bot = _bot(tmp_path)
     runner = unwrap_extracted_collaborator(bot._response_runner)
     reloaded = bot.config.model_copy(deep=True)
-    bot.config = reloaded
+    bot.orchestrator.config = reloaded
     tool = ToolExecution(tool_call_id="call-1", tool_name="dangerous", tool_args={})
 
     def resolve_approver(config: object, *_args: object) -> None:
@@ -8442,7 +8447,7 @@ async def _respond_with_skill_learning(
     bot.client.room_send.return_value = nio.RoomSendResponse(event_id="$response", room_id="!room:localhost")
     coordinator.deps.runtime.config.agents["general"].skill_learning.enabled = True
     reviews = _RecordedSkillReviews(fail=fail)
-    coordinator.deps.runtime.orchestrator = MagicMock(knowledge_refresh_scheduler=None, skill_reviews=reviews)
+    monkeypatch.setattr(bot.orchestrator, "_skill_reviews", reviews)
     model = ScriptedModel([answer("The scripted answer to the request.")])
     install_model_providers(monkeypatch, {"default": model})
     with patch_response_runner_module(
@@ -8589,7 +8594,7 @@ async def test_a_finished_response_tells_automations_its_source_events(
     assert bot.client is not None
     bot.client.room_send.return_value = nio.RoomSendResponse(event_id="$response", room_id="!room:localhost")
     automations = _RecordedAutomations()
-    coordinator.deps.runtime.orchestrator = MagicMock(knowledge_refresh_scheduler=None, automations=automations)
+    monkeypatch.setattr(bot.orchestrator, "_automations", automations)
     model = ScriptedModel([answer("The scripted answer to the request.")])
     install_model_providers(monkeypatch, {"default": model})
     request = _plain_request(_target())
@@ -8605,12 +8610,15 @@ async def test_a_finished_response_tells_automations_its_source_events(
     assert "The scripted answer to the request." in bot.client.room_send.await_args.kwargs["content"]["body"]
 
 
-def test_a_finished_approval_continuation_tells_automations_its_source_events(tmp_path: Path) -> None:
+def test_a_finished_approval_continuation_tells_automations_its_source_events(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """A run that paused for approval is verified when its continuation ends, not after the hourly fallback."""
     bot = _bot(tmp_path)
     coordinator = unwrap_extracted_collaborator(bot._response_runner)
     automations = _RecordedAutomations()
-    coordinator.deps.runtime.orchestrator = MagicMock(knowledge_refresh_scheduler=None, automations=automations)
+    monkeypatch.setattr(bot.orchestrator, "_automations", automations)
     identity = ToolExecutionIdentity(
         channel="matrix",
         agent_name="general",

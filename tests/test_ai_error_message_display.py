@@ -17,7 +17,6 @@ from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.constants import STREAM_STATUS_ERROR, STREAM_STATUS_KEY
 from mindroom.history.types import HistoryScope
-from mindroom.hooks import HookRegistry
 from mindroom.knowledge.utils import _KnowledgeResolution
 from mindroom.llm.provider import TextDelta
 from mindroom.matrix.client_delivery import DeliveredMatrixEvent
@@ -61,7 +60,7 @@ def _runtime_bound_config() -> Config:
     )
 
 
-def _mock_bot(tmp_path: Path) -> AgentBot:
+def _mock_bot() -> AgentBot:
     """Create a bot test instance with explicit mocked collaborators."""
     config = _runtime_bound_config()
     bot = make_test_agent_bot(
@@ -71,7 +70,6 @@ def _mock_bot(tmp_path: Path) -> AgentBot:
             display_name="Test Agent",
             user_id="@mindroom_test_agent:localhost",
         ),
-        tmp_path,
         config,
         runtime_paths_for(config),
         rooms=["!room:localhost"],
@@ -79,9 +77,6 @@ def _mock_bot(tmp_path: Path) -> AgentBot:
     install_direct_response_admission(bot)
     bot.logger = MagicMock()
     bot.client = make_matrix_client_mock(user_id=bot.agent_user.user_id)
-    bot.client.user_id = "@mindroom_test_agent:localhost"
-    bot.hook_registry = HookRegistry.empty()
-    bot.orchestrator = None
     install_runtime_journal_support(bot)
     bot._conversation_resolver.build_message_target = MagicMock(
         return_value=MessageTarget.resolve("!room:localhost", None, None, room_mode=True),
@@ -101,8 +96,6 @@ def _mock_bot(tmp_path: Path) -> AgentBot:
 
 def _knowledge_access_support() -> SimpleNamespace:
     return SimpleNamespace(
-        for_agent=MagicMock(return_value=None),
-        resolve_for_agent=MagicMock(return_value=_KnowledgeResolution(knowledge=None)),
         resolve_for_agent_async=AsyncMock(return_value=_KnowledgeResolution(knowledge=None)),
     )
 
@@ -190,9 +183,9 @@ class TestAIErrorDisplay:
     """Test that AI errors are shown to users properly."""
 
     @pytest.mark.asyncio
-    async def test_non_streaming_error_edits_thinking_message(self, tmp_path: Path) -> None:
+    async def test_non_streaming_error_edits_thinking_message(self) -> None:
         """Test that when AI fails in non-streaming mode, the thinking message is edited with the error."""
-        bot = _mock_bot(tmp_path)
+        bot = _mock_bot()
 
         edited_messages: list[tuple[str, dict[str, object]]] = []
 
@@ -214,9 +207,9 @@ class TestAIErrorDisplay:
             assert "API key" in content["body"]
 
     @pytest.mark.asyncio
-    async def test_streaming_error_updates_message(self, tmp_path: Path) -> None:
+    async def test_streaming_error_updates_message(self) -> None:
         """Test that when streaming AI fails, the message is updated with the error."""
-        bot = _mock_bot(tmp_path)
+        bot = _mock_bot()
 
         error_text = "[test_agent] 🔴 Rate limited. Please wait before trying again."
         edited_messages: list[tuple[str, dict[str, object]]] = []
@@ -239,9 +232,9 @@ class TestAIErrorDisplay:
         assert mock_deliver_stream.await_args.args[0].existing_event_id == "$thinking_1"
 
     @pytest.mark.asyncio
-    async def test_cancellation_shows_cancelled_message(self, tmp_path: Path) -> None:
+    async def test_cancellation_shows_cancelled_message(self) -> None:
         """Test that when a response is cancelled, it shows a cancellation message."""
-        bot = _mock_bot(tmp_path)
+        bot = _mock_bot()
         edited_messages: list[tuple[str, dict[str, object]]] = []
 
         # Mock ai_response to raise a generic interruption.
@@ -262,9 +255,9 @@ class TestAIErrorDisplay:
             assert content["body"] == _INTERRUPTED_RESPONSE_NOTE
 
     @pytest.mark.asyncio
-    async def test_user_stop_reports_a_user_stop_outcome(self, tmp_path: Path) -> None:
+    async def test_user_stop_reports_a_user_stop_outcome(self) -> None:
         """Explicit stop-button cancellations should keep the user-stop outcome its reply's note shows."""
-        bot = _mock_bot(tmp_path)
+        bot = _mock_bot()
 
         unique_room_send_responses(bot.client)
         with patch(
@@ -281,12 +274,11 @@ class TestAIErrorDisplay:
     @pytest.mark.parametrize("show_tool_calls", [False, True])
     async def test_a_user_stop_mid_run_keeps_the_user_stop_outcome(
         self,
-        tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
         show_tool_calls: bool,
     ) -> None:
         """A stop the user asks for while the model streams ends the blocking reply as stopped by the user."""
-        bot = _mock_bot(tmp_path)
+        bot = _mock_bot()
         unique_room_send_responses(bot.client)
         bot.config.agents["test_agent"].show_tool_calls = show_tool_calls
         model = ScriptedModel([[TextDelta("Partial answer"), stop_turn("user_stop")]])
@@ -301,11 +293,10 @@ class TestAIErrorDisplay:
     @pytest.mark.asyncio
     async def test_a_user_stop_mid_stream_keeps_the_streamed_text_and_the_user_stop_outcome(
         self,
-        tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """A stop the user asks for mid-stream keeps the text streamed so far and ends as stopped by the user."""
-        bot = _mock_bot(tmp_path)
+        bot = _mock_bot()
         unique_room_send_responses(bot.client)
         model = ScriptedModel([[TextDelta("Partial answer"), stop_turn("user_stop")]])
         install_model_providers(monkeypatch, {"default": model})
@@ -320,9 +311,9 @@ class TestAIErrorDisplay:
         assert outcome.failure_reason == "cancelled_by_user"
 
     @pytest.mark.asyncio
-    async def test_various_error_messages_are_user_friendly(self, tmp_path: Path) -> None:
+    async def test_various_error_messages_are_user_friendly(self) -> None:
         """Test that various error types result in user-friendly messages."""
-        bot = _mock_bot(tmp_path)
+        bot = _mock_bot()
 
         edited_messages: list[tuple[str, dict[str, object]]] = []
         # One homeserver for every turn, so each placeholder is its own event.
@@ -373,10 +364,9 @@ class TestAIErrorDisplay:
     @pytest.mark.asyncio
     async def test_non_streaming_sync_restart_edits_thinking_message_with_restart_status(
         self,
-        tmp_path: Path,
     ) -> None:
         """Sync restarts should not render as user-initiated cancellation."""
-        bot = _mock_bot(tmp_path)
+        bot = _mock_bot()
 
         edited_messages: list[tuple[str, dict[str, object]]] = []
 
@@ -397,10 +387,9 @@ class TestAIErrorDisplay:
         assert content[STREAM_STATUS_KEY] == STREAM_STATUS_ERROR
 
     @pytest.mark.asyncio
-    async def test_unavailable_knowledge_falls_back_to_response_without_knowledge(self, tmp_path: Path) -> None:
+    async def test_unavailable_knowledge_falls_back_to_response_without_knowledge(self) -> None:
         """Matrix reply paths should continue when no published knowledge is available."""
-        bot = _mock_bot(tmp_path)
-        bot._knowledge_access_support = _knowledge_access_support()
+        bot = _mock_bot()
 
         mock_ai = AsyncMock(return_value="Response without knowledge")
         with (
