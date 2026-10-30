@@ -4,15 +4,19 @@
 # Legacy format: each team turn's memories in every member's `agents/<member>/chroma` Mem0 store, one Mem0 extraction
 #   per member under user_id `team_<sorted members>` with metadata `mindroom_replica_key` naming the turn, and in every
 #   member's `agents/<member>/memory_files/team_<sorted members>/MEMORY.md`, each entry under one shared `[id=...]`.
+#   Every release that kept such copies wrote the replica key on every team record; a record without one, such as
+#   one this release writes to a team's store before the merge runs, counts as a turn of its own.
 # Last legacy release: v2026.10.696; replacement: unreleased; writes each team scope once, to
 #   `team_memory/<team scope>/`.
 # Handling: before serving, once per storage root, the copies merge into their team's store and leave the members.
 #   File entries union by id; a copy holding anything MindRoom did not write stays where it was, with a warning. Each
 #   member's Mem0 extraction of a turn shares the turn's replica key, so a turn keeps the first member's extraction
-#   (by name), as one extraction per team turn now writes; a turn one member alone holds stays. Records move with
-#   their ids, embeddings, and metadata, so nothing is embedded or extracted again. Every step is idempotent, so a start
-#   interrupted anywhere finishes on the next; a receipt stops later starts from opening every store, and is withheld
-#   while Chroma cannot be installed, so the merge runs once it is.
+#   (by name), as one extraction per team turn now writes, unless the team's store already holds one of the turn; a
+#   turn one member alone holds stays. Records move with their ids, embeddings, and metadata, so nothing is embedded
+#   or extracted again. A member store holding links or special files, or that Chroma cannot read, stays as it is,
+#   with a warning. Every step is idempotent, so a start interrupted anywhere finishes on the next; a receipt stops
+#   later starts from opening every store, and is withheld while Chroma cannot be installed, so the merge runs once it
+#   is.
 # Coverage: tests/test_legacy_team_memory.py.
 
 from __future__ import annotations
@@ -34,6 +38,7 @@ from mindroom.tool_system.dependencies import ensure_optional_deps, optional_dep
 from ._file_backend import write_scope_markdown_file
 from ._policy import team_scope
 from ._shared import FILE_MEMORY_ENTRY_PATTERN, FILE_MEMORY_ENTRYPOINT
+from .config import mem0_chroma_path
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
@@ -173,12 +178,23 @@ def _merge_mem0_copies(runtime_paths: RuntimePaths, members: list[str]) -> bool:
     except ImportError as error:
         logger.warning("Left Mem0 team memory in member stores until Chroma is installed", error=str(error))
         return False
-    kept, copies = _team_records([_chroma_client(store) for store in stores])
-    for (scope, collection_name), records in sorted(kept.items()):
-        target = _chroma_client(team_scope(scope, runtime_paths).root / "chroma")
+    copies = [copy for store in stores for copy in _member_copies(store)]
+    # Each member extracted a team turn on its own: by team scope and collection, then by turn, each member's records,
+    # in member-name order.
+    turns: dict[tuple[str, str], dict[str, dict[int, list[dict[str, Any]]]]] = {}
+    for source, (_client, collection, records) in enumerate(copies):
+        for record in records:
+            team = (record["metadata"]["user_id"], collection.name)
+            turn = _turn(record["id"], record["metadata"])
+            turns.setdefault(team, {}).setdefault(turn, {}).setdefault(source, []).append(record)
+    kept_ids: set[str] = set()
+    for (scope, collection_name), extractions in sorted(turns.items()):
+        target = _chroma_client(mem0_chroma_path(team_scope(scope, runtime_paths).root))
         collection = target.get_or_create_collection(collection_name, embedding_function=None)
+        kept = _kept_records(collection, {turn: list(by_member.values()) for turn, by_member in extractions.items()})
+        kept_ids.update(record["id"] for record in kept)
         # Records keep their IDs, so moving one again after an interrupted start changes nothing.
-        for batch in batched(records, target.get_max_batch_size()):
+        for batch in batched(kept, target.get_max_batch_size()):
             collection.upsert(
                 ids=[record["id"] for record in batch],
                 embeddings=[record["embedding"] for record in batch],
@@ -186,10 +202,9 @@ def _merge_mem0_copies(runtime_paths: RuntimePaths, members: list[str]) -> bool:
             )
     # Only after every team's store holds its records do the member copies go, the dropped extractions first: a start
     # interrupted meanwhile still finds each kept extraction where it was, so it keeps the same one.
-    kept_ids = {record["id"] for records in kept.values() for record in records}
     for keep in (False, True):
-        for client, collection, record_ids in copies:
-            removed = [record_id for record_id in record_ids if (record_id in kept_ids) is keep]
+        for client, collection, records in copies:
+            removed = [record["id"] for record in records if (record["id"] in kept_ids) is keep]
             for batch in batched(removed, client.get_max_batch_size()):
                 collection.delete(ids=list(batch))
     return True
@@ -206,7 +221,7 @@ def _holds_only_plain_files(storage_root: Path, store: Path) -> bool:
                 return True
     except FileNotFoundError:
         return False
-    except (OSError, ValueError) as error:
+    except (OSError, RecursionError, ValueError) as error:
         logger.warning("Left an unusable Mem0 store while merging team memory", path=str(store), error=str(error))
         return False
     logger.warning("Left a Mem0 store holding links or special files while merging team memory", path=str(store))
@@ -226,36 +241,56 @@ def _plain_tree(directory: int) -> bool:
     return True
 
 
-def _team_records(
-    clients: list[Any],
-) -> tuple[dict[tuple[str, str], list[dict[str, Any]]], list[tuple[Any, Any, list[str]]]]:
-    """Return the records each team's store keeps, by team scope and collection, and every member copy to delete.
+def _member_copies(store: Path) -> list[tuple[Any, Any, list[dict[str, Any]]]]:
+    """Return each Mem0 fact collection of a member's store with its team records; none when Chroma cannot read it.
 
-    Each member extracted a team turn on its own, so a turn several members hold keeps the extraction of the first
-    member by name, which the clients' order gives, as if the team had extracted the turn once.
+    The store is worker-writable in some deployments, so one Chroma cannot open leaves its copies where they are
+    instead of stopping startup.
     """
-    holders: dict[tuple[str, str, str], object] = {}
-    kept: dict[tuple[str, str], list[dict[str, Any]]] = {}
-    copies: list[tuple[Any, Any, list[str]]] = []
-    for client in clients:
+    try:
+        client = _chroma_client(store)
+        copies = []
         for collection in client.list_collections():
-            name = collection.name
-            if not name.startswith(_MEM0_COLLECTION_PREFIX) or name.endswith(_MEM0_ENTITY_SUFFIX):
+            if not collection.name.startswith(_MEM0_COLLECTION_PREFIX) or collection.name.endswith(_MEM0_ENTITY_SUFFIX):
                 continue
-            team_records = [
+            records = [
                 record
                 for record in _records(collection.get(include=["embeddings", "metadatas"]))
                 if str(record["metadata"].get("user_id", "")).startswith(_TEAM_SCOPE_PREFIX)
             ]
-            for record in team_records:
-                team = (record["metadata"]["user_id"], name)
-                # A record without a replica key is its own turn.
-                turn = record["metadata"].get(_REPLICA_KEY) or record["id"]
-                if holders.setdefault((*team, turn), client) is client:
-                    kept.setdefault(team, []).append(record)
-            if team_records:
-                copies.append((client, collection, [record["id"] for record in team_records]))
-    return kept, copies
+            if records:
+                copies.append((client, collection, records))
+    except Exception as error:
+        logger.warning(
+            "Left a Mem0 store Chroma cannot read while merging team memory",
+            path=str(store),
+            error=str(error),
+        )
+        return []
+    return copies
+
+
+def _kept_records(target: Any, extractions: dict[str, list[list[dict[str, Any]]]]) -> list[dict[str, Any]]:  # noqa: ANN401
+    """Return the records one team collection keeps: per turn, the first member's extraction, as one extraction now is.
+
+    A turn the team's store already holds keeps the extraction an earlier start chose, so a later start that finds
+    another member's copy of the turn, such as one from a store it could not read before, adds no second extraction.
+    """
+    payload = target.get(include=["metadatas"])
+    merged: dict[str, set[str]] = {}
+    for record_id, metadata in zip(payload["ids"], payload["metadatas"], strict=True):
+        merged.setdefault(_turn(record_id, metadata or {}), set()).add(record_id)
+    kept: list[dict[str, Any]] = []
+    for turn, members in extractions.items():
+        chosen = [records for records in members if turn not in merged or merged[turn] & {r["id"] for r in records}]
+        if chosen:
+            kept.extend(chosen[0])
+    return kept
+
+
+def _turn(record_id: str, metadata: dict[str, Any]) -> str:
+    """Return the team turn a member record came from; a record without a replica key is its own turn."""
+    return metadata.get(_REPLICA_KEY) or record_id
 
 
 def _chroma_client(path: Path) -> Any:  # noqa: ANN401 - chromadb is an optional dependency

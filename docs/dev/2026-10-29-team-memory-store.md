@@ -15,7 +15,7 @@ It records reasons, rejected alternatives, and accepted limitations; the code sh
 - Search ranks every scope's hits together and does not merge equal texts across scopes, because two equal texts in two scopes are two records with their own IDs, and hiding one would make it reappear after the shown one is deleted.
 - The `memory` tool's IDs stay unqualified: Mem0 IDs are UUIDs, file entry IDs carry a timestamp and 32 random bits, and `file:<path>:<line>` IDs come only from non-entrypoint Markdown, which only an agent's own workspace has; qualifying them would break every ID a model has already seen in a conversation.
 - `memory.team_reads_member_memory` and `memory.file.path` are dropped before validation rather than rejected, because the dashboard wrote both on every save; neither ever changed behavior, since nothing read memory for a whole team and the file path applied only to an empty member list.
-- The merge runs at startup under the runtime lock, after old state-root worker mounts are retired and before anything serves, as the Migration Policy requires, and needs no config, because each copy's scope ID names its target; copies of removed teams merge too.
+- The merge runs before anything serves, as the Migration Policy requires: in `mindroom run` under the runtime lock after old state-root worker mounts are retired, and in the standalone API beside its other startup migrations, which run there without that retirement too. It needs no config, because each copy's scope ID names its target, so copies of removed teams merge too.
 
 ## Merge decisions
 
@@ -26,7 +26,9 @@ It records reasons, rejected alternatives, and accepted limitations; the code sh
   The merge keeps one extraction per turn, the first member's by name, and every turn one member alone holds, so merged memory looks as if each team turn had been extracted once, as new turns are.
   Keeping every member's extraction was tried first: in a live run with a real memory model, both members extracted every turn with the same facts in different words, so the merged store held each fact twice, and after one member edited the budget, the other member's answer reported both the old and the new budget.
   The cost is a fact only a later member's extraction found, which that member saw before the upgrade and no longer does.
-- Records move with their IDs, embeddings, and metadata, so the merge makes no embedder or memory-model call and keeps every ID a model may still cite.
+- Kept records move with their IDs, embeddings, and metadata, so the merge makes no embedder or memory-model call and every kept ID a model may still cite stays valid; the IDs of the dropped extractions stop resolving.
+- A turn the team's store already holds keeps the extraction an earlier start chose, found by the IDs it moved, so a start after a skipped store was repaired adds that store's other turns without a second extraction of a merged one.
+- A member store Chroma cannot read is left where it is with a warning, like the conversation conversion's handling of a worker-writable database, because one broken store below `agents/` must not stop startup.
 - Every step is idempotent: records are upserted by their IDs, member copies are deleted only after every team store holds its records, and the dropped extractions go before the kept ones, so a start interrupted anywhere still finds each kept extraction and chooses it again; writes go in batches within Chroma's batch limit, which needs no atomicity across batches.
 - The merge reads the paths the earlier runtime read, walked without following links from the storage root.
   Chroma opens a store's files by path, so the merge opens a member's Mem0 store only when it holds nothing but directories and singly linked regular files; a store with a planted link stays unmerged, with a warning, because the static-runner sidecar can write below `agents/`, and the merge also opens the stores of agents the config no longer has.
@@ -43,11 +45,12 @@ It records reasons, rejected alternatives, and accepted limitations; the code sh
 - Moving the first member's copy directory into place: it promotes whatever else that directory holds into a primary-owned root.
 - Keeping every member's extraction of a turn, or every one minus exact text duplicates: near-duplicate facts in different words survive, and editing one leaves its twin (see Merge decisions).
 - Searching the stores concurrently: each Mem0 instance builds its own embedder, which for a local model holds a full copy of the model, so one recall would hold one copy per team at once.
-  Cost of searching one store at a time: each team store adds about one warm Mem0 build and query (about 50 ms with the OpenAI embedder) to the recall of its members.
+  Cost of searching one store at a time: each team store adds one Mem0 build and query to every recall, get, update, and delete of its members: about 50 ms warm with the OpenAI embedder, one more model load with a local sentence-transformers embedder, which Mem0 loads again for every instance, and one more request to the server with Ollama's.
 - Caching Mem0 instances per store: it would need config invalidation and an owner for each instance's lifetime, for a saving only members of teams see.
 
 ## Accepted limitations
 
+- The merge checks a member's Mem0 store for links before Chroma opens it by path, so a link swapped in between is followed, as every Mem0 open of an agent's store below `agents/` already follows one.
 - Each member's Mem0 history database stays where it is, because it also holds the member's own history; a team store's recent-message extraction context starts empty once.
 - Mem0's entity rows are not carried over; Mem0 writes them only when spaCy is installed, which MindRoom does not install.
 - A release older than this one does not read `team_memory/`; after going back and upgrading again, the receipt must be deleted for the copies that release wrote to merge.

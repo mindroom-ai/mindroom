@@ -146,7 +146,6 @@ from .response_lifecycle import (
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Awaitable, Callable, Coroutine, Mapping, Sequence
-    from pathlib import Path
 
     import nio
     import structlog
@@ -638,7 +637,6 @@ class ResponseRunnerDeps:
     runtime: BotRuntimeView
     logger: structlog.stdlib.BoundLogger
     runtime_paths: RuntimePaths
-    storage_path: Path
     agent_name: str
     matrix_full_id: str
     resolver: ConversationResolver

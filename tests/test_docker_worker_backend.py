@@ -358,8 +358,6 @@ def _projected_config_fixture(tmp_path: Path) -> tuple[str, dict[str, Path]]:
     context_file = tmp_path / "agents" / "code" / "workspace" / "context.md"
     context_file.parent.mkdir(parents=True)
     context_file.write_text("# Context\n", encoding="utf-8")
-    memory_root = tmp_path / "memory_files"
-    memory_root.mkdir()
     primary_runtime_data = tmp_path / "mindroom_data" / "credentials"
     primary_runtime_data.mkdir(parents=True)
     (primary_runtime_data / "secret.json").write_text('{"api_key":"leak"}', encoding="utf-8")
@@ -372,8 +370,6 @@ knowledge_bases:
     path: ./knowledge_docs
 memory:
   backend: file
-  file:
-    path: ./memory_files
 agents:
   code:
     display_name: Code
@@ -414,7 +410,6 @@ mindroom_user:
             "plugin_root": plugin_root,
             "knowledge_root": knowledge_root,
             "context_file": context_file,
-            "memory_root": memory_root,
         },
     )
 
@@ -432,8 +427,6 @@ def _multi_agent_projected_config_fixture(tmp_path: Path) -> tuple[str, dict[str
     beta_context = tmp_path / "agents" / "beta" / "workspace" / "beta.md"
     beta_context.parent.mkdir(parents=True)
     beta_context.write_text("# Beta\n", encoding="utf-8")
-    memory_root = tmp_path / "memory_files"
-    memory_root.mkdir()
     return (
         """
 knowledge_bases:
@@ -443,8 +436,6 @@ knowledge_bases:
     path: ./knowledge_beta
 memory:
   backend: file
-  file:
-    path: ./memory_files
 agents:
   alpha:
     display_name: Alpha
@@ -535,8 +526,6 @@ def _knowledge_base_collision_fixture(tmp_path: Path) -> str:
     second_root = tmp_path / "knowledge_collision_b"
     second_root.mkdir()
     (second_root / "b.txt").write_text("second\n", encoding="utf-8")
-    memory_root = tmp_path / "memory_files"
-    memory_root.mkdir()
     return """
 knowledge_bases:
   "docs:a":
@@ -545,8 +534,6 @@ knowledge_bases:
     path: ./knowledge_collision_b
 memory:
   backend: file
-  file:
-    path: ./memory_files
 agents:
   alpha:
     display_name: Alpha
@@ -595,7 +582,6 @@ def _assert_projected_worker_mounts(
     assert str(projected_paths["plugin_root"].resolve()) not in volumes
     assert str(projected_paths["knowledge_root"].resolve()) not in volumes
     assert str(projected_paths["context_file"].resolve()) not in volumes
-    assert str(projected_paths["memory_root"].resolve()) not in volumes
     return projection_root
 
 
@@ -604,7 +590,6 @@ def _assert_projected_config_snapshot(projection_root: Path, tmp_path: Path) -> 
     assert "plugins:\n- path: ./.mindroom-worker-assets/plugins/00-my-plugin" in projected_config
     assert "path: ./.mindroom-worker-assets/knowledge_bases/docs" in projected_config
     assert "context.md" not in projected_config
-    assert "memory_files" not in projected_config
 
     assert (tmp_path / "agents/code/workspace/context.md").read_text(encoding="utf-8") == "# Context\n"
     projected_plugin_path = projection_root / ".mindroom-worker-assets" / "plugins" / "00-my-plugin" / "plugin.py"

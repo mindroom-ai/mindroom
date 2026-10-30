@@ -176,9 +176,14 @@ def _memory_collection_name(config: Config) -> str:
     return f"{_MEMORY_COLLECTION_PREFIX}_{digest}"
 
 
+def mem0_chroma_path(store_root: Path) -> Path:
+    """Return the Chroma directory of the Mem0 store under ``store_root``."""
+    return store_root / _CHROMA_DIRNAME
+
+
 def mem0_store_exists(store_root: Path) -> bool:
     """Return whether a Mem0 store was ever built under ``store_root``, without building one."""
-    return (store_root / _CHROMA_DIRNAME).is_dir()
+    return mem0_chroma_path(store_root).is_dir()
 
 
 def mem0_ollama_host(config: Config, runtime_paths: RuntimePaths) -> str:
@@ -255,7 +260,7 @@ def _get_memory_config(store_root: Path, config: Config, runtime_paths: RuntimeP
     resolved_store_root = store_root.expanduser().resolve()
 
     # Ensure storage directories exist
-    chroma_path = resolved_store_root / _CHROMA_DIRNAME
+    chroma_path = mem0_chroma_path(resolved_store_root)
     chroma_path.mkdir(parents=True, exist_ok=True)
     # Mem0's history database keeps the text of changed and deleted memories, and the latest messages it adds to the
     # next extraction prompt under keys that do not name the requester, so each store root needs its own.

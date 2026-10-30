@@ -279,6 +279,28 @@ async def test_a_member_store_holding_a_link_is_left_unopened(
     assert set(_stored(storage / "agents" / "calculator" / "chroma")) == calculator
     assert outside.read_bytes() == b""
 
+    # Removing the entry and the receipt merges the store on the next start, without a second extraction of a turn.
+    (storage / "agents" / "calculator" / "chroma" / "planted.sqlite3").unlink()
+    (tracking_dir(runtime_paths_for(_config(storage, "mem0"))) / "team_memory_merged.json").unlink()
+    await _migrate(storage)
+
+    retro = _recorded("calculator", "The team retro is on the last Thursday")
+    assert _stored(storage / "team_memory" / _TEAM / "chroma") == {**expected, **_as_stored(retro)}
+    assert _stored(storage / "agents" / "calculator" / "chroma") == {}
+
+
+@pytest.mark.asyncio
+async def test_a_member_store_chroma_cannot_read_is_left_and_the_others_merge(storage: Path) -> None:
+    """A store of a removed agent holding a broken database does not stop startup or the merge of the others."""
+    broken = storage / "agents" / "removed" / "chroma"
+    broken.mkdir(parents=True)
+    (broken / "chroma.sqlite3").write_bytes(b"not a database")
+
+    await _migrate(storage)
+
+    _assert_merged(storage)
+    assert (broken / "chroma.sqlite3").read_bytes() == b"not a database"
+
 
 @pytest.mark.asyncio
 async def test_without_chroma_only_file_copies_merge_and_the_rest_waits_for_a_later_start(storage: Path) -> None:
