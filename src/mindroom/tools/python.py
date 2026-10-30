@@ -103,9 +103,9 @@ def python_tools() -> type[PythonTools]:
     class MindRoomPythonTools(python_tools_class):
         """MindRoom wrapper around Agno's Python tool implementation."""
 
-        def __init__(self, base_dir: Path | None = None, **kwargs: object) -> None:
+        def __init__(self, base_dir: Path | None = None) -> None:
             # Arbitrary code execution cannot be confined in-process, so the file helpers are not either.
-            super().__init__(base_dir=base_dir, restrict_to_base_dir=False, **kwargs)
+            super().__init__(base_dir=base_dir, restrict_to_base_dir=False)
 
         def pip_install_package(self, package_name: str) -> str:
             """Install a package into the current interpreter environment."""
