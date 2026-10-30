@@ -473,7 +473,7 @@ def test_non_admin_html_head_is_not_redirected(
         "/api/oauth/google_drive/reset",
     ],
 )
-def test_oauth_and_connections_routes_are_untouched_by_the_html_redirect(
+def test_oauth_completion_routes_are_untouched_by_the_html_redirect(
     path: str,
     connections_auth_client: Callable[..., TestClient],
     signed_connections_headers: Callable[[str], dict[str, str]],

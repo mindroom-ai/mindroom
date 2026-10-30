@@ -83,7 +83,8 @@ def write_config_commit(
 ) -> None:
     """Replace the config file with `commit`, refusing a write that would lose another one.
 
-    `loaded` is the config a tool derived its change from: the file must still be the one it loaded.
+    `loaded` is the config a derived change (a tool, `!config set`, or a dashboard entity save) was built from: the
+    file must still be the one it was loaded from.
     `committed_uses_includes` is whether the config the API last published used include files.
     Provisioning reserves personal-agent names under the same lock, so a commit validated before a reservation
     cannot take a name it reserved.

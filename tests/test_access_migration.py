@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import errno
+import fcntl
 from pathlib import Path
 
 import pytest
@@ -618,8 +619,6 @@ def test_load_config_migrates_under_the_config_write_lock(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """The migration's compare-and-replace holds the lock config commits write under, so neither loses the other."""
-    import fcntl  # noqa: PLC0415
-
     from mindroom import yaml_io  # noqa: PLC0415
     from mindroom.config.main import load_config  # noqa: PLC0415
     from mindroom.config.personal_agents import personal_agent_roster_lock_path  # noqa: PLC0415

@@ -3580,7 +3580,7 @@ async def test_callback_maps_locked_connection_generation_race_to_conflict(
         credential_service=None,
     )
     conflict = OAuthCredentialConflictError("OAuth connection state is stale because this credential changed")
-    monkeypatch.setattr(oauth_api, "_require_oauth_api_user", AsyncMock())
+    monkeypatch.setattr(oauth_api, "verify_user", AsyncMock())
     monkeypatch.setattr(oauth_api, "_load_provider", lambda *_args: (provider, runtime_paths))
     monkeypatch.setattr(oauth_api, "pending_oauth_state_browser_auth_source", lambda *_args: "")
     monkeypatch.setattr(oauth_api, "pending_oauth_opener_origin", lambda *_args: None)
@@ -3634,7 +3634,7 @@ async def test_callback_hides_provider_controlled_exchange_error(
         credential_service=None,
     )
     provider_error = OAuthProviderError("provider-controlled-callback-secret")
-    monkeypatch.setattr(oauth_api, "_require_oauth_api_user", AsyncMock())
+    monkeypatch.setattr(oauth_api, "verify_user", AsyncMock())
     monkeypatch.setattr(oauth_api, "_load_provider", lambda *_args: (provider, runtime_paths))
     monkeypatch.setattr(oauth_api, "pending_oauth_state_browser_auth_source", lambda *_args: "")
     monkeypatch.setattr(oauth_api, "pending_oauth_opener_origin", lambda *_args: None)
@@ -4467,7 +4467,7 @@ async def test_callback_saves_exchanged_credentials_before_propagating_cancellat
         credential_service=None,
     )
 
-    async def allow_request(_request: StarletteRequest) -> None:
+    async def allow_request(_request: StarletteRequest, _authorization: str | None) -> None:
         return None
 
     original_begin = oauth_credential_store._begin_immediate
@@ -4481,7 +4481,7 @@ async def test_callback_saves_exchanged_credentials_before_propagating_cancellat
             await asyncio.to_thread(release_lock.wait)
         await original_begin(connection)
 
-    monkeypatch.setattr(oauth_api, "_require_oauth_api_user", allow_request)
+    monkeypatch.setattr(oauth_api, "verify_user", allow_request)
     monkeypatch.setattr(oauth_api, "_load_provider", lambda *_args: (provider, runtime_paths))
     monkeypatch.setattr(oauth_api, "pending_oauth_state_browser_auth_source", lambda *_args: "")
     monkeypatch.setattr(oauth_api, "pending_oauth_opener_origin", lambda *_args: None)
@@ -4556,7 +4556,7 @@ async def test_callback_finishes_target_verification_after_state_consumption_bef
         verification_started.set()
         await release_verification.wait()
 
-    monkeypatch.setattr(oauth_api, "_require_oauth_api_user", AsyncMock())
+    monkeypatch.setattr(oauth_api, "verify_user", AsyncMock())
     monkeypatch.setattr(oauth_api, "_load_provider", lambda *_args: (provider, runtime_paths))
     monkeypatch.setattr(oauth_api, "pending_oauth_state_browser_auth_source", lambda *_args: "")
     monkeypatch.setattr(oauth_api, "pending_oauth_opener_origin", lambda *_args: None)

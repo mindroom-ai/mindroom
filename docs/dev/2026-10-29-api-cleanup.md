@@ -14,7 +14,7 @@ This record holds the decisions behind one write protocol for the config file, o
   Locking every state before filtering keeps a state that rebinds onto the runtime mid-commit from missing the publication.
 - The one-time access migration's compare-and-replace takes the same config write lock, because it runs on any load that sees the old format, including an old file restored while MindRoom runs.
 - Knowledge-mode reconciliation runs at publication, from the exact replaced and new configs, so every writer gets it; the embedded runtime still reconciles the configs it applies, and marking an index stale twice is harmless.
-- A commit publishes the config it validated with the personal-agent roster it read; a roster entry settled meanwhile reaches the API views through the reload provisioning requests and through the runtime's reload of the committed file.
+- A commit publishes the config it validated with the personal-agent roster it read; a roster entry settled meanwhile reaches the API views through the reload that provisioning requests and through the runtime's reload of the committed file.
 - The request identity is a frozen `AuthUser`; one `requester_id()` rule maps a signed-in Matrix user to themselves and an operator login (standalone or hosted platform) to the configured owner.
   A platform login without `ACCOUNT_ID` accepts any user of its Supabase project; it already acts as the owner for the owner's private credentials and can edit the whole config, so letting it open the owner's reports adds no authority.
 - Reports also admit a login through an identity it carries, because a gateway's user-ID claim may itself be a Matrix ID when its Matrix claim is absent.

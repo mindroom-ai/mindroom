@@ -175,10 +175,6 @@ def _load_provider(
     return provider, snapshot.runtime_paths
 
 
-async def _require_oauth_api_user(request: Request) -> None:
-    await verify_user(request, request.headers.get("authorization"))
-
-
 async def _require_oauth_browser_user(
     request: Request,
     *,
@@ -186,7 +182,7 @@ async def _require_oauth_browser_user(
 ) -> RedirectResponse | None:
     try:
         if connect_target is None:
-            await _require_oauth_api_user(request)
+            await verify_user(request, request.headers.get("authorization"))
         else:
             # The validated capability grants access to this flow, not administrator routes.
             await authenticate_user(request, request.headers.get("authorization"))
@@ -963,7 +959,7 @@ async def reset_and_authorize(
     intent = _browser_reset_intent(provider, runtime_paths, reset_token)
     shared_capability = intent.binding.worker_scope == "shared"
     if not shared_capability:
-        await _require_oauth_api_user(request)
+        await verify_user(request, request.headers.get("authorization"))
     try:
         context = _verify_browser_reset_intent(
             request,
@@ -1177,7 +1173,7 @@ async def _handle_callback(provider_id: str, request: Request, notice: _OpenerNo
         # and a Connections session.
         if issuing_auth_source == AuthSource.MATRIX_OPENID:
             allow_connections_session_for_oauth_callback(request)
-        await _require_oauth_api_user(request)
+        await verify_user(request, request.headers.get("authorization"))
     try:
         dashboard_flow = await _complete_oauth_callback(
             request,
