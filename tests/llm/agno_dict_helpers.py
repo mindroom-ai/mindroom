@@ -51,8 +51,8 @@ TOOL_EXECUTION_DEFAULTS: dict[str, object] = {
 # Keys Agno wrote on requirement dicts that the owned ``RunRequirement`` does not model; nothing read its timestamp.
 DROPPED_REQUIREMENT_KEYS = frozenset({"created_at"})
 # Keys Agno wrote on usage dicts that the owned metrics do not model: ``additional_metrics``, which only tests ever
-# filled in, a provider-reported ``cost``, and ``provider_metrics``, of which only a request's ``context_usage`` was read
-# (``expected_request_metrics_dict``).
+# filled in, a provider-reported ``cost``, and ``provider_metrics``, of which only a request's ``context_usage`` was
+# read (``expected_request_metrics_dict``).
 DROPPED_METRICS_KEYS = frozenset({"additional_metrics", "cost", "provider_metrics"})
 # Keys Agno wrote on run dicts that the owned records do not model; nothing in MindRoom reads them.
 DROPPED_RUN_KEYS = frozenset(

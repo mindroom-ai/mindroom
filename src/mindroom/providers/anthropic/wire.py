@@ -429,10 +429,10 @@ def assistant_message_from_response(
     """Build the assistant message of one finished response.
 
     ``provider_data`` keeps the response's blocks under ``claude_blocks``, in order and in request shape
-    (``replay_safe_blocks``), and ``context_management`` when the model was configured with one. The message's text joins the text blocks, its reasoning the thinking blocks, and its redacted reasoning the
-    redacted thinking blocks; every tool use becomes a tool call, including the calls of a response the output limit
-    cut off. A block of a type the SDK does not know keeps its own ``type``, so it is stored and replayed but read as
-    none of these.
+    (``replay_safe_blocks``), and ``context_management`` when the model was configured with one. The message's text
+    joins the text blocks, its reasoning the thinking blocks, and its redacted reasoning the redacted thinking blocks;
+    every tool use becomes a tool call, including the calls of a response the output limit cut off. A block of a type
+    the SDK does not know keeps its own ``type``, so it is stored and replayed but read as none of these.
     """
     blocks = replay_safe_blocks([block.model_dump(exclude_none=True) for block in response.content])
     texts = [block["text"] for block in blocks if block["type"] == "text"]
