@@ -6,7 +6,7 @@ import asyncio
 import random
 import time
 from contextvars import Context
-from functools import cached_property
+from functools import cached_property, partial
 from typing import TYPE_CHECKING, Any, Protocol, cast
 from uuid import uuid4
 
@@ -180,8 +180,7 @@ _SYNC_FILTER: dict[str, object] = {
 def _create_best_effort_task_wrapper(
     callback: Callable[..., Awaitable[None]],
     *,
-    owner: BotRuntimeState | None = None,
-    admit: Callable[..., bool] | None = None,
+    owner: BotRuntimeState,
 ) -> Callable[..., Awaitable[None]]:
     """Run one explicitly best-effort callback as a background task.
 
@@ -191,9 +190,6 @@ def _create_best_effort_task_wrapper(
     """
 
     async def wrapper(*args: object, **kwargs: object) -> None:
-        if admit is not None and not admit(*args, **kwargs):
-            return
-
         # Create the task but don't await it - let it run in background
         async def error_handler() -> None:
             try:
@@ -1179,8 +1175,7 @@ class AgentBot:
         self._deferred_stop_required = False
         self._deferred_stop_phase = None
         self._request_call_reconciliation()
-        if self._router is not None:
-            self._router.invalidate_memberships(reason="sync_loop_started")
+        self.invalidate_agent_reply_memberships(reason="sync_loop_started")
         mark_matrix_sync_loop_started(self.agent_name)
 
     def invalidate_agent_reply_memberships(self, *, reason: str) -> None:
@@ -1606,10 +1601,7 @@ class AgentBot:
                 client=client,
                 agent_name=self.agent_name,
                 runtime_paths=self.runtime_paths,
-                callback_wrapper=lambda callback: _create_best_effort_task_wrapper(
-                    callback,
-                    owner=self._runtime_view,
-                ),
+                callback_wrapper=partial(_create_best_effort_task_wrapper, owner=self._runtime_view),
             )
             register_model_catalog_receiver(
                 client=client,
@@ -1617,10 +1609,7 @@ class AgentBot:
                 runtime_paths=self.runtime_paths,
                 config_getter=lambda: self.config,
                 membership_index=self._runtime_view.agent_reply_memberships,
-                callback_wrapper=lambda callback: _create_best_effort_task_wrapper(
-                    callback,
-                    owner=self._runtime_view,
-                ),
+                callback_wrapper=partial(_create_best_effort_task_wrapper, owner=self._runtime_view),
             )
             await self.refresh_presence()
             self.running = True
@@ -1814,11 +1803,9 @@ class AgentBot:
             # Its replacement follows this principal's approvals from here on.
             self._response_runner.stop_following_approval_holds()
             # Each of these owns a resource this bot alone holds, and none of them
-            # may skip the others. A lane that already faulted makes dispatcher stop
-            # raise, and before this isolation that exception skipped the store and
-            # the client and then aborted the config reload's removal of this
-            # generation -- leaving it registered, half-stopped, while its
-            # replacement opened the same database under the same principal.
+            # may skip the others: a lane that already faulted makes the dispatcher's
+            # stop raise, which must not leave the ingestion session or the client
+            # open, nor abort a config reload's removal of this generation.
             self._mark_deferred_stop_phase(DeferredStopPhase.JOURNAL_DISPATCHER)
             await self._release(
                 "journal dispatcher",
@@ -1893,11 +1880,11 @@ class AgentBot:
         self._delivery_recovery_wake.set()
         if shutdown_intent.stop_reason == "shutdown":
             self.begin_process_shutdown()
-        if shutdown_intent.stop_reason == "shutdown" and self.client is not None:
-            cast(
-                _ProcessShutdownMatrixClient,  # noqa: TC006 - runtime reference proves the private protocol is live
-                self.client,
-            ).begin_process_shutdown_transport_fence()
+            if self.client is not None:
+                cast(
+                    _ProcessShutdownMatrixClient,  # noqa: TC006 - runtime reference proves the private protocol is live
+                    self.client,
+                ).begin_process_shutdown_transport_fence()
         shutdown_budget = self._sync_shutdown_budget
         if shutdown_budget is None:
             shutdown_budget = ShutdownBudget.start(SYNC_SHUTDOWN_PREPARATION_TIMEOUT_SECONDS)

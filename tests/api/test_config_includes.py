@@ -243,7 +243,6 @@ class TestEmptyDirectoryIncludes:
 
         assert response.status_code == 200
         assert response.headers[config_lifecycle.CONFIG_USES_INCLUDES_HEADER] == "true"
-        assert _snapshot(main.app).source_files == frozenset({empty_include_runtime_paths.config_path.resolve()})
         assert config_lifecycle.config_uses_includes(_request_for(main.app)) is True
 
     @pytest.mark.parametrize("replace", [False, True], ids=["mutation", "replacement"])
@@ -723,7 +722,6 @@ class TestIncludeAwareSnapshots:
         api_app = _make_api_app(runtime_paths)
         assert config_lifecycle.load_config_into_app(runtime_paths, api_app).loaded
         before = _snapshot(api_app)
-        assert before.source_files == frozenset({config_path.resolve(), shared.resolve()})
         assert config_lifecycle.config_uses_includes(_request_for(api_app)) is True
 
         shared.write_text("- file\n", encoding="utf-8")
@@ -743,12 +741,10 @@ class TestIncludeAwareSnapshots:
         assert config_path.read_text(encoding="utf-8") == source
         assert shared.read_text(encoding="utf-8") == "- file\n"
 
-    def test_load_publishes_source_files_and_multi_file_fingerprint(self, split_app: FastAPI) -> None:
-        """Loading an include-based config records every source file in the snapshot."""
+    def test_load_publishes_a_multi_file_fingerprint(self, split_app: FastAPI) -> None:
+        """Loading an include-based config fingerprints every source file, not only the top-level one."""
         snapshot = _snapshot(split_app)
         config_path = snapshot.runtime_paths.config_path
-        assert snapshot.source_files is not None
-        assert {path.name for path in snapshot.source_files} == {"config.yaml", "models.yaml", "test_agent.yaml"}
         assert snapshot.source_fingerprint is not None
         assert snapshot.source_fingerprint != hashlib.sha256(config_path.read_bytes()).hexdigest()
         assert snapshot.config_data["agents"]["test_agent"]["display_name"] == "Test Agent"
@@ -769,7 +765,6 @@ class TestIncludeAwareSnapshots:
         assert config_lifecycle.load_config_into_app(runtime_paths, api_app).loaded
         snapshot = _snapshot(api_app)
         assert snapshot.source_fingerprint == hashlib.sha256(config_path.read_bytes()).hexdigest()
-        assert snapshot.source_files == frozenset({config_path.resolve()})
 
     def test_api_load_rejects_access_migration_with_include(self, tmp_path: Path) -> None:
         """The API loader must leave every source untouched when legacy access uses includes."""
@@ -809,66 +804,6 @@ class TestIncludeAwareSnapshots:
         assert after.source_fingerprint != snapshot.source_fingerprint
         assert after.generation == snapshot.generation + 1
         assert after.config_data["agents"]["test_agent"]["role"] == "An edited agent"
-
-    def test_failed_reload_keeps_watching_the_broken_included_file(self, split_app: FastAPI) -> None:
-        """A reload broken by an included file keeps that file in the watched source set."""
-        snapshot = _snapshot(split_app)
-        runtime_paths = snapshot.runtime_paths
-        agent_file = runtime_paths.config_path.parent / "agents" / "test_agent.yaml"
-        agent_file.write_text("test_agent: [not a mapping\n", encoding="utf-8")
-
-        assert not config_lifecycle.load_config_into_app(runtime_paths, split_app).loaded
-
-        after = _snapshot(split_app)
-        assert after.config_load_result is not None
-        assert after.config_load_result.success is False
-        assert after.source_files == snapshot.source_files
-
-    def test_failed_validation_reload_unions_in_the_new_source_set(self, split_app: FastAPI) -> None:
-        """A parsed-but-invalid reload watches newly added include files plus the last good set."""
-        snapshot = _snapshot(split_app)
-        runtime_paths = snapshot.runtime_paths
-        new_include = runtime_paths.config_path.parent / "agents" / "bad_agent.yaml"
-        new_include.write_text("bad_agent: [not, a, mapping]\n", encoding="utf-8")
-
-        assert not config_lifecycle.load_config_into_app(runtime_paths, split_app).loaded
-
-        after = _snapshot(split_app)
-        assert after.config_load_result is not None
-        assert after.config_load_result.success is False
-        assert snapshot.source_files is not None
-        assert after.source_files is not None
-        assert new_include.resolve() in after.source_files
-        assert snapshot.source_files <= after.source_files
-
-    def test_parse_failure_in_new_include_file_is_still_watched(self, split_app: FastAPI) -> None:
-        """A syntax error inside a newly referenced include file joins the watched set."""
-        snapshot = _snapshot(split_app)
-        runtime_paths = snapshot.runtime_paths
-        top = runtime_paths.config_path
-        new_include = top.parent / "defaults.yaml"
-        new_include.write_text("markdown: [unclosed\n", encoding="utf-8")
-        top.write_text(
-            SPLIT_TOP_SOURCE.replace("defaults:\n  markdown: true\n", "defaults: !include defaults.yaml\n"),
-            encoding="utf-8",
-        )
-
-        assert not config_lifecycle.load_config_into_app(runtime_paths, split_app).loaded
-
-        after = _snapshot(split_app)
-        assert after.config_load_result is not None
-        assert after.config_load_result.success is False
-        assert snapshot.source_files is not None
-        assert after.source_files is not None
-        assert new_include.resolve() in after.source_files
-        assert snapshot.source_files <= after.source_files
-        # A later successful load shrinks the union back to the real set.
-        new_include.write_text("markdown: false\n", encoding="utf-8")
-        assert config_lifecycle.load_config_into_app(runtime_paths, split_app).loaded
-        final = _snapshot(split_app)
-        assert final.source_files is not None
-        assert new_include.resolve() in final.source_files
-        assert final.config_data["defaults"]["markdown"] is False
 
     def test_successful_load_logs_the_source_file_count(
         self,
@@ -1000,9 +935,6 @@ class TestRawSourceWithIncludes:
         assert runtime_paths.config_path.read_text(encoding="utf-8") == new_source
         assert agents_file.read_text(encoding="utf-8") == agents_before
         assert snapshot.config_data["defaults"]["markdown"] is False
-        assert snapshot.source_files is not None
-        assert runtime_paths.config_path.resolve() in snapshot.source_files
-        assert agents_file.resolve() in snapshot.source_files
 
     def test_raw_replace_publishes_include_aware_fingerprint(self, split_app: FastAPI) -> None:
         """The follow-up watcher reload after a raw save of a split config is a no-op."""

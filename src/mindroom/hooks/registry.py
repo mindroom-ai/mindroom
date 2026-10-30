@@ -134,25 +134,14 @@ class HookRegistrySource(Protocol):
         ...
 
 
+@dataclass(slots=True, eq=False)
 class HookRegistryState:
     """Mutable holder for the currently active hook registry snapshot.
 
     Hook contexts bound through a holder stay active while it still holds the snapshot they were bound to.
     """
 
-    __slots__ = ("_registry",)
-
-    def __init__(self, registry: HookRegistry) -> None:
-        self._registry = registry
-
-    @property
-    def registry(self) -> HookRegistry:
-        """Return the active registry snapshot."""
-        return self._registry
-
-    @registry.setter
-    def registry(self, value: HookRegistry) -> None:
-        self._registry = value
+    registry: HookRegistry
 
     def lifetime(self) -> HookRegistryLifetime:
         """Return a view of this holder for one lifetime, such as a bot generation, that can end on its own."""
@@ -166,18 +155,16 @@ class HookRegistryLifetime:
     view holds no hooks, so hooks it emitted report inactive and a stopped bot generation emits nothing more.
     """
 
-    __slots__ = ("_ended", "_runtime", "_stopped")
+    __slots__ = ("_source",)
 
     def __init__(self, runtime: HookRegistryState) -> None:
-        self._runtime = runtime
-        self._stopped = HookRegistry.empty()
-        self._ended = False
+        self._source = runtime
 
     @property
     def registry(self) -> HookRegistry:
         """Return the runtime's current snapshot, or this lifetime's own empty registry once it ended."""
-        return self._stopped if self._ended else self._runtime.registry
+        return self._source.registry
 
     def end(self) -> None:
         """End this lifetime; its view holds no hooks from now on."""
-        self._ended = True
+        self._source = HookRegistryState(HookRegistry.empty())

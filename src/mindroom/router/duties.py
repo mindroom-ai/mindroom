@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import asyncio
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from typing import TYPE_CHECKING
 
 from mindroom.background_tasks import create_background_task
@@ -27,9 +27,9 @@ if TYPE_CHECKING:
     import nio
     import structlog
 
-    from mindroom.agent_reply_membership_sync import AgentReplyMembershipSync, ReplyMembershipPreAdmission
+    from mindroom.agent_reply_membership_sync import AgentReplyMembershipSync
     from mindroom.bot_room_lifecycle import BotRoomLifecycle
-    from mindroom.bot_runtime_view import BotRuntimeState
+    from mindroom.bot_runtime_view import BotRuntimeView
     from mindroom.event_journal import IngestionRecordAdmission, PrincipalStore
     from mindroom.hooks import HookContextSupport
     from mindroom.matrix.identity import MatrixID
@@ -40,7 +40,7 @@ if TYPE_CHECKING:
 class RouterDutiesDeps:
     """The router bot's own collaborators its duties act through."""
 
-    runtime: BotRuntimeState
+    runtime: BotRuntimeView
     logger: structlog.stdlib.BoundLogger
     matrix_id: MatrixID
     hook_context: HookContextSupport
@@ -107,10 +107,6 @@ class RouterDuties:
             admission,
             timeline_provenance,
         )
-        self._publish_pre_admission(effects)
-
-    def _publish_pre_admission(self, effects: ReplyMembershipPreAdmission) -> None:
-        """Publish one sync batch's fail-closed effects."""
         if effects.invalidate_reason is not None:
             self.invalidate_memberships(reason=effects.invalidate_reason)
         if effects.authorization_changed:
@@ -169,36 +165,24 @@ class RouterDuties:
     async def _emit_member_joined(self, join: RoomMemberJoin) -> None:
         """Emit room:member_joined for one live human Matrix room join."""
         await self.deps.personal_rooms.baseline_join(join)
-        registry = self.deps.hook_context.registry
-        if not registry.has_hooks(EVENT_ROOM_MEMBER_JOINED):
-            return
-        context = RoomMemberJoinedContext(
-            **self.deps.hook_context.base_kwargs(EVENT_ROOM_MEMBER_JOINED, join.event_id),
-            agent_name=self.deps.hook_context.agent_name,
-            room_id=join.room_id,
-            event_id=join.event_id,
-            user_id=join.user_id,
-            sender_id=join.sender_id,
-            display_name=join.display_name,
-            avatar_url=join.avatar_url,
-            membership=join.membership,
-            prev_membership=join.prev_membership,
-        )
-        await emit(registry, EVENT_ROOM_MEMBER_JOINED, context)
+        if self.deps.hook_context.registry.has_hooks(EVENT_ROOM_MEMBER_JOINED):
+            await self._emit_member_change(EVENT_ROOM_MEMBER_JOINED, RoomMemberJoinedContext, join)
 
     async def _emit_member_left(self, leave: RoomMemberLeave) -> None:
         """Emit room:member_left for one live human Matrix room self-leave."""
-        registry = self.deps.hook_context.registry
-        context = RoomMemberLeftContext(
-            **self.deps.hook_context.base_kwargs(EVENT_ROOM_MEMBER_LEFT, leave.event_id),
-            agent_name=self.deps.hook_context.agent_name,
-            room_id=leave.room_id,
-            event_id=leave.event_id,
-            user_id=leave.user_id,
-            sender_id=leave.sender_id,
-            display_name=leave.display_name,
-            avatar_url=leave.avatar_url,
-            membership=leave.membership,
-            prev_membership=leave.prev_membership,
+        await self._emit_member_change(EVENT_ROOM_MEMBER_LEFT, RoomMemberLeftContext, leave)
+
+    async def _emit_member_change(
+        self,
+        event_name: str,
+        context_type: type[RoomMemberJoinedContext | RoomMemberLeftContext],
+        change: RoomMemberJoin | RoomMemberLeave,
+    ) -> None:
+        """Emit one membership hook whose context carries the change's fields."""
+        hook_context = self.deps.hook_context
+        context = context_type(
+            **hook_context.base_kwargs(event_name, change.event_id),
+            agent_name=hook_context.agent_name,
+            **asdict(change),
         )
-        await emit(registry, EVENT_ROOM_MEMBER_LEFT, context)
+        await emit(hook_context.registry, event_name, context)

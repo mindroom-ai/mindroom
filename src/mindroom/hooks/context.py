@@ -936,18 +936,13 @@ def _requester_id_for_hook_send(
 
 
 def _message_received_depth_for_hook_send(context: object) -> int:
-    """Return the synthetic hook-chain depth to preserve on hook sends."""
-    return _next_message_received_depth(_current_message_received_depth(context))
-
-
-def _current_message_received_depth(context: object) -> int:
-    """Return the inbound synthetic hook-chain depth for one hook context."""
+    """Return the synthetic hook-chain depth to preserve on hook sends: one hop past the context's inbound depth."""
     envelope = message_envelope_for_hook_context(context)
     if envelope is not None:
-        return envelope.message_received_depth
+        return envelope.message_received_depth + 1
     if isinstance(context, CustomEventContext | ToolBeforeCallContext | ToolAfterCallContext):
-        return context.message_received_depth
-    return 0
+        return context.message_received_depth + 1
+    return 1
 
 
 def message_envelope_for_hook_context(context: object) -> MessageEnvelope | None:
@@ -961,8 +956,3 @@ def message_envelope_for_hook_context(context: object) -> MessageEnvelope | None
     if isinstance(context, CancelledResponseContext):
         return context.info.envelope
     return None
-
-
-def _next_message_received_depth(current_depth: int) -> int:
-    """Return the next synthetic-chain depth after one downstream hook hop."""
-    return current_depth + 1

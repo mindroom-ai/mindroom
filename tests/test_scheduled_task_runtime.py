@@ -337,8 +337,8 @@ async def test_removed_agent_fails_each_task_it_runs_and_says_so_where_it_posts(
     assert save_status.await_args.args[2] == "failed"
     notice.assert_awaited_once()
     assert notice.await_args.args[0] is removed_bot.client
-    assert notice.await_args.args[2].resolved_thread_id == "$thread"
-    assert "❌ Schedule failed because its agent was removed: " in notice.await_args.args[3]
+    assert notice.await_args.args[1].resolved_thread_id == "$thread"
+    assert "❌ Schedule failed because its agent was removed: " in notice.await_args.args[2]
     await runtime.stop()
 
 
@@ -476,7 +476,7 @@ async def test_restore_fails_a_task_whose_owner_was_removed_while_mindroom_was_d
         client.room_put_state.assert_awaited_once()
         assert client.room_put_state.await_args.kwargs["content"]["status"] == "failed"
         notice.assert_awaited_once()
-        assert "❌ Schedule failed because its agent was removed: " in notice.await_args.args[3]
+        assert "❌ Schedule failed because its agent was removed: " in notice.await_args.args[2]
     else:
         client.room_put_state.assert_not_awaited()
         notice.assert_not_awaited()

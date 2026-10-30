@@ -40,7 +40,7 @@ class PluginWatchState:
     def capture(self, config: Config) -> tuple[tuple[Path, ...], dict[Path, dict[Path, int]]]:
         """Return the configured roots and their current snapshots without committing them."""
         configured_roots = get_configured_plugin_roots(config, self.runtime_paths)
-        return configured_roots, {root: file_watcher._tree_snapshot(root) for root in configured_roots}
+        return configured_roots, _capture_plugin_root_snapshots(configured_roots)
 
     def replace_snapshots(
         self,
@@ -52,12 +52,6 @@ class PluginWatchState:
         for root in configured_roots:
             self.last_snapshot_by_root[root] = root_snapshots[root]
         self.revision += 1
-
-    def refresh(self, config: Config) -> tuple[Path, ...]:
-        """Capture fresh watcher baselines for the current plugin roots."""
-        configured_roots, root_snapshots = self.capture(config)
-        self.replace_snapshots(configured_roots, root_snapshots)
-        return configured_roots
 
 
 class _PluginWatcherRuntime(Protocol):

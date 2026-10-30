@@ -5,24 +5,13 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 from mindroom.entity_resolution import entity_identity_registry
-from mindroom.teams.formation import TeamOutcome, resolve_configured_team, resolve_live_shared_agent_names
+from mindroom.teams.formation import TeamOutcome, resolve_configured_team
 from mindroom.teams.spec import TeamMode
 
 if TYPE_CHECKING:
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
     from mindroom.matrix.identity import MatrixID
-    from mindroom.runtime_protocols import OrchestratorRuntime
-
-
-def materializable_agent_names_for_orchestrator(
-    orchestrator: OrchestratorRuntime | None,
-    config: Config,
-) -> set[str] | None:
-    """Return concrete agents that can currently produce a response when known."""
-    if orchestrator is None:
-        return None
-    return resolve_live_shared_agent_names(orchestrator, config=config)
 
 
 def _configured_team_is_materializable(
@@ -31,14 +20,12 @@ def _configured_team_is_materializable(
     runtime_paths: RuntimePaths,
     *,
     materializable_agent_names: set[str],
-    live_entity_names: frozenset[str] | None,
+    live_entity_names: frozenset[str],
 ) -> bool:
     """Return whether one configured team responder can currently answer."""
-    team_config = config.teams.get(team_name)
-    if team_config is None:
+    if team_name not in live_entity_names:
         return False
-    if live_entity_names is not None and team_name not in live_entity_names:
-        return False
+    team_config = config.teams[team_name]
 
     registry = entity_identity_registry(config, runtime_paths)
     team_agents = [registry.current_id(agent_name) for agent_name in team_config.agents]
@@ -59,13 +46,10 @@ def filter_materializable_responders(
     config: Config,
     runtime_paths: RuntimePaths,
     *,
-    materializable_agent_names: set[str] | None,
-    live_entity_names: frozenset[str] | None = None,
+    materializable_agent_names: set[str],
+    live_entity_names: frozenset[str],
 ) -> list[MatrixID]:
-    """Keep responder candidates that are live/materializable when runtime state is known."""
-    if materializable_agent_names is None:
-        return responder_ids
-
+    """Keep responder candidates that are live and can materialize."""
     registry = entity_identity_registry(config, runtime_paths)
     filtered_responders: list[MatrixID] = []
     for responder_id in responder_ids:

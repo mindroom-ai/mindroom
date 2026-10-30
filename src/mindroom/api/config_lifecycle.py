@@ -1,4 +1,4 @@
-"""Helpers for API config loading, writing, and file-watcher lifecycle."""
+"""Helpers for API config loading and writing."""
 
 from __future__ import annotations
 
@@ -47,7 +47,6 @@ from mindroom.tool_jobs.settings import pending_background_tool_jobs_restart
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterator
-    from pathlib import Path
 
 
 logger = get_logger(__name__)
@@ -79,7 +78,6 @@ class ApiSnapshot:
     runtime_config: Config | None = None
     config_load_result: ConfigLoadResult | None = None
     source_fingerprint: str | None = None
-    source_files: frozenset[Path] | None = None
     uses_includes: bool | None = None
     auth_state: Any | None = None
 
@@ -240,7 +238,6 @@ def persist_runtime_validated_config(
                 runtime_config=runtime_config,
                 config_load_result=ConfigLoadResult(success=True),
                 source_fingerprint=source_fingerprint,
-                source_files=frozenset({runtime_paths.config_path.resolve()}),
                 uses_includes=False,
             )
 
@@ -335,7 +332,6 @@ def _published_snapshot(
     runtime_config: Config | None | _Keep = _Keep.FIELD,
     config_load_result: ConfigLoadResult | None | _Keep = _Keep.FIELD,
     source_fingerprint: str | None | _Keep = _Keep.FIELD,
-    source_files: frozenset[Path] | None | _Keep = _Keep.FIELD,
     uses_includes: bool | None | _Keep = _Keep.FIELD,
     auth_state: object = _Keep.FIELD,
 ) -> ApiSnapshot:
@@ -349,7 +345,6 @@ def _published_snapshot(
         runtime_config=snapshot.runtime_config if runtime_config is _Keep.FIELD else runtime_config,
         config_load_result=snapshot.config_load_result if config_load_result is _Keep.FIELD else config_load_result,
         source_fingerprint=snapshot.source_fingerprint if source_fingerprint is _Keep.FIELD else source_fingerprint,
-        source_files=snapshot.source_files if source_files is _Keep.FIELD else source_files,
         uses_includes=snapshot.uses_includes if uses_includes is _Keep.FIELD else uses_includes,
         auth_state=snapshot.auth_state if auth_state is _Keep.FIELD else auth_state,
     )
@@ -368,7 +363,6 @@ def publish_runtime_paths(state: ApiState, runtime_paths: constants.RuntimePaths
                 runtime_config=None,
                 config_load_result=None,
                 source_fingerprint=None,
-                source_files=None,
                 uses_includes=None,
                 auth_state=None,
             )
@@ -407,7 +401,7 @@ def _raise_if_generation_mismatch(snapshot: ApiSnapshot, expected_generation: in
 def _validate_raw_config_source(
     source: str,
     runtime_paths: constants.RuntimePaths,
-) -> tuple[Config, dict[str, Any], frozenset[Path], str]:
+) -> tuple[Config, dict[str, Any], str]:
     """Validate raw YAML source against the current runtime without mutating the live file.
 
     Parsing the source as the live config path keeps include semantics identical
@@ -419,12 +413,11 @@ def _validate_raw_config_source(
         runtime_paths.config_path,
         source=source.encode("utf-8"),
     )
-    source_files = frozenset(source_digests)
     validate_access_migration_source(data, uses_includes=uses_includes)
     runtime_config = Config.validate_with_runtime(data, runtime_paths)
     runtime_config.record_source_metadata(runtime_paths.config_path, source_digests, uses_includes=uses_includes)
     source_fingerprint = source_files_fingerprint(runtime_paths.config_path, source_digests)
-    return runtime_config, runtime_config.authored_model_dump(), source_files, source_fingerprint
+    return runtime_config, runtime_config.authored_model_dump(), source_fingerprint
 
 
 def _write_target(api_app: FastAPI, state: ApiState, pinned: ApiSnapshot | None) -> ApiSnapshot:
@@ -469,7 +462,6 @@ def _publish_saved_payload(
         runtime_config=validated_config,
         config_load_result=ConfigLoadResult(success=True),
         source_fingerprint=source_fingerprint,
-        source_files=frozenset({runtime_paths.config_path.resolve()}),
         uses_includes=False,
     )
 
@@ -534,7 +526,7 @@ def _build_and_commit_raw_replacement(
     snapshot = _write_target(api_app, initial_state, initial_snapshot)
     try:
         _raise_if_generation_mismatch(snapshot, expected_generation)
-        validated_config, validated_payload, source_files, source_fingerprint = _validate_raw_config_source(
+        validated_config, validated_payload, source_fingerprint = _validate_raw_config_source(
             source,
             snapshot.runtime_paths,
         )
@@ -550,7 +542,6 @@ def _build_and_commit_raw_replacement(
                 runtime_config=validated_config,
                 config_load_result=ConfigLoadResult(success=True, uses_includes=validated_config.uses_includes),
                 source_fingerprint=source_fingerprint,
-                source_files=source_files,
                 uses_includes=validated_config.uses_includes,
             )
             return current_state.snapshot.generation
@@ -582,15 +573,6 @@ def load_config_into_app(runtime_paths: constants.RuntimePaths, api_app: FastAPI
         same_source = (
             attempt.source_fingerprint is not None and attempt.source_fingerprint == current.source_fingerprint
         )
-        # A failed load publishes the union of the last good source set and the
-        # files the failed attempt read, so the watcher never loses last-good
-        # coverage while still covering newly added include files whose edit
-        # broke the config; the next successful load replaces the union with
-        # the real set, shrinking it back.
-        source_files = attempt.source_files
-        published_source_files = source_files if source_files is not None else current.source_files
-        if not result.success and source_files is not None and current.source_files is not None:
-            published_source_files = source_files | current.source_files
         published_uses_includes = result.uses_includes if result.uses_includes is not None else current.uses_includes
         if not result.success and current.uses_includes:
             published_uses_includes = True
@@ -601,7 +583,6 @@ def load_config_into_app(runtime_paths: constants.RuntimePaths, api_app: FastAPI
             runtime_config=attempt.config if attempt.config is not None else current.runtime_config,
             config_load_result=result,
             source_fingerprint=attempt.source_fingerprint,
-            source_files=published_source_files,
             uses_includes=published_uses_includes,
         )
     return attempt

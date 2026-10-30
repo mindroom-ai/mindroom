@@ -569,7 +569,7 @@ class TurnPolicy:
             available_responders=await self.responder_candidates_for_room(room, requester_user_id),
         )
 
-    async def _plan_router_dispatch(
+    async def _plan_router_dispatch(  # noqa: PLR0911
         self,
         room: nio.MatrixRoom,
         event: DispatchEvent,
@@ -585,47 +585,39 @@ class TurnPolicy:
             return None
 
         context = dispatch.context
-        planning_thread_history = context.planning_thread_history
         requester_user_id = dispatch.requester_user_id
         mention = self._router_mention(context.mentioned_agents, has_non_agent_mentions=context.has_non_agent_mentions)
-        if mention == "router_only":
-            if not self.can_reply_to_sender_in_room(requester_user_id, room.room_id):
-                return DispatchPlan(kind="ignore", ignore_reason="router")
-            plan = DispatchPlan(
-                kind="respond",
-                response_action=ResponseAction(
-                    kind="reject",
-                    rejection_message=_ROUTER_ONLY_MENTION_GUIDANCE,
-                ),
-            )
-        elif mention == "addressed_elsewhere":
-            plan = DispatchPlan(kind="ignore", ignore_reason="router")
-        elif context.planning_thread_history_unavailable:
+        ignore = DispatchPlan(kind="ignore", ignore_reason="router")
+        if mention == "addressed_elsewhere":
+            return ignore
+        if mention is None and context.planning_thread_history_unavailable:
             self.deps.logger.info("Skipping routing: thread policy history unavailable")
-            plan = DispatchPlan(kind="ignore", ignore_reason="router")
-        else:
-            if not self.can_reply_to_sender_in_room(requester_user_id, room.room_id):
-                return DispatchPlan(kind="ignore", ignore_reason="router")
-            available_responders = await self.responder_candidates_for_room(room, requester_user_id)
-            if context.is_thread and self._thread_defers_to_named_responders(
-                planning_thread_history,
-                sender_id=requester_user_id,
-                available_responders=available_responders,
-            ):
-                self.deps.logger.info("Skipping routing: thread already requires explicit responder targeting")
-                plan = DispatchPlan(kind="ignore", ignore_reason="router")
-            elif len(available_responders) == 1:
-                self.deps.logger.info("Skipping routing: only one responder candidate")
-                plan = DispatchPlan(kind="ignore", ignore_reason="router")
-            else:
-                plan = DispatchPlan(
-                    kind="route",
-                    router_message=message,
-                    extra_content=extra_content,
-                    media_events=media_events,
-                    router_event=router_event or event,
-                )
-        return plan
+            return ignore
+        if not self.can_reply_to_sender_in_room(requester_user_id, room.room_id):
+            return ignore
+        if mention == "router_only":
+            return DispatchPlan(
+                kind="respond",
+                response_action=ResponseAction(kind="reject", rejection_message=_ROUTER_ONLY_MENTION_GUIDANCE),
+            )
+        available_responders = await self.responder_candidates_for_room(room, requester_user_id)
+        if context.is_thread and self._thread_defers_to_named_responders(
+            context.planning_thread_history,
+            sender_id=requester_user_id,
+            available_responders=available_responders,
+        ):
+            self.deps.logger.info("Skipping routing: thread already requires explicit responder targeting")
+            return ignore
+        if len(available_responders) == 1:
+            self.deps.logger.info("Skipping routing: only one responder candidate")
+            return ignore
+        return DispatchPlan(
+            kind="route",
+            router_message=message,
+            extra_content=extra_content,
+            media_events=media_events,
+            router_event=router_event or event,
+        )
 
     @timed("dispatch_action_resolution")
     async def plan_turn(

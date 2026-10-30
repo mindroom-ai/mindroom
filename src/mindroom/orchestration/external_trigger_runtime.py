@@ -9,7 +9,7 @@ from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.matrix.client_room_admin import get_joined_rooms
 
 if TYPE_CHECKING:
-    from collections.abc import Iterable, Mapping
+    from collections.abc import Mapping
 
     from mindroom.bot import AgentBot
     from mindroom.config.main import Config
@@ -55,16 +55,6 @@ class ExternalTriggerRuntimeCoordinator:
         from mindroom.api import main as api_main  # noqa: PLC0415
 
         api_main.unbind_external_trigger_runtime(api_main.app)
-
-    def unbind_for_entity_changes(
-        self,
-        entity_names: Iterable[str],
-    ) -> None:
-        """Clear trigger runtime before any entity lifecycle changes."""
-        affected_entities = set(entity_names)
-        if not affected_entities:
-            return
-        self.unbind()
 
     async def _is_ready(
         self,

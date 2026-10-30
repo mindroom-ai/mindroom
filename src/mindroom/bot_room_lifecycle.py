@@ -368,12 +368,12 @@ class BotRoomLifecycle:
             else:
                 self._logger().warning("Failed to join room", room_id=room_id)
 
-    async def leave_unconfigured_rooms(self, room_ids: list[str] | None = None) -> None:
+    async def leave_unconfigured_rooms(self) -> None:
         """Leave any rooms this bot is no longer configured for."""
         client = self._client()
         await leave_non_dm_rooms(
             client,
-            room_ids if room_ids is not None else await self._rooms_to_leave(),
+            await self._rooms_to_leave(),
             leave_room_action=lambda room_id: self.deps.change_membership(
                 room_id,
                 "leave",
@@ -525,10 +525,6 @@ class BotRoomLifecycle:
             self._logger().exception("Welcome thread summary send failed", room_id=room_id)
         return True
 
-    async def handle_recorded_invite(self, room: nio.MatrixRoom, sender: str) -> None:
-        """Handle one invite after its pending work is durable."""
-        await self._handle_invite(room, sender)
-
     async def reconcile_pending_invites(self) -> None:
         """Re-evaluate durable and cached invites after configuration changes.
 
@@ -555,7 +551,7 @@ class BotRoomLifecycle:
                 room = nio.MatrixInvitedRoom(room_id, self.deps.agent_user.user_id)
                 room.inviter = sender
             try:
-                await self._handle_invite(room, sender)
+                await self.handle_recorded_invite(room, sender)
             except Exception:
                 self._logger().exception("Pending invite reconciliation failed", room_id=room_id, sender=sender)
 
@@ -576,12 +572,8 @@ class BotRoomLifecycle:
             else None
         )
 
-    async def _handle_invite(
-        self,
-        room: nio.MatrixRoom,
-        sender: str,
-    ) -> None:
-        """Accept one invite when its dedicated invitation policy allows it."""
+    async def handle_recorded_invite(self, room: nio.MatrixRoom, sender: str) -> None:
+        """Accept one recorded invite when its dedicated invitation policy allows it."""
         async with self._lock_for_room(self._invite_join_locks, room.room_id):
             if not self._should_accept_invite():
                 self._logger().info("Ignored invite", room_id=room.room_id, sender=sender)

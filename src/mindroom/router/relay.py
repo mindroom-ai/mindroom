@@ -128,13 +128,8 @@ async def _send_router_relay_after_readiness_recheck(
     delivery_request: SendTextRequest,
 ) -> _RouterRelayDelivery:
     """Recheck one sampled target immediately before sending its relay."""
-    if selected_entity is None:
-        return _RouterRelayDelivery(
-            event_id=await delivery_gateway.send_text(delivery_request),
-            suggested_entity=suggested_entity,
-        )
-    final_readiness = orchestrator.entity_first_sync_complete(selected_entity)
-    if final_readiness is True:
+    final_readiness = None if selected_entity is None else orchestrator.entity_first_sync_complete(selected_entity)
+    if selected_entity is None or final_readiness is True:
         return _RouterRelayDelivery(
             event_id=await delivery_gateway.send_text(delivery_request),
             suggested_entity=suggested_entity,

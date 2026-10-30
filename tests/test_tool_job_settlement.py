@@ -43,7 +43,7 @@ async def test_shutdown_save_failure_does_not_abandon_orchestrator_cleanup(
     config = _runtime_bound_config(Config(), tmp_path)
     orchestrator = _MultiAgentOrchestrator(runtime_paths=runtime_paths_for(config), config=config)
     orchestrator.event_journal_store()
-    runtime = await tool_job_runtime(orchestrator.storage_path)
+    runtime = await tool_job_runtime(orchestrator.runtime_paths.storage_root)
     orchestrator._tool_job_runtime._runtime = runtime
     started = asyncio.Event()
 

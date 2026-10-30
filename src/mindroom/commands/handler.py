@@ -201,7 +201,7 @@ class CommandHandlerContext:
     responder_candidates_for_room: Callable[[nio.MatrixRoom, str], Awaitable[list[MatrixID]]]
     reload_plugins: Callable[[], Awaitable[PluginReloadResult]] | None = None
     controller_identity: Callable[[str], DesktopControllerIdentity] | None = None
-    # Runs saved schedules; None without an orchestrator, where schedules are saved but not run.
+    # Runs saved schedules.
     scheduled_tasks: ScheduledTaskRuntime | None = None
 
 

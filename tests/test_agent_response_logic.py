@@ -184,7 +184,7 @@ class TestAgentResponseLogic:
 
         responder_pool = policy._filter_materializable_responders(
             [team_id],
-            _ResponderAvailability(materializable_agent_names={"alpha", "beta"}, live_entity_names=None),
+            _ResponderAvailability(materializable_agent_names={"alpha", "beta"}, live_entity_names=frozenset({"ops"})),
         )
         action = policy._team_response_action(
             TeamResolution(

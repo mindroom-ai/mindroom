@@ -280,6 +280,14 @@ async def delete_session(request: Request, session_id: str) -> Response:
     return Response(status_code=204)
 
 
+def withdraw_computer_runtime(app: FastAPI) -> None:
+    """Withdraw the computer runtime bound to ``app`` and close every viewer session it served."""
+    state = ensure_app_state(app)
+    state.computer_runtime = None
+    if state.computer_sessions is not None:
+        state.computer_sessions.close_all()
+
+
 def active_computer_worker_keys(app: FastAPI) -> frozenset[str]:
     """Collect live Computer worker keys on the app's owning event loop."""
     sessions = config_lifecycle.app_state(app).computer_sessions

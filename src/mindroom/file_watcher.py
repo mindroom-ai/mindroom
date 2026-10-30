@@ -32,7 +32,7 @@ def _paths_mtime_snapshot(paths: Iterable[Path | str]) -> dict[Path, int]:
     """Return the current mtime snapshot for one dynamic set of files.
 
     Missing or unreadable files snapshot as ``0`` so
-    :func:`_changed_watched_paths` can apply its missing-file policy.
+    :func:`_any_watched_path_changed` can apply its missing-file policy.
     """
     snapshot: dict[Path, int] = {}
     for raw_path in paths:
@@ -44,14 +44,14 @@ def _paths_mtime_snapshot(paths: Iterable[Path | str]) -> dict[Path, int]:
     return snapshot
 
 
-def _changed_watched_paths(previous: dict[Path, int], current: dict[Path, int]) -> list[Path]:
-    """Return the watched files that changed between two mtime snapshots, sorted.
+def _any_watched_path_changed(previous: dict[Path, int], current: dict[Path, int]) -> bool:
+    """Return whether any watched file changed between two mtime snapshots.
 
     Paths that entered the set are baselined silently, and missing files
     (mtime ``0``) wait until they reappear, so a momentarily absent file during
     an editor's delete-and-rename save cannot fire a change.
     """
-    return sorted(path for path, mtime in current.items() if mtime != 0 and previous.get(path, mtime) != mtime)
+    return any(mtime != 0 and previous.get(path, mtime) != mtime for path, mtime in current.items())
 
 
 def _any_paths_newly_missing(previous: dict[Path, int], current: dict[Path, int]) -> bool:
@@ -74,7 +74,7 @@ async def watch_paths(
 
     ``paths_provider`` is re-evaluated every scan so the watched set can grow or
     shrink between calls (e.g. config ``!include`` files after a reload). Change
-    detection follows :func:`_changed_watched_paths`.
+    detection follows :func:`_any_watched_path_changed`.
 
     The callback fires only after a quiet scan: a scan that detects changes marks
     the watcher dirty, and the callback runs on the next scan with no new changes
@@ -93,7 +93,7 @@ async def watch_paths(
 
         try:
             current_snapshot = await asyncio.to_thread(_paths_mtime_snapshot, paths_provider())
-            changed = bool(_changed_watched_paths(last_snapshot, current_snapshot))
+            changed = _any_watched_path_changed(last_snapshot, current_snapshot)
             vanished = _any_paths_newly_missing(last_snapshot, current_snapshot)
             last_snapshot = current_snapshot
             if changed:

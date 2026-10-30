@@ -491,7 +491,7 @@ def test_team_request_responder_filtering_uses_actual_member_ids(tmp_path: Path)
             ids["squad"],
             MatrixID.from_username("mindroom_missing", "localhost"),
         ],
-        _ResponderAvailability(materializable_agent_names={"worker"}, live_entity_names=None),
+        _ResponderAvailability(materializable_agent_names={"worker"}, live_entity_names=frozenset({"squad"})),
     )
 
     assert filtered == [ids["worker"], ids["squad"]]

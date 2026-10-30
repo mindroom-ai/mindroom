@@ -539,7 +539,6 @@ async def test_send_scheduled_failure_notice_follows_workflow_target() -> None:
     ) as mock_send:
         await send_scheduled_failure_notice(
             AsyncMock(),
-            workflow,
             target,
             "❌ Recurring task failed: executor test task\nTask ID: task-9\nError: boom",
             conversation_reader,

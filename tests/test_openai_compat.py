@@ -50,6 +50,7 @@ from mindroom.api.main import initialize_api_app
 from mindroom.api.openai_request_parsing import ChatMessage, _extract_content_text, convert_messages, derive_session_id
 from mindroom.api.openai_streaming_protocol import _is_error_response
 from mindroom.approval.tool_approval import shutdown_approval_runtime
+from mindroom.budgets.monitor import BudgetMonitor
 from mindroom.config.access import ResponderAccessConfig
 from mindroom.config.agent import AgentConfig, AgentPrivateConfig, TeamConfig
 from mindroom.config.judgment import TypeSafeJudgmentConfig
@@ -2686,7 +2687,11 @@ async def test_openai_completion_lock_releases_after_response_background() -> No
         background=BackgroundTask(existing_background),
     )
 
-    wrapped = openai_compat._attach_openai_completion_lock_release(response, completion_lock, None)
+    wrapped = openai_compat._attach_openai_completion_lock_release(
+        response,
+        completion_lock,
+        MagicMock(spec=BudgetMonitor),
+    )
 
     async def receive() -> dict[str, str]:
         return {"type": "http.request"}
@@ -2790,7 +2795,11 @@ async def test_openai_stream_response_skips_background_when_client_closes_before
         background=BackgroundTask(background),
     )
     streaming_response.completion_predicate = lambda: done_sent
-    response = openai_compat._attach_openai_completion_lock_release(streaming_response, completion_lock, None)
+    response = openai_compat._attach_openai_completion_lock_release(
+        streaming_response,
+        completion_lock,
+        MagicMock(spec=BudgetMonitor),
+    )
 
     async def receive() -> dict[str, str]:
         return {"type": "http.request"}
@@ -2833,7 +2842,11 @@ async def test_a_stream_the_client_left_closes_while_its_session_is_still_held(s
 
     streaming_response = openai_compat.OpenAIStreamingResponse(body(), media_type="text/event-stream")
     streaming_response.completion_predicate = lambda: False
-    response = openai_compat._attach_openai_completion_lock_release(streaming_response, completion_lock, None)
+    response = openai_compat._attach_openai_completion_lock_release(
+        streaming_response,
+        completion_lock,
+        MagicMock(spec=BudgetMonitor),
+    )
 
     async def receive() -> dict[str, str]:
         await partial_sent.wait()
@@ -2869,7 +2882,11 @@ async def test_a_stream_whose_headers_never_reached_the_client_closes_while_its_
     streaming_response = openai_compat.OpenAIStreamingResponse(body(), media_type="text/event-stream")
     streaming_response.completion_predicate = lambda: False
     streaming_response.close_stream = close_stream
-    response = openai_compat._attach_openai_completion_lock_release(streaming_response, completion_lock, None)
+    response = openai_compat._attach_openai_completion_lock_release(
+        streaming_response,
+        completion_lock,
+        MagicMock(spec=BudgetMonitor),
+    )
 
     async def receive() -> dict[str, str]:
         return {"type": "http.request"}
@@ -2912,7 +2929,11 @@ async def test_openai_stream_response_skips_background_on_asgi20_disconnect_befo
         background=BackgroundTask(background),
     )
     streaming_response.completion_predicate = lambda: done_sent
-    response = openai_compat._attach_openai_completion_lock_release(streaming_response, completion_lock, None)
+    response = openai_compat._attach_openai_completion_lock_release(
+        streaming_response,
+        completion_lock,
+        MagicMock(spec=BudgetMonitor),
+    )
 
     async def receive() -> dict[str, str]:
         await partial_sent.wait()
@@ -2949,7 +2970,7 @@ async def test_openai_json_response_skips_background_when_send_fails() -> None:
             background=BackgroundTask(background),
         ),
         completion_lock,
-        None,
+        MagicMock(spec=BudgetMonitor),
     )
 
     async def receive() -> dict[str, str]:
@@ -2979,7 +3000,7 @@ async def test_openai_error_response_releases_lock_when_send_fails() -> None:
     response = openai_compat._attach_openai_completion_lock_release(
         openai_compat.error_response(500, "failed", error_type="server_error"),
         completion_lock,
-        None,
+        MagicMock(spec=BudgetMonitor),
     )
 
     async def receive() -> dict[str, str]:

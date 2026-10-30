@@ -19,7 +19,7 @@ from mindroom.workers.models import WorkerSpec
 from mindroom.workers.runtime import configured_primary_worker_manager_identity, primary_worker_backend_name
 
 if TYPE_CHECKING:
-    from collections.abc import Iterable, Mapping
+    from collections.abc import Mapping
 
     from mindroom.agent_reply_membership import AgentReplyMembershipIndex
     from mindroom.bot import AgentBot
@@ -190,13 +190,6 @@ class ComputerRuntimeCoordinator:
         if not self.api_enabled:
             return
         from mindroom.api import main  # noqa: PLC0415
+        from mindroom.api.computers import withdraw_computer_runtime  # noqa: PLC0415
 
-        state = ensure_app_state(main.app)
-        state.computer_runtime = None
-        if state.computer_sessions is not None:
-            state.computer_sessions.close_all()
-
-    def unbind_for_entity_changes(self, entity_names: Iterable[str]) -> None:
-        """Fail closed while any managed entity changes."""
-        if tuple(entity_names):
-            self.unbind()
+        withdraw_computer_runtime(main.app)

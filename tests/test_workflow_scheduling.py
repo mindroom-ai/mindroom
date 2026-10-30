@@ -728,15 +728,6 @@ class TestExecuteScheduledWorkflow:
 
     async def test_scheduled_failure_notice_labels_latest_thread_lookup(self) -> None:
         """Scheduled failure notices should attribute latest-thread lookups."""
-        workflow = ScheduledWorkflow(
-            schedule_type="once",
-            execute_at=datetime.now(UTC),
-            message="Run report",
-            description="report",
-            thread_id="$thread123",
-            room_id="!room:server",
-            created_by="@user:server",
-        )
         target = MessageTarget.resolve("!room:server", "$thread123", None)
         conversation_reader = _conversation_reader(latest_thread_event_id="$latest456")
 
@@ -751,7 +742,6 @@ class TestExecuteScheduledWorkflow:
         ) as mock_send:
             await send_scheduled_failure_notice(
                 AsyncMock(),
-                workflow,
                 target,
                 "Workflow failed",
                 conversation_reader,

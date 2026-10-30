@@ -126,7 +126,6 @@ class ConfigReloadLifecycle:
 
     runtime_paths: RuntimePaths
     is_running: Callable[[], bool]
-    # Reloads run only once startup published its config, so a config always exists here.
     current_config: Callable[[], Config]
     agent_bots: Callable[[], Mapping[str, AgentBot]]
     load_config: Callable[[], ConfigLoad]

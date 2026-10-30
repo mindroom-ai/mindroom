@@ -150,17 +150,16 @@ def _release_openai_completion_lock(completion_lock: asyncio.Lock) -> None:
         completion_lock.release()
 
 
-async def _finish_openai_completion(completion_lock: asyncio.Lock, budget_monitor: BudgetMonitor | None) -> None:
+async def _finish_openai_completion(completion_lock: asyncio.Lock, budget_monitor: BudgetMonitor) -> None:
     """Release the session lock and let budgets count the spend of the finished completion."""
     _release_openai_completion_lock(completion_lock)
-    if budget_monitor is not None:
-        budget_monitor.response_finished()
+    budget_monitor.response_finished()
 
 
 def _attach_openai_completion_lock_release(
     response: JSONResponse | StreamingResponse,
     completion_lock: asyncio.Lock,
-    budget_monitor: BudgetMonitor | None,
+    budget_monitor: BudgetMonitor,
 ) -> JSONResponse | StreamingResponse:
     if not isinstance(response, (OpenAIJSONResponse, OpenAIStreamingResponse)):
         _release_openai_completion_lock(completion_lock)

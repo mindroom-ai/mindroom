@@ -110,7 +110,7 @@ class ToolJobRuntimeCoordinator:
     config_provider: Callable[[], Config]
     bot_provider: Callable[[str], AgentBot | None]
     agent_reply_memberships: AgentReplyMembershipIndex
-    # The event journal jobs are kept in; it is read only once a config exists, and outlives this coordinator.
+    # The event journal jobs are kept in; it outlives this coordinator.
     journal_provider: Callable[[], EventJournalStore]
     _instance: ToolJobInstance | None = field(default=None, init=False)
     _runtime: ToolJobRuntime | None = field(default=None, init=False)

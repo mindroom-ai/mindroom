@@ -28,7 +28,7 @@ _REFRESH_BACKOFF_MAX_SECONDS = 300.0
 
 
 @dataclass(frozen=True, slots=True)
-class ReplyMembershipPreAdmission:
+class _ReplyMembershipPreAdmission:
     """Effects that the sync boundary must publish before timeline admission."""
 
     invalidate_reason: str | None = None
@@ -102,10 +102,10 @@ class AgentReplyMembershipSync:
         runtime_paths: RuntimePaths,
         admission: IngestionRecordAdmission,
         timeline_provenance: nio.TimelineEventProvenance | None,
-    ) -> ReplyMembershipPreAdmission:
+    ) -> _ReplyMembershipPreAdmission:
         """Fence uncertainty and reported control departures before admission."""
         if admission.disposition is IngestionRecordDisposition.HISTORY_LOSS:
-            return ReplyMembershipPreAdmission(invalidate_reason="uncertain_sync_response")
+            return _ReplyMembershipPreAdmission(invalidate_reason="uncertain_sync_response")
         if (
             timeline_provenance is nio.TimelineEventProvenance.RECOVERED
             and admission.event is not None
@@ -123,7 +123,7 @@ class AgentReplyMembershipSync:
             room_id = admission.room_id
             reason = "control_client_departed"
         else:
-            return ReplyMembershipPreAdmission()
+            return _ReplyMembershipPreAdmission()
         authorization_changed = self._memberships.mark_room_unready(
             config,
             runtime_paths,
@@ -132,7 +132,7 @@ class AgentReplyMembershipSync:
         )
         if authorization_changed:
             self._request_refresh()
-        return ReplyMembershipPreAdmission(authorization_changed=authorization_changed)
+        return _ReplyMembershipPreAdmission(authorization_changed=authorization_changed)
 
     async def apply_live_transition(
         self,

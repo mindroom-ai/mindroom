@@ -271,7 +271,6 @@ class _MultiAgentOrchestrator:
     # The config startup loaded, then each one a reload publishes; every bot reads it here.
     config: Config
     api_enabled: bool = True
-    storage_path: Path = field(init=False)
     fleet: EntityFleet = field(init=False)
     scheduled_tasks: ScheduledTaskRuntime = field(init=False)
     # The one journal every bot in this process borrows a store from, opened on
@@ -329,8 +328,7 @@ class _MultiAgentOrchestrator:
     agent_reply_membership_sync: AgentReplyMembershipSync = field(init=False, repr=False)
 
     def __post_init__(self) -> None:
-        """Store canonical derived paths from the explicit runtime context."""
-        self.storage_path = self.runtime_paths.storage_root
+        """Build the runtime's collaborators around its paths and published config."""
         self._hook_lifetime = self.hook_registry_state.lifetime()
         self.fleet = EntityFleet(
             EntityFleetHooks(
@@ -708,14 +706,9 @@ class _MultiAgentOrchestrator:
 
     def _running_startup_maintenance_bots(self) -> list[AgentBot]:
         """Return currently running bots in startup-maintenance order."""
-        router_bot = self.agent_bots.get(ROUTER_AGENT_NAME)
-        bots: list[AgentBot] = []
-        if router_bot is not None and router_bot.running:
-            bots.append(router_bot)
-        bots.extend(
-            bot for entity_name, bot in self.agent_bots.items() if entity_name != ROUTER_AGENT_NAME and bot.running
+        return self._running_bots_for_entities(
+            (ROUTER_AGENT_NAME, *(name for name in self.agent_bots if name != ROUTER_AGENT_NAME)),
         )
-        return bots
 
     def _running_bots_for_entities(self, entity_names: Iterable[str]) -> list[AgentBot]:
         """Return running bots for the given entity names."""
@@ -735,7 +728,7 @@ class _MultiAgentOrchestrator:
                 config,
                 self.runtime_paths,
             )
-        ensure_default_agent_workspaces(config, self.storage_path)
+        ensure_default_agent_workspaces(config, self.runtime_paths.storage_root)
         self._configure_approval_store_transport()
         for service in self._services:
             await service.sync(config)
@@ -887,8 +880,8 @@ class _MultiAgentOrchestrator:
 
     async def _entities_changing(self, entity_names: set[str]) -> None:
         """Withdraw capabilities bound to these entities before any of them stops."""
-        self._external_trigger_runtime.unbind_for_entity_changes(entity_names)
-        self._computer_runtime.unbind_for_entity_changes(entity_names)
+        self._external_trigger_runtime.unbind()
+        self._computer_runtime.unbind()
         if ROUTER_AGENT_NAME in entity_names:
             # Fence room-backed grants before stopping their sole control client.
             self.invalidate_agent_reply_memberships(reason="router_replacement")
@@ -1549,7 +1542,7 @@ class _MultiAgentOrchestrator:
             store,
             journal_config=config.event_journal,
             runtime_paths=self.runtime_paths,
-            storage_path=self.storage_path,
+            storage_path=self.runtime_paths.storage_root,
         )
         # Storage roots bound to one database share its identity: a second
         # runtime against it would answer every message again.
@@ -1596,7 +1589,7 @@ class _MultiAgentOrchestrator:
             self._open_journal = open_event_journal(
                 self.config.event_journal,
                 runtime_paths=self.runtime_paths,
-                storage_path=self.storage_path,
+                storage_path=self.runtime_paths.storage_root,
             )
         return self._open_journal.store
 

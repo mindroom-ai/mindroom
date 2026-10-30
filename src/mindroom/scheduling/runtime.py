@@ -273,7 +273,6 @@ class ScheduledTaskRuntime:
             logger.warning("scheduled_task_failed_owner_removed", room_id=room_id, task_id=task_id, owner=owner)
             await scheduling_executor.send_scheduled_failure_notice(
                 client,
-                task.workflow,
                 MessageTarget.for_scheduled_task(task.workflow),
                 f"❌ Schedule failed because its agent was removed: {task.workflow.description}\nTask ID: `{task_id}`",
                 bot.conversation_reader,
@@ -502,11 +501,10 @@ class _TaskRunner:
                 occurrence=occurrence,
             )
 
-    async def _send_failure_notice(self, workflow: ScheduledWorkflow, target: MessageTarget, message: str) -> None:
+    async def _send_failure_notice(self, target: MessageTarget, message: str) -> None:
         async with self.runtime.operation(self.owner) as (bot, client):
             await scheduling_executor.send_scheduled_failure_notice(
                 client,
-                workflow,
                 target,
                 message,
                 bot.conversation_reader,
@@ -584,7 +582,7 @@ class _TaskRunner:
                 logger.exception("cron_task_failed", task_id=task_id)
                 if workflow.room_id:
                     error_message = f"❌ Recurring task failed: {workflow.description}\nTask ID: {task_id}\nError: {failure_text(e)}"
-                    await self._send_failure_notice(workflow, current_target, error_message)
+                    await self._send_failure_notice(current_target, error_message)
         finally:
             self.runtime._runner_finished(task_id)
 
@@ -646,7 +644,7 @@ class _TaskRunner:
                     error_message = (
                         f"❌ One-time task failed: {workflow.description}\nTask ID: {task_id}\nError: {failure_text(e)}"
                     )
-                    await self._send_failure_notice(workflow, current_target, error_message)
+                    await self._send_failure_notice(current_target, error_message)
                 if latest_pending_task is not None:
                     await self._save_status(latest_pending_task, "failed")
         finally:

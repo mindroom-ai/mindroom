@@ -886,7 +886,7 @@ async def test_plugin_watcher_drops_pending_changes_when_reload_commits_during_s
     task = asyncio.create_task(watch_plugins_task(orchestrator))
     try:
         await asyncio.wait_for(second_scan_started.wait(), timeout=1)
-        orchestrator.plugin_watch.refresh(config)
+        orchestrator.plugin_watch.replace_snapshots(*orchestrator.plugin_watch.capture(config))
         release_second_scan.set()
         # The scan after the committed reload shows the watcher already handled the pending edit.
         await asyncio.wait_for(third_scan_started.wait(), timeout=1)
@@ -936,7 +936,7 @@ async def test_watcher_reload_drops_stale_revision_after_waiting_for_config_lock
         ),
     )
     await asyncio.sleep(0)
-    orchestrator.plugin_watch.refresh(config)
+    orchestrator.plugin_watch.replace_snapshots(*orchestrator.plugin_watch.capture(config))
     orchestrator._config_update_lock.release()
     assert await task is None
 

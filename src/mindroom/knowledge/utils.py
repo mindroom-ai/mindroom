@@ -530,13 +530,11 @@ class KnowledgeAccessSupport:
         execution_identity: ToolExecutionIdentity | None = None,
     ) -> _KnowledgeResolution:
         """Return current knowledge without blocking the event loop on index I/O."""
-        refresh_scheduler = self.runtime.orchestrator.knowledge_refresh_scheduler
-
         return await resolve_agent_knowledge_access_async(
             agent_name,
             self.runtime.config,
             self.runtime_paths,
-            refresh_scheduler=refresh_scheduler,
+            refresh_scheduler=self.runtime.orchestrator.knowledge_refresh_scheduler,
             execution_identity=execution_identity,
         )
 

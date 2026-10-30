@@ -23,7 +23,7 @@ from mindroom.api.app_state import EmbeddedRuntime, ExternalTriggerRuntime, ensu
 from mindroom.api.auth import ApiAuthState, authenticate_user, dashboard_cors_origins, verify_user  # noqa: F401
 from mindroom.api.auth import router as auth_router
 from mindroom.api.budgets import router as budgets_router
-from mindroom.api.computers import active_computer_worker_keys
+from mindroom.api.computers import active_computer_worker_keys, withdraw_computer_runtime
 from mindroom.api.computers import router as computers_router
 from mindroom.api.config_lifecycle import ApiSnapshot, ApiState, ConfigLoadResult  # noqa: F401
 from mindroom.api.config_reload import router as config_reload_router
@@ -289,7 +289,6 @@ def _app_runtime_paths(api_app: FastAPI) -> constants.RuntimePaths:
 def initialize_api_app(api_app: FastAPI, runtime_paths: constants.RuntimePaths) -> None:
     """Bind one API app to a runtime's paths; per-generation bindings made for other paths end with them."""
     app_state = ensure_app_state(api_app)
-    app_state.api_auth_account_id = runtime_paths.env_value("ACCOUNT_ID")
     if app_state.api_state is None:
         app_state.api_state = ApiState(
             config_lock=threading.Lock(),
@@ -297,16 +296,11 @@ def initialize_api_app(api_app: FastAPI, runtime_paths: constants.RuntimePaths) 
                 generation=0,
                 runtime_paths=runtime_paths,
                 config_data={},
-                runtime_config=None,
-                config_load_result=None,
-                auth_state=None,
             ),
         )
     elif config_lifecycle.publish_runtime_paths(app_state.api_state, runtime_paths):
         app_state.external_trigger_runtime = None
-        app_state.computer_runtime = None
-        if app_state.computer_sessions is not None:
-            app_state.computer_sessions.close_all()
+        withdraw_computer_runtime(api_app)
     config_lifecycle.register_api_app(api_app)
 
 
@@ -365,9 +359,7 @@ async def _lifespan(_app: FastAPI) -> AsyncIterator[None]:
     async with gateway_lifespan(_app):
         yield
 
-    if app_state.computer_sessions is not None:
-        app_state.computer_sessions.close_all()
-    app_state.computer_runtime = None
+    withdraw_computer_runtime(_app)
     stop_event.set()
     worker_cleanup.cancel()
     with suppress(asyncio.CancelledError):

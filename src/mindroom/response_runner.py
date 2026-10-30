@@ -182,7 +182,6 @@ if TYPE_CHECKING:
     from mindroom.turn_origin import TurnOrigin
     from mindroom.turn_store import SourcePreparation
 
-    from .response_admission import ResponseAdmissionGate
 
 _ToolContextResult = TypeVar("_ToolContextResult")
 _ToolStreamChunk = TypeVar("_ToolStreamChunk")
@@ -714,8 +713,9 @@ def _requested_by_a_person(origin: TurnOrigin) -> bool:
     )
 
 
-# TODO(simplify): ResponseRunner still builds InboxResponses, which bot.py, turn_controller.py, and
-# text_ingress_dispatch.py reach through it; build it in bot.py with the refactors that own that wiring.
+# TODO(simplify): ResponseRunner still builds InboxResponses, which bot.py, edit_regenerator.py, turns/dispatch.py,
+# turns/interactive_selection.py, and approval/continuation_runner.py reach through it; build it in bot.py with
+# the refactors that own that wiring.
 # Contributors only; no behavior change (#3075).
 @dataclass
 class ResponseRunner:
@@ -811,11 +811,6 @@ class ResponseRunner:
         """Return the number of active response lifecycles for this entity."""
         return self._in_flight_response_count
 
-    @property
-    def _admission_gate(self) -> ResponseAdmissionGate:
-        """Return the orchestrator-owned gate deciding whether responses may start."""
-        return self.deps.runtime.response_admission_gate
-
     def _show_tool_calls(self) -> bool:
         """Return tool-call visibility for this agent."""
         return show_tool_calls(self.deps.runtime.config, self.deps.agent_name)
@@ -847,11 +842,10 @@ class ResponseRunner:
         response's final request for the review to fork.
         """
         config = self.deps.runtime.config
-        orchestrator = self.deps.runtime.orchestrator
         agent = config.agents.get(self.deps.agent_name)
         if agent is None or not agent.skill_learning.enabled:
             return None, runtime
-        reviews = orchestrator.skill_reviews
+        reviews = self.deps.runtime.orchestrator.skill_reviews
         agent_name = self.deps.agent_name
         reviews.cancel(config, agent_name=agent_name, session_id=session_id, identity=execution_identity)
         if not _requested_by_a_person(request.response_envelope.origin):
@@ -1007,8 +1001,9 @@ class ResponseRunner:
         signal_queued_message: bool = True,
     ) -> str | None:
         """Admit one response before lifecycle locking or visible placeholder work."""
+        gate = self.deps.runtime.response_admission_gate
         admission_deferred = False
-        while not self._admission_gate.admit():
+        while not gate.admit():
             if not admission_deferred:
                 admission_deferred = True
                 self.deps.logger.info(
@@ -1031,7 +1026,7 @@ class ResponseRunner:
             ),
             requester_id=request.response_envelope.requester_id,
         )
-        self._admission_gate.response_identities.add(identity)
+        gate.response_identities.add(identity)
         self._in_flight_response_count += 1
 
         async def acknowledge_deferred(key: str, event_id: str) -> None:
@@ -1056,9 +1051,9 @@ class ResponseRunner:
                     acknowledge_deferred=acknowledge_deferred,
                 )
         finally:
-            self._admission_gate.response_identities.remove(identity)
+            gate.response_identities.remove(identity)
             self._in_flight_response_count -= 1
-            self._admission_gate.release()
+            gate.release()
 
     async def _run_locked_response_in_span(
         self,

@@ -193,7 +193,7 @@ class AutomationRunner:
 
     name = "automations"
     runtime_paths: RuntimePaths
-    config_provider: Callable[[], Config | None]
+    config_provider: Callable[[], Config]
     bot_provider: Callable[[str], AgentBot | None]
     # The automations the active plugin snapshot provides, beside the built-ins, by name.
     definition_provider: Callable[[str], AutomationDefinition | None]
@@ -229,8 +229,6 @@ class AutomationRunner:
     async def _tick(self, now: datetime) -> None:
         """Fire every automation that is due at ``now`` and continue prompts whose run never reported back."""
         config = self.config_provider()
-        if config is None:
-            return
         instances = await asyncio.to_thread(_instances, config, self.runtime_paths)
         enabled: set[str] = set()
         # ``now`` is the loop's clock; prompts measure their hour on it from the moment they are delivered.
@@ -367,7 +365,7 @@ class AutomationRunner:
         try:
             config = self.config_provider()
             bot = self.bot_provider(chain.agent_name)
-            if pending.ask.then is None or config is None or bot is None:
+            if pending.ask.then is None or bot is None:
                 return
             name = chain.settings.name
             try:

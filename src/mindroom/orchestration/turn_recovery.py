@@ -7,7 +7,6 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
 from mindroom.background_tasks import create_background_task
-from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.logging_config import get_logger
 from mindroom.orchestration.config_updates import configured_entity_names
 from mindroom.orchestration.runtime import run_with_retry
@@ -45,8 +44,7 @@ class TurnJournalRecovery:
         """Release every ready bot's replay now, and coalesce one background pass that drains them."""
         if not self.runtime_ready():
             return
-        for bot in self._ready_bots(self.config()).values():
-            bot.release_pending_turn_journal_replay()
+        self._release_ready_bots()
         self._requested = True
         if self._task is not None and not self._task.done():
             return
@@ -59,34 +57,29 @@ class TurnJournalRecovery:
     async def recover(self) -> None:
         """Drain the turn-journal work of every entity whose required bots are ready, raising the first failure."""
         async with self._lock:
-            config = self.config()
-            ready = self._ready_bots(config)
-            for bot in ready.values():
-                bot.release_pending_turn_journal_replay()
             first_error: Exception | None = None
-            for entity_name in ready:
+            for entity_name in self._release_ready_bots():
                 error = await self._drain_current_generation(entity_name)
                 first_error = first_error or error
             if first_error is not None:
                 raise first_error
 
-    def _ready_bots(self, config: Config) -> dict[str, AgentBot]:
-        """Return each configured entity's current bot whose required bots completed their first sync."""
-        ready: dict[str, AgentBot] = {}
-        for entity_name in configured_entity_names(config):
-            bot = self._ready_bot(entity_name, config)
-            if bot is not None:
-                ready[entity_name] = bot
+    def _release_ready_bots(self) -> dict[str, AgentBot]:
+        """Release and return each configured entity's current bot whose required bots completed their first sync."""
+        config = self.config()
+        ready = {
+            entity_name: bot
+            for entity_name in configured_entity_names(config)
+            if (bot := self._ready_bot(entity_name, config)) is not None
+        }
+        for bot in ready.values():
+            bot.release_pending_turn_journal_replay()
         return ready
 
     def _ready_bot(self, entity_name: str, config: Config) -> AgentBot | None:
         """Return the entity's current bot once it and, for a team, every member completed their first sync."""
         bot = self.bots().get(entity_name)
-        required = (
-            [entity_name, *config.teams[entity_name].agents]
-            if entity_name != ROUTER_AGENT_NAME and entity_name in config.teams
-            else [entity_name]
-        )
+        required = [entity_name, *config.teams[entity_name].agents] if entity_name in config.teams else [entity_name]
         if bot is None or any(self.first_sync_complete(name) is not True for name in required):
             return None
         return bot

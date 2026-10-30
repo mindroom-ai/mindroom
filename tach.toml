@@ -1153,8 +1153,7 @@ depends_on = [
 ]
 visibility = [
     "mindroom.session_storage.agent_storage",
-    "mindroom.orchestrator",
-    "mindroom.api.main",
+    "mindroom.orchestration.storage_preparation",
 ]
 
 [[modules]]
@@ -2725,6 +2724,7 @@ depends_on = [
     "mindroom.authorization",
     "mindroom.entity_resolution",
     "mindroom.responder_availability",
+    "mindroom.teams",
     "mindroom.tool_system.runtime_context",
 ]
 
@@ -3370,6 +3370,7 @@ depends_on = [
     "mindroom.orchestration.rooms",
     "mindroom.orchestration.runtime",
     "mindroom.orchestration.script_runtime",
+    "mindroom.orchestration.storage_preparation",
     "mindroom.orchestration.todo_poke_runtime",
     "mindroom.orchestration.tool_job_runtime",
     "mindroom.response_activity",
@@ -3640,6 +3641,7 @@ depends_on = [
 visibility = [
     "mindroom.api.openai_compat",
     "mindroom.approval.continuation_runner",
+    "mindroom.custom_tools.matrix_agent_discovery",
     "mindroom.reply_turn.enrichment",
     "mindroom.responder_availability",
     "mindroom.response_runner",
@@ -7959,7 +7961,7 @@ depends_on = [
     "mindroom.tool_system.worker_routing",
     "mindroom.workers.storage_preflight",
 ]
-visibility = ["mindroom.orchestrator"]
+visibility = ["mindroom.orchestration.storage_preparation"]
 
 [[modules]]
 path = "mindroom.legacy_state_root_records"
@@ -7971,7 +7973,7 @@ depends_on = [
     "mindroom.matrix.personal_room_store",
     "mindroom.path_confinement",
 ]
-visibility = ["mindroom.orchestrator"]
+visibility = ["mindroom.orchestration.storage_preparation"]
 
 [[modules]]
 path = "mindroom.credentials.legacy_tool_credentials"
@@ -7982,7 +7984,7 @@ depends_on = [
     "mindroom.logging_config",
     "mindroom.tool_system.catalog",
 ]
-visibility = ["mindroom.orchestrator"]
+visibility = ["mindroom.orchestration.storage_preparation"]
 
 [[modules]]
 path = "mindroom.workers.backends.legacy_state_root_mounts"
@@ -7995,7 +7997,7 @@ depends_on = [
     "mindroom.workers.backends.kubernetes_resources",
     "mindroom.workers.runtime",
 ]
-visibility = ["mindroom.orchestrator"]
+visibility = ["mindroom.orchestration.storage_preparation"]
 
 [[modules]]
 path = "mindroom.workers.storage_preflight"
@@ -8248,8 +8250,7 @@ depends_on = [
     "mindroom.session_storage.store",
 ]
 visibility = [
-    "mindroom.api.main",
-    "mindroom.orchestrator",
+    "mindroom.orchestration.storage_preparation",
     "mindroom.session_storage.legacy_agno3_conversion",
     "mindroom.session_storage.legacy_session_columns",
 ]
@@ -9054,6 +9055,20 @@ depends_on = [
 ]
 visibility = [
     "mindroom.orchestrator",
+]
+
+[[modules]]
+path = "mindroom.orchestration.storage_preparation"
+depends_on = [
+    "mindroom.background_tasks",
+    "mindroom.credentials.legacy_tool_credentials",
+    "mindroom.credentials.sync",
+    "mindroom.delegation.legacy_snapshots",
+    "mindroom.legacy_state_root_records",
+    "mindroom.logging_config",
+    "mindroom.private_storage.legacy_private_storage",
+    "mindroom.session_storage.legacy_agno3_conversion",
+    "mindroom.workers.backends.legacy_state_root_mounts",
 ]
 
 [[modules]]

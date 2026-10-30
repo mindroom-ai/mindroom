@@ -1071,11 +1071,11 @@ class TestMemoryConfig:
         other_cwd.mkdir(parents=True, exist_ok=True)
         monkeypatch.chdir(other_cwd)
 
-        result = _get_memory_config(orchestrator.storage_path, config, orchestrator.runtime_paths)
+        result = _get_memory_config(orchestrator.runtime_paths.storage_root, config, orchestrator.runtime_paths)
 
         expected_storage = (project_root / "mindroom_data").resolve()
         expected_chroma = (expected_storage / "chroma").resolve()
-        assert orchestrator.storage_path == expected_storage
+        assert orchestrator.runtime_paths.storage_root == expected_storage
         assert Path(result["vector_store"]["config"]["path"]) == expected_chroma
 
     @pytest.mark.asyncio

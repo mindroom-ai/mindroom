@@ -201,20 +201,6 @@ def _request_refresh_scheduler(request: Request) -> KnowledgeRefreshScheduler:
     return config_lifecycle.app_state(request.app).runtime.knowledge_refresh_scheduler
 
 
-def _schedule_refresh(
-    config: Config,
-    base_id: str,
-    runtime_paths: RuntimePaths,
-    *,
-    request: Request,
-) -> None:
-    _request_refresh_scheduler(request).schedule_refresh(
-        base_id,
-        config=config,
-        runtime_paths=runtime_paths,
-    )
-
-
 def _schedule_refreshes(
     config: Config,
     base_ids: tuple[str, ...],
@@ -225,7 +211,7 @@ def _schedule_refreshes(
     for base_id in dict.fromkeys(base_ids):
         if config.get_knowledge_base_config(base_id).mode != "semantic":
             continue
-        _schedule_refresh(config, base_id, runtime_paths, request=request)
+        _request_refresh_scheduler(request).schedule_refresh(base_id, config=config, runtime_paths=runtime_paths)
 
 
 def _same_source_base_ids(
