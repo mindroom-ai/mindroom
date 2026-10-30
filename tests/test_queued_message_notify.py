@@ -82,6 +82,7 @@ from mindroom.response_runner import (
 )
 from mindroom.response_sources import ResponseSources
 from mindroom.session_storage.agent_storage import create_agent_state_storage, create_state_storage
+from mindroom.session_storage.lanes import run_session_storage_operation
 from mindroom.session_storage.store import ConversationStore, persist_to
 from mindroom.session_storage.types import ConversationSession, SessionKind
 from mindroom.turn_policy import DispatchPlan, PreparedDispatch, ResponseAction
@@ -3393,6 +3394,47 @@ async def test_async_cleanup_keeps_session_storage_io_off_event_loop(tmp_path: P
 
 
 @pytest.mark.asyncio
+async def test_notice_finalization_waits_its_turn_in_the_database_s_lane(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The finalizing rewrite queues behind storage work already in its database's lane and then runs on its thread."""
+    store = _recording_store(tmp_path, "general")
+    rewrite_threads: list[str] = []
+    rewrite = ConversationStore.rewrite_run_messages
+
+    def recorded(self: ConversationStore, *args: Any, **kwargs: Any) -> None:  # noqa: ANN401
+        rewrite_threads.append(threading.current_thread().name)
+        rewrite(self, *args, **kwargs)
+
+    monkeypatch.setattr(ConversationStore, "rewrite_run_messages", recorded)
+    started, release = threading.Event(), threading.Event()
+
+    def hold_the_lane(_store: ConversationStore) -> None:
+        started.set()
+        assert release.wait(timeout=5)
+
+    with queued_message_signal_context(_StaticQueuedState(pending=True)) as notice_context:
+        messages: list[OwnedMessage] = []
+        await _after_batch(messages, OwnedMessage(role="tool", content="result"))
+        _seed(store, _completed("run-1", messages))
+        _register_notice_storage(store)
+        held = asyncio.create_task(run_session_storage_operation(lambda: store, hold_the_lane))
+        try:
+            assert await asyncio.to_thread(started.wait, 5)
+            finalization = asyncio.create_task(ai_runtime.finalize_queued_notice_response_turn_async(notice_context))
+            await asyncio.sleep(0.05)
+            assert not store.rewriting.is_set()
+        finally:
+            release.set()
+        await asyncio.wait_for(asyncio.gather(held, finalization), timeout=5)
+
+    assert store.saves == [["run-1"]]
+    assert len(rewrite_threads) == 1
+    assert rewrite_threads[0].startswith("conversation-store"), rewrite_threads
+
+
+@pytest.mark.asyncio
 async def test_response_turn_finalization_completes_when_cancelled_during_storage_io(tmp_path: Path) -> None:
     """Cancellation during storage I/O must not leave a durable live imperative behind."""
     release = threading.Event()
@@ -3438,7 +3480,7 @@ async def test_response_turn_finalization_defers_repeated_cancellation_during_st
         await _after_batch(messages, OwnedMessage(role="tool", content="result"))
         _seed(store, _completed("completed-run", messages))
         _register_notice_storage(store)
-        with patch.object(ai_runtime.asyncio, "shield", new=observed_shield):
+        with patch.object(asyncio, "shield", new=observed_shield):
             finalization_task = asyncio.create_task(
                 ai_runtime.finalize_queued_notice_response_turn_async(notice_context),
             )
