@@ -43,9 +43,9 @@ The path follows the agent's [`file_access`](../architecture/security-posture.md
 | `enable_speech_generation` | `boolean` | `true` | Enable `generate_speech()`. |
 | `all` | `boolean` | `false` | Enable all three functions. |
 | `transcription_model` | `text` | `gpt-transcribe` | Model for `transcribe_audio()`. |
-| `text_to_speech_voice` | `text` | `alloy` | Voice for `generate_speech()`. |
-| `text_to_speech_model` | `text` | `gpt-4o-mini-tts` | Model for `generate_speech()`. |
-| `text_to_speech_format` | `text` | `mp3` | Speech format, such as `mp3`, `wav`, or `opus`. |
+| `text_to_speech_voice` | `text` | `alloy` | Voice for `generate_speech()`; `gpt-realtime` models offer `alloy`, `ash`, `ballad`, `coral`, `echo`, `sage`, `shimmer`, `verse`, `marin`, and `cedar`. |
+| `text_to_speech_model` | `text` | `gpt-realtime-2.1-mini` | Model for `generate_speech()`; `gpt-realtime` models use the OpenAI Realtime API. |
+| `text_to_speech_format` | `text` | `wav` | Speech format; `gpt-realtime` models return only `wav` or `pcm` (24 kHz mono), and speech-endpoint models also take `mp3`, `opus`, `aac`, or `flac`. |
 | `image_model` | `text` | `gpt-image-2.5-sunburst` | Model for `generate_image()`. |
 | `image_quality` | `text` | `null` | Passed through to the image API. |
 | `image_size` | `text` | `null` | Passed through to the image API. |
