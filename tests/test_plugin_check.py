@@ -232,6 +232,63 @@ def test_check_plugin_accepts_a_tool_whose_factory_imports_a_package_installed_l
     assert check_plugin(plugin_root).tool_names == ("wrapper",)
 
 
+def _owned_toolkit_plugin(root: Path, date_import: str) -> Path:
+    """Write a plugin whose owned toolkit annotates a model parameter with ``date``, imported by ``date_import``."""
+    return _write_plugin(
+        root,
+        manifest={"name": "calendar", "tools_module": "tools.py"},
+        modules={
+            "tools.py": (
+                "from __future__ import annotations\n"
+                "from typing import TYPE_CHECKING\n"
+                "from mindroom.plugin_api import (\n"
+                "    ToolCategory, ToolFileAccess, Toolkit, register_tool_with_metadata, tool,\n"
+                ")\n"
+                f"{date_import}\n"
+                "class CalendarTools(Toolkit):\n"
+                "    name = 'calendar'\n"
+                "    def __init__(self, api_key: str) -> None:\n"
+                "        raise AssertionError('The check must not construct the toolkit')\n"
+                "    @tool\n"
+                "    def schedule(self, day: date) -> str:\n"
+                "        '''Schedule a meeting on a day.'''\n"
+                "        return str(day)\n"
+                "    @tool\n"
+                "    @staticmethod\n"
+                "    def timezone() -> str:\n"
+                "        '''Return the calendar's timezone.'''\n"
+                "        return 'UTC'\n"
+                "@register_tool_with_metadata(\n"
+                "    name='calendar',\n"
+                "    file_access=ToolFileAccess.NONE,\n"
+                "    display_name='Calendar',\n"
+                "    description='Calendar test tool',\n"
+                "    category=ToolCategory.DEVELOPMENT,\n"
+                ")\n"
+                "def calendar_tools():\n"
+                "    return CalendarTools\n"
+            ),
+        },
+    )
+
+
+def test_check_plugin_derives_owned_tool_functions_without_constructing_the_toolkit(tmp_path: Path) -> None:
+    """The check derives each ``@tool`` function as an agent build does, from the class, without its constructor."""
+    plugin_root = _owned_toolkit_plugin(tmp_path / "plugin", "from datetime import date")
+
+    assert check_plugin(plugin_root).tool_names == ("calendar",)
+
+
+def test_check_plugin_rejects_a_tool_function_annotated_with_a_type_imported_only_for_type_checking(
+    tmp_path: Path,
+) -> None:
+    """An annotation that does not resolve drops the toolkit from every agent, so the check names it and fails."""
+    plugin_root = _owned_toolkit_plugin(tmp_path / "plugin", "if TYPE_CHECKING:\n    from datetime import date")
+
+    with pytest.raises(ValueError, match=r"^Tool 'calendar' cannot offer its function 'schedule': name 'date' is not"):
+        check_plugin(plugin_root)
+
+
 def test_plugin_fleet_registry_is_sorted_and_unique() -> None:
     """The checked-in fleet registry should remain deterministic and collision-free."""
     registry_path = Path(__file__).resolve().parents[1] / ".github" / "plugin-fleet.json"
