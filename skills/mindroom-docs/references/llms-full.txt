@@ -7525,7 +7525,7 @@ Each tool's page lists the settings it accepts.
 
 Some fields cannot be set inline:
 
-- `password` fields, such as API keys and tokens, must be set through the dashboard or credential store.
+- `password` fields, such as API keys and tokens, must be set through the dashboard, the credential store, or the environment variables the tool's page names.
 - Fields MindRoom manages itself, such as `base_dir`, cannot be overridden.
 - Per-agent-only fields, such as the [`usage_stats`](https://docs.mindroom.chat/usage/#usage_stats) tool's `admin_scope`, are rejected in `defaults.tools`.
 
@@ -7536,13 +7536,17 @@ MindRoom rejects these fields, unknown field names, and values of the wrong type
 From lowest to highest priority, a tool's settings come from:
 
 1. The tool's built-in defaults.
-2. Saved tool settings from the dashboard or credential store.
-3. `defaults.tools` inline settings.
-4. `agents.<name>.tools` inline settings.
-5. Values MindRoom sets for the agent's runtime, such as its workspace directory.
+2. The environment variables its page names, such as `TAVILY_API_KEY`, read from the process environment or, when unset there, from the `.env` next to `config.yaml`.
+3. Saved tool settings from the dashboard or credential store.
+4. `defaults.tools` inline settings.
+5. `agents.<name>.tools` inline settings.
+6. Values MindRoom sets for the agent's runtime, such as its workspace directory.
 
 When a tool appears in both `defaults.tools` and an agent's `tools`, the settings merge field by field.
 Per-agent values win for the same field, and fields set in only one place are kept.
+An empty saved value counts as unset, so the environment variable still applies.
+A call that runs in a worker rebuilds the tool there from its [leased](https://docs.mindroom.chat/deployment/sandbox-proxy/#credential-leases) saved settings and the worker's own environment, without the primary's `.env` secrets, so save a key such a call needs in the dashboard.
+The dashboard's Tools page counts only saved settings, so it can list a tool that environment variables configure as needing configuration.
 
 ### Clearing An Inherited Override
 
@@ -10690,7 +10694,7 @@ agents:
 
 `spider` exposes `search_web(query, max_results=5)`, `scrape(url)`, and `crawl(url, limit=None)`, returning Markdown.
 Search results do not include full page content.
-It requires `SPIDER_API_KEY` in the environment even though the dashboard lists it as needing no setup, and it has no `api_key` field.
+It requires `SPIDER_API_KEY` in the process environment, which the `.env` does not set, even though the dashboard lists it as needing no setup, and it has no `api_key` field.
 
 | Option | Type | Default | Notes |
 | --- | --- | --- | --- |
@@ -11115,7 +11119,7 @@ Generated images are square (1:1).
 | Option | Type | Default | Notes |
 | --- | --- | --- | --- |
 | `api_key` | `password` | `null` | Gemini API key, falling back to `GOOGLE_API_KEY`. Required unless Vertex AI mode is on. |
-| `vertexai` | `boolean` | `false` | Use Vertex AI instead of the Gemini API. `GOOGLE_GENAI_USE_VERTEXAI=true` also enables it. Required for `generate_video()`. |
+| `vertexai` | `boolean` | `false` | Use Vertex AI instead of the Gemini API. `GOOGLE_GENAI_USE_VERTEXAI=true` in the process environment also enables it; the `.env` does not. Required for `generate_video()`. |
 | `project_id` | `text` | `null` | Vertex project, falling back to `GOOGLE_CLOUD_PROJECT`. |
 | `location` | `text` | `null` | Vertex location, falling back to `GOOGLE_CLOUD_LOCATION`. |
 | `image_generation_model` | `text` | `gemini-nano-banana-2.1` | Model for `generate_image()` (Nano Banana 2.1). |
@@ -13899,7 +13903,7 @@ Use the per-function `enable_*` flags when an agent should, for example, only ch
 | `enable_cancel_booking` | `boolean` | `no` | `true` | Enable `cancel_booking()`. |
 | `all` | `boolean` | `no` | `false` | Enable every Cal.com function regardless of the `enable_*` flags. |
 
-Every function needs `api_key`, and slot lookup and new bookings also need `event_type_id`; supply them as stored credentials or through the `CALCOM_API_KEY` and `CALCOM_EVENT_TYPE_ID` environment variables of the MindRoom process.
+Every function needs `api_key`, and slot lookup and new bookings also need `event_type_id`; supply them as stored credentials or through the `CALCOM_API_KEY` and `CALCOM_EVENT_TYPE_ID` environment variables.
 
 ```yaml
 agents:
@@ -14745,7 +14749,7 @@ The sandbox and platform tools read their key from the environment when none is 
 | --- | --- |
 | `e2b` | `E2B_API_KEY` |
 | `daytona` | `DAYTONA_API_KEY` (and `DAYTONA_API_URL` for `api_url`) |
-| `composio` | `COMPOSIO_API_KEY`, or cached Composio user data |
+| `composio` | `COMPOSIO_API_KEY` in the process environment, not the `.env`, or cached Composio user data |
 
 All these tools run in the primary runtime by default; `e2b`, `daytona`, and `composio` always do, even when listed in `worker_tools` (see [Worker Routing](https://docs.mindroom.chat/deployment/sandbox-proxy/#worker-routed-execution)).
 Missing Python dependencies install on first use; see [Automatic Dependency Installation](https://docs.mindroom.chat/tools/#automatic-dependency-installation).
@@ -15006,7 +15010,7 @@ Missing Python dependencies install automatically on first use (see [Automatic D
 
 | Option | Type | Default | Notes |
 | --- | --- | --- | --- |
-| `key` | `password` | `null` | Google Maps API key; falls back to the `GOOGLE_MAPS_API_KEY` process environment variable. |
+| `key` | `password` | `null` | Google Maps API key; falls back to `GOOGLE_MAPS_API_KEY`. |
 | `search_places` | `boolean` | `true` | Enable `search_places()`. |
 | `get_directions` | `boolean` | `true` | Enable `get_directions()`. |
 | `validate_address` | `boolean` | `true` | Enable `validate_address()`. |
@@ -15041,7 +15045,7 @@ Weather lookups use the first geocoding match for the location name, so ambiguou
 
 | Option | Type | Default | Notes |
 | --- | --- | --- | --- |
-| `api_key` | `password` | `null` | OpenWeather API key; falls back to the `OPENWEATHER_API_KEY` process environment variable. A key is required for every call. |
+| `api_key` | `password` | `null` | OpenWeather API key; falls back to `OPENWEATHER_API_KEY`. A key is required for every call. |
 | `units` | `text` | `metric` | `standard`, `metric`, or `imperial`. |
 | `enable_current_weather` | `boolean` | `true` | Enable `get_current_weather()`. |
 | `enable_forecast` | `boolean` | `true` | Enable `get_forecast()`. |
@@ -16055,6 +16059,7 @@ Examples are symlinks or files planted in shared workspaces that the primary lat
 ### Config and state kept out of workers
 
 Runners and dedicated workers never receive the primary's config file, its directory, its `.env`, a ConfigMap holding it, or the credential encryption key.
+A tool setting the primary reads from its `.env` configures only the toolkit the primary builds; a worker-routed call rebuilds the toolkit from its leased saved settings and the worker's own environment.
 The config sent to runners with each request, and the config file projected into each Docker worker, hold only the fields runners resolve; models, MCP servers, plugin settings, and every other section stay in the primary, and a worker-routed call carries only the called tool's own inline overrides.
 
 Of the agents' data, dedicated Docker and Kubernetes workers mount only workspaces and shared directories, never the agent state roots around them, so sessions, memory, Mem0 data, and private-instance identity records stay out of every worker.
