@@ -15985,7 +15985,10 @@
               "type": "array",
               "items": {
                 "type": "object",
-                "additionalProperties": true
+                "propertyNames": {
+                  "type": "string"
+                },
+                "additionalProperties": {}
               },
               "description": "Sheets API batchUpdate Request objects."
             },
