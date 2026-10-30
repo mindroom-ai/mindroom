@@ -32,7 +32,7 @@ from mindroom.config.plugin import PluginEntryConfig
 from mindroom.constants import AI_RUN_METADATA_KEY
 from mindroom.dispatch_source import ScheduledHistoryBudget
 from mindroom.entity_resolution import entity_identity_registry
-from mindroom.final_delivery import AwaitingApproval, Cancelled, FinalDeliveryOutcome
+from mindroom.final_delivery import AwaitingApproval, Cancelled, Completed, FinalDeliveryOutcome
 from mindroom.history.interrupted_replay import is_interrupted_replay_run
 from mindroom.history.run_visibility import (
     QUEUED_MESSAGE_NOTICE_MARKER_KEY,
@@ -1460,11 +1460,7 @@ async def test_the_runner_delivers_an_empty_attempt_s_retry_as_the_turn_s_final_
 
     delivery, outcome = await _respond_through_runner(runner, _request(), streaming=streaming)
 
-    assert (delivery.terminal_status, delivery.final_visible_body, outcome.run_succeeded) == (
-        "completed",
-        "Recovered.",
-        True,
-    )
+    assert (delivery.ending, delivery.final_visible_body, outcome.run_succeeded) == (Completed(), "Recovered.", True)
     [record] = reply.storage.list_runs(SESSION_ID)
     assert record.content == "Recovered."
     assert delivery.response_run_id == outcome.response_run_id == record.run_id
