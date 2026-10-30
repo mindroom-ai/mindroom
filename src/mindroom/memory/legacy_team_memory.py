@@ -248,10 +248,12 @@ def _merge_mem0_copies(runtime_paths: RuntimePaths, member_stores: list[Path]) -
             # stay, and no later start writes them again, so none undoes an edit made since.
             logger.warning("Left a team's Mem0 copies its store refused", team=scope, error=str(error))
             refused.add((scope, collection_name))
-    # Only after every team's store holds its records do the member copies go, the dropped extractions first: a start
-    # interrupted meanwhile still finds each kept extraction where it was, so it keeps the same one.
+    # Only after every team's store holds its records do the member copies go, the dropped extractions first, and the
+    # kept ones only once every dropped one went: a start interrupted meanwhile still finds each kept extraction beside
+    # any dropped one, so it keeps the same one.
     kept_ids = {record.id for team, records in kept.items() if team not in refused for record in records}
     for keep in (False, True):
+        all_removed = True
         for copy in copies:
             removed = [
                 record.id
@@ -264,6 +266,9 @@ def _merge_mem0_copies(runtime_paths: RuntimePaths, member_stores: list[Path]) -
             except Exception as error:
                 # The runtime reads only an agent's own records from its store, so a copy left there is never read.
                 logger.warning("Left Mem0 team copies a member store refused to delete", error=str(error))
+                all_removed = False
+        if not all_removed:
+            break
     return True
 
 

@@ -367,6 +367,29 @@ async def test_a_copy_a_member_store_refuses_to_delete_stays_and_the_merge_finis
 
 
 @pytest.mark.asyncio
+async def test_a_start_stopped_after_a_refused_delete_keeps_the_same_extraction(storage: Path) -> None:
+    """A dropped extraction that stays keeps the kept one beside it, so a start stopped before the receipt keeps it."""
+    delete = Collection.delete
+
+    def refusing_delete(collection: Collection, *args: object, **kwargs: object) -> None:
+        if "general" in str(collection._client.get_settings().persist_directory):
+            msg = "attempt to write a readonly database"
+            raise RuntimeError(msg)
+        delete(collection, *args, **kwargs)
+
+    with (
+        patch.object(Collection, "delete", refusing_delete),
+        patch.object(legacy_team_memory, "write_json_file_durable", side_effect=_StartStoppedError),
+        pytest.raises(_StartStoppedError),
+    ):
+        await _migrate(storage)
+
+    await _migrate(storage)
+
+    _assert_merged(storage)
+
+
+@pytest.mark.asyncio
 async def test_a_file_copy_that_cannot_be_removed_stays_and_the_merge_finishes(storage: Path) -> None:
     """A merged copy whose directory refuses the removal stays behind, never read again, instead of stopping startup."""
     copy = storage / "agents" / "general" / "memory_files" / _TEAM

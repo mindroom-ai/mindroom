@@ -62,7 +62,7 @@ Team memory picks one backend from the members' effective backends:
 - Any other combination, including `file` plus `none`, uses Mem0 with the configured `memory.embedder` and `memory.llm`.
 
 A member's `none` setting disables only its own memory, so team conversations it takes part in can still be remembered in the team scope.
-A `file` member of a team that uses Mem0 does not see that team's memory in its own conversations.
+A `file` member of a team that uses Mem0 does not see that team's Mem0 memories in its own conversations.
 
 ## Backend: `mem0`
 

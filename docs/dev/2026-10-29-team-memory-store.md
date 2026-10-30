@@ -33,7 +33,7 @@ It records reasons, rejected alternatives, and accepted limitations; the code sh
 - A member store Chroma cannot read or one holding links, a team whose store refuses its records (as a planted record of another embedding dimension makes it), and a copy Chroma or the filesystem refuses to delete are left where they are with a warning, like the conversation conversion's handling of a worker-writable database, because one broken store below `agents/` must not stop startup.
   None of them merges on a later start: that would need a ledger of the turns already merged, because the team's store cannot tell which merged facts a user edited or deleted since, and merging the rest later would bring a deleted fact back, undo an edit, or add a second extraction of a turn.
 - A replica key that is not text, which only worker code could plant, makes its record a turn of its own, so a malformed record cannot stop startup.
-- Every step is idempotent: records are upserted by their IDs, member copies are deleted only after every team store holds its records, and the dropped extractions go before the kept ones, so a start interrupted anywhere still finds each kept extraction and chooses it again; writes go in batches within Chroma's batch limit, which needs no atomicity across batches.
+- Every step is idempotent: records are upserted by their IDs, member copies are deleted only after every team store holds its records, and the dropped extractions go before the kept ones, which go only once every dropped one went, so a start interrupted anywhere still finds each kept extraction beside any dropped one and chooses it again; writes go in batches within Chroma's batch limit, which needs no atomicity across batches.
 - The merge reads the paths the earlier runtime read, walked without following links from the storage root.
   Chroma opens a store's files by path, so the merge opens a member's Mem0 store only when it holds nothing but directories and regular files; hard links are allowed, because a backup made with hard links gives every file a second link, and worker code can link only files it can already write.
 - A receipt in `tracking/` stops later starts from opening every agent's Chroma store; it is withheld while Chroma cannot be installed or no config loaded, the only cases in which nothing was merged, so a later start merges the Mem0 copies.
@@ -56,7 +56,7 @@ It records reasons, rejected alternatives, and accepted limitations; the code sh
 ## Accepted limitations
 
 - Mem0 copies in the store of an agent not on Mem0 at the upgrade stay unmerged, so switching it back to Mem0 later does not bring them back; merging such a store later would need a ledger of the turns already merged, since the team's store cannot tell which merged facts users edited or deleted since.
-
+- A standalone API whose config fails to load at startup merges Mem0 copies only at a later start with a valid config, not when a repaired config loads while it runs, because a merge must finish before anything reads team memory, and the API serves while the config is invalid.
 - The merge checks a member's Mem0 store for links before Chroma opens it by path, so a link swapped in between is followed, as every Mem0 open of an agent's store below `agents/` already follows one.
 - Each member's Mem0 history database stays where it is, because it also holds the member's own history; a team store's recent-message extraction context starts empty once.
 - Mem0's entity rows are not carried over; Mem0 writes them only when spaCy is installed, which MindRoom does not install.
