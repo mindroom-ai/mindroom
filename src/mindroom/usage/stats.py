@@ -402,12 +402,12 @@ class _UsageAccumulator:
         expected_requester: str | None,
     ) -> None:
         uses_runs = scope == "self" and not row.source.requester_isolated
-        if (uses_runs and (not row.runs_available or _has_unattributed_helper(row))) or (
-            not uses_runs and not row.totals_available
-        ):
+        if uses_runs and (not row.runs_available or _has_unattributed_helper(row)):
             self.unavailable_sources.add(row.source.path_label)
-            if not uses_runs:
-                self.cumulative_model_unavailable_sources.add(row.source.path_label)
+        elif not uses_runs and (not row.totals_available or not row.runs_available or _has_uncountable_row(row)):
+            self.unavailable_sources.add(row.source.path_label)
+            self.cumulative_model_unavailable_sources.add(row.source.path_label)
+            if not row.totals_available:
                 return
         try:
             if scope == "self":
@@ -426,9 +426,6 @@ class _UsageAccumulator:
             # cannot count.
             self.unavailable_sources.add(row.source.path_label)
             return
-        if not uses_runs and (not row.runs_available or _has_uncountable_row(row)):
-            self.unavailable_sources.add(row.source.path_label)
-            self.cumulative_model_unavailable_sources.add(row.source.path_label)
         if row_totals is None:
             return
         self.total += row_totals
@@ -1090,7 +1087,6 @@ def _run_model_totals(run: UsageRunNode, totals: TokenCounts) -> dict[tuple[str,
     if not run.model_metrics:
         return {(run.model_provider or "unknown", run.model or "unknown"): totals}
     models: dict[tuple[str, str], TokenCounts] = {}
-    combined = TokenCounts()
     try:
         for entry in run.model_metrics:
             model_totals = stored_token_counts(entry.metrics)
@@ -1099,10 +1095,9 @@ def _run_model_totals(run: UsageRunNode, totals: TokenCounts) -> dict[tuple[str,
                 continue
             key = (entry.model_provider or "unknown", entry.model or "unknown")
             models[key] = models.get(key, TokenCounts()) + model_totals
-            combined += model_totals
     except ValueError:
         return None
-    return models if models and combined == totals else None
+    return models if models and sum(models.values(), TokenCounts()) == totals else None
 
 
 def _session_totals(row: UsageSessionRow) -> TokenCounts | None:
@@ -1148,7 +1143,7 @@ def _model_entries_for_row(
         return []
 
     entries: list[tuple[UsageRunNode, TokenCounts]] = []
-    # Usage stored before per-run snapshots has no model, requester, date, or request detail of its own.
+    # A pre-ledger baseline counts only in a session's cumulative totals: it has no requester, date, or request.
     for run in (run for run in row.runs if run.kind != "pre_ledger"):
         if scope == "self" and not row.source.requester_isolated:
             if run.requester_id is None and run.kind == "run":
