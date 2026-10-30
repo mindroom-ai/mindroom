@@ -371,7 +371,7 @@ def _commit(
             state.snapshot = _published_snapshot(
                 state.snapshot,
                 runtime_config=commit.config,
-                config_load_result=ConfigLoadResult(success=True, uses_includes=commit.config.uses_includes),
+                config_load_result=ConfigLoadResult(success=True),
                 source_fingerprint=commit.config.source_fingerprint,
                 source_files=commit.config.source_files,
                 uses_includes=commit.config.uses_includes,
@@ -404,13 +404,12 @@ def load_config_into_app(
     `reconcile_knowledge` marks indexes stale for the knowledge-mode changes this load publishes; only the standalone
     dashboard's file watcher asks for it (see `_reconcile_knowledge_mode`).
     """
-    initial_state = require_api_state(api_app)
-    snapshot = initial_state.snapshot
+    state = require_api_state(api_app)
+    snapshot = state.snapshot
     attempt = load_config_attempt(runtime_paths)
     result = attempt.result
-    with initial_state.config_lock:
-        current_state = require_api_state(api_app)
-        current = current_state.snapshot
+    with state.config_lock:
+        current = state.snapshot
         if current.revision != snapshot.revision or current.runtime_paths != runtime_paths:
             logger.info(
                 "Discarding API config load superseded by a newer commit",
@@ -433,7 +432,7 @@ def load_config_into_app(
         published_uses_includes = result.uses_includes if result.uses_includes is not None else current.uses_includes
         if not result.success and current.uses_includes:
             published_uses_includes = True
-        current_state.snapshot = _published_snapshot(
+        state.snapshot = _published_snapshot(
             current,
             increment_generation=not same_source,
             runtime_config=attempt.config if attempt.config is not None else current.runtime_config,
@@ -464,9 +463,9 @@ def read_app_committed_runtime_config(
     api_app: FastAPI,
 ) -> tuple[Config, constants.RuntimePaths]:
     """Read one validated runtime config and runtime from the same published snapshot."""
-    initial_state = require_api_state(api_app)
-    with initial_state.config_lock:
-        return _loaded_runtime_config(require_api_state(api_app).snapshot)
+    state = require_api_state(api_app)
+    with state.config_lock:
+        return _loaded_runtime_config(state.snapshot)
 
 
 def read_committed_runtime_config(

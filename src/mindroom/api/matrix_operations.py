@@ -60,17 +60,17 @@ class AllAgentsRoomsResponse(BaseModel):
     agents: list[AgentRoomsResponse]
 
 
-def _get_runtime_matrix_entities(config: Config) -> dict[str, AgentConfig | TeamConfig]:
-    """Return runtime-validated agents and teams keyed by their Matrix entity ID."""
+def _matrix_entities(config: Config) -> dict[str, AgentConfig | TeamConfig]:
+    """Return the config's agents and teams keyed by their Matrix entity ID."""
     return {
         **config.agents,
         **config.teams,
     }
 
 
-def _get_runtime_matrix_entity(config: Config, entity_id: str) -> AgentConfig | TeamConfig:
-    """Return one runtime-validated Matrix entity or raise a 404."""
-    entities = _get_runtime_matrix_entities(config)
+def _matrix_entity(config: Config, entity_id: str) -> AgentConfig | TeamConfig:
+    """Return one configured agent or team, or raise a 404."""
+    entities = _matrix_entities(config)
     if entity_id not in entities:
         raise HTTPException(status_code=404, detail=f"Agent or team {entity_id} not found")
     return entities[entity_id]
@@ -143,7 +143,7 @@ def _room_avatar_target(
 
     candidates = [
         entity_id
-        for entity_id in _get_runtime_matrix_entities(config)
+        for entity_id in _matrix_entities(config)
         if room_id
         in resolve_room_aliases(
             get_rooms_for_entity(entity_id, config),
@@ -158,7 +158,7 @@ def _room_avatar_target(
 async def get_agent_avatar(agent_id: str, request: Request) -> Response:
     """Serve a configured Matrix entity's current thumbnail."""
     config, runtime_paths = read_committed_runtime_config(request)
-    _get_runtime_matrix_entity(config, agent_id)
+    _matrix_entity(config, agent_id)
     try:
         client = create_agent_http_client(agent_id, runtime_paths)
     except ValueError as exc:
@@ -224,7 +224,7 @@ async def get_all_agents_rooms(request: Request) -> AllAgentsRoomsResponse:
     and unconfigured rooms (joined but not in config) for each Matrix entity.
     """
     config, runtime_paths = read_committed_runtime_config(request)
-    entities = _get_runtime_matrix_entities(config)
+    entities = _matrix_entities(config)
 
     # Gather room information for all configured Matrix entities concurrently.
     tasks = [
@@ -257,7 +257,7 @@ async def get_agent_rooms(agent_id: str, request: Request) -> AgentRoomsResponse
 
     """
     config, runtime_paths = read_committed_runtime_config(request)
-    entity = _get_runtime_matrix_entity(config, agent_id)
+    entity = _matrix_entity(config, agent_id)
     return await _get_agent_matrix_rooms(
         agent_id,
         entity.display_name,
@@ -282,7 +282,7 @@ async def leave_room_endpoint(request: RoomLeaveRequest, api_request: Request) -
 
     """
     config, _ = read_committed_runtime_config(api_request)
-    _get_runtime_matrix_entity(config, request.agent_id)
+    _matrix_entity(config, request.agent_id)
     leave = app_state(api_request.app).leave_matrix_room
     if leave is None:
         raise HTTPException(status_code=503, detail="Leaving a room requires a running MindRoom instance")

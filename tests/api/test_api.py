@@ -203,7 +203,7 @@ def test_config_lifecycle_published_snapshot_owns_optional_runtime_fields(tmp_pa
     )
     runtime_config = Config.validate_with_runtime(_authored_config_payload("old"), first_runtime)
     load_result = config_lifecycle.ConfigLoadResult(success=True)
-    snapshot = main.ApiSnapshot(
+    snapshot = config_lifecycle.ApiSnapshot(
         generation=7,
         runtime_paths=first_runtime,
         runtime_config=runtime_config,

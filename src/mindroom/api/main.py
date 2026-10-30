@@ -25,7 +25,7 @@ from mindroom.api.auth_user import AuthUser  # noqa: TC001 - FastAPI resolves ro
 from mindroom.api.budgets import router as budgets_router
 from mindroom.api.computers import active_computer_worker_keys
 from mindroom.api.computers import router as computers_router
-from mindroom.api.config_lifecycle import ApiSnapshot, ApiState, ConfigLoadResult  # noqa: F401
+from mindroom.api.config_lifecycle import ApiSnapshot, ApiState
 from mindroom.api.config_reload import router as config_reload_router
 from mindroom.api.config_schema import router as config_schema_router
 from mindroom.api.connections import router as connections_router
@@ -310,12 +310,7 @@ def initialize_api_app(api_app: FastAPI, runtime_paths: constants.RuntimePaths) 
         bind_script_tool_broker(api_app, None)
         app_state.api_state = ApiState(
             config_lock=threading.Lock(),
-            snapshot=ApiSnapshot(
-                generation=0,
-                runtime_paths=runtime_paths,
-                runtime_config=None,
-                config_load_result=None,
-            ),
+            snapshot=ApiSnapshot(generation=0, runtime_paths=runtime_paths),
         )
         config_lifecycle.register_api_app(api_app)
         return
@@ -386,9 +381,7 @@ async def _reload_config_into_app(api_app: FastAPI, runtime_paths: constants.Run
     """Reload one API app config snapshot from disk."""
     # Config validation executes plugin modules and walks the filesystem;
     # keep it off the event loop (#1260).
-    await asyncio.to_thread(
-        partial(config_lifecycle.load_config_into_app, runtime_paths, api_app, reconcile_knowledge=True),
-    )
+    await asyncio.to_thread(config_lifecycle.load_config_into_app, runtime_paths, api_app, reconcile_knowledge=True)
     await _sync_standalone_knowledge_watchers(api_app)
 
 
@@ -712,7 +705,7 @@ async def load_config(
     response: Response,
     _user: Annotated[AuthUser, Depends(verify_user)],
 ) -> dict[str, Any]:
-    """Load configuration from file."""
+    """Return the committed configuration as authored, with its generation and state headers."""
     generation = config_lifecycle.committed_generation(request)
     config, _ = config_lifecycle.read_committed_runtime_config(request)
     _set_config_generation_header(response, generation)
