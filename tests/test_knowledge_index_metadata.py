@@ -1,17 +1,24 @@
-"""Knowledge published-index state codec tests."""
+"""The two knowledge state documents: the publication and the refresh status."""
 
 from __future__ import annotations
 
 import dataclasses
 import json
+import time
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from threading import Barrier
 
 import pytest
 
 from mindroom.knowledge.index_metadata import (
-    PublishedIndexState,
-    load_published_index_state,
-    save_published_index_state,
+    Publication,
+    RefreshStatus,
+    load_publication,
+    load_refresh_status,
+    publication_path,
+    save_publication,
+    update_refresh_status,
     write_json_atomic,
 )
 from mindroom.knowledge.indexing_config import IndexingSettings
@@ -47,225 +54,286 @@ def _settings(**overrides: str) -> IndexingSettings:
     return normalized
 
 
-def _full_state() -> PublishedIndexState:
-    return PublishedIndexState(
+def _publication(**changes: object) -> Publication:
+    publication = Publication(
         settings=_settings(),
-        status="complete",
         collection="published_collection",
-        last_published_at="2026-01-02T03:04:05+00:00",
-        published_revision="deadbeef",
         indexed_count=7,
         source_signature="source-signature",
-        refresh_job="running",
-        reason="refreshing",
+        published_revision="deadbeef",
+        last_published_at="2026-01-02T03:04:05+00:00",
+        retired="retired_collection",
+    )
+    return dataclasses.replace(publication, **changes)
+
+
+def _publication_payload(**changes: object) -> dict[str, object]:
+    payload: dict[str, object] = {
+        "settings": _settings().to_metadata(),
+        "collection": "published_collection",
+        "indexed_count": 7,
+        "source_signature": "source-signature",
+        "published_revision": "deadbeef",
+        "last_published_at": "2026-01-02T03:04:05+00:00",
+        "retired": "retired_collection",
+    }
+    payload.update(changes)
+    return payload
+
+
+def _full_status() -> RefreshStatus:
+    return RefreshStatus(
+        reason="filesystem_watch",
+        reason_generation=4,
         last_error="boom",
-        updated_at="2026-01-02T03:05:06+00:00",
-        last_refresh_at="2026-01-02T03:06:07+00:00",
         consecutive_refresh_failures=3,
+        last_refresh_at="2026-01-02T03:06:07+00:00",
     )
 
 
-def test_every_state_field_round_trips_through_the_single_writer(tmp_path: Path) -> None:
-    """One writer and one loader must carry the whole schema, field for field."""
-    metadata_path = tmp_path / "indexing_settings.json"
-    state = _full_state()
+def _status_payload(**changes: object) -> dict[str, object]:
+    payload: dict[str, object] = dataclasses.asdict(_full_status())
+    payload.update(changes)
+    return payload
 
-    save_published_index_state(metadata_path, state)
 
-    assert load_published_index_state(metadata_path) == state
-    payload = json.loads(metadata_path.read_text(encoding="utf-8"))
+def _status_path(storage: Path) -> Path:
+    return storage / "refresh_status.json"
+
+
+def test_every_publication_field_round_trips(tmp_path: Path) -> None:
+    """One writer and one loader carry the whole publication, field for field."""
+    publication = _publication()
+
+    save_publication(tmp_path, publication)
+
+    assert publication_path(tmp_path) == tmp_path / "publication.json"
+    assert load_publication(tmp_path) == publication
+    payload = json.loads(publication_path(tmp_path).read_text(encoding="utf-8"))
     # Every field of the type is on disk, so no writer can drop one by omission.
-    assert set(payload) == {field.name for field in dataclasses.fields(state)}
+    assert set(payload) == {field.name for field in dataclasses.fields(publication)}
 
 
-def test_absent_optional_fields_are_omitted_rather_than_written_as_null(tmp_path: Path) -> None:
-    """Fields the state does not carry stay off disk, and reload as their defaults."""
-    metadata_path = tmp_path / "indexing_settings.json"
-    state = PublishedIndexState(settings=_settings(), status="indexing")
+def test_a_publication_without_a_revision_or_retired_collection_round_trips(tmp_path: Path) -> None:
+    """A local base has no revision, and a forced rebuild keeps no retired collection."""
+    publication = _publication(published_revision=None, retired=None)
 
-    save_published_index_state(metadata_path, state)
+    save_publication(tmp_path, publication)
 
-    payload = json.loads(metadata_path.read_text(encoding="utf-8"))
-    assert set(payload) == {"settings", "status", "refresh_job", "consecutive_refresh_failures"}
-    assert load_published_index_state(metadata_path) == state
+    assert load_publication(tmp_path) == publication
 
 
-def test_an_unfinished_record_keeps_the_collection_the_last_publication_left(tmp_path: Path) -> None:
-    """A record that is not a publication still names the collection that is live.
+def test_a_files_mode_publication_has_no_collection(tmp_path: Path) -> None:
+    """File-mode bases publish source metadata and never name a collection, so they serve no vector search."""
+    publication = _publication(settings=_settings(mode="files"), collection=None, retired=None)
 
-    The collection name is the only on-disk proof of which candidate-prefixed
-    collection candidate cleanup must spare, so a record that carries nothing
-    else must still carry that. ``indexing`` with a collection is the shape
-    older versions wrote for every in-progress refresh.
-    """
-    metadata_path = tmp_path / "indexing_settings.json"
-    write_json_atomic(
-        metadata_path,
-        {"settings": _settings().to_metadata(), "status": "indexing", "collection": "published_collection"},
-    )
+    save_publication(tmp_path, publication)
+    loaded = load_publication(tmp_path)
 
-    state = load_published_index_state(metadata_path)
+    assert loaded == publication
+    assert not publication.serves(_settings(mode="files"))
 
-    assert state is not None
-    assert state.collection == "published_collection"
-    assert state.indexed_count is None
-    assert state.source_signature is None
+
+def test_a_semantic_publication_without_a_collection_reads_as_none(tmp_path: Path) -> None:
+    """A semantic publication that names no collection proves nothing a search could read."""
+    write_json_atomic(publication_path(tmp_path), _publication_payload(collection=None))
+
+    assert load_publication(tmp_path) is None
 
 
 @pytest.mark.parametrize(
     "missing_field",
-    ["collection", "indexed_count", "source_signature"],
+    ["settings", "collection", "indexed_count", "source_signature", "last_published_at"],
 )
-def test_a_complete_record_that_proves_nothing_is_no_state_at_all(tmp_path: Path, missing_field: str) -> None:
+def test_a_publication_missing_a_required_field_reads_as_none(tmp_path: Path, missing_field: str) -> None:
     """A publication nothing can check is corrupt, not merely thin."""
-    metadata_path = tmp_path / "indexing_settings.json"
-    payload: dict[str, object] = {
-        "settings": _settings().to_metadata(),
-        "status": "complete",
-        "collection": "published_collection",
-        "indexed_count": 7,
-        "source_signature": "source-signature",
-    }
+    payload = _publication_payload()
     del payload[missing_field]
-    write_json_atomic(metadata_path, payload)
+    write_json_atomic(publication_path(tmp_path), payload)
 
-    assert load_published_index_state(metadata_path) is None
-
-
-def test_file_mode_metadata_keeps_its_mode_without_a_collection(tmp_path: Path) -> None:
-    """File-mode bases publish source metadata and never name a collection."""
-    metadata_path = tmp_path / "indexing_settings.json"
-    state = PublishedIndexState(
-        settings=_settings(mode="files"),
-        status="complete",
-        indexed_count=0,
-        source_signature="source-signature",
-    )
-
-    save_published_index_state(metadata_path, state)
-    loaded = load_published_index_state(metadata_path)
-
-    assert loaded is not None
-    assert loaded.settings.mode == "files"
-    assert loaded.collection is None
+    assert load_publication(tmp_path) is None
 
 
 @pytest.mark.parametrize(
-    "payload",
+    "settings",
     [
-        pytest.param({"status": "complete"}, id="settings_missing"),
-        pytest.param({"settings": {"base": "storage"}, "status": "complete"}, id="settings_unrecognized"),
-        pytest.param({"settings": {"base_id": 1}, "status": "complete"}, id="settings_not_strings"),
-        pytest.param({"settings": None, "status": "complete"}, id="settings_not_an_object"),
+        pytest.param({"base": "storage"}, id="settings_unrecognized"),
+        pytest.param({**_settings().to_metadata(), "mode": "graph"}, id="mode_unknown"),
+        pytest.param({**_settings().to_metadata(), "base_id": 1}, id="settings_not_strings"),
+        pytest.param(None, id="settings_null"),
+        pytest.param(["docs"], id="settings_not_an_object"),
     ],
 )
-def test_a_record_without_usable_settings_is_no_state_at_all(tmp_path: Path, payload: dict[str, object]) -> None:
+def test_a_publication_without_usable_settings_reads_as_none(tmp_path: Path, settings: object) -> None:
     """Settings identify what the index was built under; without them nothing is known."""
-    metadata_path = tmp_path / "indexing_settings.json"
-    write_json_atomic(metadata_path, payload)
+    write_json_atomic(publication_path(tmp_path), _publication_payload(settings=settings))
 
-    assert load_published_index_state(metadata_path) is None
-
-
-@pytest.mark.parametrize("status", [None, "", "publishing", 3, ["complete"], {"status": "complete"}])
-def test_an_unknown_status_is_no_state_at_all(tmp_path: Path, status: object) -> None:
-    """A status outside the schema leaves the rest of the record meaningless.
-
-    A JSON array or object decodes to an unhashable value, so a record must be
-    refused rather than raising out of a loader every caller treats as total.
-    """
-    metadata_path = tmp_path / "indexing_settings.json"
-    write_json_atomic(metadata_path, {"settings": _settings().to_metadata(), "status": status})
-
-    assert load_published_index_state(metadata_path) is None
-
-
-@pytest.mark.parametrize("refresh_job", ["sprinting", 4, ["running"], {"job": "running"}])
-def test_an_unknown_refresh_job_falls_back_to_idle(tmp_path: Path, refresh_job: object) -> None:
-    """Refresh-job bookkeeping never invalidates a record that is otherwise usable."""
-    metadata_path = tmp_path / "indexing_settings.json"
-    write_json_atomic(
-        metadata_path,
-        {"settings": _settings().to_metadata(), "status": "indexing", "refresh_job": refresh_job},
-    )
-
-    state = load_published_index_state(metadata_path)
-
-    assert state is not None
-    assert state.refresh_job == "idle"
-
-
-def test_a_torn_or_missing_file_is_no_state_at_all(tmp_path: Path) -> None:
-    """Neither a missing file nor a partially written one may raise."""
-    missing_path = tmp_path / "missing.json"
-    torn_path = tmp_path / "torn.json"
-    torn_path.write_text("{ truncated", encoding="utf-8")
-
-    assert load_published_index_state(missing_path) is None
-    assert load_published_index_state(torn_path) is None
-
-
-def test_bytes_that_are_not_utf8_are_no_state_at_all(tmp_path: Path) -> None:
-    """Undecodable bytes raise ``UnicodeDecodeError``, which is not an ``OSError``."""
-    metadata_path = tmp_path / "indexing_settings.json"
-    metadata_path.write_bytes(b'{"status": "\xff\xfe"}')
-
-    assert load_published_index_state(metadata_path) is None
+    assert load_publication(tmp_path) is None
 
 
 @pytest.mark.parametrize(
-    ("raw", "expected"),
+    ("field", "value"),
     [
-        pytest.param(7, 7, id="int"),
-        pytest.param(7.0, 7, id="whole_float"),
-        pytest.param("7", 7, id="ascii_digits"),
-        pytest.param("١٢", 12, id="arabic_indic_digits"),
-        pytest.param("²", None, id="superscript_int_refuses"),
-        pytest.param("1" * 5000, None, id="past_the_integer_conversion_limit"),
-        pytest.param(-1, None, id="negative"),
-        pytest.param(True, None, id="bool"),
-        pytest.param(7.5, None, id="fractional"),
+        ("collection", ""),
+        ("collection", 3),
+        ("collection", ["published_collection"]),
+        ("source_signature", ""),
+        ("source_signature", 5),
+        ("published_revision", ""),
+        ("published_revision", 5),
+        ("last_published_at", 5),
+        ("last_published_at", None),
+        ("retired", ""),
+        ("retired", {"collection": "retired_collection"}),
     ],
 )
-def test_counts_accept_only_values_int_can_take(tmp_path: Path, raw: object, expected: int | None) -> None:
-    """A number ``int`` refuses must read as absent, not raise out of the loader.
+def test_a_publication_with_a_malformed_field_reads_as_none(tmp_path: Path, field: str, value: object) -> None:
+    """A field of the wrong type or empty where a name is required makes the whole publication unreadable."""
+    write_json_atomic(publication_path(tmp_path), _publication_payload(**{field: value}))
 
-    Two independent ways to be refused, neither of them a property of the
-    payload's shape: ``"²".isdigit()`` is true while ``int("²")`` raises, and a
-    perfectly well-formed decimal string raises once it is longer than
-    CPython's integer conversion limit. Either would turn one hostile field in
-    a state file into a failed manager construction instead of a base that
-    simply refreshes itself. Both counts are parsed by the same helper.
+    assert load_publication(tmp_path) is None
+
+
+@pytest.mark.parametrize(
+    ("raw", "accepted"),
+    [
+        pytest.param(7, True, id="int"),
+        pytest.param(0, True, id="zero"),
+        pytest.param(7.0, False, id="whole_float"),
+        pytest.param("7", False, id="ascii_digits"),
+        pytest.param("١٢", False, id="arabic_indic_digits"),
+        pytest.param("1" * 5000, False, id="past_the_integer_conversion_limit"),
+        pytest.param(-1, False, id="negative"),
+        pytest.param(True, False, id="bool"),
+        pytest.param(7.5, False, id="fractional"),
+        pytest.param(None, False, id="null"),
+    ],
+)
+def test_counts_accept_only_non_negative_integers(tmp_path: Path, raw: object, *, accepted: bool) -> None:
+    """A count that is not a JSON integer of zero or more is refused without raising out of either loader.
+
+    A refused publication count makes the publication unreadable; a refused status count reads as zero and keeps the
+    rest of the status.
     """
-    metadata_path = tmp_path / "indexing_settings.json"
+    write_json_atomic(publication_path(tmp_path), _publication_payload(indexed_count=raw))
     write_json_atomic(
-        metadata_path,
-        {
-            "settings": _settings().to_metadata(),
-            "status": "indexing",
-            "indexed_count": raw,
-            "consecutive_refresh_failures": raw,
-        },
+        _status_path(tmp_path),
+        _status_payload(reason_generation=raw, consecutive_refresh_failures=raw),
     )
 
-    state = load_published_index_state(metadata_path)
+    publication = load_publication(tmp_path)
+    status = load_refresh_status(tmp_path)
 
-    assert state is not None
-    assert state.indexed_count == expected
-    assert state.consecutive_refresh_failures == (expected or 0)
+    expected = raw if accepted else 0
+    assert publication == (_publication(indexed_count=raw) if accepted else None)
+    assert status == dataclasses.replace(
+        _full_status(),
+        reason_generation=expected,
+        consecutive_refresh_failures=expected,
+    )
+
+
+@pytest.mark.parametrize(
+    "content",
+    [
+        pytest.param(None, id="missing"),
+        pytest.param(b"{ truncated", id="torn"),
+        pytest.param(b'{"reason": "\xff\xfe"}', id="not_utf8"),
+        pytest.param(b'["publication"]', id="not_an_object"),
+        pytest.param(b"null", id="null"),
+    ],
+)
+def test_a_missing_or_unparsable_state_file_reads_as_nothing_known(tmp_path: Path, content: bytes | None) -> None:
+    """Neither a missing file nor a partially written or foreign one may raise.
+
+    Undecodable bytes raise ``UnicodeDecodeError``, which is not an ``OSError``.
+    """
+    if content is not None:
+        publication_path(tmp_path).write_bytes(content)
+        _status_path(tmp_path).write_bytes(content)
+
+    assert load_publication(tmp_path) is None
+    assert load_refresh_status(tmp_path) == RefreshStatus()
+
+
+def test_every_refresh_status_field_round_trips(tmp_path: Path) -> None:
+    """One writer and one loader carry the whole refresh status, field for field, and the writer returns what it wrote."""
+    status = _full_status()
+
+    assert update_refresh_status(tmp_path, lambda _current: status) == status
+
+    assert load_refresh_status(tmp_path) == status
+    payload = json.loads(_status_path(tmp_path).read_text(encoding="utf-8"))
+    assert set(payload) == {field.name for field in dataclasses.fields(status)}
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("reason", ""),
+        ("reason", 3),
+        ("reason", ["filesystem_watch"]),
+        ("reason", {"reason": "filesystem_watch"}),
+        ("last_error", ""),
+        ("last_error", ["boom"]),
+        ("last_refresh_at", ""),
+        ("last_refresh_at", 3),
+        ("reason_generation", "4"),
+        ("consecutive_refresh_failures", 1.5),
+    ],
+)
+def test_a_malformed_refresh_status_field_reads_as_its_default(tmp_path: Path, field: str, value: object) -> None:
+    """One field outside the schema reads as unknown and never invalidates the rest of the status.
+
+    A JSON array or object decodes to an unhashable value, so a field must be refused rather than raising out of a
+    loader every caller treats as total.
+    """
+    write_json_atomic(_status_path(tmp_path), _status_payload(**{field: value}))
+
+    default = {status_field.name: status_field.default for status_field in dataclasses.fields(RefreshStatus)}[field]
+    assert load_refresh_status(tmp_path) == dataclasses.replace(_full_status(), **{field: default})
+
+
+def test_refresh_status_updates_never_lose_a_concurrent_update(tmp_path: Path) -> None:
+    """Each update is a load-modify-save under the base's status lock, so concurrent writers never overwrite each other."""
+    updates_per_writer = 100
+    barrier = Barrier(2)
+
+    def increment(status: RefreshStatus) -> RefreshStatus:
+        # Hand the GIL to the other writer between its read and its write, where an unlocked update would lose one.
+        time.sleep(0)
+        return dataclasses.replace(
+            status,
+            reason_generation=status.reason_generation + 1,
+            consecutive_refresh_failures=status.consecutive_refresh_failures + 1,
+        )
+
+    def write_many() -> None:
+        barrier.wait(timeout=10)
+        for _update in range(updates_per_writer):
+            update_refresh_status(tmp_path, increment)
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        writers = [pool.submit(write_many) for _writer in range(2)]
+        for writer in writers:
+            writer.result(timeout=60)
+
+    status = load_refresh_status(tmp_path)
+    assert status.reason_generation == 2 * updates_per_writer
+    assert status.consecutive_refresh_failures == 2 * updates_per_writer
 
 
 def test_write_json_atomic_uses_unique_temp_and_cleans_failed_replace(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Atomic writes use unique hidden temp files and clean them up on failure."""
-    metadata_path = tmp_path / "indexing_settings.json"
+    """Atomic writes use unique hidden temp files, clean them up on failure, and keep the previous document."""
+    save_publication(tmp_path, _publication())
     attempted_temp_paths: list[Path] = []
     original_replace = Path.replace
 
     def _fail_temp_replace(self: Path, target: Path) -> Path:
-        if self.parent == tmp_path and self.name.startswith(".indexing_settings.json.") and self.name.endswith(".tmp"):
+        if self.parent == tmp_path and self.name.startswith(".publication.json.") and self.name.endswith(".tmp"):
             attempted_temp_paths.append(self)
             msg = "replace failed"
             raise OSError(msg)
@@ -274,8 +342,9 @@ def test_write_json_atomic_uses_unique_temp_and_cleans_failed_replace(
     monkeypatch.setattr(Path, "replace", _fail_temp_replace)
 
     with pytest.raises(OSError, match="replace failed"):
-        save_published_index_state(metadata_path, PublishedIndexState(settings=_settings(), status="complete"))
+        save_publication(tmp_path, _publication(collection="replacement"))
 
     assert attempted_temp_paths
-    assert attempted_temp_paths[0].name != "indexing_settings.json.tmp"
+    assert attempted_temp_paths[0].name != "publication.json.tmp"
     assert not attempted_temp_paths[0].exists()
+    assert load_publication(tmp_path) == _publication()

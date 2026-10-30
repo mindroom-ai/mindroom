@@ -14,7 +14,6 @@ from contextvars import Context
 from dataclasses import dataclass, replace
 from functools import partial
 from pathlib import Path
-from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, cast
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -23,12 +22,14 @@ from tests.conftest import completed_ai_response_mock, completing, install_model
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Callable, Iterator, Sequence
+    from types import SimpleNamespace
 
     from agno.run import RunContext as AgnoRunContext
     from httpx import Response
 
     from mindroom.agent_loop.build import AgentBuild
     from mindroom.agent_loop.spec import RunContext
+    from mindroom.knowledge.registry import PublishedIndexResolution
     from mindroom.response_turn import ResponseTurnContext
     from mindroom.teams.members import BuiltTeam, ResolvedExactTeamMembers
     from mindroom.tool_system.tool_function import AdaptedToolkit
@@ -69,7 +70,6 @@ from mindroom.history.types import HistoryScope, PreparedHistoryState, ResolvedR
 from mindroom.judgment.client import JudgmentClient
 from mindroom.judgment.typesafe import _PINNED_MODEL
 from mindroom.knowledge.availability import KnowledgeAvailability
-from mindroom.knowledge.indexing_config import IndexingSettings
 from mindroom.knowledge.search import AgentKnowledge
 from mindroom.knowledge.utils import KnowledgeAvailabilityDetail, _KnowledgeResolution
 from mindroom.llm.errors import MISSING_API_KEY, AuthenticationFailed, ProviderError
@@ -101,6 +101,7 @@ from mindroom.turn_model import ModelScope, TeamTurnModelSelection, resolve_team
 from mindroom.usage.stats import collect_admin_usage
 from tests.agent_loop.helpers import toolkit
 from tests.api.conftest import publish_api_config
+from tests.fakes.knowledge import RecordingRefreshScheduler, published_index_lookup
 from tests.fakes.scripted_model import SYNTHETIC, Await, ScriptedModel, ScriptStep, answer, calls, tool_call, usage
 from tests.identity_helpers import persist_entity_accounts
 from tests.runtime_fakes import bind_test_embedded_runtime, openai_compat_app
@@ -166,69 +167,10 @@ def _team_identity(
     )
 
 
-def _fake_indexing_settings(base_id: str) -> IndexingSettings:
-    return IndexingSettings(
-        base_id=base_id,
-        storage_root="memory",
-        knowledge_path=f"memory/{base_id}",
-        mode="semantic",
-        embedder_provider="openai",
-        embedder_model="text-embedding-3-small",
-        embedder_host="",
-        embedder_dimensions="",
-        chunk_size="5000",
-        chunk_overlap="0",
-        repo_identity="",
-        git_branch="",
-        git_lfs="",
-        git_skip_hidden="",
-        git_include_patterns="",
-        git_exclude_patterns="",
-        include_patterns="",
-        exclude_patterns="",
-        include_extensions="",
-        exclude_extensions="()",
-    )
-
-
 def _knowledge_indexes(knowledge: object) -> list[object]:
     """Return the published index readers behind the knowledge handle an agent received."""
     assert isinstance(knowledge, AgentKnowledge)
     return [source.index for source in knowledge.sources]
-
-
-def _knowledge_lookup(
-    reader: object | None,
-    *,
-    base_id: str = "docs",
-    availability: KnowledgeAvailability = KnowledgeAvailability.READY,
-) -> SimpleNamespace:
-    index = (
-        SimpleNamespace(
-            reader=reader,
-            state=SimpleNamespace(
-                source_signature=hashlib.sha256().hexdigest(),
-                last_published_at="2999-01-01T00:00:00+00:00",
-                last_refresh_at=None,
-                last_error=None,
-            ),
-        )
-        if reader is not None
-        else None
-    )
-    key = SimpleNamespace(
-        base_id=base_id,
-        storage_root="memory",
-        knowledge_path=f"memory/{base_id}",
-        indexing_settings=_fake_indexing_settings(base_id),
-    )
-    return SimpleNamespace(
-        key=key,
-        index=index,
-        state=index.state if index is not None else None,
-        availability=availability,
-        schedule_refresh_on_access=False,
-    )
 
 
 def _prepared_team_execution_context(
@@ -3776,16 +3718,7 @@ class TestTeamCompletion:
         stream: bool,
     ) -> None:
         """Team completions should prepend the degraded knowledge notice to the prompt."""
-        scheduled_base_ids: list[str] = []
-
-        class _FakeRefreshScheduler:
-            def schedule_refresh(self, base_id: str, **_kwargs: object) -> None:
-                scheduled_base_ids.append(base_id)
-
-            def is_refreshing(self, base_id: str, **_kwargs: object) -> bool:
-                _ = base_id
-                return False
-
+        app_refresh_scheduler = RecordingRefreshScheduler()
         member_models = [("general", "GeneralAgent", ScriptedModel([])), ("code", "CodeAgent", ScriptedModel([]))]
         members = _resolved_members(member_models)
         built = _scripted_team(answer("Team consensus result", chunk=99), members=member_models)
@@ -3798,21 +3731,16 @@ class TestTeamCompletion:
                 "dict[str, KnowledgeAvailabilityDetail] | None",
                 kwargs["unavailable_bases"],
             )
-            refresh_scheduler = kwargs["refresh_scheduler"]
             assert unavailable_bases is not None
-            assert isinstance(refresh_scheduler, _FakeRefreshScheduler)
-            assert (
-                refresh_scheduler is config_lifecycle.app_state(team_app_client.app).runtime.knowledge_refresh_scheduler
-            )
+            assert kwargs["refresh_scheduler"] is app_refresh_scheduler
             unavailable_bases["docs"] = KnowledgeAvailabilityDetail(
                 availability=availability,
                 search_available=search_available,
             )
-            refresh_scheduler.schedule_refresh("docs")
             assert requested_agent_names == members.requested_agent_names
             return members
 
-        bind_test_embedded_runtime(team_app_client.app, knowledge_refresh_scheduler=_FakeRefreshScheduler())
+        bind_test_embedded_runtime(team_app_client.app, knowledge_refresh_scheduler=app_refresh_scheduler)
         with (
             patch("mindroom.api.openai_compat.resolve_exact_team_members", side_effect=fake_materialize),
             patch("mindroom.api.openai_compat.build_team_spec", return_value=built),
@@ -3833,7 +3761,6 @@ class TestTeamCompletion:
 
         assert response.status_code == 200
         assert notice in mock_prepare.await_args.kwargs["message"]
-        assert scheduled_base_ids == ["docs"]
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize("stream", [False, True])
@@ -5025,7 +4952,7 @@ class TestKnowledgeIntegration:
             patch("mindroom.api.openai_compat.ai_response", new_callable=completed_ai_response_mock) as mock_ai,
             patch(
                 "mindroom.knowledge.utils._lookup_knowledge_for_base",
-                return_value=_knowledge_lookup(mock_reader),
+                return_value=published_index_lookup("docs", mock_reader),
             ),
         ):
             mock_ai.return_value = "Response with knowledge"
@@ -5054,12 +4981,11 @@ class TestKnowledgeIntegration:
             config: Config | None = None,
             runtime_paths: RuntimePaths | None = None,
             execution_identity: object | None = None,  # noqa: ARG001
-            on_availability: Callable[[object], None] | None = None,  # noqa: ARG001
-        ) -> SimpleNamespace | None:
+        ) -> PublishedIndexResolution | None:
             observed_calls.append((base_id, config, runtime_paths))
             if config is None or runtime_paths is None or base_id != "docs":
                 return None
-            return _knowledge_lookup(mock_reader, base_id=base_id)
+            return published_index_lookup(base_id, mock_reader)
 
         with (
             patch("mindroom.api.openai_compat.ai_response", new_callable=completed_ai_response_mock) as mock_ai,
@@ -5117,29 +5043,12 @@ class TestKnowledgeIntegration:
 
     def test_unready_kb_emits_system_hint(self, knowledge_app_client: TestClient) -> None:
         """Missing published knowledge should inject a system-style degraded hint."""
-        scheduled_base_ids: list[str] = []
+        refresh_scheduler = RecordingRefreshScheduler()
 
-        class _FakeRefreshScheduler:
-            def schedule_refresh(self, base_id: str, **_kwargs: object) -> None:
-                scheduled_base_ids.append(base_id)
+        def fake_lookup_knowledge_for_base(base_id: str, **_kwargs: object) -> PublishedIndexResolution:
+            return published_index_lookup(base_id, None)
 
-            def is_refreshing(self, base_id: str, **_kwargs: object) -> bool:
-                _ = base_id
-                return False
-
-        def fake_lookup_knowledge_for_base(
-            base_id: str,
-            *,
-            config: Config | None = None,  # noqa: ARG001
-            runtime_paths: RuntimePaths | None = None,  # noqa: ARG001
-            execution_identity: object | None = None,  # noqa: ARG001
-            on_availability: Callable[[KnowledgeAvailability], None] | None = None,
-        ) -> SimpleNamespace:
-            if on_availability is not None:
-                on_availability(KnowledgeAvailability.INITIALIZING)
-            return _knowledge_lookup(None, base_id=base_id, availability=KnowledgeAvailability.INITIALIZING)
-
-        bind_test_embedded_runtime(knowledge_app_client.app, knowledge_refresh_scheduler=_FakeRefreshScheduler())
+        bind_test_embedded_runtime(knowledge_app_client.app, knowledge_refresh_scheduler=refresh_scheduler)
         with (
             patch("mindroom.api.openai_compat.ai_response", new_callable=completed_ai_response_mock) as mock_ai,
             patch("mindroom.knowledge.utils._lookup_knowledge_for_base", side_effect=fake_lookup_knowledge_for_base),
@@ -5160,7 +5069,7 @@ class TestKnowledgeIntegration:
             "Knowledge base `docs` is initializing and unavailable for semantic search this turn."
             in mock_ai.call_args.args[0].prompt
         )
-        assert scheduled_base_ids == ["docs"]
+        assert refresh_scheduler.scheduled_base_ids == ["docs"]
 
     def test_streaming_with_knowledge(self, knowledge_app_client: TestClient) -> None:
         """Knowledge is passed through in streaming mode too."""
@@ -5173,7 +5082,7 @@ class TestKnowledgeIntegration:
             patch("mindroom.api.openai_compat.stream_agent_response", side_effect=mock_stream) as mock_stream_fn,
             patch(
                 "mindroom.knowledge.utils._lookup_knowledge_for_base",
-                return_value=_knowledge_lookup(mock_reader),
+                return_value=published_index_lookup("docs", mock_reader),
             ),
         ):
             response = knowledge_app_client.post(
@@ -5201,16 +5110,9 @@ class TestKnowledgeIntegration:
         mock_reader_docs = MagicMock()
         mock_reader_wiki = MagicMock()
 
-        def fake_lookup_knowledge_for_base(
-            base_id: str,
-            *,
-            config: Config | None = None,  # noqa: ARG001
-            runtime_paths: RuntimePaths | None = None,  # noqa: ARG001
-            execution_identity: object | None = None,  # noqa: ARG001
-            on_availability: Callable[[object], None] | None = None,  # noqa: ARG001
-        ) -> SimpleNamespace | None:
+        def fake_lookup_knowledge_for_base(base_id: str, **_kwargs: object) -> PublishedIndexResolution | None:
             reader = {"docs": mock_reader_docs, "wiki": mock_reader_wiki}.get(base_id)
-            return _knowledge_lookup(reader, base_id=base_id) if reader is not None else None
+            return published_index_lookup(base_id, reader) if reader is not None else None
 
         with (
             patch("mindroom.api.openai_compat.ai_response", new_callable=completed_ai_response_mock) as mock_ai,

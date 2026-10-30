@@ -261,12 +261,18 @@ Matrix sync callback
 | `knowledge/collection_lifetime.py` | Compatible publication selection, shared reader locks, and exclusive collection reclamation |
 | `knowledge/search.py` | What an agent searches: its published sources, the `search_knowledge_base` tool and its results, and the `<knowledge_base>` prompt block |
 | `knowledge/readers.py` | The Agno document readers and chunkers knowledge indexing reads files with; the only knowledge module that imports Agno |
-| `knowledge/collections.py` | Collection lifecycle for one knowledge base: naming, opening, writing a file's chunk rows, deleting, reclaiming superseded collections and legacy Chroma storage |
-| `knowledge/vector_store.py` | One collection as one SQLite file: chunk rows, float32 vectors, and an FTS5 keyword index; in-process search |
+| `knowledge/collections.py` | Collection naming and ownership for one knowledge base: opening, writing a file's chunk rows, reclaiming superseded collections and legacy Chroma storage |
+| `knowledge/vector_store.py` | One collection as one SQLite file: chunk rows, float32 vectors, an FTS5 keyword index, and the collection's own claims, failures, and lifecycle, changed in one transaction with its rows; in-process search |
+| `knowledge/index_metadata.py` | A base's two state documents: the publication, written only by the publisher under the source-root lock, and the refresh status, written only by the runtime |
+| `knowledge/manager.py` | The candidate lifecycle of one semantic base: which collection to resume, copy, or start, reconciling it with the source, and publishing it |
+| `knowledge/file_indexer.py` | One refresh's file indexing: read, chunk, batch-embed, and write each file with its claim, with that refresh's failure evidence |
+| `knowledge/corpus_signature.py` | File signatures, the stat-first corpus scan, and the corpus hash a publication records |
+| `knowledge/legacy_index_state.py` | Startup conversion of knowledge state earlier releases kept outside each collection |
 | `knowledge/index_reader.py` | Published index handle: embeds a query and searches the current compatible publication on a worker thread |
 | `knowledge/git_source.py` | The Git checkout a knowledge base indexes: clone, fetch, force-align, LFS hydration, credential injection |
-| `knowledge/refresh_runner.py` | Dispatches one knowledge refresh: subprocess spawn, cancellation cleanup, publish and reconcile decisions |
-| `knowledge/refresh_locks.py` | Process-wide refresh serialization (in-loop and cross-process source-root locks) and active-refresh bookkeeping |
+| `knowledge/refresh_runner.py` | One knowledge refresh: the child's work under the source-root lock, and the runtime side that spawns it and records its outcome in the refresh status |
+| `knowledge/refresh_scheduler.py` | The process's one refresh scheduler: which bases are refreshing, one queued request each, the concurrency limit, and on-access cooldowns |
+| `knowledge/refresh_locks.py` | The source-root lock that serializes one source's refresh and mutation work, in-loop and across processes |
 | `knowledge_graph/scope.py` | Which graph an agent or private instance owns, named in code from its state root, embedder, and generation |
 | `knowledge_graph/store.py` | The runtime's one Graphiti client and its episode, fact, and entity operations; health and the store registry |
 | `knowledge_graph/clients.py` | Graphiti's LLM, embedder, and reranker clients backed by MindRoom's model and embedder construction |

@@ -1,0 +1,13 @@
+{
+  "base_id": "docs",
+  "description": "Published collection with its seal, and the collection it retired with its retired seal.",
+  "docs": {
+    "a.md": "alpha one",
+    "b.md": "bravo two",
+    "c.md": "charlie one",
+    "empty.md": ""
+  },
+  "knowledge_path": "/dev/shm/pytest-of-basnijholt/pytest-8778/test_two_publications0/docs",
+  "storage_key": "docs_2c41819d",
+  "storage_root": "/dev/shm/pytest-of-basnijholt/pytest-8778/test_two_publications0/mindroom_data"
+}
