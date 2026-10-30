@@ -1170,6 +1170,37 @@ async def test_a_reply_publishes_the_usage_and_cost_of_every_attempt_its_turn_ra
 
 @pytest.mark.asyncio
 @pytest.mark.usefixtures("probe")
+async def test_a_reply_publishes_the_usage_of_each_of_three_attempts(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A model switch whose continuation came back empty and was retried publishes all three attempts' usage."""
+    switch = tool_call("switch_thread_model", "call-switch", model_name="missing", when="next-turn")
+    reply = _reply(
+        tmp_path,
+        monkeypatch,
+        [calls(switch, metrics=usage(100, 5)), answer("", usage(40, 2)), answer("Answered.", usage(120, 9))],
+        tools=(PROBE_TOOL, "thread_model"),
+    )
+    run_metadata: dict[str, Any] = {}
+
+    with tool_runtime_context(reply.runtime):
+        stream = stream_agent_response(
+            _ctx(reply),
+            reply.runtime_paths,
+            reply.config,
+            sinks=TurnSinks(turn_recorder=reply.recorder, run_metadata_collector=run_metadata),
+        )
+        assert "".join(streamed_text([chunk async for chunk in stream])).endswith("Answered.")
+
+    assert len(reply.model.requests) == 3
+    assert sorted(counted_usage(reply.storage, SESSION_ID)) == [(40, 2), (100, 5), (120, 9)]
+    published = run_metadata[AI_RUN_METADATA_KEY]["usage"]
+    assert (published["input_tokens"], published["output_tokens"]) == counted_total(reply.storage, SESSION_ID)
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("probe")
 async def test_a_reply_whose_continuation_failed_publishes_the_usage_of_the_attempt_before_it(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

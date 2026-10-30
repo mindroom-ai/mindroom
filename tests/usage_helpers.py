@@ -27,7 +27,10 @@ _INPUT_PRICE, _OUTPUT_PRICE = 2, 10
 
 
 def counted_usage(storage: ConversationStore, session_id: str) -> list[tuple[int, int]]:
-    """Return the input and output tokens of each usage snapshot the session's ledger counts; zero ones are left out."""
+    """Return the input and output tokens of each usage snapshot the session's ledger counts.
+
+    A snapshot omits a zero counter, which reads as 0.
+    """
     with storage.transaction(write=False) as connection:
         snapshots = connection.execute(
             f"SELECT usage_data FROM {quote_identifier(storage.names.usage)} WHERE session_id = ?",  # noqa: S608
