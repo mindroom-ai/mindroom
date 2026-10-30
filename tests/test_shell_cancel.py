@@ -40,9 +40,7 @@ def _make_runtime_paths(tmp_path: Path) -> RuntimePaths:
 def _get_run_shell_command(tmp_path: Path) -> Callable[..., Awaitable[str]]:
     runtime_paths = _make_runtime_paths(tmp_path)
     tool = get_tool_by_name("shell", runtime_paths, runs_in_worker=False, worker_target=None)
-    entrypoint = tool.functions["run_shell_command"]
-    assert entrypoint is not None
-    return entrypoint
+    return tool.functions["run_shell_command"]
 
 
 async def _wait_for_pid(pid_file: Path) -> int:

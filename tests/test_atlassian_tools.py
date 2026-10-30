@@ -128,7 +128,6 @@ async def test_catalog_construction_applies_site_pin(tmp_path: Path, monkeypatch
     )
 
     entrypoint = tool.functions["jira_search_issues"]
-    assert entrypoint is not None
     result = json.loads(await entrypoint(jql="project = PROJ"))
 
     assert result["status"] == "ok"

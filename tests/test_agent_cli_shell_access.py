@@ -273,7 +273,6 @@ async def test_local_launcher_directory_with_a_comma_stays_on_path(tmp_path: Pat
     shell_env = agent_cli_shell_env(runtime.config, runtime.runtime_paths, "helper", "grant")
     shell = get_tool_by_name("shell", runtime.runtime_paths, runs_in_worker=False, worker_target=None)
     run = shell.functions["run_shell_command"]
-    assert run is not None
 
     with bound_agent_cli_shell_env(shell_env, window="bash"):
         output = await run("command -v mindroom-agent")

@@ -264,7 +264,6 @@ def _build(name: str, paths: RuntimePaths, requester_id: str | None = None) -> A
 
 async def _call(tool: AtlassianToolkit, function_name: str, **kwargs: object) -> dict[str, Any]:
     entrypoint = tool.functions[function_name]
-    assert entrypoint is not None
     return json.loads(await entrypoint(**kwargs))
 
 

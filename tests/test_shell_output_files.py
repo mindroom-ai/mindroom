@@ -295,7 +295,6 @@ async def test_cancelled_capture_does_not_publish(shell_toolkit: AnyToolkit, tmp
     function = toolkit_function(shell_toolkit, "run_shell_command")
     assert function is not None
     run = function.entrypoint
-    assert run is not None
     task = asyncio.create_task(
         run(
             args="echo $$ > process.pid; printf partial; exec sleep 300",
