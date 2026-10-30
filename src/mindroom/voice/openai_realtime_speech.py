@@ -46,11 +46,24 @@ _READER_INSTRUCTIONS = (
 
 
 class RealtimeSpeechError(RuntimeError):
-    """The Realtime API did not finish speaking the text; ``status_code`` is the HTTP status of a refused connection."""
+    """The Realtime API did not finish speaking the text.
 
-    def __init__(self, message: str, *, status_code: int | None = None) -> None:
+    ``status_code`` is the HTTP status of a refused connection; ``code`` and ``param`` come from a Realtime error event
+    and name what it rejected, such as an unknown voice.
+    """
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        status_code: int | None = None,
+        code: str | None = None,
+        param: str | None = None,
+    ) -> None:
         super().__init__(message)
         self.status_code = status_code
+        self.code = code
+        self.param = param
 
 
 def is_realtime_speech_model(model: str) -> bool:
@@ -141,7 +154,7 @@ async def _realtime_speech_chunks(
                         raise RealtimeSpeechError(msg)
                     return
                 elif isinstance(event, RealtimeErrorEvent):
-                    raise RealtimeSpeechError(event.error.message)
+                    raise RealtimeSpeechError(event.error.message, code=event.error.code, param=event.error.param)
     msg = "Realtime connection closed before the speech finished."
     raise RealtimeSpeechError(msg)
 

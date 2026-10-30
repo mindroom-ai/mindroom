@@ -7152,6 +7152,7 @@ from = ["mindroom.matrix.client_delivery"]
 [[interfaces]]
 expose = [
     "PreparedVoiceAudio",
+    "can_prepare_voice_audio",
     "prepare_voice_audio_bytes",
 ]
 from = ["mindroom.matrix.voice_message"]

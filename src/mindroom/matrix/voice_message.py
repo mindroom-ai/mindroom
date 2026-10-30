@@ -142,6 +142,19 @@ async def _transcode_to_opus_ogg(ffmpeg: str, input_path: Path) -> bytes | None:
         output_path.unlink(missing_ok=True)
 
 
+def _media_tools() -> tuple[str, str] | None:
+    ffmpeg = shutil.which("ffmpeg")
+    ffprobe = shutil.which("ffprobe")
+    if ffmpeg is None or ffprobe is None:
+        return None
+    return ffmpeg, ffprobe
+
+
+def can_prepare_voice_audio(response_format: str) -> bool:
+    """Return whether speech in ``response_format`` can become a voice payload on this host."""
+    return response_format == _OPUS_RESPONSE_FORMAT or _media_tools() is not None
+
+
 def _write_audio_tempfile(audio_bytes: bytes, *, suffix: str) -> Path:
     with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as audio_handle:
         audio_handle.write(audio_bytes)
@@ -155,9 +168,8 @@ async def prepare_voice_audio_bytes(audio_bytes: bytes, *, response_format: str)
     Without ffmpeg/ffprobe on PATH, opus input is returned without duration or waveform metadata and other formats return None.
     Returns None when the audio cannot be probed or transcoded.
     """
-    ffmpeg = shutil.which("ffmpeg")
-    ffprobe = shutil.which("ffprobe")
-    if ffmpeg is None or ffprobe is None:
+    media_tools = _media_tools()
+    if media_tools is None:
         if response_format == _OPUS_RESPONSE_FORMAT:
             return PreparedVoiceAudio(
                 audio_bytes=audio_bytes,
@@ -166,6 +178,7 @@ async def prepare_voice_audio_bytes(audio_bytes: bytes, *, response_format: str)
                 waveform=None,
             )
         return None
+    ffmpeg, ffprobe = media_tools
 
     input_path = await asyncio.to_thread(_write_audio_tempfile, audio_bytes, suffix=f".{response_format}")
     try:

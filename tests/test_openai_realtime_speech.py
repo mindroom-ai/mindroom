@@ -183,13 +183,19 @@ async def test_chunks_stream_in_order(fake_client: type[_FakeClient]) -> None:
 
 @pytest.mark.asyncio
 async def test_error_event_raises_with_provider_message(fake_client: type[_FakeClient]) -> None:
-    """A Realtime error event fails the synthesis with the provider's message."""
-    fake_client.events = [
-        RealtimeErrorEvent.model_construct(type="error", error=RealtimeError.model_construct(message="bad voice")),
-    ]
+    """A Realtime error event fails the synthesis with the provider's message, code, and rejected parameter."""
+    error = RealtimeError.model_construct(
+        message="bad voice",
+        code="invalid_value",
+        param="session.audio.output.voice",
+    )
+    fake_client.events = [RealtimeErrorEvent.model_construct(type="error", error=error)]
 
-    with pytest.raises(RealtimeSpeechError, match="bad voice"):
+    with pytest.raises(RealtimeSpeechError, match="bad voice") as raised:
         await _synthesize()
+
+    assert raised.value.code == "invalid_value"
+    assert raised.value.param == "session.audio.output.voice"
 
 
 @pytest.mark.asyncio

@@ -42,6 +42,12 @@ def _reset_matrix_voice_message_rate_limit() -> None:
     MatrixVoiceMessageTools._recent_actions.clear()
 
 
+@pytest.fixture(autouse=True)
+def _media_tools_on_path(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Let the ffmpeg preflight pass whether or not the test host has ffmpeg."""
+    monkeypatch.setattr("mindroom.matrix.voice_message.shutil.which", lambda name: f"/usr/bin/{name}")
+
+
 def _payload(raw: str) -> dict[str, object]:
     parsed = json.loads(raw)
     assert isinstance(parsed, dict)
@@ -722,10 +728,15 @@ async def test_matrix_voice_message_realtime_failure_is_sanitized(tmp_path: Path
 
     with (
         tool_runtime_context(context),
+        patch("mindroom.custom_tools.matrix_voice_message.logger") as mock_logger,
         patch(
             "mindroom.custom_tools.matrix_voice_message.synthesize_realtime_speech",
             new_callable=AsyncMock,
-            side_effect=RealtimeSpeechError("boom sk-secret"),
+            side_effect=RealtimeSpeechError(
+                "boom sk-secret",
+                code="invalid_value",
+                param="session.audio.output.voice",
+            ),
         ),
         patch("mindroom.custom_tools.matrix_voice_message.send_audio_message", new_callable=AsyncMock) as mock_send,
     ):
@@ -736,3 +747,36 @@ async def test_matrix_voice_message_realtime_failure_is_sanitized(tmp_path: Path
     assert payload["status"] == "error"
     assert payload["message"] == "Failed to generate speech."
     assert "sk-secret" not in result
+    log_fields = mock_logger.error.call_args.kwargs
+    assert log_fields["error_code"] == "invalid_value"
+    assert log_fields["error_param"] == "session.audio.output.voice"
+    assert "sk-secret" not in str(mock_logger.error.call_args)
+
+
+@pytest.mark.asyncio
+async def test_matrix_voice_message_without_ffmpeg_fails_before_sending_or_speaking(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A host without ffmpeg rejects a Realtime voice note before the companion text or the paid speech."""
+    monkeypatch.setattr("mindroom.matrix.voice_message.shutil.which", lambda _name: None)
+    context = _context(tmp_path, thread_id="$thread-root")
+
+    with (
+        tool_runtime_context(context),
+        patch("mindroom.custom_tools.matrix_conversation_operations.send_message_result") as mock_text_send,
+        patch(
+            "mindroom.custom_tools.matrix_voice_message.synthesize_realtime_speech",
+            new_callable=AsyncMock,
+        ) as mock_synthesize,
+    ):
+        result = await MatrixVoiceMessageTools(api_key="sk-test").matrix_voice_message(
+            "hello",
+            companion_message="Readable transcript",
+        )
+
+    payload = _payload(result)
+    assert payload["status"] == "error"
+    assert "ffmpeg" in str(payload["message"])
+    mock_text_send.assert_not_called()
+    mock_synthesize.assert_not_awaited()

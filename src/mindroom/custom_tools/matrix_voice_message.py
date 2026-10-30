@@ -23,7 +23,7 @@ from mindroom.custom_tools.matrix_helpers import check_rate_limit
 from mindroom.custom_tools.tool_payloads import custom_tool_payload
 from mindroom.logging_config import get_logger
 from mindroom.matrix.client_delivery import send_audio_message
-from mindroom.matrix.voice_message import prepare_voice_audio_bytes
+from mindroom.matrix.voice_message import can_prepare_voice_audio, prepare_voice_audio_bytes
 from mindroom.model_defaults import LOCAL_OPENAI_API_KEY_DEFAULT, OPENAI_TTS, OPENROUTER_BASE_URL_DEFAULT
 from mindroom.tool_system.runtime_context import ToolRuntimeContext, get_tool_runtime_context
 from mindroom.voice.openai_realtime_speech import (
@@ -265,7 +265,7 @@ class MatrixVoiceMessageTools(Toolkit):
             message="Failed to send companion message to Matrix.",
         )
 
-    async def _preflight(
+    async def _preflight(  # noqa: PLR0911
         self,
         context: ToolRuntimeContext,
         *,
@@ -284,6 +284,11 @@ class MatrixVoiceMessageTools(Toolkit):
 
         base_url = self._base_url_for_context(context)
         response_format = self._response_format_for_target(base_url)
+        if not can_prepare_voice_audio(response_format):
+            return None, self._payload(
+                "error",
+                message="Voice messages from gpt-realtime models and non-opus formats need ffmpeg and ffprobe on the backend host.",
+            )
 
         resolved_room_id = resolve_optional_room_id(context, room_id)
         if not await room_access_allowed(context, resolved_room_id):
@@ -420,12 +425,17 @@ class MatrixVoiceMessageTools(Toolkit):
             audio_bytes = await self._speech_audio(preflight)
         except Exception as error:
             status_code = error.status_code if isinstance(error, (APIStatusError, RealtimeSpeechError)) else None
+            error_code, error_param = (
+                (error.code, error.param) if isinstance(error, RealtimeSpeechError) else (None, None)
+            )
             logger.error(  # noqa: TRY400 - avoid traceback logging for provider errors that may include secrets.
                 "matrix_voice_tts_generation_failed",
                 room_id=preflight.room_id,
                 thread_id=effective_thread_id,
                 error_type=error.__class__.__name__,
                 status_code=status_code,
+                error_code=error_code,
+                error_param=error_param,
             )
             return self._payload(
                 "error",
@@ -448,7 +458,7 @@ class MatrixVoiceMessageTools(Toolkit):
                 room_id=preflight.room_id,
                 thread_id=effective_thread_id,
                 companion_event_id=companion_event_id,
-                message="Failed to prepare generated audio as a Matrix voice message; gpt-realtime models and non-opus response formats require ffmpeg and ffprobe.",
+                message="Failed to prepare generated audio as a Matrix voice message.",
             )
         event_id = await send_audio_message(
             context.client,
