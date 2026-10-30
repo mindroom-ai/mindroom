@@ -14,6 +14,7 @@ import sys
 import threading
 import tokenize
 import weakref
+from contextlib import contextmanager
 from dataclasses import dataclass, field, replace
 from functools import cached_property
 from pathlib import Path
@@ -37,7 +38,7 @@ from mindroom.tool_system.registry import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Iterable, Mapping, Sequence
+    from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
     from types import ModuleType
 
     from mindroom.automations.registry import CheckFn
@@ -343,6 +344,17 @@ def prepare_plugins(config: Config, runtime_paths: RuntimePaths) -> PluginGenera
     A plugin that fails to load is skipped. A structural error, such as two configured plugins with one manifest name
     or two plugins registering one tool, raises, and nothing this preparation started keeps running.
     """
+    with staged_plugins(config, runtime_paths) as generation:
+        return generation
+
+
+@contextmanager
+def staged_plugins(config: Config, runtime_paths: RuntimePaths) -> Iterator[PluginGeneration]:
+    """Load ``config``'s plugins fresh, as ``prepare_plugins`` does, with their modules importable during the block.
+
+    The installed modules return when the block ends, so code the block runs, such as a plugin callback's lazy relative
+    import, finds the staged modules; another thread's import meanwhile can see them too.
+    """
     import mindroom.tools  # noqa: F401, PLC0415 - built-ins register before any plugin may collide with them.
 
     with _PLUGIN_LOCK:
@@ -366,7 +378,7 @@ def prepare_plugins(config: Config, runtime_paths: RuntimePaths) -> PluginGenera
                 module_cache=MappingProxyType(dict(plugin_imports._MODULE_IMPORT_CACHE)),
             )
             _log_loaded_plugins(generation)
-            return generation
+            yield generation
         finally:
             for module_name in _canonical_plugin_modules():
                 sys.modules.pop(module_name, None)

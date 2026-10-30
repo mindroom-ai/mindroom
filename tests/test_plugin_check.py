@@ -222,6 +222,39 @@ def test_check_plugin_rejects_an_agno_mcp_toolkit_and_names_mcp_servers(tmp_path
     assert plugins_module._PUBLISHED is published
 
 
+def test_check_plugin_checks_a_toolkit_its_factory_imports_from_the_plugin_lazily(tmp_path: Path) -> None:
+    """A factory's lazy relative import finds the plugin's own module during the check, as after publication."""
+    plugin_root = _tool_plugin(
+        tmp_path / "plugin",
+        "def wrapper_tools():\n    from .impl import Tools\n    return Tools\n",
+    )
+    (plugin_root / "impl.py").write_text(
+        "from agno.tools.mcp import MCPTools\nclass Tools(MCPTools):\n    pass\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match=r"'wrapper' subclasses Agno MCPTools"):
+        check_plugin(plugin_root)
+
+
+def test_check_plugin_runs_an_oauth_callback_that_imports_from_the_plugin_lazily(tmp_path: Path) -> None:
+    """An OAuth registration callback's lazy relative import finds the plugin's own module during the check."""
+    plugin_root = _valid_plugin(tmp_path / "plugin")
+    oauth_path = plugin_root / "oauth.py"
+    (plugin_root / "providers.py").write_text(oauth_path.read_text(encoding="utf-8"), encoding="utf-8")
+    oauth_path.write_text(
+        "def register_oauth_providers(settings, runtime_paths):\n"
+        "    from .providers import register_oauth_providers as providers\n"
+        "    return providers(settings, runtime_paths)\n",
+        encoding="utf-8",
+    )
+    published = plugins_module._PUBLISHED
+
+    assert check_plugin(plugin_root).name == "compat-demo"
+    assert plugins_module._PUBLISHED is published
+    assert not {name for name in sys.modules if name.startswith("mindroom_plugin_compat")}
+
+
 def test_check_plugin_accepts_a_tool_whose_factory_imports_a_package_installed_later(tmp_path: Path) -> None:
     """A factory may import a dependency the user installs after the plugin, so the check cannot inspect its class."""
     plugin_root = _tool_plugin(

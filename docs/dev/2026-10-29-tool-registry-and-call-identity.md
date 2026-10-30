@@ -19,7 +19,8 @@ Rejected alternatives, in the order design review rejected them:
 
 Validating a candidate config reuses the published generation's registrations for plugins whose source is unchanged and executes only new or changed plugins, in a separate module namespace through the same loader, then removes that namespace and cancels any task it started.
 A separate namespace is what isolates candidate code from live imports, which is why validation still executes new or changed plugins instead of reading them from the registry.
-Reload preparation still stages under canonical names on the event loop, so a plugin that needs the running loop at import keeps loading; a concurrent lazy import in a tool thread can briefly see staged code there, as before.
+Preparation stages under canonical names on the event loop, at startup as at reload, so a plugin that needs the running loop at import loads in both; the loop waits for the imports, and a concurrent lazy import in a tool thread can briefly see staged code, as before.
+`mindroom plugins check` and plugin installation run their checks inside that staging, so a callback's or factory's lazy relative import finds the plugin's own modules, as it does once the plugin is published.
 
 A plugin that fails to load is skipped everywhere, and a plugin that fails part-way has the tasks its executed modules started cancelled before it is skipped.
 A reload that fails as a whole (duplicate manifest names, a tool name two plugins or a plugin and a configured MCP server take) publishes nothing, so the previous plugins and their tasks keep running.

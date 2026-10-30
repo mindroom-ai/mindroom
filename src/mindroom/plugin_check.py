@@ -12,7 +12,7 @@ from mindroom.constants import resolve_runtime_paths
 from mindroom.hooks import get_hook_metadata
 from mindroom.oauth.registry import oauth_provider_registry
 from mindroom.tool_system.catalog import load_toolkit_class
-from mindroom.tool_system.plugins import ConfigPlugins, dispose_plugins, prepare_plugins
+from mindroom.tool_system.plugins import ConfigPlugins, dispose_plugins, staged_plugins
 
 
 @dataclass(frozen=True, slots=True)
@@ -41,44 +41,45 @@ def check_plugin(plugin_path: Path) -> _PluginCheckResult:
             context={"runtime_paths": runtime_paths},
         )
 
-        generation = prepare_plugins(config, runtime_paths)
-        try:
-            if generation.skipped:
-                raise generation.skipped[0].error
-            plugins = ConfigPlugins.of(generation, config, runtime_paths)
-            automations = plugins.hooks.automations
-            if automations.collisions:
-                msg = f"Automation names already taken: {', '.join(automations.collisions)}"
-                raise ValueError(msg)
-            oauth_provider_registry(plugins, skip_broken_plugins=False)
+        # The checks run while the plugin's modules stay importable, as they are once it is published.
+        with staged_plugins(config, runtime_paths) as generation:
+            try:
+                if generation.skipped:
+                    raise generation.skipped[0].error
+                plugins = ConfigPlugins.of(generation, config, runtime_paths)
+                automations = plugins.hooks.automations
+                if automations.collisions:
+                    msg = f"Automation names already taken: {', '.join(automations.collisions)}"
+                    raise ValueError(msg)
+                oauth_provider_registry(plugins, skip_broken_plugins=False)
 
-            if len(plugins.loaded_plugins) != 1:
-                msg = f"Expected one loaded plugin, got {len(plugins.loaded_plugins)}"
-                raise ValueError(msg)
-            [plugin] = plugins.loaded_plugins
-            tool_names = tuple(sorted(plugin.tools))
-            for tool_name in tool_names:
-                factory = plugin.tools[tool_name].factory
-                # The registration decorator gives every plugin tool its factory.
-                assert factory is not None
-                # A factory may import a package the user installs after the plugin; its build checks it then.
-                with suppress(ImportError):
-                    load_toolkit_class(tool_name, factory)
-            hook_names = tuple(
-                sorted(
-                    metadata.hook_name
-                    for callback in plugin.discovered_hooks
-                    if (metadata := get_hook_metadata(callback)) is not None
-                ),
-            )
-            return _PluginCheckResult(
-                name=plugin.name,
-                tool_names=tool_names,
-                hook_names=hook_names,
-                automation_names=tuple(sorted(automations.plugin_definitions)),
-                skill_directories=tuple(
-                    sorted(str(skill_directory.relative_to(plugin.root)) for skill_directory in plugin.skill_dirs),
-                ),
-            )
-        finally:
-            dispose_plugins(generation)
+                if len(plugins.loaded_plugins) != 1:
+                    msg = f"Expected one loaded plugin, got {len(plugins.loaded_plugins)}"
+                    raise ValueError(msg)
+                [plugin] = plugins.loaded_plugins
+                tool_names = tuple(sorted(plugin.tools))
+                for tool_name in tool_names:
+                    factory = plugin.tools[tool_name].factory
+                    # The registration decorator gives every plugin tool its factory.
+                    assert factory is not None
+                    # A factory may import a package the user installs after the plugin; its build checks it then.
+                    with suppress(ImportError):
+                        load_toolkit_class(tool_name, factory)
+                hook_names = tuple(
+                    sorted(
+                        metadata.hook_name
+                        for callback in plugin.discovered_hooks
+                        if (metadata := get_hook_metadata(callback)) is not None
+                    ),
+                )
+                return _PluginCheckResult(
+                    name=plugin.name,
+                    tool_names=tool_names,
+                    hook_names=hook_names,
+                    automation_names=tuple(sorted(automations.plugin_definitions)),
+                    skill_directories=tuple(
+                        sorted(str(skill_directory.relative_to(plugin.root)) for skill_directory in plugin.skill_dirs),
+                    ),
+                )
+            finally:
+                dispose_plugins(generation)
