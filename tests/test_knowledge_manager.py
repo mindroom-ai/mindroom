@@ -3355,8 +3355,13 @@ async def test_local_refresh_marks_duplicate_source_sibling_stale_after_source_c
 
 
 @pytest.mark.asyncio
-async def test_a_forced_reindex_of_a_local_base_does_not_mark_its_aliases_stale(tmp_path: Path) -> None:
+async def test_a_forced_reindex_of_a_local_base_does_not_mark_its_aliases_stale(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """Rebuilding one alias's vectors changes no source, so the aliases over the same folder stay ready."""
+    # Stamps inside the racy window are never trusted, so a slow run would see the corpus change; close it.
+    monkeypatch.setattr(knowledge_corpus_signature, "_RACY_WINDOW_NS", 0)
     docs_path = tmp_path / "docs"
     docs_path.mkdir()
     (docs_path / "guide.md").write_text("shared local", encoding="utf-8")
@@ -3374,6 +3379,26 @@ async def test_a_forced_reindex_of_a_local_base_does_not_mark_its_aliases_stale(
     assert get_published_index("beta", config=config, runtime_paths=runtime_paths).availability is (
         KnowledgeAvailability.READY
     )
+
+
+@pytest.mark.asyncio
+async def test_a_forced_reindex_after_a_source_edit_marks_its_aliases_stale(tmp_path: Path) -> None:
+    """A forced reindex that finds the folder edited tells the aliases over it, which may never notice on their own."""
+    docs_path = tmp_path / "docs"
+    docs_path.mkdir()
+    doc = docs_path / "guide.md"
+    doc.write_text("shared local old", encoding="utf-8")
+    config = _config(tmp_path, bases={"alpha": docs_path, "beta": docs_path}, agent_bases=["alpha", "beta"])
+    runtime_paths = runtime_paths_for(config)
+    await refresh_knowledge_binding("alpha", config=config, runtime_paths=runtime_paths)
+    await refresh_knowledge_binding("beta", config=config, runtime_paths=runtime_paths)
+    doc.write_text("shared local new", encoding="utf-8")
+
+    result = await refresh_knowledge_binding("alpha", config=config, runtime_paths=runtime_paths, force_reindex=True)
+
+    assert result.index_published is True
+    beta_key = resolve_published_index_key("beta", config=config, runtime_paths=runtime_paths)
+    assert _refresh_state_for_key(beta_key) == "stale"
 
 
 def test_config_knowledge_overlap_checks_scale_with_root_count(

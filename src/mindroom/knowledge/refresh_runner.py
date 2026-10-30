@@ -630,6 +630,14 @@ async def _refresh_locked(
             return _RefreshChildResult(indexed_count=publication.indexed_count, published=True)
         if unchanged is False and not manager.git_source.is_configured():
             source_changed = "source_changed"
+    elif force_reindex and publication is not None and not manager.git_source.is_configured():
+        # The rebuild trusts no claim, but the aliases over this folder still need to hear of an edit it finds; the
+        # stat-first scan is the one the rebuild then reuses.
+        known = (
+            None if publication.collection is None else await manager.published_file_signatures(publication.collection)
+        )
+        if await manager.source_signature(known or {}) != publication.source_signature:
+            source_changed = "source_changed"
     outcome = await manager.reindex_all(force_reindex=force_reindex)
     return _RefreshChildResult(
         indexed_count=outcome.indexed_count,
