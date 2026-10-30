@@ -52,6 +52,7 @@ from tests.conftest import (
 )
 from tests.fakes.scripted_model import ScriptedModel, ScriptStep, calls, tool_call, usage
 from tests.scripted_agent_helpers import registered_toolkit
+from tests.turn_model_helpers import team_member_models
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Iterator, Mapping, Sequence
@@ -282,15 +283,7 @@ class TeamTurn:
         ``user_id`` names the requester; every option that names neither the team nor a sink is a turn input.
         """
         self.recorder = TurnRecorder(user_message=message)
-        spec = TeamTurnSpec(
-            **{
-                "agent_names": list(self.member_names),
-                "mode": self.mode,
-                "orchestrator": self.orchestrator,
-                "configured_team_name": self.team_name,
-            }
-            | {name: options.pop(name) for name in _SPEC_OPTIONS & options.keys()},
-        )
+        spec_options = {name: options.pop(name) for name in _SPEC_OPTIONS & options.keys()}
         sinks = TurnSinks(
             turn_recorder=self.recorder,
             **{name: options.pop(name) for name in _SINK_OPTIONS & options.keys()},
@@ -300,6 +293,23 @@ class TeamTurn:
         turn_ctx = replace(
             ctx or self.ctx(),
             **{"prompt": message, "execution_identity": self.identity} | options,
+        )
+        spec = TeamTurnSpec(
+            **{
+                "agent_names": list(self.member_names),
+                "mode": self.mode,
+                "orchestrator": self.orchestrator,
+                "member_model_names": team_member_models(
+                    self.config,
+                    self.runtime_paths,
+                    self.team_name,
+                    self.member_names,
+                    room_id=turn_ctx.room_id,
+                    thread_id=turn_ctx.thread_id,
+                ),
+                "configured_team_name": self.team_name,
+            }
+            | spec_options,
         )
         return spec, turn_ctx, sinks
 

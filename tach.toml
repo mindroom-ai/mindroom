@@ -6796,6 +6796,7 @@ expose = [
     "formation.select_ad_hoc_team_mode",
     "members.BuiltTeam",
     "members.ResolvedExactTeamMembers",
+    "members.allow_direct_private_team_agents",
     "members.build_team_spec",
     "members.requested_team_agent_names",
     "members.resolve_exact_team_members",

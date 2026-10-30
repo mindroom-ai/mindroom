@@ -13,8 +13,9 @@ import json
 from dataclasses import dataclass, replace
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, ClassVar
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
+import nio
 import pytest
 from agno.tools import Toolkit
 from structlog.testing import capture_logs
@@ -30,7 +31,7 @@ from mindroom.config.models import CompactionConfig
 from mindroom.config.plugin import PluginEntryConfig
 from mindroom.dispatch_source import ScheduledHistoryBudget
 from mindroom.entity_resolution import entity_identity_registry
-from mindroom.final_delivery import AwaitingApproval, Cancelled, Failed, FailureCause, FinalDeliveryOutcome
+from mindroom.final_delivery import AwaitingApproval, Cancelled, FinalDeliveryOutcome
 from mindroom.history.interrupted_replay import is_interrupted_replay_run
 from mindroom.history.run_visibility import (
     QUEUED_MESSAGE_NOTICE_MARKER_KEY,
@@ -449,7 +450,7 @@ async def test_a_pause_with_no_approval_to_ask_for_fails_the_reply(
     """A run paused on an externally executed call that is not a delegation has nothing to resume it, so the reply fails.
 
     The loop stores the ``PAUSED`` row; the turn driver records the failure on the turn recorder as an error and
-    writes it over the row, so the row no longer waits for an approval that never comes.
+    writes it over the row, so the row no longer waits for an approval that never comes. The reply says why.
     """
     reply = _reply(
         tmp_path,
@@ -459,9 +460,13 @@ async def test_a_pause_with_no_approval_to_ask_for_fails_the_reply(
     )
     replaced = _runs_under_interrupted_records(monkeypatch, reply.storage)
 
-    with pytest.raises(RuntimeError, match="without an approval to ask for"):
-        await _respond(reply)
+    text = await _respond(reply)
 
+    # Below the call it had shown, the reply ends with the failure's own paragraph.
+    assert text.split("\n\n")[-2:] == [
+        "🔧 `touch` [1] ⏳",
+        "[assistant] ⚠️ Error: agent run 'run-1' paused on ['touch'] without an approval to ask for",
+    ]
     assert probe.calls == []
     [paused] = replaced
     assert paused.status is RunStatus.paused
@@ -807,6 +812,29 @@ async def test_a_reply_persists_a_notice_an_earlier_crashed_reply_left_live(
     assert [_notice_markers([message]) for message in reply.model.requests[0].messages if message.from_history] == [
         ["persisted"],
     ]
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("probe")
+async def test_only_a_reply_whose_attempt_started_hands_its_session_to_queued_notice_finalization(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A reply that fails while preparing its first attempt ran nothing in the agent session, so it registers none."""
+    reply = _reply(tmp_path, monkeypatch, [answer("Done.")])
+
+    with queued_message_signal_context(None) as notices:
+        assert await _respond(reply) == "Done."
+    assert list(notices.storage_targets) == [("assistant", SESSION_ID, "agent")]
+
+    async def history_unavailable(*_args: object, **_kwargs: object) -> None:
+        msg = "history unavailable"
+        raise RuntimeError(msg)
+
+    monkeypatch.setattr(ai, "_prepare_agent_run_context", history_unavailable)
+    with queued_message_signal_context(None) as notices:
+        assert await _respond(reply, run_id="run-2") == "[assistant] ⚠️ Error: history unavailable"
+    assert notices.storage_targets == {}
 
 
 @pytest.mark.asyncio
@@ -1412,8 +1440,7 @@ async def test_the_runner_records_the_failure_over_a_pause_with_no_approval_to_a
     """Through ``ResponseRunner``, a pause nothing can resume fails the reply, and the failure lands over the ``PAUSED`` row.
 
     The loop stores the pause; the lifecycle owner then records the failure over the row as its interrupted-turn
-    record, so it no longer waits for an approval that never comes. Streamed or not, the reply ends failed with
-    that error.
+    record, so it no longer waits for an approval that never comes. The reply says why, streamed or delivered whole.
     """
     reply = _reply(
         tmp_path,
@@ -1422,13 +1449,16 @@ async def test_the_runner_records_the_failure_over_a_pause_with_no_approval_to_a
         tools=(EXTERNAL_PROBE_TOOL,),
     )
     runner = _runner(reply, tmp_path)
+    presence = MagicMock(spec=nio.PresenceGetResponse)
+    presence.presence = "online" if streaming else "offline"
+    presence.last_active_ago = 0
+    runner.deps.runtime.client.get_presence = AsyncMock(return_value=presence)
 
-    delivery, _outcome = await _respond_through_runner(runner, _request(), streaming=streaming)
+    await runner.generate_response(_request())
 
-    assert isinstance(delivery.ending, Failed)
-    assert delivery.ending.cause is FailureCause.ERROR
-    assert "without an approval to ask for" in (delivery.ending.detail or "")
-
+    body = runner.deps.runtime.client.room_send.await_args.kwargs["content"]["body"]
+    assert body.split("\n\n")[-1].startswith("[assistant] ⚠️ Error: agent run ")
+    assert body.endswith(" paused on ['touch'] without an approval to ask for")
     assert probe.calls == []
     session = reply.storage.load_session(SESSION_ID)
     assert session is not None

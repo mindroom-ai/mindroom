@@ -23,7 +23,6 @@ from mindroom.config.resolution import cheap_model as agent_cheap_model
 from mindroom.config.resolution import entity_timezone, memory_backend, show_tool_calls
 from mindroom.constants import (
     HOOK_SOURCE_RUN_METADATA_KEY,
-    ROUTER_AGENT_NAME,
     STREAM_STATUS_KEY,
     STREAM_STATUS_PENDING,
     TURN_INTENT_RUN_METADATA_KEY,
@@ -113,7 +112,7 @@ from mindroom.streaming import (
     UnfinishedStreamedReply,
 )
 from mindroom.teams.envelope import TeamTurnSpec, team_response_stream
-from mindroom.teams.members import requested_team_agent_names
+from mindroom.teams.members import allow_direct_private_team_agents, requested_team_agent_names
 from mindroom.teams.spec import TeamMode
 from mindroom.thread_models import set_thread_model_override
 from mindroom.thread_summary import thread_summary_message_count_hint
@@ -2181,11 +2180,10 @@ class ResponseRunner:
         execution_identity = tool_dispatch.execution_identity
         configured_team_name = self.deps.runtime.config.configured_team_name(self.deps.agent_name)
         self.deps.runtime.config.assert_team_agents_supported(
-            [agent_name for agent_name in agent_names if agent_name != ROUTER_AGENT_NAME],
-            allow_direct_private_agents=(
-                configured_team_name is None
-                and execution_identity.channel == "matrix"
-                and bool(execution_identity.requester_id)
+            requested_team_agent_names(agent_names),
+            allow_direct_private_agents=allow_direct_private_team_agents(
+                execution_identity,
+                configured_team_name=configured_team_name,
             ),
         )
         orchestrator = self.deps.runtime.orchestrator

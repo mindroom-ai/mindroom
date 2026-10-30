@@ -106,7 +106,7 @@ from mindroom.tool_system.worker_routing import run_with_tool_execution_identity
 from mindroom.turn_model import ModelScope, TurnModel, resolve_turn_model
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncGenerator, AsyncIterator, Awaitable, Callable, Mapping, Sequence
+    from collections.abc import AsyncGenerator, AsyncIterator, Callable, Mapping, Sequence
 
     from mindroom.agent_loop.build import AgentBuild
     from mindroom.agent_loop.model_loop import LoopHooks
@@ -123,10 +123,7 @@ if TYPE_CHECKING:
     from mindroom.llm.provider import ModelRequest
     from mindroom.llm.runs import AnyRunRecord, ToolExecution
     from mindroom.llm.usage import RunMetrics
-    from mindroom.response_turn import (
-        EmptyRunDiscard,
-        TurnRunState,
-    )
+    from mindroom.response_turn import TurnRunState
     from mindroom.tool_system.events import ToolTraceEntry
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 
@@ -276,9 +273,8 @@ def _agent_turn_adapter(
         [TurnRunState, TurnContinuationRunState],
         AsyncIterator[AIStreamChunk | AttemptResolved],
     ],
-    finalize_attempt: Callable[[ScopeSessionContext | None], Awaitable[None]],
 ) -> TurnAdapter[AIStreamChunk]:
-    """Return the turn driver's adapter for one agent response: its scope, its attempts, and its storage callbacks."""
+    """Return the turn driver's adapter for one agent response: its scope, its attempts, and its error reply."""
 
     def _load_scope() -> ScopeSessionContext:
         return load_scope_session(
@@ -295,23 +291,18 @@ def _agent_turn_adapter(
             entity_name=agent_name,
         )
 
-    def _discard_empty_run(scope_context: ScopeSessionContext | None, discard: EmptyRunDiscard) -> None:
-        ai_runtime.discard_empty_completed_run(
-            scope_context=scope_context,
-            session_id=discard.session_id or session_id,
-            run_id=discard.run_id,
-            entity_name=agent_name,
-            output_tokens=discard.output_tokens,
-        )
-
     return TurnAdapter[AIStreamChunk](
         load_scope=_load_scope,
         run_attempt=run_attempt,
-        discard_empty_run=_discard_empty_run,
         on_scope_loaded=_on_scope_loaded,
-        finalize_attempt=finalize_attempt,
         make_text_chunk=TextDelta,
         user_message=user_message,
+        unexpected_error_text=partial(
+            get_user_friendly_error_message,
+            agent_name=agent_name,
+            runtime_paths=runtime_paths,
+        ),
+        entity_name=agent_name,
     )
 
 
@@ -1207,21 +1198,11 @@ async def stream_agent_response(  # noqa: C901, PLR0915
         yield get_user_friendly_error_message(e, agent_name, runtime_paths=runtime_paths)
         return
 
-    attempt_started = False
-
-    async def _finalize_attempt(scope_context: ScopeSessionContext | None) -> None:
-        nonlocal attempt_started
-        if not attempt_started:
-            return
-        attempt_started = False
-        ai_runtime.register_scope_notice_storage(scope_context=scope_context, entity_name=agent_name)
-
     async def _run_attempt(  # noqa: C901
         run: TurnRunState,
         continuation_state: TurnContinuationRunState,
     ) -> AsyncGenerator[AIStreamChunk | AttemptResolved, None]:
         """Stream one agent attempt, ending with its ``AttemptResolved`` sentinel."""
-        nonlocal attempt_started
         try:
             run_context = await _prepare_agent_run_context(
                 ctx,
@@ -1244,7 +1225,6 @@ async def stream_agent_response(  # noqa: C901, PLR0915
         prepared_run = run_context.prepared_run
         state = _StreamingAttemptState()
         storage, attempt = _begin_attempt(run, run_context, continuation_state, media_inputs, stream_state=state)
-        attempt_started = True
         attempt_stream = _stream_agent_attempt_chunks(
             run_context=run_context,
             attempt=attempt,
@@ -1356,7 +1336,6 @@ async def stream_agent_response(  # noqa: C901, PLR0915
         config=config,
         execution_identity=ctx.execution_identity,
         run_attempt=_run_attempt,
-        finalize_attempt=_finalize_attempt,
     )
     response_stream = stream_response_turn(
         ctx,

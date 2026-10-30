@@ -758,38 +758,15 @@ async def test_a_private_member_is_refused_without_a_matrix_requester(
     *,
     identity: dict[str, Any] | None,
 ) -> None:
-    """Private agents join only explicit Matrix ad hoc teams with a requester, even when no bot of theirs runs."""
+    """Only an ad hoc team a Matrix requester asks for materializes a private member, which runs no bot of its own."""
     team = _private_team(tmp_path, monkeypatch)
     del team.orchestrator.agent_bots["general"]
     team.identity = None if identity is None else replace(team.identity, **identity)
 
-    with pytest.raises(
-        ValueError,
-        match="private agents are only supported in explicit Matrix ad hoc teams with requester identity",
-    ):
-        await team.respond()
+    text = await team.respond()
 
-
-@pytest.mark.asyncio
-async def test_a_member_that_delegates_to_a_private_agent_is_refused(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    team = _team(
-        tmp_path,
-        monkeypatch,
-        members=("general", "research"),
-        agents={
-            "general": {"display_name": "GeneralAgent", "model": "general-model", "delegate_to": ["mind"]},
-            "mind": {"display_name": "Mind", "private": {"per": "user", "root": "mind_data"}},
-        },
-    )
-
-    with pytest.raises(
-        ValueError,
-        match="reaches private agent 'mind' via delegation; private delegation is not supported for teams",
-    ):
-        await team.respond()
+    assert text == "Team request includes agent 'general' that could not be materialized for this request."
+    assert team.models["default"].requests == []
 
 
 @pytest.mark.asyncio

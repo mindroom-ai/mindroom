@@ -513,7 +513,7 @@ def scrub_queued_notice_session_context(
 def discard_empty_completed_run(
     *,
     scope_context: ScopeSessionContext | None,
-    session_id: str,
+    session_id: str | None,
     run_id: str | None,
     entity_name: str,
     output_tokens: int | None,
