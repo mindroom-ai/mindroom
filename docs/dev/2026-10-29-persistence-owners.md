@@ -1,6 +1,6 @@
 # Persistence owners: one owner for each stored fact readers used to copy
 
-Status: implemented (2026-10-30).
+Status: implemented (2026-10-29).
 Scope: background readers of conversation logs (memory auto-flush, knowledge-graph ingestion, exploration), usage totals, the event journal's view declarations, thread-summary state, and per-scope history metadata.
 The design went through several critique rounds before implementation; this record keeps what the code cannot show.
 
