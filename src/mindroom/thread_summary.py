@@ -687,9 +687,13 @@ async def _summary_delivery_timestamp(
     guard exists for. Costs one thread walk per generated summary, so once per
     interval rather than per turn.
 
-    A failed or partial re-read suppresses delivery because a pin may have
-    landed while the model ran. The caller records the completed generation attempt so the
-    next eligible pass retries at the normal interval without a retry storm.
+    A failed re-read, or one a bound stopped before the end of the thread,
+    suppresses delivery because a pin may have landed while the model ran. The
+    caller records the completed generation attempt so the next eligible pass
+    retries at the normal interval without a retry storm. An event this bot
+    cannot decrypt is read as absent, as the gate before generation reads it:
+    counting it as missing would discard the summary after the model ran, and
+    again on every later pass, because that gate keeps letting the thread through.
     """
     try:
         thread_history = await refetched_thread_history(
@@ -701,6 +705,7 @@ async def _summary_delivery_timestamp(
             edits_of=[
                 message.event_id for message in projected_history if THREAD_SUMMARY_CONTENT_KEY in message.content
             ],
+            unreadable_is_missing=False,
         )
     except Exception:
         logger.exception(
@@ -710,8 +715,8 @@ async def _summary_delivery_timestamp(
         )
         return None
     if not thread_history.is_full_history:
-        # A pin can be an edit of any earlier summary, so a walk that did not
-        # read the whole thread cannot rule one out.
+        # A pin can be an edit of any earlier summary, so a walk that stopped
+        # before the end of the thread cannot rule one out.
         logger.info(
             "Pin re-check before summary delivery could not read the whole thread; discarding automatic summary",
             room_id=room_id,

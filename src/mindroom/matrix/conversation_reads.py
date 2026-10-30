@@ -378,6 +378,7 @@ async def refetched_thread_history(
     thread_id: str,
     *,
     edits_of: Collection[str] = (),
+    unreadable_is_missing: bool,
 ) -> ThreadHistoryResult:
     """Return one thread's history after walking it on the server again.
 
@@ -386,10 +387,16 @@ async def refetched_thread_history(
     a thread has no reply. The result is full history only when this walk
     itself read the whole thread, so such a caller can tell a fresh view from
     an old marker's.
-    ``edits_of`` names messages whose newest revision the caller must see; see
-    `ConversationHydrator.rewalk`.
+    ``edits_of`` names messages whose newest revision the caller must see, and
+    ``unreadable_is_missing`` whether an event the walk could not decrypt keeps
+    the history short of full; see `ConversationHydrator.rewalk`.
     """
-    walk_complete = await reader.hydrator.rewalk(room_id=room_id, thread_id=thread_id, edits_of=edits_of)
+    walk_complete = await reader.hydrator.rewalk(
+        room_id=room_id,
+        thread_id=thread_id,
+        edits_of=edits_of,
+        unreadable_is_missing=unreadable_is_missing,
+    )
     page = await reader.read_strict(room_id=room_id, thread_id=thread_id, limit=HYDRATED_PROMPT_WINDOW_MESSAGES)
     # Whole only as far as this walk of this thread vouches. A room-wide
     # recovery that stopped short concerns the room timeline, which a thread's

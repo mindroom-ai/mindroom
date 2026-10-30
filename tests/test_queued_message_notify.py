@@ -998,6 +998,7 @@ async def test_post_response_effects_queues_summary_with_stale_hint_inside_margi
         room_id="!room:localhost",
         thread_id="$thread",
         edits_of=[],
+        unreadable_is_missing=False,
     )
     # Nothing has echoed the response back, so the projection this pass reads
     # stops one message short of the thread. It summarizes the projected

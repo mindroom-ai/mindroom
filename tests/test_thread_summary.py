@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import importlib.util
 import json
 from contextlib import contextmanager
@@ -74,6 +75,7 @@ from mindroom.tool_system.events import ToolTraceEntry, build_tool_trace_content
 from tests.conftest import make_conversation_reader_mock, make_matrix_client_mock, serve_conversation_reader
 from tests.fakes.scripted_model import ScriptedModel, answer
 from tests.providers.golden_support import SentRequest, httpx2_transport
+from tests.test_conversation_hydration import encrypted
 from tests.test_thread_export_projected_history import PRINCIPAL as _PROJECTION_PRINCIPAL
 from tests.test_thread_export_projected_history import ROOM as _PROJECTION_ROOM
 from tests.test_thread_export_projected_history import ROOT as _PROJECTION_ROOT
@@ -3208,8 +3210,13 @@ class TestSummaryReadsTheAnswerItWasQueuedFor:
         first_threshold: int,
         answer: str = "here is the answer",
         answer_event_id: str = "$answer:example.org",
+        recheck_walks_the_server: bool = False,
     ) -> tuple[AsyncMock, list[dict[str, Any]]]:
-        """Run one post-response pass and return its generator and sent payloads."""
+        """Run one post-response pass and return its generator and sent payloads.
+
+        The delivery-time pin re-check walks the thread on the homeserver only
+        when ``recheck_walks_the_server`` says so; otherwise it reads nothing.
+        """
         client = make_matrix_client_mock()
         client.user_id = _PROJECTION_BOT
         generate = AsyncMock(return_value="🧵 a title")
@@ -3219,12 +3226,17 @@ class TestSummaryReadsTheAnswerItWasQueuedFor:
             sent.append(content)
             return DeliveredMatrixEvent(event_id="$summary:example.org", content_sent=content)
 
+        recheck = (
+            contextlib.nullcontext()
+            if recheck_walks_the_server
+            else patch("mindroom.thread_summary.refetched_thread_history", new=AsyncMock(return_value=_full([])))
+        )
         with (
             patch(
                 "mindroom.thread_summary.current_internal_sender_ids",
                 return_value=frozenset({_PROJECTION_BOT}),
             ),
-            patch("mindroom.thread_summary.refetched_thread_history", new=AsyncMock(return_value=_full([]))),
+            recheck,
             patch("mindroom.thread_summary.maybe_rebuild_tag_vocabulary", new=AsyncMock(return_value=None)),
             patch("mindroom.thread_summary.get_thread_tags", new=AsyncMock(return_value=None)),
             patch("mindroom.thread_summary._generate_summary", new=generate),
@@ -3262,6 +3274,33 @@ class TestSummaryReadsTheAnswerItWasQueuedFor:
         assert len(sent) == 1
         # The answer came from the delivered fact, not from a homeserver walk.
         assert homeserver.history_calls == 0
+
+    async def test_a_reply_this_bot_cannot_decrypt_does_not_discard_the_title(
+        self,
+        journal_store: EventJournalStore,
+    ) -> None:
+        """The pin re-check reads an undecryptable reply as absent, as the gate before generation does.
+
+        Such a reply arrives after the thread was hydrated whenever a sender's
+        key never reached this device. Counting it as a partial re-read would
+        discard the title after the model already ran, and do so again on every
+        later pass of the thread, because the gate keeps letting it through.
+        """
+        homeserver = ProjectionHomeserver()
+        reader = await self._warm_projection(journal_store.principal(_PROJECTION_PRINCIPAL), homeserver, asks=6)
+        undecryptable = encrypted(
+            "$undecryptable:example.org",
+            ts=1100,
+            relates_to={"rel_type": "m.thread", "event_id": _PROJECTION_ROOT},
+        )
+        homeserver.events[undecryptable["event_id"]] = undecryptable
+        homeserver.relations[_PROJECTION_ROOT].append(undecryptable)
+
+        generate, sent = await self._run_pass(reader, first_threshold=5, recheck_walks_the_server=True)
+
+        generate.assert_awaited_once()
+        assert len(sent) == 1
+        assert homeserver.relation_calls > 0
 
     async def test_the_count_written_down_includes_the_answer(
         self,

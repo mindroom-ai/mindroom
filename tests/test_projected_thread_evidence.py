@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from functools import partial
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any
 
@@ -23,7 +24,7 @@ from tests.journal_membership_helpers import admit_room_membership
 from tests.test_conversation_hydration import ROOM, FakeClient, encrypted, hydrator, raw
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator
+    from collections.abc import AsyncIterator, Callable
 
     import nio
 
@@ -165,7 +166,7 @@ class TestRefetchedThreadHistory:
         client.add_reply(raw("$pin", "pinned summary", ts=2_000, thread_id="$root"))
 
         stale = await complete_thread_history(reader, ROOM, "$root")
-        fresh = await refetched_thread_history(reader, ROOM, "$root")
+        fresh = await refetched_thread_history(reader, ROOM, "$root", unreadable_is_missing=False)
         assert [message.event_id for message in stale] == ["$root"]
         assert [message.event_id for message in fresh] == ["$root", "$pin"]
 
@@ -179,13 +180,17 @@ class TestRefetchedThreadHistory:
         client.principal = principal
 
         with pytest.raises(_HydrationError, match="rewalk kept losing its membership epoch"):
-            await hydrator(principal, client).rewalk(room_id=ROOM, thread_id="$root")
+            await hydrator(principal, client).rewalk(room_id=ROOM, thread_id="$root", unreadable_is_missing=True)
 
 
-async def test_a_rewalk_that_could_not_read_everything_is_not_full_history_despite_an_older_complete_marker(
+async def test_a_rewalk_that_could_not_read_everything_is_full_history_only_when_unreadable_is_absent(
     principal: PrincipalStore,
 ) -> None:
-    """The marker keeps the widest walk ever recorded; the fresh read reports its own walk."""
+    """The marker keeps the widest walk ever recorded; the fresh read reports its own walk.
+
+    A caller proving absence counts the undecryptable reply as missing; one
+    that reads only what it can see reads past it to the end of the thread.
+    """
     client = _LaterReplyClient(
         events={"$root": raw("$root", "root", ts=1_000)},
         relations={"$root": [raw("$reply", "reply", ts=2_000, thread_id="$root")]},
@@ -197,7 +202,47 @@ async def test_a_rewalk_that_could_not_read_everything_is_not_full_history_despi
     client.add_reply(encrypted("$pin", ts=3_000, relates_to={"rel_type": "m.thread", "event_id": "$root"}))
 
     assert (await complete_thread_history(reader, ROOM, "$root")).is_full_history
-    assert not (await refetched_thread_history(reader, ROOM, "$root")).is_full_history
+    assert not (await refetched_thread_history(reader, ROOM, "$root", unreadable_is_missing=True)).is_full_history
+    assert (await refetched_thread_history(reader, ROOM, "$root", unreadable_is_missing=False)).is_full_history
+
+
+def _thread_with_replies(count: int) -> FakeClient:
+    replies = [raw(f"$reply{index}", f"reply {index}", ts=2_000 + index, thread_id="$root") for index in range(count)]
+    return FakeClient(events={"$root": raw("$root", "root", ts=1_000)}, relations={"$root": replies})
+
+
+def _thread_with_an_edited_reply(edits: int) -> FakeClient:
+    """A reply whose edits only its direct lookup returns, as a recursive walk may page them out."""
+    reply = raw("$reply", "reply", ts=2_000, thread_id="$root")
+    client = FakeClient(events={"$root": raw("$root", "root", ts=1_000), "$reply": reply}, relations={"$root": [reply]})
+    client.relations["$reply"] = [
+        raw(f"$edit{index}", f"edit {index}", ts=3_000 + index, replaces="$reply") for index in range(edits)
+    ]
+    return client
+
+
+@pytest.mark.parametrize(
+    ("make_client", "bounds", "edits_of"),
+    [
+        (partial(_thread_with_replies, 3), {"prompt_window_messages": 2}, ()),
+        (partial(_thread_with_replies, 3), {"max_fetched_events": 2}, ()),
+        (partial(_thread_with_replies, 2), {"max_requests": 1}, ("$reply0", "$reply1")),
+        (partial(_thread_with_an_edited_reply, 3), {"max_fetched_events": 2}, ("$reply",)),
+    ],
+    ids=["prompt-window", "event-ceiling", "edit-lookup-requests", "edit-lookup-event-ceiling"],
+)
+async def test_a_rewalk_a_bound_stopped_is_not_full_history_even_when_unreadable_is_absent(
+    principal: PrincipalStore,
+    make_client: Callable[[], FakeClient],
+    bounds: dict[str, int],
+    edits_of: tuple[str, ...],
+) -> None:
+    """A walk that a bound ended before the thread did has not read past it, whatever it could decrypt."""
+    reader = ConversationReader(store=principal, hydrator=hydrator(principal, make_client(), **bounds))
+
+    refetched = await refetched_thread_history(reader, ROOM, "$root", edits_of=edits_of, unreadable_is_missing=False)
+
+    assert not refetched.is_full_history
 
 
 async def test_a_rewalk_asked_for_a_message_s_edits_sees_one_the_recursive_walk_paged_out(
@@ -215,8 +260,14 @@ async def test_a_rewalk_asked_for_a_message_s_edits_sees_one_the_recursive_walk_
     # Stored only under the summary, so the recursive walk of the root never returns it.
     client.relations["$summary"] = [raw("$edit", "pinned title", ts=3_000, replaces="$summary")]
 
-    plain = await refetched_thread_history(reader, ROOM, "$root")
-    asked = await refetched_thread_history(reader, ROOM, "$root", edits_of=["$summary"])
+    plain = await refetched_thread_history(reader, ROOM, "$root", unreadable_is_missing=False)
+    asked = await refetched_thread_history(
+        reader,
+        ROOM,
+        "$root",
+        edits_of=["$summary"],
+        unreadable_is_missing=False,
+    )
 
     assert [message.body for message in plain] == ["root", "old title"]
     assert [message.body for message in asked] == ["root", "pinned title"]

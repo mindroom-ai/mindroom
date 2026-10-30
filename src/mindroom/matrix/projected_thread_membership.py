@@ -68,7 +68,7 @@ async def _thread_history_for_root_proof(
     history = await complete_thread_history(reader, room_id, thread_id)
     if thread_has_child(history, thread_id):
         return history
-    return await refetched_thread_history(reader, room_id, thread_id)
+    return await refetched_thread_history(reader, room_id, thread_id, unreadable_is_missing=True)
 
 
 async def _degradable_event_info(

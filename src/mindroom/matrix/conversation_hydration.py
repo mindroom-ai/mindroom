@@ -431,12 +431,18 @@ class _Walk:
     ``ceiling_reached`` is what lets a point refetch tell those apart, because
     an unreadable event forces ``complete`` down as well. Only the relation
     walk sets it.
+
+    ``stopped_early`` says a bound -- the prompt window, the event ceiling, or
+    the request ceiling -- ended the walk before the conversation did. An
+    unreadable event never stops a walk, so a walk that met one and kept going
+    is incomplete without having stopped early. Only thread walks set it.
     """
 
     events: tuple[ProjectedEvent, ...]
     complete: bool
     unreadable: _UnreadableHistory = field(default_factory=_UnreadableHistory)
     ceiling_reached: bool = False
+    stopped_early: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -740,7 +746,14 @@ class ConversationHydrator:
             return
         await self._walk_and_install(room_id=room_id, thread_id=thread_id)
 
-    async def rewalk(self, *, room_id: str, thread_id: str, edits_of: Collection[str] = ()) -> bool:
+    async def rewalk(
+        self,
+        *,
+        room_id: str,
+        thread_id: str,
+        edits_of: Collection[str] = (),
+        unreadable_is_missing: bool,
+    ) -> bool:
         """Walk one thread on the server again even though its marker stands, returning whether it was whole.
 
         The one exception to "once per membership", for a caller that must see
@@ -759,11 +772,17 @@ class ConversationHydrator:
         recursive walk returned, because a server may page a reply's edits out
         of that walk, and a caller that must see one message's newest revision
         cannot wait for sync to deliver it.
+
+        ``unreadable_is_missing`` decides what an event this walk could not
+        decrypt means for "whole". A caller proving that a thread holds no such
+        event counts it as missing; a caller that reads only what it can see,
+        as the projection's own readers do, counts it as absent and asks only
+        that no bound ended the walk early.
         """
         for _ in range(_HYDRATION_EPOCH_ATTEMPTS):
             walk = await self._walk_and_install(room_id=room_id, thread_id=thread_id, edits_of=edits_of)
             if walk is not None:
-                return walk.complete
+                return walk.complete if unreadable_is_missing else not walk.stopped_early
         msg = f"Conversation rewalk kept losing its membership epoch for {room_id} thread {thread_id}"
         raise _HydrationError(msg)
 
@@ -1071,6 +1090,7 @@ class ConversationHydrator:
             events=tuple(events),
             complete=relations.complete and missed_edits.complete and readable_root is not None,
             unreadable=unreadable,
+            stopped_early=relations.stopped_early or missed_edits.stopped_early,
         )
 
     async def _fetch_missed_edits(
@@ -1145,6 +1165,7 @@ class ConversationHydrator:
         seen = {event.event_id for event in events}
         found: list[ProjectedEvent] = []
         complete = True
+        stopped_early = len(lookups) > self.max_requests
         for message in lookups[: self.max_requests]:
             message_edits = await self._fetch_relations(
                 room_id,
@@ -1154,6 +1175,7 @@ class ConversationHydrator:
                 edits_only=True,
             )
             complete = complete and message_edits.complete
+            stopped_early = stopped_early or message_edits.stopped_early
             for edit in message_edits.events:
                 if edit.event_id not in seen:
                     seen.add(edit.event_id)
@@ -1172,7 +1194,7 @@ class ConversationHydrator:
                 edit_lookups=min(len(lookups), self.max_requests),
                 edits_found=len(found),
             )
-        return _Walk(events=tuple(found), complete=complete, unreadable=unreadable)
+        return _Walk(events=tuple(found), complete=complete, unreadable=unreadable, stopped_early=stopped_early)
 
     async def _walk_reached_reply_edits(
         self,
@@ -1255,6 +1277,7 @@ class ConversationHydrator:
         fetched = 0
         complete = True
         ceiling_reached = False
+        stopped_early = False
         client = self._client()
         relations = (
             client.room_get_event_relations(
@@ -1306,10 +1329,12 @@ class ConversationHydrator:
                                 admitted += 1
                                 if window_messages is not None and admitted >= window_messages:
                                     complete = False
+                                    stopped_early = True
                                     break
                     if fetched >= self.max_fetched_events:
                         complete = False
                         ceiling_reached = True
+                        stopped_early = True
                         # Said out loud for the same reason the room walk says
                         # it: this is not the window being met, it is a
                         # conversation whose remaining relations cost more than
@@ -1335,6 +1360,7 @@ class ConversationHydrator:
             complete=complete,
             unreadable=unreadable,
             ceiling_reached=ceiling_reached,
+            stopped_early=stopped_early,
         )
 
     async def _fetch_room(self, room_id: str) -> _Walk:
