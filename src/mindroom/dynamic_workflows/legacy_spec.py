@@ -1,8 +1,13 @@
-"""Read Dynamic Workflow revisions saved before participants became authored subagents."""
+"""Read Dynamic Workflow revisions saved in shapes the current spec no longer accepts."""
 
 from __future__ import annotations
 
 from typing import cast
+
+
+def upgrade_legacy_spec(spec: dict[str, object]) -> dict[str, object]:
+    """Return one freshly read revision with every retired shape read in its current form."""
+    return _upgrade_legacy_participants(spec)
 
 
 def _render_legacy_participant_prompt(name: object, role: object, instructions: object) -> str:
@@ -21,7 +26,7 @@ def _render_legacy_participant_prompt(name: object, role: object, instructions: 
     return "\n\n".join(part for part in parts if part) or "You are a Dynamic Workflow participant."
 
 
-def upgrade_legacy_participants(spec: dict[str, object]) -> dict[str, object]:
+def _upgrade_legacy_participants(spec: dict[str, object]) -> dict[str, object]:
     """Return the spec with every retired ephemeral participant read as a subagent participant."""
     # LEGACY_COMPAT: Dynamic Workflow ephemeral_agent participants.
     # Legacy format: A saved revision participant with kind ephemeral_agent and optional name, role, instructions, and tools; validation always stored an explicit kind.

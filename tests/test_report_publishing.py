@@ -20,6 +20,7 @@ from mindroom.custom_tools.dynamic_workflow import DynamicWorkflowTools
 from mindroom.custom_tools.dynamic_workflow_context import dynamic_workflow_store_and_owner
 from mindroom.custom_tools.report_publishing import ReportPublishingTools
 from mindroom.dynamic_workflows.service import DynamicWorkflowService
+from mindroom.dynamic_workflows.spec import parse_workflow_spec
 from mindroom.dynamic_workflows.store import DynamicWorkflowStore
 from mindroom.message_target import MessageTarget
 from mindroom.report_publishing.store import PublishableReport, ReportPublishingError, ReportPublishingStore
@@ -927,7 +928,7 @@ async def test_report_publishing_tool_rejects_failed_dynamic_workflow_runs(tmp_p
     with tool_runtime_context(context):
         store, owner_id = dynamic_workflow_store_and_owner(context, "agent")
         store.create_workflow(
-            spec=spec,
+            spec=parse_workflow_spec(spec),
             scope="agent",
             owner_id=owner_id,
             created_by=context.agent_name or "general",

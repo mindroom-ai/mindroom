@@ -10,17 +10,13 @@ from typing import TYPE_CHECKING
 from mindroom.background_tasks import run_blocking_or_compensate, run_blocking_until_complete
 from mindroom.dynamic_workflows.runner import execute_workflow_spec
 from mindroom.dynamic_workflows.store import DynamicWorkflowRun
-from mindroom.dynamic_workflows.validation import (
-    validate_workflow_input,
-    validate_workflow_spec,
-    workflow_runtime_seconds,
-)
 from mindroom.failure_text import failure_text
 
 if TYPE_CHECKING:
     from collections.abc import Callable
 
     from mindroom.dynamic_workflows.runner import ParticipantExecutor
+    from mindroom.dynamic_workflows.spec import WorkflowSpec
     from mindroom.dynamic_workflows.store import DynamicWorkflowStore
 
 _RUN_CANCELLED = "Workflow run was cancelled."
@@ -34,7 +30,7 @@ class DynamicWorkflowService:
         store: DynamicWorkflowStore,
         *,
         participant_executor: ParticipantExecutor | None = None,
-        spec_validator: Callable[[dict[str, object]], None] | None = None,
+        spec_validator: Callable[[WorkflowSpec], None] | None = None,
     ) -> None:
         self._store = store
         self._participant_executor = participant_executor
@@ -84,8 +80,8 @@ class DynamicWorkflowService:
         input_data: dict[str, object],
         requested_by: str,
         base_url: str | None,
-    ) -> tuple[DynamicWorkflowRun, dict[str, object]] | DynamicWorkflowRun:
-        """Admit a run and validate its pinned spec, or persist a preparation failure."""
+    ) -> tuple[DynamicWorkflowRun, WorkflowSpec] | DynamicWorkflowRun:
+        """Admit a run and check its pinned spec and input, or persist a preparation failure."""
         run = self._store.start_workflow_run(
             workflow_id=workflow_id,
             scope=scope,
@@ -101,15 +97,15 @@ class DynamicWorkflowService:
                 owner_id=owner_id,
                 revision=run.revision,
             )
-            spec = validate_workflow_spec(spec)
             if self._spec_validator is not None:
                 self._spec_validator(spec)
-            validate_workflow_input(spec, input_data)
+            if spec.inputs is not None:
+                spec.inputs.check(input_data)
         except Exception as exc:  # Persist preparation failures only after the run exists.
             return self._store.fail_workflow_run(run, error=failure_text(exc))
         return run, spec
 
-    def _cancel_admitted_run(self, prepared: tuple[DynamicWorkflowRun, dict[str, object]] | DynamicWorkflowRun) -> None:
+    def _cancel_admitted_run(self, prepared: tuple[DynamicWorkflowRun, WorkflowSpec] | DynamicWorkflowRun) -> None:
         """End a run its preparation admitted as cancelled; a run the preparation rejected keeps its rejection."""
         if not isinstance(prepared, DynamicWorkflowRun):
             self._store.fail_workflow_run(prepared[0], error=_RUN_CANCELLED)
@@ -117,10 +113,10 @@ class DynamicWorkflowService:
     async def _execute_and_persist(
         self,
         run: DynamicWorkflowRun,
-        spec: dict[str, object],
+        spec: WorkflowSpec,
         input_data: dict[str, object],
     ) -> DynamicWorkflowRun:
-        timeout_seconds = workflow_runtime_seconds(spec)
+        timeout_seconds = spec.permissions.runtime_seconds
         execution_task = asyncio.create_task(
             execute_workflow_spec(
                 spec,

@@ -27,6 +27,7 @@ from mindroom.custom_tools import dynamic_workflow as dynamic_workflow_module
 from mindroom.custom_tools.delegate import DelegateTools
 from mindroom.custom_tools.dynamic_workflow import DynamicWorkflowTools
 from mindroom.delegation.lifecycle import note_child_run_id, prepare_child_turn
+from mindroom.dynamic_workflows.spec import RoomAgentParticipant
 from mindroom.history.request_messages import TurnMessages
 from mindroom.history.types import PreparedHistoryState
 from mindroom.llm.messages import Message
@@ -429,7 +430,7 @@ async def test_dynamic_workflow_room_agent_participant_uses_fallback(
 
     await dynamic_workflow_module._execute_room_agent_participant(
         context,
-        {"id": "writer", "kind": "room_agent", "agent": "specialist"},
+        RoomAgentParticipant.model_validate({"id": "writer", "kind": "room_agent", "agent": "specialist"}),
         "Write a report.",
     )
 

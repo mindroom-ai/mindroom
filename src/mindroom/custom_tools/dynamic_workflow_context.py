@@ -4,15 +4,10 @@ from __future__ import annotations
 
 import hashlib
 
+from mindroom.dynamic_workflows.spec import DynamicWorkflowError
 from mindroom.dynamic_workflows.store import DynamicWorkflowRun, DynamicWorkflowStore
-from mindroom.dynamic_workflows.validation import DynamicWorkflowError
 from mindroom.runtime_resolution import resolve_agent_execution
 from mindroom.tool_system.runtime_context import ToolRuntimeContext, build_execution_identity_from_runtime_context
-
-
-def dynamic_workflow_store(context: ToolRuntimeContext) -> DynamicWorkflowStore:
-    """Return the Dynamic Workflow store for the current tool runtime."""
-    return DynamicWorkflowStore(context.runtime_paths.storage_root)
 
 
 def dynamic_workflow_store_and_owner(
@@ -26,7 +21,7 @@ def dynamic_workflow_store_and_owner(
     if scope in {"room", "tenant"}:
         msg = f"{scope} scope requires Dynamic Workflow approval policy and is not available to agent tools yet."
         raise DynamicWorkflowError(msg)
-    return dynamic_workflow_store(context), _dynamic_workflow_owner_id(context, scope)
+    return DynamicWorkflowStore(context.runtime_paths.storage_root), _dynamic_workflow_owner_id(context, scope)
 
 
 def _dynamic_workflow_owner_id(context: ToolRuntimeContext, scope: str) -> str:
