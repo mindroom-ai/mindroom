@@ -53,8 +53,10 @@ from mindroom.response_turn import (
     TurnSinks,
     build_llm_request_log_context,
     build_matrix_run_metadata,
+    is_empty_reply,
     pause_without_approval_error,
     paused_attempt_from_response,
+    replays_as_turn,
     stream_response_turn,
     stream_with_llm_request_log_context,
 )
@@ -95,7 +97,7 @@ if TYPE_CHECKING:
     from mindroom.knowledge.utils import KnowledgeAvailabilityDetail
     from mindroom.llm.runs import TeamRunRecord
     from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
-    from mindroom.response_turn import EmptyRunDiscard, TurnRunState
+    from mindroom.response_turn import TurnRunState
     from mindroom.run_storage import RunStorage
     from mindroom.runtime_protocols import OrchestratorRuntime
     from mindroom.teams.members import BuiltTeam
@@ -526,7 +528,7 @@ class _TeamTurn:
             agents=members.display_names,
             prompt_preview=prepared.prompt_text[:_MAX_LOG_MESSAGE_LENGTH],
         )
-        storage = bind_turn_session(run)
+        storage = bind_turn_session(run, replays=partial(replays_as_turn, self.ctx))
         leader = _leader_run(
             built,
             prepared,
@@ -678,7 +680,7 @@ class _TeamTurn:
 
         ``shown`` says whether the attempt's chunks showed a document; one that showed nothing ends with the
         no-response line. An attempt that produced anything, text or tool calls, records the Matrix events the turn
-        consumed as seen on the stored session row; an empty one, whose run is discarded, leaves them unseen, so the
+        consumed as seen on the stored session row; an empty one, whose run is not stored, leaves them unseen, so the
         next turn still reads them.
         """
         tool_executions = team_tool_executions(record)
@@ -688,7 +690,7 @@ class _TeamTurn:
         # display chrome, not replayable assistant text. A quiet scheduled reply records the bare token.
         body_text = attempt.presentation.text_without_tool_markers(finished=True)
         has_visible_output = bool(body_text)
-        is_empty = record.status is RunStatus.completed and not tool_executions and not has_visible_output
+        is_empty = is_empty_reply(record)
         if not is_empty and self.ctx.reply_to_event_id:
             await _persist_bound_seen_event_ids(
                 scope_context=run.scope,
@@ -710,7 +712,6 @@ class _TeamTurn:
             replayable_text=replayable_text,
             has_visible_content=has_visible_output,
             is_empty=is_empty,
-            session_id=record.session_id,
             run_id=record.run_id,
             attempt_run_id=attempt.run_id,
             runtime_model_name=attempt.runtime_model_name,
@@ -722,15 +723,6 @@ class _TeamTurn:
 
     def error_text(self, error: Exception) -> str:
         return get_user_friendly_error_message(error, self.ctx.entity_label, runtime_paths=self.runtime_paths)
-
-    def discard_empty_run(self, scope_context: ScopeSessionContext | None, discard: EmptyRunDiscard) -> None:
-        ai_runtime.discard_empty_completed_run(
-            scope_context=scope_context,
-            session_id=discard.session_id or self.session_id,
-            run_id=discard.run_id,
-            entity_name=self.entity_name,
-            output_tokens=discard.output_tokens,
-        )
 
     def load_scope(self) -> ScopeSessionContext:
         return load_bound_scope_session(
@@ -849,7 +841,6 @@ async def team_response_stream(
         make_text_chunk=lambda text: text,
         user_message=ctx.prompt,
         unexpected_error_text=turn.error_text,
-        discard_empty_run=turn.discard_empty_run,
     )
     response_stream = stream_response_turn(
         turn.ctx,

@@ -1,6 +1,6 @@
 """The team empty-run guard, quiet scheduled replies, and what a failed team turn records for replay.
 
-An empty completed attempt is discarded and retried once, sharing the turn's continuation budget; a second empty
+An empty completed attempt is never stored and is retried once, sharing the turn's continuation budget; a second empty
 attempt answers with the shared notice. A collected reply is the streamed document: a tool-only reply shows only its
 shown tool calls, and a member's text stays two paragraphs across a hidden call. Providers are scripted at the team
 runtime seam (``tests/team_turn_helpers.py``).
@@ -26,6 +26,7 @@ from mindroom.turn_continuation import TURN_CONTINUATION_LIMIT
 from tests.conftest import seed_session
 from tests.fakes.scripted_model import Await, ScriptStep, answer, calls, tool_call
 from tests.history_helpers import _completed_team_run, _team_session
+from tests.scripted_agent_helpers import ProcessCrash, crash_after_first_terminal_store
 from tests.team_turn_helpers import (
     EVENT_ID,
     PROBE_TOOL,
@@ -97,11 +98,11 @@ def _failing(message: str) -> list[ScriptStep]:
 
 
 @pytest.mark.asyncio
-async def test_an_empty_completed_attempt_is_discarded_and_retried_once(
+async def test_an_empty_completed_attempt_is_left_out_of_history_and_retried_once(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The empty run leaves the store; the retry is a fresh model request the pipeline timing marks."""
+    """The empty run is never stored; the retry is a fresh model request the pipeline timing marks."""
     team = _team(tmp_path, monkeypatch, leader=[answer(""), answer("Recovered answer")])
     timing = DispatchPipelineTiming(source_event_id=EVENT_ID, room_id=ROOM_ID)
 
@@ -111,6 +112,24 @@ async def test_an_empty_completed_attempt_is_discarded_and_retried_once(
     assert len(team.models["default"].requests) == 2
     assert _team_run_ids(team) == ["run-1"]
     assert 0 < timing.marks["first_model_request_sent"] < timing.marks["model_request_sent"]
+
+
+@pytest.mark.asyncio
+async def test_a_crash_after_an_empty_team_attempt_leaves_nothing_the_next_prompt_replays(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The empty team run is never stored as a turn, so a crash right after its store leaves none behind."""
+    team = _team(tmp_path, monkeypatch, leader=[answer(""), answer("Next answer.")])
+    crash_after_first_terminal_store(monkeypatch)
+
+    with pytest.raises(ProcessCrash):
+        await team.respond()
+    text = await team.respond(message="Next question", ctx=team.ctx(run_id="run-2"))
+
+    assert text.endswith("Next answer.")
+    assert [message for message in team.models["default"].requests[-1].messages if message.from_history] == []
+    assert _team_run_ids(team) == ["run-2"]
 
 
 @pytest.mark.asyncio
@@ -158,7 +177,7 @@ async def test_a_second_empty_attempt_answers_with_the_shared_notice_and_records
 
     assert text == ai_runtime.EMPTY_RESPONSE_NOTICE
     assert len(team.models["default"].requests) == 2
-    # Both empty runs left the store, so no later turn replays an answer that ended immediately.
+    # Neither empty run was stored, so no later turn replays an answer that ended immediately.
     assert _team_run_ids(team) == []
     # Each attempt's model request is marked once its context is ready, before the provider received it.
     assert timing.marks["first_model_request_sent"] <= request_times[0]
@@ -205,7 +224,7 @@ async def test_the_empty_retry_shares_the_turn_s_budget_with_model_switch_contin
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """One discarded empty attempt plus the continuations a member's switches start settle on the limit message."""
+    """One empty attempt plus the continuations a member's switches start settle on the limit message."""
     switch = tool_call("switch_thread_model", "call-switch", model_name="large", when="next-turn")
     team = _team(
         tmp_path,

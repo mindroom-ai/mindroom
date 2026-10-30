@@ -25,7 +25,7 @@ from mindroom.session_storage.legacy_agno3_conversion import BACKUP_SUFFIX
 from mindroom.session_storage.schema import TableNames, table_names
 from mindroom.session_storage.types import ConversationSession
 from mindroom.tool_system.worker_routing import build_requester_execution_identity
-from tests.conftest import bind_runtime_paths, create_agno_2_sessions_db, runtime_paths_for, seed_session
+from tests.conftest import bind_runtime_paths, create_agno_2_sessions_db, delete_runs, runtime_paths_for, seed_session
 from tests.history_helpers import stored_run_ids
 
 if TYPE_CHECKING:
@@ -128,7 +128,7 @@ def test_an_agno_2_database_is_migrated_once_and_then_keeps_its_log_order(tmp_pa
     assert loaded is not None
     assert [run.run_id for run in loaded.runs] == ["run-1", "run-2", "run-3"]
 
-    store.delete_runs(["run-2"], session_id="session-1")
+    delete_runs(store, ["run-2"], session_id="session-1")
     store.save_run(loaded, _run("run-4"), record_usage=False)
     reopened = _open(tmp_path).load_session("session-1")
 
