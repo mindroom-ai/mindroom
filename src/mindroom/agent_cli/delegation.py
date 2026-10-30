@@ -93,7 +93,7 @@ async def advance_cli_delegation(
 
     # Same mutation/authorization owner as ordinary prepared dispatch. The parent never resumes, and no hidden
     # requirement enters its provider history.
-    with tool_runtime_context(catalog.runtime_context):
+    with tool_runtime_context(context):
         result = await advance_delegation_call(
             requirement,
             response=response,

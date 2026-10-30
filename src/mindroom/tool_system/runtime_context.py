@@ -32,7 +32,6 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     import nio
-    from structlog.stdlib import BoundLogger
 
     from mindroom.agent_reply_membership import AgentReplyMembershipIndex
     from mindroom.bot_runtime_view import BotRuntimeView
@@ -57,7 +56,6 @@ if TYPE_CHECKING:
     from mindroom.tool_system.worker_routing import ResolvedWorkerTarget, ToolExecutionIdentity
     from mindroom.workers.models import WorkerReadyProgress
 
-_ToolContextReturn = TypeVar("_ToolContextReturn")
 _StreamChunk = TypeVar("_StreamChunk")
 
 
@@ -147,7 +145,6 @@ class ToolRuntimeContext:
     config_provider: Callable[[], Config] | None = None
     cli_approval_handler: Callable[[PausedAttempt], Awaitable[tuple[RunRequirement, ...]]] | None = None
     # What posted this turn's message when a hook did; a resumed approval turn restores it.
-    # Keep `hook_source` last: plugins construct this context positionally.
     hook_source: str | None = None
 
     @property
@@ -324,7 +321,6 @@ class ToolRuntimeSupport:
     """Own shared tool-runtime context building and scoped execution helpers."""
 
     runtime: BotRuntimeView
-    logger: BoundLogger
     runtime_paths: RuntimePaths
     storage_path: Path
     agent_name: str
@@ -418,16 +414,6 @@ class ToolRuntimeSupport:
             requester_id=user_id or self.matrix_id.full_id,
             runtime_paths=self.runtime_paths,
         )
-
-    async def run_in_context(
-        self,
-        *,
-        tool_context: ToolRuntimeContext,
-        operation: Callable[[], Awaitable[_ToolContextReturn]],
-    ) -> _ToolContextReturn:
-        """Execute one async operation inside the ambient tool runtime context."""
-        with tool_runtime_context(tool_context):
-            return await operation()
 
     def stream_in_context(
         self,

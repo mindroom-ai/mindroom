@@ -344,7 +344,7 @@ async def test_approved_run_continues_after_a_same_turn_continuation(  # noqa: C
     )
     runner = unwrap_extracted_collaborator(_bot(tmp_path / "runner")._response_runner)
     execution = replace(runner._approvals._approval_execution, config=lambda: config, runtime_paths=paths)
-    context = execution.tool_runtime.build_context(
+    context = runner.deps.tool_runtime.build_context(
         MessageTarget(
             identity.room_id,
             identity.thread_id,

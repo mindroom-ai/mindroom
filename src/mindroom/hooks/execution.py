@@ -70,8 +70,6 @@ def _scope_agent_name(context: HookContext) -> str | None:
         envelope = message_envelope_for_hook_context(context)
         if envelope is not None:
             agent_name = envelope.agent_name
-        elif isinstance(context, MessageEnrichContext | SystemEnrichContext):
-            agent_name = context.target_entity_name
         elif isinstance(context, AgentLifecycleContext):
             agent_name = context.entity_name
         elif isinstance(
@@ -82,7 +80,7 @@ def _scope_agent_name(context: HookContext) -> str | None:
     return agent_name
 
 
-def _scope_room_ids(context: HookContext) -> tuple[str, ...]:  # noqa: PLR0911
+def _scope_room_ids(context: HookContext) -> tuple[str, ...]:
     if isinstance(context, ToolBeforeCallContext | ToolAfterCallContext | ToolEnvironmentContext):
         return (context.room_id,) if context.room_id else ()
     envelope = message_envelope_for_hook_context(context)
@@ -90,15 +88,16 @@ def _scope_room_ids(context: HookContext) -> tuple[str, ...]:  # noqa: PLR0911
         return (envelope.room_id,)
     if isinstance(
         context,
-        ScheduleFiredContext | ReactionReceivedContext | RoomMemberJoinedContext | RoomMemberLeftContext,
+        ScheduleFiredContext
+        | ReactionReceivedContext
+        | RoomMemberJoinedContext
+        | RoomMemberLeftContext
+        | CompactionHookContext
+        | SessionHookContext,
     ):
         return (context.room_id,)
     if isinstance(context, AgentLifecycleContext):
         return context.rooms
-    if isinstance(context, CompactionHookContext):
-        return (context.room_id,)
-    if isinstance(context, SessionHookContext):
-        return (context.room_id,)
     if isinstance(context, CustomEventContext) and context.room_id:
         return (context.room_id,)
     return ()
@@ -411,14 +410,6 @@ async def emit_final_response_transform(
     )
 
 
-def _copy_transform_draft(draft: _TransformDraft) -> _TransformDraft:
-    return deepcopy(draft)
-
-
-def _transform_context_with_draft(context: _TransformContext, draft: _TransformDraft) -> _TransformContext:
-    return replace(context, draft=draft)
-
-
 def _next_transform_draft(
     current_draft: _TransformDraft,
     hook_context: _TransformContext,
@@ -444,11 +435,8 @@ async def _emit_serial_transform(
 ) -> _TransformDraft:
     current_draft = context.draft
     for hook in _eligible_hooks(registry, event_name, context):
-        hook_draft = _copy_transform_draft(current_draft) if copy_on_write else current_draft
-        hook_context = cast(
-            "_TransformContext",
-            _bind_hook_context(registry, hook, _transform_context_with_draft(context, hook_draft)),
-        )
+        hook_draft = deepcopy(current_draft) if copy_on_write else current_draft
+        hook_context = cast("_TransformContext", _bind_hook_context(registry, hook, replace(context, draft=hook_draft)))
         try:
             invocation = await _invoke_hook(hook, hook_context)
         except asyncio.CancelledError:

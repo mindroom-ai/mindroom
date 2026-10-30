@@ -113,6 +113,7 @@ from mindroom.streaming import PROGRESS_PLACEHOLDER
 from mindroom.teams.resume import continue_paused_team_run
 from mindroom.teams.spec import TeamMode
 from mindroom.tool_system.events import body_without_tool_markers
+from mindroom.tool_system.runtime_context import tool_runtime_context
 from mindroom.turn_model import ModelScope, resolve_turn_model
 
 if TYPE_CHECKING:
@@ -294,7 +295,6 @@ class ApprovalContinuationRunner:
             config=lambda: self.deps.runtime.config,
             runtime_paths=self.deps.runtime_paths,
             client=self.host.client,
-            tool_runtime=self.deps.tool_runtime,
             knowledge_access=self.deps.knowledge_access,
             refresh_scheduler=self.host.knowledge_refresh_scheduler,
         )
@@ -1248,49 +1248,43 @@ class ApprovalContinuationRunner:
         paused_answer = _paused_answer()
         with approval_receipt_context((*continuation.earlier_calls, *continuation.calls), run_id=continuation.run_id):
             if continuation.entity_kind == "team":
-
-                async def continue_team() -> CompletedApprovalRun | PausedAttempt:
-                    return await continue_paused_team_run(
-                        member_names=continuation.team_member_names,
-                        mode=TeamMode(continuation.team_mode or "coordinate"),
-                        config=self.deps.runtime.config,
-                        runtime_paths=self.deps.runtime_paths,
-                        execution_identity=execution_identity,
-                        session_id=continuation.session_id,
-                        run_id=continuation.run_id,
-                        user_id=continuation.requester_id,
-                        configured_team_name=continuation.entity_name,
-                        model_name=resolve_turn_model(
-                            self.deps.runtime.config,
-                            self.deps.runtime_paths,
-                            ModelScope(
-                                entity=continuation.entity_name,
-                                room_id=continuation.room_id,
-                                thread_id=continuation.thread_id,
-                                explicit=continuation.runtime_model_name,
-                            ),
-                            None,
-                        ).model_name,
-                        refresh_scheduler=self.host.knowledge_refresh_scheduler(),
-                        member_model_names=dict(continuation.team_member_model_names) or None,
-                        approval_calls=continuation.calls,
-                        history_scope=continuation.history_scope,
-                        prior_tool_trace=paused_answer.tool_trace,
-                        prior_presentation_state=paused_answer.team_state,
-                        show_tool_calls=continuation.show_tool_calls,
-                        tool_trace_collector=tool_trace_collector,
-                        progress=progress,
-                    )
-
                 async with response_typing_indicator(
                     self.host.client(),
                     request,
                     response_run_id=continuation.run_id,
                 ):
-                    response_text = await self.deps.tool_runtime.run_in_context(
-                        tool_context=tool_context,
-                        operation=continue_team,
-                    )
+                    with tool_runtime_context(tool_context):
+                        response_text = await continue_paused_team_run(
+                            member_names=continuation.team_member_names,
+                            mode=TeamMode(continuation.team_mode or "coordinate"),
+                            config=self.deps.runtime.config,
+                            runtime_paths=self.deps.runtime_paths,
+                            execution_identity=execution_identity,
+                            session_id=continuation.session_id,
+                            run_id=continuation.run_id,
+                            user_id=continuation.requester_id,
+                            configured_team_name=continuation.entity_name,
+                            model_name=resolve_turn_model(
+                                self.deps.runtime.config,
+                                self.deps.runtime_paths,
+                                ModelScope(
+                                    entity=continuation.entity_name,
+                                    room_id=continuation.room_id,
+                                    thread_id=continuation.thread_id,
+                                    explicit=continuation.runtime_model_name,
+                                ),
+                                None,
+                            ).model_name,
+                            refresh_scheduler=self.host.knowledge_refresh_scheduler(),
+                            member_model_names=dict(continuation.team_member_model_names) or None,
+                            approval_calls=continuation.calls,
+                            history_scope=continuation.history_scope,
+                            prior_tool_trace=paused_answer.tool_trace,
+                            prior_presentation_state=paused_answer.team_state,
+                            show_tool_calls=continuation.show_tool_calls,
+                            tool_trace_collector=tool_trace_collector,
+                            progress=progress,
+                        )
             else:
                 response_text = await self._approval_execution.continue_run(
                     continuation,

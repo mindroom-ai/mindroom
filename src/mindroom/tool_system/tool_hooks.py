@@ -187,8 +187,8 @@ class _ResolvedToolContext:
     message_received_depth: int = 0
 
     @property
-    def agent_name(self) -> str:
-        return "" if self.execution_identity is None else self.execution_identity.agent_name
+    def agent_name(self) -> str | None:
+        return None if self.execution_identity is None else self.execution_identity.agent_name or None
 
     @property
     def room_id(self) -> str | None:
@@ -221,7 +221,7 @@ class _ResolvedToolContext:
                 correlation_id=self.correlation_id,
             ),
             "arguments": arguments,
-            "agent_name": self.agent_name,
+            "agent_name": self.agent_name or "",
             "room_id": self.room_id,
             "requester_id": self.requester_id,
             "message_received_depth": self.message_received_depth,
@@ -237,7 +237,7 @@ class _ResolvedToolContext:
 
     def record_kwargs(self) -> dict[str, Any]:
         return {
-            "agent_name": self.agent_name or None,
+            "agent_name": self.agent_name,
             "channel": self.channel,
             "room_id": self.room_id,
             "thread_id": self.thread_id,
@@ -426,14 +426,14 @@ async def _run_before_hooks(
         "Tool hook dispatch timing",
         phase="before_hooks_start",
         tool_name=tool_name,
-        agent_name=resolved_context.agent_name or None,
+        agent_name=resolved_context.agent_name,
     )
     await emit_gate(resolved_context.hooks.registry, EVENT_TOOL_BEFORE_CALL, before_context)
     emit_timing_event(
         "Tool hook dispatch timing",
         phase="before_hooks_finish",
         tool_name=tool_name,
-        agent_name=resolved_context.agent_name or None,
+        agent_name=resolved_context.agent_name,
         declined=before_context.declined,
         duration_ms=elapsed_ms_since(before_hooks_started_at, clock=time.perf_counter, ndigits=2),
     )
@@ -553,7 +553,7 @@ def _record_failure(
     logger.warning(
         "tool_call_failed",
         tool_name=tool_name,
-        agent_name=resolved_context.agent_name or None,
+        agent_name=resolved_context.agent_name,
         error_type=failure_record.error_type,
         error_message=failure_record.error_message,
         duration_ms=failure_record.duration_ms,
@@ -587,12 +587,11 @@ async def _execute_bridge(  # noqa: C901, PLR0915
     has_before_hooks = hook_registry.has_hooks(EVENT_TOOL_BEFORE_CALL)
     has_after_hooks = hook_registry.has_hooks(EVENT_TOOL_AFTER_CALL)
     has_environment_hooks = hook_registry.has_hooks(EVENT_TOOL_ENVIRONMENT)
-    resolved_agent_name = resolved_context.agent_name or None
     emit_timing_event(
         "Tool hook dispatch timing",
         phase="bridge_entry",
         tool_name=tool_name,
-        agent_name=resolved_agent_name,
+        agent_name=resolved_context.agent_name,
         has_before_hooks=has_before_hooks,
         has_environment_hooks=has_environment_hooks,
         has_after_hooks=has_after_hooks,
@@ -620,7 +619,7 @@ async def _execute_bridge(  # noqa: C901, PLR0915
                 duration_ms=ready.result_ready_ms,
             )
             timing.after_hooks_ms = elapsed_ms_since(after_hooks_started_at, clock=time.perf_counter, ndigits=2)
-        timing.emit_finish(ready, tool_name=tool_name, agent_name=resolved_agent_name, outcome=outcome)
+        timing.emit_finish(ready, tool_name=tool_name, agent_name=resolved_context.agent_name, outcome=outcome)
 
     async def answer(result: _ToolHookResult, outcome: str) -> _ToolHookResult:
         ready = timing.result_ready()
@@ -679,7 +678,7 @@ async def _execute_bridge(  # noqa: C901, PLR0915
     tool_body_started_at = time.perf_counter()
     try:
         with collected_tool_environment(environment):
-            result = await _call_recorded_tool(func, args, tool_name=tool_name, agent_name=resolved_agent_name)
+            result = await _call_recorded_tool(func, args, tool_name=tool_name, agent_name=resolved_context.agent_name)
     except OAuthConnectionRequired as exc:
         timing.tool_body_ms = elapsed_ms_since(tool_body_started_at, clock=time.perf_counter, ndigits=2)
         return await answer(oauth_connection_required_payload(exc), "oauth_connection_required")

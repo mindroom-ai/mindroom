@@ -24,7 +24,6 @@ from mindroom.config.resolution import entity_timezone, memory_backend, show_too
 from mindroom.constants import (
     ATTACHMENT_IDS_KEY,
     HOOK_SOURCE_RUN_METADATA_KEY,
-    ROUTER_AGENT_NAME,
     STREAM_STATUS_KEY,
     STREAM_STATUS_PENDING,
     TURN_INTENT_RUN_METADATA_KEY,
@@ -95,7 +94,7 @@ from mindroom.streaming import (
     UnfinishedStreamedReply,
 )
 from mindroom.teams.envelope import TeamTurnSpec, team_response_stream
-from mindroom.teams.members import requested_team_agent_names
+from mindroom.teams.members import allow_direct_private_team_agents, requested_team_agent_names
 from mindroom.teams.spec import TeamMode
 from mindroom.thread_models import set_thread_model_override
 from mindroom.thread_summary import thread_summary_message_count_hint
@@ -105,6 +104,7 @@ from mindroom.tool_jobs.runtime import get_background_runtime
 from mindroom.tool_system.agent_tools import room_turn_offers
 from mindroom.tool_system.context_bound_streams import closing_async_stream
 from mindroom.tool_system.events import CollectedStreamPresentation
+from mindroom.tool_system.runtime_context import tool_runtime_context
 from mindroom.turn_model import (
     ModelScope,
     TeamTurnModelSelection,
@@ -2376,11 +2376,10 @@ class ResponseRunner:
         execution_identity = tool_context.execution_identity
         configured_team_name = self.deps.runtime.config.configured_team_name(self.deps.agent_name)
         self.deps.runtime.config.assert_team_agents_supported(
-            [agent_name for agent_name in agent_names if agent_name != ROUTER_AGENT_NAME],
-            allow_direct_private_agents=(
-                configured_team_name is None
-                and execution_identity.channel == "matrix"
-                and bool(execution_identity.requester_id)
+            requested_team_agent_names(agent_names),
+            allow_direct_private_agents=allow_direct_private_team_agents(
+                execution_identity,
+                configured_team_name=configured_team_name,
             ),
         )
         orchestrator = self.deps.runtime.orchestrator
@@ -2797,10 +2796,8 @@ class ResponseRunner:
                 response_run_id=turn.run_id,
                 participation=runtime.participation,
             ):
-                response_text = await self.deps.tool_runtime.run_in_context(
-                    tool_context=runtime.tool_context,
-                    operation=collect,
-                )
+                with tool_runtime_context(runtime.tool_context):
+                    response_text = await collect()
             _raise_if_process_shutdown()
         except ResponsePausedForApproval:
             raise

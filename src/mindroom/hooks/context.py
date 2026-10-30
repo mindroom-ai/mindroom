@@ -339,7 +339,7 @@ class HookContext:
         requester_id = _requester_id_for_hook_send(self, trigger_dispatch=trigger_dispatch)
         if requester_id:
             resolved_extra_content.setdefault(ORIGINAL_SENDER_KEY, requester_id)
-        message_received_depth = _message_received_depth_for_hook_send(self)
+        message_received_depth = _current_message_received_depth(self) + 1
         if message_received_depth > 0:
             resolved_extra_content[HOOK_MESSAGE_RECEIVED_DEPTH_KEY] = message_received_depth
         return await self.message_sender(
@@ -733,11 +733,7 @@ def _check_env_name(name: str) -> None:
         raise ValueError(msg)
 
 
-def _requester_id_for_hook_send(
-    context: HookContext,
-    *,
-    trigger_dispatch: bool = False,
-) -> str | None:
+def _requester_id_for_hook_send(context: HookContext, *, trigger_dispatch: bool) -> str | None:
     """Return the requester identity to preserve on hook-originated sends."""
     envelope = message_envelope_for_hook_context(context)
     if envelope is not None:
@@ -755,11 +751,6 @@ def _requester_id_for_hook_send(
     if trigger_dispatch:
         return mindroom_user_id(context.config, context.runtime_paths)
     return None
-
-
-def _message_received_depth_for_hook_send(context: HookContext) -> int:
-    """Return the synthetic hook-chain depth to preserve on hook sends."""
-    return _next_message_received_depth(_current_message_received_depth(context))
 
 
 def _current_message_received_depth(context: HookContext) -> int:
@@ -786,8 +777,3 @@ def message_envelope_for_hook_context(context: HookContext) -> MessageEnvelope |
     if isinstance(context, CancelledResponseContext):
         return context.info.envelope
     return None
-
-
-def _next_message_received_depth(current_depth: int) -> int:
-    """Return the next synthetic-chain depth after one downstream hook hop."""
-    return current_depth + 1

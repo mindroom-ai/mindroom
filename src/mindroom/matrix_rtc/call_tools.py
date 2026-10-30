@@ -538,9 +538,7 @@ async def build_call_tools(
             agent_name=agent_name,
             config=config,
             runtime_paths=runtime_paths,
-            tool_support=tool_support,
             context=context,
-            execution_identity=execution_identity,
             room_id=room_id,
             requester_id=requester_id,
             session_id=session_id,
@@ -665,9 +663,7 @@ async def _run_call_agent(
     agent_name: str,
     config: Config,
     runtime_paths: RuntimePaths,
-    tool_support: ToolRuntimeSupport,
     context: ToolRuntimeContext,
-    execution_identity: ToolExecutionIdentity,
     room_id: str,
     requester_id: str,
     session_id: str,
@@ -689,9 +685,7 @@ async def _run_call_agent(
             agent_name=agent_name,
             config=config,
             runtime_paths=runtime_paths,
-            tool_support=tool_support,
             context=context,
-            execution_identity=execution_identity,
             room_id=room_id,
             requester_id=requester_id,
             session_id=session_id,
@@ -710,9 +704,7 @@ async def _run_authorized_call_agent(
     agent_name: str,
     config: Config,
     runtime_paths: RuntimePaths,
-    tool_support: ToolRuntimeSupport,
     context: ToolRuntimeContext,
-    execution_identity: ToolExecutionIdentity,
     room_id: str,
     requester_id: str,
     session_id: str,
@@ -747,7 +739,7 @@ async def _run_authorized_call_agent(
             config,
             runtime_paths,
             refresh_scheduler=refresh_scheduler,
-            execution_identity=execution_identity,
+            execution_identity=context.execution_identity,
         )
         transient_enrichment_items = append_knowledge_availability_enrichment(
             (),
@@ -769,7 +761,7 @@ async def _run_authorized_call_agent(
             inline_tools=True,
             prompt=transcript,
             show_tool_calls=False,
-            execution_identity=execution_identity,
+            execution_identity=context.execution_identity,
             refresh_scheduler=refresh_scheduler,
             knowledge=knowledge_resolution.knowledge,
             eager_deferred_tools=True,
@@ -785,10 +777,8 @@ async def _run_authorized_call_agent(
             )
 
         async def _run_with_build(build: AgentBuild) -> TurnResult:
-            return await tool_support.run_in_context(
-                tool_context=context,
-                operation=functools.partial(_respond, build),
-            )
+            with tool_runtime_context(context):
+                return await _respond(build)
 
         result = await agent_cache.run(
             knowledge=knowledge_resolution.knowledge,

@@ -68,7 +68,7 @@ def build_agent_status_message(
         voice_calls_available: Whether this bot has a usable MatrixRTC call manager
 
     Returns:
-        Status message string, limited to 250 characters
+        Status message string
 
     """
     status_parts = []

@@ -1520,6 +1520,7 @@ depends_on = [
     "mindroom.streaming",
     "mindroom.teams",
     "mindroom.tool_system.events",
+    "mindroom.tool_system.runtime_context",
     "mindroom.turn_model",
 ]
 visibility = ["mindroom.response_runner"]
@@ -3507,6 +3508,7 @@ depends_on = [
     "mindroom.turn_store",
     "mindroom.tool_system.context_bound_streams",
     "mindroom.tool_system.agent_tools",
+    "mindroom.tool_system.runtime_context",
     "mindroom.config.resolution",
     "mindroom.turn_model",
 ]
@@ -6824,6 +6826,7 @@ expose = [
     "formation.select_ad_hoc_team_mode",
     "members.BuiltTeam",
     "members.ResolvedExactTeamMembers",
+    "members.allow_direct_private_team_agents",
     "members.build_team_spec",
     "members.requested_team_agent_names",
     "members.resolve_exact_team_members",

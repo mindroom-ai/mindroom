@@ -80,13 +80,11 @@ from mindroom.matrix_rtc.events import (  # noqa: E402
 from mindroom.matrix_rtc.focus import OpenIDToken, request_sfu_grant  # noqa: E402
 from mindroom.response_admission import ResponseAdmissionGate  # noqa: E402
 from mindroom.runtime_env_policy import CREDENTIALS_ENCRYPTION_KEY_ENV  # noqa: E402
-from mindroom.tool_system.runtime_context import ToolRuntimeContext, tool_runtime_context  # noqa: E402
 from mindroom.tool_system.worker_routing import agent_workspace_root_path  # noqa: E402
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable
-
     from mindroom.message_target import MessageTarget
+    from mindroom.tool_system.runtime_context import ToolRuntimeContext
 
 HOMESERVER = "https://mindroom.chat"
 SERVICE_URL = "https://mindroom.chat/livekit/jwt"
@@ -570,16 +568,6 @@ async def main() -> int:  # noqa: C901, PLR0915
                         conversation_reader=make_conversation_reader_mock(),
                         storage_path=paths.storage_root,
                     )
-
-                async def run_in_context(
-                    self,
-                    *,
-                    tool_context: ToolRuntimeContext | None,
-                    operation: Callable[[], Awaitable[str]],
-                ) -> str:
-                    """Mirror the production tool-support context binding."""
-                    with tool_runtime_context(tool_context):
-                        return await operation()
 
             response_admission_gate = ResponseAdmissionGate()
 

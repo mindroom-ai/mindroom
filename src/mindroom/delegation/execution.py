@@ -104,7 +104,6 @@ from mindroom.tool_system.output_files import (
 from mindroom.tool_system.plugins import config_plugins
 from mindroom.tool_system.runtime_context import (
     current_budget_monitor,
-    current_plugins,
     get_tool_runtime_context,
     tool_runtime_context,
 )
@@ -339,7 +338,7 @@ async def _execute_child(
         approved_calls,
         config=config,
         runtime_paths=runtime_paths,
-        tools=current_plugins(config, runtime_paths).tools,
+        tools=context.plugins.tools,
         execution_identity=identity,
         delegation_depth=child.depth,
     )
@@ -378,7 +377,7 @@ async def _execute_child(
             None,
         ),
         knowledge=knowledge.knowledge,
-        plugins=current_plugins(config, runtime_paths),
+        plugins=context.plugins,
         refresh_scheduler=refresh_scheduler,
         delegation_depth=child.depth,
         supports_native_tool_approval=True,

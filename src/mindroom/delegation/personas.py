@@ -354,7 +354,7 @@ def validate_persona_tools(
         yours = (
             [kept for kept in cap if kept.partition(".")[0] in available_toolkits]
             if cap is not None
-            else sorted(set(available_toolkits))
+            else sorted(available_toolkits)
         )
         msg = f"Cannot delegate: unknown tool '{entry}'. Your tools: {', '.join(yours) or 'none'}."
         raise PersonaError(msg)

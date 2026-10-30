@@ -595,7 +595,6 @@ class AgentBot:
         )
         self._tool_runtime_support = ToolRuntimeSupport(
             runtime=self._runtime_view,
-            logger=self.logger,
             runtime_paths=self.runtime_paths,
             storage_path=self.storage_path,
             agent_name=self.agent_name,

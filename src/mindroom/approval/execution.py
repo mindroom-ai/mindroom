@@ -52,6 +52,7 @@ from mindroom.tool_jobs.execution_scope import owned_tool_execution
 from mindroom.tool_jobs.settings import background_tool_jobs_enabled
 from mindroom.tool_system.context_bound_streams import closing_async_stream
 from mindroom.tool_system.events import CollectedStreamPresentation
+from mindroom.tool_system.runtime_context import tool_runtime_context
 from mindroom.turn_model import ModelScope, resolve_turn_model
 
 if TYPE_CHECKING:
@@ -72,7 +73,7 @@ if TYPE_CHECKING:
     from mindroom.run_storage import RunStorage
     from mindroom.streaming import ProgressPublisher
     from mindroom.tool_system.events import ToolTraceEntry
-    from mindroom.tool_system.runtime_context import ToolRuntimeContext, ToolRuntimeSupport
+    from mindroom.tool_system.runtime_context import ToolRuntimeContext
     from mindroom.turn_model import TurnModel
 
 
@@ -382,7 +383,6 @@ class AgentApprovalExecution:
     config: Callable[[], Config]
     runtime_paths: RuntimePaths
     client: Callable[[], nio.AsyncClient]
-    tool_runtime: ToolRuntimeSupport
     knowledge_access: KnowledgeAccessSupport
     refresh_scheduler: Callable[[], KnowledgeRefreshScheduler | None]
 
@@ -560,7 +560,8 @@ class AgentApprovalExecution:
                             progress=progress,
                             model_name=model.model_name,
                         )
-                    result = await self.tool_runtime.run_in_context(tool_context=tool_context, operation=operation)
+                    with tool_runtime_context(tool_context):
+                        result = await operation()
         finally:
             try:
                 await finalize_consumption()

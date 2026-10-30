@@ -379,7 +379,6 @@ def _build_response_runner(
     membership = make_membership_stub()
     tool_runtime = ToolRuntimeSupport(
         runtime=runtime,
-        logger=bot.logger,
         runtime_paths=runtime_paths,
         storage_path=storage_path,
         agent_name=bot.agent_name,

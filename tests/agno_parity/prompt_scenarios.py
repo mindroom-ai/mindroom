@@ -927,9 +927,6 @@ class _CallToolSupport:
     def build_context(self, target: MessageTarget, *, user_id: str, **_kwargs: object) -> ToolRuntimeContext:
         return self.context(target, user_id)
 
-    async def run_in_context[T](self, *, operation: Callable[[], Awaitable[T]], **_kwargs: object) -> T:
-        return await operation()
-
 
 async def _build_voice_call(root: Path, **call: object) -> tuple[dict[str, Any], CallAgentTooling]:
     authored = _voice_config()

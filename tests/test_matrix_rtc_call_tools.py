@@ -67,7 +67,6 @@ from mindroom.tool_system.plugins import config_plugins
 from mindroom.tool_system.runtime_context import (
     ToolRuntimeContext,
     get_tool_runtime_context,
-    tool_runtime_context,
 )
 from mindroom.tool_system.worker_routing import build_tool_execution_identity
 from mindroom.usage.stats import collect_admin_usage
@@ -90,6 +89,7 @@ if TYPE_CHECKING:
     from mindroom.session_storage.types import ConversationSession
     from mindroom.tool_system.invocation import ToolCall, ToolMiddleware, ToolNext
     from mindroom.tool_system.tool_function import AdaptedToolkit, ToolFunction
+    from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 
 AGENT = "helper"
 REQUESTER = "@alice:example.org"
@@ -148,6 +148,13 @@ def _runtime_context(
         hooks=HookBindings(registry=hook_registry or MagicMock()),  # type: ignore[arg-type]
         orchestrator=orchestrator,  # type: ignore[arg-type]
     )
+
+
+def _bound_tool_context() -> ToolRuntimeContext:
+    """Return the tool runtime context the call bound around its agent turn."""
+    context = get_tool_runtime_context()
+    assert context is not None
+    return context
 
 
 def _function(entrypoint: object, parameters: dict | None = None, *, name: str = "add") -> Function:
@@ -235,11 +242,11 @@ def _ollama_config(runtime_paths: object, **agent: Any) -> Config:  # noqa: ANN4
     )
 
 
-def _identity(runtime_paths: object) -> object:
+def _identity(runtime_paths: RuntimePaths) -> ToolExecutionIdentity:
     return build_tool_execution_identity(
         channel="matrix",
         agent_name=AGENT,
-        runtime_paths=runtime_paths,  # type: ignore[arg-type]
+        runtime_paths=runtime_paths,
         requester_id=REQUESTER,
         room_id="!room:example.org",
         thread_id=None,
@@ -643,7 +650,6 @@ async def test_call_responder_prepares_full_requester_prompt_before_first_turn(
                 conversation_reader=make_conversation_reader_mock(),
                 hooks=HookBindings(registry=MagicMock()),
             ),
-            run_in_context=lambda *, operation, **_kwargs: operation(),
         )
         tooling = await build_call_tools(
             agent_name=AGENT,
@@ -854,16 +860,6 @@ async def test_call_responder_uses_normal_agent_turn_and_refuses_unsafe_function
             contexts.append(context)
             return context
 
-        async def run_in_context(
-            self,
-            *,
-            tool_context: ToolRuntimeContext,
-            operation: Callable[[], Awaitable[str]],
-        ) -> str:
-            assert tool_context.tool_function_filter is not None
-            turn_contexts.append(tool_context)
-            return await operation()
-
     async def fake_ai_response(
         turn: ResponseTurnContext,
         _paths: RuntimePaths,
@@ -871,6 +867,9 @@ async def test_call_responder_uses_normal_agent_turn_and_refuses_unsafe_function
         *,
         sinks: TurnSinks,
     ) -> TurnResult:
+        context = _bound_tool_context()
+        assert context.tool_function_filter is not None
+        turn_contexts.append(context)
         calls.append((turn, config))
         recorder = sinks.turn_recorder
         assert recorder is not None
@@ -1127,16 +1126,6 @@ async def test_cascaded_responder_records_effective_selected_model_metadata(
                 active_model_name=active_model_name,
             )
 
-        async def run_in_context(
-            self,
-            *,
-            tool_context: ToolRuntimeContext,
-            operation: Callable[[], Awaitable[str]],
-        ) -> str:
-            assert get_tool_runtime_context() is None
-            with tool_runtime_context(tool_context):
-                return await operation()
-
     def scripted_provider(_config: Config, _runtime_paths: object, model_name: str, **_kwargs: object) -> ScriptedModel:
         model_id = config.models[model_name].id
         return ScriptedModel(
@@ -1195,7 +1184,7 @@ def test_call_response_tracker_keeps_fifo_without_retaining_settled_tokens(tmp_p
         agent_name=AGENT,
         config=_config(),
         runtime_paths=test_runtime_paths(tmp_path),
-        execution_identity=_identity(test_runtime_paths(tmp_path)),  # type: ignore[arg-type]
+        execution_identity=_identity(test_runtime_paths(tmp_path)),
     )
     state = _CallAgentRunState(
         session_id="call-session",
@@ -1249,13 +1238,7 @@ async def test_cascaded_cancellation_during_knowledge_resolution_persists_transc
         agent_name=AGENT,
         config=config,
         runtime_paths=runtime_paths,
-        tool_support=SimpleNamespace(
-            build_context=lambda target, **_kwargs: _runtime_context(
-                config=config,
-                runtime_paths=runtime_paths,
-                target=target,
-            ),
-        ),  # type: ignore[arg-type]
+        tool_support=_tool_support(config, runtime_paths),  # type: ignore[arg-type]
         room_id="!room:example.org",
         requester_id=REQUESTER,
         authorize_operation=_authorized_call_operation,
@@ -1288,7 +1271,7 @@ async def test_call_response_tracker_failed_settlement_does_not_abort_next_turn(
         agent_name=AGENT,
         config=_config(),
         runtime_paths=test_runtime_paths(tmp_path),
-        execution_identity=_identity(test_runtime_paths(tmp_path)),  # type: ignore[arg-type]
+        execution_identity=_identity(test_runtime_paths(tmp_path)),
     )
     state = _CallAgentRunState(
         session_id="call-session",
@@ -1348,19 +1331,11 @@ async def test_cascaded_responder_uses_the_fallback_for_an_over_budget_caller(
             context = _runtime_context(config=config, runtime_paths=runtime_paths, target=target)
             return replace(context, active_model_name=cast("str | None", kwargs.get("active_model_name")))
 
-        async def run_in_context(
-            self,
-            *,
-            tool_context: ToolRuntimeContext,
-            operation: Callable[[], Awaitable[str]],
-        ) -> str:
-            assert tool_context.active_model_name == "cheap"
-            return await operation()
-
     async def resolve_knowledge(*_args: object, **_kwargs: object) -> SimpleNamespace:
         return SimpleNamespace(knowledge=None, unavailable={})
 
     async def fake_ai_response(turn: ResponseTurnContext, *_args: object, **_kwargs: object) -> TurnResult:
+        assert _bound_tool_context().active_model_name == "cheap"
         ai_calls.append(turn)
         return TurnResult("answer")
 
@@ -1415,21 +1390,13 @@ async def test_cascaded_responder_switches_to_the_fallback_when_the_caller_cross
             )
             return replace(context, active_model_name=cast("str | None", kwargs.get("active_model_name")))
 
-        async def run_in_context(
-            self,
-            *,
-            tool_context: ToolRuntimeContext,
-            operation: Callable[[], Awaitable[str]],
-        ) -> str:
-            turn_models.append(tool_context.active_model_name)
-            return await operation()
-
     async def resolve_knowledge(*_args: object, **_kwargs: object) -> SimpleNamespace:
         return SimpleNamespace(knowledge=None, unavailable={})
 
     ai_models: list[str | None] = []
 
     async def fake_ai_response(turn: ResponseTurnContext, *_args: object, **_kwargs: object) -> TurnResult:
+        turn_models.append(_bound_tool_context().active_model_name)
         ai_models.append(turn.active_model_name)
         return TurnResult("answer")
 
@@ -1498,13 +1465,7 @@ async def _call_tools_over(build: AgentBuild, tmp_path: Path, monkeypatch: pytes
         "mindroom.matrix_rtc.call_tools.resolve_agent_knowledge_access_async",
         AsyncMock(return_value=SimpleNamespace(knowledge=None)),
     )
-    tool_support = SimpleNamespace(
-        build_context=lambda target, **_kwargs: _runtime_context(
-            config=config,
-            runtime_paths=runtime_paths,
-            target=target,
-        ),
-    )
+    tool_support = _tool_support(config, runtime_paths)
     return await build_call_tools(
         agent_name=AGENT,
         config=config,
@@ -1695,13 +1656,7 @@ async def test_realtime_call_tools_use_the_callers_budget_and_count_helper_usage
         "mindroom.matrix_rtc.call_tools.resolve_agent_knowledge_access_async",
         AsyncMock(return_value=SimpleNamespace(knowledge=None)),
     )
-    tool_support = SimpleNamespace(
-        build_context=lambda target, **_kwargs: _runtime_context(
-            config=config,
-            runtime_paths=runtime_paths,
-            target=target,
-        ),
-    )
+    tool_support = _tool_support(config, runtime_paths)
 
     tooling = await build_call_tools(
         agent_name=AGENT,
@@ -1758,20 +1713,12 @@ async def test_cascaded_responder_refreshes_knowledge_and_availability_each_turn
                 orchestrator=orchestrator,
             )
 
-        async def run_in_context(
-            self,
-            *,
-            tool_context: ToolRuntimeContext,
-            operation: Callable[[], Awaitable[str]],
-        ) -> str:
-            assert tool_context.tool_function_filter is not None
-            return await operation()
-
     async def resolve_knowledge(*_args: object, **kwargs: object) -> SimpleNamespace:
         resolver_calls.append(kwargs)
         return next(resolutions)
 
     async def fake_ai_response(turn: ResponseTurnContext, *_args: object, **_kwargs: object) -> TurnResult:
+        assert _bound_tool_context().tool_function_filter is not None
         ai_calls.append(turn)
         return TurnResult(f"answer-{len(ai_calls)}")
 
@@ -1856,14 +1803,7 @@ async def test_call_responder_adds_origin_brief_enrichment(
         agent_name=AGENT,
         config=config,
         runtime_paths=runtime_paths,
-        tool_support=SimpleNamespace(
-            build_context=lambda target, **_kwargs: _runtime_context(
-                config=config,
-                runtime_paths=runtime_paths,
-                target=target,
-            ),
-            run_in_context=lambda **kwargs: kwargs["operation"](),
-        ),  # type: ignore[arg-type]
+        tool_support=_tool_support(config, runtime_paths),  # type: ignore[arg-type]
         room_id="!room:example.org",
         requester_id=REQUESTER,
         authorize_operation=_authorized_call_operation,
@@ -1898,16 +1838,8 @@ async def test_cascaded_responder_waits_for_interrupted_playout_settlement(
         def build_context(self, target: MessageTarget, **_kwargs: object) -> ToolRuntimeContext:
             return _runtime_context(config=config, runtime_paths=runtime_paths, target=target)
 
-        async def run_in_context(
-            self,
-            *,
-            tool_context: ToolRuntimeContext,
-            operation: Callable[[], Awaitable[str]],
-        ) -> str:
-            assert tool_context.tool_function_filter is not None
-            return await operation()
-
     async def fake_ai_response(turn: ResponseTurnContext, *_args: object, sinks: TurnSinks) -> TurnResult:
+        assert _bound_tool_context().tool_function_filter is not None
         prompt = turn.prompt
         ai_prompts.append(prompt)
         recorder = sinks.turn_recorder

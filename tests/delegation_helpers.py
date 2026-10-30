@@ -56,7 +56,7 @@ from tests.team_turn_helpers import collect_team_reply
 from tests.turn_model_helpers import turn_model
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable, Iterator, Mapping, Sequence
+    from collections.abc import Iterator, Mapping, Sequence
     from pathlib import Path
 
     import pytest
@@ -285,22 +285,12 @@ async def respond(
             return _paused_with_committed_presentation(suspended, show_tool_calls=ctx.show_tool_calls)
 
 
-async def _run_in_tool_context[T](
-    *,
-    tool_context: ToolRuntimeContext | None,
-    operation: Callable[[], Awaitable[T]],
-) -> T:
-    with tool_runtime_context(tool_context):
-        return await operation()
-
-
 def approval_executor(config: Config, runtime_paths: RuntimePaths) -> AgentApprovalExecution:
     """Return the agent approval executor a response runner builds, around a detached runtime."""
     return AgentApprovalExecution(
         config=lambda: config,
         runtime_paths=runtime_paths,
         client=AsyncMock,
-        tool_runtime=MagicMock(run_in_context=_run_in_tool_context),
         knowledge_access=KnowledgeAccessSupport(
             runtime=MagicMock(config=config, orchestrator=None),
             runtime_paths=runtime_paths,

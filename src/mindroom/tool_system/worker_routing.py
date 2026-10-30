@@ -114,7 +114,6 @@ def parse_tool_execution_identity_payload(
 class _ResolvedWorkerExecution:
     """Resolved worker execution scope from explicit worker-scope policy."""
 
-    worker_scope: WorkerScope | None
     execution_identity: ToolExecutionIdentity | None
     worker_key: str | None
 
@@ -306,7 +305,6 @@ def resolve_worker_execution_scope(
             agent_name=agent_name,
         )
     return _ResolvedWorkerExecution(
-        worker_scope=worker_scope,
         execution_identity=resolved_execution_identity,
         worker_key=worker_key,
     )

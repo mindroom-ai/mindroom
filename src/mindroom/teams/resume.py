@@ -318,6 +318,7 @@ async def continue_paused_team_run(
         persisted = _stored_paused_team_run(scope, run_id)
         delegated = has_delegation_state(persisted)
         decided = approval_decisions(approval_calls)
+        tools = current_plugins(config, runtime_paths).tools
         async with asyncio.TaskGroup() as recovery:
             required_tool_tasks = {
                 name: recovery.create_task(
@@ -326,7 +327,7 @@ async def continue_paused_team_run(
                         tuple(call for call in decided.approved if call.invoking_agent == name),
                         config=config,
                         runtime_paths=runtime_paths,
-                        tools=current_plugins(config, runtime_paths).tools,
+                        tools=tools,
                         execution_identity=execution_identity,
                         delegation_depth=0,
                     ),
