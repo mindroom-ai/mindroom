@@ -1687,8 +1687,7 @@ async def test_generate_response_keeps_locked_target_when_payload_preparation_re
             delivery_kind="sent",
         )
 
-    def fake_build_lifecycle(**kwargs: object) -> _NoopResponseLifecycle:
-        request = kwargs["request"]
+    def fake_build_lifecycle(request: object, **_kwargs: object) -> _NoopResponseLifecycle:
         assert isinstance(request, ResponseRequest)
         observed_lifecycle_targets.append(request.response_envelope.target)
         return _NoopResponseLifecycle()

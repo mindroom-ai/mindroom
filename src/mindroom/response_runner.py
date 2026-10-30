@@ -15,7 +15,7 @@ from mindroom.agent_modes import resolve_agent_mode
 from mindroom.agent_run_context import append_knowledge_availability_enrichment
 from mindroom.ai import stream_agent_response
 from mindroom.ai_run_metadata import ai_run_extra_content_from_metadata
-from mindroom.approval.response import continuation_target
+from mindroom.approval.response import continuation_response_kind, continuation_target
 from mindroom.authorization import ReplyMembershipPendingError
 from mindroom.background_tasks import run_coroutine_until_complete
 from mindroom.config.resolution import cheap_model as agent_cheap_model
@@ -815,7 +815,7 @@ class ResponseRunner:
 
         await self._run_locked_response_lifecycle(
             request,
-            response_kind="team" if continuation.entity_kind == "team" else "ai",
+            response_kind=continuation_response_kind(continuation),
             locked_operation=ownership_disappeared,
             signal_queued_message=False,
         )
@@ -1306,10 +1306,7 @@ class ResponseRunner:
         if handle is not None and not handle.exited:
             # Nothing to answer: a placeholder goes, as a suppressed answer's does.
             await self.deps.delivery_gateway.end_reply_span(handle, suppress_decision(handle))
-        lifecycle = self.locked.build_lifecycle(
-            identity=self.locked.response_identity(prepared, response_kind=response_kind),
-            request=prepared,
-        )
+        lifecycle = self.locked.build_lifecycle(prepared, response_kind=response_kind)
         await lifecycle.finalize(
             FinalDeliveryOutcome(ending=Suppressed(Suppression.EMPTY_PROMPT)),
             build_post_response_outcome=lambda _final_outcome: ResponseOutcome(),
@@ -1546,7 +1543,7 @@ class ResponseRunner:
     ) -> None:
         """Answer a team turn with why it cannot run, as one final delivery."""
         response_identity = self.locked.response_identity(request, response_kind="team")
-        lifecycle = self.locked.build_lifecycle(identity=response_identity, request=request)
+        lifecycle = self.locked.build_lifecycle(request, response_kind="team")
         progress = TurnProgress()
 
         async def deliver_rejection(message_id: str | None) -> FinalDeliveryOutcome:
@@ -1567,7 +1564,6 @@ class ResponseRunner:
             lifecycle=lifecycle,
             progress=progress,
             response_function=deliver_rejection,
-            user_id=request.user_id,
             build_post_response_outcome=lambda _final_outcome: ResponseOutcome(),
             post_response_deps=lambda: self.locked.post_response_deps(request),
         )
@@ -1727,7 +1723,7 @@ class ResponseRunner:
         recorder = TurnRecorder()
         progress = TurnProgress()
         response_identity = self.locked.response_identity(request, response_kind=turn.response_kind)
-        lifecycle = self.locked.build_lifecycle(identity=response_identity, request=request)
+        lifecycle = self.locked.build_lifecycle(request, response_kind=turn.response_kind)
 
         # Set once the turn's generation returned a delivery; a turn cut short later, such as by a Stop during
         # message:before_response, has a completed record but did not deliver it.
@@ -1777,7 +1773,6 @@ class ResponseRunner:
                 lifecycle=lifecycle,
                 progress=progress,
                 response_function=generate,
-                user_id=request.user_id,
                 build_post_response_outcome=build_post_response_outcome,
                 post_response_deps=dispatched.post_response_deps,
                 approval_suspension_handler=lambda pause: self.approvals.suspend_for_approval(
@@ -2085,10 +2080,7 @@ class ResponseRunner:
             claimed = True
             # The declined turn shows nothing; its reply ends while the conversation is still held.
             await self.deps.delivery_gateway.end_reply_span(handle, suppress_decision(handle))
-        lifecycle = self.locked.build_lifecycle(
-            identity=self.locked.response_identity(request, response_kind="ai"),
-            request=request,
-        )
+        lifecycle = self.locked.build_lifecycle(request, response_kind="ai")
         await lifecycle.finalize(
             DECLINED,
             build_post_response_outcome=lambda _outcome: ResponseOutcome(run_succeeded=False),

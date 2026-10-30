@@ -601,10 +601,7 @@ async def test_failed_pause_handoff_keeps_the_regenerated_answer(
         edit_regeneration=True,
         sources=ResponseSources(("$edit",), ("$source",)),
     )
-    lifecycle = runner.locked.build_lifecycle(
-        identity=runner.locked.response_identity(request, response_kind="ai"),
-        request=request,
-    )
+    lifecycle = runner.locked.build_lifecycle(request, response_kind="ai")
     progress = TurnProgress()
     pause = ResponsePausedForApproval(PausedAttempt(session_id="session", run_id="run", tools=(), toolkit_owners={}))
 
@@ -628,7 +625,6 @@ async def test_failed_pause_handoff_keeps_the_regenerated_answer(
                 lifecycle=lifecycle,
                 progress=progress,
                 response_function=AsyncMock(),
-                user_id=request.user_id,
                 build_post_response_outcome=lambda _outcome: ResponseOutcome(),
                 post_response_deps=PostResponseEffectsDeps(logger=runner.deps.logger),
                 approval_suspension_handler=fail_handoff,

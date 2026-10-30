@@ -41,6 +41,7 @@ from mindroom.approval.failure import (
 from mindroom.approval.receipt_readers import approval_receipt_context
 from mindroom.approval.response import (
     ApprovalPausePlan,
+    continuation_response_kind,
     continuation_target,
     identify_approval_tools,
     plan_approval_calls,
@@ -835,7 +836,7 @@ class ApprovalContinuationRunner:
         tool_trace: list[ToolTraceEntry] = []
         identity = self.locked.response_identity(
             request,
-            response_kind="team" if claimed.entity_kind == "team" else "ai",
+            response_kind=continuation_response_kind(claimed),
         )
         # Streaming requesters watch the resumed work in the reply it continues.
         # Progress closes before any terminal edit, which stays owned below.
@@ -923,13 +924,7 @@ class ApprovalContinuationRunner:
         await self.locked.refresh_mid_turn_context_for_approval(request)
         # The resume writes into the reply it continues from its first step.
         progress = TurnProgress(delivery_started=True)
-        lifecycle = self.locked.build_lifecycle(
-            identity=self.locked.response_identity(
-                request,
-                response_kind="team" if claimed.entity_kind == "team" else "ai",
-            ),
-            request=request,
-        )
+        lifecycle = self.locked.build_lifecycle(request, response_kind=continuation_response_kind(claimed))
         post_effect_continuation = claimed
         awaiting = FinalDeliveryOutcome(
             ending=AwaitingApproval(),
@@ -967,7 +962,6 @@ class ApprovalContinuationRunner:
             lifecycle=lifecycle,
             progress=progress,
             response_function=continue_response,
-            user_id=claimed.requester_id,
             build_post_response_outcome=lambda final: self._approval_post_response_outcome(
                 post_effect_continuation,
                 target=target,
@@ -1040,13 +1034,7 @@ class ApprovalContinuationRunner:
             return None
         recovered_outcome = await self._approval_outcome_from_delivery(delivery)
         request = self.approval_response_request(continuation, target=target)
-        lifecycle = self.locked.build_lifecycle(
-            identity=self.locked.response_identity(
-                request,
-                response_kind="team" if continuation.entity_kind == "team" else "ai",
-            ),
-            request=request,
-        )
+        lifecycle = self.locked.build_lifecycle(request, response_kind=continuation_response_kind(continuation))
         await lifecycle.finalize(
             recovered_outcome,
             build_post_response_outcome=lambda final: self._approval_post_response_outcome(

@@ -44,7 +44,7 @@ from mindroom.reply_turn.request import (
 )
 from mindroom.response_attempt import ResponseAttemptDeps, ResponseAttemptRequest, ResponseAttemptRunner, SpanAttempt
 from mindroom.response_lifecycle import ResponseLifecycle, ResponseLifecycleDeps
-from mindroom.response_turn import ResponsePausedForApproval
+from mindroom.response_turn import ResponsePausedForApproval, skip_unapproved_attempt
 from mindroom.streaming import PausePresentationError, StreamingDeliveryError
 from mindroom.thread_summary import thread_summary_message_count_hint
 from mindroom.tool_system.runtime_context import runtime_context_from_dispatch_context
@@ -105,13 +105,6 @@ def existing_event_id(request: ResponseRequest) -> str | None:
 DECLINED = FinalDeliveryOutcome(ending=Suppressed(Suppression.PARTICIPATION_DECLINED))
 
 
-def _skip_unapproved_response(participation: ParticipationGate | None) -> FinalDeliveryOutcome | None:
-    """A failure before the participation decision stays quiet: it declines the turn."""
-    if participation is None or not participation.decline("run_failed_before_decision"):
-        return None
-    return DECLINED
-
-
 @dataclass(frozen=True)
 class ReplyTurnDeps:
     """The collaborators every owner of a reply turn shares: the response runner, its locked turns, and its approvals."""
@@ -154,7 +147,7 @@ class LockedTurns:
         return client
 
     def knowledge_refresh_scheduler(self) -> KnowledgeRefreshScheduler | None:
-        """Return the current orchestrator scheduler when this runner is managed."""
+        """Return the current orchestrator's knowledge refresh scheduler, when an orchestrator runs this bot."""
         orchestrator = self.deps.runtime.orchestrator
         return orchestrator.knowledge_refresh_scheduler if orchestrator is not None else None
 
@@ -188,13 +181,8 @@ class LockedTurns:
 
         return notify
 
-    def _log_delivery_failure(
-        self,
-        *,
-        response_kind: str,
-        error: Exception,
-    ) -> None:
-        """Log one response delivery failure with its raw error text."""
+    def _log_delivery_failure(self, *, response_kind: str, error: Exception) -> None:
+        """Log one response delivery failure with its raw error text; the attempt runner logged its traceback."""
         self.deps.logger.error(
             "Error in response delivery",
             response_kind=response_kind,
@@ -393,10 +381,10 @@ class LockedTurns:
         *,
         post_response_outcome: ResponseOutcome,
         post_response_deps: PostResponseEffectsDeps | Callable[[], PostResponseEffectsDeps],
-    ) -> FinalDeliveryOutcome:
+    ) -> None:
         """Finalize the lifecycle, reporting a cancellation that lands during finalization as the turn's ending."""
         try:
-            return await lifecycle.finalize(
+            await lifecycle.finalize(
                 final_delivery_outcome,
                 build_post_response_outcome=lambda _final_outcome: post_response_outcome,
                 post_response_deps=post_response_deps,
@@ -424,7 +412,6 @@ class LockedTurns:
         *,
         target: MessageTarget,
         response_function: Callable[[str | None], Coroutine[Any, Any, FinalDeliveryOutcome]],
-        user_id: str | None,
         approval_suspension_handler: Callable[[ResponsePausedForApproval], Awaitable[FinalDeliveryOutcome]] | None,
         participation: ParticipationGate | None,
         response_kind: str,
@@ -440,7 +427,7 @@ class LockedTurns:
                 target=target,
                 response_function=response_function,
                 existing_event_id=existing_event_id(request),
-                user_id=user_id,
+                user_id=request.user_id,
                 show_stop_button=not is_silent_schedule_response(request),
             )
         except ResponsePausedForApproval as error:
@@ -459,9 +446,10 @@ class LockedTurns:
         except Exception as error:
             if current_task_is_process_shutdown():
                 raise
-            if (skipped := _skip_unapproved_response(participation)) is not None:
+            if skip_unapproved_attempt(participation, reason="run_failed_before_decision") is not None:
+                # A failure before the participation decision stays quiet: it declines the turn.
                 self.deps.logger.exception("Response skipped before participation", error=str(error))
-                return skipped
+                return DECLINED
             self._log_delivery_failure(response_kind=response_kind, error=error)
             if isinstance(error, PausePresentationError):
                 # The run paused, but its reply could not show the pause: no approval exists for it.
@@ -479,7 +467,6 @@ class LockedTurns:
         lifecycle: ResponseLifecycle,
         progress: TurnProgress,
         response_function: Callable[[str | None], Coroutine[Any, Any, FinalDeliveryOutcome]],
-        user_id: str | None,
         build_post_response_outcome: Callable[[FinalDeliveryOutcome], ResponseOutcome],
         post_response_deps: PostResponseEffectsDeps | Callable[[], PostResponseEffectsDeps],
         approval_suspension_handler: Callable[[ResponsePausedForApproval], Awaitable[FinalDeliveryOutcome]]
@@ -502,7 +489,6 @@ class LockedTurns:
                     request,
                     target=target,
                     response_function=response_function,
-                    user_id=user_id,
                     approval_suspension_handler=approval_suspension_handler,
                     participation=participation,
                     response_kind=lifecycle.identity.response_kind,
@@ -559,20 +545,15 @@ class LockedTurns:
                 )
                 return outcome if noted is None else noted
 
-    def build_lifecycle(
-        self,
-        *,
-        identity: ResponseIdentity,
-        request: ResponseRequest,
-    ) -> ResponseLifecycle:
-        """Build one lifecycle helper with the resolved shared response context."""
+    def build_lifecycle(self, request: ResponseRequest, *, response_kind: str) -> ResponseLifecycle:
+        """Build one request's response lifecycle, with the identity its hooks and delivery carry."""
         return ResponseLifecycle(
             ResponseLifecycleDeps(
                 response_hooks=self.deps.delivery_gateway.deps.response_hooks,
                 logger=self.deps.logger,
                 process_shutdown_requested=current_task_is_process_shutdown,
             ),
-            identity=identity,
+            identity=self.response_identity(request, response_kind=response_kind),
             pipeline_timing=request.pipeline_timing,
         )
 

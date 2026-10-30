@@ -8,11 +8,17 @@ from typing import TYPE_CHECKING
 import pytest
 
 from mindroom.approval.execution import _collect_agent_continuation
-from mindroom.approval.response import identify_approval_tools, plan_approval_calls, require_ordered_pause_presentation
+from mindroom.approval.response import (
+    continuation_response_kind,
+    identify_approval_tools,
+    plan_approval_calls,
+    require_ordered_pause_presentation,
+)
 from mindroom.llm.events import RunFinished, TextDelta, ToolCompleted, ToolStarted
 from mindroom.llm.runs import RunRecord, RunRequirement, RunStatus, ToolExecution
 from mindroom.response_turn import PausedAttempt
 from mindroom.tool_system.events import CollectedStreamPresentation, ToolTraceEntry
+from tests.approval_continuation_helpers import approval_continuation
 from tests.conftest import unwrap_extracted_collaborator
 from tests.response_runner_helpers import _bot
 
@@ -495,3 +501,9 @@ async def test_pause_plan_requires_exact_live_toolkit_origin(tmp_path: Path, own
             thread_id="$thread",
         )
         assert plan.calls[0].toolkit_name == "calculator"
+
+
+@pytest.mark.parametrize(("entity_kind", "response_kind"), [("agent", "ai"), ("team", "team")])
+def test_a_resumed_reply_answers_as_the_kind_of_entity_that_paused(entity_kind: str, response_kind: str) -> None:
+    """A team's approval resumes as a team reply, which its hooks and reply mirror tell apart from an agent's."""
+    assert continuation_response_kind(approval_continuation(entity_kind=entity_kind)) == response_kind

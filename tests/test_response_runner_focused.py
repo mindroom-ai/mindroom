@@ -6455,10 +6455,7 @@ async def test_response_settlement_finalizes_and_transfers_ownership_once(
         response_function = kwargs["response_function"]
         return await response_function("$response")  # type: ignore[operator]
 
-    lifecycle = coordinator.locked.build_lifecycle(
-        identity=coordinator.locked.response_identity(request, response_kind="ai"),
-        request=request,
-    )
+    lifecycle = coordinator.locked.build_lifecycle(request, response_kind="ai")
     lifecycle.deps = replace(
         lifecycle.deps,
         process_shutdown_requested=lambda: process_shutdown_requested,
@@ -6479,7 +6476,6 @@ async def test_response_settlement_finalizes_and_transfers_ownership_once(
             lifecycle=lifecycle,
             progress=progress,
             response_function=generate,
-            user_id=request.user_id,
             build_post_response_outcome=build_post_outcome,
             post_response_deps=PostResponseEffectsDeps(logger=get_logger("tests.post_response")),
         )
@@ -6559,10 +6555,7 @@ async def test_terminal_settlement_records_landed_interruption_before_rethrowing
     progress = TurnProgress()
     progress.note_delivery_started("$response")
     post_effects = AsyncMock(side_effect=lambda *_args: order.append("post_effects"))
-    lifecycle = coordinator.locked.build_lifecycle(
-        identity=coordinator.locked.response_identity(request, response_kind="ai"),
-        request=request,
-    )
+    lifecycle = coordinator.locked.build_lifecycle(request, response_kind="ai")
     finalize = AsyncMock(wraps=lifecycle.finalize)
 
     async with _ended_with_its_note(coordinator, request):
@@ -6582,7 +6575,6 @@ async def test_terminal_settlement_records_landed_interruption_before_rethrowing
                 lifecycle=lifecycle,
                 progress=progress,
                 response_function=AsyncMock(),
-                user_id=request.user_id,
                 build_post_response_outcome=lambda _outcome: ResponseOutcome(),
                 post_response_deps=PostResponseEffectsDeps(logger=get_logger("tests.post_response")),
             )
@@ -6600,10 +6592,7 @@ async def test_process_shutdown_propagates_from_visible_response_hooks(
     """Orderly stop must not suppress hook cancellation and continue post-response effects."""
     coordinator = unwrap_extracted_collaborator(_bot(tmp_path)._response_runner)
     request = _plain_request(_target(thread_id="$thread"))
-    lifecycle = coordinator.locked.build_lifecycle(
-        identity=coordinator.locked.response_identity(request, response_kind="ai"),
-        request=request,
-    )
+    lifecycle = coordinator.locked.build_lifecycle(request, response_kind="ai")
     hook_started = asyncio.Event()
 
     async def blocked_hook(**_kwargs: object) -> None:
@@ -6641,10 +6630,7 @@ async def test_process_shutdown_skips_terminal_settlement_for_durable_replay(
     coordinator = unwrap_extracted_collaborator(_bot(tmp_path)._response_runner)
     request = _plain_request(_target(thread_id="$thread"))
     progress = TurnProgress()
-    lifecycle = coordinator.locked.build_lifecycle(
-        identity=coordinator.locked.response_identity(request, response_kind="ai"),
-        request=request,
-    )
+    lifecycle = coordinator.locked.build_lifecycle(request, response_kind="ai")
     attempt_started = asyncio.Event()
     settlement_started = asyncio.Event()
     release_settlement = asyncio.Event()
@@ -6676,7 +6662,6 @@ async def test_process_shutdown_skips_terminal_settlement_for_durable_replay(
                 lifecycle=lifecycle,
                 progress=progress,
                 response_function=AsyncMock(),
-                user_id=request.user_id,
                 build_post_response_outcome=lambda _outcome: ResponseOutcome(),
                 post_response_deps=PostResponseEffectsDeps(
                     logger=get_logger("tests.post_response"),
@@ -6705,10 +6690,7 @@ async def test_uncommitted_interruption_rethrows_cancel_without_marking_source_h
     request = _plain_request(_target(thread_id="$thread"))
     progress = TurnProgress()
     progress.note_delivery_started("$response")
-    lifecycle = coordinator.locked.build_lifecycle(
-        identity=coordinator.locked.response_identity(request, response_kind="ai"),
-        request=request,
-    )
+    lifecycle = coordinator.locked.build_lifecycle(request, response_kind="ai")
     post_effects = AsyncMock(side_effect=lambda *_args: order.append("post_effects"))
 
     with (
@@ -6726,7 +6708,6 @@ async def test_uncommitted_interruption_rethrows_cancel_without_marking_source_h
             lifecycle=lifecycle,
             progress=progress,
             response_function=AsyncMock(),
-            user_id=request.user_id,
             build_post_response_outcome=lambda _outcome: ResponseOutcome(),
             post_response_deps=PostResponseEffectsDeps(logger=get_logger("tests.post_response")),
         )
@@ -6746,10 +6727,7 @@ async def test_cancel_cleanup_error_does_not_mark_source_handled(tmp_path: Path)
         event_id="$placeholder",
         is_visible_response=True,
     )
-    lifecycle = coordinator.locked.build_lifecycle(
-        identity=coordinator.locked.response_identity(request, response_kind="ai"),
-        request=request,
-    )
+    lifecycle = coordinator.locked.build_lifecycle(request, response_kind="ai")
 
     with (
         patch.object(
@@ -6765,7 +6743,6 @@ async def test_cancel_cleanup_error_does_not_mark_source_handled(tmp_path: Path)
             lifecycle=lifecycle,
             progress=progress,
             response_function=AsyncMock(),
-            user_id=request.user_id,
             build_post_response_outcome=lambda _outcome: ResponseOutcome(),
             post_response_deps=PostResponseEffectsDeps(logger=get_logger("tests.post_response")),
         )
@@ -6817,10 +6794,7 @@ async def test_uncommitted_interruption_remains_unhandled_without_outer_cancel(t
         is_visible_response=True,
         final_visible_body=RESTART_INTERRUPTED_RESPONSE_NOTE,
     )
-    lifecycle = coordinator.locked.build_lifecycle(
-        identity=coordinator.locked.response_identity(request, response_kind="ai"),
-        request=request,
-    )
+    lifecycle = coordinator.locked.build_lifecycle(request, response_kind="ai")
 
     with (
         patch.object(
@@ -6836,7 +6810,6 @@ async def test_uncommitted_interruption_remains_unhandled_without_outer_cancel(t
             lifecycle=lifecycle,
             progress=progress,
             response_function=AsyncMock(),
-            user_id=request.user_id,
             build_post_response_outcome=lambda _outcome: ResponseOutcome(),
             post_response_deps=PostResponseEffectsDeps(logger=get_logger("tests.post_response")),
         )
@@ -6873,10 +6846,7 @@ async def test_landed_terminal_interruption_settles_the_turn(
         final_visible_body=final_visible_body,
         delivery_kind="edited",
     )
-    lifecycle = coordinator.locked.build_lifecycle(
-        identity=coordinator.locked.response_identity(request, response_kind="ai"),
-        request=request,
-    )
+    lifecycle = coordinator.locked.build_lifecycle(request, response_kind="ai")
 
     async with _ended_with_its_note(coordinator, request):
         with (
@@ -6893,7 +6863,6 @@ async def test_landed_terminal_interruption_settles_the_turn(
                 lifecycle=lifecycle,
                 progress=progress,
                 response_function=AsyncMock(),
-                user_id=request.user_id,
                 build_post_response_outcome=lambda _outcome: ResponseOutcome(),
                 post_response_deps=PostResponseEffectsDeps(logger=get_logger("tests.post_response")),
             )
@@ -6930,10 +6899,7 @@ async def test_terminal_settlement_late_cancel_keeps_settled_outcome_canonical(
     progress = TurnProgress()
     progress.note_delivery_started("$response")
     post_effects = AsyncMock(side_effect=lambda *_args: order.append("post_effects"))
-    lifecycle = coordinator.locked.build_lifecycle(
-        identity=coordinator.locked.response_identity(request, response_kind="ai"),
-        request=request,
-    )
+    lifecycle = coordinator.locked.build_lifecycle(request, response_kind="ai")
     finalize = AsyncMock(wraps=lifecycle.finalize)
     settling: list[asyncio.Task[str | None]] = []
 
@@ -6955,7 +6921,6 @@ async def test_terminal_settlement_late_cancel_keeps_settled_outcome_canonical(
                         lifecycle=lifecycle,
                         progress=progress,
                         response_function=delivered_then_cancelled,
-                        user_id=request.user_id,
                         build_post_response_outcome=lambda _outcome: ResponseOutcome(),
                         post_response_deps=PostResponseEffectsDeps(logger=get_logger("tests.post_response")),
                     ),
@@ -6978,10 +6943,7 @@ async def test_terminal_settlement_settles_generation_error_after_post_effects(t
     progress = TurnProgress()
     post_effects = AsyncMock()
     build_post_outcome = MagicMock(return_value=ResponseOutcome())
-    lifecycle = coordinator.locked.build_lifecycle(
-        identity=coordinator.locked.response_identity(request, response_kind="ai"),
-        request=request,
-    )
+    lifecycle = coordinator.locked.build_lifecycle(request, response_kind="ai")
     finalize = AsyncMock(wraps=lifecycle.finalize)
 
     with (
@@ -6999,7 +6961,6 @@ async def test_terminal_settlement_settles_generation_error_after_post_effects(t
             lifecycle=lifecycle,
             progress=progress,
             response_function=AsyncMock(),
-            user_id=request.user_id,
             build_post_response_outcome=build_post_outcome,
             post_response_deps=PostResponseEffectsDeps(logger=get_logger("tests.post_response")),
         )
@@ -8335,7 +8296,7 @@ async def test_approval_continuation_refreshes_mid_turn_context_without_replacin
         with pytest.raises(RuntimeError, match="stop before generation"):
             await runner.approvals._run_claimed_approval_lifecycle(continuation, target=target)
         assert await gate.defers((QueuedMessage("$new", "Thanks"),), current=lambda: True)
-    assert build_lifecycle.call_args.kwargs["request"].thread_history == original.thread_history
+    assert build_lifecycle.call_args.args[0].thread_history == original.thread_history
     assert captured[0][0] == {"role": "user", "text": "Thirty sleeps"}
 
 
