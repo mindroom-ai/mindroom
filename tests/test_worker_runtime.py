@@ -314,7 +314,6 @@ def test_configured_primary_worker_manager_lease_uses_backend_settings_only(
         runtime_paths,
         proxy_url="http://worker.test",
         proxy_token="worker-token",  # noqa: S106
-        storage_root=runtime_paths.storage_root,
     )
     build.assert_called_once()
 
@@ -331,33 +330,59 @@ def test_configured_primary_worker_manager_identity_uses_the_lease_signature_wit
     identity = workers_runtime_module.configured_primary_worker_manager_identity(runtime_paths)
 
     assert identity == "645b967075b7e04dcf2484456e24e777ae602b20c0bf8b0414bd06d9aaffaed6"
-    assert configure.call_args.kwargs["storage_root"] == runtime_paths.storage_root
+    assert configure.call_args.args == (runtime_paths,)
     build.assert_not_called()
 
 
+@pytest.mark.usefixtures("_fresh_primary_worker_manager")
 def test_configured_worker_lease_requires_the_current_durable_backend_identity(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
     """Historical backends fail closed instead of being reconstructed from durable state."""
     runtime_paths = _runtime_paths(tmp_path)
-    _configure_once(monkeypatch, MagicMock())
-    manager = MagicMock(cleanup_locator="current-identity")
-    lease = MagicMock(manager=manager)
-    monkeypatch.setattr(workers_runtime_module, "_lease_primary_worker_manager", MagicMock(return_value=lease))
+    manager = MagicMock()
+    _configure_once(monkeypatch, MagicMock(return_value=manager))
+    first = workers_runtime_module.lease_configured_primary_worker_manager(runtime_paths)
+    assert first is not None
+    first.release()
 
     matched = workers_runtime_module.lease_configured_primary_worker_manager(
         runtime_paths,
-        required_backend_locator="current-identity",
+        required_backend_locator=manager.cleanup_locator,
     )
     mismatched = workers_runtime_module.lease_configured_primary_worker_manager(
         runtime_paths,
         required_backend_locator="historical-identity",
     )
 
-    assert matched is lease
+    assert matched is not None
+    assert matched.manager is manager
     assert mismatched is None
-    lease.release.assert_called_once_with()
+    matched.release()
+    # The mismatched lookup holds no lease, so final shutdown reaches the manager at once.
+    workers_runtime_module.shutdown_primary_worker_manager(timeout_seconds=0.0)
+    manager.shutdown.assert_called_once_with()
+
+
+@pytest.mark.usefixtures("_fresh_primary_worker_manager")
+def test_final_worker_manager_shutdown_reports_a_manager_shutdown_failure(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A manager that fails to shut down fails the final shutdown with its message."""
+    manager = MagicMock()
+    manager.shutdown.side_effect = WorkerBackendError("containers still running")
+    _configure_once(monkeypatch, MagicMock(return_value=manager))
+    lease = workers_runtime_module.lease_configured_primary_worker_manager(_runtime_paths(tmp_path))
+    assert lease is not None
+    lease.release()
+
+    with pytest.raises(
+        WorkerBackendError,
+        match="Failed to shut down primary worker managers: containers still running",
+    ):
+        workers_runtime_module.shutdown_primary_worker_manager(timeout_seconds=0.0)
 
 
 def test_kubernetes_cleanup_identity_ignores_launch_config_but_tracks_resource_owner(tmp_path: Path) -> None:
@@ -375,10 +400,9 @@ def test_kubernetes_cleanup_identity_ignores_launch_config_but_tracks_resource_o
 
     def configured(env: dict[str, str], *, storage_root: Path = storage_root) -> ConfiguredWorkerBackend:
         return workers_runtime_module._configure_primary_worker_backend(
-            replace(runtime_paths, process_env={**runtime_paths.process_env, **env}),
+            replace(runtime_paths, storage_root=storage_root, process_env={**runtime_paths.process_env, **env}),
             proxy_url=None,
             proxy_token="worker-token",  # noqa: S106
-            storage_root=storage_root,
         )
 
     base = configured({})

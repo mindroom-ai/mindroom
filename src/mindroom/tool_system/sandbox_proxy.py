@@ -396,7 +396,6 @@ def _lease_worker_manager(runtime_paths: RuntimePaths, proxy_config: _SandboxPro
         runtime_paths,
         proxy_url=proxy_config.proxy_url,
         proxy_token=proxy_config.proxy_token,
-        storage_root=runtime_paths.storage_root,
     )
 
 

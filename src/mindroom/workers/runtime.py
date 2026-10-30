@@ -296,7 +296,6 @@ def _configured_primary_worker_backend(runtime_paths: RuntimePaths) -> Configure
             runtime_paths,
             proxy_url=proxy_config.proxy_url,
             proxy_token=proxy_config.proxy_token,
-            storage_root=runtime_paths.storage_root,
         )
     except WorkerBackendError:
         return None
@@ -307,20 +306,16 @@ def _configure_primary_worker_backend(
     *,
     proxy_url: str | None,
     proxy_token: str | None,
-    storage_root: Path,
 ) -> ConfiguredWorkerBackend:
     """Read the selected worker backend's settings once, raising when they are invalid."""
+    storage_root = runtime_paths.storage_root
     match worker_backend_kind(runtime_paths):
         case WorkerBackendKind.STATIC_RUNNER:
             return _configure_static_runner(proxy_url=proxy_url, proxy_token=proxy_token)
         case WorkerBackendKind.DOCKER:
             return configure_docker_worker_backend(runtime_paths, auth_token=proxy_token, storage_root=storage_root)
         case WorkerBackendKind.KUBERNETES:
-            return configure_kubernetes_worker_backend(
-                runtime_paths,
-                auth_token=proxy_token,
-                storage_root=storage_root,
-            )
+            return configure_kubernetes_worker_backend(runtime_paths, auth_token=proxy_token, storage_root=storage_root)
 
 
 def _configure_static_runner(*, proxy_url: str | None, proxy_token: str | None) -> ConfiguredWorkerBackend:
@@ -334,20 +329,22 @@ def _configure_static_runner(*, proxy_url: str | None, proxy_token: str | None) 
     )
 
 
-def _shutdown_worker_manager_now(
-    manager: WorkerBackend,
-    *,
-    suppress_errors: bool,
-    log_message: str,
-) -> str | None:
+def _shutdown_worker_manager_now(manager: WorkerBackend) -> str | None:
+    """Shut down one manager, returning its failure message."""
     try:
         manager.shutdown()
     except WorkerBackendError as exc:
-        if suppress_errors:
-            logger.exception(log_message)
-            return None
         return str(exc)
     return None
+
+
+def _shutdown_retired_managers(managers: list[WorkerBackend]) -> None:
+    """Shut down managers no lease holds anymore, logging each failure instead of raising it."""
+    for manager in managers:
+        try:
+            manager.shutdown()
+        except WorkerBackendError:
+            logger.exception("Failed to shut down retired primary worker manager")
 
 
 def _drain_retired_entries_locked() -> list[WorkerBackend]:
@@ -364,8 +361,12 @@ def _drain_retired_entries_locked() -> list[WorkerBackend]:
     return ready_managers
 
 
+def _primary_worker_manager_epoch_current_locked(acquisition_epoch: int) -> bool:
+    return acquisition_epoch == _PRIMARY_WORKER_MANAGER_EPOCH and _PRIMARY_WORKER_MANAGER_ACCEPTING_BUILDS
+
+
 def _require_primary_worker_manager_epoch_locked(acquisition_epoch: int) -> None:
-    if acquisition_epoch != _PRIMARY_WORKER_MANAGER_EPOCH or not _PRIMARY_WORKER_MANAGER_ACCEPTING_BUILDS:
+    if not _primary_worker_manager_epoch_current_locked(acquisition_epoch):
         msg = "Primary worker manager runtime shut down during acquisition."
         raise WorkerBackendError(msg)
 
@@ -405,34 +406,30 @@ def _publish_primary_worker_manager_build(
     global _PRIMARY_WORKER_MANAGER_ENTRY
 
     with _PRIMARY_WORKER_MANAGER_CONDITION:
-        if acquisition_epoch != _PRIMARY_WORKER_MANAGER_EPOCH or not _PRIMARY_WORKER_MANAGER_ACCEPTING_BUILDS:
+        if not _primary_worker_manager_epoch_current_locked(acquisition_epoch):
             return None
         _PRIMARY_WORKER_MANAGER_BUILDING_SIGNATURES.discard(config_signature)
         active_entry = _PRIMARY_WORKER_MANAGER_ENTRY
         if active_entry is not None and active_entry.config_signature == config_signature:
+            # Another build of the same settings won; lease it and retire this duplicate.
             active_entry.active_leases += 1
-            duplicate_entry = _WorkerManagerEntry(
+            leased_entry = active_entry
+            _RETIRED_PRIMARY_WORKER_MANAGER_ENTRIES.append(
+                _WorkerManagerEntry(manager=built_manager, config_signature=config_signature, shutdown_requested=True),
+            )
+        else:
+            leased_entry = _WorkerManagerEntry(
                 manager=built_manager,
                 config_signature=config_signature,
-                shutdown_requested=True,
+                active_leases=1,
             )
-            _RETIRED_PRIMARY_WORKER_MANAGER_ENTRIES.append(duplicate_entry)
-            managers_to_shutdown = _drain_retired_entries_locked()
-            _PRIMARY_WORKER_MANAGER_CONDITION.notify_all()
-            return active_entry, managers_to_shutdown
-        previous_entry = _PRIMARY_WORKER_MANAGER_ENTRY
-        new_entry = _WorkerManagerEntry(
-            manager=built_manager,
-            config_signature=config_signature,
-            active_leases=1,
-        )
-        _PRIMARY_WORKER_MANAGER_ENTRY = new_entry
-        if previous_entry is not None:
-            previous_entry.shutdown_requested = True
-            _RETIRED_PRIMARY_WORKER_MANAGER_ENTRIES.append(previous_entry)
+            _PRIMARY_WORKER_MANAGER_ENTRY = leased_entry
+            if active_entry is not None:
+                active_entry.shutdown_requested = True
+                _RETIRED_PRIMARY_WORKER_MANAGER_ENTRIES.append(active_entry)
         managers_to_shutdown = _drain_retired_entries_locked()
         _PRIMARY_WORKER_MANAGER_CONDITION.notify_all()
-        return new_entry, managers_to_shutdown
+        return leased_entry, managers_to_shutdown
 
 
 def _dispose_fenced_primary_worker_manager(
@@ -440,11 +437,7 @@ def _dispose_fenced_primary_worker_manager(
     config_signature: tuple[str, ...],
 ) -> Never:
     try:
-        shutdown_failure = _shutdown_worker_manager_now(
-            built_manager,
-            suppress_errors=False,
-            log_message="Failed to shut down fenced primary worker manager",
-        )
+        shutdown_failure = _shutdown_worker_manager_now(built_manager)
     finally:
         with _PRIMARY_WORKER_MANAGER_CONDITION:
             _PRIMARY_WORKER_MANAGER_BUILDING_SIGNATURES.discard(config_signature)
@@ -492,12 +485,7 @@ def _release_primary_worker_manager_entry(entry: _WorkerManagerEntry) -> None:
         managers_to_shutdown = _drain_retired_entries_locked()
         _PRIMARY_WORKER_MANAGER_CONDITION.notify_all()
 
-    for manager in managers_to_shutdown:
-        _shutdown_worker_manager_now(
-            manager,
-            suppress_errors=True,
-            log_message="Failed to shut down retired primary worker manager",
-        )
+    _shutdown_retired_managers(managers_to_shutdown)
 
 
 def lease_primary_worker_manager(
@@ -505,17 +493,11 @@ def lease_primary_worker_manager(
     *,
     proxy_url: str | None,
     proxy_token: str | None,
-    storage_root: Path | None = None,
 ) -> PrimaryWorkerManagerLease:
     """Borrow the active primary worker manager for one request-scoped operation."""
     return _lease_primary_worker_manager(
         runtime_paths,
-        _configure_primary_worker_backend(
-            runtime_paths,
-            proxy_url=proxy_url,
-            proxy_token=proxy_token,
-            storage_root=storage_root or runtime_paths.storage_root,
-        ),
+        _configure_primary_worker_backend(runtime_paths, proxy_url=proxy_url, proxy_token=proxy_token),
     )
 
 
@@ -525,12 +507,7 @@ def _lease_primary_worker_manager(
 ) -> PrimaryWorkerManagerLease:
     """Borrow the manager ``configured`` identifies, building it from that same reading when none is active."""
     entry, managers_to_shutdown = _resolve_primary_worker_manager_entry(runtime_paths, configured)
-    for manager in managers_to_shutdown:
-        _shutdown_worker_manager_now(
-            manager,
-            suppress_errors=True,
-            log_message="Failed to shut down retired primary worker manager",
-        )
+    _shutdown_retired_managers(managers_to_shutdown)
     return PrimaryWorkerManagerLease(entry)
 
 
@@ -578,14 +555,7 @@ def shutdown_primary_worker_manager(
         failures.extend(
             failure
             for manager in managers_to_shutdown
-            if (
-                failure := _shutdown_worker_manager_now(
-                    manager,
-                    suppress_errors=False,
-                    log_message="Failed to shut down primary worker manager",
-                )
-            )
-            is not None
+            if (failure := _shutdown_worker_manager_now(manager)) is not None
         )
 
     if failures:
