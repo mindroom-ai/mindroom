@@ -37,12 +37,14 @@ def team_user_id(member_names: Sequence[str]) -> str:
 
 
 def _scope_dir_name(scope_user_id: str) -> str:
-    """Return the directory name of one team scope: its ID, with a long one shortened and told apart by a hash.
+    """Return the directory name of one team scope, with a long one shortened and told apart by a hash.
 
-    A configured scope ID is already a valid name; replacing other characters keeps a planted record's scope ID, which
-    the startup merge reads, from reaching outside the team memory root.
+    The name is the one earlier releases gave a team's file copies, so the startup merge moves each copy to the
+    directory its team reads. A trailing underscore goes, so two scopes differing only in one share a directory, as
+    their file copies did; Mem0 keeps their records apart by scope ID. Replacing other characters keeps a planted
+    record's scope ID, which the merge reads, from reaching outside the team memory root.
     """
-    name = re.sub(r"[^a-zA-Z0-9._+-]+", "_", scope_user_id)
+    name = re.sub(r"[^a-zA-Z0-9._+-]+", "_", scope_user_id).strip("_")
     if len(name) <= _MAX_SCOPE_DIR_NAME:
         return name
     digest = hashlib.sha256(scope_user_id.encode()).hexdigest()[:16]

@@ -29,6 +29,7 @@ from mindroom.constants import resolve_runtime_paths, tracking_dir
 from mindroom.memory import legacy_team_memory
 from mindroom.memory._file_backend import FileMemoryBackend
 from mindroom.memory._mem0_backend import Mem0MemoryBackend
+from mindroom.memory._policy import team_scope, team_user_id
 from mindroom.memory.config import create_memory_instance
 from mindroom.orchestrator import main
 from tests.conftest import bind_runtime_paths, runtime_paths_for
@@ -107,8 +108,8 @@ def _stored(path: Path) -> dict[str, dict]:
 
 
 def _expected_team_records() -> dict[str, dict]:
-    # Both members extracted the first turn; calculator sorts first, so its extraction of that turn is the team's, and
-    # each member's lone turn stays.
+    # Both members extracted the first turn; calculator's extraction of it holds more distinct facts, so it is the
+    # team's, and each member's lone turn stays.
     kept = [
         _recorded("calculator", "The team ships on Fridays"),
         _recorded("calculator", "PRs get pair reviews"),
@@ -621,6 +622,37 @@ async def test_a_team_copy_held_by_an_agent_outside_the_team_stays_where_it_is(s
 
 
 @pytest.mark.asyncio
+async def test_file_copies_of_members_with_edge_underscores_merge_where_the_team_reads(tmp_path: Path) -> None:
+    """Agent directories lose leading and trailing underscores and copy directories a trailing one, as on main."""
+    team = team_user_id(["_alpha", "beta_"])
+    for agent_dir, entry in (("alpha", "m_alpha"), ("beta", "m_beta")):
+        copy = tmp_path / "agents" / agent_dir / "memory_files" / "team__alpha+beta"
+        copy.mkdir(parents=True)
+        (copy / "MEMORY.md").write_text(f"# Memory\n\n- [id={entry}] Note from {agent_dir}.\n")
+    config = _config(tmp_path, "file", "_alpha", "beta_")
+
+    await legacy_team_memory.migrate_team_memory(runtime_paths_for(config), config)
+
+    merged = (team_scope(team, runtime_paths_for(config)).root / "MEMORY.md").read_text()
+    assert "[id=m_alpha]" in merged
+    assert "[id=m_beta]" in merged
+    assert not (tmp_path / "agents" / "alpha" / "memory_files").exists()
+    assert not (tmp_path / "agents" / "beta" / "memory_files").exists()
+
+
+@pytest.mark.asyncio
+async def test_two_scopes_sharing_a_directory_each_keep_a_fact_they_share(tmp_path: Path) -> None:
+    """Scopes differing only in a trailing underscore share a store, and Mem0 keeps one record per fact per scope."""
+    _plant(tmp_path, "general", [("g1", "t1", "Fact A")])
+    _plant(tmp_path, "general", [("g2", "t2", "Fact A")], team="team_calculator+general_")
+
+    await _migrate(tmp_path)
+
+    merged = _stored(tmp_path / "team_memory" / _TEAM / "chroma")
+    assert sorted(record["metadata"]["user_id"] for record in merged.values()) == [_TEAM, "team_calculator+general_"]
+
+
+@pytest.mark.asyncio
 async def test_a_turn_keeps_the_copy_main_s_edit_bug_left_whole(tmp_path: Path) -> None:
     """Recorded on main after deleting one fact and editing another through `general`, which sorts second.
 
@@ -649,7 +681,7 @@ async def test_a_turn_keeps_the_copy_main_s_edit_bug_left_whole(tmp_path: Path) 
     assert set(merged) == {row["id"] for row in recorded["general"][_COLLECTION]}
 
 
-def _plant(storage: Path, member: str, rows: list[tuple[str, str, str]]) -> None:
+def _plant(storage: Path, member: str, rows: list[tuple[str, str, str]], team: str = _TEAM) -> None:
     """Store team records ``(id, turn, text)`` in a member's store the way Mem0 does, its hash of the text included."""
     collection = _client(storage / "agents" / member / "chroma").get_or_create_collection(
         _COLLECTION,
@@ -660,7 +692,7 @@ def _plant(storage: Path, member: str, rows: list[tuple[str, str, str]]) -> None
         embeddings=[[1.0, 0.0, 0.0, 0.0] for _row in rows],
         metadatas=[
             {
-                "user_id": _TEAM,
+                "user_id": team,
                 "data": text,
                 "hash": hashlib.md5(text.encode(), usedforsecurity=False).hexdigest(),
                 "mindroom_replica_key": turn,
@@ -698,6 +730,19 @@ async def test_a_fact_two_kept_extractions_share_is_stored_once(tmp_path: Path, 
 
     merged = _stored(tmp_path / "team_memory" / _TEAM / "chroma")
     assert sorted(record["metadata"]["data"] for record in merged.values()) == ["Fact A", "Fact B", "Fact C"]
+
+
+@pytest.mark.asyncio
+async def test_a_turn_whose_extractions_tie_keeps_the_first_member_s_by_name(tmp_path: Path) -> None:
+    """Equal extractions of a turn go to the member that sorts first, the same choice on every start."""
+    _plant(tmp_path, "general", [("g1", "t1", "Fact Y")])
+    _plant(tmp_path, "calculator", [("c1", "t1", "Fact X")])
+
+    await _migrate(tmp_path)
+
+    merged = _stored(tmp_path / "team_memory" / _TEAM / "chroma")
+    assert {record_id: record["metadata"]["data"] for record_id, record in merged.items()} == {"c1": "Fact X"}
+    assert _stored(tmp_path / "agents" / "general" / "chroma") == {}
 
 
 @pytest.mark.asyncio

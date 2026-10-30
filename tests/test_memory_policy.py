@@ -75,22 +75,20 @@ def test_team_scope_root_is_one_store_no_requester_or_worker_scope_partitions(tm
             assert team_scopes("calculator", config, runtime_paths) == [expected]
 
 
-def test_each_team_scope_has_its_own_store_directory_within_the_name_limit(tmp_path: Path, config: Config) -> None:
-    """Scopes differing only in a trailing underscore, or late in a long member list, keep separate usable stores."""
+def test_team_scope_directories_keep_earlier_names_within_the_name_limit(tmp_path: Path, config: Config) -> None:
+    """A scope keeps the directory name its file copies had, and scopes differing late in a long member list stay apart."""
     runtime_paths = runtime_paths_for(config)
     members = [f"research_agent_{index:02d}" for index in range(1, 21)]
-    scopes = [
-        team_user_id(["alpha", "beta"]),
-        team_user_id(["alpha", "beta_"]),
-        team_user_id(members),
-        team_user_id([*members[:-1], "research_agent_99"]),
+    long_roots = [
+        team_scope(team_user_id(members), runtime_paths).root,
+        team_scope(team_user_id([*members[:-1], "research_agent_99"]), runtime_paths).root,
     ]
 
-    roots = [team_scope(scope, runtime_paths).root for scope in scopes]
-
-    assert len(set(roots)) == len(roots)
-    assert roots[0] == tmp_path / "team_memory" / "team_alpha+beta"
-    for root in roots:
+    assert team_scope(team_user_id(["_alpha", "beta_"]), runtime_paths).root == (
+        tmp_path / "team_memory" / "team__alpha+beta"
+    )
+    assert long_roots[0] != long_roots[1]
+    for root in long_roots:
         assert root.parent == tmp_path / "team_memory"
         root.mkdir(parents=True)
 

@@ -15,7 +15,7 @@ Each member had extracted every team turn on its own, so each turn keeps the mem
 Mem0 copies merge from the agents the config lists with Mem0 memory, the only stores they were read from; to keep the team memories of an agent you switched to `file` or `none` for now, switch it back to `mem0` before upgrading.
 A member's team file copy holding anything MindRoom did not write, such as a hand-written line or another file, stays where it is, no longer read, and startup logs a warning starting with `Left` with its path; to keep a note from it, add it to the team's `MEMORY.md` as a `- [id=<unique id>] <note>` line, since team memory finds only such entries.
 A member's Mem0 store holding a link or special file, or one Chroma cannot read, is not merged either, and its warning also starts with `Left`; its team memories stay there, no longer read.
-A storage error while writing a team's store stops startup without changing any member's copy, and the next start merges again.
+A storage error while writing a team's store stops startup before any member's Mem0 copy is removed, and the next start merges the rest.
 The first start installs Chroma for this when any agent the config lists has a Mem0 store; with `MINDROOM_NO_AUTO_INSTALL_TOOLS=1` and no `chromadb` extra, the Mem0 copies stay until the first start with Chroma.
 The Mem0 copies also wait for a start whose configuration loads; after fixing a configuration that failed to load, restart MindRoom to merge them.
 An older release does not read `team_memory/`; after going back and upgrading again, delete `tracking/team_memory_merged.json` before the start so the copies that release wrote merge too.
