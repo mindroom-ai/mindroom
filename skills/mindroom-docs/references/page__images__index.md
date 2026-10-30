@@ -18,11 +18,11 @@ Other image formats are sent with the client's declared MIME type, and the provi
 
 ## Media Fallback
 
-When a provider rejects a request containing inline media (images, audio, video, or documents), MindRoom retries it once without that media.
+When a provider rejects a request containing inline media (images, audio, video, or documents), MindRoom retries it without that media.
 The retry adds `[Inline media unavailable for this model]` to the message that carried the media and tells the agent the content was not inspected, so the agent can still open the file through the [`attachments` tool](https://docs.mindroom.chat/attachments/#the-attachments-tool) or explain the limitation.
 When the error names the attachments it rejected, the retry leaves out only those, or every attachment of the same type, and the note lists them by file name and attachment ID.
 Otherwise, or if the provider rejects that retry too, all of the request's media is left out.
 If the provider error says the model does not support that kind of input, such as `does not support image input` or `is not a multimodal model`, later requests to the same model leave that media kind out from the start until MindRoom restarts.
 Other rejections, such as an image the provider could not decode, drop the media from that one request only.
-The same note replaces the request's media when an attachment file no longer exists or cannot be read, or when MindRoom cannot download media a tool returned as a URL, including media larger than 20 MiB.
+The same note replaces only that attachment when an attachment file no longer exists or cannot be read, or when MindRoom cannot download media a tool returned as a URL, including media larger than 20 MiB.
 Once a reply has produced text, tool calls, or reasoning, a later provider error is reported instead of retried without media, and provider safeguard refusals and the billing refusals listed under [Retries](https://docs.mindroom.chat/configuration/models/#retries) are never retried without media.
