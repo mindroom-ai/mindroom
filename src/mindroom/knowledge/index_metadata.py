@@ -2,7 +2,8 @@
 
 ``publication.json`` names what search serves: the collection, the settings its vectors were built under, and the
 corpus signature and revision it matches. Only the publisher writes it, while it holds the base's source-root lock:
-the refresh child, or the runtime's files-mode publication after a dashboard upload or delete.
+the refresh child, or the runtime's files-mode publication after a dashboard upload or delete. The one-time startup
+conversion of an earlier release's state also writes it, before any refresh or search runs.
 
 ``refresh_status.json`` records what the runtime knows about refreshing that publication: a source change not yet
 published, the last refresh failure, and when a refresh last finished. Only runtime processes write it, never the

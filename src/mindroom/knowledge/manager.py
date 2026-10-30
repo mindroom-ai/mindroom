@@ -405,11 +405,13 @@ class KnowledgeManager:
         a forced rebuild that completed but never published; then the collection the publication retired, taken over
         only while it is at most a quarter free and only after its readers drain. Any other complete collection is a
         leftover the last publication did not keep, such as the one a forced rebuild replaced, and is deleted. Before
-        any publication there is nothing to leave over, so a complete collection is a finished build to resume.
+        any semantic publication, or after a files-mode one, which names no collection, there is nothing to leave
+        over, so a complete collection is a finished build to resume.
         """
         usable = await asyncio.to_thread(self._working_collections, publication)
         retired_name = None if publication is None else publication.retired
-        unfinished = [entry for entry in usable if entry[1].stage == "building" or publication is None]
+        no_semantic_publication = publication is None or publication.collection is None
+        unfinished = [entry for entry in usable if entry[1].stage == "building" or no_semantic_publication]
         if unfinished:
             return max(unfinished, key=lambda entry: entry[1].updated_at)
         rebuilt = [entry for entry in usable if self._unpublished_rebuild(*entry, publication)]

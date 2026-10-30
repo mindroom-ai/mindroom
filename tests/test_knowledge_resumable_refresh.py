@@ -4142,3 +4142,33 @@ async def test_an_unchanged_source_rebuilds_a_published_collection_it_cannot_rea
     assert lookup.reader is not None
     assert await lookup.reader.asearch("content", limit=1)
     assert embedder.embedded_count("content 0") == 1
+
+
+@pytest.mark.asyncio
+async def test_a_mode_round_trip_through_files_resumes_the_semantic_index(
+    tmp_path: Path,
+    embedder: _RecordingEmbedder,
+) -> None:
+    """Switching a semantic base to files mode and back rewrites only the files that changed meanwhile."""
+    docs_path = tmp_path / "docs"
+    names = _write_corpus(docs_path, 5)
+    config = _config(tmp_path, docs_path)
+    runtime_paths = runtime_paths_for(config)
+    await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)
+    files_config = bind_runtime_paths(
+        config.model_copy(
+            update={
+                "knowledge_bases": {
+                    "docs": config.knowledge_bases["docs"].model_copy(update={"mode": "files"}),
+                },
+            },
+        ),
+        runtime_paths,
+    )
+    await refresh_knowledge_binding("docs", config=files_config, runtime_paths=runtime_paths)
+    (docs_path / names[0]).write_text("edited while in files mode", encoding="utf-8")
+    embedder.embedded_texts.clear()
+
+    assert (await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)).published
+
+    assert embedder.embedded_texts == ["edited while in files mode"]
