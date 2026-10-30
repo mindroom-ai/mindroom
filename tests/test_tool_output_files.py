@@ -307,15 +307,15 @@ def test_a_strict_function_keeps_its_strict_schema_and_takes_no_output_path(tmp_
     assert _execute(function, {"text": "hi"}).result == "RAW"
 
 
-def test_output_path_joins_the_schema_before_a_keyword_catch_all(tmp_path: Path) -> None:
-    """The argument joins a derived schema ahead of the property Agno derives for ``**kwargs``."""
+def test_output_path_joins_the_schema_of_a_function_with_a_keyword_catch_all(tmp_path: Path) -> None:
+    """The argument follows the function's named parameters, and ``**kwargs`` names no property of its own."""
 
     def tagged(name: str, **kwargs: object) -> str:
         return f"{name}{kwargs}"
 
     adapted = _with_output_files(Function(name="tagged", entrypoint=tagged), _policy(tmp_path))
 
-    assert list(adapted.parameters["properties"]) == ["name", OUTPUT_PATH_ARGUMENT, "kwargs"]
+    assert list(adapted.parameters["properties"]) == ["name", OUTPUT_PATH_ARGUMENT]
     _assert_output_path_schema_is_optional(adapted.parameters)
 
 

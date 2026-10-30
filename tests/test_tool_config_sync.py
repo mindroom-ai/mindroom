@@ -4,7 +4,7 @@ import inspect
 import json
 from collections.abc import Callable
 from pathlib import Path
-from types import MethodType, UnionType
+from types import UnionType
 from typing import Any, Union, cast, get_args, get_origin, get_type_hints
 
 import pytest
@@ -370,12 +370,13 @@ def _parsed_arguments(function: ToolFunction, arguments: dict[str, str]) -> obje
     return parse_tool_arguments(json.dumps(arguments), function)
 
 
-def _derived_without_an_instance(tool_class: type, method: Callable[..., Any]) -> ToolFunction:
-    """Return ``method`` as its toolkit offers it, derived from the class by the generator its kind of toolkit uses."""
+def _derived_without_an_instance(tool_class: type, function_name: str) -> ToolFunction:
+    """Return a function as its toolkit offers it, derived from the class through its kind of toolkit's adapter."""
+    # Bound as an instance binds it, to a stand-in no derivation reads, so a method's schema leaves out ``self``.
+    entrypoint = inspect.getattr_static(tool_class, function_name).__get__(object(), tool_class)
     if issubclass(tool_class, OwnedToolkit):
-        # Bound to a stand-in, which no derivation reads, so the schema leaves out ``self`` as an instance's does.
-        return adapt_callable(MethodType(method, object()))
-    return offered_agno_function(Function.from_callable(method))
+        return adapt_callable(entrypoint)
+    return offered_agno_function(Function(name=function_name, entrypoint=entrypoint))
 
 
 def verify_string_arguments_reach_the_tool(tool_name: str, tool_class: type) -> None:
@@ -385,7 +386,7 @@ def verify_string_arguments_reach_the_tool(tool_name: str, tool_class: type) -> 
         if method is None:
             # The toolkit builds this function per instance, for example from an MCP server's tool list.
             continue
-        function = _derived_without_an_instance(tool_class, method)
+        function = _derived_without_an_instance(tool_class, function_name)
         signature = inspect.signature(method).parameters
         choices = {
             name: string_choices

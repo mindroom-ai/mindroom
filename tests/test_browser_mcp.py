@@ -214,7 +214,7 @@ async def test_output_wrapper_precedes_wire_encoding(tmp_path: Path, media: bool
         )
 
     policy = ToolOutputFilePolicy(workspace_root=tmp_path, auto_save_threshold_bytes=5)
-    entrypoint = with_output_files(adapt_callable(result), policy, derived=True).entrypoint
+    entrypoint = with_output_files(adapt_callable(result), policy).entrypoint
     output = await cast("Awaitable[object]", entrypoint(mindroom_output_path=path))
     decoded = decode_media_result(encode_media_result(output))
     if media and path is None:

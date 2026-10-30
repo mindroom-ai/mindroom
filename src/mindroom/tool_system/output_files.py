@@ -208,17 +208,10 @@ def _output_path_schema() -> dict[str, object]:
     }
 
 
-def with_optional_output_path(parameters: Mapping[str, Any], *, before: str | None = None) -> dict[str, Any]:
-    """Return a copy of ``parameters`` offering MindRoom's reserved output-path argument as an optional property.
-
-    The property goes before the one named ``before`` when the schema has it, else last.
-    """
+def with_optional_output_path(parameters: Mapping[str, Any]) -> dict[str, Any]:
+    """Return a copy of ``parameters`` offering MindRoom's reserved output-path argument as its last, optional property."""
     finished = dict(parameters)
-    properties: dict[str, Any] = {}
-    for name, schema in (finished.get("properties") or {}).items():
-        if name == before:
-            properties[OUTPUT_PATH_ARGUMENT] = _output_path_schema()
-        properties[name] = schema
+    properties = dict(finished.get("properties") or {})
     properties[OUTPUT_PATH_ARGUMENT] = _output_path_schema()
     finished["type"] = finished.get("type") or "object"
     finished["properties"] = properties
@@ -565,12 +558,11 @@ def finalize_tool_output_file(request: ToolOutputFileRequest, result: object) ->
     return _redirect_result_to_file(result, policy=request.policy, validated_path=request.path)
 
 
-def with_output_files(function: ToolFunction, policy: ToolOutputFilePolicy, *, derived: bool) -> ToolFunction:
+def with_output_files(function: ToolFunction, policy: ToolOutputFilePolicy) -> ToolFunction:
     """Return ``function`` taking and handling ``mindroom_output_path`` beside its own arguments, no longer strict.
 
-    Its schema offers the argument as an optional property, before the one derived for the entrypoint's ``**kwargs``
-    when ``derived`` says the schema was derived from the entrypoint's signature, else last. The entrypoint takes the
-    argument out of each call, runs the call with the rest, and saves or redirects its output. A strict function keeps
+    Its schema offers the argument as its last, optional property. The entrypoint takes the argument out of each call,
+    runs the call with the rest, and saves or redirects its output. A strict function keeps
     its schema as its author made it, and a function that takes the argument itself, by its entrypoint or its schema,
     stays as it is too.
     """
@@ -585,13 +577,9 @@ def with_output_files(function: ToolFunction, policy: ToolOutputFilePolicy, *, d
             argument_name=OUTPUT_PATH_ARGUMENT,
         )
         return function
-    var_keyword = next(
-        (name for name, parameter in parameters.items() if parameter.kind is inspect.Parameter.VAR_KEYWORD),
-        None,
-    )
     return replace(
         function,
-        parameters=with_optional_output_path(function.parameters, before=var_keyword if derived else None),
+        parameters=with_optional_output_path(function.parameters),
         strict=False,
         entrypoint=_handling_output_files(function.entrypoint, policy, tool_name=function.name),
     )

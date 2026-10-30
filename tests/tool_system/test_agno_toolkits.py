@@ -23,6 +23,7 @@ from mindroom.tool_system.agno_toolkits import (
 )
 from mindroom.tool_system.authoring import Toolkit as OwnedToolkit
 from mindroom.tool_system.authoring import tool
+from mindroom.tool_system.invocation import ToolCallContext, execute_tool_call
 from mindroom.tool_system.registry import builtin_tool_registry
 from tests.agent_tool_helpers import offered_agno_function
 from tests.agno_parity import tool_argument_probes as probes
@@ -31,6 +32,8 @@ from tests.tool_system import agno_parity_support as support
 
 if TYPE_CHECKING:
     from pathlib import Path
+
+    from agno.run import RunContext as CheckedRunContext
 
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
@@ -391,6 +394,73 @@ def test_definition_is_the_provider_facing_tool_spec() -> None:
         parameters=bare.parameters,
         strict=None,
     )
+
+
+@pytest.mark.asyncio
+async def test_keyword_arguments_a_vendor_function_collects_reach_it_without_a_kwargs_property() -> None:
+    """A function collecting ``**fields``, as ClickUp's ``update_task`` does, offers only its named parameters.
+
+    The model sends the fields beside them, and the function receives each one as its own keyword argument.
+    """
+
+    def update_task(task_id: str, **fields: object) -> str:
+        return json.dumps({"task_id": task_id, "fields": fields})
+
+    [function] = adapt_toolkit(Toolkit(name="tasks", tools=[update_task])).functions
+    outcome = await execute_tool_call(
+        function,
+        {"task_id": "7", "status": "done"},
+        ToolCallContext(run_id="run", session_id="session", user_id=None),
+        middleware=(),
+    )
+
+    assert function.parameters == {
+        "type": "object",
+        "properties": {"task_id": {"type": "string"}},
+        "required": ["task_id"],
+    }
+    assert json.loads(outcome.content) == {"task_id": "7", "fields": {"status": "done"}}
+
+
+def _remember(label: str, run_context: CheckedRunContext) -> str:
+    """Remember a label for the run."""
+    return f"{label}@{run_context.run_id}"
+
+
+@pytest.mark.asyncio
+async def test_a_parameter_the_framework_fills_may_name_a_type_only_a_type_checker_resolves() -> None:
+    """A tool annotating ``run_context`` with a type imported for type checking is offered and runs.
+
+    Its schema reads only the annotations of the parameters the model sends, and its call runs unvalidated.
+    """
+    [function] = adapt_toolkit(Toolkit(name="notes", tools=[_remember])).functions
+    outcome = await execute_tool_call(
+        function,
+        {"label": "blue"},
+        ToolCallContext(run_id="run", session_id="session", user_id=None),
+        middleware=(),
+    )
+
+    assert function.description == "Remember a label for the run."
+    assert function.parameters == {"type": "object", "properties": {"label": {"type": "string"}}, "required": ["label"]}
+    assert outcome.content == "blue@run"
+
+
+def test_a_function_asking_for_a_strict_schema_is_offered_one() -> None:
+    """A strict schema closes every object and requires each property, which strict function calling demands."""
+
+    def lookup(city: str, limit: int = 5) -> str:
+        return f"{city}:{limit}"
+
+    function = offered_agno_function(Function(name="lookup", entrypoint=lookup, strict=True))
+
+    assert function.strict is True
+    assert function.parameters == {
+        "type": "object",
+        "properties": {"city": {"type": "string"}, "limit": {"type": "integer"}},
+        "additionalProperties": False,
+        "required": ["city", "limit"],
+    }
 
 
 def test_injected_parameters_are_the_names_the_framework_supplies() -> None:

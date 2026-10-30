@@ -253,6 +253,7 @@ async def _continue_persisted_agent(
         run_id=response.run_id,
         attempt_run_id=response.run_id,
         runtime_model_name=model_name,
+        usage=response.metrics,
         status=response.status,
         tool_executions=collected.tool_executions,
         completed_tools=tuple(presentation.tool_trace),
