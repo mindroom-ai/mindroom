@@ -6,6 +6,7 @@ import pytest
 import yaml
 from pydantic import ValidationError
 
+from mindroom.config.agent import AgentConfig
 from mindroom.config.egress_broker import EgressAuth, EgressBrokerConfig, EgressRule, EgressService
 from mindroom.config.main import Config
 from mindroom.egress_broker.presets import EGRESS_PRESETS
@@ -526,3 +527,69 @@ def test_host_strips_trailing_dot() -> None:
     """
     config = EgressBrokerConfig(**yaml.safe_load(config_yaml))
     assert config.services["test"].rules[0].host == "api.github.com"
+
+
+def test_admin_key_drops_a_presets_login_and_saves_as_authored() -> None:
+    """An administrator's one key takes no account, so a preset's login and read-only declaration are left out."""
+    github = EgressService.model_validate({"preset": "github", "admin_key": True})
+    calendar = EgressService.model_validate({"preset": "google_calendar", "admin_key": True})
+
+    assert github.admin_key is True
+    assert github.oauth_provider is None
+    assert github.placeholder_env == EGRESS_PRESETS["github"]["placeholder_env"]
+    assert calendar.read_only is None
+    assert github.authored_model_dump() == {"preset": "github", "admin_key": True}
+    assert EgressService.model_validate({"preset": "github"}).admin_key is False
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [("oauth_provider", "github"), ("read_only", {"post_paths": []}), ("oauth_on_shared_workers", True)],
+)
+def test_admin_key_refuses_account_settings(field: str, value: object) -> None:
+    """A service with an administrator's key never uses a connected account, so authoring one is an error."""
+    with pytest.raises(
+        ValidationError,
+        match=f"an admin_key service takes no connected account, so it cannot set {field}",
+    ):
+        EgressService.model_validate({"preset": "github", "admin_key": True, field: value})
+
+
+def test_admin_key_must_be_a_real_boolean() -> None:
+    """A string such as "true" would silently move where the service's key lives, so it is refused."""
+    with pytest.raises(ValidationError, match="valid boolean"):
+        EgressService.model_validate({"preset": "openai", "admin_key": "true"})
+
+
+def test_agents_limits_which_agents_a_service_serves() -> None:
+    """Without a list every agent is served; with one only the listed agents, and never an unknown caller."""
+    everyone = EgressService.model_validate({"preset": "openai"})
+    limited = EgressService.model_validate({"preset": "openai", "agents": ["coder", "research"]})
+
+    assert everyone.agents is None
+    assert everyone.serves_agent("coder") is True
+    assert everyone.serves_agent(None) is True
+    assert limited.serves_agent("coder") is True
+    assert limited.serves_agent("general") is False
+    assert limited.serves_agent(None) is False
+    assert limited.authored_model_dump() == {"preset": "openai", "agents": ["coder", "research"]}
+
+
+def test_agents_must_list_at_least_one_agent() -> None:
+    """An empty list would serve no agent at all, which is what removing the service does."""
+    with pytest.raises(ValidationError, match="agents must list at least one agent; leave it out to serve every agent"):
+        EgressService.model_validate({"preset": "openai", "agents": []})
+
+
+def test_config_refuses_agents_it_does_not_define() -> None:
+    """A misspelled agent would silently lose the service, so the config names the unknown ones."""
+    agents = {"coder": AgentConfig(display_name="Coder")}
+    services = {"search": {"preset": "openai", "agents": ["coder", "codr", "ghost"]}}
+
+    with pytest.raises(
+        ValidationError,
+        match=r"egress_broker\.services\.search\.agents references unknown agent\(s\): codr, ghost",
+    ):
+        Config(agents=agents, egress_broker={"services": services})
+    config = Config(agents=agents, egress_broker={"services": {"search": {"preset": "openai", "agents": ["coder"]}}})
+    assert config.egress_broker.services["search"].agents == ["coder"]
