@@ -1,7 +1,8 @@
-"""Open the conversation store of an agent, a team scope, or the system usage ledger, converting the database first."""
+"""Open the conversation store of an agent, a team scope, or the system usage ledger, converting its database once."""
 
 from __future__ import annotations
 
+import stat
 import time
 from contextlib import ExitStack, closing
 from typing import TYPE_CHECKING
@@ -36,19 +37,42 @@ if TYPE_CHECKING:
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 
 
+# The database files this process prepared, each with the device and inode it had then. A file deleted, replaced, or
+# put behind a link no longer matches and is prepared again at its next open. A file rewritten in place keeps both,
+# which only a foreign writer such as worker code does, so a layout it breaks that way fails that store's operations
+# until the next start instead of converting or being archived at the next open.
+_PREPARED: dict[Path, tuple[int, int] | None] = {}
+
+
 def create_state_storage(storage_name: str, state_root: Path, owner: HistoryScope) -> ConversationStore:
     """Open the conversation database ``<state_root>/sessions/<storage_name>.db`` that ``owner`` owns, converted first.
 
-    ``owner`` is the agent, team scope, or system usage ledger every session in it belongs to. Under the recovery
-    lock, in order: a database missing required session columns is archived, a database in an older layout converts,
-    a new one gets every table with ``owner`` recorded, and only then does the conversation store open it.
+    ``owner`` is the agent, team scope, or system usage ledger every session in it belongs to. The first open of the
+    file in this process prepares it under the recovery lock, in order: a database missing required session columns
+    is archived, a database in an older layout converts, a new one gets every table with ``owner`` recorded, and only
+    then does the conversation store open it. A later open that finds the same file, a regular file in a real sessions
+    directory, returns its store at once.
     """
     names = TableNames(storage_name)
     db_path = names.database_path(state_root)
+    if (identity := _file_identity(db_path)) is not None and _PREPARED.get(db_path) == identity:
+        return ConversationStore(db_path)
     with session_storage_preflight(state_root, names, timeout_seconds=BUSY_TIMEOUT_SECONDS):
         db_path.parent.mkdir(parents=True, exist_ok=True)
         prepare_conversation_database(db_path, names, owner)
+        _PREPARED[db_path] = _file_identity(db_path)
         return ConversationStore(db_path)
+
+
+def _file_identity(path: Path) -> tuple[int, int] | None:
+    """Return the device and inode of ``path`` when it is a regular file in a directory, neither a link; else None."""
+    try:
+        directory, database = path.parent.lstat(), path.lstat()
+    except OSError:
+        return None
+    if not (stat.S_ISDIR(directory.st_mode) and stat.S_ISREG(database.st_mode)):
+        return None
+    return database.st_dev, database.st_ino
 
 
 def create_agent_state_storage(agent_name: str, state_root: Path) -> ConversationStore:

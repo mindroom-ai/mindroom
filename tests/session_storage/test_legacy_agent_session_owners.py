@@ -16,10 +16,11 @@ from mindroom.history.storage import remove_history_of_redacted_events
 from mindroom.history.types import HistoryScope, ScopeSummary
 from mindroom.llm.messages import Message
 from mindroom.llm.runs import RunRecord
-from mindroom.session_storage.agent_storage import create_agent_state_storage, create_state_storage
+from mindroom.session_storage.agent_storage import create_agent_state_storage, prepare_conversation_database
 from mindroom.session_storage.legacy_agno3_conversion import migrate_conversation_storage
 from mindroom.session_storage.legacy_agno3_schema import AgnoTableNames
 from mindroom.session_storage.schema import LOG_VERSION, TableNames, quote_identifier
+from mindroom.session_storage.store import ConversationStore
 from mindroom.session_storage.types import ConversationSession
 from mindroom.usage.storage import SYSTEM_USAGE_ENTITY, SYSTEM_USAGE_OWNER, SYSTEM_USAGE_STORAGE_NAME
 from tests.conftest import seed_session
@@ -30,7 +31,6 @@ if TYPE_CHECKING:
     from collections.abc import Collection
     from pathlib import Path
 
-    from mindroom.session_storage.store import ConversationStore
 
 _SCOPE = HistoryScope(kind="agent", scope_id="code")
 # The id Agno derived from the display name ``Code Agent`` before MindRoom passed the agent's name.
@@ -52,9 +52,21 @@ def _session(session_id: str, owner_id: str, *, kind: str = "agent") -> Conversa
     return ConversationSession(session_id=session_id, kind=kind, owner_id=owner_id, runs=[_run(f"{session_id}-run")])
 
 
+def _unopened_store(directory: Path, owner: HistoryScope = _SCOPE) -> ConversationStore:
+    """Return a new store ``owner`` owns in the store directory ``directory``, which a later open prepares again.
+
+    A store open prepares each database file once per process, so a fixture rewritten in place must not be opened.
+    """
+    names = TableNames(directory.name)
+    path = names.database_path(directory)
+    path.parent.mkdir(parents=True)
+    prepare_conversation_database(path, names, owner)
+    return ConversationStore(path)
+
+
 def _v2_database(directory: Path, *sessions: ConversationSession, owner: HistoryScope = _SCOPE) -> Path:
     """Write ``sessions`` into the storage v2 database ``owner`` owns in the store directory ``directory``."""
-    store = create_state_storage(directory.name, directory, owner)
+    store = _unopened_store(directory, owner)
     for session in sessions:
         seed_session(store, session)
     return _as_layout_2(store, *sessions)
@@ -254,7 +266,7 @@ def test_a_summary_stored_under_the_display_name_id_still_replays_after_the_upgr
     """A version 2 database's summary rows under the row's old owner move to the agent, in their order."""
     session = _session("session", _DISPLAY_NAME_ID)
     session.runs.append(_run("later"))
-    stored = create_agent_state_storage("code", tmp_path / "code")
+    stored = _unopened_store(tmp_path / "code")
     seed_session(stored, session)
     loaded = stored.load_session("session")
     assert loaded is not None
