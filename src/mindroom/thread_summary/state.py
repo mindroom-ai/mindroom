@@ -136,6 +136,25 @@ class SummaryState:
         )
 
 
+def summary_state(
+    history: Sequence[ResolvedVisibleMessage],
+    *,
+    thread_id: str,
+    trusted_sender_ids: Collection[str],
+    authorize_human: Callable[[str], bool],
+) -> SummaryState | None:
+    """Classify one thread history, or return ``None`` while pin-authorizing membership is pending."""
+    try:
+        return SummaryState.from_history(
+            history,
+            thread_id=thread_id,
+            trusted_sender_ids=trusted_sender_ids,
+            authorize_human=authorize_human,
+        )
+    except ReplyMembershipPendingError:
+        return None
+
+
 def trusted_summary_metadata(
     message: ResolvedVisibleMessage,
     *,
@@ -319,19 +338,16 @@ def current_thread_summary_from_history(
     history itself. Returns ``None`` when room membership needed to authorize a
     human pin is still pending.
     """
-    try:
-        return SummaryState.from_history(
-            thread_history,
-            thread_id=thread_id,
-            trusted_sender_ids=trusted_sender_ids,
-            authorize_human=human_summary_authorizer(
-                client,
-                room_id,
-                config,
-                runtime_paths,
-                entity_name,
-                membership_index,
-            ),
-        )
-    except ReplyMembershipPendingError:
-        return None
+    return summary_state(
+        thread_history,
+        thread_id=thread_id,
+        trusted_sender_ids=trusted_sender_ids,
+        authorize_human=human_summary_authorizer(
+            client,
+            room_id,
+            config,
+            runtime_paths,
+            entity_name,
+            membership_index,
+        ),
+    )

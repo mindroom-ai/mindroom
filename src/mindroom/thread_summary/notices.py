@@ -41,7 +41,7 @@ _MARKDOWN_LIST_ITEM_RE = re.compile(r"(?m)^\s*(?:[-+*]|\d+\.)\s+")
 
 
 class ThreadSummaryWriteError(RuntimeError):
-    """Raised when a manual thread summary cannot be written."""
+    """Raised when a thread summary cannot be written or ordered after its predecessors."""
 
 
 @dataclass(frozen=True)
@@ -208,7 +208,7 @@ async def set_manual_thread_summary(
     re-summarization. ``pin=False`` writes the summary and releases any pin an
     earlier manual write established.
     """
-    if not isinstance(summary, str) or not (normalized_summary := normalize_thread_summary_text(summary)):
+    if not (normalized_summary := normalize_thread_summary_text(summary)):
         msg = "summary must be a non-empty string."
         raise ThreadSummaryWriteError(msg)
     if len(normalized_summary) > THREAD_SUMMARY_MAX_LENGTH:

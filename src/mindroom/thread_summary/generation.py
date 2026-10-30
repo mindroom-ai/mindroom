@@ -107,7 +107,7 @@ def _conversation_text(messages: Sequence[ResolvedVisibleMessage]) -> str:
     lines: list[str] = []
     for message in messages:
         sender = message.sender or "unknown"
-        body = body_without_tool_markers(message.body or "", message.content)
+        body = body_without_tool_markers(message.body, message.content)
         if body:
             lines.append(f"{sender}: {body}")
 
@@ -157,4 +157,4 @@ async def generate_summary(
         tag = coerce_tag_name(raw_tag)
         if tag is not None and tag not in AUTOMATIC_THREAD_TAG_EXCLUSIONS and tag not in tags:
             tags.append(tag)
-    return GeneratedSummary(summary=content.summary, tags=tuple(tags[:_MAX_INITIAL_TAGS]))
+    return GeneratedSummary(summary=content.summary, tags=tuple(tags))

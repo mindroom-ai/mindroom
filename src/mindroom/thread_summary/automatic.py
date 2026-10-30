@@ -5,7 +5,6 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
-from mindroom.authorization import ReplyMembershipPendingError
 from mindroom.entity_resolution import current_internal_sender_ids
 from mindroom.logging_config import get_logger
 from mindroom.matrix.conversation_reads import with_delivered_response
@@ -23,6 +22,7 @@ from mindroom.thread_summary.state import (
     TruncatedThreadHistoryError,
     human_summary_authorizer,
     load_complete_thread_history,
+    summary_state,
 )
 from mindroom.thread_tag_vocabulary import (
     format_tag_vocabulary_with_counts,
@@ -114,14 +114,13 @@ async def _summary_delivery_timestamp(
             thread_id=thread_id,
         )
         return None
-    try:
-        source_state = SummaryState.from_history(
-            source_history,
-            thread_id=thread_id,
-            trusted_sender_ids=trusted_sender_ids,
-            authorize_human=authorize_human,
-        )
-    except ReplyMembershipPendingError:
+    source_state = summary_state(
+        source_history,
+        thread_id=thread_id,
+        trusted_sender_ids=trusted_sender_ids,
+        authorize_human=authorize_human,
+    )
+    if source_state is None:
         # The model already ran, so this deferred delivery advances the same
         # retry baseline as any other unsuccessful generation attempt.
         return None
@@ -224,11 +223,8 @@ async def _deliver_generated_summary(
 ) -> None:
     """Apply initial tags, then independently deliver the generated summary.
 
-    Re-reads pin state first. The gate before generation cannot cover the
-    generation window, and the per-thread lock is process-local, so another
-    runtime can write a manual pin while this process waits on the model. That
-    check belongs here rather than in the caller because it is a delivery-time
-    question: a superseded summary should apply neither its tags nor its title.
+    Re-reads pin state first (``_summary_delivery_timestamp``): a superseded
+    summary should apply neither its tags nor its title.
     """
     try:
         generated_at = await _summary_delivery_timestamp(
@@ -278,8 +274,8 @@ async def _countable_thread_history(
 ) -> ThreadHistoryResult | None:
     """Return history an automatic pass may count, or nothing.
 
-    An automatic pass moves the durable baseline on every outcome it reaches,
-    so it must not run at all on a count it cannot trust. Both reasons it
+    An automatic pass records the counted size as its baseline on every outcome
+    it reaches, so it must not run at all on a count it cannot trust. Both reasons it
     cannot are handled the same way -- the history is unavailable, or it is a
     page of a longer thread -- because both leave the pass with no number worth
     recording.
@@ -342,14 +338,13 @@ async def maybe_generate_thread_summary(  # noqa: PLR0911
             entity_name,
             membership_index,
         )
-        try:
-            state = SummaryState.from_history(
-                thread_history,
-                thread_id=thread_id,
-                trusted_sender_ids=trusted_sender_ids,
-                authorize_human=authorize_human,
-            )
-        except ReplyMembershipPendingError:
+        state = summary_state(
+            thread_history,
+            thread_id=thread_id,
+            trusted_sender_ids=trusted_sender_ids,
+            authorize_human=authorize_human,
+        )
+        if state is None:
             # Unknown authority defers without advancing the baseline, so a
             # pin is never overwritten before membership recovers.
             return
