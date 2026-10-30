@@ -12,29 +12,11 @@ POD_TEMPLATE_KINDS = {"Deployment", "StatefulSet", "Job"}
 WORKER_PULL_SECRETS_ENV = "MINDROOM_KUBERNETES_WORKER_IMAGE_PULL_SECRETS_JSON"
 
 ALL_PODS_VALUES: dict[str, Any] = {
-    "approvedEgress": {
-        "enabled": True,
-        "image": {"tag": "v0.1.0"},
-        "parentProxy": {"enabled": True, "host": "agent-vault", "port": 14322},
-    },
+    "approvedEgress": {"enabled": True, "image": {"tag": "v0.1.0"}},
     "eventCache": {"postgres": {"auth": {"password": "test-password"}}},
     "workers": {
         "backend": "kubernetes",
         "sandbox": {"proxyToken": {"value": "test-token"}},
-        "kubernetes": {
-            "agentVault": {
-                "enabled": True,
-                "cliImage": "example.test/vault:test",
-                "ownerEmail": "owner@example.test",
-                "workerCaConfigMapName": "agent-vault-ca",
-                "server": {"enabled": True},
-                "bootstrap": {"enabled": True, "kubectlImage": "example.test/kubectl:test"},
-                "accessGrants": {
-                    "enabled": True,
-                    "grants": [{"email": "maintainer@example.test", "workerScope": "shared", "agent": "helper"}],
-                },
-            },
-        },
     },
 }
 
@@ -59,11 +41,8 @@ def test_every_runtime_chart_pod_uses_the_image_pull_secrets(tmp_path: Path) -> 
 
     assert set(pod_specs) == {
         "Deployment/mindroom-runtime",
-        "Deployment/agent-vault",
         "Deployment/mindroom-runtime-egress-proxy",
         "StatefulSet/mindroom-runtime-event-cache-postgres",
-        "Job/agent-vault-bootstrap",
-        "Job/agent-vault-access-grants",
     }
     assert {name: spec.get("imagePullSecrets") for name, spec in pod_specs.items()} == dict.fromkeys(
         pod_specs,

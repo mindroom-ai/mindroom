@@ -96,7 +96,7 @@ scriptGateway:
   port: 8767
 
 # Optional native credential-injecting egress broker served by the primary on its own port to dedicated Kubernetes workers.
-# Requires workers.backend=kubernetes and cannot be combined with workers.kubernetes.agentVault; see "Egress Broker" in the README.
+# Requires workers.backend=kubernetes; see "Egress Broker" in the README.
 egressBroker:
   enabled: false
   # Listener port on the primary and the egress broker Service; must differ from runtime.apiPort and scriptGateway.port.
@@ -300,7 +300,7 @@ providerCredentials: []
 #     existingSecret: my-llm-secret
 #     key: anthropic-api-key
 
-# The env lists, Agent Vault server env lists, extraVolumes, extraVolumeMounts, and the NetworkPolicy
+# The env lists, extraVolumes, extraVolumeMounts, and the NetworkPolicy
 # rule lists accept either a list or a map keyed by entry; see "Layering Values Files" in the README.
 # They default to null so Helm accepts either form without table/non-table warnings.
 env:
@@ -488,207 +488,6 @@ workers:
           limits:
             cpu: "2"
             memory: 8Gi
-    # Per-worker Agent Vault egress. When enabled, each dedicated worker pod
-    # gets an init container that mints a proxy-role Agent Vault token for that
-    # worker's vault into an in-pod volume; the sandbox runner composes
-    # http://<token>:<vault>@<proxyUrl host> for python/shell egress. No separate
-    # bridge pod or Service is created.
-    #
-    # NOTE: if egressProxy/approvedEgress NetworkPolicies are also enabled,
-    # workers still need Agent Vault API egress (apiUrl) so the init container
-    # can mint the per-worker token. For a chart-managed vault server, the chart
-    # opens that API egress automatically. For externally managed vaults, add
-    # an explicit API-only egress rule. Do not open direct worker egress to the
-    # Agent Vault proxy port when approvedEgress owns dynamic grants; enable
-    # approvedEgress.parentProxy so Squid remains the first hop and forwards
-    # token-bearing traffic to the vault parent.
-    agentVault:
-      enabled: false
-      # Agent Vault CLI image used by the init container to mint per-worker
-      # proxy-role agent tokens. Required when enabled.
-      cliImage: ""
-      # Agent Vault instance owner email used for provisioning and worker token
-      # minting. Required when enabled. When accessTool is enabled, self-service
-      # grants also keep this owner admin on each worker vault so the init
-      # container can attach the proxy-role agent even for user-created vaults.
-      ownerEmail: ""
-      # Prefix for the per-worker vault name (descriptive_worker_id_for_key); the
-      # agent_vault_access tool must use the same prefix
-      # (MINDROOM_AGENT_VAULT_ACCESS_VAULT_NAME_PREFIX) so the UI manages the
-      # same vault the worker reads.
-      vaultNamePrefix: agent-vault
-      apiUrl: http://agent-vault:14321
-      proxyUrl: http://agent-vault:14322
-      # Secret in the worker namespace holding AGENT_VAULT_OWNER_PASSWORD.
-      bootstrapSecretName: agent-vault-bootstrap
-      # Optional ConfigMap (key ca.pem) with the Agent Vault root CA; when set,
-      # worker pods mount it at /etc/agent-vault/ca.pem so brokered HTTPS
-      # traffic can trust the vault's TLS interception.
-      workerCaConfigMapName: ""
-      # Optionally run the Agent Vault server in-cluster. Leave disabled to
-      # point apiUrl/proxyUrl at an externally managed Agent Vault instance.
-      server:
-        enabled: false
-        # Service/Deployment name. Must match the host in apiUrl/proxyUrl.
-        name: agent-vault
-        # Agent Vault server image, pinned by digest; defaults to cliImage.
-        image: ""
-        imagePullPolicy: IfNotPresent
-        apiPort: 14321
-        mitmPort: 14322
-        # Key in bootstrapSecretName holding the master password that protects
-        # the vault's encryption key.
-        masterPasswordSecretKey: AGENT_VAULT_MASTER_PASSWORD
-        # Raw Kubernetes EnvVar entries appended to the Agent Vault server.
-        # Cannot override the chart-managed master password or enabled SMTP settings.
-        extraEnv: null
-        # Raw Kubernetes EnvFromSource entries for the Agent Vault server.
-        envFrom: null
-        persistence:
-          enabled: true
-          size: 1Gi
-          storageClassName: ""
-          existingClaim: ""
-        # Optional SMTP for signup verification emails. When disabled, the
-        # server logs verification codes for the owner to relay manually.
-        smtp:
-          enabled: false
-          host: ""
-          port: 587
-          # starttls | implicit | none
-          tlsMode: starttls
-          fromName: Agent Vault
-          # Secret with keys AGENT_VAULT_SMTP_USERNAME, AGENT_VAULT_SMTP_PASSWORD,
-          # and AGENT_VAULT_SMTP_FROM.
-          existingSecret: ""
-        podSecurityContext:
-          fsGroup: 101
-          fsGroupChangePolicy: OnRootMismatch
-        # The infisical/agent-vault image sets USER to the name agentvault (uid 65532, gid 101).
-        # The kubelet can only enforce runAsNonRoot for a numeric user, so runAsUser repeats the uid.
-        securityContext:
-          runAsNonRoot: true
-          runAsUser: 65532
-          allowPrivilegeEscalation: false
-          capabilities:
-            drop:
-              - ALL
-        resources: {}
-        podAnnotations: {}
-        podLabels: {}
-        # NetworkPolicy admitting only in-chart vault clients and limiting egress to DNS, TCP 80/443, and
-        # enabled SMTP; see "Agent Vault Server NetworkPolicy" in the README.
-        networkPolicy:
-          create: true
-          # Leave empty to reuse the server name.
-          name: ""
-          # Raw Kubernetes NetworkPolicyIngressRule entries, for example a deployer-managed UI proxy in front of the API port.
-          extraIngress: null
-          # Raw Kubernetes NetworkPolicyEgressRule entries, for example upstream ports beyond 80/443 or an external database.
-          extraEgress: null
-      # How the bootstrap and accessGrants Jobs are named and re-run: fixed keeps stable names and a
-      # Helm hook for accessGrants; contentHash appends an input hash so plain `kubectl apply` reruns
-      # changed Jobs. See "Agent Vault Access Grants" in the README.
-      jobNaming: fixed
-      # Optional one-shot bootstrap Job: create/log in the instance owner, set
-      # instance policy (invite-only, allowed signup domains), and publish the
-      # root CA into workerCaConfigMapName so worker pods trust the vault's TLS
-      # interception. Re-runs are idempotent.
-      bootstrap:
-        enabled: false
-        # Agent Vault image, pinned by digest; defaults to cliImage.
-        image: ""
-        # Image providing kubectl, used to publish the CA ConfigMap. Required
-        # when enabled.
-        kubectlImage: ""
-        # Key in bootstrapSecretName holding the owner account password.
-        ownerPasswordSecretKey: AGENT_VAULT_OWNER_PASSWORD
-        # Comma-separated signup domain allowlist; empty means no restriction.
-        allowedDomains: ""
-        inviteOnly: true
-        resources: {}
-        podSecurityContext:
-          seccompProfile:
-            type: RuntimeDefault
-        # bootstrap-owner runs the Agent Vault image; runAsUser repeats its uid, as for the server.
-        securityContext:
-          runAsNonRoot: true
-          runAsUser: 65532
-          allowPrivilegeEscalation: false
-          capabilities:
-            drop:
-              - ALL
-        # The publish-ca container runs kubectlImage, which may run as root.
-        # Add runAsNonRoot when it does not, and runAsUser when it names its user.
-        kubectlSecurityContext:
-          allowPrivilegeEscalation: false
-          capabilities:
-            drop:
-              - ALL
-      # Optional wiring for the agent_vault_access tool: agents grant their
-      # requester UI access to the vault backing their own worker. When
-      # bootstrap.enabled, the bootstrap Job mints an owner-role agent and
-      # publishes its token into adminTokenSecret; the control plane reads it
-      # from a mounted file so a bootstrap re-run (token rotation) takes
-      # effect without a restart.
-      accessTool:
-        enabled: false
-        # Public base URL of the (deployer-gated) Agent Vault UI, e.g.
-        # https://example.com/agent-vault. Required when enabled.
-        uiBaseUrl: ""
-        # Domain that maps a requester's Matrix localpart to their vault
-        # account email. Required when enabled.
-        emailDomain: ""
-        # Owner-role agent the bootstrap Job creates/rotates for the tool.
-        adminAgentName: access-admin
-        # Secret the bootstrap Job publishes the token into (and the control
-        # plane mounts). Provide it yourself when bootstrap is disabled.
-        adminTokenSecret:
-          name: agent-vault-access-admin
-          key: token
-      # Optional declarative Agent Vault UI/admin grants for worker vaults.
-      # This controls raw secret visibility and management only. It does not
-      # restrict which users may cause a shared agent to use credentials at
-      # runtime.
-      accessGrants:
-        enabled: false
-        # Optional tenant/account identifiers used in MindRoom worker-key
-        # derivation. Set these to the same values the runtime receives through
-        # CUSTOMER_ID or ACCOUNT_ID when your deployment uses tenant-specific
-        # worker keys. Leave empty for the runtime default tenant.
-        tenantId: ""
-        accountId: ""
-        # Existing Secret holding an owner/admin token for Agent Vault. When
-        # bootstrap.enabled is true, the bootstrap Job publishes the same
-        # owner-role token it uses for accessTool into this Secret too.
-        # If accessTool uses the same Secret name, use the same key or a
-        # different Secret name so bootstrap never applies one Secret twice.
-        adminTokenSecret:
-          name: agent-vault-access-admin
-          key: token
-        waitReadySeconds: 180
-        resources: {}
-        # Each grant gives an email raw UI/admin access to the resolved worker
-        # vault. Supported workerScope values are shared, user, and user_agent.
-        # For workerScope=user, omit agent; use workerScope=user_agent when the
-        # vault should be both requester- and agent-specific.
-        # Supported role is admin.
-        grants: []
-        # Example:
-        # grants:
-        #   - email: user@example.com
-        #     workerScope: shared
-        #     agent: example-agent
-        #     role: admin
-        #   - email: user@example.com
-        #     workerScope: user_agent
-        #     requester: "@user:example.com"
-        #     agent: example-agent
-        #     role: admin
-        #   - email: user@example.com
-        #     workerScope: user
-        #     requester: "@user:example.com"
-        #     role: admin
 
 # Optional external HTTP proxy for dedicated Kubernetes workers.
 # This chart can point worker pods at an existing proxy Service and, when
@@ -713,7 +512,7 @@ egressProxy:
     # Labels selecting the existing proxy pods. NetworkPolicy cannot target a Service directly.
     proxyPodSelector: {}
     proxyNamespaceSelector: {}
-    # DNS destinations for workers, also used by the Agent Vault server NetworkPolicy while this worker egress policy is enabled.
+    # DNS destinations for workers.
     dns:
       namespaceSelector:
         matchLabels:
@@ -773,19 +572,12 @@ approvedEgress:
   maxTtlSeconds: 21600
   sandboxProxyTimeoutSeconds: ""
   logLevel: info
-  # Optional parent proxy for token-bearing worker traffic. This is primarily
-  # for Agent Vault: workers proxy to approved egress first, so dynamic grants
-  # resolve from the real worker source IP, then Squid forwards requests with a
-  # Proxy-Authorization header to the Agent Vault MITM proxy for credential
-  # injection. Tokenless traffic egresses direct from Squid after the normal
-  # allowlist/grant check.
+  # With egressBroker.enabled, Squid forwards token-bearing worker requests to
+  # the broker after the normal allowlist/grant check; see "Egress Broker" in the README.
   parentProxy:
-    enabled: false
-    host: agent-vault
-    port: 14322
     # Route these destinations directly after the normal allowlist/grant check.
     # Use an exact hostname or a leading dot for a domain and its subdomains.
-    # Useful for signed URLs that must skip parent-proxy credential injection.
+    # Useful for signed URLs that must skip broker credential injection.
     bypassDomains: []
   resources:
     requests:

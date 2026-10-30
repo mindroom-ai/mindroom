@@ -2509,8 +2509,8 @@ def test_prepared_dedicated_shell_request_preserves_explicit_execution_env(tmp_p
             function_name="run_shell_command",
             worker_key="v1:default:unscoped:code",
             execution_env={
-                "HTTP_PROXY": "http://agent-vault-adapter:18080",
-                "http_proxy": "http://agent-vault-adapter:18080",
+                "HTTP_PROXY": "http://egress-proxy:18080",
+                "http_proxy": "http://egress-proxy:18080",
                 "PATH": "/host/bin",
                 "MINDROOM_CONFIG_PATH": "/bad/config.yaml",
                 "MINDROOM_STORAGE_PATH": "/bad/storage",
@@ -2520,8 +2520,8 @@ def test_prepared_dedicated_shell_request_preserves_explicit_execution_env(tmp_p
     )
     subprocess_context = sandbox_runner_module._prepare_subprocess_context(prepared_request)
 
-    assert prepared_request.execution_env["HTTP_PROXY"] == "http://agent-vault-adapter:18080"
-    assert prepared_request.execution_env["http_proxy"] == "http://agent-vault-adapter:18080"
+    assert prepared_request.execution_env["HTTP_PROXY"] == "http://egress-proxy:18080"
+    assert prepared_request.execution_env["http_proxy"] == "http://egress-proxy:18080"
     assert prepared_request.execution_env["PATH"].startswith(str(worker_paths.venv_dir / "bin"))
     assert "/host/bin" in prepared_request.execution_env["PATH"]
     worker_path_entries = sandbox_exec_module.worker_subprocess_env(worker_paths)["PATH"].split(os.pathsep)
@@ -2531,8 +2531,8 @@ def test_prepared_dedicated_shell_request_preserves_explicit_execution_env(tmp_p
     assert "MINDROOM_STORAGE_PATH" not in prepared_request.execution_env
     assert SHARED_CREDENTIALS_PATH_ENV not in prepared_request.execution_env
     assert subprocess_context.subprocess_env is not None
-    assert subprocess_context.subprocess_env["HTTP_PROXY"] == "http://agent-vault-adapter:18080"
-    assert subprocess_context.subprocess_env["http_proxy"] == "http://agent-vault-adapter:18080"
+    assert subprocess_context.subprocess_env["HTTP_PROXY"] == "http://egress-proxy:18080"
+    assert subprocess_context.subprocess_env["http_proxy"] == "http://egress-proxy:18080"
     assert subprocess_context.subprocess_env["PATH"].startswith(str(worker_paths.venv_dir / "bin"))
     assert "/host/bin" in subprocess_context.subprocess_env["PATH"]
 

@@ -198,7 +198,8 @@ def get_through(
 async def _worker_client(env: dict[str, str], runner_dir: Path) -> AsyncIterator[httpx.AsyncClient]:
     """Yield an HTTP client configured as a worker's tool is: the env's proxy and the runner's trust bundle."""
     worker_env = dict(env)
-    assert apply_runner_ca_bundle(worker_env, runner_dir)
+    apply_runner_ca_bundle(worker_env, runner_dir)
+    assert "SSL_CERT_FILE" in worker_env
     async with httpx.AsyncClient(
         proxy=worker_env["HTTPS_PROXY"],
         verify=ssl.create_default_context(cafile=worker_env["SSL_CERT_FILE"]),

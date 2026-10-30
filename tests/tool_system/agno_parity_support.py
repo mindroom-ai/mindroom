@@ -125,13 +125,6 @@ DUMMY_CREDENTIALS: dict[str, dict[str, object]] = {
     "whatsapp": {"access_token": _KEY, "phone_number_id": _KEY},
     "zep": {"api_key": _KEY},
 }
-# Settings that a tool reads from the runtime environment instead of its credentials.
-DUMMY_ENV = {
-    "MINDROOM_AGENT_VAULT_ACCESS_API_URL": _URL,
-    "MINDROOM_AGENT_VAULT_ACCESS_ADMIN_TOKEN": _KEY,
-    "MINDROOM_AGENT_VAULT_ACCESS_UI_BASE_URL": _URL,
-    "MINDROOM_AGENT_VAULT_ACCESS_EMAIL_DOMAIN": "golden.invalid",
-}
 # SDK clients that contact their service while a toolkit is constructed, replaced so it registers its functions offline.
 OFFLINE_CLIENTS = {
     "e2b": "agno.tools.e2b.Sandbox",
@@ -201,7 +194,7 @@ def golden_runtime(root: Path) -> tuple[Config, RuntimePaths]:
     runtime_paths = resolve_runtime_paths(
         config_path=config_path,
         storage_path=root / "storage",
-        process_env={"MINDROOM_NO_AUTO_INSTALL_TOOLS": "1", **DUMMY_ENV},
+        process_env={"MINDROOM_NO_AUTO_INSTALL_TOOLS": "1"},
     )
     ensure_tool_registry_loaded(runtime_paths)
     credentials_manager = get_runtime_credentials_manager(runtime_paths)

@@ -8470,8 +8470,6 @@ export MINDROOM_SCRIPT_GATEWAY_URL=http://mindroom-runtime-script-gateway.mindro
 export MINDROOM_SCRIPT_GATEWAY_ISOLATED=true
 ```
 
-With Agent Vault enabled, the script's own direct network requests do not receive Agent Vault credential injection, while its `MindRoomTools` calls run through normal tool routing and keep the configured Agent Vault boundary.
-
 ### What a script's worker can access
 
 - Each run gets its own dedicated worker and filesystem root, even when other runs belong to the same requester and agent.
@@ -19216,10 +19214,9 @@ Optional features:
 - [Background script gateway](https://github.com/mindroom-ai/mindroom/blob/main/cluster/k8s/runtime/README.md#background-script-gateway) (`scriptGateway`) lets dedicated workers run [background scripts](https://docs.mindroom.chat/tools/background-scripts/) and [minimal-mode](https://docs.mindroom.chat/tools/agent-cli/) shells without reaching the general API port.
 - [Content bundles](https://github.com/mindroom-ai/mindroom/blob/main/cluster/k8s/runtime/README.md#content-bundles) (`contentBundles`, `config.bootstrapContentBundle`) ship config, plugins, and skills as digest-pinned images, including how to update a bootstrapped config.
 - [Session and knowledge storage](https://github.com/mindroom-ai/mindroom/blob/main/cluster/k8s/runtime/README.md#session-and-knowledge-storage) (`sessionStorage`, `knowledgeStorage`) and [runtime state storage](https://github.com/mindroom-ai/mindroom/blob/main/cluster/k8s/runtime/README.md#runtime-state-storage) (`stateStorage`, `stateStorage.extraSubPaths`) move data to volumes of their own; on an existing install, copy the data first.
-- [Layering values files](https://github.com/mindroom-ai/mindroom/blob/main/cluster/k8s/runtime/README.md#layering-values-files) explains the map form of `env.extra`, `env.envFrom`, the Agent Vault server's `extraEnv` and `envFrom`, `extraVolumes`, and `extraVolumeMounts`, which Helm merges key by key across values files, and lists which env values are rendered with `tpl`.
+- [Layering values files](https://github.com/mindroom-ai/mindroom/blob/main/cluster/k8s/runtime/README.md#layering-values-files) explains the map form of `env.extra`, `env.envFrom`, `extraVolumes`, and `extraVolumeMounts`, which Helm merges key by key across values files, and lists which env values are rendered with `tpl`.
 - [Approved Egress](https://docs.mindroom.chat/deployment/approved-egress/) gives workers human-approved temporary hostname grants.
 - [Egress broker](https://github.com/mindroom-ai/mindroom/blob/main/cluster/k8s/runtime/README.md#egress-broker) (`egressBroker`) injects stored credentials into workers' outbound HTTPS requests, so workers never hold the secret.
-- [Agent Vault server NetworkPolicy](https://github.com/mindroom-ai/mindroom/blob/main/cluster/k8s/runtime/README.md#agent-vault-server-networkpolicy) restricts the chart-managed vault, and [`jobNaming: contentHash`](https://github.com/mindroom-ai/mindroom/blob/main/cluster/k8s/runtime/README.md#agent-vault-access-grants) reruns its Jobs under `kubectl apply` workflows.
 - Tuwunel [structured settings](https://github.com/mindroom-ai/mindroom/blob/main/cluster/k8s/tuwunel/README.md#structured-settings) (`tuwunel.settings`) merge across values files, and [upgrades and database migrations](https://github.com/mindroom-ai/mindroom/blob/main/cluster/k8s/tuwunel/README.md#upgrades-and-database-migrations) explains how to upgrade the homeserver without corrupting its database.
 - The client chart's [`matrixRTC` values](https://github.com/mindroom-ai/mindroom/blob/main/cluster/k8s/client/README.md#matrixrtc-calls) announce and proxy the MatrixRTC chart's call backend.
 - [Operational log events](https://docs.mindroom.chat/deployment/operational-log-events/) feed log-based metrics and alerts once `MINDROOM_LOG_FORMAT=json` is set through `env.extra`.
@@ -19317,7 +19314,7 @@ Workers do not inherit the runtime's `.env` or provider keys; for per-workspace 
 
 Set `egressBroker.enabled: true` in the runtime chart to let workers call authenticated HTTP APIs without holding the credential.
 The runtime chart's [Egress Broker](https://github.com/mindroom-ai/mindroom/blob/main/cluster/k8s/runtime/README.md#egress-broker) section has its values and modes, and its [Self-service for users](https://github.com/mindroom-ai/mindroom/blob/main/cluster/k8s/runtime/README.md#self-service-for-users) section explains opening the page from MindRoom Chat and lists the [trusted upstream auth](https://docs.mindroom.chat/deployment/trusted-upstream-auth/) and gateway settings for signing users in through a gateway instead.
-[Agent Keys](https://docs.mindroom.chat/deployment/egress-broker/) covers how the broker works, the users' Connections pages, and the migration from Agent Vault.
+[Agent Keys](https://docs.mindroom.chat/deployment/egress-broker/) covers how the broker works and the users' Connections pages.
 
 ### Knowledge Source Visibility
 
@@ -19374,7 +19371,6 @@ Several volumes and Secrets only work together, so back them up and restore them
 | `<fullname>-sessions` | `sessionStorage` | When enabled, the agent and team session databases (`MINDROOM_SESSION_STORAGE_PATH`) |
 | `<fullname>-knowledge` | `knowledgeStorage` | When enabled, `knowledge_db/` |
 | `<volumeName>-<fullname>-event-cache-postgres-0`, default `data-<fullname>-event-cache-postgres-0` | `eventCache.postgres.persistence` | The PostgreSQL event journal, which records which messages were already answered |
-| `<server.name>-data`, default `agent-vault-data` | `workers.kubernetes.agentVault.server.persistence` | The chart-managed Agent Vault server's data |
 | `<approved egress name>-data`, default `<fullname>-egress-proxy-data` | `approvedEgress.persistence` | Temporary hostname grants of the approved egress proxy |
 | Tuwunel `<fullname>-data` | Tuwunel chart `storage` | The homeserver's RocksDB database and its `media/` directory |
 
@@ -19387,8 +19383,6 @@ Restore each of these sets together, from the same point in time:
 - **Credentials encryption key and credential stores.**
   With `MINDROOM_CREDENTIALS_ENCRYPTION_KEY` set (for example through `workers.sandbox.credentialsEncryptionKey.existingSecret`), credential files and OAuth stores are encrypted under that key.
   Under a different key MindRoom logs `Failed to load encrypted credentials` and will not overwrite them, so back up the key's Secret value with the storage claim.
-- **Agent Vault volume and its bootstrap Secret.**
-  The Secret named by `workers.kubernetes.agentVault.bootstrapSecretName`, with its `AGENT_VAULT_MASTER_PASSWORD` and `AGENT_VAULT_OWNER_PASSWORD`, must accompany every vault snapshot.
 - **Event journal, `tracking/`, and Matrix device stores.**
   The journal, `tracking/event_journal_binding.json`, `encryption_keys/`, `matrix_state.yaml`, and `sync_continuity/` must come from the same moment, or startup refuses the journal or the device stores.
   A restored chart-managed PostgreSQL volume keeps its original password, while the chart generates a new one when `<fullname>-event-cache-postgres-auth` is missing, so back up that password too.
@@ -19409,7 +19403,7 @@ Take them from one quiet point:
 3. Scale the runtime back up; it recreates workers on demand.
 
 A storage-level group snapshot that captures all these volumes at the same instant is also safe without stopping MindRoom.
-The Agent Vault, approved egress, and knowledge volumes can be snapshotted on their own schedules.
+The approved egress and knowledge volumes can be snapshotted on their own schedules.
 For the Tuwunel volume, use an offline snapshot or Tuwunel's own database backups, which do not include media; see the fork's [backup guide](https://github.com/mindroom-ai/mindroom-tuwunel/blob/main/docs/backups.md).
 
 ### Rebuildable data
@@ -19425,11 +19419,11 @@ Everything else on the storage, sessions, state, and journal volumes is not rebu
 
 ### Restoring
 
-1. Restore the volumes before installing the charts, then point the charts at them with `storage.existingClaim`, `stateStorage.existingClaim`, `sessionStorage.existingClaim`, `knowledgeStorage.existingClaim`, `workers.kubernetes.agentVault.server.persistence.existingClaim`, `approvedEgress.persistence.existingClaim`, and the Tuwunel chart's `storage.existingClaim`.
+1. Restore the volumes before installing the charts, then point the charts at them with `storage.existingClaim`, `stateStorage.existingClaim`, `sessionStorage.existingClaim`, `knowledgeStorage.existingClaim`, `approvedEgress.persistence.existingClaim`, and the Tuwunel chart's `storage.existingClaim`.
    The chart-managed PostgreSQL adopts a claim restored under `<volumeName>-<fullname>-event-cache-postgres-0`; set its original password as described in [Restore units](#restore-units).
    With an external database, restore the database and keep its URL Secret.
    To restore a `pg_dump` instead, install with a new journal volume and `replicaCount: 0`, load the dump, then set `replicaCount` back to 1.
-2. Recreate the Secrets with their original values, including the credentials encryption key, the Agent Vault bootstrap Secret, and the Matrix registration token or application-service registration.
+2. Recreate the Secrets with their original values, including the credentials encryption key and the Matrix registration token or application-service registration.
 3. Start Tuwunel first, then the runtime.
 
 If the runtime log shows `The bound Matrix device store is missing`, `Matrix stream changed`, or `IngestionBatchSequenceError`, the device stores do not match the journal; an event journal binding error means `tracking/` and the journal database do not match.
@@ -19762,7 +19756,7 @@ agents:
 
 The tools that default to workers when no list is set are `browser_mcp`, `coding`, `docker`, `file`, `python`, and `shell`.
 Any other registered tool can be listed in `worker_tools`, except tools that need the primary runtime or room context, which stay in the primary runtime even when listed.
-These include the Matrix, scheduling, todo, attachment, and thread tools, `gmail` and the other Google tools, `github`, `atlassian`, `slack`, `spotify`, `homeassistant`, `reasoning`, `daytona`, `e2b`, `mem0`, `claude_agent`, `config_manager`, `oauth_connections`, and `agent_vault_access`, plus `browserbase`, `composio`, `duckdb`, `pandas`, `sql`, and `zep`, which keep a session, connection, or other state between calls.
+These include the Matrix, scheduling, todo, attachment, and thread tools, `gmail` and the other Google tools, `github`, `atlassian`, `slack`, `spotify`, `homeassistant`, `reasoning`, `daytona`, `e2b`, `mem0`, `claude_agent`, `config_manager`, and `oauth_connections`, plus `browserbase`, `composio`, `duckdb`, `pandas`, `sql`, and `zep`, which keep a session, connection, or other state between calls.
 The built-in `memory`, `delegate`, `self_config`, and `agent_manager` tools and configured MCP `mcp_<server_id>` tools also always run in the primary runtime.
 The `browser` tool chooses per call: `target: desktop` stays in the primary runtime, while `target: host` follows the worker routing.
 
@@ -19907,68 +19901,17 @@ For shell authentication, use [environment passthrough](#shell-environment-and-p
 
 To let worker-routed `shell` and `python` call external APIs without ever receiving the real credential, route their egress through a proxy that injects the credential in transit.
 This works at the network layer, so it covers URLs inside scripts, package CLIs, and subprocesses.
-There are three supported shapes:
+There are two supported shapes:
 
 - **Native egress broker** runs inside the primary runtime and injects secrets from primary-only credential stores that workers never read, for agents with the [`egress_credentials` tool](https://docs.mindroom.chat/deployment/egress-broker/#agent-tool).
   See [Agent Keys](https://docs.mindroom.chat/deployment/egress-broker/) for configuration, secret management, and deployment.
-  This is the recommended option for new deployments; it works with Docker workers, the static runner, and Kubernetes workers through the runtime chart's `egressBroker` values; for hosted instances, see [Hosted instances](https://docs.mindroom.chat/deployment/egress-broker/#hosted-instances-sandbox-runner-sidecar).
-- **Per-worker Agent Vault egress** (Kubernetes backend), the legacy path, which gives each worker its own vault for per-user or per-agent isolation, described below.
+  It works with Docker workers, the static runner, and Kubernetes workers through the runtime chart's `egressBroker` values; for hosted instances, see [Hosted instances](https://docs.mindroom.chat/deployment/egress-broker/#hosted-instances-sandbox-runner-sidecar).
 - **A shared credential-injecting proxy** that you run, configured through `MINDROOM_KUBERNETES_WORKER_ENV_JSON`, the chart's `egressProxy` integration, or the worker proxy environment on other backends.
   The proxy holds the real credential and workers receive only its URL.
 
-[Approved egress](https://docs.mindroom.chat/deployment/approved-egress/) and the `mindroom-egress-proxy` image restrict which hosts workers can reach but do not inject credentials; to combine them with the egress broker, see [Egress Broker Chaining](https://docs.mindroom.chat/deployment/approved-egress/#egress-broker-chaining), or with Agent Vault, see [Agent Vault Chaining](https://docs.mindroom.chat/deployment/approved-egress/#agent-vault-chaining).
+[Approved egress](https://docs.mindroom.chat/deployment/approved-egress/) and the `mindroom-egress-proxy` image restrict which hosts workers can reach but do not inject credentials; to combine them with the egress broker, see [Egress Broker Chaining](https://docs.mindroom.chat/deployment/approved-egress/#egress-broker-chaining).
 
 Do not put upstream API tokens in `extra_env_passthrough` or `.mindroom/worker-env.sh` unless you intend the worker process to receive them.
-
-### Per-worker Agent Vault egress (Kubernetes backend)
-
-Each dedicated worker gets its own vault, created if missing, and a fresh proxy-role Agent Vault token on one shared Agent Vault server.
-Before enabling it, create the Secret named by `MINDROOM_KUBERNETES_AGENT_VAULT_BOOTSTRAP_SECRET_NAME` (chart: `workers.kubernetes.agentVault.bootstrapSecretName`, default `agent-vault-bootstrap`) with both `AGENT_VAULT_MASTER_PASSWORD` and `AGENT_VAULT_OWNER_PASSWORD`.
-Create it in the worker namespace too when that differs from the release namespace.
-`python` and `shell` egress then goes through the Agent Vault proxy with that token, so credentials stored in the worker's vault are injected in transit.
-
-```bash
-MINDROOM_KUBERNETES_AGENT_VAULT_ENABLED=true
-MINDROOM_KUBERNETES_AGENT_VAULT_CLI_IMAGE=infisical/agent-vault:<pinned>
-MINDROOM_KUBERNETES_AGENT_VAULT_OWNER_EMAIL=vault-owner@example.test
-# optional overrides and their defaults:
-MINDROOM_KUBERNETES_AGENT_VAULT_VAULT_NAME_PREFIX=agent-vault
-MINDROOM_KUBERNETES_AGENT_VAULT_API_URL=http://agent-vault:14321
-MINDROOM_KUBERNETES_AGENT_VAULT_PROXY_URL=http://agent-vault:14322
-MINDROOM_KUBERNETES_AGENT_VAULT_BOOTSTRAP_SECRET_NAME=agent-vault-bootstrap
-```
-
-The proxy token exists only inside the worker pod and changes on every worker restart.
-Tool code can read its own token, but a proxy-role token cannot read or decrypt credentials through the Agent Vault API and cannot reach another worker's vault.
-
-For HTTPS, workers must trust the Agent Vault root CA.
-Publish the CA from `agent-vault ca fetch` as a ConfigMap with key `ca.pem` and set `MINDROOM_KUBERNETES_AGENT_VAULT_WORKER_CA_CONFIGMAP_NAME` (chart: `workers.kubernetes.agentVault.workerCaConfigMapName`); `python` and `shell` then get `REQUESTS_CA_BUNDLE`, `CURL_CA_BUNDLE`, and `SSL_CERT_FILE` pointing at it.
-
-When you also use [approved egress](https://docs.mindroom.chat/deployment/approved-egress/), Squid must be the first hop; see [Agent Vault Chaining](https://docs.mindroom.chat/deployment/approved-egress/#agent-vault-chaining).
-Workers still need access to the Agent Vault API (`apiUrl`, usually port `14321`) to obtain their token.
-The chart adds that rule when it manages the Agent Vault server; for an external server, add an egress rule for the API endpoint only, and do not add direct worker egress to the proxy port (`proxyUrl`, usually `14322`) when approved egress owns dynamic grants.
-The chart-managed server's own NetworkPolicy is described under `workers.kubernetes.agentVault.server.networkPolicy` in `cluster/k8s/runtime/README.md`.
-
-### Self-service vault access
-
-The `agent_vault_access` tool lets a user ask their agent for a link to manage that agent's vault.
-For `user` and `user_agent` scopes it grants the requester's Agent Vault account admin access to the worker's vault and returns the UI link.
-For shared scopes it only returns the vault name and UI link (`"access": "operator_managed"`), which grants nothing by itself and tells the operator which vault backs the agent.
-
-```bash
-MINDROOM_AGENT_VAULT_ACCESS_API_URL=http://agent-vault:14321
-MINDROOM_AGENT_VAULT_ACCESS_ADMIN_TOKEN=<owner or admin session/agent token>
-MINDROOM_AGENT_VAULT_ACCESS_UI_BASE_URL=https://example.com/agent-vault
-MINDROOM_AGENT_VAULT_ACCESS_EMAIL_DOMAIN=example.com
-MINDROOM_AGENT_VAULT_ACCESS_VAULT_NAME_PREFIX=agent-vault  # must match workers.kubernetes.agentVault.vaultNamePrefix
-```
-
-Shared scopes need only the UI base URL and the vault name prefix; `user` and `user_agent` scopes also need the API URL, admin token, and email domain.
-Instead of the inline admin token, `MINDROOM_AGENT_VAULT_ACCESS_ADMIN_TOKEN_FILE` can point at a file holding it; the file takes precedence and is re-read on every call, so rotating the Secret needs no restart.
-When `MINDROOM_AGENT_VAULT_ACCESS_OWNER_EMAIL` names the Agent Vault owner account, self-service grants keep that account admin on the worker vault too.
-The requester's account is `<Matrix localpart>@<EMAIL_DOMAIN>`, and only requesters on the runtime's own homeserver can self-grant.
-The user must already have registered and verified that Agent Vault account.
-This mapping controls only who may manage a vault in the UI, never which worker uses which vault.
 
 ## Stopping and background commands
 
@@ -20612,7 +20555,6 @@ Adding the `egress_credentials` tool to an agent with `shell` or `python` is wha
 An agent without the tool gets no key or connected account through the broker, even when its scope has one, and its requests go out as with the broker off.
 So does an agent whose `shell` and `python` run in the primary process, for example because its `worker_tools` leave them out: the broker never sees those calls, so the agent is left off the Agent Keys pages, its tool says so instead of listing services, and MindRoom logs a warning at startup and on each config reload.
 The tool also lets the agent tell a user which keys or accounts are missing when a brokered request fails with `credential_not_configured`.
-It replaces `agent_vault_access` for the native broker.
 
 ```yaml
 agents:
@@ -20771,45 +20713,6 @@ The broker returns these errors to worker code:
 
 The `connect_url` values are short-lived, single-use connect links, so treat the response bodies as sensitive and do not log them.
 
-## Migrating from Agent Vault
-
-If you are currently using Agent Vault (the Go-based proxy fork) with Docker workers or in a Kubernetes deployment, follow these steps to migrate to the native broker.
-A deployment uses either Agent Vault or Agent Keys, never both, so the switch is one change that turns the broker on and Agent Vault off.
-Keys can only be entered once the broker is on, and the secrets stored in Agent Vault do not carry over, so users enter their keys after the switch.
-Until they do, a brokered call answers 403 `credential_not_configured`, and its message says where to add the key.
-
-### Docker workers
-
-Apply steps 1 to 5 as one change, so Agent Vault stops serving when the broker starts:
-
-1. Set `MINDROOM_EGRESS_BROKER_PORT=8768`, `MINDROOM_EGRESS_BROKER_HOST=0.0.0.0`, and `MINDROOM_EGRESS_BROKER_URL=http://host.docker.internal:8768` on the MindRoom service.
-2. Allow TCP 8768 from the Docker bridge (`docker0`) in the host firewall (see [Docker workers](#docker-workers)).
-3. Rebuild or pull the worker image from the same release as the primary, so workers install the broker's CA (see [Worker images](#worker-images)).
-4. Add the services you use to `config.yaml` under `egress_broker.services`, for example `github: {preset: github}`.
-5. Remove the `agent-vault-bridge` plugin from the config.
-6. Set the keys, or connect and allow the accounts, of `shared` and unscoped agents in the dashboard's **Agent Keys** panel on the Credentials page.
-   Each user sets the keys of `user` and `user_agent` agents, private agents included, on the personal egress page, which users open from MindRoom Chat or through trusted upstream auth; with neither, give those agents a shared worker scope, or their brokered calls that need a key are refused.
-7. Verify the broker works by running a worker command that uses a brokered service (such as `gh pr list` or `git clone` of a private repository) and checking that the request succeeds, the request log records it, and the worker environment and workspace contain no trace of the token.
-8. After a grace period, remove the Agent Vault CA from wherever you pinned it for workers, and stop Agent Vault.
-
-### Kubernetes
-
-1. Add the services to the deployment's `config.yaml` under `egress_broker.services`.
-2. Run one `helm upgrade` that sets `egressBroker.enabled=true` and `workers.kubernetes.agentVault.enabled=false`.
-   The chart refuses both being on at once.
-   If approved egress is on, the chart rewires Squid's parent from Agent Vault to the broker in the same upgrade.
-3. Have users and credential managers enter their keys, or connect and allow their accounts, on `/connections/egress` or the dashboard.
-   Users open the personal page from MindRoom Chat or through trusted upstream auth; with neither, `user` and `user_agent` agents get no keys until one is enabled or they get a shared worker scope.
-4. Verify against real workers: a brokered call succeeds, the request log records it, and `env` and `/proc/self/environ` hold only the placeholder values and the per-call proxy token, never a secret.
-   Replaying the proxy URL after the token TTL returns 407.
-5. Delete the Agent Vault bootstrap Secret and PVC after a grace period.
-
-The broker runs in the primary, so Agent Vault's server, its init container, per-worker vaults, and CA ConfigMap have no replacement to deploy: each call carries its own token and CA, and keys live per worker scope in the primary's credential store.
-The `agent_vault_access` tool becomes `egress_credentials`, and the `accessGrants` Job becomes `administrators` and `agents.<name>.credential_managers` in config.
-Add `egress_credentials` to every agent whose commands should keep brokered credentials, because agents without it get none.
-
-Hosted instances never had Agent Vault, so they have nothing to migrate and only gain brokered credentials.
-
 ## What the broker cannot protect against
 
 The broker keeps keys out of worker code.
@@ -20841,7 +20744,7 @@ Each of these is a choice you make, so make it on purpose.
 - **No body or websocket frame substitutions:** the broker injects into headers and query parameters only; websocket frames and raw tunnels to hosts without rules are relayed as they come.
 - **Background-script workers are not covered:** the broker environment reaches dedicated Docker and Kubernetes workers and the static runner, not background-script workers.
 - **No independent review:** the transport code was tested with a smuggling corpus and property-based fuzzing, but no human or automated adversarial review of it has been done; see [Testing and review](https://docs.mindroom.chat/architecture/security-posture/#testing-and-review-of-the-egress-broker).
-- **Broker approvals stay with Squid:** the broker does not enforce approved-egress grants itself; in the Kubernetes chain Squid does, and the broker takes Agent Vault's place as its parent.
+- **Broker approvals stay with Squid:** the broker does not enforce approved-egress grants itself; in the Kubernetes chain Squid does, with the broker as its parent.
 
 ## Troubleshooting
 
@@ -21030,67 +20933,14 @@ approvedEgress:
     tag: v0.1.10
 ```
 
-With both enabled, the chart renders Squid's parent as the broker itself, so you do not set `approvedEgress.parentProxy`; the runtime chart's [Egress Broker](https://github.com/mindroom-ai/mindroom/blob/main/cluster/k8s/runtime/README.md#egress-broker) section has what it renders in this mode and the values it refuses.
-`approvedEgress.parentProxy.bypassDomains` still skips the broker for destinations such as signed URLs.
+With both enabled, the chart renders Squid's parent as the broker itself; the runtime chart's [Egress Broker](https://github.com/mindroom-ai/mindroom/blob/main/cluster/k8s/runtime/README.md#egress-broker) section has what it renders in this mode and the values it refuses.
+After the allowlist and grant check, requests carrying a broker token go on to the broker, which injects the credential, while requests without a token go directly to the internet.
 
-Squid denies a brokered host such as `api.github.com` before a grant, unless the host is in the static allowlist, so `curl https://api.github.com/user` fails.
-After `request_network_access` for that host is approved, the same request is meant to succeed with the credential injected.
-Chain mode has not yet been run end to end on a live cluster.
-
-## Agent Vault Chaining
-
-Agent Vault is the legacy credential-injecting path; the native [egress broker](#egress-broker-chaining) replaces it (see [Migrating from Agent Vault](https://docs.mindroom.chat/deployment/egress-broker/#migrating-from-agent-vault)), and the chart does not allow both at once.
-Use this section only for deployments that still run Agent Vault.
-When approved egress and [Agent Vault](https://docs.mindroom.chat/deployment/sandbox-proxy/) are used together, the chain must be:
-
-```text
-worker -> approved egress (Squid) -> Agent Vault MITM parent -> internet
-```
-
-Squid must be first because temporary grants are matched to the worker by its source IP.
-If traffic goes through Agent Vault first, Squid sees only the vault's IP, so temporary grants never match while static allowlist entries still work.
-
-Before enabling the Agent Vault server and bootstrap job, create the Secret named by `workers.kubernetes.agentVault.bootstrapSecretName` (default `agent-vault-bootstrap`) with both `AGENT_VAULT_MASTER_PASSWORD` and `AGENT_VAULT_OWNER_PASSWORD`.
-Create it in the worker namespace too when that differs from the release namespace.
-
-```yaml
-workers:
-  backend: kubernetes
-  sandbox:
-    proxyToken:
-      existingSecret: mindroom-sandbox-proxy
-      key: MINDROOM_SANDBOX_PROXY_TOKEN
-  kubernetes:
-    agentVault:
-      enabled: true
-      cliImage: infisical/agent-vault:<pinned>
-      ownerEmail: owner@example.test
-      server:
-        enabled: true
-      bootstrap:
-        enabled: true
-        kubectlImage: bitnami/kubectl:<pinned>
-      workerCaConfigMapName: agent-vault-ca
-
-approvedEgress:
-  enabled: true
-  image:
-    tag: v0.1.10
-  parentProxy:
-    enabled: true
-    host: agent-vault
-    port: 14322
-```
-
-With `approvedEgress.parentProxy.enabled: true`, workers send Agent Vault traffic to approved egress first.
-After the allowlist and grant check, requests carrying the worker's Agent Vault token go on to the vault, which still validates the token and injects credentials, while requests without a token go directly to the internet.
-
-Use `approvedEgress.parentProxy.bypassDomains` (default empty) for destinations such as signed URLs that must skip credential injection:
+Use `approvedEgress.parentProxy.bypassDomains` (default empty) for destinations such as signed URLs that must skip the broker:
 
 ```yaml
 approvedEgress:
   parentProxy:
-    enabled: true
     bypassDomains:
       - downloads.example.test
       - .objects.example.test
@@ -21100,9 +20950,9 @@ Entries match like allowlist entries: exact hostnames, or a leading dot for a do
 Use ASCII domain names without schemes, ports, paths, `*` wildcards, or whitespace.
 Bypassed destinations still need an allowlist match or grant, and changing `bypassDomains` restarts the proxy automatically.
 
-Do not point Agent Vault tool traffic directly at the chart-managed Agent Vault proxy while approved egress is enabled.
-The chart refuses that combination with `approvedEgress with Agent Vault must be squid-first: enable approvedEgress.parentProxy so Squid sees worker source IPs for dynamic grants, or set workers.kubernetes.agentVault.proxyUrl to an external/custom proxy URL explicitly`.
-An external or custom `workers.kubernetes.agentVault.proxyUrl` remains allowed.
+Squid denies a brokered host such as `api.github.com` before a grant, unless the host is in the static allowlist, so `curl https://api.github.com/user` fails.
+After `request_network_access` for that host is approved, the same request is meant to succeed with the credential injected.
+Chain mode has not yet been run end to end on a live cluster.
 
 ## Secure Minimum
 

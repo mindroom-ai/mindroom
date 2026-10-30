@@ -13,10 +13,11 @@ from tests.test_helm_instance_worker_isolation import _resource, _run_helm_templ
 PROXY_NAME = "mindroom-runtime-egress-proxy"
 
 
-def _render_text(tmp_path: Path, approved_egress: dict[str, Any]) -> str:
+def _render_text(tmp_path: Path, approved_egress: dict[str, Any], *, egress_broker: bool = False) -> str:
     values = {
         "workers": {"backend": "kubernetes", "sandbox": {"proxyToken": {"value": "test-token"}}},
         "approvedEgress": {"enabled": True, "image": {"tag": "v0.1.10"}, **approved_egress},
+        "egressBroker": {"enabled": egress_broker},
     }
     completed = _run_helm_template(
         Path("cluster/k8s/runtime"),
@@ -27,8 +28,9 @@ def _render_text(tmp_path: Path, approved_egress: dict[str, Any]) -> str:
     return completed.stdout
 
 
-def _render(tmp_path: Path, approved_egress: dict[str, Any]) -> list[dict[str, Any]]:
-    return [doc for doc in yaml.safe_load_all(_render_text(tmp_path, approved_egress)) if isinstance(doc, dict)]
+def _render(tmp_path: Path, approved_egress: dict[str, Any], *, egress_broker: bool = False) -> list[dict[str, Any]]:
+    text = _render_text(tmp_path, approved_egress, egress_broker=egress_broker)
+    return [doc for doc in yaml.safe_load_all(text) if isinstance(doc, dict)]
 
 
 def _proxy_annotations(docs: list[dict[str, Any]]) -> dict[str, str]:
@@ -49,11 +51,8 @@ def test_inline_allowlist_changes_roll_only_the_proxy(tmp_path: Path) -> None:
 
 
 def test_inline_allowlist_checksum_keeps_pod_annotations_and_squid_checksum(tmp_path: Path) -> None:
-    """The allowlist checksum sits beside user pod annotations and the parent-proxy Squid checksum."""
-    docs = _render(
-        tmp_path,
-        {"podAnnotations": {"example.test/owner": "platform"}, "parentProxy": {"enabled": True}},
-    )
+    """The allowlist checksum sits beside user pod annotations and the broker chain's Squid checksum."""
+    docs = _render(tmp_path, {"podAnnotations": {"example.test/owner": "platform"}}, egress_broker=True)
 
     assert set(_proxy_annotations(docs)) == {"example.test/owner", "checksum/allowlist", "checksum/squid-config"}
     assert _proxy_annotations(docs)["checksum/allowlist"] == hashlib.sha256(b"").hexdigest()

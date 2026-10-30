@@ -797,44 +797,6 @@ async def test_kubernetes_worker_accepts_scripts_with_an_explicit_isolated_gatew
 
 
 @pytest.mark.asyncio
-async def test_kubernetes_worker_accepts_scripts_when_agent_vault_is_enabled(tmp_path: Path) -> None:
-    """Run-specific workers may launch when their pod omits external vault identity material."""
-    manager, backend, client = _manager(
-        tmp_path,
-        backend="kubernetes",
-        isolated_script_gateway=True,
-    )
-    context = _context(
-        tmp_path,
-        backend="kubernetes",
-        isolated_script_gateway=True,
-    )
-    context = replace(
-        context,
-        runtime_paths=replace(
-            context.runtime_paths,
-            process_env={
-                **context.runtime_paths.process_env,
-                "MINDROOM_KUBERNETES_AGENT_VAULT_ENABLED": "true",
-            },
-        ),
-    )
-
-    run = await manager.run(context, source="print('ok')\n")
-
-    assert run.state is ScriptRunState.RUNNING
-    assert backend.specs == [
-        WorkerSpec(
-            run.worker_key or "",
-            private_agent_names=frozenset(),
-            mirror_grantable_credentials=False,
-            state_scope_worker_key="v1:default:user_agent:~@alice:example.test:watcher",
-        ),
-    ]
-    assert len(client.requested_handles) == 1
-
-
-@pytest.mark.asyncio
 async def test_kubernetes_worker_requires_an_explicit_gateway_with_isolation_attestation(tmp_path: Path) -> None:
     """The isolation flag alone must not reinterpret a general API URL as a gateway-only listener."""
     manager, backend, client = _manager(

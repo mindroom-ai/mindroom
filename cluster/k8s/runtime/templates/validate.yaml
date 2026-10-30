@@ -417,17 +417,7 @@
 {{- if and .Values.approvedEgress.persistence.enabled (not .Values.approvedEgress.persistence.existingClaim) (not .Values.approvedEgress.persistence.size) -}}
 {{- fail "approvedEgress.persistence.size is required when chart-managed approved egress persistence is enabled" -}}
 {{- end -}}
-{{- if .Values.approvedEgress.parentProxy.enabled -}}
-{{- if not (trim (default "" .Values.approvedEgress.parentProxy.host)) -}}
-{{- fail "approvedEgress.parentProxy.host is required when approvedEgress.parentProxy.enabled=true" -}}
-{{- end -}}
-{{- $parentProxyPort := int .Values.approvedEgress.parentProxy.port -}}
-{{- if or (lt $parentProxyPort 1) (gt $parentProxyPort 65535) -}}
-{{- fail "approvedEgress.parentProxy.port must be between 1 and 65535 when approvedEgress.parentProxy.enabled=true" -}}
-{{- end -}}
-{{- end -}}
-{{- /* Bypass domains also shape the broker chain, which renders without parentProxy.enabled. */ -}}
-{{- if include "mindroom-runtime.approvedEgressParentEnabled" . -}}
+{{- if include "mindroom-runtime.egressBrokerChainMode" . -}}
 {{- $bypassDomains := .Values.approvedEgress.parentProxy.bypassDomains -}}
 {{- if not (kindIs "invalid" $bypassDomains) -}}
 {{- if not (kindIs "slice" $bypassDomains) -}}
@@ -448,100 +438,7 @@
 {{- if ne .Values.workers.backend "kubernetes" -}}
 {{- fail "egressBroker.enabled requires workers.backend=kubernetes" -}}
 {{- end -}}
-{{- if .Values.workers.kubernetes.agentVault.enabled -}}
-{{- fail "egressBroker and workers.kubernetes.agentVault cannot both be enabled: disable agentVault in the upgrade that enables egressBroker, then enter keys on the Agent Keys pages" -}}
-{{- end -}}
 {{- if or (eq (int .Values.egressBroker.port) (int .Values.runtime.apiPort)) (eq (int .Values.egressBroker.port) (int .Values.scriptGateway.port)) -}}
 {{- fail "egressBroker.port must differ from runtime.apiPort and scriptGateway.port" -}}
-{{- end -}}
-{{- if and (include "mindroom-runtime.egressBrokerChainMode" .) .Values.approvedEgress.parentProxy.enabled (ne .Values.approvedEgress.parentProxy.host "agent-vault") -}}
-{{- fail "approvedEgress.parentProxy.host must stay at its default when egressBroker.enabled; the chart chains Squid to the egress broker" -}}
-{{- end -}}
-{{- end -}}
-{{- $agentVault := .Values.workers.kubernetes.agentVault -}}
-{{- if not (has $agentVault.jobNaming (list "fixed" "contentHash")) -}}
-{{- fail "workers.kubernetes.agentVault.jobNaming must be fixed or contentHash" -}}
-{{- end -}}
-{{- if $agentVault.server.enabled -}}
-{{- $managedVaultEnv := list "AGENT_VAULT_MASTER_PASSWORD" -}}
-{{- if $agentVault.server.smtp.enabled -}}
-{{- $managedVaultEnv = concat $managedVaultEnv (list "AGENT_VAULT_SMTP_HOST" "AGENT_VAULT_SMTP_PORT" "AGENT_VAULT_SMTP_TLS_MODE" "AGENT_VAULT_SMTP_FROM_NAME" "AGENT_VAULT_SMTP_USERNAME" "AGENT_VAULT_SMTP_PASSWORD" "AGENT_VAULT_SMTP_FROM") -}}
-{{- end -}}
-{{- range $entry := include "mindroom-runtime.envList" (list $ $agentVault.server.extraEnv "workers.kubernetes.agentVault.server.extraEnv") | fromJsonArray -}}
-{{- if has (default "" $entry.name) $managedVaultEnv -}}
-{{- fail (printf "workers.kubernetes.agentVault.server.extraEnv cannot override chart-managed %s" $entry.name) -}}
-{{- end -}}
-{{- end -}}
-{{- end -}}
-{{- $agentVaultProxyUrl := lower (regexReplaceAll "/+$" (trim (default "" $agentVault.proxyUrl)) "") -}}
-{{- $agentVaultServiceName := include "mindroom-runtime.agentVaultServerName" . -}}
-{{- $agentVaultMitmPort := printf "%v" $agentVault.server.mitmPort -}}
-{{- $agentVaultServiceProxyUrls := list (printf "http://%s:%s" $agentVaultServiceName $agentVaultMitmPort) (printf "http://%s.%s:%s" $agentVaultServiceName .Release.Namespace $agentVaultMitmPort) (printf "http://%s.%s.svc:%s" $agentVaultServiceName .Release.Namespace $agentVaultMitmPort) (printf "http://%s.%s.svc.cluster.local:%s" $agentVaultServiceName .Release.Namespace $agentVaultMitmPort) -}}
-{{- if and .Values.approvedEgress.enabled $agentVault.enabled (not .Values.approvedEgress.parentProxy.enabled) (has $agentVaultProxyUrl $agentVaultServiceProxyUrls) -}}
-{{- fail "approvedEgress with Agent Vault must be squid-first: enable approvedEgress.parentProxy so Squid sees worker source IPs for dynamic grants, or set workers.kubernetes.agentVault.proxyUrl to an external/custom proxy URL explicitly" -}}
-{{- end -}}
-{{- if $agentVault.accessTool.enabled -}}
-{{- if not $agentVault.enabled -}}
-{{- fail "workers.kubernetes.agentVault.accessTool.enabled requires workers.kubernetes.agentVault.enabled=true" -}}
-{{- end -}}
-{{- if not (trim (default "" $agentVault.accessTool.adminAgentName)) -}}
-{{- fail "workers.kubernetes.agentVault.accessTool.adminAgentName must not be empty" -}}
-{{- end -}}
-{{- if not (and (trim (default "" $agentVault.accessTool.adminTokenSecret.name)) (trim (default "" $agentVault.accessTool.adminTokenSecret.key))) -}}
-{{- fail "workers.kubernetes.agentVault.accessTool.adminTokenSecret.name and .key must not be empty" -}}
-{{- end -}}
-{{- end -}}
-{{- $accessGrants := $agentVault.accessGrants -}}
-{{- if and $accessGrants.enabled (gt (len $accessGrants.grants) 0) -}}
-{{- if not $agentVault.enabled -}}
-{{- fail "workers.kubernetes.agentVault.accessGrants.enabled requires workers.kubernetes.agentVault.enabled=true when grants are configured" -}}
-{{- end -}}
-{{- if not (and (trim (default "" $accessGrants.adminTokenSecret.name)) (trim (default "" $accessGrants.adminTokenSecret.key))) -}}
-{{- fail "workers.kubernetes.agentVault.accessGrants.adminTokenSecret.name and .key must not be empty" -}}
-{{- end -}}
-{{- if and $agentVault.bootstrap.enabled (not (trim (default "" $agentVault.accessTool.adminAgentName))) -}}
-{{- fail "workers.kubernetes.agentVault.accessTool.adminAgentName must not be empty when accessGrants and bootstrap are enabled" -}}
-{{- end -}}
-{{- if and $agentVault.bootstrap.enabled $agentVault.accessTool.enabled (eq (trim (default "" $agentVault.accessTool.adminTokenSecret.name)) (trim (default "" $accessGrants.adminTokenSecret.name))) (ne (trim (default "" $agentVault.accessTool.adminTokenSecret.key)) (trim (default "" $accessGrants.adminTokenSecret.key))) -}}
-{{- fail "workers.kubernetes.agentVault.accessTool.adminTokenSecret.key must match workers.kubernetes.agentVault.accessGrants.adminTokenSecret.key when both use the same Secret name" -}}
-{{- end -}}
-{{- range $index, $grant := $accessGrants.grants -}}
-{{- $path := printf "workers.kubernetes.agentVault.accessGrants.grants[%d]" $index -}}
-{{- $email := trim (default "" $grant.email) -}}
-{{- $scope := trim (default "" $grant.workerScope) -}}
-{{- $role := trim (default "admin" $grant.role) -}}
-{{- $requester := trim (default "" $grant.requester) -}}
-{{- $agent := trim (default "" $grant.agent) -}}
-{{- if not $email -}}
-{{- fail (printf "%s.email is required" $path) -}}
-{{- end -}}
-{{- if not (has $scope (list "shared" "user" "user_agent")) -}}
-{{- fail (printf "%s.workerScope must be one of: shared, user, user_agent" $path) -}}
-{{- end -}}
-{{- if ne $role "admin" -}}
-{{- fail (printf "%s.role must be admin" $path) -}}
-{{- end -}}
-{{- if eq $scope "shared" -}}
-{{- if $requester -}}
-{{- fail (printf "%s.requester must be empty for workerScope=shared" $path) -}}
-{{- end -}}
-{{- if not $agent -}}
-{{- fail (printf "%s.agent is required for workerScope=shared" $path) -}}
-{{- end -}}
-{{- else if eq $scope "user" -}}
-{{- if not $requester -}}
-{{- fail (printf "%s.requester is required for workerScope=user" $path) -}}
-{{- end -}}
-{{- if $agent -}}
-{{- fail (printf "%s.agent must be empty for workerScope=user" $path) -}}
-{{- end -}}
-{{- else if eq $scope "user_agent" -}}
-{{- if not $requester -}}
-{{- fail (printf "%s.requester is required for workerScope=user_agent" $path) -}}
-{{- end -}}
-{{- if not $agent -}}
-{{- fail (printf "%s.agent is required for workerScope=user_agent" $path) -}}
-{{- end -}}
-{{- end -}}
 {{- end -}}
 {{- end -}}

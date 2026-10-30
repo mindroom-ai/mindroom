@@ -549,7 +549,6 @@ Adding the `egress_credentials` tool to an agent with `shell` or `python` is wha
 An agent without the tool gets no key or connected account through the broker, even when its scope has one, and its requests go out as with the broker off.
 So does an agent whose `shell` and `python` run in the primary process, for example because its `worker_tools` leave them out: the broker never sees those calls, so the agent is left off the Agent Keys pages, its tool says so instead of listing services, and MindRoom logs a warning at startup and on each config reload.
 The tool also lets the agent tell a user which keys or accounts are missing when a brokered request fails with `credential_not_configured`.
-It replaces `agent_vault_access` for the native broker.
 
 ```yaml
 agents:
@@ -708,45 +707,6 @@ The broker returns these errors to worker code:
 
 The `connect_url` values are short-lived, single-use connect links, so treat the response bodies as sensitive and do not log them.
 
-## Migrating from Agent Vault
-
-If you are currently using Agent Vault (the Go-based proxy fork) with Docker workers or in a Kubernetes deployment, follow these steps to migrate to the native broker.
-A deployment uses either Agent Vault or Agent Keys, never both, so the switch is one change that turns the broker on and Agent Vault off.
-Keys can only be entered once the broker is on, and the secrets stored in Agent Vault do not carry over, so users enter their keys after the switch.
-Until they do, a brokered call answers 403 `credential_not_configured`, and its message says where to add the key.
-
-### Docker workers
-
-Apply steps 1 to 5 as one change, so Agent Vault stops serving when the broker starts:
-
-1. Set `MINDROOM_EGRESS_BROKER_PORT=8768`, `MINDROOM_EGRESS_BROKER_HOST=0.0.0.0`, and `MINDROOM_EGRESS_BROKER_URL=http://host.docker.internal:8768` on the MindRoom service.
-2. Allow TCP 8768 from the Docker bridge (`docker0`) in the host firewall (see [Docker workers](#docker-workers)).
-3. Rebuild or pull the worker image from the same release as the primary, so workers install the broker's CA (see [Worker images](#worker-images)).
-4. Add the services you use to `config.yaml` under `egress_broker.services`, for example `github: {preset: github}`.
-5. Remove the `agent-vault-bridge` plugin from the config.
-6. Set the keys, or connect and allow the accounts, of `shared` and unscoped agents in the dashboard's **Agent Keys** panel on the Credentials page.
-   Each user sets the keys of `user` and `user_agent` agents, private agents included, on the personal egress page, which users open from MindRoom Chat or through trusted upstream auth; with neither, give those agents a shared worker scope, or their brokered calls that need a key are refused.
-7. Verify the broker works by running a worker command that uses a brokered service (such as `gh pr list` or `git clone` of a private repository) and checking that the request succeeds, the request log records it, and the worker environment and workspace contain no trace of the token.
-8. After a grace period, remove the Agent Vault CA from wherever you pinned it for workers, and stop Agent Vault.
-
-### Kubernetes
-
-1. Add the services to the deployment's `config.yaml` under `egress_broker.services`.
-2. Run one `helm upgrade` that sets `egressBroker.enabled=true` and `workers.kubernetes.agentVault.enabled=false`.
-   The chart refuses both being on at once.
-   If approved egress is on, the chart rewires Squid's parent from Agent Vault to the broker in the same upgrade.
-3. Have users and credential managers enter their keys, or connect and allow their accounts, on `/connections/egress` or the dashboard.
-   Users open the personal page from MindRoom Chat or through trusted upstream auth; with neither, `user` and `user_agent` agents get no keys until one is enabled or they get a shared worker scope.
-4. Verify against real workers: a brokered call succeeds, the request log records it, and `env` and `/proc/self/environ` hold only the placeholder values and the per-call proxy token, never a secret.
-   Replaying the proxy URL after the token TTL returns 407.
-5. Delete the Agent Vault bootstrap Secret and PVC after a grace period.
-
-The broker runs in the primary, so Agent Vault's server, its init container, per-worker vaults, and CA ConfigMap have no replacement to deploy: each call carries its own token and CA, and keys live per worker scope in the primary's credential store.
-The `agent_vault_access` tool becomes `egress_credentials`, and the `accessGrants` Job becomes `administrators` and `agents.<name>.credential_managers` in config.
-Add `egress_credentials` to every agent whose commands should keep brokered credentials, because agents without it get none.
-
-Hosted instances never had Agent Vault, so they have nothing to migrate and only gain brokered credentials.
-
 ## What the broker cannot protect against
 
 The broker keeps keys out of worker code.
@@ -778,7 +738,7 @@ Each of these is a choice you make, so make it on purpose.
 - **No body or websocket frame substitutions:** the broker injects into headers and query parameters only; websocket frames and raw tunnels to hosts without rules are relayed as they come.
 - **Background-script workers are not covered:** the broker environment reaches dedicated Docker and Kubernetes workers and the static runner, not background-script workers.
 - **No independent review:** the transport code was tested with a smuggling corpus and property-based fuzzing, but no human or automated adversarial review of it has been done; see [Testing and review](../architecture/security-posture.md#testing-and-review-of-the-egress-broker).
-- **Broker approvals stay with Squid:** the broker does not enforce approved-egress grants itself; in the Kubernetes chain Squid does, and the broker takes Agent Vault's place as its parent.
+- **Broker approvals stay with Squid:** the broker does not enforce approved-egress grants itself; in the Kubernetes chain Squid does, with the broker as its parent.
 
 ## Troubleshooting
 

@@ -88,10 +88,9 @@ Optional features:
 - [Background script gateway](https://github.com/mindroom-ai/mindroom/blob/main/cluster/k8s/runtime/README.md#background-script-gateway) (`scriptGateway`) lets dedicated workers run [background scripts](../tools/background-scripts.md) and [minimal-mode](../tools/agent-cli.md) shells without reaching the general API port.
 - [Content bundles](https://github.com/mindroom-ai/mindroom/blob/main/cluster/k8s/runtime/README.md#content-bundles) (`contentBundles`, `config.bootstrapContentBundle`) ship config, plugins, and skills as digest-pinned images, including how to update a bootstrapped config.
 - [Session and knowledge storage](https://github.com/mindroom-ai/mindroom/blob/main/cluster/k8s/runtime/README.md#session-and-knowledge-storage) (`sessionStorage`, `knowledgeStorage`) and [runtime state storage](https://github.com/mindroom-ai/mindroom/blob/main/cluster/k8s/runtime/README.md#runtime-state-storage) (`stateStorage`, `stateStorage.extraSubPaths`) move data to volumes of their own; on an existing install, copy the data first.
-- [Layering values files](https://github.com/mindroom-ai/mindroom/blob/main/cluster/k8s/runtime/README.md#layering-values-files) explains the map form of `env.extra`, `env.envFrom`, the Agent Vault server's `extraEnv` and `envFrom`, `extraVolumes`, and `extraVolumeMounts`, which Helm merges key by key across values files, and lists which env values are rendered with `tpl`.
+- [Layering values files](https://github.com/mindroom-ai/mindroom/blob/main/cluster/k8s/runtime/README.md#layering-values-files) explains the map form of `env.extra`, `env.envFrom`, `extraVolumes`, and `extraVolumeMounts`, which Helm merges key by key across values files, and lists which env values are rendered with `tpl`.
 - [Approved Egress](approved-egress.md) gives workers human-approved temporary hostname grants.
 - [Egress broker](https://github.com/mindroom-ai/mindroom/blob/main/cluster/k8s/runtime/README.md#egress-broker) (`egressBroker`) injects stored credentials into workers' outbound HTTPS requests, so workers never hold the secret.
-- [Agent Vault server NetworkPolicy](https://github.com/mindroom-ai/mindroom/blob/main/cluster/k8s/runtime/README.md#agent-vault-server-networkpolicy) restricts the chart-managed vault, and [`jobNaming: contentHash`](https://github.com/mindroom-ai/mindroom/blob/main/cluster/k8s/runtime/README.md#agent-vault-access-grants) reruns its Jobs under `kubectl apply` workflows.
 - Tuwunel [structured settings](https://github.com/mindroom-ai/mindroom/blob/main/cluster/k8s/tuwunel/README.md#structured-settings) (`tuwunel.settings`) merge across values files, and [upgrades and database migrations](https://github.com/mindroom-ai/mindroom/blob/main/cluster/k8s/tuwunel/README.md#upgrades-and-database-migrations) explains how to upgrade the homeserver without corrupting its database.
 - The client chart's [`matrixRTC` values](https://github.com/mindroom-ai/mindroom/blob/main/cluster/k8s/client/README.md#matrixrtc-calls) announce and proxy the MatrixRTC chart's call backend.
 - [Operational log events](operational-log-events.md) feed log-based metrics and alerts once `MINDROOM_LOG_FORMAT=json` is set through `env.extra`.
@@ -189,7 +188,7 @@ Workers do not inherit the runtime's `.env` or provider keys; for per-workspace 
 
 Set `egressBroker.enabled: true` in the runtime chart to let workers call authenticated HTTP APIs without holding the credential.
 The runtime chart's [Egress Broker](https://github.com/mindroom-ai/mindroom/blob/main/cluster/k8s/runtime/README.md#egress-broker) section has its values and modes, and its [Self-service for users](https://github.com/mindroom-ai/mindroom/blob/main/cluster/k8s/runtime/README.md#self-service-for-users) section explains opening the page from MindRoom Chat and lists the [trusted upstream auth](trusted-upstream-auth.md) and gateway settings for signing users in through a gateway instead.
-[Agent Keys](egress-broker.md) covers how the broker works, the users' Connections pages, and the migration from Agent Vault.
+[Agent Keys](egress-broker.md) covers how the broker works and the users' Connections pages.
 
 ### Knowledge Source Visibility
 
@@ -246,7 +245,6 @@ Several volumes and Secrets only work together, so back them up and restore them
 | `<fullname>-sessions` | `sessionStorage` | When enabled, the agent and team session databases (`MINDROOM_SESSION_STORAGE_PATH`) |
 | `<fullname>-knowledge` | `knowledgeStorage` | When enabled, `knowledge_db/` |
 | `<volumeName>-<fullname>-event-cache-postgres-0`, default `data-<fullname>-event-cache-postgres-0` | `eventCache.postgres.persistence` | The PostgreSQL event journal, which records which messages were already answered |
-| `<server.name>-data`, default `agent-vault-data` | `workers.kubernetes.agentVault.server.persistence` | The chart-managed Agent Vault server's data |
 | `<approved egress name>-data`, default `<fullname>-egress-proxy-data` | `approvedEgress.persistence` | Temporary hostname grants of the approved egress proxy |
 | Tuwunel `<fullname>-data` | Tuwunel chart `storage` | The homeserver's RocksDB database and its `media/` directory |
 
@@ -259,8 +257,6 @@ Restore each of these sets together, from the same point in time:
 - **Credentials encryption key and credential stores.**
   With `MINDROOM_CREDENTIALS_ENCRYPTION_KEY` set (for example through `workers.sandbox.credentialsEncryptionKey.existingSecret`), credential files and OAuth stores are encrypted under that key.
   Under a different key MindRoom logs `Failed to load encrypted credentials` and will not overwrite them, so back up the key's Secret value with the storage claim.
-- **Agent Vault volume and its bootstrap Secret.**
-  The Secret named by `workers.kubernetes.agentVault.bootstrapSecretName`, with its `AGENT_VAULT_MASTER_PASSWORD` and `AGENT_VAULT_OWNER_PASSWORD`, must accompany every vault snapshot.
 - **Event journal, `tracking/`, and Matrix device stores.**
   The journal, `tracking/event_journal_binding.json`, `encryption_keys/`, `matrix_state.yaml`, and `sync_continuity/` must come from the same moment, or startup refuses the journal or the device stores.
   A restored chart-managed PostgreSQL volume keeps its original password, while the chart generates a new one when `<fullname>-event-cache-postgres-auth` is missing, so back up that password too.
@@ -281,7 +277,7 @@ Take them from one quiet point:
 3. Scale the runtime back up; it recreates workers on demand.
 
 A storage-level group snapshot that captures all these volumes at the same instant is also safe without stopping MindRoom.
-The Agent Vault, approved egress, and knowledge volumes can be snapshotted on their own schedules.
+The approved egress and knowledge volumes can be snapshotted on their own schedules.
 For the Tuwunel volume, use an offline snapshot or Tuwunel's own database backups, which do not include media; see the fork's [backup guide](https://github.com/mindroom-ai/mindroom-tuwunel/blob/main/docs/backups.md).
 
 ### Rebuildable data
@@ -297,11 +293,11 @@ Everything else on the storage, sessions, state, and journal volumes is not rebu
 
 ### Restoring
 
-1. Restore the volumes before installing the charts, then point the charts at them with `storage.existingClaim`, `stateStorage.existingClaim`, `sessionStorage.existingClaim`, `knowledgeStorage.existingClaim`, `workers.kubernetes.agentVault.server.persistence.existingClaim`, `approvedEgress.persistence.existingClaim`, and the Tuwunel chart's `storage.existingClaim`.
+1. Restore the volumes before installing the charts, then point the charts at them with `storage.existingClaim`, `stateStorage.existingClaim`, `sessionStorage.existingClaim`, `knowledgeStorage.existingClaim`, `approvedEgress.persistence.existingClaim`, and the Tuwunel chart's `storage.existingClaim`.
    The chart-managed PostgreSQL adopts a claim restored under `<volumeName>-<fullname>-event-cache-postgres-0`; set its original password as described in [Restore units](#restore-units).
    With an external database, restore the database and keep its URL Secret.
    To restore a `pg_dump` instead, install with a new journal volume and `replicaCount: 0`, load the dump, then set `replicaCount` back to 1.
-2. Recreate the Secrets with their original values, including the credentials encryption key, the Agent Vault bootstrap Secret, and the Matrix registration token or application-service registration.
+2. Recreate the Secrets with their original values, including the credentials encryption key and the Matrix registration token or application-service registration.
 3. Start Tuwunel first, then the runtime.
 
 If the runtime log shows `The bound Matrix device store is missing`, `Matrix stream changed`, or `IngestionBatchSequenceError`, the device stores do not match the journal; an event journal binding error means `tracking/` and the journal database do not match.

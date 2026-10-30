@@ -423,8 +423,8 @@ env:
 ## Layering Values Files
 
 Helm replaces lists wholesale when it merges several values files, so an environment overlay cannot change one list entry without restating the whole list.
-`env.extra`, `env.envFrom`, `workers.kubernetes.agentVault.server.extraEnv`, `workers.kubernetes.agentVault.server.envFrom`, `extraVolumes`, and `extraVolumeMounts` therefore accept either a list or a map keyed by entry, which Helm merges key by key.
-So do the NetworkPolicy rule lists `networkPolicy.apiIngressFrom`, `networkPolicy.extraIngress`, `networkPolicy.extraEgress`, `egressProxy.networkPolicy.extraEgress`, `workers.kubernetes.agentVault.server.networkPolicy.extraIngress`, and `workers.kubernetes.agentVault.server.networkPolicy.extraEgress`, and the `egressProxy.noProxy` hosts.
+`env.extra`, `env.envFrom`, `extraVolumes`, and `extraVolumeMounts` therefore accept either a list or a map keyed by entry, which Helm merges key by key.
+So do the NetworkPolicy rule lists `networkPolicy.apiIngressFrom`, `networkPolicy.extraIngress`, `networkPolicy.extraEgress`, and `egressProxy.networkPolicy.extraEgress`, as well as the `egressProxy.noProxy` hosts.
 
 - Map entries render sorted by key, so choose keys accordingly where order matters, such as `envFrom` precedence or `$(VAR)` references.
 - An entry's `name` defaults to its key; set `name` explicitly to mount one volume at several paths.
@@ -435,7 +435,7 @@ So do the NetworkPolicy rule lists `networkPolicy.apiIngressFrom`, `networkPolic
 - An env map entry may be a plain string as shorthand for `value`; quote numbers and booleans, which Kubernetes requires as strings anyway.
 - Use the same form for a field in every values file, because Helm replaces a list with a map, or a map with a list, wholesale.
 
-String env values in `env.extra`, `workers.kubernetes.agentVault.server.extraEnv`, and `workers.kubernetes.extraEnv` are rendered with `tpl`, as are `egressProxy.noProxy` entries.
+String env values in `env.extra` and `workers.kubernetes.extraEnv` are rendered with `tpl`, as are `egressProxy.noProxy` entries.
 Shared values can therefore reference the release namespace or other values instead of repeating environment-specific names.
 Write `{{ "{{" }}` for a literal `{{`.
 A `null` in `workers.kubernetes.extraEnv` removes an inherited or chart-injected worker variable.
@@ -602,192 +602,6 @@ When `approvedEgress.enabled` is true, the chart automatically points worker pro
 When `egressProxy.networkPolicy.create` is true, workers can egress only to DNS, the selected proxy pods, and `egressProxy.networkPolicy.extraEgress`.
 For externally managed proxies, NetworkPolicy targets pods rather than Services, so `proxyPodSelector` must match the existing proxy Deployment labels.
 
-When Agent Vault is also enabled, keep approved egress as the first network hop.
-The proxy resolves dynamic `request_network_access` grants from the worker pod's source IP; if worker traffic goes to Agent Vault first, every request reaches Squid from the vault pod IP and worker identity cannot be resolved.
-Enable `approvedEgress.parentProxy` to route only token-bearing Agent Vault tool traffic through the vault parent after the allowlist/grant check:
-
-```yaml
-workers:
-  backend: kubernetes
-  kubernetes:
-    agentVault:
-      enabled: true
-      cliImage: infisical/agent-vault:<pinned>
-      ownerEmail: owner@example.test
-      server:
-        enabled: true
-      # Leave proxyUrl at the default; parentProxy makes workers use approved
-      # egress first and Squid forwards Proxy-Authorization traffic to the vault.
-
-approvedEgress:
-  enabled: true
-  image:
-    tag: v0.1.10
-  parentProxy:
-    enabled: true
-    host: agent-vault
-    port: 14322
-```
-
-With this setup, workers mint Agent Vault tokens through the API port (`14321`), workers proxy tool egress to the approved egress Service, Squid enforces allowlists and dynamic grants using the real worker IP, and Squid forwards requests carrying `Proxy-Authorization` to Agent Vault (`login=PASSTHRU`) for credential injection.
-Tokenless traffic egresses directly from Squid after the normal policy check.
-For signed URLs or other destinations that must skip parent-proxy credential injection, set `approvedEgress.parentProxy.bypassDomains`:
-
-```yaml
-approvedEgress:
-  parentProxy:
-    enabled: true
-    bypassDomains:
-      - downloads.example.test
-      - .objects.example.test
-```
-
-This list defaults to empty and applies only when chart-managed approved egress and its parent proxy are enabled.
-An entry without a leading dot matches that exact hostname; a leading dot matches the domain and its subdomains, following [Squid domain ACL syntax](https://www.squid-cache.org/Doc/config/acl/).
-Use ASCII domain names (Punycode for internationalized names), without URL schemes, ports, paths, `*` wildcards, or whitespace; invalid entries fail chart rendering.
-Matching uses the request hostname without reverse DNS lookups.
-Bypass destinations still require the normal allowlist or dynamic grant and remain subject to the proxy's destination and port restrictions.
-Other token-bearing requests continue through the configured parent.
-Changing the list changes the chart's Squid config checksum and rolls the proxy Deployment automatically.
-
-When `agentVault.accessTool.enabled` is set, self-service vault grants also keep `agentVault.ownerEmail` as an admin on each worker vault; the Kubernetes worker init container uses that owner account to mint and attach the proxy-role agent token.
-The chart rejects the unsafe default combination of chart-managed approved egress plus Agent Vault without `approvedEgress.parentProxy`, because that would be vault-first and break dynamic grants.
-
-### Agent Vault Server Environment
-
-Use `workers.kubernetes.agentVault.server.extraEnv` for raw Kubernetes `EnvVar` entries, including `valueFrom` Secret references.
-Use `server.envFrom` to import variables from existing Secrets or ConfigMaps.
-Both default to empty, accept the map form described in [Layering Values Files](#layering-values-files), and apply only to the chart-managed Agent Vault server.
-Keep sensitive values in Secrets and avoid duplicate environment variable names; use the dedicated master-password and SMTP settings for chart-managed variables.
-The chart rejects `extraEnv` entries that repeat the master-password variable or any SMTP variable emitted when `server.smtp.enabled` is true.
-
-```yaml
-workers:
-  kubernetes:
-    agentVault:
-      server:
-        enabled: true
-        image: registry.example.com/agent-vault@sha256:1111111111111111111111111111111111111111111111111111111111111111
-        extraEnv:
-          - name: AGENT_VAULT_ADDR
-            value: https://vault.example.com
-          - name: AGENT_VAULT_OAUTH_GITHUB_CLIENT_SECRET
-            valueFrom:
-              secretKeyRef:
-                name: vault-oauth
-                key: client-secret
-        envFrom:
-          - secretRef:
-              name: vault-extra-env
-          - configMapRef:
-              name: vault-settings
-```
-
-### Agent Vault Server NetworkPolicy
-
-The chart-managed Agent Vault server gets its own NetworkPolicy by default, because the API port can create vaults and agent tokens and the proxy port injects stored credentials.
-Ingress to the API port (`server.apiPort`) is limited to the in-chart clients that are enabled: dedicated workers when `agentVault.enabled` is true, the control plane when `accessTool.enabled` is true, the bootstrap Job, and the access-grants Job.
-Workers are matched like the worker NetworkPolicy and the runtime's own worker listing: the worker namespace, the generic worker labels, and `workers.kubernetes.extraLabels`.
-The selector matches any worker pod that carries all of those labels, so releases that share a worker namespace must each set a different value for the same `workers.kubernetes.extraLabels` key, for example `mindroom.ai/instance`.
-If one release's `extraLabels` are empty or a subset of another release's, its vault also admits the other release's workers.
-Ingress to the proxy port (`server.mitmPort`) is limited to the approved egress proxy when `approvedEgress.parentProxy.enabled` is true, or to dedicated workers when `approvedEgress` is disabled and workers use `agentVault.proxyUrl` directly.
-Egress is limited to DNS and, to any address, TCP `80` and `443` for proxied upstreams and OAuth providers and `server.smtp.port` when SMTP is enabled.
-When `egressProxy` or `approvedEgress` is enabled and `egressProxy.networkPolicy.create` is true (its default), vault DNS is limited to the same `egressProxy.networkPolicy.dns` destinations as worker DNS (default kube-dns in `kube-system`), and otherwise to port 53 on any address.
-Kubelet health probes are unaffected.
-
-Clients the chart does not render, such as an SSO proxy in front of the vault UI or an ingress controller, need `server.networkPolicy.extraIngress`.
-Destinations beyond the defaults, such as upstream services on other ports, need `server.networkPolicy.extraEgress`.
-Set `server.networkPolicy.create: false` to manage the vault policy yourself.
-
-```yaml
-workers:
-  kubernetes:
-    agentVault:
-      server:
-        enabled: true
-        networkPolicy:
-          extraIngress:
-            - from:
-                - podSelector:
-                    matchLabels:
-                      app.kubernetes.io/name: vault-ui-proxy
-              ports:
-                - protocol: TCP
-                  port: 14321
-```
-
-### Agent Vault Access Grants
-
-Agent Vault has two separate access questions.
-Runtime use is controlled by MindRoom worker scope and tool authorization.
-Raw secret visibility is controlled by Agent Vault vault membership.
-
-Use `worker_scope: user` or `worker_scope: user_agent` when each requester should manage and use their own credentials.
-Those requester-isolated workers can use the self-service `agent_vault_access` tool to grant the requester admin access to their own worker vault.
-On an agent that is not `private`, requesters still share one agent workspace, so one requester's files can run in another's commands with that requester's credentials; use `private` agents (`private.per: user` or `user_agent` in place of `worker_scope`, which cannot be set together with `private`) when requesters need isolation.
-
-Use `worker_scope: shared` when a shared agent should use a common service credential.
-In that model, all users who can invoke credential-capable tools on that shared agent may indirectly use the credentials through the worker proxy path.
-Only trusted maintainers should receive Agent Vault admin access, because admin access lets them view, edit, and manage the raw secret values in the vault.
-Access grants do not restrict who can cause a shared worker to use credentials at runtime.
-
-Set `workers.kubernetes.agentVault.accessGrants` to declaratively grant vault admin access without deployment-specific inline scripts:
-
-```yaml
-workers:
-  backend: kubernetes
-  kubernetes:
-    agentVault:
-      enabled: true
-      cliImage: infisical/agent-vault:<pinned>
-      ownerEmail: owner@example.test
-      accessGrants:
-        enabled: true
-        grants:
-          - email: maintainer@example.com
-            workerScope: shared
-            agent: example-agent
-            role: admin
-          - email: user@example.com
-            workerScope: user_agent
-            requester: "@user:example.com"
-            agent: example-agent
-            role: admin
-          - email: user@example.com
-            workerScope: user
-            requester: "@user:example.com"
-            role: admin
-```
-
-The chart renders no access-grant resources by default.
-When access grants are enabled and at least one grant is configured, the chart renders a Job that runs `python -m mindroom.agent_vault_access_grants apply` from the MindRoom image.
-The helper resolves worker keys and vault names through MindRoom's worker-routing code, creates or joins the vault when needed, and grants the configured email the `admin` role.
-The helper is idempotent, so running it again with the same grants changes nothing.
-If an email has not registered and verified in Agent Vault yet, the helper reports a warning and the grant can be applied again after registration.
-
-For `workerScope: shared`, `agent` is required and `requester` must be omitted.
-For `workerScope: user_agent`, both `requester` and `agent` are required.
-For `workerScope: user`, `requester` is required and `agent` must be omitted because the worker key is per-user, not per-agent.
-The initial supported role is `admin`.
-If your deployment sets `CUSTOMER_ID` or `ACCOUNT_ID` for tenant-specific worker keys, set `accessGrants.tenantId` or `accessGrants.accountId` to the same value.
-When `agentVault.bootstrap.enabled` is true, the bootstrap Job publishes the owner-role admin token Secret used by the access-grant Job.
-If `accessTool` and `accessGrants` use the same admin-token Secret name, configure the same key for both or use different Secret names.
-When bootstrap is disabled, provide `accessGrants.adminTokenSecret` yourself.
-
-`workers.kubernetes.agentVault.jobNaming` controls how the access-grant and bootstrap Jobs run again.
-With the default `fixed`, both Jobs keep stable names and the access-grant Job is a Helm `post-install,post-upgrade` hook, so `helm install` and `helm upgrade` replace and rerun it.
-The bootstrap Job is not a hook, so changing its pod template requires deleting the finished Job first, even with `helm upgrade`.
-Workflows that apply rendered manifests, such as `kubectl kustomize --enable-helm` followed by `kubectl apply`, ignore Helm hook annotations, and Job pod templates are immutable.
-With `fixed`, those workflows fail to apply a changed grant list or pod template until the old Job is deleted, and do not rerun an existing Job otherwise.
-Set `jobNaming: contentHash` for those workflows.
-The chart then drops the hook and appends a hash of each Job's rendered pod spec to the Job name.
-The access-grant Job's pod spec includes its grant config, so each access-grant Job applies the grants it was created for.
-Applying changed inputs creates a new Job, and applying unchanged inputs leaves the existing Job alone.
-In either mode, a chart upgrade that changes only the chart or app version keeps both Job names and pod templates, while changed inputs still get a new `contentHash` name.
-Finished Jobs are deleted after 24 hours by `ttlSecondsAfterFinished`, so the first apply after that runs the idempotent Job again.
-To rerun a Job with unchanged inputs, for example after a grant recipient registers, delete it by label and apply again with `kubectl delete job -l app.kubernetes.io/component=agent-vault-access-grants`.
-To remove grants ConfigMaps that older chart versions left in the namespace, run `kubectl delete configmap -l app.kubernetes.io/component=agent-vault-access-grants` once.
-
 ## Background Script Gateway
 
 Background scripts on Kubernetes workers call governed tools through the primary's capability-authenticated script gateway.
@@ -872,13 +686,29 @@ If `networkPolicy.extraEgress` restricts the primary, allow TCP 80 and 443 to pu
 The broker runs in the primary: a primary restart interrupts brokered connections in flight, and brokered TLS uses the primary's CPU, so leave room in its resource requests.
 
 With `approvedEgress.enabled` as well, workers keep the approved egress proxy (Squid) as their first hop, so Squid still enforces per-worker grants by pod IP.
-The chart then renders Squid's parent chain to the broker Service and port itself, without `approvedEgress.parentProxy.enabled`, the same way `parentProxy` chains Agent Vault: requests that carry a token go to the broker, and `parentProxy.bypassDomains` still skip it.
+The chart then chains Squid to the broker Service and port: after the normal allowlist or grant check, requests that carry a token go to the broker and tokenless requests egress directly from Squid.
 `MINDROOM_EGRESS_BROKER_URL` is the Squid URL, the broker NetworkPolicy admits only the approved egress pods instead of workers, and no worker egress rule is added.
 Changing `egressBroker.port` rolls the Squid pod.
-Leave `approvedEgress.parentProxy.host` at its default in this setup, because the chart rejects a custom parent instead of dropping it silently.
+
+For signed URLs or other destinations that must skip broker credential injection, set `approvedEgress.parentProxy.bypassDomains`:
+
+```yaml
+approvedEgress:
+  parentProxy:
+    bypassDomains:
+      - downloads.example.test
+      - .objects.example.test
+```
+
+This list defaults to empty and applies only when both `egressBroker` and chart-managed approved egress are enabled.
+An entry without a leading dot matches that exact hostname; a leading dot matches the domain and its subdomains, following [Squid domain ACL syntax](https://www.squid-cache.org/Doc/config/acl/).
+Use ASCII domain names (Punycode for internationalized names), without URL schemes, ports, paths, `*` wildcards, or whitespace; invalid entries fail chart rendering.
+Matching uses the request hostname without reverse DNS lookups.
+Bypass destinations still require the normal allowlist or dynamic grant and remain subject to the proxy's destination and port restrictions.
+Other token-bearing requests continue through the broker.
+Changing the list changes the chart's Squid config checksum and rolls the proxy Deployment automatically.
 
 `egressBroker.enabled` requires `workers.backend=kubernetes`, and `egressBroker.port` must differ from `runtime.apiPort` and `scriptGateway.port`.
-It cannot be combined with `workers.kubernetes.agentVault`; to switch an existing deployment, see [Migrating from Agent Vault](../../../docs/deployment/egress-broker.md#migrating-from-agent-vault).
 
 ### Self-service for users
 
@@ -995,9 +825,6 @@ workers:
 - The chart does not create ingress or a Matrix homeserver.
 - Set `networkPolicy.create: true` to restrict control-plane API ingress to known client pods.
 - Containers that run the runtime image default to `securityContext.runAsNonRoot: true`, which the kubelet enforces against the image's numeric uid 1000.
-  The chart-managed Agent Vault server and the bootstrap Job's `bootstrap-owner` container default to `runAsNonRoot: true` with `runAsUser: 65532`, because the `infisical/agent-vault` image names its user (`agentvault`) and the kubelet can only verify a numeric user.
-  A custom image that runs as root, or an Agent Vault image with a different uid, needs matching `securityContext` overrides.
-  The bootstrap Job's `publish-ca` container leaves out `runAsNonRoot` because `kubectlImage` may run as root, so add it to `workers.kubernetes.agentVault.bootstrap.kubectlSecurityContext` for a non-root image or a restricted Pod Security policy.
   The state-storage init container still runs as root for `chown` and `chmod`, and content bundles, the event journal PostgreSQL, and user-supplied containers use the security contexts you set for them.
 - The chart can create PostgreSQL for MindRoom's event journal, or use an external PostgreSQL URL from an existing Secret.
 - Set `workers.sandbox.proxyToken.existingSecret` or `workers.sandbox.proxyToken.value` when sandbox proxying is enabled.

@@ -164,11 +164,6 @@ def request_execution_env(
     """Return the effective runtime-scoped execution env for one request."""
     if tool_name not in EXECUTION_ENV_TOOL_NAMES:
         return {}
-    # Agent Vault egress is composed from the worker pod's own token + endpoint,
-    # so it is always overlaid here at the worker (never shipped from the
-    # primary, which has neither the token nor the endpoint env).
-    worker_local_env = {**runtime_paths.process_env, **os.environ}
-    agent_vault_env = constants.worker_proxy_execution_env(worker_local_env)
     if execution_env:
         protected_env_names = _protected_dedicated_worker_execution_env_names(runtime_paths)
         if protected_env_names:
@@ -176,25 +171,18 @@ def request_execution_env(
             # workspace HOME contract replaces it, so only the incoming request env drops it.
             protected_env_names |= {"HOME"}
         env = {key: value for key, value in execution_env.items() if key not in protected_env_names}
-        # Apply broker CA bundle if present
-        bundle_dir = Path(tempfile.gettempdir()) / "mindroom-egress-broker"
-        # The native broker wins: with its CA active the Agent Vault overlay is skipped.
-        if not apply_runner_ca_bundle(env, bundle_dir):
-            env.update(agent_vault_env)
+        apply_runner_ca_bundle(env, Path(tempfile.gettempdir()) / "mindroom-egress-broker")
         return env
     shell_process_env = (
         runtime_paths.process_env
         if runner_uses_dedicated_worker(runtime_paths)
         else {**os.environ, **runtime_paths.process_env}
     )
-    return (
-        constants.build_execution_tool_env(
-            tool_name,
-            runtime_paths,
-            extra_env_passthrough=extra_env_passthrough,
-            shell_process_env=shell_process_env,
-        )
-        | agent_vault_env
+    return constants.build_execution_tool_env(
+        tool_name,
+        runtime_paths,
+        extra_env_passthrough=extra_env_passthrough,
+        shell_process_env=shell_process_env,
     )
 
 

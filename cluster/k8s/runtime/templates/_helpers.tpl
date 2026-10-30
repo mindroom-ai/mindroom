@@ -452,18 +452,9 @@ cp -a "$1/." "$2/"
 /etc/squid/mindroom-egress-chain.conf
 {{- end -}}
 
-{{- /* Whether Squid chains token-bearing requests to a parent: the operator's Agent Vault parent or, in chain mode, the egress broker. */ -}}
-{{- define "mindroom-runtime.approvedEgressParentEnabled" -}}
-{{- if or .Values.approvedEgress.parentProxy.enabled (include "mindroom-runtime.egressBrokerChainMode" .) -}}true{{- end -}}
-{{- end -}}
-
 {{- define "mindroom-runtime.approvedEgressSquidConfig" -}}
-{{- $parentHost := .Values.approvedEgress.parentProxy.host -}}
-{{- $parentPort := .Values.approvedEgress.parentProxy.port -}}
-{{- if include "mindroom-runtime.egressBrokerChainMode" . -}}
-{{- $parentHost = include "mindroom-runtime.egressBrokerHost" . -}}
-{{- $parentPort = .Values.egressBroker.port -}}
-{{- end -}}
+{{- $parentHost := include "mindroom-runtime.egressBrokerHost" . -}}
+{{- $parentPort := .Values.egressBroker.port -}}
 include /etc/squid/squid.conf
 
 acl egress_has_token req_header Proxy-Authorization .
@@ -471,7 +462,7 @@ acl egress_has_token req_header Proxy-Authorization .
 acl egress_bypass_parent dstdomain -n {{ join " " . }}
 {{- end }}
 dns_defnames on
-{{- /* The parent (Agent Vault or the egress broker) is Squid's only route for credentialed requests (never_direct), so
+{{- /* The egress broker is Squid's only route for credentialed requests (never_direct), so
 marking it dead only refuses them: connect failures while it restarts, or runs of 5xx CONNECT replies, would make the
 first requests after it recovers fail until Squid re-probed it. */}}
 cache_peer {{ $parentHost }} parent {{ $parentPort }} 0 no-query no-digest login=PASSTHRU connect-fail-limit=1000000
@@ -557,7 +548,7 @@ matchLabels:
 {{- if or .Values.egressProxy.enabled .Values.approvedEgress.enabled -}}true{{- end -}}
 {{- end -}}
 
-{{- /* Whether the worker NetworkPolicy fences worker egress; the Agent Vault policy follows the same gate. */ -}}
+{{- /* Whether the worker NetworkPolicy fences worker egress. */ -}}
 {{- define "mindroom-runtime.workerEgressPolicyEnabled" -}}
 {{- if and (include "mindroom-runtime.egressProxyEnabled" .) .Values.egressProxy.networkPolicy.create -}}true{{- end -}}
 {{- end -}}
@@ -594,16 +585,13 @@ matchLabels:
 {{- end -}}
 {{- end -}}
 
-{{- /* NetworkPolicy peers for the egressProxy.networkPolicy.dns destination, shared by the worker and Agent Vault policies. */ -}}
+{{- /* NetworkPolicy peers for the egressProxy.networkPolicy.dns destination of the worker policy. */ -}}
 {{- define "mindroom-runtime.egressProxyDnsPeers" -}}
 {{- $dns := .Values.egressProxy.networkPolicy.dns -}}
 {{- $peers := list -}}
 {{- $selectorPeer := dict -}}
 {{- if kindIs "map" $dns.namespaceSelector -}}
 {{- $_ := set $selectorPeer "namespaceSelector" $dns.namespaceSelector -}}
-{{- else if kindIs "map" $dns.podSelector -}}
-{{- /* A pod-only peer means the policy's own namespace; pin it to the worker namespace so both policies select the same pods. */ -}}
-{{- $_ := set $selectorPeer "namespaceSelector" (dict "matchLabels" (dict "kubernetes.io/metadata.name" (include "mindroom-runtime.workerNamespace" .))) -}}
 {{- end -}}
 {{- if kindIs "map" $dns.podSelector -}}
 {{- $_ := set $selectorPeer "podSelector" $dns.podSelector -}}
@@ -626,14 +614,6 @@ matchLabels:
 {{- $scheme = "http" -}}
 {{- end -}}
 {{- printf "%s://%s.%s.svc.cluster.local:%v" $scheme $serviceName $namespace $servicePort -}}
-{{- end -}}
-
-{{- define "mindroom-runtime.agentVaultProxyUrl" -}}
-{{- if and .Values.approvedEgress.enabled .Values.approvedEgress.parentProxy.enabled -}}
-{{- include "mindroom-runtime.egressProxyUrl" . -}}
-{{- else -}}
-{{- .Values.workers.kubernetes.agentVault.proxyUrl -}}
-{{- end -}}
 {{- end -}}
 
 {{- define "mindroom-runtime.scriptGatewayName" -}}
@@ -866,90 +846,6 @@ event_journal:
 {{- if eq .Values.eventCache.backend "postgres" }}
   database_url_env: {{ .Values.eventCache.databaseUrlEnv | quote }}
 {{- end }}
-{{- end -}}
-
-{{- define "mindroom-runtime.agentVaultServerName" -}}
-{{- default "agent-vault" .Values.workers.kubernetes.agentVault.server.name -}}
-{{- end -}}
-
-{{- define "mindroom-runtime.agentVaultSelectorLabels" -}}
-app.kubernetes.io/name: {{ include "mindroom-runtime.agentVaultServerName" . | quote }}
-app.kubernetes.io/instance: {{ .Release.Name | quote }}
-app.kubernetes.io/component: agent-vault
-{{- end -}}
-
-{{- define "mindroom-runtime.agentVaultLabels" -}}
-helm.sh/chart: {{ printf "%s-%s" .Chart.Name .Chart.Version | replace "+" "_" | quote }}
-{{ include "mindroom-runtime.agentVaultSelectorLabels" . }}
-app.kubernetes.io/version: {{ .Chart.AppVersion | quote }}
-app.kubernetes.io/managed-by: {{ .Release.Service | quote }}
-{{- end -}}
-
-{{- define "mindroom-runtime.agentVaultServerClaimName" -}}
-{{- if .Values.workers.kubernetes.agentVault.server.persistence.existingClaim -}}
-{{- .Values.workers.kubernetes.agentVault.server.persistence.existingClaim -}}
-{{- else -}}
-{{- printf "%s-data" (include "mindroom-runtime.agentVaultServerName" .) -}}
-{{- end -}}
-{{- end -}}
-
-{{- define "mindroom-runtime.agentVaultBootstrapName" -}}
-{{- printf "%s-bootstrap" (include "mindroom-runtime.agentVaultServerName" .) | trunc 63 | trimSuffix "-" -}}
-{{- end -}}
-
-{{- define "mindroom-runtime.agentVaultAccessGrantsName" -}}
-{{- printf "%s-access-grants" (include "mindroom-runtime.agentVaultServerName" .) | trunc 63 | trimSuffix "-" -}}
-{{- end -}}
-
-{{/*
-Agent Vault Job name from (list root baseName renderedInputs).
-jobNaming=contentHash appends a hash of the rendered inputs, so a plain `kubectl apply`
-creates a new Job when they change and leaves the existing one alone otherwise.
-*/}}
-{{- define "mindroom-runtime.agentVaultJobName" -}}
-{{- $root := index . 0 -}}
-{{- $name := index . 1 -}}
-{{- if eq $root.Values.workers.kubernetes.agentVault.jobNaming "contentHash" -}}
-{{- printf "%s-%s" ($name | trunc 52 | trimSuffix "-") (index . 2 | sha256sum | trunc 10) -}}
-{{- else -}}
-{{- $name -}}
-{{- end -}}
-{{- end -}}
-
-{{- define "mindroom-runtime.agentVaultAccessGrantsConfigPath" -}}
-/etc/mindroom-agent-vault-access-grants/access-grants.yaml
-{{- end -}}
-
-{{- define "mindroom-runtime.agentVaultAccessGrantsTokenPath" -}}
-{{- printf "/etc/agent-vault-access-grants/%s" .Values.workers.kubernetes.agentVault.accessGrants.adminTokenSecret.key -}}
-{{- end -}}
-
-{{- define "mindroom-runtime.agentVaultBootstrapLabels" -}}
-helm.sh/chart: {{ printf "%s-%s" .Chart.Name .Chart.Version | replace "+" "_" | quote }}
-app.kubernetes.io/name: {{ include "mindroom-runtime.agentVaultBootstrapName" . | quote }}
-app.kubernetes.io/instance: {{ .Release.Name | quote }}
-app.kubernetes.io/component: agent-vault-bootstrap
-app.kubernetes.io/version: {{ .Chart.AppVersion | quote }}
-app.kubernetes.io/managed-by: {{ .Release.Service | quote }}
-{{- end -}}
-
-{{- define "mindroom-runtime.agentVaultAccessGrantsLabels" -}}
-helm.sh/chart: {{ printf "%s-%s" .Chart.Name .Chart.Version | replace "+" "_" | quote }}
-app.kubernetes.io/name: {{ include "mindroom-runtime.agentVaultAccessGrantsName" . | quote }}
-app.kubernetes.io/instance: {{ .Release.Name | quote }}
-app.kubernetes.io/component: agent-vault-access-grants
-app.kubernetes.io/version: {{ .Chart.AppVersion | quote }}
-app.kubernetes.io/managed-by: {{ .Release.Service | quote }}
-{{- end -}}
-
-{{- define "mindroom-runtime.agentVaultServerImage" -}}
-{{- $av := .Values.workers.kubernetes.agentVault -}}
-{{- required "workers.kubernetes.agentVault.server.image or cliImage is required when the Agent Vault server is enabled" (default $av.cliImage $av.server.image) -}}
-{{- end -}}
-
-{{- define "mindroom-runtime.agentVaultBootstrapImage" -}}
-{{- $av := .Values.workers.kubernetes.agentVault -}}
-{{- required "workers.kubernetes.agentVault.bootstrap.image or cliImage is required when bootstrap is enabled" (default $av.cliImage $av.bootstrap.image) -}}
 {{- end -}}
 
 {{/*

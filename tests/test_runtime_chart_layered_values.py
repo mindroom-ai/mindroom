@@ -27,22 +27,16 @@ KUBERNETES_WORKERS = (
     "workers.sandbox.proxyToken.value=test-token",
     "eventCache.postgres.auth.password=test-password",
 )
-AGENT_VAULT_SERVER = (
-    "workers.kubernetes.agentVault.server.enabled=true",
-    "workers.kubernetes.agentVault.server.image=example.test/agent-vault:test",
-)
 EGRESS_PROXY = (
     "egressProxy.enabled=true",
     "egressProxy.networkPolicy.proxyPodSelector.matchLabels.app=egress-proxy",
 )
-POLICY_SET_ARGS = (*KUBERNETES_WORKERS, *AGENT_VAULT_SERVER, *EGRESS_PROXY, "networkPolicy.create=true")
+POLICY_SET_ARGS = (*KUBERNETES_WORKERS, *EGRESS_PROXY, "networkPolicy.create=true")
 POLICY_LISTS = (
     "networkPolicy.apiIngressFrom",
     "networkPolicy.extraIngress",
     "networkPolicy.extraEgress",
     "egressProxy.networkPolicy.extraEgress",
-    "workers.kubernetes.agentVault.server.networkPolicy.extraIngress",
-    "workers.kubernetes.agentVault.server.networkPolicy.extraEgress",
 )
 
 SHARED_VALUES = """
@@ -151,17 +145,12 @@ def _rendered_policy_lists(docs: list[dict[str, Any]]) -> dict[str, list[dict[st
     """The rendered entries of each POLICY_LISTS value, without the chart's own rules."""
     runtime = _resource(docs, "NetworkPolicy", "mindroom-runtime")["spec"]
     workers = _resource(docs, "NetworkPolicy", "mindroom-runtime-workers")["spec"]
-    vault = _resource(docs, "NetworkPolicy", "agent-vault")["spec"]
     return {
         "networkPolicy.apiIngressFrom": runtime["ingress"][0]["from"],
         "networkPolicy.extraIngress": runtime["ingress"][1:],
         "networkPolicy.extraEgress": runtime["egress"],
         # After the DNS and proxy rules.
         "egressProxy.networkPolicy.extraEgress": workers["egress"][2:],
-        # No chart-rendered vault clients are enabled.
-        "workers.kubernetes.agentVault.server.networkPolicy.extraIngress": vault["ingress"],
-        # After the DNS and TCP 80/443 rules.
-        "workers.kubernetes.agentVault.server.networkPolicy.extraEgress": vault["egress"][2:],
     }
 
 
@@ -343,10 +332,6 @@ def test_string_env_values_render_templates(tmp_path: Path) -> None:
             extraEnv:
               WORKER_API_URL: "http://api.{{ .Release.Namespace }}.svc.cluster.local:8080"
               all_proxy: null
-            agentVault:
-              server:
-                extraEnv:
-                  AGENT_VAULT_ADDR: "https://{{ .Values.matrix.serverName }}/agent-vault"
         egressProxy:
           enabled: true
           networkPolicy:
@@ -357,13 +342,12 @@ def test_string_env_values_render_templates(tmp_path: Path) -> None:
             - localhost
             - "api.{{ .Release.Namespace }}.svc.cluster.local"
         """,
-        set_args=(*KUBERNETES_WORKERS, *AGENT_VAULT_SERVER),
+        set_args=KUBERNETES_WORKERS,
     )
     _, container = _runtime(docs)
     env = _env_by_name(container)
     env_json = {"MINDROOM_KUBERNETES_WORKER_ENV_JSON": env["MINDROOM_KUBERNETES_WORKER_ENV_JSON"]["value"]}
     worker_env = json.loads(env_json["MINDROOM_KUBERNETES_WORKER_ENV_JSON"])
-    vault_env = _env_by_name(_container(_resource(docs, "Deployment", "agent-vault"), "agent-vault"))
 
     assert env["API_URL"]["value"] == "http://api.mindroom-staging.svc.cluster.local:8080"
     assert env["LITERAL_BRACES"]["value"] == "{{ literal }}"
@@ -373,68 +357,11 @@ def test_string_env_values_render_templates(tmp_path: Path) -> None:
     assert "all_proxy" not in read_json_mapping_env(env_json, "MINDROOM_KUBERNETES_WORKER_ENV_JSON")
     assert worker_env["ALL_PROXY"].startswith("http://")
     assert worker_env["NO_PROXY"] == "localhost,api.mindroom-staging.svc.cluster.local"
-    assert vault_env["AGENT_VAULT_ADDR"]["value"] == "https://chat.example.com/agent-vault"
-
-
-def test_agent_vault_server_env_lists_accept_maps(tmp_path: Path) -> None:
-    """The Agent Vault server env lists layer like the runtime container's."""
-    docs = _render_layered(
-        tmp_path,
-        """
-        workers:
-          kubernetes:
-            agentVault:
-              server:
-                extraEnv:
-                  AGENT_VAULT_UI_BASE_PATH: /agent-vault
-                  AGENT_VAULT_OAUTH_CLIENT_SECRET:
-                    valueFrom:
-                      secretKeyRef:
-                        name: shared-oauth
-                        key: client-secret
-                envFrom:
-                  settings:
-                    configMapRef:
-                      name: vault-settings
-        """,
-        """
-        workers:
-          kubernetes:
-            agentVault:
-              server:
-                extraEnv:
-                  AGENT_VAULT_OAUTH_CLIENT_SECRET:
-                    valueFrom:
-                      secretKeyRef:
-                        name: staging-oauth
-        """,
-        set_args=AGENT_VAULT_SERVER,
-    )
-    vault = _container(_resource(docs, "Deployment", "agent-vault"), "agent-vault")
-    env = _env_by_name(vault)
-
-    assert env["AGENT_VAULT_UI_BASE_PATH"]["value"] == "/agent-vault"
-    assert env["AGENT_VAULT_OAUTH_CLIENT_SECRET"]["valueFrom"] == {
-        "secretKeyRef": {"name": "staging-oauth", "key": "client-secret"},
-    }
-    assert vault["envFrom"] == [{"configMapRef": {"name": "vault-settings"}}]
 
 
 @pytest.mark.parametrize(
     ("values", "set_args", "error"),
     [
-        (
-            """
-            workers:
-              kubernetes:
-                agentVault:
-                  server:
-                    extraEnv:
-                      AGENT_VAULT_MASTER_PASSWORD: override
-            """,
-            AGENT_VAULT_SERVER,
-            "workers.kubernetes.agentVault.server.extraEnv cannot override chart-managed AGENT_VAULT_MASTER_PASSWORD",
-        ),
         (
             """
             providerCredentials:
@@ -533,7 +460,6 @@ def test_agent_vault_server_env_lists_accept_maps(tmp_path: Path) -> None:
         ),
     ],
     ids=[
-        "vault-managed-env",
         "provider-credential-env",
         "config-mount-overlap",
         "scalar-volume",

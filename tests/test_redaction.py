@@ -206,7 +206,7 @@ def test_url_redaction_preserves_text_before_a_credential_bearing_scheme(prefix:
 def test_printed_proxy_settings_hide_the_token_in_the_proxy_user_name() -> None:
     """Worker proxies carry their token as the proxy URL user name, so printing the proxy settings must not show it."""
     broker_token = _minted_broker_token()
-    vault_token = _fake_token("", 32)
+    proxy_token = _fake_token("", 32)
     broker_env = broker_execution_env(
         broker_url="http://broker:8768",
         token=broker_token,
@@ -216,14 +216,14 @@ def test_printed_proxy_settings_hide_the_token_in_the_proxy_user_name() -> None:
     )
     printed = [
         *(f"{key}={value}" for key, value in broker_env.items()),
-        f"HTTPS_PROXY=http://{vault_token}:vault@proxy:8080",
+        f"HTTPS_PROXY=http://{proxy_token}:password@proxy:8080",
         f"* Proxy auth using Basic with user '{broker_token}'",
     ]
 
     redacted = redact_sensitive_text("\n".join(printed))
 
     assert broker_token not in redacted
-    assert vault_token not in redacted
+    assert proxy_token not in redacted
     assert "HTTPS_PROXY=http://***@broker:8768" in redacted
 
 

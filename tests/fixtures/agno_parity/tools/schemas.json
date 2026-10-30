@@ -71,39 +71,6 @@
       }
     ]
   },
-  "agent_vault_access": {
-    "instructions": null,
-    "guidance": null,
-    "functions": [
-      {
-        "name": "request_vault_access",
-        "description": "Grant yourself access to manage this agent's Agent Vault secrets and return a link.\nResolves the vault that backs your worker identity for this agent,\ngrants your Agent Vault account admin access, and returns the UI link\nwhere you can add or update the secrets this agent's tools will use.\nFor shared-worker agents it returns the vault name and link without\ngranting anything; an operator manages access to shared vaults.",
-        "parameters": {
-          "type": "object",
-          "properties": {
-            "mindroom_output_path": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "default": null,
-              "description": "Optional MindRoom-managed workspace-relative path. If set, the full supported tool output is written to this file in your workspace and the tool returns only a compact receipt. Use this for large output you plan to inspect later with file, coding, python, or shell tools."
-            }
-          },
-          "required": []
-        },
-        "strict": false,
-        "requires_confirmation": false,
-        "external_execution": false,
-        "approval_type": null,
-        "stop_after_tool_call": false
-      }
-    ]
-  },
   "agentql": {
     "instructions": null,
     "guidance": null,

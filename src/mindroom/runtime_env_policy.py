@@ -8,7 +8,6 @@ from types import MappingProxyType
 from typing import cast
 
 __all__ = [
-    "AGENT_VAULT_ACCESS_ENV_BY_KEY",
     "AWS_ENV_BY_KEY",
     "AZURE_OPENAI_ENV_BY_KEY",
     "COMPUTER_ALLOWED_ORIGINS_ENV",
@@ -32,7 +31,6 @@ __all__ = [
     "VERTEXAI_CLAUDE_ENV_BY_KEY",
     "WORKER_BACKEND_ENV",
     "WORKER_COMPUTER_ENABLED_ENV",
-    "WORKER_EGRESS_PROXY_ENV_BY_KEY",
     "credentials_encryption_key_value",
     "is_isolated_worker_runtime_env_name",
     "is_public_worker_startup_env_name",
@@ -97,34 +95,6 @@ ENV_TEMPLATE_PLACEHOLDERS: Mapping[str, str] = MappingProxyType(
         AZURE_OPENAI_ENV_BY_KEY["api_key"]: "your-azure-openai-key-here",
         AZURE_OPENAI_ENV_BY_KEY["endpoint"]: "https://your-resource.openai.azure.com",
         VERTEXAI_CLAUDE_ENV_BY_KEY["project_id"]: "your-gcp-project-id",
-    },
-)
-AGENT_VAULT_ACCESS_ENV_BY_KEY: Mapping[str, str] = MappingProxyType(
-    {
-        "api_url": "MINDROOM_AGENT_VAULT_ACCESS_API_URL",
-        "admin_token": "MINDROOM_AGENT_VAULT_ACCESS_ADMIN_TOKEN",
-        # File alternative to admin_token, read per call: a Secret mounted as a
-        # volume refreshes in place, so token rotation by a re-run of the vault
-        # bootstrap takes effect without a process restart (env values would
-        # need one).
-        "admin_token_file": "MINDROOM_AGENT_VAULT_ACCESS_ADMIN_TOKEN_FILE",
-        "ui_base_url": "MINDROOM_AGENT_VAULT_ACCESS_UI_BASE_URL",
-        "email_domain": "MINDROOM_AGENT_VAULT_ACCESS_EMAIL_DOMAIN",
-        "vault_name_prefix": "MINDROOM_AGENT_VAULT_ACCESS_VAULT_NAME_PREFIX",
-        "owner_email": "MINDROOM_AGENT_VAULT_ACCESS_OWNER_EMAIL",
-    },
-)
-
-# Single source of truth for the per-worker egress proxy env contract. The
-# Kubernetes backend (writer) sets these on the worker pod; the sandbox runner
-# (reader, mindroom.constants.worker_proxy_execution_env) consumes them. Both
-# import from here so a rename cannot silently desync writer and reader.
-WORKER_EGRESS_PROXY_ENV_BY_KEY: Mapping[str, str] = MappingProxyType(
-    {
-        "proxy_url": "MINDROOM_WORKER_EGRESS_PROXY_URL",
-        "token_file": "MINDROOM_WORKER_EGRESS_PROXY_TOKEN_FILE",
-        "vault": "MINDROOM_WORKER_EGRESS_PROXY_VAULT",
-        "ca_file": "MINDROOM_WORKER_EGRESS_PROXY_CA_FILE",
     },
 )
 
@@ -199,14 +169,6 @@ KUBERNETES_WORKER_BACKEND_CONFIG_ENV_BY_KEY: Mapping[str, str] = MappingProxyTyp
         "enable_service_links": "MINDROOM_KUBERNETES_WORKER_ENABLE_SERVICE_LINKS",
         "auth_secret_name": "MINDROOM_KUBERNETES_WORKER_AUTH_SECRET_NAME",
         "seccomp_profile_json": "MINDROOM_KUBERNETES_WORKER_SECCOMP_PROFILE_JSON",
-        "agent_vault_enabled": "MINDROOM_KUBERNETES_AGENT_VAULT_ENABLED",
-        "agent_vault_vault_name_prefix": "MINDROOM_KUBERNETES_AGENT_VAULT_VAULT_NAME_PREFIX",
-        "agent_vault_cli_image": "MINDROOM_KUBERNETES_AGENT_VAULT_CLI_IMAGE",
-        "agent_vault_api_url": "MINDROOM_KUBERNETES_AGENT_VAULT_API_URL",
-        "agent_vault_proxy_url": "MINDROOM_KUBERNETES_AGENT_VAULT_PROXY_URL",
-        "agent_vault_owner_email": "MINDROOM_KUBERNETES_AGENT_VAULT_OWNER_EMAIL",
-        "agent_vault_bootstrap_secret_name": "MINDROOM_KUBERNETES_AGENT_VAULT_BOOTSTRAP_SECRET_NAME",
-        "agent_vault_worker_ca_configmap_name": "MINDROOM_KUBERNETES_AGENT_VAULT_WORKER_CA_CONFIGMAP_NAME",
     },
 )
 

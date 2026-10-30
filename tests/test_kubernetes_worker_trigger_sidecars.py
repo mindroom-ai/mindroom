@@ -75,7 +75,6 @@ def _worker_config(
         enable_service_links=False,
         auth_secret_name=None,
         reconcile_pod_templates=True,
-        agent_vault=None,
         extra_containers=extra_containers,
         extra_volumes=extra_volumes,
     )

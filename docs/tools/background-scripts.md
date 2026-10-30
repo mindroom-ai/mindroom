@@ -208,8 +208,6 @@ export MINDROOM_SCRIPT_GATEWAY_URL=http://mindroom-runtime-script-gateway.mindro
 export MINDROOM_SCRIPT_GATEWAY_ISOLATED=true
 ```
 
-With Agent Vault enabled, the script's own direct network requests do not receive Agent Vault credential injection, while its `MindRoomTools` calls run through normal tool routing and keep the configured Agent Vault boundary.
-
 ### What a script's worker can access
 
 - Each run gets its own dedicated worker and filesystem root, even when other runs belong to the same requester and agent.

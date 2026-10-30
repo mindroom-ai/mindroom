@@ -189,7 +189,7 @@ Only Agno's non-strict preparation is captured, because Agno makes functions str
 Each tool is built by `build_agent_toolkit` with its default configuration, for one agent of a config shaped like `mindroom config init` output; `tests/tool_system/agno_parity_support.py` holds that setup.
 File memory gives that agent a workspace, so output-file wrapping adds `mindroom_output_path`, and the agent delegates and uses the knowledge graph, so the `delegate` and `knowledge_graph` tools exist.
 `dynamic_tools` is built beside a deferred `calculator`, because tool search exists only with a deferred toolkit.
-Tools that need settings to construct get dummy credentials (`DUMMY_CREDENTIALS`, `DUMMY_ENV`), and SDK clients that contact their service during construction are replaced by mocks (`OFFLINE_CLIENTS`).
+Tools that need settings to construct get dummy credentials (`DUMMY_CREDENTIALS`), and SDK clients that contact their service during construction are replaced by mocks (`OFFLINE_CLIENTS`).
 The capture hides the host environment and refuses network connections, so the `update_awareness` instructions report an unknown latest release.
 
 Entries leave out policy that agent construction applies after a tool is built: approval capability (which pauses, hides, or job-gates functions per `tool_approval`, and marks `delegate`'s `run_subagent` and `continue_subagent` as external execution), persona and function filters, hook bridges, and the per-turn `background_after` parameter that tool jobs add to managed calls.

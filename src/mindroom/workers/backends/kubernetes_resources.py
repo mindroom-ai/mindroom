@@ -37,13 +37,11 @@ from mindroom.runtime_env_policy import (
     KUBERNETES_WORKER_BACKEND_CONFIG_ENV_BY_KEY,
     SANDBOX_RUNTIME_ENV_BY_KEY,
     VENDOR_TELEMETRY_ENV_VALUES,
-    WORKER_EGRESS_PROXY_ENV_BY_KEY,
     isolated_worker_runtime_env,
     worker_extra_env,
 )
 from mindroom.tool_system.worker_routing import (
     WORKER_SHARED_CREDENTIALS_DIRNAME,
-    descriptive_worker_id_for_key,
     worker_log_id,
     written_by_other_workers,
 )
@@ -67,10 +65,6 @@ from mindroom.workers.backends.dedicated_launch import (
 )
 from mindroom.workers.backends.kubernetes_config import resolve_kubeconfig_paths
 from mindroom.workers.backends.kubernetes_pod_names import (
-    AGENT_VAULT_BOOTSTRAP_VOLUME_NAME,
-    AGENT_VAULT_CA_VOLUME_NAME,
-    AGENT_VAULT_MINT_CONTAINER_NAME,
-    AGENT_VAULT_TOKEN_VOLUME_NAME,
     SANDBOX_RUNNER_CONTAINER_NAME,
     WORKER_STORAGE_VOLUME_NAME,
     WORKER_TMP_VOLUME_NAME,
@@ -83,7 +77,7 @@ if TYPE_CHECKING:
     from mindroom.config.main import Config
     from mindroom.workers.models import WorkerLaunchConfig, WorkerStatus
 
-    from .kubernetes_config import KubernetesAgentVaultConfig, KubernetesWorkerBackendConfig
+    from .kubernetes_config import KubernetesWorkerBackendConfig
 
 logger = get_logger(__name__)
 
@@ -122,59 +116,6 @@ LABEL_WORKER_ID = "mindroom.ai/worker-id"
 # tmpfs: kubelet measures usage periodically and evicts only this pod once it exceeds the
 # limit, instead of the node running out of ephemeral storage.
 _WORKER_TMP_SIZE_LIMIT = "1Gi"
-# Agent Vault per-worker egress: an init container in the worker pod mints the
-# worker's proxy-role token into a shared in-pod volume; the sandbox runner
-# composes http://<token>:<vault>@<proxy host> for python/shell. No separate bridge pod.
-_AGENT_VAULT_TOKEN_MOUNT_DIR = "/agent-vault"  # noqa: S105
-_AGENT_VAULT_TOKEN_FILE = "token"  # noqa: S105
-_AGENT_VAULT_TOKEN_PATH = f"{_AGENT_VAULT_TOKEN_MOUNT_DIR}/{_AGENT_VAULT_TOKEN_FILE}"
-_AGENT_VAULT_BOOTSTRAP_MOUNT_PATH = "/agent-vault-bootstrap"
-_AGENT_VAULT_OWNER_PASSWORD_SECRET_KEY = "AGENT_VAULT_OWNER_PASSWORD"  # noqa: S105
-_AGENT_VAULT_WORKER_CA_MOUNT_DIR = "/etc/agent-vault"
-_AGENT_VAULT_WORKER_CA_FILE = "ca.pem"
-_AGENT_VAULT_WORKER_CA_PATH = f"{_AGENT_VAULT_WORKER_CA_MOUNT_DIR}/{_AGENT_VAULT_WORKER_CA_FILE}"
-# Worker pod env consumed by the sandbox runner to compose python/shell proxy env.
-_WORKER_EGRESS_PROXY_URL_ENV = WORKER_EGRESS_PROXY_ENV_BY_KEY["proxy_url"]
-_WORKER_EGRESS_PROXY_TOKEN_FILE_ENV = WORKER_EGRESS_PROXY_ENV_BY_KEY["token_file"]
-_WORKER_EGRESS_PROXY_VAULT_ENV = WORKER_EGRESS_PROXY_ENV_BY_KEY["vault"]
-_WORKER_EGRESS_PROXY_CA_FILE_ENV = WORKER_EGRESS_PROXY_ENV_BY_KEY["ca_file"]
-# HOME is kept on the init container's own ephemeral filesystem (not the shared
-# token volume) so the owner CLI session never lands on a volume the
-# agent-executing container can read. Only the minted proxy token is written to
-# the shared volume.
-_AGENT_VAULT_MINT_SCRIPT = """\
-set -eu
-export HOME=/tmp/agent-vault-mint-home
-mkdir -p "$HOME"
-deadline=$(($(date +%s) + 180))
-until wget -q -O /dev/null "$AGENT_VAULT_API_URL/health"; do
-  if [ "$(date +%s)" -ge "$deadline" ]; then
-    echo "Agent Vault did not become ready at $AGENT_VAULT_API_URL" >&2
-    exit 1
-  fi
-  sleep 2
-done
-agent-vault auth login \\
-  --address "$AGENT_VAULT_API_URL" \\
-  --email "$AGENT_VAULT_OWNER_EMAIL" \\
-  --password-stdin < "{bootstrap_path}/{owner_password_key}" > /dev/null
-agent-vault vault create "$AGENT_VAULT_VAULT" > /dev/null 2>&1 || true
-agent-vault owner vault join "$AGENT_VAULT_VAULT" > /dev/null 2>&1 || true
-if ! agent-vault agent create "$AGENT_VAULT_VAULT" \\
-  --vault "$AGENT_VAULT_VAULT:proxy" \\
-  --token-only > "{token_path}"; then
-  agent-vault agent rotate "$AGENT_VAULT_VAULT" --token-only > "{token_path}"
-fi
-if ! agent-vault vault agent add "$AGENT_VAULT_VAULT" \\
-  --vault "$AGENT_VAULT_VAULT" \\
-  --role proxy > /dev/null; then
-  agent-vault vault agent set-role "$AGENT_VAULT_VAULT" \\
-    --vault "$AGENT_VAULT_VAULT" \\
-    --role proxy > /dev/null
-fi
-test -s "{token_path}"
-"""
-
 _CONTAINER_NAME = SANDBOX_RUNNER_CONTAINER_NAME
 _KUBERNETES_STORAGE_SUBPATH_PREFIX_ENV = KUBERNETES_WORKER_BACKEND_CONFIG_ENV_BY_KEY["storage_subpath_prefix"]
 _WORKER_TOKEN_PURPOSE = b"mindroom-kubernetes-worker-token-v1"
@@ -970,77 +911,6 @@ class KubernetesResourceManager:
             return
         self._delete_object(self._core.delete_namespaced_secret, secret_name)
 
-    def _agent_vault_vault_name(self, worker_key: str) -> str | None:
-        """Return the Agent Vault vault name backing one worker, or None when disabled."""
-        cfg = self.config.agent_vault
-        if cfg is None:
-            return None
-        return descriptive_worker_id_for_key(worker_key, prefix=cfg.vault_name_prefix)
-
-    def _agent_vault_init_container(self, *, worker_key: str, resources: dict[str, object]) -> dict[str, object]:
-        cfg: KubernetesAgentVaultConfig | None = self.config.agent_vault
-        vault = self._agent_vault_vault_name(worker_key)
-        if cfg is None or vault is None:
-            msg = "Agent Vault init container requested without Agent Vault config."
-            raise WorkerBackendError(msg)
-        script = _AGENT_VAULT_MINT_SCRIPT.format(
-            bootstrap_path=_AGENT_VAULT_BOOTSTRAP_MOUNT_PATH,
-            owner_password_key=_AGENT_VAULT_OWNER_PASSWORD_SECRET_KEY,
-            token_path=_AGENT_VAULT_TOKEN_PATH,
-        )
-        return {
-            "name": AGENT_VAULT_MINT_CONTAINER_NAME,
-            "image": cfg.cli_image,
-            "imagePullPolicy": self.config.image_pull_policy,
-            "command": ["sh", "-ec", script],
-            "env": [
-                {"name": "AGENT_VAULT_API_URL", "value": cfg.api_url},
-                {"name": "AGENT_VAULT_OWNER_EMAIL", "value": cfg.owner_email},
-                {"name": "AGENT_VAULT_VAULT", "value": vault},
-            ],
-            "volumeMounts": [
-                {"name": AGENT_VAULT_TOKEN_VOLUME_NAME, "mountPath": _AGENT_VAULT_TOKEN_MOUNT_DIR},
-                {
-                    "name": AGENT_VAULT_BOOTSTRAP_VOLUME_NAME,
-                    "mountPath": _AGENT_VAULT_BOOTSTRAP_MOUNT_PATH,
-                    "readOnly": True,
-                },
-            ],
-            # kubelet sets no pod-level memory limit unless every container, init containers
-            # included, declares one, and sandboxed runtimes such as gVisor enforce memory only
-            # at that pod level, so an init container without limits leaves the worker unbounded.
-            "resources": resources,
-            "securityContext": {"allowPrivilegeEscalation": False, "capabilities": {"drop": ["ALL"]}},
-        }
-
-    def _agent_vault_main_env(self, *, worker_key: str) -> list[dict[str, object]]:
-        cfg = self.config.agent_vault
-        if cfg is None:
-            return []
-        vault = self._agent_vault_vault_name(worker_key)
-        if vault is None:
-            msg = (
-                f"Agent Vault main env requested without a worker vault name for worker={worker_log_id(worker_key)!r}."
-            )
-            raise WorkerBackendError(msg)
-        env: list[dict[str, object]] = [
-            {"name": _WORKER_EGRESS_PROXY_URL_ENV, "value": cfg.proxy_url},
-            {"name": _WORKER_EGRESS_PROXY_TOKEN_FILE_ENV, "value": _AGENT_VAULT_TOKEN_PATH},
-            {"name": _WORKER_EGRESS_PROXY_VAULT_ENV, "value": vault},
-        ]
-        if cfg.worker_ca_configmap_name is not None:
-            env.append({"name": _WORKER_EGRESS_PROXY_CA_FILE_ENV, "value": _AGENT_VAULT_WORKER_CA_PATH})
-        return env
-
-    def _agent_vault_volumes(self) -> list[dict[str, object]]:
-        cfg = self.config.agent_vault
-        if cfg is None:
-            return []
-        return [
-            {"name": AGENT_VAULT_TOKEN_VOLUME_NAME, "emptyDir": {}},
-            {"name": AGENT_VAULT_BOOTSTRAP_VOLUME_NAME, "secret": {"secretName": cfg.bootstrap_secret_name}},
-        ]
-
     def _patch_secret_merge(self, secret_name: str, body: dict[str, object]) -> None:
         api_client = self._core.api_client
         api_client.call_api(
@@ -1335,8 +1205,6 @@ class KubernetesResourceManager:
             # limits, and some clusters (GKE Autopilot) inject a 1 GiB default when unset.
             resource_requests["ephemeral-storage"] = self.config.tmp_size_limit
             resource_limits["ephemeral-storage"] = self.config.tmp_size_limit
-        owns_state_scope = resolved_state_scope_worker_key == worker_key
-        include_agent_vault = self.config.agent_vault is not None and owns_state_scope
         worker_labels = _labels(extra_labels=self.config.extra_labels, worker_id=worker_id)
         template_annotations = dict(self.config.extra_annotations)
         template_annotations[ANNOTATION_WORKER_KEY] = worker_key
@@ -1371,7 +1239,6 @@ class KubernetesResourceManager:
                         worker_key=worker_key,
                         worker_id=worker_id,
                         state_subpath=state_subpath,
-                        include_agent_vault=include_agent_vault,
                     ),
                     "volumeMounts": self._volume_mounts(
                         worker_key,
@@ -1379,7 +1246,6 @@ class KubernetesResourceManager:
                         private_agent_names,
                         launch=launch,
                         state_scope_worker_key=state_scope_worker_key,
-                        include_agent_vault=include_agent_vault,
                     ),
                     "readinessProbe": {
                         "httpGet": {"path": "/healthz", "port": "api"},
@@ -1416,7 +1282,7 @@ class KubernetesResourceManager:
                     },
                 },
             ],
-            "volumes": self._volumes(include_agent_vault=include_agent_vault),
+            "volumes": self._volumes(),
         }
         containers = cast("list[dict[str, object]]", template_spec["containers"])
         _extend_unique_named_pod_entries(
@@ -1424,13 +1290,6 @@ class KubernetesResourceManager:
             self.config.extra_containers,
             field_name="extra_containers",
         )
-        if include_agent_vault:
-            template_spec["initContainers"] = [
-                self._agent_vault_init_container(
-                    worker_key=worker_key,
-                    resources={"requests": dict(resource_requests), "limits": dict(resource_limits)},
-                ),
-            ]
         if self.config.runtime_class_name is not None:
             template_spec["runtimeClassName"] = self.config.runtime_class_name
         # Added only when configured so the default template, and its hash, stay unchanged.
@@ -1519,7 +1378,6 @@ class KubernetesResourceManager:
         worker_key: str,
         worker_id: str,
         state_subpath: str,
-        include_agent_vault: bool,
     ) -> list[dict[str, object]]:
         layout = self._worker_layout(state_subpath)
         # No PATH or VIRTUAL_ENV here: the long-lived runner resolves uv, node,
@@ -1534,10 +1392,6 @@ class KubernetesResourceManager:
             {"name": "HOME", "value": layout.dedicated_root},
             self._worker_token_env(worker_id=worker_id),
         ]
-
-        if include_agent_vault:
-            env.extend(self._agent_vault_main_env(worker_key=worker_key))
-
         for name, value in sorted(worker_extra_env(self.config.extra_env).items()):
             env.append({"name": name, "value": value})
         for name, value in sorted(VENDOR_TELEMETRY_ENV_VALUES.items()):
@@ -1628,7 +1482,6 @@ class KubernetesResourceManager:
         *,
         launch: WorkerLaunchConfig,
         state_scope_worker_key: str | None = None,
-        include_agent_vault: bool,
     ) -> list[dict[str, object]]:
         agent_policies = launch.agent_policies
         mounts = self._scoped_storage_mounts(
@@ -1652,22 +1505,6 @@ class KubernetesResourceManager:
             )
         )
         mounts.append({"name": WORKER_TMP_VOLUME_NAME, "mountPath": "/tmp"})  # noqa: S108
-        if include_agent_vault:
-            mounts.append(
-                {
-                    "name": AGENT_VAULT_TOKEN_VOLUME_NAME,
-                    "mountPath": _AGENT_VAULT_TOKEN_MOUNT_DIR,
-                    "readOnly": True,
-                },
-            )
-        if include_agent_vault and self._agent_vault_worker_ca_configmap_name() is not None:
-            mounts.append(
-                {
-                    "name": AGENT_VAULT_CA_VOLUME_NAME,
-                    "mountPath": _AGENT_VAULT_WORKER_CA_MOUNT_DIR,
-                    "readOnly": True,
-                },
-            )
         mounts.extend(
             self._knowledge_storage_mounts(
                 worker_key,
@@ -1684,13 +1521,7 @@ class KubernetesResourceManager:
         )
         return mounts
 
-    def _agent_vault_worker_ca_configmap_name(self) -> str | None:
-        cfg = self.config.agent_vault
-        if cfg is None:
-            return None
-        return cfg.worker_ca_configmap_name
-
-    def _volumes(self, *, include_agent_vault: bool) -> list[dict[str, object]]:
+    def _volumes(self) -> list[dict[str, object]]:
         volumes: list[dict[str, object]] = [
             {
                 "name": WORKER_STORAGE_VOLUME_NAME,
@@ -1701,24 +1532,6 @@ class KubernetesResourceManager:
                 "emptyDir": {"sizeLimit": self.config.tmp_size_limit or _WORKER_TMP_SIZE_LIMIT},
             },
         ]
-        if include_agent_vault:
-            volumes.extend(self._agent_vault_volumes())
-        ca_configmap_name = self._agent_vault_worker_ca_configmap_name() if include_agent_vault else None
-        if ca_configmap_name is not None:
-            volumes.append(
-                {
-                    "name": AGENT_VAULT_CA_VOLUME_NAME,
-                    "configMap": {
-                        "name": ca_configmap_name,
-                        "items": [
-                            {
-                                "key": _AGENT_VAULT_WORKER_CA_FILE,
-                                "path": _AGENT_VAULT_WORKER_CA_FILE,
-                            },
-                        ],
-                    },
-                },
-            )
         _extend_unique_named_pod_entries(
             volumes,
             self.config.extra_volumes,

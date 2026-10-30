@@ -67,7 +67,7 @@ class CallEnvironment(_WireModel):
     ``set_names`` are the ``execution_env`` variables the call set itself, from plugin hooks or a CLI grant, and
     ``unset_names`` the variables its hooks removed; both apply over the worker's own environment and the
     workspace's ``.mindroom/worker-env.sh``, except where the worker's own composition changed the name (its
-    protected names, HOME, its CA bundle and its Agent Vault settings). ``path_prepend`` holds the directories the
+    protected names, HOME and its CA bundle). ``path_prepend`` holds the directories the
     call puts first on the command's ``PATH``.
     """
 

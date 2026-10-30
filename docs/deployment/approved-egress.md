@@ -139,67 +139,14 @@ approvedEgress:
     tag: v0.1.10
 ```
 
-With both enabled, the chart renders Squid's parent as the broker itself, so you do not set `approvedEgress.parentProxy`; the runtime chart's [Egress Broker](https://github.com/mindroom-ai/mindroom/blob/main/cluster/k8s/runtime/README.md#egress-broker) section has what it renders in this mode and the values it refuses.
-`approvedEgress.parentProxy.bypassDomains` still skips the broker for destinations such as signed URLs.
+With both enabled, the chart renders Squid's parent as the broker itself; the runtime chart's [Egress Broker](https://github.com/mindroom-ai/mindroom/blob/main/cluster/k8s/runtime/README.md#egress-broker) section has what it renders in this mode and the values it refuses.
+After the allowlist and grant check, requests carrying a broker token go on to the broker, which injects the credential, while requests without a token go directly to the internet.
 
-Squid denies a brokered host such as `api.github.com` before a grant, unless the host is in the static allowlist, so `curl https://api.github.com/user` fails.
-After `request_network_access` for that host is approved, the same request is meant to succeed with the credential injected.
-Chain mode has not yet been run end to end on a live cluster.
-
-## Agent Vault Chaining
-
-Agent Vault is the legacy credential-injecting path; the native [egress broker](#egress-broker-chaining) replaces it (see [Migrating from Agent Vault](egress-broker.md#migrating-from-agent-vault)), and the chart does not allow both at once.
-Use this section only for deployments that still run Agent Vault.
-When approved egress and [Agent Vault](sandbox-proxy.md) are used together, the chain must be:
-
-```text
-worker -> approved egress (Squid) -> Agent Vault MITM parent -> internet
-```
-
-Squid must be first because temporary grants are matched to the worker by its source IP.
-If traffic goes through Agent Vault first, Squid sees only the vault's IP, so temporary grants never match while static allowlist entries still work.
-
-Before enabling the Agent Vault server and bootstrap job, create the Secret named by `workers.kubernetes.agentVault.bootstrapSecretName` (default `agent-vault-bootstrap`) with both `AGENT_VAULT_MASTER_PASSWORD` and `AGENT_VAULT_OWNER_PASSWORD`.
-Create it in the worker namespace too when that differs from the release namespace.
-
-```yaml
-workers:
-  backend: kubernetes
-  sandbox:
-    proxyToken:
-      existingSecret: mindroom-sandbox-proxy
-      key: MINDROOM_SANDBOX_PROXY_TOKEN
-  kubernetes:
-    agentVault:
-      enabled: true
-      cliImage: infisical/agent-vault:<pinned>
-      ownerEmail: owner@example.test
-      server:
-        enabled: true
-      bootstrap:
-        enabled: true
-        kubectlImage: bitnami/kubectl:<pinned>
-      workerCaConfigMapName: agent-vault-ca
-
-approvedEgress:
-  enabled: true
-  image:
-    tag: v0.1.10
-  parentProxy:
-    enabled: true
-    host: agent-vault
-    port: 14322
-```
-
-With `approvedEgress.parentProxy.enabled: true`, workers send Agent Vault traffic to approved egress first.
-After the allowlist and grant check, requests carrying the worker's Agent Vault token go on to the vault, which still validates the token and injects credentials, while requests without a token go directly to the internet.
-
-Use `approvedEgress.parentProxy.bypassDomains` (default empty) for destinations such as signed URLs that must skip credential injection:
+Use `approvedEgress.parentProxy.bypassDomains` (default empty) for destinations such as signed URLs that must skip the broker:
 
 ```yaml
 approvedEgress:
   parentProxy:
-    enabled: true
     bypassDomains:
       - downloads.example.test
       - .objects.example.test
@@ -209,9 +156,9 @@ Entries match like allowlist entries: exact hostnames, or a leading dot for a do
 Use ASCII domain names without schemes, ports, paths, `*` wildcards, or whitespace.
 Bypassed destinations still need an allowlist match or grant, and changing `bypassDomains` restarts the proxy automatically.
 
-Do not point Agent Vault tool traffic directly at the chart-managed Agent Vault proxy while approved egress is enabled.
-The chart refuses that combination with `approvedEgress with Agent Vault must be squid-first: enable approvedEgress.parentProxy so Squid sees worker source IPs for dynamic grants, or set workers.kubernetes.agentVault.proxyUrl to an external/custom proxy URL explicitly`.
-An external or custom `workers.kubernetes.agentVault.proxyUrl` remains allowed.
+Squid denies a brokered host such as `api.github.com` before a grant, unless the host is in the static allowlist, so `curl https://api.github.com/user` fails.
+After `request_network_access` for that host is approved, the same request is meant to succeed with the credential injected.
+Chain mode has not yet been run end to end on a live cluster.
 
 ## Secure Minimum
 

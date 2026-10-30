@@ -113,9 +113,8 @@ def test_apply_runner_ca_bundle_sets_ca_vars_and_pops_pem(tmp_path: Path, test_c
         "EXISTING_VAR": "kept",
     }
 
-    result = apply_runner_ca_bundle(test_env, tmp_path)
+    apply_runner_ca_bundle(test_env, tmp_path)
 
-    assert result is True
     assert BROKER_CA_PEM_ENV not in test_env
     assert test_env["EXISTING_VAR"] == "kept"
 
@@ -142,11 +141,10 @@ def test_apply_runner_ca_bundle_sets_ca_vars_and_pops_pem(tmp_path: Path, test_c
 
 
 def test_apply_runner_ca_bundle_noop_without_pem(tmp_path: Path) -> None:
-    """apply_runner_ca_bundle returns False when BROKER_CA_PEM_ENV is absent."""
+    """apply_runner_ca_bundle leaves the env unchanged when BROKER_CA_PEM_ENV is absent."""
     test_env = {"OTHER_VAR": "value"}
-    result = apply_runner_ca_bundle(test_env, tmp_path)
+    apply_runner_ca_bundle(test_env, tmp_path)
 
-    assert result is False
     assert test_env == {"OTHER_VAR": "value"}
 
 

@@ -65,9 +65,6 @@ _FULL_KUBERNETES_ENV = {
     "MINDROOM_KUBERNETES_WORKER_ENABLE_SERVICE_LINKS": "true",
     "MINDROOM_KUBERNETES_WORKER_AUTH_SECRET_NAME": "worker-auth",
     "MINDROOM_KUBERNETES_WORKER_RECONCILE_POD_TEMPLATES": "true",
-    "MINDROOM_KUBERNETES_AGENT_VAULT_ENABLED": "true",
-    "MINDROOM_KUBERNETES_AGENT_VAULT_CLI_IMAGE": "example.test/agent-vault:1",
-    "MINDROOM_KUBERNETES_AGENT_VAULT_OWNER_EMAIL": "vault-owner@example.test",
     CREDENTIALS_ENCRYPTION_KEY_ENV: _TEST_ENCRYPTION_KEY,
 }
 _MINIMAL_DOCKER_ENV = {
@@ -165,7 +162,6 @@ def _legacy_kubernetes_backend_config_signature(
         str(config.enable_service_links),
         config.auth_secret_name or "",
         str(config.reconcile_pod_templates),
-        config.agent_vault.signature() if config.agent_vault is not None else "",
         credentials_encryption_key_marker,
         auth_token or "",
         str(storage_root.expanduser().resolve()),
@@ -476,7 +472,6 @@ def test_kubernetes_user_resources_change_cache_identity_only_when_configured(tm
         ("MINDROOM_KUBERNETES_WORKER_ENABLE_SERVICE_LINKS", "false"),
         ("MINDROOM_KUBERNETES_WORKER_AUTH_SECRET_NAME", "other-auth"),
         ("MINDROOM_KUBERNETES_WORKER_RECONCILE_POD_TEMPLATES", "false"),
-        ("MINDROOM_KUBERNETES_AGENT_VAULT_CLI_IMAGE", "example.test/agent-vault:2"),
         (CREDENTIALS_ENCRYPTION_KEY_ENV, base64.urlsafe_b64encode(b"8" * 32).decode("ascii")),
     ],
 )

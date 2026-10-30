@@ -13,7 +13,6 @@ from typing import TYPE_CHECKING, Any
 
 import pytest
 
-from mindroom import constants
 from mindroom.agent_cli.shell_contract import AgentCliShellEnv, bound_agent_cli_shell_env
 from mindroom.api import sandbox_runner
 from mindroom.config.main import Config
@@ -335,10 +334,6 @@ def _broker_sets_the_proxy(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(egress_service, "execution_env_for_worker", lambda *_args, **_kwargs: {"HTTPS_PROXY": "egress"})
 
 
-def _worker_sets_the_proxy(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(constants, "worker_proxy_execution_env", lambda _env: {"HTTPS_PROXY": "egress"})
-
-
 def _remove_the_proxy(ctx: ToolEnvironmentContext) -> None:
     ctx.unset_env("HTTPS_PROXY")
 
@@ -348,17 +343,15 @@ def _set_the_proxy(ctx: ToolEnvironmentContext) -> None:
 
 
 @pytest.mark.parametrize("change", [_remove_the_proxy, _set_the_proxy], ids=["removed", "set"])
-@pytest.mark.parametrize("egress", [_broker_sets_the_proxy, _worker_sets_the_proxy], ids=["broker", "worker-egress"])
 @pytest.mark.asyncio
 async def test_the_egress_proxy_a_worker_call_gets_wins_over_a_hook(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
-    egress: Callable[[pytest.MonkeyPatch], None],
     change: Callable[[ToolEnvironmentContext], None],
 ) -> None:
-    """MindRoom's egress proxy for the call, set by the primary's broker or by the worker, applies over a hook's change."""
+    """The egress broker's proxy for the call applies over a hook's change."""
     shell = _worker_tool(monkeypatch, tmp_path, "shell", "run_shell_command")
-    egress(monkeypatch)
+    _broker_sets_the_proxy(monkeypatch)
 
     @hook(EVENT_TOOL_ENVIRONMENT)
     async def proxy(ctx: ToolEnvironmentContext) -> None:

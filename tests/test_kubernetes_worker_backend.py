@@ -38,12 +38,10 @@ from mindroom.script_runs.models import script_worker_key_for_run
 from mindroom.shared_directories.store import add_shared_directory_member, create_shared_directory
 from mindroom.tool_system.worker_routing import (
     ToolExecutionIdentity,
-    descriptive_worker_id_for_key,
     private_instance_scope_root_path,
     resolve_unscoped_worker_key,
     resolve_worker_key,
     worker_dir_name,
-    worker_log_id,
     worker_root_path,
 )
 from mindroom.workers import progress as progress_module
@@ -57,7 +55,6 @@ from mindroom.workers.backends.kubernetes import (
     KubernetesWorkerBackendConfig,
     configure_kubernetes_worker_backend,
 )
-from mindroom.workers.backends.kubernetes_config import KubernetesAgentVaultConfig
 from mindroom.workers.backends.kubernetes_resources import (
     _ANNOTATION_PRIVATE_AGENT_NAMES,
     _ANNOTATION_RUNNER_TOKEN_HASH,
@@ -701,7 +698,6 @@ def _backend(
     reconcile_pod_templates: bool = True,
     seccomp_profile: _WorkerSeccompProfile | None = None,
     runtime_class_name: str | None = None,
-    agent_vault: KubernetesAgentVaultConfig | None = None,
     applied_config: Config | None = None,
     tmp_size_limit: str | None = None,
     user_resources: dict[str, dict[str, dict[str, str]]] | None = None,
@@ -740,7 +736,6 @@ def _backend(
         reconcile_pod_templates=reconcile_pod_templates,
         seccomp_profile=seccomp_profile,
         runtime_class_name=runtime_class_name,
-        agent_vault=agent_vault,
         tmp_size_limit=tmp_size_limit,
         user_resources=user_resources or {},
         image_pull_secrets=image_pull_secrets,
@@ -2012,7 +2007,6 @@ def test_kubernetes_worker_user_resources_apply_only_to_that_requesters_workers(
     )
     backend, apps_api, _core_api = _backend(
         runtime_paths=runtime_paths,
-        agent_vault=_test_agent_vault_config(),
         user_resources={"@alice:example.org": {"requests": {"memory": "1Gi"}, "limits": {"memory": "4Gi"}}},
     )
     alice_user_agent_key = "v1:tenant-123:user_agent:~@alice:example.org:code"
@@ -2040,9 +2034,6 @@ def test_kubernetes_worker_user_resources_apply_only_to_that_requesters_workers(
         deployment = next(b for b in apps_api.created_bodies if b["metadata"]["name"] == handle.worker_id)
         template_spec = deployment["spec"]["template"]["spec"]
         assert template_spec["containers"][0]["resources"] == expected, spec.worker_key
-        # The Agent Vault init container must keep matching the worker so the pod stays memory-bounded.
-        init_resources = [container["resources"] for container in template_spec.get("initContainers", [])]
-        assert init_resources == ([] if spec.state_scope_worker_key else [expected]), spec.worker_key
 
 
 def test_kubernetes_script_worker_uses_selected_bounded_resource_profile(tmp_path: Path) -> None:
@@ -2761,10 +2752,11 @@ router:
     assert apps_api.created_bodies == []
 
 
-def test_kubernetes_backend_rejects_knowledge_mount_containing_agent_vault_mount(tmp_path: Path) -> None:
-    """Knowledge mounts must not contain fixed runner mounts added later in the plan."""
+@pytest.mark.parametrize("knowledge_dir", ["tmp", "tmp/docs"])
+def test_kubernetes_backend_rejects_knowledge_mount_overlapping_tmp_mount(tmp_path: Path, knowledge_dir: str) -> None:
+    """Knowledge mounts must not overlap the fixed /tmp mount, which is not on the storage PVC."""
     storage_root = tmp_path / "storage"
-    knowledge_root = storage_root / "etc"
+    knowledge_root = storage_root / knowledge_dir
     knowledge_root.mkdir(parents=True)
     config_path = tmp_path / "config.yaml"
     config_path.write_text(
@@ -2789,51 +2781,7 @@ router:
         encoding="utf-8",
     )
     runtime_paths = resolve_primary_runtime_paths(config_path=config_path, storage_path=storage_root)
-    backend, apps_api, _core_api = _backend(
-        runtime_paths=runtime_paths,
-        storage_mount_path="/",
-        agent_vault=_test_agent_vault_config(worker_ca_configmap_name="agent-vault-ca"),
-    )
-
-    with pytest.raises(WorkerBackendError, match="knowledge mount overlaps existing mountPath"):
-        backend.ensure_worker(_spec(_TEST_SCOPED_WORKER_KEY_A), now=10.0)
-
-    assert apps_api.created_bodies == []
-
-
-def test_kubernetes_backend_rejects_knowledge_mount_inside_agent_vault_mount(tmp_path: Path) -> None:
-    """Only same-PVC storage ancestors may suppress a redundant knowledge mount."""
-    storage_root = tmp_path / "storage"
-    knowledge_root = storage_root / "agent-vault" / "docs"
-    knowledge_root.mkdir(parents=True)
-    config_path = tmp_path / "config.yaml"
-    config_path.write_text(
-        f"""
-agents:
-  code:
-    display_name: Code
-    role: Code test
-    model: default
-    worker_scope: shared
-    knowledge_bases: [unsafe_docs]
-knowledge_bases:
-  unsafe_docs:
-    path: {knowledge_root}
-models:
-  default:
-    provider: openai
-    id: gpt-6-astra
-router:
-  model: default
-""".lstrip(),
-        encoding="utf-8",
-    )
-    runtime_paths = resolve_primary_runtime_paths(config_path=config_path, storage_path=storage_root)
-    backend, apps_api, _core_api = _backend(
-        runtime_paths=runtime_paths,
-        storage_mount_path="/",
-        agent_vault=_test_agent_vault_config(),
-    )
+    backend, apps_api, _core_api = _backend(runtime_paths=runtime_paths, storage_mount_path="/")
 
     with pytest.raises(WorkerBackendError, match="knowledge mount overlaps existing mountPath"):
         backend.ensure_worker(_spec(_TEST_SCOPED_WORKER_KEY_A), now=10.0)
@@ -5560,220 +5508,6 @@ def test_kubernetes_backend_keeps_digest_when_worker_name_prefix_is_long() -> No
     assert first.worker_id != second.worker_id
     assert len(first.worker_id) <= 63
     assert len(second.worker_id) <= 63
-
-
-def _test_agent_vault_config(**overrides: object) -> KubernetesAgentVaultConfig:
-    values: dict[str, object] = {
-        "vault_name_prefix": "agent-vault",
-        "cli_image": "example.test/agent-vault:1",
-        "api_url": "http://agent-vault:14321",
-        "proxy_url": "http://agent-vault:14322",
-        "owner_email": "vault-owner@example.test",
-        "bootstrap_secret_name": "agent-vault-bootstrap",
-    }
-    values.update(overrides)
-    return KubernetesAgentVaultConfig(**values)  # type: ignore[arg-type]
-
-
-def test_kubernetes_backend_adds_agent_vault_mint_init_container(tmp_path: Path) -> None:
-    """An enabled worker pod gets a mint init container, token volume, and proxy env."""
-    runtime_paths = resolve_primary_runtime_paths(
-        config_path=Path("config.yaml"),
-        storage_path=tmp_path / "mindroom-test-storage",
-    )
-    backend, apps_api, _core_api = _backend(
-        runtime_paths=runtime_paths,
-        agent_vault=_test_agent_vault_config(worker_ca_configmap_name="agent-vault-ca"),
-    )
-    worker_key = _TEST_SCOPED_WORKER_KEY_A
-
-    handle = backend.ensure_worker(_spec(worker_key), now=10.0)
-
-    deployment = next(b for b in apps_api.created_bodies if b["metadata"]["name"] == handle.worker_id)
-    template_spec = deployment["spec"]["template"]["spec"]
-
-    init = template_spec["initContainers"]
-    assert len(init) == 1
-    mint = init[0]
-    assert mint["name"] == "agent-vault-mint-token"
-    assert mint["image"] == "example.test/agent-vault:1"
-    mint_script = mint["command"][2]
-    assert "agent-vault owner vault join" in mint_script
-    assert "agent-vault agent create" in mint_script
-    assert "agent-vault agent rotate" in mint_script
-    assert "agent-vault vault agent add" in mint_script
-    assert "agent-vault vault agent set-role" in mint_script
-    assert mint_script.index("agent-vault owner vault join") < mint_script.index("agent-vault agent create")
-    assert "--role proxy > /dev/null 2>&1" not in mint_script
-    assert ":proxy" in mint_script
-    # The owner CLI session must not land on the shared token volume, or the
-    # agent container (which mounts it) could read the owner credential.
-    assert "export HOME=/tmp/agent-vault-mint-home" in mint_script
-    assert 'export HOME="/agent-vault"' not in mint_script
-    mint_env = {e["name"]: e["value"] for e in mint["env"]}
-    # The vault name is the worker's own deterministic vault, owner email is configured.
-    assert mint_env["AGENT_VAULT_VAULT"] == descriptive_worker_id_for_key(worker_key, prefix="agent-vault")
-    assert mint_env["AGENT_VAULT_OWNER_EMAIL"] == "vault-owner@example.test"
-    # The owner password (bootstrap secret) is mounted only on the init container.
-    assert any(m["name"] == "agent-vault-bootstrap" for m in mint["volumeMounts"])
-
-    main = template_spec["containers"][0]
-    # Without its own limits the init container would leave the pod without a memory limit.
-    assert mint["resources"] == main["resources"]
-    assert "memory" in mint["resources"]["limits"]
-    assert all(m["name"] != "agent-vault-bootstrap" for m in main["volumeMounts"])
-    assert any(m["name"] == "agent-vault-token" and m.get("readOnly") for m in main["volumeMounts"])
-    main_env = {e["name"]: e.get("value") for e in main["env"]}
-    expected_vault = descriptive_worker_id_for_key(worker_key, prefix="agent-vault")
-    assert main_env["MINDROOM_WORKER_EGRESS_PROXY_URL"] == "http://agent-vault:14322"
-    assert main_env["MINDROOM_WORKER_EGRESS_PROXY_TOKEN_FILE"] == "/agent-vault/token"  # noqa: S105
-    assert main_env["MINDROOM_WORKER_EGRESS_PROXY_VAULT"] == expected_vault
-    assert main_env["MINDROOM_WORKER_EGRESS_PROXY_CA_FILE"] == "/etc/agent-vault/ca.pem"
-
-    volume_names = {v["name"] for v in template_spec["volumes"]}
-    assert {"agent-vault-token", "agent-vault-bootstrap", "agent-vault-ca"} <= volume_names
-
-    # No bridge/NetworkPolicy resources exist in this model.
-    assert backend._resources._agent_vault_vault_name(worker_key) == expected_vault
-
-
-def test_kubernetes_script_worker_omits_agent_vault_identity_material(tmp_path: Path) -> None:
-    """A run-scoped process pod must not mint an external identity that retirement cannot delete."""
-    runtime_paths = resolve_primary_runtime_paths(
-        config_path=Path("config.yaml"),
-        storage_path=tmp_path / "mindroom-test-storage",
-    )
-    backend, apps_api, _core_api = _backend(
-        runtime_paths=runtime_paths,
-        agent_vault=_test_agent_vault_config(worker_ca_configmap_name="agent-vault-ca"),
-    )
-    state_scope_worker_key = "v1:tenant-123:user_agent:@alice:example.org:mind"
-    worker_key = script_worker_key_for_run(state_scope_worker_key, f"script-{'a' * 32}")
-
-    handle = backend.ensure_worker(
-        _spec(
-            worker_key,
-            private_agent_names=frozenset({"mind"}),
-            state_scope_worker_key=state_scope_worker_key,
-        ),
-        now=10.0,
-    )
-
-    deployment = next(b for b in apps_api.created_bodies if b["metadata"]["name"] == handle.worker_id)
-    template_spec = deployment["spec"]["template"]["spec"]
-    main = template_spec["containers"][0]
-    main_env_names = {entry["name"] for entry in main["env"]}
-    main_mount_names = {mount["name"] for mount in main["volumeMounts"]}
-    volume_names = {volume["name"] for volume in template_spec["volumes"]}
-
-    assert "initContainers" not in template_spec
-    assert not any(name.startswith("MINDROOM_WORKER_EGRESS_PROXY_") for name in main_env_names)
-    assert not {"agent-vault-token", "agent-vault-bootstrap", "agent-vault-ca"} & main_mount_names
-    assert not {"agent-vault-token", "agent-vault-bootstrap", "agent-vault-ca"} & volume_names
-
-
-def test_agent_vault_main_env_error_names_worker_log_id_when_vault_name_missing(tmp_path: Path) -> None:
-    """The defensive vault-name guard should name the worker that failed by its log ID."""
-    runtime_paths = resolve_primary_runtime_paths(
-        config_path=Path("config.yaml"),
-        storage_path=tmp_path / "mindroom-test-storage",
-    )
-    backend, _apps_api, _core_api = _backend(
-        runtime_paths=runtime_paths,
-        agent_vault=_test_agent_vault_config(),
-    )
-    worker_key = _TEST_SCOPED_WORKER_KEY_A
-
-    def _missing_vault_name(_self: object, requested_worker_key: str) -> None:
-        assert requested_worker_key == worker_key
-
-    backend._resources._agent_vault_vault_name = MethodType(_missing_vault_name, backend._resources)
-
-    with pytest.raises(WorkerBackendError) as exc_info:
-        backend._resources._agent_vault_main_env(worker_key=worker_key)
-
-    assert f"worker={worker_log_id(worker_key)!r}" in str(exc_info.value)
-    assert worker_key not in str(exc_info.value)
-
-
-def test_kubernetes_backend_omits_agent_vault_when_disabled(tmp_path: Path) -> None:
-    """Without Agent Vault config, no init container, token volume, or proxy env."""
-    runtime_paths = resolve_primary_runtime_paths(
-        config_path=Path("config.yaml"),
-        storage_path=tmp_path / "mindroom-test-storage",
-    )
-    backend, apps_api, _core_api = _backend(runtime_paths=runtime_paths)
-
-    handle = backend.ensure_worker(_spec(_TEST_SCOPED_WORKER_KEY_A), now=10.0)
-
-    deployment = next(b for b in apps_api.created_bodies if b["metadata"]["name"] == handle.worker_id)
-    template_spec = deployment["spec"]["template"]["spec"]
-    assert "initContainers" not in template_spec
-    assert all(v["name"] != "agent-vault-token" for v in template_spec["volumes"])
-    main_env = {e["name"] for e in template_spec["containers"][0]["env"]}
-    assert "MINDROOM_WORKER_EGRESS_PROXY_URL" not in main_env
-    assert backend._resources._agent_vault_vault_name(_TEST_SCOPED_WORKER_KEY_A) is None
-
-
-def test_agent_vault_config_from_env_defaults_and_requirements() -> None:
-    """Agent Vault env parsing applies defaults and enforces required fields."""
-    assert KubernetesAgentVaultConfig.from_env({}) is None
-    with pytest.raises(WorkerBackendError, match="CLI_IMAGE"):
-        KubernetesAgentVaultConfig.from_env({"MINDROOM_KUBERNETES_AGENT_VAULT_ENABLED": "true"})
-    with pytest.raises(WorkerBackendError, match="OWNER_EMAIL"):
-        KubernetesAgentVaultConfig.from_env(
-            {
-                "MINDROOM_KUBERNETES_AGENT_VAULT_ENABLED": "true",
-                "MINDROOM_KUBERNETES_AGENT_VAULT_CLI_IMAGE": "example.test/agent-vault:1",
-            },
-        )
-    config = KubernetesAgentVaultConfig.from_env(
-        {
-            "MINDROOM_KUBERNETES_AGENT_VAULT_ENABLED": "true",
-            "MINDROOM_KUBERNETES_AGENT_VAULT_CLI_IMAGE": "example.test/agent-vault:1",
-            "MINDROOM_KUBERNETES_AGENT_VAULT_OWNER_EMAIL": "vault-owner@example.test",
-        },
-    )
-    assert config is not None
-    assert config.vault_name_prefix == "agent-vault"
-    assert config.api_url == "http://agent-vault:14321"
-    assert config.proxy_url == "http://agent-vault:14322"
-    assert config.bootstrap_secret_name == "agent-vault-bootstrap"  # noqa: S105
-
-
-def test_kubernetes_backend_config_from_runtime_reads_agent_vault(tmp_path: Path) -> None:
-    """Backend config picks Agent Vault settings up from runtime env files."""
-    config_dir = tmp_path / "cfg"
-    config_dir.mkdir(parents=True, exist_ok=True)
-    config_path = config_dir / "config.yaml"
-    config_path.write_text(
-        "models:\n  default:\n    provider: openai\n    id: gpt-6-astra\nagents: {}\nrouter:\n  model: default\n",
-        encoding="utf-8",
-    )
-    (config_dir / ".env").write_text(
-        (
-            "MINDROOM_WORKER_BACKEND=kubernetes\n"
-            "MINDROOM_KUBERNETES_WORKER_IMAGE=test-image\n"
-            "MINDROOM_KUBERNETES_WORKER_STORAGE_PVC_NAME=test-pvc\n"
-            "MINDROOM_KUBERNETES_AGENT_VAULT_ENABLED=true\n"
-            "MINDROOM_KUBERNETES_AGENT_VAULT_CLI_IMAGE=example.test/agent-vault:1\n"
-            "MINDROOM_KUBERNETES_AGENT_VAULT_OWNER_EMAIL=vault-owner@example.test\n"
-        ),
-        encoding="utf-8",
-    )
-    runtime_paths = resolve_primary_runtime_paths(config_path=config_path)
-
-    config = KubernetesWorkerBackendConfig.from_runtime(runtime_paths)
-
-    assert config.agent_vault is not None
-    assert config.agent_vault.cli_image == "example.test/agent-vault:1"
-    assert config.agent_vault.owner_email == "vault-owner@example.test"
-    signature = configure_kubernetes_worker_backend(
-        runtime_paths,
-        auth_token="token",  # noqa: S106
-        storage_root=runtime_paths.storage_root,
-    ).signature
-    assert config.agent_vault.signature() in signature
 
 
 def test_storage_preflight_reports_remaining_workers_in_paginated_inventory(monkeypatch: pytest.MonkeyPatch) -> None:

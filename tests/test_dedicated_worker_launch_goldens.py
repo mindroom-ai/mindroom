@@ -36,7 +36,6 @@ from tests.test_docker_worker_backend import _spec as _docker_spec
 from tests.test_kubernetes_worker_backend import (
     _answer_worker_health,
     _materialize_private_workspace,
-    _test_agent_vault_config,
 )
 from tests.test_kubernetes_worker_backend import _backend as _kubernetes_test_backend
 from tests.test_kubernetes_worker_backend import _spec as _kubernetes_spec
@@ -148,20 +147,18 @@ def _manifest_text(storage_root: Path, worker_key: str) -> object:
 
 _KUBERNETES_CASES = {
     "shared_with_knowledge": {"worker_key": _SHARED_KEY},
-    "shared_with_agent_vault": {"worker_key": _SHARED_KEY, "agent_vault": True},
     "user": {"worker_key": _USER_KEY},
     "user_agent_private": {"worker_key": _USER_AGENT_KEY, "private": True},
     "unscoped": {"worker_key": _UNSCOPED_KEY},
-    "script_scoped_with_agent_vault": {
+    "script_scoped": {
         "worker_key": _SCRIPT_KEY,
         "state_scope_worker_key": _USER_AGENT_KEY,
         "private": True,
-        "agent_vault": True,
     },
 }
 
 
-def _kubernetes_backend(tmp_path: Path, *, agent_vault: bool) -> KubernetesWorkerBackend:
+def _kubernetes_backend(tmp_path: Path) -> KubernetesWorkerBackend:
     config_path = _write_config(tmp_path)
     storage_root = tmp_path / "storage"
     applied_config = load_config(resolve_primary_runtime_paths(config_path=config_path, storage_path=storage_root))
@@ -174,7 +171,6 @@ def _kubernetes_backend(tmp_path: Path, *, agent_vault: bool) -> KubernetesWorke
         runtime_paths=runtime_paths,
         applied_config=applied_config,
         extra_env=dict(_EXTRA_ENV),
-        agent_vault=_test_agent_vault_config(worker_ca_configmap_name="agent-vault-ca") if agent_vault else None,
     )
     return backend
 
@@ -184,7 +180,7 @@ def test_kubernetes_worker_deployment_matches_its_golden(tmp_path: Path, case: s
     """The Deployment body, its readiness patch, and the startup manifest of each worker kind are unchanged."""
     options = _KUBERNETES_CASES[case]
     worker_key = str(options["worker_key"])
-    backend = _kubernetes_backend(tmp_path, agent_vault=bool(options.get("agent_vault")))
+    backend = _kubernetes_backend(tmp_path)
     apps_api = backend._resources.apps_api
     if options.get("private"):
         _materialize_private_workspace(backend.storage_root, _USER_AGENT_KEY, "@alice:example.org")
@@ -211,7 +207,7 @@ def test_kubernetes_worker_deployment_matches_its_golden(tmp_path: Path, case: s
 
 def test_kubernetes_worker_lifecycle_annotations_match_their_golden(tmp_path: Path) -> None:
     """Cold start, a warm re-check, a cached touch, and a stale-protocol replacement write the same annotations."""
-    backend = _kubernetes_backend(tmp_path, agent_vault=False)
+    backend = _kubernetes_backend(tmp_path)
     apps_api = backend._resources.apps_api
     spec = _kubernetes_spec(_SHARED_KEY)
 

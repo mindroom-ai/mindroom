@@ -37,7 +37,6 @@ from mindroom.tool_system.worker_routing import ResolvedWorkerTarget
 from tests.agent_tool_helpers import blocking_entrypoint, offered_agno_function
 
 SKIP_CONFIG_FIELD_VALIDATION = {
-    "agent_vault_access",
     "homeassistant",
     "gmail",
     "google_calendar",
