@@ -291,13 +291,19 @@ async def test_responses_rejecting_one_kind_retries_without_that_kind(
 
 @pytest.mark.asyncio
 async def test_responses_rejecting_an_extension_leaves_the_continued_response_chained(tmp_path: Path) -> None:
-    """Only the files the request sent are named, so the stored response's conversation stays as it was."""
+    """Only the files the request sent are named, so the stored response's conversation stays as it was.
+
+    The earlier turn's audio, which Responses never takes, keeps the plain note that turn was stored with.
+    """
     earlier = Message(
         role="user",
         content="Read these notes.",
+        audio=[Audio(id="att_old_clip", content=b"RIFF old", format="wav")],
         files=[File(id="att_old_notes", content=b"# notes one", filename="notes.md", mime_type="text/markdown")],
     )
-    stored = {"response_id": "resp_1", "mindroom_conversation_sha256": conversation_digest([earlier])}
+    # The stored response recorded the conversation as its request sent it, the audio replaced by the note.
+    sent_earlier = replace(earlier, audio=None, content=f"Read these notes.\n\n{_NOTE}")
+    stored = {"response_id": "resp_1", "mindroom_conversation_sha256": conversation_digest([sent_earlier])}
     reply = Message(role="assistant", content="Read.", provider_data=stored)
     notes = File(id="att_notes", content=b"# notes two", filename="notes.md", mime_type="text/markdown")
     message = Message(role="user", content=_PROMPT, images=[_PHOTO], files=[notes])
@@ -356,6 +362,20 @@ async def test_claude_rejecting_a_block_retries_without_the_media_of_its_kind(
 
     assert [part["type"] for part in user_parts(retry)] == kept
     assert prompt_text(retry) == _named(*named)
+
+
+@pytest.mark.asyncio
+async def test_claude_names_the_media_it_never_takes_beside_the_rejected_document(tmp_path: Path) -> None:
+    """The video Claude never takes is left out of the message as before, and the note that names the PDF names it too."""
+    trip = Video(id="att_trip", content=b"mp4 video", mime_type="video/mp4")
+    prompt = Message(role="user", content=_PROMPT, images=[_PHOTO], videos=[trip], files=[_REPORT])
+    rejection = _claude_rejected("messages.0.content.2.pdf.source.base64.data: The PDF specified was not valid.")
+
+    first, retry = await _sent_after("anthropic", tmp_path, rejection, prompt)
+
+    assert prompt_text(first) == f"{_PROMPT}\n\n{_NOTE}"
+    assert prompt_text(retry) == _named("video (att_trip)", "report.pdf (att_report)")
+    assert [part["type"] for part in user_parts(retry)] == ["text", "image"]
 
 
 # --- Gemini ---------------------------------------------------------------------------------------------------------

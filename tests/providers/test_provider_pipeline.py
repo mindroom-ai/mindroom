@@ -758,8 +758,8 @@ async def test_a_capability_gap_is_learned_once_the_media_free_backstop_answers(
 
 
 @pytest.mark.asyncio
-async def test_a_named_retry_leaves_the_media_the_route_omits_noted_once() -> None:
-    """Media the route never takes stays out of the named retry, under the one note that now names the rejected item."""
+async def test_a_named_retry_leaves_the_media_the_route_omits_out_and_names_it_too() -> None:
+    """Media the route never takes stays out of the named retry, and the one note names it beside the rejected item."""
     inner = _ScriptedProvider(
         [[_rejection("att_photo")], [_turn()]],
         capabilities=Capabilities(omitted_media=frozenset({"audio"})),
@@ -771,7 +771,8 @@ async def test_a_named_retry_leaves_the_media_the_route_omits_noted_once() -> No
     assert (sent.audio, sent.content) == (None, f"{_PROMPT}\n\n{FALLBACK_MARKER}\n{_FALLBACK_PROMPT}")
     retried = inner.requests[1].messages[1]
     assert (retried.audio, retried.images, retried.files) == (None, [_image("att_scan")], [_REPORT])
-    assert retried.content == f"{_PROMPT}\n\n{FALLBACK_MARKER}\nNot sent: image (att_photo).\n{_FALLBACK_PROMPT}"
+    named = "Not sent: image (att_photo), audio (att_clip)."
+    assert retried.content == f"{_PROMPT}\n\n{FALLBACK_MARKER}\n{named}\n{_FALLBACK_PROMPT}"
 
 
 @pytest.mark.asyncio
@@ -796,7 +797,8 @@ async def test_a_named_viewed_image_removes_every_image_and_marks_the_receipts()
     retried = inner.requests[1].messages
     assert json.loads(retried[1].content)["view_status"] == "unsupported"
     assert (retried[2].images, retried[2].files) == (None, [_REPORT])
-    assert retried[2].content == f"Viewed image follows.\n\n{FALLBACK_MARKER}\nNot sent: image.\n{_FALLBACK_PROMPT}"
+    named = "Not sent: image, image (att_photo)."
+    assert retried[2].content == f"Viewed image follows.\n\n{FALLBACK_MARKER}\n{named}\n{_FALLBACK_PROMPT}"
 
 
 @pytest.mark.asyncio

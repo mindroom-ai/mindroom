@@ -90,7 +90,7 @@ def _label(kind: MediaKind, item: _Media) -> str:
 
 
 def _note(named: Sequence[tuple[MediaKind, _Media]], fallback_prompt: str) -> str:
-    """Return the fallback note, which names the items removed by id when there are any."""
+    """Return the fallback note, which names the ``named`` items when there are any."""
     if not named:
         return f"{FALLBACK_MARKER}\n{fallback_prompt}"
     labels = ", ".join(_label(kind, item) for kind, item in named)
@@ -140,7 +140,10 @@ def _without_media(
 ) -> list[Message]:
     """Return copies without the removed kinds and the items whose id is in ``ids``.
 
-    Each message that lost media carries the fallback note, which names the items ``ids`` removed.
+    Each message that lost media carries the fallback note. The note of a message that lost an item in ``ids`` names
+    every item it lost, of a removed kind too, so its list never reads as complete while leaving one out. Any other
+    note names none, as the first request and the media-free retry send it, so a message that lost only removed
+    kinds reads as it did in the first request.
     """
     if not removed and not ids:
         return list(messages)
@@ -150,8 +153,8 @@ def _without_media(
         if "image" in removed:
             # Every ready view receipt, also one whose image follows its tool results as a separate message.
             content = _mark_view_unsupported(content)
-        named = [(kind, item) for kind, item in media_items(message) if item.id in ids]
-        lost_media = bool(removed & _media_kinds([message])) or bool(named)
+        lost = [(kind, item) for kind, item in media_items(message) if kind in removed or item.id in ids]
+        named = lost if any(item.id in ids for _kind, item in lost) else []
         stripped.append(
             replace(
                 message,
@@ -159,7 +162,7 @@ def _without_media(
                 images=_kept(message.images, "image", removed, ids),
                 files=_kept(message.files, "file", removed, ids),
                 videos=_kept(message.videos, "video", removed, ids),
-                content=_with_note(content, _note(named, fallback_prompt)) if lost_media else content,
+                content=_with_note(content, _note(named, fallback_prompt)) if lost else content,
             ),
         )
     return stripped
