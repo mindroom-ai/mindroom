@@ -284,7 +284,9 @@ def greeter_tools() -> type[GreeterTools]:
 
 Each `@tool` method, synchronous or `async`, is a function the model can call, and `@tool(name="...")` offers it under another name.
 The model reads its docstring as its description, its `Args:` entries as parameter descriptions, and its annotations as parameter types.
+A `@tool` method receives only the model's arguments, so MindRoom refuses one that takes `agent`, `team`, or `run_context`; read the call through `current_call()` instead.
 Annotations are read when an agent is built, so import the types they name at runtime, not only under `TYPE_CHECKING`.
+An agent leaves out a toolkit with a refused parameter or an annotation that does not resolve, and logs `Could not load tool for agent construction`.
 `instructions` is guidance on the toolkit as a whole: it appears in the system prompt of every agent that offers one of the toolkit's functions.
 A factory may also return an Agno toolkit class, for example to offer one of Agno's own toolkits.
 
