@@ -19,7 +19,11 @@ from mindroom.agent_loop.run import run_agent
 from mindroom.agent_loop.spec import RunContext
 from mindroom.agent_run_context import append_knowledge_availability_enrichment
 from mindroom.agents import agent_build_can_overlap_file_memory, create_agent
-from mindroom.ai_run_metadata import build_ai_run_metadata_content, build_prepared_history_metadata_content
+from mindroom.ai_run_metadata import (
+    build_ai_run_metadata_content,
+    build_prepared_history_metadata_content,
+    with_prior_usage,
+)
 from mindroom.approval.resume import resume_from_session
 from mindroom.budgets.pricing import model_prices
 from mindroom.config.resolution import memory_backend as agent_memory_backend
@@ -226,6 +230,8 @@ class _AgentAttempt:
     run_input: list[Message]
     run_id: str
     stream_state: _StreamingAttemptState
+    # The metadata its run's record stores: the turn's, with the usage of the attempts the turn spent before it.
+    metadata: dict[str, Any] | None
 
     def partial_snapshot(self) -> TurnPartialSnapshot:
         """Return what an interruption records of this attempt: its partial output, and its run id."""
@@ -468,6 +474,7 @@ def _begin_attempt(
         run_input=prepared_run.run_input(media),
         run_id=continuation.active_run_id or str(uuid4()),
         stream_state=stream_state,
+        metadata=with_prior_usage(run_context.metadata, run.prior_usage),
     )
     return storage, attempt
 
@@ -519,7 +526,7 @@ async def _start_agent_run(
     run = RunContext(
         run_id=attempt.run_id,
         user_id=run_context.turn.requester_id,
-        metadata=run_context.metadata,
+        metadata=attempt.metadata,
         session=storage.session,
         model_name=prepared.runtime_model_name,
     )
@@ -981,12 +988,14 @@ async def run_delegated_child_response(
     refresh_scheduler: KnowledgeRefreshScheduler | None,
     supports_native_tool_approval: bool = True,
     approval_config: Config | None = None,
+    prior_usage: Sequence[RunMetrics] = (),
 ) -> str:
     """Execute the normal response envelope for a prepared child owned by either adapter.
 
     The native delegation driver resumes a child that pauses for approval; the direct delegate tool, which cannot,
     passes ``supports_native_tool_approval=False``. A minimal child cannot pause for approval: approval-gated tools
-    stay hidden from it, so no adapter ever has to resume it natively.
+    stay hidden from it, so no adapter ever has to resume it natively. ``prior_usage`` is the usage of the child's turn
+    before this envelope: a resumed run a model switch continued, whose continuation this envelope runs.
     """
     identity = child_execution_identity(child)
     authorized_config = authorize_delegation(
@@ -1051,7 +1060,13 @@ async def run_delegated_child_response(
     with tool_runtime_context(child_context):
         result = await run_with_tool_execution_identity(
             identity,
-            operation=lambda: ai_response(turn, runtime_paths, active_config, sinks=sinks),
+            operation=lambda: ai_response(
+                turn,
+                runtime_paths,
+                active_config,
+                sinks=sinks,
+                resume=TurnResume(prior_usage=tuple(prior_usage)),
+            ),
         )
     return result.text
 
@@ -1098,11 +1113,13 @@ async def ai_response(
     config: Config,
     *,
     sinks: TurnSinks | None = None,
+    resume: TurnResume | None = None,
 ) -> TurnResult:
     """Generate one agent response and return how its turn ended, its text collected from the turn's stream.
 
     ``sinks`` says how the turn records itself; the result holds the attempt that ended the turn, so any run metadata
-    collector, completion, or failure sink ``sinks`` names is replaced.
+    collector, completion, or failure sink ``sinks`` names is replaced. ``resume`` is where the turn starts, as
+    ``stream_agent_response`` takes it.
     """
     completed: list[CompletedAttempt] = []
     failed: list[HandledAttempt] = []
@@ -1113,7 +1130,7 @@ async def ai_response(
         on_failed=failed.append,
     )
     body, _tool_trace = await collect_streamed_response_content(
-        stream_agent_response(ctx, runtime_paths, config, sinks=reporting),
+        stream_agent_response(ctx, runtime_paths, config, sinks=reporting, resume=resume),
         # Hidden tool calls still separate the text around them, as a streamed reply shows it.
         presentation=CollectedStreamPresentation(show_tool_calls=ctx.show_tool_calls, track_hidden_tools=True),
     )
@@ -1238,8 +1255,8 @@ async def stream_agent_response(  # noqa: C901, PLR0915
 
     ``ctx`` carries every input of the turn (``entity_label`` names the agent, ``session_id`` is required, and
     ``requester_id`` is the Matrix sender used for prompt attribution); ``sinks`` receives what the turn writes back,
-    and ``resume`` restores an attempt to settle, or counts the same-turn attempts spent, before the first fresh
-    request.
+    and ``resume`` restores an attempt to settle, or counts the same-turn attempts spent and their usage, before the
+    first fresh request.
     """
     ctx = _with_background_tool_jobs(ctx, config, runtime_paths)
     sinks = sinks or TurnSinks()

@@ -19,6 +19,7 @@ from mindroom.constants import (
     AI_RUN_METADATA_KEY,
     DEFAULT_COMPACTION_TIMEOUT_SECONDS,
     MATRIX_SOURCE_EVENT_PROMPTS_METADATA_KEY,
+    PRIOR_USAGE_RUN_METADATA_KEY,
 )
 from mindroom.history.storage import (
     read_scope_state,
@@ -512,6 +513,7 @@ def test_build_summary_input_normal_run_omits_non_summary_metadata() -> None:
         "started_at": "2026-07-17T20:00:00Z",
         "durable_outcome": {"state": "delivered"},
         "model_params": {"temperature": 0.2},
+        PRIOR_USAGE_RUN_METADATA_KEY: {"input_tokens": 100, "output_tokens": 5},
     }
     run.metadata = metadata.copy()
 
@@ -526,6 +528,7 @@ def test_build_summary_input_normal_run_omits_non_summary_metadata() -> None:
     assert included_runs == [run]
     assert run.metadata == metadata
     assert "model_params" not in summary_input
+    assert PRIOR_USAGE_RUN_METADATA_KEY not in summary_input
     assert AI_RUN_METADATA_KEY not in summary_input
     assert MATRIX_SOURCE_EVENT_PROMPTS_METADATA_KEY not in summary_input
     assert "$request" in summary_input

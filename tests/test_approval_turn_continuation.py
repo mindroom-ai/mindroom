@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING, Any
 import pytest
 
 from mindroom.ai import ai_response, stream_agent_response
+from mindroom.ai_run_metadata import prior_usage_of, with_prior_usage
 from mindroom.ai_runtime import queued_message_signal_context
 from mindroom.approval.execution import (
     AgentApprovalExecution,
@@ -19,7 +20,7 @@ from mindroom.approval.execution import (
 )
 from mindroom.approval.receipt_readers import approval_receipt_context
 from mindroom.config.main import Config
-from mindroom.constants import AI_RUN_METADATA_KEY, resolve_runtime_paths
+from mindroom.constants import AI_RUN_METADATA_KEY, PRIOR_USAGE_RUN_METADATA_KEY, resolve_runtime_paths
 from mindroom.custom_tools.calculator import CalculatorTools
 from mindroom.custom_tools.sleep import SleepTools
 from mindroom.event_journal import ApprovalCall, ApprovalDecision, approval_arguments_digest
@@ -28,6 +29,7 @@ from mindroom.llm.errors import ProviderError
 from mindroom.llm.events import RunFinished, TextDelta, ToolCompleted, ToolStarted
 from mindroom.llm.provider import ToolCallReady
 from mindroom.llm.runs import RunRecord, RunStatus, ToolExecution
+from mindroom.llm.usage import RunMetrics, TokenCounts
 from mindroom.message_target import MessageTarget
 from mindroom.reply_presentation import Presentation, Segment, decode_presentation, encode_presentation
 from mindroom.response_runner import _paused_with_committed_presentation
@@ -816,15 +818,23 @@ async def test_an_approved_run_that_answers_without_text_shows_its_earlier_text_
     assert threads["get_run"][0].startswith("conversation-store"), threads
 
 
-@pytest.mark.asyncio
-async def test_an_approved_run_s_reply_publishes_the_usage_of_the_resumed_run_and_the_attempt_after_it(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """A resumed run that a model switch continues publishes its own usage, both legs, with its continuation's.
+def test_a_run_s_record_keeps_only_the_usage_its_own_turn_spent_before_it() -> None:
+    """The record sums the turn's earlier attempts; a copy of another run's metadata never stands for them."""
+    first = RunMetrics(tokens=TokenCounts(input_tokens=100, output_tokens=5), time_to_first_token=1.5)
+    second = RunMetrics(tokens=TokenCounts(input_tokens=20, output_tokens=2), time_to_first_token=0.5)
+    copied = with_prior_usage({"requester_id": "@user:example.org"}, [first])
+    assert copied is not None
 
-    That is the usage the ledger counts: the resumed run replaced its paused record, and the continuation ran apart.
-    """
+    assert with_prior_usage(None, ()) is None
+    assert with_prior_usage({"requester_id": "@user:example.org"}, ()) == {"requester_id": "@user:example.org"}
+    assert with_prior_usage(copied, ()) == {"requester_id": "@user:example.org"}
+    [spent] = prior_usage_of(RunRecord(run_id="run", metadata=with_prior_usage(copied, [first, second])))
+    assert (spent.tokens.input_tokens, spent.tokens.output_tokens, spent.time_to_first_token) == (120, 7, 1.5)
+    assert prior_usage_of(RunRecord(run_id="run", metadata={"requester_id": "@user:example.org"})) == ()
+
+
+def _usage_config(tmp_path: Path) -> tuple[RuntimePaths, Config]:
+    """Return where ``general`` runs and its config: it adds, each addition gated by an approval, and switches models."""
     paths = resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path / "storage")
     config = bind_runtime_paths(
         Config.model_validate(
@@ -838,19 +848,34 @@ async def test_an_approved_run_s_reply_publishes_the_usage_of_the_resumed_run_an
         ),
         paths,
     )
-    identity = _identity("usage-session")
-    switch = tool_call("switch_thread_model", "continue", model_name="default", when="next-turn")
-    model = _CheckedModel(
-        [
-            calls(tool_call("add", "approved", a=2, b=3), metrics=usage(10, 1)),
-            calls(switch, metrics=usage(20, 2)),
-            answer("Done.", usage(30, 3)),
-        ],
-    )
-    install_model_providers(monkeypatch, {"default": model})
-    paused = await _paused_turn(config, paths, identity, "Add them.", show_tool_calls=False)
+    return paths, config
+
+
+def _add(call_id: str, input_tokens: int, output_tokens: int) -> list[ScriptStep]:
+    """Return a turn that adds two and three, which waits for an approval."""
+    return calls(tool_call("add", call_id, a=2, b=3), metrics=usage(input_tokens, output_tokens))
+
+
+def _switch(call_id: str, input_tokens: int, output_tokens: int) -> list[ScriptStep]:
+    """Return a next-turn switch to the current model, which continues the same turn on it."""
+    switch = tool_call("switch_thread_model", call_id, model_name="default", when="next-turn")
+    return calls(switch, metrics=usage(input_tokens, output_tokens))
+
+
+async def _approve_add(
+    tmp_path: Path,
+    config: Config,
+    paths: RuntimePaths,
+    identity: ToolExecutionIdentity,
+    paused: PausedAttempt,
+    call_id: str,
+) -> CompletedApprovalRun | PausedAttempt:
+    """Approve ``paused``'s addition ``call_id`` through a response runner built after the pause, as after a restart.
+
+    The runner reads the paused run from storage alone.
+    """
     continuation = approval_continuation(
-        approval_id="approval-usage",
+        approval_id=f"approval-{call_id}",
         run_id=paused.run_id,
         session_id=identity.session_id,
         room_id=identity.room_id,
@@ -859,7 +884,7 @@ async def test_an_approved_run_s_reply_publishes_the_usage_of_the_resumed_run_an
         state="claimed",
         calls=(
             ApprovalCall(
-                "approved",
+                call_id,
                 "add",
                 "general",
                 2**62,
@@ -870,10 +895,9 @@ async def test_an_approved_run_s_reply_publishes_the_usage_of_the_resumed_run_an
         ),
         request_body="Add them.",
         show_tool_calls=False,
+        continuation_count=paused.continuation_count,
     )
-    execution = _approval_execution(tmp_path, config, paths)
-
-    result = await execution.continue_run(
+    return await _approval_execution(tmp_path / call_id, config, paths).continue_run(
         continuation,
         paused_answer=PausedAnswer(text=paused.response_text, tool_trace=paused.tool_trace),
         tool_dispatch=ToolDispatchContext(execution_identity=identity),
@@ -882,12 +906,132 @@ async def test_an_approved_run_s_reply_publishes_the_usage_of_the_resumed_run_an
         progress=None,
     )
 
+
+def _published_tokens(result: CompletedApprovalRun | PausedAttempt) -> tuple[int, int]:
+    """Return the input and output tokens the completed resume's reply publishes."""
     assert isinstance(result, CompletedApprovalRun)
     assert result.response_text.endswith("Done.")
-    storage = create_session_storage("general", config, paths, execution_identity=identity)
-    assert counted_usage(storage, identity.session_id) == [(30, 3), (30, 3)]
     published = result.metadata_content[AI_RUN_METADATA_KEY]["usage"]
-    assert (published["input_tokens"], published["output_tokens"]) == counted_total(storage, identity.session_id)
+    return published["input_tokens"], published["output_tokens"]
+
+
+@pytest.mark.asyncio
+async def test_an_approved_run_s_reply_publishes_the_usage_of_the_resumed_run_and_the_attempt_after_it(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A resumed run that a model switch continues publishes its own usage, both legs, with its continuation's.
+
+    That is the usage the ledger counts: the resumed run replaced its paused record, and the continuation ran apart.
+    A run its turn ran first stores no earlier usage.
+    """
+    paths, config = _usage_config(tmp_path)
+    identity = _identity("usage-session")
+    model = _CheckedModel([_add("approved", 10, 1), _switch("continue", 20, 2), answer("Done.", usage(30, 3))])
+    install_model_providers(monkeypatch, {"default": model})
+    paused = await _paused_turn(config, paths, identity, "Add them.", show_tool_calls=False)
+    storage = create_session_storage("general", config, paths, execution_identity=identity)
+    stored = storage.get_run(paused.run_id)
+    assert stored is not None
+    assert PRIOR_USAGE_RUN_METADATA_KEY not in (stored.metadata or {})
+
+    result = await _approve_add(tmp_path, config, paths, identity, paused, "approved")
+
+    assert counted_usage(storage, identity.session_id) == [(30, 3), (30, 3)]
+    assert _published_tokens(result) == counted_total(storage, identity.session_id)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("before", ["empty_retry", "model_switch"])
+@pytest.mark.parametrize("after", ["answered", "continued"])
+async def test_an_approved_reply_publishes_the_usage_of_the_attempt_its_turn_spent_before_the_pause(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    before: str,
+    after: str,
+) -> None:
+    """An empty answer the turn retried, or a run a model switch continued, before the pause counts in the reply.
+
+    The approval resumes on a runner built after the pause, as after a restart, and the reply publishes what the
+    ledger counts: the earlier attempt, the resumed run's both legs, and any attempt a model switch continued it with.
+    """
+    paths, config = _usage_config(tmp_path)
+    identity = _identity("usage-session")
+    spent = answer("", usage(100, 5)) if before == "empty_retry" else _switch("spent", 100, 5)
+    resumed = [answer("Done.", usage(30, 3))]
+    if after == "continued":
+        resumed = [_switch("continue", 20, 2), *resumed]
+    install_model_providers(monkeypatch, {"default": _CheckedModel([spent, _add("approved", 10, 1), *resumed])})
+    paused = await _paused_turn(config, paths, identity, "Add them.", show_tool_calls=False)
+
+    result = await _approve_add(tmp_path, config, paths, identity, paused, "approved")
+
+    storage = create_session_storage("general", config, paths, execution_identity=identity)
+    assert counted_total(storage, identity.session_id) == ((140, 9) if after == "answered" else (160, 11))
+    assert _published_tokens(result) == counted_total(storage, identity.session_id)
+
+
+@pytest.mark.asyncio
+async def test_a_reply_paused_again_after_its_resume_publishes_every_attempt_of_its_turn(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A model switch before the first pause and one after its resume, then a second pause: every attempt counts.
+
+    The attempt that paused the second time started after the resumed run, so its record carries both earlier
+    attempts' usage to the second resume.
+    """
+    paths, config = _usage_config(tmp_path)
+    identity = _identity("usage-session")
+    model = _CheckedModel(
+        [
+            _switch("spent", 100, 5),
+            _add("first", 10, 1),
+            _switch("continue", 20, 2),
+            _add("second", 5, 1),
+            answer("Done.", usage(30, 3)),
+        ],
+    )
+    install_model_providers(monkeypatch, {"default": model})
+    paused = await _paused_turn(config, paths, identity, "Add them.", show_tool_calls=False)
+    again = await _approve_add(tmp_path, config, paths, identity, paused, "first")
+    assert isinstance(again, PausedAttempt)
+
+    result = await _approve_add(tmp_path, config, paths, identity, again, "second")
+
+    storage = create_session_storage("general", config, paths, execution_identity=identity)
+    assert counted_total(storage, identity.session_id) == (165, 12)
+    assert _published_tokens(result) == counted_total(storage, identity.session_id)
+
+
+@pytest.mark.asyncio
+async def test_a_pause_stored_without_its_turn_s_earlier_usage_resumes_publishing_the_paused_run_s(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A paused run an earlier release stored, without its turn's earlier usage, resumes as that release resumed it.
+
+    The reply publishes the resumed run's both legs; the ledger still counts the empty answer retried before it.
+    """
+    paths, config = _usage_config(tmp_path)
+    identity = _identity("usage-session")
+    model = _CheckedModel([answer("", usage(100, 5)), _add("approved", 10, 1), answer("Done.", usage(30, 3))])
+    install_model_providers(monkeypatch, {"default": model})
+    paused = await _paused_turn(config, paths, identity, "Add them.", show_tool_calls=False)
+    storage = create_session_storage("general", config, paths, execution_identity=identity)
+    session = storage.load_session(identity.session_id)
+    stored = storage.get_run(paused.run_id)
+    assert session is not None
+    assert stored is not None
+    assert stored.metadata is not None
+    assert PRIOR_USAGE_RUN_METADATA_KEY in stored.metadata
+    stored.metadata = {key: value for key, value in stored.metadata.items() if key != PRIOR_USAGE_RUN_METADATA_KEY}
+    assert storage.save_run(session, stored, record_usage=False) == "written"
+
+    result = await _approve_add(tmp_path, config, paths, identity, paused, "approved")
+
+    assert counted_total(storage, identity.session_id) == (140, 9)
+    assert _published_tokens(result) == (40, 4)
 
 
 @pytest.mark.asyncio

@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING
 from mindroom.constants import (
     AI_RUN_METADATA_KEY,
     MATRIX_SOURCE_EVENT_PROMPTS_METADATA_KEY,
+    PRIOR_USAGE_RUN_METADATA_KEY,
 )
 from mindroom.history.message_content import media_payload_snapshot, message_media_entries, render_message_content
 from mindroom.history.request_messages import filter_tool_calls, replayable_messages
@@ -37,6 +38,7 @@ _SUMMARY_METADATA_OMIT_KEYS = frozenset(
         # The run's own messages already carry its prompts.
         MATRIX_SOURCE_EVENT_PROMPTS_METADATA_KEY,
         COMPACTED_REQUESTS_METADATA_KEY,
+        PRIOR_USAGE_RUN_METADATA_KEY,
         "model_params",
     },
 )

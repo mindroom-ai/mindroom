@@ -17,7 +17,7 @@ from typing import TYPE_CHECKING, Any
 from uuid import uuid4
 
 from mindroom.agent_run_context import append_knowledge_availability_enrichment
-from mindroom.ai_run_metadata import build_prepared_history_metadata_content
+from mindroom.ai_run_metadata import build_prepared_history_metadata_content, with_prior_usage
 from mindroom.config.resolution import entity_timezone
 from mindroom.constants import MATRIX_SEEN_EVENT_IDS_METADATA_KEY, is_silent_schedule_no_report_response
 from mindroom.error_handling import get_user_friendly_error_message
@@ -536,7 +536,8 @@ class _TeamTurn:
                 run_input,
                 run_id=attempt.run_id,
                 user_id=self.ctx.requester_id,
-                metadata=prepared.run_metadata,
+                # The team run's record keeps the usage of the attempts the turn spent before it.
+                metadata=with_prior_usage(prepared.run_metadata, run.prior_usage),
                 records=attempt.records,
             )
         events = drive_team_delegations(

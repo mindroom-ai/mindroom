@@ -1387,6 +1387,7 @@ depends_on = [
     "mindroom.session_storage.agent_storage",
     "mindroom.agents",
     "mindroom.ai",
+    "mindroom.ai_run_metadata",
     "mindroom.ai_runtime",
     "mindroom.approval.receipt_readers",
     "mindroom.approval.resume",
@@ -8199,6 +8200,7 @@ visibility = ["mindroom.orchestrator"]
 path = "mindroom.delegation.execution"
 depends_on = [
     "mindroom.agent_loop.build",
+    "mindroom.ai_run_metadata",
     "mindroom.delegation.job_approvals",
     "mindroom.tool_jobs.consumption",
     "mindroom.cancellation",
@@ -8568,6 +8570,7 @@ depends_on = [
 [[modules]]
 path = "mindroom.delegation.lifecycle"
 depends_on = [
+    "mindroom.ai_run_metadata",
     "mindroom.delegation.personas",
     "mindroom.delegation.audit",
     "mindroom.delegation.records",
