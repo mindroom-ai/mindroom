@@ -56,6 +56,7 @@ from tests.conftest import (
     runtime_paths_for,
     test_runtime_paths,
 )
+from tests.journal_helpers import membership_position
 from tests.journal_membership_helpers import admit_room_membership
 
 if TYPE_CHECKING:
@@ -115,7 +116,6 @@ def _router_bot_with_orchestrator(tmp_path: Path) -> tuple[AgentBot, ReadyRuntim
 
 _CONSUMER_GENERATION = UUID("20000000-0000-4000-8000-000000000001")
 _STREAM_ID = UUID("20000000-0000-4000-8000-000000000002")
-_DEVICE_ID = "READY-HOOK-DEVICE"
 _FRESH_SEMANTIC_FACTS = AdmissionFacts(receipt_new=True, semantic_event_new=True)
 _FRESH_RECEIPT_FACTS = AdmissionFacts(receipt_new=True, semantic_event_new=False)
 _REPLAY_FACTS = AdmissionFacts(receipt_new=False, semantic_event_new=False)
@@ -125,15 +125,11 @@ def _validated_timeline_admission(
     bot: AgentBot,
     room_id: str,
     event: dict[str, object],
-    *,
-    transport: str = "classic",
-    sequence: int = 0,
 ) -> IngestionRecordAdmission:
-    del transport
     return validate_ingestion_batch(
         SyncBatch(
             _STREAM_ID,
-            sequence + 1,
+            1,
             (SyncRecord(RecordKind.TIMELINE, room_id, event, provenance=TimelineEventProvenance.LIVE),),
         ),
         account_id=bot.matrix_id.full_id,
@@ -147,16 +143,12 @@ def _validated_reported_membership_admission(
     previous_membership: str | None,
     membership: str,
     previous_epoch: int,
-    transport: str = "classic",
-    sequence: int = 0,
-    event_id: str | None = None,
 ) -> IngestionRecordAdmission:
-    del transport, event_id
     epoch = previous_epoch + int(previous_membership == "join" and membership != "join")
     return validate_ingestion_batch(
         SyncBatch(
             _STREAM_ID,
-            sequence + 1,
+            1,
             (
                 SyncRecord(
                     RecordKind.ROOM_LIFECYCLE,
@@ -376,10 +368,8 @@ def test_router_limited_sync_invalidates_before_timeline_admission(tmp_path: Pat
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("transport", ["classic"])
 async def test_router_departure_revokes_grant_before_timeline_admission(
     tmp_path: Path,
-    transport: str,
 ) -> None:
     """A final router departure must close its grant before sibling timeline events are admitted."""
     room_id = "!grant:localhost"
@@ -407,7 +397,6 @@ async def test_router_departure_revokes_grant_before_timeline_admission(
         previous_membership="join",
         membership="leave",
         previous_epoch=0,
-        transport=transport,
     )
     second_departure = _validated_reported_membership_admission(
         bot,
@@ -415,8 +404,6 @@ async def test_router_departure_revokes_grant_before_timeline_admission(
         previous_membership="join",
         membership="leave",
         previous_epoch=0,
-        transport=transport,
-        sequence=1,
     )
 
     bot._before_ingestion_admission(departure, TimelineEventProvenance.LIVE)
@@ -506,10 +493,8 @@ async def test_router_invalidation_during_post_refresh_effects_revokes_and_skips
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("transport", ["classic"])
 async def test_router_authoritative_departure_revokes_grant_before_membership_fence(
     tmp_path: Path,
-    transport: str,
 ) -> None:
     """Classic and sliding leave sections must synchronously fail the grant room closed."""
     room_id = "!grant:localhost"
@@ -538,7 +523,6 @@ async def test_router_authoritative_departure_revokes_grant_before_membership_fe
         previous_membership="join",
         membership="leave",
         previous_epoch=0,
-        transport=transport,
     )
     bot._before_ingestion_admission(admission, TimelineEventProvenance.LIVE)
 
@@ -587,7 +571,6 @@ async def test_router_leave_then_rejoin_in_one_sync_requires_grant_refresh(tmp_p
         previous_membership="join",
         membership="leave",
         previous_epoch=0,
-        event_id="$leave",
     )
     rejoin = _validated_reported_membership_admission(
         bot,
@@ -595,8 +578,6 @@ async def test_router_leave_then_rejoin_in_one_sync_requires_grant_refresh(tmp_p
         previous_membership="leave",
         membership="join",
         previous_epoch=1,
-        sequence=1,
-        event_id="$rejoin",
     )
 
     bot._before_ingestion_admission(departure, TimelineEventProvenance.LIVE)
@@ -609,10 +590,8 @@ async def test_router_leave_then_rejoin_in_one_sync_requires_grant_refresh(tmp_p
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("transport", ["classic"])
 async def test_router_final_invite_revokes_grant_before_timeline_admission(
     tmp_path: Path,
-    transport: str,
 ) -> None:
     """A final invite means the router can no longer vouch for the old roster."""
     room_id = "!grant:localhost"
@@ -639,7 +618,6 @@ async def test_router_final_invite_revokes_grant_before_timeline_admission(
         previous_membership="join",
         membership="invite",
         previous_epoch=0,
-        transport=transport,
     )
 
     bot._before_ingestion_admission(admission, TimelineEventProvenance.LIVE)
@@ -650,11 +628,9 @@ async def test_router_final_invite_revokes_grant_before_timeline_admission(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("transport", ["classic"])
 @pytest.mark.parametrize("membership", ["leave", "ban", "invite"])
 async def test_grant_user_revocation_waits_for_durable_live_admission(
     tmp_path: Path,
-    transport: str,
     membership: str,
 ) -> None:
     """An ordinary revocation takes effect at its accepted durable LIVE event."""
@@ -686,8 +662,6 @@ async def test_grant_user_revocation_waits_for_durable_live_admission(
         bot,
         grant_room_id,
         member_event,
-        transport=transport,
-        sequence=0,
     )
 
     bot._before_ingestion_admission(admission, TimelineEventProvenance.LIVE)
@@ -710,10 +684,8 @@ async def test_grant_user_revocation_waits_for_durable_live_admission(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("transport", ["classic"])
 async def test_grant_user_join_waits_for_durable_timeline_admission(
     tmp_path: Path,
-    transport: str,
 ) -> None:
     """The pre-admission scan must never grant access from a positive transition."""
     room_id = "!grant:localhost"
@@ -736,8 +708,6 @@ async def test_grant_user_join_waits_for_durable_timeline_admission(
         bot,
         room_id,
         member_event,
-        transport=transport,
-        sequence=0,
     )
 
     bot._before_ingestion_admission(admission, TimelineEventProvenance.LIVE)
@@ -777,8 +747,6 @@ async def test_live_membership_replay_retries_an_unfinished_reconciliation(tmp_p
         bot,
         room_id,
         _departure_member_event("$join", user_id=sender_id, membership="join", ts=1),
-        transport="classic",
-        sequence=0,
     )
     orchestrator.revoke_reply_authorized_calls = AsyncMock(
         side_effect=[RuntimeError("reconciliation interrupted"), None],
@@ -821,8 +789,6 @@ async def test_recovered_membership_does_not_grant_reply_access(tmp_path: Path) 
         bot,
         room_id,
         _departure_member_event("$join", user_id=sender_id, membership="join", ts=1),
-        transport="classic",
-        sequence=0,
     )
 
     await bot._after_ingestion_admission(
@@ -853,8 +819,6 @@ async def test_room_activity_tracks_fresh_receipts_and_ignores_unsettled_replay(
             "sender": "@alice:localhost",
             "type": "m.room.message",
         },
-        transport="classic",
-        sequence=0,
     )
 
     await bot._after_ingestion_admission(
@@ -872,11 +836,9 @@ async def test_room_activity_tracks_fresh_receipts_and_ignores_unsettled_replay(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("transport", ["classic"])
 @pytest.mark.parametrize("membership", ["leave", "ban"])
 async def test_grant_user_join_then_revoke_applies_in_durable_order(
     tmp_path: Path,
-    transport: str,
     membership: str,
 ) -> None:
     """Accepted LIVE transitions update grants in their durable event order."""
@@ -901,15 +863,11 @@ async def test_grant_user_join_then_revoke_applies_in_durable_order(
         bot,
         room_id,
         join_event,
-        transport=transport,
-        sequence=0,
     )
     revoke_admission = _validated_timeline_admission(
         bot,
         room_id,
         revoke_event,
-        transport=transport,
-        sequence=1,
     )
 
     orchestrator.reconcile_reply_authorized_calls = AsyncMock()
@@ -936,8 +894,6 @@ async def test_grant_user_join_then_revoke_applies_in_durable_order(
         bot,
         room_id,
         _departure_member_event("$later-join", user_id=sender_id, membership="join", ts=3),
-        transport=transport,
-        sequence=2,
     )
     await bot._after_ingestion_admission(
         later_join,
@@ -1138,7 +1094,7 @@ async def test_replayed_truncated_leave_cannot_fence_a_rejoined_membership(tmp_p
     with pytest.raises(IngestionBatchSequenceError):
         await principal.admit_ingestion_batch(IngestionBatchAdmission(_STREAM_ID, 1, (admission,)))
 
-    assert await principal.membership_position(room_id) == RoomMembershipPosition("join", 1)
+    assert await membership_position(principal, room_id) == RoomMembershipPosition("join", 1)
 
 
 @pytest.mark.asyncio
@@ -1152,7 +1108,6 @@ async def test_replayed_departure_cannot_leave_a_confirmed_join_fenced(tmp_path:
         previous_membership="join",
         membership="leave",
         previous_epoch=0,
-        event_id="$leave",
     )
     rejoin = _validated_reported_membership_admission(
         bot,
@@ -1160,8 +1115,6 @@ async def test_replayed_departure_cannot_leave_a_confirmed_join_fenced(tmp_path:
         previous_membership="leave",
         membership="join",
         previous_epoch=1,
-        sequence=1,
-        event_id="$rejoin",
     )
     principal = bot.journal_principal()
     await principal.load_or_create_ingestion_consumer(new_generation=_CONSUMER_GENERATION)

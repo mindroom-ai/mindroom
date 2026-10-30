@@ -11,7 +11,7 @@ import httpx
 import pytest
 
 from mindroom.custom_tools.microsoft_meetings import MicrosoftMeetingsTools
-from mindroom.oauth.microsoft import microsoft_meetings_oauth_provider
+from mindroom.oauth.microsoft import microsoft_oauth_provider
 from mindroom.tool_system.catalog import TOOL_METADATA
 from mindroom.tool_system.declarations import SetupType, ToolCategory, ToolFileAccess
 from tests.agent_tool_helpers import toolkit_offers
@@ -131,7 +131,7 @@ def _tools(
     graph = FakeGraph(handler).install(monkeypatch)
     paths = runtime_paths(tmp_path)
     manager = save_client_config(paths)
-    publish_grant(microsoft_meetings_oauth_provider(), manager)
+    publish_grant(microsoft_oauth_provider("microsoft_meetings"), manager)
     tools = MicrosoftMeetingsTools(
         runtime_paths=paths,
         credentials_manager=manager,
@@ -148,22 +148,6 @@ def _payload(result: str) -> dict[str, Any]:
 def _description(tools: MicrosoftMeetingsTools, name: str) -> str:
     """Return the description the model sees; deferred toolkits do not show toolkit instructions."""
     return " ".join((toolkit_offers(tools, name).description or "").split())
-
-
-def test_provider_requests_only_the_meeting_and_transcript_permissions() -> None:
-    provider = microsoft_meetings_oauth_provider()
-
-    assert (provider.id, provider.display_name) == ("microsoft_meetings", "Microsoft Teams Meetings")
-    assert provider.scopes == (
-        "OnlineMeetings.Read",
-        "OnlineMeetingTranscript.Read.All",
-        "User.Read",
-        "offline_access",
-    )
-    assert provider.credential_service == "microsoft_meetings_oauth"
-    assert provider.tool_config_service == "microsoft_meetings"
-    assert provider.shared_client_config_services == ("microsoft_oauth_client",)
-    assert provider.requester_scoped_credentials is True
 
 
 def test_registered_metadata_declares_a_read_only_primary_runtime_tool() -> None:

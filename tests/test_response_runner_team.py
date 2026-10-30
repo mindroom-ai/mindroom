@@ -42,7 +42,7 @@ from mindroom.response_sources import ResponseSources
 from mindroom.room_model_overrides import set_room_model_override
 from mindroom.teams.formation import TeamIntent, TeamMemberStatus, TeamOutcome, TeamResolution, TeamResolutionMember
 from mindroom.teams.spec import TeamMode
-from mindroom.thread_summary import thread_summary_message_count_hint
+from mindroom.thread_summary.schedule import thread_summary_message_count_hint
 from mindroom.tool_system.events import StructuredStreamChunk, ToolTraceEntry
 from tests.bot_helpers import (
     AgentBotTestBase,

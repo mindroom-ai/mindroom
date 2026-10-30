@@ -96,7 +96,6 @@ async def test_failed_retirement_fails_startup_before_anything_serves(tmp_path: 
     """The primary never converts its databases, builds its runtime, or serves while an old worker may still run."""
     with (
         patch("mindroom.orchestrator.setup_logging"),
-        patch("mindroom.orchestration.storage_preparation.sync_env_to_credentials"),
         patch(
             "mindroom.orchestration.storage_preparation.retire_state_root_worker_mounts",
             side_effect=WorkerBackendError("Could not stop workers that mount whole state roots: old-worker"),

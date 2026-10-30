@@ -23,7 +23,7 @@ from unittest.mock import AsyncMock, MagicMock, Mock, create_autospec, patch
 
 import nio
 import pytest
-from agno.tools.function import Function, FunctionCall
+from agno.tools.function import Function
 from agno.tools.toolkit import Toolkit
 
 from mindroom import interactive, response_runner
@@ -64,7 +64,6 @@ from mindroom.constants import (
 from mindroom.conversation_resolver import ConversationResolver, MessageContext
 from mindroom.delivery_gateway import (
     DeliveryGateway,
-    EditTextRequest,
     SendTextRequest,
     StreamingDeliveryRequest,
 )
@@ -153,12 +152,14 @@ from mindroom.streaming import (
 from mindroom.teams.presentation import TeamStreamPresentation
 from mindroom.teams.resume import continue_paused_team_run
 from mindroom.thread_models import set_thread_model_override
-from mindroom.thread_summary import thread_summary_message_count_hint
+from mindroom.thread_summary.schedule import thread_summary_message_count_hint
 from mindroom.timing import DispatchPipelineTiming
 from mindroom.tool_jobs.conversation import ConversationKey
 from mindroom.tool_jobs.follow_ups import follow_up_envelope
+from mindroom.tool_system.agno_toolkits import adapt_callable
 from mindroom.tool_system.approval_exemptions import register_tool_approval_exemption
 from mindroom.tool_system.events import StructuredStreamChunk, ToolTraceEntry, format_tool_started_event
+from mindroom.tool_system.invocation import ToolCallContext, execute_tool_call
 from mindroom.tool_system.output_files import ToolOutputFilePolicy
 from mindroom.tool_system.runtime_context import ToolDispatchContext, build_execution_identity_from_runtime_context
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity
@@ -449,20 +450,13 @@ async def test_response_typing_supplies_complete_attribution(monkeypatch: pytest
 def _through_the_gateway(runner: ResponseRunner) -> Iterator[tuple[AsyncMock, AsyncMock]]:
     """Record the edits and sends the runner makes, which still go through the real gateway to a patched Matrix."""
     gateway = unwrap_extracted_collaborator(runner.deps.delivery_gateway)
-    real_edit_text, real_send_text = DeliveryGateway.edit_text, DeliveryGateway.send_text
-
-    async def edit_through(request: EditTextRequest) -> bool:
-        return await real_edit_text(gateway, request)
-
-    async def send_through(request: SendTextRequest) -> str | None:
-        return await real_send_text(gateway, request)
 
     async def transport(_client: object, _room_id: str, content: dict[str, Any], **_kwargs: object) -> object:
         replaced = content.get("m.relates_to", {}).get("event_id")
         return DeliveredMatrixEvent(replaced or "$sent", content)
 
-    edit_text = AsyncMock(side_effect=edit_through)
-    send_text = AsyncMock(side_effect=send_through)
+    edit_text = AsyncMock(wraps=gateway.edit_text)
+    send_text = AsyncMock(wraps=gateway.send_text)
     with (
         patch.object(DeliveryGateway, "edit_text", new=edit_text),
         patch.object(DeliveryGateway, "send_text", new=send_text),
@@ -6501,7 +6495,6 @@ async def test_terminal_settlement_records_landed_interruption_before_rethrowing
     """A deferred sync-restart cancel whose note landed should finalize once, run post-response effects, then re-raise."""
     bot = _bot(tmp_path)
     coordinator = unwrap_extracted_collaborator(bot._response_runner)
-    order: list[str] = []
     request = _plain_request(_target(thread_id="$thread"))
     delivery_outcome = FinalDeliveryOutcome(
         terminal_status="cancelled",
@@ -6514,7 +6507,7 @@ async def test_terminal_settlement_records_landed_interruption_before_rethrowing
     progress = response_runner.DeliveryProgress()
     progress.note_delivery_started("$response")
     progress.settle(delivery_outcome)
-    post_effects = AsyncMock(side_effect=lambda *_args: order.append("post_effects"))
+    post_effects = AsyncMock(return_value=None)
     lifecycle = coordinator.build_lifecycle(
         identity=coordinator.response_identity(request, response_kind="ai"),
         request=request,
@@ -6543,7 +6536,6 @@ async def test_terminal_settlement_records_landed_interruption_before_rethrowing
                 post_response_deps=PostResponseEffectsDeps(logger=get_logger("tests.post_response")),
             )
 
-    assert order == ["post_effects"]
     assert progress.delivery_outcome is delivery_outcome
     finalize.assert_awaited_once()
     post_effects.assert_awaited_once()
@@ -6657,7 +6649,6 @@ async def test_process_shutdown_skips_terminal_settlement_for_durable_replay(
 async def test_uncommitted_interruption_rethrows_cancel_without_marking_source_handled(tmp_path: Path) -> None:
     """Checkpoint replay must remain actionable when no terminal recovery note landed."""
     coordinator = unwrap_extracted_collaborator(_bot(tmp_path)._response_runner)
-    order: list[str] = []
     request = _plain_request(_target(thread_id="$thread"))
     progress = response_runner.DeliveryProgress()
     progress.note_delivery_started("$response")
@@ -6674,7 +6665,7 @@ async def test_uncommitted_interruption_rethrows_cancel_without_marking_source_h
         identity=coordinator.response_identity(request, response_kind="ai"),
         request=request,
     )
-    post_effects = AsyncMock(side_effect=lambda *_args: order.append("post_effects"))
+    post_effects = AsyncMock(return_value=None)
 
     with (
         patch.object(
@@ -6696,7 +6687,7 @@ async def test_uncommitted_interruption_rethrows_cancel_without_marking_source_h
             post_response_deps=PostResponseEffectsDeps(logger=get_logger("tests.post_response")),
         )
 
-    assert order == ["post_effects"]
+    post_effects.assert_awaited_once()
 
 
 @pytest.mark.asyncio
@@ -6892,12 +6883,11 @@ async def test_terminal_settlement_late_cancel_keeps_settled_outcome_canonical(
     """A late cancel records an existing terminal outcome without queueing a duplicate retry."""
     bot = _bot(tmp_path)
     coordinator = unwrap_extracted_collaborator(bot._response_runner)
-    order: list[str] = []
     request = _plain_request(_target())
     progress = response_runner.DeliveryProgress()
     progress.note_delivery_started("$response")
     progress.settle(delivery_outcome)
-    post_effects = AsyncMock(side_effect=lambda *_args: order.append("post_effects"))
+    post_effects = AsyncMock(return_value=None)
     lifecycle = coordinator.build_lifecycle(
         identity=coordinator.response_identity(request, response_kind="ai"),
         request=request,
@@ -6925,7 +6915,6 @@ async def test_terminal_settlement_late_cancel_keeps_settled_outcome_canonical(
             post_response_deps=PostResponseEffectsDeps(logger=get_logger("tests.post_response")),
         )
 
-    assert order == ["post_effects"]
     assert progress.delivery_outcome is delivery_outcome
     finalize.assert_awaited_once()
     post_effects.assert_awaited_once()
@@ -7924,13 +7913,19 @@ async def test_expired_cli_grant_hands_exact_approval_to_native_resume(  # noqa:
                             await context.cli_approval_handler(paused)
                             pytest.fail("Expired owner must not receive execution authority")
 
-                        function = Function.from_callable(wait_for_approval)
-                        function.process_entrypoint()
+                        outcomes = []
 
                         async def source():  # noqa: ANN202
                             try:
-                                # Actual Agno swallows ordinary tool errors; the side channel must still suspend.
-                                await FunctionCall(function=function, call_id="bash", arguments={}).aexecute()
+                                # The tool call turns the pause the tool raised into a failed outcome; the side channel
+                                # must still suspend.
+                                outcome = await execute_tool_call(
+                                    adapt_callable(wait_for_approval),
+                                    {},
+                                    ToolCallContext(run_id="run-1", session_id=target.session_id, user_id=None),
+                                    middleware=(),
+                                )
+                                outcomes.append(outcome)
                                 yield "swallowed tool error"
                                 await asyncio.Event().wait()
                             finally:
@@ -7949,6 +7944,7 @@ async def test_expired_cli_grant_hands_exact_approval_to_native_resume(  # noqa:
                             await asyncio.wait_for(pulling, timeout=2)
                         await stream.aclose()
                         assert stopped.is_set()
+                        assert [outcome.is_error for outcome in outcomes] == [True]
                     else:
                         with pytest.raises(ResponsePausedForApproval) as caught:
                             await asyncio.wait_for(context.cli_approval_handler(paused), timeout=1)

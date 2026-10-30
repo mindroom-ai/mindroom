@@ -108,7 +108,7 @@ def _docker_worker_api_app(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> t
     monkeypatch.setattr(
         DockerWorkerBackend,
         "_wait_for_ready",
-        lambda _backend, _container: "http://127.0.0.1:1/api/sandbox-runner/execute",
+        lambda _backend, _container, **_kwargs: None,
     )
     return api_app, docker_daemon
 
@@ -124,7 +124,6 @@ def _start_docker_worker(api_app: FastAPI) -> WorkerHandle:
         runtime_paths,
         proxy_url=None,
         proxy_token="test-token",  # noqa: S106
-        storage_root=runtime_paths.storage_root,
     ) as worker_manager:
         return worker_manager.ensure_worker(WorkerSpec("v1:default:unscoped:code"))
 

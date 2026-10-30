@@ -47,6 +47,10 @@ def event_ids(value: object) -> set[str]:
 async def _attempt(call: Awaitable[object]) -> object:
     try:
         return await call
+    except AssertionError:
+        # A failed check, such as the adapter's on what a pending write returns, fails the test instead of becoming
+        # an outcome that a recording's divergence step could stop comparing.
+        raise
     except Exception as error:
         return {"error": type(error).__name__, "message": str(error)}
 

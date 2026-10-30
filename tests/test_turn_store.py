@@ -8,7 +8,7 @@ from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING, Any, cast
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -25,7 +25,6 @@ from mindroom.event_journal.identity import journal_principal_id
 from mindroom.event_journal.models import ResponseRecoveryState
 from mindroom.history.request_messages import TurnMessages, build_request, scope_history_messages
 from mindroom.history.storage import (
-    _with_scope_seen_event_ids,
     read_scope_seen_event_ids,
     read_scope_state,
 )
@@ -41,6 +40,10 @@ from mindroom.response_runner import ResponseRequest, ResponseRunner
 from mindroom.response_sources import ResponseSources
 from mindroom.session_storage.agent_storage import create_agent_state_storage, create_state_storage
 from mindroom.session_storage.legacy_agno3_schema import AgnoTableNames
+from mindroom.session_storage.legacy_scope_metadata import (
+    LEGACY_COMPACTION_METADATA_KEY,
+    LEGACY_MATRIX_HISTORY_METADATA_KEY,
+)
 from mindroom.session_storage.types import ConversationSession
 from mindroom.teams.formation import TeamIntent, TeamMemberStatus, TeamResolution, TeamResolutionMember
 from mindroom.teams.spec import TeamMode
@@ -80,7 +83,7 @@ from tests.session_storage.agno_layout import write_agno_database
 from tests.test_edit_regenerator import _reply
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Callable, Iterable
 
     from mindroom.event_journal import EventJournalStore
     from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
@@ -238,6 +241,12 @@ def _seeded_storage_with_runs(
     storage = _seeded_storage(tmp_path, session, name=name)
     assert _stored_run_ids(storage, session) == [run.run_id for run in session.runs or []]
     return storage
+
+
+def _with_legacy_seen_event_ids(session: ConversationSession, event_ids: Iterable[str]) -> dict[str, Any]:
+    """Return ``session``'s metadata holding ``event_ids`` as its scope's preserved seen ids, as older releases stored them."""
+    states = {owner_scope(session).key: {"seen_event_ids": sorted(event_ids)}}
+    return {**(session.metadata or {}), LEGACY_MATRIX_HISTORY_METADATA_KEY: {"version": 1, "states": states}}
 
 
 def _legacy_compacted_event_ids(run: RunRecord) -> list[str]:
@@ -1375,10 +1384,10 @@ async def test_prepare_redaction_invalidates_legacy_compacted_replay(
         ],
         summary=ScopeSummary(text="The user disclosed REDACTED_SECRET.", updated_at=_EPOCH),
     )
-    session.metadata = _with_scope_seen_event_ids(session.metadata, scope=scope, event_ids={"$user_msg", "$older"})
+    session.metadata = _with_legacy_seen_event_ids(session, {"$user_msg", "$older"})
     session.metadata = {
         **(session.metadata or {}),
-        constants.MINDROOM_COMPACTION_METADATA_KEY: {
+        LEGACY_COMPACTION_METADATA_KEY: {
             "version": 2,
             "states": {scope.key: {"last_summary_model": "summary-model", "compacted_run_ids": ["$compacted-run"]}},
         },
@@ -1534,7 +1543,7 @@ async def test_redaction_cleanup_keeps_context_after_colliding_alias_projection(
         ],
         summary=ScopeSummary(text="contains REDACTED_SECRET", updated_at=_EPOCH),
     )
-    session.metadata = _with_scope_seen_event_ids(session.metadata, scope=scope, event_ids={human_event_id})
+    session.metadata = _with_legacy_seen_event_ids(session, {human_event_id})
     storage = _seeded_storage_with_runs(tmp_path, session)
     store = await _store_with_storage(journal_store, storage)
     await store.record_pending_turn(
@@ -1596,20 +1605,7 @@ async def test_active_ad_hoc_team_redaction_uses_pending_response_scope(
         ],
     )
     storage = _seeded_storage_with_runs(tmp_path, session, name="team_private")
-    state_writer = MagicMock()
-    state_writer.create_storage.return_value = storage
-    state_writer.history_scope.return_value = HistoryScope(kind="agent", scope_id="agent")
-    store = TurnStore(
-        TurnStoreDeps(
-            turn_records=journal_store.turn_records("agent"),
-            legacy_responses_file=None,
-            state_writer=state_writer,
-            tool_runtime=MagicMock(),
-            response_recovery_state=AsyncMock(),
-            retry_dispatch_sources=MagicMock(),
-        ),
-    )
-    await store.warm()
+    store = await _store_with_storage(journal_store, storage)
     response_record = TurnRecord.create(
         ["$user_msg"],
         requester_id="@user:example.org",
@@ -1672,7 +1668,7 @@ async def test_multi_bot_redaction_only_changes_the_history_that_read_the_source
         runs=[],
         summary=ScopeSummary(text="contains REDACTED_SECRET", updated_at=_EPOCH),
     )
-    owner_session.metadata = _with_scope_seen_event_ids(owner_session.metadata, scope=scope, event_ids={"$user_msg"})
+    owner_session.metadata = _with_legacy_seen_event_ids(owner_session, {"$user_msg"})
     owner_storage = _seeded_storage(tmp_path, owner_session, name="owner")
     owner_store = await _store_with_storage(
         journal_store,
@@ -2272,11 +2268,7 @@ async def test_deleted_edit_cannot_enter_reopened_model_history(  # noqa: PLR091
         ],
     )
     if compacted:
-        session.metadata = _with_scope_seen_event_ids(
-            session.metadata,
-            scope=scope,
-            event_ids=set(_legacy_compacted_event_ids(edited)),
-        )
+        session.metadata = _with_legacy_seen_event_ids(session, set(_legacy_compacted_event_ids(edited)))
         session.summary = ScopeSummary(text="DELETED_EDIT_MARKER", updated_at=_EPOCH)
         session.runs = session.runs[1:]
     write_agno_database(AgnoTableNames("agent").database_path(tmp_path), session, usage=False)
@@ -2375,11 +2367,7 @@ async def test_deleted_noncurrent_edit_preserves_independent_surviving_run(
     session = ConversationSession(kind="agent", session_id=target.session_id, owner_id="agent", runs=[newest])
     if compacted:
         session.summary = ScopeSummary(text="Independent surviving summary", updated_at=_EPOCH)
-        session.metadata = _with_scope_seen_event_ids(
-            session.metadata,
-            scope=HistoryScope(kind="agent", scope_id="agent"),
-            event_ids={"$user_msg", "$surviving-edit"},
-        )
+        session.metadata = _with_legacy_seen_event_ids(session, {"$user_msg", "$surviving-edit"})
     storage = _seeded_storage_with_runs(tmp_path, session)
     store = await _store_with_storage(journal_store, storage)
     await store.record_responded_turn(
@@ -2628,7 +2616,7 @@ async def test_legacy_compacted_revision_uses_retained_owner_on_cold_reopen(
         summary=ScopeSummary(text="DELETED_EDIT_MARKER", updated_at=_EPOCH),
         runs=[later_run] if later_run_names_revision else [],
     )
-    session.metadata = _with_scope_seen_event_ids(session.metadata, scope=scope, event_ids={"$user_msg"})
+    session.metadata = _with_legacy_seen_event_ids(session, {"$user_msg"})
     write_agno_database(AgnoTableNames("agent").database_path(tmp_path), session, usage=False)
     if later_run_names_revision:
         # A modern compaction folds the later run on top of the legacy summary.

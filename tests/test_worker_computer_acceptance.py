@@ -8,6 +8,7 @@ import os
 import signal
 import sys
 from contextlib import nullcontext, suppress
+from dataclasses import replace
 from pathlib import Path
 from types import ModuleType, SimpleNamespace
 from unittest.mock import AsyncMock
@@ -277,7 +278,11 @@ async def test_acceptance_reconciles_config_before_browser_continuity(
     )
     fixture = object.__new__(module.Fixture)
     fixture.config = Config.model_validate(yaml.safe_load(config_text))
-    fixture.paths = backend._runtime_paths
+    # The live fixture selects the Docker backend whose manager the patched lease returns.
+    fixture.paths = replace(
+        backend._runtime_paths,
+        process_env={**backend._runtime_paths.process_env, "MINDROOM_WORKER_BACKEND": "docker"},
+    )
     fixture.viewer = "@alice:example.org"
     fixture.room = "!room:example.org"
     fixture.agent = "@writer:example.org"

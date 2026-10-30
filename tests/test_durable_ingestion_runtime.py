@@ -38,6 +38,7 @@ from mindroom.runtime_shutdown import ShutdownBudget
 from mindroom.scheduling.runtime import ScheduledTaskRuntime
 from tests.bot_helpers import make_matrix_client_mock
 from tests.conftest import SETTLE_TIMEOUT_SECONDS
+from tests.journal_helpers import membership_position
 from tests.test_bot_ready_hook import _agent_bot
 from tests.test_durable_ingestion_admission import ROOM, Session
 from tests.test_event_journal_store import admit, interactive_edit, interactive_prompt, projection
@@ -417,20 +418,14 @@ async def test_invite_authorization_is_rechecked_after_membership_waits(
         session._transport.request = request
         if wait_at == "lock":
             await bot._local_membership_lock.acquire()
-        elif wait_at == "producer":
-
-            async def wait_for_producer() -> None:
-                reached.set()
-                await release.wait()
-
-            monkeypatch.setattr(session, "wait_for_membership_idle", wait_for_producer)
         else:
 
-            async def wait_for_admission() -> None:
+            async def wait_for_release() -> None:
                 reached.set()
                 await release.wait()
 
-            monkeypatch.setattr(session, "next_batch", wait_for_admission)
+            waiting = "wait_for_membership_idle" if wait_at == "producer" else "next_batch"
+            monkeypatch.setattr(session, waiting, wait_for_release)
         task = asyncio.create_task(_handle_invite(bot, room, event))
         try:
             await asyncio.wait_for(reached.wait(), 2)
@@ -793,7 +788,7 @@ async def test_startup_cleanup_leaves_room_before_first_membership_observation(
             assert len(leave_requests) == 1
             facts = await consume_one_ingestion_batch(session, principal, account_id=bot.agent_user.user_id)
             assert facts is not None
-            assert await principal.membership_position(ROOM) == RoomMembershipPosition("leave", 0)
+            assert await membership_position(principal, ROOM) == RoomMembershipPosition("leave", 0)
             assert await principal.ingestion_membership_position(ROOM) == RoomMembershipPosition("leave", 0)
         finally:
             runner.cancel()

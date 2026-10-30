@@ -8,6 +8,7 @@ import shutil
 import sys
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
+from functools import cached_property
 from pathlib import Path
 from types import MappingProxyType
 from typing import TypeGuard, cast
@@ -186,6 +187,16 @@ class RuntimePaths:
         if value is None:
             return default
         return value.strip().lower() in {"1", "true", "yes", "on"}
+
+    @cached_property
+    def env_digest(self) -> str:
+        """Return a digest of every env input this snapshot resolves against, computed once per snapshot."""
+        inputs = {
+            "config_dir": str(self.config_dir),
+            "process_env": sorted(self.process_env.items()),
+            "env_file_values": sorted(self.env_file_values.items()),
+        }
+        return hashlib.sha256(json.dumps(inputs, separators=(",", ":")).encode("utf-8")).hexdigest()
 
 
 def resolve_session_state_root(state_root: Path, runtime_paths: RuntimePaths) -> Path:
@@ -1153,8 +1164,8 @@ MATRIX_SEEN_EVENT_IDS_METADATA_KEY = "matrix_seen_event_ids"
 MATRIX_SOURCE_EVENT_IDS_METADATA_KEY = "matrix_source_event_ids"
 MATRIX_SOURCE_EVENT_PROMPTS_METADATA_KEY = "matrix_source_event_prompts"
 MATRIX_SOURCE_EVENT_REVISIONS_METADATA_KEY = "matrix_source_event_revisions"
-MINDROOM_COMPACTION_METADATA_KEY = "mindroom_compaction"
-MINDROOM_MATRIX_HISTORY_METADATA_KEY = "mindroom_matrix_history"
+# Session metadata key holding the database owner's history state: its force-compaction flag and preserved seen ids.
+MINDROOM_HISTORY_METADATA_KEY = "mindroom_history"
 COMPACTION_NOTICE_CONTENT_KEY = "io.mindroom.compaction"
 SKILL_REVIEW_NOTICE_CONTENT_KEY = "io.mindroom.skill_review"
 UI_ACTION_CONTENT_KEY = "io.mindroom.ui_action"

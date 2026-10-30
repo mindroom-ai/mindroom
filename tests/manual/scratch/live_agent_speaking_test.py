@@ -69,7 +69,6 @@ from mindroom.config.memory import MemoryConfig  # noqa: E402
 from mindroom.config.models import ModelConfig  # noqa: E402
 from mindroom.config.voice import SpeechServiceConfig  # noqa: E402
 from mindroom.constants import resolve_runtime_paths  # noqa: E402
-from mindroom.credentials.sync import sync_env_to_credentials  # noqa: E402
 from mindroom.matrix.state import MatrixState  # noqa: E402
 from mindroom.matrix_rtc import call_manager as cm  # noqa: E402
 from mindroom.matrix_rtc.events import (  # noqa: E402
@@ -515,7 +514,6 @@ async def main() -> int:  # noqa: C901, PLR0915
                     CREDENTIALS_ENCRYPTION_KEY_ENV: _ephemeral_encryption_key(),
                 },
             )
-            sync_env_to_credentials(paths)
             # Entity resolution needs managed identities, but the live Matrix
             # token stays only on the client and is never persisted to state.
             state = MatrixState.load(paths)

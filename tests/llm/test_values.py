@@ -266,19 +266,6 @@ def test_token_counts_with_totals_sums_input_and_output_and_the_audio_parts() ->
     )
 
 
-def test_token_counts_from_mapping_passes_every_counter_through_the_reader() -> None:
-    seen: list[object] = []
-
-    def read(value: object) -> int:
-        seen.append(value)
-        return value if isinstance(value, int) else 0
-
-    counts = TokenCounts.from_mapping({"input_tokens": 3, "output_tokens": "4", "other": 9}, read)
-
-    assert counts == TokenCounts(input_tokens=3)
-    assert seen == [3, "4", None, None, None, None, None, None, None]
-
-
 def test_token_counts_dict_lists_every_counter_in_report_order() -> None:
     assert list(TokenCounts().to_dict()) == [
         "input_tokens",

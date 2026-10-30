@@ -90,11 +90,9 @@ from .store import EventJournalStore, PrincipalStore, ToolJobStore
 from .tool_jobs import SavedToolJob, ToolJobExistsError, ToolJobOwnershipLostError
 from .turn_rows import TurnRecordStore
 from .views import (
-    AdmissionView,
     ApprovalDeliveryView,
     ConversationReadView,
     DispatchView,
-    HistoryRecoveryRecordView,
     HydrationView,
     MatrixDeliveryView,
     PendingTurnView,
@@ -110,7 +108,6 @@ __all__ = [
     "TURN_BACKED_KINDS",
     "AdmissionFacts",
     "AdmissionResult",
-    "AdmissionView",
     "ApprovalAdvance",
     "ApprovalCall",
     "ApprovalCardReservation",
@@ -137,7 +134,6 @@ __all__ = [
     "EventKind",
     "FinalAnswerEnqueue",
     "HistoryRecoveryOutcome",
-    "HistoryRecoveryRecordView",
     "HistoryRecoveryState",
     "HydrationCoverage",
     "HydrationPolicy",

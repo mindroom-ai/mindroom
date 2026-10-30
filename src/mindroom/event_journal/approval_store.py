@@ -18,7 +18,8 @@ from . import (
     scheduled_approvals,
 )
 from .approval_continuations import ApprovalAdvance
-from .store import ReplyRowRefusedError, enqueue_reply_row
+from .matrix_delivery_rows import ReplyRowRefusedError, enqueue_reply_row
+from .principal_rows import PrincipalRows
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Mapping
@@ -34,7 +35,7 @@ if TYPE_CHECKING:
     )
     from .approval_continuations import ApprovalContinuation, ApprovalContinuationState, ApprovalFailure
     from .approval_signals import ApprovalSignals
-    from .backend import Backend, Transaction
+    from .backend import Transaction
     from .replies import AppliedTransition, PostCommitEffect, PreparedReplyRow, ReplyRowEnqueue, ReplyRowRequest
     from .scheduled_approvals import (
         ScheduledApprovalArmState,
@@ -49,11 +50,9 @@ _DEFAULT_ROOM_CARD_LIMIT = 256
 
 
 @dataclass(frozen=True, slots=True)
-class ApprovalStore:
+class ApprovalStore(PrincipalRows):
     """One principal's approval records."""
 
-    _backend: Backend
-    _principal_id: str
     _signals: ApprovalSignals
 
     async def reserve_reply_cards(
@@ -65,15 +64,12 @@ class ApprovalStore:
         cards: tuple[ApprovalCardReservation, ...],
     ) -> bool:
         """Atomically reserve every undecided call's card of one paused generation and release its publication lease."""
-        return await self._backend.write(
-            lambda transaction: approval_cards.reserve_reply_cards(
-                transaction,
-                self._principal_id,
-                continuation_principal_id=continuation_principal_id,
-                continuation_id=continuation_id,
-                expected_generation=expected_generation,
-                cards=cards,
-            ),
+        return await self._write(
+            approval_cards.reserve_reply_cards,
+            continuation_principal_id=continuation_principal_id,
+            continuation_id=continuation_id,
+            expected_generation=expected_generation,
+            cards=cards,
         )
 
     async def reserve_detached_card(
@@ -91,28 +87,23 @@ class ApprovalStore:
         grant_scope: ApprovalGrantScope | None = None,
     ) -> bool:
         """Atomically reserve one detached call and its card, or apply an active grant in the card's place."""
-        return await self._backend.write(
-            lambda transaction: approval_cards.reserve_detached_card(
-                transaction,
-                self._principal_id,
-                call=call,
-                owner_kind=owner_kind,
-                tool_name=tool_name,
-                toolkit_name=toolkit_name,
-                invoking_agent=invoking_agent,
-                room_id=room_id,
-                thread_id=thread_id,
-                expires_at_ns=expires_at_ns,
-                card=card,
-                grant_scope=grant_scope,
-            ),
+        return await self._write(
+            approval_cards.reserve_detached_card,
+            call=call,
+            owner_kind=owner_kind,
+            tool_name=tool_name,
+            toolkit_name=toolkit_name,
+            invoking_agent=invoking_agent,
+            room_id=room_id,
+            thread_id=thread_id,
+            expires_at_ns=expires_at_ns,
+            card=card,
+            grant_scope=grant_scope,
         )
 
     async def detached_decision(self, call: CallKey) -> BackgroundApprovalDecision | None:
         """Return one detached call's decision, if it has one."""
-        return await self._backend.read(
-            lambda transaction: approval_calls.detached_decision(transaction, self._principal_id, call),
-        )
+        return await self._read(approval_calls.detached_decision, call)
 
     async def resolve_approval_call(
         self,
@@ -141,9 +132,7 @@ class ApprovalStore:
 
     async def prune_detached_calls(self, *, owner_id: str) -> bool:
         """Delete one detached run's decided calls after their cards have retired."""
-        return await self._backend.write(
-            lambda transaction: approval_calls.prune(transaction, self._principal_id, owner_id=owner_id),
-        )
+        return await self._write(approval_calls.prune, owner_id=owner_id)
 
     async def reserve_scheduled_call_approval(
         self,
@@ -153,14 +142,11 @@ class ApprovalStore:
         any_arguments_offered: bool,
     ) -> bool:
         """Atomically reserve one scheduling-time card and its exact-call binding."""
-        return await self._backend.write(
-            lambda transaction: scheduled_approvals.reserve(
-                transaction,
-                self._principal_id,
-                binding=binding,
-                card=card,
-                any_arguments_offered=any_arguments_offered,
-            ),
+        return await self._write(
+            scheduled_approvals.reserve,
+            binding=binding,
+            card=card,
+            any_arguments_offered=any_arguments_offered,
         )
 
     async def arm_scheduled_call_approval(
@@ -171,33 +157,20 @@ class ApprovalStore:
         any_arguments_allowed: bool,
     ) -> ScheduledApprovalArmState:
         """Arm one approved scheduled call for its unchanged task firing on time."""
-        return await self._backend.write(
-            lambda transaction: scheduled_approvals.arm(
-                transaction,
-                self._principal_id,
-                task_id=task_id,
-                workflow_digest=workflow_digest,
-                any_arguments_allowed=any_arguments_allowed,
-                now_ns=time.time_ns(),
-            ),
+        return await self._write(
+            _arm_scheduled_call_approval,
+            task_id=task_id,
+            workflow_digest=workflow_digest,
+            any_arguments_allowed=any_arguments_allowed,
         )
 
     async def withdraw_scheduled_call_approval(self, *, task_id: str, reason: str) -> RecordedApprovalDecision:
         """Withdraw one cancelled task's approval and deny its card if still pending."""
-        return await self._backend.write(
-            lambda transaction: scheduled_approvals.withdraw(
-                transaction,
-                self._principal_id,
-                task_id=task_id,
-                reason=reason,
-            ),
-        )
+        return await self._write(scheduled_approvals.withdraw, task_id=task_id, reason=reason)
 
     async def scheduled_call(self, *, task_id: str) -> ScheduledCall | None:
         """Read the call one scheduled task stored."""
-        return await self._backend.read(
-            lambda transaction: scheduled_approvals.stored_call(transaction, self._principal_id, task_id=task_id),
-        )
+        return await self._read(scheduled_approvals.stored_call, task_id=task_id)
 
     async def claim_scheduled_call(
         self,
@@ -207,27 +180,11 @@ class ApprovalStore:
         receipt: ApprovalCardReservation,
     ) -> ScheduledCallClaim | ScheduledCallRefusal:
         """Spend one armed scheduled approval and reserve its receipt in one commit."""
-        return await self._backend.write(
-            lambda transaction: scheduled_approvals.claim(
-                transaction,
-                self._principal_id,
-                call=call,
-                arguments_json=arguments_json,
-                receipt=receipt,
-                now_ns=time.time_ns(),
-            ),
-        )
+        return await self._write(_claim_scheduled_call, call=call, arguments_json=arguments_json, receipt=receipt)
 
     async def record_scheduled_call_outcome(self, *, task_id: str, outcome: ScheduledCallOutcome) -> None:
         """Record how one claimed scheduled call ended."""
-        await self._backend.write(
-            lambda transaction: scheduled_approvals.record_outcome(
-                transaction,
-                self._principal_id,
-                task_id=task_id,
-                outcome=outcome,
-            ),
-        )
+        await self._write(scheduled_approvals.record_outcome, task_id=task_id, outcome=outcome)
 
     async def create_approval_grant(
         self,
@@ -241,44 +198,24 @@ class ApprovalStore:
         current_binding: str | None = None,
     ) -> tuple[RecordedApprovalDecision, ...]:
         """Commit the originating decision, fixed grant, and matching pending decisions."""
-        return await self._backend.write(
-            lambda transaction: approval_grants.create(
-                transaction,
-                self._principal_id,
-                room_id=room_id,
-                card_event_id=card_event_id,
-                sender_id=sender_id,
-                seconds=seconds,
-                metadata=metadata,
-                reason=reason,
-                current_binding=current_binding,
-            ),
+        return await self._write(
+            approval_grants.create,
+            room_id=room_id,
+            card_event_id=card_event_id,
+            sender_id=sender_id,
+            seconds=seconds,
+            metadata=metadata,
+            reason=reason,
+            current_binding=current_binding,
         )
 
     async def approval_grant_for_card(self, *, room_id: str, card_event_id: str) -> ApprovalGrant | None:
         """Load a grant independently of its retired card."""
-        return await self._backend.read(
-            lambda transaction: approval_grants.for_card(
-                transaction,
-                self._principal_id,
-                room_id=room_id,
-                card_event_id=card_event_id,
-            ),
-        )
+        return await self._read(approval_grants.for_card, room_id=room_id, card_event_id=card_event_id)
 
     async def maintain_automatic_approvals(self, *, grant_id: str | None = None) -> tuple[str, ...]:
         """Retire settled receipts, enqueue grant revocations after their approval edits, and prune old scheduled calls."""
-
-        def maintain(transaction: Transaction) -> tuple[str, ...]:
-            approval_grants.lock(transaction, self._principal_id)
-            if grant_id is None:
-                approval_cards.retire_receipts(transaction, self._principal_id)
-            deliveries = approval_grants.maintain(transaction, self._principal_id, grant_id=grant_id)
-            if grant_id is None:
-                scheduled_approvals.prune(transaction, self._principal_id, time.time_ns())
-            return deliveries
-
-        return await self._backend.write(maintain)
+        return await self._write(_maintain_automatic_approvals, grant_id=grant_id)
 
     async def revoke_approval_grant(
         self,
@@ -289,33 +226,25 @@ class ApprovalStore:
         grant_id: str,
     ) -> ApprovalGrantRevocation | None:
         """Record durable revocation debt for ordered acknowledgement delivery."""
-        return await self._backend.write(
-            lambda transaction: approval_grants.revoke(
-                transaction,
-                self._principal_id,
-                room_id=room_id,
-                card_event_id=card_event_id,
-                sender_id=sender_id,
-                grant_id=grant_id,
-            ),
+        return await self._write(
+            approval_grants.revoke,
+            room_id=room_id,
+            card_event_id=card_event_id,
+            sender_id=sender_id,
+            grant_id=grant_id,
         )
 
     async def retire_approval_card(self, *, delivery_id: str) -> bool:
         """Retire a decided request card once Matrix acknowledged or refused for good its terminal edit."""
-        return await self._backend.write(
-            lambda transaction: approval_cards.retire(transaction, self._principal_id, delivery_id=delivery_id),
-        )
+        return await self._write(approval_cards.retire, delivery_id=delivery_id)
 
     async def remember_terminal_approval_alias(self, *, room_id: str, card_event_id: str, delivery_id: str) -> None:
         """Remember a transport-verified copy of an automatic receipt as another event of that receipt."""
-        await self._backend.write(
-            lambda transaction: approval_cards.remember_alias(
-                transaction,
-                self._principal_id,
-                room_id=room_id,
-                card_event_id=card_event_id,
-                delivery_id=delivery_id,
-            ),
+        await self._write(
+            approval_cards.remember_alias,
+            room_id=room_id,
+            card_event_id=card_event_id,
+            delivery_id=delivery_id,
         )
 
     async def approval_card(
@@ -325,20 +254,11 @@ class ApprovalStore:
         card_event_id: str,
     ) -> ApprovalCardView | None:
         """Return the card one Matrix event shows, if it shows one."""
-        return await self._backend.read(
-            lambda transaction: approval_cards.card_for_event(
-                transaction,
-                self._principal_id,
-                room_id=room_id,
-                card_event_id=card_event_id,
-            ),
-        )
+        return await self._read(approval_cards.card_for_event, room_id=room_id, card_event_id=card_event_id)
 
     async def pending_approval_room_ids(self) -> tuple[str, ...]:
         """Return every current room where this principal still owns a live request card."""
-        return await self._backend.read(
-            lambda transaction: approval_cards.pending_room_ids(transaction, self._principal_id),
-        )
+        return await self._read(approval_cards.pending_room_ids)
 
     async def pending_approval_cards(
         self,
@@ -348,15 +268,7 @@ class ApprovalStore:
         after: tuple[int, str] | None = None,
     ) -> tuple[ApprovalCardView, ...]:
         """Return one room's live request cards, oldest first."""
-        return await self._backend.read(
-            lambda transaction: approval_cards.pending_cards(
-                transaction,
-                self._principal_id,
-                room_id=room_id,
-                limit=limit,
-                after=after,
-            ),
-        )
+        return await self._read(approval_cards.pending_cards, room_id=room_id, limit=limit, after=after)
 
     async def pause_for_approval(
         self,
@@ -371,9 +283,7 @@ class ApprovalStore:
         committed meanwhile) comes back unapplied. Either way nothing is written.
         """
         try:
-            return await self._backend.write(
-                lambda transaction: _pause_for_approval(transaction, self._principal_id, hold, request, prepared),
-            )
+            return await self._write(_pause_for_approval, hold, request, prepared)
         except ReplyRowRefusedError:
             return None
         except _PauseRefusedError as refused:
@@ -384,23 +294,11 @@ class ApprovalStore:
         event_id: str,
     ) -> ApprovalContinuation | None:
         """Return the paused run that owns one original source event."""
-        return await self._backend.read(
-            lambda transaction: approval_continuations.for_source(
-                transaction,
-                self._principal_id,
-                event_id=event_id,
-            ),
-        )
+        return await self._read(approval_continuations.for_source, event_id=event_id)
 
     async def approval_continuation(self, approval_id: str) -> ApprovalContinuation | None:
         """Return one principal-owned paused run by its stable identity."""
-        return await self._backend.read(
-            lambda transaction: approval_continuations.get(
-                transaction,
-                self._principal_id,
-                approval_id=approval_id,
-            ),
-        )
+        return await self._read(approval_continuations.get, approval_id=approval_id)
 
     async def claim_approval_resume(
         self,
@@ -414,14 +312,7 @@ class ApprovalStore:
         unresolved durable writes refuses the resume, and the continuation
         stays ready.
         """
-        return await self._backend.write(
-            lambda transaction: _claim_approval_resume(
-                transaction,
-                self._principal_id,
-                approval_id=approval_id,
-                claim=claim,
-            ),
-        )
+        return await self._write(_claim_approval_resume, approval_id=approval_id, claim=claim)
 
     async def claim_approval_in_place(
         self,
@@ -436,37 +327,14 @@ class ApprovalStore:
         Only a span this bot instance still owns resumes; when the reply's
         rule refuses, the continuation stays ready and nothing executes.
         """
-
-        def claim(transaction: Transaction) -> tuple[ApprovalContinuation | None, AppliedTransition | None]:
-            current = approval_continuations.get(transaction, self._principal_id, approval_id=approval_id)
-            if current is None or current.state != "ready":
-                return None, None
-            resumed = replies.decide_on_span(
-                transaction,
-                self._principal_id,
+        try:
+            return await self._write(
+                _claim_approval_in_place,
+                approval_id=approval_id,
+                runtime_generation=runtime_generation,
                 reply_id=reply_id,
                 span_id=span_id,
-                author_generation=runtime_generation,
-                decide=lambda reply, span: rl.resumed_in_place(
-                    reply,
-                    span,
-                    approval_id=approval_id,
-                    now_ns=time.time_ns(),
-                ),
             )
-            if not resumed.transition.applied:
-                raise _InPlaceResumeRefusedError(resumed)
-            claimed = approval_continuations.claim(
-                transaction,
-                self._principal_id,
-                approval_id=approval_id,
-                span_id=span_id,
-            )
-            assert claimed, "the reply resumed in place for a continuation no other span claimed"
-            return approval_continuations.get(transaction, self._principal_id, approval_id=approval_id), resumed
-
-        try:
-            return await self._backend.write(claim)
         except _InPlaceResumeRefusedError as refused:
             return None, refused.applied
 
@@ -477,13 +345,10 @@ class ApprovalStore:
         expected_generation: int,
     ) -> ApprovalContinuation | None:
         """Expose one generation only after every approval card is durable."""
-        return await self._backend.write(
-            lambda transaction: approval_continuations.activate(
-                transaction,
-                self._principal_id,
-                approval_id=approval_id,
-                expected_generation=expected_generation,
-            ),
+        return await self._write(
+            approval_continuations.activate,
+            approval_id=approval_id,
+            expected_generation=expected_generation,
         )
 
     async def request_approval_failure(
@@ -496,16 +361,13 @@ class ApprovalStore:
         expected_runtime_generation: str | None = None,
     ) -> ApprovalContinuation | None:
         """Fence one observed continuation state against any later execution."""
-        return await self._backend.write(
-            lambda transaction: approval_continuations.request_failure(
-                transaction,
-                self._principal_id,
-                approval_id=approval_id,
-                failure=failure,
-                expected_state=expected_state,
-                expected_generation=expected_generation,
-                expected_runtime_generation=expected_runtime_generation,
-            ),
+        return await self._write(
+            approval_continuations.request_failure,
+            approval_id=approval_id,
+            failure=failure,
+            expected_state=expected_state,
+            expected_generation=expected_generation,
+            expected_runtime_generation=expected_runtime_generation,
         )
 
     async def release_approval_continuation(
@@ -518,44 +380,14 @@ class ApprovalStore:
 
         Returns the work its commit left for afterwards, or ``None`` when the run may not be released.
         """
-        return await self._backend.write(
-            lambda transaction: _end_approval(
-                transaction,
-                self._principal_id,
-                approval_id,
-                may_end=lambda: approval_continuations.may_release(
-                    transaction,
-                    self._principal_id,
-                    approval_id=approval_id,
-                    expected_generation=expected_generation,
-                ),
-                end=lambda released: replies.approval_released(transaction, self._principal_id, released),
-            ),
-        )
+        return await self._write(_release_approval_continuation, approval_id, expected_generation=expected_generation)
 
     async def finish_approval_continuation(self, approval_id: str) -> tuple[PostCommitEffect, ...] | None:
         """Settle one paused run after its FINAL delivery reaches a terminal outcome, and end its reply.
 
         Returns the work its commit left for afterwards, or ``None`` when the run is not ready to finish.
         """
-        return await self._backend.write(
-            lambda transaction: _end_approval(
-                transaction,
-                self._principal_id,
-                approval_id,
-                may_end=lambda: approval_continuations.may_finish(
-                    transaction,
-                    self._principal_id,
-                    approval_id=approval_id,
-                ),
-                end=lambda finishing: replies.approval_finished(
-                    transaction,
-                    self._principal_id,
-                    finishing,
-                    owner_available=True,
-                ),
-            ),
-        )
+        return await self._write(_finish_approval_continuation, approval_id)
 
     async def enqueue_unavailable_approval_notice(
         self,
@@ -566,15 +398,12 @@ class ApprovalStore:
         payload: Mapping[str, object],
     ) -> str | None:
         """Enqueue this membership's physical attempt for one logical notice."""
-        return await self._backend.write(
-            lambda transaction: approval_continuations.enqueue_unavailable_notice(
-                transaction,
-                self._principal_id,
-                approval_id=approval_id,
-                room_id=room_id,
-                thread_id=thread_id,
-                payload=payload,
-            ),
+        return await self._write(
+            approval_continuations.enqueue_unavailable_notice,
+            approval_id=approval_id,
+            room_id=room_id,
+            thread_id=thread_id,
+            payload=payload,
         )
 
     async def discard_unavailable_approval_continuation(
@@ -587,36 +416,70 @@ class ApprovalStore:
 
         Returns the work its commit left for afterwards, or ``None`` when the run may not be discarded.
         """
-        # The owner that could settle the reply is gone; the notice is what the room sees.
-        return await self._backend.write(
-            lambda transaction: _end_approval(
-                transaction,
-                self._principal_id,
-                approval_id,
-                may_end=lambda: approval_continuations.may_discard_unavailable(
-                    transaction,
-                    self._principal_id,
-                    approval_id=approval_id,
-                    notice_principal_id=notice_principal_id,
-                ),
-                end=lambda discarded: replies.approval_finished(
-                    transaction,
-                    self._principal_id,
-                    discarded,
-                    owner_available=False,
-                ),
-            ),
+        return await self._write(
+            _discard_unavailable_approval_continuation,
+            approval_id,
+            notice_principal_id=notice_principal_id,
         )
-
-    @property
-    def principal_id(self) -> str:
-        """Return this view's durable principal identity."""
-        return self._principal_id
 
     @property
     def signals(self) -> ApprovalSignals:
         """Return what the store's committed approval writes tell this process."""
         return self._signals
+
+
+def _arm_scheduled_call_approval(
+    transaction: Transaction,
+    principal_id: str,
+    *,
+    task_id: str,
+    workflow_digest: str,
+    any_arguments_allowed: bool,
+) -> ScheduledApprovalArmState:
+    """Arm one approved scheduled call against the time its transaction runs."""
+    return scheduled_approvals.arm(
+        transaction,
+        principal_id,
+        task_id=task_id,
+        workflow_digest=workflow_digest,
+        any_arguments_allowed=any_arguments_allowed,
+        now_ns=time.time_ns(),
+    )
+
+
+def _claim_scheduled_call(
+    transaction: Transaction,
+    principal_id: str,
+    *,
+    call: ScheduledCall,
+    arguments_json: str,
+    receipt: ApprovalCardReservation,
+) -> ScheduledCallClaim | ScheduledCallRefusal:
+    """Spend one armed scheduled approval against the time its transaction runs."""
+    return scheduled_approvals.claim(
+        transaction,
+        principal_id,
+        call=call,
+        arguments_json=arguments_json,
+        receipt=receipt,
+        now_ns=time.time_ns(),
+    )
+
+
+def _maintain_automatic_approvals(
+    transaction: Transaction,
+    principal_id: str,
+    *,
+    grant_id: str | None,
+) -> tuple[str, ...]:
+    """Retire settled receipts, enqueue due grant revocations, and prune old scheduled calls, under the grant lock."""
+    approval_grants.lock(transaction, principal_id)
+    if grant_id is None:
+        approval_cards.retire_receipts(transaction, principal_id)
+    deliveries = approval_grants.maintain(transaction, principal_id, grant_id=grant_id)
+    if grant_id is None:
+        scheduled_approvals.prune(transaction, principal_id, time.time_ns())
+    return deliveries
 
 
 def _claim_approval_resume(
@@ -674,6 +537,118 @@ def _end_approval(
     effects = () if applied is None else applied.post_commit
     # A claim that waited for the approval to end, such as an edit's regeneration, retries now.
     return effects if paused is None else (*effects, replies.ApprovalEnded(paused.reply_id))
+
+
+def _release_approval_continuation(
+    transaction: Transaction,
+    principal_id: str,
+    approval_id: str,
+    *,
+    expected_generation: int,
+) -> tuple[PostCommitEffect, ...] | None:
+    """Release an interrupted continuation of the expected generation, handing its reply's sources back."""
+    return _end_approval(
+        transaction,
+        principal_id,
+        approval_id,
+        may_end=lambda: approval_continuations.may_release(
+            transaction,
+            principal_id,
+            approval_id=approval_id,
+            expected_generation=expected_generation,
+        ),
+        end=lambda released: replies.approval_released(transaction, principal_id, released),
+    )
+
+
+def _finish_approval_continuation(
+    transaction: Transaction,
+    principal_id: str,
+    approval_id: str,
+) -> tuple[PostCommitEffect, ...] | None:
+    """Settle a paused run whose FINAL delivery ended, and end its reply."""
+    return _end_approval(
+        transaction,
+        principal_id,
+        approval_id,
+        may_end=lambda: approval_continuations.may_finish(
+            transaction,
+            principal_id,
+            approval_id=approval_id,
+        ),
+        end=lambda finishing: replies.approval_finished(
+            transaction,
+            principal_id,
+            finishing,
+            owner_available=True,
+        ),
+    )
+
+
+def _discard_unavailable_approval_continuation(
+    transaction: Transaction,
+    principal_id: str,
+    approval_id: str,
+    *,
+    notice_principal_id: str,
+) -> tuple[PostCommitEffect, ...] | None:
+    """Release a run whose owner is permanently gone, ending the reply it paused."""
+    # The owner that could settle the reply is gone; the notice is what the room sees.
+    return _end_approval(
+        transaction,
+        principal_id,
+        approval_id,
+        may_end=lambda: approval_continuations.may_discard_unavailable(
+            transaction,
+            principal_id,
+            approval_id=approval_id,
+            notice_principal_id=notice_principal_id,
+        ),
+        end=lambda discarded: replies.approval_finished(
+            transaction,
+            principal_id,
+            discarded,
+            owner_available=False,
+        ),
+    )
+
+
+def _claim_approval_in_place(
+    transaction: Transaction,
+    principal_id: str,
+    *,
+    approval_id: str,
+    runtime_generation: str,
+    reply_id: str,
+    span_id: str,
+) -> tuple[ApprovalContinuation | None, AppliedTransition | None]:
+    """Claim a ready continuation and resume its reply in place, or refuse both."""
+    current = approval_continuations.get(transaction, principal_id, approval_id=approval_id)
+    if current is None or current.state != "ready":
+        return None, None
+    resumed = replies.decide_on_span(
+        transaction,
+        principal_id,
+        reply_id=reply_id,
+        span_id=span_id,
+        author_generation=runtime_generation,
+        decide=lambda reply, span: rl.resumed_in_place(
+            reply,
+            span,
+            approval_id=approval_id,
+            now_ns=time.time_ns(),
+        ),
+    )
+    if not resumed.transition.applied:
+        raise _InPlaceResumeRefusedError(resumed)
+    claimed = approval_continuations.claim(
+        transaction,
+        principal_id,
+        approval_id=approval_id,
+        span_id=span_id,
+    )
+    assert claimed, "the reply resumed in place for a continuation no other span claimed"
+    return approval_continuations.get(transaction, principal_id, approval_id=approval_id), resumed
 
 
 class _InPlaceResumeRefusedError(Exception):

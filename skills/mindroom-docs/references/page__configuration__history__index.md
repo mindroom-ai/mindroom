@@ -16,7 +16,7 @@ Set these fields in `defaults`, on an agent, or on a team (see [Team History and
 
 An agent or team that leaves both `num_history_runs` and `num_history_messages` at `null` inherits both from `defaults`; setting either one replaces both defaults.
 History replay is unlimited only when the inherited values are also `null`.
-Tool results replay unchanged; the retired `compress_tool_results` field fails validation with `Unknown key`, so remove it.
+Tool results replay unchanged.
 
 ## Context Window
 

@@ -15,8 +15,9 @@ from mindroom.entity_resolution import MissingManagedEntityAccountError, entity_
 from mindroom.runtime_env_policy import WORKER_COMPUTER_ENABLED_ENV
 from mindroom.tool_system.worker_routing import build_agent_toolkit_worker_target, build_tool_execution_identity
 from mindroom.worker_computer.sessions import ComputerError, ComputerTarget
+from mindroom.workers.backend_kinds import worker_backend_kind
 from mindroom.workers.models import WorkerSpec
-from mindroom.workers.runtime import configured_primary_worker_manager_identity, primary_worker_backend_name
+from mindroom.workers.runtime import configured_primary_worker_manager_identity
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
@@ -73,7 +74,7 @@ async def _authorize_computer(
 
 def _computer_browser_provider(agent_name: str, config: Config, runtime_paths: RuntimePaths) -> str:
     """Return the one browser tool that gives this agent a worker computer, or raise the API's error."""
-    if primary_worker_backend_name(runtime_paths) not in {"docker", "kubernetes"}:
+    if not worker_backend_kind(runtime_paths).dedicated:
         raise ComputerError(503, "Computer requires a dedicated Docker or Kubernetes worker backend.")
     providers = [
         provider

@@ -10,8 +10,8 @@ from mindroom.background_tasks import create_background_task
 from mindroom.interactive_models import InteractivePrompt
 from mindroom.matrix.conversation_reads import DeliveredResponse
 from mindroom.runtime_protocols import SupportsClientConfigMemberships  # noqa: TC001
-from mindroom.thread_summary import maybe_generate_thread_summary
-from mindroom.thread_summary import should_queue_thread_summary as should_queue_thread_summary_check
+from mindroom.thread_summary.automatic import maybe_generate_thread_summary
+from mindroom.thread_summary.schedule import should_queue_thread_summary as should_queue_thread_summary_check
 from mindroom.timing import timed
 from mindroom.tool_system.events import strip_visible_tool_markers
 

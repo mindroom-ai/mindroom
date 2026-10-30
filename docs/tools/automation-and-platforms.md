@@ -126,7 +126,6 @@ Downloads always land inside the agent workspace at workspace-relative paths; ab
 | --- | --- | --- | --- |
 | `api_key` | `password` | `null` | E2B API key. |
 | `timeout` | `number` | `300` | Sandbox timeout in seconds. |
-| `sandbox_options` | `text` | `null` | Extra E2B sandbox-creation options; the SDK expects a mapping that tool config cannot express, so leave it unset. |
 
 ```yaml
 agents:
@@ -194,10 +193,6 @@ It is not confined by `file_access` and cannot run in a worker, so enable it onl
 | `base_url` | `url` | `null` | Composio API base URL. |
 | `entity_id` | `text` | `default` | Composio entity whose connected accounts run the actions. |
 | `workspace_id` | `text` | `null` | Composio workspace ID. |
-| `workspace_config` | `text` | `null` | Composio workspace configuration object; tool config cannot express it, so leave it unset. |
-| `connected_account_ids` | `text` | `null` | Mapping of apps to connected account IDs; tool config cannot express it, so leave it unset. |
-| `metadata` | `text` | `null` | Action metadata mapping; tool config cannot express it, so leave it unset. |
-| `processors` | `text` | `null` | Request, response, and schema processor mapping; tool config cannot express it, so leave it unset. |
 | `output_dir` | `text` | `null` | Directory for file-based results. |
 | `output_in_file` | `boolean` | `false` | Write action output to files. |
 | `lockfile` | `text` | `null` | Lockfile path for action-version locking. |
@@ -205,7 +200,6 @@ It is not confined by `file_access` and cannot run in a worker, so enable it onl
 | `max_retries` | `number` | `3` | Retries for failed Composio operations. |
 | `verbosity_level` | `number` | `null` | Verbosity from `0` to `3`. |
 | `allow_tracing` | `boolean` | `false` | Enable Composio tracing. |
-| `logging_level` | `text` | `INFO` | `DEBUG`, `INFO`, `WARNING`, `ERROR`, or `CRITICAL`. |
 
 ```yaml
 agents:

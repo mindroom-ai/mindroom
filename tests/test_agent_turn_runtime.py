@@ -898,7 +898,7 @@ async def test_a_reply_that_is_no_turn_still_counts_toward_usage_and_budgets(
     ending: str,
     run_id: str | None,
 ) -> None:
-    """Its tokens stay in the usage ledger, the session totals, the usage report, and the requester's monthly spend."""
+    """Its tokens stay in the usage ledger, the usage report's session totals, and the requester's monthly spend."""
     if ending == "empty":
         script = [answer("", usage(100, 5)), answer("Recovered.", usage(120, 9))]
         expected_snapshots, stored = [(100, 5), (120, 9)], ["Recovered."]

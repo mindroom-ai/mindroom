@@ -30,7 +30,7 @@ from mindroom.matrix.rooms import leave_non_dm_rooms
 from mindroom.matrix.state import matrix_state_for_runtime
 from mindroom.message_target import MessageTarget
 from mindroom.runtime_protocols import SupportsClientConfigMemberships  # noqa: TC001
-from mindroom.thread_summary import send_welcome_thread_summary
+from mindroom.thread_summary.notices import send_welcome_thread_summary
 
 if TYPE_CHECKING:
     from contextlib import AbstractAsyncContextManager

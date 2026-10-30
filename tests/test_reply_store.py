@@ -267,7 +267,7 @@ async def test_applying_a_terminal_transition_settles_the_span_sources(journal_s
 async def _pending_turn(journal_store: EventJournalStore, *source_ids: str, requester_id: str | None = None) -> None:
     pending = TurnRecord.create(list(source_ids), completed=False, requester_id=requester_id)
     result = await journal_store.turn_records("agent").write(turn_rows.record_pending_turn, pending, room_id=ROOM)
-    assert isinstance(result, turn_rows.Accepted)
+    assert isinstance(result, turn_rows.PendingTurn)
 
 
 async def _turn(journal_store: EventJournalStore, source_id: str) -> TurnRecord:
@@ -1775,7 +1775,7 @@ async def test_deleting_the_relayed_messages_ends_the_routed_reply(
     )
     assert isinstance(
         await journal_store.turn_records("agent").write(turn_rows.record_pending_turn, relays, room_id=ROOM),
-        turn_rows.Accepted,
+        turn_rows.PendingTurn,
     )
     if held:
         assert await paused_for_approval(

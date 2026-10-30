@@ -73,7 +73,7 @@ from mindroom.tool_system.worker_routing import (
     worker_root_path,
 )
 from mindroom.workers.backend import WorkerBackendError
-from mindroom.workers.models import WorkerHandle, WorkerSpec
+from mindroom.workers.models import ConfiguredWorkerBackend, WorkerHandle, WorkerSpec
 from tests.authorization_helpers import make_test_tool_runtime_context
 from tests.conftest import (
     SETTLE_TIMEOUT_SECONDS,
@@ -2805,7 +2805,7 @@ async def test_cancelled_late_backend_build_cannot_publish_after_final_shutdown(
     tmp_path: Path,
 ) -> None:
     """Final shutdown fences a provider thread even after its asyncio owner is cancelled."""
-    workers_runtime_module._reset_primary_worker_manager()
+    workers_runtime_module.reset_primary_worker_manager()
     runtime_paths = _runtime_paths(tmp_path)
     loop = asyncio.get_running_loop()
     build_started = asyncio.Event()
@@ -2828,10 +2828,13 @@ async def test_cancelled_late_backend_build_cannot_publish_after_final_shutdown(
 
     monkeypatch.setattr(
         workers_runtime_module,
-        "_primary_worker_backend_config_signature",
-        lambda *_args, **_kwargs: ("late-generation",),
+        "_configure_primary_worker_backend",
+        lambda *_args, **_kwargs: ConfiguredWorkerBackend(
+            signature=("late-generation",),
+            cleanup_signature=("late-generation",),
+            build=build_manager,
+        ),
     )
-    monkeypatch.setattr(workers_runtime_module, "_build_primary_worker_manager", build_manager)
     manager = SimpleNamespace(
         begin_shutdown=AsyncMock(),
         begin_startup_reconciliation=AsyncMock(),
@@ -2854,7 +2857,6 @@ async def test_cancelled_late_backend_build_cannot_publish_after_final_shutdown(
             runtime_paths,
             proxy_url=None,
             proxy_token=None,
-            storage_root=runtime_paths.storage_root,
         ),
     )
     acquisition = None
@@ -2889,7 +2891,7 @@ async def test_cancelled_late_backend_build_cannot_publish_after_final_shutdown(
             await asyncio.gather(pending_acquisition.task, return_exceptions=True)
         if build_started.is_set():
             await manager_shutdown.wait()
-        workers_runtime_module._reset_primary_worker_manager()
+        workers_runtime_module.reset_primary_worker_manager()
 
 
 @pytest.mark.asyncio
@@ -2898,7 +2900,7 @@ async def test_cancelled_published_worker_lease_handoff_releases_after_final_shu
     tmp_path: Path,
 ) -> None:
     """Cancellation after publication cannot strand the executor-owned lease delivery."""
-    workers_runtime_module._reset_primary_worker_manager()
+    workers_runtime_module.reset_primary_worker_manager()
     runtime_paths = _runtime_paths(tmp_path)
     loop = asyncio.get_running_loop()
     lease_published = asyncio.Event()
@@ -2916,13 +2918,12 @@ async def test_cancelled_published_worker_lease_handoff_releases_after_final_shu
 
     monkeypatch.setattr(
         workers_runtime_module,
-        "_primary_worker_backend_config_signature",
-        lambda *_args, **_kwargs: ("published-generation",),
-    )
-    monkeypatch.setattr(
-        workers_runtime_module,
-        "_build_primary_worker_manager",
-        lambda *_args, **_kwargs: cast("WorkerBackend", published_manager),
+        "_configure_primary_worker_backend",
+        lambda *_args, **_kwargs: ConfiguredWorkerBackend(
+            signature=("published-generation",),
+            cleanup_signature=("published-generation",),
+            build=lambda _current_launch: cast("WorkerBackend", published_manager),
+        ),
     )
 
     def lease_provider(_locator: str | None) -> workers_runtime_module.PrimaryWorkerManagerLease:
@@ -2930,7 +2931,6 @@ async def test_cancelled_published_worker_lease_handoff_releases_after_final_shu
             runtime_paths,
             proxy_url=None,
             proxy_token=None,
-            storage_root=runtime_paths.storage_root,
         )
         loop.call_soon_threadsafe(lease_published.set)
         assert release_provider.wait(timeout=SETTLE_TIMEOUT_SECONDS)
@@ -2992,7 +2992,7 @@ async def test_cancelled_published_worker_lease_handoff_releases_after_final_shu
             await asyncio.gather(pending_acquisition.task, return_exceptions=True)
         if lease_published.is_set():
             await manager_shutdown.wait()
-        workers_runtime_module._reset_primary_worker_manager()
+        workers_runtime_module.reset_primary_worker_manager()
 
 
 @pytest.mark.asyncio

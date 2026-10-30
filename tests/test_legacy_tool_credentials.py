@@ -5,7 +5,6 @@ from __future__ import annotations
 import base64
 import os
 from typing import TYPE_CHECKING
-from unittest.mock import Mock
 
 import pytest
 
@@ -191,11 +190,6 @@ async def test_startup_cleans_up_before_credentials_are_used(
         raise _CleanupRanError
 
     monkeypatch.setattr(storage_preparation, "migrate_tool_credential_defaults", cleanup)
-    monkeypatch.setattr(
-        storage_preparation,
-        "sync_env_to_credentials",
-        Mock(side_effect=AssertionError("credentials started")),
-    )
     with pytest.raises(_CleanupRanError):
         await storage_preparation.prepare_runtime_storage(runtime_paths)
 

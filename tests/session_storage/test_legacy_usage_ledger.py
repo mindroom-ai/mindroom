@@ -20,7 +20,7 @@ from mindroom.session_storage import legacy_usage_ledger
 from mindroom.session_storage.agent_storage import prepare_conversation_database
 from mindroom.session_storage.legacy_agno3_conversion import migrate_conversation_storage
 from mindroom.session_storage.legacy_agno3_schema import AgnoTableNames, agno_runs_sql
-from mindroom.session_storage.schema import TableNames
+from mindroom.session_storage.schema import TableNames, table_names, usage_table_sql
 from mindroom.usage.stats_storage import UsageSessionRow, UsageStorageSource, iter_usage_storage_rows
 from tests.conftest import create_agno_2_sessions_db
 from tests.session_storage.agno_layout import recorded_owner
@@ -70,7 +70,18 @@ def test_migration_imports_once_with_current_precedence(tmp_path: Path) -> None:
                     [
                         {"run_id": "overlap", "created_at": 2, "metrics": {"total_tokens": 10}},
                         {"metrics": {"total_tokens": 3}, "content": "private history"},
-                        {"run_id": "legacy", "metrics": {"total_tokens": 4}},
+                        {
+                            "run_id": "legacy",
+                            "metrics": {
+                                "total_tokens": 4,
+                                "details": {
+                                    "model": [
+                                        {"id": "m", "provider": "p", "total_tokens": 3, "note": "dropped"},
+                                        {"id": 7, "provider": None, "total_tokens": 1},
+                                    ],
+                                },
+                            },
+                        },
                     ],
                 ),
             ),
@@ -96,9 +107,26 @@ def test_migration_imports_once_with_current_precedence(tmp_path: Path) -> None:
     assert len(rows) == 3
     assert rows["overlap"]["metrics"]["total_tokens"] == 20
     assert rows["overlap"]["created_at"] == 1
+    # Model details keep their counters and string names only.
+    assert rows["legacy"]["metrics"]["details"] == {
+        "model": [{"total_tokens": 3, "id": "m", "provider": "p"}, {"total_tokens": 1}],
+    }
     assert "created_at" not in rows[None]
     assert "user_id" not in rows[None]
     assert "private history" not in json.dumps(rows)
+
+
+def test_seeding_leaves_a_database_with_a_ledger_or_without_sessions(tmp_path: Path) -> None:
+    """Only an Agno database with sessions and no ledger is seeded; the step never replaces or invents a ledger."""
+    path = create_agno_2_sessions_db(_NAMES.database_path(tmp_path))
+    with closing(sqlite3.connect(path)) as connection, connection:
+        connection.execute(usage_table_sql(_NAMES))
+        legacy_usage_ledger.seed_usage_ledger(connection, _NAMES)
+    assert _usage(path) == []
+    empty = tmp_path / "empty.db"
+    with closing(sqlite3.connect(empty)) as connection, connection:
+        legacy_usage_ledger.seed_usage_ledger(connection, _NAMES)
+        assert table_names(connection) == set()
 
 
 def test_migration_reads_the_agno_runs_table_beside_agno_sessions(tmp_path: Path) -> None:
@@ -152,7 +180,7 @@ def test_a_blob_run_with_an_unusable_timestamp_keeps_its_usage(tmp_path: Path, c
 def test_migration_rolls_back_schema_and_seed_on_interruption(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """A failed first import cannot publish an empty or partially seeded usage table."""
     path = create_agno_2_sessions_db(_NAMES.database_path(tmp_path))
-    project = legacy_usage_ledger.project_usage
+    project = legacy_usage_ledger._project_usage
     calls = 0
 
     def interrupt(run: dict[str, object]) -> dict[str, object]:
@@ -164,7 +192,7 @@ def test_migration_rolls_back_schema_and_seed_on_interruption(tmp_path: Path, mo
         return project(run)
 
     with monkeypatch.context() as patch:
-        patch.setattr(legacy_usage_ledger, "project_usage", interrupt)
+        patch.setattr(legacy_usage_ledger, "_project_usage", interrupt)
         with pytest.raises(RuntimeError, match="interrupted seed"):
             _convert(path)
     with sqlite3.connect(path) as connection:

@@ -605,16 +605,11 @@ async def test_cancellation_keeps_locks_until_blocking_migration_drains(
 
 
 @pytest.mark.asyncio
-async def test_primary_admission_fails_before_credentials(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_primary_admission_fails_before_credentials(tmp_path: Path) -> None:
     """Startup must reject unrecoverable storage before starting runtime work."""
     paths = _paths(tmp_path)
     _seed(paths, _OLD, _REQUESTER)
     (paths.storage_root / ".mindroom-storage-upgrade.json").write_text("{}")
-    monkeypatch.setattr(
-        storage_preparation,
-        "sync_env_to_credentials",
-        Mock(side_effect=AssertionError("credentials started")),
-    )
     with pytest.raises(ValueError, match=r"[Pp]rivate"):
         await storage_preparation.prepare_runtime_storage(paths)
 

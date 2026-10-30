@@ -20,7 +20,7 @@ It records reasons, rejected alternatives, and accepted limitations; the code sh
   What `mindroom run` lends its API is one frozen value bound once before the server serves and cleared once after it stops; the API reads it as always present, and an app served without it fails at startup.
   Values that change while the runtime runs, such as reload status and active calls, are callables into their owners, because a frozen copy would go stale.
   Bindings the runtime replaces per published config generation, such as external-trigger delivery and the computer runtime, stay separate, because they are not set once.
-- Every startup migration and the credential sync run through one ordered step; old worker mounts of whole state roots retire before conversation storage converts.
+- Every startup migration runs through one ordered step; old worker mounts of whole state roots retire before conversation storage converts.
   Only `mindroom run` prepares a storage root and deployments replace its process rather than overlap two, so startup migrations take no lock against a second starting process.
 - The router's early skip before shared ingress work and its dispatch plan share one mention rule and one thread rule; the early skip only drops what the plan would ignore, and a missing thread snapshot means continue through normal ingress.
 - The router bot's own duties, keeping room-backed reply grants current from its sync, setting up and welcoming the rooms it joins, cleaning orphaned bot accounts, and emitting room-membership hooks, live in one collaborator only the router builds.

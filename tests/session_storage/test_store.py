@@ -20,7 +20,7 @@ import pytest
 from mindroom.history.types import HistoryScope
 from mindroom.llm.messages import Message
 from mindroom.llm.runs import RunRecord, RunRequirement, RunStatus, TeamRunRecord, ToolExecution
-from mindroom.llm.usage import HelperUsage, MessageMetrics, RequestUsage, RunMetrics, TokenCounts
+from mindroom.llm.usage import TOKEN_FIELDS, HelperUsage, MessageMetrics, RequestUsage, RunMetrics, TokenCounts
 from mindroom.session_storage import store as store_module
 from mindroom.session_storage.schema import LOG_VERSION
 from mindroom.session_storage.store import (
@@ -35,7 +35,7 @@ from mindroom.session_storage.types import ConversationSession, session_state_sn
 from tests.conftest import delete_runs, seed_session_row, seed_session_state, stored_session_state
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Iterator
+    from collections.abc import Callable
     from pathlib import Path
 
     from mindroom.llm.runs import AnyRunRecord
@@ -205,9 +205,14 @@ def _has_usage(store: ConversationStore, run_id: str) -> bool:
     return bool(_query(store, "SELECT 1 FROM code_sessions_usage WHERE run_id = ?", run_id))
 
 
-def _totals(store: ConversationStore, session_id: str = "s1") -> dict[str, Any]:
-    [(session_data,)] = _query(store, "SELECT session_data FROM code_sessions WHERE session_id = ?", session_id)
-    return json.loads(session_data or "{}").get("session_metrics", {})
+def _totals(store: ConversationStore, session_id: str = "s1") -> dict[str, int]:
+    """Return the session's totals: the token counters of its usage rows, added up."""
+    totals = dict.fromkeys(TOKEN_FIELDS, 0)
+    for (usage_data,) in _query(store, "SELECT usage_data FROM code_sessions_usage WHERE session_id = ?", session_id):
+        for name, value in json.loads(usage_data)["metrics"].items():
+            if name in totals:
+                totals[name] += value
+    return totals
 
 
 def _loaded(store: ConversationStore) -> ConversationSession:
@@ -994,8 +999,27 @@ def test_list_runs_returns_every_run_with_members_in_seq_order_in_its_replay_vie
     assert stored.messages == []
 
 
+def test_logged_runs_list_top_level_runs_in_log_order_with_a_finished_approval_last(
+    team_store: ConversationStore,
+) -> None:
+    """A run that finishes after its approval moves past the runs that finished meanwhile; members are left out."""
+    team = _team()
+    _save(team_store, _team_run("t0", RunStatus.paused), _member("m1", "t1"), _team_run("t1"), session=team)
+    first = team_store.logged_runs("s1")
+    assert [(logged.run.run_id, logged.run.status) for logged in first] == [
+        ("t0", RunStatus.paused),
+        ("t1", RunStatus.completed),
+    ]
+
+    _save(team_store, _team_run("t0"), session=team)
+
+    logged = team_store.logged_runs("s1")
+    assert [turn.run.run_id for turn in logged] == ["t1", "t0"]
+    assert logged[1].seq > first[-1].seq
+
+
 @pytest.fixture
-def traced(monkeypatch: pytest.MonkeyPatch) -> Iterator[list[Callable[[str], None]]]:
+def traced(monkeypatch: pytest.MonkeyPatch) -> list[Callable[[str], None]]:
     """Statement hooks called as each store connection starts executing a statement."""
     hooks: list[Callable[[str], None]] = []
     connect = store_module.connect_conversation_database
@@ -1451,8 +1475,8 @@ async def test_the_save_that_creates_the_session_row_records_the_state_it_stored
 
 
 @pytest.mark.asyncio
-async def test_the_state_and_the_usage_totals_are_stored_apart(store: ConversationStore) -> None:
-    """A row keeps its state in its own column and its totals alone in ``session_data``, so neither write reads the other."""
+async def test_a_run_save_keeps_the_state_in_its_column_and_its_usage_in_the_ledger(store: ConversationStore) -> None:
+    """A row keeps its state in its own column, and a save recording usage writes the ledger, not ``session_data``."""
     session = _session()
     session.session_state["cwd"] = "/repo"
     store.save_run(session, _run("r1"), record_usage=False)
@@ -1461,9 +1485,8 @@ async def test_the_state_and_the_usage_totals_are_stored_apart(store: Conversati
     session.session_state["cwd"] = "/repo/sub"
     await persist_to(store, session)(_run("r2", metrics=_usage(10)))
 
-    [(state, totals)] = _query(store, "SELECT session_state, session_data FROM code_sessions")
-    assert json.loads(state) == {"cwd": "/repo/sub"}
-    assert set(json.loads(totals)) == {"session_metrics"}
+    assert _query(store, "SELECT session_state, session_data FROM code_sessions") == [('{"cwd": "/repo/sub"}', None)]
+    assert _usage_row(store, "r2")["metrics"]["input_tokens"] == 10
 
 
 @pytest.mark.asyncio
@@ -1671,18 +1694,22 @@ def test_unreadable_session_columns_load_as_empty_and_usage_leaves_their_bytes(s
     assert _usage_row(store, "r1")["metrics"]["input_tokens"] == 3
 
 
-def test_json_null_session_data_counts_usage_like_an_empty_row(store: ConversationStore) -> None:
-    """Agno wrote ``null`` for a session without data; its runs count in the totals and move its update time."""
+@pytest.mark.parametrize(
+    "totals",
+    [{"input_tokens": "12"}, {"input_tokens": 12, "details": {"model": ["not an object"]}}],
+)
+def test_a_run_saves_with_its_usage_whatever_totals_an_older_release_left(
+    store: ConversationStore,
+    totals: dict[str, object],
+) -> None:
+    """Totals an older release stored that no longer read as counters never stop a run, or its usage, from saving."""
     seed_session_row(store, _session())
-    _execute(store, "UPDATE code_sessions SET session_data = 'null', updated_at = 5 WHERE session_id = 's1'")
+    _execute(store, f"UPDATE code_sessions SET session_data = '{json.dumps({'session_metrics': totals})}'")  # noqa: S608
 
-    _persist(store, _session(), _run("r1", RunStatus.paused, metrics=_usage(3)))
-    [(updated_at,)] = _query(store, "SELECT updated_at FROM code_sessions")
-    assert updated_at > 5
-    assert _totals(store)["input_tokens"] == 3
+    _persist(store, _session(), _run("r1", metrics=_usage(3)))
 
-    _persist(store, _session(), _run("r1", metrics=_usage(7)))
-    assert _totals(store)["input_tokens"] == 7
+    assert _row(store, "r1") is not None
+    assert _usage_row(store, "r1")["metrics"]["input_tokens"] == 3
 
 
 # --- usage ------------------------------------------------------------------------------------------------------
@@ -1721,11 +1748,11 @@ def test_a_run_saved_again_counts_once_in_the_session_totals(store: Conversation
 
     totals = _totals(store)
     assert (totals["input_tokens"], totals["output_tokens"], totals["total_tokens"]) == (125, 2, 127)
-    assert sorted((entry["id"], entry["input_tokens"]) for entry in totals["details"]["model"]) == [
-        ("code-model", 25),
-        ("other-model", 100),
-    ]
-    assert _usage_row(store, "r1")["metrics"]["input_tokens"] == 25
+    assert [
+        (entry["id"], entry["input_tokens"])
+        for run_id in ("r1", "r2")
+        for entry in _usage_row(store, run_id)["metrics"]["details"]["model"]
+    ] == [("code-model", 25), ("other-model", 100)]
 
 
 def test_team_member_runs_count_in_their_team_sessions_totals(team_store: ConversationStore) -> None:
@@ -1756,24 +1783,43 @@ def test_a_usage_write_failure_rolls_back_the_run(store: ConversationStore) -> N
     assert _message_rows(store, "r1") == []
 
 
-def test_usage_saves_move_the_sessions_update_time_and_rewrites_do_not(store: ConversationStore) -> None:
-    """Update-time cursors see a session whose run recorded usage, not one whose runs were only saved or rewritten."""
+def test_news_in_the_log_moves_the_sessions_update_time_and_rewrites_do_not(store: ConversationStore) -> None:
+    """Update-time cursors see a finished run new to the log, one that finished after waiting, and usage; no rewrite."""
+
+    def updated_at() -> int:
+        [(value,)] = _query(store, "SELECT updated_at FROM code_sessions")
+        _execute(store, "UPDATE code_sessions SET updated_at = 5")
+        return value
+
     _save(store, _run("r1", RunStatus.paused))
     _execute(store, "UPDATE code_sessions SET updated_at = 5")
-
-    _save(store, _run("r1"), _run("r2"))
+    _save(store, _run("r1", RunStatus.paused))
     store.patch_run_metadata("s1", "r1", {"matrix_response_event_id": "$reply"})
     store.rewrite_run_messages("s1", lambda runs: runs)
+    assert updated_at() == 5
+
+    _save(store, _run("r1"))
+    assert updated_at() > 5
+    _save(store, _run("r2", RunStatus.cancelled))
+    assert updated_at() == 5
+    store.save_interrupted_record(_session(), _run("r2", content="what was heard"))
+    assert updated_at() > 5
+    _save(store, _run("r3"))
+    assert updated_at() > 5
+
+    store.save_interrupted_record(_session(), _run("r1", content="what was heard"))
     delete_runs(store, ["r2"], session_id="s1")
-    assert _query(store, "SELECT updated_at FROM code_sessions") == [(5,)]
+    assert updated_at() == 5
 
-    _persist(store, _session(), _run("r3"))
-    [(updated_at,)] = _query(store, "SELECT updated_at FROM code_sessions")
-    assert updated_at > 5
+    _persist(store, _session(), _run("r4"))
+    assert updated_at() > 5
+    # A paused run takes no place in the log yet; its recorded usage still moves the update time.
+    _persist(store, _session(), _run("r5", RunStatus.paused, metrics=_usage(1)))
+    assert updated_at() > 5
 
 
-def test_independent_usage_is_recorded_beside_the_runs_and_not_in_the_totals(store: ConversationStore) -> None:
-    """Helper usage keeps its kind and requester beside the runs, and adds nothing to the totals."""
+def test_independent_usage_is_recorded_beside_the_runs(store: ConversationStore) -> None:
+    """Helper usage keeps its kind and requester in the ledger, beside the runs."""
     created_at = 1_700_000_500
     tokens = TokenCounts(input_tokens=40, output_tokens=4, total_tokens=44)
     metrics = {"input_tokens": 40, "output_tokens": 4, "total_tokens": 44}
@@ -1806,7 +1852,7 @@ def test_independent_usage_is_recorded_beside_the_runs_and_not_in_the_totals(sto
         "requests": [{"created_at": created_at, "metrics": metrics}],
         "kind": "compaction_summary",
     }
-    assert _totals(store) == {}
+    assert _query(store, "SELECT session_data FROM code_sessions") == [(None,)]
     assert _loaded(store).runs == []
 
 

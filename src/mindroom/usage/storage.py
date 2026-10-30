@@ -6,12 +6,15 @@ from typing import TYPE_CHECKING, Literal, cast, get_args
 
 from mindroom.history.types import HistoryScope
 from mindroom.llm.messages import MODEL_PROVENANCE_KEY, read_model_provenance, usage_sums_attempts
-from mindroom.llm.usage import TOKEN_FIELDS
+from mindroom.llm.runs import TeamRunRecord
+from mindroom.llm.usage import TOKEN_FIELDS, RequestUsage, TokenCounts
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
 
-    from mindroom.llm.usage import HelperUsage, RequestUsage
+    from mindroom.llm.messages import Message
+    from mindroom.llm.runs import AnyRunRecord
+    from mindroom.llm.usage import HelperUsage, RunMetrics
 
 # Run metadata key holding the projected usage of requests mid-turn compaction folded out of the run's messages.
 COMPACTED_REQUESTS_METADATA_KEY = "mindroom_compacted_requests"
@@ -35,8 +38,10 @@ type IndependentUsageKind = Literal[
     "voice_normalization",
     "voice_transcription",
 ]
-type UsageKind = Literal["run"] | IndependentUsageKind
-USAGE_KINDS: frozenset[str] = frozenset({"run", *get_args(IndependentUsageKind.__value__)})
+# ``pre_ledger`` is the row holding the usage a session's stored totals counted beyond its run rows when this ledger
+# replaced them (``session_storage.legacy_usage_totals``): part of the session's totals, with no date or requester.
+type UsageKind = Literal["run", "pre_ledger"] | IndependentUsageKind
+USAGE_KINDS: frozenset[str] = frozenset({"run", "pre_ledger", *get_args(IndependentUsageKind.__value__)})
 
 SYSTEM_USAGE_ENTITY = "system:internal"
 SYSTEM_USAGE_STORAGE_NAME = "system"
@@ -44,54 +49,113 @@ SYSTEM_USAGE_STORAGE_NAME = "system"
 SYSTEM_USAGE_OWNER = HistoryScope(kind="agent", scope_id=SYSTEM_USAGE_ENTITY)
 
 
-def project_usage(run: Mapping[str, object]) -> dict[str, object]:
-    """Keep only attribution, timestamps and provider counters, never conversation content."""
-    result = {
-        key: run[key]
-        for key in (
-            "run_id",
-            "parent_run_id",
-            "team_id",
-            "user_id",
-            "model_provider",
-            "model",
-            "created_at",
-            "updated_at",
-            "voice_seconds",
-            "voice_finalized",
-        )
-        if key in run and isinstance(run[key], (str, int, float, type(None)))
+def run_usage_snapshot(record: AnyRunRecord) -> dict[str, object]:
+    """Return the ledger snapshot of ``record``'s usage, without the times of the save that records it.
+
+    It keeps the run's attribution, its requester, its token counters in total and per model, and its requests: those
+    mid-turn compaction carried out of its messages, then those its messages answered (``message_request_snapshot``),
+    never conversation content. A run resumed from a row worker code wrote can hold values of any shape: an
+    attribution value that is not a scalar is left out, and a parent or a counter of another shape becomes ``False``
+    for the reporter (``project_token_counters``).
+    """
+    team_id = record.team_id if isinstance(record, TeamRunRecord) else None
+    attribution = {
+        "run_id": record.run_id,
+        "parent_run_id": record.parent_run_id,
+        "team_id": team_id,
+        "user_id": record.user_id,
+        "model_provider": record.model_provider,
+        "model": record.model,
     }
-    if run.get("parent_run_id") is not None and "parent_run_id" not in result:
-        result["parent_run_id"] = False
-    metadata = run.get("metadata")
-    if isinstance(metadata, dict):
-        requester = cast("dict[str, object]", metadata).get("requester_id")
-        if isinstance(requester, str):
-            result["metadata"] = {"requester_id": requester}
-    metrics = run.get("metrics", {})
-    if not isinstance(metrics, dict):
-        result["metrics"] = None
-        return result
-    result["metrics"] = _project_run_metrics(cast("dict[str, object]", metrics))
-    requests = project_requests(run.get("messages"))
-    carried = _carried_requests(run, metadata)
-    if carried:
-        # Mid-turn compaction folded these earlier requests out of the run's messages.
-        requests = [*carried, *(requests or [])]
-    if requests is not None:
-        result["requests"] = requests
-    return result
+    snapshot: dict[str, object] = {
+        key: value for key, value in attribution.items() if isinstance(value, (str, int, float))
+    }
+    if record.parent_run_id is not None and "parent_run_id" not in snapshot:
+        snapshot["parent_run_id"] = False
+    metadata = record.metadata if isinstance(record.metadata, dict) else {}
+    requester = metadata.get("requester_id")
+    if isinstance(requester, str):
+        snapshot["metadata"] = {"requester_id": requester}
+    snapshot["metrics"] = {} if record.metrics is None else _project_run_metrics(record.metrics)
+    requests = (message_request_snapshot(message) for message in record.messages)
+    snapshot["requests"] = [
+        *_carried_requests(record, metadata),
+        *(request for request in requests if request is not None),
+    ]
+    return snapshot
 
 
-def project_helper_usage(
+def request_usage(message: Message) -> RequestUsage | None:
+    """Return the usage of the provider request ``message`` answered, or None when it is not one.
+
+    That is an assistant message of the run that holds it, not a history copy, that reported token counters, unless
+    they sum a retried request's attempts, which describe no one request. Its model is the one its provenance stamp
+    records; a message stored before stamps existed and a stamp of another shape name none alike, which
+    ``message_request_snapshot`` tells apart.
+    """
+    provider_data = _provider_data(message)
+    if (
+        message.role != "assistant"
+        or message.from_history
+        or usage_sums_attempts(provider_data)
+        or not project_token_counters(message.metrics.to_dict())
+    ):
+        return None
+    return RequestUsage(
+        created_at=message.created_at,
+        metrics=message.metrics,
+        model=read_model_provenance(provider_data),
+    )
+
+
+def message_request_snapshot(message: Message) -> dict[str, object] | None:
+    """Return the ledger snapshot of the request ``message`` answered (``request_usage``), or None when it is not one.
+
+    A provenance stamp of another shape, as a row worker code wrote can hold, stays visible to the reporter as invalid
+    attribution (``False``), apart from a message stored before stamps existed, whose model the report infers.
+    """
+    request = request_usage(message)
+    if request is None:
+        return None
+    snapshot = _project_request(request)
+    assert snapshot is not None, "a request reported counters, so it projects to a snapshot"
+    if request.model is None and MODEL_PROVENANCE_KEY in (_provider_data(message) or {}):
+        snapshot["model"] = snapshot["model_provider"] = False
+    return snapshot
+
+
+def _provider_data(message: Message) -> dict[str, object] | None:
+    # A message read from a row worker code wrote can hold provider data of any shape.
+    return message.provider_data if isinstance(message.provider_data, dict) else None
+
+
+def _carried_requests(record: AnyRunRecord, metadata: Mapping[str, object]) -> list[dict[str, object]]:
+    """Return the usage mid-turn compaction carried out of the run's messages, minus any message it still saves.
+
+    A reply that failed after a compaction can still hold some folded messages, which already count.
+    """
+    carried = metadata.get(COMPACTED_REQUESTS_METADATA_KEY)
+    if not isinstance(carried, list):
+        return []
+    saved = {message.id for message in record.messages}
+    requests: list[dict[str, object]] = []
+    for item in carried:
+        if not isinstance(item, dict):
+            continue
+        entry = cast("dict[str, object]", item)
+        if entry.get("message_id") not in saved:
+            requests.append({key: value for key, value in entry.items() if key != "message_id"})
+    return requests
+
+
+def helper_usage_snapshot(
     usage: HelperUsage,
     *,
     usage_id: str,
     kind: IndependentUsageKind,
     requester_id: str | None,
 ) -> dict[str, object]:
-    """Return the snapshot of helper usage recorded as ``usage_id`` for ``requester_id``, in a run snapshot's key order.
+    """Return the snapshot of helper usage recorded as ``usage_id`` for ``requester_id``, with a run snapshot's keys.
 
     A model or provider left unknown is omitted, and a request that reported no counters is not listed.
     """
@@ -104,7 +168,7 @@ def project_helper_usage(
     if usage.voice is not None:
         snapshot["voice_seconds"] = usage.voice.seconds
         snapshot["voice_finalized"] = usage.voice.finalized
-    snapshot["metrics"] = _project_run_metrics(usage.metrics.to_dict())
+    snapshot["metrics"] = _project_run_metrics(usage.metrics)
     if usage.voice is None:
         snapshot["requests"] = [request for request in map(_project_request, usage.requests) if request is not None]
     snapshot["kind"] = kind
@@ -112,7 +176,7 @@ def project_helper_usage(
 
 
 def _project_request(request: RequestUsage) -> dict[str, object] | None:
-    metrics = _project_metrics(request.metrics.to_dict())
+    metrics = project_token_counters(request.metrics.to_dict())
     if not metrics:
         return None
     projected: dict[str, object] = {"created_at": request.created_at, "metrics": metrics}
@@ -122,78 +186,31 @@ def _project_request(request: RequestUsage) -> dict[str, object] | None:
     return projected
 
 
-def _carried_requests(run: Mapping[str, object], metadata: object) -> list[dict[str, object]]:
-    """Return the usage mid-turn compaction carried out of the run's messages, minus any message it still saves.
-
-    A reply that failed after a compaction can still hold some folded messages, which already count.
-    """
-    carried = (
-        cast("dict[str, object]", metadata).get(COMPACTED_REQUESTS_METADATA_KEY) if isinstance(metadata, dict) else None
-    )
-    if not isinstance(carried, list):
-        return []
-    saved = _message_ids(run.get("messages"))
-    requests: list[dict[str, object]] = []
-    for item in carried:
-        if not isinstance(item, dict):
-            continue
-        entry = cast("dict[str, object]", item)
-        if entry.get("message_id") not in saved:
-            requests.append({key: value for key, value in entry.items() if key != "message_id"})
-    return requests
-
-
-def _message_ids(messages: object) -> set[object]:
-    if not isinstance(messages, list):
-        return set()
-    return {cast("dict[str, object]", message).get("id") for message in messages if isinstance(message, dict)} - {None}
-
-
-def project_requests(messages: object) -> list[dict[str, object]] | None:
-    """Project current assistant counters, timestamps and recorded model attribution."""
-    if not isinstance(messages, list):
-        return None
-    requests: list[dict[str, object]] = []
-    for raw_message in messages:
-        if not isinstance(raw_message, dict):
-            continue
-        message = cast("dict[str, object]", raw_message)
-        if message.get("role") != "assistant" or message.get("from_history", False) is not False:
-            continue
-        provider_data = message.get("provider_data")
-        if isinstance(provider_data, dict) and usage_sums_attempts(cast("dict[str, object]", provider_data)):
-            # Retried attempts have aggregate counters, not one request's price or timestamp.
-            continue
-        message_metrics = message.get("metrics")
-        if not isinstance(message_metrics, dict):
-            continue
-        request_metrics = _project_metrics(cast("dict[str, object]", message_metrics))
-        if request_metrics:
-            created_at = message.get("created_at")
-            request: dict[str, object] = {
-                "created_at": created_at if isinstance(created_at, (int, float)) else None,
-                "metrics": request_metrics,
-            }
-            if isinstance(provider_data, dict) and MODEL_PROVENANCE_KEY in provider_data:
-                # A recorded model of another shape stays visible to the reporter as invalid attribution.
-                model = read_model_provenance(cast("dict[str, object]", provider_data))
-                request["model"] = model.model_id if model is not None else False
-                request["model_provider"] = model.provider if model is not None else False
-            requests.append(request)
-    return requests
-
-
-def _project_run_metrics(metrics: Mapping[str, object]) -> dict[str, object]:
-    selected = _project_metrics(metrics)
-    details = metrics.get("details")
-    if details is not None:
-        # An invalid details sentinel lets the reporter retain totals while reporting missing attribution.
-        selected["details"] = _project_model_details(details)
+def _project_run_metrics(metrics: RunMetrics) -> dict[str, object]:
+    selected = project_token_counters(metrics.to_dict())
+    if metrics.details:
+        selected["details"] = {
+            "model": [
+                project_model_entry(entry.to_dict()) for entries in metrics.details.values() for entry in entries
+            ],
+        }
     return selected
 
 
-def _project_metrics(metrics: Mapping[str, object]) -> dict[str, object]:
-    # Preserve scalar validation failures for the reporter, without retaining arbitrary nested data.
+def project_model_entry(entry: Mapping[str, object]) -> dict[str, object]:
+    """Return a stored model entry's token counters as ``project_token_counters`` does, and its string model names."""
+    model = project_token_counters(entry)
+    for key in ("id", "provider"):
+        if isinstance(entry.get(key), str):
+            model[key] = entry[key]
+    return model
+
+
+def project_token_counters(metrics: Mapping[str, object]) -> dict[str, object]:
+    """Return the token counters of a stored usage dict, each that is not a scalar as ``False``.
+
+    The reporter tells such an invalid counter from an absent one, and no nested value is ever kept.
+    """
     return {
         key: value if isinstance(value, (int, float, str, type(None))) else False
         for key in TOKEN_FIELDS
@@ -201,20 +218,26 @@ def _project_metrics(metrics: Mapping[str, object]) -> dict[str, object]:
     }
 
 
-def _project_model_details(details: object) -> object:
-    if not isinstance(details, dict):
-        return False
-    models = []
-    for entries in details.values():
-        if not isinstance(entries, list):
-            return False
-        for entry in entries:
-            if not isinstance(entry, dict):
-                return False
-            model_metrics = cast("dict[str, object]", entry)
-            model = _project_metrics(model_metrics)
-            for key in ("id", "provider"):
-                if isinstance(model_metrics.get(key), str):
-                    model[key] = model_metrics[key]
-            models.append(model)
-    return {"model": models}
+def stored_token_counts(values: Mapping[str, object]) -> TokenCounts | None:
+    """Return the token counters a stored usage dict holds, or None when it holds none.
+
+    A whole float or a short digit string counts, as rows older releases wrote can hold them. Raises ValueError for any
+    other counter that is not a nonnegative whole number, so a report never counts part of a damaged dict.
+    """
+    if all(values.get(name) is None for name in TOKEN_FIELDS):
+        return None
+    return TokenCounts(**{name: _stored_count(values.get(name)) for name in TOKEN_FIELDS})
+
+
+def _stored_count(value: object) -> int:
+    if value is None:
+        return 0
+    if isinstance(value, int) and not isinstance(value, bool):
+        count = value
+    elif (isinstance(value, float) and value.is_integer()) or (isinstance(value, str) and len(value) <= 32):
+        count = int(value)
+    else:
+        raise ValueError
+    if count < 0:
+        raise ValueError
+    return count

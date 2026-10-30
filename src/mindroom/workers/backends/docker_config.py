@@ -4,22 +4,22 @@ from __future__ import annotations
 
 import os
 import re
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from pathlib import PurePosixPath
 from typing import TYPE_CHECKING, Literal, cast
 
 from mindroom.constants import (
     RuntimePaths,
     resolve_config_relative_path,
-    resolve_primary_runtime_paths,
     runtime_env_values,
     runtime_paths_with_config_path,
     runtime_paths_with_storage_root,
 )
 from mindroom.credentials.manager import runtime_credentials_manager_key
 from mindroom.runtime_env_policy import (
-    KUBERNETES_WORKER_BACKEND_CONFIG_ENV_BY_KEY,
+    DOCKER_WORKER_BACKEND_CONFIG_ENV_BY_KEY,
     SANDBOX_RUNTIME_ENV_BY_KEY,
+    WORKER_BACKEND_ENV,
     WORKER_COMPUTER_ENABLED_ENV,
 )
 from mindroom.tool_system.worker_routing import worker_root_path
@@ -35,6 +35,7 @@ from mindroom.workers.backends._dedicated_worker_common import (
     build_backend_config_signature,
     validate_dedicated_worker_extra_env,
 )
+from mindroom.workers.backends._lifecycle import DEFAULT_IDLE_TIMEOUT_SECONDS
 from mindroom.workers.backends.worker_security import docker_worker_security_policy_signature
 
 if TYPE_CHECKING:
@@ -42,24 +43,31 @@ if TYPE_CHECKING:
     from pathlib import Path
 
 __all__ = [
-    "DEFAULT_WORKER_PORT",
     "DOCKER_HOST_ALIAS",
     "DOCKER_RESERVED_EXTRA_ENV_NAMES",
+    "LABEL_COMPONENT",
+    "LABEL_IMAGE_REFERENCE",
+    "LABEL_LAUNCH_CONFIG_HASH",
+    "LABEL_MANAGED_BY",
+    "LABEL_NAME",
+    "LABEL_RUNTIME_NAMESPACE",
+    "LABEL_STARTUP_MANIFEST_HASH",
+    "LABEL_STORAGE_LAYOUT",
+    "LABEL_STORAGE_LAYOUT_VALUE",
+    "LABEL_WORKER_ID",
     "DockerWorkerBackendConfig",
     "docker_backend_cleanup_signature",
     "docker_backend_config_signature",
+    "docker_primary_runtime_paths",
     "docker_workers_root",
     "normalize_docker_name_prefix",
-    "resolve_docker_storage_path",
     "validate_docker_endpoint_host",
     "validate_docker_extra_labels",
     "validate_docker_mount_layout",
 ]
 
-_DEFAULT_IDLE_TIMEOUT_SECONDS = 1800.0
 _DEFAULT_READY_TIMEOUT_SECONDS = 60.0
-DEFAULT_WORKER_PORT = 8766
-_DEFAULT_WORKER_PORT = DEFAULT_WORKER_PORT
+_DEFAULT_WORKER_PORT = 8766
 _DEFAULT_STORAGE_MOUNT_PATH = "/app/worker"
 _DEFAULT_CONFIG_PATH = "/app/config-host/config.yaml"
 _DEFAULT_NAME_PREFIX = "mindroom-worker"
@@ -67,38 +75,52 @@ _DEFAULT_PUBLISH_HOST = "127.0.0.1"
 # Workers reach the Docker host, where the MindRoom API usually listens, under this name.
 DOCKER_HOST_ALIAS = "host.docker.internal"
 
-_WORKER_BACKEND_ENV = KUBERNETES_WORKER_BACKEND_CONFIG_ENV_BY_KEY["worker_backend"]
-_IMAGE_ENV = "MINDROOM_DOCKER_WORKER_IMAGE"
-_PORT_ENV = "MINDROOM_DOCKER_WORKER_PORT"
-_STORAGE_MOUNT_PATH_ENV = "MINDROOM_DOCKER_WORKER_STORAGE_MOUNT_PATH"
-_CONFIG_PATH_ENV = "MINDROOM_DOCKER_WORKER_CONFIG_PATH"
-_HOST_CONFIG_PATH_ENV = "MINDROOM_DOCKER_WORKER_HOST_CONFIG_PATH"
-_IDLE_TIMEOUT_ENV = "MINDROOM_DOCKER_WORKER_IDLE_TIMEOUT_SECONDS"
-_READY_TIMEOUT_ENV = "MINDROOM_DOCKER_WORKER_READY_TIMEOUT_SECONDS"
-_NAME_PREFIX_ENV = "MINDROOM_DOCKER_WORKER_NAME_PREFIX"
-_PUBLISH_HOST_ENV = "MINDROOM_DOCKER_WORKER_PUBLISH_HOST"
-_ENDPOINT_HOST_ENV = "MINDROOM_DOCKER_WORKER_ENDPOINT_HOST"
-_USER_ENV = "MINDROOM_DOCKER_WORKER_USER"
-_SECURITY_POLICY_ENV = "MINDROOM_DOCKER_WORKER_SECURITY_POLICY"
-_RUNTIME_ENV = "MINDROOM_DOCKER_WORKER_RUNTIME"
-_EXTRA_ENV_JSON_ENV = "MINDROOM_DOCKER_WORKER_ENV_JSON"
-_EXTRA_LABELS_JSON_ENV = "MINDROOM_DOCKER_WORKER_LABELS_JSON"
+_IMAGE_ENV = DOCKER_WORKER_BACKEND_CONFIG_ENV_BY_KEY["image"]
+_PORT_ENV = DOCKER_WORKER_BACKEND_CONFIG_ENV_BY_KEY["port"]
+_STORAGE_MOUNT_PATH_ENV = DOCKER_WORKER_BACKEND_CONFIG_ENV_BY_KEY["storage_mount_path"]
+_CONFIG_PATH_ENV = DOCKER_WORKER_BACKEND_CONFIG_ENV_BY_KEY["config_path"]
+_HOST_CONFIG_PATH_ENV = DOCKER_WORKER_BACKEND_CONFIG_ENV_BY_KEY["host_config_path"]
+_IDLE_TIMEOUT_ENV = DOCKER_WORKER_BACKEND_CONFIG_ENV_BY_KEY["idle_timeout"]
+_READY_TIMEOUT_ENV = DOCKER_WORKER_BACKEND_CONFIG_ENV_BY_KEY["ready_timeout"]
+_NAME_PREFIX_ENV = DOCKER_WORKER_BACKEND_CONFIG_ENV_BY_KEY["name_prefix"]
+_PUBLISH_HOST_ENV = DOCKER_WORKER_BACKEND_CONFIG_ENV_BY_KEY["publish_host"]
+_ENDPOINT_HOST_ENV = DOCKER_WORKER_BACKEND_CONFIG_ENV_BY_KEY["endpoint_host"]
+_USER_ENV = DOCKER_WORKER_BACKEND_CONFIG_ENV_BY_KEY["user"]
+_SECURITY_POLICY_ENV = DOCKER_WORKER_BACKEND_CONFIG_ENV_BY_KEY["security_policy"]
+_RUNTIME_ENV = DOCKER_WORKER_BACKEND_CONFIG_ENV_BY_KEY["runtime"]
+_EXTRA_ENV_JSON_ENV = DOCKER_WORKER_BACKEND_CONFIG_ENV_BY_KEY["extra_env_json"]
+_EXTRA_LABELS_JSON_ENV = DOCKER_WORKER_BACKEND_CONFIG_ENV_BY_KEY["extra_labels_json"]
 DOCKER_RESERVED_EXTRA_ENV_NAMES = frozenset(
     {
         SANDBOX_RUNTIME_ENV_BY_KEY["proxy_token"],
     },
 )
-_DOCKER_RESERVED_EXTRA_ENV_NAMES = DOCKER_RESERVED_EXTRA_ENV_NAMES
+
+# The labels the Docker backend stamps on each worker container, which operator labels must not override.
+LABEL_COMPONENT = "mindroom.ai/component"
+LABEL_MANAGED_BY = "app.mindroom.ai/managed-by"
+LABEL_NAME = "app.mindroom.ai/name"
+LABEL_WORKER_ID = "mindroom.ai/worker-id"
+LABEL_LAUNCH_CONFIG_HASH = "mindroom.ai/launch-config-hash"
+# Launch inputs no other run argument carries, labelled so that the launch hash covers them.
+LABEL_STARTUP_MANIFEST_HASH = "mindroom.ai/startup-manifest-hash"
+LABEL_IMAGE_REFERENCE = "mindroom.ai/image-reference"
+LABEL_RUNTIME_NAMESPACE = "mindroom.ai/runtime-namespace"
+# Containers that mount only workspaces; earlier releases mounted whole state roots.
+LABEL_STORAGE_LAYOUT = "mindroom.ai/storage-layout"
+LABEL_STORAGE_LAYOUT_VALUE = "workspaces"
 _DOCKER_RESERVED_LABEL_NAMES = frozenset(
     {
-        "mindroom.ai/component",
-        "app.mindroom.ai/managed-by",
-        "app.mindroom.ai/name",
-        "mindroom.ai/worker-id",
+        LABEL_COMPONENT,
+        LABEL_MANAGED_BY,
+        LABEL_NAME,
+        LABEL_WORKER_ID,
         "mindroom.ai/worker-key",
-        "mindroom.ai/launch-config-hash",
-        "mindroom.ai/runtime-namespace",
-        "mindroom.ai/storage-layout",
+        LABEL_LAUNCH_CONFIG_HASH,
+        LABEL_STARTUP_MANIFEST_HASH,
+        LABEL_IMAGE_REFERENCE,
+        LABEL_RUNTIME_NAMESPACE,
+        LABEL_STORAGE_LAYOUT,
     },
 )
 
@@ -153,13 +175,11 @@ def _read_host_config_path(runtime_paths: RuntimePaths, env: Mapping[str, str]) 
 def _default_docker_user_for_os(os_name: str) -> str | None:
     if os_name == "posix":
         return f"{os.getuid()}:{os.getgid()}"
-    if os_name == "nt":
-        return None
     return None
 
 
-def _read_docker_user(env: Mapping[str, str] | None = None) -> str | None:
-    raw_value = os.getenv(_USER_ENV) if env is None else env.get(_USER_ENV)
+def _read_docker_user(env: Mapping[str, str]) -> str | None:
+    raw_value = env.get(_USER_ENV)
     if raw_value is None:
         return _default_docker_user_for_os(os.name)
     normalized = raw_value.strip()
@@ -177,19 +197,22 @@ def docker_workers_root(base_storage_path: Path) -> Path:
     return worker_root_path(base_storage_path, "__mindroom_root__").parent
 
 
-def resolve_docker_storage_path(storage_path: Path | None = None, *, runtime_paths: RuntimePaths | None = None) -> Path:
-    """Resolve the storage root used by the Docker backend."""
-    if storage_path is not None:
-        base_storage_path = storage_path
-    elif runtime_paths is not None:
-        base_storage_path = runtime_paths.storage_root
-    else:
-        base_storage_path = resolve_primary_runtime_paths(process_env=dict(os.environ)).storage_root
-    return base_storage_path.expanduser().resolve()
+def docker_primary_runtime_paths(
+    runtime_paths: RuntimePaths,
+    config: DockerWorkerBackendConfig,
+    *,
+    storage_root: Path,
+) -> RuntimePaths:
+    """Return the primary's runtime paths as the Docker backend uses them: its host config file and storage root."""
+    if config.host_config_path is not None:
+        runtime_paths = runtime_paths_with_config_path(runtime_paths, config.host_config_path)
+    return runtime_paths_with_storage_root(runtime_paths, storage_root)
 
 
 @dataclass(frozen=True, slots=True)
-class _DockerWorkerBackendConfig:
+class DockerWorkerBackendConfig:
+    """Resolved environment-backed configuration for the Docker provider."""
+
     image: str
     worker_port: int
     storage_mount_path: str
@@ -207,6 +230,7 @@ class _DockerWorkerBackendConfig:
     runtime: str | None = None
 
     def __post_init__(self) -> None:
+        """Reject an unknown security policy, reserved labels, and an invalid mount layout or endpoint host."""
         if self.security_policy not in {"runtime_default", "computer"}:
             msg = f"{_SECURITY_POLICY_ENV} must be runtime_default or computer; got {self.security_policy!r}."
             raise WorkerBackendError(msg)
@@ -231,11 +255,12 @@ class _DockerWorkerBackendConfig:
             raise WorkerBackendError(msg)
 
     @classmethod
-    def from_runtime(cls, runtime_paths: RuntimePaths) -> _DockerWorkerBackendConfig:
+    def from_runtime(cls, runtime_paths: RuntimePaths) -> DockerWorkerBackendConfig:
+        """Build Docker worker configuration from one explicit runtime context."""
         env = runtime_env_values(runtime_paths)
         image = read_env(env, _IMAGE_ENV)
         if not image:
-            msg = f"{_IMAGE_ENV} must be set when {_WORKER_BACKEND_ENV}=docker."
+            msg = f"{_IMAGE_ENV} must be set when {WORKER_BACKEND_ENV}=docker."
             raise WorkerBackendError(msg)
 
         publish_host = read_env(env, _PUBLISH_HOST_ENV, _DEFAULT_PUBLISH_HOST) or _DEFAULT_PUBLISH_HOST
@@ -244,7 +269,7 @@ class _DockerWorkerBackendConfig:
         validate_dedicated_worker_extra_env(
             extra_env,
             backend_name="Docker",
-            extra_reserved_names=_DOCKER_RESERVED_EXTRA_ENV_NAMES,
+            extra_reserved_names=DOCKER_RESERVED_EXTRA_ENV_NAMES,
         )
         config = cls(
             image=image,
@@ -253,7 +278,7 @@ class _DockerWorkerBackendConfig:
             or _DEFAULT_STORAGE_MOUNT_PATH,
             config_path=read_env(env, _CONFIG_PATH_ENV, _DEFAULT_CONFIG_PATH) or _DEFAULT_CONFIG_PATH,
             host_config_path=_read_host_config_path(runtime_paths, env),
-            idle_timeout_seconds=read_float_env(env, _IDLE_TIMEOUT_ENV, _DEFAULT_IDLE_TIMEOUT_SECONDS),
+            idle_timeout_seconds=read_float_env(env, _IDLE_TIMEOUT_ENV, DEFAULT_IDLE_TIMEOUT_SECONDS),
             ready_timeout_seconds=read_float_env(env, _READY_TIMEOUT_ENV, _DEFAULT_READY_TIMEOUT_SECONDS),
             name_prefix=read_env(env, _NAME_PREFIX_ENV, _DEFAULT_NAME_PREFIX) or _DEFAULT_NAME_PREFIX,
             publish_host=publish_host,
@@ -270,33 +295,20 @@ class _DockerWorkerBackendConfig:
         config.validate_runtime_security(runtime_paths)
         return config
 
-    @classmethod
-    def from_env(cls) -> _DockerWorkerBackendConfig:
-        return cls.from_runtime(resolve_primary_runtime_paths(process_env=dict(os.environ)))
-
-
-DockerWorkerBackendConfig = _DockerWorkerBackendConfig
-
 
 def docker_backend_cleanup_signature(
+    config: DockerWorkerBackendConfig,
     runtime_paths: RuntimePaths,
-    *,
-    storage_path: Path | None = None,
 ) -> tuple[str, ...]:
-    """Return the stable fields needed to find and retire an existing Docker worker."""
-    config = _DockerWorkerBackendConfig.from_runtime(runtime_paths)
-    effective_runtime_paths = runtime_paths
-    if config.host_config_path is not None:
-        effective_runtime_paths = runtime_paths_with_config_path(effective_runtime_paths, config.host_config_path)
-    effective_runtime_paths = runtime_paths_with_storage_root(
-        effective_runtime_paths,
-        resolve_docker_storage_path(storage_path, runtime_paths=effective_runtime_paths),
-    )
-    runtime_env = runtime_env_values(effective_runtime_paths)
+    """Return the stable fields needed to find and retire an existing Docker worker.
+
+    ``runtime_paths`` are the primary's paths as :func:`docker_primary_runtime_paths` returns them.
+    """
+    runtime_env = runtime_env_values(runtime_paths)
     return (
         "docker",
         normalize_docker_name_prefix(config.name_prefix),
-        str(docker_workers_root(effective_runtime_paths.storage_root)),
+        str(docker_workers_root(runtime_paths.storage_root)),
         runtime_env.get("DOCKER_HOST", ""),
         runtime_env.get("DOCKER_TLS_VERIFY", ""),
         runtime_env.get("DOCKER_CERT_PATH", ""),
@@ -304,23 +316,17 @@ def docker_backend_cleanup_signature(
 
 
 def docker_backend_config_signature(
+    config: DockerWorkerBackendConfig,
     runtime_paths: RuntimePaths,
     *,
     auth_token: str | None,
-    storage_path: Path | None = None,
 ) -> tuple[str, ...]:
-    """Return a cache signature for one concrete Docker backend config."""
-    config = _DockerWorkerBackendConfig.from_runtime(runtime_paths)
-    effective_runtime_paths = runtime_paths
-    if config.host_config_path is not None:
-        effective_runtime_paths = runtime_paths_with_config_path(effective_runtime_paths, config.host_config_path)
-    effective_runtime_paths = runtime_paths_with_storage_root(
-        effective_runtime_paths,
-        resolve_docker_storage_path(storage_path, runtime_paths=effective_runtime_paths),
-    )
-    workers_root = docker_workers_root(effective_runtime_paths.storage_root)
-    credentials_key = runtime_credentials_manager_key(effective_runtime_paths)
-    runtime_env = runtime_env_values(effective_runtime_paths)
+    """Return a cache signature for one concrete Docker backend config.
+
+    ``runtime_paths`` are the primary's paths as :func:`docker_primary_runtime_paths` returns them.
+    """
+    credentials_key = runtime_credentials_manager_key(runtime_paths)
+    runtime_env = runtime_env_values(runtime_paths)
     security_policy_signature = (
         docker_worker_security_policy_signature() if config.security_policy == "computer" else ()
     )
@@ -328,18 +334,7 @@ def docker_backend_config_signature(
         prefix_parts=(
             "docker",
             *security_policy_signature,
-            config.image,
-            str(config.worker_port),
-            config.storage_mount_path,
-            config.config_path,
-            str(config.host_config_path or ""),
-            str(config.idle_timeout_seconds),
-            str(config.ready_timeout_seconds),
-            config.name_prefix,
-            config.publish_host,
-            config.endpoint_host,
-            config.user or "",
-            str(workers_root),
+            str(docker_workers_root(runtime_paths.storage_root)),
             str(credentials_key.shared_base_path),
             credentials_key.current_worker_key or "",
             str(credentials_key.current_worker_root or ""),
@@ -347,10 +342,8 @@ def docker_backend_config_signature(
             runtime_env.get("DOCKER_TLS_VERIFY", ""),
             runtime_env.get("DOCKER_CERT_PATH", ""),
         ),
-        runtime_paths=effective_runtime_paths,
-        json_values=(
-            config.extra_env,
-            config.extra_labels,
-        ),
+        runtime_paths=runtime_paths,
+        # Every parsed setting, so a change to any of them, now or added later, builds a new backend.
+        json_values=({**asdict(config), "host_config_path": str(config.host_config_path or "")},),
         suffix_parts=(auth_token or "",),
     )

@@ -18,13 +18,17 @@ from mindroom.session_storage.agent_storage import create_agent_state_storage
 from mindroom.session_storage.store import ConversationStore, persist_to, watch_session_row
 from mindroom.session_storage.types import ConversationSession
 from mindroom.usage.stats_storage import UsageSessionRow, UsageStorageSource, iter_usage_storage_rows
-from mindroom.usage.storage import COMPACTED_REQUESTS_METADATA_KEY, project_requests, project_usage
+from mindroom.usage.storage import (
+    COMPACTED_REQUESTS_METADATA_KEY,
+    message_request_snapshot,
+    request_usage,
+    run_usage_snapshot,
+)
 from tests.conftest import delete_runs, persist_runs, seed_session_row
 from tests.history_helpers import compact_runs
 
 if TYPE_CHECKING:
     from mindroom.llm.runs import AnyRunRecord
-    from mindroom.session_storage.store import ConversationStore
 
 
 def _session() -> ConversationSession:
@@ -184,13 +188,13 @@ def _no_turn(_record: AnyRunRecord) -> bool:
     return False
 
 
-def _session_row(storage: ConversationStore) -> tuple[object, dict[str, object], dict[str, object]]:
-    """Return the session row's requester, its stored session state, and its usage totals."""
+def _session_row(storage: ConversationStore) -> tuple[object, dict[str, object]]:
+    """Return the session row's requester and its stored session state."""
     with sqlite3.connect(storage.path) as connection:
-        user_id, state, data = connection.execute(
-            "SELECT user_id, session_state, session_data FROM code_sessions WHERE session_id = 'session'",
+        user_id, state = connection.execute(
+            "SELECT user_id, session_state FROM code_sessions WHERE session_id = 'session'",
         ).fetchone()
-    return user_id, json.loads(state), json.loads(data)["session_metrics"]
+    return user_id, json.loads(state)
 
 
 @pytest.mark.asyncio
@@ -204,7 +208,6 @@ async def test_a_run_that_is_no_turn_records_its_usage_and_removes_the_row_it_he
 
     [(run_id, snapshot)] = _rows(usage_db)
     assert (run_id, snapshot["metrics"]["total_tokens"], snapshot["created_at"]) == ("run-1", 30, 1_700_000_000)
-    assert _session_row(usage_db)[2]["total_tokens"] == 30
     assert usage_db.list_runs("session") == []
     assert session.runs == []
 
@@ -220,8 +223,8 @@ async def test_a_run_that_is_no_turn_creates_the_session_row_with_its_requester_
         await persist_to(storage, session, replays=_no_turn)(_run(10))
 
     assert watch.created
-    user_id, state, totals = _session_row(storage)
-    assert (user_id, state, totals["total_tokens"]) == ("@alice:example.test", {"checked": True}, 10)
+    assert _session_row(storage) == ("@alice:example.test", {"checked": True})
+    assert [snapshot["metrics"]["total_tokens"] for _, snapshot in _rows(storage)] == [10]
     assert session.stored_session_state == {"checked": True}
     assert storage.list_runs("session") == []
 
@@ -303,11 +306,23 @@ def test_a_request_names_the_model_that_answered_it_and_a_retried_request_s_sum_
         provider_data={**answered, "mindroom_aggregate_usage": True},
     )
 
-    requests = project_requests([single.to_dict(), retried.to_dict()]) or []
+    requests = [request for message in (single, retried) if (request := message_request_snapshot(message))]
 
     assert [(request["model"], request["model_provider"], request["metrics"]) for request in requests] == [
         ("reply-model", "test-provider", {"input_tokens": 100, "output_tokens": 1}),
     ]
+
+
+def test_an_assistant_message_from_history_is_no_request_of_the_run() -> None:
+    """A history copy of an earlier reply, which a run's input carries, describes a request of another run."""
+    replayed = Message(
+        role="assistant",
+        metrics=MessageMetrics(tokens=TokenCounts(input_tokens=100, output_tokens=1)),
+        provider_data={"mindroom_model": {"id": "reply-model", "provider": "test-provider"}},
+        from_history=True,
+    )
+
+    assert (request_usage(replayed), message_request_snapshot(replayed)) == (None, None)
 
 
 @pytest.mark.parametrize(
@@ -326,8 +341,9 @@ def test_a_request_whose_recorded_model_has_another_shape_has_invalid_attributio
         provider_data={"mindroom_model": recorded},
     )
 
-    [request] = project_requests([message.to_dict()]) or []
+    request = message_request_snapshot(message)
 
+    assert request is not None
     assert (request["model"], request["model_provider"]) == (False, False)
 
 
@@ -343,7 +359,9 @@ def test_carried_request_usage_is_not_counted_again_while_its_message_is_saved()
         content="done",
         metrics=MessageMetrics(tokens=TokenCounts(input_tokens=50, output_tokens=1)),
     )
-    carried = [{**request, "message_id": folded.id} for request in project_requests([folded.to_dict()]) or []]
+    request = message_request_snapshot(folded)
+    assert request is not None
+    carried = [{**request, "message_id": folded.id}]
     run = RunRecord(
         run_id="run",
         status=RunStatus.error,
@@ -351,7 +369,7 @@ def test_carried_request_usage_is_not_counted_again_while_its_message_is_saved()
         metadata={COMPACTED_REQUESTS_METADATA_KEY: carried},
     )
 
-    requests = project_usage(run.to_dict())["requests"]
+    requests = run_usage_snapshot(run)["requests"]
 
     assert [request["metrics"]["input_tokens"] for request in requests] == [100, 50]
     assert all("message_id" not in request for request in requests)

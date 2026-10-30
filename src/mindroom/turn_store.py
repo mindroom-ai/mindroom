@@ -206,21 +206,6 @@ class _RecoveryGap:
 
 
 @dataclass(frozen=True)
-class PendingTurn:
-    """A turn whose response context is stored, with what the caller must reconcile before it answers.
-
-    ``resumes_response`` means an earlier attempt of these sources already owned
-    a response, so a visible one may already exist. ``deleted_sources`` names the
-    sources deleted, directly or through the message they answer for, when the
-    context was stored.
-    """
-
-    record: TurnRecord
-    resumes_response: bool
-    deleted_sources: frozenset[str]
-
-
-@dataclass(frozen=True)
 class SourcePreparation:
     """Which of a pending response's sources became terminal while it waited, and which still owe an answer.
 
@@ -387,7 +372,7 @@ class TurnStore:
             room_id=_room_of(turn_record, room_id),
         )
 
-    async def record_pending_turn(self, turn_record: TurnRecord) -> PendingTurn | None:
+    async def record_pending_turn(self, turn_record: TurnRecord) -> turn_rows.PendingTurn | None:
         """Persist exact response context before generation reaches session storage; return the turn as stored.
 
         None means the caller stops without answering: the turn is already
@@ -399,13 +384,13 @@ class TurnStore:
         """
         room_id = _room_of(turn_record, None)
         result = await self.deps.turn_records.write(
-            _record_pending_turn,
+            turn_rows.record_pending_turn,
             canonicalize_turn_record(turn_record, completed=False),
             room_id=room_id,
         )
         if isinstance(result, turn_rows.Refused):
             self.retry_when_claim_releases(room_id, turn_record.source_event_ids)
-        return result if isinstance(result, PendingTurn) else None
+        return result if isinstance(result, turn_rows.PendingTurn) else None
 
     async def record_placeholder(self, turn_record: TurnRecord, response_event_id: str) -> None:
         """Record the visible message an unfinished turn's answer streams into or was recovered as."""
@@ -857,34 +842,6 @@ def _register_revisions(
     if not turn_rows.record_revisions(transaction, agent_name, turn_key=turn_key, revisions=revisions):
         return None
     return turn_rows.load_turn(transaction, agent_name, turn_key)
-
-
-def _record_pending_turn(
-    transaction: Transaction,
-    agent_name: str,
-    record: TurnRecord,
-    *,
-    room_id: str,
-) -> PendingTurn | turn_rows.Answered | turn_rows.Refused:
-    resumes_response = _has_pending_response_intent(transaction, agent_name, record.source_event_ids)
-    result = turn_rows.record_pending_turn(transaction, agent_name, record, room_id=room_id)
-    if not isinstance(result, turn_rows.Accepted):
-        return result
-    return PendingTurn(
-        record=result.record,
-        resumes_response=resumes_response,
-        deleted_sources=turn_rows.deleted_sources(transaction, agent_name, result.record.source_event_ids),
-    )
-
-
-def _has_pending_response_intent(transaction: Transaction, agent_name: str, source_event_ids: tuple[str, ...]) -> bool:
-    return any(
-        (record := turn_rows.get_turn_record(transaction, agent_name, source_event_id)) is not None
-        and not record.completed
-        and record.response_owner is not None
-        and record.conversation_target is not None
-        for source_event_id in source_event_ids
-    )
 
 
 def _redacted_history_events(

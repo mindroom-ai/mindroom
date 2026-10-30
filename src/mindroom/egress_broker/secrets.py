@@ -81,23 +81,9 @@ def load_egress_document(
 ) -> dict[str, Any] | None:
     """Load one egress credential document from the primary-only store of a worker target or the global store.
 
-    `target=None` is the global (unscoped) store. Requester-scoped targets (user, user_agent) never fall back to
-    shared or global documents. Worker stores are never read: workers can write them.
+    `target=None` is the global (unscoped) store. Egress documents never come from a shared layer or a worker store.
     """
-    # For global (unscoped) documents, load directly from the base manager
-    if target is None:
-        return manager.load_credentials(credential_service)
-
-    # For requester-scoped targets, disable shared fallback
-    allowed_shared = frozenset() if is_personal_target(target) else None
-
-    return load_scoped_credentials(
-        credential_service,
-        credentials_manager=manager,
-        worker_target=target,
-        primary_built_tool=True,
-        allowed_shared_services=allowed_shared,
-    )
+    return load_scoped_credentials(credential_service, credentials_manager=manager, worker_target=target)
 
 
 def save_egress_document(
@@ -107,18 +93,7 @@ def save_egress_document(
     document: dict[str, Any],
 ) -> None:
     """Save one egress credential document to the store `load_egress_document` reads for the same target."""
-    # For global (unscoped) documents, save directly to the base manager
-    if target is None:
-        manager.save_credentials(credential_service, document)
-        return
-
-    save_scoped_credentials(
-        credential_service,
-        document,
-        credentials_manager=manager,
-        worker_target=target,
-        primary_built_tool=True,
-    )
+    save_scoped_credentials(credential_service, document, credentials_manager=manager, worker_target=target)
 
 
 def delete_egress_document(
@@ -127,17 +102,7 @@ def delete_egress_document(
     credential_service: str,
 ) -> None:
     """Delete one egress credential document from the store `load_egress_document` reads for the same target."""
-    # For global (unscoped) documents, delete directly from the base manager
-    if target is None:
-        manager.delete_credentials(credential_service)
-        return
-
-    delete_scoped_credentials(
-        credential_service,
-        credentials_manager=manager,
-        worker_target=target,
-        primary_built_tool=True,
-    )
+    delete_scoped_credentials(credential_service, credentials_manager=manager, worker_target=target)
 
 
 def load_secret(
