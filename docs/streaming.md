@@ -71,9 +71,9 @@ Each streamed message carries its progress in the Matrix event content field `io
 | `pending` | Initial message of the response |
 | `streaming` | Response is still being generated |
 | `approval_pending` | Response is paused until someone approves or denies a tool call (see [Tool Approval](tool-approval.md)) |
-| `completed` | Response finished successfully |
+| `completed` | Response finished, including a reply that only reports an error, such as a provider failure |
 | `cancelled` | User stopped the response |
-| `error` | Response failed or was otherwise interrupted |
+| `error` | Response was cut short by an error or an interruption, such as a restart, and ends with a note that says so |
 
 To confirm a response finished, inspect the latest `io.mindroom.stream_status` in a client or event view that shows event content.
 MindRoom never appends an ellipsis to generated text, and clients may draw their own progress indicators, so a trailing ellipsis is not a progress signal.
