@@ -675,8 +675,8 @@ class TestAgentBot(AgentBotTestBase):
         mock_refresh_thread_history.assert_awaited_once()
         mock_build_payload.assert_awaited_once()
         delivered_turn = mock_deliver.await_args.args[0]
-        assert list(delivered_turn.delivery_request.thread_history) == full_history
-        assert delivered_turn.delivery_request.attachment_ids == ("att_older",)
+        assert list(delivered_turn.request.thread_history) == full_history
+        assert delivered_turn.request.attachment_ids == ("att_older",)
         assert call_order == ["action", "payload", "generate"]
 
     @pytest.mark.asyncio

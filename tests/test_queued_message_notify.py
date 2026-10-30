@@ -1607,7 +1607,7 @@ async def test_generate_response_uses_post_lock_reproof_target(tmp_path: Path) -
         return await response_function(None)
 
     async def fake_deliver_turn(turn: object, **_kwargs: object) -> FinalDeliveryOutcome:
-        observed_delivery_targets.append(cast("Any", turn).delivery_request.response_envelope.target)
+        observed_delivery_targets.append(cast("Any", turn).request.response_envelope.target)
         return FinalDeliveryOutcome(
             ending=Completed(),
             event_id="$response",
@@ -1676,7 +1676,7 @@ async def test_generate_response_keeps_locked_target_when_payload_preparation_re
         return await response_function(None)
 
     async def fake_deliver_turn(turn: object, **_kwargs: object) -> FinalDeliveryOutcome:
-        observed_delivery_targets.append(cast("Any", turn).delivery_request.response_envelope.target)
+        observed_delivery_targets.append(cast("Any", turn).request.response_envelope.target)
         return FinalDeliveryOutcome(
             ending=Completed(),
             event_id="$response",
