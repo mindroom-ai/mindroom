@@ -49,7 +49,7 @@ This keeps prompt caches warm across the upgrade, keeps paused approvals resumab
 
 - Stored runs keep Agno 3's JSON keys, `RunStatus` strings, provider identity strings (`model_provider` and the metrics provider name that budgets price by), and `provider_data` keys.
   Owned codecs ignore keys they do not model.
-  Once the replacement had shipped, each route records one usage name, its `model_provider`, instead of the metrics provider name that split the `openai`, `codex`, and `kimi` routes by API, because prices and usage reports then keyed one model under two names, so memory extraction and realtime calls matched no model entry's prices.
+  Once the replacement had shipped, each route records one usage name, its `model_provider`, instead of the metrics provider name that split the `openai`, `codex`, and `kimi` routes by API, because prices and usage reports then keyed one model under two names, so memory extraction priced only at Chat Completions entries and realtime calls at none.
   Usage stored under the older names reads through a `LEGACY_COMPAT` map, and stored runs' `model_provider`, which native-compaction routes also hash, is unchanged.
 - Conversation databases keep their paths and table names; no table is rebuilt.
   Agno merged the Agno 2 `runs` blob on every read, so the owned store moves those runs into the runs table once when a database opens.
