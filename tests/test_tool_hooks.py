@@ -504,6 +504,30 @@ async def test_tool_hook_bridge_records_failures_without_registered_hooks(tmp_pa
 
 
 @pytest.mark.asyncio
+async def test_a_call_without_an_identity_gives_its_hooks_an_empty_agent_name(tmp_path: Path) -> None:
+    """A hook context's agent name is a string, empty when the call runs for no identity."""
+    seen: list[str] = []
+
+    @hook(EVENT_TOOL_BEFORE_CALL)
+    async def before(ctx: ToolBeforeCallContext) -> None:
+        seen.append(ctx.agent_name)
+
+    bridge = tool_policy(
+        HookRegistry.from_plugins([_plugin("tool-policy", [before])]),
+        runtime_paths=test_runtime_paths(tmp_path),
+    )
+
+    async def next_func(**kwargs: object) -> str:
+        del kwargs
+        return "ok"
+
+    with detached_tool_scope(None):
+        assert await bridge("read_file", next_func, {}) == "ok"
+
+    assert seen == [""]
+
+
+@pytest.mark.asyncio
 async def test_a_call_outside_a_live_turn_reports_its_identity_s_room_resolved_thread_and_channel(
     tmp_path: Path,
 ) -> None:
