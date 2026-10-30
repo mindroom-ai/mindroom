@@ -355,72 +355,6 @@ class _OwnerProbe(Toolkit):
         return "touched"
 
 
-@pytest.mark.asyncio
-async def test_an_agent_s_job_is_owned_by_the_agent_in_its_conversation(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """An agent's own call that becomes a job in a Matrix reply saves this exact owner, and so this exact job ID.
-
-    The ID hashes every owner field with the run and call IDs, so a change to any field the owner names loses saved
-    jobs across an upgrade: their next lookup computes another ID.
-    """
-    paths = _runtime_paths(tmp_path)
-    config = Config(
-        agents={"leader": AgentConfig(display_name="Leader", tools=["owner_probe"])},
-        defaults=DefaultsConfig(tools=[]),
-        memory={"backend": "none"},
-        background_tool_jobs=BackgroundToolJobsConfig(enabled=True),
-    )
-    entity_ids(config, paths)
-    # The identity a bot gives its own reply in a thread, as the runtime context it binds names it.
-    identity = ToolExecutionIdentity(
-        "matrix",
-        "leader",
-        "@alice:example.org",
-        "!room:example.org",
-        "$thread:example.org",
-        "$thread:example.org",
-        "!room:example.org:$thread:example.org",
-        transport_agent_name="leader",
-    )
-    runtime = await tool_job_runtime(tmp_path)
-    pin_background_tool_jobs(config, paths)
-    register_background_runtime(paths, runtime)
-    model = ScriptedModel([calls(tool_call("touch", "call-touch")), answer("Done")])
-    ScriptedAgents({"leader": model}).install(monkeypatch)
-    try:
-        with registered_toolkit("owner_probe", _OwnerProbe):
-            async with execution_resources():
-                await respond(
-                    "leader",
-                    "Touch it",
-                    config=config,
-                    runtime_paths=paths,
-                    identity=identity,
-                    run_id="run-1",
-                )
-    finally:
-        await runtime.shutdown()
-
-    [job] = (await saved_jobs(paths.storage_root)).values()
-    assert (job.tool_name, job.status) == ("touch", "completed")
-    assert asdict(job.owner) == {
-        "channel": "matrix",
-        "agent_name": "leader",
-        "requester_id": "@alice:example.org",
-        "room_id": "!room:example.org",
-        "thread_id": "$thread:example.org",
-        "resolved_thread_id": "$thread:example.org",
-        "session_id": "!room:example.org:$thread:example.org",
-        "tenant_id": None,
-        "account_id": None,
-        "transport_agent_name": "leader",
-    }
-    assert (job.adapter["run_id"], job.adapter["tool_call_id"]) == ("run-1", "call-touch")
-    assert job.job_id == "ad48a334cdcae4deee1dac610cb0ba48a9f3c1da6cd9f274533c1ec369f5c5a0"
-
-
 class _ConfirmedOwnerProbe(Toolkit):
     """The agent's own tool, which asks for confirmation, so its call runs once its paused reply resumes approved."""
 
@@ -469,6 +403,43 @@ _LEADER_TOUCH_OWNER = {
     "transport_agent_name": "leader",
 }
 _LEADER_TOUCH_JOB_ID = "ad48a334cdcae4deee1dac610cb0ba48a9f3c1da6cd9f274533c1ec369f5c5a0"
+
+
+@pytest.mark.asyncio
+async def test_an_agent_s_job_is_owned_by_the_agent_in_its_conversation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An agent's own call that becomes a job in a Matrix reply saves this exact owner, and so this exact job ID.
+
+    The ID hashes every owner field with the run and call IDs, so a change to any field the owner names loses saved
+    jobs across an upgrade: their next lookup computes another ID.
+    """
+    config, paths, identity = _owner_probe_turn(tmp_path)
+    runtime = await tool_job_runtime(tmp_path)
+    pin_background_tool_jobs(config, paths)
+    register_background_runtime(paths, runtime)
+    model = ScriptedModel([calls(tool_call("touch", "call-touch")), answer("Done")])
+    ScriptedAgents({"leader": model}).install(monkeypatch)
+    try:
+        with registered_toolkit("owner_probe", _OwnerProbe):
+            async with execution_resources():
+                await respond(
+                    "leader",
+                    "Touch it",
+                    config=config,
+                    runtime_paths=paths,
+                    identity=identity,
+                    run_id="run-1",
+                )
+    finally:
+        await runtime.shutdown()
+
+    [job] = (await saved_jobs(paths.storage_root)).values()
+    assert (job.tool_name, job.status) == ("touch", "completed")
+    assert asdict(job.owner) == _LEADER_TOUCH_OWNER
+    assert (job.adapter["run_id"], job.adapter["tool_call_id"]) == ("run-1", "call-touch")
+    assert job.job_id == _LEADER_TOUCH_JOB_ID
 
 
 @pytest.mark.asyncio
@@ -734,10 +705,10 @@ async def test_a_call_a_plugin_hook_declines_fails_its_job_with_the_decline(tmp_
         "Reason: notes are paused\n\n"
         "Adjust your approach — try a different tool or different arguments."
     )
-    registry = HookRegistry.from_plugins([_plugin("policy", [decline])])
-    policy = detached_policy(registry)
+    policy = detached_policy(HookRegistry.empty())
     context, runtime = await _managed_context(tmp_path)
-    context = replace(context, hooks=HookBindings(registry=registry))
+    # The call runs in the context's conversation, so its hooks are the context's.
+    context = replace(context, hooks=HookBindings(registry=HookRegistry.from_plugins([_plugin("policy", [decline])])))
     owner = context.execution_identity
     try:
         async with execution_resources():

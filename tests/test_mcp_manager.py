@@ -75,6 +75,7 @@ if TYPE_CHECKING:
 
     from agno.tools.function import ToolResult
 
+    from mindroom.agent_loop.build import AgentBuild
     from mindroom.constants import RuntimePaths
     from mindroom.mcp.manager import _MCPAuthorizationLease
     from mindroom.mcp.types import MCPServerCatalog
@@ -3912,6 +3913,39 @@ async def test_mcp_manager_shutdown_fences_sync_resuming_after_await(
     assert manager._scoped_states == {}
 
 
+def _pause_before_publication(
+    monkeypatch: pytest.MonkeyPatch,
+    manager: MCPServerManager,
+) -> tuple[asyncio.Event, asyncio.Event]:
+    """Pause ``manager`` once it discovers a catalog, at the last suspension before the catalog publishes.
+
+    Return the event set once discovery finished, and the event that lets the publication go on.
+    """
+    discovered = asyncio.Event()
+    release = asyncio.Event()
+    original_connect = manager._connect_and_discover
+    original_validate = manager._validate_authoritative_oauth_lease
+
+    async def observed_connect(
+        state: MCPServerState,
+        *,
+        auth_headers: Mapping[str, str] | None = None,
+    ) -> MCPServerCatalog:
+        catalog = await original_connect(state, auth_headers=auth_headers)
+        discovered.set()
+        return catalog
+
+    async def paused_validate(state: MCPServerState, authorization_lease: object) -> None:
+        # Its call after discovery is the last suspension before the catalog publishes.
+        if discovered.is_set():
+            await release.wait()
+        await original_validate(state, authorization_lease)
+
+    monkeypatch.setattr(manager, "_connect_and_discover", observed_connect)
+    monkeypatch.setattr(manager, "_validate_authoritative_oauth_lease", paused_validate)
+    return discovered, release
+
+
 @pytest.mark.asyncio
 async def test_mcp_manager_shutdown_fences_catalog_publication_after_discovery(
     monkeypatch: pytest.MonkeyPatch,
@@ -3922,29 +3956,7 @@ async def test_mcp_manager_shutdown_fences_catalog_publication_after_discovery(
     _FakeClientSession.tool_list = [_tool("echo")]
     manager = MCPServerManager(_runtime_paths(tmp_path))
     config = _ConfigStub({"demo": MCPServerConfig(transport="stdio", command="npx")})
-    discovery_finished = asyncio.Event()
-    original_connect = manager._connect_and_discover
-
-    async def observed_connect(
-        state: MCPServerState,
-        *,
-        auth_headers: Mapping[str, str] | None = None,
-    ) -> MCPServerCatalog:
-        catalog = await original_connect(state, auth_headers=auth_headers)
-        discovery_finished.set()
-        return catalog
-
-    monkeypatch.setattr(manager, "_connect_and_discover", observed_connect)
-    release = asyncio.Event()
-    original_validate = manager._validate_authoritative_oauth_lease
-
-    async def paused_validate(state: MCPServerState, authorization_lease: object) -> None:
-        # Its call after discovery is the last suspension before the catalog publishes.
-        if discovery_finished.is_set():
-            await release.wait()
-        await original_validate(state, authorization_lease)
-
-    monkeypatch.setattr(manager, "_validate_authoritative_oauth_lease", paused_validate)
+    discovery_finished, release = _pause_before_publication(monkeypatch, manager)
     sync_task = asyncio.create_task(manager.sync_servers(config))
     await discovery_finished.wait()
     captured_state = manager._states["demo"]
@@ -4404,6 +4416,28 @@ async def test_mcp_manager_marks_colliding_catalogs_as_failed(
     assert manager.failed_server_ids() == {"demo"}
 
 
+def _code_agent(
+    config: Config,
+    runtime_paths: RuntimePaths,
+    execution_identity: ToolExecutionIdentity | None = None,
+) -> AgentBuild:
+    """Build agent ``code`` on its model with the published plugins, as a turn without questions or knowledge does."""
+    return create_agent(
+        "code",
+        config,
+        runtime_paths,
+        execution_identity=execution_identity,
+        include_interactive_questions=False,
+        knowledge=None,
+        model=turn_model(config, runtime_paths, "code"),
+        plugins=config_plugins(config, runtime_paths),
+    )
+
+
+def _function_names(agent: AgentBuild) -> list[str]:
+    return [function.name for toolkit in agent.spec.toolkits for function in toolkit.functions]
+
+
 @pytest.mark.asyncio
 async def test_a_cross_server_collision_keeps_both_servers_and_leaves_the_name_out_of_the_agent(
     monkeypatch: pytest.MonkeyPatch,
@@ -4421,21 +4455,12 @@ async def test_a_cross_server_collision_keeps_both_servers_and_leaves_the_name_o
 
     bind_mcp_server_manager(manager)
     try:
-        agent = create_agent(
-            "code",
-            config,
-            runtime_paths,
-            execution_identity=None,
-            include_interactive_questions=False,
-            knowledge=None,
-            model=turn_model(config, runtime_paths, "code"),
-            plugins=config_plugins(config, runtime_paths),
-        )
+        agent = _code_agent(config, runtime_paths)
         assert manager.get_catalog("demo").tools[0].function_name == "shared_echo"
         assert manager.get_catalog("other").tools[0].function_name == "shared_echo"
     finally:
         await manager.shutdown()
-    assert "shared_echo" not in [function.name for toolkit in agent.spec.toolkits for function in toolkit.functions]
+    assert "shared_echo" not in _function_names(agent)
 
 
 @pytest.mark.asyncio
@@ -4576,20 +4601,11 @@ async def test_agent_creation_hides_catalogless_oauth_bridge_collisions(tmp_path
 
     bind_mcp_server_manager(manager)
     try:
-        agent = create_agent(
-            "code",
-            config,
-            runtime_paths,
-            execution_identity=worker_target.execution_identity,
-            include_interactive_questions=False,
-            knowledge=None,
-            model=turn_model(config, runtime_paths, "code"),
-            plugins=config_plugins(config, runtime_paths),
-        )
+        agent = _code_agent(config, runtime_paths, worker_target.execution_identity)
     finally:
         await manager.shutdown()
 
-    function_names = [function.name for toolkit in agent.spec.toolkits for function in toolkit.functions]
+    function_names = _function_names(agent)
     assert "shared_connection_status" not in function_names
     assert "shared_list_tools" not in function_names
     assert "shared_call_tool" not in function_names
@@ -4649,16 +4665,7 @@ async def test_a_local_collision_keeps_the_server_and_leaves_out_only_its_mcp_fu
 
     bind_mcp_server_manager(manager)
     try:
-        agent = create_agent(
-            "code",
-            config,
-            runtime_paths,
-            execution_identity=None,
-            include_interactive_questions=False,
-            knowledge=None,
-            model=turn_model(config, runtime_paths, "code"),
-            plugins=config_plugins(config, runtime_paths),
-        )
+        agent = _code_agent(config, runtime_paths)
     finally:
         await manager.shutdown()
     owners = {function.name: toolkit.name for toolkit in agent.spec.toolkits for function in toolkit.functions}
@@ -4702,19 +4709,10 @@ async def test_mcp_manager_reserves_matrix_runtime_invite_router_function(
     try:
         assert await manager.sync_servers(config) == {"demo"}
         assert manager.failed_server_ids() == set()
-        agent = create_agent(
-            "code",
-            config,
-            runtime_paths,
-            execution_identity=None,
-            include_interactive_questions=False,
-            knowledge=None,
-            model=turn_model(config, runtime_paths, "code"),
-            plugins=config_plugins(config, runtime_paths),
-        )
+        agent = _code_agent(config, runtime_paths)
     finally:
         await manager.shutdown()
-    assert "invite_router" not in [function.name for toolkit in agent.spec.toolkits for function in toolkit.functions]
+    assert "invite_router" not in _function_names(agent)
 
 
 @pytest.mark.asyncio
@@ -4803,22 +4801,13 @@ async def test_oauth_mcp_catalog_projection_hides_function_colliding_with_deferr
             worker_target=worker_target,
         )
 
-        agent = create_agent(
-            "code",
-            config,
-            runtime_paths,
-            execution_identity=worker_target.execution_identity,
-            include_interactive_questions=False,
-            knowledge=None,
-            model=turn_model(config, runtime_paths, "code"),
-            plugins=config_plugins(config, runtime_paths),
-        )
+        agent = _code_agent(config, runtime_paths, worker_target.execution_identity)
     finally:
         await manager.shutdown()
 
     mcp_toolkit = next(toolkit for toolkit in agent.spec.toolkits if toolkit.name == "mcp_demo")
     mcp_functions = {function.name for function in mcp_toolkit.functions}
-    function_names = [function.name for toolkit in agent.spec.toolkits for function in toolkit.functions]
+    function_names = _function_names(agent)
     assert function_names.count("run_shell_command") == 1
     assert "run_shell_command" not in mcp_functions
     assert "run_call_tool" in mcp_functions
@@ -4866,16 +4855,7 @@ async def test_failed_deferred_non_oauth_mcp_server_is_left_out_of_agent_constru
     assert manager.failed_server_ids() == {"demo"}
 
     bind_mcp_server_manager(manager)
-    agent = create_agent(
-        "code",
-        config,
-        runtime_paths,
-        execution_identity=None,
-        include_interactive_questions=False,
-        knowledge=None,
-        model=turn_model(config, runtime_paths, "code"),
-        plugins=config_plugins(config, runtime_paths),
-    )
+    agent = _code_agent(config, runtime_paths)
     tool_names = [toolkit.name for toolkit in agent.spec.toolkits]
     assert "mcp_demo" not in tool_names
     assert "dynamic_tools" not in tool_names
@@ -4927,16 +4907,7 @@ async def test_agent_creation_omits_tools_of_failed_optional_mcp_server(
 
     bind_mcp_server_manager(manager)
     try:
-        agent = create_agent(
-            "code",
-            config,
-            runtime_paths,
-            execution_identity=None,
-            include_interactive_questions=False,
-            knowledge=None,
-            model=turn_model(config, runtime_paths, "code"),
-            plugins=config_plugins(config, runtime_paths),
-        )
+        agent = _code_agent(config, runtime_paths)
     finally:
         await manager.shutdown()
 
@@ -5022,29 +4993,7 @@ async def test_mcp_manager_cancellation_closes_transport_after_discovery_before_
     _FakeClientSession.tool_list = [_tool("echo")]
     manager = MCPServerManager(_runtime_paths(tmp_path))
     config = _ConfigStub({"demo": MCPServerConfig(transport="stdio", command="npx")})
-    discovered = asyncio.Event()
-    original_connect = manager._connect_and_discover
-
-    async def observed_connect(
-        state: MCPServerState,
-        *,
-        auth_headers: Mapping[str, str] | None = None,
-    ) -> MCPServerCatalog:
-        catalog = await original_connect(state, auth_headers=auth_headers)
-        discovered.set()
-        return catalog
-
-    monkeypatch.setattr(manager, "_connect_and_discover", observed_connect)
-    release = asyncio.Event()
-    original_validate = manager._validate_authoritative_oauth_lease
-
-    async def paused_validate(state: MCPServerState, authorization_lease: object) -> None:
-        # Its call after discovery is the last suspension before the catalog publishes.
-        if discovered.is_set():
-            await release.wait()
-        await original_validate(state, authorization_lease)
-
-    monkeypatch.setattr(manager, "_validate_authoritative_oauth_lease", paused_validate)
+    discovered, _release = _pause_before_publication(monkeypatch, manager)
     sync_task = asyncio.create_task(manager.sync_servers(config))
     await discovered.wait()
     sync_task.cancel()

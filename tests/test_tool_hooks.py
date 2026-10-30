@@ -776,11 +776,7 @@ async def test_tool_after_call_hooks_cannot_mutate_returned_result(tmp_path: Pat
 async def test_tool_hook_bridge_does_not_record_success_rows_by_default(tmp_path: Path) -> None:
     """Successful tool calls should not create durable audit rows unless debug logging is enabled."""
     runtime_context = _tool_runtime_context(tmp_path)
-    bridge = tool_policy(
-        HookRegistry.empty(),
-        config=runtime_context.config,
-        runtime_paths=runtime_context.runtime_paths,
-    )
+    bridge = tool_policy(HookRegistry.empty())
 
     async def next_func(**kwargs: object) -> dict[str, object]:
         return {"echo": kwargs["path"]}
@@ -803,7 +799,7 @@ async def test_tool_after_call_hook_error_does_not_lose_debug_success_row(tmp_pa
 
     registry = HookRegistry.from_plugins([_plugin("tool-policy", [explode_after])])
     runtime_context = _tool_runtime_context(tmp_path, log_llm_requests=True, hook_registry=registry)
-    bridge = tool_policy(registry, config=runtime_context.config, runtime_paths=runtime_context.runtime_paths)
+    bridge = tool_policy(registry)
 
     async def next_func(**kwargs: object) -> dict[str, object]:
         return {"echo": kwargs["path"]}
@@ -844,11 +840,7 @@ async def test_a_call_s_record_and_after_hooks_read_one_duration(
     monkeypatch.setattr(tool_hooks, "time", SimpleNamespace(perf_counter=lambda: float(next(ticks))))
     registry = HookRegistry.from_plugins([_plugin("tool-policy", [allow, observe])])
     runtime_context = _tool_runtime_context(tmp_path, log_llm_requests=True, hook_registry=registry)
-    bridge = tool_policy(
-        registry,
-        config=runtime_context.config,
-        runtime_paths=runtime_context.runtime_paths,
-    )
+    bridge = tool_policy(registry)
 
     async def next_func(**kwargs: object) -> str:
         return str(kwargs["path"])
@@ -876,7 +868,7 @@ async def test_tool_success_logging_error_does_not_skip_after_hook(tmp_path: Pat
 
     registry = HookRegistry.from_plugins([_plugin("tool-policy", [after_call])])
     runtime_context = _tool_runtime_context(tmp_path, log_llm_requests=True, hook_registry=registry)
-    bridge = tool_policy(registry, config=runtime_context.config, runtime_paths=runtime_context.runtime_paths)
+    bridge = tool_policy(registry)
 
     async def next_func(**kwargs: object) -> dict[str, object]:
         return {"echo": kwargs["path"]}
@@ -920,11 +912,7 @@ async def test_a_tool_that_answers_with_a_failed_outcome_reaches_its_observers_a
 
     registry = HookRegistry.from_plugins([_plugin("tool-policy", [after_call])])
     runtime_context = _tool_runtime_context(tmp_path, log_llm_requests=log_llm_requests, hook_registry=registry)
-    bridge = tool_policy(
-        registry,
-        config=runtime_context.config,
-        runtime_paths=runtime_context.runtime_paths,
-    )
+    bridge = tool_policy(registry)
     refusal = ToolOutcome(
         content="❌ Scheduled call `task-1` did not run: its approval was already used.",
         is_error=True,
@@ -956,11 +944,7 @@ async def test_a_tool_that_answers_with_a_failed_outcome_reaches_its_observers_a
 async def test_oauth_required_tool_result_is_recorded_when_debug_enabled(tmp_path: Path) -> None:
     """OAuth-required structured returns should be logged like other successful tool results."""
     runtime_context = _tool_runtime_context(tmp_path, log_llm_requests=True)
-    bridge = tool_policy(
-        HookRegistry.empty(),
-        config=runtime_context.config,
-        runtime_paths=runtime_context.runtime_paths,
-    )
+    bridge = tool_policy(HookRegistry.empty())
 
     async def next_func(**_kwargs: object) -> None:
         msg = "Connect Google"
