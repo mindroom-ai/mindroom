@@ -229,7 +229,7 @@ def _admit_suppressed_semantic_identity(
     event: InboundEvent,
 ) -> None:
     """Retain a settled identity for turn work fenced out of this tenure."""
-    result = admit(
+    result = _admit(
         transaction,
         principal_id,
         replace(event, event_class=EventClass.CONTEXT_ONLY),
@@ -254,7 +254,7 @@ def _apply_semantic_ingestion_disposition(
     if event.kind in TURN_BACKED_KINDS and state.departure_fenced:
         _admit_suppressed_semantic_identity(transaction, principal_id, event)
         return False
-    semantic_result = admit(transaction, principal_id, event, projected)
+    semantic_result = _admit(transaction, principal_id, event, projected)
     if semantic_result is AdmissionResult.DUPLICATE:
         retained = _require_matching_semantic_event(transaction, principal_id, event)
         if retained["kind"] == EventKind.OPAQUE_HISTORY and projected is not None:
@@ -855,13 +855,13 @@ def _claim_membership_state(
     )
 
 
-def admit(
+def _admit(
     transaction: Transaction,
     principal_id: str,
     event: InboundEvent,
     projected: ProjectedEvent | None,
 ) -> AdmissionResult:
-    """Insert, deduplicate, and project one event, after any already-visible outbox delivery is projected, in a single transaction.
+    """Insert, deduplicate, and project one event in a single transaction.
 
     A context-only event is projected here and never replayed, so it keeps no
     payload: it is admitted already settled, and settlement is what would
@@ -908,8 +908,23 @@ def admit(
             membership_epoch=epoch,
             settle_redacted_arrival=True,
         )
-    _snapshot_interactive_source(transaction, principal_id, event)
     return AdmissionResult.ADMITTED
+
+
+def admit_snapshotting_source(
+    transaction: Transaction,
+    principal_id: str,
+    event: InboundEvent,
+    projected: ProjectedEvent | None,
+) -> AdmissionResult:
+    """Admit one event as ``_admit`` does, then freeze it as an interactive source once its visible target is durable.
+
+    Batch admission snapshots only the actionable events it admits, after their disposition, so it calls ``_admit``.
+    """
+    result = _admit(transaction, principal_id, event, projected)
+    if result is AdmissionResult.ADMITTED:
+        _snapshot_interactive_source(transaction, principal_id, event)
+    return result
 
 
 def _snapshot_interactive_source(

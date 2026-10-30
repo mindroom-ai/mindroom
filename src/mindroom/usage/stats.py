@@ -426,7 +426,7 @@ class _UsageAccumulator:
             # cannot count.
             self.unavailable_sources.add(row.source.path_label)
             return
-        if not uses_runs and _has_uncountable_row(row):
+        if not uses_runs and (not row.runs_available or _has_uncountable_row(row)):
             self.unavailable_sources.add(row.source.path_label)
             self.cumulative_model_unavailable_sources.add(row.source.path_label)
         if row_totals is None:

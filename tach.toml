@@ -1093,7 +1093,6 @@ visibility = ["mindroom.session_storage.legacy_agno3_conversion"]
 [[modules]]
 path = "mindroom.session_storage.legacy_usage_ledger"
 depends_on = [
-    "mindroom.llm",
     "mindroom.session_storage.legacy_agno2_runs",
     "mindroom.session_storage.schema",
     "mindroom.usage.storage",
@@ -6078,7 +6077,6 @@ depends_on = [
     "mindroom.requester_identity",
     "mindroom.matrix.room_history_reads",
     "mindroom.entity_resolution",
-    "mindroom.matrix.client_delivery",
     "mindroom.matrix.conversation_reads",
     "mindroom.thread_summary.notices",
     "mindroom.providers.registry",
@@ -6092,7 +6090,6 @@ depends_on = [
 [[modules]]
 path = "mindroom.thread_summary.notices"
 depends_on = [
-    "mindroom.authorization",
     "mindroom.constants",
     "mindroom.entity_resolution",
     "mindroom.logging_config",

@@ -123,7 +123,7 @@ class PrincipalStore(
         projected: ProjectedEvent | None = None,
     ) -> AdmissionResult:
         """Admit one event and update the projection in a single transaction."""
-        return await self._write(journal.admit, event, projected)
+        return await self._write(journal.admit_snapshotting_source, event, projected)
 
     async def response_recovery_state(self, turn_record: TurnRecord) -> ResponseRecoveryState:
         """Read one response's durable handoff through the reserved recovery lane."""

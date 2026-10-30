@@ -1577,7 +1577,7 @@ def test_an_unreadable_usage_row_keeps_the_other_rows_totals(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A snapshot the reader drops marks the models incomplete; the session's readable rows still total."""
+    """A snapshot the reader drops marks the totals and models incomplete; the session's readable rows still total."""
     source = _source()
     _wire(
         monkeypatch,
@@ -1596,7 +1596,8 @@ def test_an_unreadable_usage_row_keeps_the_other_rows_totals(
     report = collect_admin_usage(config=_config(), runtime_paths=_paths(tmp_path))
 
     assert report.totals.total_tokens == 20
-    assert report.coverage.unavailable_sources == 0
+    assert report.coverage.unavailable_sources == 1
+    assert report.cumulative_model_coverage.unavailable_sources == 1
     assert report.model_breakdown == ()
     assert report.model_coverage.unavailable_sources == 1
 

@@ -203,6 +203,27 @@ async def test_batch_projection_failure_rolls_back_all_records_and_receipt(
 
 
 @pytest.mark.asyncio
+async def test_a_batch_freezes_each_admitted_source_once(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Batch admission snapshots every admitted actionable record as an interactive source exactly once."""
+    store = EventJournalStore.open_sqlite(tmp_path / "journal.db")
+    batch = SyncBatch(uuid4(), 1, (message("$first"), message("$second")))
+    principal = await principal_for(store, batch.stream_id)
+    original = journal._snapshot_interactive_source
+    snapshotted: list[str] = []
+
+    def counting(transaction: Transaction, principal_id: str, event: InboundEvent) -> None:
+        snapshotted.append(event.event_id)
+        original(transaction, principal_id, event)
+
+    monkeypatch.setattr(journal, "_snapshot_interactive_source", counting)
+
+    await consume_one_ingestion_batch(Session(batch), principal, account_id=ACCOUNT)
+
+    assert snapshotted == ["$first", "$second"]
+    await store.close()
+
+
+@pytest.mark.asyncio
 async def test_redelivery_after_post_hook_failure_retries_hook_without_semantics(tmp_path: Path) -> None:
     store = EventJournalStore.open_sqlite(tmp_path / "journal.db")
     batch = SyncBatch(uuid4(), 1, (message("$first"), message("$second")))
