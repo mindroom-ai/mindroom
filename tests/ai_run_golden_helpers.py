@@ -28,7 +28,7 @@ from mindroom.history.types import CompactionDecision, PreparedHistoryState, Res
 from mindroom.llm.errors import ProviderError
 from mindroom.llm.runs import AnyRunRecord, RunRecord, RunStatus, TeamRunRecord
 from mindroom.message_target import MessageTarget
-from mindroom.response_turn import CompletedApprovalRun, TurnSinks, paused_attempt_from_response
+from mindroom.response_turn import CompletedApprovalRun, paused_attempt_from_response
 from mindroom.teams.presentation import TeamStreamPresentation
 from mindroom.teams.resume import continued_team_pause
 from mindroom.teams.spec import TeamMode
@@ -228,10 +228,9 @@ async def _agent_reply(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, run_id: 
         prompt="Hello",
         execution_identity=build_execution_identity_from_runtime_context(runtime),
     )
-    published: dict[str, Any] = {}
     with tool_runtime_context(runtime):
-        await ai_response(ctx, paths, config, sinks=TurnSinks(run_metadata_collector=published))
-    return published
+        result = await ai_response(ctx, paths, config)
+    return result.run_metadata
 
 
 async def _team_reply(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, run_id: str) -> dict[str, Any]:

@@ -71,7 +71,7 @@ async def _respond(runtime: ToolRuntimeContext) -> str:
         supports_native_tool_approval=True,
     )
     with tool_runtime_context(runtime):
-        return await ai.ai_response(turn, runtime.runtime_paths, runtime.config)
+        return (await ai.ai_response(turn, runtime.runtime_paths, runtime.config)).text
 
 
 def _tool_outputs(provider: ScriptedProvider, request: int = 1) -> list[str]:

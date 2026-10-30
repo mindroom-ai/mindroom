@@ -68,6 +68,7 @@ if TYPE_CHECKING:
     from livekit.agents.llm import RawFunctionTool
 
     from mindroom.agent_loop.build import AgentBuild
+    from mindroom.ai import TurnResult
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
     from mindroom.knowledge.refresh_scheduler import KnowledgeRefreshScheduler
@@ -383,14 +384,14 @@ class _CallAgentCache:
             operation=render,
         )
 
-    async def run(
+    async def run[T](
         self,
         *,
         knowledge: AgentKnowledge | None,
         refresh_scheduler: KnowledgeRefreshScheduler | None,
         active_model_name: str | None,
-        operation: Callable[[AgentBuild], Awaitable[str]],
-    ) -> str:
+        operation: Callable[[AgentBuild], Awaitable[T]],
+    ) -> T:
         """Run one turn, rebuilding only when call dependencies or the turn's model change."""
         knowledge_identity = knowledge_runtime_identity(knowledge)
         async with self.lock:
@@ -735,7 +736,6 @@ async def _run_authorized_call_agent(
         context = replace(context, active_model_name=active_model_name)
     # Seeded here too: a cancellation before the turn driver starts still stores the transcript it answered.
     recorder = TurnRecorder(user_message=transcript)
-    run_metadata: dict[str, Any] = {}
     fallback_run_id = f"{session_id}:turn:{uuid4().hex}"
     try:
         refresh_scheduler = (
@@ -774,40 +774,47 @@ async def _run_authorized_call_agent(
             eager_deferred_tools=True,
         )
 
-        async def _respond(build: AgentBuild) -> str:
+        async def _respond(build: AgentBuild) -> TurnResult:
             return await ai_response(
                 replace(turn, reusable_build=build),
                 runtime_paths,
                 config,
                 # The call stores what it spoke of an interrupted reply itself.
-                sinks=TurnSinks(turn_recorder=recorder, run_metadata_collector=run_metadata, persist_interrupted=False),
+                sinks=TurnSinks(turn_recorder=recorder, persist_interrupted=False),
             )
 
-        async def _run_with_build(build: AgentBuild) -> str:
+        async def _run_with_build(build: AgentBuild) -> TurnResult:
             return await tool_support.run_in_context(
                 tool_context=context,
                 operation=functools.partial(_respond, build),
             )
 
-        response = await agent_cache.run(
+        result = await agent_cache.run(
             knowledge=knowledge_resolution.knowledge,
             refresh_scheduler=refresh_scheduler,
             active_model_name=active_model_name,
             operation=_run_with_build,
         )
     except asyncio.CancelledError:
-        state = _call_agent_run_state(recorder, run_metadata, session_id=session_id, fallback_run_id=fallback_run_id)
+        # A raised turn returns no run metadata; only the attempt that ends a turn publishes it, as the turn returns.
+        state = _call_agent_run_state(recorder, {}, session_id=session_id, fallback_run_id=fallback_run_id)
         await response_tracker.persist_unspoken(state, default_status=RunStatus.cancelled)
         raise
     except Exception:
-        state = _call_agent_run_state(recorder, run_metadata, session_id=session_id, fallback_run_id=fallback_run_id)
+        state = _call_agent_run_state(recorder, {}, session_id=session_id, fallback_run_id=fallback_run_id)
         await response_tracker.persist_unspoken(state, default_status=RunStatus.error)
         raise
     finally:
         tool_names = tuple(dict.fromkeys(entry.tool_name for entry in recorder.completed_tools))
         if on_tools_executed is not None and tool_names:
             on_tools_executed(list(tool_names))
-    state = _call_agent_run_state(recorder, run_metadata, session_id=session_id, fallback_run_id=fallback_run_id)
+    state = _call_agent_run_state(
+        recorder,
+        result.run_metadata,
+        session_id=session_id,
+        fallback_run_id=fallback_run_id,
+    )
+    response = result.text
     # Live commentary can be paraphrased or omitted; only cascaded TTS owns a
     # one-to-one mapping between this answer and the eventual spoken turn.
     turn_id = response_tracker.register(state) if response and reconcile_spoken_response else None

@@ -14,6 +14,7 @@ import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
+from mindroom.ai import TurnResult
 from mindroom.api import config_lifecycle, openai_compat
 from mindroom.api.main import initialize_api_app
 from mindroom.background_tasks import wait_for_background_tasks
@@ -283,7 +284,11 @@ async def test_direct_delegation_reads_the_orchestrators_budget_monitor(tmp_path
 
     with (
         tool_runtime_context(context),
-        patch("mindroom.ai.ai_response", new_callable=AsyncMock, return_value="Child completed.") as response,
+        patch(
+            "mindroom.ai.ai_response",
+            new_callable=AsyncMock,
+            return_value=TurnResult("Child completed."),
+        ) as response,
     ):
         await tools.run_subagent(agent_name="child", task="Do the work")
 

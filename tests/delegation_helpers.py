@@ -277,7 +277,7 @@ async def respond(
     )
     with tool_runtime_context(runtime):
         try:
-            return await ai_response(ctx, runtime_paths, config)
+            return (await ai_response(ctx, runtime_paths, config)).text
         except ResponsePausedForApproval as suspended:
             return _paused_with_committed_presentation(suspended, show_tool_calls=ctx.show_tool_calls)
 

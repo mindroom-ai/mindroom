@@ -27,7 +27,7 @@ if TYPE_CHECKING:
 
     from mindroom.agent_loop.build import AgentBuild
     from mindroom.agent_loop.spec import RunContext
-    from mindroom.response_turn import ResponseTurnContext, TurnSinks
+    from mindroom.response_turn import ResponseTurnContext
     from mindroom.teams.members import BuiltTeam, ResolvedExactTeamMembers
     from mindroom.tool_system.tool_function import AdaptedToolkit
 
@@ -42,6 +42,7 @@ from structlog.testing import capture_logs
 from mindroom import constants
 from mindroom.agent_loop.output_limit import CUT_OFF_TOOL_CALL_RESULT
 from mindroom.agents import create_agent
+from mindroom.ai import TurnResult
 from mindroom.ai_run_metadata import build_ai_run_metadata_content, build_prepared_history_metadata_content
 from mindroom.api import config_lifecycle, openai_compat
 from mindroom.api.main import initialize_api_app
@@ -79,6 +80,7 @@ from mindroom.matrix.client import ResolvedVisibleMessage
 from mindroom.memory import MemoryPromptParts
 from mindroom.prompt_message_tags import render_msg_tag
 from mindroom.prompts import QUEUED_MESSAGE_NOTICE_TEXT
+from mindroom.response_turn import CompletedAttempt
 from mindroom.routing import ResponderSelection
 from mindroom.teams import leader as leader_module
 from mindroom.teams.envelope import PreparedTeamExecution
@@ -1090,16 +1092,17 @@ class TestChatCompletions:
 
     def test_non_stream_completion_reports_run_token_usage(self, app_client: TestClient) -> None:
         """Non-streaming usage comes from the run's own token metrics instead of zeros."""
+        result = TurnResult(
+            text="Hello!",
+            completed=CompletedAttempt(),
+            run_metadata={
+                constants.AI_RUN_METADATA_KEY: {
+                    "usage": {"input_tokens": 1200, "output_tokens": 34, "total_tokens": 1234},
+                },
+            },
+        )
 
-        async def respond(*_args: object, sinks: TurnSinks) -> str:
-            collector = sinks.run_metadata_collector
-            assert collector is not None
-            collector[constants.AI_RUN_METADATA_KEY] = {
-                "usage": {"input_tokens": 1200, "output_tokens": 34, "total_tokens": 1234},
-            }
-            return "Hello!"
-
-        with patch("mindroom.api.openai_compat.ai_response", side_effect=completing(respond)):
+        with patch("mindroom.api.openai_compat.ai_response", new=AsyncMock(return_value=result)):
             response = app_client.post(
                 "/v1/chat/completions",
                 json={"model": "general", "messages": [{"role": "user", "content": "Hello"}]},
@@ -1110,39 +1113,36 @@ class TestChatCompletions:
 
     def test_non_stream_usage_counts_cached_prompt_tokens_for_anthropic(self, app_client: TestClient) -> None:
         """Anthropic reports cache reads and writes outside input_tokens; prompt_tokens must include them."""
-
-        async def respond(*_args: object, sinks: TurnSinks) -> str:
-            collector = sinks.run_metadata_collector
-            assert collector is not None
-            collector.update(
-                build_ai_run_metadata_content(
-                    prices={},
-                    config=Config(
-                        agents={},
-                        models={"default": ModelConfig(provider="anthropic", id="claude-sonnet-5-5")},
-                        router=RouterConfig(model="default"),
-                    ),
-                    model_name="default",
-                    run_id="run-1",
-                    session_id="session-1",
-                    status=RunStatus.completed,
-                    model="claude-sonnet-5-5",
-                    model_provider="Anthropic",
-                    tool_count=0,
-                    metrics=RunMetrics(
-                        tokens=TokenCounts(
-                            input_tokens=40,
-                            output_tokens=200,
-                            total_tokens=240,
-                            cache_read_tokens=30000,
-                            cache_write_tokens=500,
-                        ),
+        result = TurnResult(
+            text="Hello!",
+            completed=CompletedAttempt(),
+            run_metadata=build_ai_run_metadata_content(
+                prices={},
+                config=Config(
+                    agents={},
+                    models={"default": ModelConfig(provider="anthropic", id="claude-sonnet-5-5")},
+                    router=RouterConfig(model="default"),
+                ),
+                model_name="default",
+                run_id="run-1",
+                session_id="session-1",
+                status=RunStatus.completed,
+                model="claude-sonnet-5-5",
+                model_provider="Anthropic",
+                tool_count=0,
+                metrics=RunMetrics(
+                    tokens=TokenCounts(
+                        input_tokens=40,
+                        output_tokens=200,
+                        total_tokens=240,
+                        cache_read_tokens=30000,
+                        cache_write_tokens=500,
                     ),
                 ),
-            )
-            return "Hello!"
+            ),
+        )
 
-        with patch("mindroom.api.openai_compat.ai_response", side_effect=completing(respond)):
+        with patch("mindroom.api.openai_compat.ai_response", new=AsyncMock(return_value=result)):
             response = app_client.post(
                 "/v1/chat/completions",
                 json={"model": "general", "messages": [{"role": "user", "content": "Hello"}]},
@@ -1766,7 +1766,7 @@ class TestChatCompletions:
     def test_error_response_detection(self, app_client: TestClient) -> None:
         """A turn that completes no attempt failed, so it answers HTTP 500 with a sanitized message."""
         with patch("mindroom.api.openai_compat.ai_response", new_callable=AsyncMock) as mock_ai:
-            mock_ai.return_value = "❌ Authentication failed (openai): Invalid API key"
+            mock_ai.return_value = TurnResult("❌ Authentication failed (openai): Invalid API key")
 
             response = app_client.post(
                 "/v1/chat/completions",

@@ -134,6 +134,7 @@ logger = get_logger(__name__)
 
 __all__ = [
     "AIStreamChunk",
+    "TurnResult",
     "agent_run_metadata_content",
     "ai_response",
     "run_delegated_child_response",
@@ -1042,10 +1043,12 @@ async def run_delegated_child_response(
     )
     # The child's tools run as the child, whichever adapter runs it; its caller's identity stays with the caller.
     with tool_runtime_context(child_context):
-        return await run_with_tool_execution_identity(
+        result = await run_with_tool_execution_identity(
             identity,
-            operation=lambda: ai_response(turn, runtime_paths, active_config, sinks=sinks),
+            # Its parent reads only the child's text.
+            operation=lambda: ai_response(turn, runtime_paths, active_config, sinks=sinks, run_metadata=False),
         )
+    return result.text
 
 
 def _with_background_tool_jobs(
@@ -1060,20 +1063,55 @@ def _with_background_tool_jobs(
     )
 
 
+@dataclass(frozen=True)
+class TurnResult:
+    """How one blocking agent turn ended: its reply text, and what the turn reported beside it.
+
+    A completed turn holds the attempt that completed it, and a turn whose attempt failed holds the failure its text
+    reports; a turn with neither was skipped, or failed where no attempt could report it.
+    """
+
+    text: str
+    completed: CompletedAttempt | None = None
+    failure: Exception | None = None
+    # The run metadata of the attempt that ended the turn: its model, status, and usage.
+    run_metadata: dict[str, Any] = field(default_factory=dict)
+
+
 async def ai_response(
     ctx: ResponseTurnContext,
     runtime_paths: RuntimePaths,
     config: Config,
     *,
     sinks: TurnSinks | None = None,
-) -> str:
-    """Generate one agent response and return its text, collected from the turn's stream."""
+    run_metadata: bool = True,
+) -> TurnResult:
+    """Generate one agent response and return how its turn ended, its text collected from the turn's stream.
+
+    ``sinks`` says how the turn records itself; the result holds what the turn reports, so any run metadata
+    collector, completion, or failure sink ``sinks`` names is replaced. A caller that reads no run metadata passes
+    ``run_metadata=False``, since building it prices the run against every priced model.
+    """
+    published: dict[str, Any] = {}
+    completed: list[CompletedAttempt] = []
+    failures: list[Exception] = []
+    reporting = replace(
+        sinks or TurnSinks(),
+        run_metadata_collector=published if run_metadata else None,
+        on_completed=completed.append,
+        on_failed=failures.append,
+    )
     body, _tool_trace = await collect_streamed_response_content(
-        stream_agent_response(ctx, runtime_paths, config, sinks=sinks),
+        stream_agent_response(ctx, runtime_paths, config, sinks=reporting),
         # Hidden tool calls still separate the text around them, as a streamed reply shows it.
         presentation=CollectedStreamPresentation(show_tool_calls=ctx.show_tool_calls, track_hidden_tools=True),
     )
-    return body
+    return TurnResult(
+        text=body,
+        completed=completed[-1] if completed else None,
+        failure=failures[-1] if failures else None,
+        run_metadata=published,
+    )
 
 
 @timed("model_request_to_completion")
