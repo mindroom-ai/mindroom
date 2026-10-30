@@ -232,12 +232,11 @@ def with_prior_usage(metadata: dict[str, Any] | None, prior_usage: Sequence[RunM
     """Return the metadata a run's record stores: ``metadata``, with ``prior_usage``, what its turn spent before it.
 
     The record keeps that usage summed (``turn_usage``), so whichever resume continues the run after a pause, even
-    after a restart, reports it with the run's own (``prior_usage_of``). A turn's first run keeps none, and a copy of
-    another run's metadata, which a resumed turn's context carries, never stands for this run's.
+    after a restart, reports it with the run's own (``prior_usage_of``). A turn's first run keeps none. ``metadata``
+    is the turn's, which holds no other run's usage (``without_run_usage``).
     """
-    kept = None if metadata is None else {k: v for k, v in metadata.items() if k != PRIOR_USAGE_RUN_METADATA_KEY}
     usage = turn_usage(prior_usage, None)
-    return kept if usage is None else {**(kept or {}), PRIOR_USAGE_RUN_METADATA_KEY: usage.to_dict()}
+    return metadata if usage is None else {**(metadata or {}), PRIOR_USAGE_RUN_METADATA_KEY: usage.to_dict()}
 
 
 def prior_usage_of(record: AnyRunRecord) -> tuple[RunMetrics, ...]:

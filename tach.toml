@@ -10135,6 +10135,7 @@ visibility = ["mindroom.automations.registry"]
 path = "mindroom.history.mid_turn_compaction"
 depends_on = [
     "mindroom.agent_loop",
+    "mindroom.constants",
     "mindroom.helper_usage",
     "mindroom.history.policy",
     "mindroom.history.prompt_tokens",

@@ -25,6 +25,7 @@ from mindroom.custom_tools.calculator import CalculatorTools
 from mindroom.custom_tools.sleep import SleepTools
 from mindroom.event_journal import ApprovalCall, ApprovalDecision, approval_arguments_digest
 from mindroom.history.interrupted_replay import is_interrupted_replay_run
+from mindroom.history.mid_turn_compaction import without_run_usage
 from mindroom.llm.errors import ProviderError
 from mindroom.llm.events import RunFinished, TextDelta, ToolCompleted, ToolStarted
 from mindroom.llm.provider import ToolCallReady
@@ -50,6 +51,7 @@ from mindroom.tool_system.events import (
 )
 from mindroom.tool_system.runtime_context import LiveToolDispatchContext, ToolDispatchContext
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity, get_tool_execution_identity
+from mindroom.usage.storage import COMPACTED_REQUESTS_METADATA_KEY
 from tests.approval_continuation_helpers import RECEIPT_CALLS, approval_continuation, carries_approval_receipt
 from tests.conftest import (
     bind_runtime_paths,
@@ -818,19 +820,65 @@ async def test_an_approved_run_that_answers_without_text_shows_its_earlier_text_
     assert threads["get_run"][0].startswith("conversation-store"), threads
 
 
-def test_a_run_s_record_keeps_only_the_usage_its_own_turn_spent_before_it() -> None:
-    """The record sums the turn's earlier attempts; a copy of another run's metadata never stands for them."""
+_REQUESTER = {"requester_id": "@user:example.org"}
+
+
+def test_a_run_s_record_keeps_the_summed_usage_its_turn_spent_before_it() -> None:
+    """The record sums the turn's earlier attempts, keeping the first one's first token; a turn's first run keeps none."""
     first = RunMetrics(tokens=TokenCounts(input_tokens=100, output_tokens=5), time_to_first_token=1.5)
     second = RunMetrics(tokens=TokenCounts(input_tokens=20, output_tokens=2), time_to_first_token=0.5)
-    copied = with_prior_usage({"requester_id": "@user:example.org"}, [first])
-    assert copied is not None
 
     assert with_prior_usage(None, ()) is None
-    assert with_prior_usage({"requester_id": "@user:example.org"}, ()) == {"requester_id": "@user:example.org"}
-    assert with_prior_usage(copied, ()) == {"requester_id": "@user:example.org"}
-    [spent] = prior_usage_of(RunRecord(run_id="run", metadata=with_prior_usage(copied, [first, second])))
+    assert with_prior_usage(_REQUESTER, ()) == _REQUESTER
+    [spent] = prior_usage_of(RunRecord(run_id="run", metadata=with_prior_usage(_REQUESTER, [first, second])))
     assert (spent.tokens.input_tokens, spent.tokens.output_tokens, spent.time_to_first_token) == (120, 7, 1.5)
-    assert prior_usage_of(RunRecord(run_id="run", metadata={"requester_id": "@user:example.org"})) == ()
+    assert prior_usage_of(RunRecord(run_id="run", metadata=_REQUESTER)) == ()
+
+
+def test_a_run_seeded_from_another_run_s_metadata_keeps_none_of_that_run_s_usage() -> None:
+    """A resumed turn's context copies its paused run's metadata, without the usage that run's record held.
+
+    That is the requests its mid-turn folds carried out of its messages and the usage its turn spent before it.
+    """
+    folded = [{"created_at": 1, "metrics": {"input_tokens": 3}, "message_id": "folded"}]
+    spent = RunMetrics(tokens=TokenCounts(input_tokens=100, output_tokens=5))
+    paused = with_prior_usage({**_REQUESTER, COMPACTED_REQUESTS_METADATA_KEY: folded}, [spent])
+
+    assert without_run_usage(paused) == _REQUESTER
+    assert without_run_usage(None) is None
+
+
+@pytest.mark.asyncio
+async def test_a_stopped_attempt_after_an_approved_run_records_none_of_the_paused_run_s_earlier_usage(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A model switch continues the resumed run into a fresh attempt that the user stops.
+
+    The stopped attempt's record keeps the turn's metadata, not the earlier usage the paused run's record holds.
+    """
+    paths, config = _usage_config(tmp_path)
+    identity = _identity("usage-session")
+    model = _CheckedModel(
+        [
+            _continue_call("spent", usage(100, 5)),
+            _add("approved", 10, 1),
+            _continue_call("continue", usage(20, 2)),
+            [stop_turn()],
+        ],
+    )
+    install_model_providers(monkeypatch, {"default": model})
+    paused = await _paused_turn(config, paths, identity, "Add them.", show_tool_calls=False)
+
+    with pytest.raises(asyncio.CancelledError):
+        await _approve_add(tmp_path, config, paths, identity, paused, "approved")
+
+    [stopped] = [run for run in stored_runs(config, paths, identity.session_id) if is_interrupted_replay_run(run)]
+    assert stopped.run_id != paused.run_id
+    assert [(usage.tokens.input_tokens, usage.tokens.output_tokens) for usage in prior_usage_of(stopped)] in (
+        [],
+        [(130, 8)],
+    )
 
 
 def _usage_config(tmp_path: Path) -> tuple[RuntimePaths, Config]:
