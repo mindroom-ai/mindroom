@@ -1249,7 +1249,6 @@ depends_on = [
 ]
 visibility = [
     "mindroom.tool_jobs.runtime",
-    "mindroom.response_runner",
     "mindroom.ai",
     "mindroom.api.openai_compat",
     "mindroom.approval.execution",
@@ -1538,10 +1537,7 @@ depends_on = [
     "mindroom.turn_model",
     "mindroom.reply_turn.request",
 ]
-visibility = [
-    "mindroom.bot",
-    "mindroom.response_runner",
-]
+visibility = ["mindroom.bot"]
 
 [[modules]]
 path = "mindroom.approval.auto_approve_windows"
@@ -3505,10 +3501,7 @@ depends_on = [
     "mindroom.orchestration.runtime",
     "mindroom.response_admission",
 ]
-visibility = [
-    "mindroom.bot",
-    "mindroom.response_runner",
-]
+visibility = ["mindroom.bot"]
 
 [[interfaces]]
 from = ["mindroom.reply_turn.inbox"]
@@ -3564,7 +3557,6 @@ depends_on = [
 path = "mindroom.response_sources"
 depends_on = []
 visibility = [
-    "mindroom.approval.continuation_runner",
     "mindroom.delivery_gateway",
     "mindroom.edit_regenerator",
     "mindroom.event_journal",
@@ -3614,7 +3606,6 @@ depends_on = [
 visibility = [
     "mindroom.bot",
     "mindroom.delivery_gateway",
-    "mindroom.response_runner",
     "mindroom.turns.interactive_selection",
     "mindroom.reply_turn.locked_turn",
 ]
@@ -3628,7 +3619,7 @@ depends_on = [
     "mindroom.orchestration.runtime",
     "mindroom.streaming",
 ]
-visibility = ["mindroom.response_runner", "mindroom.reply_turn.locked_turn"]
+visibility = ["mindroom.reply_turn.locked_turn"]
 
 [[modules]]
 path = "mindroom.responder_availability"
@@ -4302,7 +4293,7 @@ depends_on = [
     "mindroom.logging_config",
     "mindroom.matrix.client_session",
 ]
-visibility = ["mindroom.response_runner", "mindroom.approval.execution", "mindroom.reply_turn.request"]
+visibility = ["mindroom.approval.execution", "mindroom.reply_turn.request"]
 
 [[modules]]
 path = "mindroom.matrix.client_session"

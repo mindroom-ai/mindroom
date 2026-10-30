@@ -49,4 +49,4 @@ A non-success reply ending was decided by the streamer (a terminal row with the 
 
 ## Open
 
-- An interrupted turn's record still comes from the running attempt's partial output and is stored as an interrupted replay row, not as an "interrupted" run status (#3108); ending a failed attempt's stream with a typed failure stays with #3119.
+- An interrupted turn's record still comes from the running attempt's partial output and is stored as an interrupted replay row, not as an "interrupted" run status (#3108).
