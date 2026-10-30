@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
@@ -20,9 +19,7 @@ from mindroom.config.main import Config
 from mindroom.credentials.manager import (
     get_runtime_credentials_manager,
     load_scoped_credentials,
-    load_worker_grantable_shared_credentials,
 )
-from mindroom.credentials.policy import CredentialPlacement, credential_service_policy
 from mindroom.oauth import OAuthProviderError
 from mindroom.oauth.credential_lifecycle import (
     load_oauth_credentials_snapshot,
@@ -40,6 +37,7 @@ from mindroom.tool_system.sandbox_proxy import primary_owns_tool_settings
 from mindroom.tool_system.worker_routing import (
     WorkerScope,
     build_worker_target_from_runtime_env,
+    resolve_worker_target,
     unsupported_shared_only_integration_names,
 )
 
@@ -73,17 +71,6 @@ class _ResolvedToolAvailabilityContext:
     oauth_providers: dict[str, OAuthProvider]
     runtime_paths: RuntimePaths
     oauth_config: Config | None = None
-
-
-def _effective_allowed_shared_services(
-    service: str,
-    context: _ResolvedToolAvailabilityContext,
-) -> frozenset[str] | None:
-    """Return the worker allowlist that applies to one dashboard credential lookup."""
-    policy = credential_service_policy(service, context.execution_scope)
-    if policy.placement is CredentialPlacement.SHARED:
-        return frozenset({service})
-    return context.allowed_shared_services
 
 
 def _check_homeassistant_configured(tool_name: str, ha_creds: dict[str, Any] | None) -> bool:
@@ -219,29 +206,6 @@ def _annotate_execution_scope_support(
         tool["execution_scope_supported"] = tool["name"] not in unsupported_tools
 
 
-def _load_shared_preview_credentials(
-    service: str,
-    *,
-    credentials_manager: CredentialsManager,
-    allowed_shared_services: frozenset[str] | None,
-) -> dict[str, Any] | None:
-    """Return the shared credentials visible to non-authoritative dashboard previews.
-
-    Dashboard users are not the same trusted requester identity as live Matrix senders.
-    For isolated scopes we can still report capabilities and allowlisted shared availability,
-    but we must not pretend to inspect requester-owned scoped credential state.
-    """
-    shared_manager = credentials_manager.shared_manager()
-    if allowed_shared_services is None:
-        shared_credentials = shared_manager.load_credentials(service)
-        return dict(shared_credentials) if isinstance(shared_credentials, Mapping) else None
-    return load_worker_grantable_shared_credentials(
-        service,
-        shared_manager=shared_manager,
-        allowed_services=allowed_shared_services,
-    )
-
-
 def _resolve_tool_availability_context(
     request: Request,
     *,
@@ -338,6 +302,40 @@ async def _load_oauth_provider_credentials(
     return cache[cache_key]
 
 
+def _tool_status_credentials(
+    service: str,
+    context: _ResolvedToolAvailabilityContext,
+    *,
+    worker_target: ResolvedWorkerTarget | None,
+    authoritative: bool,
+) -> dict[str, Any] | None:
+    """Return the credentials the runtime would read for one service, or a preview of them without a requester.
+
+    Dashboard users are not the trusted requester of a live Matrix sender, so a preview reads only what the scope
+    holds for no requester, and a service that lives only in a requester's store previews as unconfigured.
+    """
+    if not authoritative and worker_target is not None:
+        worker_target = resolve_worker_target(
+            worker_target.worker_scope,
+            worker_target.routing_agent_name,
+            execution_identity=None,
+        )
+    try:
+        return load_scoped_credentials(
+            service,
+            credentials_manager=context.credentials_manager,
+            worker_target=worker_target,
+            allowed_shared_services=context.allowed_shared_services,
+            primary_built_tool=worker_target is not None
+            and worker_target.routing_agent_name is not None
+            and primary_owns_tool_settings(service, runtime_paths=context.runtime_paths),
+        )
+    except ValueError:
+        if authoritative:
+            raise
+        return None
+
+
 async def _update_tools_statuses(
     tools: list[dict[str, Any]],
     context: _ResolvedToolAvailabilityContext,
@@ -354,23 +352,12 @@ async def _update_tools_statuses(
     ) -> dict[str, Any] | None:
         cache_key = (service, worker_target.worker_key if worker_target is not None else None, use_request_target)
         if cache_key not in credentials_cache:
-            allowed_shared_services = _effective_allowed_shared_services(service, context)
-            if context.status_authoritative or use_request_target:
-                credentials_cache[cache_key] = load_scoped_credentials(
-                    service,
-                    credentials_manager=context.credentials_manager,
-                    worker_target=worker_target,
-                    allowed_shared_services=allowed_shared_services,
-                    primary_built_tool=worker_target is not None
-                    and worker_target.routing_agent_name is not None
-                    and primary_owns_tool_settings(service, runtime_paths=context.runtime_paths),
-                )
-            else:
-                credentials_cache[cache_key] = _load_shared_preview_credentials(
-                    service,
-                    credentials_manager=context.credentials_manager,
-                    allowed_shared_services=allowed_shared_services,
-                )
+            credentials_cache[cache_key] = _tool_status_credentials(
+                service,
+                context,
+                worker_target=worker_target,
+                authoritative=context.status_authoritative or use_request_target,
+            )
         return credentials_cache[cache_key]
 
     for tool in tools:

@@ -473,6 +473,9 @@ class _TrackingWorkerManager:
             created_at=0.0,
         )
 
+    def require_compatible_runner(self) -> None:
+        """Accept the shared runner's protocol, as a compatible runner would."""
+
     def touch_worker(self, worker_key: str, *, now: float | None = None) -> object:
         del now
         self.touched.append(worker_key)

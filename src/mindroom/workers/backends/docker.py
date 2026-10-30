@@ -24,7 +24,6 @@ from mindroom.constants import (
     sandbox_startup_manifest_path,
 )
 from mindroom.credentials.manager import (
-    CredentialsManager,
     get_runtime_credentials_manager,
     sync_shared_credentials_to_worker,
 )
@@ -458,7 +457,7 @@ class DockerWorkerBackend:
         auth_token: str | None,
         current_launch: Callable[[], WorkerLaunchConfig],
         storage_root: Path,
-        runtime_paths: RuntimePaths | None = None,
+        runtime_paths: RuntimePaths,
     ) -> None:
         if auth_token is None:
             msg = "A worker auth token is required for Docker workers."
@@ -488,17 +487,7 @@ class DockerWorkerBackend:
         self._storage_root = storage_root.expanduser().resolve()
         self._workers_root = docker_workers_root(self._storage_root)
         self._control_root = self._workers_root / _WORKER_CONTROL_DIRNAME
-        self._runtime_paths = docker_primary_runtime_paths(
-            resolve_primary_runtime_paths(
-                config_path=config.host_config_path,
-                storage_path=self._storage_root,
-                process_env=dict(os.environ),
-            )
-            if runtime_paths is None
-            else runtime_paths,
-            config,
-            storage_root=self._storage_root,
-        )
+        self._runtime_paths = docker_primary_runtime_paths(runtime_paths, config, storage_root=self._storage_root)
         config.validate_runtime_security(self._runtime_paths)
         self._client, self._docker_errors = _load_docker_client_and_errors(runtime_paths=self._runtime_paths)
         self._worker_locks: dict[str, threading.Lock] = {}
@@ -510,14 +499,11 @@ class DockerWorkerBackend:
             projected_configs_root=self._workers_root / PROJECTED_CONFIGS_DIRNAME,
             runtime_paths=self._runtime_paths,
         )
-        if runtime_paths is None:
-            self._credentials_manager = CredentialsManager(base_path=self._storage_root / "credentials")
-        else:
-            # The primary's own environment declares the credentials it grants; the worker's config file may live
-            # beside another `.env`, so only the storage root is rebased.
-            self._credentials_manager = get_runtime_credentials_manager(
-                runtime_paths_with_storage_root(runtime_paths, self._storage_root),
-            )
+        # The primary's own environment declares the credentials it grants; the worker's config file may live
+        # beside another `.env`, so only the storage root is rebased.
+        self._credentials_manager = get_runtime_credentials_manager(
+            runtime_paths_with_storage_root(runtime_paths, self._storage_root),
+        )
         self._runtime_namespace = _runtime_namespace_for_workers_root(self._workers_root)
         self._workers_root.mkdir(parents=True, exist_ok=True)
         drop_retired_docker_worker_record_keys(self._control_root)

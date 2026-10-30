@@ -1742,44 +1742,6 @@ async def test_non_oauth_auth_provider_uses_required_credential_fields(tmp_path:
     assert tools[0]["status"] == "available"
 
 
-@pytest.mark.parametrize(
-    ("service", "execution_scope", "expected_allowed_services"),
-    [
-        ("google_drive", "shared", frozenset({"google_drive"})),
-        ("google_calendar", "shared", frozenset({"google_calendar"})),
-        ("google_docs", "shared", frozenset({"google_docs"})),
-        ("google_sheets", "shared", frozenset({"google_sheets"})),
-        ("google_tasks", "shared", frozenset({"google_tasks"})),
-        ("gmail", "shared", frozenset({"gmail"})),
-        # Agent-scoped OAuth token services no longer inject themselves into the
-        # shared allowlist; they fall through to the context allowlist unchanged.
-        ("google_drive_oauth", "shared", frozenset({"weather"})),
-        ("weather", "shared", frozenset({"weather"})),
-        ("google_drive", "user", frozenset({"weather"})),
-        ("google_drive", "user_agent", frozenset({"weather"})),
-    ],
-)
-def test_effective_allowed_shared_services_uses_credential_policy(
-    tmp_path: Path,
-    service: str,
-    execution_scope: str,
-    expected_allowed_services: frozenset[str],
-) -> None:
-    """Tool availability should apply local-only credential policy before worker grants."""
-    context = tools_api._ResolvedToolAvailabilityContext(
-        execution_scope=execution_scope,
-        status_authoritative=True,
-        credentials_manager=get_runtime_credentials_manager(_runtime_paths(tmp_path)),
-        worker_target=None,
-        allowed_shared_services=frozenset({"weather"}),
-        auth_provider_credential_services={},
-        oauth_providers={},
-        runtime_paths=_runtime_paths(tmp_path),
-    )
-
-    assert tools_api._effective_allowed_shared_services(service, context) == expected_allowed_services
-
-
 def test_get_tools_marks_shared_only_integrations_unsupported_for_isolating_worker_scope(
     test_client: TestClient,
 ) -> None:
@@ -2295,7 +2257,7 @@ def test_get_tools_does_not_treat_scoped_credentials_as_dashboard_truth(
     with (
         patch("mindroom.api.tools._read_tools_runtime_config", return_value=(config, runtime_paths)),
         patch("mindroom.api.tools.export_tools_metadata", return_value=tools),
-        patch("mindroom.api.tools.load_scoped_credentials") as mock_load_scoped_credentials,
+        patch("mindroom.api.tools.load_scoped_credentials", return_value=None) as mock_load_scoped_credentials,
     ):
         response = test_client.get("/api/tools/?agent_name=general")
 
@@ -2306,7 +2268,10 @@ def test_get_tools_does_not_treat_scoped_credentials_as_dashboard_truth(
     assert tool["name"] == "weather"
     assert tool["status"] == "requires_config"
     assert tool["dashboard_configuration_supported"] is False
-    mock_load_scoped_credentials.assert_not_called()
+    # The preview reads what the scope holds for no requester, never a requester's own store.
+    targets = [call.kwargs["worker_target"] for call in mock_load_scoped_credentials.call_args_list]
+    assert targets
+    assert all(target.execution_identity is None and target.worker_key is None for target in targets)
 
 
 def test_get_tools_reports_requester_scoped_github_manual_fallback(test_client: TestClient) -> None:

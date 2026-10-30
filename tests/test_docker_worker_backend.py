@@ -804,6 +804,13 @@ def _launch(
 
 def _docker_backend(**kwargs: Any) -> DockerWorkerBackend:  # noqa: ANN401
     """Build a backend whose applied launch is read from its config file, which these tests make the primary's."""
+    if kwargs.get("runtime_paths") is None:
+        # A primary whose environment declares nothing, booted from the backend's config file.
+        kwargs["runtime_paths"] = resolve_primary_runtime_paths(
+            config_path=kwargs["config"].host_config_path,
+            storage_path=kwargs["storage_root"],
+            process_env={},
+        )
     backend = DockerWorkerBackend(current_launch=lambda: _applied_launch(backend), **kwargs)
     return backend
 

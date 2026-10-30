@@ -49,7 +49,6 @@ from mindroom.tool_system.worker_routing import (
     serialize_tool_execution_identity,
 )
 from mindroom.workers.backend_kinds import WorkerBackendKind, worker_backend_kind
-from mindroom.workers.backends.static_runner import StaticSandboxRunnerBackend
 from mindroom.workers.models import ProgressSink, WorkerHandle, WorkerReadyProgress, WorkerSpec
 from mindroom.workers.protocol import (
     WORKER_PROTOCOL_VERSION,
@@ -71,6 +70,7 @@ if TYPE_CHECKING:
     from mindroom.credentials.manager import CredentialsManager
     from mindroom.tool_system.agno_toolkits import Function, Toolkit
     from mindroom.workers.backend import WorkerBackend
+    from mindroom.workers.backends.static_runner import StaticSandboxRunnerBackend
     from mindroom.workers.runtime import PrimaryWorkerManagerLease
 
 _DEFAULT_SANDBOX_PROXY_TIMEOUT_SECONDS = 120.0
@@ -320,10 +320,10 @@ def _worker_route(
                 account_id=worker_target.account_id,
             )
             worker_handle = worker_manager.ensure_worker(WorkerSpec(worker_key), progress_sink=progress_sink)
-        elif isinstance(worker_manager, StaticSandboxRunnerBackend):
+        else:
             # The shared runner is the only backend that is not dedicated, and an unscoped call reaches it without a
             # worker handle, so its protocol check happens here.
-            worker_manager.require_compatible_runner()
+            cast("StaticSandboxRunnerBackend", worker_manager).require_compatible_runner()
     else:
         if worker_target is None or execution_identity is None:
             msg = f"Worker-routed tool '{tool_name}.{function_name}' requires execution identity context."
