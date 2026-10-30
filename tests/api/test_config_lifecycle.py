@@ -634,9 +634,30 @@ def test_every_publication_reconciles_knowledge_modes_against_the_config_it_repl
         save_config(_request_for(loaded_app), payload)
     else:
         _write_config(before.runtime_paths.config_path, payload)
-        assert config_lifecycle.load_config_into_app(before.runtime_paths, loaded_app).loaded
+        assert config_lifecycle.load_config_into_app(before.runtime_paths, loaded_app, reconcile_knowledge=True).loaded
 
     assert pairs == [(before.runtime_config, _snapshot(loaded_app).runtime_config)]
+
+
+def test_the_runtime_load_leaves_knowledge_reconciliation_to_the_runtime(
+    loaded_app: FastAPI,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The embedded runtime reconciles each config it applies after its drain, so its load publishes without it."""
+    runtime_paths = _snapshot(loaded_app).runtime_paths
+    payload = copy.deepcopy(VALID_CONFIG)
+    payload["agents"]["test_agent"]["role"] = "Changed"
+    _write_config(runtime_paths.config_path, payload)
+    pairs: list[object] = []
+    monkeypatch.setattr(
+        config_lifecycle,
+        "reconcile_knowledge_mode_transition_states",
+        lambda *args: pairs.append(args),
+    )
+
+    assert config_lifecycle.load_config_into_app(runtime_paths, loaded_app).loaded
+
+    assert pairs == []
 
 
 def test_a_request_never_rebinds_onto_another_runtime(loaded_app: FastAPI, tmp_path: Path) -> None:

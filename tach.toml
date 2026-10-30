@@ -2186,6 +2186,7 @@ depends_on = [
 [[modules]]
 path = "mindroom.api.credentials"
 depends_on = [
+    "mindroom.api.config_lifecycle",
     "mindroom.api.credential_responses",
     "mindroom.api.credentials_oauth_policy",
     "mindroom.api.credentials_target",

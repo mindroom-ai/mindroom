@@ -11,7 +11,7 @@ from fastapi.testclient import TestClient
 
 import mindroom.credentials.manager as credential_runtime
 from mindroom import constants
-from mindroom.api import config_lifecycle, credentials_oauth_policy, credentials_target, main
+from mindroom.api import config_lifecycle, credentials, credentials_oauth_policy, credentials_target, main
 from mindroom.api.auth_user import AuthSource, AuthUser, bind_request_auth_user
 from mindroom.api.main import app, initialize_api_app
 from mindroom.config.main import Config
@@ -2447,5 +2447,9 @@ def test_credential_edits_compare_the_embedder_of_the_last_config_that_loaded(cl
     runtime_paths.config_path.write_text("agents: [broken\n", encoding="utf-8")
     assert not config_lifecycle.load_config_into_app(runtime_paths, client.app).loaded
     request = Request({"type": "http", "app": client.app, "headers": [], "query_string": b""})
+    access = credentials._DashboardCredentialAccess.resolve(request, agent_name=None)
 
-    assert credentials_target.loaded_runtime_config_for_credentials_request(request) == (running, runtime_paths)
+    embedder = credentials._active_embedder_runtime(request, access)
+
+    assert embedder is not None
+    assert embedder.config is running

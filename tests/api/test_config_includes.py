@@ -1077,7 +1077,8 @@ async def test_watch_config_reloads_when_an_included_file_changes(
     load_event = asyncio.Event()
     stop_event = asyncio.Event()
 
-    def _record_load(runtime_paths: constants.RuntimePaths, _app: FastAPI) -> ConfigLoad:
+    def _record_load(runtime_paths: constants.RuntimePaths, _app: FastAPI, *, reconcile_knowledge: bool) -> ConfigLoad:
+        assert reconcile_knowledge
         loaded_paths.append(runtime_paths.config_path)
         load_event.set()
         return failed_config_load(OSError("this test only records the load"))
@@ -1110,7 +1111,8 @@ async def test_watch_config_coalesces_a_multi_file_burst_into_one_reload(
     loaded_paths: list[Path] = []
     stop_event = asyncio.Event()
 
-    def _record_load(runtime_paths: constants.RuntimePaths, _app: FastAPI) -> ConfigLoad:
+    def _record_load(runtime_paths: constants.RuntimePaths, _app: FastAPI, *, reconcile_knowledge: bool) -> ConfigLoad:
+        assert reconcile_knowledge
         loaded_paths.append(runtime_paths.config_path)
         return failed_config_load(OSError("this test only records the load"))
 

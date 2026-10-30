@@ -39,7 +39,6 @@ from mindroom.tool_system.worker_routing import (
 )
 
 if TYPE_CHECKING:
-    from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
     from mindroom.tool_system.worker_routing import ResolvedWorkerTarget
 
@@ -55,14 +54,6 @@ class RequestCredentialsTarget:
     agent_name: str | None
     execution_identity: ToolExecutionIdentity | None
     allowed_shared_services: frozenset[str] | None = None
-
-
-def loaded_runtime_config_for_credentials_request(
-    request: Request,
-) -> tuple[Config, RuntimePaths] | None:
-    """Return the last config that loaded, which built the running embedder, without making edits depend on it."""
-    config = config_lifecycle.last_good_runtime_config(request)
-    return (config, config_lifecycle.api_runtime_paths(request)) if config is not None else None
 
 
 def _reject_raw_worker_targeting(request: Request) -> None:

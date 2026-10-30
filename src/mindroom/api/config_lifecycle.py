@@ -401,8 +401,17 @@ def _reconcile_knowledge_modes(
         reconcile_knowledge_mode_transition_states(previous, current, runtime_paths)
 
 
-def load_config_into_app(runtime_paths: constants.RuntimePaths, api_app: FastAPI) -> ConfigLoad:
-    """Load config from disk into one API app's committed config cache unless a newer commit wins."""
+def load_config_into_app(
+    runtime_paths: constants.RuntimePaths,
+    api_app: FastAPI,
+    *,
+    reconcile_knowledge: bool = False,
+) -> ConfigLoad:
+    """Load config from disk into one API app's committed config cache unless a newer commit wins.
+
+    `reconcile_knowledge` marks indexes stale for the knowledge-mode changes this load publishes; only the standalone
+    dashboard's file watcher asks for it, because the embedded runtime reconciles each config it applies itself.
+    """
     initial_state = require_api_state(api_app)
     snapshot = initial_state.snapshot
     attempt = load_config_attempt(runtime_paths)
@@ -441,7 +450,7 @@ def load_config_into_app(runtime_paths: constants.RuntimePaths, api_app: FastAPI
             source_files=published_source_files,
             uses_includes=published_uses_includes,
         )
-    if attempt.config is not None:
+    if reconcile_knowledge and attempt.config is not None:
         _reconcile_knowledge_modes([current.runtime_config], attempt.config, runtime_paths)
     return attempt
 

@@ -155,8 +155,8 @@ class TestCredentialsAPI:
 
         with (
             patch(
-                "mindroom.api.credentials.loaded_runtime_config_for_credentials_request",
-                return_value=_active_embedder_runtime(mock_credentials_manager),
+                "mindroom.api.config_lifecycle.last_good_runtime_config",
+                return_value=(_active_embedder_runtime(mock_credentials_manager))[0],
             ),
             patch(
                 "mindroom.embeddings.embedder_health.create_background_task",
@@ -183,8 +183,8 @@ class TestCredentialsAPI:
         recorder.record("embedder authentication failed (HTTP 401)")
 
         with patch(
-            "mindroom.api.credentials.loaded_runtime_config_for_credentials_request",
-            return_value=_active_embedder_runtime(mock_credentials_manager),
+            "mindroom.api.config_lifecycle.last_good_runtime_config",
+            return_value=(_active_embedder_runtime(mock_credentials_manager))[0],
         ):
             response = test_client.post(
                 "/api/credentials/embedder/api-key",
@@ -207,8 +207,8 @@ class TestCredentialsAPI:
         recorder.record("embedder authentication failed (HTTP 401)")
 
         with patch(
-            "mindroom.api.credentials.loaded_runtime_config_for_credentials_request",
-            return_value=_active_embedder_runtime(mock_credentials_manager),
+            "mindroom.api.config_lifecycle.last_good_runtime_config",
+            return_value=(_active_embedder_runtime(mock_credentials_manager))[0],
         ):
             response = test_client.post(
                 "/api/credentials/openai/api-key",
@@ -235,8 +235,8 @@ class TestCredentialsAPI:
 
         with (
             patch(
-                "mindroom.api.credentials.loaded_runtime_config_for_credentials_request",
-                return_value=runtime_config,
+                "mindroom.api.config_lifecycle.last_good_runtime_config",
+                return_value=(runtime_config)[0],
             ),
             patch(
                 "mindroom.embeddings.embedder_health.create_background_task",
@@ -270,8 +270,8 @@ class TestCredentialsAPI:
 
         with (
             patch(
-                "mindroom.api.credentials.loaded_runtime_config_for_credentials_request",
-                return_value=(config, runtime_paths),
+                "mindroom.api.config_lifecycle.last_good_runtime_config",
+                return_value=((config, runtime_paths))[0],
             ),
             patch("mindroom.embeddings.embedder_health.check_embedder_health", return_value=object()) as check_health,
             patch(

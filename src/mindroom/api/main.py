@@ -387,7 +387,9 @@ async def _reload_config_into_app(api_app: FastAPI, runtime_paths: constants.Run
     """Reload one API app config snapshot from disk."""
     # Config validation executes plugin modules and walks the filesystem;
     # keep it off the event loop (#1260).
-    await asyncio.to_thread(config_lifecycle.load_config_into_app, runtime_paths, api_app)
+    await asyncio.to_thread(
+        partial(config_lifecycle.load_config_into_app, runtime_paths, api_app, reconcile_knowledge=True),
+    )
     await _sync_standalone_knowledge_watchers(api_app)
 
 

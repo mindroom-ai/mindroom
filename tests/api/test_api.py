@@ -881,7 +881,7 @@ async def test_watch_config_follows_runtime_swaps(monkeypatch: pytest.MonkeyPatc
     monkeypatch.setattr(
         config_lifecycle,
         "load_config_into_app",
-        lambda runtime_paths, _app: _record_loaded_path(runtime_paths, loaded_paths, load_event),
+        lambda runtime_paths, _app, **_kwargs: _record_loaded_path(runtime_paths, loaded_paths, load_event),
     )
 
     watch_task = asyncio.create_task(main._watch_config(stop_event, main.app, poll_interval_seconds=0.01))

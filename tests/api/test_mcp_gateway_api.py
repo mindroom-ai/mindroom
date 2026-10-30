@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import copy
 import hashlib
 import json
 import threading
@@ -28,14 +29,12 @@ from mindroom import agents, constants
 from mindroom.api import config_lifecycle, main
 from mindroom.api.connections_session_cookie import connections_session_cookie, issue_connections_session
 from mindroom.api.mcp_gateway import GatewayRuntime, gateway_cors_origins, gateway_lifespan, install_gateway_routes
-from mindroom.config.commit import ConfigCommit
-from mindroom.config.main import Config
 from mindroom.config.plugin import PluginEntryConfig
 from mindroom.hooks import EVENT_TOOL_BEFORE_CALL, ToolBeforeCallContext, hook
 from mindroom.mcp_gateway import admission
 from mindroom.mcp_gateway import tools as gateway_tools
 from mindroom.tool_system.worker_routing import get_tool_execution_identity
-from tests.api.conftest import trusted_upstream_jwks, trusted_upstream_jwt, trusted_upstream_jwt_key
+from tests.api.conftest import commit_tool_change, trusted_upstream_jwks, trusted_upstream_jwt, trusted_upstream_jwt_key
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterator
@@ -106,24 +105,27 @@ def gateway_app(tmp_path: Path, enforce_turn_authorization: None) -> FastAPI:  #
         storage_path=tmp_path / "storage",
         process_env=env,
     )
-    config = Config.model_validate(
-        {
-            "agents": {
-                "personal": {
-                    "display_name": "Personal assistant",
-                    "role": "Help",
-                    "tools": ["calculator"],
-                    "private": {"per": "user_agent"},
-                    "access": {"users": ["@alice:example.org", "@bob:example.org"]},
+    paths.config_path.write_text(
+        yaml.safe_dump(
+            {
+                "models": {"default": {"provider": "openai", "id": "gpt-6-astra"}},
+                "agents": {
+                    "personal": {
+                        "display_name": "Personal assistant",
+                        "role": "Help",
+                        "tools": ["calculator"],
+                        "private": {"per": "user_agent"},
+                        "access": {"users": ["@alice:example.org", "@bob:example.org"]},
+                    },
                 },
             },
-        },
+        ),
+        encoding="utf-8",
     )
     app = FastAPI(lifespan=gateway_lifespan)
     main.initialize_api_app(app, paths)
     main._add_dashboard_cors_middleware(app, paths)
-    snapshot = config_lifecycle.require_api_state(app).snapshot
-    snapshot.runtime_config = config
+    assert config_lifecycle.load_config_into_app(paths, app).loaded
     install_gateway_routes(app)
     return app
 
@@ -458,19 +460,17 @@ def test_native_dispatch_rejects_changed_publication(
             state = config_lifecycle.require_api_state(gateway_app)
             original = state.snapshot
             assert original.runtime_config is not None
-            updated = original.runtime_config.authored_model_dump()
+            # A tool reads the file, changes it, and commits, so the gateway's config must exist on disk first.
+            authored = original.runtime_config.authored_model_dump()
+            original.runtime_paths.config_path.write_text(yaml.safe_dump(authored), encoding="utf-8")
+            updated = copy.deepcopy(authored)
             if change == "remove":
                 updated["agents"]["personal"]["tools"] = []
             elif change == "scope":
                 updated["agents"]["personal"]["private"]["per"] = "user"
             elif change == "access":
                 updated["agents"]["personal"]["access"]["users"] = ["@bob:example.org"]
-            commit = ConfigCommit(
-                source=yaml.safe_dump(updated),
-                config=Config.model_validate(updated),
-                structured=True,
-            )
-            config_lifecycle.commit_config(original.runtime_paths, commit, loaded=original.runtime_config)
+            commit_tool_change(updated, original.runtime_paths)
             assert state.snapshot is not original
         finally:
             release.set()

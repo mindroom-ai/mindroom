@@ -5,7 +5,7 @@ This record holds the decisions behind one write protocol for the config file, o
 ## Decisions
 
 - Every config file write MindRoom makes while it runs goes through one commit: the dashboard's full, raw, and entity saves, the config tools, and `!config set`; the one-time access migration takes the same lock.
-  The `mindroom config` CLI writers run before MindRoom does and stay outside it.
+  Writers in other processes stay outside it: the `mindroom config` CLI commands, including `apply-bundle`, which installs into a running instance under the bundle's own lock.
   The API publishes the committed config to every in-process API state while it holds their locks, so no load or dashboard save can slip between the file write and the publication.
 - A change derived from a loaded config (a tool, `!config set`, or a dashboard entity save built from the published config) is refused when the file's fingerprint changed since that load.
   A dashboard full or raw save stays exempt and checks only that nothing was published since its request pinned the snapshot, because it deliberately lets a save repair a broken file no reload has read (`docs/dev/2026-10-28-lifecycle-owners.md`).
@@ -13,7 +13,8 @@ This record holds the decisions behind one write protocol for the config file, o
 - The commit lock order is the app registry lock, then every registered API state lock (in id order, before filtering by runtime), then the config write lock that personal-agent provisioning shares.
   Locking every state before filtering keeps a state that rebinds onto the runtime mid-commit from missing the publication.
 - The one-time access migration's compare-and-replace takes the same config write lock, because it runs on any load that sees the old format, including an old file restored while MindRoom runs.
-- Knowledge-mode reconciliation runs at publication, from the exact replaced and new configs, so every writer gets it; the embedded runtime still reconciles the configs it applies, and marking an index stale twice is harmless.
+- Knowledge-mode reconciliation runs at publication, from the exact replaced and new configs: for every commit, and for the standalone dashboard's file-watcher loads.
+  The embedded runtime's own load publishes without it, because the runtime reconciles each config it applies after the response drain; reconciling at its load would retire an index while replies on the old config still search it.
 - A commit publishes the config it validated with the personal-agent roster it read; a roster entry settled meanwhile reaches the API views through the reload that provisioning requests and through the runtime's reload of the committed file.
 - The request identity is a frozen `AuthUser`; one `requester_id()` rule maps a signed-in Matrix user to themselves and an operator login (standalone or hosted platform) to the configured owner.
   A platform login without `ACCOUNT_ID` accepts any user of its Supabase project; it already acts as the owner for the owner's private credentials and can edit the whole config, so letting it open the owner's reports adds no authority.
