@@ -165,9 +165,10 @@ def _schema(hint: Any) -> dict[str, Any]:  # noqa: ANN401, PLR0911 - One branch 
     if json_type != "object":
         return {"type": json_type}
     # TODO(simplify): ``Any``, ``object``, and any class without a JSON type render as an object that admits no
-    # property, which tells the model it can send only ``{}``; MindRoom's tools annotate such values as a bare ``dict``
-    # instead, as custom_tools/microsoft_sharepoint.py does, and the AGNO_COMPAT marker in custom_tools/google_sheets.py
-    # works around it in a toolkit that subclasses Agno's. Rendering ``Any`` unconstrained changes those schemas.
+    # property, so the local argument validation the agent tool calls run (``validate_tool_arguments``) rejects any
+    # real value there. custom_tools/microsoft_sharepoint.py annotates a bare ``dict`` to avoid it; the browser, Matrix
+    # API, and thread-tags tools are still affected, and the AGNO_COMPAT marker in custom_tools/google_sheets.py works
+    # around Agno's identical rendering. Rendering ``Any`` unconstrained changes those tools' schemas.
     return {"type": "object", "properties": {}, "additionalProperties": False}
 
 
