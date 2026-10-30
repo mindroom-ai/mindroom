@@ -158,7 +158,7 @@ class ApiAuthState:
     trusted_upstream_jwt_client: PyJWKClient | None = None
 
 
-def _build_auth_settings(runtime_paths: RuntimePaths) -> _ApiAuthSettings:
+def _build_auth_settings(runtime_paths: RuntimePaths, *, account_id: str | None = None) -> _ApiAuthSettings:
     """Read dashboard auth settings from one explicit runtime context."""
     trusted_upstream = _build_trusted_upstream_auth_settings(runtime_paths)
     dashboard = dashboard_origin(runtime_paths)
@@ -173,7 +173,7 @@ def _build_auth_settings(runtime_paths: RuntimePaths) -> _ApiAuthSettings:
     return _ApiAuthSettings(
         supabase_url=runtime_paths.env_value("SUPABASE_URL"),
         supabase_anon_key=runtime_paths.env_value("SUPABASE_ANON_KEY"),
-        account_id=runtime_paths.env_value("ACCOUNT_ID"),
+        account_id=account_id,
         mindroom_api_key=runtime_paths.env_value("MINDROOM_API_KEY"),
         public_url=runtime_paths.env_value("MINDROOM_PUBLIC_URL"),
         dashboard_origin=dashboard,
@@ -242,13 +242,14 @@ def _build_trusted_upstream_jwt_client(settings: _TrustedUpstreamAuthSettings) -
 
 def _app_auth_state(api_app: FastAPI) -> ApiAuthState:
     """Return the committed auth state for one API app instance."""
+    app_state = config_lifecycle.app_state(api_app)
     api_state = config_lifecycle.require_api_state(api_app)
     with api_state.config_lock:
         snapshot = api_state.snapshot
         state = cast("ApiAuthState | None", snapshot.auth_state)
         if state is not None and state.runtime_paths == snapshot.runtime_paths:
             return state
-        settings = _build_auth_settings(snapshot.runtime_paths)
+        settings = _build_auth_settings(snapshot.runtime_paths, account_id=app_state.api_auth_account_id)
         state = ApiAuthState(
             runtime_paths=snapshot.runtime_paths,
             settings=settings,
@@ -558,12 +559,13 @@ def _bind_authenticated_request_snapshot(request: Request) -> ApiSnapshot:
     ):
         return existing
 
+    app_state = config_lifecycle.app_state(request.app)
     api_state = config_lifecycle.require_api_state(request.app)
     with api_state.config_lock:
         current = api_state.snapshot
         auth_state = cast("ApiAuthState | None", current.auth_state)
         if auth_state is None or auth_state.runtime_paths != current.runtime_paths:
-            settings = _build_auth_settings(current.runtime_paths)
+            settings = _build_auth_settings(current.runtime_paths, account_id=app_state.api_auth_account_id)
             auth_state = ApiAuthState(
                 runtime_paths=current.runtime_paths,
                 settings=settings,

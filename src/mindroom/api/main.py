@@ -289,6 +289,7 @@ def _app_runtime_paths(api_app: FastAPI) -> constants.RuntimePaths:
 def initialize_api_app(api_app: FastAPI, runtime_paths: constants.RuntimePaths) -> None:
     """Bind one API app to a runtime's paths; per-generation bindings made for other paths end with them."""
     app_state = ensure_app_state(api_app)
+    app_state.api_auth_account_id = runtime_paths.env_value("ACCOUNT_ID")
     if app_state.api_state is None:
         app_state.api_state = ApiState(
             config_lock=threading.Lock(),

@@ -70,6 +70,7 @@ class _MindroomAppState:
     """Single typed namespace for FastAPI ``app.state`` attributes used across the API."""
 
     api_state: ApiState | None = None
+    api_auth_account_id: str | None = None
     # What `mindroom run` lends this app while it serves it; read through `runtime`.
     embedded: EmbeddedRuntime | None = None
     # Rebound per published config generation, or as integrations start and stop.
