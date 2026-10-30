@@ -147,7 +147,7 @@ def _run(
             raise NotImplementedError(msg)
 
 
-def retired(transaction: Transaction, principal_id: str, span: Span, *, author_generation: str | None = None) -> bool:
+def retired(transaction: Transaction, principal_id: str, span: Span, *, author_generation: str | None) -> bool:
     """Return whether a write on a running span comes from a bot instance that no longer owns the principal's replies.
 
     Such a span writes nothing more: the instance that took over replays its
@@ -166,6 +166,16 @@ def retired(transaction: Transaction, principal_id: str, span: Span, *, author_g
     return span.kind is not rl.SpanKind.APPROVAL_RESUME and span.bot_generation != active
 
 
+def lock_reply_and_span(transaction: Transaction, principal_id: str, reply_id: str, span_id: str) -> tuple[Reply, Span]:
+    """Lock one reply and read the named span, raising when either does not exist."""
+    reply = reply_messages.lock(transaction, principal_id, reply_id)
+    span = reply_spans.load(transaction, principal_id, span_id)
+    if reply is None or span is None:
+        msg = f"Reply {reply_id} or span {span_id} does not exist"
+        raise RuntimeError(msg)
+    return reply, span
+
+
 def decide_on_span(
     transaction: Transaction,
     principal_id: str,
@@ -179,11 +189,7 @@ def decide_on_span(
 
     ``author_generation`` names the bot instance of the span's own task, when it writes.
     """
-    reply = reply_messages.lock(transaction, principal_id, reply_id)
-    span = reply_spans.load(transaction, principal_id, span_id)
-    if reply is None or span is None:
-        msg = f"Reply {reply_id} or span {span_id} does not exist"
-        raise RuntimeError(msg)
+    reply, span = lock_reply_and_span(transaction, principal_id, reply_id, span_id)
     if retired(transaction, principal_id, span, author_generation=author_generation):
         return AppliedTransition(transition=rl.Transition(outcome=rl.Outcome.STALE, reply=reply), post_commit=())
     return with_ended_span(apply(transaction, principal_id, decide(reply, span)), span)

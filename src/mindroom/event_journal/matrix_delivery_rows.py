@@ -287,8 +287,6 @@ def acknowledge_delivery(
         delivery_id=delivery_id,
         stage=stage,
     )
-    may_project = ownership is not None
-    projection_epoch = 0 if ownership is None else ownership[1]
     bound = outbox.acknowledge(
         transaction,
         principal_id,
@@ -296,63 +294,61 @@ def acknowledge_delivery(
         stage=stage,
         event_id=event_id,
     )
-    # A caller that lost the acknowledgement must not write the record
-    # either. The row already names another event, and a terminal
-    # record pointing somewhere else is the disagreement this whole
-    # transaction exists to prevent.
-    if bound and may_project and terminal_response_event_id is not None:
-        turn_rows.complete_bound_delivery(
-            transaction,
-            agent_of_principal(principal_id),
-            delivery_id=delivery_id,
-            response_event_id=terminal_response_event_id,
+    if not bound:
+        # Lost the row. Whatever is on it now is the answer this delivery
+        # resolves to, and the caller has to be told that rather than its
+        # own event id -- everything downstream records what `flush`
+        # returns, so a loser reporting its own send is how the outbox and
+        # the turn record end up naming different events. A loser must not
+        # write the record either: a terminal record pointing somewhere
+        # else is the disagreement this whole transaction exists to prevent.
+        settled = transaction.fetchone(
+            """
+            SELECT acknowledged_event_id FROM matrix_delivery_outbox
+            WHERE principal_id = ? AND delivery_id = ? AND stage = ?
+            """,
+            (principal_id, delivery_id, stage.value),
         )
-    if bound and may_project:
+        return DeliveryAcknowledgement(
+            settled_event_id=None if settled is None else str(settled["acknowledged_event_id"]),
+        )
+    if ownership is None:
+        discard_delivery_event(
+            transaction,
+            principal_id,
+            event_id=event_id,
+        )
+    else:
+        if terminal_response_event_id is not None:
+            turn_rows.complete_bound_delivery(
+                transaction,
+                agent_of_principal(principal_id),
+                delivery_id=delivery_id,
+                response_event_id=terminal_response_event_id,
+            )
         for delivered_projection in delivered_projections:
             project(
                 transaction,
                 principal_id,
                 delivered_projection,
                 receipt_order=0,
-                membership_epoch=projection_epoch,
+                membership_epoch=ownership[1],
             )
-    elif bound and not may_project:
-        discard_delivery_event(
+    delivery = outbox.load(transaction, principal_id, delivery_id=delivery_id, stage=stage)
+    reply_applied = (
+        None
+        if delivery is None
+        else replies.acknowledge_row(
             transaction,
             principal_id,
+            delivery,
             event_id=event_id,
+            membership_current=ownership is not None,
         )
-    if bound:
-        delivery = outbox.load(transaction, principal_id, delivery_id=delivery_id, stage=stage)
-        reply_applied = (
-            None
-            if delivery is None
-            else replies.acknowledge_row(
-                transaction,
-                principal_id,
-                delivery,
-                event_id=event_id,
-                membership_current=may_project,
-            )
-        )
-        return DeliveryAcknowledgement(
-            settled_event_id=event_id,
-            reply_effects=() if reply_applied is None else reply_applied.post_commit,
-        )
-    # Lost the row. Whatever is on it now is the answer this delivery
-    # resolves to, and the caller has to be told that rather than its
-    # own event id -- everything downstream records what `flush`
-    # returns, so a loser reporting its own send is how the outbox and
-    # the turn record end up naming different events.
-    settled = transaction.fetchone(
-        """
-        SELECT acknowledged_event_id FROM matrix_delivery_outbox
-        WHERE principal_id = ? AND delivery_id = ? AND stage = ?
-        """,
-        (principal_id, delivery_id, stage.value),
     )
     return DeliveryAcknowledgement(
-        settled_event_id=None if settled is None else str(settled["acknowledged_event_id"]),
+        settled_event_id=event_id,
+        reply_effects=() if reply_applied is None else reply_applied.post_commit,
     )
 
 
@@ -384,12 +380,7 @@ def _decide_reply_row(
         reply, span = transition.reply, transition.spans[0]
     else:
         assert request.decide is not None
-        locked = reply_messages.lock(transaction, principal_id, request.reply_id)
-        loaded = reply_spans.load(transaction, principal_id, request.span_id)
-        if locked is None or loaded is None:
-            msg = f"Reply {request.reply_id} or span {request.span_id} does not exist"
-            raise RuntimeError(msg)
-        reply, span = locked, loaded
+        reply, span = replies.lock_reply_and_span(transaction, principal_id, request.reply_id, request.span_id)
         earlier = _span_row(transaction, principal_id, reply, span, request.stage)
         if earlier is not None:
             return earlier
@@ -501,7 +492,7 @@ def enqueue_reply_row(
     return ReplyRowEnqueue(
         applied=applied,
         delivery_id=delivery_id,
-        stage=row.stage,
+        stage=stage,
         settled_event_ids=replies.settled_event_ids(transaction, principal_id, transition),
         sequence=row.sequence,
     )
