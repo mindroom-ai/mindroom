@@ -9,7 +9,8 @@ from __future__ import annotations
 
 import enum
 import inspect
-import typing
+
+import typing_extensions
 
 from mindroom import plugin_api
 
@@ -362,7 +363,7 @@ def test_each_exported_callable_keeps_its_parameter_names_and_kinds() -> None:
     shapes = {
         name: _parameter_shape(obj)
         for name, obj in exported.items()
-        if callable(obj) and not _is_enum(obj) and not typing.is_protocol(obj)
+        if callable(obj) and not _is_enum(obj) and not typing_extensions.is_protocol(obj)
     }
     assert shapes == _SIGNATURES
 

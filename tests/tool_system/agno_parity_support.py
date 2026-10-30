@@ -23,6 +23,7 @@ from unittest.mock import patch
 
 import httpx
 from agno.tools import Toolkit
+from agno.tools import function as agno_function
 from agno.tools.function import Function
 from agno.utils import json_schema
 from packaging.version import Version
@@ -324,9 +325,22 @@ def agno_derivation(entrypoint: Callable[..., Any]) -> tuple[str | None, dict[st
         return {} if type_hint is Any or type_hint is object else agno_schema(type_hint)
 
     function = Function(name="derived", entrypoint=entrypoint)
-    with patch.object(json_schema, "get_json_schema_for_arg", unconstrained_any):
-        function.process_entrypoint(strict=False)
+    # Agno caches each callable's derivation, so forget it around the patch: a cached schema would skip the patch,
+    # and the patched one would reach later unpatched derivations.
+    _forget_agno_derivation(entrypoint)
+    try:
+        with patch.object(json_schema, "get_json_schema_for_arg", unconstrained_any):
+            function.process_entrypoint(strict=False)
+    finally:
+        _forget_agno_derivation(entrypoint)
     return function.description, function.parameters
+
+
+def _forget_agno_derivation(entrypoint: Callable[..., Any]) -> None:
+    """Drop Agno's cached schema derivations of ``entrypoint``."""
+    agno_function._cached_entrypoint_schema.cache_clear()
+    if (cache := agno_function._get_lifetime_cache(entrypoint)) is not None:
+        cache.clear()
 
 
 def probe_functions() -> dict[str, ToolFunction]:
