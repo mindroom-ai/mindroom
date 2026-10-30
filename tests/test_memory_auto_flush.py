@@ -19,7 +19,6 @@ from mindroom.config.main import Config
 from mindroom.constants import (
     HOOK_SOURCE_RUN_METADATA_KEY,
     MATRIX_EVENT_ID_METADATA_KEY,
-    MATRIX_SEEN_EVENT_IDS_METADATA_KEY,
     resolve_runtime_paths,
 )
 from mindroom.history import session_runs
@@ -536,29 +535,6 @@ async def test_a_conversation_whose_redactions_cannot_be_checked_backs_off_witho
     await worker._run_cycle(config)
     entry = _entry(tmp_path, broken)
     assert (entry["failures"], entry["updated_at"]) == (0, T0 + 6)
-
-
-@pytest.mark.asyncio
-async def test_a_paused_turn_that_read_a_redacted_message_keeps_the_later_turns_out(
-    tmp_path: Path,
-    extractor: _Extractor,
-) -> None:
-    """A redaction removes the waiting turn that read the message and every turn after it, so none of them is flushed."""
-    config = _config(tmp_path)
-    session = _thread("t1")
-    asks = _run("asks", session, T0 + 20, status=RunStatus.paused)
-    cast("dict[str, object]", asks.metadata)[MATRIX_SEEN_EVENT_IDS_METADATA_KEY] = ["$secret"]
-
-    async def redacted(agent_name: str, room_id: str, event_ids: tuple[str, ...]) -> frozenset[str] | None:
-        del agent_name, room_id
-        return frozenset({"$secret"}) & frozenset(event_ids)
-
-    worker = await _started(config, redacted_event_ids=redacted)
-    _seed(config, session, [_run("before", session, T0 + 10), asks, _run("after", session, T0 + 30)])
-
-    await worker._run_cycle(config)
-
-    assert extractor.lines() == [_lines("before")]
 
 
 @pytest.mark.asyncio

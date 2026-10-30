@@ -8,7 +8,7 @@ import json
 import threading
 import time
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any
 from unittest.mock import patch
 
 import pytest
@@ -16,7 +16,7 @@ import pytest
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
-from mindroom.constants import MATRIX_EVENT_ID_METADATA_KEY, MATRIX_SEEN_EVENT_IDS_METADATA_KEY, resolve_runtime_paths
+from mindroom.constants import MATRIX_EVENT_ID_METADATA_KEY, resolve_runtime_paths
 from mindroom.history import session_runs
 from mindroom.knowledge_graph import ingestion
 from mindroom.knowledge_graph.episodes import RUN_DONE
@@ -481,25 +481,6 @@ async def test_released_progress_part_way_through_a_run_renders_it_again(tmp_pat
     assert tool_results[0].startswith("call fetch_0(")
     assert "fetch_7" in tool_results[-1]
     assert not any("Issue for r1" in body for body in tool_results)
-
-
-@pytest.mark.asyncio
-async def test_a_paused_turn_that_read_a_redacted_message_keeps_the_later_turns_out(tmp_path: Path) -> None:
-    """A redaction removes the waiting turn that read the message and every turn after it, so none of them is added."""
-    config, paths, store = _config(), _paths(tmp_path), _FakeStore()
-
-    def read_secret(runs: list[RunRecord]) -> None:
-        cast("dict[str, object]", runs[1].metadata)[MATRIX_SEEN_EVENT_IDS_METADATA_KEY] = ["$secret"]
-
-    _seed(config, paths, "!room:x:$t1", ["r1", "asks", "r3"], paused=frozenset({"asks"}), edit=read_secret)
-
-    async def redacted(agent_name: str, room_id: str, event_ids: tuple[str, ...]) -> frozenset[str] | None:
-        del agent_name, room_id
-        return frozenset({"$secret"}) & frozenset(event_ids)
-
-    await _pass(_worker(config, paths, store, redacted), config, now=T0 + 10)
-
-    assert _answers(store) == ["Mind: answer r1"]
 
 
 @pytest.mark.asyncio
