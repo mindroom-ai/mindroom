@@ -28,6 +28,7 @@ from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
 from mindroom import runtime_env_policy as _runtime_env_policy
 from mindroom.atomic_file import atomic_write_bytes_at
+from mindroom.credentials.legacy_env_credentials import remove_environment_copies
 from mindroom.credentials.policy import CredentialPlacement, CredentialServicePolicy, credential_service_policy
 from mindroom.durable_write import create_directory_durable
 from mindroom.logging_config import get_logger
@@ -43,6 +44,7 @@ if TYPE_CHECKING:
     from collections.abc import Callable
 
     from mindroom.constants import RuntimePaths
+    from mindroom.credentials.environment import DeclaredCredential
     from mindroom.tool_system.worker_routing import ResolvedWorkerTarget
 
 # The characters a credential service name may contain. A config name that becomes part of one, such as a model
@@ -105,6 +107,8 @@ class _CredentialsManagerKey:
     current_worker_key: str | None
     current_worker_root: Path | None
     encryption_key: str | None
+    # The primary's environment inputs, whose declared credentials its store reads under saved ones; None elsewhere.
+    declaring_env_digest: str | None = None
 
 
 _credentials_managers: dict[_CredentialsManagerKey, CredentialsManager] = {}
@@ -450,6 +454,7 @@ class CredentialsManager:
         current_worker_key: str | None = None,
         current_worker_root: Path | None = None,
         encryption_key: str | None = None,
+        declared: Mapping[str, DeclaredCredential] | None = None,
     ) -> None:
         """Initialize the credentials manager.
 
@@ -460,6 +465,7 @@ class CredentialsManager:
             current_worker_key: Optional worker key for the current runtime context.
             current_worker_root: Optional worker root for the current runtime context.
             encryption_key: Optional base64-encoded 32-byte credential encryption key.
+            declared: Credentials the environment declares, read for a service with no saved document.
 
         """
         self.base_path = Path(base_path)
@@ -472,6 +478,7 @@ class CredentialsManager:
             Path(current_worker_root).expanduser().resolve() if current_worker_root is not None else None
         )
         self._encryption_key_config = _runtime_env_policy.credentials_encryption_key_value(encryption_key)
+        self._declared: Mapping[str, DeclaredCredential] = dict(declared or {})
         self._encryption_key = (
             _decode_credentials_encryption_key(self._encryption_key_config)
             if self._encryption_key_config is not None
@@ -545,6 +552,8 @@ class CredentialsManager:
             current_worker_key=self.current_worker_key,
             current_worker_root=self.current_worker_root,
             encryption_key=self._encryption_key_config,
+            # In the primary the shared layer is this store, so it reads the same declared credentials.
+            declared=self._declared if self.shared_base_path == self.base_path else None,
         )
 
     def get_credentials_path(self, service: str) -> Path:
@@ -607,7 +616,8 @@ class CredentialsManager:
         try:
             payload = _read_credentials_payload(credentials_path)
             if payload is None:
-                return None
+                declared = self._declared.get(normalized_service)
+                return dict(declared.credentials) if declared is not None else None
             return self.decode_credentials(normalized_service, payload)
         except (OSError, TypeError, ValueError, InvalidTag) as exc:
             logger.warning(
@@ -667,12 +677,10 @@ class CredentialsManager:
                 raise
 
     def list_services(self) -> list[str]:
-        """List all services with stored credentials.
+        """List every service with credentials: saved ones and the ones the environment declares."""
+        return sorted({*self._saved_services(), *self._declared})
 
-        Returns:
-            List of service names
-
-        """
+    def _saved_services(self) -> list[str]:
         try:
             with open_directory_within_root(self.base_path) as directory_fd:
                 names = [name for name, _entry_stat in _credentials_file_entries(directory_fd)]
@@ -681,7 +689,32 @@ class CredentialsManager:
                 raise
             return []
         services = [name.removesuffix(_CREDENTIALS_FILE_SUFFIX) for name in names]
-        return sorted(service for service in services if SERVICE_NAME_PATTERN.fullmatch(service))
+        return [service for service in services if SERVICE_NAME_PATTERN.fullmatch(service)]
+
+    def declared_variable(self, service: str) -> str | None:
+        """Return the variable that supplies a service's credentials, or None when a saved document supplies them."""
+        normalized_service = validate_service_name(service)
+        declared = self._declared.get(normalized_service)
+        if declared is None or _read_credentials_payload(self._credentials_file(normalized_service)) is not None:
+            return None
+        return declared.variable
+
+    def remove_saved_documents(self, matches: Callable[[dict[str, Any]], bool]) -> _SavedDocumentsRemoval:
+        """Delete every saved document ``matches`` selects, counting the documents that cannot be read."""
+        removed: list[str] = []
+        unreadable = 0
+        for service in self._saved_services():
+            credentials_path = self._credentials_file(service)
+            try:
+                payload = _read_credentials_payload(credentials_path)
+                credentials = None if payload is None else self.decode_credentials(service, payload)
+            except (OSError, TypeError, ValueError, InvalidTag):
+                unreadable += 1
+                continue
+            if credentials is not None and matches(credentials):
+                self.delete_credentials(service)
+                removed.append(service)
+        return _SavedDocumentsRemoval(removed=tuple(removed), unreadable=unreadable)
 
     def get_api_key(self, service: str, key_name: str = "api_key") -> str | None:
         """Get an API key for a service.
@@ -760,52 +793,59 @@ def _runtime_dedicated_worker_root(runtime_paths: RuntimePaths) -> Path | None:
     return Path(raw_worker_root).expanduser().resolve()
 
 
-def _credentials_manager_key(
-    *,
-    base_path: Path,
-    shared_base_path: Path,
-    current_worker_key: str | None = None,
-    current_worker_root: Path | None = None,
-    encryption_key: str | None = None,
-) -> _CredentialsManagerKey:
-    return _CredentialsManagerKey(
-        base_path=Path(base_path).expanduser().resolve(),
-        shared_base_path=Path(shared_base_path).expanduser().resolve(),
-        current_worker_key=current_worker_key,
-        current_worker_root=(
-            Path(current_worker_root).expanduser().resolve() if current_worker_root is not None else None
-        ),
-        encryption_key=_runtime_env_policy.credentials_encryption_key_value(encryption_key),
-    )
-
-
 def runtime_credentials_manager_key(runtime_paths: RuntimePaths) -> _CredentialsManagerKey:
     """Return the cache key for one explicit runtime credential context."""
     base_path = _credentials_base_path(runtime_paths.storage_root)
-    return _credentials_manager_key(
+    # Only the primary reads the credentials its environment declares; every runner establishes runner mode.
+    runner = runtime_paths.env_flag(_runtime_env_policy.SANDBOX_RUNTIME_ENV_BY_KEY["runner_mode"])
+    return _CredentialsManagerKey(
         base_path=base_path,
         shared_base_path=_runtime_shared_credentials_base_path(runtime_paths, base_path),
         current_worker_key=_runtime_dedicated_worker_key(runtime_paths),
         current_worker_root=_runtime_dedicated_worker_root(runtime_paths),
-        encryption_key=runtime_paths.env_value(_runtime_env_policy.CREDENTIALS_ENCRYPTION_KEY_ENV),
+        encryption_key=_runtime_env_policy.credentials_encryption_key_value(
+            runtime_paths.env_value(_runtime_env_policy.CREDENTIALS_ENCRYPTION_KEY_ENV),
+        ),
+        declaring_env_digest=None if runner else runtime_paths.env_digest,
     )
 
 
 def get_runtime_credentials_manager(runtime_paths: RuntimePaths) -> CredentialsManager:
-    """Return the cached credentials manager for one explicit runtime context."""
+    """Return the cached credentials manager for one explicit runtime context.
+
+    The primary's manager reads the credentials its environment declares under the saved ones; opening it the first
+    time also removes the copies earlier releases imported from the environment.
+    """
     key = runtime_credentials_manager_key(runtime_paths)
     with _credentials_manager_lock:
         manager = _credentials_managers.get(key)
         if manager is None:
+            declared: Mapping[str, DeclaredCredential] = {}
+            if key.declaring_env_digest is not None:
+                # The environment module validates service names with this module.
+                from mindroom.credentials.environment import declared_credentials  # noqa: PLC0415
+
+                declared = declared_credentials(runtime_paths)
             manager = CredentialsManager(
                 base_path=key.base_path,
                 shared_base_path=key.shared_base_path,
                 current_worker_key=key.current_worker_key,
                 current_worker_root=key.current_worker_root,
                 encryption_key=key.encryption_key,
+                declared=declared,
             )
+            if key.declaring_env_digest is not None:
+                remove_environment_copies(manager, declared_services=declared)
             _credentials_managers[key] = manager
         return manager
+
+
+@dataclass(frozen=True, slots=True)
+class _SavedDocumentsRemoval:
+    """Which saved documents one removal deleted, and how many it could not read."""
+
+    removed: tuple[str, ...]
+    unreadable: int
 
 
 @dataclass(frozen=True, slots=True)

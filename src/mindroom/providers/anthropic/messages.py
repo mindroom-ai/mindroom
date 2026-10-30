@@ -33,7 +33,7 @@ from anthropic.types.beta import (
 )
 
 from mindroom.constants import PROVIDER_ENV_KEYS
-from mindroom.credentials.sync import get_secret_from_env
+from mindroom.credentials.environment import get_secret_from_env
 from mindroom.llm.errors import ProviderError
 from mindroom.llm.provider import (
     STRUCTURED_OUTPUT_TOOL,

@@ -1,46 +1,27 @@
-"""Sync shared provider/bootstrap credentials from runtime env into CredentialsManager.
+"""Shared provider keys, as the runtime reads them from the shared credentials store.
 
-On first run, supported provider/bootstrap env values from the config-adjacent
-`.env` or exported process env are seeded into the shared credentials store.
-On subsequent runs, env-sourced shared credentials (`_source=env`) are updated,
-but UI-sourced credentials (`_source=ui`) are never overwritten.
-
-Built-in sync is intentionally limited to supported shared credentials such as
-model provider API keys, Ollama host settings, and `GITHUB_TOKEN` mirroring for
-private Git knowledge sync. Deployments that need additional bootstrap
-credentials can opt in with explicit credential seed declarations.
+The environment's provider variables reach the store as a read-time layer (see ``credentials/environment.py``).
 """
 
 from __future__ import annotations
 
-import json
-from collections.abc import Callable, Mapping
-from dataclasses import dataclass
-from pathlib import Path
-from typing import Any, cast
+from typing import TYPE_CHECKING
 
-from mindroom.constants import PROVIDER_ENV_KEYS, RuntimePaths, runtime_env_path
-from mindroom.credentials.manager import get_runtime_shared_credentials_manager, validate_service_name
-from mindroom.credentials.policy import is_oauth_token_service
-from mindroom.logging_config import get_logger
+from mindroom.constants import PROVIDER_ENV_KEYS
+from mindroom.credentials.environment import EMBEDDER_CREDENTIAL_SERVICE, get_secret_from_env
+from mindroom.credentials.manager import get_runtime_shared_credentials_manager
 from mindroom.model_defaults import OLLAMA_HOST_DEFAULT
 from mindroom.providers.names import provider_route
-from mindroom.runtime_env_policy import CREDENTIAL_SEEDS_FILE_ENV, CREDENTIAL_SEEDS_JSON_ENV, is_unset_env_value
 
-logger = get_logger(__name__)
+if TYPE_CHECKING:
+    from collections.abc import Callable
 
-# Reverse view: env-var → provider (derived from the canonical mapping).
-_ENV_TO_SERVICE_MAP = {v: k for k, v in PROVIDER_ENV_KEYS.items()}
+    from mindroom.constants import RuntimePaths
 
 # Provider API-key services that also accept a dashboard credential saved under
 # the env var name (for example ``OPENROUTER_API_KEY`` for ``openrouter``).
 _PROVIDER_SERVICE_ENV_ALIASES = {k: v for k, v in PROVIDER_ENV_KEYS.items() if k != "ollama"}
 _ENV_NAMED_PROVIDER_SERVICES = {v: k for k, v in _PROVIDER_SERVICE_ENV_ALIASES.items()}
-
-# Dedicated credential service for the semantic-search embedder. Deliberately
-# not part of PROVIDER_ENV_KEYS: that map means "model provider" and feeds
-# model loading, while the embedder is a separate authentication concern.
-_EMBEDDER_CREDENTIAL_SERVICE = "embedder"
 
 # Sent when no embedder key resolves: the OpenAI SDK rejects client
 # construction without a key, keyless local endpoints ignore the header, and
@@ -48,410 +29,10 @@ _EMBEDDER_CREDENTIAL_SERVICE = "embedder"
 _EMBEDDER_KEYLESS_PLACEHOLDER_API_KEY = "mindroom-keyless-placeholder"
 
 
-@dataclass(frozen=True)
-class _CredentialSeedDeclaration:
-    source_env_var: str
-    seed: Mapping[str, Any]
-
-
-@dataclass(frozen=True)
-class _SeededCredentials:
-    service: str
-    credentials: dict[str, Any]
-    source_env_var: str
-
-
-@dataclass(frozen=True, slots=True)
-class _StoredProviderKey:
-    """A provider's shared API key as the runtime reads it from the credential store, and where it came from."""
-
-    api_key: str | None
-    # Whether the startup import stored the key; otherwise it was saved in the dashboard or has no recorded source.
-    imported: bool
-    # The variable the import copies this key from now, such as OPENAI_API_KEY_FILE or MINDROOM_CREDENTIAL_SEEDS_FILE;
-    # None for a key it does not supply any more.
-    import_variable: str | None
-
-
-def _read_secret_from_env(name: str, runtime_paths: RuntimePaths) -> tuple[str, str] | None:
-    """Read a secret from NAME or NAME_FILE and return it with the variable that supplied it.
-
-    A usable `NAME` wins without touching `NAME_FILE`. Otherwise, if `NAME_FILE`
-    points to a readable file with usable contents, return its stripped contents.
-    Else return None. Blank values and unedited starter-template placeholders
-    count as unset in both places.
-    """
-    val = runtime_paths.env_value(name)
-    if val is not None and not is_unset_env_value(name, val):
-        return val, name
-    file_var = f"{name}_FILE"
-    file_path = runtime_env_path(runtime_paths, file_var)
-    if file_path is not None and file_path.exists():
-        try:
-            content = file_path.read_text(encoding="utf-8").strip()
-        except Exception:
-            # Avoid noisy logs here; callers can handle None gracefully
-            return None
-        return None if is_unset_env_value(name, content) else (content, file_var)
-    return None
-
-
-def get_secret_from_env(name: str, runtime_paths: RuntimePaths) -> str | None:
-    """Read a secret from NAME or NAME_FILE; None when neither supplies a usable (non-blank, non-placeholder) value."""
-    secret = _read_secret_from_env(name, runtime_paths)
-    return secret[0] if secret else None
-
-
-def _env_source(name: str, runtime_paths: RuntimePaths) -> str:
-    """Classify where the runtime reads one environment variable from."""
-    if name not in runtime_paths.process_env:
-        return "env_file"
-    if name in runtime_paths.env_file_values:
-        return "process_env_overrides_env_file"
-    return "process_env"
-
-
-def _sync_github_private_credentials(runtime_paths: RuntimePaths) -> bool:
-    """Seed/update github_private from GITHUB_TOKEN for Git knowledge sync."""
-    secret = _read_secret_from_env("GITHUB_TOKEN", runtime_paths=runtime_paths)
-    if secret is None:
-        logger.debug("No value found for GITHUB_TOKEN or GITHUB_TOKEN_FILE")
-        return False
-    github_token, env_var = secret
-
-    return _sync_service_credentials(
-        service="github_private",
-        credentials={
-            "username": "x-access-token",
-            "token": github_token,
-        },
-        runtime_paths=runtime_paths,
-        env_var=env_var,
-    )
-
-
-def _sync_embedder_credentials(runtime_paths: RuntimePaths) -> bool:
-    """Seed/update the dedicated embedder credential from EMBEDDER_API_KEY."""
-    secret = _read_secret_from_env("EMBEDDER_API_KEY", runtime_paths=runtime_paths)
-    if secret is None:
-        logger.debug("No value found for EMBEDDER_API_KEY or EMBEDDER_API_KEY_FILE")
-        return False
-    embedder_api_key, env_var = secret
-
-    return _sync_service_credentials(
-        service=_EMBEDDER_CREDENTIAL_SERVICE,
-        credentials={"api_key": embedder_api_key},
-        runtime_paths=runtime_paths,
-        env_var=env_var,
-    )
-
-
-def _sync_service_credentials(
-    *,
-    service: str,
-    credentials: dict[str, Any],
-    runtime_paths: RuntimePaths,
-    env_var: str,
-) -> bool:
-    """Seed or update one env-backed named service, logging a notice when the stored value changes."""
-    if is_oauth_token_service(service):
-        logger.warning(
-            "credential_env_sync_rejected_lifecycle_owned_service",
-            service=service,
-        )
-        return False
-    creds_manager = get_runtime_shared_credentials_manager(runtime_paths)
-    credentials_path = creds_manager.get_credentials_path(service)
-    credentials_file_exists = credentials_path.exists()
-    existing = creds_manager.load_credentials(service)
-    if existing is None and credentials_file_exists:
-        logger.warning(
-            "credential_env_sync_skipped_unreadable_existing_file",
-            service=service,
-            path=str(credentials_path),
-        )
-        return False
-    if existing is not None:
-        source = existing.get("_source")
-        if source != "env":
-            logger.debug("credential_env_sync_skipped", service=service, source=source)
-            return False
-
-    stored = {**credentials, "_source": "env"}
-    if existing == stored:
-        logger.debug("credential_env_sync_unchanged", service=service, env_var=env_var)
-        return False
-
-    creds_manager.save_credentials(service, stored)
-    logger.info(
-        "credential_imported_from_env" if existing is None else "credential_updated_from_env",
-        service=service,
-        env_var=env_var,
-        source=_env_source(env_var, runtime_paths),
-        to_stop=(
-            "remove the variable (and any _FILE variant) from the process environment and .env, "
-            f"or this service's entry from every seed declaration that lists it, then DELETE /api/credentials/{service}"
-        ),
-    )
-    return True
-
-
-def _read_text_file(path: Path) -> str | None:
-    try:
-        return path.read_text(encoding="utf-8").strip()
-    except OSError:
-        return None
-
-
-def _resolve_seed_file_path(raw_path: str, runtime_paths: RuntimePaths) -> Path:
-    path = Path(raw_path).expanduser()
-    if not path.is_absolute():
-        path = runtime_paths.config_dir / path
-    return path.resolve()
-
-
-def _coerce_seed_entries(raw_value: object, *, source: str) -> list[Mapping[str, Any]]:
-    """Return validated raw seed entries from a decoded JSON value."""
-    if isinstance(raw_value, Mapping) and "seeds" in raw_value:
-        raw_value = cast("Mapping[str, Any]", raw_value)["seeds"]
-    elif isinstance(raw_value, Mapping):
-        raw_value = [cast("Mapping[str, Any]", raw_value)]
-    if not isinstance(raw_value, list):
-        msg = f"{source} must contain a credential seed object, a list, or an object with a 'seeds' list"
-        raise TypeError(msg)
-
-    entries: list[Mapping[str, Any]] = []
-    for index, item in enumerate(raw_value):
-        if not isinstance(item, Mapping):
-            msg = f"{source} credential seed at index {index} must be an object"
-            raise TypeError(msg)
-        entries.append(cast("Mapping[str, Any]", item))
-    return entries
-
-
-def _decode_seed_entries(
-    raw_json: str,
-    *,
-    source_env_var: str,
-    source_path: Path | None = None,
-) -> list[Mapping[str, Any]]:
-    try:
-        raw_value = json.loads(raw_json)
-    except json.JSONDecodeError as exc:
-        log_context = {"env_var": source_env_var, "error": str(exc)}
-        if source_path is not None:
-            log_context["path"] = str(source_path)
-        logger.warning("credential_seed_declaration_json_invalid", **log_context)
-        return []
-    try:
-        return _coerce_seed_entries(raw_value, source=source_env_var)
-    except (TypeError, ValueError) as exc:
-        log_context = {"env_var": source_env_var, "error": str(exc)}
-        if source_path is not None:
-            log_context["path"] = str(source_path)
-        logger.warning("credential_seed_declaration_invalid", **log_context)
-        return []
-
-
-def _load_declared_credential_seeds(runtime_paths: RuntimePaths) -> list[_CredentialSeedDeclaration]:
-    """Load explicit credential seed declarations from runtime env or file."""
-    seed_entries: list[_CredentialSeedDeclaration] = []
-
-    seed_file = runtime_env_path(runtime_paths, CREDENTIAL_SEEDS_FILE_ENV)
-    if seed_file is not None:
-        try:
-            raw_file_json = seed_file.read_text(encoding="utf-8")
-        except OSError as exc:
-            logger.warning(
-                "credential_seed_declaration_file_unreadable",
-                env_var=CREDENTIAL_SEEDS_FILE_ENV,
-                path=str(seed_file),
-                error=str(exc),
-            )
-        else:
-            seed_entries.extend(
-                _CredentialSeedDeclaration(source_env_var=CREDENTIAL_SEEDS_FILE_ENV, seed=entry)
-                for entry in _decode_seed_entries(
-                    raw_file_json,
-                    source_env_var=CREDENTIAL_SEEDS_FILE_ENV,
-                    source_path=seed_file,
-                )
-            )
-
-    raw_json = runtime_paths.env_value(CREDENTIAL_SEEDS_JSON_ENV)
-    if raw_json:
-        seed_entries.extend(
-            _CredentialSeedDeclaration(source_env_var=CREDENTIAL_SEEDS_JSON_ENV, seed=entry)
-            for entry in _decode_seed_entries(raw_json, source_env_var=CREDENTIAL_SEEDS_JSON_ENV)
-        )
-
-    return seed_entries
-
-
-def _resolve_seed_value(value_spec: object, runtime_paths: RuntimePaths) -> object | None:
-    """Resolve one seed value from an env ref, file ref, or literal value."""
-    if isinstance(value_spec, str | int | float | bool):
-        return value_spec
-    if not isinstance(value_spec, Mapping):
-        msg = "Credential seed field values must be literals or objects with env, file, or value"
-        raise TypeError(msg)
-    value_mapping = cast("Mapping[str, Any]", value_spec)
-
-    env_name = value_mapping.get("env")
-    if isinstance(env_name, str) and env_name.strip():
-        return get_secret_from_env(env_name.strip(), runtime_paths=runtime_paths)
-
-    file_path = value_mapping.get("file")
-    if isinstance(file_path, str) and file_path.strip():
-        return _read_text_file(_resolve_seed_file_path(file_path.strip(), runtime_paths))
-
-    if "value" in value_mapping:
-        return value_mapping["value"]
-
-    msg = "Credential seed field object must include env, file, or value"
-    raise ValueError(msg)
-
-
-def _resolve_seed_credentials(
-    seed: Mapping[str, Any],
-    *,
-    service: str,
-    runtime_paths: RuntimePaths,
-) -> dict[str, Any] | None:
-    credentials_spec = seed.get("credentials")
-    if not isinstance(credentials_spec, Mapping) or not credentials_spec:
-        msg = f"Credential seed for service '{service}' must include a non-empty credentials object"
-        raise ValueError(msg)
-
-    credentials: dict[str, Any] = {}
-    for raw_field_name, value_spec in credentials_spec.items():
-        if not isinstance(raw_field_name, str) or not raw_field_name.strip():
-            msg = f"Credential seed for service '{service}' has an invalid field name"
-            raise ValueError(msg)
-        field_name = raw_field_name.strip()
-        if field_name.startswith("_"):
-            msg = f"Credential seed for service '{service}' may not set internal field '{field_name}'"
-            raise ValueError(msg)
-
-        value = _resolve_seed_value(value_spec, runtime_paths)
-        if value is None or (isinstance(value, str) and not value.strip()):
-            logger.debug(
-                "credential_seed_value_missing",
-                service=service,
-                field=field_name,
-            )
-            return None
-        credentials[field_name] = value.strip() if isinstance(value, str) else value
-
-    return credentials
-
-
-def _declared_seed_credentials(runtime_paths: RuntimePaths) -> list[_SeededCredentials]:
-    """Return the credentials each valid seed declaration supplies, in declaration order."""
-    seeded: list[_SeededCredentials] = []
-    for declaration in _load_declared_credential_seeds(runtime_paths):
-        seed = declaration.seed
-        raw_service = seed.get("service")
-        if not isinstance(raw_service, str):
-            logger.warning(
-                "credential_seed_declaration_invalid",
-                env_var=declaration.source_env_var,
-                error="Credential seed must include a string service name",
-            )
-            continue
-        try:
-            service = validate_service_name(raw_service)
-            credentials = _resolve_seed_credentials(seed, service=service, runtime_paths=runtime_paths)
-        except (TypeError, ValueError) as exc:
-            logger.warning(
-                "credential_seed_declaration_invalid",
-                env_var=declaration.source_env_var,
-                error=str(exc),
-            )
-            continue
-        if credentials is None:
-            continue
-        seeded.append(_SeededCredentials(service, credentials, declaration.source_env_var))
-    return seeded
-
-
-def _sync_declared_credential_seeds(runtime_paths: RuntimePaths) -> int:
-    """Seed/update explicitly declared credential services."""
-    return sum(
-        _sync_service_credentials(
-            service=seed.service,
-            credentials=seed.credentials,
-            runtime_paths=runtime_paths,
-            env_var=seed.source_env_var,
-        )
-        for seed in _declared_seed_credentials(runtime_paths)
-    )
-
-
-def sync_env_to_credentials(runtime_paths: RuntimePaths) -> None:
-    """Sync supported shared provider/bootstrap env values into CredentialsManager.
-
-    - If no shared credential file exists for a supported service, seed it from runtime env.
-    - If the existing credential has ``_source=env``, update it from runtime env
-      (the user never touched it via UI, so runtime env should still win).
-    - If the existing credential has ``_source=ui`` (or no ``_source``,
-      for legacy files), skip it to protect the user's manual override.
-
-    This keeps conventional provider/bootstrap `.env` support without treating
-    arbitrary tool-specific env vars as a supported tool configuration path.
-    """
-    synced_count = 0
-
-    for env_var, service in _ENV_TO_SERVICE_MAP.items():
-        secret = _read_secret_from_env(env_var, runtime_paths=runtime_paths)
-
-        if secret is None:
-            logger.debug("credential_env_value_missing", env_var=env_var)
-            continue
-
-        env_value, supplying_var = secret
-        logger.debug("credential_env_value_found", env_var=supplying_var, value_length=len(env_value))
-
-        credentials = {"host": env_value} if service == "ollama" else {"api_key": env_value}
-        if _sync_service_credentials(
-            service=service,
-            credentials=credentials,
-            runtime_paths=runtime_paths,
-            env_var=supplying_var,
-        ):
-            synced_count += 1
-
-    adc_path = runtime_env_path(runtime_paths, "GOOGLE_APPLICATION_CREDENTIALS")
-    if adc_path is not None:
-        if _sync_service_credentials(
-            service="google_vertex_adc",
-            credentials={"application_credentials_path": str(adc_path)},
-            runtime_paths=runtime_paths,
-            env_var="GOOGLE_APPLICATION_CREDENTIALS",
-        ):
-            synced_count += 1
-    else:
-        logger.debug("No GOOGLE_APPLICATION_CREDENTIALS path found for google_vertex_adc")
-
-    if _sync_github_private_credentials(runtime_paths=runtime_paths):
-        synced_count += 1
-
-    if _sync_embedder_credentials(runtime_paths=runtime_paths):
-        synced_count += 1
-
-    synced_count += _sync_declared_credential_seeds(runtime_paths=runtime_paths)
-
-    if synced_count > 0:
-        logger.info("credentials_synced_from_env", synced_count=synced_count)
-    else:
-        logger.debug("No credentials to sync from environment")
-
-
 def get_api_key_for_provider(provider: str, runtime_paths: RuntimePaths) -> str | None:
-    """Get API key for a provider, checking CredentialsManager first.
+    """Get API key for a provider from the shared credentials store.
 
-    Supported provider env values are mirrored into the shared credentials store
-    during startup, so model creation reads from one explicit source of truth.
+    A key saved in the dashboard wins over the provider's environment variable, which the store reads under it.
 
     Args:
         provider: The provider name (e.g., 'openai', 'anthropic')
@@ -468,34 +49,14 @@ def get_api_key_for_provider(provider: str, runtime_paths: RuntimePaths) -> str 
     return _get_provider_service_api_key(provider, runtime_paths)
 
 
-def get_stored_provider_key(provider: str, runtime_paths: RuntimePaths) -> _StoredProviderKey:
-    """Return a provider's shared API key as ``get_api_key_for_provider`` resolves it, and where it came from.
+def provider_key_with_source(provider: str, runtime_paths: RuntimePaths) -> tuple[str | None, str | None]:
+    """Return a provider's shared API key as ``get_api_key_for_provider`` resolves it, and the variable supplying it.
 
-    Import never overwrites a key saved in the dashboard. An imported key comes from the variable whose current value
-    it is (``_import_variable``); a key imported from a variable or seed since removed or changed has none.
+    The variable is None for a key saved in the dashboard, which wins over the environment.
     """
     creds_manager = get_runtime_shared_credentials_manager(runtime_paths)
     service, api_key = resolve_provider_service_api_key(provider_route(provider), creds_manager.get_api_key)
-    imported = (creds_manager.load_credentials(service) or {}).get("_source") == "env"
-    variable = _import_variable(service, api_key, runtime_paths) if imported and api_key else None
-    return _StoredProviderKey(api_key=api_key, imported=imported, import_variable=variable)
-
-
-def _import_variable(service: str, api_key: str, runtime_paths: RuntimePaths) -> str | None:
-    """Return the variable the import copies ``api_key`` into ``service`` from now: the provider's own, else a seed's.
-
-    It is a variable whose current value for the service is ``api_key``; a later seed for the service replaces an
-    earlier one and the provider's variable. Seeds are read only for a key the provider's variable does not supply, so
-    the warnings of a bad seed, which the import already logged, repeat only for a seeded key.
-    """
-    env_var = PROVIDER_ENV_KEYS.get(service)
-    secret = _read_secret_from_env(env_var, runtime_paths) if env_var else None
-    if secret is not None and secret[0] == api_key:
-        return secret[1]
-    for seed in _declared_seed_credentials(runtime_paths):
-        if seed.service == service and seed.credentials.get("api_key") == api_key:
-            return seed.source_env_var
-    return None
+    return api_key, creds_manager.declared_variable(service) if api_key else None
 
 
 def canonical_provider_service(service: str) -> str:
@@ -556,7 +117,7 @@ def get_embedder_api_key(
        strict binding: a missing key does not fall through to another service,
        except that a provider service (for example ``openrouter``) also accepts
        its env-var-named alias (``OPENROUTER_API_KEY``).
-    3. Otherwise, the legacy dedicated ``embedder`` service (seeded from
+    3. Otherwise, the dedicated ``embedder`` service (declared by
        ``EMBEDDER_API_KEY`` / ``EMBEDDER_API_KEY_FILE``).
     4. Otherwise, the shared ``openai`` provider key (backward-compat fallback).
     5. ``_EMBEDDER_KEYLESS_PLACEHOLDER_API_KEY``: the OpenAI SDK refuses to
@@ -576,7 +137,7 @@ def get_embedder_api_key(
         if service_api_key and service_api_key.strip():
             return service_api_key.strip()
         return _EMBEDDER_KEYLESS_PLACEHOLDER_API_KEY
-    embedder_api_key = creds_manager.get_api_key(_EMBEDDER_CREDENTIAL_SERVICE)
+    embedder_api_key = creds_manager.get_api_key(EMBEDDER_CREDENTIAL_SERVICE)
     if embedder_api_key and embedder_api_key.strip():
         return embedder_api_key.strip()
     openai_api_key = get_api_key_for_provider("openai", runtime_paths=runtime_paths)

@@ -35,7 +35,11 @@ from mindroom.api.credentials_target import RequestCredentialsTarget
 from mindroom.commands.config_commands import apply_config_change
 from mindroom.config.load_attempt import ConfigLoad
 from mindroom.config.main import Config, dashboard_config_schema, iter_config_validation_messages
-from mindroom.credentials.manager import get_runtime_credentials_manager, save_scoped_credentials
+from mindroom.credentials.manager import (
+    CredentialsManager,
+    get_runtime_credentials_manager,
+    save_scoped_credentials,
+)
 from mindroom.custom_tools.homeassistant import HomeAssistantTools
 from mindroom.embeddings.embedder_health import capture_embedder_health_recorder
 from mindroom.knowledge_graph.store import record_knowledge_graph_failure
@@ -551,21 +555,20 @@ def test_ensure_writable_config_path_seeds_from_template(
     assert writable_config.read_text(encoding="utf-8") == template_config.read_text(encoding="utf-8")
 
 
-def test_api_lifespan_syncs_env_credentials_on_startup(
+def test_api_startup_removes_copies_an_earlier_release_imported_from_the_environment(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    """API startup should run env credential sync via the FastAPI lifespan hook."""
-    sync_calls: list[str] = []
+    """A standalone API opens the credential store at startup, so a copy of a removed variable stops working."""
     watch_calls: list[str] = []
-    main.initialize_api_app(
-        main.app,
-        constants.resolve_primary_runtime_paths(
-            config_path=tmp_path / "config.yaml",
-            storage_path=tmp_path / "mindroom_data",
-            process_env={},
-        ),
+    runtime_paths = constants.resolve_primary_runtime_paths(
+        config_path=tmp_path / "config.yaml",
+        storage_path=tmp_path / "mindroom_data",
+        process_env={},
     )
+    copy_path = runtime_paths.storage_root / "credentials" / "openai_credentials.json"
+    CredentialsManager(copy_path.parent).save_credentials("openai", {"api_key": "sk-old", "_source": "env"})
+    main.initialize_api_app(main.app, runtime_paths)
 
     async def _fake_watch_config(
         stop_event: asyncio.Event,
@@ -575,17 +578,12 @@ def test_api_lifespan_syncs_env_credentials_on_startup(
         watch_calls.append("watch")
         await stop_event.wait()
 
-    monkeypatch.setattr(
-        main,
-        "sync_env_to_credentials",
-        lambda runtime_paths: sync_calls.append(str(runtime_paths.config_path)),
-    )
     monkeypatch.setattr(main, "_watch_config", _fake_watch_config)
 
     with TestClient(main.app) as client:
         assert client.get("/api/health").status_code == 200
+        assert not copy_path.exists()
 
-    assert len(sync_calls) == 1
     assert watch_calls == ["watch"]
 
 
@@ -861,7 +859,6 @@ def test_api_lifespan_loads_config_from_injected_runtime(
     async def _idle_worker_cleanup(stop_event: asyncio.Event, _app: FastAPI) -> None:
         await stop_event.wait()
 
-    monkeypatch.setattr(main, "sync_env_to_credentials", lambda runtime_paths: None)  # noqa: ARG005
     monkeypatch.setattr(main, "_watch_config", _idle_watch_config)
     monkeypatch.setattr(main, "_worker_cleanup_loop", _idle_worker_cleanup)
 
@@ -3653,7 +3650,6 @@ def test_save_config_rejects_runtime_sensitive_invalid_payload(
     async def _idle_worker_cleanup(stop_event: asyncio.Event, _app: FastAPI) -> None:
         await stop_event.wait()
 
-    monkeypatch.setattr(main, "sync_env_to_credentials", lambda runtime_paths: None)  # noqa: ARG005
     monkeypatch.setattr(main, "_watch_config", _idle_watch_config)
     monkeypatch.setattr(main, "_worker_cleanup_loop", _idle_worker_cleanup)
 

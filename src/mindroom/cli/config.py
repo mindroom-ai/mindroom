@@ -618,7 +618,7 @@ def _prompt_provider_key(
     interactive: bool,
 ) -> str | None:
     """Ask a terminal for the preset's API key with hidden input; return None when none was typed or none is needed."""
-    from mindroom.credentials.sync import get_secret_from_env  # noqa: PLC0415
+    from mindroom.credentials.environment import get_secret_from_env  # noqa: PLC0415
 
     env_key = _preset_api_key_env(selected_preset)
     if selected_preset not in _API_KEY_PRESETS or env_key is None:
@@ -1044,7 +1044,7 @@ def _find_missing_env_keys(config: Config, runtime_paths: RuntimePaths) -> list[
 
     A key the credential store holds for the model or its route counts as set, as it does for the runtime.
     """
-    from mindroom.credentials.sync import get_secret_from_env  # noqa: PLC0415
+    from mindroom.credentials.environment import get_secret_from_env  # noqa: PLC0415
 
     with_key = _models_with_a_key(config, runtime_paths)
     missing: dict[tuple[str, str], list[str]] = {}

@@ -605,7 +605,6 @@ async def test_mindroom_run_publishes_its_first_config_load_before_the_api_serve
 
     with (
         patch("mindroom.orchestrator.setup_logging"),
-        patch("mindroom.orchestrator.sync_env_to_credentials"),
         patch("mindroom.orchestrator.retire_state_root_worker_mounts"),
         patch("mindroom.orchestrator.wait_for_matrix_homeserver", side_effect=unreachable_homeserver),
         patch.object(_MultiAgentOrchestrator, "start", recording_start),
@@ -653,7 +652,6 @@ async def test_probes_see_a_live_process_that_is_not_ready_while_conversation_st
     )
     with (
         patch("mindroom.orchestrator.setup_logging"),
-        patch("mindroom.orchestrator.sync_env_to_credentials"),
         patch("mindroom.orchestrator.retire_state_root_worker_mounts"),
         patch("mindroom.orchestrator.migrate_conversation_storage", side_effect=convert),
         patch("mindroom.orchestrator.load_startup_config", side_effect=_NextStartupStepError),
@@ -754,7 +752,6 @@ class TestAgentBot(AgentBotTestBase):
 
         with (
             patch("mindroom.orchestrator.setup_logging"),
-            patch("mindroom.orchestrator.sync_env_to_credentials"),
             patch("mindroom.orchestrator.reset_primary_worker_manager"),
             patch("mindroom.orchestrator._MultiAgentOrchestrator", return_value=mock_orchestrator),
             _startup_config_loaded(),
@@ -785,7 +782,6 @@ class TestAgentBot(AgentBotTestBase):
 
         with (
             patch("mindroom.orchestrator.setup_logging"),
-            patch("mindroom.orchestrator.sync_env_to_credentials"),
             patch("mindroom.orchestrator.reset_primary_worker_manager"),
             patch("mindroom.orchestrator._MultiAgentOrchestrator", return_value=mock_orchestrator),
             _startup_config_loaded(),
@@ -1541,7 +1537,6 @@ class TestAgentBot(AgentBotTestBase):
 
         with (
             patch("mindroom.orchestrator.setup_logging"),
-            patch("mindroom.orchestrator.sync_env_to_credentials"),
             patch("mindroom.orchestrator.reset_primary_worker_manager"),
             patch("mindroom.orchestrator._MultiAgentOrchestrator", return_value=mock_orchestrator),
             _startup_config_loaded(),
@@ -1636,7 +1631,6 @@ class TestAgentBot(AgentBotTestBase):
 
         with (
             patch("mindroom.orchestrator.setup_logging"),
-            patch("mindroom.orchestrator.sync_env_to_credentials"),
             patch("mindroom.orchestrator._MultiAgentOrchestrator", return_value=mock_orchestrator),
             _startup_config_loaded(),
             patch("mindroom.orchestrator._run_auxiliary_task_forever", new=_blocked_auxiliary_task),
@@ -1722,7 +1716,6 @@ class TestAgentBot(AgentBotTestBase):
 
         with (
             patch("mindroom.orchestrator.setup_logging"),
-            patch("mindroom.orchestrator.sync_env_to_credentials"),
             patch("mindroom.orchestrator._MultiAgentOrchestrator", return_value=mock_orchestrator),
             _startup_config_loaded(),
             patch("mindroom.orchestrator._run_auxiliary_task_forever", new=_blocked_auxiliary_task),
@@ -1868,7 +1861,6 @@ class TestAgentBot(AgentBotTestBase):
 
         with (
             patch("mindroom.orchestrator.setup_logging"),
-            patch("mindroom.orchestrator.sync_env_to_credentials"),
             patch("mindroom.orchestrator._MultiAgentOrchestrator", return_value=mock_orchestrator),
             _startup_config_loaded(),
             patch("mindroom.orchestrator._run_auxiliary_task_forever", new=_blocked_auxiliary_task),
@@ -1914,7 +1906,6 @@ class TestAgentBot(AgentBotTestBase):
 
         with (
             patch("mindroom.orchestrator.setup_logging"),
-            patch("mindroom.orchestrator.sync_env_to_credentials"),
             patch("mindroom.orchestrator._MultiAgentOrchestrator", return_value=mock_orchestrator),
             _startup_config_loaded(),
             patch("mindroom.orchestrator._watch_config_task", side_effect=_watch_config_task),
@@ -1956,7 +1947,6 @@ class TestAgentBot(AgentBotTestBase):
         mock_orchestrator.start = AsyncMock(side_effect=_start)
         with (
             patch("mindroom.orchestrator.setup_logging"),
-            patch("mindroom.orchestrator.sync_env_to_credentials"),
             patch("mindroom.orchestrator.load_startup_config", new=AsyncMock(return_value=loaded)),
             patch("mindroom.orchestrator._MultiAgentOrchestrator", return_value=mock_orchestrator),
             patch("mindroom.orchestrator._run_auxiliary_task_forever", new=AsyncMock()),
@@ -2000,7 +1990,6 @@ class TestAgentBot(AgentBotTestBase):
 
         with (
             patch("mindroom.orchestrator.setup_logging"),
-            patch("mindroom.orchestrator.sync_env_to_credentials"),
             patch("mindroom.orchestrator._MultiAgentOrchestrator", return_value=mock_orchestrator),
             _startup_config_loaded(),
             patch("mindroom.orchestrator._run_auxiliary_task_forever", new=AsyncMock()),
@@ -2051,7 +2040,6 @@ class TestAgentBot(AgentBotTestBase):
 
         with (
             patch("mindroom.orchestrator.setup_logging"),
-            patch("mindroom.orchestrator.sync_env_to_credentials"),
             patch("mindroom.orchestrator._MultiAgentOrchestrator", return_value=mock_orchestrator),
             _startup_config_loaded(),
             patch("mindroom.orchestrator._run_auxiliary_task_forever", new=AsyncMock()),
@@ -2087,7 +2075,6 @@ class TestAgentBot(AgentBotTestBase):
 
         with (
             patch("mindroom.orchestrator.setup_logging"),
-            patch("mindroom.orchestrator.sync_env_to_credentials"),
             patch("mindroom.orchestrator._MultiAgentOrchestrator", return_value=mock_orchestrator),
             _startup_config_loaded(),
             patch("mindroom.orchestrator._run_auxiliary_task_forever", new=run_auxiliary),
@@ -2125,7 +2112,6 @@ class TestAgentBot(AgentBotTestBase):
         with (
             patch("mindroom.background_tasks.logger", new=background_logger),
             patch("mindroom.orchestrator.setup_logging"),
-            patch("mindroom.orchestrator.sync_env_to_credentials"),
             patch("mindroom.orchestrator._MultiAgentOrchestrator", return_value=mock_orchestrator),
             _startup_config_loaded(),
             patch("mindroom.orchestrator._run_auxiliary_task_forever", new=AsyncMock()),
@@ -2144,7 +2130,7 @@ class TestAgentBot(AgentBotTestBase):
         shutdown_worker_manager.assert_called_once_with()
 
     @pytest.mark.asyncio
-    async def test_orchestrator_main_commits_runtime_storage_root_before_logging_and_credential_sync(
+    async def test_orchestrator_main_commits_runtime_storage_root_before_logging_and_storage_setup(
         self,
         tmp_path: Path,
     ) -> None:
@@ -2152,7 +2138,6 @@ class TestAgentBot(AgentBotTestBase):
         reset_runtime_state()
         runtime_storage = tmp_path / "runtime-storage"
         observed_logging_root: Path | None = None
-        observed_credentials_root: Path | None = None
         mock_orchestrator = _mock_runtime_orchestrator()
         mock_orchestrator.start = AsyncMock(side_effect=RuntimeError("stop after storage capture"))
         mock_orchestrator.stop = AsyncMock()
@@ -2162,13 +2147,8 @@ class TestAgentBot(AgentBotTestBase):
             nonlocal observed_logging_root
             observed_logging_root = runtime_paths.storage_root
 
-        def _capture_credentials_sync(runtime_paths: RuntimePaths) -> None:
-            nonlocal observed_credentials_root
-            observed_credentials_root = runtime_paths.storage_root
-
         with (
             patch("mindroom.orchestrator.setup_logging", side_effect=_capture_logging),
-            patch("mindroom.orchestrator.sync_env_to_credentials", side_effect=_capture_credentials_sync),
             patch("mindroom.orchestrator._MultiAgentOrchestrator", return_value=mock_orchestrator),
             _startup_config_loaded(),
             pytest.raises(RuntimeError, match="stop after storage capture"),
@@ -2176,15 +2156,15 @@ class TestAgentBot(AgentBotTestBase):
             await main(log_level="INFO", runtime_paths=self._runtime_paths(runtime_storage), api=False)
 
         assert observed_logging_root == runtime_storage.resolve()
-        assert observed_credentials_root == runtime_storage.resolve()
+        assert runtime_storage.resolve().is_dir()
 
     @pytest.mark.asyncio
-    async def test_orchestrator_main_offloads_initial_credential_and_storage_setup(
+    async def test_orchestrator_main_offloads_initial_storage_setup(
         self,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        """Credential sync and initial storage creation must not block the event loop."""
+        """Initial storage creation must not block the event loop."""
         runtime_paths = self._runtime_paths(tmp_path)
         storage_path = runtime_paths.storage_root
         event_loop_thread_id = threading.get_ident()
@@ -2202,11 +2182,6 @@ class TestAgentBot(AgentBotTestBase):
                 events.append("storage")
             original_mkdir(path, *args, **kwargs)
 
-        def _sync_credentials(*, runtime_paths: RuntimePaths) -> None:
-            assert runtime_paths is not None
-            setup_thread_ids.append(threading.get_ident())
-            events.append("credentials")
-
         def _construct_orchestrator(*_args: object, **_kwargs: object) -> MagicMock:
             assert storage_path.is_dir()
             events.append("orchestrator")
@@ -2220,7 +2195,6 @@ class TestAgentBot(AgentBotTestBase):
                 "mindroom.orchestrator.start_event_loop_stall_detector",
                 return_value=stall_detector,
             ) as start_detector,
-            patch("mindroom.orchestrator.sync_env_to_credentials", side_effect=_sync_credentials),
             patch("mindroom.orchestrator._MultiAgentOrchestrator", side_effect=_construct_orchestrator),
             _startup_config_loaded(),
             pytest.raises(RuntimeError, match="stop after setup"),
@@ -2228,9 +2202,8 @@ class TestAgentBot(AgentBotTestBase):
             await main(log_level="INFO", runtime_paths=runtime_paths, api=False)
 
         start_detector.assert_called_once_with(runtime_paths)
-        assert events == ["credentials", "storage", "orchestrator"]
-        assert len(setup_thread_ids) == 2
-        assert setup_thread_ids[0] == setup_thread_ids[1]
+        assert events == ["storage", "orchestrator"]
+        assert len(setup_thread_ids) == 1
         assert setup_thread_ids[0] != event_loop_thread_id
         stall_detector.stop.assert_called_once_with()
 
@@ -2243,7 +2216,7 @@ class TestAgentBot(AgentBotTestBase):
         events: list[str] = []
         runtime_paths = self._runtime_paths(tmp_path)
 
-        def _blocked_credential_sync(*, runtime_paths: RuntimePaths) -> None:
+        def _blocked_setup(runtime_paths: RuntimePaths) -> None:
             assert runtime_paths is not None
             events.append("setup_started")
             setup_started.set()
@@ -2254,7 +2227,7 @@ class TestAgentBot(AgentBotTestBase):
             patch("mindroom.orchestrator.setup_logging"),
             patch("mindroom.orchestrator.reset_primary_worker_manager"),
             patch("mindroom.orchestrator.start_event_loop_stall_detector", return_value=MagicMock()),
-            patch("mindroom.orchestrator.sync_env_to_credentials", side_effect=_blocked_credential_sync),
+            patch("mindroom.orchestrator.retire_state_root_worker_mounts", side_effect=_blocked_setup),
             patch(
                 "mindroom.orchestrator.shutdown_primary_worker_manager",
                 side_effect=lambda: events.append("cleanup"),
@@ -2291,7 +2264,6 @@ class TestAgentBot(AgentBotTestBase):
         runtime_paths = self._runtime_paths(tmp_path)
         with (
             patch("mindroom.orchestrator.setup_logging"),
-            patch("mindroom.orchestrator.sync_env_to_credentials"),
             patch("mindroom.orchestrator.reset_primary_worker_manager") as mock_reset_worker_manager,
             patch("mindroom.orchestrator._MultiAgentOrchestrator", return_value=mock_orchestrator),
             _startup_config_loaded(),
@@ -2308,7 +2280,7 @@ class TestAgentBot(AgentBotTestBase):
         mock_orchestrator.stop.assert_awaited_once()
 
     @pytest.mark.asyncio
-    async def test_orchestrator_main_shuts_down_primary_worker_manager_when_env_sync_fails(
+    async def test_orchestrator_main_shuts_down_primary_worker_manager_when_initial_setup_fails(
         self,
         tmp_path: Path,
     ) -> None:
@@ -2319,7 +2291,7 @@ class TestAgentBot(AgentBotTestBase):
 
         with (
             patch("mindroom.orchestrator.setup_logging"),
-            patch("mindroom.orchestrator.sync_env_to_credentials", side_effect=RuntimeError("boom")),
+            patch("mindroom.orchestrator.retire_state_root_worker_mounts", side_effect=RuntimeError("boom")),
             patch("mindroom.orchestrator.reset_primary_worker_manager") as mock_reset_worker_manager,
             patch("mindroom.orchestrator._MultiAgentOrchestrator") as mock_orchestrator_cls,
             patch(
@@ -2354,7 +2326,6 @@ class TestAgentBot(AgentBotTestBase):
         runtime_paths = self._runtime_paths(tmp_path)
         with (
             patch("mindroom.orchestrator.setup_logging"),
-            patch("mindroom.orchestrator.sync_env_to_credentials"),
             patch("mindroom.orchestrator.reset_primary_worker_manager") as mock_reset_worker_manager,
             patch("mindroom.orchestrator._MultiAgentOrchestrator", return_value=mock_orchestrator),
             _startup_config_loaded(),

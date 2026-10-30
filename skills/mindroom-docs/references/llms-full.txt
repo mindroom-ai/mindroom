@@ -1654,7 +1654,7 @@ Hosted pairing variables written by `mindroom connect` are described in [Hosted 
 ### Model Providers
 
 Provider API keys such as `ANTHROPIC_API_KEY` and `OPENAI_API_KEY`, their `_FILE` variants, and Vertex AI and Bedrock settings are listed in [Models — Environment Variables](https://docs.mindroom.chat/configuration/models/#environment-variables), and `codex login` and `CODEX_HOME` in [Codex Models with ChatGPT Login](https://docs.mindroom.chat/configuration/models/#codex-models-with-chatgpt-login).
-Provider keys from the environment or `.env` are also copied into the shared credentials store, as described in [Automatic Credential Import](https://docs.mindroom.chat/oauth-framework/#automatic-credential-import).
+Provider keys from the environment or `.env` also supply shared credentials, as described in [Credentials from the Environment](https://docs.mindroom.chat/oauth-framework/#credentials-from-the-environment).
 
 | Variable | Description |
 |----------|-------------|
@@ -15462,22 +15462,23 @@ An [adopted personal room](https://docs.mindroom.chat/personal-rooms/#adopting-a
 # OAuth Integration Framework
 
 This page covers how MindRoom stores credentials and how users connect OAuth accounts for tools and MCP servers.
-Use it to import or seed credentials, encrypt the credential store, connect or reset an OAuth account, decide who may manage a connection, and build OAuth providers in plugins.
+Use it to supply credentials from the environment or seeds, encrypt the credential store, connect or reset an OAuth account, decide who may manage a connection, and build OAuth providers in plugins.
 
 ## Credential Storage
 
-### Automatic Credential Import
+### Credentials from the Environment
 
-When MindRoom starts or `mindroom doctor` runs, it copies these variables from the process environment or the config-adjacent `.env` into the shared credentials store: `ANTHROPIC_API_KEY`, `AZURE_OPENAI_API_KEY`, `OPENAI_API_KEY`, `GOOGLE_API_KEY`, `OPENROUTER_API_KEY`, `DEEPSEEK_API_KEY`, `CEREBRAS_API_KEY`, `GROQ_API_KEY`, `ZAI_API_KEY`, `OLLAMA_HOST`, `GITHUB_TOKEN` (stored as `github_private`), `EMBEDDER_API_KEY` (stored as `embedder`), and `GOOGLE_APPLICATION_CREDENTIALS` (stored as `google_vertex_adc`).
+MindRoom reads these variables from the process environment or the config-adjacent `.env` as shared credentials: `ANTHROPIC_API_KEY`, `AZURE_OPENAI_API_KEY`, `OPENAI_API_KEY`, `GOOGLE_API_KEY`, `OPENROUTER_API_KEY`, `DEEPSEEK_API_KEY`, `CEREBRAS_API_KEY`, `GROQ_API_KEY`, `ZAI_API_KEY`, `OLLAMA_HOST`, `GITHUB_TOKEN` (as service `github_private`), `EMBEDDER_API_KEY` (as `embedder`), and `GOOGLE_APPLICATION_CREDENTIALS` (as `google_vertex_adc`).
 Every one of these except `GOOGLE_APPLICATION_CREDENTIALS` also accepts a `_FILE` variant, read only when the plain variable is unset or empty.
-Services declared through [Credential Seeds](#credential-seeds) are imported the same way.
-Import never overwrites credentials saved through the dashboard or credentials with no recorded source.
-When an imported value is first stored or changes, MindRoom logs a notice naming the service, the supplying variable, and whether it came from the process environment or `.env`; values are never logged.
-To stop an import, remove the variable and any `_FILE` variant from both the process environment and `.env`, then delete the stored credential in the dashboard or with `DELETE /api/credentials/{service}`.
+Services declared through [Credential Seeds](#credential-seeds) are supplied the same way.
+A credential saved for the same service in the dashboard wins over the variable; deleting that saved credential makes the variable apply again.
+MindRoom stores no copy: changes to these variables, their `_FILE` files, and seed declarations apply when MindRoom restarts, and a removed variable stops supplying its credential, including to workers granted it through `worker_grantable_credentials`.
+Deleting a credential that only the environment supplies changes nothing; remove the variable and restart instead.
+`mindroom doctor` reports which variable supplies each model provider's key.
 
 ### Credential Seeds
 
-Credential seeds create shared credential services at startup for deployment-managed credentials, such as an OAuth app's client ID and secret.
+Credential seeds supply shared credential services for deployment-managed credentials, such as an OAuth app's client ID and secret.
 Set `MINDROOM_CREDENTIAL_SEEDS_FILE` to a JSON file path (relative paths resolve from the config directory), or `MINDROOM_CREDENTIAL_SEEDS_JSON` to the same JSON inline.
 
 ```json
@@ -15496,10 +15497,10 @@ Set `MINDROOM_CREDENTIAL_SEEDS_FILE` to a JSON file path (relative paths resolve
 - If an env ref such as `EXAMPLE_CLIENT_SECRET` is unset, MindRoom also checks `EXAMPLE_CLIENT_SECRET_FILE` and reads that file.
 - If any declared field is missing or empty, MindRoom skips that seed instead of creating a partial credential.
 - Env and file refs always produce strings, so a tool's boolean field accepts the exact strings `true` and `false` as well as JSON booleans, and any other value makes that tool fail to load.
-- Seeds are reapplied on every startup but never replace credentials saved through the dashboard or with no recorded source.
+- A credential saved for the same service in the dashboard wins over its seed.
 - OAuth token services, whose names end with `_oauth`, cannot be seeded; connect them through OAuth instead.
   OAuth client configuration services, whose names end with `_oauth_client`, can be seeded.
-- To stop seeding one service, remove its entry from each declaration that lists it and delete the stored credential with `DELETE /api/credentials/{service}`.
+- To stop seeding one service, remove its entry from each declaration that lists it and restart.
 
 ### Credential Storage Encryption
 
@@ -16054,6 +16055,9 @@ Examples are symlinks or files planted in shared workspaces that the primary lat
 ### Config and state kept out of workers
 
 Runners and dedicated workers never receive the primary's config file, its directory, its `.env`, a ConfigMap holding it, or the credential encryption key.
+Neither Docker nor Kubernetes backend settings reach a dedicated worker's startup manifest; Kubernetes passes only its storage-subpath prefix, which the runner needs.
+Credentials the primary's environment declares (provider keys, `GITHUB_TOKEN`, credential seeds) are read only by the primary, under the credentials saved in its store, and never stored; every runner establishes runner mode at startup and never reads them, and a worker receives one only as a granted mirror copy.
+OAuth app client configurations (`*_oauth_client`) live in the primary's own store for every worker scope, so a worker's store never supplies one.
 The config sent to runners with each request, and the config file projected into each Docker worker, hold only the fields runners resolve; models, MCP servers, plugin settings, and every other section stay in the primary, and a worker-routed call carries only the called tool's own inline overrides.
 
 Of the agents' data, dedicated Docker and Kubernetes workers mount only workspaces and shared directories, never the agent state roots around them, so sessions, memory, Mem0 data, and private-instance identity records stay out of every worker.
@@ -16273,7 +16277,7 @@ Do not report or "fix" these; they are deliberate.
 - Inviting an agent to a shared directory makes it readable to every requester of that agent, and the invitation needs only the inviting user's access to that agent, because that user could already relay the files in chat.
 - A user who may use both agents can restart the invited agent's dedicated workers by inviting and removing it repeatedly, which ends their background shells.
 - Removing a member or deleting a shared directory takes effect for a member's dedicated worker on that worker's next tool call, so until then its running processes can still read the directory, including files written after the removal.
-- Removing a service from `defaults.worker_grantable_credentials` deletes its copy from a running dedicated worker at that worker's next tool call, not at the config reload, so until then, or until the worker stops for being idle, its running processes can still read the credential.
+- Removing a service from `defaults.worker_grantable_credentials`, or removing the environment variable that declares a granted credential and restarting, deletes its copy from a running dedicated worker at that worker's next tool call, not at the config reload, so until then, or until the worker stops for being idle, its running processes can still read the credential.
   Worker code may already have copied a credential it was granted, so rotate the credential at its provider to revoke it.
 - A team's `access` authorizes its exact member agents for team requests, in Matrix and the OpenAI-compatible API, even members whose own `access` would not admit the requester directly; adding an agent to a team is a deliberate grant.
 - A response's CLI grant, in minimal mode or for a standard-mode agent whose shell can reach MindRoom, is in the environment of its shell commands, so other code in the same worker can use that requester's tools through it until the response and its background jobs end; code that shares a worker already shares its trust.
@@ -22450,7 +22454,7 @@ It checks, in one pass:
 
 - **Config file**: exists, is valid YAML, and matches the config schema.
 - **Providers**: API keys for each configured provider (Anthropic, OpenAI, Ollama, Vertex AI Claude, and others) are valid.
-  Doctor checks the key the runtime uses, whether it comes from the environment or was saved in the dashboard, and names its source (see [Automatic Credential Import](https://docs.mindroom.chat/oauth-framework/#automatic-credential-import)).
+  Doctor checks the key the runtime uses, whether it comes from the environment or was saved in the dashboard, and names its source (see [Credentials from the Environment](https://docs.mindroom.chat/oauth-framework/#credentials-from-the-environment)).
   Doctor skips the key check and reports it as not checked for a model that uses a custom endpoint, meaning its config sets an endpoint or headers (such as `base_url` or `default_headers`) or its provider's endpoint variable (such as `OPENAI_BASE_URL`) is set.
 - **Memory config**: the memory LLM and embedder are reachable (Ollama, OpenAI embeddings, sentence-transformers).
 - **Matrix homeserver**: the homeserver answers `/_matrix/client/versions`.

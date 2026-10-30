@@ -233,7 +233,7 @@ Hosted pairing variables written by `mindroom connect` are described in [Hosted 
 ### Model Providers
 
 Provider API keys such as `ANTHROPIC_API_KEY` and `OPENAI_API_KEY`, their `_FILE` variants, and Vertex AI and Bedrock settings are listed in [Models — Environment Variables](models.md#environment-variables), and `codex login` and `CODEX_HOME` in [Codex Models with ChatGPT Login](models.md#codex-models-with-chatgpt-login).
-Provider keys from the environment or `.env` are also copied into the shared credentials store, as described in [Automatic Credential Import](../oauth-framework.md#automatic-credential-import).
+Provider keys from the environment or `.env` also supply shared credentials, as described in [Credentials from the Environment](../oauth-framework.md#credentials-from-the-environment).
 
 | Variable | Description |
 |----------|-------------|
