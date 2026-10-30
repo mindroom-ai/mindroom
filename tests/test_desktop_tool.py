@@ -20,6 +20,7 @@ from mindroom.desktop.media import DesktopMediaError
 from mindroom.desktop.protocol import MAX_SHELL_OUTPUT_BYTES, DesktopResponse, EncryptedDesktopMedia
 from mindroom.tool_system.metadata import TOOL_METADATA, get_tool_by_name
 from mindroom.tool_system.worker_routing import ResolvedWorkerTarget, ToolExecutionIdentity, WorkerScope
+from tests.agent_tool_helpers import toolkit_offers
 from tests.conftest import test_runtime_paths
 
 if TYPE_CHECKING:
@@ -813,7 +814,7 @@ def _output_media(output: bytes) -> EncryptedDesktopMedia:
 
 def test_local_folder_and_shell_actions_are_discoverable_with_their_own_parameters() -> None:
     """The schema advertises read-only folder and handle-based shell actions with bounded arguments."""
-    function = DesktopTools().async_functions["desktop"]
+    function = toolkit_offers(DesktopTools(), "desktop")
     schema = function.parameters
     properties = schema["properties"]
 
@@ -841,7 +842,7 @@ def test_local_folder_and_shell_actions_are_discoverable_with_their_own_paramete
 
 def test_shell_guidance_states_output_limits_and_the_shell_it_runs_in() -> None:
     """The agent learns the real size limits and that each command runs alone in a non-interactive /bin/sh."""
-    function = DesktopTools().async_functions["desktop"]
+    function = toolkit_offers(DesktopTools(), "desktop")
     description = function.description or ""
     assert f"{DEFAULT_TOOL_OUTPUT_AUTO_SAVE_THRESHOLD_BYTES // 1024} KiB" in description
     assert f"{MAX_SHELL_OUTPUT_BYTES // (1024 * 1024)} MiB" in description
@@ -931,9 +932,9 @@ async def test_check_shell_polls_from_an_offset_and_returns_where_to_continue(mo
         payload = json.loads((await tool.desktop(action, **arguments)).content)
         assert (payload["status"], message in payload["message"]) == ("error", True)
     assert request.await_count == 1
-    properties = tool.async_functions["desktop"].parameters["properties"]
+    properties = toolkit_offers(tool, "desktop").parameters["properties"]
     assert "check_shell" in properties["offset"]["description"]
-    description = tool.async_functions["desktop"].description or ""
+    description = toolkit_offers(tool, "desktop").description or ""
     assert "next_offset" in description
     assert "an output_start above the offset you asked for" in description
 
@@ -1167,9 +1168,8 @@ async def test_large_shell_output_uses_the_workspace_output_file_wrapper(
         tool_output_workspace_root=workspace,
         worker_target=_desktop_target(),
     )
-    function = toolkit.async_functions["desktop"]
+    function = toolkit_offers(toolkit, "desktop")
     assert "mindroom_output_path" in function.parameters["properties"]
-    assert function.entrypoint is not None
 
     auto_saved = await function.entrypoint(action="run_shell", command="make logs")
     redirected = await function.entrypoint(

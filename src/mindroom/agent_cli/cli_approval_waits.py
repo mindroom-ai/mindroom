@@ -13,7 +13,6 @@ from mindroom.agent_cli.events import emit_cli_suspension
 from mindroom.agent_cli.lifetime import current_cli_lifetime
 from mindroom.approval.continuation_rules import CliExit
 from mindroom.approval.failure import cancelled_failure
-from mindroom.event_journal import ApprovalDecision, ApprovalFailure
 from mindroom.final_delivery import (
     AwaitingApproval,
     Cancelled,
@@ -31,7 +30,7 @@ if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Awaitable, Callable
 
     from mindroom.cancellation import CancelSource
-    from mindroom.event_journal import ApprovalContinuation
+    from mindroom.event_journal import ApprovalContinuation, ApprovalFailure
     from mindroom.event_journal.approval_store import ApprovalStore
     from mindroom.llm.runs import RunRequirement
     from mindroom.message_target import MessageTarget
@@ -152,15 +151,7 @@ class CliApprovalWaits:
                 if claimed is None:
                     msg = "CLI approval lost its single execution claim"
                     raise RuntimeError(msg)
-                return tuple(
-                    apply_exact_approval_decisions(
-                        deepcopy(paused.requirements),
-                        decisions={
-                            call.tool_call_id: call.decision is ApprovalDecision.APPROVED for call in claimed.calls
-                        },
-                        denial_reasons={call.tool_call_id: call.reason for call in claimed.calls},
-                    ),
-                )
+                return tuple(apply_exact_approval_decisions(deepcopy(paused.requirements), claimed.calls))
             try:
                 async with asyncio.timeout(None if deadline is None else max(0, (deadline - time.time_ns()) / 1e9)):
                     await waiter.wait()

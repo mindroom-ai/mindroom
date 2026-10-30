@@ -208,7 +208,7 @@ async def _reply(config: Config, prompt: str) -> str:
         execution_identity=identity,
         include_interactive_questions=False,
     )
-    return await ai_response(turn, runtime_paths_for(config), config)
+    return (await ai_response(turn, runtime_paths_for(config), config)).text
 
 
 @pytest.mark.asyncio

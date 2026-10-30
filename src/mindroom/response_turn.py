@@ -2,8 +2,11 @@
 
 One reply turn has the same lifecycle whichever entity answers it: load the
 scope session, run prepared attempts, decide whether the turn continues after a
-model switch or a discarded empty run, and settle the turn's record, storing an
-interrupted turn once in the scope its runs are stored in.
+model switch or an empty reply, and settle the turn's record, storing an
+interrupted turn once in the scope its runs are stored in. Which of its runs are
+stored as turns that later prompts replay is the driver's rule too
+(``replays_as_turn``), which each attempt's storage applies to the records its
+runs hand over.
 This module owns that lifecycle once; ``mindroom.ai`` and ``mindroom.teams``
 supply adapters carrying the entity's attempt bodies, and blocking callers read
 the same stream through ``collect_streamed_response_content``.
@@ -99,10 +102,12 @@ __all__ = [
     "build_llm_request_log_context",
     "build_matrix_run_metadata",
     "collect_streamed_response_content",
+    "is_empty_reply",
     "own_approved_calls",
     "pause_without_approval_error",
     "paused_attempt_from_response",
     "pending_approval_requirements",
+    "replays_as_turn",
     "skip_unapproved_attempt",
     "stream_response_turn",
     "stream_with_llm_request_log_context",
@@ -119,22 +124,21 @@ class CompletedApprovalRun:
 
 def apply_exact_approval_decisions(
     requirements: Sequence[RunRequirement],
-    *,
-    decisions: Mapping[str, bool],
-    denial_reasons: Mapping[str, str | None],
+    calls: Sequence[ApprovalCall],
 ) -> list[RunRequirement]:
-    """Apply decisions only when they exactly identify one persisted call each."""
+    """Apply the decisions ``calls`` carry only when they exactly identify one persisted call each."""
     pending = [requirement for requirement in requirements if requirement.needs_confirmation]
     call_ids = [requirement.tool_execution.tool_call_id for requirement in pending]
-    decision_ids = set(decisions)
-    if len(call_ids) != len(set(call_ids)) or set(call_ids) != decision_ids or set(denial_reasons) != decision_ids:
+    decided = {call.tool_call_id: call for call in calls}
+    if len(call_ids) != len(set(call_ids)) or set(call_ids) != set(decided):
         msg = "Paused tools no longer match the approval continuation"
         raise RuntimeError(msg)
     for requirement, tool_call_id in zip(pending, call_ids, strict=True):
-        if decisions[tool_call_id]:
+        call = decided[tool_call_id]
+        if call.approved:
             requirement.confirm()
         else:
-            requirement.reject(denial_reasons[tool_call_id])
+            requirement.reject(call.reason)
     return pending
 
 
@@ -400,8 +404,8 @@ class TurnSinks:
     turn_recorder: TurnRecorder | None = None
     run_metadata_collector: dict[str, Any] | None = None
     on_completed: Callable[[CompletedAttempt], None] | None = None
-    # Receives the failure a turn that failed with a reply text reports.
-    on_failed: Callable[[Exception], None] | None = None
+    # Receives the attempt that failed with a reply text.
+    on_failed: Callable[[HandledAttempt], None] | None = None
     # Receives each attempt's run id and configured model name before the attempt starts.
     on_attempt_start: Callable[[str, str], None] | None = None
     # Whether the driver stores an interrupted turn in its scope's history; a delegated child's interruption belongs
@@ -483,8 +487,8 @@ class CompletedAttempt:
     response_text: str = ""
     replayable_text: str = ""
     has_visible_content: bool = False
+    # The run is an empty reply (``is_empty_reply``), as its storage read it (``replays_as_turn``).
     is_empty: bool = False
-    session_id: str | None = None
     run_id: str | None = None
     attempt_run_id: str | None = None
     runtime_model_name: str | None = None
@@ -493,7 +497,8 @@ class CompletedAttempt:
     tool_executions: tuple[ToolExecution, ...] = ()
     control_calls: tuple[ReportedCall, ...] = ()
     completed_tools: tuple[ToolTraceEntry, ...] = ()
-    metadata_content: dict[str, Any] | None = None
+    # Builds the run metadata the attempt publishes; building prices the run, so only a reader of it calls this.
+    build_run_metadata: Callable[[], dict[str, Any]] | None = None
     status: RunStatus = RunStatus.completed
 
 
@@ -600,18 +605,14 @@ def pause_without_approval_error(record: AnyRunRecord, *, entity_label: str) -> 
     return RuntimeError(msg)
 
 
-def own_approved_calls(
-    record: AnyRunRecord,
-    calls: Sequence[ApprovalCall],
-    decisions: Mapping[str, bool],
-) -> tuple[ApprovalCall, ...]:
+def own_approved_calls(record: AnyRunRecord, calls: Sequence[ApprovalCall]) -> tuple[ApprovalCall, ...]:
     """Return the approved calls among ``calls`` that the paused run ``record`` asked about itself.
 
     Projected child calls belong to the child executor, so a run waiting on a child asked about none of its own.
     """
     if DelegationState.from_metadata(record.metadata).pending_child_id is not None:
         return ()
-    return tuple(call for call in calls if decisions.get(call.tool_call_id))
+    return tuple(call for call in calls if call.approved)
 
 
 def pending_approval_requirements(record: AnyRunRecord) -> list[RunRequirement]:
@@ -722,19 +723,15 @@ class HandledAttempt:
     """One attempt that failed: the reply text that says so, which the driver emits once it recorded the failure."""
 
     text: str
-    # The failure the text reports, which ``TurnSinks.on_failed`` receives.
+    # The failure the text reports.
     error: Exception
-    metadata_content: dict[str, Any] | None = None
+    # Builds the run metadata the attempt publishes, as ``CompletedAttempt.build_run_metadata`` does.
+    build_run_metadata: Callable[[], dict[str, Any]] | None = None
 
 
 @dataclass(frozen=True)
 class SkippedAttempt:
-    """One unapproved response attempt with no answer or successful-run effects."""
-
-    reason: str
-    session_id: str | None = None
-    run_id: str | None = None
-    output_tokens: int | None = None
+    """One unapproved response attempt with no answer or successful-run effects; its run is no turn."""
 
 
 StreamAttemptResolution = CompletedAttempt | PausedAttempt | HandledAttempt | SkippedAttempt
@@ -761,8 +758,8 @@ class TurnAdapter[ChunkT]:
     user_message: str
     # The reply to an error no attempt handled, its credentials redacted.
     unexpected_error_text: Callable[[Exception], str]
-    # The entity the turn's discarded runs and queued notices name: a configured team's own name, which the label of
-    # its members the turn context carries is not.
+    # The entity the turn's queued notices name: a configured team's own name, which the label of its members the turn
+    # context carries is not.
     entity_name: str
     on_scope_loaded: Callable[[ScopeSessionContext | None], None] | None = None
 
@@ -863,34 +860,38 @@ async def _failed_turn_text(
     error: Exception,
 ) -> str | None:
     """Settle a turn that raised: return its error reply, None when it is skipped before participation."""
-    if skipped := skip_unapproved_attempt(ctx.participation, reason="run_failed_before_decision"):
-        _settle_skipped_attempt(ctx, adapter, run, skipped)
+    if skip_unapproved_attempt(ctx.participation, reason="run_failed_before_decision"):
+        run.record.mark_skipped()
         logger.exception("Response turn skipped before participation", entity=ctx.entity_label)
         return None
     await _record_interrupted(ctx, adapter, sinks, run, continuation, RunStatus.error)
     logger.exception("Response turn failed", entity=ctx.entity_label)
+    text = adapter.unexpected_error_text(error)
     if sinks.on_failed is not None:
-        sinks.on_failed(error)
-    return adapter.unexpected_error_text(error)
+        sinks.on_failed(HandledAttempt(text, error=error))
+    return text
 
 
 def _settle_empty_run(
     ctx: ResponseTurnContext,
-    adapter: TurnAdapter[Any],
     run: TurnRunState,
     resolution: CompletedAttempt,
     *,
     continuation_count: int,
 ) -> bool:
-    """Discard the empty completed run; return whether one retry is granted.
+    """Log the empty completed run, which was never stored as a turn; return whether one retry is granted.
 
-    Every empty run is discarded, including the retry's: a persisted assistant
-    turn with no content teaches the model that ending immediately is the
-    expected continuation. The one-shot retry borrows a continuation slot so
-    the outer loop's iteration budget stays authoritative; a granted retry
-    drops the spent attempt exactly like the continuation handoff.
+    The one-shot retry borrows a continuation slot so the outer loop's iteration
+    budget stays authoritative; a granted retry drops the spent attempt exactly
+    like the continuation handoff.
     """
-    _discard_run(ctx, adapter, run, resolution)
+    logger.warning(
+        "model_returned_empty_response",
+        entity=ctx.entity_label,
+        session_id=ctx.session_id,
+        run_id=resolution.run_id,
+        output_tokens=resolution.output_tokens,
+    )
     if run.empty_response_retried or continuation_count >= TURN_CONTINUATION_LIMIT:
         return False
     run.empty_response_retried = True
@@ -960,46 +961,35 @@ async def _load_scope_session(
     return scope_context
 
 
-def skip_unapproved_attempt(
-    participation: ParticipationGate | None,
-    *,
-    reason: str,
-    session_id: str | None = None,
-    run_id: str | None = None,
-    output_tokens: int | None = None,
-) -> SkippedAttempt | None:
-    """Resolve unapproved completion or failure without taking over run cleanup."""
+def skip_unapproved_attempt(participation: ParticipationGate | None, *, reason: str) -> SkippedAttempt | None:
+    """Resolve an unapproved completion or failure; its run, if any, was stored as no turn (``replays_as_turn``)."""
     if participation is None or not participation.decline(reason):
         return None
-    return SkippedAttempt(reason=reason, session_id=session_id, run_id=run_id, output_tokens=output_tokens)
+    return SkippedAttempt()
 
 
-def _settle_skipped_attempt(
-    ctx: ResponseTurnContext,
-    adapter: TurnAdapter[Any],
-    run: TurnRunState,
-    resolution: SkippedAttempt,
-) -> None:
-    """Discard the skipped provider run without recording an assistant turn."""
-    if resolution.run_id is not None:
-        _discard_run(ctx, adapter, run, resolution)
-    run.record.mark_skipped()
+def is_empty_reply(record: AnyRunRecord) -> bool:
+    """Whether ``record``'s run completed with no text and no tool call, so a team run's leader ran no member.
+
+    The content holds every text the run's requests finished with.
+    """
+    return record.status is RunStatus.completed and not record.tools and not (record.content or "").strip()
 
 
-def _discard_run(
-    ctx: ResponseTurnContext,
-    adapter: TurnAdapter[Any],
-    run: TurnRunState,
-    resolution: CompletedAttempt | SkippedAttempt,
-) -> None:
-    """Purge the run of an attempt the turn keeps nothing of, an empty or a skipped one, from the scope's history."""
-    ai_runtime.discard_empty_completed_run(
-        scope_context=run.scope_context,
-        session_id=resolution.session_id or ctx.session_id,
-        run_id=resolution.run_id,
-        entity_name=adapter.entity_name,
-        output_tokens=resolution.output_tokens,
-    )
+def replays_as_turn(ctx: ResponseTurnContext, record: AnyRunRecord, *, is_empty: bool) -> bool:
+    """Whether an attempt's terminal ``record`` is stored as a turn later prompts replay; any other keeps only its usage.
+
+    ``is_empty`` says whether the attempt's run is an empty reply, as the adapter reads it (``is_empty_reply``), which
+    its resolution reads the same. A team's member run is stored with its team run. A run the turn's participation
+    gate has not approved, declined or failed before the decision, answered nothing; a cancelled one is stored, and the
+    turn records what it showed. An empty reply outside a quiet turn would teach the model that ending a turn
+    immediately is the expected continuation.
+    """
+    if record.parent_run_id is not None:
+        return True
+    if ctx.participation is not None and not ctx.participation.approved:
+        return record.status is RunStatus.cancelled
+    return ctx.allow_no_report_response or not is_empty
 
 
 def _register_started_attempt(adapter: TurnAdapter[Any], run: TurnRunState) -> None:
@@ -1011,10 +1001,10 @@ def _register_started_attempt(adapter: TurnAdapter[Any], run: TurnRunState) -> N
         ai_runtime.register_scope_notice_storage(scope_context=run.scope_context, entity_name=adapter.entity_name)
 
 
-def _publish_run_metadata(sinks: TurnSinks, metadata_content: dict[str, Any] | None) -> None:
-    """Publish one attempt's run metadata payload to the caller's collector."""
-    if sinks.run_metadata_collector is not None and metadata_content is not None:
-        sinks.run_metadata_collector.update(metadata_content)
+def _publish_run_metadata(sinks: TurnSinks, build: Callable[[], dict[str, Any]] | None) -> None:
+    """Publish one attempt's run metadata to the caller's collector, building it only for a caller that collects it."""
+    if sinks.run_metadata_collector is not None and build is not None:
+        sinks.run_metadata_collector.update(build())
 
 
 def _record_completed_turn(
@@ -1024,7 +1014,7 @@ def _record_completed_turn(
     settle: _CompletionSettle,
 ) -> None:
     """Publish the turn-ending attempt's run metadata, record the completed turn, and hand the attempt to the caller."""
-    _publish_run_metadata(sinks, resolution.metadata_content)
+    _publish_run_metadata(sinks, resolution.build_run_metadata)
     run.record.record_completed(
         run_id=resolution.attempt_run_id or resolution.run_id,
         run_metadata=run.run_metadata,
@@ -1057,7 +1047,6 @@ class _CompletionSettle:
 
 def _settle_completed_attempt(
     ctx: ResponseTurnContext,
-    adapter: TurnAdapter[Any],
     run: TurnRunState,
     resolution: CompletedAttempt,
     continuation: TurnContinuationRunState,
@@ -1068,7 +1057,7 @@ def _settle_completed_attempt(
     if resolution.is_empty and ctx.allow_no_report_response:
         return _CompletionSettle(keep_going=False, continuation=continuation)
     if resolution.is_empty:
-        if _settle_empty_run(ctx, adapter, run, resolution, continuation_count=continuation_count):
+        if _settle_empty_run(ctx, run, resolution, continuation_count=continuation_count):
             return _CompletionSettle(keep_going=True, continuation=continuation)
         # The notice falls through: run metadata and recorder completion
         # still apply to this notice-only turn.
@@ -1213,21 +1202,20 @@ async def _stream_response_turn[ChunkT](  # noqa: C901, PLR0912, PLR0915
                 if resolution is None:
                     _raise_missing_stream_resolution(ctx.entity_label)
                 if isinstance(resolution, SkippedAttempt):
-                    _settle_skipped_attempt(ctx, adapter, run, resolution)
+                    run.record.mark_skipped()
                     return
                 if isinstance(resolution, PausedAttempt):
                     run.record.mark_suspended()
                     raise ResponsePausedForApproval(replace(resolution, continuation_count=continuation_count))
                 if isinstance(resolution, HandledAttempt):
-                    _publish_run_metadata(sinks, resolution.metadata_content)
+                    _publish_run_metadata(sinks, resolution.build_run_metadata)
                     await _record_interrupted(ctx, adapter, sinks, run, continuation, RunStatus.error)
                     if sinks.on_failed is not None:
-                        sinks.on_failed(resolution.error)
+                        sinks.on_failed(resolution)
                     yield resolution.text
                     return
                 settle = _settle_completed_attempt(
                     ctx,
-                    adapter,
                     run,
                     resolution,
                     continuation,

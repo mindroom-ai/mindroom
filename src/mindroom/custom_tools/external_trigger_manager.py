@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from agno.tools import Toolkit
 from pydantic import ValidationError
 
 from mindroom.custom_tools.external_trigger_context import (
@@ -20,6 +19,7 @@ from mindroom.external_triggers.store import (
     ExternalTriggerTarget,
     public_key_fingerprint,
 )
+from mindroom.tool_system.authoring import Toolkit
 
 if TYPE_CHECKING:
     from collections.abc import Callable

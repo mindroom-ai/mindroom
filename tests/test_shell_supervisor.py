@@ -1241,8 +1241,7 @@ async def test_toolkit_supervisor_result_includes_workspace_cwd(
         worker_target=None,
         tool_init_overrides={"base_dir": str(workspace)},
     )
-    run_fn = tool.async_functions["run_shell_command"].entrypoint
-    assert run_fn is not None
+    run_fn = tool.functions["run_shell_command"]
 
     result = await run_fn(["pwd"])
 
@@ -1257,8 +1256,7 @@ async def test_toolkit_stops_a_supervised_command_past_its_timeout(
 ) -> None:
     """Through the supervisor, as in a worker, a command past its timeout stops with its output so far."""
     monkeypatch.setenv(SHELL_SUPERVISOR_SOCKET_ENV, manager.ensure())
-    run_fn = _get_toolkit(tmp_path).async_functions["run_shell_command"].entrypoint
-    assert run_fn is not None
+    run_fn = _get_toolkit(tmp_path).functions["run_shell_command"]
 
     result = await run_fn(["bash", "-c", "echo client-mode; sleep 300"], timeout=1)
 
@@ -1273,8 +1271,7 @@ async def test_toolkit_reports_unavailable_supervisor(
     """A dead supervisor socket should produce a clear error, not a crash."""
     monkeypatch.setenv(SHELL_SUPERVISOR_SOCKET_ENV, str(tmp_path / "missing.sock"))
     tool = _get_toolkit(tmp_path)
-    run_fn = tool.async_functions["run_shell_command"].entrypoint
-    assert run_fn is not None
+    run_fn = tool.functions["run_shell_command"]
     result = await run_fn(["echo", "hi"])
     assert result.startswith("Error: Shell supervisor is unavailable")
 

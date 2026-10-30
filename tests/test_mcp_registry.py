@@ -439,7 +439,7 @@ def test_mcp_tool_registry_returns_empty_toolkit_without_bound_manager(tmp_path:
     toolkit = get_tool_by_name("mcp_demo", _runtime_paths(tmp_path), worker_target=None)
 
     assert toolkit.name == "mcp_demo"
-    assert toolkit.async_functions == {}
+    assert toolkit.functions == {}
 
 
 def test_non_oauth_mcp_toolkit_builds_for_private_per_user_worker_target(tmp_path: Path) -> None:
@@ -481,7 +481,7 @@ def test_mcp_tool_registry_degrades_when_optional_server_unavailable(tmp_path: P
     toolkit = get_tool_by_name("mcp_demo", _runtime_paths(tmp_path), worker_target=None)
 
     assert toolkit.name == "mcp_demo"
-    assert toolkit.async_functions == {}
+    assert toolkit.functions == {}
 
 
 def test_mcp_tool_registry_fails_when_required_server_unavailable(tmp_path: Path) -> None:
@@ -548,7 +548,7 @@ def test_oauth_mcp_toolkit_instantiates_with_managed_runtime_args(tmp_path: Path
     toolkit = get_tool_by_name("mcp_demo", _runtime_paths(tmp_path), worker_target=None)
 
     assert toolkit.name == "mcp_demo"
-    assert set(toolkit.async_functions) == {
+    assert set(toolkit.functions) == {
         "demo_connection_status",
         "demo_list_tools",
         "demo_call_tool",

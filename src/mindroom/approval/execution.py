@@ -186,8 +186,6 @@ async def _continue_persisted_agent(
     config: Config,
     runtime_paths: RuntimePaths,
     refresh_scheduler: KnowledgeRefreshScheduler | None,
-    decisions: dict[str, bool],
-    denial_reasons: dict[str, str | None],
     knowledge: AgentKnowledge | None,
     tool_trace_collector: list[ToolTraceEntry],
     tool_dispatch: ToolDispatchContext,
@@ -209,9 +207,7 @@ async def _continue_persisted_agent(
     )
     delegated = has_delegation_state(persisted)
     native_events = (
-        _persisted_events(persisted)
-        if delegated
-        else runner.events(persisted, approval_decisions(continuation.calls, decisions, denial_reasons))
+        _persisted_events(persisted) if delegated else runner.events(persisted, approval_decisions(continuation.calls))
     )
     events = drive_delegation_stream(
         native_events,
@@ -223,9 +219,7 @@ async def _continue_persisted_agent(
         runtime_paths=runtime_paths,
         execution_identity=tool_dispatch.execution_identity,
         refresh_scheduler=refresh_scheduler,
-        decisions=decisions if delegated else None,
-        denial_reasons=denial_reasons if delegated else None,
-        approval_calls=continuation.calls if delegated else (),
+        approval_calls=continuation.calls if delegated else None,
     )
     presentation = CollectedStreamPresentation(
         show_tool_calls=continuation.show_tool_calls,
@@ -256,14 +250,14 @@ async def _continue_persisted_agent(
         or ("" if presentation.final_text() else "Tool approval continuation completed"),
         replayable_text=presentation.final_text(),
         has_visible_content=collected.has_visible_content,
-        session_id=response.session_id,
         run_id=response.run_id,
         attempt_run_id=response.run_id,
         runtime_model_name=model_name,
         status=response.status,
         tool_executions=collected.tool_executions,
         completed_tools=tuple(presentation.tool_trace),
-        metadata_content=agent_run_metadata_content(
+        build_run_metadata=partial(
+            agent_run_metadata_content,
             config,
             response,
             runtime_paths=runtime_paths,
@@ -402,8 +396,6 @@ class AgentApprovalExecution:
         *,
         paused_answer: PausedAnswer,
         tool_dispatch: ToolDispatchContext,
-        decisions: dict[str, bool],
-        denial_reasons: dict[str, str | None],
         tool_trace_collector: list[ToolTraceEntry],
         typing_log_context: Mapping[str, object],
         progress: ProgressPublisher | None,
@@ -444,7 +436,7 @@ class AgentApprovalExecution:
         ):
             msg = f"Paused run {continuation.run_id!r} is no longer available"
             raise RuntimeError(msg)
-        approved_calls = own_approved_calls(persisted, continuation.calls, decisions)
+        approved_calls = own_approved_calls(persisted, continuation.calls)
         # Generated CLI functions have no configured toolkit to restore.
         # Their exact current binding is checked by continue_cli_approval
         # and authorize_prepared_tool_call after this agent is rebuilt.
@@ -518,8 +510,6 @@ class AgentApprovalExecution:
                                 storage,
                                 paused_answer=paused_answer,
                                 runtime_context=runtime_context,
-                                decisions=decisions,
-                                denial_reasons=denial_reasons,
                                 tool_trace_collector=tool_trace_collector,
                                 refresh_scheduler=self.refresh_scheduler(),
                                 authorize=lambda binding: authorize_prepared_tool_call(
@@ -566,8 +556,6 @@ class AgentApprovalExecution:
                             config=config,
                             runtime_paths=self.runtime_paths,
                             refresh_scheduler=self.refresh_scheduler(),
-                            decisions=decisions,
-                            denial_reasons=denial_reasons,
                             knowledge=knowledge,
                             tool_trace_collector=tool_trace_collector,
                             tool_dispatch=tool_dispatch,

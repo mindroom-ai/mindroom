@@ -38,6 +38,14 @@ type ScriptStep = StreamEvent | Await
 SYNTHETIC = ModelIdentity(id="scripted-model", provider="Synthetic", provider_name="Synthetic")
 
 
+def scripted_body(identity: ModelIdentity, request: ModelRequest) -> dict[str, Any]:
+    """Return the body a scripted model reports sending: its id and each message's role and content."""
+    return {
+        "model": identity.id,
+        "messages": [{"role": message.role, "content": message.content} for message in request.messages],
+    }
+
+
 @dataclass
 class ScriptedModel:
     """Replay one scripted turn per request, in order; ``requests`` keeps every request as the loop sent it.
@@ -55,9 +63,10 @@ class ScriptedModel:
     model_params: dict[str, Any] = field(default_factory=dict)
 
     async def stream(self, request: ModelRequest) -> AsyncIterator[StreamEvent]:
-        """Yield the next scripted turn's events."""
+        """Report the request's ``scripted_body`` as sent, then yield the next scripted turn's events."""
         self.requests.append(request)
         assert self.turns, f"ScriptedModel has no turn scripted for request {len(self.requests)}"
+        await request.on_send(scripted_body(self.identity, request))
         for step in self.turns.pop(0):
             if isinstance(step, Await):
                 await step.run()

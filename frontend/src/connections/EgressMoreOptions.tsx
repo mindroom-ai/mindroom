@@ -7,6 +7,7 @@ import {
   personalPlaceholderHint,
 } from "./egressPlaceholderRules";
 import {
+  type AgentOption,
   BROKERED_PLACEHOLDER,
   type EditorContext,
   type EgressServiceForm,
@@ -33,6 +34,12 @@ import type {
   EgressScope,
   EgressValidation,
 } from "./types";
+
+// What an administrator's key means for the users of the service and for its account login.
+const ADMIN_KEY_HELP =
+  "Users see that the key is set but cannot see, replace, or remove it, and the service uses no connected account. Set the key in the service's row.";
+const AGENTS_HELP =
+  "Only the agents you tick get this service's key or account; leave all unticked for every agent that uses Agent Keys.";
 
 // What "Refuse other paths" does, in the order spec 12.4 gives it. The second
 // sentence is about a user's own services, so the dashboard leaves it out. The
@@ -156,6 +163,7 @@ export function MoreOptions({
   context,
   scope,
   sharedTarget,
+  agentOptions,
   validation,
   preset,
   providers,
@@ -176,6 +184,8 @@ export function MoreOptions({
   scope: EgressScope | undefined;
   /** Shared and unscoped agents cannot use personal accounts. */
   sharedTarget: boolean;
+  /** The agents the dashboard can limit the service to. */
+  agentOptions: readonly AgentOption[];
   /** What the server checks on save, for the most rules and the placeholder hint; `null` until it says. */
   validation: EgressValidation | null;
   preset: EgressPreset | undefined;
@@ -205,7 +215,9 @@ export function MoreOptions({
         i === index ? placeholder : existing,
       ),
     });
-  const loginField = preset?.oauth_provider ? (
+  // An administrator's key is the service's only credential, so there is no account to offer.
+  const adminKey = context === "operator" && form.adminKey;
+  const loginField = adminKey ? null : preset?.oauth_provider ? (
     <p className="text-xs text-muted-foreground">
       {sharedTarget
         ? "Accounts cannot be connected on a shared agent, so this service uses an API key."
@@ -329,9 +341,54 @@ export function MoreOptions({
         </p>
       </div>
 
+      {context === "operator" && (
+        <div className="space-y-1">
+          <label className="flex items-start gap-2 text-sm">
+            <input
+              type="checkbox"
+              className="mt-0.5 h-4 w-4"
+              checked={form.adminKey}
+              disabled={disabled}
+              onChange={(event) => set({ adminKey: event.target.checked })}
+            />
+            <span className="font-medium">
+              One key for every agent, set only by an administrator
+            </span>
+          </label>
+          <p className="pl-6 text-xs text-muted-foreground">{ADMIN_KEY_HELP}</p>
+        </div>
+      )}
+
+      {context === "operator" && agentOptions.length > 0 && (
+        <fieldset className="space-y-1">
+          <legend className="text-sm font-medium">Agents</legend>
+          <p className="text-xs text-muted-foreground">{AGENTS_HELP}</p>
+          <div className="flex flex-wrap gap-x-4 gap-y-1">
+            {agentOptions.map((agent) => (
+              <label key={agent.id} className="flex items-center gap-2 text-sm">
+                <input
+                  type="checkbox"
+                  className="h-4 w-4"
+                  checked={form.agents.includes(agent.id)}
+                  disabled={disabled}
+                  onChange={(event) =>
+                    set({
+                      agents: event.target.checked
+                        ? [...form.agents, agent.id]
+                        : form.agents.filter((name) => name !== agent.id),
+                    })
+                  }
+                />
+                {agent.label}
+              </label>
+            ))}
+          </div>
+        </fieldset>
+      )}
+
       {/* The Account choice says what a preset's login line would. */}
       {preset && accountChoice ? null : loginField}
-      {!preset && accountChoice}
+      {!preset && !adminKey && accountChoice}
 
       {/* The placeholder variables: what they are for, the rules for their names, one row each with its problem or warning. */}
       <div className="space-y-3">

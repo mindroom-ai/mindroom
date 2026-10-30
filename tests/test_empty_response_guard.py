@@ -1,4 +1,4 @@
-"""Tests for the empty-completed-response guard (retry, fallback notice, history scrub)."""
+"""Tests for the empty-completed-response guard: one retry, the fallback notice, and no empty run in history."""
 
 from __future__ import annotations
 
@@ -7,30 +7,20 @@ from typing import TYPE_CHECKING, Any
 
 import pytest
 
-from mindroom.ai import ai_response, stream_agent_response
-from mindroom.ai_runtime import (
-    EMPTY_RESPONSE_NOTICE,
-    discard_empty_completed_run,
-)
+from mindroom.ai import TurnResult, ai_response, stream_agent_response
+from mindroom.ai_runtime import EMPTY_RESPONSE_NOTICE
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
 from mindroom.constants import AI_RUN_METADATA_KEY, resolve_runtime_paths
-from mindroom.history.session_context import ScopeSessionContext
 from mindroom.history.turn_recorder import TurnRecorder
-from mindroom.history.types import HistoryScope
-from mindroom.llm.messages import Message
-from mindroom.llm.runs import RunRecord, RunStatus, TeamRunRecord
 from mindroom.response_turn import TurnSinks
-from mindroom.session_storage.agent_storage import create_state_storage
-from mindroom.session_storage.types import ConversationSession
 from mindroom.timing import DispatchPipelineTiming
 from tests.conftest import (
     bind_runtime_paths,
     install_model_providers,
     make_turn_context,
     runtime_paths_for,
-    seed_session,
 )
 from tests.fakes.scripted_model import ScriptedModel, answer
 from tests.scripted_agent_helpers import stored_runs, streamed_text
@@ -52,32 +42,11 @@ def _config(tmp_path: Path) -> Config:
     )
 
 
-def _completed_run(run_id: str, content: str | None) -> RunRecord:
-    return RunRecord(
-        run_id=run_id,
-        agent_id="general",
-        session_id="session-1",
-        content=content,
-        messages=[Message(role="assistant", content=content)],
-        status=RunStatus.completed,
-    )
-
-
-def _completed_team_run(run_id: str, content: str | None) -> TeamRunRecord:
-    return TeamRunRecord(
-        run_id=run_id,
-        team_id="team_general",
-        session_id="session-1",
-        content=content,
-        status=RunStatus.completed,
-    )
-
-
 def _ctx(**turn_inputs: object) -> ResponseTurnContext:
     return replace(make_turn_context("general", session_id="session-1"), prompt="test", **turn_inputs)
 
 
-async def _respond(config: Config, *, sinks: TurnSinks = TurnSinks(), **turn_inputs: object) -> str:  # noqa: B008
+async def _respond(config: Config, *, sinks: TurnSinks = TurnSinks(), **turn_inputs: object) -> TurnResult:  # noqa: B008
     return await ai_response(_ctx(**turn_inputs), runtime_paths_for(config), config, sinks=sinks)
 
 
@@ -86,113 +55,6 @@ async def _stream(config: Config, *, sinks: TurnSinks = TurnSinks(), **turn_inpu
         chunk
         async for chunk in stream_agent_response(_ctx(**turn_inputs), runtime_paths_for(config), config, sinks=sinks)
     ]
-
-
-def test_discard_empty_completed_run_removes_run_from_loaded_session_and_storage(tmp_path: Path) -> None:
-    """The empty run must disappear from both the in-memory session and persisted history."""
-    storage = create_state_storage("general", tmp_path, HistoryScope(kind="agent", scope_id="general"))
-    session = ConversationSession(
-        session_id="session-1",
-        kind="agent",
-        owner_id="general",
-        runs=[_completed_run("run-good", "First response"), _completed_run("run-empty", None)],
-        metadata={},
-    )
-    seed_session(storage, session)
-    scope_context = ScopeSessionContext(
-        scope=HistoryScope(kind="agent", scope_id="general"),
-        storage=storage,
-        session=session,
-        session_id="session-1",
-        storage_factory=lambda: storage,
-    )
-
-    discard_empty_completed_run(
-        scope_context=scope_context,
-        session_id="session-1",
-        run_id="run-empty",
-        entity_name="general",
-        output_tokens=2,
-    )
-
-    assert [run.run_id for run in session.runs] == ["run-good"]
-    persisted = storage.load_session("session-1")
-    assert persisted is not None
-    assert [run.run_id for run in persisted.runs] == ["run-good"]
-
-
-def test_discard_empty_completed_run_deletes_a_run_the_live_session_never_saw(tmp_path: Path) -> None:
-    """The loop stores the run without the scope session it loaded first, which therefore lacks the run."""
-    storage = create_state_storage("general", tmp_path, HistoryScope(kind="agent", scope_id="general"))
-    live_session = seed_session(
-        storage,
-        ConversationSession(
-            session_id="session-1",
-            kind="agent",
-            owner_id="general",
-            runs=[_completed_run("run-good", "First response")],
-            metadata={},
-        ),
-    )
-    loop_session = ConversationSession(session_id="session-1", kind="agent", owner_id="general")
-    storage.save_run(loop_session, _completed_run("run-empty", None), record_usage=False)
-    assert [run.run_id for run in live_session.runs] == ["run-good"]
-
-    discard_empty_completed_run(
-        scope_context=ScopeSessionContext(
-            scope=HistoryScope(kind="agent", scope_id="general"),
-            storage=storage,
-            session=live_session,
-            session_id="session-1",
-            storage_factory=lambda: storage,
-        ),
-        session_id="session-1",
-        run_id="run-empty",
-        entity_name="general",
-        output_tokens=2,
-    )
-
-    assert [run.run_id for run in live_session.runs] == ["run-good"]
-    persisted = storage.load_session("session-1")
-    assert persisted is not None
-    assert [run.run_id for run in persisted.runs] == ["run-good"]
-
-
-def test_discard_empty_completed_team_run_removes_run_from_session_and_storage(tmp_path: Path) -> None:
-    """The team discard must purge the run and its member runs from memory and persisted history."""
-    storage = create_state_storage("team_general", tmp_path, HistoryScope(kind="team", scope_id="team_general"))
-    session = ConversationSession(
-        session_id="session-1",
-        kind="team",
-        owner_id="team_general",
-        runs=[
-            _completed_team_run("run-good", "First response"),
-            _completed_team_run("run-empty", None),
-            RunRecord(run_id="member-of-empty", agent_id="general", parent_run_id="run-empty"),
-        ],
-        metadata={},
-    )
-    seed_session(storage, session)
-    scope_context = ScopeSessionContext(
-        scope=HistoryScope(kind="team", scope_id="team_general"),
-        storage=storage,
-        session=session,
-        session_id="session-1",
-        storage_factory=lambda: storage,
-    )
-
-    discard_empty_completed_run(
-        scope_context=scope_context,
-        session_id="session-1",
-        run_id="run-empty",
-        entity_name="team_general",
-        output_tokens=2,
-    )
-
-    assert [run.run_id for run in session.runs] == ["run-good"]
-    persisted = storage.load_session("session-1")
-    assert persisted is not None
-    assert [run.run_id for run in persisted.runs] == ["run-good"]
 
 
 @pytest.mark.asyncio
@@ -208,7 +70,7 @@ async def test_ai_response_retries_once_after_empty_completed_run(
 
     result = await _respond(config, pipeline_timing=timing)
 
-    assert result == "Recovered"
+    assert result.text == "Recovered"
     assert len(model.requests) == 2
     assert timing.marks["first_model_request_sent"] < timing.marks["model_request_sent"]
     assert len(stored_runs(config, runtime_paths_for(config), "session-1")) == 1
@@ -227,9 +89,9 @@ async def test_ai_response_returns_fallback_notice_when_retry_is_also_empty(
     result = await _respond(config)
 
     # The retry's whitespace streamed before the notice, as a streamed reply shows it.
-    assert result == f"  {EMPTY_RESPONSE_NOTICE}"
+    assert result.text == f"  {EMPTY_RESPONSE_NOTICE}"
     assert len(model.requests) == 2
-    # The retry's empty run is discarded too; the notice is delivery-only.
+    # The retry's empty run is not stored either; the notice is delivery-only.
     assert stored_runs(config, runtime_paths_for(config), "session-1") == []
 
 
@@ -241,15 +103,14 @@ async def test_a_blocking_reply_that_ends_empty_publishes_the_error_status_a_str
     """A blocking reply whose retry is empty too publishes its run as failed, as the streamed reply does."""
     config = _config(tmp_path)
     install_model_providers(monkeypatch, {"default": ScriptedModel([answer(""), answer(""), answer(""), answer("")])})
-    blocking: dict[str, Any] = {}
     streamed: dict[str, Any] = {}
 
-    result = await _respond(config, sinks=TurnSinks(run_metadata_collector=blocking))
+    result = await _respond(config)
     chunks = await _stream(config, sinks=TurnSinks(run_metadata_collector=streamed))
 
-    assert result == EMPTY_RESPONSE_NOTICE
+    assert result.text == EMPTY_RESPONSE_NOTICE
     assert streamed_text(chunks) == [EMPTY_RESPONSE_NOTICE]
-    assert blocking[AI_RUN_METADATA_KEY]["status"] == "error"
+    assert result.run_metadata[AI_RUN_METADATA_KEY]["status"] == "error"
     assert streamed[AI_RUN_METADATA_KEY]["status"] == "error"
 
 
@@ -265,7 +126,7 @@ async def test_ai_response_fallback_notice_stays_out_of_the_turn_recorder(
 
     result = await _respond(config, sinks=TurnSinks(turn_recorder=recorder))
 
-    assert result == EMPTY_RESPONSE_NOTICE
+    assert result.text == EMPTY_RESPONSE_NOTICE
     assert recorder.outcome == "completed"
     assert recorder.assistant_text == ""
 

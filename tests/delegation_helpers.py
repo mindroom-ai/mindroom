@@ -46,7 +46,7 @@ from mindroom.teams.resume import continue_paused_team_run
 from mindroom.teams.spec import TeamMode
 from mindroom.tool_system.runtime_context import LiveToolDispatchContext, tool_runtime_context
 from tests.ai_user_id_helpers import team_orchestrator
-from tests.approval_continuation_helpers import approval_continuation
+from tests.approval_continuation_helpers import approval_continuation, decided_calls
 from tests.authorization_helpers import make_test_tool_runtime_context
 from tests.conftest import make_conversation_reader_mock, make_relation_lookup, make_turn_context
 from tests.scripted_agent_helpers import registered_toolkit
@@ -277,7 +277,7 @@ async def respond(
     )
     with tool_runtime_context(runtime):
         try:
-            return await ai_response(ctx, runtime_paths, config)
+            return (await ai_response(ctx, runtime_paths, config)).text
         except ResponsePausedForApproval as suspended:
             return _paused_with_committed_presentation(suspended, show_tool_calls=ctx.show_tool_calls)
 
@@ -336,7 +336,7 @@ async def resume(
         thread_id=identity.thread_id,
         requester_id=identity.requester_id,
         state="claimed",
-        calls=tuple(calls),
+        calls=decided_calls(calls, decisions, denial_reasons),
         request_body=request_body,
         runtime_model_name=paused.runtime_model_name,
         continuation_count=paused.continuation_count,
@@ -355,8 +355,6 @@ async def resume(
         continuation,
         paused_answer=PausedAnswer(text=paused.response_text, tool_trace=paused.tool_trace),
         tool_dispatch=LiveToolDispatchContext(execution_identity=identity, runtime_context=runtime),
-        decisions=dict(decisions),
-        denial_reasons={call_id: (denial_reasons or {}).get(call_id) for call_id in decisions},
         tool_trace_collector=[],
         typing_log_context={},
         progress=None,
@@ -556,10 +554,8 @@ async def resume_team(
             user_id=identity.requester_id,
             configured_team_name=team_name,
             model_name=paused.runtime_model_name or "default",
-            decisions=dict(decisions),
-            denial_reasons=dict.fromkeys(decisions),
             refresh_scheduler=None,
-            approval_calls=calls,
+            approval_calls=decided_calls(calls, decisions),
             prior_tool_trace=paused.tool_trace,
             prior_presentation_state=paused.response_presentation_state,
             progress=None,

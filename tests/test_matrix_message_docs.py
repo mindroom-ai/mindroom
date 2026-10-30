@@ -6,15 +6,14 @@ import inspect
 from typing import TYPE_CHECKING
 
 from mindroom.custom_tools.matrix_message import MatrixMessageTools
+from tests.agent_tool_helpers import toolkit_offers
 
 if TYPE_CHECKING:
-    from agno.tools.function import Function
+    from mindroom.tool_system.tool_function import ToolFunction
 
 
-def _matrix_message_function() -> Function:
-    function = MatrixMessageTools().async_functions["matrix_message"]
-    function.process_entrypoint(strict=False)
-    return function
+def _matrix_message_function() -> ToolFunction:
+    return toolkit_offers(MatrixMessageTools(), "matrix_message")
 
 
 def test_matrix_message_schema_exposes_four_actions_and_eleven_arguments() -> None:

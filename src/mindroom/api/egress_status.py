@@ -34,6 +34,7 @@ from mindroom.egress_broker.user_services import (
     PLACEHOLDER_VALUE,
     PLACEHOLDER_VALUE_MAX_LENGTH,
     effective_config,
+    services_for_agent,
 )
 from mindroom.logging_config import get_logger
 from mindroom.oauth.registry import load_oauth_providers_for_snapshot
@@ -129,6 +130,18 @@ def effective_services(
     reads the credential store, so async callers run this in a thread.
     """
     return effective_config(config.egress_broker, manager, target).services
+
+
+def agent_services(
+    config: Config,
+    manager: CredentialsManager,
+    target: ResolvedWorkerTarget,
+) -> dict[str, EgressService]:
+    """Return the services one agent's scope offers that agent: `effective_services`, less those its `agents` leave out.
+
+    The Connections page lists and accepts these; the dashboard, which an administrator uses, lists every service.
+    """
+    return services_for_agent(effective_services(config, manager, target), target.routing_agent_name)
 
 
 class EgressRuleLocation(BaseModel):

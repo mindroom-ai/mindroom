@@ -9,9 +9,6 @@ from __future__ import annotations
 from dataclasses import replace
 from typing import TYPE_CHECKING
 
-from agno.tools import Toolkit
-from agno.tools.function import Function
-
 from mindroom.agent_cli.minimal_mode_preflight import minimal_subagent_candidates
 from mindroom.agent_descriptions import describe_agent
 from mindroom.delegation.direct import run_direct_child_turn
@@ -30,8 +27,10 @@ from mindroom.delegation.sessions import SubagentSessionError
 from mindroom.delegation.state import RUN_SUBAGENT
 from mindroom.tool_jobs.runtime import get_background_runtime
 from mindroom.tool_jobs.settings import background_tool_jobs_enabled, toolkit_is_background_excluded
+from mindroom.tool_system.authoring import Toolkit
 from mindroom.tool_system.invocation import current_tool_call
 from mindroom.tool_system.runtime_context import current_budget_monitor, get_tool_runtime_context
+from mindroom.tool_system.tool_schema import closed_parameters
 from mindroom.tool_system.worker_routing import (
     build_tool_execution_identity,
 )
@@ -44,6 +43,7 @@ if TYPE_CHECKING:
     from mindroom.constants import RuntimePaths
     from mindroom.delegation.state import DelegationChild, SubagentPersona
     from mindroom.knowledge.refresh_scheduler import KnowledgeRefreshScheduler
+    from mindroom.tool_system.tool_function import ToolFunction
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 
 
@@ -81,19 +81,21 @@ class DelegateTools(Toolkit):
             instructions=self._build_instructions(),
             tools=[self.run_subagent, self.continue_subagent],
         )
-        delegate_function = self.async_functions[RUN_SUBAGENT]
-        delegate_function.description = self._build_run_subagent_description()
+
+    def offered_function(self, function: ToolFunction) -> ToolFunction:
+        """Describe ``run_subagent`` with this caller's targets, offering no option the caller cannot use."""
+        if function.name != RUN_SUBAGENT:
+            return function
         hidden = {
             *(() if self._minimal_targets else ("minimal",)),
             *(() if self._authoring else ("system_prompt", "tools", "skills", "knowledge", "profile")),
         }
-        if hidden:
-            # Offer no option this caller cannot use. Agno keeps explicitly set
-            # parameters when it later processes the entrypoint, so derive them once here.
-            derived = Function(name=RUN_SUBAGENT, entrypoint=self.run_subagent)
-            derived.process_entrypoint()
-            properties = {name: value for name, value in derived.parameters["properties"].items() if name not in hidden}
-            delegate_function.parameters = {**derived.parameters, "properties": properties}
+        description = self._build_run_subagent_description()
+        if not hidden:
+            return replace(function, description=description)
+        properties = {name: value for name, value in function.parameters["properties"].items() if name not in hidden}
+        parameters = closed_parameters(self.run_subagent, {**function.parameters, "properties": properties})
+        return replace(function, description=description, parameters=parameters)
 
     def _build_instructions(self) -> str:
         """Build toolkit instructions listing available delegation targets."""

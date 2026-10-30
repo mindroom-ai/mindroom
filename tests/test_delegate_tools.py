@@ -12,6 +12,7 @@ import pytest
 import mindroom.tools  # noqa: F401
 from mindroom.agent_reply_membership import AgentReplyMembershipIndex
 from mindroom.agents import create_agent, describe_agent
+from mindroom.ai import TurnResult
 from mindroom.config.agent import AgentConfig, AgentPrivateConfig
 from mindroom.config.main import Config
 from mindroom.config.models import DefaultsConfig, ModelConfig
@@ -25,11 +26,11 @@ from mindroom.knowledge.utils import _KnowledgeResolution
 from mindroom.matrix.state import MatrixState
 from mindroom.message_target import MessageTarget
 from mindroom.thread_models import set_thread_model_override
-from mindroom.tool_system.agno_toolkits import adapt_function
 from mindroom.tool_system.metadata import TOOL_METADATA
 from mindroom.tool_system.runtime_context import get_tool_runtime_context, tool_runtime_context
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity, agent_workspace_root_path
 from tests.access_schema_support import with_responder_access
+from tests.agent_tool_helpers import toolkit_offers
 from tests.authorization_helpers import (
     make_test_tool_runtime_context,
 )
@@ -145,18 +146,17 @@ class TestDelegateTools:
 
     def test_toolkit_offers_exactly_the_delegation_functions(self, tools: DelegateTools) -> None:
         """The names the driver, the approval capability, and the tool metadata share are the toolkit's own functions."""
-        assert tuple(tools.async_functions) == DELEGATION_FUNCTIONS
+        assert tuple(tools.functions) == DELEGATION_FUNCTIONS
         assert TOOL_METADATA["delegate"].function_names == DELEGATION_FUNCTIONS
 
     def test_toolkit_has_delegate_task(self, tools: DelegateTools) -> None:
         """Test that the toolkit exposes the run_subagent function."""
-        func_names = [f.name for f in tools.async_functions.values()]
+        func_names = list(tools.functions)
         assert "run_subagent" in func_names
 
     def test_schema_requires_task_and_allows_omitted_or_null_agent_name(self, tools: DelegateTools) -> None:
         """The model must be able to request a self subagent using only its task."""
-        function = tools.async_functions["run_subagent"]
-        function.process_entrypoint(strict=False)
+        function = toolkit_offers(tools, "run_subagent")
         assert function.parameters["required"] == ["task"]
         assert function.parameters["properties"]["agent_name"]["anyOf"] == [
             {"type": "string"},
@@ -169,8 +169,7 @@ class TestDelegateTools:
 
     def test_continue_subagent_schema(self, tools: DelegateTools) -> None:
         """Continuation has two required string arguments, without a conditional target."""
-        function = tools.async_functions["continue_subagent"]
-        function.process_entrypoint(strict=False)
+        function = toolkit_offers(tools, "continue_subagent")
         assert function.parameters["required"] == ["subagent_id", "message"]
         assert set(function.parameters["properties"]) == {"subagent_id", "message"}
         assert function.parameters["properties"]["subagent_id"]["type"] == "string"
@@ -187,7 +186,7 @@ class TestDelegateTools:
 
     def test_model_facing_tool_description_lists_allowed_targets(self, tools: DelegateTools) -> None:
         """Test that the model-visible function description includes delegation targets."""
-        description = adapt_function(tools.async_functions["run_subagent"]).description
+        description = toolkit_offers(tools, "run_subagent").description
 
         assert description is not None
         assert "Allowed subagents for this caller:" in description
@@ -300,7 +299,7 @@ class TestDelegateTools:
         with patch(
             "mindroom.ai.ai_response",
             new_callable=AsyncMock,
-            return_value="Here is the generated code: print('hello')",
+            return_value=TurnResult("Here is the generated code: print('hello')"),
         ) as mock_ai_response:
             result = await tools.run_subagent(agent_name="code", task="Write a hello world program")
 
@@ -389,7 +388,7 @@ class TestDelegateTools:
             patch(
                 "mindroom.ai.ai_response",
                 new_callable=AsyncMock,
-                return_value="done",
+                return_value=TurnResult("done"),
             ) as mock_ai_response,
         ):
             result = await tools.run_subagent(agent_name="worker", task="do work")
@@ -403,7 +402,7 @@ class TestDelegateTools:
         with patch(
             "mindroom.ai.ai_response",
             new_callable=AsyncMock,
-            return_value="",
+            return_value=TurnResult(""),
         ):
             result = await tools.run_subagent(agent_name="code", task="Do something")
             assert "returned no content" in result
@@ -440,7 +439,7 @@ class TestDelegateTools:
             patch(
                 "mindroom.ai.ai_response",
                 new_callable=AsyncMock,
-                return_value="done",
+                return_value=TurnResult("done"),
             ) as mock_ai_response,
         ):
             await tools.run_subagent(agent_name="code", task="task")
@@ -471,7 +470,7 @@ class TestDelegateTools:
             patch(
                 "mindroom.ai.ai_response",
                 new_callable=AsyncMock,
-                return_value="done",
+                return_value=TurnResult("done"),
             ) as mock_ai_response,
         ):
             await tools.run_subagent(agent_name="code", task="update yourself")
@@ -522,7 +521,7 @@ class TestDelegateKnowledge:
             patch(
                 "mindroom.ai.ai_response",
                 new_callable=AsyncMock,
-                return_value="Found relevant docs",
+                return_value=TurnResult("Found relevant docs"),
             ) as mock_ai_response,
         ):
             result = await tools.run_subagent(agent_name="researcher", task="Find info about X")
@@ -616,7 +615,7 @@ class TestDelegateKnowledge:
             patch(
                 "mindroom.ai.ai_response",
                 new_callable=AsyncMock,
-                return_value="Found relevant docs",
+                return_value=TurnResult("Found relevant docs"),
             ),
         ):
             result = await run_subagent.entrypoint(agent_name="researcher", task="Find info about X")
@@ -653,7 +652,7 @@ class TestDelegateKnowledge:
             patch(
                 "mindroom.ai.ai_response",
                 new_callable=AsyncMock,
-                return_value="done",
+                return_value=TurnResult("done"),
             ) as mock_ai_response,
         ):
             await tools.run_subagent(agent_name="worker", task="do work")
@@ -708,7 +707,7 @@ class TestDelegateKnowledge:
             patch(
                 "mindroom.ai.ai_response",
                 new_callable=AsyncMock,
-                return_value="done",
+                return_value=TurnResult("done"),
             ) as mock_ai_response,
         ):
             await tools.run_subagent(agent_name="worker", task="do work")
@@ -785,7 +784,7 @@ class TestDelegateKnowledge:
             tool_function_filter=tool_function_filter,
         )
 
-        async def fake_ai_response(ctx: ResponseTurnContext, *_args: object, **_kwargs: object) -> str:
+        async def fake_ai_response(ctx: ResponseTurnContext, *_args: object, **_kwargs: object) -> TurnResult:
             context = get_tool_runtime_context()
             assert context is not None
             assert context.agent_name == "worker"
@@ -797,7 +796,7 @@ class TestDelegateKnowledge:
             assert context.active_model_name == "default"
             assert context.tool_function_filter is tool_function_filter
             assert ctx.tool_function_filter is tool_function_filter
-            return "done"
+            return TurnResult("done")
 
         with (
             tool_runtime_context(runtime_context),
@@ -894,7 +893,7 @@ class TestDelegateKnowledge:
             active_model_name="default",
         )
 
-        async def fake_ai_response(ctx: ResponseTurnContext, *_args: object, **_kwargs: object) -> str:
+        async def fake_ai_response(ctx: ResponseTurnContext, *_args: object, **_kwargs: object) -> TurnResult:
             context = get_tool_runtime_context()
             assert context is not None
             assert context.agent_name == "worker"
@@ -903,7 +902,7 @@ class TestDelegateKnowledge:
             assert ctx.room_id == "!room:example.org"
             assert ctx.thread_id == "$thread"
             assert ctx.active_model_name == expected_model_name
-            return "done"
+            return TurnResult("done")
 
         with (
             tool_runtime_context(runtime_context),

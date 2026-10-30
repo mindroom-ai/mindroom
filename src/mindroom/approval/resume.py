@@ -76,15 +76,11 @@ class ContinueRun[R: AnyRunRecord](Protocol):
         ...
 
 
-def approval_decisions(
-    calls: Sequence[ApprovalCall],
-    decisions: Mapping[str, bool],
-    denial_reasons: Mapping[str, str | None],
-) -> ResumeDecisions:
-    """Return the decisions one approval generation took on ``calls``, by the call ids ``decisions`` names."""
+def approval_decisions(calls: Sequence[ApprovalCall]) -> ResumeDecisions:
+    """Return the decisions one approval generation took on ``calls``: each call not approved is denied with its reason."""
     return ResumeDecisions(
-        approved=tuple(call for call in calls if decisions.get(call.tool_call_id)),
-        denied={call_id: denial_reasons.get(call_id) for call_id, approved in decisions.items() if not approved},
+        approved=tuple(call for call in calls if call.approved),
+        denied={call.tool_call_id: call.reason for call in calls if not call.approved},
     )
 
 
@@ -201,7 +197,10 @@ async def forward_resume[R: AnyRunRecord](
     *,
     paused: R,
 ) -> R:
-    """Drain the resume of ``paused``, handing every event but the last to ``on_event``; return its terminal record."""
+    """Drain the resume of ``paused``, handing ``on_event`` every event but a completed or paused record; return it.
+
+    A failed resume's record reaches ``on_event`` before its failure propagates, as its stream ended with it.
+    """
     finished = TerminalRecord(type(paused))
     async with closing_async_stream(events):
         async for event in events:

@@ -48,7 +48,7 @@ from mindroom.response_turn import (
 from mindroom.run_storage import RunStorage
 from mindroom.session_storage.agent_storage import create_agent_state_storage, create_session_storage
 from mindroom.tool_system.agent_tool_calls import AgentToolCallWaiting, DeferredAgentToolkit, execute_agent_tool_call
-from mindroom.tool_system.agno_toolkits import adapt_function, adapt_toolkit
+from mindroom.tool_system.agno_toolkits import adapt_toolkit
 from mindroom.tool_system.events import CollectedStreamPresentation
 from mindroom.tool_system.metadata import get_tool_by_name
 from mindroom.tool_system.output_files import ToolOutputFilePolicy
@@ -59,7 +59,8 @@ from mindroom.tool_system.tool_function import AdaptedToolkit
 from mindroom.tool_system.worker_routing import agent_workspace_root_path
 from mindroom.turn_continuation import continuation_decision_from_tools
 from tests.access_schema_support import with_responder_access
-from tests.approval_continuation_helpers import approval_continuation
+from tests.agent_tool_helpers import offered_agno_function
+from tests.approval_continuation_helpers import answered_calls, approval_continuation
 from tests.conftest import bind_runtime_paths, live_turn_tools_for_test, seed_session_row
 from tests.delegation_helpers import ScriptedAgents, _delegate_runtime_context, _runtime_paths, registered_report_tool
 from tests.fakes.scripted_model import ScriptedModel, answer, calls, tool_call
@@ -101,7 +102,7 @@ def _flagged(name: str, *entrypoints: Callable[..., object], **flags: object) ->
         function = Function.from_callable(entrypoint)
         for flag, value in flags.items():
             setattr(function, flag, value)
-        functions.append(adapt_function(function))
+        functions.append(offered_agno_function(function))
     return AdaptedToolkit(name=name, functions=tuple(functions), instructions=None)
 
 
@@ -383,8 +384,7 @@ async def test_hidden_delegation_never_inherits_an_approval_under_a_reused_call_
         return tuple(
             apply_exact_approval_decisions(
                 paused.requirements,
-                decisions=dict.fromkeys(asked, approved),
-                denial_reasons=dict.fromkeys(asked, "denied"),
+                answered_calls(asked, approved=approved, reason="denied"),
             ),
         )
 
@@ -465,19 +465,15 @@ async def test_hidden_child_pause_reuses_native_resume(tmp_path, monkeypatch, mo
             "code",
             users=["@alice:example.org"],
         )
-        ScriptedAgents(
-            {
-                "helper": ScriptedModel([]),
-                "code": ScriptedModel(
-                    [
-                        calls(tool_call("write_report", "child-write")),
-                        calls(tool_call("write_report", "child-write-again"))
-                        if mode == "recover_again"
-                        else answer("child done"),
-                    ],
-                ),
-            },
-        ).install(monkeypatch)
+        code = ScriptedModel(
+            [
+                calls(tool_call("write_report", "child-write")),
+                calls(tool_call("write_report", "child-write-again"))
+                if mode == "recover_again"
+                else answer("child done"),
+            ],
+        )
+        ScriptedAgents({"helper": ScriptedModel([]), "code": code}).install(monkeypatch)
         approval_ids = []
 
         async def approve(paused):
@@ -501,8 +497,7 @@ async def test_hidden_child_pause_reuses_native_resume(tmp_path, monkeypatch, mo
             return tuple(
                 apply_exact_approval_decisions(
                     paused.requirements,
-                    decisions=dict.fromkeys(approval_ids, mode != "deny"),
-                    denial_reasons=dict.fromkeys(approval_ids, "denied"),
+                    answered_calls(approval_ids, approved=mode != "deny", reason="denied"),
                 ),
             )
 
@@ -553,16 +548,14 @@ async def test_hidden_child_pause_reuses_native_resume(tmp_path, monkeypatch, mo
                     parent_bash_call_id="bash-parent",
                     delegation_depth=0,
                     refresh_scheduler=None,
-                    decisions=None,
-                    denial_reasons=None,
-                    approval_calls=(),
+                    approval_calls=None,
                     on_event=lambda _event: None,
                 )
             assert isinstance(paused, PausedAttempt)
             assert paused.cli_call is not None
             assert paused.runtime_model_name == "parent-model"
-            approval_calls = approval_calls_for_cli_pause(paused, "helper")
-            decisions = {call.tool_call_id: True for call in approval_calls}
+            approved = [replace(waiting, confirmation=True) for waiting in paused.requirements]
+            approval_calls = approval_calls_for_cli_pause(paused, "helper", approved)
 
             presentation = CollectedStreamPresentation(show_tool_calls=True, track_hidden_tools=True)
             presentation.start_tool(
@@ -616,8 +609,6 @@ async def test_hidden_child_pause_reuses_native_resume(tmp_path, monkeypatch, mo
                         tool_trace=tuple(presentation.tool_trace),
                     ),
                     runtime_context=runtime,
-                    decisions=decisions,
-                    denial_reasons=dict.fromkeys(decisions),
                     tool_trace_collector=[],
                     refresh_scheduler=None,
                     authorize=authorize_binding,
@@ -682,6 +673,13 @@ async def test_hidden_child_pause_reuses_native_resume(tmp_path, monkeypatch, mo
                 receipt = await owner.get_call(str(call_id))
                 assert receipt["status"] == "completed", receipt
                 assert "child done" in receipt["outcome"]
+                if mode == "deny":
+                    # The child's model is answered with the reason the requester denied its call with.
+                    assert [
+                        (message.tool_call_id, str(message.content))
+                        for message in code.requests[-1].messages
+                        if message.role == "tool"
+                    ] == [("child-write", "denied")]
                 assert len(approval_ids) == 1
                 assert approval_ids[0].endswith(":child-write")
                 text, trace = running.result()
