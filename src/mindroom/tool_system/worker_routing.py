@@ -201,10 +201,7 @@ def worker_id_for_key(worker_key: str, *, prefix: str) -> str:
     digest = hashlib.sha256(worker_key.encode("utf-8")).hexdigest()[:_WORKER_ID_DIGEST_LENGTH]
     normalized_prefix = re.sub(r"[^a-z0-9-]+", "-", prefix.lower()).strip("-") or _DEFAULT_WORKER_NAME_PREFIX
     max_prefix_length = _DNS_LABEL_MAX_LENGTH - len(digest) - 1
-    safe_prefix = normalized_prefix[:max_prefix_length].rstrip("-")
-    if not safe_prefix:
-        safe_prefix = _DEFAULT_WORKER_NAME_PREFIX[:max_prefix_length].rstrip("-") or "worker"
-    return f"{safe_prefix}-{digest}"
+    return f"{normalized_prefix[:max_prefix_length].rstrip('-')}-{digest}"
 
 
 def _encode_worker_requester_part(value: str) -> str:
