@@ -501,7 +501,8 @@ async def find(question: str) -> Finding | str:
     return result.content
 ```
 
-`resolve_turn_model` names the model the calling agent's turn runs: the model the turn is running with (`active_model_name`, such as a scheduled task's model or a switch), else the model chosen for its thread or room. Inside an agent's reply the active model already reflects the requester's [budget](https://docs.mindroom.chat/budgets/) fallback; where no model is active, `None` as the last argument skips that fallback.
+`resolve_turn_model` names the model the calling agent's turn runs: the model the turn is running with (`active_model_name`, such as a scheduled task's model or a switch), else the model chosen for its thread or room.
+Inside an agent's reply the active model already reflects the requester's [budget](https://docs.mindroom.chat/budgets/) fallback; where no model is active, `None` as the last argument skips that fallback.
 Pass a model name from `config.yaml` to `build_model_provider` instead to call a fixed model.
 `build_model_provider` returns a `ModelProvider`, the type to annotate a provider with.
 The provider uses the model entry's credentials, base URL, and request settings.
