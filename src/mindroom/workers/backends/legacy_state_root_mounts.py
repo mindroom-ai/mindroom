@@ -11,6 +11,7 @@ from mindroom.workers.backend import WorkerBackendError
 from mindroom.workers.backend_kinds import WorkerBackendKind, worker_backend_kind
 from mindroom.workers.backends import docker, kubernetes
 from mindroom.workers.backends._lifecycle import mark_worker_idle
+from mindroom.workers.backends.docker_config import LABEL_STORAGE_LAYOUT, LABEL_STORAGE_LAYOUT_VALUE
 from mindroom.workers.backends.kubernetes_resources import (
     ANNOTATION_TEMPLATE_HASH,
     ANNOTATION_WORKSPACE_TEMPLATE_HASH,
@@ -71,7 +72,7 @@ def _remove_docker_workers_mounting_state_roots(runtime_paths: RuntimePaths) -> 
     failed: list[str] = []
     for container in docker.list_docker_worker_containers(runtime_paths):
         labels = cast("dict[str, dict[str, str] | None]", container.attrs.get("Config") or {}).get("Labels") or {}
-        if labels.get(docker.LABEL_STORAGE_LAYOUT) == docker.LABEL_STORAGE_LAYOUT_VALUE:
+        if labels.get(LABEL_STORAGE_LAYOUT) == LABEL_STORAGE_LAYOUT_VALUE:
             continue
         try:
             container.remove(force=True)

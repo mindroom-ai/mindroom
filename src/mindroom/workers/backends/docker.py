@@ -204,8 +204,6 @@ _DOCKER_DEPENDENCIES = ["docker"]
 _DOCKER_EXTRA = "docker"
 
 __all__ = [
-    "LABEL_STORAGE_LAYOUT",
-    "LABEL_STORAGE_LAYOUT_VALUE",
     "DockerWorkerBackend",
     "check_docker_workers_absent_for_storage_upgrade",
     "configure_docker_worker_backend",

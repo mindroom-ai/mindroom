@@ -97,7 +97,7 @@ class _ReadyWorkerCacheEntry:
     launch_digest: str
     worker_id: str
     state_subpath: str
-    # The worker's lifecycle as its Deployment records it, so a cached touch rewrites every annotation without a read.
+    # The worker's lifecycle when cached, so a cached touch returns its full handle without reading the Deployment.
     lifecycle: WorkerLifecycleState
     validated_at: float
     workspace_mounts: tuple[ScopedWorkspaceMount, ...]

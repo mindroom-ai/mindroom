@@ -7997,6 +7997,7 @@ depends_on = [
     "mindroom.workers.backend_kinds",
     "mindroom.workers.backends._lifecycle",
     "mindroom.workers.backends.docker",
+    "mindroom.workers.backends.docker_config",
     "mindroom.workers.backends.kubernetes",
     "mindroom.workers.backends.kubernetes_resources",
 ]
