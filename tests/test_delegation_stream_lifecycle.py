@@ -62,9 +62,10 @@ class _UnusedContinuation:
         return _paused_run()
 
 
-def _stream(**options: object) -> AsyncIterator[RunEvent]:
+def _stream(events: AsyncIterator[RunEvent] | None = None, **options: object) -> AsyncIterator[RunEvent]:
+    """Drive ``events``, by default a run paused on delegations, under a continuation that never resumes it."""
     return execution.drive_delegation_stream(
-        _paused_run(),
+        _paused_run() if events is None else events,
         record_type=RunRecord,
         continue_parent=_UnusedContinuation(
             RunStorage(
@@ -105,6 +106,30 @@ async def test_the_driver_refuses_a_paused_run_whose_owner_is_not_a_matrix_conve
 
     with pytest.raises(RuntimeError, match="requires a Matrix execution owner"):
         [event async for event in stream]
+
+
+@pytest.mark.asyncio
+async def test_the_driver_passes_a_failed_runs_record_on_before_its_failure() -> None:
+    """A failed run's record ends the driven stream as the run's own stream ended, before its failure propagates."""
+    failed = RunRecord(run_id="parent-run", session_id="session-1", status=RunStatus.error, error="provider down")
+
+    async def failing_run() -> AsyncIterator[RunEvent]:
+        yield TextDelta("partial output")
+        yield RunFinished(failed)
+        message = "provider down"
+        raise RuntimeError(message)
+
+    stream = _stream(failing_run())
+    seen: list[RunEvent] = []
+
+    async def consume() -> None:
+        async for event in stream:
+            seen.append(event)  # noqa: PERF401 - the stream raises after its last event, which a comprehension drops
+
+    with pytest.raises(RuntimeError, match="provider down"):
+        await consume()
+
+    assert seen == [TextDelta("partial output"), RunFinished(failed)]
 
 
 @pytest.mark.asyncio

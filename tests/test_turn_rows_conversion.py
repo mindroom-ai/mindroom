@@ -23,6 +23,7 @@ from mindroom.event_journal import (
     ApprovalFailure,
     DeliveryStage,
     EventJournalStore,
+    legacy_turn_rows,
     turn_rows,
     upgrades,
 )
@@ -879,5 +880,106 @@ async def test_a_released_journal_without_reply_tables_converts(
         assert found.source_event_prompts is None
         assert await read(store, turn_rows.redacted_events, ROOM, ["$m"]) == {"$m"}
         assert await legacy_tables(store) is None
+    finally:
+        await store.close()
+
+
+async def _index_names(store: EventJournalStore, table: str, *, postgres: bool) -> set[str]:
+    sql = (
+        "SELECT indexname AS name FROM pg_indexes WHERE schemaname = current_schema() AND tablename = ?"
+        if postgres
+        else "SELECT name FROM sqlite_master WHERE type = 'index' AND tbl_name = ?"
+    )
+    rows = await store.backend.read(lambda transaction: transaction.fetchall(sql, (table,)))
+    return {str(row["name"]) for row in rows}
+
+
+async def test_the_upgrade_replaces_the_dense_turn_source_indexes(journal: Journal) -> None:
+    """A journal holding the full turn-source indexes keeps only their partial replacements after the upgrade."""
+    store = await journal.legacy()
+
+    def dense(transaction: Transaction) -> None:
+        transaction.execute("CREATE INDEX turn_sources_selected_revision ON turn_sources (agent_name, selected_rev_id)")
+        transaction.execute("CREATE INDEX turn_sources_discovery ON turn_sources (agent_name, discovery_event_id)")
+
+    await store.backend.write(dense)
+    await store.close()
+    journal.opened.remove(store)
+
+    names = await _index_names(journal.upgraded(), "turn_sources", postgres=journal.postgres)
+
+    assert {"turn_sources_selected_revision_set", "turn_sources_discovery_set"} <= names
+    assert not names & {"turn_sources_selected_revision", "turn_sources_discovery"}
+
+
+async def test_the_conversion_plans_with_statistics_it_then_forgets(tmp_path: Path) -> None:
+    """The redactions run with SQLite statistics for the turn rows, which the upgrade drops once they are applied."""
+    path = tmp_path / "journal.db"
+    journal = Journal(lambda: EventJournalStore.open_sqlite(path), postgres=False, opened=[])
+    store = await journal.legacy()
+    await admit(store.principal(PRINCIPAL), "$m", room_id=ROOM)
+    await seed_rows(store, every_index(blob(["$m"], response="$r")))
+
+    def tombstone(transaction: Transaction) -> None:
+        transaction.execute(
+            "INSERT INTO redaction_tombstones (principal_id, room_id, redacted_event_id) VALUES (?, ?, ?)",
+            (PRINCIPAL, ROOM, "$m"),
+        )
+
+    await store.backend.write(tombstone)
+    await store.close()
+    journal.opened.remove(store)
+    analyzed_during_redaction: list[set[str]] = []
+    apply_redaction = legacy_turn_rows._apply_redaction
+
+    def recording(transaction: Transaction, *args: str) -> None:
+        rows = transaction.fetchall("SELECT tbl FROM sqlite_stat1")
+        analyzed_during_redaction.append({str(row["tbl"]) for row in rows})
+        apply_redaction(transaction, *args)
+
+    with patch.object(legacy_turn_rows, "_apply_redaction", recording):
+        await journal.upgraded().close()
+
+    with closing(sqlite3.connect(path)) as database:
+        remaining = {str(row[0]) for row in database.execute("SELECT tbl FROM sqlite_stat1")}
+    assert analyzed_during_redaction
+    assert {"turns", "turn_sources"} <= analyzed_during_redaction[-1]
+    assert not remaining & {"turns", "turn_sources", "reply_spans", "reply_span_sources", "interactive_questions"}
+
+
+async def test_a_turn_finds_its_room_through_an_earlier_login(journal: Journal) -> None:
+    """A source only an earlier login of the agent admitted still places its turn in that room."""
+    store = await journal.legacy()
+    # The current login admitted something else, so the agent has two logins to look the source up under.
+    await admit(store.principal(PRINCIPAL), "$other", room_id=ROOMS["b"])
+    await admit(store.principal(EARLIER_LOGIN), "$m", room_id=ROOM)
+    # Without a conversation target the room can only come from the admitted events.
+    await seed_rows(store, every_index(blob(["$m"], response="$r", room=None)))
+    await store.close()
+    journal.opened.remove(store)
+
+    upgraded = journal.upgraded()
+    row = await upgraded.backend.read(
+        lambda transaction: transaction.fetchone("SELECT room_id FROM turns WHERE anchor_event_id = '$m'"),
+    )
+
+    assert row is not None
+    assert row["room_id"] == ROOM
+
+
+async def test_the_runtime_writes_through_a_connection_opened_after_the_upgrade(tmp_path: Path) -> None:
+    """The writer is not the connection the schema upgrade ran on, which keeps the row counts its statistics loaded."""
+    upgraded_on: list[sqlite3.Connection] = []
+    upgrade = upgrades.upgrade_schema
+
+    def recording(transaction: Transaction, inspector: Any) -> None:  # noqa: ANN401
+        upgraded_on.append(transaction.connection)
+        upgrade(transaction, inspector)
+
+    with patch("mindroom.event_journal.sqlite_backend.upgrade_schema", recording):
+        store = EventJournalStore.open_sqlite(tmp_path / "journal.db")
+    try:
+        assert len(upgraded_on) == 1
+        assert store.backend._writer is not upgraded_on[0]
     finally:
         await store.close()
