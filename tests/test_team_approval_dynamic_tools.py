@@ -114,7 +114,6 @@ async def test_team_approval_forwards_frozen_invoking_member_functions(tmp_path:
     assert continued.await_args.kwargs["progress"] is progress
     assert continued.await_args.kwargs["approval_calls"] == calls
     assert continued.await_args.kwargs["member_names"] == ("alpha", "beta")
-    assert continued.await_args.kwargs["decisions"] == dict.fromkeys((call.tool_call_id for call in calls), True)
 
 
 @pytest.mark.asyncio
@@ -273,8 +272,6 @@ async def _exercise_team_member_assembly(
             user_id=identity.requester_id,
             configured_team_name="research",
             model_name="default",
-            decisions={"call-one": True},
-            denial_reasons={"call-one": None},
             refresh_scheduler=None,
             approval_calls=(
                 ApprovalCall(
@@ -283,6 +280,7 @@ async def _exercise_team_member_assembly(
                     invoking_agent="alpha",
                     toolkit_name="calculator",
                     expires_at_ns=2**62,
+                    decision=ApprovalDecision.APPROVED,
                 ),
             ),
             progress=None,

@@ -48,6 +48,7 @@ from mindroom.session_storage.agent_storage import create_session_storage
 from mindroom.tool_system.runtime_context import build_execution_identity_from_runtime_context, tool_runtime_context
 from mindroom.workers.backends.docker import DockerWorkerBackend
 from mindroom.workers.runtime import bind_worker_launch_config_source, shutdown_primary_worker_manager
+from tests.approval_continuation_helpers import answered_calls
 from tests.conftest import bind_runtime_paths
 from tests.identity_helpers import persist_entity_accounts
 from tests.minimal_agent_fixtures import PLUGIN, ScriptedProvider, offered_tools
@@ -342,8 +343,7 @@ async def smoke(image, evidence_dir) -> None:  # noqa: C901, PLR0912, PLR0915 - 
             return tuple(
                 apply_exact_approval_decisions(
                     paused.requirements,
-                    decisions={str(tool.tool_call_id): True for tool in paused.tools},
-                    denial_reasons={str(tool.tool_call_id): None for tool in paused.tools},
+                    answered_calls((str(tool.tool_call_id) for tool in paused.tools), approved=True),
                 ),
             )
 

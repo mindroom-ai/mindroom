@@ -41,6 +41,7 @@ from mindroom.tool_system.worker_routing import (
     ToolExecutionIdentity,
     serialize_tool_execution_identity,
 )
+from tests.approval_continuation_helpers import answered_calls
 from tests.conftest import test_runtime_paths
 
 if TYPE_CHECKING:
@@ -112,8 +113,7 @@ async def test_audit_snapshot_cannot_settle_child_or_release_followup(tmp_path: 
         RunRecord(run_id=child.run_id, session_id=child.session_id, status=status, content="retained outcome"),
         config=config,
         runtime_paths=paths,
-        decisions=None,
-        denial_reasons=None,
+        approval_calls=(),
     )
     assert asdict(child) == before_child
     assert handle_path.read_bytes() == before_handle
@@ -428,8 +428,7 @@ async def test_record_child_response_orders_tools_approval_output_usage_and_fini
         completed,
         config=config,
         runtime_paths=runtime_paths,
-        decisions={"pending-tool": True},
-        denial_reasons={"pending-tool": None},
+        approval_calls=answered_calls(["pending-tool"], approved=True),
     )
 
     record_dir = await _record_dir(child, config, runtime_paths)

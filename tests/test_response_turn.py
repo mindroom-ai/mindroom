@@ -46,6 +46,7 @@ from mindroom.session_storage.agent_storage import create_state_storage
 from mindroom.session_storage.store import ConversationStore
 from mindroom.session_storage.types import ConversationSession
 from mindroom.tool_system.events import ToolTraceEntry
+from tests.approval_continuation_helpers import answered_calls
 from tests.conftest import seed_session
 
 if TYPE_CHECKING:
@@ -307,8 +308,7 @@ def test_a_denial_is_recorded_with_the_reason_given_or_the_default_note(reason: 
 
     [decided] = response_turn_module.apply_exact_approval_decisions(
         [requirement],
-        decisions={"call": False},
-        denial_reasons={"call": reason},
+        answered_calls(["call"], approved=False, reason=reason),
     )
 
     assert decided.confirmation_note == note

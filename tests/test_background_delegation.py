@@ -600,7 +600,7 @@ async def test_a_childs_gated_call_skips_its_card_only_inside_the_requesters_aut
 
     await start_delegation_job(runtime, child, owner=identity, operation=operation)
     try:
-        decisions, _reasons, _calls = await request_child_approvals(
+        decided = await request_child_approvals(
             child,
             response,
             {(child.child_agent_name, "write_report"): "file"},
@@ -613,7 +613,7 @@ async def test_a_childs_gated_call_skips_its_card_only_inside_the_requesters_aut
         await runtime.shutdown()
 
     inside = window_thread == "$thread"
-    assert decisions == {"w": inside}
+    assert {call.tool_call_id: call.approved for call in decided} == {"w": inside}
     assert len(cards.requested) == (0 if inside else 1)
 
 

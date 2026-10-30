@@ -59,7 +59,7 @@ from mindroom.tool_system.tool_function import AdaptedToolkit
 from mindroom.tool_system.worker_routing import agent_workspace_root_path
 from mindroom.turn_continuation import continuation_decision_from_tools
 from tests.access_schema_support import with_responder_access
-from tests.approval_continuation_helpers import approval_continuation
+from tests.approval_continuation_helpers import answered_calls, approval_continuation
 from tests.conftest import bind_runtime_paths, live_turn_tools_for_test, seed_session_row
 from tests.delegation_helpers import ScriptedAgents, _delegate_runtime_context, _runtime_paths, registered_report_tool
 from tests.fakes.scripted_model import ScriptedModel, answer, calls, tool_call
@@ -383,8 +383,7 @@ async def test_hidden_delegation_never_inherits_an_approval_under_a_reused_call_
         return tuple(
             apply_exact_approval_decisions(
                 paused.requirements,
-                decisions=dict.fromkeys(asked, approved),
-                denial_reasons=dict.fromkeys(asked, "denied"),
+                answered_calls(asked, approved=approved, reason="denied"),
             ),
         )
 
@@ -501,8 +500,7 @@ async def test_hidden_child_pause_reuses_native_resume(tmp_path, monkeypatch, mo
             return tuple(
                 apply_exact_approval_decisions(
                     paused.requirements,
-                    decisions=dict.fromkeys(approval_ids, mode != "deny"),
-                    denial_reasons=dict.fromkeys(approval_ids, "denied"),
+                    answered_calls(approval_ids, approved=mode != "deny", reason="denied"),
                 ),
             )
 
@@ -553,16 +551,14 @@ async def test_hidden_child_pause_reuses_native_resume(tmp_path, monkeypatch, mo
                     parent_bash_call_id="bash-parent",
                     delegation_depth=0,
                     refresh_scheduler=None,
-                    decisions=None,
-                    denial_reasons=None,
-                    approval_calls=(),
+                    approval_calls=None,
                     on_event=lambda _event: None,
                 )
             assert isinstance(paused, PausedAttempt)
             assert paused.cli_call is not None
             assert paused.runtime_model_name == "parent-model"
-            approval_calls = approval_calls_for_cli_pause(paused, "helper")
-            decisions = {call.tool_call_id: True for call in approval_calls}
+            approved = [replace(waiting, confirmation=True) for waiting in paused.requirements]
+            approval_calls = approval_calls_for_cli_pause(paused, "helper", approved)
 
             presentation = CollectedStreamPresentation(show_tool_calls=True, track_hidden_tools=True)
             presentation.start_tool(
@@ -616,8 +612,6 @@ async def test_hidden_child_pause_reuses_native_resume(tmp_path, monkeypatch, mo
                         tool_trace=tuple(presentation.tool_trace),
                     ),
                     runtime_context=runtime,
-                    decisions=decisions,
-                    denial_reasons=dict.fromkeys(decisions),
                     tool_trace_collector=[],
                     refresh_scheduler=None,
                     authorize=authorize_binding,

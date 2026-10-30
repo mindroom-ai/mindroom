@@ -44,7 +44,7 @@ from mindroom.tool_system.progress import tool_progress_reporter
 from mindroom.tool_system.runtime_context import tool_runtime_context
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity, agent_workspace_root_path
 from tests.access_schema_support import with_responder_access
-from tests.approval_continuation_helpers import approval_continuation, repeats_each_request
+from tests.approval_continuation_helpers import answered_calls, approval_continuation, repeats_each_request
 from tests.delegation_helpers import (
     RECALLED_MEMORY,
     ScriptedAgents,
@@ -1017,7 +1017,6 @@ async def test_member_delegation_gate_and_card_keep_the_member_call_id(tmp_path:
         "execution_identity": identity,
         "delegation_depth": 0,
         "refresh_scheduler": None,
-        "approval_calls": (),
         "on_event": events.append,
     }
     with tool_runtime_context(_delegate_runtime_context(config, paths, execution_identity=identity)):
@@ -1025,15 +1024,13 @@ async def test_member_delegation_gate_and_card_keep_the_member_call_id(tmp_path:
             response,
             agent_name="leader",
             config=config,
-            decisions=None,
-            denial_reasons=None,
+            approval_calls=None,
         )
         asked = await execution.advance_delegation_call(
             requirement,
             state=state,
             previous_state=previous,
-            decisions=None,
-            denial_reasons=None,
+            approval_calls=None,
             **options,
         )
         assert asked is None
@@ -1044,22 +1041,19 @@ async def test_member_delegation_gate_and_card_keep_the_member_call_id(tmp_path:
 
         # The answer to that card is kept as the gate of the same key, which settles the call without a child.
         response.metadata = {DELEGATION_STATE_KEY: state.to_dict()}
-        decisions = {"code:call": False}
-        denial_reasons = {"code:call": "No"}
+        card = answered_calls(["code:call"], approved=False, reason="No")
         state, previous, _own = execution.prepare_delegation_state(
             response,
             agent_name="leader",
             config=config,
-            decisions=decisions,
-            denial_reasons=denial_reasons,
+            approval_calls=card,
         )
         assert state.gates == {"code:call": False}
         denied = await execution.advance_delegation_call(
             requirement,
             state=state,
             previous_state=previous,
-            decisions=decisions,
-            denial_reasons=denial_reasons,
+            approval_calls=card,
             **options,
         )
 

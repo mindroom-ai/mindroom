@@ -54,6 +54,7 @@ from mindroom.tool_system.runtime_context import (
 )
 from mindroom.tool_system.worker_routing import agent_workspace_root_path, get_tool_execution_identity
 from tests.access_schema_support import with_responder_access
+from tests.approval_continuation_helpers import answered_calls
 from tests.conftest import install_model_providers
 from tests.delegation_helpers import ScriptedAgents
 from tests.fakes.scripted_model import SYNTHETIC, ScriptedModel, answer
@@ -604,8 +605,7 @@ async def test_authored_confirmation_actual_owner_rechecks_effect_boundary(
         return tuple(
             apply_exact_approval_decisions(
                 paused.requirements,
-                decisions=dict.fromkeys(ids, decision != "deny"),
-                denial_reasons=dict.fromkeys(ids, "No"),
+                answered_calls(ids, approved=decision != "deny", reason="No"),
             ),
         )
 
@@ -636,11 +636,7 @@ async def test_self_config_cli_preserves_native_next_build_change(response_harne
         ids = [str(tool.tool_call_id) for tool in paused.tools]
         approved.extend(ids)
         return tuple(
-            apply_exact_approval_decisions(
-                paused.requirements,
-                decisions=dict.fromkeys(ids, True),
-                denial_reasons=dict.fromkeys(ids),
-            ),
+            apply_exact_approval_decisions(paused.requirements, answered_calls(ids, approved=True)),
         )
 
     h.runtime = replace(h.runtime, cli_approval_handler=approve)
