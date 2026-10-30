@@ -50,7 +50,6 @@ from mindroom.api.openai_streaming_protocol import (
     extract_stream_text,
     finalize_pending_tools,
     format_stream_tool_event,
-    is_error_response,
     new_completion_id,
     sse_chunk,
 )
@@ -73,9 +72,7 @@ from mindroom.redaction import redact_sensitive_text
 from mindroom.requester_identity import is_human_requester_id, resolve_human_requester_alias
 from mindroom.response_activity import ActiveResponseIdentity  # noqa: TC001 - FastAPI evaluates dependency annotations.
 from mindroom.response_turn import (
-    CompletedAttempt,
     ResponseTurnContext,
-    TurnSinks,
     build_llm_request_log_context,
     stream_with_llm_request_log_context,
 )
@@ -816,29 +813,18 @@ async def _non_stream_completion(
 ) -> JSONResponse:
     """Handle non-streaming chat completion: the streamed turn, collected into one answer."""
     agent_name, session_id = turn.entity_label, turn.session_id
-    run_metadata: dict[str, Any] = {}
-    completed: list[CompletedAttempt] = []
-    failures: list[Exception] = []
-    response_text = await ai_response(
-        replace(turn, show_tool_calls=False),
-        runtime_paths,
-        config,
-        sinks=TurnSinks(
-            run_metadata_collector=run_metadata,
-            on_completed=completed.append,
-            on_failed=failures.append,
-        ),
-    )
+    result = await ai_response(replace(turn, show_tool_calls=False), runtime_paths, config)
+    failed = result.failed
 
     # A failed turn completes no attempt, also when it failed after part of its answer, which its text then holds. One
     # that failed for want of a provider key answers with its reply, the setup guidance the user has to read.
-    if not completed and not any(needs_provider_key(error) for error in failures):
+    if result.completed is None and not (failed is not None and needs_provider_key(failed.error)):
         # The reply text can hold the answer the turn had started, which is conversation content; log only why it failed.
         logger.warning(
             "AI response failed",
             model=agent_name,
             session_id=session_id,
-            error=redact_sensitive_text(failure_text(failures[-1])) if failures else None,
+            error=redact_sensitive_text(failure_text(failed.error)) if failed is not None else None,
         )
         return error_response(500, "Agent execution failed", error_type="server_error")
 
@@ -849,10 +835,10 @@ async def _non_stream_completion(
         model=agent_name,
         choices=[
             _ChatCompletionChoice(
-                message=ChatMessage(role="assistant", content=response_text),
+                message=ChatMessage(role="assistant", content=result.text),
             ),
         ],
-        usage=_usage_from_run_metadata(run_metadata),
+        usage=_usage_from_run_metadata(result.run_metadata),
     )
     return OpenAIJSONResponse(content=response.model_dump())
 
@@ -1179,12 +1165,9 @@ async def _non_stream_team_completion(
         logger.exception("Team execution failed", team=team_name)
         return error_response(500, "Team execution failed", error_type="server_error")
     record = records.terminal(team_name)
-    # The leader's answer, the text a streamed team completion sends; members' text reaches the client through it.
+    # The leader's answer, the text a streamed team completion sends; members' text reaches the client through it. A
+    # failed team run raises above and hands over no record, so this one's text is never a failure's.
     response_text = record.handover_content or ""
-
-    if is_error_response(response_text):
-        logger.warning("Team response returned error", team=team_name, error=response_text)
-        return error_response(500, "Team execution failed", error_type="server_error")
 
     logger.info("Team completion sent", team=team_name, stream=False)
     result = _ChatCompletionResponse(

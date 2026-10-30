@@ -54,6 +54,7 @@ from mindroom.tool_system.runtime_context import (
 )
 from mindroom.tool_system.worker_routing import agent_workspace_root_path, get_tool_execution_identity
 from tests.access_schema_support import with_responder_access
+from tests.approval_continuation_helpers import answered_calls
 from tests.conftest import install_model_providers
 from tests.delegation_helpers import ScriptedAgents
 from tests.fakes.scripted_model import SYNTHETIC, ScriptedModel, answer
@@ -203,7 +204,7 @@ async def test_response_direct_cli_parity(tmp_path, monkeypatch, function) -> No
             show_tool_calls=True,
         )
         with tool_runtime_context(runtime):
-            result = await ai.ai_response(ctx, runtime.runtime_paths, runtime.config)
+            result = (await ai.ai_response(ctx, runtime.runtime_paths, runtime.config)).text
         results.append(result)
     assert effects[0][:4] == effects[1][:4]
     assert effects[1][4] == identity
@@ -339,7 +340,7 @@ def response_harness(tmp_path, monkeypatch) -> SimpleNamespace:
         persist_entity_accounts(runtime.config, runtime.runtime_paths)
         provider.steps = steps
         with tool_runtime_context(runtime):
-            return await ai.ai_response(
+            result = await ai.ai_response(
                 replace(
                     _turn_context(),
                     agent_mode=mode,
@@ -353,6 +354,7 @@ def response_harness(tmp_path, monkeypatch) -> SimpleNamespace:
                 runtime.runtime_paths,
                 runtime.config,
             )
+        return result.text
 
     h.respond = respond
     return h
@@ -603,8 +605,7 @@ async def test_authored_confirmation_actual_owner_rechecks_effect_boundary(
         return tuple(
             apply_exact_approval_decisions(
                 paused.requirements,
-                decisions=dict.fromkeys(ids, decision != "deny"),
-                denial_reasons=dict.fromkeys(ids, "No"),
+                answered_calls(ids, approved=decision != "deny", reason="No"),
             ),
         )
 
@@ -635,11 +636,7 @@ async def test_self_config_cli_preserves_native_next_build_change(response_harne
         ids = [str(tool.tool_call_id) for tool in paused.tools]
         approved.extend(ids)
         return tuple(
-            apply_exact_approval_decisions(
-                paused.requirements,
-                decisions=dict.fromkeys(ids, True),
-                denial_reasons=dict.fromkeys(ids),
-            ),
+            apply_exact_approval_decisions(paused.requirements, answered_calls(ids, approved=True)),
         )
 
     h.runtime = replace(h.runtime, cli_approval_handler=approve)
@@ -755,7 +752,7 @@ async def test_concurrent_factory_owners_scoped_credentials_and_grants(tmp_path,
             supports_native_tool_approval=True,
         )
         with tool_runtime_context(runtime):
-            return await ai.ai_response(turn, runtime.runtime_paths, config)
+            return (await ai.ai_response(turn, runtime.runtime_paths, config)).text
 
     minimal_steps = {session: provider.steps for session, provider in providers.items()}
     for session, runtime in runtimes.items():

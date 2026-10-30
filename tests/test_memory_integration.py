@@ -95,7 +95,7 @@ class TestMemoryIntegration:
         )
 
         # Verify response
-        assert response == "Test response"
+        assert response.text == "Test response"
 
         # Verify memory enhancement was applied
         mock_build.assert_called_once_with(
@@ -167,7 +167,7 @@ class TestMemoryIntegration:
             )
 
             # Should return user-friendly error message with the actual error
-            assert "Error: Model error" in response
+            assert "Error: Model error" in response.text
 
     @pytest.mark.asyncio
     async def test_memory_persistence_across_calls(

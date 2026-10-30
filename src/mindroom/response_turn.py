@@ -120,22 +120,21 @@ class CompletedApprovalRun:
 
 def apply_exact_approval_decisions(
     requirements: Sequence[RunRequirement],
-    *,
-    decisions: Mapping[str, bool],
-    denial_reasons: Mapping[str, str | None],
+    calls: Sequence[ApprovalCall],
 ) -> list[RunRequirement]:
-    """Apply decisions only when they exactly identify one persisted call each."""
+    """Apply the decisions ``calls`` carry only when they exactly identify one persisted call each."""
     pending = [requirement for requirement in requirements if requirement.needs_confirmation]
     call_ids = [requirement.tool_execution.tool_call_id for requirement in pending]
-    decision_ids = set(decisions)
-    if len(call_ids) != len(set(call_ids)) or set(call_ids) != decision_ids or set(denial_reasons) != decision_ids:
+    decided = {call.tool_call_id: call for call in calls}
+    if len(call_ids) != len(set(call_ids)) or set(call_ids) != set(decided):
         msg = "Paused tools no longer match the approval continuation"
         raise RuntimeError(msg)
     for requirement, tool_call_id in zip(pending, call_ids, strict=True):
-        if decisions[tool_call_id]:
+        call = decided[tool_call_id]
+        if call.approved:
             requirement.confirm()
         else:
-            requirement.reject(denial_reasons[tool_call_id])
+            requirement.reject(call.reason)
     return pending
 
 
@@ -401,8 +400,8 @@ class TurnSinks:
     turn_recorder: TurnRecorder | None = None
     run_metadata_collector: dict[str, Any] | None = None
     on_completed: Callable[[CompletedAttempt], None] | None = None
-    # Receives the failure an attempt that failed with a reply text reports.
-    on_failed: Callable[[Exception], None] | None = None
+    # Receives the attempt that failed with a reply text.
+    on_failed: Callable[[HandledAttempt], None] | None = None
     # Receives each attempt's run id and configured model name before the attempt starts.
     on_attempt_start: Callable[[str, str], None] | None = None
     # Whether the driver stores an interrupted turn in its scope's history; a delegated child's interruption belongs
@@ -493,7 +492,8 @@ class CompletedAttempt:
     tool_executions: tuple[ToolExecution, ...] = ()
     control_calls: tuple[ReportedCall, ...] = ()
     completed_tools: tuple[ToolTraceEntry, ...] = ()
-    metadata_content: dict[str, Any] | None = None
+    # Builds the run metadata the attempt publishes; building prices the run, so only a reader of it calls this.
+    build_run_metadata: Callable[[], dict[str, Any]] | None = None
     status: RunStatus = RunStatus.completed
 
 
@@ -600,18 +600,14 @@ def pause_without_approval_error(record: AnyRunRecord, *, entity_label: str) -> 
     return RuntimeError(msg)
 
 
-def own_approved_calls(
-    record: AnyRunRecord,
-    calls: Sequence[ApprovalCall],
-    decisions: Mapping[str, bool],
-) -> tuple[ApprovalCall, ...]:
+def own_approved_calls(record: AnyRunRecord, calls: Sequence[ApprovalCall]) -> tuple[ApprovalCall, ...]:
     """Return the approved calls among ``calls`` that the paused run ``record`` asked about itself.
 
     Projected child calls belong to the child executor, so a run waiting on a child asked about none of its own.
     """
     if DelegationState.from_metadata(record.metadata).pending_child_id is not None:
         return ()
-    return tuple(call for call in calls if decisions.get(call.tool_call_id))
+    return tuple(call for call in calls if call.approved)
 
 
 def pending_approval_requirements(record: AnyRunRecord) -> list[RunRequirement]:
@@ -722,9 +718,10 @@ class HandledAttempt:
     """One attempt that failed: the reply text that says so, which the driver emits once it recorded the failure."""
 
     text: str
-    # The failure the text reports, which ``TurnSinks.on_failed`` receives.
+    # The failure the text reports.
     error: Exception
-    metadata_content: dict[str, Any] | None = None
+    # Builds the run metadata the attempt publishes, as ``CompletedAttempt.build_run_metadata`` does.
+    build_run_metadata: Callable[[], dict[str, Any]] | None = None
 
 
 @dataclass(frozen=True)
@@ -1010,10 +1007,10 @@ def _settle_skipped_attempt(
     run.record.mark_skipped()
 
 
-def _publish_run_metadata(sinks: TurnSinks, metadata_content: dict[str, Any] | None) -> None:
-    """Publish one attempt's run metadata payload to the caller's collector."""
-    if sinks.run_metadata_collector is not None and metadata_content is not None:
-        sinks.run_metadata_collector.update(metadata_content)
+def _publish_run_metadata(sinks: TurnSinks, build: Callable[[], dict[str, Any]] | None) -> None:
+    """Publish one attempt's run metadata to the caller's collector, building it only for a caller that collects it."""
+    if sinks.run_metadata_collector is not None and build is not None:
+        sinks.run_metadata_collector.update(build())
 
 
 def _record_completed_turn(
@@ -1023,7 +1020,7 @@ def _record_completed_turn(
     settle: _CompletionSettle,
 ) -> None:
     """Publish the turn-ending attempt's run metadata, record the completed turn, and hand the attempt to the caller."""
-    _publish_run_metadata(sinks, resolution.metadata_content)
+    _publish_run_metadata(sinks, resolution.build_run_metadata)
     run.record.record_completed(
         run_id=resolution.attempt_run_id or resolution.run_id,
         run_metadata=run.run_metadata,
@@ -1214,10 +1211,10 @@ async def _stream_response_turn[ChunkT](  # noqa: C901, PLR0912, PLR0915
                     run.record.mark_suspended()
                     raise ResponsePausedForApproval(replace(resolution, continuation_count=continuation_count))
                 if isinstance(resolution, HandledAttempt):
-                    _publish_run_metadata(sinks, resolution.metadata_content)
+                    _publish_run_metadata(sinks, resolution.build_run_metadata)
                     await _record_interrupted(ctx, adapter, sinks, run, continuation, RunStatus.error)
                     if sinks.on_failed is not None:
-                        sinks.on_failed(resolution.error)
+                        sinks.on_failed(resolution)
                     yield resolution.text
                     return
                 settle = _settle_completed_attempt(
