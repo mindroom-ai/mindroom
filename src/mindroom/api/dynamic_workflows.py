@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import FileResponse
 
-from mindroom.api.auth_user import request_auth_user
+from mindroom.api.auth_user import STANDALONE_USER_ID, AuthSource, AuthUser, request_auth_user
 from mindroom.api.config_lifecycle import api_runtime_paths
 from mindroom.api.report_headers import set_report_headers
 from mindroom.dynamic_workflows.store import DynamicWorkflowRun, DynamicWorkflowStore
@@ -65,10 +65,19 @@ def _authorize_private_report_request(
 ) -> None:
     """Admit the login that requested the run: as the Matrix user it acts as, or as an identity it carries."""
     auth_user = request_auth_user(request)
-    # A gateway's user-ID claim can itself be the Matrix ID.
     if auth_user is None or run.requested_by not in {
         auth_user.requester_id(runtime_paths),
         auth_user.matrix_user_id,
-        auth_user.user_id,
+        _carried_user_id(auth_user),
     }:
         raise HTTPException(status_code=403, detail="Private Dynamic Workflow report access denied.")
+
+
+def _carried_user_id(auth_user: AuthUser) -> str | None:
+    """Return the login's own user ID when it can name a requester: a gateway's claim can itself be the Matrix ID.
+
+    A gateway user whose claim is the standalone sentinel is not the standalone operator.
+    """
+    if auth_user.source is AuthSource.TRUSTED_UPSTREAM and auth_user.user_id == STANDALONE_USER_ID:
+        return None
+    return auth_user.user_id

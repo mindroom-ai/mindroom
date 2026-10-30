@@ -193,6 +193,21 @@ def test_private_dynamic_workflow_report_accepts_gateway_user_id_that_is_the_mat
     assert response.status_code == 200, response.text
 
 
+def test_private_dynamic_workflow_report_refuses_a_gateway_user_named_like_the_standalone_login(
+    test_client: TestClient,
+) -> None:
+    """A gateway user whose user-ID claim is literally `standalone` is not the standalone operator."""
+    runtime_paths = _use_process_env(test_client.app, trusted_upstream_env(matrix_user_id_claim=None))
+    run = _completed_run(runtime_paths, requested_by="standalone")
+
+    response = test_client.get(
+        f"/reports/private/agent/general/competitor-research-report/{run.run_id}",
+        headers=trusted_upstream_headers(user_id="standalone"),
+    )
+
+    assert response.status_code == 403
+
+
 def test_private_dynamic_workflow_report_accepts_matching_trusted_upstream_user(test_client: TestClient) -> None:
     """Private report auth should allow the Matrix requester that started the run."""
     runtime_paths = use_trusted_upstream_runtime(test_client.app)
