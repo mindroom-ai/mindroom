@@ -15,6 +15,7 @@ that holds the saved document.
 
 from __future__ import annotations
 
+import json
 from functools import partial
 from typing import TYPE_CHECKING, Any
 
@@ -32,7 +33,9 @@ from mindroom.api.credentials_target import (
 )
 from mindroom.credentials.manager import (
     CredentialsManager,
+    EnvironmentCredentialError,
     delete_scoped_credentials,
+    get_runtime_credentials_manager,
     load_scoped_credentials,
     save_scoped_credentials,
 )
@@ -688,3 +691,30 @@ def test_a_requester_scope_without_a_requester_refuses_writes(tmp_path: Path, sc
             worker_target=_target(scope, None),
         )
     assert stores["base"].load_credentials(service) is None
+
+
+@pytest.mark.parametrize(
+    ("scope", "service"),
+    [(None, "openweather"), ("shared", "homeassistant"), ("user", "google_drive_oauth_client")],
+)
+def test_deleting_a_credential_only_the_environment_supplies_is_refused(
+    tmp_path: Path,
+    scope: str | None,
+    service: str,
+) -> None:
+    """Every delete that lands in the primary store refuses a credential only the environment supplies there."""
+    seeds = json.dumps([{"service": service, "credentials": {"api_key": "seeded"}}])
+    runtime_paths = constants_mod.resolve_primary_runtime_paths(
+        config_path=tmp_path / "config.yaml",
+        storage_path=tmp_path,
+        process_env={"MINDROOM_CREDENTIAL_SEEDS_JSON": seeds},
+    )
+    manager = get_runtime_credentials_manager(runtime_paths)
+    scope_args = {"credentials_manager": manager, "worker_target": _target(scope, IDENTITY)}
+
+    with pytest.raises(EnvironmentCredentialError, match="MINDROOM_CREDENTIAL_SEEDS_JSON"):
+        delete_scoped_credentials(service, **scope_args)
+    # A saved override deletes normally, revealing the environment's value again.
+    save_scoped_credentials(service, {"api_key": "saved", "_source": "ui"}, **scope_args)
+    delete_scoped_credentials(service, **scope_args)
+    assert (load_scoped_credentials(service, **scope_args) or {}).get("api_key") == "seeded"

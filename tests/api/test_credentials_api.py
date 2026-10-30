@@ -332,7 +332,7 @@ class TestCredentialsAPI:
         response = client.get("/api/credentials/openai/api-key?agent_name=general")
 
         assert response.status_code == 200
-        mock_credentials_manager.for_worker.assert_called_once_with(expected_worker_key)
+        assert {call.args[0] for call in mock_credentials_manager.for_worker.call_args_list} == {expected_worker_key}
 
     def test_credentials_target_worker_resolver_matches_worker_routing(
         self,

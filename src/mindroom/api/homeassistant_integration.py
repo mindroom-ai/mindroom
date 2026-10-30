@@ -31,6 +31,7 @@ from mindroom.api.credentials_target import (
     save_credentials_for_target,
 )
 from mindroom.api.integrations import get_dashboard_url
+from mindroom.credentials.manager import EnvironmentCredentialError
 from mindroom.homeassistant_requests import send_homeassistant_request
 from mindroom.homeassistant_url_validation import homeassistant_url_error_detail, validate_homeassistant_instance_url
 from mindroom.server_fetch_url import ServerFetchAsyncHTTPTransport, ServerFetchUrlError
@@ -412,6 +413,8 @@ async def disconnect(request: Request, agent_name: str | None = None) -> dict[st
         delete_credentials_for_target("homeassistant", target)
     except HTTPException:
         raise
+    except EnvironmentCredentialError as e:
+        raise HTTPException(status_code=409, detail=str(e)) from e
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to disconnect: {e!s}") from e
     else:

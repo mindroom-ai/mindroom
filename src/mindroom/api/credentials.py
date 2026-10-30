@@ -35,7 +35,7 @@ from mindroom.api.credentials_target import (
     resolve_request_credentials_target,
     save_credentials_for_target,
 )
-from mindroom.credentials.manager import validate_service_name
+from mindroom.credentials.manager import EnvironmentCredentialError, validate_service_name
 from mindroom.credentials.policy import is_egress_broker_service, is_oauth_token_service
 from mindroom.credentials.sync import canonical_provider_service, resolve_provider_service_api_key
 from mindroom.embeddings.embedder_health import handle_embedder_credential_change
@@ -183,6 +183,8 @@ class _DashboardCredentialAccess:
         self.reject_token_service(service)
         try:
             delete_credentials_for_target(service, self.target)
+        except EnvironmentCredentialError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
 
@@ -427,7 +429,7 @@ async def get_api_key(
 
     if api_key:
         # The environment's own declarations carry no source tag; the store knows which variable supplies them.
-        declared = access.target.base_manager.declared_variable(credential_service) is not None
+        declared = environment_variable_for_target(credential_service, access.target) is not None
         source = credentials.get("_source") or ("env" if declared else None)
         response = {
             "service": service,
@@ -486,12 +488,6 @@ async def delete_credentials(
     existing_credentials = access.load(service)
     if existing_credentials:
         access.reject_stored_oauth_credentials(existing_credentials)
-    variable = environment_variable_for_target(service, access.target)
-    if variable is not None:
-        raise HTTPException(
-            status_code=409,
-            detail=f"{service} comes from {variable} in the environment; remove it there and restart MindRoom.",
-        )
     previous_embedder_runtime = _active_embedder_runtime(request, access)
     access.delete(service)
     _handle_runtime_credential_change(request, access, previous_embedder_runtime)
