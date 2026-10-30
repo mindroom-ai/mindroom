@@ -45,6 +45,7 @@ from mindroom.tool_system.runtime_context import (
 from mindroom.tool_system.worker_routing import get_tool_execution_identity, tool_execution_identity
 from tests.oauth_test_utils import publish_oauth_credentials
 from tests.test_mcp_manager import _FakeClientSession, _patch_manager, _tool
+from tests.test_script_tool_broker import _routed_connection_calculator
 from tests.test_tool_hooks import _tool_runtime_context
 
 if TYPE_CHECKING:
@@ -764,6 +765,30 @@ async def test_gateway_call_context_covers_construction_body_and_cleanup(
     assert phases == ["build", "connect", "body", "close"]
     # Worker-routed calls take their config from the toolkit build, so the gateway's config reaches the worker.
     assert built_from == [context.config]
+
+
+@pytest.mark.asyncio
+@pytest.mark.xfail(strict=True, reason="the gateway connects every requires_connect toolkit, worker-routed ones too")
+async def test_gateway_leaves_a_worker_routed_toolkit_s_connection_to_the_worker(
+    context: AgentToolContext,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A toolkit the agent routes to a worker connects in that worker only, as a chat run's does, never here."""
+    config = context.config.model_copy(deep=True)
+    config.agents["personal"].worker_tools = ["calculator"]
+    snapshot = ApiSnapshot(
+        generation=1,
+        runtime_paths=context.runtime_paths,
+        config_data=config.model_dump(),
+        runtime_config=config,
+    )
+    routed = resolve_connection_agent(resolve_connection_user(snapshot, context.requester_id), "personal")
+
+    with _routed_connection_calculator(monkeypatch) as lifecycle:
+        result = await gateway.invoke_tool(routed, toolkit="calculator", function="add", arguments={"a": 1, "b": 2})
+
+    assert result == {"result": "3"}
+    assert lifecycle == ["worker calculator.add"]
 
 
 @pytest.mark.asyncio

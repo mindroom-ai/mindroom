@@ -8,9 +8,10 @@ import threading
 import time
 from collections.abc import Iterator  # noqa: TC003 - Agno reads tool annotations at runtime.
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager
 from dataclasses import replace
 from types import SimpleNamespace
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING, ClassVar, cast
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -57,6 +58,7 @@ from mindroom.script_runs.models import (
     ScriptToolGrant,
 )
 from mindroom.script_runs.store import ScriptCallConflictError, ScriptRunStore, mint_script_capability
+from mindroom.tool_system import sandbox_proxy
 from mindroom.tool_system.runtime_context import build_execution_identity_from_runtime_context
 from mindroom.tool_system.tool_hooks import run_sync_tool_entrypoint
 from mindroom.tool_system.worker_routing import (
@@ -73,6 +75,7 @@ from tests.conftest import (
     make_relation_lookup,
     runtime_paths_for,
 )
+from tests.scripted_agent_helpers import registered_toolkit
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -161,6 +164,7 @@ def _context(
     tool_function_filter: Callable[[Function], bool] | None = None,
     worker_scope: WorkerScope | None = None,
     private: bool = False,
+    worker_tools: list[str] | None = None,
 ) -> ToolRuntimeContext:
     runtime_paths = _runtime_paths(tmp_path)
     config = bind_runtime_paths(
@@ -171,6 +175,7 @@ def _context(
                     tools=["calculator"],
                     worker_scope=worker_scope,
                     private=({"per": "user_agent", "root": "private/watcher"} if private else None),
+                    worker_tools=worker_tools,
                 ),
             },
             defaults=DefaultsConfig(tools=[]),
@@ -315,6 +320,7 @@ def _broker(
     authorized: bool = True,
     admission_open: bool = True,
     decline: str | None = None,
+    worker_tools: list[str] | None = None,
 ) -> tuple[ScriptToolBroker, str]:
     context = _context(
         tmp_path,
@@ -325,6 +331,7 @@ def _broker(
         tool_function_filter=tool_function_filter,
         worker_scope=worker_scope,
         private=private,
+        worker_tools=worker_tools,
     )
     store = ScriptRunStore(context.runtime_paths)
     token, token_hash = mint_script_capability()
@@ -1032,6 +1039,57 @@ async def test_script_broker_runs_a_streaming_tool_to_the_end_of_its_stream(
     assert receipt.state is ScriptCallState.COMPLETED
     assert receipt.result == "1 + 2 = 3"
     assert lifecycle == ["connect", "body", "close"]
+
+
+class _RoutedConnectionToolkit(Toolkit):
+    """A calculator with a connection lifecycle; ``lifecycle`` records each step the primary runs."""
+
+    _requires_connect = True
+    lifecycle: ClassVar[list[str]] = []
+
+    def __init__(self) -> None:
+        super().__init__(name="calculator", tools=[self.add])
+
+    def connect(self) -> None:
+        type(self).lifecycle.append("primary connect")
+
+    def close(self) -> None:
+        type(self).lifecycle.append("primary close")
+
+    def add(self, a: int, b: int) -> int:
+        type(self).lifecycle.append("primary add")
+        return a + b
+
+
+@contextmanager
+def _routed_connection_calculator(monkeypatch: pytest.MonkeyPatch) -> Iterator[list[str]]:
+    """Register ``calculator`` as a toolkit with a connection whose worker calls answer 3; yield what runs where."""
+
+    def worker(*, tool_name: str, function_name: str, **_kwargs: object) -> str:
+        _RoutedConnectionToolkit.lifecycle.append(f"worker {tool_name}.{function_name}")
+        return "3"
+
+    _RoutedConnectionToolkit.lifecycle.clear()
+    monkeypatch.setattr(sandbox_proxy, "_call_proxy_sync", worker)
+    with registered_toolkit("calculator", _RoutedConnectionToolkit):
+        yield _RoutedConnectionToolkit.lifecycle
+
+
+@pytest.mark.asyncio
+@pytest.mark.xfail(strict=True, reason="the broker connects every requires_connect toolkit, worker-routed ones too")
+async def test_script_broker_leaves_a_worker_routed_toolkit_s_connection_to_the_worker(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A toolkit the agent routes to a worker connects in that worker only, as a chat run's does, never here."""
+    broker, token = _broker(tmp_path, events=[], worker_tools=["calculator"])
+
+    with _routed_connection_calculator(monkeypatch) as lifecycle:
+        receipt = await _call_through_gateway(broker, _request(call_id="routed-call"), token)
+
+    assert receipt.state is ScriptCallState.COMPLETED
+    assert receipt.result == "3"
+    assert lifecycle == ["worker calculator.add"]
 
 
 @pytest.mark.asyncio

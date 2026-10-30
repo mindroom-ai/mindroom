@@ -26,6 +26,7 @@ from mindroom.config.main import Config, ConfigRuntimeValidationError, load_conf
 from mindroom.constants import RuntimePaths, resolve_runtime_paths
 from mindroom.hooks import EVENT_MESSAGE_RECEIVED, HookRegistry
 from mindroom.oauth.registry import clear_oauth_provider_cache, load_oauth_providers
+from mindroom.orchestrator import _MultiAgentOrchestrator
 from mindroom.tool_system.agent_tools import resolve_agent_tools
 from mindroom.tool_system.metadata import TOOL_METADATA, TOOL_REGISTRY, get_tool_by_name
 from mindroom.tool_system.plugins import get_configured_plugin_roots, load_plugins, reload_plugins
@@ -1981,6 +1982,56 @@ def test_load_config_tolerates_agent_reference_to_tool_declared_by_broken_plugin
             and call.kwargs["config_path"] == "agents.assistant.tools[1]"
             for call in mock_logger.warning.call_args_list
         )
+
+
+@pytest.mark.asyncio
+@pytest.mark.xfail(strict=True, reason="tool availability is frozen into the config when it validates")
+async def test_a_repaired_plugin_s_tool_returns_to_the_live_config_after_an_explicit_reload(tmp_path: Path) -> None:
+    """Startup skips a broken plugin and the tool it declares; once its file is fixed, ``!reload-plugins`` restores it.
+
+    No config edit follows the repair, so the live config stays the object startup validated.
+    """
+    plugin_root = tmp_path / "plugins" / "broken"
+    _write_broken_tool_plugin(plugin_root)
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        "models:\n"
+        "  default:\n"
+        "    provider: openai\n"
+        "    id: gpt-6-astra\n"
+        "agents:\n"
+        "  assistant:\n"
+        "    display_name: Assistant\n"
+        "    tools:\n"
+        "      - broken_plugin_tool\n"
+        "plugins:\n"
+        "  - ./plugins/broken\n",
+        encoding="utf-8",
+    )
+    runtime_paths = resolve_runtime_paths(
+        config_path=config_path,
+        storage_path=tmp_path / "mindroom_data",
+        process_env={"MATRIX_HOMESERVER": "http://localhost:8008", "MINDROOM_NAMESPACE": ""},
+    )
+
+    with _preserved_plugin_loader_state():
+        config = load_config(runtime_paths, tolerate_plugin_load_errors=True)
+        assert "broken_plugin_tool" not in resolve_agent_tools(config, "assistant").tool_names
+        tools_path = plugin_root / "tools.py"
+        repaired = tools_path.read_text(encoding="utf-8").replace(
+            "raise ImportError('missing optional plugin dependency')\n",
+            "",
+        )
+        tools_path.write_text(repaired, encoding="utf-8")
+        _bump_mtime(tools_path)
+        orchestrator = _MultiAgentOrchestrator(runtime_paths)
+        orchestrator.config = config
+        orchestrator.running = True
+
+        result = await orchestrator.reload_plugins_now(source="command")
+
+        assert result.active_plugin_names == ("broken_plugin",)
+        assert "broken_plugin_tool" in [entry.name for entry in resolve_agent_tools(config, "assistant").candidates()]
 
 
 def test_load_config_tolerates_unavailable_ast_plugin_tool_with_authored_overrides(

@@ -12,10 +12,11 @@ resumes the turn they approve.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import threading
 from contextlib import asynccontextmanager
-from dataclasses import replace
+from dataclasses import asdict, replace
 from typing import TYPE_CHECKING, Any, ClassVar
 from unittest.mock import AsyncMock, patch
 
@@ -629,6 +630,53 @@ async def test_a_member_s_tool_hooks_run_as_the_member_with_the_turn_s_live_bind
 
     assert ProbeToolkit.calls == ["a"]
     assert seen == [("writer", "writer", True)]
+
+
+@pytest.mark.asyncio
+async def test_a_configured_member_s_job_is_owned_by_the_member_answering_through_the_team(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A configured team member's call that becomes a job saves this exact owner, and so this exact job ID.
+
+    The ID hashes every owner field with the run and call IDs, so a change to any field the owner names loses saved
+    jobs across an upgrade: their next lookup computes another ID.
+    """
+    team = squad_turn(
+        tmp_path,
+        monkeypatch,
+        leader=[delegate("call-team", "writer", "Touch it"), answer("Touched.", usage(50, 5))],
+        writer=[calls(tool_call("touch", "call-touch", label="a"), metrics=usage(10, 1)), answer("Done.")],
+    )
+    team.config.background_tool_jobs.enabled = True
+    pin_background_tool_jobs(team.config, team.runtime_paths)
+    runtime = await tool_job_runtime(team.runtime_paths.storage_root)
+    register_background_runtime(team.runtime_paths, runtime)
+    try:
+        async with execution_resources():
+            await team.stream()
+    finally:
+        await runtime.shutdown()
+
+    [job] = (await saved_jobs(team.runtime_paths.storage_root)).values()
+    owner = {
+        "channel": "matrix",
+        "agent_name": "writer",
+        "requester_id": REQUESTER_ID,
+        "room_id": ROOM_ID,
+        "thread_id": THREAD_ID,
+        "resolved_thread_id": THREAD_ID,
+        "session_id": SESSION_ID,
+        "tenant_id": None,
+        "account_id": None,
+        "transport_agent_name": "squad",
+    }
+    assert asdict(job.owner) == owner
+    # The member's run ID is random, so the ID is pinned as the hash of the pinned owner with the member's run.
+    _, [member] = team.stored_runs()
+    assert (job.adapter["run_id"], job.adapter["tool_call_id"]) == (member.run_id, "call-touch")
+    hashed = {"owner": owner, "run_id": member.run_id, "tool_call_id": "call-touch"}
+    assert job.job_id == hashlib.sha256(json.dumps(hashed, sort_keys=True).encode()).hexdigest()
 
 
 class _IdentityProbe(Toolkit):

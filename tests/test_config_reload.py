@@ -73,6 +73,7 @@ from tests.conftest import (
 )
 from tests.test_personal_agents_config import BASE as PERSONAL_AGENTS_BASE
 from tests.test_personal_agents_config import _entry as personal_agent_entry
+from tests.test_plugins import _preserved_plugin_loader_state, _write_import_task_plugin
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterable
@@ -1167,6 +1168,43 @@ async def test_reload_plugins_now_deactivates_all_plugins_when_degraded_reload_s
         for module_name in set(sys.modules) - original_modules:
             if module_name.startswith("mindroom_plugin_"):
                 sys.modules.pop(module_name, None)
+
+
+@pytest.mark.asyncio
+@pytest.mark.xfail(strict=True, reason="a failed explicit reload cancels the live plugin tasks, then deactivates all")
+async def test_a_reload_that_fails_as_a_whole_keeps_the_live_plugins_and_their_tasks(tmp_path: Path) -> None:
+    """A reload whose plugin set no tolerant load can accept publishes nothing: the live plugins keep hooks and tasks."""
+    _write_import_task_plugin(tmp_path / "plugins" / "import-task")
+    other_manifest = tmp_path / "plugins" / "other" / "mindroom.plugin.json"
+    other_manifest.parent.mkdir(parents=True)
+    other_manifest.write_text('{"name": "other", "skills": []}', encoding="utf-8")
+    config = _runtime_bound_config(Config(plugins=["./plugins/import-task", "./plugins/other"]), tmp_path)
+    orchestrator = _MultiAgentOrchestrator(runtime_paths_for(config))
+    orchestrator.config = config
+    orchestrator.running = True
+    hooks_path = (tmp_path / "plugins" / "import-task" / "hooks.py").resolve()
+
+    tasks: list[asyncio.Task[None]] = []
+    with _preserved_plugin_loader_state():
+        try:
+            await orchestrator.reload_plugins_now(source="command")
+            live_task = cached_plugin_module(hooks_path)._BACKGROUND_TASK
+            tasks.append(live_task)
+            # The other plugin now claims the live plugin's name, which skipping broken plugins cannot resolve.
+            other_manifest.write_text('{"name": "import-task", "skills": []}', encoding="utf-8")
+
+            with pytest.raises(plugin_module.PluginValidationError, match="Duplicate plugin manifest names configured"):
+                await orchestrator.reload_plugins_now(source="command")
+            await asyncio.sleep(0)
+
+            assert not live_task.done()
+            assert [hook.plugin_name for hook in orchestrator.hook_registry.hooks_for(EVENT_MESSAGE_RECEIVED)] == [
+                "import-task",
+            ]
+        finally:
+            for task in tasks:
+                task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
 
 
 @pytest.mark.asyncio

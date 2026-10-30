@@ -20,7 +20,7 @@ from agno.tools.function import ToolResult
 
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
-from mindroom.config.models import BackgroundToolJobsConfig
+from mindroom.config.models import BackgroundToolJobsConfig, DefaultsConfig
 from mindroom.custom_tools.job import JobTools
 from mindroom.hooks import EVENT_TOOL_BEFORE_CALL, HookRegistry, ToolBeforeCallContext, hook
 from mindroom.llm.errors import ProviderError
@@ -66,8 +66,11 @@ from mindroom.tool_system.metadata import get_tool_by_name
 from mindroom.tool_system.runtime_context import build_execution_identity_from_runtime_context, tool_runtime_context
 from mindroom.tool_system.tool_function import ToolOutcome, ToolValue
 from mindroom.tool_system.tool_hooks import build_tool_hook_middleware, run_async_entrypoint_blocking_call
-from tests.delegation_helpers import _delegate_runtime_context, _runtime_paths
+from mindroom.tool_system.worker_routing import ToolExecutionIdentity
+from tests.delegation_helpers import ScriptedAgents, _delegate_runtime_context, _runtime_paths, respond
 from tests.fakes.scripted_model import Await, ScriptedModel, answer, calls, tool_call
+from tests.identity_helpers import entity_ids
+from tests.scripted_agent_helpers import registered_toolkit
 from tests.test_tool_hooks import _plugin
 from tests.tool_job_helpers import (
     JOB_TEST_TIMEOUT,
@@ -326,6 +329,83 @@ async def test_registered_sync_tool_completes_through_the_loop(
                     assert json.loads(str(tool.result))["job_id"] == jobs[0].job_id
     finally:
         await runtime.shutdown()
+
+
+class _OwnerProbe(Toolkit):
+    """The agent's own tool, whose one call becomes a job."""
+
+    def __init__(self) -> None:
+        super().__init__(name="owner_probe", tools=[self.touch])
+
+    async def touch(self) -> str:
+        """Touch nothing."""
+        return "touched"
+
+
+@pytest.mark.asyncio
+async def test_an_agent_s_job_is_owned_by_the_agent_in_its_conversation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An agent's own call that becomes a job in a Matrix reply saves this exact owner, and so this exact job ID.
+
+    The ID hashes every owner field with the run and call IDs, so a change to any field the owner names loses saved
+    jobs across an upgrade: their next lookup computes another ID.
+    """
+    paths = _runtime_paths(tmp_path)
+    config = Config(
+        agents={"leader": AgentConfig(display_name="Leader", tools=["owner_probe"])},
+        defaults=DefaultsConfig(tools=[]),
+        memory={"backend": "none"},
+        background_tool_jobs=BackgroundToolJobsConfig(enabled=True),
+    )
+    entity_ids(config, paths)
+    # The identity a bot gives its own reply in a thread, as the runtime context it binds names it.
+    identity = ToolExecutionIdentity(
+        "matrix",
+        "leader",
+        "@alice:example.org",
+        "!room:example.org",
+        "$thread:example.org",
+        "$thread:example.org",
+        "!room:example.org:$thread:example.org",
+        transport_agent_name="leader",
+    )
+    runtime = await tool_job_runtime(tmp_path)
+    pin_background_tool_jobs(config, paths)
+    register_background_runtime(paths, runtime)
+    model = ScriptedModel([calls(tool_call("touch", "call-touch")), answer("Done")])
+    ScriptedAgents({"leader": model}).install(monkeypatch)
+    try:
+        with registered_toolkit("owner_probe", _OwnerProbe):
+            async with execution_resources():
+                await respond(
+                    "leader",
+                    "Touch it",
+                    config=config,
+                    runtime_paths=paths,
+                    identity=identity,
+                    run_id="run-1",
+                )
+    finally:
+        await runtime.shutdown()
+
+    [job] = (await saved_jobs(paths.storage_root)).values()
+    assert (job.tool_name, job.status) == ("touch", "completed")
+    assert asdict(job.owner) == {
+        "channel": "matrix",
+        "agent_name": "leader",
+        "requester_id": "@alice:example.org",
+        "room_id": "!room:example.org",
+        "thread_id": "$thread:example.org",
+        "resolved_thread_id": "$thread:example.org",
+        "session_id": "!room:example.org:$thread:example.org",
+        "tenant_id": None,
+        "account_id": None,
+        "transport_agent_name": "leader",
+    }
+    assert (job.adapter["run_id"], job.adapter["tool_call_id"]) == ("run-1", "call-touch")
+    assert job.job_id == "ad48a334cdcae4deee1dac610cb0ba48a9f3c1da6cd9f274533c1ec369f5c5a0"
 
 
 @pytest.mark.asyncio
