@@ -77,18 +77,10 @@ def _context(
     return _provider_context(github_oauth_provider(), runtime_paths, credentials_manager, worker_target)
 
 
-def _github_tool() -> dict[str, object]:
-    return {
-        "name": "github",
-        "status": "requires_config",
-        "setup_type": "oauth",
-        "auth_provider": "github",
-        "config_fields": [
-            {"name": "access_token", "required": False},
-            {"name": "base_url", "required": False},
-        ],
-        "oauth_fallback_fields": ["access_token"],
-    }
+def _github_tool() -> dict[str, Any]:
+    tool = export_tools_metadata({"github": builtin_tool_registry().entries["github"]})[0]
+    assert tool["status"] == "requires_config"
+    return tool
 
 
 @pytest.mark.asyncio
@@ -156,6 +148,48 @@ async def test_environment_oauth_fallback_status_is_available_and_secret_free(tm
     assert tool["manual_auth_configured"] is False
     assert tool["environment_auth_configured"] is True
     assert environment_secret not in repr(tool)
+
+
+@pytest.mark.asyncio
+async def test_environment_oauth_fallback_reads_the_env_file_past_a_blank_exported_value(tmp_path: Path) -> None:
+    """A blank exported token does not hide the `.env` token the tool itself falls back to."""
+    (tmp_path / "config.yaml").write_text("agents: {}\n")
+    (tmp_path / ".env").write_text("GITHUB_ACCESS_TOKEN=github-env-file-secret\n")
+    runtime_paths = resolve_runtime_paths(
+        config_path=tmp_path / "config.yaml",
+        storage_path=tmp_path / "mindroom_data",
+        process_env={"GITHUB_ACCESS_TOKEN": " "},
+    )
+    manager = get_runtime_credentials_manager(runtime_paths)
+    target = _worker_target("@alice:example.test")
+    tool = _github_tool()
+
+    await tools_api._update_tools_statuses([tool], _context(runtime_paths, manager, target))
+
+    assert tool["environment_auth_configured"] is True
+    assert tool["status"] == "available"
+
+
+@pytest.mark.asyncio
+async def test_environment_oauth_fallback_needs_every_fallback_field(tmp_path: Path) -> None:
+    """The environment configures a tool only when it sets every manual fallback field."""
+    runtime_paths = resolve_runtime_paths(
+        config_path=tmp_path / "config.yaml",
+        storage_path=tmp_path / "mindroom_data",
+        process_env={"PROBE_KEY_ID": "key-id"},
+    )
+    manager = get_runtime_credentials_manager(runtime_paths)
+    target = _worker_target("@alice:example.test")
+    tool = _github_tool()
+    tool["config_fields"] = [
+        {"name": "key_id", "required": False, "env": ["PROBE_KEY_ID"]},
+        {"name": "key_secret", "required": False, "env": ["PROBE_KEY_SECRET"]},
+    ]
+    tool["oauth_fallback_fields"] = ["key_id", "key_secret"]
+
+    await tools_api._update_tools_statuses([tool], _context(runtime_paths, manager, target))
+
+    assert tool["environment_auth_configured"] is False
 
 
 @pytest.mark.asyncio

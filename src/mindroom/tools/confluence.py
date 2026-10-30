@@ -25,6 +25,7 @@ if TYPE_CHECKING:
         # Authentication/Connection parameters
         ConfigField(
             name="url",
+            env=("CONFLUENCE_URL",),
             label="Confluence URL",
             type="url",
             required=False,
@@ -33,6 +34,7 @@ if TYPE_CHECKING:
         ),
         ConfigField(
             name="username",
+            env=("CONFLUENCE_USERNAME",),
             label="Username",
             type="text",
             required=False,
@@ -41,6 +43,7 @@ if TYPE_CHECKING:
         ),
         ConfigField(
             name="password",
+            env=("CONFLUENCE_PASSWORD",),
             label="Password",
             type="password",
             required=False,
@@ -49,6 +52,7 @@ if TYPE_CHECKING:
         ),
         ConfigField(
             name="api_key",
+            env=("CONFLUENCE_API_KEY",),
             label="API Key",
             type="password",
             required=False,

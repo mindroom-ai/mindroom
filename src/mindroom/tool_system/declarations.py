@@ -106,6 +106,9 @@ class ConfigField:
     options: list[dict[str, str]] | None = None
     validation: dict[str, Any] | None = None
     authored_override: bool = True
+    # Variables the field falls back to, in order, when no saved, inline, or runtime value sets it:
+    # the process environment first, then the `.env` beside `config.yaml`.
+    env: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)

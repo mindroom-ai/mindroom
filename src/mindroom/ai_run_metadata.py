@@ -210,12 +210,12 @@ def _uncached_input_tokens(
     )
 
 
-def _reply_usage(prior_usage: Sequence[RunMetrics], metrics: RunMetrics | None) -> RunMetrics | None:
-    """Return the usage of a reply's turn: its spent attempts' ``prior_usage``, then ``metrics``, the final attempt's.
+def turn_usage(prior_usage: Sequence[RunMetrics], metrics: RunMetrics | None) -> RunMetrics | None:
+    """Return the usage of a turn: its spent attempts' ``prior_usage``, then ``metrics``, the final attempt's.
 
-    A turn of one attempt publishes that attempt's usage as it is. Otherwise counters, costs, durations, and per-model
-    details add up, and the reply's first token is its first attempt's that reported one, as a run's is its first
-    request's.
+    A reply and a delegated child's record both report their turn's usage so. A turn of one attempt reports that
+    attempt's usage as it is. Otherwise counters, costs, durations, and per-model details add up, and the turn's first
+    token is its first attempt's that reported one, as a run's is its first request's.
     """
     if not prior_usage:
         return metrics
@@ -257,7 +257,7 @@ def build_ai_run_metadata_content(
     leader run, whose members' requests each held a context of their own.
     `prices` maps recorded (provider, model ID) identities to prices for the reply's cost.
     """
-    metrics = _reply_usage(prior_usage, metrics)
+    metrics = turn_usage(prior_usage, metrics)
     model_config = config.models.get(model_name)
     model_id = model or (model_config.id if model_config is not None else None)
     provider = model_provider or (model_config.provider if model_config is not None else None)

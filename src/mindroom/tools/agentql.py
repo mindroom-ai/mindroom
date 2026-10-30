@@ -71,6 +71,7 @@ def _install_agentql_playwright_stealth_compat(playwright_stealth: ModuleType) -
     config_fields=[
         ConfigField(
             name="api_key",
+            env=("AGENTQL_API_KEY",),
             label="API Key",
             type="password",
             required=False,

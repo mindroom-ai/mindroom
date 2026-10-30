@@ -158,6 +158,18 @@ def test_every_builtin_tool_links_an_existing_heading_of_mindroom_docs() -> None
             assert link.fragment in _heading_anchors(page), f"{name} links to {link.geturl()}, which has no heading"
 
 
+def test_every_builtin_tool_docs_page_names_the_environment_variables_its_settings_read() -> None:
+    """A tool's settings fall back to the environment variables its page names, so the page names each of them."""
+    unnamed: dict[str, list[str]] = {}
+    for tool in export_tools_metadata(builtin_tool_registry().entries):
+        page = _docs_page(urlsplit(tool["docs_url"]).path).read_text(encoding="utf-8")
+        variables = [variable for field in tool["config_fields"] or () for variable in field["env"]]
+        if missing := [variable for variable in variables if f"`{variable}`" not in page]:
+            unnamed[tool["name"]] = missing
+
+    assert unnamed == {}
+
+
 def test_heading_anchors_follow_the_docs_slugs(tmp_path: Path) -> None:
     """Anchors match the docs site's: code and links keep their text, spaces become hyphens, fences hold none."""
     page = tmp_path / "page.md"

@@ -777,7 +777,13 @@ def test_explicit_access_token_takes_precedence_over_scoped_oauth(tmp_path: Path
 def test_environment_access_token_remains_an_explicit_fallback(tmp_path: Path) -> None:
     runtime_paths = _runtime_paths(tmp_path, {"GITHUB_ACCESS_TOKEN": ENV_ACCESS_TOKEN})
     manager = _save_client_config(runtime_paths)
-    tool = _build_tool(runtime_paths, manager, _worker_target("@alice:example.test"))
+    tool = get_tool_by_name(
+        "github",
+        runtime_paths,
+        tools=builtin_tool_registry(),
+        credentials_manager=manager,
+        worker_target=_worker_target("@alice:example.test"),
+    )
     tool.g = _FakeGithub()
 
     assert json.loads(tool.list_repositories()) == ["example/project"]
@@ -853,7 +859,15 @@ def test_whitespace_explicit_tokens_fall_back_to_scoped_oauth(
         worker_target=_oauth_target("@alice:example.test"),
     )
 
-    tool = _build_tool(runtime_paths, manager, target, access_token=access_token)
+    tool = get_tool_by_name(
+        "github",
+        runtime_paths,
+        tools=builtin_tool_registry(),
+        credentials_manager=manager,
+        credential_overrides={"access_token": access_token} if access_token is not None else None,
+        worker_target=target,
+    )
+    assert isinstance(tool, GithubTools)
     tool.g = _FakeGithub()
 
     assert json.loads(tool.list_repositories()) == ["example/project"]

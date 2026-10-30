@@ -397,8 +397,8 @@ def sync_env_to_credentials(runtime_paths: RuntimePaths) -> None:
     - If the existing credential has ``_source=ui`` (or no ``_source``,
       for legacy files), skip it to protect the user's manual override.
 
-    This keeps conventional provider/bootstrap `.env` support without treating
-    arbitrary tool-specific env vars as a supported tool configuration path.
+    Tool-specific variables are not copied here: each toolkit reads the variables its
+    config fields declare from the runtime env when it is built.
     """
     synced_count = 0
 

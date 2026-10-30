@@ -97,7 +97,7 @@ from mindroom.providers.extra_kwargs import sdk_request_body, settings_params
 from mindroom.providers.google_adc import load_ambient_google_credentials, with_runtime_application_credentials
 from mindroom.providers.model_http_client import MODEL_HTTP_CLIENT
 from mindroom.providers.names import provider_route
-from mindroom.runtime_env_policy import AWS_BEDROCK_CLAUDE_ENV_BY_KEY, VERTEXAI_CLAUDE_ENV_BY_KEY
+from mindroom.runtime_env_policy import AWS_ENV_BY_KEY, VERTEXAI_CLAUDE_ENV_BY_KEY
 from mindroom.tool_system.dependencies import ensure_optional_deps, optional_dependency_environment
 
 if TYPE_CHECKING:
@@ -802,9 +802,9 @@ def _vertex_kwargs(authored: dict[str, Any], runtime_paths: RuntimePaths) -> dic
 
 def _bedrock_static_credentials(kwargs: dict[str, Any], runtime_paths: RuntimePaths) -> None:
     for config_key, env_key in (
-        ("aws_access_key", AWS_BEDROCK_CLAUDE_ENV_BY_KEY["access_key"]),
-        ("aws_secret_key", AWS_BEDROCK_CLAUDE_ENV_BY_KEY["secret_key"]),
-        ("aws_session_token", AWS_BEDROCK_CLAUDE_ENV_BY_KEY["session_token"]),
+        ("aws_access_key", AWS_ENV_BY_KEY["access_key"]),
+        ("aws_secret_key", AWS_ENV_BY_KEY["secret_key"]),
+        ("aws_session_token", AWS_ENV_BY_KEY["session_token"]),
     ):
         if config_key not in kwargs and (value := get_secret_from_env(env_key, runtime_paths=runtime_paths)):
             kwargs[config_key] = value
@@ -837,9 +837,9 @@ def _bedrock_kwargs(authored: dict[str, Any], runtime_paths: RuntimePaths) -> di
         return kwargs
     if "aws_region" not in kwargs:
         aws_region = get_secret_from_env(
-            AWS_BEDROCK_CLAUDE_ENV_BY_KEY["region"],
+            AWS_ENV_BY_KEY["region"],
             runtime_paths=runtime_paths,
-        ) or get_secret_from_env(AWS_BEDROCK_CLAUDE_ENV_BY_KEY["default_region"], runtime_paths=runtime_paths)
+        ) or get_secret_from_env(AWS_ENV_BY_KEY["default_region"], runtime_paths=runtime_paths)
         if aws_region:
             kwargs["aws_region"] = aws_region
     if "aws_access_key" in kwargs or "aws_secret_key" in kwargs:
@@ -853,7 +853,7 @@ def _bedrock_kwargs(authored: dict[str, Any], runtime_paths: RuntimePaths) -> di
     _bedrock_static_credentials(kwargs, runtime_paths)
     if kwargs.get("aws_access_key") or kwargs.get("aws_secret_key"):
         return kwargs
-    _bedrock_session(kwargs, get_secret_from_env(AWS_BEDROCK_CLAUDE_ENV_BY_KEY["profile"], runtime_paths=runtime_paths))
+    _bedrock_session(kwargs, get_secret_from_env(AWS_ENV_BY_KEY["profile"], runtime_paths=runtime_paths))
     return kwargs
 
 

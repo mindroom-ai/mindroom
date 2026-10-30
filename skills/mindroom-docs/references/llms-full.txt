@@ -7527,7 +7527,7 @@ Each tool's page lists the settings it accepts.
 
 Some fields cannot be set inline:
 
-- `password` fields, such as API keys and tokens, must be set through the dashboard or credential store.
+- `password` fields, such as API keys and tokens, must be set through the dashboard, the credential store, or the environment variables the tool's page names.
 - Fields MindRoom manages itself, such as `base_dir`, cannot be overridden.
 - Per-agent-only fields, such as the [`usage_stats`](https://docs.mindroom.chat/usage/#usage_stats) tool's `admin_scope`, are rejected in `defaults.tools`.
 
@@ -7538,13 +7538,17 @@ MindRoom rejects these fields, unknown field names, and values of the wrong type
 From lowest to highest priority, a tool's settings come from:
 
 1. The tool's built-in defaults.
-2. Saved tool settings from the dashboard or credential store.
-3. `defaults.tools` inline settings.
-4. `agents.<name>.tools` inline settings.
-5. Values MindRoom sets for the agent's runtime, such as its workspace directory.
+2. The environment variables its page names, such as `TAVILY_API_KEY`, read from the process environment or, when unset there, from the `.env` next to `config.yaml`.
+3. Saved tool settings from the dashboard or credential store.
+4. `defaults.tools` inline settings.
+5. `agents.<name>.tools` inline settings.
+6. Values MindRoom sets for the agent's runtime, such as its workspace directory.
 
 When a tool appears in both `defaults.tools` and an agent's `tools`, the settings merge field by field.
 Per-agent values win for the same field, and fields set in only one place are kept.
+An empty saved value counts as unset, so the environment variable still applies.
+A call that runs in a worker rebuilds the tool there from its [leased](https://docs.mindroom.chat/deployment/sandbox-proxy/#credential-leases) saved settings and the worker's own environment, without the primary's `.env` secrets, so save a key such a call needs in the dashboard.
+The dashboard's Tools page counts only saved settings, so it can list a tool that environment variables configure as needing configuration.
 
 ### Clearing An Inherited Override
 
@@ -9852,7 +9856,9 @@ agents:
 
 `redshift` provides the same functions as [`postgres`](#postgres): `show_tables()`, `describe_table()`, `summarize_table()`, `inspect_query()`, `run_query()`, and `export_table_to_path()`.
 It authenticates with `user` and `password`, or with IAM through an AWS `profile` or explicit AWS keys when `iam: true`.
-Unset fields can fall back to the environment variables `REDSHIFT_HOST`, `REDSHIFT_DATABASE`, `REDSHIFT_DB_USER`, `REDSHIFT_CLUSTER_IDENTIFIER`, `AWS_REGION`, and `AWS_PROFILE`.
+Unset fields can fall back to the environment variables `REDSHIFT_HOST`, `REDSHIFT_DATABASE`, `REDSHIFT_DB_USER`, `REDSHIFT_CLUSTER_IDENTIFIER`, `AWS_REGION` (then `AWS_DEFAULT_REGION`), `AWS_PROFILE`, `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, and `AWS_SESSION_TOKEN`.
+These are the standard AWS variables, so AWS values set for another client, such as [Amazon Bedrock Claude](https://docs.mindroom.chat/configuration/models/#amazon-bedrock-claude), apply here too.
+With IAM, a `profile` wins over explicit AWS keys, so an `AWS_PROFILE` in the environment replaces keys saved for this tool.
 The dashboard treats `user` and `password` as required even when `iam` is enabled, so store values for both before the tool becomes available.
 
 | Option | Type | Required | Default | Notes |
@@ -9891,9 +9897,9 @@ Set `enable_run_cypher: false` to give an agent schema visibility without free-f
 
 | Option | Type | Required | Default | Notes |
 | --- | --- | --- | --- | --- |
-| `uri` | `url` | no | `null` | Connection URI such as `bolt://localhost:7687`; set it in practice. |
-| `user` | `text` | yes | `null` | Username. |
-| `password` | `password` | yes | `null` | Password. |
+| `uri` | `url` | no | `null` | Connection URI such as `bolt://localhost:7687`, or `NEO4J_URI`; set it in practice. |
+| `user` | `text` | yes | `null` | Username, or `NEO4J_USERNAME`. |
+| `password` | `password` | yes | `null` | Password, or `NEO4J_PASSWORD`. |
 | `database` | `text` | no | `null` | Target database. |
 | `enable_list_labels` | `boolean` | no | `true` | Enable `list_labels()`. |
 | `enable_list_relationships` | `boolean` | no | `true` | Enable `list_relationship_types()`. |
@@ -10691,7 +10697,7 @@ agents:
 
 `spider` exposes `search_web(query, max_results=5)`, `scrape(url)`, and `crawl(url, limit=None)`, returning Markdown.
 Search results do not include full page content.
-It requires `SPIDER_API_KEY` in the environment even though the dashboard lists it as needing no setup, and it has no `api_key` field.
+It requires `SPIDER_API_KEY` in the process environment, which the `.env` does not set, even though the dashboard lists it as needing no setup, and it has no `api_key` field.
 
 | Option | Type | Default | Notes |
 | --- | --- | --- | --- |
@@ -10756,8 +10762,8 @@ It requires `api_key` or `BRIGHT_DATA_API_KEY`.
 | `enable_search_engine` | `boolean` | `true` | Enable `search_engine()`. |
 | `enable_web_data_feed` | `boolean` | `true` | Enable `web_data_feed()`. |
 | `all` | `boolean` | `false` | Enable every function. |
-| `serp_zone` | `text` | `serp_api` | SERP zone; `BRIGHT_DATA_SERP_ZONE` overrides it. |
-| `web_unlocker_zone` | `text` | `web_unlocker1` | Web unlocker zone; `BRIGHT_DATA_WEB_UNLOCKER_ZONE` overrides it. |
+| `serp_zone` | `text` | `serp_api` | SERP zone; `BRIGHT_DATA_SERP_ZONE` in the process environment overrides it, while a `.env` value applies only when no zone is set. |
+| `web_unlocker_zone` | `text` | `web_unlocker1` | Web unlocker zone; `BRIGHT_DATA_WEB_UNLOCKER_ZONE` in the process environment overrides it, while a `.env` value applies only when no zone is set. |
 | `verbose` | `boolean` | `false` | Log extra request detail. |
 | `timeout` | `number` | `600` | Timeout in seconds. |
 
@@ -11116,7 +11122,7 @@ Generated images are square (1:1).
 | Option | Type | Default | Notes |
 | --- | --- | --- | --- |
 | `api_key` | `password` | `null` | Gemini API key, falling back to `GOOGLE_API_KEY`. Required unless Vertex AI mode is on. |
-| `vertexai` | `boolean` | `false` | Use Vertex AI instead of the Gemini API. `GOOGLE_GENAI_USE_VERTEXAI=true` also enables it. Required for `generate_video()`. |
+| `vertexai` | `boolean` | `false` | Use Vertex AI instead of the Gemini API. `GOOGLE_GENAI_USE_VERTEXAI=true` in the process environment also enables it; the `.env` does not. Required for `generate_video()`. |
 | `project_id` | `text` | `null` | Vertex project, falling back to `GOOGLE_CLOUD_PROJECT`. |
 | `location` | `text` | `null` | Vertex location, falling back to `GOOGLE_CLOUD_LOCATION`. |
 | `image_generation_model` | `text` | `gemini-nano-banana-2.1` | Model for `generate_image()` (Nano Banana 2.1). |
@@ -12227,7 +12233,7 @@ agents:
 ## [`twilio`]
 
 `twilio` sends SMS with `send_sms()`, looks up calls with `get_call_details()`, and lists recent messages with `list_messages()`.
-Authenticate with `account_sid` plus either `auth_token` or the `api_key` and `api_secret` pair.
+Authenticate with `account_sid` plus either `auth_token` or the `api_key` and `api_secret` pair; the pair wins when both are set.
 `send_sms()` rejects sender and recipient numbers that are not in E.164 format, such as `+15551234567`, and the sender must be a number on the Twilio account.
 
 | Option | Type | Default | Notes |
@@ -12236,8 +12242,8 @@ Authenticate with `account_sid` plus either `auth_token` or the `api_key` and `a
 | `auth_token` | `password` | `null` | Auth token, or `TWILIO_AUTH_TOKEN`. |
 | `api_key` | `password` | `null` | API key, or `TWILIO_API_KEY`; used with `api_secret`. |
 | `api_secret` | `password` | `null` | API secret, or `TWILIO_API_SECRET`; used with `api_key`. |
-| `region` | `text` | `null` | Twilio region, such as `au1`. |
-| `edge` | `text` | `null` | Twilio edge location, such as `sydney`. |
+| `region` | `text` | `null` | Twilio region, such as `au1`, or `TWILIO_REGION`. |
+| `edge` | `text` | `null` | Twilio edge location, such as `sydney`, or `TWILIO_EDGE`. |
 | `debug` | `boolean` | `false` | Log Twilio HTTP requests. |
 | `enable_send_sms` | `boolean` | `true` | Enable `send_sms()`. |
 | `enable_get_call_details` | `boolean` | `true` | Enable `get_call_details()`. |
@@ -13900,7 +13906,7 @@ Use the per-function `enable_*` flags when an agent should, for example, only ch
 | `enable_cancel_booking` | `boolean` | `no` | `true` | Enable `cancel_booking()`. |
 | `all` | `boolean` | `no` | `false` | Enable every Cal.com function regardless of the `enable_*` flags. |
 
-Every function needs `api_key`, and slot lookup and new bookings also need `event_type_id`; supply them as stored credentials or through the `CALCOM_API_KEY` and `CALCOM_EVENT_TYPE_ID` environment variables of the MindRoom process.
+Every function needs `api_key`, and slot lookup and new bookings also need `event_type_id`; supply them as stored credentials or through the `CALCOM_API_KEY` and `CALCOM_EVENT_TYPE_ID` environment variables.
 
 ```yaml
 agents:
@@ -13941,7 +13947,7 @@ API keys are `password` fields, so set them in the dashboard or through the envi
 
 `mem0` gives the agent `add_memory()`, `search_memory()`, `get_all_memories()`, and `delete_all_memories()` backed by the `mem0ai` client.
 With an API key, it uses the hosted Mem0 Platform; without one, it uses Mem0's default setup, which stores memories locally but calls OpenAI for embeddings and memory extraction.
-That default setup requires `OPENAI_API_KEY` even when the agent itself uses another provider; without it, the `mem0` tool fails to load.
+That default setup requires `OPENAI_API_KEY` in the process environment, not the `.env`, even when the agent itself uses another provider; without it, the `mem0` tool fails to load.
 Local memories live outside MindRoom's storage directory, in `/tmp/qdrant` with history in `history.db` in Mem0's directory (`~/.mem0/`, or `MEM0_DIR` when set), so persist and back up those paths separately or the memories can be lost on reboot or container recreation.
 A custom local Mem0 config object cannot be set through MindRoom.
 
@@ -14184,7 +14190,9 @@ Authoring errors:
 
 Each child turn writes `run.json`, `events.jsonl`, and `transcript.md` to `.mindroom/delegations/YYYY-MM-DD/<delegation-id>/` in the child's workspace, dated by the delegation's start in UTC.
 `run.json` and `events.jsonl` update as the child runs, and `transcript.md` is written when the turn finishes.
-The `usage` in `run.json` and in each `usage` event of `events.jsonl` reports the child turn's token counts (`input_tokens`, `output_tokens`, `total_tokens`, `cache_read_tokens`, `cache_write_tokens`, `reasoning_tokens`, and the audio counts), `uncached_input_tokens` (input not read from the provider's cache), a `cost` when the provider reports one, and `time_to_first_token` and `duration` in seconds.
+The `usage` in `run.json` reports the child turn's token counts (`input_tokens`, `output_tokens`, `total_tokens`, `cache_read_tokens`, `cache_write_tokens`, `reasoning_tokens`, and the audio counts), `uncached_input_tokens` (input not read from the provider's cache), a `cost` when the provider reports one, and `time_to_first_token` and `duration` in seconds.
+It covers the turn's model runs, except a run that ended before the child paused for approval, such as an empty answer retried before the call it asked approval for.
+Each `usage` event of `events.jsonl` reports the same values for one model run as it stood when the event was written, so a run's last `usage` event is that run's total.
 Fractional values are decimal strings; a token count of zero and an unreported value are left out, while `uncached_input_tokens` and a reported cost or timing appear even when zero once the turn reported any usage.
 The caller receives a receipt at `.mindroom/delegation_receipts/YYYY-MM-DD/<delegation-id>.json` in its own workspace.
 Sensitive fields are redacted, and large outputs are stored as referenced artifacts.
@@ -14747,7 +14755,7 @@ The sandbox and platform tools read their key from the environment when none is 
 | --- | --- |
 | `e2b` | `E2B_API_KEY` |
 | `daytona` | `DAYTONA_API_KEY` (and `DAYTONA_API_URL` for `api_url`) |
-| `composio` | `COMPOSIO_API_KEY`, or cached Composio user data |
+| `composio` | `COMPOSIO_API_KEY` in the process environment, not the `.env`, or cached Composio user data |
 
 All these tools run in the primary runtime by default; `e2b`, `daytona`, and `composio` always do, even when listed in `worker_tools` (see [Worker Routing](https://docs.mindroom.chat/deployment/sandbox-proxy/#worker-routed-execution)).
 Missing Python dependencies install on first use; see [Automatic Dependency Installation](https://docs.mindroom.chat/tools/#automatic-dependency-installation).
@@ -15008,7 +15016,7 @@ Missing Python dependencies install automatically on first use (see [Automatic D
 
 | Option | Type | Default | Notes |
 | --- | --- | --- | --- |
-| `key` | `password` | `null` | Google Maps API key; falls back to the `GOOGLE_MAPS_API_KEY` process environment variable. |
+| `key` | `password` | `null` | Google Maps API key; falls back to `GOOGLE_MAPS_API_KEY`. |
 | `search_places` | `boolean` | `true` | Enable `search_places()`. |
 | `get_directions` | `boolean` | `true` | Enable `get_directions()`. |
 | `validate_address` | `boolean` | `true` | Enable `validate_address()`. |
@@ -15043,7 +15051,7 @@ Weather lookups use the first geocoding match for the location name, so ambiguou
 
 | Option | Type | Default | Notes |
 | --- | --- | --- | --- |
-| `api_key` | `password` | `null` | OpenWeather API key; falls back to the `OPENWEATHER_API_KEY` process environment variable. A key is required for every call. |
+| `api_key` | `password` | `null` | OpenWeather API key; falls back to `OPENWEATHER_API_KEY`. A key is required for every call. |
 | `units` | `text` | `metric` | `standard`, `metric`, or `imperial`. |
 | `enable_current_weather` | `boolean` | `true` | Enable `get_current_weather()`. |
 | `enable_forecast` | `boolean` | `true` | Enable `get_forecast()`. |
@@ -15615,7 +15623,7 @@ These rules apply to built-in providers and to providers that plugins register (
   Only the OAuth callback writes it, and the generic credentials API neither returns OAuth token fields nor accepts direct writes to these services.
 - An optional `tool_config_service` holds the tool's editable dashboard settings separately from the token.
 - `tool_config_oauth_fallback_fields` (tuple of strings, default `()`) names token-like fields, such as `access_token`, that the dashboard may save to and show from `tool_config_service` as manual credentials; otherwise the dashboard strips token fields from that service.
-- `tool_config_oauth_fallback_env_vars` (tuple of strings, default `()`) names environment variables that, when all are set, make the dashboard show the provider's tools as configured without an OAuth connection.
+- The dashboard also shows a provider's tool as configured without an OAuth connection when the environment sets every one of the tool's `oauth_fallback_fields` through the variables those fields declare in `env`.
 - `client_config_services` lists, in lookup order, services holding the OAuth app's `client_id`, `client_secret`, and optional `redirect_uri`; every name must end with `_oauth_client`.
 - `shared_client_config_services` are checked after those and supply one app ID and secret for several providers, such as `google_oauth_client`; they never supply `redirect_uri`, so each provider keeps its own callback URL.
 - Public clients set `token_endpoint_auth_method: none` and need only `client_id`; confidential clients need both `client_id` and `client_secret`.
@@ -16057,6 +16065,8 @@ Examples are symlinks or files planted in shared workspaces that the primary lat
 ### Config and state kept out of workers
 
 Runners and dedicated workers never receive the primary's config file, its directory, its `.env`, a ConfigMap holding it, or the credential encryption key.
+A secret tool setting the primary reads from its `.env` configures only the toolkit the primary builds; a worker-routed call rebuilds the toolkit from its leased saved settings and the worker's own environment.
+A Docker dedicated worker's environment includes the non-secret startup names it receives from the primary's environment and `.env`, so the tool settings among them, `AWS_REGION`, `AWS_DEFAULT_REGION`, `AWS_PROFILE`, `GOOGLE_CLOUD_PROJECT`, and `GOOGLE_CLOUD_LOCATION`, also configure the toolkit it rebuilds.
 The config sent to runners with each request, and the config file projected into each Docker worker, hold only the fields runners resolve; models, MCP servers, plugin settings, and every other section stay in the primary, and a worker-routed call carries only the called tool's own inline overrides.
 
 Of the agents' data, dedicated Docker and Kubernetes workers mount only workspaces and shared directories, never the agent state roots around them, so sessions, memory, Mem0 data, and private-instance identity records stay out of every worker.
@@ -16840,6 +16850,7 @@ Each `ConfigField` describes one constructor parameter that users can set throug
 | `options` | list | `None` | For `select`: a list of `{"label": "...", "value": "..."}` dicts |
 | `validation` | dict | `None` | Validation rules such as min, max, or pattern |
 | `authored_override` | bool | `True` | Set to `False` to forbid setting the field inline in `config.yaml`; `password` fields are never allowed inline (see [Per-Agent Tool Configuration](https://docs.mindroom.chat/tools/#per-agent-tool-configuration)) |
+| `env` | tuple of strings | `()` | Environment variables the field falls back to, in order, when nothing else sets it (see [How Settings Combine](https://docs.mindroom.chat/tools/#how-settings-combine)) |
 
 A `ConfigField` `default` only pre-fills the dashboard form and is not passed to the constructor.
 When no value is stored or configured, the constructor's Python default applies, so give optional parameters matching defaults, such as `units: str = "metric"` below.

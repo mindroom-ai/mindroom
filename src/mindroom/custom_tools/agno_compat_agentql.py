@@ -209,8 +209,8 @@ def _destination_relay(egress: BrowserEgress) -> Iterator[str]:
 class MindRoomAgentQLTools(AgnoAgentQLTools):
     """Preserve Agno registration with scoped requests and complete custom results."""
 
-    # Mirror the authored upstream options beside the managed runtime paths, which supply the key fallback,
-    # the AgentQL host, and the browser egress.
+    # Mirror the authored upstream options beside the managed runtime paths, which supply the AgentQL host and the
+    # browser egress.
     def __init__(
         self,
         runtime_paths: RuntimePaths,
@@ -220,8 +220,8 @@ class MindRoomAgentQLTools(AgnoAgentQLTools):
         all: bool = False,  # noqa: A002 - upstream option name
         agentql_query: str = "",
     ) -> None:
-        # Resolving the fallback here means Agno's own fallback, which reads the live process environment, never runs.
-        api_key = api_key or runtime_paths.env_value("AGENTQL_API_KEY")
+        # The tool's `AGENTQL_API_KEY` declaration supplies the runtime environment's key; refusing to build without
+        # one means Agno's own fallback, which reads the live process environment, never runs.
         if not api_key:
             msg = "AGENTQL_API_KEY not set: set the tool's api_key, or AGENTQL_API_KEY in the environment or `.env`."
             raise ValueError(msg)
