@@ -18,11 +18,10 @@ import pytest
 from structlog.testing import capture_logs
 
 from mindroom.history.message_content import render_message_content
-from mindroom.llm import usage as llm_usage
 from mindroom.llm.media import Audio, File, Image, Video
 from mindroom.llm.messages import Message
 from mindroom.llm.runs import RunRecord, RunRequirement, RunStatus, TeamRunRecord, ToolExecution
-from mindroom.llm.usage import MessageMetrics, ModelMetrics, RunMetrics, SessionMetrics, TokenCounts
+from mindroom.llm.usage import MessageMetrics, ModelMetrics, RunMetrics, TokenCounts
 from tests.llm.agno_dict_helpers import (
     DROPPED_METRICS_KEYS,
     DROPPED_RUN_KEYS,
@@ -436,7 +435,6 @@ FIXTURE_CODECS: dict[str, tuple[Callable[[dict[str, Any]], Any], Callable[[dict[
     "message_metrics": (MessageMetrics.from_dict, dict),
     "run_metrics": (RunMetrics.from_dict, dict),
     "model_metrics": (ModelMetrics.from_dict, dict),
-    "session_metrics": (SessionMetrics.from_dict, dict),
 }
 
 
@@ -469,7 +467,6 @@ _METRIC_CODECS: dict[str, Callable[[dict[str, Any]], Any]] = {
     "message_metrics": MessageMetrics.from_dict,
     "run_metrics": RunMetrics.from_dict,
     "model_metrics": ModelMetrics.from_dict,
-    "session_metrics": SessionMetrics.from_dict,
 }
 
 
@@ -485,41 +482,3 @@ def test_stored_metrics_keep_agno_key_order_at_every_level(fixture: str) -> None
 
     for value in stored:
         assert json.dumps(_METRIC_CODECS[fixture](value).to_dict()) == json.dumps(value)
-
-
-# --- session totals --------------------------------------------------------------------------------------------
-
-
-def _run_metrics_cases() -> list[dict[str, Any]]:
-    return [
-        agno("run_metrics"),
-        agno("run_metrics_with_empty_details"),
-        {},
-        *json.loads((FIXTURE_RUNS / "run_metrics.json").read_text()).values(),
-    ]
-
-
-def _counted_totals(totals: dict[str, Any]) -> dict[str, Any]:
-    """Return the token counters of stored session totals, in total and for each model entry."""
-    counters = set(llm_usage.TOKEN_FIELDS)
-    counted: dict[str, Any] = {key: value for key, value in totals.items() if key in counters}
-    if "details" in totals:
-        counted["details"] = {
-            model_type: [
-                {key: value for key, value in entry.items() if key in counters | {"id", "provider"}}
-                for entry in entries
-            ]
-            for model_type, entries in totals["details"].items()
-        }
-    return counted
-
-
-def test_session_metrics_count_token_counters_as_agno_accumulated_them() -> None:
-    """The session totals add each run's token counters, in total and per model, as Agno summed them."""
-    totals = agno("session_metrics_totals")
-    owned = SessionMetrics()
-    for case, agno_totals in zip(_run_metrics_cases(), totals, strict=True):
-        owned.count_run(RunMetrics.from_dict(case), replacing=None)
-
-        assert owned.to_dict() == _counted_totals(agno_totals)
-    assert SessionMetrics.from_dict(totals[-1]).to_dict() == without(totals[-1], DROPPED_METRICS_KEYS)

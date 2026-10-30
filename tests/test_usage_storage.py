@@ -17,7 +17,12 @@ from mindroom.session_storage.agent_storage import create_agent_state_storage
 from mindroom.session_storage.store import ConversationStore
 from mindroom.session_storage.types import ConversationSession
 from mindroom.usage.stats_storage import UsageSessionRow, UsageStorageSource, iter_usage_storage_rows
-from mindroom.usage.storage import COMPACTED_REQUESTS_METADATA_KEY, project_requests, project_usage
+from mindroom.usage.storage import (
+    COMPACTED_REQUESTS_METADATA_KEY,
+    message_request_snapshot,
+    request_usage,
+    run_usage_snapshot,
+)
 from tests.conftest import persist_runs, seed_session_row
 from tests.history_helpers import compact_runs
 
@@ -255,11 +260,23 @@ def test_a_request_names_the_model_that_answered_it_and_a_retried_request_s_sum_
         provider_data={**answered, "mindroom_aggregate_usage": True},
     )
 
-    requests = project_requests([single.to_dict(), retried.to_dict()]) or []
+    requests = [request for message in (single, retried) if (request := message_request_snapshot(message))]
 
     assert [(request["model"], request["model_provider"], request["metrics"]) for request in requests] == [
         ("reply-model", "test-provider", {"input_tokens": 100, "output_tokens": 1}),
     ]
+
+
+def test_an_assistant_message_from_history_is_no_request_of_the_run() -> None:
+    """A history copy of an earlier reply, which a run's input carries, describes a request of another run."""
+    replayed = Message(
+        role="assistant",
+        metrics=MessageMetrics(tokens=TokenCounts(input_tokens=100, output_tokens=1)),
+        provider_data={"mindroom_model": {"id": "reply-model", "provider": "test-provider"}},
+        from_history=True,
+    )
+
+    assert (request_usage(replayed), message_request_snapshot(replayed)) == (None, None)
 
 
 @pytest.mark.parametrize(
@@ -278,8 +295,9 @@ def test_a_request_whose_recorded_model_has_another_shape_has_invalid_attributio
         provider_data={"mindroom_model": recorded},
     )
 
-    [request] = project_requests([message.to_dict()]) or []
+    request = message_request_snapshot(message)
 
+    assert request is not None
     assert (request["model"], request["model_provider"]) == (False, False)
 
 
@@ -295,7 +313,7 @@ def test_carried_request_usage_is_not_counted_again_while_its_message_is_saved()
         content="done",
         metrics=MessageMetrics(tokens=TokenCounts(input_tokens=50, output_tokens=1)),
     )
-    carried = [{**request, "message_id": folded.id} for request in project_requests([folded.to_dict()]) or []]
+    carried = [{**request, "message_id": folded.id} for request in [message_request_snapshot(folded)] if request]
     run = RunRecord(
         run_id="run",
         status=RunStatus.error,
@@ -303,7 +321,7 @@ def test_carried_request_usage_is_not_counted_again_while_its_message_is_saved()
         metadata={COMPACTED_REQUESTS_METADATA_KEY: carried},
     )
 
-    requests = project_usage(run.to_dict())["requests"]
+    requests = run_usage_snapshot(run)["requests"]
 
     assert [request["metrics"]["input_tokens"] for request in requests] == [100, 50]
     assert all("message_id" not in request for request in requests)

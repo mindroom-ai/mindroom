@@ -31,6 +31,7 @@ from mindroom.history.legacy_scope_metadata import LEGACY_COMPACTION_METADATA_KE
 from mindroom.history.storage import has_queued_force_compaction
 from mindroom.llm.messages import Message
 from mindroom.llm.runs import RunRecord, RunStatus, TeamRunRecord
+from mindroom.llm.usage import ModelMetrics, RunMetrics, TokenCounts
 from mindroom.session_storage.schema import NON_VISIBLE_RUN_STATUS_VALUES, quote_identifier
 from mindroom.session_storage.store import ConversationStore
 from mindroom.session_storage.summary_rows import folded_tool_call_ids, history_event_ids, latest_row
@@ -91,6 +92,10 @@ MASKS: dict[str, Mask] = {
             "force_request_only_in_metadata",
             "decision 5 (W9): a manual compaction request is only the metadata flag, with no copy in the session state "
             "that the next reply moves into the flag",
+        ),
+        Mask(
+            "ledger_is_the_only_usage_owner",
+            "a run's usage lives only in the ledger: the session row keeps no totals beside it",
         ),
         Mask(
             "readers_follow_the_log",
@@ -218,6 +223,60 @@ def _old_reader_view(runs: Sequence[AnyRunRecord]) -> list[str]:
         and (run.metadata or {}).get("room_id")
     ]
     return [run.run_id for run in sorted(turns, key=lambda run: (run.created_at, run.run_id))]
+
+
+def _counted(value: object) -> int:
+    return value if isinstance(value, int) and not isinstance(value, bool) else 0
+
+
+def _old_session_totals(ledger: object) -> dict[str, Any] | None:
+    """Return the totals the Agno-layout store kept in ``session_data``: every run snapshot's counters, per model too.
+
+    That store moved them by the difference on each usage save, so they were the sum of its run rows; helper rows
+    (those with a ``kind``) never counted. None when no run recorded usage.
+    """
+    snapshots = (
+        [row[1] for row in ledger if isinstance(row[1], dict) and "kind" not in row[1]]
+        if isinstance(ledger, list)
+        else []
+    )
+    if not snapshots:
+        return None
+    totals = RunMetrics()
+    for snapshot in snapshots:
+        metrics = snapshot.get("metrics")
+        if not isinstance(metrics, dict):
+            continue
+        totals.tokens = totals.tokens + TokenCounts.from_mapping(metrics, _counted)
+        details = metrics.get("details")
+        models = details.get("model") if isinstance(details, dict) else None
+        if not isinstance(models, list):
+            continue
+        entries = (totals.details if totals.details is not None else {}).setdefault("model", [])
+        totals.details = {**(totals.details or {}), "model": entries}
+        for raw in models:
+            if not isinstance(raw, dict):
+                continue
+            model_id, provider = raw.get("id"), raw.get("provider")
+            entry = ModelMetrics(
+                tokens=TokenCounts.from_mapping(raw, _counted),
+                id=model_id if isinstance(model_id, str) else "",
+                provider=provider if isinstance(provider, str) else "",
+            )
+            same = next((total for total in entries if (total.provider, total.id) == (entry.provider, entry.id)), None)
+            if same is None:
+                entries.append(entry)
+            else:
+                same.accumulate(entry)
+    return totals.to_dict()
+
+
+def drop_inert_session_totals(observed: dict[str, Any]) -> None:
+    """Leave out the usage totals a converted row still holds in ``session_data``, which nothing reads any more."""
+    row = observed["row"]
+    data = row.get("session_data") if isinstance(row, dict) else None
+    if isinstance(data, dict):
+        data.pop("session_metrics", None)
 
 
 def readers_in_creation_order(observed: dict[str, Any], used: set[str]) -> None:
@@ -806,11 +865,21 @@ class MaskedBackend(StoreBackend):
             self.used.add("summary_requests_name_their_model")
         self._old_pending_view(view)
         self._old_history_metadata(view)
+        self._old_session_totals(view)
         row = view["row"]
         if self.news_at is not None and isinstance(row, dict) and row.get("updated_at") == self.news_at[0]:
             row["updated_at"] = self.news_at[1]
             self.used.add("a_finished_interrupted_record_is_news")
         return view
+
+    def _old_session_totals(self, view: dict[str, Any]) -> None:
+        """Show the usage totals the Agno-layout store kept beside its ledger, the sum of the ledger's run rows."""
+        row, totals = view["row"], _old_session_totals(view["ledger"])
+        if totals is None or not isinstance(row, dict):
+            return
+        data = row["session_data"] if isinstance(row.get("session_data"), dict) else {}
+        row["session_data"] = {**data, "session_metrics": totals}
+        self.used.add("ledger_is_the_only_usage_owner")
 
     def _old_history_metadata(self, view: dict[str, Any]) -> None:
         """Show the owner's history state as the per-scope maps the Agno-layout store kept it in."""

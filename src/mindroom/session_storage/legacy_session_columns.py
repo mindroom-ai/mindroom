@@ -20,6 +20,7 @@ from mindroom.history.types import HistoryScope
 from mindroom.logging_config import get_logger
 from mindroom.session_storage.legacy_agent_session_owners import adopt_agent_session_owners
 from mindroom.session_storage.legacy_conversion_backup import leave_write_ahead_log, write_conversion_backup
+from mindroom.session_storage.legacy_usage_totals import add_pre_ledger_baselines
 from mindroom.session_storage.schema import (
     LOG_VERSION,
     OWNER_VERSION,
@@ -68,9 +69,9 @@ def upgrade_layout(
 
     In one ``BEGIN IMMEDIATE``, so a crash or an error leaves the file as it was and the next open converts it again.
     Below version 4 the conversion starts with the byte-for-byte backup beside it (``write_conversion_backup``); the steps
-    to versions 5 and 6 (``rewrite_run_snapshots``, ``flatten_history_metadata``) take none, since a release at version 4
-    or 5 reads the database they leave. A file in write-ahead-log mode returns to the rollback journal first, and the
-    conversion is logged once it commits.
+    to versions 5 and 6 (``rewrite_run_snapshots``, ``flatten_history_metadata``, ``add_pre_ledger_baselines``) take
+    none, since a release at version 4 or 5 reads the database they leave. A file in write-ahead-log mode returns to the
+    rollback journal first, and the conversion is logged once it commits.
     ``descriptors`` takes the backup's descriptor of the file, which the caller closes after ``connection``.
     """
     leave_write_ahead_log(connection, path)
@@ -96,6 +97,7 @@ def upgrade_layout(
             )
         rewrite_run_snapshots(connection, names)
         flatten_history_metadata(connection, names)
+        add_pre_ledger_baselines(connection, names)
         connection.execute(f"UPDATE {meta} SET version = ? WHERE id = 1", (LOG_VERSION,))  # noqa: S608
         runs, messages = stored_counts(connection, names)
     # The dropped columns free too little of the file to be worth compacting.

@@ -37,7 +37,8 @@ _SESSION_COLUMN_SQL = ", ".join(f"{column} {column_type}" for column, column_typ
 # (``legacy_agent_session_owners``), 4 once the meta row names the database's owner and each session row holds its
 # state in a column of its own (``legacy_session_columns``), 5 once every delegation child its runs' metadata holds
 # has the current shape (``delegation.legacy_snapshots``), and 6 once each session row holds its owner's history state in
-# one metadata value (``history.legacy_scope_metadata``).
+# one metadata value (``history.legacy_scope_metadata``) and the usage ledger holds the usage each session's stored
+# totals counted beyond it (``legacy_usage_totals``).
 LOG_VERSION = 6
 # The first version whose meta row names the database's owner.
 OWNER_VERSION = 4

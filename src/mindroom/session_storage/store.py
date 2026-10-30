@@ -34,7 +34,6 @@ from mindroom.constants import (
 )
 from mindroom.history.types import HistoryScope, ScopeSummary, owner_scope
 from mindroom.llm.runs import RunStatus, TeamRunRecord
-from mindroom.llm.usage import ModelMetrics, RunMetrics, SessionMetrics, TokenCounts
 from mindroom.session_storage.codec import RunColumns, decode_json, run_columns, run_kind, run_record
 from mindroom.session_storage.lanes import run_session_storage_operation
 from mindroom.session_storage.schema import (
@@ -45,7 +44,7 @@ from mindroom.session_storage.schema import (
     usage_upsert_sql,
 )
 from mindroom.session_storage.types import ConversationSession, session_state_snapshot
-from mindroom.usage.storage import project_helper_usage, project_usage
+from mindroom.usage.storage import project_helper_usage, run_usage_snapshot
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Collection, Iterable, Iterator, Mapping, Sequence
@@ -241,11 +240,12 @@ class ConversationStore:
         after the turns it waited for, and the first requester a written run names goes on a row that has none.
 
         ``record_usage`` replaces the run's usage snapshot in the ledger, which outlives removed runs, and moves the
-        session totals by the difference; a final run's usage changes neither. ``state``, a
-        ``session_state_snapshot`` of the state the run ran with, commits with the run when the row does not hold it.
-        ``session.runs`` then holds the run as the store does (``_mirror``).
+        session's update time; a final run's usage is not recorded. ``state``, a ``session_state_snapshot`` of the
+        state the run ran with, commits with the run when the row does not hold it. ``session.runs`` then holds the run
+        as the store does (``_mirror``).
         """
-        return self._save(session, run.to_dict(), run_kind(run), record_usage=record_usage, state=state)
+        usage = run_usage_snapshot(run) if record_usage else None
+        return self._save(session, run.to_dict(), run_kind(run), usage=usage, state=state)
 
     def save_interrupted_record(
         self,
@@ -260,7 +260,7 @@ class ConversationStore:
         answer; a visible run keeps its ``seq``, so replay order does not change.
         """
         kind = run_kind(record)
-        outcome = self._save(session, record.to_dict(), kind, record_usage=False, state=state, interrupted=True)
+        outcome = self._save(session, record.to_dict(), kind, usage=None, state=state, interrupted=True)
         return cast("Literal['written', 'removed']", outcome)
 
     def _save(
@@ -269,16 +269,19 @@ class ConversationStore:
         data: dict[str, Any],
         kind: SessionKind,
         *,
-        record_usage: bool,
+        usage: dict[str, object] | None,
         state: dict[str, Any] | None,
         interrupted: bool = False,
     ) -> SaveOutcome:
-        """Save one run from its stored dict and ``state`` in one transaction, then mirror it in ``session``."""
+        """Save one run from its stored dict, its ``usage`` snapshot when given, and ``state`` in one transaction.
+
+        The run is then mirrored in ``session``.
+        """
         with self.transaction(write=True) as connection:
             created = ensure_session_row(connection, self.names, session)
             saved = _write_run(connection, self.names, session.session_id, data, kind, interrupted=interrupted)
-            if record_usage and saved.outcome != "final":
-                snapshot = project_usage({**data, "created_at": saved.created_at, "updated_at": saved.updated_at})
+            if usage is not None and saved.outcome != "final":
+                snapshot = {**usage, "created_at": saved.created_at, "updated_at": saved.updated_at}
                 _record_run_usage(connection, self.names, session.session_id, data["run_id"], snapshot)
             stored = self._write_state(connection, session, created, state)
         _record_stored_state(session, stored)
@@ -461,8 +464,7 @@ class ConversationStore:
     ) -> None:
         """Upsert helper usage as ``usage_id``, owned by a conversation and a requester, beside the run log.
 
-        ``initial_session`` creates the conversation's row when no run has yet. Helper usage is not part of the
-        session totals.
+        ``initial_session`` creates the conversation's row when no run has yet.
         """
         snapshot = project_helper_usage(usage, usage_id=usage_id, kind=kind, requester_id=requester_id)
         created = None
@@ -564,19 +566,19 @@ def persist_to(store: ConversationStore, session: ConversationSession) -> Callab
     """Return the callback a run hands its terminal record to: save it to ``store`` with its usage, in the database's lane.
 
     The record saves as ``ConversationStore.save_run`` saves it with ``record_usage``.
-    The record and ``session.session_state``, which the run's tools change in place, are copied on the caller's task
-    before the lane is awaited, so what lands is what was handed over. The state is written back, in the record's
-    own transaction, when it differs from ``session.stored_session_state``, which every write of the field records,
-    so a turn whose runs or checkpoints change the state and restore it stores it restored.
+    The record, with its usage snapshot, and ``session.session_state``, which the run's tools change in place, are
+    copied on the caller's task before the lane is awaited, so what lands is what was handed over. The state is written
+    back, in the record's own transaction, when it differs from ``session.stored_session_state``, which every write of
+    the field records, so a turn whose runs or checkpoints change the state and restore it stores it restored.
     The save mirrors itself in ``session.runs`` in the lane, where the session's saves run one at a time; it completes
     even when the caller is cancelled, as the lane's operations do.
     """
 
     async def persist(record: AnyRunRecord) -> None:
-        data, kind = record.to_dict(), run_kind(record)
+        data, kind, usage = record.to_dict(), run_kind(record), run_usage_snapshot(record)
 
         def save(opened: ConversationStore, state: dict[str, Any]) -> SaveOutcome:
-            return opened._save(session, data, kind, record_usage=True, state=state)
+            return opened._save(session, data, kind, usage=usage, state=state)
 
         await write_with_session_state(store, session, save)
 
@@ -1118,9 +1120,6 @@ def delete_runs_in_transaction(
     }
 
 
-# TODO(simplify): the session totals in `session_data` repeat what the usage ledger's run snapshots record.
-# Report undated totals from the ledger and stop writing them, once a migration keeps pre-ledger history.
-# Operators would notice in admin and private usage totals, and stored data.
 def _record_run_usage(
     connection: sqlite3.Connection,
     names: TableNames,
@@ -1128,65 +1127,16 @@ def _record_run_usage(
     run_id: str,
     snapshot: dict[str, object],
 ) -> None:
-    """Replace the run's usage snapshot and move the session totals by the difference from the snapshot it replaces.
+    """Replace the run's usage snapshot in the ledger and move the session's update time.
 
-    A run saved again when it continues after a pause, or at a checkpoint, so counts once in the totals. The totals
-    count what the ledger records: token counters, in total and per model.
+    A run saved again when it continues after a pause, or at a checkpoint, replaces its snapshot, so it counts once;
+    background readers learn of the save through the update time (``list_updated_sessions``).
     """
-    usage, sessions = quote_identifier(names.usage), quote_identifier(names.sessions)
-    previous = connection.execute(
-        f"SELECT usage_data FROM {usage} WHERE session_id = ? AND run_id = ?",  # noqa: S608
-        (session_id, run_id),
-    ).fetchone()
     connection.execute(usage_upsert_sql(names), (session_id, run_id, json.dumps(snapshot)))
-    (raw_session_data,) = connection.execute(
-        f"SELECT session_data FROM {sessions} WHERE session_id = ?",  # noqa: S608
-        (session_id,),
-    ).fetchone()
-    session_data = decoded_mapping(raw_session_data, null={})
-    if session_data is not None:
-        stored_totals = session_data.get("session_metrics")
-        totals = SessionMetrics.from_dict(stored_totals) if isinstance(stored_totals, dict) else SessionMetrics()
-        totals.count_run(
-            _counted_usage(snapshot),
-            replacing=None if previous is None else _counted_usage(decoded_mapping(previous[0]) or {}),
-        )
-        session_data["session_metrics"] = totals.to_dict()
-    # An unreadable row keeps its bytes, so the ledger alone records this run; its update time moves either way.
     connection.execute(
-        f"UPDATE {sessions} SET session_data = COALESCE(?, session_data), updated_at = ? WHERE session_id = ?",  # noqa: S608
-        (None if session_data is None else json.dumps(session_data), int(time()), session_id),
+        f"UPDATE {quote_identifier(names.sessions)} SET updated_at = ? WHERE session_id = ?",  # noqa: S608
+        (int(time()), session_id),
     )
-
-
-def _counted_usage(snapshot: Mapping[str, object]) -> RunMetrics:
-    """Return the usage a ledger snapshot records: its token counters, in total and for each model."""
-    metrics = snapshot.get("metrics")
-    if not isinstance(metrics, dict):
-        return RunMetrics()
-    metrics = cast("dict[str, object]", metrics)
-    counted = RunMetrics(tokens=TokenCounts.from_mapping(metrics, _counted_value))
-    details = metrics.get("details")
-    models = cast("dict[str, object]", details).get("model") if isinstance(details, dict) else None
-    if isinstance(models, list):
-        counted.details = {
-            "model": [_counted_model(cast("dict[str, object]", entry)) for entry in models if isinstance(entry, dict)],
-        }
-    return counted
-
-
-def _counted_model(entry: Mapping[str, object]) -> ModelMetrics:
-    model_id, provider = entry.get("id"), entry.get("provider")
-    return ModelMetrics(
-        tokens=TokenCounts.from_mapping(entry, _counted_value),
-        id=model_id if isinstance(model_id, str) else "",
-        provider=provider if isinstance(provider, str) else "",
-    )
-
-
-def _counted_value(value: object) -> int:
-    # The ledger keeps an invalid counter as a sentinel for its reporter; only real counts add up.
-    return value if isinstance(value, int) and not isinstance(value, bool) else 0
 
 
 __all__ = [

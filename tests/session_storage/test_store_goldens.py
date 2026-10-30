@@ -19,6 +19,7 @@ from mindroom.history.legacy_scope_metadata import _flattened_history_metadata
 from mindroom.history.storage import new_scope_session
 from mindroom.history.types import HistoryScope, owner_scope
 from mindroom.llm.runs import TeamRunRecord
+from mindroom.llm.usage import RunMetrics
 from mindroom.session_storage.agent_storage import create_state_storage
 from mindroom.session_storage.legacy_agno3_schema import AgnoTableNames, run_from_row
 from mindroom.session_storage.types import ConversationSession
@@ -235,13 +236,21 @@ def _without_update_time(row: dict[str, Any]) -> dict[str, Any]:
     return {key: value for key, value in row.items() if key != "updated_at"}
 
 
+def _ledger_totals(usage_rows: list[dict[str, Any]]) -> dict[str, Any]:
+    """Return what a session's usage rows add up to: their token counters, in total and for each model."""
+    totals = RunMetrics()
+    for row in usage_rows:
+        totals += RunMetrics.from_dict(row["usage_data"]["metrics"])
+    return totals.to_dict()
+
+
 @pytest.mark.parametrize(("store", "session_id"), _REPLAYABLE, ids=_REPLAYABLE_IDS)
 def test_replaying_golden_runs_with_usage_reproduces_rows_ledger_and_totals(
     store: GoldenStore,
     session_id: str,
     tmp_path: Path,
 ) -> None:
-    """Saving each stored run with its usage into a new database writes the runs, snapshots, and totals Agno wrote."""
+    """Saving each stored run with its usage into a new database writes the runs and snapshots, totalling what Agno did."""
     golden = store.restore(tmp_path / "golden")
     rows = stored_rows(golden, store.names.runs, session_id)
     [golden_session] = _query(golden, f'SELECT * FROM "{store.names.sessions}" WHERE session_id = ?', session_id)  # noqa: S608
@@ -283,7 +292,7 @@ def test_replaying_golden_runs_with_usage_reproduces_rows_ledger_and_totals(
     )
     [fresh_session] = _query(fresh.path, f'SELECT * FROM "{store.names.sessions}" WHERE session_id = ?', session_id)  # noqa: S608
     assert fresh_session["user_id"] == golden_session["user_id"]
-    assert _sorted_details(json.loads(fresh_session["session_data"])["session_metrics"]) == _sorted_details(
+    assert _sorted_details(_ledger_totals(stored_rows(fresh.path, store.names.usage, session_id))) == _sorted_details(
         json.loads(golden_session["session_data"])["session_metrics"],
     )
 

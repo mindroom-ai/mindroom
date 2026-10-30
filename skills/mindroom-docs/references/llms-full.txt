@@ -6415,7 +6415,7 @@ Every completed report includes `schema_version: 1` and `generated_at`, the UTC 
 Each `breakdown` row has session `totals`, `session_count`, and `cumulative_model_breakdown`, plus `retained_run_totals`, `run_count`, and a `user_breakdown` showing which requesters used that agent or team.
 Requester totals sum to `retained_run_totals`, which can differ from the cumulative session `totals`.
 
-`cumulative_model_breakdown` comes from per-model totals stored with each session, so it includes compacted history still in retained sessions but has no dates or requesters.
+`cumulative_model_breakdown` splits each session's `totals` by the models that produced them, so it includes compacted history still in retained sessions but has no dates or requesters.
 A session using several models counts once in each model's `session_count`.
 
 ### Daily Rows

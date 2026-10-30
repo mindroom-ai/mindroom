@@ -7,7 +7,7 @@ import math
 import re
 import sqlite3
 import sys
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, replace
 from pathlib import Path
 from types import MappingProxyType
 from typing import TYPE_CHECKING, Literal, TypeGuard, cast
@@ -21,11 +21,11 @@ from mindroom.private_storage.private_instance_identity import (
 )
 from mindroom.requester_identity import equivalent_requester_ids
 from mindroom.runtime_resolution import resolve_agent_storage
-from mindroom.session_storage.legacy_agno2_runs import decode_session_json
 from mindroom.session_storage.schema import TableNames, table_names
 from mindroom.session_storage.usage_reader import (
+    LEDGER_TOTALS_VERSION,
     read_only_snapshot,
-    recorded_owner,
+    recorded_meta,
     stored_sessions,
     stored_usage,
     unreadable_layout,
@@ -41,7 +41,7 @@ if TYPE_CHECKING:
     from collections.abc import Iterator, Mapping
 
     from mindroom.config.main import Config
-    from mindroom.session_storage.usage_reader import StoredSession
+    from mindroom.session_storage.usage_reader import RecordedMeta, StoredSession
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
     from mindroom.usage.storage import UsageKind
 
@@ -59,7 +59,6 @@ __all__ = [
 ]
 
 type _UsageStorageScope = Literal["shared_agent", "private_agent", "team", "system"]
-type _UsageReadMode = Literal["runs", "both"]
 type _MetricValue = int | float | str | None
 
 _MAX_STRING_LENGTH = 512
@@ -132,19 +131,18 @@ class UsageRunNode:
 
 @dataclass(frozen=True, slots=True)
 class UsageSessionRow:
-    """Usage runs from one retained session."""
+    """The usage ledger rows of one retained session, whose sum is its totals."""
 
     source: UsageStorageSource
     entity_id: str
     entity_kind: Literal["agent", "team"]
     row_key: str
     runs: tuple[UsageRunNode, ...]
-    session_metrics: Mapping[str, _MetricValue] = field(default_factory=lambda: MappingProxyType({}))
-    # Empty means no detailed attribution was stored; None means it was unusable.
-    session_model_metrics: tuple[UsageModelMetrics, ...] | None = ()
     requester_id: str | None = None
     runs_available: bool = True
-    session_metrics_available: bool = True
+    # False when the rows may not sum to the totals: a whole-history read of a database whose conversion to the layout
+    # version that keeps pre-ledger usage as a row (``LEDGER_TOTALS_VERSION``) has not run yet.
+    totals_available: bool = True
 
 
 @dataclass(frozen=True, slots=True)
@@ -435,18 +433,13 @@ def _source(
 def iter_usage_storage_rows(
     source: UsageStorageSource,
     *,
-    mode: _UsageReadMode = "runs",
     since: float | None = None,
 ) -> Iterator[UsageSessionRow | UsageStorageDiagnostic]:
-    """Read independent usage snapshots and optional cumulative session counters without writes.
+    """Read each session's usage snapshots without writes.
 
-    ``since`` reads only runs last updated at or after that epoch time and skips session counters,
-    which cover a session's whole history.
+    ``since`` reads only snapshots last updated at or after that epoch time, which leaves out the undated usage a
+    session had before the ledger.
     """
-    if mode not in {"runs", "both"}:
-        raise ValueError(mode)
-    if since is not None:
-        mode = "runs"
     if not source.path.is_file():
         yield _source_diagnostic(source, "absent", "database absent")
         return
@@ -461,22 +454,17 @@ def iter_usage_storage_rows(
                 yield _source_diagnostic(source, "unsupported_schema", problem)
                 return
             has_usage = source.names.usage in table_names(connection)
-            owner: tuple[object, object] | None = None
+            meta: RecordedMeta | None = None
             # A dated read visits the sessions with a usage snapshot in range, or every one when there is no ledger.
-            rows = stored_sessions(
-                connection,
-                source.names,
-                with_totals=mode == "both",
-                since=since if has_usage else None,
-            )
+            rows = stored_sessions(connection, source.names, since=since if has_usage else None)
             for row in rows:
                 # Read once a row needs it, so a database without sessions reads alike in every layout.
-                owner = owner or recorded_owner(connection, source.names)
-                if owner is None:
+                meta = meta or recorded_meta(connection, source.names)
+                if meta is None:
                     yield _source_diagnostic(source, "unsupported_schema", "session owner unavailable")
                     return
                 try:
-                    yield _extract_row(source, row, owner, connection, mode=mode, has_usage=has_usage, since=since)
+                    yield _extract_row(source, row, meta, connection, has_usage=has_usage, since=since)
                 except (RecursionError, TypeError, ValueError):
                     yield _source_diagnostic(source, "partial", "malformed retained session")
     except sqlite3.Error as error:
@@ -488,14 +476,13 @@ def iter_usage_storage_rows(
 def _extract_row(
     source: UsageStorageSource,
     row: StoredSession,
-    owner: tuple[object, object],
+    meta: RecordedMeta,
     connection: sqlite3.Connection,
     *,
-    mode: _UsageReadMode,
     has_usage: bool,
     since: float | None,
 ) -> UsageSessionRow:
-    entity_kind, entity_id = owner
+    entity_kind, entity_id, version = meta
     if entity_kind not in {"agent", "team"}:
         raise ValueError
     if source.scope == "system" and (entity_kind != "agent" or entity_id != SYSTEM_USAGE_ENTITY):
@@ -516,26 +503,15 @@ def _extract_row(
         if has_usage
         else ([], False)
     )
-    session_metrics: Mapping[str, _MetricValue] = MappingProxyType({})
-    session_model_metrics: tuple[UsageModelMetrics, ...] | None = ()
-    session_metrics_available = mode == "both"
-    if session_metrics_available:
-        try:
-            session_metrics, session_model_metrics = _decode_session_usage(row.session_data)
-        except (RecursionError, TypeError, ValueError):
-            session_model_metrics = None
-            session_metrics_available = False
     return UsageSessionRow(
         source=source,
         entity_id=_bounded_string(entity_id),
         entity_kind=cast("Literal['agent', 'team']", entity_kind),
         row_key=_bounded_string(row_key),
         runs=tuple(runs),
-        session_metrics=session_metrics,
-        session_model_metrics=session_model_metrics,
         requester_id=row_requester,
         runs_available=runs_available,
-        session_metrics_available=session_metrics_available,
+        totals_available=since is not None or (isinstance(version, int) and version >= LEDGER_TOTALS_VERSION),
     )
 
 
@@ -570,23 +546,6 @@ def _decoded_snapshot(payload: object) -> object:
     if not isinstance(payload, (str, bytes)):
         raise TypeError
     return json.loads(payload)
-
-
-def _decode_session_usage(
-    raw_value: object,
-) -> tuple[Mapping[str, _MetricValue], tuple[UsageModelMetrics, ...] | None]:
-    decoded = decode_session_json(raw_value)
-    if decoded is None:
-        return MappingProxyType({}), ()
-    if not isinstance(decoded, dict):
-        raise TypeError
-    raw_metrics = cast("dict[str, object]", decoded).get("session_metrics")
-    if raw_metrics is None:
-        return MappingProxyType({}), ()
-    if not isinstance(raw_metrics, dict):
-        raise TypeError
-    session_metrics = cast("dict[str, object]", raw_metrics)
-    return _select_metrics(session_metrics), _extract_model_metrics(session_metrics.get("details"))
 
 
 def _extract_run(

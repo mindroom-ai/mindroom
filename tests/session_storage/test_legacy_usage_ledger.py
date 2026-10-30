@@ -153,7 +153,7 @@ def test_a_blob_run_with_an_unusable_timestamp_keeps_its_usage(tmp_path: Path, c
 def test_migration_rolls_back_schema_and_seed_on_interruption(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """A failed first import cannot publish an empty or partially seeded usage table."""
     path = create_agno_2_sessions_db(_NAMES.database_path(tmp_path))
-    project = legacy_usage_ledger.project_usage
+    project = legacy_usage_ledger._project_usage
     calls = 0
 
     def interrupt(run: dict[str, object]) -> dict[str, object]:
@@ -165,7 +165,7 @@ def test_migration_rolls_back_schema_and_seed_on_interruption(tmp_path: Path, mo
         return project(run)
 
     with monkeypatch.context() as patch:
-        patch.setattr(legacy_usage_ledger, "project_usage", interrupt)
+        patch.setattr(legacy_usage_ledger, "_project_usage", interrupt)
         with pytest.raises(RuntimeError, match="interrupted seed"):
             _convert(path)
     with sqlite3.connect(path) as connection:

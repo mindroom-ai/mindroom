@@ -1076,17 +1076,29 @@ visibility = [
     "mindroom.history.legacy_compaction_state",
     "mindroom.session_storage.legacy_agno3_conversion",
     "mindroom.session_storage.legacy_usage_ledger",
-    "mindroom.usage.stats_storage",
+    "mindroom.session_storage.legacy_usage_totals",
 ]
 
 [[modules]]
 path = "mindroom.session_storage.legacy_usage_ledger"
 depends_on = [
+    "mindroom.llm",
     "mindroom.session_storage.legacy_agno2_runs",
     "mindroom.session_storage.schema",
     "mindroom.usage.storage",
 ]
 visibility = ["mindroom.session_storage.legacy_agno3_conversion"]
+
+[[modules]]
+path = "mindroom.session_storage.legacy_usage_totals"
+depends_on = [
+    "mindroom.llm",
+    "mindroom.session_storage.legacy_agno2_runs",
+    "mindroom.session_storage.schema",
+    "mindroom.session_storage.store",
+    "mindroom.usage.storage",
+]
+visibility = ["mindroom.session_storage.legacy_agno3_conversion", "mindroom.session_storage.legacy_session_columns"]
 
 [[modules]]
 path = "mindroom.session_storage.legacy_agent_session_owners"
@@ -1101,6 +1113,7 @@ depends_on = [
     "mindroom.history.types",
     "mindroom.session_storage.legacy_agent_session_owners",
     "mindroom.session_storage.legacy_conversion_backup",
+    "mindroom.session_storage.legacy_usage_totals",
     "mindroom.session_storage.schema",
     "mindroom.session_storage.store",
 ]
@@ -1131,6 +1144,7 @@ depends_on = [
     "mindroom.session_storage.legacy_agno3_schema",
     "mindroom.session_storage.legacy_session_columns",
     "mindroom.session_storage.legacy_usage_ledger",
+    "mindroom.session_storage.legacy_usage_totals",
     "mindroom.session_storage.schema",
     "mindroom.session_storage.store",
     "mindroom.usage.storage",
@@ -9499,7 +9513,7 @@ expose = ["clear_stale_singleton_locks"]
 [[modules]]
 path = "mindroom.usage.storage"
 depends_on = ["mindroom.history.types", "mindroom.llm"]
-visibility = ["mindroom.session_storage.legacy_agno3_conversion", "mindroom.session_storage.legacy_usage_ledger", "mindroom.session_storage.store", "mindroom.helper_usage", "mindroom.usage.stats", "mindroom.usage.stats_storage", "mindroom.history.mid_turn_compaction", "mindroom.history.summary_input"]
+visibility = ["mindroom.session_storage.legacy_agno3_conversion", "mindroom.session_storage.legacy_usage_ledger", "mindroom.session_storage.legacy_usage_totals", "mindroom.session_storage.store", "mindroom.helper_usage", "mindroom.usage.stats", "mindroom.usage.stats_storage", "mindroom.history.mid_turn_compaction", "mindroom.history.summary_input"]
 
 [[modules]]
 path = "mindroom.usage.legacy_usage_storage"

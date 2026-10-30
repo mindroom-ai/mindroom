@@ -199,7 +199,9 @@ def test_invalid_team_child_counter_preserves_valid_usage(tmp_path: Path, invali
             connection.execute(query, (json.dumps(payload), "other-member"))
         report = collect_admin_usage(config=config, runtime_paths=paths, include_daily=True, include_requests=True)
 
-    assert report.totals.total_tokens == 63  # Authoritative session counters remain valid.
+    # The damaged child adds nothing, so the totals are the leader's and the other member's, marked incomplete.
+    assert report.totals.total_tokens == 32
+    assert report.coverage.unavailable_sources == 2
     assert {(row.model, row.totals.total_tokens) for row in report.model_breakdown} == {
         ("leader-model", 11),
         ("member-model", 21),

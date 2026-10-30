@@ -27,6 +27,7 @@ from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 from mindroom.usage.stats import collect_admin_usage, collect_self_usage
 from mindroom.usage.stats_storage import (
     UsageModelMetrics,
+    UsageRequestMetrics,
     UsageRunNode,
     UsageSessionRow,
     UsageStorageDiagnostic,
@@ -111,15 +112,27 @@ def _run(
     )
 
 
+def _baseline(metrics: Mapping[str, object], *models: UsageModelMetrics) -> UsageRunNode:
+    """Return the row holding what a session's stored totals counted beyond its runs, as layout version 6 keeps it."""
+    return UsageRunNode(
+        team_id=None,
+        requester_id=None,
+        run_id="pre_ledger",
+        model_provider=None,
+        model=None,
+        metrics=MappingProxyType(dict(metrics)),
+        model_metrics=models,
+        kind="pre_ledger",
+    )
+
+
 def _row(
     source: UsageStorageSource,
     *runs: UsageRunNode,
     entity_id: str | None = None,
-    session_metrics: Mapping[str, object] | None = None,
-    session_model_metrics: tuple[UsageModelMetrics, ...] | None = (),
     row_key: str = "session-1",
     runs_available: bool = True,
-    session_metrics_available: bool = True,
+    totals_available: bool = True,
 ) -> UsageSessionRow:
     is_team = source.scope == "team"
     return UsageSessionRow(
@@ -128,10 +141,8 @@ def _row(
         entity_kind="team" if is_team else "agent",
         row_key=row_key,
         runs=tuple(runs),
-        session_metrics=MappingProxyType(dict(session_metrics or {})),
-        session_model_metrics=session_model_metrics,
         runs_available=runs_available,
-        session_metrics_available=session_metrics_available,
+        totals_available=totals_available,
     )
 
 
@@ -153,7 +164,7 @@ def test_admin_exports_reconciled_cumulative_models_separately_from_retained_run
     source_scope: str,
     agent_name: str | None,
 ) -> None:
-    """Compacted session totals retain exact per-model counters and session counts."""
+    """A session's run and the usage it had before per-run snapshots add up to exact per-model counters."""
     source = _source(scope=source_scope, agent_name=agent_name)
     session_totals = {
         "input_tokens": 60,
@@ -166,13 +177,15 @@ def test_admin_exports_reconciled_cumulative_models_separately_from_retained_run
         "audio_output_tokens": 7,
         "audio_total_tokens": 15,
     }
-    session_models = (
+    # What the session's stored totals counted beyond its run, as layout version 6 keeps it: the run's model-a
+    # 17/3/20 subtracted from the first model-a entry.
+    baseline_models = (
         _model_metrics(
             "provider-a",
             "model-a",
-            input_tokens=20,
-            output_tokens=10,
-            total_tokens=30,
+            input_tokens=3,
+            output_tokens=7,
+            total_tokens=10,
             cache_read_tokens=10,
             cache_write_tokens=4,
             reasoning_tokens=3,
@@ -207,6 +220,17 @@ def test_admin_exports_reconciled_cumulative_models_separately_from_retained_run
             audio_total_tokens=9,
         ),
     )
+    baseline_totals = {
+        "input_tokens": 43,
+        "output_tokens": 37,
+        "total_tokens": 80,
+        "cache_read_tokens": 30,
+        "cache_write_tokens": 10,
+        "reasoning_tokens": 9,
+        "audio_input_tokens": 8,
+        "audio_output_tokens": 7,
+        "audio_total_tokens": 15,
+    }
     _wire(
         monkeypatch,
         (source,),
@@ -214,9 +238,8 @@ def test_admin_exports_reconciled_cumulative_models_separately_from_retained_run
             source.path_label: (
                 _row(
                     source,
-                    _run(total_tokens=20, model_provider="retained-provider", model="retained-model"),
-                    session_metrics=MappingProxyType(session_totals),
-                    session_model_metrics=session_models,
+                    _run(total_tokens=20, model_provider="provider-a", model="model-a"),
+                    _baseline(baseline_totals, *baseline_models),
                 ),
             ),
         },
@@ -227,8 +250,8 @@ def test_admin_exports_reconciled_cumulative_models_separately_from_retained_run
     assert payload["totals"] == session_totals
     assert payload["model_breakdown"] == [
         {
-            "provider": "retained-provider",
-            "model": "retained-model",
+            "provider": "provider-a",
+            "model": "model-a",
             "totals": {
                 "input_tokens": 17,
                 "output_tokens": 3,
@@ -284,68 +307,51 @@ def test_admin_exports_reconciled_cumulative_models_separately_from_retained_run
 
 
 @pytest.mark.parametrize(
-    "session_model_metrics",
+    "model_metrics",
     [
         (),
         None,
         (_model_metrics("provider-a", "model-a", total_tokens=-1),),
         (_model_metrics("provider-a", "model-a", total_tokens=5),),
-        (_model_metrics(None, "model-a", input_tokens=97, output_tokens=3, total_tokens=100),),
-        (_model_metrics("provider-a", None, input_tokens=97, output_tokens=3, total_tokens=100),),
     ],
-    ids=[
-        "absent",
-        "malformed",
-        "negative",
-        "unreconciled",
-        "missing-provider",
-        "missing-model",
-    ],
+    ids=["absent", "malformed", "negative", "unreconciled"],
 )
 def test_admin_keeps_cumulative_totals_under_unknown_when_model_detail_is_unusable(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
-    session_model_metrics: tuple[UsageModelMetrics, ...] | None,
+    model_metrics: tuple[UsageModelMetrics, ...] | None,
 ) -> None:
-    """Unusable cumulative attribution cannot discard session or retained-run totals."""
+    """Unusable attribution of a session's usage row cannot discard its totals or the other rows' models."""
     source = _source()
-    _wire(
-        monkeypatch,
-        (source,),
-        {
-            source.path_label: (
-                _row(
-                    source,
-                    _run(total_tokens=20),
-                    session_metrics=_metrics(100),
-                    session_model_metrics=session_model_metrics,
-                ),
-            ),
-        },
-    )
+    baseline = replace(_baseline(_metrics(80)), model_metrics=model_metrics)
+    _wire(monkeypatch, (source,), {source.path_label: (_row(source, _run(total_tokens=20), baseline),)})
 
     payload = collect_admin_usage(config=_config(), runtime_paths=_paths(tmp_path)).to_dict()
 
     assert payload["totals"]["total_tokens"] == 100
     assert payload["model_breakdown"][0]["totals"]["total_tokens"] == 20
-    assert payload["cumulative_model_breakdown"] == [
-        {
-            "provider": "unknown",
-            "model": "unknown",
-            "totals": {
-                "input_tokens": 97,
-                "output_tokens": 3,
-                "total_tokens": 100,
-                "cache_read_tokens": 0,
-                "cache_write_tokens": 0,
-                "reasoning_tokens": 0,
-                "audio_input_tokens": 0,
-                "audio_output_tokens": 0,
-                "audio_total_tokens": 0,
-            },
-            "session_count": 1,
-        },
+    assert [
+        (row["provider"], row["model"], row["totals"]["total_tokens"]) for row in payload["cumulative_model_breakdown"]
+    ] == [
+        ("unknown", "unknown", 80),
+        ("openai", "gpt-6-astra", 20),
     ]
+    assert payload["cumulative_model_breakdown"][0] == {
+        "provider": "unknown",
+        "model": "unknown",
+        "totals": {
+            "input_tokens": 77,
+            "output_tokens": 3,
+            "total_tokens": 80,
+            "cache_read_tokens": 0,
+            "cache_write_tokens": 0,
+            "reasoning_tokens": 0,
+            "audio_input_tokens": 0,
+            "audio_output_tokens": 0,
+            "audio_total_tokens": 0,
+        },
+        "session_count": 1,
+    }
     assert payload["cumulative_model_coverage"]["unavailable_sources"] == 1
 
 
@@ -355,39 +361,62 @@ def test_admin_attributes_cumulative_usage_beside_a_model_that_reported_none(
 ) -> None:
     """A model whose requests reported no usage, such as a reply stopped before usage arrived, adds nothing."""
     source = _source()
-    session_models = (
+    baseline = _baseline(
+        _metrics(80),
         _model_metrics("provider-a", "model-a"),
-        _model_metrics("provider-b", "model-b", input_tokens=97, output_tokens=3, total_tokens=100),
+        _model_metrics("provider-b", "model-b", **dict(_metrics(80))),
     )
-    _wire(
-        monkeypatch,
-        (source,),
-        {
-            source.path_label: (
-                _row(
-                    source,
-                    _run(total_tokens=20),
-                    session_metrics=_metrics(100),
-                    session_model_metrics=session_models,
-                ),
-            ),
-        },
-    )
+    _wire(monkeypatch, (source,), {source.path_label: (_row(source, _run(total_tokens=20), baseline),)})
 
     payload = collect_admin_usage(config=_config(), runtime_paths=_paths(tmp_path)).to_dict()
 
     assert [
         (entry["provider"], entry["model"], entry["totals"]["total_tokens"])
         for entry in payload["cumulative_model_breakdown"]
-    ] == [("provider-b", "model-b", 100)]
+    ] == [("provider-b", "model-b", 80), ("openai", "gpt-6-astra", 20)]
     assert payload["cumulative_model_coverage"]["unavailable_sources"] == 0
+
+
+@pytest.mark.parametrize("stored_models", [{"model-a": 10}, {"model-a": 7}], ids=["contradictory", "unreconciled"])
+def test_ledger_attribution_wins_over_contradictory_stored_attribution(
+    tmp_path: Path,
+    stored_models: dict[str, int],
+) -> None:
+    """Runs of model B under totals an earlier release stored for model A report B and the rest as unknown.
+
+    That release reported model A's 10, or 10 under unknown when its details did not reconcile.
+    """
+    paths = _paths(tmp_path)
+    storage = create_agent_state_storage("code", paths.storage_root / "agents" / "code")
+    run = RunRecord(
+        run_id="b",
+        user_id="@alice:example.test",
+        model_provider="provider-b",
+        model="model-b",
+        metrics=RunMetrics(tokens=TokenCounts(input_tokens=8, total_tokens=8)),
+    )
+    persist_session(storage, ConversationSession(kind="agent", session_id="session-1", owner_id="code", runs=[run]))
+    models = [
+        {"input_tokens": tokens, "total_tokens": tokens, "id": model, "provider": "provider-a"}
+        for model, tokens in stored_models.items()
+    ]
+    seed_session_metrics(storage, "session-1", {"input_tokens": 10, "total_tokens": 10, "details": {"model": models}})
+
+    report = collect_admin_usage(config=Config(agents={"code": AgentConfig(display_name="Code")}), runtime_paths=paths)
+
+    assert report.totals.total_tokens == 10
+    assert [(row.model_provider, row.model, row.totals.total_tokens) for row in report.cumulative_model_breakdown] == [
+        ("provider-b", "model-b", 8),
+        ("unknown", "unknown", 2),
+    ]
+    assert report.cumulative_model_coverage.unavailable_sources == 1
 
 
 def _wire(
     monkeypatch: pytest.MonkeyPatch,
     sources: tuple[UsageStorageSource | UsageStorageDiagnostic, ...],
     rows: dict[str, tuple[UsageSessionRow | UsageStorageDiagnostic, ...]],
-    calls: list[tuple[str, str]] | None = None,
+    calls: list[str] | None = None,
 ) -> None:
     monkeypatch.setattr("mindroom.usage.stats.discover_self_usage_sources", lambda **_: sources)
     monkeypatch.setattr("mindroom.usage.stats.discover_admin_usage_sources", lambda **_: sources)
@@ -395,12 +424,11 @@ def _wire(
     def iter_rows(
         source: UsageStorageSource,
         *,
-        mode: str = "runs",
         since: float | None = None,
     ) -> Iterator[UsageSessionRow | UsageStorageDiagnostic]:
         del since
         if calls is not None:
-            calls.append((source.path_label, mode))
+            calls.append(source.path_label)
         yield from rows.get(source.path_label, ())
 
     monkeypatch.setattr("mindroom.usage.stats.iter_usage_storage_rows", iter_rows)
@@ -437,7 +465,7 @@ def test_admin_groups_canonical_users_and_models_without_counting_duplicate_runs
                     ),
                     _run(requester_id="@bob:example.test", run_id="bob", total_tokens=15, created_at=first_day),
                     _run(requester_id=None, run_id="unattributed", total_tokens=5, created_at=first_day),
-                    session_metrics=_metrics(100),
+                    _baseline(_metrics(40)),
                 ),
             ),
         },
@@ -513,13 +541,13 @@ def test_entity_requesters_group_the_same_retained_runs_as_the_report(
                     _run(requester_id="@telegram-alice:example.test", run_id="alias", total_tokens=20),
                     _run(requester_id="@bob:example.test", run_id="bob", total_tokens=15),
                     _run(requester_id=None, run_id="unknown", total_tokens=5),
-                    session_metrics=_metrics(150),
+                    _baseline(_metrics(90)),
                 ),
             ),
             private.path_label: (
-                _row(private, _run(requester_id="@bob:example.test", total_tokens=11), session_metrics=_metrics(40)),
+                _row(private, _run(requester_id="@bob:example.test", total_tokens=11), _baseline(_metrics(29))),
             ),
-            other.path_label: (_row(other, _run(total_tokens=7), session_metrics=_metrics(100)),),
+            other.path_label: (_row(other, _run(total_tokens=7), _baseline(_metrics(93))),),
         },
     )
 
@@ -567,10 +595,10 @@ def test_daily_usage_groups_utc_dates_and_deduplicates_runs(tmp_path: Path, monk
         (source, team),
         {
             source.path_label: (
-                _row(source, after_midnight, before_midnight, before_midnight, session_metrics=_metrics(100)),
-                _row(source, before_midnight, row_key="session-2", session_metrics=_metrics(70)),
+                _row(source, after_midnight, before_midnight, before_midnight, _baseline(_metrics(60))),
+                _row(source, before_midnight, _baseline(_metrics(60)), row_key="session-2"),
             ),
-            team.path_label: (_row(team, after_midnight, session_metrics=_metrics(100)),),
+            team.path_label: (_row(team, after_midnight, _baseline(_metrics(80))),),
         },
     )
     config = _config()
@@ -602,7 +630,7 @@ def test_daily_usage_groups_utc_dates_and_deduplicates_runs(tmp_path: Path, monk
 
 def test_admin_usage_since_reads_only_runs_from_that_time(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     source = _source()
-    calls: list[tuple[str, str]] = []
+    calls: list[str] = []
     september = _run(run_id="sept", created_at=datetime(2026, 9, 15, tzinfo=UTC).timestamp())
     october = _run(run_id="oct", total_tokens=20, created_at=datetime(2026, 10, 2, tzinfo=UTC).timestamp())
     since = datetime(2026, 10, 1, tzinfo=UTC).timestamp()
@@ -610,10 +638,9 @@ def test_admin_usage_since_reads_only_runs_from_that_time(tmp_path: Path, monkey
     def iter_rows(
         source: UsageStorageSource,
         *,
-        mode: str = "runs",
         since: float | None = None,
     ) -> Iterator[UsageSessionRow | UsageStorageDiagnostic]:
-        calls.append((mode, str(since)))
+        calls.append(str(since))
         runs = (
             (september, october)
             if since is None
@@ -631,9 +658,59 @@ def test_admin_usage_since_reads_only_runs_from_that_time(tmp_path: Path, monkey
         since=since,
     ).to_dict()
 
-    assert calls == [("runs", str(since))]
+    assert calls == [str(since)]
     (user,) = payload["user_breakdown"]
     assert [row["date"] for row in user["daily_breakdown"]] == ["2026-10-02"]
+
+
+def test_dated_admin_usage_totals_are_the_dated_ledger_rows(tmp_path: Path) -> None:
+    """A dated admin report totals the usage rows written in range, per entity, not only per user and day."""
+    paths = _paths(tmp_path)
+    storage = create_agent_state_storage("code", paths.storage_root / "agents" / "code")
+    september = int(datetime(2026, 9, 15, tzinfo=UTC).timestamp())
+    october = int(datetime(2026, 10, 2, tzinfo=UTC).timestamp())
+    for session_id, created_at, total_tokens in (("september", september, 7), ("october", october, 20)):
+        persist_session(
+            storage,
+            ConversationSession(
+                kind="agent",
+                session_id=session_id,
+                owner_id="code",
+                runs=[
+                    RunRecord(
+                        run_id=session_id,
+                        user_id="@alice:example.test",
+                        model_provider="openai",
+                        model="gpt-6-astra",
+                        created_at=created_at,
+                        metrics=RunMetrics(tokens=TokenCounts(input_tokens=total_tokens, total_tokens=total_tokens)),
+                    ),
+                ],
+            ),
+        )
+    with storage.transaction(write=True) as connection:
+        connection.execute(
+            "UPDATE code_sessions_usage SET usage_data = json_set(usage_data, '$.updated_at', json_extract(usage_data, "
+            "'$.created_at'))",
+        )
+
+    report = collect_admin_usage(
+        config=_config(),
+        runtime_paths=_paths(tmp_path),
+        include_daily=True,
+        since=datetime(2026, 10, 1, tzinfo=UTC).timestamp(),
+    )
+
+    # The other scanned source is agent `other`'s absent database.
+    assert (report.totals.total_tokens, report.session_count, report.coverage.unavailable_sources) == (20, 1, 1)
+    [entity] = report.breakdown
+    assert (entity.key, entity.totals.total_tokens, entity.session_count) == ("code", 20, 1)
+    assert (entity.retained_run_totals.total_tokens, entity.run_count) == (20, 1)
+    assert [(row.model, row.totals.total_tokens, row.session_count) for row in report.cumulative_model_breakdown] == [
+        ("gpt-6-astra", 20, 1),
+    ]
+    assert report.cumulative_model_coverage.unavailable_sources == 1
+    assert [(day.date, day.totals.total_tokens) for day in report.daily_breakdown] == [("2026-10-02", 20)]
 
 
 @pytest.mark.parametrize("private", [False, True])
@@ -653,7 +730,7 @@ def test_daily_self_usage_keeps_requester_scope(
                     source,
                     _run(requester_id="@telegram-alice:example.test", created_at=timestamp),
                     _run(requester_id=None if private else "@bob:example.test", run_id="other", created_at=timestamp),
-                    session_metrics=_metrics(100),
+                    _baseline(_metrics(80)),
                 ),
             ),
         },
@@ -694,7 +771,7 @@ def test_daily_usage_skips_undatable_runs_without_losing_other_totals(
                     source,
                     _run(run_id="dated", created_at=datetime(2026, 9, 15, tzinfo=UTC).timestamp()),
                     _run(run_id="undated", requester_id="@bob:example.test", created_at=created_at),
-                    session_metrics=_metrics(100),
+                    _baseline(_metrics(80)),
                 ),
             ),
         },
@@ -719,7 +796,7 @@ def test_daily_usage_returns_empty_breakdown_without_retained_runs(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     source = _source()
-    _wire(monkeypatch, (source,), {source.path_label: (_row(source, session_metrics=_metrics(100)),)})
+    _wire(monkeypatch, (source,), {source.path_label: (_row(source, _baseline(_metrics(100))),)})
 
     payload = collect_admin_usage(config=_config(), runtime_paths=_paths(tmp_path), include_daily=True).to_dict()
 
@@ -829,7 +906,6 @@ def test_daily_and_combined_models_use_the_per_model_metrics_details(tmp_path: P
             ],
         ),
     )
-    seed_session_metrics(storage, "session-1", totals)
 
     report = (
         collect_admin_usage(config=config, runtime_paths=paths, include_daily=True)
@@ -1125,7 +1201,7 @@ def test_shared_self_reads_each_source_once_for_totals_and_models(
     _wire(
         monkeypatch,
         (source,),
-        {source.path_label: (_row(source, _run(), session_metrics_available=False),)},
+        {source.path_label: (_row(source, _run(), totals_available=False),)},
         calls,
     )
 
@@ -1137,7 +1213,7 @@ def test_shared_self_reads_each_source_once_for_totals_and_models(
         execution_identity=_identity(),
     )
 
-    assert calls == [(source.path_label, "runs")]
+    assert calls == [source.path_label]
     assert report.totals.total_tokens == 10
     assert report.model_breakdown[0].totals.total_tokens == 10
 
@@ -1147,7 +1223,7 @@ def test_self_usage_accepts_missing_requester_in_exact_private_store(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     source = _source(scope="private_agent", requester_isolated=True)
-    _wire(monkeypatch, (source,), {source.path_label: (_row(source, session_metrics=_metrics()),)})
+    _wire(monkeypatch, (source,), {source.path_label: (_row(source, _baseline(_metrics())),)})
 
     report = collect_self_usage(
         agent_name="code",
@@ -1160,7 +1236,7 @@ def test_self_usage_accepts_missing_requester_in_exact_private_store(
     assert report.totals.total_tokens == 10
 
 
-def test_private_self_usage_uses_compaction_safe_session_metrics(
+def test_private_self_usage_counts_usage_from_before_per_run_snapshots(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1168,7 +1244,7 @@ def test_private_self_usage_uses_compaction_safe_session_metrics(
     _wire(
         monkeypatch,
         (source,),
-        {source.path_label: (_row(source, _run(total_tokens=10), session_metrics=_metrics(25)),)},
+        {source.path_label: (_row(source, _run(total_tokens=10), _baseline(_metrics(15))),)},
     )
 
     report = collect_self_usage(
@@ -1251,7 +1327,7 @@ def test_self_usage_rejects_row_with_invalid_own_run_metrics(
     assert report.daily_coverage.unavailable_sources == 1
 
 
-def test_admin_usage_uses_member_inclusive_session_metrics(
+def test_admin_usage_uses_member_inclusive_session_totals(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1265,14 +1341,14 @@ def test_admin_usage_uses_member_inclusive_session_metrics(
                 _row(
                     agent_source,
                     _run(total_tokens=7, model_provider="openai", model="gpt-6-astra"),
-                    session_metrics=_metrics(10),
+                    _baseline(_metrics(3)),
                 ),
             ),
             team_source.path_label: (
                 _row(
                     team_source,
                     _run(total_tokens=5, model_provider="vertexai", model="claude-opus-5"),
-                    session_metrics=_metrics(30),
+                    _baseline(_metrics(25)),
                 ),
             ),
         },
@@ -1308,13 +1384,13 @@ def test_admin_reads_each_source_once_for_session_and_model_views(
     _wire(
         monkeypatch,
         (source,),
-        {source.path_label: (_row(source, _run(), session_metrics=_metrics()),)},
+        {source.path_label: (_row(source, _run()),)},
         calls,
     )
 
     collect_admin_usage(config=_config(), runtime_paths=_paths(tmp_path))
 
-    assert calls == [(source.path_label, "both")]
+    assert calls == [source.path_label]
 
 
 def test_model_breakdown_groups_runs_and_uses_unknown_for_missing_identity(
@@ -1332,7 +1408,6 @@ def test_model_breakdown_groups_runs_and_uses_unknown_for_missing_identity(
                     _run(run_id="run-1", total_tokens=8),
                     _run(run_id="run-2", total_tokens=12),
                     _run(run_id="run-3", total_tokens=5, model_provider=None, model=None),
-                    session_metrics=_metrics(30),
                 ),
             ),
         },
@@ -1362,7 +1437,6 @@ def test_model_breakdown_deduplicates_repeated_retained_run_ids(
                     source,
                     _run(run_id="duplicate", total_tokens=8),
                     _run(run_id="duplicate", total_tokens=8),
-                    session_metrics=_metrics(8),
                 ),
             ),
         },
@@ -1387,7 +1461,6 @@ def test_model_breakdown_uses_provider_and_model_as_equal_token_tiebreakers(
                     source,
                     _run(run_id="z-model", model_provider="zeta", model="alpha"),
                     _run(run_id="a-model", model_provider="alpha", model="zeta"),
-                    session_metrics=_metrics(20),
                 ),
             ),
         },
@@ -1406,7 +1479,7 @@ def test_admin_usage_rejects_unconfigured_entity_attribution(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     source = _source(agent_name="rogue")
-    _wire(monkeypatch, (source,), {source.path_label: (_row(source, session_metrics=_metrics()),)})
+    _wire(monkeypatch, (source,), {source.path_label: (_row(source, _baseline(_metrics())),)})
 
     report = collect_admin_usage(config=_config(), runtime_paths=_paths(tmp_path))
 
@@ -1415,7 +1488,43 @@ def test_admin_usage_rejects_unconfigured_entity_attribution(
     assert report.model_breakdown == ()
 
 
-def test_invalid_admin_session_metrics_mark_source_incomplete(
+@pytest.mark.parametrize("baseline", [True, False], ids=["pre-ledger-usage", "runs-only"])
+def test_usage_from_before_per_run_snapshots_leaves_request_detail_incomplete(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    baseline: bool,
+) -> None:
+    """Requests that reconcile with their run are exported; usage from before per-run snapshots has none."""
+    source = _source()
+    created_at = datetime(2026, 9, 15, tzinfo=UTC).timestamp()
+    run = replace(_run(created_at=created_at), requests=(UsageRequestMetrics(created_at, _metrics()),))
+    rows = (run, _baseline(_metrics(5))) if baseline else (run,)
+    _wire(monkeypatch, (source,), {source.path_label: (_row(source, *rows),)})
+
+    report = collect_admin_usage(config=_config(), runtime_paths=_paths(tmp_path), include_requests=True)
+
+    assert [(row.model, row.totals.total_tokens) for row in report.request_breakdown] == [("gpt-6-astra", 10)]
+    assert report.request_coverage is not None
+    assert report.request_coverage.unavailable_sources == int(baseline)
+    assert report.totals.total_tokens == (15 if baseline else 10)
+
+
+def test_a_whole_float_or_digit_string_counter_counts(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Rows older releases wrote can hold a counter as a whole float or a short digit string; both count."""
+    source = _source()
+    _wire(
+        monkeypatch,
+        (source,),
+        {source.path_label: (_row(source, _baseline({"input_tokens": "12", "total_tokens": 12.0})),)},
+    )
+
+    report = collect_admin_usage(config=_config(), runtime_paths=_paths(tmp_path))
+
+    assert (report.totals.input_tokens, report.totals.total_tokens) == (12, 12)
+    assert report.coverage.unavailable_sources == 0
+
+
+def test_an_invalid_usage_row_marks_the_admin_source_incomplete(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1423,7 +1532,7 @@ def test_invalid_admin_session_metrics_mark_source_incomplete(
     _wire(
         monkeypatch,
         (source,),
-        {source.path_label: (_row(source, session_metrics={"total_tokens": -1}),)},
+        {source.path_label: (_row(source, _baseline({"total_tokens": -1})),)},
     )
 
     report = collect_admin_usage(config=_config(), runtime_paths=_paths(tmp_path))
@@ -1432,10 +1541,11 @@ def test_invalid_admin_session_metrics_mark_source_incomplete(
     assert report.coverage.unavailable_sources == 1
 
 
-def test_invalid_model_run_does_not_discard_authoritative_admin_totals(
+def test_an_invalid_run_counter_keeps_the_other_rows_totals_and_marks_them_incomplete(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """A row whose counter is not a count adds nothing, so the session's other rows total, marked incomplete."""
     source = _source()
     invalid_run = UsageRunNode(
         team_id=None,
@@ -1448,13 +1558,13 @@ def test_invalid_model_run_does_not_discard_authoritative_admin_totals(
     _wire(
         monkeypatch,
         (source,),
-        {source.path_label: (_row(source, invalid_run, session_metrics=_metrics(20)),)},
+        {source.path_label: (_row(source, invalid_run, _baseline(_metrics(20))),)},
     )
 
     report = collect_admin_usage(config=_config(), runtime_paths=_paths(tmp_path))
 
     assert report.totals.total_tokens == 20
-    assert report.coverage.unavailable_sources == 0
+    assert report.coverage.unavailable_sources == 1
     assert report.model_breakdown == ()
     assert report.model_coverage.unavailable_sources == 1
 
@@ -1463,10 +1573,11 @@ def test_invalid_model_run_does_not_discard_authoritative_admin_totals(
     assert entity["user_breakdown"] == []
 
 
-def test_unavailable_model_payload_does_not_discard_authoritative_admin_totals(
+def test_an_unreadable_usage_row_keeps_the_other_rows_totals(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """A snapshot the reader drops marks the models incomplete; the session's readable rows still total."""
     source = _source()
     _wire(
         monkeypatch,
@@ -1475,7 +1586,7 @@ def test_unavailable_model_payload_does_not_discard_authoritative_admin_totals(
             source.path_label: (
                 _row(
                     source,
-                    session_metrics=_metrics(20),
+                    _baseline(_metrics(20)),
                     runs_available=False,
                 ),
             ),
@@ -1490,7 +1601,7 @@ def test_unavailable_model_payload_does_not_discard_authoritative_admin_totals(
     assert report.model_coverage.unavailable_sources == 1
 
 
-def test_unavailable_session_payload_does_not_discard_model_attribution(
+def test_totals_unavailable_below_the_ledger_totals_version_keep_model_attribution(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1503,7 +1614,7 @@ def test_unavailable_session_payload_does_not_discard_model_attribution(
                 _row(
                     source,
                     _run(total_tokens=12),
-                    session_metrics_available=False,
+                    totals_available=False,
                 ),
             ),
         },
@@ -1533,8 +1644,8 @@ def test_admin_usage_reads_every_retained_session(
         (source,),
         {
             source.path_label: (
-                _row(source, session_metrics=_metrics(), row_key="session-1"),
-                _row(source, session_metrics=_metrics(), row_key="session-2"),
+                _row(source, _baseline(_metrics()), row_key="session-1"),
+                _row(source, _baseline(_metrics()), row_key="session-2"),
             ),
         },
     )

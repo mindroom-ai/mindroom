@@ -47,7 +47,7 @@ from mindroom.session_storage.lanes import run_session_storage_operation
 from mindroom.session_storage.summary_rows import Fold, summarized_tool_call_ids
 from mindroom.token_budget import estimate_text_tokens
 from mindroom.tool_system.runtime_context import current_requester_id
-from mindroom.usage.storage import COMPACTED_REQUESTS_METADATA_KEY, project_requests
+from mindroom.usage.storage import COMPACTED_REQUESTS_METADATA_KEY, message_request_snapshot
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Sequence
@@ -709,8 +709,7 @@ def _carry_request_usage(record: AnyRunRecord, folded: Sequence[Message]) -> Non
     requests = [
         {**request, "message_id": message.id}
         for message in folded
-        if message.role == "assistant"
-        for request in project_requests([message.to_dict()]) or []
+        if (request := message_request_snapshot(message)) is not None
     ]
     if not requests:
         return

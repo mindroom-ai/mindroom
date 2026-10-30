@@ -172,6 +172,7 @@ from mindroom.response_runner import (
 from mindroom.response_sources import ResponseSources
 from mindroom.response_turn import CompletedAttempt, ResponseTurnContext, TurnSinks
 from mindroom.session_storage.agent_storage import create_state_storage
+from mindroom.session_storage.legacy_usage_totals import add_pre_ledger_baselines
 from mindroom.session_storage.schema import quote_identifier
 from mindroom.session_storage.store import _session_state, _write_session_state, ensure_session_row, persist_to
 from mindroom.thread_utils import decide_agent_response
@@ -4063,8 +4064,8 @@ def _in_save_order(runs: "Sequence[AnyRunRecord]") -> "list[AnyRunRecord]":
 def persist_runs(storage: "ConversationStore", session: "ConversationSession", *runs: "AnyRunRecord") -> None:
     """Hand each run to ``persist_to`` in order, as a turn hands over its terminal record, recording its usage too.
 
-    Only that save writes the usage ledger and the session totals. The saves run on an event loop of their own, so
-    sync and async tests alike can call this.
+    Only that save writes the usage ledger. The saves run on an event loop of their own, so sync and async tests
+    alike can call this.
     """
     persist = persist_to(storage, session)
 
@@ -4077,7 +4078,11 @@ def persist_runs(storage: "ConversationStore", session: "ConversationSession", *
 
 
 def seed_session_metrics(storage: "ConversationStore", session_id: str, totals: "Mapping[str, object]") -> None:
-    """Write ``totals`` as the session row's stored usage totals, as an older release's run saves left them."""
+    """Write ``totals`` as the session row's stored usage totals, as an older release's run saves left them.
+
+    The step to layout version 6 then keeps what they count beyond the session's run rows, as opening the database
+    at this release does.
+    """
     with storage.transaction(write=True) as connection:
         (raw,) = connection.execute(
             f"SELECT session_data FROM {quote_identifier(storage.names.sessions)} WHERE session_id = ?",  # noqa: S608
@@ -4089,6 +4094,7 @@ def seed_session_metrics(storage: "ConversationStore", session_id: str, totals: 
             f"UPDATE {quote_identifier(storage.names.sessions)} SET session_data = ? WHERE session_id = ?",  # noqa: S608
             (json.dumps(session_data), session_id),
         )
+        add_pre_ledger_baselines(connection, storage.names)
 
 
 def create_agno_2_sessions_db(path: "Path") -> "Path":

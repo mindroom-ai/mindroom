@@ -27,6 +27,7 @@ from mindroom.session_storage.agent_storage import (
 )
 from mindroom.session_storage.schema import TableNames, table_names
 from mindroom.session_storage.types import ConversationSession
+from mindroom.session_storage.usage_reader import LEDGER_TOTALS_VERSION
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity, resolve_worker_key, worker_dir_name
 from mindroom.usage import stats_storage
 from mindroom.usage.stats_storage import (
@@ -241,9 +242,8 @@ def test_reader_extracts_only_top_level_usage_fields(tmp_path: Path) -> None:
             created_at=1_723_837_600,
         ),
     )
-    assert row.session_metrics == {}
     assert row.runs_available is True
-    assert row.session_metrics_available is False
+    assert row.totals_available is True
 
 
 def test_reader_extracts_runs_written_by_the_conversation_store(tmp_path: Path) -> None:
@@ -324,7 +324,7 @@ def test_reader_since_skips_older_and_undated_usage_rows(tmp_path: Path) -> None
     rows = [row for row in iter_usage_storage_rows(source, since=since) if isinstance(row, UsageSessionRow)]
 
     assert [run.run_id for row in rows for run in row.runs] == ["oct"]
-    assert all(row.session_metrics_available is False for row in rows)
+    assert all(row.totals_available for row in rows)
     unfiltered = [row for row in iter_usage_storage_rows(source) if isinstance(row, UsageSessionRow)]
     assert sorted(run.run_id or "" for row in unfiltered for run in row.runs) == ["oct", "sept", "undated"]
 
@@ -398,9 +398,8 @@ def test_reader_preserves_run_table_creation_date_after_updates(tmp_path: Path) 
     assert row.runs[0].metrics["total_tokens"] == 20
 
 
-@pytest.mark.parametrize("legacy_encoding", [False, True])
-def test_reader_extracts_team_session_metrics_with_member_runs(tmp_path: Path, legacy_encoding: bool) -> None:
-    """Admin totals use the team session's member-inclusive aggregate, and the team's source lists each member run."""
+def test_reader_lists_each_member_run_of_a_team_session(tmp_path: Path) -> None:
+    """A team's source lists each member run beside its team run, so the session's totals include its members."""
     session = ConversationSession(
         kind="team",
         session_id="session-1",
@@ -452,27 +451,24 @@ def test_reader_extracts_team_session_metrics_with_member_runs(tmp_path: Path, l
     )
 
     source = replace(_source(tmp_path / "sessions" / "engineering.db"), scope="team", source_agent_id=None)
-    if legacy_encoding:
-        with sqlite3.connect(source.path) as connection:
-            (session_data,) = connection.execute("SELECT session_data FROM engineering_sessions").fetchone()
-            connection.execute("UPDATE engineering_sessions SET session_data = ?", (json.dumps(session_data),))
-    result = list(iter_usage_storage_rows(source, mode="both"))
+    result = list(iter_usage_storage_rows(source))
 
     assert len(result) == 1
     row = result[0]
     assert isinstance(row, UsageSessionRow)
-    assert row.session_metrics == {"input_tokens": 21, "output_tokens": 9, "total_tokens": 30}
-    assert [(entry.model_provider, entry.model, dict(entry.metrics)) for entry in row.session_model_metrics or ()] == [
-        ("provider-b", "model-b", {"input_tokens": 14, "output_tokens": 6, "total_tokens": 20}),
-        ("provider-a", "model-a", {"input_tokens": 7, "output_tokens": 3, "total_tokens": 10}),
+    assert [(run.run_id, run.parent_run_id, dict(run.metrics)) for run in row.runs] == [
+        ("member-run", "team-run", {"input_tokens": 14, "output_tokens": 6, "total_tokens": 20}),
+        ("team-run", None, {"input_tokens": 7, "output_tokens": 3, "total_tokens": 10}),
     ]
-    assert [(run.run_id, run.parent_run_id) for run in row.runs] == [("member-run", "team-run"), ("team-run", None)]
-    assert row.runs_available is True
-    assert row.session_metrics_available is True
+    assert [(entry.model_provider, entry.model) for run in row.runs for entry in run.model_metrics or ()] == [
+        ("provider-b", "model-b"),
+        ("provider-a", "model-a"),
+    ]
+    assert (row.runs_available, row.totals_available) == (True, True)
 
 
-def test_reader_both_mode_keeps_session_metrics_when_runs_are_malformed(tmp_path: Path) -> None:
-    """Run-attribution corruption cannot erase authoritative session metrics."""
+def test_reader_keeps_stored_totals_beside_runs_it_cannot_read(tmp_path: Path) -> None:
+    """Runs an earlier release could not decode leave its stored totals as the session's pre-ledger usage."""
     database = tmp_path / "code.db"
     _create_database(database)
     connection = sqlite3.connect(database)
@@ -485,19 +481,18 @@ def test_reader_both_mode_keeps_session_metrics_when_runs_are_malformed(tmp_path
     finally:
         connection.close()
 
-    result = list(iter_usage_storage_rows(_source(database), mode="both"))
+    result = list(iter_usage_storage_rows(_source(database)))
 
     assert len(result) == 1
     row = result[0]
     assert isinstance(row, UsageSessionRow)
-    assert row.runs == ()
+    assert [(run.kind, dict(run.metrics)) for run in row.runs] == [("pre_ledger", {"total_tokens": 30})]
     assert row.runs_available is False
-    assert row.session_metrics == {"total_tokens": 30}
-    assert row.session_metrics_available is True
+    assert row.totals_available is True
 
 
-def test_reader_both_mode_keeps_runs_when_session_metrics_are_malformed(tmp_path: Path) -> None:
-    """Session-aggregate corruption cannot erase retained model attribution."""
+def test_reader_reads_no_session_data(tmp_path: Path) -> None:
+    """Session data an earlier release left unreadable neither stops the read nor changes the session's usage."""
     database = tmp_path / "code.db"
     _create_database(database)
     connection = sqlite3.connect(database)
@@ -507,15 +502,29 @@ def test_reader_both_mode_keeps_runs_when_session_metrics_are_malformed(tmp_path
     finally:
         connection.close()
 
-    result = list(iter_usage_storage_rows(_source(database), mode="both"))
+    result = list(iter_usage_storage_rows(_source(database)))
 
     assert len(result) == 1
     row = result[0]
     assert isinstance(row, UsageSessionRow)
     assert len(row.runs) == 1
-    assert row.runs_available is True
-    assert row.session_metrics == {}
-    assert row.session_metrics_available is False
+    assert (row.runs_available, row.totals_available) == (True, True)
+
+
+def test_a_database_below_the_ledger_totals_version_reads_without_whole_history_totals(tmp_path: Path) -> None:
+    """Until its conversion keeps its pre-ledger usage as a row, a database's rows total only its dated reads."""
+    database = tmp_path / "code.db"
+    _create_database(database)
+    source = _source(database)
+    with closing(sqlite3.connect(database)) as connection, connection:
+        connection.execute("UPDATE code_sessions_log_meta SET version = ?", (LEDGER_TOTALS_VERSION - 1,))
+
+    [row] = iter_usage_storage_rows(source)
+    [dated] = iter_usage_storage_rows(source, since=0)
+
+    assert isinstance(row, UsageSessionRow)
+    assert isinstance(dated, UsageSessionRow)
+    assert (row.totals_available, dated.totals_available) == (False, True)
 
 
 def test_reader_excludes_persisted_child_runs(tmp_path: Path) -> None:
@@ -684,16 +693,16 @@ def test_a_database_not_named_by_a_plain_identifier_is_not_read(tmp_path: Path) 
 
 # The tables a usage read reads, each with only the columns it reads.
 _READ_TABLES = {
-    "code_sessions": "session_id TEXT PRIMARY KEY, user_id TEXT, session_data TEXT",
+    "code_sessions": "session_id TEXT PRIMARY KEY, user_id TEXT",
     "code_sessions_usage": "id INTEGER PRIMARY KEY, session_id TEXT, run_id TEXT, usage_data TEXT",
-    "code_sessions_log_meta": "id INTEGER PRIMARY KEY, owner_kind TEXT, owner_id TEXT",
+    "code_sessions_log_meta": "id INTEGER PRIMARY KEY, version INTEGER, owner_kind TEXT, owner_id TEXT",
 }
 
 
 @pytest.mark.parametrize(
     ("table", "columns", "detail"),
     [
-        ("code_sessions", "session_id TEXT PRIMARY KEY, session_data TEXT", "session schema unsupported"),
+        ("code_sessions", "session_id TEXT PRIMARY KEY", "session schema unsupported"),
         ("code_sessions_usage", "id INTEGER PRIMARY KEY, session_id TEXT, run_id TEXT", "usage schema unsupported"),
         ("code_sessions_log_meta", "id INTEGER PRIMARY KEY, owner_id TEXT", "session owner unavailable"),
     ],
@@ -730,7 +739,7 @@ def test_a_database_without_a_usage_ledger_reads_its_sessions_without_runs(tmp_p
         for name in ("code_sessions", "code_sessions_log_meta"):
             connection.execute(f'CREATE TABLE "{name}" ({_READ_TABLES[name]})')
         connection.execute("INSERT INTO code_sessions (session_id) VALUES ('session-1')")
-        connection.execute("INSERT INTO code_sessions_log_meta VALUES (1, 'agent', 'code')")
+        connection.execute("INSERT INTO code_sessions_log_meta VALUES (1, 6, 'agent', 'code')")
 
     [row] = iter_usage_storage_rows(source, since=since)
 

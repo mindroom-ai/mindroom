@@ -53,6 +53,7 @@ from mindroom.session_storage.legacy_session_columns import (
     upgrade_layout,
 )
 from mindroom.session_storage.legacy_usage_ledger import seed_usage_ledger
+from mindroom.session_storage.legacy_usage_totals import add_pre_ledger_baselines
 from mindroom.session_storage.schema import (
     LOG_VERSION,
     OWNER_VERSION,
@@ -109,8 +110,9 @@ def convert_conversation_database(
     blob runs and positions), the conversion, the drop of the Agno tables, the log tables and the meta row, which
     records the current version and ``owner``, once an agent ``owner``'s session rows name it
     (``adopt_agent_session_owners``), the sessions table's conversion (``convert_session_columns``), the rewrite of
-    the delegation children its runs hold (``rewrite_run_snapshots``), and the owner's history metadata
-    (``flatten_history_metadata``). A file in write-ahead-log mode returns to the rollback journal first, which
+    the delegation children its runs hold (``rewrite_run_snapshots``), the owner's history metadata
+    (``flatten_history_metadata``), and the usage its sessions' stored totals hold beyond the ledger
+    (``add_pre_ledger_baselines``). A file in write-ahead-log mode returns to the rollback journal first, which
     checkpoints its log. The file is then compacted when that pays off (``_compact``), and its conversion is logged.
     ``descriptors`` takes the backup's descriptor of the file, which the caller closes after ``connection``.
     """
@@ -131,6 +133,7 @@ def convert_conversation_database(
             convert_session_columns(connection, names)
         rewrite_run_snapshots(connection, names)
         flatten_history_metadata(connection, names)
+        add_pre_ledger_baselines(connection, names)
         runs, messages = stored_counts(connection, names)
     compacted = _compact(connection, path)
     logger.info(

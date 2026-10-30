@@ -7,10 +7,11 @@ from typing import TYPE_CHECKING, cast
 
 from mindroom.session_storage.legacy_agno2_runs import decode_session_json, has_blob_column
 from mindroom.session_storage.schema import quote_identifier, table_names, usage_table_sql, usage_upsert_sql
-from mindroom.usage.storage import project_usage
+from mindroom.usage.storage import project_token_counters
 
 if TYPE_CHECKING:
     import sqlite3
+    from collections.abc import Mapping
 
     from mindroom.session_storage.legacy_agno3_schema import AgnoTableNames
 
@@ -20,7 +21,9 @@ if TYPE_CHECKING:
 # Last legacy release: v2026.9.190, the last verified native writer without an independent usage table.
 # Replacement: v2026.9.191 introduced independent usage snapshots; no historical billing completeness is inferred.
 # Handling: Detect by schema in a database's conversion to storage v2; seed in its transaction, prefer current rows,
-# retain unknown dates and content-free gaps.
+# retain unknown dates and content-free gaps. Each snapshot projects a stored run dict (``_project_usage``) as
+# ``usage.storage.run_usage_snapshot`` projects a typed run, but for what no release before the ledger stored: requests
+# mid-turn compaction carried, model provenance stamps, and retry-attempt sums.
 # Coverage: tests/session_storage/test_legacy_usage_ledger.py.
 def seed_usage_ledger(connection: sqlite3.Connection, names: AgnoTableNames) -> None:
     """Seed the usage ledger of a database that has none in the caller's write transaction."""
@@ -78,5 +81,93 @@ def _insert_usage(
     run_id: str | None,
     run: object,
 ) -> None:
-    payload = json.dumps(project_usage(cast("dict[str, object]", run))) if isinstance(run, dict) else None
+    payload = json.dumps(_project_usage(cast("dict[str, object]", run))) if isinstance(run, dict) else None
     connection.execute(usage_upsert_sql(names), (session_id, run_id, payload))
+
+
+def _project_usage(run: Mapping[str, object]) -> dict[str, object]:
+    """Keep only attribution, timestamps and provider counters, never conversation content."""
+    result = {
+        key: run[key]
+        for key in (
+            "run_id",
+            "parent_run_id",
+            "team_id",
+            "user_id",
+            "model_provider",
+            "model",
+            "created_at",
+            "updated_at",
+        )
+        if key in run and isinstance(run[key], (str, int, float, type(None)))
+    }
+    if run.get("parent_run_id") is not None and "parent_run_id" not in result:
+        result["parent_run_id"] = False
+    metadata = run.get("metadata")
+    if isinstance(metadata, dict):
+        requester = cast("dict[str, object]", metadata).get("requester_id")
+        if isinstance(requester, str):
+            result["metadata"] = {"requester_id": requester}
+    metrics = run.get("metrics", {})
+    if not isinstance(metrics, dict):
+        result["metrics"] = None
+        return result
+    result["metrics"] = _project_run_metrics(cast("dict[str, object]", metrics))
+    requests = _project_requests(run.get("messages"))
+    if requests is not None:
+        result["requests"] = requests
+    return result
+
+
+def _project_requests(messages: object) -> list[dict[str, object]] | None:
+    """Project current assistant counters, timestamps and recorded model attribution."""
+    if not isinstance(messages, list):
+        return None
+    requests: list[dict[str, object]] = []
+    for raw_message in messages:
+        if not isinstance(raw_message, dict):
+            continue
+        message = cast("dict[str, object]", raw_message)
+        if message.get("role") != "assistant" or message.get("from_history", False) is not False:
+            continue
+        message_metrics = message.get("metrics")
+        if not isinstance(message_metrics, dict):
+            continue
+        request_metrics = project_token_counters(cast("dict[str, object]", message_metrics))
+        if request_metrics:
+            created_at = message.get("created_at")
+            requests.append(
+                {
+                    "created_at": created_at if isinstance(created_at, (int, float)) else None,
+                    "metrics": request_metrics,
+                },
+            )
+    return requests
+
+
+def _project_run_metrics(metrics: Mapping[str, object]) -> dict[str, object]:
+    selected = project_token_counters(metrics)
+    details = metrics.get("details")
+    if details is not None:
+        # An invalid details sentinel lets the reporter retain totals while reporting missing attribution.
+        selected["details"] = _project_model_details(details)
+    return selected
+
+
+def _project_model_details(details: object) -> object:
+    if not isinstance(details, dict):
+        return False
+    models = []
+    for entries in details.values():
+        if not isinstance(entries, list):
+            return False
+        for entry in entries:
+            if not isinstance(entry, dict):
+                return False
+            model_metrics = cast("dict[str, object]", entry)
+            model = project_token_counters(model_metrics)
+            for key in ("id", "provider"):
+                if isinstance(model_metrics.get(key), str):
+                    model[key] = model_metrics[key]
+            models.append(model)
+    return {"model": models}

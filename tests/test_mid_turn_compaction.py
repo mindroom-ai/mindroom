@@ -72,7 +72,7 @@ from mindroom.tool_system.runtime_context import (
     detached_requester_context,
     tool_runtime_context,
 )
-from mindroom.usage.storage import project_usage
+from mindroom.usage.storage import run_usage_snapshot
 from tests.conftest import install_model_providers, seed_session
 from tests.fakes.summary_model import summary_model
 from tests.history_helpers import (
@@ -876,7 +876,7 @@ async def test_folded_request_usage_stays_in_the_usage_projection(
     output = await _run(_agent(model, config, paths), "Do the task")
 
     assert len(summary_calls.inputs) >= 2
-    projected = project_usage(output.to_dict())
+    projected = run_usage_snapshot(output)
     requests = projected["requests"]
     assert [request["metrics"]["input_tokens"] for request in requests] == [
         1001 * number for number in range(1, len(model.requests) + 1)
@@ -898,7 +898,7 @@ async def test_folded_request_usage_stays_on_a_run_cancelled_after_compaction(tm
         await _run(agent, "Do the task")
 
     # The cancelled run's record keeps the usage of the requests the fold took out of it.
-    requests = project_usage(agent.records[-1].to_dict())["requests"]
+    requests = run_usage_snapshot(agent.records[-1])["requests"]
     assert [request["metrics"]["input_tokens"] for request in requests] == [
         1001 * number for number in range(1, len(model.requests) + 1)
     ]
