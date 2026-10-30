@@ -165,10 +165,6 @@ def _version(store: ConversationStore) -> int:
         return meta_version(connection, store.names)
 
 
-def _totals_of(tokens: TokenCounts) -> tuple[int, int, int]:
-    return tokens.input_tokens, tokens.output_tokens, tokens.total_tokens
-
-
 def test_a_baseline_keeps_the_report_of_a_compacted_session(tmp_path: Path) -> None:
     """Totals that counted compacted history report as before: the stored totals plus helper usage."""
     paths = _paths(tmp_path)
@@ -227,7 +223,7 @@ def test_a_baseline_holds_each_counter_above_the_run_rows(tmp_path: Path) -> Non
         "metrics": {"output_tokens": 4, "total_tokens": 2},
     }
     report = collect_admin_usage(config=_config(), runtime_paths=paths)
-    assert _totals_of(report.totals) == (8, 6, 12)
+    assert report.totals == TokenCounts(input_tokens=8, output_tokens=6, total_tokens=12)
 
 
 @pytest.mark.parametrize(
