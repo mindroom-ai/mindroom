@@ -23,13 +23,14 @@ from mindroom.llm.errors import (
     MODEL_SAFEGUARD_REFUSAL_MESSAGE,
     QUOTA_EXHAUSTED,
     SAFEGUARD_REFUSAL,
+    ContextWindowExceeded,
     InvalidRequest,
     ModelSafeguardRefusal,
     ProviderError,
     ProviderUnavailable,
     RateLimited,
 )
-from mindroom.llm.media import Audio, Image
+from mindroom.llm.media import Audio, File, Image
 from mindroom.llm.messages import AGGREGATE_USAGE_KEY, Message
 from mindroom.llm.provider import (
     Capabilities,
@@ -602,6 +603,218 @@ async def test_removed_viewed_image_marks_its_receipt_unsupported() -> None:
     tool_result = json.loads(inner.requests[0].messages[1].content)
     assert tool_result["view_status"] == "unsupported"
     assert messages[1].content == receipt
+
+
+# --- Media the rejection names --------------------------------------------------------------------------------
+
+_REPORT = File(id="att_report", content=b"%PDF-1.4", filename="report.pdf", mime_type="application/pdf")
+_CLIP = Audio(id="att_clip", content=b"RIFF", mime_type="audio/wav")
+
+
+def _rejection(*rejected: str, message: str = "Unsupported image") -> InvalidRequest:
+    return InvalidRequest(message, provider="Scripted Chat", status_code=400, rejected_media=frozenset(rejected))
+
+
+def _media_request() -> ModelRequest:
+    """A prompt with two images, a file, and a clip, after a turn without media."""
+    return ModelRequest(
+        messages=[
+            _user("Earlier"),
+            _user(_PROMPT, images=[_image("att_photo"), _image("att_scan")], files=[_REPORT], audio=[_CLIP]),
+        ],
+    )
+
+
+def _sent(messages: list[Message]) -> list[tuple[object, ...]]:
+    """What a request's messages send: each one's role, content, and media."""
+    return [(item.role, item.content, item.images, item.audio, item.videos, item.files) for item in messages]
+
+
+# What the media-free retry sends for ``_media_request``, as the stage sent it before rejections named media.
+_MEDIA_FREE = [
+    ("user", "Earlier", None, None, None, None),
+    ("user", f"{_PROMPT}\n\n{FALLBACK_MARKER}\n{_FALLBACK_PROMPT}", None, None, None, None),
+]
+
+
+def _fallback_stage(inner: _ScriptedProvider) -> WrappedProvider:
+    return WrappedProvider(inner, partial(media_fallback_stream, fallback_prompt=_FALLBACK_PROMPT))
+
+
+@pytest.mark.asyncio
+async def test_a_rejection_that_names_some_media_retries_without_only_those_and_names_them() -> None:
+    inner = _ScriptedProvider([[_rejection("att_photo", "att_report")], [_turn()]])
+
+    await _drain(_fallback_stage(inner), _media_request())
+
+    earlier, retried = inner.requests[1].messages
+    assert _sent([earlier]) == _MEDIA_FREE[:1]
+    assert (retried.images, retried.files, retried.audio) == ([_image("att_scan")], None, [_CLIP])
+    named = "Not sent: image (att_photo), report.pdf (att_report)."
+    assert retried.content == f"{_PROMPT}\n\n{FALLBACK_MARKER}\n{named}\n{_FALLBACK_PROMPT}"
+    assert len(inner.requests) == 2
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "rejected",
+    [(), ("att_photo", "att_scan", "att_report", "att_clip"), ("att_unsent",)],
+    ids=["names-none", "names-all", "names-only-unsent-media"],
+)
+async def test_a_rejection_that_names_no_part_of_the_media_retries_without_any_of_it(rejected: tuple[str, ...]) -> None:
+    """The retry is the media-free request the stage always sent, byte for byte, note included."""
+    inner = _ScriptedProvider([[_rejection(*rejected)], [_turn()]])
+
+    await _drain(_fallback_stage(inner), _media_request())
+
+    assert _sent(inner.requests[1].messages) == _MEDIA_FREE
+    assert len(inner.requests) == 2
+
+
+@pytest.mark.asyncio
+async def test_a_request_too_large_for_the_window_retries_without_any_media_whatever_it_names() -> None:
+    """Only a rejected request body names its parts; a request that does not fit shrinks as a whole."""
+    too_large = ContextWindowExceeded(
+        "Request too large",
+        provider="Scripted Chat",
+        status_code=413,
+        rejected_media=frozenset({"att_photo"}),
+    )
+    inner = _ScriptedProvider([[too_large], [_turn()]])
+
+    await _drain(_fallback_stage(inner), _media_request())
+
+    assert _sent(inner.requests[1].messages) == _MEDIA_FREE
+
+
+@pytest.mark.asyncio
+async def test_a_named_retry_that_is_rejected_too_is_sent_once_more_without_any_media() -> None:
+    """A wrong or partial naming costs one request: the media-free request still answers."""
+    inner = _ScriptedProvider([[_rejection("att_photo")], [_rejection("att_scan")], [_turn("answered")]])
+
+    events = await _drain(_fallback_stage(inner), _media_request())
+
+    assert inner.requests[1].messages[1].images == [_image("att_scan")]
+    assert _sent(inner.requests[2].messages) == _MEDIA_FREE
+    finished = events[-1]
+    assert isinstance(finished, TurnCompleted)
+    assert finished.message.content == "answered"
+
+
+@pytest.mark.asyncio
+async def test_a_third_rejection_ends_the_request() -> None:
+    inner = _ScriptedProvider([[_rejection("att_photo")], [_rejection()], [_rejection()], [_turn()]])
+
+    with pytest.raises(InvalidRequest):
+        await _drain(_fallback_stage(inner), _media_request())
+
+    assert len(inner.requests) == 3
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "failure",
+    [
+        _transient(),
+        ProviderError("You exceeded your current quota", provider="Scripted Chat", code=QUOTA_EXHAUSTED),
+    ],
+    ids=["retryable", "quota"],
+)
+async def test_a_named_retry_ends_at_a_failure_the_media_cannot_have_caused(failure: ProviderError) -> None:
+    inner = _ScriptedProvider([[_rejection("att_photo")], [failure], [_turn()]])
+
+    with pytest.raises(ProviderError) as raised:
+        await _drain(_fallback_stage(inner), _media_request())
+
+    assert raised.value is failure
+    assert len(inner.requests) == 2
+
+
+@pytest.mark.asyncio
+async def test_a_named_retry_that_answers_teaches_the_route_nothing() -> None:
+    """Only a request without any of the media shows the model lacks a kind, so the next request sends it all."""
+    gap = "This model does not support image input"
+    inner = _ScriptedProvider([[_rejection("att_photo", message=gap)], [_turn()], [_turn()]])
+    request = ModelRequest(messages=[_user(_PROMPT, images=[_image("att_photo"), _image("att_scan")])])
+
+    await _drain(_fallback_stage(inner), request)
+    await _drain(_fallback_stage(inner), request)
+
+    assert inner.requests[1].messages[0].images == [_image("att_scan")]
+    assert inner.requests[2].messages[0].images == [_image("att_photo"), _image("att_scan")]
+
+
+@pytest.mark.asyncio
+async def test_a_capability_gap_is_learned_once_the_media_free_backstop_answers() -> None:
+    gap = "This model does not support image input"
+    inner = _ScriptedProvider([[_rejection("att_photo", message=gap)], [_rejection(message=gap)], [_turn()], [_turn()]])
+    request = ModelRequest(messages=[_user(_PROMPT, images=[_image("att_photo"), _image("att_scan")])])
+
+    await _drain(_fallback_stage(inner), request)
+    await _drain(_fallback_stage(inner), request)
+
+    assert [len(attempt.messages[0].images or ()) for attempt in inner.requests] == [2, 1, 0, 0]
+    assert len(inner.requests) == 4
+
+
+@pytest.mark.asyncio
+async def test_a_named_retry_leaves_the_media_the_route_omits_out_and_names_it_too() -> None:
+    """Media the route never takes stays out of the named retry, and the one note names it beside the rejected item."""
+    inner = _ScriptedProvider(
+        [[_rejection("att_photo")], [_turn()]],
+        capabilities=Capabilities(omitted_media=frozenset({"audio"})),
+    )
+
+    await _drain(_fallback_stage(inner), _media_request())
+
+    sent = inner.requests[0].messages[1]
+    assert (sent.audio, sent.content) == (None, f"{_PROMPT}\n\n{FALLBACK_MARKER}\n{_FALLBACK_PROMPT}")
+    retried = inner.requests[1].messages[1]
+    assert (retried.audio, retried.images, retried.files) == (None, [_image("att_scan")], [_REPORT])
+    named = "Not sent: image (att_photo), audio (att_clip)."
+    assert retried.content == f"{_PROMPT}\n\n{FALLBACK_MARKER}\n{named}\n{_FALLBACK_PROMPT}"
+
+
+@pytest.mark.asyncio
+async def test_a_named_viewed_image_removes_every_image_and_marks_the_receipts() -> None:
+    """A viewed image's receipt cannot be told apart from the others', so naming one leaves every image out."""
+    receipt = json.dumps({"view_status": "ready", "attachment_id": "att-1"})
+    viewed = _image(f"{VIEWED_IMAGE_ID_PREFIX}1")
+    messages = [
+        Message(
+            role="assistant",
+            tool_calls=[
+                {"id": "call_1", "type": "function", "function": {"name": "get_attachment", "arguments": "{}"}},
+            ],
+        ),
+        Message(role="tool", tool_call_id="call_1", content=receipt),
+        _user("Viewed image follows.", images=[viewed, _image("att_photo")], files=[_REPORT]),
+    ]
+    inner = _ScriptedProvider([[_rejection(viewed.id)], [_turn()]])
+
+    await _drain(_fallback_stage(inner), ModelRequest(messages=messages))
+
+    retried = inner.requests[1].messages
+    assert json.loads(retried[1].content)["view_status"] == "unsupported"
+    assert (retried[2].images, retried[2].files) == (None, [_REPORT])
+    named = "Not sent: image, image (att_photo)."
+    assert retried[2].content == f"Viewed image follows.\n\n{FALLBACK_MARKER}\n{named}\n{_FALLBACK_PROMPT}"
+
+
+@pytest.mark.asyncio
+async def test_the_note_names_each_removed_item_by_its_file_name_or_kind() -> None:
+    """Only stored attachments' ids, which ``get_attachment`` takes, appear beside the label."""
+    unnamed = File(id="tool-file", content=b"data")
+    clip = Audio(id="generated-clip", content=b"RIFF", mime_type="audio/wav")
+    message = _user(_PROMPT, images=[_image("att_photo")], files=[_REPORT, unnamed], audio=[clip, _CLIP])
+    inner = _ScriptedProvider([[_rejection("tool-file", "generated-clip", "att_report")], [_turn()]])
+
+    await _drain(_fallback_stage(inner), ModelRequest(messages=[message]))
+
+    retried = inner.requests[1].messages[0]
+    named = "Not sent: audio, report.pdf (att_report), file."
+    assert retried.content == f"{_PROMPT}\n\n{FALLBACK_MARKER}\n{named}\n{_FALLBACK_PROMPT}"
+    assert (retried.images, retried.files, retried.audio) == ([_image("att_photo")], None, [_CLIP])
 
 
 # --- Portable tool search -------------------------------------------------------------------------------------
