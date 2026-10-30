@@ -1305,7 +1305,7 @@ def test_a_queued_compaction_request_becomes_the_metadata_flag(tmp_path: Path) -
 def test_a_request_queued_before_the_summary_rows_existed_leaves_the_scopes_tombstones_to_their_step(
     tmp_path: Path,
 ) -> None:
-    """The destructive compactor's tombstones in the scope's state drop their runs before the flag joins that state."""
+    """The destructive compactor's tombstones in the scope's state still drop their runs, and the request sets the flag."""
     compaction = LEGACY_COMPACTION_METADATA_KEY
     database = write_agno_database(
         _NAMES.database_path(tmp_path),
