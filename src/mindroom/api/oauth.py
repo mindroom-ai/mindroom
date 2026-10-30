@@ -7,10 +7,10 @@ import json
 import re
 from dataclasses import dataclass, replace
 from html import escape
-from typing import TYPE_CHECKING, Literal
+from typing import TYPE_CHECKING, Annotated, Literal
 from urllib.parse import urlencode, urlparse
 
-from fastapi import APIRouter, HTTPException, Request, Response
+from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from fastapi.responses import HTMLResponse, RedirectResponse
 from pydantic import BaseModel, Field
 
@@ -23,6 +23,7 @@ from mindroom.api.auth import (
     oauth_callback_hostname,
     verify_user,
 )
+from mindroom.api.auth_user import AuthUser  # noqa: TC001 - FastAPI resolves route annotations.
 from mindroom.api.credentials_oauth_flows import (
     consume_pending_oauth_request,
     issue_pending_oauth_state,
@@ -100,7 +101,6 @@ if TYPE_CHECKING:
     from mindroom.api.credentials_target import RequestCredentialsTarget
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
-    from mindroom.credentials.manager import CredentialsManager
     from mindroom.tool_system.worker_routing import WorkerScope
 
 router = APIRouter(prefix="/api/oauth", tags=["oauth"])
@@ -804,20 +804,27 @@ def _oauth_success_origin(provider: OAuthProvider, runtime_paths: RuntimePaths) 
 
 
 @router.post("/{provider_id}/connect")
-async def connect(provider_id: str, request: Request, agent_name: str | None = None) -> OAuthConnectResponse:
-    """Start a provider OAuth flow and return the external authorization URL."""
-    return await connect_account(provider_id, request, agent_name=agent_name, credential_service=None)
-
-
-async def connect_account(
+async def connect(
     provider_id: str,
     request: Request,
+    _user: Annotated[AuthUser, Depends(verify_user)],
+    agent_name: str | None = None,
+) -> OAuthConnectResponse:
+    """Start a provider OAuth flow and return the external authorization URL."""
+    return await start_connect(request, provider_id, agent_name=agent_name)
+
+
+async def start_connect(
+    request: Request,
+    provider_id: str,
     *,
     agent_name: str | None,
-    credential_service: str | None,
+    credential_service: str | None = None,
 ) -> OAuthConnectResponse:
-    """Start the flow of the provider's connection, stored under `credential_service` when given (Agent Keys)."""
-    await _require_oauth_api_user(request)
+    """Start the flow of the provider's connection for an authorized request, bound to its login.
+
+    The connection is stored under `credential_service` when given (Agent Keys).
+    """
     provider, runtime_paths = _load_provider(request, provider_id, credential_service)
     return await _issue_authorization_url(
         request,
@@ -1186,34 +1193,30 @@ async def _handle_callback(provider_id: str, request: Request, notice: _OpenerNo
 
 
 @router.get("/{provider_id}/status")
-async def status(provider_id: str, request: Request, agent_name: str | None = None) -> OAuthStatusResponse:
-    """Return scoped connection status for one provider."""
-    await _require_oauth_api_user(request)
-    return await authenticated_connection_status(provider_id, request, agent_name=agent_name)
-
-
-async def authenticated_connection_status(
+async def status(
     provider_id: str,
     request: Request,
+    _user: Annotated[AuthUser, Depends(verify_user)],
+    agent_name: str | None = None,
+) -> OAuthStatusResponse:
+    """Return scoped connection status for one provider."""
+    return await connection_status(request, dashboard_oauth_context(request, provider_id, agent_name=agent_name))
+
+
+def dashboard_oauth_context(
+    request: Request,
+    provider_id: str,
     *,
     agent_name: str | None,
-    refresh: bool = True,
-    bootstrap_client: bool = True,
-) -> OAuthStatusResponse:
-    """Return scoped connection status for a request the caller has already authenticated.
+    credential_service: str | None = None,
+) -> OAuthCredentialContext:
+    """Resolve the credential context an authorized dashboard request's login may manage for one provider.
 
-    Callers that load several providers for one request authenticate once and call this per provider.
-    `refresh=False` and `bootstrap_client=False` skip the token refresh and the OAuth client bootstrap, as in
-    `connection_status`.
+    The connection is the one stored under `credential_service` when given (Agent Keys).
     """
-    provider, runtime_paths = _load_provider(request, provider_id)
-    target = _resolve_oauth_credentials_target(
-        request,
-        provider,
-        agent_name=agent_name,
-    )
-    context = _credential_context(provider, runtime_paths, target)
-    return await connection_status(request, context, refresh=refresh, bootstrap_client=bootstrap_client)
+    provider, runtime_paths = _load_provider(request, provider_id, credential_service)
+    target = _resolve_oauth_credentials_target(request, provider, agent_name=agent_name)
+    return _credential_context(provider, runtime_paths, target)
 
 
 @dataclass(frozen=True)
@@ -1328,52 +1331,21 @@ async def connection_status(
     )
 
 
-async def agent_connection_status(
-    request: Request,
-    provider: OAuthProvider,
-    runtime_paths: RuntimePaths,
-    credentials_manager: CredentialsManager,
-    worker_target: ResolvedWorkerTarget | None,
-    *,
-    config: Config,
-    refresh: bool = True,
-) -> OAuthStatusResponse:
-    """Load connection state for an agent's worker target after the caller has authorized that agent."""
-    context = resolve_oauth_credential_context(
-        provider,
-        runtime_paths,
-        credentials_manager,
-        worker_target,
-        config=config,
-    )
-    return await connection_status(request, context, refresh=refresh)
-
-
 @router.post("/{provider_id}/disconnect")
-async def disconnect(provider_id: str, request: Request, agent_name: str | None = None) -> dict[str, str]:
-    """Remove scoped OAuth credentials for one provider while preserving tool settings."""
-    return await disconnect_account(provider_id, request, agent_name=agent_name, credential_service=None)
-
-
-async def disconnect_account(
+async def disconnect(
     provider_id: str,
     request: Request,
-    *,
-    agent_name: str | None,
-    credential_service: str | None,
+    _user: Annotated[AuthUser, Depends(verify_user)],
+    agent_name: str | None = None,
 ) -> dict[str, str]:
-    """Remove the provider's connection, the one stored under `credential_service` when given (Agent Keys)."""
-    await _require_oauth_api_user(request)
-    provider, runtime_paths = _load_provider(request, provider_id, credential_service)
-    target = _resolve_oauth_credentials_target(
-        request,
-        provider,
-        agent_name=agent_name,
-    )
-    context = _credential_context(provider, runtime_paths, target)
-    snapshot = config_lifecycle.bind_current_request_snapshot(request)
-    config = snapshot.runtime_config
+    """Remove scoped OAuth credentials for one provider while preserving tool settings."""
+    return await reset_connection(request, dashboard_oauth_context(request, provider_id, agent_name=agent_name))
 
+
+async def reset_connection(request: Request, context: OAuthCredentialContext) -> dict[str, str]:
+    """Remove the connection an authorized request resolved, keeping the tool settings."""
+    provider = context.provider
+    config = config_lifecycle.bind_current_request_snapshot(request).runtime_config
     try:
         await retire_and_reset_oauth_credentials(
             context,

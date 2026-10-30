@@ -267,24 +267,31 @@ def _require_management(context: _Connections, agent_name: str, provider_id: str
     return context.providers[provider_id]
 
 
-async def _agent_scope_status(
+async def _connection_status(
     request: Request,
     context: _Connections,
     agent_name: str,
     provider_id: str,
     *,
+    can_manage: bool,
     listing: bool = False,
 ) -> oauth.OAuthStatusResponse:
-    """Read a non-manager's connection for the status and state routes; `listing` skips refresh and bootstrap."""
-    agent = resolve_connection_agent(context.user, agent_name)
-    credential_context = resolve_oauth_credential_context(
-        context.providers[provider_id],
-        context.runtime_paths,
-        get_runtime_credentials_manager(context.runtime_paths),
-        agent.worker_target,
-        execution_identity=agent.execution_identity,
-        config=agent.config,
-    )
+    """Read the connection a viewer sees: the managed scope for a manager, else the agent's scope for this user.
+
+    `listing` skips the token refresh and the OAuth client bootstrap.
+    """
+    if can_manage:
+        credential_context = oauth.dashboard_oauth_context(request, provider_id, agent_name=agent_name)
+    else:
+        agent = resolve_connection_agent(context.user, agent_name)
+        credential_context = resolve_oauth_credential_context(
+            context.providers[provider_id],
+            context.runtime_paths,
+            get_runtime_credentials_manager(context.runtime_paths),
+            agent.worker_target,
+            execution_identity=agent.execution_identity,
+            config=agent.config,
+        )
     return await oauth.connection_status(request, credential_context, refresh=not listing, bootstrap_client=not listing)
 
 
@@ -302,16 +309,14 @@ async def _service_connected(
     unreadable service must not fail the agent's state.
     """
     try:
-        if service.can_manage:
-            result = await oauth.authenticated_connection_status(
-                service.provider,
-                request,
-                agent_name=agent_name,
-                refresh=False,
-                bootstrap_client=False,
-            )
-        else:
-            result = await _agent_scope_status(request, context, agent_name, service.provider, listing=True)
+        result = await _connection_status(
+            request,
+            context,
+            agent_name,
+            service.provider,
+            can_manage=service.can_manage,
+            listing=True,
+        )
     except Exception as exc:
         logger.warning(
             "connection_state_status_unavailable",
@@ -463,12 +468,10 @@ async def avatar(agent_name: str, user: _ConnectionUserContext) -> Response:
 async def status(agent_name: str, provider_id: str, request: Request, context: _ConnectionsContext) -> ConnectionStatus:
     """Load status for one authorized agent and provider."""
     service = _service(context, agent_name, provider_id)
-    call = (
-        oauth.status(provider_id, request, agent_name=agent_name)
-        if service.can_manage
-        else _agent_scope_status(request, context, agent_name, provider_id)
+    result = await masked_oauth_call(
+        _connection_status(request, context, agent_name, provider_id, can_manage=service.can_manage),
+        "Connection status is unavailable",
     )
-    result = await masked_oauth_call(call, "Connection status is unavailable")
     view = oauth.personal_connection_view(result, can_manage=service.can_manage)
     return ConnectionStatus(
         provider=provider_id,
@@ -498,7 +501,7 @@ async def connect(
             headers=CONNECTIONS_HEADERS,
         )
     return await masked_oauth_call(
-        oauth.connect(provider_id, request, agent_name=agent_name),
+        oauth.start_connect(request, provider_id, agent_name=agent_name),
         "Could not start account connection",
     )
 
@@ -515,6 +518,13 @@ async def disconnect(
     require_connections_same_origin(request, context.runtime_paths)
     _require_management(context, agent_name, provider_id)
     return await masked_oauth_call(
-        oauth.disconnect(provider_id, request, agent_name=agent_name),
+        _reset_connection(request, provider_id, agent_name),
         "Could not disconnect account",
+    )
+
+
+async def _reset_connection(request: Request, provider_id: str, agent_name: str) -> dict[str, str]:
+    return await oauth.reset_connection(
+        request,
+        oauth.dashboard_oauth_context(request, provider_id, agent_name=agent_name),
     )

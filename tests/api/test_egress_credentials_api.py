@@ -10,7 +10,7 @@ from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal, Never
-from unittest.mock import AsyncMock, Mock, patch
+from unittest.mock import AsyncMock, MagicMock, Mock, patch
 from urllib.parse import parse_qs, urlparse
 
 import httpx
@@ -1052,6 +1052,16 @@ def test_connect_returns_an_authorize_url_for_an_eligible_manager(oauth_egress_p
         assert "no-store" in response.headers["cache-control"]
 
 
+def _fail_account_flow(monkeypatch: pytest.MonkeyPatch, action: str, failure: Exception) -> MagicMock:
+    """Make the first OAuth step of an account action fail and return its mock.
+
+    Connect starts the flow; disconnect first resolves the connection it resets.
+    """
+    flow = AsyncMock(side_effect=failure) if action == "connect" else MagicMock(side_effect=failure)
+    monkeypatch.setattr(oauth, "start_connect" if action == "connect" else "dashboard_oauth_context", flow)
+    return flow
+
+
 @pytest.mark.parametrize(
     ("action", "masked"),
     [("connect", "Could not start account connection"), ("disconnect", "Could not disconnect account")],
@@ -1064,7 +1074,7 @@ def test_connect_and_disconnect_mask_an_internal_oauth_error(
 ) -> None:
     """A refusal from the OAuth flow keeps its status, but the route says only its own text and never the detail."""
     portal = oauth_egress_portal
-    monkeypatch.setattr(oauth, f"{action}_account", AsyncMock(side_effect=HTTPException(503, "internal-client-secret")))
+    _fail_account_flow(monkeypatch, action, HTTPException(503, "internal-client-secret"))
     response = _account_action(portal, "alice", "personal", "drive", action)
     assert response.status_code == 503
     assert response.json() == {"detail": masked}
@@ -1545,14 +1555,14 @@ def test_an_unreadable_connection_state_degrades_one_service_without_failing_the
 ) -> None:
     """Whatever fails while reading one provider's state, that service shows as not connectable and the rest stay."""
     portal = oauth_egress_portal
-    real = oauth.agent_connection_status
+    real = oauth.connection_status
 
-    async def fails_for_drive(request: Any, provider: Any, *args: Any, **kwargs: Any) -> Any:  # noqa: ANN401
-        if provider.id == "google_drive":
+    async def fails_for_drive(request: Any, context: Any, **kwargs: Any) -> Any:  # noqa: ANN401
+        if context.provider.id == "google_drive":
             raise failure
-        return await real(request, provider, *args, **kwargs)
+        return await real(request, context, **kwargs)
 
-    monkeypatch.setattr(oauth, "agent_connection_status", fails_for_drive)
+    monkeypatch.setattr(oauth, "connection_status", fails_for_drive)
     degraded = _oauth_block(can_connect=False)
     listing = _listing(portal, "alice")
     state = _state(portal, "alice", "personal")
@@ -2293,8 +2303,7 @@ def test_only_a_service_with_its_own_account_names_another_credential_service(
     """The flows of the tools' connection stay as they were; only a service's own account is stored elsewhere."""
     portal = oauth_egress_portal
     _put_own_account_service(portal)
-    flow = AsyncMock(side_effect=HTTPException(503, "stop"))
-    monkeypatch.setattr(oauth, f"{action}_account", flow)
+    flow = _fail_account_flow(monkeypatch, action, HTTPException(503, "stop"))
 
     _account_action(portal, "alice", "personal", "drive", action)
     _account_action(portal, "alice", "personal", "mine", action)

@@ -12,8 +12,8 @@ import yaml
 from fastapi import HTTPException
 from fastapi.routing import APIRoute
 
+from mindroom.api import auth, egress_status, oauth
 from mindroom.api import egress_broker as egress_broker_api
-from mindroom.api import egress_status, oauth
 from mindroom.api.connection_agents import build_connection_agent_target
 from mindroom.config.egress_broker import EgressService
 from mindroom.constants import EXECUTION_ENV_TOOL_NAMES
@@ -1042,14 +1042,14 @@ def test_an_unreadable_connection_state_degrades_one_service_without_failing_the
     failure: Exception,
 ) -> None:
     """Whatever fails while reading one provider's state, that service shows as not connectable and the rest stay."""
-    real = oauth.authenticated_connection_status
+    real = oauth.connection_status
 
-    async def fails_for_drive(provider_id: str, *args: Any, **kwargs: Any) -> Any:  # noqa: ANN401
-        if provider_id == "google_drive":
+    async def fails_for_drive(request: Any, context: Any, **kwargs: Any) -> Any:  # noqa: ANN401
+        if context.provider.id == "google_drive":
             raise failure
-        return await real(provider_id, *args, **kwargs)
+        return await real(request, context, **kwargs)
 
-    monkeypatch.setattr(oauth, "authenticated_connection_status", fails_for_drive)
+    monkeypatch.setattr(oauth, "connection_status", fails_for_drive)
     response = oauth_broker_client.get("/api/egress-broker/services")
     assert response.status_code == 200, response.text
     assert "internal-client-secret" not in response.text
@@ -1127,17 +1127,17 @@ def test_listing_authenticates_once_not_per_service(
 ) -> None:
     """The router's dependency authenticates the request; the per-provider status does not repeat it."""
     calls: list[str] = []
-    real = oauth.verify_user
+    real = auth.authenticate_user
 
     async def counted(*args: Any, **kwargs: Any) -> Any:  # noqa: ANN401
-        calls.append("verify")
+        calls.append("authenticate")
         return await real(*args, **kwargs)
 
-    monkeypatch.setattr(oauth, "verify_user", counted)
+    monkeypatch.setattr(auth, "authenticate_user", counted)
     assert oauth_broker_client.get("/api/egress-broker/services").status_code == 200
-    assert calls == []
+    assert calls == ["authenticate"]
     assert oauth_broker_client.get("/api/oauth/google_drive/status").status_code == 200
-    assert calls == ["verify"]
+    assert calls == ["authenticate", "authenticate"]
 
 
 def test_key_status_is_read_off_the_event_loop(

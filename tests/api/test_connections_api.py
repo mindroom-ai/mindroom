@@ -123,7 +123,7 @@ def test_catalog_includes_deferred_oauth_tools_without_status_calls(
 ) -> None:
     """A private agent exposes its allowed OAuth tools without dashboard internals."""
     status = AsyncMock(side_effect=AssertionError("Catalog must not load remote status"))
-    monkeypatch.setattr(oauth, "status", status)
+    monkeypatch.setattr(oauth, "connection_status", status)
     response = portal["client"].get("/api/connections", headers=portal["headers"]["alice"])
     assert response.status_code == 200, response.text
     assert response.json()["agents"][0]["agent_display_name"] == "Personal Mind"
@@ -584,7 +584,11 @@ def test_provider_failure_does_not_block_catalog_or_leak_details(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """An unavailable backend affects only its status request."""
-    monkeypatch.setattr(oauth, "status", AsyncMock(side_effect=HTTPException(503, "internal-client-secret")))
+    monkeypatch.setattr(
+        oauth,
+        "connection_status",
+        AsyncMock(side_effect=HTTPException(503, "internal-client-secret")),
+    )
     response = portal["client"].get(
         "/api/connections/agents/personal/google_drive/status",
         headers=portal["headers"]["alice"],
@@ -1156,14 +1160,14 @@ def test_state_survives_a_service_whose_state_cannot_be_read(
     _publish_config(main.app, portal["paths"], portal["payload"])
     _use_runtime_auth_settings(main.app)
     _connect_account(portal, "alice", "personal")
-    real = oauth.authenticated_connection_status
+    real = oauth.connection_status
 
-    async def fails_for_wiki(provider_id: str, *args: Any, **kwargs: Any) -> Any:  # noqa: ANN401
-        if provider_id != "google_drive":
+    async def fails_for_wiki(request: Any, context: Any, **kwargs: Any) -> Any:  # noqa: ANN401
+        if context.provider.id != "google_drive":
             raise HTTPException(503, "internal-client-secret")
-        return await real(provider_id, *args, **kwargs)
+        return await real(request, context, **kwargs)
 
-    monkeypatch.setattr(oauth, "authenticated_connection_status", fails_for_wiki)
+    monkeypatch.setattr(oauth, "connection_status", fails_for_wiki)
     response = portal["client"].get("/api/connections/agents/personal/state", headers=portal["headers"]["alice"])
     assert response.status_code == 200, response.text
     connected = response.json()["connected"]

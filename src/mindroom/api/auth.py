@@ -864,8 +864,6 @@ def _require_connections_route_authorized(request: Request, auth_user: AuthUser)
     if not _env_text(snapshot.runtime_paths, "MINDROOM_CONNECTIONS_AGENT"):
         return
     path = request.scope["path"]
-    if _is_connections_path(path):
-        return
     if _is_oauth_popup_path(path, frozenset({"callback", "success", "reset"})):
         # These handlers independently validate their state or reset capability.
         return

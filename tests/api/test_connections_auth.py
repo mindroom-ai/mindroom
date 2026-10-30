@@ -214,15 +214,12 @@ def test_administrator_and_unset_connections_agent_preserve_dashboard_access(
 @pytest.mark.parametrize(
     "path",
     [
-        "/api/connections",
-        "/api/connections/",
-        "/api/connections/agents/personal/google_drive/status",
         "/api/oauth/google_drive/callback",
         "/api/oauth/google_drive/success",
         "/api/oauth/google_drive/reset",
     ],
 )
-def test_signed_nonadmin_can_enter_personal_and_oauth_completion_routes(
+def test_signed_nonadmin_can_enter_oauth_completion_routes(
     path: str,
     connections_auth_client: Callable[..., TestClient],
     signed_connections_headers: Callable[[str], dict[str, str]],
@@ -471,8 +468,6 @@ def test_non_admin_html_head_is_not_redirected(
 @pytest.mark.parametrize(
     "path",
     [
-        "/api/connections",
-        "/api/connections/agents/personal/google_drive/status",
         "/api/oauth/google_drive/callback",
         "/api/oauth/google_drive/success",
         "/api/oauth/google_drive/reset",
@@ -483,7 +478,7 @@ def test_oauth_and_connections_routes_are_untouched_by_the_html_redirect(
     connections_auth_client: Callable[..., TestClient],
     signed_connections_headers: Callable[[str], dict[str, str]],
 ) -> None:
-    """Callback, success, reset, and Connections API routes behave as before for a browser request."""
+    """Callback, success, and reset routes behave as before for a browser request."""
     headers = {**signed_connections_headers("alice"), **_BROWSER_ACCEPT}
     response = connections_auth_client().get(path, headers=headers, follow_redirects=False)
     assert response.status_code == 200

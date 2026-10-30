@@ -118,11 +118,9 @@ async def _load_service_statuses_for_target(
             runtime_paths=target.runtime_paths,
             manager=target.base_manager,
             can_manage=True,
-            # The router's dependency has authenticated the request, so the dashboard's status helper can read it.
-            connection_status=lambda provider: oauth.authenticated_connection_status(
-                provider.id,
+            connection_status=lambda provider: oauth.connection_status(
                 request,
-                agent_name=target.agent_name,
+                oauth.dashboard_oauth_context(request, provider.id, agent_name=target.agent_name),
                 refresh=False,
             ),
             reuse_target=lambda provider: _oauth_reuse_target(request, target, worker_target, provider),
@@ -321,7 +319,7 @@ async def connect_service_account(
     broker never uses a requester's own account unless the service opts in.
     """
     *_scope, provider = _config_service_provider(request, name, agent_name, connecting=True)
-    return await oauth.connect(provider.id, request, agent_name=agent_name)
+    return await oauth.start_connect(request, provider.id, agent_name=agent_name)
 
 
 @router.post("/services/{name}/disconnect")
@@ -335,7 +333,10 @@ async def disconnect_service_account(
     Raises 404 like the connect route, and 409 where the scope's sandbox is shared by several requesters.
     """
     *_scope, provider = _config_service_provider(request, name, agent_name, connecting=False)
-    return await oauth.disconnect(provider.id, request, agent_name=agent_name)
+    return await oauth.reset_connection(
+        request,
+        oauth.dashboard_oauth_context(request, provider.id, agent_name=agent_name),
+    )
 
 
 @router.put("/services/{name}/oauth-reuse", status_code=204)
