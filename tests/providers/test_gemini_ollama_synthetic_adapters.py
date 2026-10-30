@@ -693,12 +693,107 @@ async def test_gemini_decision_requests_fail_on_client_body_overrides(tmp_path: 
     assert sent == []
 
 
-@pytest.mark.asyncio
-@pytest.mark.parametrize("config", [GEMINI, GEMINI_VERTEX], ids=["gemini", "vertexai"])
-async def test_gemini_decision_requests_with_search_send_no_tools(config: dict[str, Any], tmp_path: Path) -> None:
-    """Search replaces the function tools and a decision drops native tools, so nothing is left to call.
+_WEATHER_DECLARATIONS = {
+    "functionDeclarations": [
+        {"name": "get_weather", "description": "Return the forecast.", "parameters_json_schema": WEATHER.parameters},
+    ],
+}
 
-    The Agno path sent the same body: no tools, no function-calling config, and JSON output on both routes.
+
+_COMBINED_SEARCH = ([{"googleSearch": {}}, _WEATHER_DECLARATIONS], {"includeServerSideToolInvocations": True})
+_SEARCH_ALONE = ([{"googleSearch": {}}], None)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("config", "tools", "sent"),
+    [
+        (GEMINI, [WEATHER], _COMBINED_SEARCH),
+        ({**GEMINI, "id": "gemini-3.8-flash"}, [WEATHER], _COMBINED_SEARCH),
+        ({**GEMINI, "id": "models/gemini-4-pro"}, [WEATHER], _COMBINED_SEARCH),
+        ({**GEMINI, "id": "gemini-2.5-flash"}, [WEATHER], _SEARCH_ALONE),
+        ({**GEMINI, "id": "gemini-flash-latest"}, [WEATHER], _SEARCH_ALONE),
+        ({**GEMINI, "id": "tunedModels/travel-helper"}, [WEATHER], _SEARCH_ALONE),
+        (GEMINI, [], _SEARCH_ALONE),
+        (GEMINI_VERTEX, [WEATHER], _SEARCH_ALONE),
+    ],
+    ids=[
+        "gemini-3-1-with-tools",
+        "gemini-3-8-with-tools",
+        "gemini-4-with-tools",
+        "gemini-2-5-with-tools",
+        "alias-with-tools",
+        "tuned-model-with-tools",
+        "gemini-without-tools",
+        "vertexai-with-tools",
+    ],
+)
+async def test_gemini_search_goes_beside_the_function_tools_only_for_a_gemini_3_or_later_name_on_the_gemini_api(
+    config: dict[str, Any],
+    tools: list[ToolSpec],
+    sent: tuple[list[dict[str, Any]], dict[str, Any] | None],
+    tmp_path: Path,
+) -> None:
+    """The Gemini API takes Google Search beside function tools on Gemini 3 and later, with the server-side search parts.
+
+    Any other model name, an alias or an older generation, sends search alone in place of the function tools, as before
+    search combined with them, since older models reject the combination; Vertex AI takes no search tool beside
+    function calling.
+    """
+    sent_tools, sent_tool_config = sent
+    request, _ = await run_adapter(
+        _config(config, search=True),
+        _request(tools=tools),
+        tmp_path,
+        gemini_sse(_gemini_chunk({"text": "ok"})),
+    )
+
+    body = request["body"]
+    assert body["tools"] == sent_tools
+    assert body.get("toolConfig") == sent_tool_config
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("source", ["generation_config", "generative_model_kwargs"])
+async def test_gemini_search_beside_tools_keeps_the_authored_tool_config(source: str, tmp_path: Path) -> None:
+    """Authored retrieval settings, such as the location search answers for, stay beside the server-side parts flag."""
+    retrieval = {"retrieval_config": {"lat_lng": {"latitude": 52.37, "longitude": 4.9}, "language_code": "nl"}}
+    sent = {}
+    for model_id in ("gemini-2.5-flash", "gemini-3.8-flash"):
+        config = _config({**GEMINI, "id": model_id}, search=True, **{source: {"tool_config": copy.deepcopy(retrieval)}})
+        request, _ = await run_adapter(
+            config,
+            _request(tools=[WEATHER]),
+            tmp_path,
+            gemini_sse(_gemini_chunk({"text": "ok"})),
+        )
+        sent[model_id] = request["body"]["toolConfig"]
+
+    # Search alone sends the authored tool config as it is.
+    assert set(sent["gemini-2.5-flash"]) == {"retrievalConfig"}
+    assert sent["gemini-3.8-flash"] == {**sent["gemini-2.5-flash"], "includeServerSideToolInvocations": True}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("config", "sent_tools", "json_output"),
+    [
+        (GEMINI, [_WEATHER_DECLARATIONS], True),
+        ({**GEMINI, "id": "gemini-2.5-flash"}, None, True),
+        (GEMINI_VERTEX, None, True),
+    ],
+    ids=["gemini-3", "gemini-2-5", "vertexai"],
+)
+async def test_gemini_decision_requests_with_search_drop_the_search(
+    config: dict[str, Any],
+    sent_tools: list[dict[str, Any]] | None,
+    *,
+    json_output: bool,
+    tmp_path: Path,
+) -> None:
+    """A decision drops Google Search and keeps whatever function schemas the request sends beside it, uncallable.
+
+    An older model and Vertex AI send search in place of the function tools, so their decision is left with no tools.
     """
     request, _ = await run_adapter(
         _config(config, search=True),
@@ -708,17 +803,90 @@ async def test_gemini_decision_requests_with_search_send_no_tools(config: dict[s
     )
 
     body = request["body"]
-    assert "tools" not in body
-    assert "toolConfig" not in body
-    assert body["generationConfig"] == {"responseMimeType": "application/json"}
+    assert body.get("tools") == sent_tools
+    assert body.get("toolConfig") == (None if sent_tools is None else {"functionCallingConfig": {"mode": "NONE"}})
+    assert ("responseMimeType" in body["generationConfig"]) is json_output
 
 
-def test_gemini_tool_choice_none_turns_function_calling_off() -> None:
-    """The wire helper maps a ``"none"`` tool choice to Gemini's function-calling mode NONE.
+# A server-side Google Search call and its result as the Gemini API streams them, and as the reply stores them, in
+# google-genai's field names, which the SDK sends back as they are, as it sends a reply's own parts.
+_SEARCH_CALL = {"id": "search-1", "toolType": "GOOGLE_SEARCH_WEB", "args": {"queries": ["Paris weather"]}}
+_SEARCH_RESULT = {"id": "search-1", "toolType": "GOOGLE_SEARCH_WEB", "response": {"results": ["Rain."]}}
+_STORED_SEARCH_CALL = {"id": "search-1", "tool_type": "GOOGLE_SEARCH_WEB", "args": {"queries": ["Paris weather"]}}
+_STORED_SEARCH_RESULT = {"id": "search-1", "tool_type": "GOOGLE_SEARCH_WEB", "response": {"results": ["Rain."]}}
 
-    No production request reaches it with that choice outside a decision request.
+
+@pytest.mark.asyncio
+async def test_gemini_stores_server_side_search_parts_even_unsigned(tmp_path: Path) -> None:
+    """Only a reply of nothing but unsigned text replays from its content alone."""
+    response = gemini_sse(
+        _gemini_chunk({"toolCall": _SEARCH_CALL}, finish=None, usage=False),
+        _gemini_chunk({"toolResponse": _SEARCH_RESULT}, finish=None, usage=False),
+        _gemini_chunk({"text": "Pack a raincoat."}),
+    )
+
+    _, events = await run_adapter(_config(GEMINI, search=True), _request(tools=[WEATHER]), tmp_path, response)
+
+    reply = _completed(events).message
+    assert reply.provider_data is not None
+    assert reply.provider_data["gemini_parts"] == [
+        {"tool_call": _STORED_SEARCH_CALL},
+        {"tool_response": _STORED_SEARCH_RESULT},
+        {"text": "Pack a raincoat."},
+    ]
+
+
+@pytest.mark.asyncio
+async def test_gemini_replays_server_side_search_parts_only_to_a_request_that_asks_for_them(tmp_path: Path) -> None:
+    """The search calls and results a reply returns go back as given, signatures included, beside the function tools.
+
+    A request without search beside its function tools, such as one from an older model or one without tools, asked for
+    no such parts, and Vertex AI rejects them, so those requests leave them out and keep the reply's own call.
     """
-    assert gemini_wire.tool_config("none") == {"function_calling_config": {"mode": "NONE"}}
+    call = {"id": "call-1", "name": "get_weather", "args": {"city": "Paris"}}
+    response = gemini_sse(
+        _gemini_chunk({"toolCall": _SEARCH_CALL, "thoughtSignature": "c2lnMQ=="}, finish=None, usage=False),
+        _gemini_chunk({"toolResponse": _SEARCH_RESULT, "thoughtSignature": "c2lnMg=="}, finish=None, usage=False),
+        _gemini_chunk({"functionCall": call, "thoughtSignature": "c2lnMw=="}),
+    )
+    combined = _config(GEMINI, search=True)
+    _, events = await run_adapter(combined, _request(tools=[WEATHER]), tmp_path, response)
+    reply = _completed(events).message
+    assert reply.provider_data is not None
+    assert reply.provider_data["gemini_parts"] == [
+        {"tool_call": _STORED_SEARCH_CALL, "thought_signature": "c2lnMQ=="},
+        {"tool_response": _STORED_SEARCH_RESULT, "thought_signature": "c2lnMg=="},
+        {"function_call_id": "call-1"},
+    ]
+
+    messages = (
+        Message(role="user", content="Weather?"),
+        reply,
+        Message(role="tool", tool_call_id="call-1", tool_name="get_weather", content="Rain."),
+    )
+    replays = {
+        "combined": (combined, _request(*messages, tools=[WEATHER])),
+        "decision": (combined, _request(*messages, tools=[WEATHER], tool_choice="none")),
+        "without-search": (GEMINI, _request(*messages, tools=[WEATHER])),
+        "without-tools": (combined, _request(*messages)),
+        "gemini-2-5": (
+            _config({**GEMINI, "id": "gemini-2.5-flash"}, search=True),
+            _request(*messages, tools=[WEATHER]),
+        ),
+        "vertexai": (_config(GEMINI_VERTEX, search=True), _request(*messages, tools=[WEATHER])),
+    }
+    sent = {}
+    for name, (config, request) in replays.items():
+        body, _ = await run_adapter(config, request, tmp_path, gemini_sse(_gemini_chunk({"text": "ok"})))
+        sent[name] = body["body"]["contents"][1]["parts"]
+
+    function_call = {"functionCall": call, "thoughtSignature": "c2lnMw=="}
+    assert sent["combined"] == [
+        {"toolCall": _STORED_SEARCH_CALL, "thoughtSignature": "c2lnMQ=="},
+        {"toolResponse": _STORED_SEARCH_RESULT, "thoughtSignature": "c2lnMg=="},
+        function_call,
+    ]
+    assert all(parts == [function_call] for name, parts in sent.items() if name != "combined")
 
 
 @pytest.mark.asyncio
@@ -1753,6 +1921,17 @@ async def test_ollama_native_settings_reach_the_chat_request(tmp_path: Path) -> 
     assert body["format"] == "json"
     assert body["think"] is False
     assert request["url"] == "http://ollama.test:11434/api/chat"
+
+
+@pytest.mark.asyncio
+async def test_ollama_request_params_merge_over_the_request_but_keep_it_streaming(tmp_path: Path) -> None:
+    """Authored ``request_params`` merge over MindRoom's fields, as on other routes, and the request still streams."""
+    config = _config(OLLAMA, request_params={"model": "other", "messages": [], "stream": False})
+
+    request, _ = await run_adapter(config, _request(), tmp_path, ollama_ndjson(_ollama_done()))
+
+    body = request["body"]
+    assert (body["model"], body["messages"], body["stream"]) == ("other", [], True)
 
 
 @pytest.mark.asyncio

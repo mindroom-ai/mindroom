@@ -4,7 +4,8 @@ Before layout version 4, every session row named its kind and owner (Agno's ``se
 ``team_id``) and kept ``session_state`` inside the ``session_data`` object beside the session's usage totals. Version 4
 records the database's owner once, in its meta row, and gives the state a column of its own. The conversion of an
 Agno-layout database (``legacy_agno3_conversion``) ends here too, and so does a database at version 2, whose agent rows
-first take their agent's name (``legacy_agent_session_owners``).
+first take their agent's name (``legacy_agent_session_owners``). ``upgrade_layout`` also takes a database at version 4
+or 5 the rest of the way: the delegation snapshots' rewrite of version 5, then the paused-run rewrite of version 6.
 """
 
 from __future__ import annotations
@@ -13,12 +14,15 @@ import json
 import time
 from typing import TYPE_CHECKING
 
+from mindroom.delegation.legacy_snapshots import rewrite_run_snapshots
 from mindroom.history.types import HistoryScope
 from mindroom.logging_config import get_logger
 from mindroom.session_storage.legacy_agent_session_owners import adopt_agent_session_owners
 from mindroom.session_storage.legacy_conversion_backup import leave_write_ahead_log, write_conversion_backup
+from mindroom.session_storage.legacy_paused_runs import rewrite_paused_runs
 from mindroom.session_storage.schema import (
     LOG_VERSION,
+    OWNER_VERSION,
     SESSION_COLUMNS,
     TableNames,
     index_name,
@@ -37,6 +41,8 @@ logger = get_logger(__name__)
 
 # The version whose agent rows name their agent (``legacy_agent_session_owners``).
 _AGENT_OWNERS_VERSION = 3
+# The version whose runs' delegation children have the current shape (``delegation.legacy_snapshots``).
+_SNAPSHOTS_VERSION = 5
 # The suffix of the backup a database below layout version 4 gets before its conversion.
 BACKUP_SUFFIX = ".pre-storage-v4"
 
@@ -46,12 +52,12 @@ BACKUP_SUFFIX = ".pre-storage-v4"
 # `owner_kind` and `owner_id` columns; its session rows name their owner instead.
 # Last legacy release: v2026.10.676; replacement: the next release, layout version 4, whose meta row records the
 # agent, team scope, or system usage ledger that owns the database.
-# Handling: Every store open and the startup sweep, which know the owner, convert such a database once in one write
-# transaction, after its backup to `<name>.db.pre-storage-v4`: at version 2 an agent's rows first take its name, then
-# the sessions table converts (`convert_session_columns`) and the meta row records the owner and version 4. The sweep
-# takes a team database's owner from the team its rows name whose database has this one's name (`team_owner`), and
-# leaves one no row names to its scope's next store open. Two openers converting at once are serialized by the write
-# lock, and the second finds the database converted.
+# Handling: A process's first store open of each database file and the startup sweep, which know the owner, convert
+# such a database once in one write transaction, after its backup to `<name>.db.pre-storage-v4`: at version 2 an
+# agent's rows first take its name, then the sessions table converts (`convert_session_columns`), the meta row records
+# the owner, and the later layout steps follow. The sweep takes a team database's owner from the team its rows name
+# whose database has this one's name (`team_owner`), and leaves one no row names to its scope's next store open. Two
+# openers converting at once are serialized by the write lock, and the second finds the database converted.
 # Coverage: tests/session_storage/test_legacy_session_columns.py.
 def upgrade_layout(
     connection: sqlite3.Connection,
@@ -62,10 +68,12 @@ def upgrade_layout(
 ) -> None:
     """Bring the database at ``path``, in the current layout at an older version, to ``LOG_VERSION`` as ``owner``'s.
 
-    In one ``BEGIN IMMEDIATE``, after the byte-for-byte backup beside it (``write_conversion_backup``), so a crash or an
-    error leaves the file as it was and the next open converts it again. A file in write-ahead-log mode returns to the
-    rollback journal first, and the conversion is logged once it commits. ``descriptors`` takes the backup's descriptor
-    of the file, which the caller closes after ``connection``.
+    In one ``BEGIN IMMEDIATE``, so a crash or an error leaves the file as it was and the next open converts it again.
+    Below version 4 the conversion starts with the byte-for-byte backup beside it (``write_conversion_backup``); the
+    steps to version 5 (``rewrite_run_snapshots``) and version 6 (``rewrite_paused_runs``) take none, since a release at
+    version 4 or 5 reads the database they leave. A file in write-ahead-log mode returns to the rollback journal first,
+    and the conversion is logged once it commits. ``descriptors`` takes the backup's descriptor of the file, which the
+    caller closes after ``connection``.
     """
     leave_write_ahead_log(connection, path)
     started = time.monotonic()
@@ -75,20 +83,25 @@ def upgrade_layout(
         version = meta_version(connection, names)
         if version >= LOG_VERSION:
             return
-        # The copy takes the file's size, and the conversion's rollback journal at most as much again.
-        write_conversion_backup(path, descriptors, suffix=BACKUP_SUFFIX, size_factor=2, copied_bytes=0)
-        if version < _AGENT_OWNERS_VERSION and owner.kind == "agent":
-            adopt_agent_session_owners(connection, names, owner.scope_id)
-        convert_session_columns(connection, names)
         meta = quote_identifier(names.log_meta)
-        for column in ("owner_kind", "owner_id"):
-            connection.execute(f"ALTER TABLE {meta} ADD COLUMN {column} TEXT")
-        connection.execute(
-            f"UPDATE {meta} SET version = ?, owner_kind = ?, owner_id = ? WHERE id = 1",  # noqa: S608
-            (LOG_VERSION, owner.kind, owner.scope_id),
-        )
+        if version < OWNER_VERSION:
+            # The copy takes the file's size, and the conversion's rollback journal at most as much again.
+            write_conversion_backup(path, descriptors, suffix=BACKUP_SUFFIX, size_factor=2, copied_bytes=0)
+            if version < _AGENT_OWNERS_VERSION and owner.kind == "agent":
+                adopt_agent_session_owners(connection, names, owner.scope_id)
+            convert_session_columns(connection, names)
+            for column in ("owner_kind", "owner_id"):
+                connection.execute(f"ALTER TABLE {meta} ADD COLUMN {column} TEXT")
+            connection.execute(
+                f"UPDATE {meta} SET owner_kind = ?, owner_id = ? WHERE id = 1",  # noqa: S608
+                (owner.kind, owner.scope_id),
+            )
+        if version < _SNAPSHOTS_VERSION:
+            rewrite_run_snapshots(connection, names)
+        rewrite_paused_runs(connection, names)
+        connection.execute(f"UPDATE {meta} SET version = ? WHERE id = 1", (LOG_VERSION,))  # noqa: S608
         runs, messages = stored_counts(connection, names)
-    # The dropped columns free too little of the file to be worth compacting.
+    # The dropped columns and rewritten rows free too little of the file to be worth compacting.
     logger.info(
         "conversation_converted",
         path=str(path),

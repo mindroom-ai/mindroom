@@ -209,6 +209,7 @@ function ServiceSection({
   onListing: (listing: ServicesListing) => void;
 }) {
   const config = useConfigStore((state) => state.config);
+  const agents = useConfigStore((state) => state.agents);
   const dirtyRoots = useConfigStore((state) => state.dirtyRoots);
   const updateConfigValue = useConfigStore((state) => state.updateConfigValue);
   const restoreConfigValue = useConfigStore(
@@ -353,9 +354,10 @@ function ServiceSection({
       </div>
       <p className="text-xs text-muted-foreground">
         Services you add here are offered to every user and to every agent that
-        uses Agent Keys. Agents with a <code>user</code> or{" "}
-        <code>user_agent</code> worker scope and private agents are not listed:
-        each user sets their keys on the Connections page&apos;s{" "}
+        uses Agent Keys, unless you limit them to some agents. Agents with a{" "}
+        <code>user</code> or <code>user_agent</code> worker scope and private
+        agents are not listed: each user sets their keys on the Connections
+        page&apos;s{" "}
         {personalPage ? (
           <>
             <a
@@ -372,12 +374,16 @@ function ServiceSection({
             MindRoom Chat is off and trusted upstream JWT auth is not set. Give
             such agents a shared worker scope to set their keys here.
           </>
-        )}
+        )}{" "}
+        A service with one key for every agent gets that key here, for all of
+        its agents.
       </p>
       {keysUnused && (
         <p className="text-xs text-muted-foreground">
           {personalAgents
-            ? "Only agents whose keys each user sets use the broker, so no keys are set here."
+            ? services?.some((service) => service.admin_key)
+              ? "Only agents whose keys each user sets use the broker, so only services with one key for every agent take a key here."
+              : "Only agents whose keys each user sets use the broker, so no keys are set here."
             : "No agent uses these keys. An agent uses them once it has the egress_credentials tool and shell or python running in a worker."}
         </p>
       )}
@@ -402,6 +408,10 @@ function ServiceSection({
           <EgressServiceEditor
             key={editor.kind === "add" ? "add" : `edit:${editor.name}`}
             context="operator"
+            agentOptions={agents.map((agent) => ({
+              id: agent.id,
+              label: agent.display_name || agent.id,
+            }))}
             name={editor.kind === "edit" ? editor.name : undefined}
             service={
               editor.kind === "edit" ? authoredServices[editor.name] : null

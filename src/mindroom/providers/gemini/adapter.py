@@ -9,6 +9,7 @@ credentials file from the config, else ``GOOGLE_CLOUD_PROJECT``, ``GOOGLE_CLOUD_
 
 from __future__ import annotations
 
+import re
 from contextlib import aclosing
 from dataclasses import dataclass, field
 from functools import partial
@@ -38,14 +39,13 @@ from mindroom.providers.gemini.wire import (
     read_chunk,
     reply_provider_data,
     stop_reason,
-    tool_config,
     without_tool_selection,
 )
 from mindroom.providers.google_adc import with_runtime_application_credentials
 from mindroom.providers.tool_policy import disables_tools
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncGenerator, AsyncIterator
+    from collections.abc import AsyncGenerator, AsyncIterator, Mapping
 
     from google.genai import Client
     from google.genai.types import GenerateContentConfig, GenerateContentResponse
@@ -58,6 +58,9 @@ _PROVIDER = "Google"
 _SAMPLING_CONTROL_NAMES = frozenset({"temperature", "top_p", "top_k"})
 # How the SDK's ``ValueError`` begins when a Gemini API client has no API key at all.
 _NO_API_KEY_ERROR = "No API key was provided."
+# The generation a Gemini model id names, as in ``gemini-3.1-pro-preview`` or ``models/gemini-4-pro``; an alias
+# such as ``gemini-flash-latest`` names none.
+_GEMINI_GENERATION = re.compile(r"gemini-(\d+)(?:[.-]|$)")
 
 
 @dataclass(slots=True, kw_only=True)
@@ -96,10 +99,16 @@ class GeminiProvider:
         # The client, which ``client_params`` can switch to Vertex AI, names the route; Vertex AI has no Files API.
         upload = None if client.vertexai else partial(uploaded_file_uri, client, provider=provider)
         try:
-            contents, system_instruction = await format_contents(request.messages, MediaRoute(provider, upload))
+            contents, system_instruction = await format_contents(
+                request.messages,
+                MediaRoute(provider, upload),
+                # A decision request asks for no server-side tool parts (``without_tool_selection``).
+                server_tool_parts=self._sends_search_beside_tools(request) and not disables_tools(request.tool_choice),
+            )
             config = self._request_config(request, system_instruction)
             # The request dicts use google-genai's field names; the SDK validates them into its types.
             call = {"model": self.identity.id, "contents": cast("Any", contents), "config": cast("Any", config or None)}
+            await request.on_send(_sent_body(call))
             chunks = await client.aio.models.generate_content_stream(**call)
             async with aclosing(cast("AsyncGenerator[GenerateContentResponse]", chunks)) as responses:
                 async for chunk in responses:
@@ -174,12 +183,7 @@ class GeminiProvider:
         # it off.
         if thinking := {key: value for key, value in thinking.items() if value is not None}:
             config["thinking_config"] = thinking
-        if settings.search:
-            config["tools"] = [{"google_search": {}}]
-        elif (declarations := function_declarations(request.tools)) is not None:
-            config["tools"] = [declarations]
-        if (function_calling := tool_config(request.tool_choice)) is not None:
-            config["tool_config"] = function_calling
+        config.update(self._tool_settings(request, authored_tool_config=config.get("tool_config")))
         config = {key: value for key, value in config.items() if value is not None}
         if self.capabilities.provider_default_sampling:
             config = {key: value for key, value in config.items() if key not in _SAMPLING_CONTROL_NAMES}
@@ -189,6 +193,43 @@ class GeminiProvider:
         if disables_tools(request.tool_choice):
             return self._decision_config(config)
         return config
+
+    def _sends_search_beside_tools(self, request: ModelRequest) -> bool:
+        """Return whether ``request`` sends Google Search beside its function tools, as Gemini 3 and later take it.
+
+        Such a request asks for the server-side search parts, as the Gemini API requires for that combination, which it
+        supports on Gemini 3 and later models only (https://ai.google.dev/gemini-api/docs/generate-content/tool-combination).
+        A model whose id names no such generation, an older model or an alias that may point at one, sends search in
+        place of the function tools, which every model accepts. Vertex AI takes no search tool beside function calling
+        (https://docs.cloud.google.com/vertex-ai/generative-ai/docs/grounding/grounding-with-google-search), so there
+        search replaces the function tools too.
+        """
+        if not self.settings.search or not request.tools or self._sdk_client().vertexai:
+            return False
+        generation = _GEMINI_GENERATION.match(self.identity.id.rsplit("/", 1)[-1].casefold())
+        return generation is not None and int(generation[1]) >= 3
+
+    def _tool_settings(
+        self,
+        request: ModelRequest,
+        *,
+        authored_tool_config: Mapping[str, Any] | None,
+    ) -> dict[str, Any]:
+        """Return the request's ``tools`` and ``tool_config``; one it leaves out keeps the authored generation config's.
+
+        Search beside the function tools adds its flag to the authored ``tool_config``, so authored settings such as
+        the search's ``retrieval_config`` stay.
+        """
+        chosen: dict[str, Any] = {}
+        declarations = function_declarations(request.tools)
+        if self._sends_search_beside_tools(request):
+            chosen["tools"] = [{"google_search": {}}, declarations]
+            chosen["tool_config"] = {**(authored_tool_config or {}), "include_server_side_tool_invocations": True}
+        elif self.settings.search:
+            chosen["tools"] = [{"google_search": {}}]
+        elif declarations is not None:
+            chosen["tools"] = [declarations]
+        return chosen
 
     def _decision_config(self, config: dict[str, Any]) -> dict[str, Any] | GenerateContentConfig:
         """Keep function schemas but disable function calling and native tools for a decision request."""
@@ -239,6 +280,19 @@ def _provider_error(error: Exception, *, provider: str) -> ProviderError:
         # The SDK rejected an authored generation setting; the same request cannot succeed.
         return InvalidRequest(str(error), provider=provider)
     raise error
+
+
+def _sent_body(call: Mapping[str, Any]) -> dict[str, Any]:
+    """Return the request as the adapter hands it to the SDK, in google-genai's field names.
+
+    The config's ``http_options`` are request options, so they stay out. The SDK builds the REST body from the rest:
+    camelCase names, with the system instruction, tools, and tool config at its top level and the other settings
+    under ``generationConfig``.
+    """
+    config = call["config"] or {}
+    if not isinstance(config, dict):
+        config = cast("GenerateContentConfig", config).model_dump(mode="json", exclude_none=True)
+    return {**call, "config": {key: value for key, value in config.items() if key != "http_options"}}
 
 
 def _vertex_kwargs(authored: dict[str, Any], runtime_paths: RuntimePaths) -> dict[str, Any]:

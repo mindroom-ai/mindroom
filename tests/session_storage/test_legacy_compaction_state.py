@@ -13,16 +13,15 @@ from typing import TYPE_CHECKING
 import pytest
 
 from mindroom.constants import MINDROOM_COMPACTION_METADATA_KEY, MINDROOM_MATRIX_HISTORY_METADATA_KEY
-from mindroom.history import legacy_compaction_state
-from mindroom.history.legacy_compaction_state import _legacy_tombstones
 from mindroom.history.types import HistoryScope, ScopeSummary
 from mindroom.llm.runs import RunRecord
-from mindroom.session_storage import summary_rows
+from mindroom.session_storage import legacy_compaction_state, summary_rows
 from mindroom.session_storage.agent_storage import (
     create_agent_state_storage,
     create_state_storage,
     prepare_conversation_database,
 )
+from mindroom.session_storage.legacy_compaction_state import _legacy_tombstones
 from mindroom.session_storage.schema import TableNames, table_names
 from mindroom.session_storage.store import ConversationStore
 from mindroom.session_storage.types import ConversationSession
@@ -402,11 +401,13 @@ def test_an_interrupted_migration_changes_nothing_and_runs_again(
 def test_owners_migrating_at_once_adopt_the_summary_once(tmp_path: Path) -> None:
     """Startups racing on one database convert it once: one legacy summary row and one row per run."""
     db_file = _agno_2_database_with_summary(tmp_path)
+    # Read the owner before the race: a conversion that commits first drops the columns it is read from.
+    owner = recorded_owner(db_file)
     start = threading.Barrier(4)
 
     def migrate(_index: int) -> None:
         start.wait()
-        prepare_conversation_database(db_file, _NAMES, recorded_owner(db_file))
+        prepare_conversation_database(db_file, _NAMES, owner)
 
     with ThreadPoolExecutor(max_workers=4) as pool:
         list(pool.map(migrate, range(4)))

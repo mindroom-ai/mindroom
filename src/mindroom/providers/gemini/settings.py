@@ -38,9 +38,8 @@ class GeminiSettings:
     thinking_budget: int | None = None
     include_thoughts: bool | None = None
     thinking_level: str | None = None
-    # TODO(simplify): Google Search grounding is sent in place of the request's function tools, so a grounded model
-    # calls no function. Decide whether search combines with function tools (#3075). Users would notice: a grounded
-    # agent could call its tools.
+    # Google Search grounding, beside the function tools for a Gemini 3 or later model name on the Gemini API and in
+    # place of them for every other model and on Vertex AI.
     search: bool = False
 
 

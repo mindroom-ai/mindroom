@@ -71,15 +71,20 @@ MASKS: dict[str, str] = {
     "naming another agent, which no release stored there, takes the agent's name as layout version 3 set it "
     "(``mindroom.session_storage.legacy_agent_session_owners``)",
     "paused_notice_reads_as_no_content": "#3106: a run whose content is a paused notice reads with no content "
-    "(``mindroom.llm.legacy_run_content``)",
+    "(``mindroom.session_storage.legacy_paused_runs``)",
+    "waiting_call_names_its_member_run": "#3116: a paused team run's waiting delegation call stored without its "
+    "member run names it (``mindroom.session_storage.legacy_paused_runs``)",
 }
 # The masks each golden and legacy input uses; every other input compares unmasked.
 _PINS: dict[str, set[str]] = {
     "goldens/agent_code": {"stored_copy_hides_folded_messages"},
     "goldens/agent_helper": {"paused_notice_reads_as_no_content"},
     "goldens/agent_helper__before_run-delegation-approved": {"paused_notice_reads_as_no_content"},
-    "goldens/team_squad": {"paused_notice_reads_as_no_content"},
-    "goldens/team_squad__before_team-approved": {"paused_notice_reads_as_no_content"},
+    "goldens/team_squad": {"paused_notice_reads_as_no_content", "waiting_call_names_its_member_run"},
+    "goldens/team_squad__before_team-approved": {
+        "paused_notice_reads_as_no_content",
+        "waiting_call_names_its_member_run",
+    },
     "goldens/agno2_migrated": {"session_columns_encoded_once"},
     "goldens/agno_2_6_12_code_sessions": {"session_columns_encoded_once"},
     "legacy/captured__legacy_agno2_runs__an_unreadable_blob_is_cleared_without_rows": {"session_columns_encoded_once"},
@@ -285,6 +290,29 @@ def _paused_notices_read_as_no_content(recorded: dict[str, Any], observed: dict[
             used.add("paused_notice_reads_as_no_content")
 
 
+def _waiting_calls(run: dict[str, Any]) -> list[dict[str, Any]]:
+    """Return the delegation calls of a paused team run that still wait on their member."""
+    if run.get("status") != RunStatus.paused.value:
+        return []
+    return [
+        tool
+        for tool in run.get("tools") or []
+        if tool.get("tool_name") == "delegate_task_to_member"
+        and str(tool.get("result")).endswith("requires human input before continuing.")
+    ]
+
+
+def _waiting_calls_name_their_member_runs(recorded: dict[str, Any], observed: dict[str, Any], used: set[str]) -> None:
+    for run in _runs(observed):
+        assert all(call.get("child_run_id") for call in _waiting_calls(run)), run["run_id"]
+    for run in _runs(recorded):
+        member_runs = {item.get("member_agent_id"): item.get("member_run_id") for item in run.get("requirements") or []}
+        for call in _waiting_calls(run):
+            if call.get("child_run_id") is None:
+                call["child_run_id"] = member_runs[(call.get("tool_args") or {}).get("member_id")]
+                used.add("waiting_call_names_its_member_run")
+
+
 def _drop_history_copies(recorded: dict[str, Any], observed: dict[str, Any], used: set[str]) -> None:
     for run in _runs(observed):
         assert not any(message.get("from_history") for message in run["messages"]), run["run_id"]
@@ -416,6 +444,7 @@ def _mask_session(
     """Show one session's recorded and observed observables as one store would; return the runs the fold mask hid."""
     _rows_fill_records(recorded, observed, session_id, used)
     _paused_notices_read_as_no_content(recorded, observed, used)
+    _waiting_calls_name_their_member_runs(recorded, observed, used)
     _session_columns_encoded_once(recorded, observed, used)
     _force_requests_in_metadata(recorded, observed, used)
     _drop_history_copies(recorded, observed, used)

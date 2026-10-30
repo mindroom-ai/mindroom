@@ -14,17 +14,21 @@ from typing import TYPE_CHECKING
 import pytest
 
 from mindroom.history.request_messages import build_resume_request
+from mindroom.history.types import HistoryScope
 from mindroom.llm.errors import ProviderError
 from mindroom.llm.events import ToolCompleted, ToolStarted
 from mindroom.llm.messages import Message
 from mindroom.llm.provider import TextDelta, TurnCompleted
 from mindroom.llm.runs import RunStatus, TeamRunRecord
+from mindroom.session_storage.agent_storage import create_state_storage
+from mindroom.session_storage.schema import TableNames
 from mindroom.teams.delegate_tools import MEMBER_PAUSED_RESULT, NO_MEMBER_RESPONSE
 from mindroom.teams.runtime import MemberEvent
 from mindroom.teams.spec import TeamMode
 from tests.agent_loop.helpers import echo, external, gated, toolkit
 from tests.fakes.scripted_model import Await, answer, calls, tool_call, usage
 from tests.run_record_helpers import PRODUCT, approved_call, reply, result, resumed, run_metrics, settled, waiting_call
+from tests.session_storage.layout_4 import store_rows, upgrade_from_layout_4
 from tests.teams.squad import (
     CHECKER_PAUSED_PIECE,
     PROVIDER,
@@ -44,6 +48,8 @@ from tests.teams.squad import (
 )
 
 if TYPE_CHECKING:
+    from pathlib import Path
+
     from agno.run import RunContext as AgnoRunContext
 
     from mindroom.agent_loop.spec import RunContext
@@ -52,6 +58,7 @@ if TYPE_CHECKING:
 pytestmark = pytest.mark.asyncio
 
 APPROVED_CALL = "call-checker-multiply-approved"
+_SQUAD_SCOPE = HistoryScope(kind="team", scope_id="squad")
 
 
 def _paused_team_approved() -> TeamRunRecord:
@@ -85,11 +92,12 @@ async def test_an_approved_member_call_resumes_the_member_and_then_the_leader() 
         ),
     )
 
-    # The paused row names no member run on its delegation, as rows stored before the link do, and is answered with
-    # the member's result where it held the pause notice; the run keeps the metadata it paused with.
+    # Agno stored the paused row without the member run on its delegation, which the conversion names; the call is
+    # answered with the member's result where it held the pause notice, and the run keeps the metadata it paused with.
     assert paused.tools is not None
     [delegation] = paused.tools
-    assert delegation.child_run_id is None
+    [member_run] = paused.member_responses
+    assert delegation.child_run_id == member_run.run_id
     assert settled(record) == settled(
         replace(
             paused,
@@ -950,12 +958,13 @@ async def test_a_waiting_delegation_under_a_call_id_an_earlier_request_used_is_a
 async def test_a_row_a_streamed_agno_turn_paused_answers_each_call_with_its_own_member_s_result(
     first: str,
     linked: str,
+    tmp_path: Path,
 ) -> None:
     """A streamed turn on the Agno runtime stored one member run on every coordinate call: the run that ended last.
 
     The first call's member finished and the checker paused on the second, and both calls name the same run, the
-    paused one or the finished one. Once approved, the first call keeps its answer and the second reads the
-    checker's result, also when both calls went to the checker.
+    paused one or the finished one. Once the upgrade rewrote the row and the call is approved, the first call keeps
+    its answer and the second reads the checker's result, also when both calls went to the checker.
     """
     leader = scripted(
         "leader-model",
@@ -979,10 +988,14 @@ async def test_a_row_a_streamed_agno_turn_paused_answers_each_call_with_its_own_
     )
     [paused_run] = live.member_responses
     [finished_run] = [run for run in live.ended_member_runs if run.run_id != paused_run.run_id]
-    paused = TeamRunRecord.from_dict(live.to_dict())
-    assert paused.tools is not None
-    for tool in paused.tools:
-        tool.child_run_id = (paused_run if linked == "paused" else finished_run).run_id
+    stored = live.to_dict()
+    for tool in stored["tools"]:
+        tool["child_run_id"] = (paused_run if linked == "paused" else finished_run).run_id
+    store = create_state_storage(TableNames.of_team(_SQUAD_SCOPE).storage_name, tmp_path, _SQUAD_SCOPE)
+    store_rows(store, SQUAD, [stored, *(member.to_dict() for member in live.member_responses)])
+    upgrade_from_layout_4(store, _SQUAD_SCOPE)
+    paused = store.get_run(live.run_id)
+    assert isinstance(paused, TeamRunRecord)
 
     _, record = await collect(
         resume_team(

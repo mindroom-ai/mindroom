@@ -39,7 +39,7 @@ def _gemini_mime_type(result: ToolValue) -> str:
     """Return the MIME type the Gemini wire sends for the first audio or video of a tool value."""
     message = Message(role="user", audio=result.audios, videos=result.videos)
     route = gemini_wire.MediaRoute(provider="gemini", upload=None)
-    contents, _ = asyncio.run(gemini_wire.format_contents([message], route))
+    contents, _ = asyncio.run(gemini_wire.format_contents([message], route, server_tool_parts=False))
     return contents[0]["parts"][0]["inline_data"]["mime_type"]
 
 

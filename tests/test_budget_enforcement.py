@@ -14,6 +14,7 @@ import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
+from mindroom.ai import TurnResult
 from mindroom.api import config_lifecycle, openai_compat
 from mindroom.api.main import initialize_api_app
 from mindroom.background_tasks import wait_for_background_tasks
@@ -264,46 +265,6 @@ def test_delegated_follow_up_keeps_a_model_switched_to_during_the_run(tmp_path: 
     assert (follow_up.model_name, follow_up.requested_model_name) == ("alternate", "alternate")
 
 
-def test_delegated_follow_up_of_a_child_saved_without_a_requested_model(tmp_path: Path) -> None:
-    """Children saved by earlier releases continue on the model they recorded."""
-    config = _delegation_config()
-    runtime_paths = _runtime_paths(tmp_path)
-    saved = replace(
-        prepare_child_turn(
-            "leader",
-            "child",
-            "Do the work",
-            owner=_owner(),
-            config=config,
-            runtime_paths=runtime_paths,
-            depth=0,
-            budget_monitor=_spent(runtime_paths, 0.0),
-            model=None,
-            agent_mode="standard",
-            previous=None,
-            persona=None,
-        ),
-        requested_model_name=None,
-    )
-
-    follow_up = prepare_child_turn(
-        "leader",
-        "child",
-        "Continue",
-        owner=_owner(),
-        config=config,
-        runtime_paths=runtime_paths,
-        depth=0,
-        budget_monitor=_spent(runtime_paths, 12.0),
-        previous=saved,
-        model=None,
-        agent_mode="standard",
-        persona=None,
-    )
-
-    assert (follow_up.model_name, follow_up.requested_model_name) == ("luna", "default")
-
-
 @pytest.mark.asyncio
 async def test_direct_delegation_reads_the_orchestrators_budget_monitor(tmp_path: Path) -> None:
     config = _delegation_config()
@@ -323,7 +284,11 @@ async def test_direct_delegation_reads_the_orchestrators_budget_monitor(tmp_path
 
     with (
         tool_runtime_context(context),
-        patch("mindroom.ai.ai_response", new_callable=AsyncMock, return_value="Child completed.") as response,
+        patch(
+            "mindroom.ai.ai_response",
+            new_callable=AsyncMock,
+            return_value=TurnResult("Child completed."),
+        ) as response,
     ):
         await tools.run_subagent(agent_name="child", task="Do the work")
 

@@ -1051,6 +1051,49 @@ _CHAT_SHARED_FAILURES = frozenset(
     {"http_503", "http_400", "http_429_moonshot_exceeded_current_quota", "event_server_error", "http_200_error_body"},
 )
 _CHAT_SHARED = [case for case in _CHAT_CASES if case.failure in _CHAT_SHARED_FAILURES]
+# OpenRouter and DeepSeek answer an account without credit with a 402 whose body names no billing failure: OpenRouter's
+# code is the status, and DeepSeek types it ``unknown_error``. No retry passes until the account is topped up.
+_OPENROUTER_NO_CREDIT = _json(
+    402,
+    {"error": {"code": 402, "message": "Insufficient credits. Add more using https://openrouter.ai/credits"}},
+)
+_DEEPSEEK_NO_BALANCE = _openai_status(402, "Insufficient Balance", "unknown_error", "invalid_request_error")
+_OPENROUTER_CASES = [
+    _Case(
+        "http_402_insufficient_credits",
+        _OPENROUTER_NO_CREDIT,
+        ProviderError,
+        f"{ERROR}Insufficient credits",
+        1,
+        code=QUOTA_EXHAUSTED,
+    ),
+]
+_DEEPSEEK_CASES = [
+    _Case(
+        "http_402_insufficient_balance",
+        _DEEPSEEK_NO_BALANCE,
+        ProviderError,
+        f"{ERROR}Insufficient Balance",
+        1,
+        code=QUOTA_EXHAUSTED,
+    ),
+]
+# Z.ai answers an account without balance or resource package with a 429 that only its business code tells apart from
+# a rate limit.
+_ZAI_NO_BALANCE = _json(
+    429,
+    {"error": {"code": "1113", "message": "Insufficient balance or no resource package. Please recharge."}},
+)
+_ZAI_CASES = [
+    _Case(
+        "http_429_insufficient_balance",
+        _ZAI_NO_BALANCE,
+        ProviderError,
+        f"{ERROR}Insufficient balance or no resource package",
+        1,
+        code=QUOTA_EXHAUSTED,
+    ),
+]
 
 _RESPONSES_CASES = [
     *_OPENAI_HTTP_CASES,
@@ -1414,14 +1457,25 @@ _LLAMA_CPP_CASES = [
         1,
     ),
 ]
+# Bedrock rejects input and requested output tokens above the model's quota with a ValidationException of its own.
+_BEDROCK_CASES = [
+    _Case(
+        "http_400_input_too_long",
+        _json(400, {"message": "Input is too long for requested model."}),
+        ContextWindowExceeded,
+        CONTEXT_WINDOW,
+        1,
+    ),
+]
 
 # Vertex AI Claude, Bedrock Claude, and Vertex AI Gemini fail exactly as their family's direct route does, so they
-# run every row of that family; the other OpenAI-compatible Chat routes run the shared Chat rows, and llama.cpp its
-# own context-size wording too.
+# run every row of that family; the other OpenAI-compatible Chat routes run the shared Chat rows, and Bedrock,
+# llama.cpp, OpenRouter, DeepSeek, and Z.ai their own wording or bodies too.
 ROWS = [
     *_rows("anthropic", _CLAUDE_CASES),
     *_rows("vertexai_claude", _CLAUDE_CASES),
     *_rows("bedrock_claude", _CLAUDE_CASES),
+    *_rows("bedrock_claude", _BEDROCK_CASES),
     *_rows("openai_chat", _CHAT_CASES),
     *(
         row
@@ -1429,6 +1483,9 @@ ROWS = [
         for row in _rows(route, _CHAT_SHARED)
     ),
     *_rows("llama_cpp", _LLAMA_CPP_CASES),
+    *_rows("openrouter", _OPENROUTER_CASES),
+    *_rows("deepseek", _DEEPSEEK_CASES),
+    *_rows("zai", _ZAI_CASES),
     *_rows("openai_responses", _RESPONSES_CASES),
     *_rows("codex", _RESPONSES_CASES),
     *_rows("gemini", _GEMINI_CASES),
@@ -1462,8 +1519,17 @@ async def test_a_failed_request_is_retried_and_reported_as_its_row_says(row: Row
         assert raised.value.code == row.code
 
 
+# How a route's provider answers a request the account's billing stops.
+_BILLING_STOPS: dict[str, Reply] = {
+    **dict.fromkeys(ROUTE_CONFIGS, _claude_status(400, "invalid_request_error", _CLAUDE_CREDIT_TOO_LOW)),
+    "openrouter": _OPENROUTER_NO_CREDIT,
+    "deepseek": _DEEPSEEK_NO_BALANCE,
+    "zai": _ZAI_NO_BALANCE,
+}
+
+
 @pytest.mark.asyncio
-@pytest.mark.parametrize("route", sorted(ROUTE_CONFIGS))
+@pytest.mark.parametrize("route", sorted(_BILLING_STOPS))
 async def test_a_request_the_account_s_billing_stops_is_not_resent_without_its_media(
     route: str,
     tmp_path: Path,
@@ -1473,7 +1539,7 @@ async def test_a_request_the_account_s_billing_stops_is_not_resent_without_its_m
 
     def respond(request: httpx.Request) -> httpx.Response:
         sent.append(request)
-        return _claude_status(400, "invalid_request_error", _CLAUDE_CREDIT_TOO_LOW)()
+        return _BILLING_STOPS[route]()
 
     provider = pipeline_provider(_adapter(route, tmp_path, respond))
     image = Image(content=_PNG, mime_type="image/png")

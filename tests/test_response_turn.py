@@ -46,6 +46,7 @@ from mindroom.session_storage.agent_storage import create_state_storage
 from mindroom.session_storage.store import ConversationStore
 from mindroom.session_storage.types import ConversationSession
 from mindroom.tool_system.events import ToolTraceEntry
+from tests.approval_continuation_helpers import answered_calls
 from tests.conftest import seed_session
 
 if TYPE_CHECKING:
@@ -268,8 +269,11 @@ def test_a_paused_child_s_toolkit_owners_are_the_toolkits_its_sources_recorded(
         session_id="child-session",
         run_id="child-run",
         model_name="default",
+        requested_model_name="default",
         depth=1,
         execution_identity={},
+        agent_mode="standard",
+        persona=None,
     )
     state = DelegationState(
         pending_tools=[tool.to_dict()],
@@ -304,12 +308,25 @@ def test_a_denial_is_recorded_with_the_reason_given_or_the_default_note(reason: 
 
     [decided] = response_turn_module.apply_exact_approval_decisions(
         [requirement],
-        decisions={"call": False},
-        denial_reasons={"call": reason},
+        answered_calls(["call"], approved=False, reason=reason),
     )
 
     assert decided.confirmation_note == note
     assert decided.tool_execution.confirmation_note == note
+
+
+@pytest.mark.parametrize("decided_ids", [["first"], ["first", "second", "unasked"], ["first", "first-again"]])
+def test_decided_calls_that_do_not_name_exactly_the_waiting_calls_decide_nothing(decided_ids: list[str]) -> None:
+    """A decision for a call nobody waits for, or none for one that waits, is refused before any call is decided."""
+    requirements = [
+        RunRequirement(ToolExecution(tool_call_id=call_id, tool_name="dangerous", requires_confirmation=True))
+        for call_id in ("first", "second")
+    ]
+
+    with pytest.raises(RuntimeError, match="no longer match the approval continuation"):
+        response_turn_module.apply_exact_approval_decisions(requirements, answered_calls(decided_ids, approved=True))
+
+    assert [requirement.confirmation for requirement in requirements] == [None, None]
 
 
 def test_paused_attempt_rejects_duplicate_requirement_call_ids() -> None:
@@ -697,7 +714,7 @@ def test_completion_records_and_updates_collector() -> None:
             replayable_text="replayable",
             has_visible_content=True,
             completed_tools=(trace,),
-            metadata_content={"io.mindroom.ai_run": {"usage": 1}},
+            build_run_metadata=lambda: {"io.mindroom.ai_run": {"usage": 1}},
         )
 
     chunks = asyncio.run(
@@ -770,7 +787,7 @@ def test_tool_only_agent_and_team_presentations_respect_quiet_delivery(
             has_visible_content=False,
             tool_executions=(tool,),
             completed_tools=(trace,),
-            metadata_content={"ai_run": {"tools": 1}},
+            build_run_metadata=lambda: {"ai_run": {"tools": 1}},
         )
 
     chunks = asyncio.run(
@@ -822,7 +839,7 @@ def test_a_quiet_turn_without_an_answer_ends_with_an_empty_final_text(
     assert chunks == ["tool document", *ending]
 
 
-def test_completion_skips_collector_without_metadata_content() -> None:
+def test_completion_skips_collector_without_run_metadata() -> None:
     """No collector update happens when the attempt resolved without metadata."""
     log = _AdapterLog()
     collector: dict[str, Any] = {}
@@ -1354,7 +1371,7 @@ def test_discarded_empty_run_metadata_stays_out_of_collector() -> None:
                 CompletedAttempt(
                     is_empty=True,
                     run_id="run-empty",
-                    metadata_content={"io.mindroom.ai_run": {"run_id": "run-empty", "status": "completed"}},
+                    build_run_metadata=lambda: {"io.mindroom.ai_run": {"run_id": "run-empty", "status": "completed"}},
                 ),
             )
             return
@@ -1389,13 +1406,13 @@ def test_superseded_continuation_metadata_stays_out_of_collector() -> None:
             return CompletedAttempt(
                 attempt_run_id="run-1",
                 tool_executions=(_model_switch_execution("next-turn"),),
-                metadata_content={"io.mindroom.ai_run": {"run_id": "run-1"}},
+                build_run_metadata=lambda: {"io.mindroom.ai_run": {"run_id": "run-1"}},
             )
         return CompletedAttempt(
             response_text="final",
             replayable_text="final",
             has_visible_content=True,
-            metadata_content={"io.mindroom.ai_run": {"run_id": "run-2"}},
+            build_run_metadata=lambda: {"io.mindroom.ai_run": {"run_id": "run-2"}},
         )
 
     chunks = asyncio.run(
@@ -1457,7 +1474,11 @@ def test_streaming_handled_attempt_records_and_publishes_its_metadata() -> None:
         _c: TurnContinuationRunState,
     ) -> AsyncGenerator[str | AttemptResolved, None]:
         yield AttemptResolved(
-            HandledAttempt("friendly error", error=RuntimeError("friendly error"), metadata_content=error_metadata),
+            HandledAttempt(
+                "friendly error",
+                error=RuntimeError("friendly error"),
+                build_run_metadata=lambda: error_metadata,
+            ),
         )
 
     chunks = asyncio.run(
@@ -1758,7 +1779,7 @@ def test_resumed_continuation_uses_remaining_budget(saved_count: int, expected_a
     assert "stale" not in chunks[0]
     assert len(completed) == 1
     assert completed[0].status is RunStatus.completed
-    assert completed[0].metadata_content is None
+    assert completed[0].build_run_metadata is None
 
 
 def test_resumed_continuation_preserves_count_on_next_pause() -> None:

@@ -31,7 +31,7 @@ from tests.team_turn_helpers import (
 from tests.teams.squad import resolved_members, scripted, team_spec
 
 if TYPE_CHECKING:
-    from collections.abc import Iterator, Sequence
+    from collections.abc import AsyncIterator, Iterator, Sequence
     from pathlib import Path
 
 
@@ -168,6 +168,28 @@ async def test_a_failed_team_reply_still_publishes_the_usage_it_was_billed(
     payload = collector[AI_RUN_METADATA_KEY]
     assert (payload["run_id"], payload["status"]) == ("run-1", "error")
     assert (payload["usage"]["input_tokens"], payload["usage"]["output_tokens"]) == (800, 130)
+
+
+@pytest.mark.asyncio
+async def test_a_team_reply_that_fails_before_its_run_stored_a_record_shows_why_and_publishes_nothing(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A team run that fails before it stores its record has no metadata to publish, so its reply says why it failed."""
+
+    async def fails_before_storing(*_args: object, **_kwargs: object) -> AsyncIterator[object]:
+        msg = "team start failed"
+        raise ProviderError(msg, provider="Synthetic")
+        yield  # pragma: no cover - unreachable, keeps this an async generator
+
+    team = _team(tmp_path, monkeypatch, leader=[answer("Unused")], general=[answer("Unused")])
+    monkeypatch.setattr("mindroom.teams.leader.run_team", fails_before_storing)
+    collector: dict[str, Any] = {}
+
+    text = await team.respond(run_metadata_collector=collector)
+
+    assert "team start failed" in text
+    assert collector == {}
 
 
 def test_a_team_reply_on_priced_models_publishes_its_cost_at_each_model_s_prices(tmp_path: Path) -> None:

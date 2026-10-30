@@ -13,7 +13,6 @@ import pytest
 from mindroom.llm.runs import RunRecord, RunStatus, TeamRunRecord, ToolExecution
 from mindroom.teams.delegate_tools import (
     DELEGATION_TOOLS,
-    MEMBER_PAUSED_RESULT,
     NO_MEMBER_RESPONSE,
     answer_delegation,
     collaborate_result_text,
@@ -61,50 +60,6 @@ def test_collaborate_result_text_labels_every_member_s_piece_and_separates_them(
         "Agent Writer: 42\n\nAgent Checker: Checker overloaded\n\nAgent Reader: first,second"
     )
     assert record.member_responses == []
-
-
-def test_a_saved_coordinate_call_without_its_member_run_waits_on_the_member_it_names() -> None:
-    """A call stored before calls named their member run is matched by member id and pause notice.
-
-    Two members may share a display name, and so a pause notice; the call answered is the one naming the member.
-    """
-    writer, checker = (member(agent_id, "Twin", scripted(f"{agent_id}-model")) for agent_id in ("writer", "checker"))
-    notice = MEMBER_PAUSED_RESULT.format(name="Twin")
-    tools = [
-        ToolExecution(
-            tool_call_id=call_id,
-            tool_name="delegate_task_to_member",
-            tool_args={"member_id": agent_id},
-            result=notice,
-        )
-        for call_id, agent_id in (("call-w", "writer"), ("call-c", "checker"))
-    ]
-
-    answered = answer_delegation(tools, checker, RunRecord(run_id="c", content="Checked."))
-
-    assert answered is tools[1]
-    assert [tool.result for tool in tools] == [notice, "Checked."]
-    assert answer_delegation(tools, writer, RunRecord(run_id="w", content="Wrote.")) is tools[0]
-
-
-def test_two_saved_calls_to_one_member_are_answered_in_the_order_its_runs_resume() -> None:
-    """Calls stored without their member runs cannot be told apart, so the first run to resume answers the first."""
-    checker = member("checker", "Checker", scripted("checker-model"))
-    notice = MEMBER_PAUSED_RESULT.format(name="Checker")
-    tools = [
-        ToolExecution(
-            tool_call_id=call_id,
-            tool_name="delegate_task_to_member",
-            tool_args={"member_id": "checker"},
-            result=notice,
-        )
-        for call_id in ("call-1", "call-2")
-    ]
-
-    answer_delegation(tools, checker, RunRecord(run_id="first", content="First."))
-    answer_delegation(tools, checker, RunRecord(run_id="second", content="Second."))
-
-    assert [tool.result for tool in tools] == ["First.", "Second."]
 
 
 def test_each_of_two_paused_pieces_under_one_name_is_answered_by_its_own_member() -> None:

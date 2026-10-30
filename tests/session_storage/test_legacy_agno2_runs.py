@@ -15,12 +15,12 @@ from typing import TYPE_CHECKING, Any
 
 import pytest
 
-from mindroom.history import legacy_compaction_state
-from mindroom.history.legacy_compaction_state import adopt_summary_rows
+from mindroom.session_storage import legacy_compaction_state
 from mindroom.session_storage.agent_storage import prepare_conversation_database
 from mindroom.session_storage.codec import decode_json
 from mindroom.session_storage.legacy_agno2_runs import move_blob_runs_to_rows, number_unindexed_runs
 from mindroom.session_storage.legacy_agno3_schema import AgnoTableNames, agno_runs_sql
+from mindroom.session_storage.legacy_compaction_state import adopt_summary_rows
 from mindroom.session_storage.legacy_conversion_backup import ConversionSpaceError
 from mindroom.session_storage.store import ConversationStore
 from tests.conftest import create_agno_2_sessions_db
@@ -300,11 +300,13 @@ def test_databases_agno_3_created_are_left_untouched(tmp_path: Path) -> None:
 def test_owners_migrating_at_once_move_the_blob_runs_once(tmp_path: Path) -> None:
     """Owners racing to convert one Agno 2 database write each run row once."""
     db_file = _agno_2_database(tmp_path)
+    # Read the owner before the race: a conversion that commits first drops the columns it is read from.
+    owner = recorded_owner(db_file)
     start = threading.Barrier(4)
 
     def migrate(_index: int) -> None:
         start.wait()
-        prepare_conversation_database(db_file, _NAMES, recorded_owner(db_file))
+        prepare_conversation_database(db_file, _NAMES, owner)
 
     with ThreadPoolExecutor(max_workers=4) as pool:
         list(pool.map(migrate, range(4)))

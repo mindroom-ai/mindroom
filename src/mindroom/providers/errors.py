@@ -42,6 +42,11 @@ __all__ = [
 
 _RATE_LIMIT_STATUS = 429
 _UNAUTHORIZED_STATUS = 401
+# Payment Required, which OpenRouter and DeepSeek send for an account or key without credit, Gemini for used-up prepaid
+# credit, and Anthropic for a billing or payment problem: no retry passes until the account's billing changes. OpenRouter
+# also sends one with a ``Retry-After`` header when the requests it is still settling fill a low balance's in-flight
+# spending budget, which a wait can let through; that one is final too.
+_PAYMENT_REQUIRED_STATUS = 402
 # Statuses after which an unchanged request can succeed, the ones the OpenAI and Claude SDKs retried: a request
 # timeout, OpenAI's transient conflict (409), and every server error, among them Anthropic's overloaded model (529),
 # which the error message reports as temporary unavailability rather than a rate limit, and a CDN's origin failures
@@ -60,6 +65,9 @@ _RATE_LIMIT_NAMES = frozenset({"rate_limit_error", "rate_limit_exceeded"})
 # disabled. Anthropic's error type for a problem with the organization's billing or payment details, which it sends
 # with a 402, and the ``details.error_code`` of its 429 ``rate_limit_error`` once the organization reached its usage
 # tier's monthly spend cap, which carries no ``retry-after``.
+# Z.ai's business codes, which it sends with a 429 like a rate limit, for an account without balance or resource
+# package (1113), an expired GLM Coding Plan (1309), and an expired enterprise package (1314); its codes for a usage
+# limit, extra usage included, name the time the limit resets, so they stay rate limits.
 _QUOTA_EXHAUSTED_NAMES = frozenset(
     {
         "insufficient_quota",
@@ -70,6 +78,9 @@ _QUOTA_EXHAUSTED_NAMES = frozenset(
         "exceeded_current_quota_error",
         "billing_error",
         "enforced_spend_limit_reached",
+        "1113",
+        "1309",
+        "1314",
     },
 )
 # How providers word a refusal their account's billing causes when they send no billing name, which no retry passes
@@ -120,9 +131,10 @@ _REQUEST_TOO_LARGE = "request too large"
 
 # Wording providers use when a request does not fit the model's context window, such as the payload-size wording of
 # OpenAI-compatible servers and Anthropic, older Claude models' "input length and `max_tokens` exceed context limit",
-# llama.cpp's "the request exceeds the available context size", and Vertex AI's "Unable to submit request because the
+# llama.cpp's "the request exceeds the available context size", Vertex AI's "Unable to submit request because the
 # input token count is 106244 but model only supports up to 65536.", whose "only supports up to" alone also names
-# other limits, such as a number of images. A bare ``max_tokens`` is too broad to count.
+# other limits, such as a number of images, and Bedrock's ValidationException "Input is too long for requested model."
+# for input and requested output tokens above the model's quota. A bare ``max_tokens`` is too broad to count.
 _CONTEXT_WINDOW_MARKERS = (
     "context_length_exceeded",
     "context window",
@@ -141,6 +153,7 @@ _CONTEXT_WINDOW_MARKERS = (
     "exceeds the model",
     "available context size",
     "because the input token count is",
+    "input is too long for requested model",
 )
 # How a llama.cpp server words the 500 of an input it must take in one physical batch, such as an embedding, that is
 # larger than that batch: "input (9000 tokens) is too large to process. increase the physical batch size (current batch
@@ -198,9 +211,9 @@ def classify_provider_error(  # noqa: PLR0911 - one return per rule
     7. An invalid-request status is ``InvalidRequest``.
     8. Anything else, such as a 403 or an unknown status, is a final ``ProviderError``.
 
-    A name or wording that says the account has no credit left or reached its monthly spend or usage limit outranks
-    every rule: whatever its status, it is a final ``ProviderError`` marked ``QUOTA_EXHAUSTED``, since no wait lets it
-    through.
+    A 402 status, or a name or wording that says the account has no credit left or reached its monthly spend or usage
+    limit, outranks every rule: it is a final ``ProviderError`` marked ``QUOTA_EXHAUSTED``, since only a change to the
+    account's billing lets it through, except OpenRouter's in-flight-budget 402, which stays final too.
     """
     status = status_code if status_code is not None else (int(code) if code is not None and code.isdecimal() else None)
     names = {code, error_type}
@@ -217,7 +230,11 @@ def classify_provider_error(  # noqa: PLR0911 - one return per rule
             retry_after_seconds=retry_after_seconds,
         )
 
-    if names & _QUOTA_EXHAUSTED_NAMES or any(wording in lowered for wording in _QUOTA_EXHAUSTED_WORDING):
+    if (
+        status == _PAYMENT_REQUIRED_STATUS
+        or names & _QUOTA_EXHAUSTED_NAMES
+        or any(wording in lowered for wording in _QUOTA_EXHAUSTED_WORDING)
+    ):
         return typed(ProviderError, marker=QUOTA_EXHAUSTED)
     over_tokens_per_minute = _REQUEST_TOO_LARGE in lowered
     if status == _RATE_LIMIT_STATUS or (names & _RATE_LIMIT_NAMES and (status is None or over_tokens_per_minute)):

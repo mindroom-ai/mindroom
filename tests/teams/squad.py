@@ -2,16 +2,18 @@
 
 The capture ran ``Team-writer-checker`` with a scripted ``Synthetic`` provider: the writer has MindRoom's calculator,
 the checker the same calculator with ``multiply`` under the approval policy, and the leader only the delegation tool.
-``pre_resume_runs`` reads a team run Agno stored paused, which the resume tests continue.
+``pre_resume_runs`` reads a team run Agno stored paused, as the store reads it once converted, which the resume
+tests continue.
 """
 
 from __future__ import annotations
 
 import asyncio
-import json
 import sqlite3
 from contextlib import closing
 from dataclasses import replace
+from pathlib import Path
+from tempfile import TemporaryDirectory
 from typing import TYPE_CHECKING, Any
 
 from mindroom.agent_loop.model_loop import EMPTY_REQUEST, NO_HOOKS
@@ -29,7 +31,7 @@ from mindroom.teams.spec import MemberBuild, TeamMember, TeamMode, TeamSpec
 from mindroom.tool_system.agno_toolkits import adapt_toolkit
 from tests.fakes.scripted_model import ScriptedModel
 from tests.run_record_helpers import PROVIDER
-from tests.session_storage.goldens import STORAGE
+from tests.session_storage.goldens import STORAGE, golden_stores
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Callable, Mapping, Sequence
@@ -51,7 +53,7 @@ CHECKER_PAUSED_PIECE = "Agent Checker: Requires human input before continuing."
 
 
 def pre_resume_runs(dump: str) -> dict[str, dict[str, Any]]:
-    """Return the run rows of one pre-resume dump by run id, as the resume read them."""
+    """Return the run rows of one pre-resume dump by run id, as the store reads them once it converted the dump."""
     with closing(sqlite3.connect(":memory:")) as connection:
         connection.executescript((STORAGE / f"{dump}.sql").read_text(encoding="utf-8"))
         [table] = [
@@ -60,8 +62,12 @@ def pre_resume_runs(dump: str) -> dict[str, dict[str, Any]]:
                 "select name from sqlite_master where type = 'table' and name like '%_sessions_runs'",
             )
         ]
-        rows = connection.execute(f"select run_id, run_data from {table}")  # noqa: S608 - the dump's own table name
-        return {run_id: json.loads(data) for run_id, data in rows}
+        run_ids = [run_id for (run_id,) in connection.execute(f"select run_id from {table}")]  # noqa: S608
+    [squad_store] = [store for store in golden_stores() if store.label == "team_squad"]
+    with TemporaryDirectory() as root:
+        conversation = replace(squad_store, label=dump).open(Path(root))
+        runs = {run_id: conversation.get_run(run_id) for run_id in run_ids}
+    return {run_id: run.to_dict() for run_id, run in runs.items() if run is not None}
 
 
 def scripted(model_id: str, *turns: list[Any]) -> ScriptedModel:

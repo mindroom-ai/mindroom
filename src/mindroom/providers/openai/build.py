@@ -443,7 +443,12 @@ def _build_chat(route_key: str, model_config: ModelConfig, runtime: ProviderRunt
     return ChatAdapter(
         identity=identity,
         capabilities=capabilities,
-        wire=ChatWire(route=route_key),
+        # OpenAI's own API takes the system prompt as ``developer``; OpenAI-compatible servers, such as vLLM and
+        # llama.cpp behind the ``openai`` route, expect ``system``.
+        wire=ChatWire(
+            route=route_key,
+            system_role="developer" if identity.endpoint == OPENAI_BASE_URL_DEFAULT else "system",
+        ),
         settings=settings,
         clients=SDKClients(
             _chat_client_factory(

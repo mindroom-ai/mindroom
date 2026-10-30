@@ -609,6 +609,38 @@ async def test_a_chat_request_sends_no_participant_name_and_no_empty_call_list(t
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("model_config", "env_file", "system_role"),
+    [
+        (_OPENAI_CHAT, "", "developer"),
+        ({**_OPENAI_CHAT, "extra_kwargs": {"base_url": "https://api.openai.com/v1/"}}, "", "developer"),
+        ({**_OPENAI_CHAT, "extra_kwargs": {"base_url": "http://localhost:8000/v1"}}, "", "system"),
+        ({**_OPENAI_CHAT, "extra_kwargs": {"client_params": {"base_url": "http://vllm.test/v1"}}}, "", "system"),
+        (_OPENAI_CHAT, "OPENAI_BASE_URL=http://127.0.0.1:8080/v1\n", "system"),
+        (
+            {"provider": "llama_cpp", "id": "qwen", "extra_kwargs": {"base_url": "http://localhost:8080/v1"}},
+            "",
+            "system",
+        ),
+    ],
+    ids=["openai", "openai-endpoint-set", "base-url", "client-params-base-url", "env-base-url", "llama-cpp"],
+)
+async def test_only_openai_s_own_api_gets_the_system_prompt_as_developer(
+    tmp_path: Path,
+    model_config: dict[str, Any],
+    env_file: str,
+    system_role: str,
+) -> None:
+    """An OpenAI-compatible server behind ``provider: openai``, such as vLLM or llama.cpp, gets the ``system`` role."""
+    (tmp_path / ".env").write_text(env_file, encoding="utf-8")
+    built = _Built(tmp_path, model_config, _chat_reply(_chunk({"content": "ok"}, finish_reason="stop")))
+
+    await _turn(built, ModelRequest(messages=[Message(role="system", content="Be brief."), _user()]))
+
+    assert built.body()["messages"][0] == {"role": system_role, "content": "Be brief."}
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("provider", ["openai", "groq", "cerebras"])
 async def test_a_chat_request_sends_stored_calls_without_other_routes_fields(tmp_path: Path, provider: str) -> None:
     """A call another route stored keeps only the Chat call fields, without Gemini's or Responses' replay state."""

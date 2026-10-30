@@ -9599,6 +9599,17 @@ class TestHotQueriesAreIndexCovered:
 
         assert "edit_event_id=?" in plan, plan
 
+    async def test_a_redaction_deletes_its_questions_through_their_revision(self, tmp_path: Path) -> None:
+        """A redaction finds the questions of the revision it deletes by that revision, not by every question held."""
+        database = sqlite3.connect(tmp_path / "question-plan.db")
+        for statement in schema_statements(SQLITE_DIALECT):
+            database.execute(statement)
+        sql = "DELETE FROM interactive_questions WHERE principal_id=? AND room_id=? AND revision_event_id=?"
+
+        plan = " | ".join(row[-1] for row in database.execute("EXPLAIN QUERY PLAN " + sql, ("x", "x", "x")))
+
+        assert "interactive_questions_revision" in plan, plan
+
     async def test_every_ordered_index_column_carries_the_byte_order_pin_on_postgres(self) -> None:
         """Every ordered index column carries the byte-order pin on PostgreSQL.
 

@@ -169,7 +169,8 @@ Failures from one `sender_device_id` point at that client, while failures across
 
 ### `conversation_converted`
 
-Logged once for each conversation database the first start after [upgrading to conversation storage v2](https://docs.mindroom.chat/deployment/upgrades/#upgrading-to-conversation-storage-v2) or [to one owner per conversation database](https://docs.mindroom.chat/deployment/upgrades/#upgrading-to-one-owner-per-conversation-database) converts, or that converts at its first use later, such as a restored backup.
+Logged once for each conversation database the first start after an upgrade that changes the database layout converts, such as [upgrading to conversation storage v2](https://docs.mindroom.chat/deployment/upgrades/#upgrading-to-conversation-storage-v2) or [to one owner per conversation database](https://docs.mindroom.chat/deployment/upgrades/#upgrading-to-one-owner-per-conversation-database), or that converts at its first use later, such as a restored backup.
+An upgrade the [upgrade notes](https://docs.mindroom.chat/deployment/upgrades/) do not list converts without a backup, and the release before it reads the converted databases as they are, so going back needs no restore.
 
 | Field | Meaning |
 |-------|---------|
@@ -282,7 +283,7 @@ These `error_type` values are stable; any other value is the class name of an un
 - `InvalidRequest`: the provider rejected the request, such as a malformed or oversized body or an unknown model.
 - `ModelSafeguardRefusal`: the model's safeguards refused the request.
 - `ModelOutputLimitError`: the model's responses kept stopping at the output limit before their tool calls were complete.
-- `ProviderError`: any other provider rejection, such as an HTTP `403`, or an OpenAI, Anthropic, Gemini, or Moonshot account with no credit left or past its monthly spend or usage limit.
+- `ProviderError`: any other provider rejection, such as an HTTP `403`, an HTTP `402`, an OpenAI, Anthropic, Gemini, or Moonshot account with no credit left or past its monthly spend or usage limit, or a Z.ai account with no balance or an expired plan or package.
 
 Count it grouped by `error_type` and alert when one value is far more frequent than usual.
 `RateLimited` and `ProviderUnavailable` from many agents mean a provider is failing, while `InvalidRequest` or `ContextWindowExceeded` from one agent is more likely one conversation the provider cannot accept.
@@ -308,7 +309,7 @@ debug:
 - `log_llm_requests` (bool, default `false`): write provider requests as JSONL, and record successful tool calls with timing in `<storage>/tracking/tool_calls.jsonl`, where `<storage>` is `MINDROOM_STORAGE_PATH` or the default `mindroom_data` (tool failures are always recorded there).
 - `llm_request_log_dir` (string, default `null`, meaning `<storage>/logs/llm_requests`): directory for the request logs.
 
-Request logs include prompts, messages, the tools sent to the provider, model parameters, and requester and source Matrix event metadata.
+Request logs hold each request as MindRoom hands it to the provider's client library, with its prompts, messages, tools, and attachments (on Gemini, in google-genai's field names and without the settings under `http_options`), beside the model parameters and requester and source Matrix event metadata.
 Credentials such as tokens, cookies, passwords, API keys, authorization headers, and PEM private keys are redacted, but these files can still contain sensitive prompt, argument, and result data, so leave the flag disabled unless you are actively debugging.
 
 Export `MINDROOM_TIMING=1` before startup to log timing for tool calls and one INFO-level `Dispatch pipeline timing` summary per turn, including `time_to_model_request_ms` and context, queue, payload, agent-build, and model spans.

@@ -41,6 +41,7 @@ from mindroom.tool_system.runtime_context import (
 )
 from tests.access_schema_support import with_current_room_member_access, with_responder_access
 from tests.ai_user_id_helpers import team_orchestrator
+from tests.approval_continuation_helpers import decided_calls
 from tests.authorization_helpers import make_test_tool_runtime_context
 from tests.conftest import (
     bind_runtime_paths,
@@ -360,8 +361,8 @@ class TeamTurn:
         unless ``history_scope`` names the scope the approval retained, or None for an approval that retained none.
         """
         call_ids = [call.tool_call_id for call in approvals]
-        kwargs.setdefault("decisions", dict.fromkeys(call_ids, approved))
-        kwargs.setdefault("denial_reasons", dict.fromkeys(call_ids, "Declined by requester"))
+        reasons = dict.fromkeys(call_ids, "Declined by requester")
+        decided = decided_calls(approvals, dict.fromkeys(call_ids, approved), reasons)
         kwargs.setdefault("model_name", paused.runtime_model_name or "default")
         kwargs.setdefault("member_model_names", dict(paused.team_member_model_names) or None)
         kwargs.setdefault("show_tool_calls", False)
@@ -380,7 +381,7 @@ class TeamTurn:
                 user_id=REQUESTER_ID,
                 configured_team_name=self.team_name or self.member_names[0],
                 refresh_scheduler=None,
-                approval_calls=approvals,
+                approval_calls=decided,
                 prior_tool_trace=paused.tool_trace,
                 prior_presentation_state=paused.response_presentation_state,
                 **kwargs,

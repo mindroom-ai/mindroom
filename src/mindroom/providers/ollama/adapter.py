@@ -22,7 +22,6 @@ from mindroom.llm.messages import tool_result_view, with_joined_system
 from mindroom.llm.provider import Capabilities, ModelIdentity, ReasoningDelta, TextDelta, ToolCallReady, UsageReported
 from mindroom.llm.tool_search import call_arguments
 from mindroom.llm.usage import MessageMetrics, TokenCounts
-from mindroom.model_defaults import OLLAMA_HOST_DEFAULT
 from mindroom.providers.assistant_turn import ThinkTagSplitter, TurnTimer, finished_turn
 from mindroom.providers.extra_kwargs import settings_from_extra_kwargs, settings_params
 from mindroom.providers.media_files import read_media_bytes
@@ -89,13 +88,19 @@ class OllamaProvider:
             await _format_message(message, self.identity.provider_name)
             for message in with_joined_system(request.messages)
         ]
-        model = self.identity.id.strip()
-        chat_kwargs = self._chat_kwargs(request)
+        # Authored ``request_params`` merge over MindRoom's fields, as on the other routes; the adapter needs streaming.
+        call: dict[str, Any] = {
+            "model": self.identity.id.strip(),
+            "messages": messages,
+            **self._chat_kwargs(request),
+            "stream": True,
+        }
         reply = _OllamaReply()
         timer = TurnTimer()
         try:
             client = self._sdk_client()
-            chunks = await client.chat(model=model, messages=messages, stream=True, **chat_kwargs)
+            await request.on_send(call)
+            chunks = await client.chat(**call)
             async with aclosing(cast("AsyncGenerator[ChatResponse]", chunks)) as responses:
                 async for chunk in responses:
                     for event in timer.chunk(_read_chunk(reply, chunk)):
@@ -295,11 +300,10 @@ def build_provider(model_config: ModelConfig, runtime_paths: RuntimePaths) -> Ol
     extra_kwargs = {**(model_config.extra_kwargs or {}), "api_key": api_key}
     settings = settings_from_extra_kwargs(OllamaSettings, extra_kwargs, provider=model_config.provider)
     # ``client_params`` wins over every client option, so its ``host`` is the server requests reach.
-    host = str(
-        (settings.client_params or {}).get("host")
-        or model_config.host
-        or get_ollama_host(runtime_paths=runtime_paths)
-        or OLLAMA_HOST_DEFAULT,
+    host = get_ollama_host(
+        runtime_paths=runtime_paths,
+        configured_host=(settings.client_params or {}).get("host") or model_config.host,
+        saved_first=False,
     )
     return OllamaProvider(
         identity=ModelIdentity(

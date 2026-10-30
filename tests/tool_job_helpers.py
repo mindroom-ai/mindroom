@@ -626,9 +626,12 @@ def job_child(job_id: str = "a" * 32) -> DelegationChild:
         session_id="child-session",
         run_id="run",
         model_name="default",
+        requested_model_name="default",
         depth=1,
         execution_identity={},
         subagent_id="b" * 32,
+        agent_mode="standard",
+        persona=None,
     )
 
 
@@ -669,8 +672,11 @@ def completed_delegation_job() -> BackgroundJob:
         session_id="child_session",
         run_id="child_run",
         model_name="default",
+        requested_model_name="default",
         depth=1,
         execution_identity={},
+        agent_mode="standard",
+        persona=None,
     )
     return BackgroundJob(
         job_id="job_123",
