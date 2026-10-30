@@ -4255,7 +4255,7 @@ async def test_the_refresh_child_publishes_without_touching_the_refresh_status(t
     child_result = await run_refresh_child("docs", config=config, runtime_paths=runtime_paths)
 
     # A first build compares no corpus, so it reports no source change to the base's aliases.
-    assert replace(child_result, publication_made_at=None) == _RefreshChildResult(indexed_count=1, published=True)
+    assert child_result == _RefreshChildResult(indexed_count=1, published=True)
     assert status_file.read_bytes() == status_bytes
     publication = load_publication(storage)
     assert publication is not None
@@ -9846,6 +9846,42 @@ async def test_refresh_scheduler_manual_reindex_waits_behind_the_running_refresh
 
     assert seen == [(1024, False), (5000, True)]
     assert result.index_published is True
+
+
+@pytest.mark.asyncio
+async def test_an_abandoned_manual_reindex_that_fails_is_logged(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A failure no waiting caller receives still reaches the log."""
+    config = _config(tmp_path, bases={"docs": tmp_path / "docs"}, agent_bases=["docs"])
+    runtime_paths = runtime_paths_for(config)
+    scheduler = KnowledgeRefreshScheduler()
+    started = asyncio.Event()
+    release = asyncio.Event()
+    logger = MagicMock()
+
+    async def _failing_refresh(*_args: object, **_kwargs: object) -> knowledge_refresh_runner.KnowledgeRefreshResult:
+        started.set()
+        await release.wait()
+        msg = "refresh child crashed"
+        raise RuntimeError(msg)
+
+    monkeypatch.setattr("mindroom.knowledge.refresh_runner.refresh_knowledge_binding_in_subprocess", _failing_refresh)
+    monkeypatch.setattr(knowledge_refresh_scheduler, "logger", logger)
+    waiter = asyncio.create_task(
+        scheduler.refresh_now("docs", config=config, runtime_paths=runtime_paths, force_reindex=True),
+    )
+    await asyncio.wait_for(started.wait(), timeout=SETTLE_TIMEOUT_SECONDS)
+    waiter.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await waiter
+    release.set()
+    await _wait_until(lambda: not scheduler._tasks, "the abandoned reindex did not finish")
+    await scheduler.shutdown()
+
+    logger.error.assert_called_once()
+    assert logger.error.call_args.args == ("Background knowledge refresh failed",)
 
 
 @pytest.mark.asyncio

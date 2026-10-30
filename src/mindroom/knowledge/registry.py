@@ -104,14 +104,15 @@ class PublishedIndexResolution:
 
     def while_refreshing(self) -> PublishedIndexResolution:
         """Return this view while a refresh runs: its last failure is being retried, and a ready index may change."""
+        status = reported_refresh_status(self.status, refreshing=True)
         availability = index_availability(
             self.key,
             self.publication,
-            self.status,
+            status,
             publication_unreadable=self.publication_unreadable,
             refreshing=True,
         )
-        return replace(self, status=replace(self.status, last_error=None), availability=availability)
+        return replace(self, status=status, availability=availability)
 
 
 #: What the dashboard shows of a base's refresh.
@@ -229,6 +230,11 @@ def published_index_storage_path(key: PublishedIndexKey) -> Path:
     return (Path(key.storage_root) / "knowledge_db" / storage_key_for_base(key.base_id, knowledge_path)).resolve()
 
 
+def reported_refresh_status(status: RefreshStatus, *, refreshing: bool) -> RefreshStatus:
+    """Return ``status`` as a base reports it: a refresh in flight supersedes the failure it retries."""
+    return replace(status, last_error=None) if refreshing else status
+
+
 def index_availability(
     key: PublishedIndexKey,
     publication: Publication | None,
@@ -237,20 +243,16 @@ def index_availability(
     publication_unreadable: bool,
     refreshing: bool,
 ) -> KnowledgeAvailability:
-    """Return what a base can serve, from its publication, its refresh status, and whether a refresh runs.
-
-    A refresh in flight supersedes the failure it retries.
-    """
-    last_error = None if refreshing else status.last_error
+    """Return what a base can serve, from its publication, its reported refresh status, and whether a refresh runs."""
     if publication is None:
         return (
             KnowledgeAvailability.REFRESH_FAILED
-            if publication_unreadable or last_error is not None
+            if publication_unreadable or status.last_error is not None
             else KnowledgeAvailability.INITIALIZING
         )
     if publication.settings != key.indexing_settings:
         return KnowledgeAvailability.CONFIG_MISMATCH
-    if last_error is not None:
+    if status.last_error is not None:
         return KnowledgeAvailability.REFRESH_FAILED
     if refreshing or status.reason is not None:
         return KnowledgeAvailability.STALE
@@ -263,7 +265,7 @@ def index_refresh_state(
     publication_unreadable: bool,
     refreshing: bool,
 ) -> KnowledgeRefreshState:
-    """Return the dashboard's refresh state; a refresh in flight supersedes the failure it retries."""
+    """Return the dashboard's refresh state from a base's reported refresh status."""
     if publication_unreadable:
         return "refresh_failed"
     if refreshing:

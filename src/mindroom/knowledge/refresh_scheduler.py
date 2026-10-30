@@ -257,10 +257,10 @@ class KnowledgeRefreshScheduler:
             _cancel_waiters(request)
             raise
         except Exception as exc:
-            for waiter in request.waiters:
-                if not waiter.done():
-                    waiter.set_exception(exc)
-            if request.waiters:
+            answered = [waiter for waiter in request.waiters if not waiter.done()]
+            for waiter in answered:
+                waiter.set_exception(exc)
+            if answered:
                 return
             raise
         for waiter in request.waiters:

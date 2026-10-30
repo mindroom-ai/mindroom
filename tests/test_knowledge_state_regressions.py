@@ -7,21 +7,19 @@ local embedder to test that a file exists.
 from __future__ import annotations
 
 import asyncio
-from dataclasses import replace
 from typing import TYPE_CHECKING
 
 import pytest
 
 import mindroom.knowledge.index_metadata as knowledge_index_metadata
 import mindroom.knowledge.manager as knowledge_manager_module
-import mindroom.knowledge.refresh_runner as knowledge_refresh_runner
 import mindroom.knowledge.registry as knowledge_registry
 from mindroom.config.agent import AgentConfig
 from mindroom.config.knowledge import KnowledgeBaseConfig
 from mindroom.config.main import Config
 from mindroom.config.memory import MemorySearchConfig
 from mindroom.knowledge.file_indexer import FileIndexer, _PreparedFile
-from mindroom.knowledge.index_metadata import load_publication, load_refresh_status, save_publication
+from mindroom.knowledge.index_metadata import load_publication
 from mindroom.knowledge.refresh_runner import _refresh_knowledge_binding as refresh_knowledge_binding
 from mindroom.knowledge.registry import (
     get_published_index,
@@ -208,33 +206,6 @@ async def test_an_unchanged_refresh_builds_no_embedder(tmp_path: Path, embedder_
 
     assert result.published
     assert embedder_builds == []
-
-
-@pytest.mark.asyncio
-async def test_a_child_failure_superseded_by_a_later_publication_is_not_recorded(
-    tmp_path: Path,
-    embedder_builds: list[str],
-) -> None:
-    """A failure the runtime records after a dashboard publication replaced what the child saw would be stale."""
-    del embedder_builds
-    config = _config(tmp_path)
-    runtime_paths = runtime_paths_for(config)
-    (tmp_path / "docs" / "a.md").write_text("alpha one", encoding="utf-8")
-    first = await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)
-    key = resolve_published_index_key("docs", config=config, runtime_paths=runtime_paths)
-    storage = published_index_storage_path(key)
-    failure = replace(first, published=False, error="refresh failed")
-
-    knowledge_refresh_runner._record_child_result(key, failure, 0)
-    assert load_refresh_status(storage).last_error == "refresh failed"
-
-    knowledge_registry.record_refresh_succeeded(key, reason_generation=0)
-    publication = load_publication(storage)
-    assert publication is not None
-    save_publication(storage, replace(publication, last_published_at="2099-01-01T00:00:00+00:00"))
-    knowledge_refresh_runner._record_child_result(key, failure, 0)
-
-    assert load_refresh_status(storage).last_error is None
 
 
 def test_a_config_change_replaces_the_bindings_cached_read_handle(tmp_path: Path, embedder_builds: list[str]) -> None:

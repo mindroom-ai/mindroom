@@ -105,8 +105,8 @@ A semantic base keeps the index it last replaced on disk beside the live one, so
 Rewriting leaves free space inside an index file, which later writes reuse; once a quarter of a kept index is free space, for example after many files were deleted, the next refresh copies the live index instead, so neither file stays much larger than its contents.
 Changing `chunk_size`, `chunk_overlap`, `chunk_context_model`, the embedder, or any file filter re-embeds the whole base on the next refresh.
 An explicit reindex from the dashboard or API rebuilds every vector, which is how you replace an index you no longer trust.
-A reindex requested while a refresh of the base runs starts once that refresh finishes, and one interrupted, for example by a restart, finishes on the next refresh.
-An interrupted or failed semantic build continues where it stopped on the next refresh instead of starting over.
+A reindex requested while a refresh of the base runs starts once that refresh finishes.
+An interrupted or failed semantic build, including a reindex, continues where it stopped on the next refresh instead of starting over.
 Temporary embedding failures (timeouts, connection errors, and HTTP 408, 409, 429, and any other 5xx status) are retried, while permanent failures such as authentication errors, or a 429 that says the OpenAI account has no credit left or reached its monthly spend or usage limit, stop the refresh until you fix the cause.
 A batch of chunks larger than the account's tokens-per-minute limit is embedded again one chunk per request.
 
@@ -523,7 +523,7 @@ Semantic indexes are stored under `<storage_path>/knowledge_db/<base_id>_<hash>/
 Each published index is one SQLite file there, holding the chunks, their vectors, and a keyword index, and searches run inside the MindRoom process.
 Searching needs numpy, whose `numpy` extra installs on first use unless `MINDROOM_NO_AUTO_INSTALL_TOOLS=1` is set; otherwise install `mindroom[numpy]`.
 Private agent knowledge is indexed under `<storage_path>/knowledge_db/private/<requester>/`, outside the private roots that sandboxed workers can write, with one directory per requester and agent.
-Removing a private instance leaves its index behind; each index directory's `indexing_settings.json` names the `knowledge_path` it was built from.
+Removing a private instance leaves its index behind; each index directory's `publication.json` names the `knowledge_path` it was built from under `settings`.
 The storage path defaults to `mindroom_data/` next to `config.yaml` and can be changed with `MINDROOM_STORAGE_PATH`.
 
 A shared base's index that earlier MindRoom versions stored in Chroma is converted on its first refresh after upgrading: its chunks and vectors are copied out of Chroma, and only files changed since are embedded again.

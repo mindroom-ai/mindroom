@@ -113,9 +113,6 @@ class _RefreshChildResult:
     deferred: bool = False
     #: Why other bases over the same source must refresh too, when this refresh found the source changed.
     source_changed: str | None = None
-    #: When the publication the child left was made, read under its lock, so the runtime can tell whether a later
-    #: publication, such as a dashboard upload's, superseded this result.
-    publication_made_at: str | None = None
 
 
 _child_result_adapter = TypeAdapter(_RefreshChildResult)
@@ -313,15 +310,8 @@ def _record_child_result(key: PublishedIndexKey, result: _RefreshChildResult, re
         record_refresh_succeeded(key, reason_generation=reason_generation)
     elif result.deferred:
         mark_published_index_stale(key, reason="source_empty")
-    elif result.error is not None and result.publication_made_at in {None, _publication_made_at(key)}:
-        # A publication made after the child released its lock, such as a dashboard upload's, answers for the base;
-        # a child that failed before it could read the publication reports none and is recorded.
+    elif result.error is not None:
         record_refresh_failed(key, error=result.error)
-
-
-def _publication_made_at(key: PublishedIndexKey) -> str | None:
-    publication = load_publication(published_index_storage_path(key))
-    return None if publication is None else publication.last_published_at
 
 
 def _record_refresh_without_result(
@@ -596,14 +586,13 @@ async def _refresh_knowledge_binding(
         create=True,
     )
     async with refresh_source_root_lock(source_root_for_published_index_key(key)):
-        result = await _refresh_locked(
+        return await _refresh_locked(
             key,
             config=config,
             runtime_paths=runtime_paths,
             execution_identity=execution_identity,
             force_reindex=force_reindex,
         )
-        return replace(result, publication_made_at=await asyncio.to_thread(_publication_made_at, key))
 
 
 async def _refresh_locked(

@@ -145,9 +145,10 @@ def _interrupted_copy(storage: Path, snapshot: dict[str, object]) -> bool:
 # Handling: A schema-1 collection whose settings the legacy state names is upgraded in place, in one transaction:
 # `files` claims each path at the signature its rows carry (every path's rows were written in one transaction),
 # `failures` starts empty, and `meta` records those settings, `complete` for the published and retired collections
-# and `building` for a candidate. No row and no vector is rewritten. A file a refresh restamped is read once more,
-# and empty files and failed files are simply indexed again. Other schema-1 collections stay as they are for the next
-# refresh, which deletes them as unusable unless the publication is unreadable.
+# and `building` for a candidate. No row and no vector is rewritten. A file the old code restamped without rewriting
+# its rows is hashed again by each unchanged check until a refresh that indexes a change restamps its claim, and empty
+# files and failed files are simply indexed again. Other schema-1 collections stay as they are for the next refresh,
+# which deletes them as unusable unless the publication is unreadable.
 # Coverage: tests/test_knowledge_legacy_index_state.py::test_a_published_base_with_its_retired_collection_converts_and_refreshes_without_embedding,
 # tests/test_knowledge_legacy_index_state.py::test_a_publication_of_a_resumed_candidate_converts_with_its_claims,
 # tests/test_knowledge_legacy_index_state.py::test_an_interrupted_build_with_a_journal_resumes_where_it_stopped,
@@ -218,7 +219,7 @@ def _delete_legacy_state(storage: Path) -> None:
     """
     for name in (_LEGACY_CHECKPOINT_FILE, _LEGACY_JOURNAL_FILE, _LEGACY_PUBLISHED_SEAL_FILE, _LEGACY_RETIRED_SEAL_FILE):
         (storage / name).unlink(missing_ok=True)
-    (storage / _LEGACY_STATE_FILE).unlink()
+    (storage / _LEGACY_STATE_FILE).unlink(missing_ok=True)
 
 
 def _upgrade_named_collections(

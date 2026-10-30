@@ -115,7 +115,7 @@ def get_knowledge_index_status(
     storage = registry.published_index_storage_path(key)
     publication = load_publication(storage)
     unreadable = publication_unreadable(storage, publication)
-    status = load_refresh_status(storage)
+    status = registry.reported_refresh_status(load_refresh_status(storage), refreshing=refreshing)
     return KnowledgeIndexStatus(
         candidate=_candidate_status_for_key(key, None if publication is None else publication.collection),
         indexed_count=(
@@ -133,7 +133,7 @@ def get_knowledge_index_status(
             refreshing=refreshing,
         ),
         published=publication is not None,
-        last_error=None if refreshing else status.last_error,
+        last_error=status.last_error,
         last_published_at=None if publication is None else publication.last_published_at,
         published_revision=None if publication is None else publication.published_revision,
     )
