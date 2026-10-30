@@ -266,15 +266,13 @@ class KnowledgeManager:
         self._source_scan = None if self.git_source.is_configured() else scanned
         return corpus_signature({relative_path: signature for relative_path, (signature, _path) in scanned.items()})
 
-    async def published_file_signatures(self, publication: Publication) -> Mapping[str, FileSignature] | None:
-        """Return the signatures the published collection claims, for a stat-first scan to reuse.
+    async def published_file_signatures(self, collection: str) -> Mapping[str, FileSignature] | None:
+        """Return the signatures the published ``collection`` claims, for a stat-first scan to reuse.
 
         None when the collection is not one this release can read, which a refresh must rebuild rather than republish.
         """
-        if publication.collection is None:
-            return {}
         try:
-            return await asyncio.to_thread(open_collection(self._collections, publication.collection).files)
+            return await asyncio.to_thread(open_collection(self._collections, collection).files)
         except Exception as error:
             if not unusable_collection(error):
                 raise

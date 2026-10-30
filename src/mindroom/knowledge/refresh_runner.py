@@ -689,12 +689,13 @@ async def _publish_unchanged(manager: KnowledgeManager, key: PublishedIndexKey, 
     publication = await asyncio.to_thread(load_publication, storage)
     if (
         publication is None
+        or publication.collection is None
         or publication.settings != key.indexing_settings
         or not await asyncio.to_thread(published_collection_exists, key, publication)
         or await manager.has_unfinished_rebuild(publication)
     ):
         return None
-    known = await manager.published_file_signatures(publication)
+    known = await manager.published_file_signatures(publication.collection)
     if known is None:
         return None
     needs_scan = git_head is None or publication.published_revision != git_head

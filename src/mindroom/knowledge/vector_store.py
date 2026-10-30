@@ -21,7 +21,7 @@ from contextlib import closing, suppress
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Literal
+from typing import TYPE_CHECKING, Any, Literal, cast
 
 from mindroom.knowledge.read_protocol import (
     DISTANCE_KEY,
@@ -427,7 +427,7 @@ def _read_meta(connection: sqlite3.Connection) -> CollectionMeta:
     ).fetchone()
     return CollectionMeta(
         settings=json.loads(settings),
-        stage="complete" if stage == "complete" else "building",
+        stage=cast("Literal['building', 'complete']", stage),
         rebuild=bool(rebuild),
         revision=revision,
         total_files=total_files,
