@@ -20,7 +20,7 @@ from mindroom.approval.tool_approval import tool_may_require_approval
 from mindroom.config.main import Config
 from mindroom.credentials.manager import CredentialsManager, get_runtime_credentials_manager
 from mindroom.custom_tools.google_drive import GoogleDriveTools
-from mindroom.oauth.google_drive import _GOOGLE_DRIVE_OAUTH_SCOPES, GOOGLE_DRIVE_READ_OAUTH_SCOPES
+from mindroom.oauth.google import GOOGLE_DRIVE_READ_OAUTH_SCOPES, google_oauth_provider
 from mindroom.tool_system.agno_toolkits import adapt_toolkit
 from mindroom.tool_system.metadata import get_tool_by_name
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity, resolve_worker_target
@@ -591,7 +591,7 @@ def test_google_drive_rejects_stored_token_disallowed_by_new_identity_policy(tmp
         {
             "token": "access-token",
             "refresh_token": "refresh-token",
-            "scopes": list(_GOOGLE_DRIVE_OAUTH_SCOPES),
+            "scopes": list(google_oauth_provider("google_drive").scopes),
             "_source": "oauth",
             "_oauth_provider": "google_drive",
             "_oauth_claims": {"email": "alice@blocked.example", "email_verified": True},
@@ -624,7 +624,7 @@ def test_google_drive_rejects_stored_token_missing_claims_when_identity_policy_c
         {
             "token": "access-token",
             "refresh_token": "refresh-token",
-            "scopes": list(_GOOGLE_DRIVE_OAUTH_SCOPES),
+            "scopes": list(google_oauth_provider("google_drive").scopes),
             "_source": "oauth",
             "_oauth_provider": "google_drive",
         },
@@ -653,7 +653,7 @@ def test_google_drive_stored_token_without_client_config_connects_on_invocation(
         {
             "token": "access-token",
             "refresh_token": "refresh-token",
-            "scopes": list(_GOOGLE_DRIVE_OAUTH_SCOPES),
+            "scopes": list(google_oauth_provider("google_drive").scopes),
             "_source": "oauth",
         },
     )
@@ -686,7 +686,7 @@ def test_google_drive_mismatched_client_id_connects_on_invocation(tmp_path: Path
             "token": "access-token",
             "refresh_token": "refresh-token",
             "client_id": "old-client-id",
-            "scopes": list(_GOOGLE_DRIVE_OAUTH_SCOPES),
+            "scopes": list(google_oauth_provider("google_drive").scopes),
             "_source": "oauth",
         },
     )

@@ -26,7 +26,7 @@ from mindroom.custom_tools.microsoft_graph import (
     page_path,
     path_segment,
 )
-from mindroom.oauth.microsoft import microsoft_sharepoint_oauth_provider
+from mindroom.oauth.microsoft import microsoft_oauth_provider
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterator, Mapping
@@ -289,7 +289,7 @@ class MicrosoftSharePointTools(Toolkit):
         if credentials_manager is None:
             msg = "MicrosoftSharePointTools requires an explicit credentials_manager"
             raise RuntimeError(msg)
-        self._provider = microsoft_sharepoint_oauth_provider()
+        self._provider = microsoft_oauth_provider("microsoft_sharepoint")
         self._runtime_paths = runtime_paths
         self._credentials_manager = credentials_manager
         self._worker_target = worker_target

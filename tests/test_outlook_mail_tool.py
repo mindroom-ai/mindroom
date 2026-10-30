@@ -14,7 +14,7 @@ from agno.tools.function import Function
 
 from mindroom.custom_tools import outlook_mail
 from mindroom.custom_tools.outlook_mail import OutlookMailTools
-from mindroom.oauth.microsoft import outlook_mail_oauth_provider
+from mindroom.oauth.microsoft import microsoft_oauth_provider
 from mindroom.tool_system.catalog import TOOL_METADATA
 from mindroom.tool_system.declarations import SetupType, ToolCategory, ToolFileAccess
 from tests.microsoft_graph_test_support import (
@@ -157,7 +157,7 @@ def _tools(
     graph = FakeGraph(handler).install(monkeypatch)
     paths = runtime_paths(tmp_path)
     manager = save_client_config(paths)
-    publish_grant(outlook_mail_oauth_provider(), manager)
+    publish_grant(microsoft_oauth_provider("outlook_mail"), manager)
     workspace = tmp_path / "workspace"
     workspace.mkdir(exist_ok=True)
     tools = OutlookMailTools(
@@ -205,7 +205,7 @@ def test_registered_metadata_declares_a_primary_runtime_path_tool() -> None:
 
 
 def test_provider_requests_mail_scopes_on_the_shared_app() -> None:
-    provider = outlook_mail_oauth_provider()
+    provider = microsoft_oauth_provider("outlook_mail")
 
     assert provider.scopes == (
         "Mail.ReadWrite",
@@ -229,7 +229,11 @@ def test_a_connection_without_the_new_scopes_asks_to_reconnect(
     graph = FakeGraph(_Graph()).install(monkeypatch)
     paths = runtime_paths(tmp_path)
     manager = save_client_config(paths)
-    publish_grant(outlook_mail_oauth_provider(), manager, scopes=["Mail.ReadWrite", "Mail.Send", "User.Read"])
+    publish_grant(
+        microsoft_oauth_provider("outlook_mail"),
+        manager,
+        scopes=["Mail.ReadWrite", "Mail.Send", "User.Read"],
+    )
     tools = OutlookMailTools(runtime_paths=paths, credentials_manager=manager, worker_target=worker_target())
 
     result = _payload(tools.outlook_mail_search())

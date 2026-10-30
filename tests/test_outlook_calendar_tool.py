@@ -12,7 +12,7 @@ from agno.tools.function import Function
 
 from mindroom.custom_tools import outlook_calendar
 from mindroom.custom_tools.outlook_calendar import OutlookCalendarTools
-from mindroom.oauth.microsoft import outlook_calendar_oauth_provider
+from mindroom.oauth.microsoft import microsoft_oauth_provider
 from mindroom.tool_system.catalog import TOOL_METADATA
 from mindroom.tool_system.declarations import SetupType, ToolFileAccess
 from tests.microsoft_graph_test_support import (
@@ -127,7 +127,7 @@ def _tools(
     graph = FakeGraph(_Graph(routes)).install(monkeypatch)
     paths = runtime_paths(tmp_path)
     manager = save_client_config(paths)
-    publish_grant(outlook_calendar_oauth_provider(), manager)
+    publish_grant(microsoft_oauth_provider("outlook_calendar"), manager)
     tools = OutlookCalendarTools(
         runtime_paths=paths,
         credentials_manager=manager,
@@ -163,7 +163,7 @@ def test_registered_metadata_declares_a_primary_runtime_oauth_tool() -> None:
 
 
 def test_provider_requests_own_and_shared_calendar_read_write() -> None:
-    provider = outlook_calendar_oauth_provider()
+    provider = microsoft_oauth_provider("outlook_calendar")
 
     assert provider.id == "outlook_calendar"
     assert provider.display_name == "Outlook Calendar"

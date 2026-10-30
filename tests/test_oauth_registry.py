@@ -41,6 +41,31 @@ def _provider(provider_id: str) -> OAuthProvider:
     )
 
 
+def test_builtin_oauth_registry_lists_every_builtin_provider_once_in_order() -> None:
+    """The built-in registry lists each built-in provider once, in a stable order."""
+    assert [provider.id for provider in oauth_registry._builtin_oauth_providers()] == [
+        "atlassian",
+        "github",
+        "google_calendar",
+        "google_cloud",
+        "google_docs",
+        "google_drive",
+        "google_gmail",
+        "google_sheets",
+        "google_tasks",
+        "microsoft_files",
+        "microsoft_sharepoint",
+        "outlook_mail",
+        "outlook_calendar",
+        "microsoft_todo",
+        "microsoft_teams",
+        "microsoft_meetings",
+        "microsoft_onenote",
+        "microsoft_people",
+        "slack",
+    ]
+
+
 def test_builtin_oauth_registry_includes_google_docs() -> None:
     """The built-in provider registry should expose Google Docs independently from Drive."""
     providers = {provider.id: provider for provider in oauth_registry._builtin_oauth_providers()}

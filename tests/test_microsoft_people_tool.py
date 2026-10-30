@@ -11,7 +11,7 @@ import pytest
 from agno.tools.function import Function
 
 from mindroom.custom_tools.microsoft_people import MicrosoftPeopleTools
-from mindroom.oauth.microsoft import microsoft_people_oauth_provider
+from mindroom.oauth.microsoft import microsoft_oauth_provider
 from mindroom.tool_system.catalog import TOOL_METADATA
 from mindroom.tool_system.declarations import SetupType, ToolCategory, ToolFileAccess
 from tests.microsoft_graph_test_support import (
@@ -91,7 +91,7 @@ def _tools(
     graph = FakeGraph(handler).install(monkeypatch)
     paths = runtime_paths(tmp_path)
     manager = save_client_config(paths)
-    publish_grant(microsoft_people_oauth_provider(), manager)
+    publish_grant(microsoft_oauth_provider("microsoft_people"), manager)
     tools = MicrosoftPeopleTools(
         runtime_paths=paths,
         credentials_manager=manager,

@@ -25,11 +25,7 @@ from mindroom.file_access import AuthorizedFile, resolve_agent_file
 from mindroom.logging_config import get_logger
 from mindroom.oauth.client import ScopedOAuthClientMixin
 from mindroom.oauth.credential_lifecycle import oauth_credentials_have_scopes
-from mindroom.oauth.google_drive import (
-    GOOGLE_DRIVE_READ_OAUTH_SCOPES,
-    GOOGLE_DRIVE_WRITE_SCOPE,
-    google_drive_oauth_provider,
-)
+from mindroom.oauth.google import GOOGLE_DRIVE_READ_OAUTH_SCOPES, GOOGLE_DRIVE_WRITE_SCOPE, google_oauth_provider
 from mindroom.oauth.service import (
     OAUTH_MISSING_WRITE_SCOPE_REASON,
     oauth_connection_required,
@@ -154,7 +150,7 @@ def _open_upload_media(authorized: AuthorizedFile, mime_type: str) -> Iterator[M
 class GoogleDriveTools(ScopedOAuthClientMixin, ThreadLocalGoogleServiceMixin, AgnoGoogleDriveTools):
     """Google Drive toolkit that uses MindRoom-scoped OAuth credentials."""
 
-    _oauth_provider = google_drive_oauth_provider()
+    _oauth_provider = google_oauth_provider("google_drive")
     _oauth_tool_name = "google_drive"
 
     def __init__(

@@ -32,7 +32,7 @@ from mindroom.custom_tools.microsoft_graph import (
     time_zone_name,
 )
 from mindroom.file_access import checked_upload_source, read_upload_source
-from mindroom.oauth.microsoft import outlook_mail_oauth_provider
+from mindroom.oauth.microsoft import microsoft_oauth_provider
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Mapping
@@ -342,7 +342,7 @@ class OutlookMailTools(Toolkit):
         if credentials_manager is None:
             msg = "OutlookMailTools requires an explicit credentials_manager"
             raise RuntimeError(msg)
-        self._provider = outlook_mail_oauth_provider()
+        self._provider = microsoft_oauth_provider("outlook_mail")
         self._runtime_paths = runtime_paths
         self._credentials_manager = credentials_manager
         self._worker_target = worker_target

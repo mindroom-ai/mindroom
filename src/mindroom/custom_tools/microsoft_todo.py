@@ -23,7 +23,7 @@ from mindroom.custom_tools.microsoft_graph import (
     text_to_html,
     time_zone_name,
 )
-from mindroom.oauth.microsoft import microsoft_todo_oauth_provider
+from mindroom.oauth.microsoft import microsoft_oauth_provider
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Mapping
@@ -171,7 +171,7 @@ class MicrosoftTodoTools(Toolkit):
         if credentials_manager is None:
             msg = "MicrosoftTodoTools requires an explicit credentials_manager"
             raise RuntimeError(msg)
-        self._provider = microsoft_todo_oauth_provider()
+        self._provider = microsoft_oauth_provider("microsoft_todo")
         self._runtime_paths = runtime_paths
         self._credentials_manager = credentials_manager
         self._worker_target = worker_target

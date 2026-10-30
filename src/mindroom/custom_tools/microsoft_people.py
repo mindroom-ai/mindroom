@@ -17,7 +17,7 @@ from mindroom.custom_tools.microsoft_graph import (
     page_path,
     path_segment,
 )
-from mindroom.oauth.microsoft import microsoft_people_oauth_provider
+from mindroom.oauth.microsoft import microsoft_oauth_provider
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Mapping
@@ -140,7 +140,7 @@ class MicrosoftPeopleTools(Toolkit):
         if credentials_manager is None:
             msg = "MicrosoftPeopleTools requires an explicit credentials_manager"
             raise RuntimeError(msg)
-        self._provider = microsoft_people_oauth_provider()
+        self._provider = microsoft_oauth_provider("microsoft_people")
         self._runtime_paths = runtime_paths
         self._credentials_manager = credentials_manager
         self._worker_target = worker_target

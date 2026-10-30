@@ -50,7 +50,7 @@ from mindroom.oauth.credential_lifecycle import (
     reset_oauth_credentials,
 )
 from mindroom.oauth.credential_store import _oauth_credential_database_path
-from mindroom.oauth.google_drive import GOOGLE_DRIVE_READ_OAUTH_SCOPES
+from mindroom.oauth.google import GOOGLE_DRIVE_READ_OAUTH_SCOPES
 from mindroom.oauth.providers import OAuthConnectionRequired, OAuthProviderError, OAuthTokenResult
 from mindroom.tool_system.metadata import export_tools_metadata, get_tool_by_name
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity, resolve_worker_target, tool_execution_identity

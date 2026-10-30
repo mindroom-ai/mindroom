@@ -8,16 +8,11 @@ and their stored connections are never changed.
 from __future__ import annotations
 
 from dataclasses import replace
-from typing import TYPE_CHECKING, Any, Literal
+from typing import TYPE_CHECKING, Any, Literal, get_args
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
-from mindroom.oauth.google_calendar import google_calendar_oauth_provider
-from mindroom.oauth.google_docs import google_docs_oauth_provider
-from mindroom.oauth.google_drive import google_drive_oauth_provider
-from mindroom.oauth.google_gmail import google_gmail_oauth_provider
-from mindroom.oauth.google_sheets import google_sheets_oauth_provider
-from mindroom.oauth.google_tasks import google_tasks_oauth_provider
+from mindroom.oauth.google import google_oauth_providers
 from mindroom.tool_system.catalog import TOOL_METADATA
 from mindroom.tool_system.registration import register_tool_with_metadata
 from mindroom.tool_system.toolkit_aliases import apply_toolkit_function_aliases
@@ -33,12 +28,9 @@ if TYPE_CHECKING:
 
 _GoogleService = Literal["gmail", "google_calendar", "google_drive", "google_docs", "google_sheets", "google_tasks"]
 _PROVIDERS = {
-    "gmail": google_gmail_oauth_provider,
-    "google_calendar": google_calendar_oauth_provider,
-    "google_drive": google_drive_oauth_provider,
-    "google_docs": google_docs_oauth_provider,
-    "google_sheets": google_sheets_oauth_provider,
-    "google_tasks": google_tasks_oauth_provider,
+    provider.tool_config_service: provider
+    for provider in google_oauth_providers()
+    if provider.tool_config_service in get_args(_GoogleService)
 }
 
 
@@ -51,14 +43,7 @@ class GoogleWorkspaceConfig(BaseModel):
     display_name: str = Field(min_length=1)
     client_config_service: str = Field(pattern=r"^[a-z][a-z0-9_]*_oauth_client$")
     allowed_hosted_domains: tuple[str, ...] = Field(min_length=1)
-    services: tuple[_GoogleService, ...] = (
-        "gmail",
-        "google_calendar",
-        "google_drive",
-        "google_docs",
-        "google_sheets",
-        "google_tasks",
-    )
+    services: tuple[_GoogleService, ...] = get_args(_GoogleService)
 
     @field_validator("services")
     @classmethod
@@ -83,7 +68,7 @@ def google_workspace_oauth_providers(workspace: GoogleWorkspaceConfig) -> tuple[
     """Build independent providers for a plugin's OAuth registration callback."""
     providers = []
     for service in workspace.services:
-        base = _PROVIDERS[service]()
+        base = _PROVIDERS[service]
         providers.append(
             replace(
                 base,

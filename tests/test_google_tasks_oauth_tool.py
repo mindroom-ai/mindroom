@@ -18,8 +18,7 @@ from mindroom import tools as _mindroom_tools  # noqa: F401  # registers built-i
 from mindroom.config.main import Config
 from mindroom.credentials.manager import CredentialsManager
 from mindroom.custom_tools.google_tasks import GoogleTasksTools
-from mindroom.oauth.google import GOOGLE_IDENTITY_SCOPES
-from mindroom.oauth.google_tasks import google_tasks_oauth_provider
+from mindroom.oauth.google import _GOOGLE_IDENTITY_SCOPES, google_oauth_provider
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity, resolve_worker_target
 from tests.oauth_test_utils import publish_oauth_credentials
 
@@ -169,7 +168,7 @@ def test_google_tasks_tokens_stay_separate_from_dashboard_settings(tmp_path: Pat
     manager = CredentialsManager(tmp_path / "credentials")
     manager.save_credentials("google_tasks", {"manage_tasks": False, "_source": "ui"})
     publish_oauth_credentials(
-        google_tasks_oauth_provider(),
+        google_oauth_provider("google_tasks"),
         {"token": "access-token", "refresh_token": "refresh-token", "_source": "oauth"},
         credentials_manager=manager,
         worker_target=None,
@@ -512,9 +511,9 @@ def test_google_tasks_agent_config_accepts_inline_operation_flags() -> None:
 
 
 def test_google_tasks_provider_requests_only_tasks_and_identity_scopes() -> None:
-    provider = google_tasks_oauth_provider()
+    provider = google_oauth_provider("google_tasks")
 
-    assert provider.scopes == (*GOOGLE_IDENTITY_SCOPES, "https://www.googleapis.com/auth/tasks")
+    assert provider.scopes == (*_GOOGLE_IDENTITY_SCOPES, "https://www.googleapis.com/auth/tasks")
     assert "include_granted_scopes" not in provider.extra_auth_params
 
 

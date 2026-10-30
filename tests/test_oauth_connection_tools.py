@@ -26,8 +26,7 @@ from mindroom.oauth.credential_lifecycle import (
     oauth_credentials_worker_target,
 )
 from mindroom.oauth.credential_store import _oauth_credential_database_path
-from mindroom.oauth.google_calendar import google_calendar_oauth_provider
-from mindroom.oauth.google_drive import google_drive_oauth_provider
+from mindroom.oauth.google import google_oauth_provider
 from mindroom.oauth.providers import OAuthProviderError
 from mindroom.tool_system.runtime_context import (
     ToolRuntimeContext,
@@ -149,7 +148,7 @@ async def test_reset_oauth_connection_issues_browser_confirmation_without_mutati
 ) -> None:
     """The agent tool should issue a browser action and leave deletion to its confirmation POST."""
     tool, context, worker_target = _tool_and_context(tmp_path, worker_scope="user_agent")
-    provider = google_drive_oauth_provider()
+    provider = google_oauth_provider("google_drive")
     credentials = _save_credentials(context, worker_target, provider, "refresh-token")
 
     with tool_runtime_context(context):
@@ -176,7 +175,7 @@ async def test_reset_oauth_connection_issues_browser_confirmation_for_unreadable
 ) -> None:
     """A corrupt credential must still be recoverable through the public browser-reset action."""
     tool, context, worker_target = _tool_and_context(tmp_path, worker_scope="user_agent")
-    provider = google_drive_oauth_provider()
+    provider = google_oauth_provider("google_drive")
     credentials_manager = get_runtime_credentials_manager(context.runtime_paths)
     lifecycle_context = OAuthCredentialContext(
         provider=provider,
@@ -211,7 +210,7 @@ async def test_reset_oauth_connection_uses_team_member_ownership(tmp_path: Path)
         worker_scope="user_agent",
         context_agent_name="research_team",
     )
-    provider = google_drive_oauth_provider()
+    provider = google_oauth_provider("google_drive")
 
     with tool_runtime_context(context):
         result = await tool.reset_oauth_connection(provider.id)
@@ -231,7 +230,7 @@ async def test_reset_oauth_connection_canonicalizes_bridge_alias_scope(tmp_path:
         requester_id=alias,
         aliases={"@alice:example.org": [alias]},
     )
-    provider = google_drive_oauth_provider()
+    provider = google_oauth_provider("google_drive")
     canonical_target = oauth_credentials_worker_target(
         provider,
         context.runtime_paths,
@@ -260,7 +259,7 @@ def test_oauth_target_does_not_canonicalize_configured_bot_alias(tmp_path: Path)
     context.config.bot_accounts = [bot_alias]
 
     resolved_target = oauth_credentials_worker_target(
-        google_drive_oauth_provider(),
+        google_oauth_provider("google_drive"),
         context.runtime_paths,
         worker_target,
         config=context.config,
@@ -275,7 +274,7 @@ def test_oauth_target_does_not_canonicalize_configured_bot_alias(tmp_path: Path)
 async def test_reset_oauth_connection_issues_browser_confirmation_for_shared_scope(tmp_path: Path) -> None:
     """A credential manager may issue a browser-confirmed reset for the agent's shared credential."""
     tool, context, _worker_target = _tool_and_context(tmp_path, worker_scope="shared")
-    provider = google_drive_oauth_provider()
+    provider = google_oauth_provider("google_drive")
 
     with tool_runtime_context(context):
         result = await tool.reset_oauth_connection(provider.id)
@@ -341,7 +340,7 @@ async def test_reset_oauth_connection_denies_provider_not_backing_agent_tool(tmp
     tool, context, _worker_target = _tool_and_context(tmp_path, worker_scope="user_agent")
 
     with tool_runtime_context(context):
-        result = await tool.reset_oauth_connection(google_calendar_oauth_provider().id)
+        result = await tool.reset_oauth_connection(google_oauth_provider("google_calendar").id)
 
     assert "is not available to this agent" in result
 

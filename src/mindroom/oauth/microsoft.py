@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 import httpx
@@ -17,17 +18,9 @@ if TYPE_CHECKING:
 __all__ = [
     "ACCOUNT_LOOKUP_TIMEOUT_SECONDS",
     "GRAPH_ME_URL",
-    "microsoft_files_oauth_provider",
-    "microsoft_meetings_oauth_provider",
     "microsoft_oauth_provider",
-    "microsoft_onenote_oauth_provider",
-    "microsoft_people_oauth_provider",
-    "microsoft_sharepoint_oauth_provider",
-    "microsoft_teams_oauth_provider",
-    "microsoft_todo_oauth_provider",
+    "microsoft_oauth_providers",
     "microsoft_token_url",
-    "outlook_calendar_oauth_provider",
-    "outlook_mail_oauth_provider",
 ]
 
 _CLIENT_CONFIG_SERVICE = "microsoft_oauth_client"
@@ -40,6 +33,85 @@ _IDENTITY_SCOPES = ("User.Read", "offline_access")
 # A tenant is a GUID, a verified domain, or organizations, common, or consumers; it becomes a URL path segment.
 _TENANT = re.compile(r"[A-Za-z0-9][A-Za-z0-9.-]{0,252}")
 _EMAIL = re.compile(r"[^@\s]+@[^@\s]+")
+
+
+@dataclass(frozen=True, slots=True)
+class _MicrosoftProviderSpec:
+    """What sets one Microsoft Graph provider apart; every other field is shared or named after the provider id."""
+
+    display_name: str
+    # Requested before `_IDENTITY_SCOPES`.
+    service_scopes: tuple[str, ...]
+    status_capabilities: tuple[str, ...]
+
+
+_MICROSOFT_PROVIDERS = {
+    "microsoft_files": _MicrosoftProviderSpec(
+        display_name="Microsoft OneDrive and SharePoint",
+        service_scopes=("Files.ReadWrite.All",),
+        status_capabilities=("search, read, and save OneDrive and SharePoint files",),
+    ),
+    "microsoft_sharepoint": _MicrosoftProviderSpec(
+        display_name="Microsoft SharePoint",
+        service_scopes=("Sites.ReadWrite.All",),
+        status_capabilities=("read SharePoint sites, lists, and pages, and add and change list items",),
+    ),
+    "outlook_mail": _MicrosoftProviderSpec(
+        display_name="Outlook Mail",
+        service_scopes=(
+            "Mail.ReadWrite",
+            "Mail.Send",
+            "Mail.ReadWrite.Shared",
+            "Mail.Send.Shared",
+            "MailboxSettings.ReadWrite",
+        ),
+        status_capabilities=(
+            "search, read, draft, send, and organize Outlook mail, including shared mailboxes, and set automatic replies",
+        ),
+    ),
+    "outlook_calendar": _MicrosoftProviderSpec(
+        display_name="Outlook Calendar",
+        service_scopes=("Calendars.ReadWrite", "Calendars.ReadWrite.Shared"),
+        status_capabilities=("read and change Outlook calendar events",),
+    ),
+    "microsoft_todo": _MicrosoftProviderSpec(
+        display_name="Microsoft To Do",
+        service_scopes=("Tasks.ReadWrite",),
+        status_capabilities=("list, create, update, and delete Microsoft To Do tasks",),
+    ),
+    # `ChannelMessage.Read.All` and `User.Read.All`, which finds a person's user id for a presence read, need admin
+    # consent.
+    "microsoft_teams": _MicrosoftProviderSpec(
+        display_name="Microsoft Teams",
+        service_scopes=(
+            "Team.ReadBasic.All",
+            "Channel.ReadBasic.All",
+            "ChannelMessage.Read.All",
+            "ChannelMessage.Send",
+            "Chat.ReadWrite",
+            "ChatMessage.Send",
+            "Presence.Read.All",
+            "User.Read.All",
+        ),
+        status_capabilities=("read and send Teams channel and chat messages, start chats, and read presence",),
+    ),
+    # `OnlineMeetingTranscript.Read.All` needs admin consent.
+    "microsoft_meetings": _MicrosoftProviderSpec(
+        display_name="Microsoft Teams Meetings",
+        service_scopes=("OnlineMeetings.Read", "OnlineMeetingTranscript.Read.All"),
+        status_capabilities=("find Teams meetings and read their transcripts",),
+    ),
+    "microsoft_onenote": _MicrosoftProviderSpec(
+        display_name="Microsoft OneNote",
+        service_scopes=("Notes.ReadWrite.All",),
+        status_capabilities=("read, create, and append to OneNote pages",),
+    ),
+    "microsoft_people": _MicrosoftProviderSpec(
+        display_name="Microsoft 365 People",
+        service_scopes=("User.Read.All",),
+        status_capabilities=("look up people, their managers, and their direct reports in the directory",),
+    ),
+}
 
 
 def _endpoint(tenant: str, kind: str) -> str:
@@ -101,21 +173,16 @@ def _microsoft_account_claims(token_data: Mapping[str, Any]) -> dict[str, Any]:
     raise ValueError(msg)
 
 
-def microsoft_oauth_provider(
-    *,
-    provider_id: str,
-    display_name: str,
-    scopes: tuple[str, ...],
-    status_capabilities: tuple[str, ...] = (),
-) -> OAuthProvider:
-    """Return one requester-scoped Microsoft Graph provider that shares the `microsoft_oauth_client` app."""
+def microsoft_oauth_provider(provider_id: str) -> OAuthProvider:
+    """Return the requester-scoped Microsoft Graph provider `provider_id`, sharing the `microsoft_oauth_client` app."""
+    spec = _MICROSOFT_PROVIDERS[provider_id]
     return OAuthProvider(
         id=provider_id,
-        display_name=display_name,
+        display_name=spec.display_name,
         # The runtime resolves the configured tenant; these defaults name the organizations endpoints.
         authorization_url=_endpoint(_DEFAULT_TENANT, "authorize"),
         token_url=_endpoint(_DEFAULT_TENANT, "token"),
-        scopes=(*scopes, *_IDENTITY_SCOPES),
+        scopes=(*spec.service_scopes, *_IDENTITY_SCOPES),
         credential_service=f"{provider_id}_oauth",
         tool_config_service=provider_id,
         client_config_services=(f"{provider_id}_oauth_client",),
@@ -123,118 +190,12 @@ def microsoft_oauth_provider(
         token_endpoint_auth_method="client_secret_post",  # noqa: S106
         pkce_code_challenge_method="S256",
         requester_scoped_credentials=True,
-        status_capabilities=status_capabilities,
+        status_capabilities=spec.status_capabilities,
         runtime_bootstrapper=_microsoft_runtime_endpoints,
         account_claims_reader=_microsoft_account_claims,
     )
 
 
-def microsoft_files_oauth_provider() -> OAuthProvider:
-    """Return the OneDrive and SharePoint files provider."""
-    return microsoft_oauth_provider(
-        provider_id="microsoft_files",
-        display_name="Microsoft OneDrive and SharePoint",
-        scopes=("Files.ReadWrite.All",),
-        status_capabilities=("search, read, and save OneDrive and SharePoint files",),
-    )
-
-
-def microsoft_sharepoint_oauth_provider() -> OAuthProvider:
-    """Return the SharePoint sites, lists, and pages provider."""
-    return microsoft_oauth_provider(
-        provider_id="microsoft_sharepoint",
-        display_name="Microsoft SharePoint",
-        scopes=("Sites.ReadWrite.All",),
-        status_capabilities=("read SharePoint sites, lists, and pages, and add and change list items",),
-    )
-
-
-def outlook_mail_oauth_provider() -> OAuthProvider:
-    """Return the Outlook mail provider."""
-    return microsoft_oauth_provider(
-        provider_id="outlook_mail",
-        display_name="Outlook Mail",
-        scopes=(
-            "Mail.ReadWrite",
-            "Mail.Send",
-            "Mail.ReadWrite.Shared",
-            "Mail.Send.Shared",
-            "MailboxSettings.ReadWrite",
-        ),
-        status_capabilities=(
-            "search, read, draft, send, and organize Outlook mail, including shared mailboxes, and set automatic replies",
-        ),
-    )
-
-
-def outlook_calendar_oauth_provider() -> OAuthProvider:
-    """Return the Outlook calendar provider."""
-    return microsoft_oauth_provider(
-        provider_id="outlook_calendar",
-        display_name="Outlook Calendar",
-        scopes=("Calendars.ReadWrite", "Calendars.ReadWrite.Shared"),
-        status_capabilities=("read and change Outlook calendar events",),
-    )
-
-
-def microsoft_todo_oauth_provider() -> OAuthProvider:
-    """Return the Microsoft To Do provider."""
-    return microsoft_oauth_provider(
-        provider_id="microsoft_todo",
-        display_name="Microsoft To Do",
-        scopes=("Tasks.ReadWrite",),
-        status_capabilities=("list, create, update, and delete Microsoft To Do tasks",),
-    )
-
-
-def microsoft_teams_oauth_provider() -> OAuthProvider:
-    """Return the Teams channels, chats, and presence provider.
-
-    `ChannelMessage.Read.All` and `User.Read.All`, which finds a person's user id for a presence read, need admin
-    consent.
-    """
-    return microsoft_oauth_provider(
-        provider_id="microsoft_teams",
-        display_name="Microsoft Teams",
-        scopes=(
-            "Team.ReadBasic.All",
-            "Channel.ReadBasic.All",
-            "ChannelMessage.Read.All",
-            "ChannelMessage.Send",
-            "Chat.ReadWrite",
-            "ChatMessage.Send",
-            "Presence.Read.All",
-            "User.Read.All",
-        ),
-        status_capabilities=("read and send Teams channel and chat messages, start chats, and read presence",),
-    )
-
-
-def microsoft_meetings_oauth_provider() -> OAuthProvider:
-    """Return the Teams meeting transcripts provider; `OnlineMeetingTranscript.Read.All` needs admin consent."""
-    return microsoft_oauth_provider(
-        provider_id="microsoft_meetings",
-        display_name="Microsoft Teams Meetings",
-        scopes=("OnlineMeetings.Read", "OnlineMeetingTranscript.Read.All"),
-        status_capabilities=("find Teams meetings and read their transcripts",),
-    )
-
-
-def microsoft_onenote_oauth_provider() -> OAuthProvider:
-    """Return the OneNote notebooks provider."""
-    return microsoft_oauth_provider(
-        provider_id="microsoft_onenote",
-        display_name="Microsoft OneNote",
-        scopes=("Notes.ReadWrite.All",),
-        status_capabilities=("read, create, and append to OneNote pages",),
-    )
-
-
-def microsoft_people_oauth_provider() -> OAuthProvider:
-    """Return the organization directory provider."""
-    return microsoft_oauth_provider(
-        provider_id="microsoft_people",
-        display_name="Microsoft 365 People",
-        scopes=("User.Read.All",),
-        status_capabilities=("look up people, their managers, and their direct reports in the directory",),
-    )
+def microsoft_oauth_providers() -> tuple[OAuthProvider, ...]:
+    """Return every built-in Microsoft Graph provider."""
+    return tuple(microsoft_oauth_provider(provider_id) for provider_id in _MICROSOFT_PROVIDERS)

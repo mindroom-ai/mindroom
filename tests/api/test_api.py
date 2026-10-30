@@ -45,7 +45,7 @@ from mindroom.matrix.state import MatrixState
 from mindroom.oauth.credential_lifecycle import resolve_oauth_credential_context
 from mindroom.oauth.credential_store import oauth_credential_transaction
 from mindroom.oauth.github import github_oauth_provider
-from mindroom.oauth.google_drive import google_drive_oauth_provider
+from mindroom.oauth.google import google_oauth_provider
 from mindroom.personal_agents import _append_personal_agent_roster_entry
 from mindroom.runtime_state import reset_runtime_state, set_runtime_ready, set_runtime_starting
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity, resolve_worker_key, resolve_worker_target
@@ -2124,7 +2124,7 @@ def test_get_tools_requires_oauth_token_for_generic_auth_provider(test_client: T
 
     worker_target = resolve_worker_target("shared", "general", execution_identity=identity)
     credential_context = resolve_oauth_credential_context(
-        google_drive_oauth_provider(),
+        google_oauth_provider("google_drive"),
         runtime_paths,
         manager,
         worker_target,

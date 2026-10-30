@@ -23,7 +23,7 @@ from mindroom.custom_tools.google_service import ThreadLocalGoogleServiceMixin
 from mindroom.file_access import resolve_agent_file
 from mindroom.logging_config import get_logger
 from mindroom.oauth.client import ScopedOAuthClientMixin
-from mindroom.oauth.google_gmail import google_gmail_oauth_provider
+from mindroom.oauth.google import google_oauth_provider
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -113,7 +113,7 @@ def _stage_attachments(
 class GmailTools(ScopedOAuthClientMixin, ThreadLocalGoogleServiceMixin, AgnoGmailTools):
     """Gmail tools wrapper that uses MindRoom's credential management."""
 
-    _oauth_provider = google_gmail_oauth_provider()
+    _oauth_provider = google_oauth_provider("google_gmail")
     _oauth_tool_name = "gmail"
 
     def __init__(

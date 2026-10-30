@@ -17,7 +17,7 @@ from mindroom import tools as _mindroom_tools  # noqa: F401  # registers built-i
 from mindroom.config.main import Config
 from mindroom.credentials.manager import CredentialsManager
 from mindroom.custom_tools.google_docs import GoogleDocsTools
-from mindroom.oauth.google_docs import google_docs_oauth_provider
+from mindroom.oauth.google import google_oauth_provider
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity, resolve_worker_target
 from tests.oauth_test_utils import publish_oauth_credentials
 
@@ -170,7 +170,7 @@ def test_google_docs_tokens_stay_separate_from_dashboard_settings(tmp_path: Path
     manager = CredentialsManager(tmp_path / "credentials")
     manager.save_credentials("google_docs", {"edit_document": False, "_source": "ui"})
     publish_oauth_credentials(
-        google_docs_oauth_provider(),
+        google_oauth_provider("google_docs"),
         {"token": "access-token", "refresh_token": "refresh-token", "_source": "oauth"},
         credentials_manager=manager,
         worker_target=None,
@@ -392,7 +392,7 @@ def test_google_docs_agent_config_accepts_inline_operation_flags() -> None:
 
 
 def test_google_docs_provider_uses_docs_scope_without_drive_scope() -> None:
-    provider = google_docs_oauth_provider()
+    provider = google_oauth_provider("google_docs")
 
     assert "https://www.googleapis.com/auth/documents" in provider.scopes
     assert "https://www.googleapis.com/auth/drive" not in provider.scopes

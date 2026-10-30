@@ -23,7 +23,7 @@ from mindroom.constants import RuntimePaths, resolve_runtime_paths
 from mindroom.credentials.manager import CredentialsManager, get_runtime_credentials_manager
 from mindroom.custom_tools.gmail import GmailTools
 from mindroom.oauth.credential_lifecycle import load_oauth_credentials_snapshot_sync
-from mindroom.oauth.google_gmail import google_gmail_oauth_provider
+from mindroom.oauth.google import google_oauth_provider
 from mindroom.oauth.providers import OAuthConnectionRequired
 from mindroom.path_confinement import resolve_path_within_root
 from tests.oauth_test_utils import publish_oauth_credentials
@@ -52,7 +52,7 @@ def mock_credentials_manager(runtime_paths: RuntimePaths) -> CredentialsManager:
         ],
     }
     publish_oauth_credentials(
-        google_gmail_oauth_provider(),
+        google_oauth_provider("google_gmail"),
         test_creds,
         credentials_manager=manager,
         worker_target=None,
@@ -199,7 +199,7 @@ class TestGmailTools:
     ) -> None:
         """Test initialization when credentials are invalid."""
         publish_oauth_credentials(
-            google_gmail_oauth_provider(),
+            google_oauth_provider("google_gmail"),
             {"invalid": "data"},
             credentials_manager=mock_credentials_manager,
             worker_target=None,

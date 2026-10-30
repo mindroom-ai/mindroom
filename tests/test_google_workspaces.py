@@ -22,7 +22,7 @@ from mindroom.oauth.credential_lifecycle import (
     reset_oauth_credentials,
     resolve_oauth_credential_context,
 )
-from mindroom.oauth.google_gmail import google_gmail_oauth_provider
+from mindroom.oauth.google import google_oauth_provider
 from mindroom.oauth.providers import OAuthClaimValidationError, OAuthTokenResult
 from mindroom.oauth.registry import load_oauth_providers
 from mindroom.tool_system.catalog import TOOL_METADATA
@@ -235,7 +235,7 @@ def test_registration_and_second_account_preserve_existing_connection(tmp_path: 
     """Adding a workspace retains the original grant and credential generation exactly."""
     config, paths = _plugin(tmp_path)
     manager = get_runtime_credentials_manager(paths)
-    original = google_gmail_oauth_provider()
+    original = google_oauth_provider("google_gmail")
     original_context = resolve_oauth_credential_context(original, paths, manager, None)
     manager.save_credentials("google_oauth_client", {"client_id": "original", "client_secret": "original-secret"})
     credentials = {
