@@ -47,6 +47,7 @@ from mindroom.matrix.conversation_reads import (
 from mindroom.matrix.journal_ingress import _inbound_event, _projected_event
 from mindroom.matrix.sidecar_content import holds_unresolved_sidecar
 from tests.conftest import TEST_ACCESS_TOKEN, FakeMediaResponse, serve_media_download
+from tests.journal_helpers import record_room_history_recovery
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Iterable, Iterator
@@ -1101,7 +1102,7 @@ class TestCompletenessRequirement:
                 ([raw("$root", "root", ts=1_000)], None),
             ],
         )
-        await alice.record_room_history_recovery(ROOM)
+        await record_room_history_recovery(alice, ROOM)
         await hydrator(alice, client, max_requests=1).ensure_hydrated(room_id=ROOM, thread_id="$root")
         recovery = await alice.room_history_recovery(ROOM)
         assert recovery is not None
@@ -1139,7 +1140,7 @@ class TestCompletenessRequirement:
                 ([raw("$root", "root", ts=1_000)], None),
             ],
         )
-        await alice.record_room_history_recovery(ROOM)
+        await record_room_history_recovery(alice, ROOM)
         await hydrator(alice, client, max_requests=1, **EXPORT_CALLER).ensure_hydrated(
             room_id=ROOM,
             thread_id="$root",
@@ -1152,7 +1153,7 @@ class TestCompletenessRequirement:
         )
         assert client.history_pages == 0
 
-        await alice.record_room_history_recovery(ROOM)
+        await record_room_history_recovery(alice, ROOM)
         await hydrator(alice, client, max_requests=1).ensure_hydrated(room_id=ROOM, thread_id="$root")
         recovery = await alice.room_history_recovery(ROOM)
         assert recovery is not None
@@ -2942,7 +2943,7 @@ class TestEncryptedRelations:
             client.history = [client.events["$root"], *client.relations["$root"]]
             client.repeat_last = True
             client.pages = [(client.history, None)]
-            await alice.record_room_history_recovery(ROOM)
+            await record_room_history_recovery(alice, ROOM)
         strict = hydrator(alice, client, **EXPORT_CALLER)
         with pytest.raises(RuntimeError, match="unreadable events remain"):
             await strict.ensure_hydrated(room_id=ROOM, thread_id="$root")
@@ -2971,7 +2972,7 @@ class TestEncryptedRelations:
         refuses it.
         """
         client = self._readable_thread_beside_an_unreadable_welcome()
-        await alice.record_room_history_recovery(ROOM)
+        await record_room_history_recovery(alice, ROOM)
 
         await hydrator(alice, client).ensure_hydrated(room_id=ROOM, thread_id="$root")
 
@@ -2989,7 +2990,7 @@ class TestEncryptedRelations:
     ) -> None:
         """An export refuses the threads holding an unreadable event, not every thread in the room."""
         client = self._readable_thread_beside_an_unreadable_welcome()
-        await alice.record_room_history_recovery(ROOM)
+        await record_room_history_recovery(alice, ROOM)
 
         await hydrator(alice, client, **EXPORT_CALLER).ensure_hydrated(room_id=ROOM, thread_id="$root")
 
@@ -3027,7 +3028,7 @@ class TestEncryptedRelations:
                 attempted_policy_rank=HydrationPolicy.EXPORT,
                 expected_membership_epoch=0,
             )
-        await alice.record_room_history_recovery(ROOM)
+        await record_room_history_recovery(alice, ROOM)
         prompt = hydrator(alice, client)
 
         await prompt.ensure_hydrated(room_id=ROOM, thread_id="$root")

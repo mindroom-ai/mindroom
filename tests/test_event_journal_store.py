@@ -85,6 +85,7 @@ from mindroom.turn_record import TurnRecord
 from tests.approval_card_helpers import card_is_terminal, pending_card, resolve_card_event, terminal_edit
 from tests.approval_continuation_helpers import advance_continuation, approval_continuation, claim_continuation
 from tests.conftest import SETTLE_TIMEOUT_SECONDS, postgres_journal_schema_url
+from tests.journal_helpers import membership_position, record_room_history_recovery
 from tests.journal_membership_helpers import admit_room_membership
 from tests.reply_span_helpers import pause_shown_reply, paused_for_approval, reply_shown_for_approval
 
@@ -3260,7 +3261,7 @@ class TestProjectedInteractivePrompts:
                 expected_membership_epoch=epoch,
             )
         else:
-            recovery = await alice.record_room_history_recovery(ROOM)
+            recovery = await record_room_history_recovery(alice, ROOM)
             assert recovery is not None
             assert await alice.install_room_history_recovery_chunk(
                 recovery,
@@ -4451,15 +4452,15 @@ class TestMembershipEpoch:
         alice: PrincipalStore,
     ) -> None:
         """Absent, joined, and departed rows expose one exact prior position."""
-        absent = await alice.membership_position(ROOM)
+        absent = await membership_position(alice, ROOM)
         assert (absent.membership, absent.membership_epoch) == ("leave", 0)
 
         await admit_room_membership(alice, ROOM, "leave", source=DepartureSource.LOCAL)
-        departed = await alice.membership_position(ROOM)
+        departed = await membership_position(alice, ROOM)
         assert (departed.membership, departed.membership_epoch) == ("leave", 1)
 
         await admit_room_membership(alice, ROOM, "join")
-        joined = await alice.membership_position(ROOM)
+        joined = await membership_position(alice, ROOM)
         assert (joined.membership, joined.membership_epoch) == ("join", 1)
 
     async def test_hydration_is_recorded_per_membership(self, alice: PrincipalStore) -> None:
@@ -4777,7 +4778,7 @@ class TestBoundedHydrationInstallation:
     ) -> None:
         """A recovery page must not enter a different gap or membership."""
         alice = journal_store.principal("agent@alice")
-        recovery = await alice.record_room_history_recovery(ROOM)
+        recovery = await record_room_history_recovery(alice, ROOM)
         assert recovery is not None
         observed = _ObservedHydrationBackend(journal_store.backend)
         recovering = EventJournalStore(backend=observed, approval_signals=journal_store.approval_signals).principal(
@@ -4808,8 +4809,8 @@ class TestBoundedHydrationInstallation:
     ) -> None:
         """A later gap must fence every remaining page of an older walk."""
         alice = journal_store.principal("agent@alice")
-        stale = await alice.record_room_history_recovery(ROOM)
-        current = await alice.record_room_history_recovery(ROOM)
+        stale = await record_room_history_recovery(alice, ROOM)
+        current = await record_room_history_recovery(alice, ROOM)
         assert stale is not None
         assert current is not None
         observed = _ObservedHydrationBackend(journal_store.backend)
@@ -4836,7 +4837,7 @@ class TestBoundedHydrationInstallation:
     ) -> None:
         """Membership invalidation must fence projection before recovery lookup."""
         alice = journal_store.principal("agent@alice")
-        recovery = await alice.record_room_history_recovery(ROOM)
+        recovery = await record_room_history_recovery(alice, ROOM)
         assert recovery is not None
         stale_epoch = await alice.membership_epoch(ROOM)
         await admit_room_membership(alice, ROOM, "leave", source=DepartureSource.LOCAL)
@@ -4860,7 +4861,7 @@ class TestBoundedHydrationInstallation:
         alice: PrincipalStore,
     ) -> None:
         """Callers cannot turn the page API back into one unbounded write."""
-        recovery = await alice.record_room_history_recovery(ROOM)
+        recovery = await record_room_history_recovery(alice, ROOM)
         assert recovery is not None
 
         with pytest.raises(ValueError, match="at most 256"):
@@ -4879,7 +4880,7 @@ class TestBoundedHydrationInstallation:
     ) -> None:
         """Combining recovery projection and settlement into one giant write breaks this test."""
         alice = journal_store.principal("agent@alice")
-        recovery = await alice.record_room_history_recovery(ROOM)
+        recovery = await record_room_history_recovery(alice, ROOM)
         assert recovery is not None
         events = hydration_messages(_EVENTS_SPANNING_TWO_HYDRATION_CHUNKS)
         observed = _ObservedHydrationBackend(journal_store.backend)
@@ -4920,7 +4921,7 @@ class TestBoundedHydrationInstallation:
     ) -> None:
         """Publishing or settling before every chunk lands breaks this retry."""
         alice = journal_store.principal("agent@alice")
-        recovery = await alice.record_room_history_recovery(ROOM)
+        recovery = await record_room_history_recovery(alice, ROOM)
         assert recovery is not None
         events = hydration_messages(_EVENTS_SPANNING_TWO_HYDRATION_CHUNKS)
 
@@ -4973,7 +4974,7 @@ class TestBoundedHydrationInstallation:
     ) -> None:
         """The final bounded transaction must not rewrite every thread marker."""
         alice = journal_store.principal("agent@alice")
-        recovery = await alice.record_room_history_recovery(ROOM)
+        recovery = await record_room_history_recovery(alice, ROOM)
         assert recovery is not None
         observed = _ObservedHydrationBackend(journal_store.backend)
         recovering = EventJournalStore(backend=observed, approval_signals=journal_store.approval_signals).principal(
@@ -5081,7 +5082,7 @@ class TestBoundedHydrationInstallation:
     ) -> None:
         """Settling recovery outside final epoch validation erases this newer obligation."""
         alice = journal_store.principal("agent@alice")
-        old_recovery = await alice.record_room_history_recovery(ROOM)
+        old_recovery = await record_room_history_recovery(alice, ROOM)
         assert old_recovery is not None
         stale_epoch = await alice.membership_epoch(ROOM)
         newer_recovery: RoomHistoryRecovery | None = None
@@ -5092,7 +5093,7 @@ class TestBoundedHydrationInstallation:
                 await admit_room_membership(alice, ROOM, "leave", source=DepartureSource.LOCAL)
                 await admit_room_membership(alice, ROOM, "join")
                 await admit(alice, "$new-anchor", ts=10_000)
-                newer_recovery = await alice.record_room_history_recovery(ROOM)
+                newer_recovery = await record_room_history_recovery(alice, ROOM)
 
         observed = _ObservedHydrationBackend(journal_store.backend, after_write=fence_and_record_new_recovery)
         recovering = EventJournalStore(backend=observed, approval_signals=journal_store.approval_signals).principal(
@@ -5519,7 +5520,7 @@ class TestRecoveryFinalizesOnlyItsExactObligation:
         """A new gap waits behind the exact recovery claim and survives settlement."""
         principal_id = "agent@alice"
         reader = rival_stores.first.principal(principal_id)
-        old_recovery = await reader.record_room_history_recovery(ROOM)
+        old_recovery = await record_room_history_recovery(reader, ROOM)
         assert old_recovery is not None
         inside_final = threading.Event()
         release_final = threading.Event()
@@ -5548,7 +5549,7 @@ class TestRecoveryFinalizesOnlyItsExactObligation:
         await asyncio.to_thread(inside_final.wait, SETTLE_TIMEOUT_SECONDS)
         assert inside_final.is_set(), "the repayment never claimed its exact recovery row"
         replacement = asyncio.create_task(
-            rival_stores.second.principal(principal_id).record_room_history_recovery(ROOM),
+            record_room_history_recovery(rival_stores.second.principal(principal_id), ROOM),
         )
         try:
             await _await_queued_racers(

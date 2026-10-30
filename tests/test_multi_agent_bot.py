@@ -65,6 +65,7 @@ from tests.conftest import (
 )
 from tests.fakes.scripted_model import ScriptedModel, answer
 from tests.identity_helpers import entity_ids, persist_entity_accounts
+from tests.journal_helpers import membership_position
 from tests.response_attempt_helpers import install_direct_response_admission
 from tests.threading_helpers import seed_thread_history
 
@@ -796,7 +797,7 @@ class TestAgentBot(AgentBotTestBase):
             membership="join",
             previous_epoch=0,
         )
-        assert await principal.membership_position(room_id) == RoomMembershipPosition(
+        assert await membership_position(principal, room_id) == RoomMembershipPosition(
             "join",
             0,
         )
@@ -844,7 +845,7 @@ class TestAgentBot(AgentBotTestBase):
                     current_membership="leave",
                 ),
             ]
-            assert await principal.membership_position(room_id) == RoomMembershipPosition(
+            assert await membership_position(principal, room_id) == RoomMembershipPosition(
                 "leave",
                 2,
             )

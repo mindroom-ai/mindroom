@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import json
 import time
-from collections.abc import Callable, Mapping
+from collections.abc import Mapping
 from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, cast
 from uuid import UUID
@@ -29,7 +29,10 @@ from mindroom.logging_config import get_logger
 from . import (
     approval_cards,
     approval_continuations,
+    interactive_questions,
     membership_hooks,
+    outbox,
+    reads,
     replies,
     reply_messages,
     turn_rows,
@@ -39,6 +42,8 @@ from .models import (
     TURN_BACKED_KINDS,
     AdmissionFacts,
     AdmissionResult,
+    DeliveryProjectionPendingError,
+    DeliveryStage,
     DepartureSource,
     EventClass,
     EventKind,
@@ -52,6 +57,7 @@ from .models import (
     IngestionRecordDisposition,
     JournalEvent,
     PendingPage,
+    ResponseRecoveryState,
     RoomMembershipPosition,
     SemanticConsumer,
 )
@@ -349,8 +355,6 @@ def admit_ingestion_batch(
     transaction: Transaction,
     principal_id: str,
     admission: IngestionBatchAdmission,
-    *,
-    snapshot: Callable[[Transaction, str, InboundEvent], None],
 ) -> AdmissionFacts:
     """Commit semantic effects and the consumer's acceptance in one transaction."""
     validate_ingestion_batch_admission(admission)
@@ -375,7 +379,7 @@ def admit_ingestion_batch(
     for record in admission.records:
         semantic_new = _apply_ingestion_disposition(transaction, principal_id, record)
         if semantic_new and record.event is not None:
-            snapshot(transaction, principal_id, record.event)
+            _snapshot_interactive_source(transaction, principal_id, record.event)
         facts.append(AdmissionFacts(True, semantic_new))
     return AdmissionFacts(True, any(f.semantic_event_new for f in facts), tuple(facts))
 
@@ -509,7 +513,7 @@ def claim_room_history_recovery(
     return row is not None
 
 
-def settle_room_history_recovery(
+def _settle_claimed_room_history_recovery(
     transaction: Transaction,
     principal_id: str,
     recovery: RoomHistoryRecovery,
@@ -540,6 +544,108 @@ def settle_room_history_recovery(
         ),
     )
     return HistoryRecoveryOutcome.TRUNCATED
+
+
+def install_room_history_recovery_chunk(
+    transaction: Transaction,
+    principal_id: str,
+    recovery: RoomHistoryRecovery,
+    *,
+    events: tuple[ProjectedEvent, ...],
+    expected_membership_epoch: int,
+) -> bool:
+    """Project one chunk only while its membership and exact recovery stand."""
+    if not reads.claim_membership_epoch(
+        transaction,
+        principal_id,
+        room_id=recovery.room_id,
+        expected_membership_epoch=expected_membership_epoch,
+    ):
+        return False
+    if not claim_room_history_recovery(transaction, principal_id, recovery):
+        return False
+    for event in events:
+        project_with_redactions(
+            transaction,
+            principal_id,
+            event,
+            receipt_order=0,
+            membership_epoch=expected_membership_epoch,
+            settle_redacted_arrival=False,
+        )
+    return True
+
+
+def settle_room_history_recovery(
+    transaction: Transaction,
+    principal_id: str,
+    recovery: RoomHistoryRecovery,
+    *,
+    exhausted_server: bool,
+    unreadable: bool,
+    attempted_policy_rank: int,
+    expected_membership_epoch: int,
+) -> HistoryRecoveryOutcome:
+    """Publish a recovery and settle its exact obligation in one transaction."""
+    if not reads.claim_membership_epoch(
+        transaction,
+        principal_id,
+        room_id=recovery.room_id,
+        expected_membership_epoch=expected_membership_epoch,
+    ):
+        return HistoryRecoveryOutcome.SUPERSEDED
+    if not claim_room_history_recovery(transaction, principal_id, recovery):
+        return HistoryRecoveryOutcome.SUPERSEDED
+    if exhausted_server and unreadable:
+        # Repairing unmasks every marker the gap retracted, and one from before
+        # the gap cannot vouch for an event this walk could not read: it may be
+        # a reply in that very thread. A truncated obligation already withholds
+        # their completeness.
+        reads.revoke_room_hydration(transaction, principal_id, room_id=recovery.room_id)
+    reads.publish_conversation_hydration(
+        transaction,
+        principal_id,
+        room_id=recovery.room_id,
+        thread_id=None,
+        complete=exhausted_server and not unreadable,
+        attempted_policy_rank=attempted_policy_rank,
+        membership_epoch=expected_membership_epoch,
+    )
+    return _settle_claimed_room_history_recovery(
+        transaction,
+        principal_id,
+        recovery,
+        exhausted_server=exhausted_server,
+        attempted_policy_rank=attempted_policy_rank,
+    )
+
+
+def install_hydration_chunk(
+    transaction: Transaction,
+    principal_id: str,
+    *,
+    room_id: str,
+    events: tuple[ProjectedEvent, ...],
+    expected_membership_epoch: int,
+) -> bool:
+    """Project one chunk only while its membership epoch is current."""
+    if not reads.claim_membership_epoch(
+        transaction,
+        principal_id,
+        room_id=room_id,
+        expected_membership_epoch=expected_membership_epoch,
+    ):
+        return False
+    for event in events:
+        project_with_redactions(
+            transaction,
+            principal_id,
+            event,
+            receipt_order=0,
+            membership_epoch=expected_membership_epoch,
+            settle_redacted_arrival=False,
+        )
+    return True
 
 
 def current_membership_epoch(
@@ -799,7 +905,7 @@ def admit(
     event: InboundEvent,
     projected: ProjectedEvent | None,
 ) -> AdmissionResult:
-    """Insert, deduplicate, and project one event in a single transaction.
+    """Insert, deduplicate, and project one event, after any already-visible outbox delivery is projected, in a single transaction.
 
     A context-only event is projected here and never replayed, so it keeps no
     payload: it is admitted already settled, and settlement is what would
@@ -846,7 +952,28 @@ def admit(
             membership_epoch=epoch,
             settle_redacted_arrival=True,
         )
+    _snapshot_interactive_source(transaction, principal_id, event)
     return AdmissionResult.ADMITTED
+
+
+def _snapshot_interactive_source(
+    transaction: Transaction,
+    principal_id: str,
+    event: InboundEvent,
+) -> None:
+    """Freeze an interactive source only after its visible target is durable."""
+    if interactive_questions.snapshot_source_candidate(
+        transaction,
+        principal_id,
+        event,
+    ) and outbox.has_attempted_unacknowledged_prompt_delivery(
+        transaction,
+        principal_id,
+        room_id=event.room_id,
+        membership_epoch=current_membership_epoch(transaction, principal_id, event.room_id),
+    ):
+        msg = f"Matrix delivery projection is pending in room {event.room_id!r}"
+        raise DeliveryProjectionPendingError(msg)
 
 
 def project_with_redactions(
@@ -1069,7 +1196,6 @@ def _pending_page(
     limit: int,
     after_receipt_order: int | None,
     room_id: str | None = None,
-    kind: EventKind | None = None,
     runtime_generation: str = "unmanaged",
 ) -> PendingPage:
     """Return whatever decoded from one page of at most ``limit`` raw rows.
@@ -1085,7 +1211,6 @@ def _pending_page(
         limit=limit,
         room_id=room_id,
         after_receipt_order=after_receipt_order,
-        kind=kind,
         runtime_generation=runtime_generation,
     )
     events = _decode_rows(rows)
@@ -1109,7 +1234,6 @@ def _pending_rows(
     limit: int,
     after_receipt_order: int | None,
     room_id: str | None = None,
-    kind: EventKind | None = None,
     runtime_generation: str = "unmanaged",
 ) -> tuple[Row, ...]:
     """Return one raw page of pending rows, in receipt order."""
@@ -1117,8 +1241,6 @@ def _pending_rows(
     cursor_params: tuple[object, ...] = () if after_receipt_order is None else (after_receipt_order,)
     room_clause = "" if room_id is None else " AND events.room_id = ?"
     room_params: tuple[object, ...] = () if room_id is None else (room_id,)
-    kind_clause = "" if kind is None else " AND kind = ?"
-    kind_params: tuple[object, ...] = () if kind is None else (kind.value,)
     continuation_joins = f"""
         LEFT JOIN ({approval_continuations.HELD_SOURCES})
           ON held_source.principal_id = events.principal_id
@@ -1164,11 +1286,11 @@ def _pending_rows(
         SELECT {_EVENT_JOURNAL_COLUMNS} FROM journal_events AS events
         {continuation_joins}
         WHERE events.principal_id = ? AND events.state = 'pending'
-          {continuation_clause}{kind_clause}{room_clause}{cursor_clause}
+          {continuation_clause}{room_clause}{cursor_clause}
         ORDER BY events.receipt_order
         LIMIT ?
         """,  # noqa: S608 - a fixed column list and fixed clauses, not input
-        (principal_id, *continuation_params, *kind_params, *room_params, *cursor_params, limit),
+        (principal_id, *continuation_params, *room_params, *cursor_params, limit),
     )
 
 
@@ -1311,6 +1433,43 @@ def sources_settled_by_departure(
     )
 
 
+def response_recovery_state(
+    transaction: Transaction,
+    principal_id: str,
+    turn_record: TurnRecord,
+) -> ResponseRecoveryState:
+    """Return one response's durable handoff: its sources, turn records, FINAL delivery, and reply."""
+    source_event_ids = turn_record.source_event_ids
+    turn_id = turn_record.anchor_event_id
+    pending = tuple(is_pending(transaction, principal_id, event_id) for event_id in source_event_ids)
+    delivery = (
+        None
+        if turn_id is None
+        else outbox.load(
+            transaction,
+            principal_id,
+            delivery_id=turn_id,
+            stage=DeliveryStage.FINAL,
+        )
+    )
+    agent_name = agent_of_principal(principal_id)
+    return ResponseRecoveryState(
+        pending_sources=pending,
+        redacted_sources=tuple(
+            not source_pending and source_has_redaction_handoff(transaction, principal_id, event_id, turn_record)
+            for event_id, source_pending in zip(source_event_ids, pending, strict=True)
+        ),
+        turn_records=tuple(
+            turn_rows.get_turn_record(transaction, agent_name, event_id) for event_id in turn_record.indexed_event_ids
+        ),
+        final_delivery=delivery,
+        sources_settled_by_departure=(
+            not any(pending) and sources_settled_by_departure(transaction, principal_id, source_event_ids)
+        ),
+        reply=reply_messages.for_sources(transaction, principal_id, source_event_ids),
+    )
+
+
 def _settle(transaction: Transaction, principal_id: str, event_id: str) -> None:
     """Mark one event's semantic work terminal and release its replay payload.
 
@@ -1343,6 +1502,12 @@ def settle_many(transaction: Transaction, principal_id: str, event_ids: tuple[st
         _settle(transaction, principal_id, event_id)
 
 
+def settle_turn_sources(transaction: Transaction, principal_id: str, event_ids: tuple[str, ...]) -> tuple[str, ...]:
+    """Settle a terminal turn's sources, ending the replies left waiting to replay them; return those replies."""
+    settle_many(transaction, principal_id, event_ids)
+    return replies.drop_replays(transaction, principal_id, event_ids, now_ns=time.time_ns())
+
+
 def unsettled_event_ids(transaction: Transaction, principal_id: str) -> frozenset[str]:
     """Return every event that still owes semantic work."""
     rows = transaction.fetchall(
@@ -1350,30 +1515,6 @@ def unsettled_event_ids(transaction: Transaction, principal_id: str) -> frozense
         (principal_id,),
     )
     return frozenset(row["event_id"] for row in rows)
-
-
-def pending_of_kind(
-    transaction: Transaction,
-    principal_id: str,
-    kind: EventKind,
-    *,
-    limit: int,
-    after_receipt_order: int | None = None,
-) -> PendingPage:
-    """Return pending events of one kind, in receipt order.
-
-    Pages the same way ``pending`` does, so a caller that needs every one of
-    them can walk to the end and know when it got there -- and can tell that a
-    row it walked past was one it could not read, which is the difference
-    between an enumeration that is complete and one that only looks it.
-    """
-    return _pending_page(
-        transaction,
-        principal_id,
-        limit=limit,
-        after_receipt_order=after_receipt_order,
-        kind=kind,
-    )
 
 
 def claim_semantic_consumer(

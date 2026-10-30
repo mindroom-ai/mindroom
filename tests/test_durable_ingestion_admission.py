@@ -32,13 +32,14 @@ from mindroom.event_journal import (
     IngestionRecordDisposition,
     PrincipalStore,
     RoomMembershipPosition,
+    journal,
 )
-from mindroom.event_journal import store as journal_store
 from mindroom.matrix import durable_ingestion
 from mindroom.matrix.durable_ingestion import consume_one_ingestion_batch, validate_ingestion_batch
 from mindroom.matrix.journal_ingress import parse_journal_event
 from mindroom.matrix.olm_to_device import authenticated_sender_is_current
 from mindroom.pending_event_worker import PendingEventWorker
+from tests.journal_helpers import membership_position
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -179,7 +180,7 @@ async def test_batch_projection_failure_rolls_back_all_records_and_receipt(
     store = EventJournalStore.open_sqlite(tmp_path / "journal.db")
     batch = SyncBatch(uuid4(), 1, (message("$first"), message("$second")))
     principal = await principal_for(store, batch.stream_id)
-    original = journal_store._snapshot_interactive_source
+    original = journal._snapshot_interactive_source
 
     def block_second(transaction: Transaction, principal_id: str, event: InboundEvent) -> None:
         if event.event_id == "$second":
@@ -187,13 +188,13 @@ async def test_batch_projection_failure_rolls_back_all_records_and_receipt(
             raise DeliveryProjectionPendingError(message)
         original(transaction, principal_id, event)
 
-    monkeypatch.setattr(journal_store, "_snapshot_interactive_source", block_second)
+    monkeypatch.setattr(journal, "_snapshot_interactive_source", block_second)
     session = Session(batch)
     with pytest.raises(DeliveryProjectionPendingError):
         await consume_one_ingestion_batch(session, principal, account_id=ACCOUNT)
     assert not await principal.pending()
     assert session.acked == []
-    monkeypatch.setattr(journal_store, "_snapshot_interactive_source", original)
+    monkeypatch.setattr(journal, "_snapshot_interactive_source", original)
     facts = await consume_one_ingestion_batch(session, principal, account_id=ACCOUNT)
     assert facts.receipt_new
     assert [event.event_id for event in await principal.pending()] == ["$first", "$second"]
@@ -483,7 +484,7 @@ async def test_batch_acceptance_rolls_back_with_admission(
     await principal.admit_ingestion_batch(first)
 
     def fail_after_admission(transaction: Transaction) -> None:
-        journal_store._admit_ingestion_batch(transaction, ACCOUNT, second)
+        journal.admit_ingestion_batch(transaction, ACCOUNT, second)
         message = "abort admission transaction"
         raise RuntimeError(message)
 
@@ -563,7 +564,7 @@ async def test_membership_tenure_fences_departed_work_and_retains_rejoin_epoch(
     assert facts[1].semantic_event_new
     assert not facts[3].semantic_event_new
     assert facts[5].semantic_event_new
-    position = await principal.membership_position(ROOM)
+    position = await membership_position(principal, ROOM)
     assert position.membership == "join"
     assert position.membership_epoch == 1
     assert [event.event_id for event in await principal.pending()] == ["$after"]
@@ -713,11 +714,11 @@ async def test_initial_nonjoined_producer_position_stays_fenced(
     principal = await principal_for(store, stream)
     record = SyncRecord(RecordKind.ROOM_LIFECYCLE, ROOM, {}, membership=OwnMembership(None, membership, 0, 0))
     await consume_one_ingestion_batch(Session(SyncBatch(stream, 1, (record,))), principal, account_id=ACCOUNT)
-    position = await principal.membership_position(ROOM)
+    position = await membership_position(principal, ROOM)
     assert (position.membership, position.membership_epoch) == ("leave", 0)
     record = SyncRecord(RecordKind.ROOM_LIFECYCLE, ROOM, {}, membership=OwnMembership(membership, "join", 0, 0))
     await consume_one_ingestion_batch(Session(SyncBatch(stream, 2, (record,))), principal, account_id=ACCOUNT)
-    position = await principal.membership_position(ROOM)
+    position = await membership_position(principal, ROOM)
     assert (position.membership, position.membership_epoch) == ("join", 0)
 
 
@@ -732,20 +733,20 @@ async def test_producer_membership_position_rolls_back_with_failed_admission(
     principal = await principal_for(store, stream)
     record = SyncRecord(RecordKind.ROOM_LIFECYCLE, ROOM, {}, membership=OwnMembership(None, "join", 0, 0))
     batch = SyncBatch(stream, 1, (record, message("$blocked")))
-    snapshot = journal_store._snapshot_interactive_source
+    snapshot = journal._snapshot_interactive_source
 
     def blocked(_transaction: Transaction, _principal_id: str, _event: InboundEvent) -> None:
         message = "pending projection"
         raise DeliveryProjectionPendingError(message)
 
-    monkeypatch.setattr(journal_store, "_snapshot_interactive_source", blocked)
+    monkeypatch.setattr(journal, "_snapshot_interactive_source", blocked)
     with pytest.raises(DeliveryProjectionPendingError):
         await consume_one_ingestion_batch(Session(batch), principal, account_id=ACCOUNT)
-    assert await principal.membership_position(ROOM) == RoomMembershipPosition("leave", 0)
+    assert await membership_position(principal, ROOM) == RoomMembershipPosition("leave", 0)
     assert await principal.ingestion_membership_position(ROOM) is None
-    monkeypatch.setattr(journal_store, "_snapshot_interactive_source", snapshot)
+    monkeypatch.setattr(journal, "_snapshot_interactive_source", snapshot)
     await consume_one_ingestion_batch(Session(batch), principal, account_id=ACCOUNT)
-    assert await principal.membership_position(ROOM) == RoomMembershipPosition("join", 0)
+    assert await membership_position(principal, ROOM) == RoomMembershipPosition("join", 0)
     assert await principal.ingestion_membership_position(ROOM) == RoomMembershipPosition("join", 0)
     assert [event.event_id for event in await principal.pending()] == ["$blocked"]
 
@@ -763,5 +764,5 @@ async def test_membership_rejects_a_skipped_producer_epoch(
     invalid = SyncRecord(RecordKind.ROOM_LIFECYCLE, ROOM, {}, membership=OwnMembership("join", "leave", 1, 2))
     with pytest.raises(IngestionBatchIntegrityError):
         await consume_one_ingestion_batch(Session(SyncBatch(stream, 2, (invalid,))), principal, account_id=ACCOUNT)
-    assert await principal.membership_position(ROOM) == RoomMembershipPosition("join", 0)
+    assert await membership_position(principal, ROOM) == RoomMembershipPosition("join", 0)
     assert await principal.ingestion_membership_position(ROOM) == RoomMembershipPosition("join", 0)

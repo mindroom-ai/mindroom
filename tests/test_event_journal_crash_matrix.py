@@ -36,7 +36,7 @@ from mindroom.event_journal import (
     EventKind,
 )
 from mindroom.event_journal.matrix_delivery import MatrixDeliveryWorker
-from mindroom.event_journal.store import _DEFAULT_UNACKNOWLEDGED_LIMIT as _UNACKNOWLEDGED_BATCH
+from mindroom.event_journal.views import _DEFAULT_UNACKNOWLEDGED_LIMIT as _UNACKNOWLEDGED_BATCH
 from mindroom.matrix.journal_ingress import _inbound_event, _projected_event
 from mindroom.pending_event_worker import PendingEventWorker
 from tests.conftest import (

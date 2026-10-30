@@ -59,6 +59,7 @@ from tests.conftest import (
     test_runtime_paths,
 )
 from tests.identity_helpers import entity_ids
+from tests.journal_helpers import membership_position
 from tests.journal_membership_helpers import admit_room_membership
 
 if TYPE_CHECKING:
@@ -798,7 +799,7 @@ async def test_stale_client_room_after_leave_cannot_reopen_cache(
 
     assert raised.value is failure
     join_room.assert_awaited_once_with(bot.client, room_id)
-    assert await bot.journal_principal().membership_position(room_id) == RoomMembershipPosition("leave", 1)
+    assert await membership_position(bot.journal_principal(), room_id) == RoomMembershipPosition("leave", 1)
     assert bot._room_lifecycle.decrypt_notice_is_fenced(room_id)
 
 

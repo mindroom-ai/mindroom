@@ -58,6 +58,7 @@ from tests.conftest import (
     swap_fleet_bot,
     test_runtime_paths,
 )
+from tests.journal_helpers import membership_position
 from tests.journal_membership_helpers import admit_room_membership
 
 if TYPE_CHECKING:
@@ -1251,7 +1252,7 @@ async def test_replayed_truncated_leave_cannot_fence_a_rejoined_membership(tmp_p
     with pytest.raises(IngestionBatchSequenceError):
         await principal.admit_ingestion_batch(IngestionBatchAdmission(_STREAM_ID, 1, (admission,)))
 
-    assert await principal.membership_position(room_id) == RoomMembershipPosition("join", 1)
+    assert await membership_position(principal, room_id) == RoomMembershipPosition("join", 1)
 
 
 @pytest.mark.asyncio
