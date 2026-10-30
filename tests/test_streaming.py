@@ -215,8 +215,12 @@ async def test_a_refused_flush_before_an_approval_pause_cannot_show_the_pause(co
 
 @pytest.mark.asyncio
 @pytest.mark.usefixtures("fake_clock")
-async def test_a_progress_edit_that_fails_as_the_stream_pauses_cannot_show_the_pause(config: Config) -> None:
-    """A progress edit that fails while a pausing stream stops its delivery leaves a pause that could not be shown."""
+@pytest.mark.parametrize("ending", ["finished", "paused"])
+async def test_a_progress_edit_that_fails_while_the_stream_stops_fails_the_stream(config: Config, ending: str) -> None:
+    """A progress edit that fails while the stream stops its delivery fails the stream, which writes no ending.
+
+    A stream pausing for approval then fails as a pause that could not be shown.
+    """
     suspension = StreamingLifecycleSuspensionError("paused")
     gateway = _FakeGateway()
     edit_started = asyncio.Event()
@@ -227,24 +231,75 @@ async def test_a_progress_edit_that_fails_as_the_stream_pauses_cannot_show_the_p
         assert pump is not None
         # Stopping the stream sets the pump's shutdown first, so the edit fails while the stream stops its delivery.
         # That shutdown is a threading event, which cannot be awaited.
-        while not pump.shutdown.is_set():  # noqa: ASYNC110
-            await asyncio.sleep(0)
+        async with asyncio.timeout(5):
+            while not pump.shutdown.is_set():  # noqa: ASYNC110
+                await asyncio.sleep(0)
 
-    async def suspended_stream() -> AsyncIterator[object]:
+    async def stream() -> AsyncIterator[object]:
         yield TextDelta("I checked the input.")
         await gateway.wait_for_ops(1)
         yield TextDelta(" Then more.")
         await edit_started.wait()
-        raise suspension
+        if ending == "paused":
+            raise suspension
 
     with (
         patch("mindroom.streaming.edit_message_result", new=refuse_once_the_stream_stops),
-        pytest.raises(PausePresentationError) as raised,
+        pytest.raises(StreamingDeliveryError) as raised,
     ):
-        await _run_stream(config, suspended_stream(), hooks=gateway.hooks())
+        await _run_stream(config, stream(), hooks=gateway.hooks())
 
+    assert type(raised.value) is (PausePresentationError if ending == "paused" else StreamingDeliveryError)
     assert "Failed to edit streaming message" in str(raised.value.error)
+    assert [op.kind for op in gateway.ops] == ["send"]
     assert suspension.presentation is None
+
+
+@pytest.mark.asyncio
+async def test_a_progress_drain_failure_seen_only_as_the_stream_stops_fails_the_stream(config: Config) -> None:
+    """A worker-progress failure that lands after the last chunk still fails the stream, which writes no ending."""
+    gateway = _FakeGateway()
+
+    async def no_chunks() -> AsyncIterator[object]:
+        return
+        yield  # pragma: no cover
+
+    async def finish_once_the_drain_failed(
+        _response_stream: AsyncIterator[object],
+        _streaming: StreamingResponse,
+        progress_task: asyncio.Task[None] | None,
+        _delivery_task: asyncio.Task[None] | None,
+        _delivery_queue: asyncio.Queue[object | None],
+        _placeholder_ready: Callable[[], Awaitable[bool]] | None,
+    ) -> None:
+        pump = get_worker_progress_pump()
+        assert pump is not None
+        assert progress_task is not None
+        pump.queue.put_nowait(
+            WorkerProgressEvent(
+                tool_name="shell",
+                function_name="run",
+                progress=WorkerReadyProgress(
+                    phase="cold_start",
+                    worker_key="worker-a",
+                    backend_name="kubernetes",
+                    elapsed_seconds=2.0,
+                ),
+            ),
+        )
+        await asyncio.wait({progress_task})
+
+    with (
+        patch("mindroom.streaming._consume_stream_with_progress_supervision", new=finish_once_the_drain_failed),
+        patch(
+            "mindroom.streaming_warmup.WorkerWarmupState.apply_event",
+            side_effect=RuntimeError("worker progress broke"),
+        ),
+        pytest.raises(StreamingDeliveryError, match="worker progress broke"),
+    ):
+        await _run_stream(config, no_chunks(), hooks=gateway.hooks())
+
+    assert gateway.ops == []
 
 
 def test_a_stream_failure_without_text_still_names_its_reason() -> None:
@@ -1236,16 +1291,19 @@ async def test_a_stream_ends_only_after_a_progress_edit_past_the_drain_deadline_
     hooks = FakeReplyRecords(send=gateway.send, edit=terminal_edit).hooks()
     with patch("mindroom.streaming.edit_message_result", new=blocking.edit):
         stream_task = asyncio.create_task(_run_stream(config, stream(), hooks=hooks))
-        await blocking.started.wait()
-        if ending == "cancelled":
-            stream_task.cancel()
-        # The deadline passed and the stop cancelled the edit, which is still in flight.
-        await blocking.cancel_seen.wait()
-        for _ in range(50):
-            await asyncio.sleep(0)
-        assert not stream_task.done()
-        assert blocking.landed == []
-        blocking.release.set()
+        try:
+            await blocking.started.wait()
+            if ending == "cancelled":
+                stream_task.cancel()
+            # The deadline passed and the stop cancelled the edit, which is still in flight.
+            async with asyncio.timeout(5):
+                await blocking.cancel_seen.wait()
+            for _ in range(50):
+                await asyncio.sleep(0)
+            assert not stream_task.done()
+            assert blocking.landed == []
+        finally:
+            blocking.release.set()
         [outcome] = await asyncio.gather(stream_task, return_exceptions=True)
 
     assert blocking.landed == (["progress", "terminal"] if ending == "finished" else ["progress"])
@@ -1283,12 +1341,15 @@ async def test_a_shutdown_while_a_stream_waits_out_a_progress_edit_propagates_on
 
     with patch("mindroom.streaming.edit_message_result", new=blocking.edit):
         stream_task = asyncio.create_task(_run_stream(config, stream(), hooks=gateway.hooks()))
-        await blocking.cancel_seen.wait()
-        request_task_cancel(stream_task, process_shutdown=True)
-        with pytest.raises(asyncio.CancelledError):
-            await stream_task
-        assert blocking.finished.is_set()
-        blocking.release.set()
+        try:
+            async with asyncio.timeout(5):
+                await blocking.cancel_seen.wait()
+            request_task_cancel(stream_task, process_shutdown=True)
+            with pytest.raises(asyncio.CancelledError):
+                await stream_task
+            assert blocking.finished.is_set()
+        finally:
+            blocking.release.set()
 
     assert blocking.landed == []
     assert [op.kind for op in gateway.ops] == ["send"]
