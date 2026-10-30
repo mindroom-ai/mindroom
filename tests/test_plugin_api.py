@@ -223,8 +223,8 @@ _SIGNATURES = {
         "message_received_depth, declined, decline_reason)"
     ),
     "ToolEnvironmentContext": (
-        f"({_TOOL_HOOK}, function_name, registered_toolkit, arguments, agent_name, room_id, requester_id, declined, "
-        "decline_reason)"
+        f"({_TOOL_HOOK}, function_name, registered_toolkit, arguments, agent_name, room_id, requester_id, "
+        "message_received_depth, declined, decline_reason)"
     ),
     "ToolRuntimeContext": (
         "(agent_name, target, requester_id, client, config, runtime_paths, plugins, conversation_reader, relations, "
