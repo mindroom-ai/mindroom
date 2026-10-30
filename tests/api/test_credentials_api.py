@@ -65,17 +65,6 @@ def _config_with_worker_scope(
     return config
 
 
-def _use_owner_runtime(api_app: object, matrix_user_id: str = "@alice:example.org") -> constants.RuntimePaths:
-    runtime_paths = main._app_runtime_paths(api_app)
-    owner_runtime_paths = constants.resolve_primary_runtime_paths(
-        config_path=runtime_paths.config_path,
-        storage_path=runtime_paths.storage_root,
-        process_env={constants.OWNER_MATRIX_USER_ID_ENV: matrix_user_id},
-    )
-    initialize_api_app(api_app, owner_runtime_paths)
-    return owner_runtime_paths
-
-
 @pytest.fixture
 def client(tmp_path: Path) -> TestClient:
     """Create a test client for the API."""
@@ -302,7 +291,6 @@ class TestCredentialsAPI:
                 },
             ),
         )
-        config_lifecycle.app_state(client.app).api_auth_state = None
 
         expected_worker_key = resolve_worker_key(
             "shared",
@@ -394,7 +382,6 @@ class TestCredentialsAPI:
         client: TestClient,
     ) -> None:
         """Dashboard service listing should support private scoped OAuth services."""
-        _use_owner_runtime(client.app)
         config = _config_with_worker_scope("user")
         publish_api_config(client.app, config)
         response = client.get("/api/credentials/list?agent_name=general")
@@ -973,7 +960,7 @@ class TestCredentialsAPI:
         client: TestClient,
     ) -> None:
         """OAuth client config is deployment config even when edited from an agent-scoped view."""
-        runtime_paths = _use_owner_runtime(client.app)
+        runtime_paths = main._app_runtime_paths(client.app)
         config = _config_with_worker_scope("shared")
         publish_api_config(client.app, config)
         manager = get_runtime_credentials_manager(runtime_paths)
@@ -1020,7 +1007,7 @@ class TestCredentialsAPI:
         client: TestClient,
     ) -> None:
         """OAuth client config may be edited from private agent scopes but stays global."""
-        runtime_paths = _use_owner_runtime(client.app)
+        runtime_paths = main._app_runtime_paths(client.app)
         config = _config_with_worker_scope("user_agent")
         publish_api_config(client.app, config)
         manager = get_runtime_credentials_manager(runtime_paths)
@@ -1062,7 +1049,7 @@ class TestCredentialsAPI:
         client: TestClient,
     ) -> None:
         """Plugin OAuth client config should not use worker credential storage."""
-        runtime_paths = _use_owner_runtime(client.app)
+        runtime_paths = main._app_runtime_paths(client.app)
         config = _config_with_worker_scope("shared")
         publish_api_config(client.app, config)
         manager = get_runtime_credentials_manager(runtime_paths)
@@ -1290,7 +1277,6 @@ class TestCredentialsAPI:
         client: TestClient,
     ) -> None:
         """OAuth-backed tool options may save in private scopes without replacing tokens."""
-        _use_owner_runtime(client.app)
         config = _config_with_worker_scope("user_agent")
         publish_api_config(client.app, config)
         runtime_paths = main._app_runtime_paths(client.app)
@@ -1345,7 +1331,6 @@ class TestCredentialsAPI:
         client: TestClient,
     ) -> None:
         """Private-scope OAuth config reads should not return stored OAuth tokens."""
-        _use_owner_runtime(client.app)
         config = _config_with_worker_scope("user_agent")
         publish_api_config(client.app, config)
         runtime_paths = main._app_runtime_paths(client.app)
@@ -1404,7 +1389,6 @@ class TestCredentialsAPI:
         client: TestClient,
     ) -> None:
         """Private-scope OAuth tool settings should appear in service listings."""
-        _use_owner_runtime(client.app)
         config = _config_with_worker_scope("user_agent")
         publish_api_config(client.app, config)
         runtime_paths = main._app_runtime_paths(client.app)
@@ -1445,7 +1429,6 @@ class TestCredentialsAPI:
         client: TestClient,
     ) -> None:
         """Shared-scope listings must hide registered, orphaned, and stale OAuth token stores."""
-        _use_owner_runtime(client.app)
         config = _config_with_worker_scope("shared")
         publish_api_config(client.app, config)
         runtime_paths = main._app_runtime_paths(client.app)
@@ -1511,7 +1494,6 @@ class TestCredentialsAPI:
         client: TestClient,
     ) -> None:
         """Private-agent self-service stays limited to registered connection credentials."""
-        _use_owner_runtime(client.app)
         config = _config_with_worker_scope(
             None,
             administrators=[],
@@ -1528,7 +1510,7 @@ class TestCredentialsAPI:
 
     def test_private_agent_requester_cannot_edit_global_oauth_client_config(self, client: TestClient) -> None:
         """Private-agent ownership must not grant deployment-global OAuth client authority."""
-        runtime_paths = _use_owner_runtime(client.app)
+        runtime_paths = main._app_runtime_paths(client.app)
         config = _config_with_worker_scope(
             None,
             administrators=["@admin:example.org"],
@@ -1554,7 +1536,7 @@ class TestCredentialsAPI:
         method: str,
     ) -> None:
         """Neither global access nor agent-manager authority may edit deployment-global OAuth clients."""
-        runtime_paths = _use_owner_runtime(client.app)
+        runtime_paths = main._app_runtime_paths(client.app)
         config = _config_with_worker_scope(
             "shared",
             administrators=["@admin:example.org"],
@@ -1584,7 +1566,7 @@ class TestCredentialsAPI:
     @pytest.mark.parametrize("agent_name", [None, "general"])
     def test_admin_can_manage_global_oauth_client_config(self, client: TestClient, agent_name: str | None) -> None:
         """Platform administrators retain global OAuth client configuration authority."""
-        runtime_paths = _use_owner_runtime(client.app)
+        runtime_paths = main._app_runtime_paths(client.app)
         config = _config_with_worker_scope("shared")
         publish_api_config(client.app, config)
         query = f"?agent_name={agent_name}" if agent_name is not None else ""

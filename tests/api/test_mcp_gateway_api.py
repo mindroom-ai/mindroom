@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import asyncio
 import base64
-import copy
 import hashlib
 import json
 import threading
@@ -460,10 +459,7 @@ def test_native_dispatch_rejects_changed_publication(
             state = config_lifecycle.require_api_state(gateway_app)
             original = state.snapshot
             assert original.runtime_config is not None
-            # A tool reads the file, changes it, and commits, so the gateway's config must exist on disk first.
-            authored = original.runtime_config.authored_model_dump()
-            original.runtime_paths.config_path.write_text(yaml.safe_dump(authored), encoding="utf-8")
-            updated = copy.deepcopy(authored)
+            updated = original.runtime_config.authored_model_dump()
             if change == "remove":
                 updated["agents"]["personal"]["tools"] = []
             elif change == "scope":

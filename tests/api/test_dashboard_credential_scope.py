@@ -288,23 +288,13 @@ class TestRequireAgentCredentialManagementAuthorized:
             )
         assert exc_info.value.status_code == 403
 
-    def test_dashboard_user_without_matrix_identity_is_rejected_by_allowlist(self) -> None:
-        """A dashboard user without a Matrix identity fails a Matrix-ID allowlist."""
+    @pytest.mark.parametrize("credential_managers", [_credential_managers, None], ids=["allowlist", "no-managers"])
+    def test_dashboard_user_without_matrix_identity_is_rejected(self, credential_managers: list[str] | None) -> None:
+        """A dashboard user without a Matrix identity fails a Matrix-ID allowlist and has no authority without one."""
         with pytest.raises(HTTPException) as exc_info:
             require_agent_credential_management_authorized(
                 _request(AuthUser(user_id="alice", email=None, source=AuthSource.PLATFORM)),
-                config=_config(credential_managers=self._credential_managers),
-                runtime_paths=self._runtime_paths(),
-                agent_name="general",
-            )
-        assert exc_info.value.status_code == 403
-
-    def test_dashboard_user_is_rejected_when_no_credential_manager_is_configured(self) -> None:
-        """An authenticated dashboard user still needs explicit credential authority."""
-        with pytest.raises(HTTPException) as exc_info:
-            require_agent_credential_management_authorized(
-                _request(AuthUser(user_id="alice", email=None, source=AuthSource.PLATFORM)),
-                config=_config(),
+                config=_config(credential_managers=credential_managers),
                 runtime_paths=self._runtime_paths(),
                 agent_name="general",
             )
