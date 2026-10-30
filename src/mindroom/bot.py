@@ -88,7 +88,6 @@ from .conversation_state_writer import ConversationStateWriter, ConversationStat
 from .delivery_gateway import (
     DeliveryGateway,
     DeliveryGatewayDeps,
-    ResponseHookService,
     SendTextRequest,
 )
 from .edit_regenerator import EditRegenerator, EditRegeneratorDeps
@@ -126,7 +125,7 @@ from .reply_scope import ReplyRuntime
 from .reply_turn.inbox import InboxResponses
 from .reply_turn.locked_turn import LockedTurns, ReplyTurnDeps
 from .response_admission import admitted_response_decision
-from .response_lifecycle import ResponseLifecycleCoordinator
+from .response_lifecycle import ResponseHookService, ResponseLifecycleCoordinator
 from .response_payload_preparation import ResponsePayloadPreparer
 from .response_runner import ResponseRunner
 from .response_shutdown_diagnostics import DeferredStopPhase

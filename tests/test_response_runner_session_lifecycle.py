@@ -200,7 +200,7 @@ async def test_generate_response_emits_cancelled_hook_once_for_empty_prompt(
             storage_path=tmp_path,
             requester_id="@alice:localhost",
         )
-        coordinator.deps.delivery_gateway.deps.response_hooks.emit_cancelled_response.reset_mock()
+        coordinator.deps.delivery_gateway.deps.response_hooks._emit_cancelled_response.reset_mock()
 
         fate = await coordinator.generate_response(
             _response_request(prompt="   ", user_id="@alice:localhost"),
@@ -208,9 +208,9 @@ async def test_generate_response_emits_cancelled_hook_once_for_empty_prompt(
 
     # The claimed reply ended showing nothing; its records hold the source.
     assert fate == Owned()
-    coordinator.deps.delivery_gateway.deps.response_hooks.emit_cancelled_response.assert_awaited_once()
+    coordinator.deps.delivery_gateway.deps.response_hooks._emit_cancelled_response.assert_awaited_once()
     assert (
-        coordinator.deps.delivery_gateway.deps.response_hooks.emit_cancelled_response.await_args.kwargs[
+        coordinator.deps.delivery_gateway.deps.response_hooks._emit_cancelled_response.await_args.kwargs[
             "failure_reason"
         ]
         == "empty_prompt"
@@ -231,7 +231,7 @@ def _before_response_stopped_runner(tmp_path: Path) -> tuple[ResponseRunner, Con
         requester_id="@alice:localhost",
         message_target=MessageTarget.resolve("!test:localhost", "$thread-root", "$user_msg"),
     )
-    coordinator.deps.delivery_gateway.deps.response_hooks._apply_before_response = AsyncMock(
+    coordinator.deps.delivery_gateway.deps.response_hooks.apply_before_response = AsyncMock(
         side_effect=asyncio.CancelledError(USER_STOP_CANCEL_MSG),
     )
     return coordinator, config, runtime_paths
@@ -248,7 +248,7 @@ async def test_a_before_response_cancellation_ends_the_reply_stopped_by_the_user
     ):
         await coordinator.generate_response(_thread_request())
 
-    cancelled = coordinator.deps.delivery_gateway.deps.response_hooks.emit_cancelled_response
+    cancelled = coordinator.deps.delivery_gateway.deps.response_hooks._emit_cancelled_response
     cancelled.assert_awaited_once()
     assert cancelled.await_args.kwargs["failure_reason"] == "cancelled_by_user"
 
@@ -298,7 +298,7 @@ async def test_a_user_stop_mid_stream_ends_the_reply_stopped_by_the_user(
         coordinator.deps.delivery_gateway.deliver_stream.side_effect = stopped_delivery
         finalize = AsyncMock()
         _set_gateway_method(coordinator.deps.delivery_gateway, "finalize_streamed_response", finalize)
-        coordinator.deps.delivery_gateway.deps.response_hooks.emit_cancelled_response.reset_mock()
+        coordinator.deps.delivery_gateway.deps.response_hooks._emit_cancelled_response.reset_mock()
 
         with patch(
             "mindroom.response_runner.stream_agent_response",
@@ -309,7 +309,7 @@ async def test_a_user_stop_mid_stream_ends_the_reply_stopped_by_the_user(
     assert response_event_id == Owned()
     assert _answering_event(effects) == "$thinking"
     finalize.assert_not_awaited()
-    cancelled = coordinator.deps.delivery_gateway.deps.response_hooks.emit_cancelled_response
+    cancelled = coordinator.deps.delivery_gateway.deps.response_hooks._emit_cancelled_response
     cancelled.assert_awaited_once()
     assert cancelled.await_args.kwargs["failure_reason"] == "cancelled_by_user"
 
@@ -1405,15 +1405,15 @@ async def test_generate_response_locked_reports_plain_streaming_exception_as_err
     # The error note replaces the placeholder, which stays the reply's visible message.
     assert resolution == Owned()
     assert _answering_event(effects) == "$thinking"
-    coordinator.deps.delivery_gateway.deps.response_hooks.emit_cancelled_response.assert_awaited_once()
+    coordinator.deps.delivery_gateway.deps.response_hooks._emit_cancelled_response.assert_awaited_once()
     assert (
-        coordinator.deps.delivery_gateway.deps.response_hooks.emit_cancelled_response.await_args.kwargs[
+        coordinator.deps.delivery_gateway.deps.response_hooks._emit_cancelled_response.await_args.kwargs[
             "visible_response_event_id"
         ]
         == "$thinking"
     )
     assert (
-        coordinator.deps.delivery_gateway.deps.response_hooks.emit_cancelled_response.await_args.kwargs[
+        coordinator.deps.delivery_gateway.deps.response_hooks._emit_cancelled_response.await_args.kwargs[
             "failure_reason"
         ]
         == "error"

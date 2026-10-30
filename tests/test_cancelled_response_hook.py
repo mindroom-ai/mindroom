@@ -22,7 +22,6 @@ from mindroom.delivery_gateway import (
     DeliveryGatewayDeps,
     FinalDeliveryRequest,
     FinalizeStreamedResponseRequest,
-    ResponseHookService,
     ResponseIdentity,
 )
 from mindroom.dispatch_source import EDIT_SOURCE_KIND, MESSAGE_SOURCE_KIND
@@ -59,7 +58,7 @@ from mindroom.matrix.users import AgentMatrixUser
 from mindroom.message_target import MessageTarget
 from mindroom.post_response_effects import PostResponseEffectsDeps, ResponseOutcome
 from mindroom.reply_turn.request import ResponseRequest
-from mindroom.response_lifecycle import ResponseLifecycle, ResponseLifecycleDeps
+from mindroom.response_lifecycle import ResponseHookService, ResponseLifecycle, ResponseLifecycleDeps
 from mindroom.response_sources import Owned, ResponseSources
 from mindroom.turn_record import TurnRecord
 from tests.access_schema_support import with_current_room_member_access
@@ -365,7 +364,7 @@ async def test_cancelled_hook_respects_agent_and_room_scope(tmp_path: Path) -> N
 
 @pytest.mark.asyncio
 async def test_response_hook_service_emit_cancelled(tmp_path: Path) -> None:
-    """ResponseHookService.emit_cancelled_response should emit via the registry."""
+    """ResponseHookService._emit_cancelled_response should emit via the registry."""
     seen: list[CancelledResponseInfo] = []
 
     @hook(EVENT_MESSAGE_CANCELLED)
@@ -385,7 +384,7 @@ async def test_response_hook_service_emit_cancelled(tmp_path: Path) -> None:
     )
     service = ResponseHookService(hook_context=hook_context)
 
-    await service.emit_cancelled_response(
+    await service._emit_cancelled_response(
         identity=ResponseIdentity(
             response_kind="ai",
             response_envelope=_envelope(),
@@ -401,7 +400,7 @@ async def test_response_hook_service_emit_cancelled(tmp_path: Path) -> None:
 
 @pytest.mark.asyncio
 async def test_response_hook_service_skips_when_no_hooks(tmp_path: Path) -> None:
-    """emit_cancelled_response should be a no-op when no hooks are registered."""
+    """_emit_cancelled_response should be a no-op when no hooks are registered."""
     registry = HookRegistry.from_plugins([])
     config = _config(tmp_path)
     rp = runtime_paths_for(config)
@@ -416,7 +415,7 @@ async def test_response_hook_service_skips_when_no_hooks(tmp_path: Path) -> None
     service = ResponseHookService(hook_context=hook_context)
 
     # Should not raise
-    await service.emit_cancelled_response(
+    await service._emit_cancelled_response(
         identity=ResponseIdentity(
             response_kind="ai",
             response_envelope=_envelope(),
@@ -446,7 +445,7 @@ def _after_response_service(
 async def _emit_after_response(service: ResponseHookService, *, response_kind: str) -> None:
     """Emit one final reply, then wait for what the service started in the background."""
     envelope = _envelope()
-    await service.emit_after_response(
+    await service._emit_after_response(
         identity=ResponseIdentity(
             response_kind=response_kind,
             response_envelope=envelope,
@@ -492,7 +491,7 @@ async def test_after_response_does_not_wait_for_the_reply_mirror(tmp_path: Path)
     )
 
     await asyncio.wait_for(
-        service.emit_after_response(
+        service._emit_after_response(
             identity=identity,
             response_text="final reply",
             response_event_id="$reply",
@@ -516,7 +515,7 @@ async def test_after_response_starts_no_task_for_a_reply_the_mirror_declines(tmp
 
     service = _after_response_service(tmp_path, declining_mirror)
 
-    with capture_logs() as logs, patch("mindroom.delivery_gateway.create_background_task") as create_task:
+    with capture_logs() as logs, patch("mindroom.response_lifecycle.create_background_task") as create_task:
         await _emit_after_response(service, response_kind="ai")
 
     assert seen == ["final reply"]
@@ -574,7 +573,7 @@ async def test_team_bot_empty_prompt_emits_cancelled_hook_once(tmp_path: Path) -
     with (
         patch.object(
             bot._delivery_gateway.deps.response_hooks,
-            "emit_cancelled_response",
+            "_emit_cancelled_response",
             new=AsyncMock(),
         ) as mock_emit,
         patch("mindroom.response_lifecycle.apply_post_response_effects", new=AsyncMock(return_value=None)),
@@ -644,7 +643,7 @@ async def test_team_edit_regeneration_empty_prompt_emits_cancelled_hook_once(tmp
     with (
         patch.object(
             bot._delivery_gateway.deps.response_hooks,
-            "emit_cancelled_response",
+            "_emit_cancelled_response",
             new=AsyncMock(),
         ) as mock_emit,
         patch("mindroom.response_lifecycle.apply_post_response_effects", new=AsyncMock(return_value=None)),
@@ -918,7 +917,7 @@ async def test_process_shutdown_escapes_real_best_effort_final_response_transfor
         sources=ResponseSources((_envelope().source_event_id,), (_envelope().source_event_id,)),
     )
     task = asyncio.create_task(
-        response_hooks._apply_final_response_transform(
+        response_hooks.apply_final_response_transform(
             identity=identity,
             response_text="visible response",
         ),
@@ -1279,8 +1278,8 @@ async def test_a_suspended_reply_applies_its_run_effects_only_once_its_run_finis
 
     with (
         patch("mindroom.response_lifecycle.apply_post_response_effects", new=post_effects),
-        patch.object(response_hooks, "emit_after_response", new=after_response),
-        patch.object(response_hooks, "emit_cancelled_response", new=cancelled),
+        patch.object(response_hooks, "_emit_after_response", new=after_response),
+        patch.object(response_hooks, "_emit_cancelled_response", new=cancelled),
     ):
         outcome = await lifecycle.finalize(
             FinalDeliveryOutcome(ending=ending, event_id=None),

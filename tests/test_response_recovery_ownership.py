@@ -100,7 +100,7 @@ async def test_preparation_outcomes_reach_dispatch_and_journal_owners(  # noqa: 
     )
     runner = _runner_on(bot, gateway, principal)
     turn_dispatcher = bot._turn_dispatcher
-    gateway.deps.response_hooks.emit_cancelled_response = AsyncMock()
+    gateway.deps.response_hooks._emit_cancelled_response = AsyncMock()
 
     async def settle_ignored(sources: tuple[str, ...]) -> None:
         for source in sources:

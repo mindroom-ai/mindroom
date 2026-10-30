@@ -1426,7 +1426,7 @@ class TestAgentBot(AgentBotTestBase):
             bot,
             redact_message_event=redact_message_event,
             response_hooks=SimpleNamespace(
-                _apply_before_response=AsyncMock(
+                apply_before_response=AsyncMock(
                     return_value=SimpleNamespace(
                         response_text="Handled",
                         response_kind="ai",
@@ -1436,8 +1436,8 @@ class TestAgentBot(AgentBotTestBase):
                         suppress=True,
                     ),
                 ),
-                emit_after_response=AsyncMock(),
-                emit_cancelled_response=AsyncMock(),
+                _emit_after_response=AsyncMock(),
+                _emit_cancelled_response=AsyncMock(),
             ),
         )
 
@@ -1497,7 +1497,7 @@ class TestAgentBot(AgentBotTestBase):
             bot,
             redact_message_event=redact_message_event,
             response_hooks=SimpleNamespace(
-                _apply_before_response=AsyncMock(
+                apply_before_response=AsyncMock(
                     return_value=SimpleNamespace(
                         response_text="Handled",
                         response_kind="ai",
@@ -1507,8 +1507,8 @@ class TestAgentBot(AgentBotTestBase):
                         suppress=True,
                     ),
                 ),
-                emit_after_response=AsyncMock(),
-                emit_cancelled_response=AsyncMock(),
+                _emit_after_response=AsyncMock(),
+                _emit_cancelled_response=AsyncMock(),
             ),
         )
 

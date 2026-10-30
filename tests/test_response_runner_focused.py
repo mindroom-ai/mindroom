@@ -5363,7 +5363,7 @@ async def test_non_streaming_final_delivery_exposes_fixed_shutdown_phase(tmp_pat
             await release_finalization.wait()
             raise
 
-    coordinator.deps.delivery_gateway.deps.response_hooks._apply_before_response = AsyncMock(
+    coordinator.deps.delivery_gateway.deps.response_hooks.apply_before_response = AsyncMock(
         side_effect=retained_before_response,
     )
     with _agent_turn(streamed_answer(AsyncMock(return_value="final text")), streaming=False):
@@ -6610,7 +6610,7 @@ async def test_process_shutdown_propagates_from_visible_response_hooks(
         hook_started.set()
         await asyncio.Event().wait()
 
-    lifecycle.deps.response_hooks.emit_after_response = AsyncMock(
+    lifecycle.deps.response_hooks._emit_after_response = AsyncMock(
         side_effect=blocked_hook,
     )
     post_effects = AsyncMock()
@@ -7069,12 +7069,12 @@ async def test_delivery_failure_emits_cancelled_hook_and_passes_error_outcome_to
         patch.object(DeliveryGateway, "deliver_final", new=AsyncMock(return_value=error_outcome)),
         patch.object(
             bot._delivery_gateway.deps.response_hooks,
-            "emit_after_response",
+            "_emit_after_response",
             new=AsyncMock(),
         ) as mock_after,
         patch.object(
             bot._delivery_gateway.deps.response_hooks,
-            "emit_cancelled_response",
+            "_emit_cancelled_response",
             new=AsyncMock(),
         ) as mock_cancelled,
         patch_response_runner_module(

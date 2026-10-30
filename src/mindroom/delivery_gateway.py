@@ -7,8 +7,6 @@ import json
 import time
 from collections import ChainMap
 from contextlib import asynccontextmanager, suppress
-from contextvars import Context
-from copy import deepcopy
 from dataclasses import dataclass, field, replace
 from html import escape as html_escape
 from typing import TYPE_CHECKING, Any, Literal, cast
@@ -19,7 +17,6 @@ import nio
 
 from mindroom import constants, interactive
 from mindroom import reply_lifecycle as rl
-from mindroom.background_tasks import create_background_task
 from mindroom.cancellation import classify_cancel_source
 from mindroom.constants import ACTING_REQUESTER_KEY, SKIP_MENTIONS_KEY
 from mindroom.dispatch_source import SILENT_SCHEDULE_SOURCE_KIND
@@ -59,24 +56,6 @@ from mindroom.final_delivery import (
     StreamTransportOutcome,
     Suppressed,
     Suppression,
-)
-from mindroom.hooks import (
-    EVENT_MESSAGE_AFTER_RESPONSE,
-    EVENT_MESSAGE_BEFORE_RESPONSE,
-    EVENT_MESSAGE_CANCELLED,
-    EVENT_MESSAGE_FINAL_RESPONSE_TRANSFORM,
-    AfterResponseContext,
-    BeforeResponseContext,
-    CancelledResponseContext,
-    CancelledResponseInfo,
-    FinalResponseDraft,
-    FinalResponseTransformContext,
-    HookContextSupport,
-    ResponseDraft,
-    ResponseResult,
-    emit,
-    emit_final_response_transform,
-    emit_transform,
 )
 from mindroom.logging_config import get_logger
 from mindroom.matrix.client_delivery import (
@@ -128,9 +107,9 @@ from mindroom.reply_scope import (
     terminal_write,
 )
 from mindroom.requester_identity import is_access_checked_requester_id
+from mindroom.response_lifecycle import answer_suppression
 from mindroom.response_shutdown_diagnostics import ResponseShutdownPhase, response_shutdown_phase
 from mindroom.runtime_protocols import SupportsClientConfig  # noqa: TC001
-from mindroom.scheduling.scheduled_run_records import record_silent_schedule_result_if_needed
 from mindroom.stop import send_stop_button
 from mindroom.streaming import (
     USER_STOP_CANCEL_MSG,
@@ -142,11 +121,10 @@ from mindroom.streaming import (
     interactive_response_for_visible_body,
     send_streaming_response,
     stream_progress_edits,
-    strip_matching_visible_tool_markers,
 )
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Awaitable, Callable, Coroutine, Mapping, Sequence
+    from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequence
     from contextlib import AbstractAsyncContextManager
 
     import structlog
@@ -160,7 +138,8 @@ if TYPE_CHECKING:
         CompactionLifecycleStart,
         CompactionOutcome,
     )
-    from mindroom.hooks import MessageEnvelope
+    from mindroom.hooks import MessageEnvelope, ResponseDraft
+    from mindroom.response_lifecycle import ResponseHookService
     from mindroom.response_sources import ResponseSources
     from mindroom.streaming import (
         ProgressDelivered,
@@ -338,6 +317,26 @@ def _with_note(shown: Presentation, note: Segment) -> Presentation:
     return with_trailing_note(shown, note)
 
 
+@dataclass(frozen=True)
+class _NoteRow:
+    """One note row composed from its reply as the reply stands: the write, how it renders, and where it goes."""
+
+    reply: rl.Reply
+    write: ReplyWrite
+    rendered: RenderedReply
+    target: MessageTarget
+
+
+@dataclass(frozen=True)
+class _SentNote:
+    """A note row the reply's rule took or refused."""
+
+    row: _NoteRow
+    # The event the row was delivered as; ``None`` when its delivery failed or the rule refused it.
+    event_id: str | None
+    refused: bool
+
+
 def _shown_before(reply: rl.Reply, handle: SpanHandle | None) -> Presentation:
     """Return what the reply may show now, as its latest write recorded it."""
     stored = reply.possibly_shown if reply.possibly_shown is not None else reply.presentation
@@ -385,133 +384,6 @@ class ResponseIdentity:
     correlation_id: str
     sources: ResponseSources
     participating_agent_names: tuple[str, ...] = ()
-
-
-@dataclass
-class ResponseHookService:
-    """Own response hook execution around final delivery."""
-
-    hook_context: HookContextSupport
-    # Passes each final agent reply on to another surface, or returns None when the reply goes nowhere else, so no
-    # task starts for it. It runs in the background, so a slow surface never holds the response lock that
-    # `emit_after_response` runs under.
-    reply_mirror: Callable[[MessageEnvelope, str], Coroutine[Any, Any, None] | None] | None = None
-
-    async def _apply_before_response(
-        self,
-        *,
-        identity: ResponseIdentity,
-        response_text: str,
-        tool_trace: list[ToolTraceEntry] | None,
-        extra_content: dict[str, Any] | None,
-    ) -> ResponseDraft:
-        draft = ResponseDraft(
-            response_text=response_text,
-            response_kind=identity.response_kind,
-            tool_trace=deepcopy(tool_trace) if tool_trace is not None else None,
-            extra_content=deepcopy(extra_content) if extra_content is not None else None,
-            envelope=identity.response_envelope,
-        )
-        if not self.hook_context.registry.has_hooks(EVENT_MESSAGE_BEFORE_RESPONSE):
-            return draft
-        context = BeforeResponseContext(
-            **self.hook_context.base_kwargs(EVENT_MESSAGE_BEFORE_RESPONSE, identity.correlation_id),
-            draft=draft,
-        )
-        return await emit_transform(self.hook_context.registry, EVENT_MESSAGE_BEFORE_RESPONSE, context)
-
-    async def _apply_final_response_transform(
-        self,
-        *,
-        identity: ResponseIdentity,
-        response_text: str,
-    ) -> FinalResponseDraft:
-        if current_task_is_process_shutdown():
-            raise asyncio.CancelledError
-        draft = FinalResponseDraft(
-            response_text=response_text,
-            response_kind=identity.response_kind,
-            envelope=identity.response_envelope,
-        )
-        if not self.hook_context.registry.has_hooks(EVENT_MESSAGE_FINAL_RESPONSE_TRANSFORM):
-            return draft
-        context = FinalResponseTransformContext(
-            **self.hook_context.base_kwargs(EVENT_MESSAGE_FINAL_RESPONSE_TRANSFORM, identity.correlation_id),
-            draft=draft,
-        )
-        draft = await emit_final_response_transform(
-            self.hook_context.registry,
-            EVENT_MESSAGE_FINAL_RESPONSE_TRANSFORM,
-            context,
-        )
-        if current_task_is_process_shutdown():
-            raise asyncio.CancelledError
-        return draft
-
-    async def emit_after_response(  # noqa: D102
-        self,
-        *,
-        identity: ResponseIdentity,
-        response_text: str,
-        response_event_id: str,
-        delivery_kind: Literal["sent", "edited"],
-        continue_on_cancelled: bool = False,
-    ) -> None:
-        if identity.response_kind == "ai" and self.reply_mirror is not None:
-            try:
-                mirror = self.reply_mirror(identity.response_envelope, response_text)
-                if mirror is not None:
-                    create_background_task(
-                        mirror,
-                        name="reply_mirror",
-                        owner=self.hook_context.runtime,
-                        # Outside the reply's span and context: the mirror is no part of the reply.
-                        context=Context(),
-                    )
-            except Exception:
-                logger.exception(
-                    "Reply mirror failed",
-                    agent=self.hook_context.agent_name,
-                    correlation_id=identity.correlation_id,
-                )
-        if not self.hook_context.registry.has_hooks(EVENT_MESSAGE_AFTER_RESPONSE):
-            return
-        context = AfterResponseContext(
-            **self.hook_context.base_kwargs(EVENT_MESSAGE_AFTER_RESPONSE, identity.correlation_id),
-            result=ResponseResult(
-                response_text=response_text,
-                response_event_id=response_event_id,
-                delivery_kind=delivery_kind,
-                response_kind=identity.response_kind,
-                envelope=identity.response_envelope,
-            ),
-        )
-        await emit(
-            self.hook_context.registry,
-            EVENT_MESSAGE_AFTER_RESPONSE,
-            context,
-            continue_on_cancelled=continue_on_cancelled,
-        )
-
-    async def emit_cancelled_response(  # noqa: D102
-        self,
-        *,
-        identity: ResponseIdentity,
-        visible_response_event_id: str | None = None,
-        failure_reason: str | None = None,
-    ) -> None:
-        if not self.hook_context.registry.has_hooks(EVENT_MESSAGE_CANCELLED):
-            return
-        context = CancelledResponseContext(
-            **self.hook_context.base_kwargs(EVENT_MESSAGE_CANCELLED, identity.correlation_id),
-            info=CancelledResponseInfo(
-                envelope=identity.response_envelope,
-                visible_response_event_id=visible_response_event_id,
-                response_kind=identity.response_kind,
-                failure_reason=failure_reason,
-            ),
-        )
-        await emit(self.hook_context.registry, EVENT_MESSAGE_CANCELLED, context)
 
 
 @dataclass(frozen=True)
@@ -1277,35 +1149,54 @@ class DeliveryGateway:
 
         A Stop recorded meanwhile turns the note into the cancellation, and the returned ending with it.
         """
-        while True:
+        stopped = False
+
+        async def compose() -> _NoteRow:
+            nonlocal stopped
             reply = await self.deps.outbox.replies.load(handle.reply_id)
             assert reply is not None, "a span's reply exists while the span ends"
             handle.note_reply(reply)
-            if reply.unapplied_stop and handle.span.kind is not rl.SpanKind.APPROVAL_RESUME:
-                # A Stop committed before this span ended; its note is the cancellation.
-                state, note, ending = ReplyState.CANCELLED, note_segment(NoteKind.CANCELLED), Cancelled("user_stop")
-            shown = _with_note(_shown_before(reply, handle), note)
-            write = terminal_write(handle, shown, state=state)
+            # A Stop committed before this span ended; its note is the cancellation.
+            stopped = stopped or reply.unapplied_stop
+            row_state, row_note = (ReplyState.CANCELLED, note_segment(NoteKind.CANCELLED)) if stopped else (state, note)
+            shown = _with_note(_shown_before(reply, handle), row_note)
             # An interruption's note keeps its sources pending, yet shows as a failure.
-            rendered = render(shown, state=ReplyState.FAILED if state is ReplyState.ACTIVE else state)
-            try:
-                delivered = await self._deliver_rendered_reply_write(write, target, rendered, event_id=reply.event_id)
-            except ReplyWriteRefusedError as refused:
-                if refused.transition.outcome is ReplyOutcome.RECOMPUTE:
-                    # The reply changed after this note was rendered; render it again.
-                    continue
-                delivered = None
-            break
+            rendered = render(shown, state=ReplyState.FAILED if row_state is ReplyState.ACTIVE else row_state)
+            return _NoteRow(reply, terminal_write(handle, shown, state=row_state), rendered, target)
+
+        sent = await self._send_note(compose)
+        reply, rendered, delivered = sent.row.reply, sent.row.rendered, sent.event_id
         # A transition that wrote no row, such as a restore, may still leave a button or a note owed.
         await self.settle_reply_debt(handle.reply_id)
         return FinalDeliveryOutcome(
-            ending=ending,
+            ending=Cancelled("user_stop") if stopped else ending,
             event_id=reply.event_id or delivered,
             is_visible_response=(reply.event_id or delivered) is not None,
             final_visible_body=rendered.body if delivered is not None else None,
             delivery_kind=None if delivered is None else ("edited" if reply.event_id else "sent"),
             tool_trace=rendered.tool_trace,
         )
+
+    async def _send_note[T](self, compose: Callable[[], Awaitable[_NoteRow | T]]) -> _SentNote | T:
+        """Send the note row ``compose`` builds from its reply as it stands, building it again when the reply changed.
+
+        ``compose`` returns something other than a row when the reply needs no note now; that value is returned.
+        """
+        while isinstance(row := await compose(), _NoteRow):
+            try:
+                event_id = await self._deliver_rendered_reply_write(
+                    row.write,
+                    row.target,
+                    row.rendered,
+                    event_id=row.reply.event_id,
+                )
+            except ReplyWriteRefusedError as refused:
+                if refused.transition.outcome is ReplyOutcome.RECOMPUTE:
+                    # The reply changed after this note was rendered; render it again.
+                    continue
+                return _SentNote(row, event_id=None, refused=True)
+            return _SentNote(row, event_id=event_id, refused=False)
+        return row
 
     async def _deliver_rendered_reply_write(
         self,
@@ -1446,11 +1337,13 @@ class DeliveryGateway:
         whether the note was delivered; the continuation's finish then ends the
         reply.
         """
-        while True:
-            reply = await self.deps.outbox.replies.for_event(event_id)
-            assert reply is not None, "a continuation's paused reply exists while the continuation does"
-            if reply.current_span_id is not None and await self._end_span_left_behind(reply, reply.current_span_id):
-                continue
+
+        async def compose() -> _NoteRow | bool:
+            while True:
+                reply = await self.deps.outbox.replies.for_event(event_id)
+                assert reply is not None, "a continuation's paused reply exists while the continuation does"
+                if reply.current_span_id is None or not await self._end_span_left_behind(reply, reply.current_span_id):
+                    break
             span = await self.deps.outbox.replies.span(reply.last_span_id)
             assert span is not None, "a reply's last span exists"
             final = await self.deps.outbox.load_matrix_delivery(delivery_id=span.delivery_id, stage=DeliveryStage.FINAL)
@@ -1471,25 +1364,14 @@ class DeliveryGateway:
                 note_segment(shown_note, text if shown_note is NoteKind.ERROR else None),
             )
             state = ReplyState.CANCELLED if shown_note is NoteKind.CANCELLED else ReplyState.FAILED
-            write = approval_note_write(
-                reply,
-                span,
-                shown,
-                approval_id=approval_id,
-                state=state,
-            )
-            rendered = render(shown, state=state)
-            try:
-                return (
-                    await self._deliver_rendered_reply_write(write, target, rendered, event_id=reply.event_id)
-                    is not None
-                )
-            except ReplyWriteRefusedError as refused:
-                if refused.transition.outcome is ReplyOutcome.RECOMPUTE:
-                    # The reply changed after this note was rendered; render it again.
-                    continue
-                # The reply ended otherwise; the continuation's finish reads its rows.
-                return True
+            write = approval_note_write(reply, span, shown, approval_id=approval_id, state=state)
+            return _NoteRow(reply, write, render(shown, state=state), target)
+
+        sent = await self._send_note(compose)
+        if isinstance(sent, bool):
+            return sent
+        # A refused note means the reply ended otherwise; the continuation's finish reads its rows.
+        return sent.refused or sent.event_id is not None
 
     async def _end_span_left_behind(self, reply: rl.Reply, span_id: str) -> bool:
         """End a resume an older bot instance left running on the reply; return whether it ended one."""
@@ -1616,39 +1498,40 @@ class DeliveryGateway:
 
     async def _flush_owed_write(self, reply_id: str) -> None:
         """Render and send the note a reply-authored transition owed."""
-        while (reply := await self.deps.outbox.replies.load(reply_id)) is not None and reply.owed_write is not None:
-            owed = reply.owed_write
-            span = await self.deps.outbox.replies.span(owed.span_id)
+
+        async def compose() -> _NoteRow | None:
+            reply = await self.deps.outbox.replies.load(reply_id)
+            if reply is None or reply.owed_write is None:
+                return None
+            span = await self.deps.outbox.replies.span(reply.owed_write.span_id)
             assert span is not None, "an owed write names a span of its reply"
-            shown = _with_note(_shown_before(reply, None), note_segment(owed.note, owed.text))
+            shown = _with_note(_shown_before(reply, None), note_segment(reply.owed_write.note, reply.owed_write.text))
             final = await self.deps.outbox.load_matrix_delivery(delivery_id=span.delivery_id, stage=DeliveryStage.FINAL)
             write = owed_note_write(reply, span, shown, span_has_final=final is not None)
-            rendered = render(shown, state=reply.state)
             target = MessageTarget.resolve(room_id=reply.room_id, thread_id=reply.thread_id, reply_to_event_id=None)
-            try:
-                await self._deliver_rendered_reply_write(write, target, rendered, event_id=reply.event_id)
-            except ReplyWriteRefusedError as refused:
-                if refused.transition.outcome is ReplyOutcome.RECOMPUTE:
-                    # The reply changed after this note was rendered; render what it owes now.
-                    continue
-                return
-            current = await self.deps.outbox.replies.load(reply_id)
-            # A note the outbox refuses because the room's membership ended is never sent; one that stays owed
-            # for another reason, such as a payload that could not be prepared yet, the next recovery pass retries.
-            if (
-                current is not None
-                and current.owed_write == owed
-                and not await self.deps.outbox.turn_membership_is_current(
-                    turn_id=span.delivery_id,
-                    room_id=current.room_id,
-                )
-            ):
-                self.deps.logger.warning("reply_owed_write_refused", reply_id=reply_id, note=owed.note)
-                await self.deps.outbox.replies.update(
-                    reply_id,
-                    lambda latest, owed=owed: rl.owed_write_refused(latest, owed, now_ns=time.time_ns()),
-                )
+            return _NoteRow(reply, write, render(shown, state=reply.state), target)
+
+        sent = await self._send_note(compose)
+        if sent is None or sent.refused:
             return
+        owed = sent.row.reply.owed_write
+        current = await self.deps.outbox.replies.load(reply_id)
+        # A note the outbox refuses because the room's membership ended is never sent; one that stays owed
+        # for another reason, such as a payload that could not be prepared yet, the next recovery pass retries.
+        if (
+            owed is not None
+            and current is not None
+            and current.owed_write == owed
+            and not await self.deps.outbox.turn_membership_is_current(
+                turn_id=sent.row.write.span.delivery_id,
+                room_id=current.room_id,
+            )
+        ):
+            self.deps.logger.warning("reply_owed_write_refused", reply_id=reply_id, note=owed.note)
+            await self.deps.outbox.replies.update(
+                reply_id,
+                lambda latest: rl.owed_write_refused(latest, owed, now_ns=time.time_ns()),
+            )
 
     async def send_text(self, request: SendTextRequest) -> str | None:
         """Send one response message to a room."""
@@ -1760,7 +1643,7 @@ class DeliveryGateway:
         with response_shutdown_phase(ResponseShutdownPhase.FINAL_DELIVERY):
             return await self._deliver_final(request)
 
-    async def _deliver_final(  # noqa: C901, PLR0911, PLR0912
+    async def _deliver_final(  # noqa: C901, PLR0911
         self,
         request: FinalDeliveryRequest,
     ) -> FinalDeliveryOutcome:
@@ -1770,7 +1653,7 @@ class DeliveryGateway:
             # Only a running reply span writes an answer; one that ended meanwhile writes nothing.
             return _refused_reply_outcome(None, request, request.tool_trace, request.extra_content)
         try:
-            draft = await self.deps.response_hooks._apply_before_response(
+            draft = await self.deps.response_hooks.apply_before_response(
                 identity=request.identity,
                 response_text=request.response_text,
                 tool_trace=request.tool_trace,
@@ -1785,21 +1668,12 @@ class DeliveryGateway:
                 correlation_id=request.identity.correlation_id,
             )
             return await self._reply_hook_failed(request, handle)
-        suppression_reason = Suppression.HOOK if draft.suppress else None
-        if suppression_reason is None and draft.envelope.source_kind == SILENT_SCHEDULE_SOURCE_KIND:
-            no_report_text = draft.response_text
-            if draft.tool_trace:
-                no_report_text = strip_matching_visible_tool_markers(no_report_text, draft.tool_trace)
-            if constants.is_silent_schedule_no_report_response(no_report_text):
-                suppression_reason = Suppression.SILENT_NO_REPORT
-        await record_silent_schedule_result_if_needed(
+        suppression_reason = await answer_suppression(
+            draft,
+            request.identity,
             entity_name=self.deps.agent_name,
-            agent_names=request.identity.participating_agent_names or (self.deps.agent_name,),
-            envelope=request.identity.response_envelope,
             config=self.deps.runtime.config,
             runtime_paths=self.deps.runtime_paths,
-            suppression_reason=None if suppression_reason is None else suppression_reason.value,
-            response_text=draft.response_text,
         )
         if suppression_reason is not None:
             self.deps.logger.info(
@@ -2399,7 +2273,7 @@ class DeliveryGateway:
         """
 
         async def transform(response_text: str) -> str:
-            draft = await self.deps.response_hooks._apply_final_response_transform(
+            draft = await self.deps.response_hooks.apply_final_response_transform(
                 identity=identity,
                 response_text=response_text,
             )

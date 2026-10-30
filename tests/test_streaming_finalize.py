@@ -146,7 +146,7 @@ def _reply_span(
 def _delivery_gateway(tmp_path: Path, outbox: MatrixDeliveryView | None = None) -> DeliveryGateway:
     config = _config(tmp_path)
     response_hooks = SimpleNamespace(
-        _apply_before_response=AsyncMock(
+        apply_before_response=AsyncMock(
             return_value=SimpleNamespace(
                 response_text="final answer",
                 response_kind="ai",
@@ -156,9 +156,9 @@ def _delivery_gateway(tmp_path: Path, outbox: MatrixDeliveryView | None = None) 
                 suppress=False,
             ),
         ),
-        _apply_final_response_transform=AsyncMock(),
-        emit_after_response=AsyncMock(),
-        emit_cancelled_response=AsyncMock(),
+        apply_final_response_transform=AsyncMock(),
+        _emit_after_response=AsyncMock(),
+        _emit_cancelled_response=AsyncMock(),
     )
     return DeliveryGateway(
         DeliveryGatewayDeps(
@@ -320,10 +320,10 @@ async def test_transport_failed_terminal_update_drops_committed_interactive_meta
     transport_outcome = await streaming.finalize(_client())
 
     response_hooks = SimpleNamespace(
-        _apply_before_response=AsyncMock(),
-        _apply_final_response_transform=AsyncMock(),
-        emit_after_response=AsyncMock(),
-        emit_cancelled_response=AsyncMock(),
+        apply_before_response=AsyncMock(),
+        apply_final_response_transform=AsyncMock(),
+        _emit_after_response=AsyncMock(),
+        _emit_cancelled_response=AsyncMock(),
     )
     gateway = DeliveryGateway(
         DeliveryGatewayDeps(
@@ -368,10 +368,10 @@ async def test_transport_failed_terminal_update_ignores_hidden_canonical_interac
     """Preserved visible streamed replies must not register interactive metadata from hidden canonical content."""
     config = _config(tmp_path)
     response_hooks = SimpleNamespace(
-        _apply_before_response=AsyncMock(),
-        _apply_final_response_transform=AsyncMock(),
-        emit_after_response=AsyncMock(),
-        emit_cancelled_response=AsyncMock(),
+        apply_before_response=AsyncMock(),
+        apply_final_response_transform=AsyncMock(),
+        _emit_after_response=AsyncMock(),
+        _emit_cancelled_response=AsyncMock(),
     )
     gateway = DeliveryGateway(
         DeliveryGatewayDeps(
@@ -677,16 +677,16 @@ async def test_streamed_interactive_final_reply_registers_reactions_on_root_even
 
     envelope = _envelope()
     response_hooks = SimpleNamespace(
-        _apply_before_response=AsyncMock(),
-        _apply_final_response_transform=AsyncMock(
+        apply_before_response=AsyncMock(),
+        apply_final_response_transform=AsyncMock(
             return_value=SimpleNamespace(
                 response_text=raw_interactive,
                 response_kind="ai",
                 envelope=envelope,
             ),
         ),
-        emit_after_response=AsyncMock(),
-        emit_cancelled_response=AsyncMock(),
+        _emit_after_response=AsyncMock(),
+        _emit_cancelled_response=AsyncMock(),
     )
     gateway = DeliveryGateway(
         DeliveryGatewayDeps(
@@ -808,16 +808,16 @@ async def test_streamed_interactive_metadata_survives_unparseable_canonical_fina
     )
 
     response_hooks = SimpleNamespace(
-        _apply_before_response=AsyncMock(),
-        _apply_final_response_transform=AsyncMock(
+        apply_before_response=AsyncMock(),
+        apply_final_response_transform=AsyncMock(
             return_value=SimpleNamespace(
                 response_text=stream_outcome.canonical_final_body_candidate,
                 response_kind="ai",
                 envelope=_envelope(),
             ),
         ),
-        emit_after_response=AsyncMock(),
-        emit_cancelled_response=AsyncMock(),
+        _emit_after_response=AsyncMock(),
+        _emit_cancelled_response=AsyncMock(),
     )
     gateway = DeliveryGateway(
         DeliveryGatewayDeps(
@@ -867,7 +867,7 @@ async def test_hook_failure_cleanup_propagates_restart_cancellation(
     """Cancellation during cleanup of an ordinary hook failure must reach source settlement."""
     principal = journal_store.principal("code@alice")
     gateway = _delivery_gateway(tmp_path, principal)
-    gateway.deps.response_hooks._apply_before_response.side_effect = RuntimeError("hook failed")
+    gateway.deps.response_hooks.apply_before_response.side_effect = RuntimeError("hook failed")
     gateway.deps.redact_message_event.side_effect = asyncio.CancelledError("sync_restart")
 
     with pytest.raises(asyncio.CancelledError, match="sync_restart"):

@@ -2686,7 +2686,7 @@ class TestAgentBot(AgentBotTestBase):
         gateway = replace_delivery_gateway_deps(
             bot,
             response_hooks=SimpleNamespace(
-                _apply_before_response=AsyncMock(
+                apply_before_response=AsyncMock(
                     return_value=SimpleNamespace(
                         response_text="ignored",
                         response_kind="ai",
@@ -2696,8 +2696,8 @@ class TestAgentBot(AgentBotTestBase):
                         suppress=True,
                     ),
                 ),
-                emit_after_response=AsyncMock(),
-                emit_cancelled_response=AsyncMock(),
+                _emit_after_response=AsyncMock(),
+                _emit_cancelled_response=AsyncMock(),
             ),
         )
 
@@ -2730,7 +2730,7 @@ class TestAgentBot(AgentBotTestBase):
         assert outcome.ending == Suppressed(Suppression.HOOK)
         assert _visible_response_event_id(outcome) == "$existing"
         assert _handled_response_event_id(outcome) is None
-        gateway.deps.response_hooks.emit_cancelled_response.assert_not_awaited()
+        gateway.deps.response_hooks._emit_cancelled_response.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_deliver_final_failed_existing_visible_edit_preserves_prior_response(
@@ -2747,7 +2747,7 @@ class TestAgentBot(AgentBotTestBase):
         gateway = replace_delivery_gateway_deps(
             bot,
             response_hooks=SimpleNamespace(
-                _apply_before_response=AsyncMock(
+                apply_before_response=AsyncMock(
                     return_value=SimpleNamespace(
                         response_text="Updated answer",
                         response_kind="ai",
@@ -2757,8 +2757,8 @@ class TestAgentBot(AgentBotTestBase):
                         suppress=False,
                     ),
                 ),
-                emit_after_response=AsyncMock(),
-                emit_cancelled_response=AsyncMock(),
+                _emit_after_response=AsyncMock(),
+                _emit_cancelled_response=AsyncMock(),
             ),
         )
         with patch("mindroom.delivery_gateway.edit_message_outcome", new=AsyncMock(return_value=None)):
@@ -2785,7 +2785,7 @@ class TestAgentBot(AgentBotTestBase):
         assert outcome.ending == Failed(FailureCause.WRITE_REFUSED)
         assert _visible_response_event_id(outcome) == "$existing"
         assert _handled_response_event_id(outcome) == "$existing"
-        gateway.deps.response_hooks.emit_cancelled_response.assert_not_awaited()
+        gateway.deps.response_hooks._emit_cancelled_response.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_deliver_final_before_response_exception_cleans_placeholder(
@@ -2802,9 +2802,9 @@ class TestAgentBot(AgentBotTestBase):
             bot,
             redact_message_event=AsyncMock(return_value=True),
             response_hooks=SimpleNamespace(
-                _apply_before_response=AsyncMock(side_effect=RuntimeError("hook boom")),
-                emit_after_response=AsyncMock(),
-                emit_cancelled_response=AsyncMock(),
+                apply_before_response=AsyncMock(side_effect=RuntimeError("hook boom")),
+                _emit_after_response=AsyncMock(),
+                _emit_cancelled_response=AsyncMock(),
             ),
         )
 
@@ -2833,7 +2833,7 @@ class TestAgentBot(AgentBotTestBase):
             event_id="$thinking",
             reason="Reply removed",
         )
-        gateway.deps.response_hooks.emit_cancelled_response.assert_not_awaited()
+        gateway.deps.response_hooks._emit_cancelled_response.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_execute_dispatch_action_does_not_mark_responded_when_generation_returns_no_final_event(

@@ -1509,7 +1509,7 @@ async def test_generate_team_response_helper_settles_late_failure_without_finali
     assert resolution == Owned()
     assert _answering_event(effects) == "$thinking"
     coordinator.deps.delivery_gateway.finalize_streamed_response.assert_not_awaited()
-    coordinator.deps.delivery_gateway.deps.response_hooks.emit_cancelled_response.assert_awaited_once()
+    coordinator.deps.delivery_gateway.deps.response_hooks._emit_cancelled_response.assert_awaited_once()
 
 
 @pytest.mark.asyncio

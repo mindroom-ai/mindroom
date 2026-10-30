@@ -290,8 +290,8 @@ def _gateway_with_mocks(tmp_path: Path) -> tuple[DeliveryGateway, AsyncMock, Asy
     before_hooks = AsyncMock()
     after_hooks = AsyncMock()
     response_hooks = MagicMock()
-    response_hooks._apply_before_response = before_hooks
-    response_hooks.emit_after_response = after_hooks
+    response_hooks.apply_before_response = before_hooks
+    response_hooks._emit_after_response = after_hooks
     conversation_reader = SimpleNamespace(latest_thread_event_id=AsyncMock(return_value=None))
     gateway = DeliveryGateway(
         DeliveryGatewayDeps(

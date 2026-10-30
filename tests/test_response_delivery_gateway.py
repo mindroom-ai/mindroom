@@ -228,7 +228,7 @@ def _gateway(
                     ),
                 ),
             ),
-            response_hooks=MagicMock(_apply_before_response=AsyncMock(), emit_after_response=AsyncMock()),
+            response_hooks=MagicMock(apply_before_response=AsyncMock(), _emit_after_response=AsyncMock()),
             outbox=outbox if outbox is not None else make_outbox_mock(),
             turn_handoff=turn_handoff,
             sending_device_id=lambda: sending_device_id,
@@ -350,7 +350,7 @@ class TestTurnDeliveryGoesThroughTheOutbox:
     def _hooks() -> MagicMock:
         """Return hooks that pass the draft through unchanged."""
         return MagicMock(
-            _apply_before_response=AsyncMock(
+            apply_before_response=AsyncMock(
                 side_effect=lambda *, identity, response_text, tool_trace, extra_content: ResponseDraft(
                     response_text=response_text,
                     response_kind=identity.response_kind,
@@ -359,8 +359,8 @@ class TestTurnDeliveryGoesThroughTheOutbox:
                     envelope=identity.response_envelope,
                 ),
             ),
-            _apply_final_response_transform=AsyncMock(side_effect=lambda *, draft, **_kwargs: draft),
-            emit_after_response=AsyncMock(),
+            apply_final_response_transform=AsyncMock(side_effect=lambda *, draft, **_kwargs: draft),
+            _emit_after_response=AsyncMock(),
         )
 
     @staticmethod
@@ -392,7 +392,7 @@ class TestTurnDeliveryGoesThroughTheOutbox:
     ) -> None:
         """Silent whitespace settles as suppressed without creating a Matrix event."""
         gateway = _gateway(tmp_path, alice)
-        gateway.deps.response_hooks._apply_before_response = self._hooks()._apply_before_response
+        gateway.deps.response_hooks.apply_before_response = self._hooks().apply_before_response
         send = AsyncMock(return_value=DeliveredMatrixEvent("$sent", {"body": text}))
 
         with patch("mindroom.delivery_gateway.send_message_outcome", send):
@@ -414,7 +414,7 @@ class TestTurnDeliveryGoesThroughTheOutbox:
     ) -> None:
         """Removing the workspace receipt must make an evidence-free silent completion fail this test."""
         gateway = _gateway(tmp_path, alice)
-        gateway.deps.response_hooks._apply_before_response = self._hooks()._apply_before_response
+        gateway.deps.response_hooks.apply_before_response = self._hooks().apply_before_response
         request = replace(
             self._final_request(SILENT_SCHEDULE_NO_REPLY_TOKEN, source_kind=SILENT_SCHEDULE_SOURCE_KIND),
             identity=ResponseIdentity(
@@ -491,11 +491,11 @@ class TestTurnDeliveryGoesThroughTheOutbox:
         hook_service = self._hooks()
 
         async def replace_envelope(**kwargs: object) -> object:
-            draft = await hook_service._apply_before_response(**kwargs)  # type: ignore[arg-type]
+            draft = await hook_service.apply_before_response(**kwargs)  # type: ignore[arg-type]
             draft.envelope = replace(draft.envelope, source_event_id="$hook-replaced")
             return draft
 
-        gateway.deps.response_hooks._apply_before_response = AsyncMock(side_effect=replace_envelope)
+        gateway.deps.response_hooks.apply_before_response = AsyncMock(side_effect=replace_envelope)
 
         outcome = await final_in_span(
             gateway,
@@ -523,7 +523,7 @@ class TestTurnDeliveryGoesThroughTheOutbox:
     ) -> None:
         """A damaged start receipt cannot prevent the final machine-readable record."""
         gateway = _gateway(tmp_path, alice)
-        gateway.deps.response_hooks._apply_before_response = self._hooks()._apply_before_response
+        gateway.deps.response_hooks.apply_before_response = self._hooks().apply_before_response
         receipt_path = (
             tmp_path
             / "mindroom_data"
@@ -573,7 +573,7 @@ class TestTurnDeliveryGoesThroughTheOutbox:
     ) -> None:
         """Agent-controlled workspace symlinks cannot redirect a host receipt write."""
         gateway = _gateway(tmp_path, alice)
-        gateway.deps.response_hooks._apply_before_response = self._hooks()._apply_before_response
+        gateway.deps.response_hooks.apply_before_response = self._hooks().apply_before_response
         workspace = tmp_path / "mindroom_data" / "agents" / "agent" / "workspace"
         outside = tmp_path / "outside"
         workspace.mkdir(parents=True)
@@ -596,7 +596,7 @@ class TestTurnDeliveryGoesThroughTheOutbox:
     ) -> None:
         """Display-only tool markers must not turn a silent no-report result into a visible response."""
         gateway = _gateway(tmp_path, alice)
-        gateway.deps.response_hooks._apply_before_response = self._hooks()._apply_before_response
+        gateway.deps.response_hooks.apply_before_response = self._hooks().apply_before_response
         send = AsyncMock(return_value=DeliveredMatrixEvent("$sent", {"body": SILENT_SCHEDULE_NO_REPLY_TOKEN}))
         request = replace(
             self._final_request(
@@ -628,7 +628,7 @@ class TestTurnDeliveryGoesThroughTheOutbox:
     ) -> None:
         """A quiet reply whose runs only called tools ends empty; its tool trace does not make it visible."""
         gateway = _gateway(tmp_path, alice)
-        gateway.deps.response_hooks._apply_before_response = self._hooks()._apply_before_response
+        gateway.deps.response_hooks.apply_before_response = self._hooks().apply_before_response
         send = AsyncMock(return_value=DeliveredMatrixEvent("$sent", {"body": ""}))
         request = replace(
             self._final_request("", source_kind=SILENT_SCHEDULE_SOURCE_KIND),
@@ -655,7 +655,7 @@ class TestTurnDeliveryGoesThroughTheOutbox:
     ) -> None:
         """Marker-shaped findings must not be stripped when they do not match the trace."""
         gateway = _gateway(tmp_path, alice)
-        gateway.deps.response_hooks._apply_before_response = self._hooks()._apply_before_response
+        gateway.deps.response_hooks.apply_before_response = self._hooks().apply_before_response
         text = f"🔧 `reported_finding` [1]\n\n{SILENT_SCHEDULE_NO_REPLY_TOKEN}"
         send = AsyncMock(return_value=DeliveredMatrixEvent("$sent", {"body": text}))
         request = replace(
@@ -695,7 +695,7 @@ class TestTurnDeliveryGoesThroughTheOutbox:
     ) -> None:
         """Automatic suppression never swallows findings or ordinary responses."""
         gateway = _gateway(tmp_path, alice)
-        gateway.deps.response_hooks._apply_before_response = self._hooks()._apply_before_response
+        gateway.deps.response_hooks.apply_before_response = self._hooks().apply_before_response
         send = AsyncMock(return_value=DeliveredMatrixEvent("$sent", {"body": text}))
 
         with patch("mindroom.delivery_gateway.send_message_outcome", send):
@@ -712,7 +712,7 @@ class TestTurnDeliveryGoesThroughTheOutbox:
     ) -> None:
         """An ordinary empty response is not suppressed: it ends like a stream that showed only its placeholder."""
         gateway = _gateway(tmp_path, alice)
-        gateway.deps.response_hooks._apply_before_response = self._hooks()._apply_before_response
+        gateway.deps.response_hooks.apply_before_response = self._hooks().apply_before_response
         send = AsyncMock(return_value=DeliveredMatrixEvent("$sent", {"body": ""}))
 
         with patch("mindroom.delivery_gateway.send_message_outcome", send):
@@ -734,11 +734,11 @@ class TestTurnDeliveryGoesThroughTheOutbox:
         hooks = self._hooks()
 
         async def add_finding(**kwargs: object) -> ResponseDraft:
-            draft = await hooks._apply_before_response(**kwargs)
+            draft = await hooks.apply_before_response(**kwargs)
             draft.response_text = "Finding from hook"
             return draft
 
-        gateway.deps.response_hooks._apply_before_response = AsyncMock(side_effect=add_finding)
+        gateway.deps.response_hooks.apply_before_response = AsyncMock(side_effect=add_finding)
         send = AsyncMock(return_value=DeliveredMatrixEvent("$sent", {"body": "Finding from hook"}))
 
         with patch("mindroom.delivery_gateway.send_message_outcome", send):
@@ -755,7 +755,7 @@ class TestTurnDeliveryGoesThroughTheOutbox:
     async def test_final_reply_names_its_human_requester(self, tmp_path: Path, alice: PrincipalStore) -> None:
         """Entities the reply mentions act for the human the reply was written for."""
         gateway = _gateway(tmp_path, alice)
-        gateway.deps.response_hooks._apply_before_response = self._hooks()._apply_before_response
+        gateway.deps.response_hooks.apply_before_response = self._hooks().apply_before_response
         send = AsyncMock(return_value=DeliveredMatrixEvent("$sent", {"body": "answer"}))
 
         with patch("mindroom.delivery_gateway.send_message_outcome", send):
@@ -767,7 +767,7 @@ class TestTurnDeliveryGoesThroughTheOutbox:
         """Entities the reply mentions apply their access to a configured bot account, as they would to a human."""
         gateway = _gateway(tmp_path, alice)
         gateway.deps.runtime.config.bot_accounts = ["@user:localhost"]
-        gateway.deps.response_hooks._apply_before_response = self._hooks()._apply_before_response
+        gateway.deps.response_hooks.apply_before_response = self._hooks().apply_before_response
         send = AsyncMock(return_value=DeliveredMatrixEvent("$sent", {"body": "answer"}))
 
         with patch("mindroom.delivery_gateway.send_message_outcome", send):
@@ -782,7 +782,7 @@ class TestTurnDeliveryGoesThroughTheOutbox:
     ) -> None:
         """A reply to an agent or system requester leaves mentioned entities acting as today."""
         gateway = _gateway(tmp_path, alice)
-        gateway.deps.response_hooks._apply_before_response = self._hooks()._apply_before_response
+        gateway.deps.response_hooks.apply_before_response = self._hooks().apply_before_response
         agent_id = entity_identity_registry(gateway.deps.runtime.config, gateway.deps.runtime_paths).current_id("agent")
         request = self._final_request("answer")
         request = replace(
@@ -814,11 +814,11 @@ class TestTurnDeliveryGoesThroughTheOutbox:
         hooks = self._hooks()
 
         async def replace_with_no_reply(**kwargs: object) -> ResponseDraft:
-            draft = await hooks._apply_before_response(**kwargs)
+            draft = await hooks.apply_before_response(**kwargs)
             draft.response_text = SILENT_SCHEDULE_NO_REPLY_TOKEN
             return draft
 
-        gateway.deps.response_hooks._apply_before_response = AsyncMock(side_effect=replace_with_no_reply)
+        gateway.deps.response_hooks.apply_before_response = AsyncMock(side_effect=replace_with_no_reply)
         send = AsyncMock(return_value=DeliveredMatrixEvent("$sent", {"body": "Finding"}))
 
         with patch("mindroom.delivery_gateway.send_message_outcome", send):
@@ -843,12 +843,12 @@ class TestTurnDeliveryGoesThroughTheOutbox:
         hooks = self._hooks()
 
         async def add_suppressed_finding(**kwargs: object) -> ResponseDraft:
-            draft = await hooks._apply_before_response(**kwargs)
+            draft = await hooks.apply_before_response(**kwargs)
             draft.response_text = "Finding from hook"
             draft.suppress = True
             return draft
 
-        gateway.deps.response_hooks._apply_before_response = AsyncMock(side_effect=add_suppressed_finding)
+        gateway.deps.response_hooks.apply_before_response = AsyncMock(side_effect=add_suppressed_finding)
         send = AsyncMock(return_value=DeliveredMatrixEvent("$sent", {"body": "Finding from hook"}))
 
         with patch("mindroom.delivery_gateway.send_message_outcome", send):
@@ -868,7 +868,7 @@ class TestTurnDeliveryGoesThroughTheOutbox:
     ) -> None:
         """The silent-source repair must not change ordinary interactive delivery."""
         gateway = _gateway(tmp_path, alice)
-        gateway.deps.response_hooks._apply_before_response = AsyncMock(side_effect=RuntimeError("hook failed"))
+        gateway.deps.response_hooks.apply_before_response = AsyncMock(side_effect=RuntimeError("hook failed"))
         send_text = AsyncMock(return_value="$unexpected")
 
         with patch.object(DeliveryGateway, "send_text", new=send_text):
@@ -890,7 +890,7 @@ class TestTurnDeliveryGoesThroughTheOutbox:
         the only name for it that survives a restart.
         """
         gateway = _gateway(tmp_path, alice)
-        gateway.deps.response_hooks._apply_before_response = self._hooks()._apply_before_response
+        gateway.deps.response_hooks.apply_before_response = self._hooks().apply_before_response
         delivered = DeliveredMatrixEvent("$sent", {"msgtype": "m.text", "body": "answer"})
 
         with patch("mindroom.delivery_gateway.send_message_outcome", AsyncMock(return_value=delivered)):
@@ -934,7 +934,7 @@ class TestTurnDeliveryGoesThroughTheOutbox:
     ) -> None:
         """Projection ownership requires prompt metadata to cross Matrix with the answer."""
         gateway = _gateway(tmp_path, alice)
-        gateway.deps.response_hooks._apply_before_response = self._hooks()._apply_before_response
+        gateway.deps.response_hooks.apply_before_response = self._hooks().apply_before_response
         delivered = DeliveredMatrixEvent("$sent", {"msgtype": "m.text", "body": "Choose"})
         response = """```interactive
 {"question":"Pick","options":[{"emoji":"✅","label":"Yes","value":"yes"}]}
@@ -1121,7 +1121,7 @@ class TestTurnDeliveryGoesThroughTheOutbox:
     ) -> None:
         """The outbox must retry rather than invent projection ordering metadata."""
         gateway = _gateway(tmp_path, alice)
-        gateway.deps.response_hooks._apply_before_response = self._hooks()._apply_before_response
+        gateway.deps.response_hooks.apply_before_response = self._hooks().apply_before_response
         gateway.deps.runtime.client.room_get_event.return_value = nio.RoomGetEventError("not found")
         gateway.deps.runtime.client.room_get_event.side_effect = None
         response = """```interactive
@@ -1146,7 +1146,7 @@ class TestTurnDeliveryGoesThroughTheOutbox:
     ) -> None:
         """Server redaction wins over the frozen plaintext payload."""
         gateway = _gateway(tmp_path, alice)
-        gateway.deps.response_hooks._apply_before_response = self._hooks()._apply_before_response
+        gateway.deps.response_hooks.apply_before_response = self._hooks().apply_before_response
         response = _delivered_event_response(_ROOM_ID, "$sent")
         response.event.source["unsigned"] = {"redacted_because": {}}
         gateway.deps.runtime.client.room_get_event.return_value = response
@@ -1173,7 +1173,7 @@ class TestTurnDeliveryGoesThroughTheOutbox:
         """
         outbox = FakeOutbox()
         gateway = _gateway(tmp_path, outbox)
-        gateway.deps.response_hooks._apply_before_response = self._hooks()._apply_before_response
+        gateway.deps.response_hooks.apply_before_response = self._hooks().apply_before_response
         delivered = DeliveredMatrixEvent("$sent", {"msgtype": "m.text", "body": "a notice"})
 
         with patch("mindroom.delivery_gateway.send_message_outcome", AsyncMock(return_value=delivered)):
@@ -1201,7 +1201,7 @@ class TestTurnDeliveryGoesThroughTheOutbox:
         good.
         """
         gateway = _gateway(tmp_path, alice)
-        gateway.deps.response_hooks._apply_before_response = self._hooks()._apply_before_response
+        gateway.deps.response_hooks.apply_before_response = self._hooks().apply_before_response
         edited = DeliveredMatrixEvent("$placeholder", {"msgtype": "m.text", "body": "the answer"})
 
         with patch("mindroom.delivery_gateway.send_message_outcome", AsyncMock(return_value=edited)) as edit:
@@ -1237,7 +1237,7 @@ class TestTurnDeliveryGoesThroughTheOutbox:
     ) -> None:
         """Approval recovery must restore the interactive registration facts of an approved run's answer."""
         gateway = _gateway(tmp_path, alice)
-        gateway.deps.response_hooks._apply_before_response = self._hooks()._apply_before_response
+        gateway.deps.response_hooks.apply_before_response = self._hooks().apply_before_response
         edited = DeliveredMatrixEvent("$placeholder", {"msgtype": "m.text", "body": "Choose"})
         interactive_text = (
             'Choose one.\n```interactive\n{"question":"Pick",'
@@ -1273,7 +1273,7 @@ class TestTurnDeliveryGoesThroughTheOutbox:
     ) -> None:
         """A recoverable final edit must not leave an impossible outbox retry."""
         gateway = _gateway(tmp_path, alice, large_message_strategy="split")
-        gateway.deps.response_hooks._apply_before_response = self._hooks()._apply_before_response
+        gateway.deps.response_hooks.apply_before_response = self._hooks().apply_before_response
         client = AsyncMock(spec=nio.AsyncClient)
         client.user_id = _AGENT_USER_ID
         client.device_id = "DEVICE"
@@ -1322,7 +1322,7 @@ class TestTurnDeliveryGoesThroughTheOutbox:
     ) -> None:
         """The default strategy uploads one sidecar instead of segmenting the answer."""
         gateway = _gateway(tmp_path, alice)
-        gateway.deps.response_hooks._apply_before_response = self._hooks()._apply_before_response
+        gateway.deps.response_hooks.apply_before_response = self._hooks().apply_before_response
         client = AsyncMock(spec=nio.AsyncClient)
         client.user_id = _AGENT_USER_ID
         client.device_id = "DEVICE"
@@ -1367,7 +1367,7 @@ class TestTurnDeliveryGoesThroughTheOutbox:
         the missing one goes out, under its stable derived transaction ID.
         """
         gateway = _gateway(tmp_path, alice, large_message_strategy="split")
-        gateway.deps.response_hooks._apply_before_response = self._hooks()._apply_before_response
+        gateway.deps.response_hooks.apply_before_response = self._hooks().apply_before_response
         answer = "\n\n".join(f"## Part {index}\n\n" + "x" * 500 for index in range(200))
 
         with patch("mindroom.delivery_gateway.send_message_outcome", AsyncMock(return_value=_failed_delivery())):
@@ -1423,7 +1423,7 @@ class TestTurnDeliveryGoesThroughTheOutbox:
     ) -> None:
         """The exact persisted and sent event must fit after identity is attached."""
         gateway = _gateway(tmp_path, alice)
-        gateway.deps.response_hooks._apply_before_response = self._hooks()._apply_before_response
+        gateway.deps.response_hooks.apply_before_response = self._hooks().apply_before_response
         client = AsyncMock(spec=nio.AsyncClient)
         client.user_id = _AGENT_USER_ID
         client.device_id = "DEVICE"
@@ -1458,7 +1458,7 @@ class TestTurnDeliveryGoesThroughTheOutbox:
     ) -> None:
         """Remote encryption state must shape the payload before the outbox freezes it."""
         gateway = _gateway(tmp_path, alice, large_message_strategy="split")
-        gateway.deps.response_hooks._apply_before_response = self._hooks()._apply_before_response
+        gateway.deps.response_hooks.apply_before_response = self._hooks().apply_before_response
         client = AsyncMock(spec=nio.AsyncClient)
         client.rooms = {}
         client.olm = MagicMock()
@@ -1502,7 +1502,7 @@ class TestTurnDeliveryGoesThroughTheOutbox:
     ) -> None:
         """Persistence must freeze bytes that remain valid if encryption is enabled."""
         gateway = _gateway(tmp_path, alice, large_message_strategy="split")
-        gateway.deps.response_hooks._apply_before_response = self._hooks()._apply_before_response
+        gateway.deps.response_hooks.apply_before_response = self._hooks().apply_before_response
         client = AsyncMock(spec=nio.AsyncClient)
         client.user_id = _AGENT_USER_ID
         client.device_id = "DEVICE"
@@ -1555,7 +1555,7 @@ class TestTurnDeliveryGoesThroughTheOutbox:
     ) -> None:
         """An unknown encryption state must not leave an ambiguously sized outbox row."""
         gateway = _gateway(tmp_path, alice)
-        gateway.deps.response_hooks._apply_before_response = self._hooks()._apply_before_response
+        gateway.deps.response_hooks.apply_before_response = self._hooks().apply_before_response
         client = AsyncMock(spec=nio.AsyncClient)
         client.rooms = {}
         client.olm = MagicMock()
@@ -1580,7 +1580,7 @@ class TestTurnDeliveryGoesThroughTheOutbox:
     ) -> None:
         """Irreducible metadata becomes durable terminal state without network I/O."""
         gateway = _gateway(tmp_path, alice)
-        gateway.deps.response_hooks._apply_before_response = self._hooks()._apply_before_response
+        gateway.deps.response_hooks.apply_before_response = self._hooks().apply_before_response
         client = AsyncMock(spec=nio.AsyncClient)
         client.user_id = _AGENT_USER_ID
         client.device_id = "DEVICE"
@@ -1665,7 +1665,7 @@ class TestTurnDeliveryGoesThroughTheOutbox:
         turn, which is the thing the outbox exists to prevent.
         """
         gateway = _gateway(tmp_path, alice)
-        gateway.deps.response_hooks._apply_before_response = self._hooks()._apply_before_response
+        gateway.deps.response_hooks.apply_before_response = self._hooks().apply_before_response
         edited = DeliveredMatrixEvent("$placeholder", {"body": "the answer"})
 
         # A delivery that reached Matrix but whose acknowledgement was lost.
@@ -1699,7 +1699,7 @@ class TestTurnDeliveryGoesThroughTheOutbox:
         process restarted.
         """
         gateway = _gateway(tmp_path, alice)
-        gateway.deps.response_hooks._apply_before_response = self._hooks()._apply_before_response
+        gateway.deps.response_hooks.apply_before_response = self._hooks().apply_before_response
         answer = DeliveredMatrixEvent("$answer", {"body": "the answer"})
 
         with patch("mindroom.delivery_gateway.send_message_outcome", AsyncMock(return_value=_failed_delivery())):
@@ -1735,8 +1735,8 @@ class TestAnEndedMembershipStopsTheAnswer:
     ) -> None:
         """The fence deleted this conversation; the answer must not rebuild it."""
         gateway = _gateway(tmp_path, alice)
-        gateway.deps.response_hooks._apply_before_response = (
-            TestTurnDeliveryGoesThroughTheOutbox._hooks()._apply_before_response
+        gateway.deps.response_hooks.apply_before_response = (
+            TestTurnDeliveryGoesThroughTheOutbox._hooks().apply_before_response
         )
         delivered = DeliveredMatrixEvent("$sent", {"msgtype": "m.text", "body": "answer"})
 

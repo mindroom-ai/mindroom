@@ -25,7 +25,6 @@ from mindroom.delivery_gateway import (
     DeliveryGateway,
     DeliveryGatewayDeps,
     FinalDeliveryRequest,
-    ResponseHookService,
     ResponseIdentity,
 )
 from mindroom.hooks import (
@@ -49,6 +48,7 @@ from mindroom.hooks.execution import emit, emit_collect
 from mindroom.hooks.registry import HookRegistryState
 from mindroom.logging_config import get_logger
 from mindroom.message_target import MessageTarget
+from mindroom.response_lifecycle import ResponseHookService
 from mindroom.response_sources import ResponseSources
 from mindroom.scheduling.tasks import ScheduledWorkflow
 from mindroom.session_ids import create_session_id

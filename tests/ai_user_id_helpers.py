@@ -21,7 +21,7 @@ from mindroom.constants import (
     RuntimePaths,
     resolve_runtime_paths,
 )
-from mindroom.delivery_gateway import DeliveryGateway, DeliveryGatewayDeps, ResponseHookService
+from mindroom.delivery_gateway import DeliveryGateway, DeliveryGatewayDeps
 from mindroom.event_journal import EventJournalStore
 from mindroom.event_journal.approval_store import ApprovalStore
 from mindroom.event_journal.identity import journal_principal_id
@@ -40,6 +40,7 @@ from mindroom.post_response_effects import PostResponseEffectsDeps, PostResponse
 from mindroom.reply_scope import ReplyRuntime
 from mindroom.reply_turn.locked_turn import ReplyTurnDeps
 from mindroom.reply_turn.request import ResponseRequest
+from mindroom.response_lifecycle import ResponseHookService
 from mindroom.response_payload_preparation import ResponsePayloadPreparer
 from mindroom.response_sources import ResponseSources
 from mindroom.tool_system.runtime_context import (
@@ -331,8 +332,8 @@ def _build_response_runner(
         hook_send_message=AsyncMock(),
     )
     response_hook_service = ResponseHookService(hook_context=hook_context)
-    response_hook_service.emit_cancelled_response = AsyncMock(wraps=response_hook_service.emit_cancelled_response)
-    response_hook_service.emit_after_response = AsyncMock(wraps=response_hook_service.emit_after_response)
+    response_hook_service._emit_cancelled_response = AsyncMock(wraps=response_hook_service._emit_cancelled_response)
+    response_hook_service._emit_after_response = AsyncMock(wraps=response_hook_service._emit_after_response)
     # One principal's records, as a bot's gateway and reply runtime share them.
     principal = EventJournalStore.open_sqlite(storage_path / "reply_records.db").principal(
         journal_principal_id(bot.agent_name, bot.matrix_id.full_id),

@@ -1072,7 +1072,7 @@ async def test_a_final_transform_is_what_the_reply_shows_from_then_on(tmp_path: 
         )
 
     with (
-        patch.object(hooks, "_apply_final_response_transform", new=shout),
+        patch.object(hooks, "apply_final_response_transform", new=shout),
         patch_response_runner_module(
             stream_agent_response=stream,
             should_use_streaming=AsyncMock(return_value=True),
@@ -1093,14 +1093,14 @@ async def test_a_suppressed_answer_removes_the_placeholder_its_reply_showed(tmp_
     """A before-response hook that suppresses the answer ends the reply gone, its placeholder redacted."""
     bot = await _streaming_bot(tmp_path)
     hooks = unwrap_extracted_collaborator(bot._delivery_gateway).deps.response_hooks
-    apply = hooks._apply_before_response
+    apply = hooks.apply_before_response
 
     async def suppressed(**kwargs: object) -> ResponseDraft:
         draft = await apply(**kwargs)  # type: ignore[arg-type]
         draft.suppress = True
         return draft
 
-    with patch.object(hooks, "_apply_before_response", new=suppressed):
+    with patch.object(hooks, "apply_before_response", new=suppressed):
         assert await _answer(bot, _plain_request(_target()), AsyncMock(return_value="Hidden.")) == Owned()
 
     reply = await _reply(bot)
@@ -1117,14 +1117,14 @@ async def test_a_suppressed_reply_settles_its_sources_through_its_records_alone(
     bot = await _streaming_bot(tmp_path)
     await _pending_turn(bot)
     hooks = unwrap_extracted_collaborator(bot._delivery_gateway).deps.response_hooks
-    apply = hooks._apply_before_response
+    apply = hooks.apply_before_response
 
     async def suppressed(**kwargs: object) -> ResponseDraft:
         draft = await apply(**kwargs)  # type: ignore[arg-type]
         draft.suppress = True
         return draft
 
-    with patch.object(hooks, "_apply_before_response", new=suppressed):
+    with patch.object(hooks, "apply_before_response", new=suppressed):
         assert await _answer(bot, _plain_request(_target()), AsyncMock(return_value="Hidden.")) == Owned()
 
     assert not await bot._reply_runtime.store.is_pending("$event")
@@ -1148,7 +1148,7 @@ async def test_a_silent_schedule_whose_hook_fails_reports_the_failure(tmp_path: 
         ),
     )
 
-    with patch.object(hooks, "_apply_before_response", new=AsyncMock(side_effect=RuntimeError("hook down"))):
+    with patch.object(hooks, "apply_before_response", new=AsyncMock(side_effect=RuntimeError("hook down"))):
         await _answer(bot, silent, AsyncMock(return_value="Hidden."))
 
     reply = await _reply(bot)
