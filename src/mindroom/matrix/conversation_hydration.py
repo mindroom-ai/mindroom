@@ -1046,6 +1046,7 @@ class ConversationHydrator:
         )
         events.extend(relations.events)
         edits_fetched: frozenset[str] = frozenset()
+        root_edits_stopped_early = False
         if (
             root_projected is not None
             and not relations.complete
@@ -1064,6 +1065,7 @@ class ConversationHydrator:
             )
             events.extend(root_edits.events)
             edits_fetched = frozenset({thread_id})
+            root_edits_stopped_early = root_edits.stopped_early
             if root_edits.ceiling_reached and not _edited_by_sender(root_projected, root_edits.events):
                 # Edits arrive newest first, so anyone in the room can push the
                 # sender's own past the ceiling with edits of theirs. The root,
@@ -1090,7 +1092,7 @@ class ConversationHydrator:
             events=tuple(events),
             complete=relations.complete and missed_edits.complete and readable_root is not None,
             unreadable=unreadable,
-            stopped_early=relations.stopped_early or missed_edits.stopped_early,
+            stopped_early=relations.stopped_early or root_edits_stopped_early or missed_edits.stopped_early,
         )
 
     async def _fetch_missed_edits(

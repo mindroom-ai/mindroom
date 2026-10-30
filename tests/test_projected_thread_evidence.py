@@ -221,6 +221,30 @@ def _thread_with_an_edited_reply(edits: int) -> FakeClient:
     return client
 
 
+class _WalkDropsRootEdits(FakeClient):
+    """A server whose recursive walk leaves out the root's edits while its direct-edit lookup returns them."""
+
+    async def room_get_event_relations(self, **kwargs: Any) -> AsyncIterator[nio.Event]:  # type: ignore[override]  # noqa: ANN401
+        async for event in super().room_get_event_relations(**kwargs):
+            replaces_root = event.source["content"].get("m.relates_to") == {
+                "rel_type": "m.replace",
+                "event_id": "$root",
+            }
+            if kwargs.get("rel_type") is None and replaces_root:
+                continue
+            yield event
+
+
+def _thread_whose_walk_drops_root_edits(edits: int) -> FakeClient:
+    """An undecryptable reply keeps the walk short of whole, so the root's edits get their own lookup."""
+    reply = encrypted("$reply", ts=2_000, relates_to={"rel_type": "m.thread", "event_id": "$root"})
+    root_edits = [raw(f"$edit{index}", f"root {index}", ts=3_000 + index, replaces="$root") for index in range(edits)]
+    return _WalkDropsRootEdits(
+        events={"$root": raw("$root", "root", ts=1_000), "$reply": reply},
+        relations={"$root": [reply, *root_edits]},
+    )
+
+
 @pytest.mark.parametrize(
     ("make_client", "bounds", "edits_of"),
     [
@@ -228,8 +252,9 @@ def _thread_with_an_edited_reply(edits: int) -> FakeClient:
         (partial(_thread_with_replies, 3), {"max_fetched_events": 2}, ()),
         (partial(_thread_with_replies, 2), {"max_requests": 1}, ("$reply0", "$reply1")),
         (partial(_thread_with_an_edited_reply, 3), {"max_fetched_events": 2}, ("$reply",)),
+        (partial(_thread_whose_walk_drops_root_edits, 3), {"max_fetched_events": 2}, ()),
     ],
-    ids=["prompt-window", "event-ceiling", "edit-lookup-requests", "edit-lookup-event-ceiling"],
+    ids=["prompt-window", "event-ceiling", "edit-lookup-requests", "edit-lookup-event-ceiling", "root-edit-lookup"],
 )
 async def test_a_rewalk_a_bound_stopped_is_not_full_history_even_when_unreadable_is_absent(
     principal: PrincipalStore,
