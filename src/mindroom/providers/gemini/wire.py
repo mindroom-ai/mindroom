@@ -11,6 +11,7 @@ import asyncio
 import base64
 import json
 import mimetypes
+import re
 from dataclasses import dataclass, field, replace
 from functools import partial
 from pathlib import Path
@@ -31,6 +32,7 @@ from mindroom.llm.messages import system_text, tool_result_view
 from mindroom.llm.provider import ReasoningDelta, TextDelta, ToolCallReady, UsageReported, hosted_tool_started
 from mindroom.llm.tool_search import call_arguments
 from mindroom.llm.usage import MessageMetrics, TokenCounts
+from mindroom.providers.errors import media_ids
 from mindroom.providers.media_files import read_media_file
 
 if TYPE_CHECKING:
@@ -83,6 +85,10 @@ _TEXT_FILE_MIME_TYPES = frozenset(
         "application/x-python",
     },
 )
+# How Gemini rejects one media type, as reported for an SVG image: "Unsupported MIME type: image/svg+xml"
+# (https://github.com/google/adk-python/issues/5693). Its other rejection of media, "Request contains an invalid
+# argument.", which the Gemini API sent in October 2026 for an inline DOCX, names no attachment.
+_UNSUPPORTED_MIME_TYPE = re.compile(r"unsupported mime type: ([a-z0-9.+-]+/[a-z0-9.+-]+)", re.IGNORECASE)
 # The finish reason of a candidate whose tool call the model malformed.
 _MALFORMED_FUNCTION_CALL = "MALFORMED_FUNCTION_CALL"
 _FILTERED_FINISH_REASONS = frozenset(
@@ -357,18 +363,65 @@ def _typed_file_part(file: File, mime_type: str, part: Callable[[str], dict[str,
     return _omitted_file(file, mime_type) if sent_type is None else part(sent_type)
 
 
+def _declared_file_type(file: File) -> str | None:
+    """Return the type a file is declared as, its own or its source's name's, or None for a file without a source.
+
+    The source is the first of its inline content, which its filename names, its URL, and its local path.
+    """
+    if file.content:
+        return _file_mime_type(file, file.filename or "")
+    if file.url is not None:
+        return _file_mime_type(file, file.url)
+    if file.filepath is not None:
+        return _file_mime_type(file, file.filepath)
+    return None
+
+
 async def _file_part(file: File, route: MediaRoute) -> dict[str, Any] | None:
+    if (mime_type := _declared_file_type(file)) is None:
+        return None
     if file.content:
         data = file.content.encode("utf-8") if isinstance(file.content, str) else file.content
-        return _typed_file_part(file, _file_mime_type(file, file.filename or ""), partial(_inline, data))
+        return _typed_file_part(file, mime_type, partial(_inline, data))
     if (url := file.url) is not None:
-        return _typed_file_part(file, _file_mime_type(file, url), partial(_file_uri, url))
-    if file.filepath is None:
+        return _typed_file_part(file, mime_type, partial(_file_uri, url))
+    if (path := file.filepath) is None:
         return None
-    mime_type = _file_mime_type(file, file.filepath)
     if (sent_type := _sent_file_type(mime_type)) is None:
         return _omitted_file(file, mime_type)
-    return await _local_part(file.filepath, file.id, "file", route, lambda _: sent_type)
+    return await _local_part(path, file.id, "file", route, lambda _: sent_type)
+
+
+def rejected_media(text: object, messages: Sequence[Message]) -> frozenset[str]:
+    """Return the ids of the attachments in ``messages`` that a rejection's ``text`` names by the type they went as.
+
+    The files, audio, and video sent as that type are named, and for an image type every image, whose type its bytes
+    may decide; a rejection that names no type, or whose message is not text, names none.
+    """
+    if not isinstance(text, str) or (match := _UNSUPPORTED_MIME_TYPE.search(text)) is None:
+        return frozenset()
+    rejected = match[1].casefold()
+    ids = {
+        file.id
+        for message in messages
+        for file in message.files or ()
+        if (declared := _declared_file_type(file)) is not None and _sent_file_type(declared) == rejected
+    }
+    ids.update(
+        clip.id
+        for message in messages
+        for clip in message.audio or ()
+        if canonical_mime_type(_media_mime_type(clip, "audio/mp3")) == rejected
+    )
+    ids.update(
+        video.id
+        for message in messages
+        for video in message.videos or ()
+        if canonical_mime_type(_media_mime_type(video, "video/mp4")) == rejected
+    )
+    if rejected.startswith("image/"):
+        ids.update(media_ids(messages, "image"))
+    return frozenset(ids)
 
 
 # ---------------------------------------------------------------------------
@@ -596,6 +649,7 @@ __all__ = [
     "function_declarations",
     "malformed_tool_call_error",
     "read_chunk",
+    "rejected_media",
     "reply_provider_data",
     "stop_reason",
     "without_tool_selection",

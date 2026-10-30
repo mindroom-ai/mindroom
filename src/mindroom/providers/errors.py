@@ -11,7 +11,7 @@ from __future__ import annotations
 import re
 from datetime import UTC, datetime
 from email.utils import parsedate_to_datetime
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any, cast
 
 import httpx
 
@@ -30,12 +30,19 @@ from mindroom.llm.errors import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Iterator, Mapping
+    from collections.abc import Iterator, Mapping, Sequence
+
+    from mindroom.llm.media import Audio, File, Image, Video
+    from mindroom.llm.messages import Message
+    from mindroom.llm.provider import MediaKind
 
 __all__ = [
     "CliLoginError",
     "classify_provider_error",
+    "media_ids",
     "missing_api_key_error",
+    "part_at",
+    "path_tokens",
     "provider_failure",
     "retry_after_seconds",
 ]
@@ -334,6 +341,57 @@ def provider_failure(error: BaseException, *, provider: str) -> ProviderError | 
             failure = classify_provider_error(str(cause), provider=provider, status_code=cause.status_code)
             return failure if failure.retryable else None
     return None
+
+
+# --- The attachments a rejection names ---------------------------------------------------------------------------
+# An adapter reads its rejection's body for the media items it points to (``ProviderError.rejected_media``). The body
+# is the provider's, so these helpers accept any value and fail to nothing: a rejection they cannot read names no
+# attachment, and the media fallback then leaves out all of the request's media, as it does for any other rejection.
+
+# One step of a request-body path, a field name or an index short enough to read as a number.
+_PATH_STEP = re.compile(r"[A-Za-z_][A-Za-z0-9_]*|[0-9]{1,9}")
+
+
+def path_tokens(path: str) -> list[str | int]:
+    """Return the steps of a request-body path, field names as text and indexes as numbers.
+
+    Providers write a path as ``messages[3].content[2].file`` or as ``messages.3.content.2.image``; both read alike.
+    """
+    return [int(step) if step.isdigit() else step for step in _PATH_STEP.findall(path)]
+
+
+def part_at(body: object, tokens: Sequence[str | int]) -> Mapping[str, Any] | None:
+    """Return the deepest object with a text ``type`` that ``tokens`` lead through in ``body``, the part a path names.
+
+    The walk stops at the first step ``body`` does not have, and None means the path reaches no typed part.
+    """
+    part: Mapping[str, Any] | None = None
+    current = body
+    for token in tokens:
+        if isinstance(token, int) and isinstance(current, list) and token < len(current):
+            current = cast("list[object]", current)[token]
+        elif isinstance(token, str) and isinstance(current, dict) and token in current:
+            current = cast("dict[str, object]", current)[token]
+        else:
+            break
+        if isinstance(current, dict) and isinstance((fields := cast("dict[str, Any]", current)).get("type"), str):
+            part = fields
+    return part
+
+
+def _kind_items(message: Message, kind: MediaKind) -> Sequence[Image | Audio | Video | File]:
+    if kind == "image":
+        return message.images or ()
+    if kind == "audio":
+        return message.audio or ()
+    if kind == "video":
+        return message.videos or ()
+    return message.files or ()
+
+
+def media_ids(messages: Sequence[Message], kind: MediaKind) -> frozenset[str]:
+    """Return the ids of every ``kind`` media item in ``messages``, for a rejection that names the kind alone."""
+    return frozenset(item.id for message in messages for item in _kind_items(message, kind))
 
 
 def _visible_chain(error: BaseException) -> Iterator[BaseException]:

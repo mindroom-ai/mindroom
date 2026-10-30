@@ -24,6 +24,7 @@ __all__ = [
     "chat_audio_part",
     "chat_file_part",
     "chat_image_part",
+    "file_part_name",
     "responses_file_part",
     "responses_image_part",
 ]
@@ -96,8 +97,12 @@ def _content_bytes(file: File, provider: str) -> bytes | None:
     return file.content
 
 
-def _file_part_name(file: File, fallback: str) -> str:
-    """Return the name a file part carries: the attachment's original filename, else its stored file's name."""
+def file_part_name(file: File, *, chat: bool) -> str:
+    """Return the name a Chat (``chat``) or Responses file part carries for ``file``.
+
+    That is the attachment's original filename, else its stored file's name, else the wire's generic name.
+    """
+    fallback = "file" if chat else "document"
     return file.filename or file.name or (Path(file.filepath).name if file.filepath else None) or fallback
 
 
@@ -123,9 +128,9 @@ def _file_part_data_url(file: File, name: str, data: bytes) -> str:
 def chat_file_part(file: File, *, provider: str) -> dict[str, Any] | None:
     """Return a Chat Completions ``file`` part with an inline data URL, or None for a file without bytes or an empty one.
 
-    It is named and typed as a Responses file part is (``_file_part_name``, ``_file_part_data_url``).
+    It is named and typed as a Responses file part is (``file_part_name``, ``_file_part_data_url``).
     """
-    name = _file_part_name(file, "file")
+    name = file_part_name(file, chat=True)
     data = _content_bytes(file, provider)
     if data is None:
         return None
@@ -134,7 +139,7 @@ def chat_file_part(file: File, *, provider: str) -> dict[str, Any] | None:
 
 def responses_file_part(file: File, *, provider: str) -> dict[str, Any] | None:
     """Return a Responses ``input_file`` part, a URL reference or inline data, or None when neither is available."""
-    name = _file_part_name(file, "document")
+    name = file_part_name(file, chat=False)
     if file.url:
         return {"type": "input_file", "file_url": file.url}
     data = _content_bytes(file, provider)
