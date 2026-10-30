@@ -1605,20 +1605,7 @@ async def test_active_ad_hoc_team_redaction_uses_pending_response_scope(
         ],
     )
     storage = _seeded_storage_with_runs(tmp_path, session, name="team_private")
-    state_writer = MagicMock()
-    state_writer.create_storage.return_value = storage
-    state_writer.history_scope.return_value = HistoryScope(kind="agent", scope_id="agent")
-    store = TurnStore(
-        TurnStoreDeps(
-            turn_records=journal_store.turn_records("agent"),
-            legacy_responses_file=None,
-            state_writer=state_writer,
-            tool_runtime=MagicMock(),
-            response_recovery_state=AsyncMock(),
-            retry_dispatch_sources=MagicMock(),
-        ),
-    )
-    await store.warm()
+    store = await _store_with_storage(journal_store, storage)
     response_record = TurnRecord.create(
         ["$user_msg"],
         requester_id="@user:example.org",
