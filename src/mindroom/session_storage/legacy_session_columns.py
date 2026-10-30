@@ -57,8 +57,7 @@ BACKUP_SUFFIX = ".pre-storage-v4"
 # agent's rows first take its name, then the sessions table converts (`convert_session_columns`), the meta row records
 # the owner, and the later layout steps follow. The sweep takes a team database's owner from the team its rows name
 # whose database has this one's name (`team_owner`), and leaves one no row names to its scope's next store open. Two
-# openers converting at once are
-# serialized by the write lock, and the second finds the database converted.
+# openers converting at once are serialized by the write lock, and the second finds the database converted.
 # Coverage: tests/session_storage/test_legacy_session_columns.py.
 def upgrade_layout(
     connection: sqlite3.Connection,
