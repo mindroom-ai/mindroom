@@ -6,7 +6,7 @@
 #   member's `agents/<member>/memory_files/team_<sorted members>/MEMORY.md`, each entry under one shared `[id=...]`.
 #   v2026.3.72 started both the copies and the replica key, so every native copy carries the key; only a planted
 #   record lacks one, and it counts as a turn of its own.
-# Last legacy release: v2026.10.705; replacement: unreleased; writes each team scope once, to
+# Last legacy release: v2026.10.711; replacement: unreleased; writes each team scope once, to
 #   `team_memory/<team scope>/`.
 # Handling: before serving, once per storage root, the copies merge into their team's store and leave the members.
 #   File entries union by id; a copy holding anything MindRoom did not write stays where it was. Mem0 copies merge
