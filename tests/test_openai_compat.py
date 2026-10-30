@@ -903,6 +903,15 @@ class TestListModels:
         assert general["name"] == "GeneralAgent"
         assert general["description"] == "General-purpose assistant"
 
+    def test_an_agent_named_auto_is_not_listed(self, test_config: Config, app_client: TestClient) -> None:
+        """The `auto` model id always means automatic routing, so an agent of that name is not offered."""
+        test_config.agents["auto"] = AgentConfig(display_name="Auto Agent")
+
+        response = app_client.get("/v1/models")
+
+        assert response.status_code == 200
+        assert [(m["id"], m["name"]) for m in response.json()["data"] if m["id"] == "auto"] == [("auto", "Auto")]
+
     def test_hides_models_with_non_shared_worker_scopes(self, test_config: Config) -> None:
         """Agents and teams that require non-shared worker scopes should not be advertised on /v1."""
         from fastapi import FastAPI  # noqa: PLC0415

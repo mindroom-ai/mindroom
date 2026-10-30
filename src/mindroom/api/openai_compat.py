@@ -56,7 +56,7 @@ from mindroom.api.response_activity import track_openai_request
 from mindroom.authorization import is_sender_allowed_for_responder
 from mindroom.config.access import validate_concrete_matrix_user_ids
 from mindroom.config.resolution import entity_timezone
-from mindroom.constants import AI_RUN_METADATA_KEY, ROUTER_AGENT_NAME, RuntimePaths, runtime_env_flag
+from mindroom.constants import AI_RUN_METADATA_KEY, RuntimePaths, runtime_env_flag
 from mindroom.error_handling import needs_provider_key
 from mindroom.failure_text import failure_text
 from mindroom.helper_usage import helper_usage_context
@@ -387,16 +387,16 @@ def _api_key_requester(token: str, runtime_paths: RuntimePaths) -> JSONResponse 
 def _parse_chat_request(
     request: Request,
     body: bytes,
-) -> tuple[ChatCompletionRequest, Config, RuntimePaths, str, list[ResolvedVisibleMessage] | None] | JSONResponse:
+) -> tuple[ChatCompletionRequest, Config, str, list[ResolvedVisibleMessage] | None] | JSONResponse:
     """Parse and validate a chat completion request body.
 
-    Returns (request, config, runtime_paths, prompt, thread_history) on success, or a JSONResponse error.
+    Returns (request, config, prompt, thread_history) on success, or a JSONResponse error.
     """
     req = parse_chat_completion_body(body)
     if isinstance(req, JSONResponse):
         return req
 
-    config, runtime_paths = config_lifecycle.read_committed_runtime_config(request)
+    config, _ = config_lifecycle.read_committed_runtime_config(request)
     validation_error = validate_chat_request(req, config)
     if validation_error:
         return validation_error
@@ -405,7 +405,7 @@ def _parse_chat_request(
     if not prompt:
         return error_response(400, "No user message content found in messages")
 
-    return req, config, runtime_paths, prompt, thread_history
+    return req, config, prompt, thread_history
 
 
 def _requester_authority(
@@ -460,7 +460,7 @@ async def _resolve_auto_route(
     config: Config,
     runtime_paths: RuntimePaths,
     thread_history: Sequence[ResolvedVisibleMessage] | None,
-    authority: DetachedRequesterContext | None = None,
+    authority: DetachedRequesterContext | None,
 ) -> str | JSONResponse:
     """Resolve auto-routing to a specific agent name.
 
@@ -542,7 +542,7 @@ async def list_models(
     if isinstance(caller, JSONResponse):
         return caller
 
-    config, runtime_paths = config_lifecycle.read_committed_runtime_config(request)
+    config, _ = config_lifecycle.read_committed_runtime_config(request)
 
     authority = _requester_authority(request, caller.requester_id, config, runtime_paths)
     if isinstance(authority, JSONResponse):
@@ -554,8 +554,9 @@ async def list_models(
     except OSError:
         created = 0
 
-    compatible_agents = set(openai_compatible_agent_names(config))
-    compatible_agents = {name for name in compatible_agents if _requester_allows_model(name, authority)}
+    compatible_agents = [
+        name for name in openai_compatible_agent_names(config) if _requester_allows_model(name, authority)
+    ]
     models: list[_ModelObject] = []
     if compatible_agents:
         models.append(
@@ -566,9 +567,10 @@ async def list_models(
                 created=created,
             ),
         )
-    for agent_name, agent_config in config.agents.items():
-        if agent_name == ROUTER_AGENT_NAME or agent_name in RESERVED_MODEL_NAMES or agent_name not in compatible_agents:
+    for agent_name in compatible_agents:
+        if agent_name in RESERVED_MODEL_NAMES:
             continue
+        agent_config = config.agents[agent_name]
         models.append(
             _ModelObject(
                 id=agent_name,
@@ -579,7 +581,7 @@ async def list_models(
         )
 
     # Add teams
-    for team_name, team_config in (config.teams or {}).items():
+    for team_name, team_config in config.teams.items():
         if not _requester_allows_model(f"{TEAM_MODEL_PREFIX}{team_name}", authority):
             continue
         if openai_incompatible_agents(team_config.agents, config):
@@ -612,7 +614,7 @@ async def chat_completions(
     parsed = _parse_chat_request(request, await request.body())
     if isinstance(parsed, JSONResponse):
         return parsed
-    req, config, runtime_paths, prompt, thread_history = parsed
+    req, config, prompt, thread_history = parsed
     authority = _requester_authority(request, caller.requester_id, config, runtime_paths)
     if isinstance(authority, JSONResponse):
         return authority
@@ -637,7 +639,7 @@ async def chat_completions(
     return response
 
 
-async def _chat_completions(  # noqa: C901, PLR0912
+async def _chat_completions(
     request: Request,
     req: ChatCompletionRequest,
     config: Config,
@@ -667,8 +669,9 @@ async def _chat_completions(  # noqa: C901, PLR0912
     if not _requester_allows_model(agent_name, authority):
         return error_response(403, "This requester is not authorized for the model", code="permission_denied")
 
+    requester_id = authority.requester_id if authority is not None else None
     activity.responder = agent_name
-    activity.requester_id = authority.requester_id if authority is not None else None
+    activity.requester_id = requester_id
 
     # Derive a key-namespaced session ID from request headers or fallback UUID.
     session_id = derive_session_id(agent_name, request, session_namespace)
@@ -680,14 +683,14 @@ async def _chat_completions(  # noqa: C901, PLR0912
         model=agent_name,
         stream=req.stream,
         session_id=session_id,
-        requester_id=authority.requester_id if authority is not None else None,
+        requester_id=requester_id,
     )
     execution_identity = build_tool_execution_identity(
         channel="openai_compat",
         agent_name=agent_name,
         session_id=session_id,
         runtime_paths=runtime_paths,
-        requester_id=authority.requester_id if authority is not None else None,
+        requester_id=requester_id,
         room_id=None,
         thread_id=None,
         resolved_thread_id=None,
@@ -714,32 +717,19 @@ async def _chat_completions(  # noqa: C901, PLR0912
                 config.teams[team_name].agents,
                 budget,
             )
-            if req.stream:
-                response: JSONResponse | StreamingResponse = await _stream_team_completion(
-                    team_name,
-                    agent_name,
-                    prompt,
-                    session_id,
-                    config,
-                    runtime_paths,
-                    thread_history,
-                    team_models,
-                    execution_identity=execution_identity,
-                    refresh_scheduler=knowledge_refresh_scheduler,
-                )
-            else:
-                response = await _non_stream_team_completion(
-                    team_name,
-                    agent_name,
-                    prompt,
-                    session_id,
-                    config,
-                    runtime_paths,
-                    thread_history,
-                    team_models,
-                    execution_identity=execution_identity,
-                    refresh_scheduler=knowledge_refresh_scheduler,
-                )
+            team_completion = _stream_team_completion if req.stream else _non_stream_team_completion
+            response: JSONResponse | StreamingResponse = await team_completion(
+                team_name,
+                agent_name,
+                prompt,
+                session_id,
+                config,
+                runtime_paths,
+                thread_history,
+                team_models,
+                execution_identity=execution_identity,
+                refresh_scheduler=knowledge_refresh_scheduler,
+            )
         else:
             # Resolve knowledge base for this agent
             try:
