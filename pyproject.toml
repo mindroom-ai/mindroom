@@ -415,7 +415,6 @@ spider = [
 ]
 spotify = [
   "httpx>=0.27",
-  "spotipy>=2.25.1",
 ]
 sql = [
   "sqlalchemy",

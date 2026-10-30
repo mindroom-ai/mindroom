@@ -22,6 +22,8 @@ from mindroom.matrix.state import MatrixState
 from tests.api.conftest import trusted_upstream_headers, use_trusted_upstream_runtime
 from tests.matrix_state_helpers import save_matrix_state
 from tests.runtime_fakes import bind_test_embedded_runtime
+from tests.test_generated_agents import _created as created_entry
+from tests.test_generated_agents import _load as load_generated
 
 
 def _add_test_team_to_runtime_config() -> None:
@@ -32,15 +34,6 @@ def _add_test_team_to_runtime_config() -> None:
         if context.runtime_config is None:
             msg = "runtime config should be loaded"
             raise AssertionError(msg)
-        context.config_data["teams"] = {
-            "test_team": {
-                "display_name": "Test Team",
-                "role": "A test team",
-                "agents": ["test_agent"],
-                "rooms": ["team_room"],
-                "mode": "coordinate",
-            },
-        }
         context.runtime_config.teams["test_team"] = TeamConfig(
             display_name="Test Team",
             role="A test team",
@@ -58,7 +51,6 @@ def _add_room_metadata_to_runtime_config(room_key: str) -> None:
         if context.runtime_config is None:
             msg = "runtime config should be loaded"
             raise AssertionError(msg)
-        context.config_data.setdefault("rooms", {})[room_key] = {"description": "Room-only metadata"}
         context.runtime_config.rooms[room_key] = RoomConfig(description="Room-only metadata")
 
 
@@ -607,6 +599,24 @@ class TestMatrixOperations:
 
         assert response.status_code == 200
         assert response.json()["success"] is True
+
+    @pytest.mark.asyncio
+    async def test_leave_room_for_a_generated_agent(self, test_client: TestClient, tmp_path: Path) -> None:
+        """A created agent runs from the roster, not the authored config, and still leaves rooms on request."""
+        config = load_generated(tmp_path, created=[created_entry()])
+        assert "creator_research" in config.agents
+        assert "creator_research" not in (config.authored_model_dump().get("agents") or {})
+        config_lifecycle.require_api_state(main.app).snapshot.runtime_config = config
+        leave = AsyncMock(return_value=True)
+        bind_test_embedded_runtime(main.app, leave_matrix_room=leave)
+
+        response = test_client.post(
+            "/api/matrix/rooms/leave",
+            json={"agent_id": "creator_research", "room_id": "!room_to_leave:localhost"},
+        )
+
+        assert response.status_code == 200, response.text
+        leave.assert_awaited_once_with("creator_research", "!room_to_leave:localhost")
 
     @pytest.mark.asyncio
     async def test_leave_room_failure(self, test_client: TestClient) -> None:

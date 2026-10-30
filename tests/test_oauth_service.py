@@ -98,6 +98,7 @@ class _FakeOAuthProvider:
     scopes: tuple[str, ...] = ()
     claim_validator = None
     token_url = "https://oauth.example.test/token"  # noqa: S105
+    legacy_credentials = None
 
     def __init__(self, refresh: Callable[[Mapping[str, Any]], Awaitable[dict[str, Any] | None]]) -> None:
         self._refresh = refresh

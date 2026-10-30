@@ -12,7 +12,8 @@ from typing import TYPE_CHECKING, cast
 from fastapi import HTTPException, Request
 
 from mindroom.api import config_lifecycle
-from mindroom.api.dashboard_credential_scope import require_auth_user_id, resolve_dashboard_execution_scope_override
+from mindroom.api.auth_user import require_request_auth_user
+from mindroom.api.dashboard_credential_scope import resolve_dashboard_execution_scope_override
 from mindroom.oauth.providers import OAuthProviderError
 from mindroom.oauth.state import consume_opaque_oauth_state, issue_opaque_oauth_state, read_opaque_oauth_state
 
@@ -55,14 +56,13 @@ def issue_pending_oauth_state(
     tells how the flow ended. `credential_service` is the name the callback stores the connection under instead of the
     provider's own, for an Agent Keys service's own account.
     """
-    user_id = require_auth_user_id(request) if browser_user_required else ""
-    auth_user = request.scope.get("auth_user")
-    auth_source = auth_user.get("auth_source") if browser_user_required and isinstance(auth_user, dict) else None
     if browser_user_required:
+        auth_user = require_request_auth_user(request)
         execution_scope_override_provided, execution_scope_override = resolve_dashboard_execution_scope_override(
             request,
         )
     else:
+        auth_user = None
         execution_scope_override_provided, execution_scope_override = False, None
     runtime_paths = config_lifecycle.bind_current_request_snapshot(request).runtime_paths
     return issue_opaque_oauth_state(
@@ -71,8 +71,8 @@ def issue_pending_oauth_state(
         ttl_seconds=_PENDING_OAUTH_STATE_TTL_SECONDS,
         data={
             "service": service,
-            "user_id": user_id,
-            "auth_source": auth_source if isinstance(auth_source, str) else "",
+            "user_id": auth_user.user_id if auth_user is not None else "",
+            "auth_source": auth_user.source.value if auth_user is not None else "",
             "browser_user_required": browser_user_required,
             "agent_name": agent_name or "",
             "execution_scope_override_provided": execution_scope_override_provided,
@@ -124,8 +124,7 @@ def consume_pending_oauth_request(request: Request, service: str, state: str) ->
     runtime_paths = config_lifecycle.bind_current_request_snapshot(request).runtime_paths
     data = _read_pending_oauth_request(request, service, state)
     browser_user_required = data.get("browser_user_required") is not False
-    user_id = require_auth_user_id(request) if browser_user_required else ""
-    if browser_user_required and data.get("user_id") != user_id:
+    if browser_user_required and data.get("user_id") != require_request_auth_user(request).user_id:
         raise HTTPException(status_code=403, detail="OAuth state does not belong to the current user")
     try:
         consume_opaque_oauth_state(runtime_paths, kind=_PENDING_OAUTH_STATE_KIND, token=state)
