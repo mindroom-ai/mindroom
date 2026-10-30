@@ -151,7 +151,7 @@ _SIGNATURES = {
         f"token_count_after, compaction_summary, *, {_HOOK_HELPERS})"
     ),
     "ConfigField": (
-        "(name, label, type, required, default, placeholder, description, options, validation, authored_override)"
+        "(name, label, type, required, default, placeholder, description, options, validation, authored_override, env)"
     ),
     "ConfigReloadedContext": (
         f"({_HOOK}, changed_entities, added_entities, removed_entities, plugin_changes, *, {_HOOK_HELPERS})"

@@ -4,11 +4,15 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+from mindroom.runtime_env_policy import AWS_BEDROCK_CLAUDE_ENV_BY_KEY
 from mindroom.tool_system.declarations import ConfigField, SetupType, ToolCategory, ToolFileAccess, ToolStatus
 from mindroom.tool_system.registration import register_tool_with_metadata
 
 if TYPE_CHECKING:
     from agno.tools.redshift import RedshiftTools
+
+# The standard AWS variables, which the runtime env policy names once for every AWS client.
+_AWS_ENV = AWS_BEDROCK_CLAUDE_ENV_BY_KEY
 
 
 @register_tool_with_metadata(
@@ -79,7 +83,7 @@ if TYPE_CHECKING:
         ),
         ConfigField(
             name="region",
-            env=("AWS_REGION", "AWS_DEFAULT_REGION"),
+            env=(_AWS_ENV["region"], _AWS_ENV["default_region"]),
             label="Region",
             type="text",
             required=False,
@@ -97,7 +101,7 @@ if TYPE_CHECKING:
         ),
         ConfigField(
             name="access_key_id",
-            env=("AWS_ACCESS_KEY_ID",),
+            env=(_AWS_ENV["access_key"],),
             label="Access Key ID",
             type="password",
             required=False,
@@ -105,7 +109,7 @@ if TYPE_CHECKING:
         ),
         ConfigField(
             name="secret_access_key",
-            env=("AWS_SECRET_ACCESS_KEY",),
+            env=(_AWS_ENV["secret_key"],),
             label="Secret Access Key",
             type="password",
             required=False,
@@ -113,7 +117,7 @@ if TYPE_CHECKING:
         ),
         ConfigField(
             name="session_token",
-            env=("AWS_SESSION_TOKEN",),
+            env=(_AWS_ENV["session_token"],),
             label="Session Token",
             type="password",
             required=False,
@@ -121,7 +125,7 @@ if TYPE_CHECKING:
         ),
         ConfigField(
             name="profile",
-            env=("AWS_PROFILE",),
+            env=(_AWS_ENV["profile"],),
             label="AWS Profile",
             type="text",
             required=False,

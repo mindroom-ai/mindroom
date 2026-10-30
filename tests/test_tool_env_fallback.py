@@ -5,11 +5,11 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any
 
 import pytest
-from agno.tools import Toolkit
 
 import mindroom.tools  # noqa: F401
 from mindroom.constants import resolve_primary_runtime_paths
 from mindroom.credentials.manager import CredentialsManager
+from mindroom.tool_system.authoring import Toolkit
 from mindroom.tool_system.declarations import ConfigField, ToolCategory, ToolFileAccess
 from mindroom.tool_system.metadata import get_tool_by_name
 from mindroom.tool_system.registration import register_tool_with_metadata
@@ -291,10 +291,7 @@ def test_a_number_setting_from_the_env_file_reaches_the_toolkit_as_a_number(tmp_
     class _NumberToolkit(Toolkit):
         def __init__(self, limit: int | None = None) -> None:
             self.limit = limit
-            super().__init__(name=tool_name, tools=[self.ping])
-
-        def ping(self) -> str:
-            return "pong"
+            super().__init__(name=tool_name)
 
     snapshot = capture_tool_registry_snapshot()
 
