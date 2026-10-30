@@ -1484,34 +1484,6 @@ class TestCredentialsAPI:
         assert response.status_code == 200
         assert response.json() == []
 
-    def test_shared_agent_target_reads_only_agent_store_oauth_token_services(
-        self,
-        tmp_path: Path,
-    ) -> None:
-        """Shared-scope targets should read only OAuth token services from the agent store."""
-        runtime_paths = constants.resolve_primary_runtime_paths(
-            config_path=tmp_path / "config.yaml",
-            storage_path=tmp_path / "mindroom_data",
-            process_env={},
-        )
-        manager = get_runtime_credentials_manager(runtime_paths)
-        agent_store = manager.for_primary_runtime_agent_scope("general")
-        agent_store.save_credentials("acme_oauth", {"token": "agent-token", "_source": "oauth"})
-        agent_store.save_credentials("weather", {"api_key": "not-a-token", "_source": "ui"})
-        target = credentials_target.RequestCredentialsTarget(
-            runtime_paths=runtime_paths,
-            base_manager=manager,
-            worker_scope="shared",
-            agent_name="general",
-            execution_identity=None,
-        )
-
-        assert credentials_target.load_credentials_for_target("acme_oauth", target) == {
-            "token": "agent-token",
-            "_source": "oauth",
-        }
-        assert credentials_target.load_credentials_for_target("weather", target) is None
-
     def test_non_oauth_tool_settings_still_reject_private_scopes(
         self,
         client: TestClient,

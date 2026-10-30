@@ -5,15 +5,13 @@ from __future__ import annotations
 from enum import StrEnum
 from typing import TYPE_CHECKING
 
-from mindroom.runtime_env_policy import KUBERNETES_WORKER_BACKEND_CONFIG_ENV_BY_KEY
+from mindroom.runtime_env_policy import WORKER_BACKEND_ENV
 from mindroom.workers.backend import WorkerBackendError
 
 if TYPE_CHECKING:
     from mindroom.constants import RuntimePaths
 
 __all__ = ["WorkerBackendKind", "worker_backend_kind"]
-
-_WORKER_BACKEND_ENV = KUBERNETES_WORKER_BACKEND_CONFIG_ENV_BY_KEY["worker_backend"]
 
 
 class WorkerBackendKind(StrEnum):
@@ -43,7 +41,7 @@ _KIND_BY_SELECTOR = {
 
 def worker_backend_kind(runtime_paths: RuntimePaths) -> WorkerBackendKind:
     """Return the worker backend this runtime selects, raising on a selector value no backend answers to."""
-    raw_value = runtime_paths.env_value(_WORKER_BACKEND_ENV)
+    raw_value = runtime_paths.env_value(WORKER_BACKEND_ENV)
     kind = _KIND_BY_SELECTOR.get((raw_value or "").strip().lower())
     if kind is None:
         msg = f"Unsupported worker backend: {raw_value}"

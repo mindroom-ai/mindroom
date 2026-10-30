@@ -8,7 +8,6 @@ from typing import TYPE_CHECKING, TextIO
 import pytest
 
 from mindroom.workers.backend import effective_idle_status, filter_and_sort_worker_handles
-from mindroom.workers.backends import _metadata_store as metadata_store_module
 from mindroom.workers.backends import local as local_module
 from mindroom.workers.backends._lifecycle import (
     WorkerLifecycleState,
@@ -230,6 +229,6 @@ def test_worker_metadata_replace_preserves_previous_document_when_serialization_
     monkeypatch.setattr(json, "dump", fail_after_partial_write)
 
     with pytest.raises(RuntimeError, match="serialization interrupted"):
-        metadata_store_module.save_worker_metadata(paths, backend._default_metadata("v1:t:shared:a", 2.0))
+        save_worker_metadata(paths, backend._default_metadata("v1:t:shared:a", 2.0))
 
     assert paths.metadata_file.read_bytes() == original_bytes

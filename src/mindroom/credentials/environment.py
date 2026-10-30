@@ -262,7 +262,7 @@ def declared_credentials(runtime_paths: RuntimePaths) -> dict[str, DeclaredCrede
         if is_oauth_token_service(service):
             logger.warning("credential_env_declaration_rejected_lifecycle_owned_service", service=service)
             return
-        declared[service] = DeclaredCredential({**credentials, "_source": "env"}, variable)
+        declared[service] = DeclaredCredential(credentials, variable)
 
     for service, env_var in PROVIDER_ENV_KEYS.items():
         secret = _read_secret_from_env(env_var, runtime_paths)

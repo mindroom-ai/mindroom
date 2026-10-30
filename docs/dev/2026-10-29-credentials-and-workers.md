@@ -20,7 +20,8 @@ Deleting stale copies at each start would have kept two owners of one fact in sy
 - A saved document hides the whole declared document for its service, which matches the import's rule that a dashboard save was never overwritten.
 - Only a runtime outside runner mode reads the layer; the sandbox runner app now sets runner mode in the runtime it commits, because runners rehydrate from manifests and their own process environment, and absence of the flag is not evidence of being the primary.
 - The declared layer is computed when a primary manager is created and keyed by a digest computed once per `RuntimePaths` snapshot, so lookups add no hashing and changes to referenced files take effect at restart, as the import did.
-- The legacy copies are deleted when the primary first opens its store rather than at a startup hook, so `mindroom doctor` run before the first start after an upgrade validates the keys that start will use.
+- The legacy copies are deleted whenever the primary opens its store rather than at a startup hook, so `mindroom doctor` run before the first start after an upgrade validates the keys that start will use.
+- Declared documents carry no `_source` tag, so nothing writes `_source: "env"` any more: a tool that saves back a credential it loaded from the environment, such as a renewed token, keeps it as a saved document, and the cleanup needs no receipt to tell such a save from an old copy.
 - A legacy reader that hides `_source=env` documents at read time was rejected because it keeps an old-format branch in every read.
 
 ## Docker worker currency

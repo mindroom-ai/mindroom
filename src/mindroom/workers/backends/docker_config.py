@@ -11,7 +11,6 @@ from typing import TYPE_CHECKING, Literal, cast
 from mindroom.constants import (
     RuntimePaths,
     resolve_config_relative_path,
-    resolve_primary_runtime_paths,
     runtime_env_values,
     runtime_paths_with_config_path,
     runtime_paths_with_storage_root,
@@ -46,13 +45,22 @@ if TYPE_CHECKING:
 __all__ = [
     "DOCKER_HOST_ALIAS",
     "DOCKER_RESERVED_EXTRA_ENV_NAMES",
+    "LABEL_COMPONENT",
+    "LABEL_IMAGE_REFERENCE",
+    "LABEL_LAUNCH_CONFIG_HASH",
+    "LABEL_MANAGED_BY",
+    "LABEL_NAME",
+    "LABEL_RUNTIME_NAMESPACE",
+    "LABEL_STARTUP_MANIFEST_HASH",
+    "LABEL_STORAGE_LAYOUT",
+    "LABEL_STORAGE_LAYOUT_VALUE",
+    "LABEL_WORKER_ID",
     "DockerWorkerBackendConfig",
     "docker_backend_cleanup_signature",
     "docker_backend_config_signature",
     "docker_primary_runtime_paths",
     "docker_workers_root",
     "normalize_docker_name_prefix",
-    "resolve_docker_storage_root",
     "validate_docker_endpoint_host",
     "validate_docker_extra_labels",
     "validate_docker_mount_layout",
@@ -88,18 +96,32 @@ DOCKER_RESERVED_EXTRA_ENV_NAMES = frozenset(
     },
 )
 _DOCKER_RESERVED_EXTRA_ENV_NAMES = DOCKER_RESERVED_EXTRA_ENV_NAMES
+
+# The labels the Docker backend stamps on each worker container, which operator labels must not override.
+LABEL_COMPONENT = "mindroom.ai/component"
+LABEL_MANAGED_BY = "app.mindroom.ai/managed-by"
+LABEL_NAME = "app.mindroom.ai/name"
+LABEL_WORKER_ID = "mindroom.ai/worker-id"
+LABEL_LAUNCH_CONFIG_HASH = "mindroom.ai/launch-config-hash"
+# Launch inputs no other run argument carries, labelled so that the launch hash covers them.
+LABEL_STARTUP_MANIFEST_HASH = "mindroom.ai/startup-manifest-hash"
+LABEL_IMAGE_REFERENCE = "mindroom.ai/image-reference"
+LABEL_RUNTIME_NAMESPACE = "mindroom.ai/runtime-namespace"
+# Containers that mount only workspaces; earlier releases mounted whole state roots.
+LABEL_STORAGE_LAYOUT = "mindroom.ai/storage-layout"
+LABEL_STORAGE_LAYOUT_VALUE = "workspaces"
 _DOCKER_RESERVED_LABEL_NAMES = frozenset(
     {
-        "mindroom.ai/component",
-        "app.mindroom.ai/managed-by",
-        "app.mindroom.ai/name",
-        "mindroom.ai/worker-id",
+        LABEL_COMPONENT,
+        LABEL_MANAGED_BY,
+        LABEL_NAME,
+        LABEL_WORKER_ID,
         "mindroom.ai/worker-key",
-        "mindroom.ai/launch-config-hash",
-        "mindroom.ai/startup-manifest-hash",
-        "mindroom.ai/image-reference",
-        "mindroom.ai/runtime-namespace",
-        "mindroom.ai/storage-layout",
+        LABEL_LAUNCH_CONFIG_HASH,
+        LABEL_STARTUP_MANIFEST_HASH,
+        LABEL_IMAGE_REFERENCE,
+        LABEL_RUNTIME_NAMESPACE,
+        LABEL_STORAGE_LAYOUT,
     },
 )
 
@@ -176,13 +198,6 @@ def normalize_docker_name_prefix(raw_value: str) -> str:
 def docker_workers_root(base_storage_path: Path) -> Path:
     """Return the top-level workers directory used by the Docker backend."""
     return worker_root_path(base_storage_path, "__mindroom_root__").parent
-
-
-def resolve_docker_storage_root(storage_root: Path | None = None, *, runtime_paths: RuntimePaths | None = None) -> Path:
-    """Resolve the storage root used by the Docker backend."""
-    if storage_root is None:
-        storage_root = (runtime_paths or resolve_primary_runtime_paths(process_env=dict(os.environ))).storage_root
-    return storage_root.expanduser().resolve()
 
 
 def docker_primary_runtime_paths(

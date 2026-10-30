@@ -46,7 +46,7 @@ def get_api_key_for_provider(provider: str, runtime_paths: RuntimePaths) -> str 
     # Special case for Ollama - return None as it doesn't use API keys
     if provider == "ollama":
         return None
-    return _get_provider_service_api_key(provider, runtime_paths)
+    return get_api_key_for_service(provider, runtime_paths)
 
 
 def provider_key_with_source(provider: str, runtime_paths: RuntimePaths) -> tuple[str | None, str | None]:
@@ -92,15 +92,10 @@ def resolve_provider_service_api_key(
     return service, api_key
 
 
-def _get_provider_service_api_key(service: str, runtime_paths: RuntimePaths) -> str | None:
-    """Get a provider key from the shared store using runtime alias resolution."""
-    creds_manager = get_runtime_shared_credentials_manager(runtime_paths)
-    return resolve_provider_service_api_key(service, creds_manager.get_api_key)[1]
-
-
 def get_api_key_for_service(service: str, runtime_paths: RuntimePaths) -> str | None:
     """Get an API key from one explicitly named shared credential service or its env-var-named twin."""
-    return _get_provider_service_api_key(service, runtime_paths)
+    creds_manager = get_runtime_shared_credentials_manager(runtime_paths)
+    return resolve_provider_service_api_key(service, creds_manager.get_api_key)[1]
 
 
 def get_embedder_api_key(
@@ -133,7 +128,7 @@ def get_embedder_api_key(
         return explicit_api_key.strip()
     creds_manager = get_runtime_shared_credentials_manager(runtime_paths)
     if credentials_service is not None:
-        service_api_key = _get_provider_service_api_key(credentials_service, runtime_paths)
+        service_api_key = get_api_key_for_service(credentials_service, runtime_paths)
         if service_api_key and service_api_key.strip():
             return service_api_key.strip()
         return _EMBEDDER_KEYLESS_PLACEHOLDER_API_KEY

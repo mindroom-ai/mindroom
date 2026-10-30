@@ -1137,7 +1137,7 @@ See [Knowledge Bases](https://docs.mindroom.chat/knowledge/) for configuration a
 
 A new service named after a provider key environment variable, such as `ANTHROPIC_API_KEY`, is saved as the canonical provider service (`anthropic`) that the Models tab and runtime read.
 An existing service with an environment-variable name keeps receiving writes, because config may reference it by that exact name.
-See [Credential Storage](https://docs.mindroom.chat/oauth-framework/#credential-storage) for credentials imported from `.env`, such as `GITHUB_TOKEN`.
+See [Credentials from the Environment](https://docs.mindroom.chat/oauth-framework/#credentials-from-the-environment) for credentials read from `.env`, such as `GITHUB_TOKEN`.
 
 ### Voice
 

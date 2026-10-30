@@ -5,7 +5,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any
 
 from mindroom.credentials.manager import credential_layers
-from mindroom.tool_system.worker_routing import ResolvedWorkerTarget, ToolExecutionIdentity
+from mindroom.tool_system.worker_routing import ToolExecutionIdentity, resolve_worker_target
 
 if TYPE_CHECKING:
     from mindroom.credentials.manager import CredentialsManager
@@ -20,23 +20,8 @@ def _desktop_credentials_manager(
     agent_name: str,
 ) -> CredentialsManager:
     """Return the store the credential policy names for one requester's Desktop identity with one agent."""
-    identity = ToolExecutionIdentity(
-        channel="matrix",
-        agent_name=agent_name,
-        requester_id=requester_id,
-        room_id=None,
-        thread_id=None,
-        resolved_thread_id=None,
-        session_id=None,
-    )
-    target = ResolvedWorkerTarget(
-        worker_scope=None,
-        routing_agent_name=agent_name,
-        execution_identity=identity,
-        tenant_id=None,
-        account_id=None,
-        worker_key=None,
-    )
+    identity = ToolExecutionIdentity("matrix", agent_name, requester_id, None, None, None, None)
+    target = resolve_worker_target(None, agent_name, identity)
     layers = credential_layers(_DESKTOP_SERVICE, credentials_manager=credentials_manager, worker_target=target)
     return layers.writable_store()
 

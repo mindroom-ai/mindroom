@@ -68,7 +68,8 @@ _PRIMARY_RUNTIME_SCOPED_CREDENTIALS_DIRNAME = "private_oauth"
 # Sanitized scope directory parts never start with "_", so this literal cannot
 # collide with a requester directory inside the primary-runtime scoped store.
 _PRIMARY_RUNTIME_AGENT_SCOPED_DIRNAME = "_agents"
-_WORKER_GRANTABLE_SHARED_CREDENTIAL_SOURCES = frozenset({"env", "ui", None})
+# A grant passes on documents saved in the dashboard or declared by the environment, never OAuth connections.
+_WORKER_GRANTABLE_SHARED_CREDENTIAL_SOURCES = frozenset({"ui", None})
 # Securing one dormant worker store takes several filesystem round trips, which on network
 # storage with thousands of workers made the primary's first credential access take seconds.
 _WORKER_STORE_HARDENING_CONCURRENCY = 16
@@ -87,7 +88,6 @@ __all__ = [
     "delete_scoped_credentials",
     "get_runtime_credentials_manager",
     "get_runtime_shared_credentials_manager",
-    "list_worker_grantable_shared_services",
     "load_scoped_credentials",
     "load_worker_grantable_shared_credentials",
     "remove_worker_service_credentials",
@@ -108,7 +108,7 @@ class _CredentialsManagerKey:
     current_worker_root: Path | None
     encryption_key: str | None
     # The primary's environment inputs, whose declared credentials its store reads under saved ones; None elsewhere.
-    declaring_env_digest: str | None = None
+    declaring_env_digest: str | None
 
 
 _credentials_managers: dict[_CredentialsManagerKey, CredentialsManager] = {}
@@ -469,10 +469,7 @@ class CredentialsManager:
 
         """
         self.base_path = Path(base_path)
-        if shared_base_path is None:
-            self.shared_base_path = _default_shared_credentials_base_path(self.base_path)
-        else:
-            self.shared_base_path = Path(shared_base_path)
+        self.shared_base_path = self.base_path if shared_base_path is None else Path(shared_base_path)
         self.current_worker_key = current_worker_key
         self.current_worker_root = (
             Path(current_worker_root).expanduser().resolve() if current_worker_root is not None else None
@@ -545,15 +542,15 @@ class CredentialsManager:
         )
 
     def shared_manager(self) -> CredentialsManager:
-        """Return a manager rooted in the shared credential layer for this execution context."""
+        """Return the shared credential layer for this execution context: this store itself, or a worker's mirror."""
+        if self.shared_base_path == self.base_path:
+            return self
         return CredentialsManager(
             base_path=self.shared_base_path,
             shared_base_path=self.shared_base_path,
             current_worker_key=self.current_worker_key,
             current_worker_root=self.current_worker_root,
             encryption_key=self._encryption_key_config,
-            # In the primary the shared layer is this store, so it reads the same declared credentials.
-            declared=self._declared if self.shared_base_path == self.base_path else None,
         )
 
     def get_credentials_path(self, service: str) -> Path:
@@ -751,10 +748,6 @@ def _credentials_base_path(storage_root: Path) -> Path:
     return Path(storage_root).expanduser().resolve() / "credentials"
 
 
-def _default_shared_credentials_base_path(base_path: Path) -> Path:
-    return base_path
-
-
 def _runtime_shared_credentials_base_path(runtime_paths: RuntimePaths, base_path: Path) -> Path:
     shared_storage_path = (
         runtime_paths.env_value(
@@ -941,16 +934,9 @@ def remove_worker_service_credentials(
     return _WorkerCredentialsRemoval(removed=removed, failed=failed)
 
 
-def _shared_credentials_manager(credentials_manager: CredentialsManager) -> CredentialsManager:
-    """Return the shared credential layer for one execution context."""
-    if credentials_manager.shared_base_path == credentials_manager.base_path:
-        return credentials_manager
-    return credentials_manager.shared_manager()
-
-
 def get_runtime_shared_credentials_manager(runtime_paths: RuntimePaths) -> CredentialsManager:
     """Return the shared credential layer for one explicit runtime context."""
-    return _shared_credentials_manager(get_runtime_credentials_manager(runtime_paths))
+    return get_runtime_credentials_manager(runtime_paths).shared_manager()
 
 
 def _reset_credentials_manager_cache() -> None:
@@ -1009,24 +995,6 @@ def _grantable_document(credentials: Mapping[str, Any] | None) -> dict[str, Any]
     return dict(credentials)
 
 
-def list_worker_grantable_shared_services(
-    *,
-    shared_manager: CredentialsManager,
-    allowed_services: frozenset[str],
-) -> list[str]:
-    """List shared credential services that isolated workers may inherit."""
-    return sorted(
-        service
-        for service in shared_manager.list_services()
-        if load_worker_grantable_shared_credentials(
-            service,
-            shared_manager=shared_manager,
-            allowed_services=allowed_services,
-        )
-        is not None
-    )
-
-
 def sync_shared_credentials_to_worker(
     worker_key: str,
     *,
@@ -1054,7 +1022,7 @@ def sync_shared_credentials_to_worker(
     # default configuration and it runs on every worker-routed tool call, so short-circuit it and
     # fall straight through to the cleanup pass, which still tears down any stale mirror.
     if allowed_services:
-        source_manager = _shared_credentials_manager(manager)
+        source_manager = manager.shared_manager()
         for service in source_manager.list_services():
             shared_credentials = load_worker_grantable_shared_credentials(
                 service,
@@ -1088,7 +1056,7 @@ class CredentialLayers:
     # The shared layer passes on only documents a grant may pass on.
     granted_only: bool
     # Why saves and deletes are refused when there is no store.
-    refusal: str = ""
+    refusal: str
 
     def load(self, service: str) -> dict[str, Any] | None:
         """Return the service's document: the store's fields over the shared layer's."""
@@ -1119,18 +1087,17 @@ def credential_layers(
     ``allowed_shared_services`` is the configured worker grant; ``primary_built_tool`` marks the settings of a tool
     the primary builds for this agent, which never come from a store worker code can write.
     """
-    manager = credentials_manager
     worker_scope = worker_target.worker_scope if worker_target is not None else None
     policy = credential_service_policy(service, worker_scope, primary_built_tool=primary_built_tool)
     # A dedicated worker's runtime reads a mirror that holds only its grants, under its own store.
-    worker_runtime = manager.shared_base_path != manager.base_path
+    worker_runtime = credentials_manager.shared_base_path != credentials_manager.base_path
     reads_shared = (
         policy.reads_shared and (service in (allowed_shared_services or frozenset()) and policy.grantable)
     ) or (worker_runtime and (policy.reads_shared or policy.placement is CredentialPlacement.GLOBAL))
-    store, refusal = _placement_store(service, policy, manager, worker_target)
+    store, refusal = _placement_store(service, policy, credentials_manager, worker_target)
     return CredentialLayers(
         store=store,
-        shared=_shared_credentials_manager(manager) if reads_shared else None,
+        shared=credentials_manager.shared_manager() if reads_shared else None,
         granted_only=not worker_runtime,
         refusal=refusal,
     )
@@ -1147,7 +1114,7 @@ def _placement_store(
     if placement is CredentialPlacement.GLOBAL:
         return manager, ""
     if placement is CredentialPlacement.SHARED:
-        return _shared_credentials_manager(manager), ""
+        return manager.shared_manager(), ""
     if worker_target is None or placement in {CredentialPlacement.REQUESTER, CredentialPlacement.REQUESTER_AGENT}:
         return _requester_store(service, policy, manager, worker_target)
     if placement is CredentialPlacement.AGENT:

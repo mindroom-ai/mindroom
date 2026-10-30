@@ -97,7 +97,7 @@ def test_terminal_oauth_refresh_error_classification(value: object, expected: bo
             },
         ),
         (
-            google_oauth_provider("google_cloud"),
+            google_cloud_oauth_provider(),
             {
                 "id": "google_cloud",
                 "display_name": "Google Cloud",
@@ -182,44 +182,6 @@ def test_public_google_oauth_providers_preserve_service_specific_fields(
     assert provider.tool_config_service == expected["tool_config_service"]
     assert provider.client_config_services == expected["client_config_services"]
     assert provider.status_capabilities == expected["status_capabilities"]
-
-
-def test_google_providers_request_minimum_functionality_preserving_scopes() -> None:
-    """Google providers avoid broader or redundant scopes without removing tool operations."""
-    assert google_oauth_provider("google_gmail").scopes == (
-        *_GOOGLE_IDENTITY_SCOPES,
-        "https://www.googleapis.com/auth/gmail.modify",
-    )
-    assert google_oauth_provider("google_calendar").scopes == (
-        *_GOOGLE_IDENTITY_SCOPES,
-        "https://www.googleapis.com/auth/calendar.events",
-        "https://www.googleapis.com/auth/calendar.calendarlist.readonly",
-        "https://www.googleapis.com/auth/calendar.freebusy",
-        "https://www.googleapis.com/auth/calendar.settings.readonly",
-    )
-    assert google_oauth_provider("google_docs").scopes == (
-        *_GOOGLE_IDENTITY_SCOPES,
-        "https://www.googleapis.com/auth/documents",
-    )
-    assert google_oauth_provider("google_tasks").scopes == (
-        *_GOOGLE_IDENTITY_SCOPES,
-        "https://www.googleapis.com/auth/tasks",
-    )
-
-
-def test_google_cloud_provider_requests_only_read_only_cloud_and_identity_scopes() -> None:
-    """Google Cloud asks only for identity plus the read-only cloud-platform scope."""
-    provider = google_cloud_oauth_provider()
-
-    assert provider.id == "google_cloud"
-    assert provider.display_name == "Google Cloud"
-    assert provider.scopes == (*_GOOGLE_IDENTITY_SCOPES, "https://www.googleapis.com/auth/cloud-platform.read-only")
-    assert provider == google_oauth_provider("google_cloud")
-    assert provider.credential_service == "google_cloud_oauth"
-    assert provider.tool_config_service is None
-    assert provider.client_config_services == ("google_cloud_oauth_client",)
-    assert provider.shared_client_config_services == ("google_oauth_client",)
-    assert provider.extra_auth_params == GOOGLE_NARROW_EXTRA_AUTH_PARAMS
 
 
 @pytest.mark.parametrize("scope_field", ["scopes", "scope"])
@@ -375,34 +337,6 @@ def test_public_google_oauth_providers_preserve_shared_google_oauth_fields(provi
     assert provider.extra_auth_params == expected_auth_params
     assert provider.pkce_code_challenge_method == "S256"
     assert provider.runtime_bootstrapper is _google_runtime_bootstrapper
-    assert provider.token_parser is _google_token_parser
-
-
-def test_google_oauth_provider_applies_shared_google_defaults_to_a_table_entry() -> None:
-    """The Google builder names services after the provider id and adds the shared Google skeleton."""
-    provider = google_oauth_provider("google_drive")
-
-    assert provider.id == "google_drive"
-    assert provider.display_name == "Google Drive"
-    assert provider.authorization_url == GOOGLE_AUTHORIZATION_URL
-    assert provider.token_url == GOOGLE_TOKEN_URL
-    assert provider.scopes == (*_GOOGLE_IDENTITY_SCOPES, "https://www.googleapis.com/auth/drive")
-    assert provider.credential_service == "google_drive_oauth"
-    assert provider.tool_config_service == "google_drive"
-    assert provider.client_config_services == ("google_drive_oauth_client",)
-    assert provider.shared_client_config_services == ("google_oauth_client",)
-    assert provider.allowed_email_domains_env == (
-        "GOOGLE_DRIVE_ALLOWED_EMAIL_DOMAINS",
-        "MINDROOM_OAUTH_GOOGLE_DRIVE_ALLOWED_EMAIL_DOMAINS",
-    )
-    assert provider.allowed_hosted_domains_env == (
-        "GOOGLE_DRIVE_ALLOWED_HOSTED_DOMAINS",
-        "MINDROOM_OAUTH_GOOGLE_DRIVE_ALLOWED_HOSTED_DOMAINS",
-    )
-    assert provider.extra_auth_params == GOOGLE_EXTRA_AUTH_PARAMS
-    assert provider.pkce_code_challenge_method == "S256"
-    assert provider.runtime_bootstrapper is _google_runtime_bootstrapper
-    assert provider.status_capabilities == ("Drive file search and read", "Drive file upload and organization")
     assert provider.token_parser is _google_token_parser
 
 

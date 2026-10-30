@@ -20,6 +20,7 @@ from mindroom.private_storage.private_instance_identity_store import (
 from mindroom.runtime_env_policy import (
     CREDENTIALS_ENCRYPTION_KEY_ENV,
     KUBERNETES_WORKER_BACKEND_CONFIG_ENV_BY_KEY,
+    WORKER_BACKEND_ENV,
     WORKER_COMPUTER_ENABLED_ENV,
     credentials_encryption_key_value,
 )
@@ -74,7 +75,6 @@ _DEFAULT_AGENT_VAULT_API_URL = "http://agent-vault:14321"
 _DEFAULT_AGENT_VAULT_PROXY_URL = "http://agent-vault:14322"
 _DEFAULT_AGENT_VAULT_BOOTSTRAP_SECRET_NAME = "agent-vault-bootstrap"  # noqa: S105
 
-_WORKER_BACKEND_ENV = KUBERNETES_WORKER_BACKEND_CONFIG_ENV_BY_KEY["worker_backend"]
 _NAMESPACE_ENV = KUBERNETES_WORKER_BACKEND_CONFIG_ENV_BY_KEY["namespace"]
 _IMAGE_ENV = KUBERNETES_WORKER_BACKEND_CONFIG_ENV_BY_KEY["image"]
 _IMAGE_PULL_POLICY_ENV = KUBERNETES_WORKER_BACKEND_CONFIG_ENV_BY_KEY["image_pull_policy"]
@@ -521,12 +521,12 @@ class KubernetesWorkerBackendConfig:
         namespace = read_env(env, _NAMESPACE_ENV) or read_env(env, _POD_NAMESPACE_ENV) or "default"
         image = read_env(env, _IMAGE_ENV)
         if not image:
-            msg = f"{_IMAGE_ENV} must be set when {_WORKER_BACKEND_ENV}=kubernetes."
+            msg = f"{_IMAGE_ENV} must be set when {WORKER_BACKEND_ENV}=kubernetes."
             raise WorkerBackendError(msg)
 
         storage_pvc_name = read_env(env, _STORAGE_PVC_ENV)
         if not storage_pvc_name:
-            msg = f"{_STORAGE_PVC_ENV} must be set when {_WORKER_BACKEND_ENV}=kubernetes."
+            msg = f"{_STORAGE_PVC_ENV} must be set when {WORKER_BACKEND_ENV}=kubernetes."
             raise WorkerBackendError(msg)
 
         resource_requests = {

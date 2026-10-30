@@ -86,58 +86,58 @@ def _exchange(runtime_paths: RuntimePaths) -> object:
         )
 
 
-def test_files_provider_declares_a_requester_scoped_graph_contract() -> None:
-    provider = microsoft_oauth_provider("microsoft_files")
+@pytest.mark.parametrize(
+    ("provider_id", "display_name", "service_scopes"),
+    [
+        ("microsoft_files", "Microsoft OneDrive and SharePoint", ("Files.ReadWrite.All",)),
+        ("microsoft_sharepoint", "Microsoft SharePoint", ("Sites.ReadWrite.All",)),
+        (
+            "outlook_mail",
+            "Outlook Mail",
+            (
+                "Mail.ReadWrite",
+                "Mail.Send",
+                "Mail.ReadWrite.Shared",
+                "Mail.Send.Shared",
+                "MailboxSettings.ReadWrite",
+            ),
+        ),
+        ("outlook_calendar", "Outlook Calendar", ("Calendars.ReadWrite", "Calendars.ReadWrite.Shared")),
+        ("microsoft_todo", "Microsoft To Do", ("Tasks.ReadWrite",)),
+        (
+            "microsoft_teams",
+            "Microsoft Teams",
+            (
+                "Team.ReadBasic.All",
+                "Channel.ReadBasic.All",
+                "ChannelMessage.Read.All",
+                "ChannelMessage.Send",
+                "Chat.ReadWrite",
+                "ChatMessage.Send",
+                "Presence.Read.All",
+                "User.Read.All",
+            ),
+        ),
+        ("microsoft_meetings", "Microsoft Teams Meetings", ("OnlineMeetings.Read", "OnlineMeetingTranscript.Read.All")),
+        ("microsoft_onenote", "Microsoft OneNote", ("Notes.ReadWrite.All",)),
+        ("microsoft_people", "Microsoft 365 People", ("User.Read.All",)),
+    ],
+)
+def test_each_provider_declares_a_requester_scoped_graph_contract(
+    provider_id: str,
+    display_name: str,
+    service_scopes: tuple[str, ...],
+) -> None:
+    provider = microsoft_oauth_provider(provider_id)
 
-    assert provider.id == "microsoft_files"
-    assert provider.display_name == "Microsoft OneDrive and SharePoint"
-    assert provider.scopes == ("Files.ReadWrite.All", "User.Read", "offline_access")
-    assert provider.credential_service == "microsoft_files_oauth"
-    assert provider.tool_config_service == "microsoft_files"
-    assert provider.client_config_services == ("microsoft_files_oauth_client",)
+    assert (provider.id, provider.display_name) == (provider_id, display_name)
+    assert provider.scopes == (*service_scopes, "User.Read", "offline_access")
+    assert provider.credential_service == f"{provider_id}_oauth"
+    assert provider.tool_config_service == provider_id
+    assert provider.client_config_services == (f"{provider_id}_oauth_client",)
     assert provider.shared_client_config_services == ("microsoft_oauth_client",)
     assert provider.token_endpoint_auth_method == "client_secret_post"
     assert provider.pkce_code_challenge_method == "S256"
-    assert provider.requester_scoped_credentials is True
-
-
-def test_sharepoint_provider_requests_only_sites_read_write_all() -> None:
-    provider = microsoft_oauth_provider("microsoft_sharepoint")
-
-    assert (provider.id, provider.display_name) == ("microsoft_sharepoint", "Microsoft SharePoint")
-    assert provider.scopes == ("Sites.ReadWrite.All", "User.Read", "offline_access")
-    assert provider.credential_service == "microsoft_sharepoint_oauth"
-    assert provider.shared_client_config_services == ("microsoft_oauth_client",)
-    assert provider.requester_scoped_credentials is True
-
-
-def test_todo_provider_requests_only_tasks_read_write() -> None:
-    provider = microsoft_oauth_provider("microsoft_todo")
-
-    assert (provider.id, provider.display_name) == ("microsoft_todo", "Microsoft To Do")
-    assert provider.scopes == ("Tasks.ReadWrite", "User.Read", "offline_access")
-    assert provider.credential_service == "microsoft_todo_oauth"
-    assert provider.shared_client_config_services == ("microsoft_oauth_client",)
-    assert provider.requester_scoped_credentials is True
-
-
-def test_onenote_provider_requests_only_notes_read_write_all() -> None:
-    provider = microsoft_oauth_provider("microsoft_onenote")
-
-    assert (provider.id, provider.display_name) == ("microsoft_onenote", "Microsoft OneNote")
-    assert provider.scopes == ("Notes.ReadWrite.All", "User.Read", "offline_access")
-    assert provider.credential_service == "microsoft_onenote_oauth"
-    assert provider.shared_client_config_services == ("microsoft_oauth_client",)
-    assert provider.requester_scoped_credentials is True
-
-
-def test_people_provider_requests_only_user_read_all() -> None:
-    provider = microsoft_oauth_provider("microsoft_people")
-
-    assert (provider.id, provider.display_name) == ("microsoft_people", "Microsoft 365 People")
-    assert provider.scopes == ("User.Read.All", "User.Read", "offline_access")
-    assert provider.credential_service == "microsoft_people_oauth"
-    assert provider.shared_client_config_services == ("microsoft_oauth_client",)
     assert provider.requester_scoped_credentials is True
 
 

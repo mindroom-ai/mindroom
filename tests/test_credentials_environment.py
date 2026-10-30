@@ -10,7 +10,6 @@ import pytest
 from mindroom import constants as constants_mod
 from mindroom.api import sandbox_runner as sandbox_runner_module
 from mindroom.credentials.environment import get_secret_from_env
-from mindroom.credentials.legacy_env_credentials import _RECEIPT_NAME
 from mindroom.credentials.manager import (
     CredentialsManager,
     _reset_credentials_manager_cache,
@@ -114,7 +113,7 @@ def _credential_seed_json(service: str = "google_oauth_client") -> str:
 
 
 _OAUTH_CLIENT_ENV = {"OAUTH_CLIENT_ID": "client-id", "OAUTH_CLIENT_SECRET": "client-secret"}
-_DECLARED_OAUTH_CLIENT = {"client_id": "client-id", "client_secret": "client-secret", "_source": "env"}
+_DECLARED_OAUTH_CLIENT = {"client_id": "client-id", "client_secret": "client-secret"}
 
 
 # Which variables declare which services.
@@ -140,7 +139,7 @@ def test_each_provider_variable_declares_its_service(tmp_path: Path, variable: s
     manager = get_runtime_credentials_manager(_runtime_paths(tmp_path, {variable: "value-from-env"}))
 
     field = "host" if service == "ollama" else "api_key"
-    assert manager.load_credentials(service) == {field: "value-from-env", "_source": "env"}
+    assert manager.load_credentials(service) == {field: "value-from-env"}
     assert manager.declared_variable(service) == variable
     assert not manager.get_credentials_path(service).exists()
 
@@ -262,7 +261,6 @@ def test_github_token_declares_the_private_git_credential(tmp_path: Path) -> Non
     assert manager.load_credentials("github_private") == {
         "username": "x-access-token",
         "token": "ghp-test-token",
-        "_source": "env",
     }
 
 
@@ -274,7 +272,7 @@ def test_embedder_api_key_declares_the_embedder_credential(tmp_path: Path, from_
     env = {"EMBEDDER_API_KEY_FILE": str(key_file)} if from_file else {"EMBEDDER_API_KEY": "sk-embedder-key"}
     manager = get_runtime_credentials_manager(_runtime_paths(tmp_path, env))
 
-    assert manager.load_credentials("embedder") == {"api_key": "sk-embedder-key", "_source": "env"}
+    assert manager.load_credentials("embedder") == {"api_key": "sk-embedder-key"}
 
 
 def test_google_application_credentials_declares_the_vertex_adc_path(tmp_path: Path) -> None:
@@ -286,7 +284,6 @@ def test_google_application_credentials_declares_the_vertex_adc_path(tmp_path: P
 
     assert manager.load_credentials("google_vertex_adc") == {
         "application_credentials_path": str(adc_file.resolve()),
-        "_source": "env",
     }
     assert manager.declared_variable("google_vertex_adc") == "GOOGLE_APPLICATION_CREDENTIALS"
 
@@ -472,7 +469,7 @@ def test_only_a_primary_reads_the_credentials_its_environment_declares(
     runner_mode: str | None,
     reads_layer: bool,
 ) -> None:
-    """A runner never reads the environment as credentials, nor cleans up the store it opens."""
+    """A runner never reads the environment as credentials."""
     env = {"OPENAI_API_KEY": "sk-env"}
     if runner_mode is not None:
         env[_RUNNER_MODE] = runner_mode
@@ -481,7 +478,6 @@ def test_only_a_primary_reads_the_credentials_its_environment_declares(
 
     assert get_api_key_for_provider("openai", runtime_paths) == ("sk-env" if reads_layer else None)
     assert manager.list_services() == (["openai"] if reads_layer else [])
-    assert (manager.base_path / _RECEIPT_NAME).exists() is reads_layer
 
 
 @pytest.mark.parametrize("dedicated", [True, False], ids=["dedicated", "static"])
@@ -571,7 +567,7 @@ def test_a_dashboard_save_wins_over_the_environment_until_it_is_deleted(
     manager = get_runtime_credentials_manager(_runtime_paths(tmp_path, env))
     declared = manager.load_credentials(service)
     assert declared is not None
-    assert declared["_source"] == "env"
+    assert "_source" not in declared
 
     manager.save_credentials(service, {**saved, "_source": "ui"})
     assert manager.load_credentials(service) == {**saved, "_source": "ui"}
@@ -670,7 +666,7 @@ def test_the_environment_layer_is_never_written_to_disk(tmp_path: Path) -> None:
 # The one-time removal of the copies earlier releases imported.
 
 
-def test_an_unreadable_copy_keeps_the_cleanup_pending(tmp_path: Path) -> None:
+def test_an_unreadable_copy_is_kept_until_an_open_can_read_it(tmp_path: Path) -> None:
     """A copy that cannot be read stays, hides the variable, and is removed by the first open that can read it."""
     written_key = _encryption_key(b"a")
     store = CredentialsManager(tmp_path / "storage" / "credentials", encryption_key=written_key)
@@ -685,13 +681,11 @@ def test_an_unreadable_copy_keeps_the_cleanup_pending(tmp_path: Path) -> None:
     assert manager.load_credentials("openai") is None
     assert get_api_key_for_provider("openai", runtime_paths) is None
     assert copy_path.read_bytes() == copy_bytes
-    assert not (manager.base_path / _RECEIPT_NAME).exists()
 
     runtime_paths = _restart(tmp_path, {**env, CREDENTIALS_ENCRYPTION_KEY_ENV: written_key})
     manager = get_runtime_credentials_manager(runtime_paths)
 
     assert not copy_path.exists()
-    assert (manager.base_path / _RECEIPT_NAME).exists()
     assert get_api_key_for_provider("openai", runtime_paths) == "sk-env"
 
 
@@ -715,4 +709,14 @@ def test_a_dashboard_save_survives_the_cleanup(tmp_path: Path) -> None:
     assert manager.get_credentials_path("openai").exists()
     assert manager.get_credentials_path("anthropic").exists()
     assert not manager.get_credentials_path("google").exists()
-    assert (manager.base_path / _RECEIPT_NAME).exists()
+
+
+def test_a_write_back_of_a_declared_credential_is_kept_as_a_saved_one(tmp_path: Path) -> None:
+    """A tool that saves back what it loaded from the environment keeps that save at the next start."""
+    runtime_paths = _runtime_paths(tmp_path, {"OPENAI_API_KEY": "sk-env"})
+    manager = get_runtime_credentials_manager(runtime_paths)
+    manager.save_credentials("openai", {**(manager.load_credentials("openai") or {}), "api_key": "sk-renewed"})
+
+    runtime_paths = _restart(tmp_path, {"OPENAI_API_KEY": "sk-env"})
+
+    assert get_api_key_for_provider("openai", runtime_paths) == "sk-renewed"

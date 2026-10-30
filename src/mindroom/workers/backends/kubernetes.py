@@ -279,7 +279,7 @@ class KubernetesWorkerBackend:
             state_subpath=state_subpath,
             state=lifecycle,
         )
-        poll_reporter: Callable[[float], None] | None = None
+        poll_reporter: Callable[[], None] | None = None
         finalize_progress: Callable[[WorkerReadyPhase, str | None], None] = noop_finalize_progress
         destructive_failure_allowed = current_handle is None or current_handle.status != "ready"
         if should_restart or existing is None or not self._deployment_ready(existing):
@@ -674,7 +674,6 @@ class KubernetesWorkerBackend:
         failure_reason: str,
         *,
         now: float | None = None,
-        annotations_override: dict[str, str] | None = None,
         startup_count: int | None = None,
     ) -> WorkerHandle:
         """Persist a failed worker startup or execution state."""
@@ -684,7 +683,6 @@ class KubernetesWorkerBackend:
                 worker_key,
                 failure_reason,
                 now=timestamp,
-                annotations_override=annotations_override,
                 startup_count=startup_count,
             )
 

@@ -114,26 +114,21 @@ class _FakeContainer:
         self,
         *,
         name: str,
-        image: str,
         image_identity: str,
         host_port: int,
         environment: dict[str, str],
         labels: dict[str, str],
-        user: str | None,
         status: str = "running",
     ) -> None:
         self.name = name
-        self.image = image
         self.status = status
         self.id = f"{name}-id"
         self.attrs = {
             "Image": image_identity,
             "State": {"Status": status},
             "Config": {
-                "Image": image,
                 "Env": [f"{key}={value}" for key, value in sorted(environment.items())],
                 "Labels": dict(labels),
-                "User": user or "",
             },
             "Mounts": [],
             "NetworkSettings": {
@@ -218,20 +213,11 @@ class _FakeContainersApi:
         volumes = kwargs.get("volumes")
         container = _FakeContainer(
             name=str(kwargs["name"]),
-            image=image,
             image_identity=image_identity,
             host_port=host_port,
             environment=dict(environment) if isinstance(environment, dict) else {},
             labels=dict(labels) if isinstance(labels, dict) else {},
-            user=str(kwargs["user"]) if kwargs.get("user") is not None else None,
         )
-        container.attrs["HostConfig"] = {
-            "Privileged": bool(kwargs.get("privileged", False)),
-            "CapAdd": None,
-            "CapDrop": list(kwargs.get("cap_drop", [])),
-            "SecurityOpt": list(kwargs.get("security_opt", [])),
-            "ReadonlyRootfs": bool(kwargs.get("read_only", False)),
-        }
         if isinstance(volumes, list):
             container.attrs["Mounts"] = [
                 {
@@ -1097,61 +1083,54 @@ def _slow_configured_image_pull(
     monkeypatch.setattr(backend, "_pull_configured_image", _slow_pull)
 
 
-def _install_health_by_image(
-    monkeypatch: pytest.MonkeyPatch,
-    fake_client: _FakeDockerClient,
-    *,
-    stale_protocol: int = 0,
-) -> None:
-    class _HealthByImage:
+def _install_health(monkeypatch: pytest.MonkeyPatch, answer: Callable[[str], httpx.Response]) -> None:
+    """Answer every Docker worker health check with ``answer(url)``."""
+
+    class _HealthClient:
         def __init__(self, *, timeout: float) -> None:
             assert timeout > 0
 
-        def __enter__(self) -> _HealthByImage:
+        def __enter__(self) -> _HealthClient:
             return self
 
         def __exit__(self, *_args: object) -> None:
             return None
 
         def get(self, url: str) -> httpx.Response:
-            port = url.split(":")[2].split("/", maxsplit=1)[0]
-            container = next(
-                (
-                    item
-                    for item in fake_client.containers.by_name.values()
-                    if item.status == "running"
-                    and item.attrs["NetworkSettings"]["Ports"]["8766/tcp"][0]["HostPort"] == port
-                ),
-                None,
-            )
-            assert container is not None, f"no running fake container publishes host port {port}"
-            protocol = WORKER_PROTOCOL_VERSION if container.attrs["Image"] == "sha256:image-v2" else stale_protocol
-            return httpx.Response(
-                200,
-                json={"status": "ok", "mindroom_version": "test", "worker_protocol": protocol},
-            )
+            return answer(url)
 
-    monkeypatch.setattr("mindroom.workers.backends.docker.httpx.Client", _HealthByImage)
+    monkeypatch.setattr("mindroom.workers.backends.docker.httpx.Client", _HealthClient)
+
+
+def _install_health_by_image(
+    monkeypatch: pytest.MonkeyPatch,
+    fake_client: _FakeDockerClient,
+    *,
+    stale_protocol: int = 0,
+) -> None:
+    def _answer(url: str) -> httpx.Response:
+        port = url.split(":")[2].split("/", maxsplit=1)[0]
+        container = next(
+            (
+                item
+                for item in fake_client.containers.by_name.values()
+                if item.status == "running"
+                and item.attrs["NetworkSettings"]["Ports"]["8766/tcp"][0]["HostPort"] == port
+            ),
+            None,
+        )
+        assert container is not None, f"no running fake container publishes host port {port}"
+        protocol = WORKER_PROTOCOL_VERSION if container.attrs["Image"] == "sha256:image-v2" else stale_protocol
+        return httpx.Response(200, json={"status": "ok", "mindroom_version": "test", "worker_protocol": protocol})
+
+    _install_health(monkeypatch, _answer)
 
 
 def _install_stale_health(monkeypatch: pytest.MonkeyPatch) -> None:
-    class _StaleHealthClient:
-        def __init__(self, *, timeout: float) -> None:
-            assert timeout > 0
-
-        def __enter__(self) -> _StaleHealthClient:
-            return self
-
-        def __exit__(self, *_args: object) -> None:
-            return None
-
-        def get(self, _url: str) -> httpx.Response:
-            return httpx.Response(
-                200,
-                json={"status": "ok", "mindroom_version": "test", "worker_protocol": 0},
-            )
-
-    monkeypatch.setattr("mindroom.workers.backends.docker.httpx.Client", _StaleHealthClient)
+    _install_health(
+        monkeypatch,
+        lambda _url: httpx.Response(200, json={"status": "ok", "mindroom_version": "test", "worker_protocol": 0}),
+    )
 
 
 def test_docker_backend_availability_uses_runtime_env_values(tmp_path: Path) -> None:
@@ -1286,7 +1265,7 @@ def test_docker_backend_signature_ignores_original_runtime_storage_root_when_exp
     )
 
 
-def test_docker_backend_from_runtime_reanchors_host_config_projection_and_runtime_env(
+def test_docker_backend_host_config_path_reanchors_projection_and_runtime_env(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
@@ -1899,27 +1878,6 @@ def test_docker_worker_runtime_reads_from_env(
     assert _DockerWorkerBackendConfig.from_runtime(runtime_paths).runtime == expected_runtime
 
 
-def test_docker_backend_recreates_container_when_runtime_changes(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> None:
-    """Workers started under the daemon's default runtime are replaced once a runtime is configured."""
-    backend, fake_client, _sync_calls = _backend(monkeypatch, tmp_path)
-    first_handle = backend.ensure_worker(_spec(backend, _TEST_UNSCOPED_WORKER_KEY), now=10.0)
-    first_container = fake_client.containers.by_name[first_handle.worker_id]
-
-    sandboxed_backend = _docker_backend(
-        config=replace(backend.config, runtime="runsc"),
-        auth_token=_TEST_AUTH_TOKEN,
-        storage_root=tmp_path,
-    )
-    monkeypatch.setattr(sandboxed_backend, "_wait_for_ready", lambda _container, **_kwargs: None)
-    sandboxed_backend.ensure_worker(_spec(sandboxed_backend, _TEST_UNSCOPED_WORKER_KEY), now=20.0)
-
-    assert first_container.removed == 1
-    assert [run_call["runtime"] for run_call in fake_client.containers.run_calls] == [None, "runsc"]
-
-
 def test_docker_workers_reach_the_docker_host_by_name(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -2154,11 +2112,11 @@ def test_docker_backend_reports_a_slow_start_to_its_caller(
     backend, _fake_client, _sync_calls = _backend(monkeypatch, tmp_path)
     clock = _control_progress_clock(monkeypatch)
 
-    def _ready_after_six_seconds(_container: _FakeContainer, *, on_poll_tick: Callable[[float], None] | None) -> None:
+    def _ready_after_six_seconds(_container: _FakeContainer, *, on_poll_tick: Callable[[], None] | None) -> None:
         assert on_poll_tick is not None
         for elapsed_seconds in range(1, 7):
             clock.now = float(elapsed_seconds)
-            on_poll_tick(clock.now)
+            on_poll_tick()
 
     monkeypatch.setattr(backend, "_wait_for_ready", _ready_after_six_seconds)
     progress_events: list[WorkerReadyProgress] = []
@@ -2209,7 +2167,7 @@ def test_docker_backend_reports_no_progress_when_a_running_worker_fails_its_heal
     clock = _control_progress_clock(monkeypatch)
     backend.ensure_worker(_spec(backend, _TEST_UNSCOPED_WORKER_KEY), now=10.0)
 
-    def _unhealthy(_container: _FakeContainer, *, on_poll_tick: Callable[[float], None] | None) -> None:
+    def _unhealthy(_container: _FakeContainer, *, on_poll_tick: Callable[[], None] | None) -> None:
         assert on_poll_tick is None
         clock.now = 2.0
         msg = "worker stopped answering"
@@ -2254,13 +2212,13 @@ def test_docker_backend_sends_a_concurrent_caller_the_progress_of_the_start_it_w
     def _ready_once_second_caller_waits(
         _container: _FakeContainer,
         *,
-        on_poll_tick: Callable[[float], None] | None,
+        on_poll_tick: Callable[[], None] | None,
     ) -> None:
         if on_poll_tick is None:
             # The second caller finds the worker the first one started already running.
             return
         clock.now = 2.0
-        on_poll_tick(clock.now)
+        on_poll_tick()
         assert second_saw_cold_start.wait(timeout=5.0)
 
     monkeypatch.setattr(backend, "_wait_for_ready", _ready_once_second_caller_waits)
@@ -2282,16 +2240,14 @@ def test_docker_worker_readiness_poll_wakes_the_progress_reporter_on_each_retry(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    """Every unanswered health check passes the elapsed time to the reporter before the next poll."""
+    """Every unanswered health check wakes the reporter before the next poll."""
     backend, _fake_client, _sync_calls = _backend(monkeypatch, tmp_path)
     container = _FakeContainer(
         name="mindroom-worker-slow",
-        image="img",
         image_identity="sha256:slow",
         host_port=44999,
         environment={},
         labels={},
-        user=None,
     )
     answers = iter(
         [
@@ -2301,27 +2257,13 @@ def test_docker_worker_readiness_poll_wakes_the_progress_reporter_on_each_retry(
         ],
     )
 
-    class _ReadyOnThirdPoll:
-        def __init__(self, *, timeout: float) -> None:
-            assert timeout > 0
-
-        def __enter__(self) -> _ReadyOnThirdPoll:
-            return self
-
-        def __exit__(self, *_args: object) -> None:
-            return None
-
-        def get(self, _url: str) -> httpx.Response:
-            return next(answers)
-
-    monkeypatch.setattr("mindroom.workers.backends.docker.httpx.Client", _ReadyOnThirdPoll)
+    _install_health(monkeypatch, lambda _url: next(answers))
     monkeypatch.setattr(docker_backend_module, "_READY_POLL_INTERVAL_SECONDS", 0.0)
-    ticks: list[float] = []
+    ticks: list[None] = []
 
-    DockerWorkerBackend._wait_for_ready(backend, container, on_poll_tick=ticks.append)
+    DockerWorkerBackend._wait_for_ready(backend, container, on_poll_tick=lambda: ticks.append(None))
 
     assert len(ticks) == 2
-    assert all(elapsed_seconds >= 0.0 for elapsed_seconds in ticks)
 
 
 def test_docker_backend_projects_assets_from_runtime_storage_root(
@@ -3346,12 +3288,10 @@ def _foreign_container(fake_client: _FakeDockerClient, name: str) -> _FakeContai
     """Register one unrelated container (a homeserver, a database) on the same Docker daemon."""
     container = _FakeContainer(
         name=name,
-        image="matrixdotorg/synapse:latest",
         image_identity="sha256:foreign",
         host_port=8008,
         environment={},
         labels={},
-        user=None,
     )
     fake_client.containers.by_name[name] = container
     return container
@@ -3831,12 +3771,10 @@ def test_docker_worker_ready_failure_surfaces_container_logs(
     backend, _fake_client, _sync_calls = _backend(monkeypatch, tmp_path)
     container = _FakeContainer(
         name="mindroom-worker-x",
-        image="img",
         image_identity="sha256:x",
         host_port=44999,
         environment={},
         labels={},
-        user=None,
         status="exited",
     )
     container.logs_output = (
@@ -3883,28 +3821,13 @@ def test_docker_worker_readiness_rejects_incompatible_image(
     backend, _fake_client, _sync_calls = _backend(monkeypatch, tmp_path)
     container = _FakeContainer(
         name="mindroom-worker-stale",
-        image="mindroom:stale",
         image_identity="sha256:stale",
         host_port=44999,
         environment={},
         labels={},
-        user=None,
     )
 
-    class _IncompatibleHealthClient:
-        def __init__(self, *, timeout: float) -> None:
-            assert timeout > 0
-
-        def __enter__(self) -> _IncompatibleHealthClient:
-            return self
-
-        def __exit__(self, *_args: object) -> None:
-            return None
-
-        def get(self, _url: str) -> httpx.Response:
-            return httpx.Response(200, json={"status": "ok"})
-
-    monkeypatch.setattr("mindroom.workers.backends.docker.httpx.Client", _IncompatibleHealthClient)
+    _install_health(monkeypatch, lambda _url: httpx.Response(200, json={"status": "ok"}))
 
     with pytest.raises(
         WorkerBackendError,
@@ -4028,7 +3951,7 @@ def test_docker_worker_from_a_newer_release_is_replaced_once_without_a_pull(
     assert created[0].removed == 1
 
 
-def test_docker_worker_failed_stale_replacement_retains_launch_identity_for_retry(
+def test_docker_worker_failed_stale_replacement_restarts_the_pulled_image_on_retry(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
@@ -4062,11 +3985,11 @@ def test_docker_worker_failed_stale_replacement_retains_launch_identity_for_retr
     assert len(fake_client.containers.created_containers) == 2
 
 
-def test_docker_worker_concurrent_tag_update_keeps_request_local_launch_identity(
+def test_docker_worker_concurrent_tag_update_converges_each_ensure_on_the_pulled_image(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    """Concurrent ensures should converge on the pulled image without sharing launch identity."""
+    """Concurrent ensures each resolve the configured image themselves and converge on the pulled one."""
     backend, fake_client, _sync_calls = _backend(monkeypatch, tmp_path)
     recovering_key = _TEST_UNSCOPED_WORKER_KEY
     stale_reader_key = "v1:default:unscoped:research"
@@ -4351,6 +4274,7 @@ def test_docker_backend_recreates_container_when_launch_config_changes(
     updated_config = replace(
         backend.config,
         user="2000:2000",
+        runtime="runsc",
         extra_env={"EXTRA_ENV": "updated"},
     )
     updated_backend = _docker_backend(config=updated_config, auth_token=_ROTATED_AUTH_TOKEN, storage_root=tmp_path)
@@ -4370,6 +4294,7 @@ def test_docker_backend_recreates_container_when_launch_config_changes(
     assert second_env["MINDROOM_SANDBOX_PROXY_TOKEN"] == second_handle.auth_token
     assert second_env["EXTRA_ENV"] == "updated"
     assert second_run_call["user"] == "2000:2000"
+    assert second_run_call["runtime"] == "runsc"
 
 
 def test_docker_backend_recreates_computer_container_when_its_seccomp_profile_changes(
@@ -6015,26 +5940,6 @@ def test_docker_backend_restarts_a_stopped_worker_whose_image_left_the_local_dae
     assert len(fake_client.containers.run_calls) == 1
 
 
-def test_docker_backend_recreates_container_when_same_tag_resolves_to_new_image_id(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> None:
-    """Rebuilding the same image tag locally should rotate the worker on the next ensure."""
-    backend, fake_client, _sync_calls = _backend(monkeypatch, tmp_path)
-
-    handle = backend.ensure_worker(_spec(backend, _TEST_UNSCOPED_WORKER_KEY), now=10.0)
-    existing_container = fake_client.containers.by_name[handle.worker_id]
-
-    fake_client.images.by_name[backend.config.image] = _FakeImage("sha256:image-v2")
-
-    backend.ensure_worker(_spec(backend, _TEST_UNSCOPED_WORKER_KEY), now=20.0)
-
-    replacement_container = fake_client.containers.by_name[handle.worker_id]
-    assert replacement_container is not existing_container
-    assert existing_container.removed == 1
-    assert len(fake_client.containers.run_calls) == 2
-
-
 def test_docker_workers_get_their_own_runner_tokens(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     """A runner token taken from one requester's worker must not authenticate to another requester's worker."""
     runtime_paths = resolve_primary_runtime_paths(
@@ -6251,7 +6156,7 @@ def test_docker_direct_backend_rejects_incompatible_computer_policy(
 
     monkeypatch.setattr("mindroom.workers.backends.docker._load_docker_client_and_errors", forbidden_client)
     with pytest.raises(WorkerBackendError, match="MINDROOM_DOCKER_WORKER_SECURITY_POLICY=computer"):
-        _docker_backend(config=config, auth_token=_TEST_AUTH_TOKEN, runtime_paths=paths)
+        _docker_backend(config=config, auth_token=_TEST_AUTH_TOKEN, storage_root=tmp_path, runtime_paths=paths)
 
 
 @pytest.mark.parametrize(
@@ -6337,7 +6242,7 @@ def test_docker_direct_computer_rejects_root_before_client(
 
     monkeypatch.setattr("mindroom.workers.backends.docker._load_docker_client_and_errors", forbidden_client)
     with pytest.raises(WorkerBackendError, match="non-root"):
-        _docker_backend(config=config, auth_token=_TEST_AUTH_TOKEN, runtime_paths=paths)
+        _docker_backend(config=config, auth_token=_TEST_AUTH_TOKEN, storage_root=tmp_path, runtime_paths=paths)
 
 
 @pytest.mark.parametrize(

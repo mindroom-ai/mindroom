@@ -260,7 +260,9 @@ MERGED_READ_WINNER: dict[tuple[str, str, bool, bool], str] = {
 # A granted base document of the regular service reaches a `shared` read only when a worker may inherit its
 # `_source`; None plants no `_source`. Value: (read without primary_built_tool, read with it).
 GRANTED_BASE_BY_SOURCE: dict[str | None, tuple[Read, Read]] = {
-    "env": (("base", "worker"), ("agent", "base")),
+    # Changed: copies earlier releases imported carry `_source: "env"`; the primary deletes them when it opens its store,
+    # and the environment's own declarations carry no source, so that tag is never passed on.
+    "env": (("worker",), ("agent",)),
     "ui": (("base", "worker"), ("agent", "base")),
     None: (("base", "worker"), ("agent", "base")),
     "oauth": (("worker",), ("agent",)),

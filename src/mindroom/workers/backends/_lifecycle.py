@@ -9,12 +9,8 @@ on its worker record (Kubernetes: converts Deployment annotations to and from it
 from __future__ import annotations
 
 from dataclasses import dataclass, replace
-from typing import TYPE_CHECKING
 
-from mindroom.workers.models import WorkerHandle
-
-if TYPE_CHECKING:
-    from mindroom.workers.models import WorkerStatus
+from mindroom.workers.models import WorkerHandle, WorkerStatus
 
 DEFAULT_IDLE_TIMEOUT_SECONDS = 1800.0
 
@@ -121,19 +117,9 @@ def mark_worker_ready(
     )
 
 
-def mark_worker_idle(
-    state: WorkerLifecycleState,
-    *,
-    now: float | None = None,
-    update_last_used: bool = False,
-) -> WorkerLifecycleState:
+def mark_worker_idle(state: WorkerLifecycleState) -> WorkerLifecycleState:
     """Return lifecycle fields for one worker whose persisted state is being retained."""
-    if not update_last_used:
-        return replace(state, status="idle", failure_reason=None)
-    if now is None:
-        msg = "now is required when update_last_used is true."
-        raise ValueError(msg)
-    return replace(state, last_used_at=now, status="idle", failure_reason=None)
+    return replace(state, status="idle", failure_reason=None)
 
 
 def mark_worker_failed(

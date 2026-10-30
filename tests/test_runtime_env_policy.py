@@ -457,7 +457,7 @@ def test_worker_backend_config_names_are_classified_and_filter_public_startup() 
     """Only worker runtime state survives public startup filtering for backend config env names."""
     backend_names = {
         runtime_env_policy.WORKER_BACKEND_ENV,
-        *runtime_env_policy.KUBERNETES_WORKER_BACKEND_CONFIG_ENV_NAMES,
+        *runtime_env_policy.KUBERNETES_WORKER_BACKEND_CONFIG_ENV_BY_KEY.values(),
         *runtime_env_policy.DOCKER_WORKER_BACKEND_CONFIG_ENV_BY_KEY.values(),
     }
     env = dict.fromkeys(backend_names, "value")

@@ -322,15 +322,15 @@ def delete_credentials_for_target(service: str, target: RequestCredentialsTarget
 def dashboard_candidate_services(target: RequestCredentialsTarget) -> set[str]:
     """Return every service stored where this target could read it, before checking where each one lives."""
     worker_target = worker_target_for_credentials_target(target)
-    stores = [target.base_manager]
+    base_manager = target.base_manager
+    stores = [base_manager]
     if worker_target is not None:
         if worker_target.worker_key is not None:
-            stores.append(target.base_manager.for_worker(worker_target.worker_key))
-        if target.agent_name is not None:
-            stores.append(target.base_manager.for_primary_runtime_agent_scope(target.agent_name))
+            stores.append(base_manager.for_worker(worker_target.worker_key))
         requester_id = target.execution_identity.requester_id if target.execution_identity is not None else None
-        if requester_id is not None:
-            stores.append(target.base_manager.for_primary_runtime_scope(requester_id, None))
-            if target.agent_name is not None:
-                stores.append(target.base_manager.for_primary_runtime_scope(requester_id, target.agent_name))
+        if target.worker_scope == "shared" and target.agent_name is not None:
+            stores.append(base_manager.for_primary_runtime_agent_scope(target.agent_name))
+        elif requester_id is not None:
+            agent_name = target.agent_name if target.worker_scope == "user_agent" else None
+            stores.append(base_manager.for_primary_runtime_scope(requester_id, agent_name))
     return {service for store in stores for service in store.list_services()}

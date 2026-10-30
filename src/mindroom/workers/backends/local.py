@@ -89,12 +89,9 @@ def _default_worker_root(runtime_paths: RuntimePaths) -> Path:
 
 
 def _read_idle_timeout_seconds(runtime_paths: RuntimePaths) -> float:
-    raw_timeout = runtime_paths.env_value(
-        SANDBOX_RUNTIME_ENV_BY_KEY["worker_idle_timeout_seconds"],
-        default=str(DEFAULT_IDLE_TIMEOUT_SECONDS),
-    ) or str(DEFAULT_IDLE_TIMEOUT_SECONDS)
+    raw_timeout = runtime_paths.env_value(SANDBOX_RUNTIME_ENV_BY_KEY["worker_idle_timeout_seconds"])
     try:
-        timeout = float(raw_timeout)
+        timeout = float(raw_timeout or DEFAULT_IDLE_TIMEOUT_SECONDS)
     except ValueError:
         timeout = DEFAULT_IDLE_TIMEOUT_SECONDS
     return max(1.0, timeout)

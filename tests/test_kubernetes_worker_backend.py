@@ -833,7 +833,7 @@ def _install_real_elapsed_wait_for_ready(
         *,
         timeout_seconds: float,
         deployment_ready_fn: object,
-        on_poll_tick: Callable[[float], None] | None = None,
+        on_poll_tick: Callable[[], None] | None = None,
     ) -> object:
         del deployment_ready_fn
         started_at = monotonic()
@@ -848,7 +848,7 @@ def _install_real_elapsed_wait_for_ready(
                 return deployment
             assert monotonic() < deadline
             if on_poll_tick is not None:
-                on_poll_tick(elapsed_seconds)
+                on_poll_tick()
             sleep(poll_interval_seconds)
 
     backend._resources.wait_for_ready = MethodType(_ready, backend._resources)
@@ -5400,7 +5400,7 @@ def test_kubernetes_backend_reports_failed_cold_start_progress() -> None:
         *,
         timeout_seconds: float,
         deployment_ready_fn: object,
-        on_poll_tick: Callable[[float], None] | None = None,
+        on_poll_tick: Callable[[], None] | None = None,
     ) -> object:
         del deployment_ready_fn
         assert on_poll_tick is not None
@@ -5411,7 +5411,7 @@ def test_kubernetes_backend_reports_failed_cold_start_progress() -> None:
             if elapsed_seconds >= 2.0:
                 raise WorkerBackendError(error_message)
             assert time.monotonic() < deadline
-            on_poll_tick(elapsed_seconds)
+            on_poll_tick()
             time.sleep(0.01)
 
     backend._resources.wait_for_ready = MethodType(_boom, backend._resources)
@@ -5471,15 +5471,9 @@ def test_kubernetes_backend_replays_progress_snapshot_to_late_joining_waiter() -
 
     def second_sink(progress: WorkerReadyProgress) -> None:
         second_events.append(progress)
-
-    original_register = backend._progress.register
-
-    def register_with_signal(current_worker_key: str, progress_sink: Callable[[WorkerReadyProgress], None]) -> None:
-        original_register(current_worker_key, progress_sink)
-        if current_worker_key == worker_key and progress_sink is second_sink:
+        if progress.phase == "cold_start":
+            # Only the snapshot replayed when this late waiter subscribes can carry cold_start to it.
             second_registered.set()
-
-    backend._progress.register = register_with_signal
 
     _install_real_elapsed_wait_for_ready(
         backend,

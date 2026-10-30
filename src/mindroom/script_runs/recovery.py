@@ -53,8 +53,7 @@ def script_recovery_signature(
 ) -> str | None:
     """Bind one recoverable launch to its worker authority, private scope and gateway."""
     if (
-        backend is None
-        or not isinstance(backend, _RecoveringScriptBackend)
+        not isinstance(backend, _RecoveringScriptBackend)
         or not gateway_url
         or (process_authority := script_process_authority(config, agent_name)) is None
     ):

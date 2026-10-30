@@ -111,33 +111,20 @@ class WorkerWarmupProgress:
         if progress_sink is None:
             yield
             return
-        self.register(worker_key, progress_sink)
-        try:
-            yield
-        finally:
-            self.unregister(worker_key, progress_sink)
-
-    def register(self, worker_key: str, progress_sink: ProgressSink) -> None:
-        """Send ``worker_key``'s progress to ``progress_sink``, starting with the latest phase of a start under way."""
         with self._lock:
             self._sinks.setdefault(worker_key, []).append(progress_sink)
             latest = self._latest.get(worker_key)
             if latest is not None:
                 progress_sink(latest)
-
-    def unregister(self, worker_key: str, progress_sink: ProgressSink) -> None:
-        """Stop sending ``worker_key``'s progress to ``progress_sink``."""
-        with self._lock:
-            sinks = self._sinks.get(worker_key)
-            if sinks is None:
-                return
-            for index, current_sink in enumerate(sinks):
-                if current_sink is progress_sink:
-                    sinks.pop(index)
-                    break
-            if not sinks:
-                del self._sinks[worker_key]
-                self._latest.pop(worker_key, None)
+        try:
+            yield
+        finally:
+            with self._lock:
+                sinks = self._sinks[worker_key]
+                sinks.remove(progress_sink)
+                if not sinks:
+                    del self._sinks[worker_key]
+                    self._latest.pop(worker_key, None)
 
     def emit(self, progress: WorkerReadyProgress) -> None:
         """Send one event to every caller waiting on its worker, and keep it for later callers until the start ends."""
@@ -152,7 +139,7 @@ class WorkerWarmupProgress:
     def start_reporter(
         self,
         worker_key: str,
-    ) -> tuple[Callable[[float], None], Callable[[WorkerReadyPhase, str | None], None]]:
+    ) -> tuple[Callable[[], None], Callable[[WorkerReadyPhase, str | None], None]]:
         """Report one start of ``worker_key`` from a daemon thread, as each event falls due.
 
         Returns ``on_poll_tick``, which a readiness poll calls to wake the reporter, and ``finalize``, which reports
@@ -168,7 +155,7 @@ class WorkerWarmupProgress:
         )
         thread.start()
 
-        def on_poll_tick(_elapsed_seconds: float) -> None:
+        def on_poll_tick() -> None:
             with condition:
                 condition.notify_all()
 
