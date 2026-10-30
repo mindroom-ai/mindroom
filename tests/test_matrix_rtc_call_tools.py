@@ -60,7 +60,7 @@ from mindroom.session_storage.types import ConversationSession
 from mindroom.tool_jobs.execution import agent_tool_middleware
 from mindroom.tool_system.agno_toolkits import adapt_toolkit
 from mindroom.tool_system.call_record import recording_tool_calls
-from mindroom.tool_system.events import ToolTraceEntry
+from mindroom.tool_system.events import FailedReply, ToolTraceEntry
 from mindroom.tool_system.invocation import ToolCallContext, run_tool_call
 from mindroom.tool_system.runtime_context import (
     ToolRuntimeContext,
@@ -1027,7 +1027,7 @@ async def test_call_responder_uses_normal_agent_turn_and_refuses_unsafe_function
         assert recorder is not None
         recorder.start(run_metadata={})
         recorder.record_interrupted(run_id=None, run_metadata={"model": "same-chat-model"})
-        failure = HandledAttempt("provider failed", error=RuntimeError("provider failed"))
+        failure = HandledAttempt(FailedReply("provider failed", RuntimeError("provider failed")))
         return TurnResult("provider failed", failed=failure)
 
     monkeypatch.setattr("mindroom.ai.ai_response", return_error_without_run_id)
@@ -1387,12 +1387,9 @@ def _completed_run_state(run_id: str) -> _CallAgentRunState:
     return _CallAgentRunState(
         session_id="call-session",
         run_id=run_id,
-        user_message="hello",
-        completed_tools=(),
-        interrupted_tools=(),
+        transcript="hello",
         run_metadata={},
         outcome="completed",
-        original_status=None,
     )
 
 

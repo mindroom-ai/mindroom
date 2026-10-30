@@ -842,6 +842,7 @@ depends_on = [
     "mindroom.delegation.state",
     "mindroom.failure_text",
     "mindroom.helper_usage",
+    "mindroom.history.mid_turn_compaction",
     "mindroom.history.storage",
     "mindroom.history.turn_recorder",
     "mindroom.llm",
@@ -10158,6 +10159,7 @@ visibility = [
     "mindroom.agents",
     "mindroom.ai",
     "mindroom.loop_hooks",
+    "mindroom.response_turn",
     "mindroom.teams",
 ]
 
