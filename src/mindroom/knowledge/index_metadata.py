@@ -15,7 +15,7 @@ from __future__ import annotations
 import json
 import os
 import uuid
-from dataclasses import dataclass, replace
+from dataclasses import asdict, dataclass, replace
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, TypeIs
 
@@ -101,10 +101,10 @@ def load_publication(storage_path: Path) -> Publication | None:
     Callers that must tell the two apart check whether ``publication_path`` exists: an unreadable publication proves
     nothing about which collection is live.
     """
-    payload = _load_object(publication_path(storage_path))
+    payload = load_json_object(publication_path(storage_path))
     if payload is None:
         return None
-    settings = _settings(payload.get("settings"))
+    settings = settings_from_json(payload.get("settings"))
     collection = payload.get("collection")
     indexed_count = payload.get("indexed_count")
     source_signature = payload.get("source_signature")
@@ -138,52 +138,36 @@ def save_publication(storage_path: Path, publication: Publication) -> None:
     """Atomically replace the base's publication."""
     write_json_atomic(
         publication_path(storage_path),
-        {
-            "settings": publication.settings.to_metadata(),
-            "collection": publication.collection,
-            "indexed_count": publication.indexed_count,
-            "source_signature": publication.source_signature,
-            "published_revision": publication.published_revision,
-            "last_published_at": publication.last_published_at,
-            "retired": publication.retired,
-        },
+        {**asdict(publication), "settings": publication.settings.to_metadata()},
     )
+
+
+def publication_unreadable(storage_path: Path, publication: Publication | None) -> bool:
+    """Return whether a publication file exists that ``load_publication`` could not read, proving nothing live."""
+    return publication is None and publication_path(storage_path).exists()
 
 
 def load_refresh_status(storage_path: Path) -> RefreshStatus:
     """Return the base's refresh status; a missing or unreadable file reads as nothing known."""
-    payload = _load_object(storage_path / _REFRESH_STATUS_FILE)
+    payload = load_json_object(storage_path / _REFRESH_STATUS_FILE)
     if payload is None:
         return RefreshStatus()
-    reason = payload.get("reason")
-    last_error = payload.get("last_error")
-    last_refresh_at = payload.get("last_refresh_at")
     reason_generation = payload.get("reason_generation")
     failures = payload.get("consecutive_refresh_failures")
     return RefreshStatus(
-        reason=reason if isinstance(reason, str) and reason else None,
+        reason=optional_str(payload.get("reason")),
         reason_generation=reason_generation if _count(reason_generation) else 0,
-        last_error=last_error if isinstance(last_error, str) and last_error else None,
+        last_error=optional_str(payload.get("last_error")),
         consecutive_refresh_failures=failures if _count(failures) else 0,
-        last_refresh_at=last_refresh_at if isinstance(last_refresh_at, str) and last_refresh_at else None,
+        last_refresh_at=optional_str(payload.get("last_refresh_at")),
     )
 
 
 def update_refresh_status(storage_path: Path, change: Callable[[RefreshStatus], RefreshStatus]) -> RefreshStatus:
     """Apply ``change`` to the base's refresh status under its lock, which orders threads and processes alike."""
-    storage_path.mkdir(parents=True, exist_ok=True)
     with advisory_file_lock(storage_path / _REFRESH_STATUS_LOCK_FILE):
         status = change(load_refresh_status(storage_path))
-        write_json_atomic(
-            storage_path / _REFRESH_STATUS_FILE,
-            {
-                "reason": status.reason,
-                "reason_generation": status.reason_generation,
-                "last_error": status.last_error,
-                "consecutive_refresh_failures": status.consecutive_refresh_failures,
-                "last_refresh_at": status.last_refresh_at,
-            },
-        )
+        write_json_atomic(storage_path / _REFRESH_STATUS_FILE, asdict(status))
     return status
 
 
@@ -204,7 +188,8 @@ def write_json_atomic(path: Path, payload: Mapping[str, object]) -> None:
         raise
 
 
-def _load_object(path: Path) -> dict[str, object] | None:
+def load_json_object(path: Path) -> dict[str, object] | None:
+    """Return the JSON object stored at ``path``, or None when the file is missing, unreadable, or not an object."""
     # ``ValueError`` rather than ``JSONDecodeError``: invalid UTF-8 raises ``UnicodeDecodeError``, a ``ValueError``.
     try:
         payload = json.loads(path.read_text(encoding="utf-8"))
@@ -213,7 +198,8 @@ def _load_object(path: Path) -> dict[str, object] | None:
     return payload if isinstance(payload, dict) else None
 
 
-def _settings(raw_settings: object) -> IndexingSettings | None:
+def settings_from_json(raw_settings: object) -> IndexingSettings | None:
+    """Return indexing settings stored as a JSON object of strings, or None when they are not."""
     if not isinstance(raw_settings, dict):
         return None
     metadata: dict[str, str] = {}
@@ -222,6 +208,11 @@ def _settings(raw_settings: object) -> IndexingSettings | None:
             return None
         metadata[key] = value
     return IndexingSettings.from_metadata(metadata)
+
+
+def optional_str(value: object) -> str | None:
+    """Return a stored non-empty string, or None for anything else."""
+    return value if isinstance(value, str) and value else None
 
 
 def _count(value: object) -> TypeIs[int]:

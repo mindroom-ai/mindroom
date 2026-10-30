@@ -22,14 +22,13 @@ from mindroom.knowledge.index_metadata import (
     load_publication,
     load_refresh_status,
     marked_stale,
-    publication_path,
+    publication_unreadable,
     update_refresh_status,
     utc_now,
 )
 from mindroom.knowledge.indexing_config import (
     IndexingSettings,
     indexing_settings_key,
-    published_index_settings_compatible,
     storage_key_for_base,
 )
 from mindroom.knowledge.vector_store import KnowledgeCollection
@@ -103,11 +102,6 @@ class PublishedIndexResolution:
     publication_unreadable: bool = False
     schedule_refresh_on_access: bool = False
 
-    @property
-    def last_error(self) -> str | None:
-        """Return the last refresh failure, which a refresh in flight supersedes."""
-        return self.status.last_error
-
     def while_refreshing(self) -> PublishedIndexResolution:
         """Return this view while a refresh runs: its last failure is being retried, and a ready index may change."""
         availability = index_availability(
@@ -120,6 +114,8 @@ class PublishedIndexResolution:
         return replace(self, status=replace(self.status, last_error=None), availability=availability)
 
 
+#: What the dashboard shows of a base's refresh.
+KnowledgeRefreshState = Literal["none", "stale", "refreshing", "refresh_failed"]
 _published_indexes: dict[PublishedIndexKey, _PublishedIndexHandle] = {}
 _CONSECUTIVE_REFRESH_FAILURE_ALERT_THRESHOLD = 3
 _MAX_PRIVATE_PUBLISHED_INDEXES = 128
@@ -252,10 +248,7 @@ def index_availability(
             if publication_unreadable or last_error is not None
             else KnowledgeAvailability.INITIALIZING
         )
-    if (
-        not published_index_settings_compatible(publication.settings, key.indexing_settings)
-        or publication.settings != key.indexing_settings
-    ):
+    if publication.settings != key.indexing_settings:
         return KnowledgeAvailability.CONFIG_MISMATCH
     if last_error is not None:
         return KnowledgeAvailability.REFRESH_FAILED
@@ -269,7 +262,7 @@ def index_refresh_state(
     *,
     publication_unreadable: bool,
     refreshing: bool,
-) -> Literal["none", "stale", "refreshing", "refresh_failed"]:
+) -> KnowledgeRefreshState:
     """Return the dashboard's refresh state; a refresh in flight supersedes the failure it retries."""
     if publication_unreadable:
         return "refresh_failed"
@@ -293,7 +286,7 @@ def _build_published_index_reader(
     # Searching needs numpy, which installs on first use.
     ensure_optional_deps(["numpy"], "numpy", runtime_paths)
     return PublishedIndexReader(
-        path=str(published_index_storage_path(key)),
+        path=published_index_storage_path(key),
         embedder=create_configured_embedder(config, runtime_paths),
         settings=key.indexing_settings,
         max_matrix_bytes=(
@@ -363,7 +356,7 @@ def get_published_index(
     ):
         # A publication that replaced this one, and deleted its collection, may have landed since it was read.
         publication = load_publication(storage)
-    unreadable = publication is None and publication_path(storage).exists()
+    unreadable = publication_unreadable(storage, publication)
     status = load_refresh_status(storage)
     availability = index_availability(key, publication, status, publication_unreadable=unreadable, refreshing=False)
     reader: PublishedIndexReader | None = None
@@ -402,7 +395,10 @@ def _cached_reader(key: PublishedIndexKey, *, config: Config, runtime_paths: Run
             embedder_client_signature=signature,
         )
         # A config change gives the same binding a new key; the old key's handle serves nothing new.
-        for cached in [cached for cached in _published_indexes if _same_binding(cached, key)]:
+        target = refresh_target_for_published_index_key(key)
+        for cached in [
+            cached for cached in _published_indexes if refresh_target_for_published_index_key(cached) == target
+        ]:
             del _published_indexes[cached]
         _published_indexes[key] = handle
         # Private knowledge has one key per requester, so only the most recent private handles stay cached.
@@ -412,14 +408,6 @@ def _cached_reader(key: PublishedIndexKey, *, config: Config, runtime_paths: Run
         for stale in private_keys[:-_MAX_PRIVATE_PUBLISHED_INDEXES]:
             _published_indexes.pop(stale, None)
     return handle.reader
-
-
-def _same_binding(left: PublishedIndexKey, right: PublishedIndexKey) -> bool:
-    return (left.base_id, left.storage_root, left.knowledge_path) == (
-        right.base_id,
-        right.storage_root,
-        right.knowledge_path,
-    )
 
 
 def mark_published_index_stale(key: PublishedIndexKey, *, reason: str) -> None:

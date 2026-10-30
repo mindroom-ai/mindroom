@@ -2056,24 +2056,6 @@ def _install_refresh_scheduler(client: TestClient) -> KnowledgeRefreshScheduler:
     return scheduler
 
 
-def _refresh_result(
-    config: Config,
-    runtime_paths: RuntimePaths,
-    *,
-    indexed_count: int,
-    index_published: bool,
-    availability: KnowledgeAvailability,
-    last_error: str | None = None,
-) -> KnowledgeRefreshResult:
-    return KnowledgeRefreshResult(
-        key=resolve_published_index_key("research", config=config, runtime_paths=runtime_paths),
-        indexed_count=indexed_count,
-        index_published=index_published,
-        availability=availability,
-        last_error=last_error,
-    )
-
-
 def test_explicit_reindex_runs_the_forced_refresh_through_the_apps_scheduler(tmp_path: Path) -> None:
     """Admin reindex blocks until the scheduler's shared refresh finishes, and forces a rebuild."""
     client = _test_client(tmp_path)
@@ -2083,9 +2065,7 @@ def test_explicit_reindex_runs_the_forced_refresh_through_the_apps_scheduler(tmp
     config = _knowledge_config(docs)
     _publish_committed_runtime_config(client.app, config)
     _install_refresh_scheduler(client)
-    result = _refresh_result(
-        config,
-        runtime_paths,
+    result = KnowledgeRefreshResult(
         indexed_count=7,
         index_published=True,
         availability=KnowledgeAvailability.READY,
@@ -2132,9 +2112,7 @@ def test_explicit_reindex_uses_refresh_scheduler_when_available(tmp_path: Path) 
     config = _knowledge_config(docs)
     _publish_committed_runtime_config(client.app, config)
     runtime_paths = main._app_context(client.app).runtime_paths
-    result = _refresh_result(
-        config,
-        runtime_paths,
+    result = KnowledgeRefreshResult(
         indexed_count=11,
         index_published=True,
         availability=KnowledgeAvailability.READY,
@@ -2173,15 +2151,12 @@ def test_explicit_reindex_uses_refresh_scheduler_when_available(tmp_path: Path) 
 def test_explicit_reindex_returns_conflict_when_no_index_is_published(tmp_path: Path) -> None:
     """Admin reindex must not report success when refresh leaves no usable index."""
     client = _test_client(tmp_path)
-    runtime_paths = main._app_context(client.app).runtime_paths
     docs = tmp_path / "docs"
     docs.mkdir()
     config = _knowledge_config(docs)
     _publish_committed_runtime_config(client.app, config)
     _install_refresh_scheduler(client)
-    result = _refresh_result(
-        config,
-        runtime_paths,
+    result = KnowledgeRefreshResult(
         indexed_count=0,
         index_published=False,
         availability=KnowledgeAvailability.REFRESH_FAILED,
@@ -2204,15 +2179,12 @@ def test_explicit_reindex_returns_conflict_when_no_index_is_published(tmp_path: 
 def test_explicit_reindex_succeeds_once_it_publishes_even_while_the_base_stays_stale(tmp_path: Path) -> None:
     """A reindex that published reports success; a source change marked while it ran keeps the base stale."""
     client = _test_client(tmp_path)
-    runtime_paths = main._app_context(client.app).runtime_paths
     docs = tmp_path / "docs"
     docs.mkdir()
     config = _knowledge_config(docs)
     _publish_committed_runtime_config(client.app, config)
     _install_refresh_scheduler(client)
-    result = _refresh_result(
-        config,
-        runtime_paths,
+    result = KnowledgeRefreshResult(
         indexed_count=3,
         index_published=True,
         availability=KnowledgeAvailability.STALE,

@@ -136,9 +136,10 @@ class CollectionMeta:
 
     #: The indexing settings its vectors were built under, as ``IndexingSettings.to_metadata()``.
     settings: Mapping[str, str]
-    #: ``building`` until the publisher marks it ``complete`` just before publishing it.
+    #: ``complete`` once the publisher marks it so, just before publishing it; a refresh that takes it over makes it
+    #: ``building`` again.
     stage: Literal["building", "complete"]
-    #: Fixed at creation: a forced rebuild, which neither reuses nor keeps the publication it replaces.
+    #: A forced rebuild, which neither reuses nor keeps the publication it replaces; set by whichever build writes it.
     rebuild: bool
     #: The Git revision its claims describe, when known.
     revision: str | None

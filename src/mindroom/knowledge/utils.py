@@ -120,13 +120,11 @@ def _schedule_refresh_for_availability(
     config: Config,
     runtime_paths: RuntimePaths,
     execution_identity: ToolExecutionIdentity | None,
-    lookup: PublishedIndexResolution | None,
+    lookup: PublishedIndexResolution,
     availability: KnowledgeAvailability,
     wall_now: datetime,
 ) -> KnowledgeAvailability:
-    """Apply the refresh policy for one resolved base: probe, throttle, schedule, report."""
-    if lookup is None:
-        return availability
+    """Apply the refresh policy for one resolved base no refresh is running for: throttle, schedule, report."""
     trigger = refresh_trigger(
         lookup=lookup,
         availability=availability,
@@ -135,8 +133,6 @@ def _schedule_refresh_for_availability(
     )
     if trigger is None:
         return availability
-    if refresh_scheduler.is_refreshing(refresh_target_for_published_index_key(lookup.key)):
-        return trigger.availability_while_refreshing
     scheduled = refresh_scheduler.schedule_refresh_after_cooldown(
         base_id,
         config=config,
@@ -225,11 +221,12 @@ def _finish_base_knowledge_resolution(
     # One instant per resolve: the poll-interval boundary must not be evaluated
     # against two different clock readings within a single turn.
     wall_now = datetime.now(tz=UTC)
-    if (
+    refreshing = (
         lookup is not None
         and refresh_scheduler is not None
         and refresh_scheduler.is_refreshing(refresh_target_for_published_index_key(lookup.key))
-    ):
+    )
+    if lookup is not None and refreshing:
         lookup = lookup.while_refreshing()
     # A cold index has a resolution; None means the binding lookup raised.
     availability = lookup.availability if lookup is not None else KnowledgeAvailability.REFRESH_FAILED
@@ -240,7 +237,7 @@ def _finish_base_knowledge_resolution(
         if lookup is not None and lookup.reader is not None
         else None
     )
-    if refresh_scheduler is not None:
+    if lookup is not None and refresh_scheduler is not None and not refreshing:
         availability = _schedule_refresh_for_availability(
             refresh_scheduler,
             base_id,
@@ -251,7 +248,7 @@ def _finish_base_knowledge_resolution(
             availability=availability,
             wall_now=wall_now,
         )
-    return source, availability, None if lookup is None else lookup.last_error
+    return source, availability, None if lookup is None else lookup.status.last_error
 
 
 def _agent_knowledge_base_ids(

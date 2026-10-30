@@ -10,7 +10,12 @@ from typing import TYPE_CHECKING, Literal
 from mindroom.knowledge import registry
 from mindroom.knowledge.availability import KnowledgeAvailability
 from mindroom.knowledge.collections import CollectionSpace, open_collection, owned_collection_names
-from mindroom.knowledge.index_metadata import load_publication, load_refresh_status, publication_path
+from mindroom.knowledge.index_metadata import (
+    load_publication,
+    load_refresh_status,
+    publication_path,
+    publication_unreadable,
+)
 from mindroom.knowledge.indexing_config import IndexingSettings, published_index_settings_compatible
 
 if TYPE_CHECKING:
@@ -18,8 +23,6 @@ if TYPE_CHECKING:
     from mindroom.constants import RuntimePaths
     from mindroom.knowledge.refresh_scheduler import KnowledgeRefreshScheduler
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
-
-_KnowledgeRefreshState = Literal["none", "stale", "refreshing", "refresh_failed"]
 
 
 @dataclass(frozen=True)
@@ -31,14 +34,13 @@ class KnowledgeCandidateStatus:
     usable when nothing has been published yet.
     """
 
-    collection: str
     status: Literal["building", "failed"]
     completed_count: int
     failed_count: int
     total_files: int
-    target_revision: str | None = None
-    created_at: str | None = None
-    updated_at: str | None = None
+    target_revision: str | None
+    created_at: str
+    updated_at: str
 
     @property
     def pending_count(self) -> int:
@@ -51,7 +53,7 @@ class KnowledgeIndexStatus:
     """Read-only published index status for API and runtime status surfaces."""
 
     indexed_count: int = 0
-    refresh_state: _KnowledgeRefreshState = "none"
+    refresh_state: registry.KnowledgeRefreshState = "none"
     availability: KnowledgeAvailability = KnowledgeAvailability.INITIALIZING
     published: bool = False
     last_error: str | None = None
@@ -89,7 +91,6 @@ def _candidate_status_for_key(
             continue
         found.append(
             KnowledgeCandidateStatus(
-                collection=name,
                 status="failed" if failed else "building",
                 completed_count=completed,
                 failed_count=failed,
@@ -99,7 +100,7 @@ def _candidate_status_for_key(
                 updated_at=meta.updated_at,
             ),
         )
-    return max(found, key=lambda candidate: candidate.updated_at or "", default=None)
+    return max(found, key=lambda candidate: candidate.updated_at, default=None)
 
 
 def get_knowledge_index_status(
@@ -107,24 +108,16 @@ def get_knowledge_index_status(
     *,
     config: Config,
     runtime_paths: RuntimePaths,
-    execution_identity: ToolExecutionIdentity | None = None,
-    create: bool = False,
     refreshing: bool = False,
 ) -> KnowledgeIndexStatus:
     """Resolve one base's publication and refresh status into the small status shape callers need.
 
     ``refreshing`` is the scheduler's answer for the base, which only the runtime knows.
     """
-    key = registry.resolve_published_index_key(
-        base_id,
-        config=config,
-        runtime_paths=runtime_paths,
-        execution_identity=execution_identity,
-        create=create,
-    )
+    key = registry.resolve_published_index_key(base_id, config=config, runtime_paths=runtime_paths)
     storage = registry.published_index_storage_path(key)
     publication = load_publication(storage)
-    unreadable = publication is None and publication_path(storage).exists()
+    unreadable = publication_unreadable(storage, publication)
     status = load_refresh_status(storage)
     return KnowledgeIndexStatus(
         candidate=_candidate_status_for_key(key, None if publication is None else publication.collection),
@@ -175,19 +168,12 @@ def knowledge_base_refreshing(
     *,
     config: Config,
     runtime_paths: RuntimePaths,
-    execution_identity: ToolExecutionIdentity | None = None,
 ) -> bool:
     """Return whether the runtime's scheduler is refreshing one base; a base whose binding cannot resolve is not."""
     if refresh_scheduler is None:
         return False
     try:
-        target = registry.resolve_refresh_target(
-            base_id,
-            config=config,
-            runtime_paths=runtime_paths,
-            execution_identity=execution_identity,
-            create=False,
-        )
+        target = registry.resolve_refresh_target(base_id, config=config, runtime_paths=runtime_paths)
     except ValueError:
         return False
     return refresh_scheduler.is_refreshing(target)

@@ -19,7 +19,6 @@ from mindroom.embeddings.errors import (
     describe_embedder_error,
     embedder_batch_cardinality_mismatch,
     embedder_credentials_rejected,
-    embedder_failure_is_transient,
 )
 from mindroom.logging_config import get_logger
 
@@ -118,7 +117,7 @@ class RefreshEmbedder:
         except Exception as exc:
             if isinstance(exc, EmbedderRequestError) and exc.kind == "too_large":
                 return self._embed_each_leaving_failures(texts, stop)
-            if embedder_failure_is_transient(exc) or not embedder_batch_cardinality_mismatch(exc):
+            if not embedder_batch_cardinality_mismatch(exc):
                 raise
             self._disable_batching(f"multi-input request failed: {describe_embedder_error(exc)}")
             return self._embed_each_leaving_failures(texts, stop)

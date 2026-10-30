@@ -33,7 +33,7 @@ from mindroom.knowledge.index_metadata import (
     Publication,
     load_publication,
     new_publication,
-    publication_path,
+    publication_unreadable,
     save_publication,
     utc_now,
 )
@@ -371,7 +371,7 @@ class KnowledgeManager:
         """
         storage = self._base_storage_path
         publication = await asyncio.to_thread(load_publication, storage)
-        if publication is None and await asyncio.to_thread(publication_path(storage).exists):
+        if await asyncio.to_thread(publication_unreadable, storage, publication):
             # The live collection cannot be proven, so nothing is resumed or deleted, whatever the refresh asked.
             logger.warning(
                 "Starting a fresh knowledge candidate and deleting nothing because the publication is unreadable",

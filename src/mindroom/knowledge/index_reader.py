@@ -5,7 +5,6 @@ from __future__ import annotations
 import asyncio
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
-from pathlib import Path
 from typing import TYPE_CHECKING
 
 from mindroom.knowledge.collection_lifetime import read_collection
@@ -13,6 +12,7 @@ from mindroom.knowledge.vector_store import KnowledgeCollection
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
+    from pathlib import Path
 
     from mindroom.embeddings.base import Embedder
     from mindroom.knowledge.indexing_config import IndexingSettings
@@ -28,7 +28,7 @@ _search_threads = ThreadPoolExecutor(4, thread_name_prefix="knowledge-search")
 class PublishedIndexReader:
     """A scoped read handle; each read selects and holds the current publication compatible with ``settings``."""
 
-    path: str
+    path: Path
     embedder: Embedder
     settings: IndexingSettings
     #: The most bytes of vectors a search may load, or None for no limit.
@@ -47,8 +47,8 @@ class PublishedIndexReader:
             )
 
     def _search(self, query: str, embedding: Sequence[float], limit: int) -> list[SearchHit]:
-        with read_collection(Path(self.path), self.settings) as collection_name:
-            return KnowledgeCollection(path=Path(self.path), name=collection_name).search(
+        with read_collection(self.path, self.settings) as collection_name:
+            return KnowledgeCollection(path=self.path, name=collection_name).search(
                 embedding,
                 limit=limit,
                 query=query,

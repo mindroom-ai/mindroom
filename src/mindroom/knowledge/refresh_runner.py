@@ -51,7 +51,7 @@ from mindroom.knowledge.index_metadata import (
     load_publication,
     load_refresh_status,
     new_publication,
-    publication_path,
+    publication_unreadable,
     save_publication,
     utc_now,
 )
@@ -95,7 +95,6 @@ logger = get_logger(__name__)
 class KnowledgeRefreshResult:
     """Result of one explicit knowledge refresh, as recorded by the runtime."""
 
-    key: PublishedIndexKey
     indexed_count: int
     index_published: bool
     availability: KnowledgeAvailability
@@ -280,7 +279,7 @@ async def refresh_knowledge_binding_in_subprocess(
                 error,
             )
         else:
-            await run_blocking_until_complete(_record_failure, key, error)
+            await run_blocking_until_complete(partial(record_refresh_failed, key, error=error))
         _schedule_refresh_health_check(key, config, runtime_paths, recorder, error=error)
         raise
     await run_blocking_until_complete(_record_child_result, key, result, reason_generation)
@@ -296,14 +295,13 @@ async def refresh_knowledge_binding_in_subprocess(
     _schedule_refresh_health_check(key, config, runtime_paths, recorder, error=result.error)
     publication = await asyncio.to_thread(load_publication, storage)
     return KnowledgeRefreshResult(
-        key=key,
         indexed_count=result.indexed_count,
         index_published=result.published,
         availability=index_availability(
             key,
             publication,
             await asyncio.to_thread(load_refresh_status, storage),
-            publication_unreadable=publication is None and publication_path(storage).exists(),
+            publication_unreadable=await asyncio.to_thread(publication_unreadable, storage, publication),
             refreshing=False,
         ),
         last_error=result.error,
@@ -318,7 +316,7 @@ def _record_child_result(key: PublishedIndexKey, result: _RefreshChildResult, re
     elif result.error is not None and result.publication_made_at in {None, _publication_made_at(key)}:
         # A publication made after the child released its lock, such as a dashboard upload's, answers for the base;
         # a child that failed before it could read the publication reports none and is recorded.
-        _record_failure(key, result.error)
+        record_refresh_failed(key, error=result.error)
 
 
 def _publication_made_at(key: PublishedIndexKey) -> str | None:
@@ -341,11 +339,7 @@ def _record_refresh_without_result(
     if publication is not None and publication != publication_before:
         record_refresh_succeeded(key, reason_generation=reason_generation)
     elif error is not None:
-        _record_failure(key, error)
-
-
-def _record_failure(key: PublishedIndexKey, error: str) -> None:
-    record_refresh_failed(key, error=error)
+        record_refresh_failed(key, error=error)
 
 
 def _schedule_refresh_health_check(
@@ -572,7 +566,7 @@ async def knowledge_binding_mutation_lock(
     execution_identity: ToolExecutionIdentity | None = None,
     create: bool = False,
 ) -> AsyncIterator[None]:
-    """Serialize source mutations with refresh publishes in this runtime event loop."""
+    """Hold the source-root lock a refresh child holds, so a dashboard mutation never overlaps a refresh."""
     key = resolve_refresh_target(
         base_id,
         config=config,
@@ -621,20 +615,11 @@ async def _refresh_locked(
     force_reindex: bool,
 ) -> _RefreshChildResult:
     base_id = key.base_id
-    binding = resolve_knowledge_binding(
+    manager = _knowledge_manager(
         base_id,
-        config,
-        runtime_paths,
-        execution_identity=execution_identity,
-        start_watchers=False,
-        create=True,
-    )
-    manager = KnowledgeManager(
-        base_id=base_id,
         config=config,
         runtime_paths=runtime_paths,
-        storage_path=binding.storage_root,
-        knowledge_path=binding.knowledge_path,
+        execution_identity=execution_identity,
     )
     if config.get_knowledge_base_config(base_id).mode == "files":
         return await _refresh_files_mode(manager, key)
@@ -664,6 +649,30 @@ async def _refresh_locked(
         published=outcome.published,
         error=outcome.error,
         source_changed=source_changed,
+    )
+
+
+def _knowledge_manager(
+    base_id: str,
+    *,
+    config: Config,
+    runtime_paths: RuntimePaths,
+    execution_identity: ToolExecutionIdentity | None,
+) -> KnowledgeManager:
+    binding = resolve_knowledge_binding(
+        base_id,
+        config,
+        runtime_paths,
+        execution_identity=execution_identity,
+        start_watchers=False,
+        create=True,
+    )
+    return KnowledgeManager(
+        base_id=base_id,
+        config=config,
+        runtime_paths=runtime_paths,
+        storage_path=binding.storage_root,
+        knowledge_path=binding.knowledge_path,
     )
 
 
@@ -756,20 +765,11 @@ async def publish_file_mode_source_metadata_for_base(
         execution_identity=execution_identity,
         create=True,
     )
-    binding = resolve_knowledge_binding(
+    manager = _knowledge_manager(
         base_id,
-        config,
-        runtime_paths,
-        execution_identity=execution_identity,
-        start_watchers=False,
-        create=True,
-    )
-    manager = KnowledgeManager(
-        base_id=base_id,
         config=config,
         runtime_paths=runtime_paths,
-        storage_path=binding.storage_root,
-        knowledge_path=binding.knowledge_path,
+        execution_identity=execution_identity,
     )
     reason_generation = await asyncio.to_thread(refresh_reason_generation, key)
     await _publish_file_mode_source_metadata(manager, key)

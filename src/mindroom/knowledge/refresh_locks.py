@@ -49,9 +49,7 @@ async def refresh_source_root_lock(key: KnowledgeSourceRoot) -> AsyncIterator[No
     ``flock`` alone, polling every ``_REFRESH_FILE_LOCK_POLL_SECONDS`` in arrival-blind
     order rather than queueing.
     """
-    lock = _refresh_locks.get(key)
-    if lock is None:
-        lock = _refresh_locks.setdefault(key, asyncio.Lock())
+    lock = _refresh_locks.setdefault(key, asyncio.Lock())
     async with (
         lock,
         async_exclusive_file_lock(

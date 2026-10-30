@@ -134,7 +134,7 @@ async def test_rows_agno_wrote_stay_searchable(tmp_path: Path, parity_embedder: 
             published_revision=None,
         ),
     )
-    reader = PublishedIndexReader(path=str(store), embedder=parity_embedder, settings=settings)
+    reader = PublishedIndexReader(path=store, embedder=parity_embedder, settings=settings)
 
     for search in SEARCH_GOLDENS["searches"]:
         if search["agent"] != "librarian" or "documents" not in search:

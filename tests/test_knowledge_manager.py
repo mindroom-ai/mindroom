@@ -38,6 +38,7 @@ import mindroom.knowledge.corpus_signature as knowledge_corpus_signature
 import mindroom.knowledge.file_indexer as knowledge_file_indexer
 import mindroom.knowledge.file_listing as knowledge_file_listing_module
 import mindroom.knowledge.git_source as knowledge_git_source_module
+import mindroom.knowledge.indexing_config as knowledge_indexing_config
 import mindroom.knowledge.manager as knowledge_manager_module
 import mindroom.knowledge.refresh_locks as knowledge_refresh_locks
 import mindroom.knowledge.refresh_runner as knowledge_refresh_runner
@@ -715,7 +716,7 @@ def _published_result_index(
             knowledge_path=str(storage),
             indexing_settings=settings,
         ),
-        reader=PublishedIndexReader(path=str(storage), embedder=_FakeEmbedder(), settings=settings),
+        reader=PublishedIndexReader(path=storage, embedder=_FakeEmbedder(), settings=settings),
         publication=publication,
         status=RefreshStatus(),
         availability=KnowledgeAvailability.READY,
@@ -3648,7 +3649,10 @@ def test_indexing_settings_key_uses_named_settings(tmp_path: Path) -> None:
     assert key.indexing_settings.repo_identity == credential_free_url_identity("https://example.com/org/repo.git")
     assert IndexingSettings.from_metadata(key.indexing_settings.to_metadata()) == key.indexing_settings
     changed_repo_identity = replace(key.indexing_settings, repo_identity="https://example.com/other/repo.git")
-    assert not knowledge_registry.published_index_settings_compatible(key.indexing_settings, changed_repo_identity)
+    assert not knowledge_indexing_config.published_index_settings_compatible(
+        key.indexing_settings,
+        changed_repo_identity,
+    )
 
 
 def test_embedder_prefixes_make_indexing_settings_incompatible(tmp_path: Path) -> None:
@@ -3661,7 +3665,7 @@ def test_embedder_prefixes_make_indexing_settings_incompatible(tmp_path: Path) -
 
     prefixed = indexing_settings_key(config, runtime_paths.storage_root, "docs", docs_path)
 
-    assert not knowledge_registry.published_index_settings_compatible(plain, prefixed)
+    assert not knowledge_indexing_config.published_index_settings_compatible(plain, prefixed)
 
 
 def test_legacy_empty_optional_filter_metadata_remains_compatible() -> None:
@@ -3675,8 +3679,8 @@ def test_legacy_empty_optional_filter_metadata_remains_compatible() -> None:
 
     assert legacy is not None
     assert legacy == current
-    assert knowledge_registry.published_index_settings_compatible(legacy, current)
-    assert not knowledge_registry.published_index_settings_compatible(
+    assert knowledge_indexing_config.published_index_settings_compatible(legacy, current)
+    assert not knowledge_indexing_config.published_index_settings_compatible(
         legacy,
         replace(current, extra_extensions="('.pdf',)"),
     )
@@ -5427,7 +5431,7 @@ async def test_first_time_partial_refresh_does_not_publish_ready_index(
     assert candidate.claim_counts() == (1, 1)
     candidate_status = get_knowledge_index_status("docs", config=config, runtime_paths=runtime_paths).candidate
     assert candidate_status is not None
-    assert (candidate_status.collection, candidate_status.status) == (candidate.name, "failed")
+    assert candidate_status.status == "failed"
     assert (candidate_status.completed_count, candidate_status.failed_count) == (1, 1)
 
 
@@ -6382,7 +6386,6 @@ async def test_refresh_scheduler_refresh_now_runs_the_shared_refresh_with_force_
         assert isinstance(refresh_config, Config)
         seen_force_reindex.append(bool(kwargs.get("force_reindex", False)))
         return knowledge_refresh_runner.KnowledgeRefreshResult(
-            key=resolve_published_index_key("docs", config=refresh_config, runtime_paths=runtime_paths),
             indexed_count=1,
             index_published=True,
             availability=KnowledgeAvailability.READY,
@@ -6705,7 +6708,6 @@ async def test_subprocess_refresh_primes_parent_github_app_token(
         )
         assert resolved == ("x-access-token", "parent-cached-token")
         return knowledge_refresh_runner.KnowledgeRefreshResult(
-            key=resolve_published_index_key(base_id, config=config, runtime_paths=runtime_paths),
             indexed_count=0,
             index_published=False,
             availability=KnowledgeAvailability.READY,
@@ -6805,7 +6807,6 @@ async def test_subprocess_refresh_rejects_parent_token_after_credentials_rotate(
         )
         assert resolved == ("x-access-token", "current-token")
         return knowledge_refresh_runner.KnowledgeRefreshResult(
-            key=resolve_published_index_key(base_id, config=config, runtime_paths=runtime_paths),
             indexed_count=0,
             index_published=False,
             availability=KnowledgeAvailability.READY,
@@ -7761,7 +7762,6 @@ async def test_refresh_scheduler_limits_concurrent_subprocess_refreshes(
             refresh_config = kwargs["config"]
             assert isinstance(refresh_config, Config)
             return KnowledgeRefreshResult(
-                key=resolve_published_index_key(base_id, config=refresh_config, runtime_paths=runtime_paths),
                 indexed_count=0,
                 index_published=True,
                 availability=KnowledgeAvailability.READY,
@@ -7785,11 +7785,10 @@ async def test_refresh_scheduler_limits_concurrent_subprocess_refreshes(
     assert started_base_ids == ["docs"]
 
     release_first.set()
-    result = await asyncio.wait_for(manual, timeout=SETTLE_TIMEOUT_SECONDS)
+    await asyncio.wait_for(manual, timeout=SETTLE_TIMEOUT_SECONDS)
     await _wait_until(lambda: not scheduler._tasks, "the queued refreshes did not finish")
     await scheduler.shutdown()
 
-    assert result.key.base_id == "manual"
     assert started_base_ids == ["docs", "api", "manual"]
     assert max_active_refreshes == 1
 
@@ -9472,7 +9471,7 @@ async def test_git_failure_redacts_authorization_headers_from_raised_and_metadat
     error_texts = [
         str(exc_info.value),
         _refresh_status(config, runtime_paths).last_error or "",
-        lookup.last_error or "",
+        lookup.status.last_error or "",
     ]
 
     assert _refresh_state_for_key(key) == "refresh_failed"
@@ -9766,7 +9765,6 @@ async def test_refresh_scheduler_manual_reindex_waits_behind_the_running_refresh
             first_started.set()
             await release_first.wait()
         return knowledge_refresh_runner.KnowledgeRefreshResult(
-            key=resolve_published_index_key("docs", config=refresh_config, runtime_paths=runtime_paths),
             indexed_count=1,
             index_published=True,
             availability=KnowledgeAvailability.READY,
@@ -10212,7 +10210,6 @@ async def test_refresh_subprocess_returns_exact_result(tmp_path: Path) -> None:
     assert result.index_published is True
     assert result.availability is KnowledgeAvailability.READY
     assert result.last_error is None
-    assert result.key == resolve_published_index_key("docs", config=config, runtime_paths=runtime_paths)
 
 
 @pytest.mark.asyncio
@@ -10251,7 +10248,6 @@ async def test_manual_refresh_returns_failed_candidate_result_and_tracks_parent_
         force_reindex=True,
     )
     assert result == knowledge_refresh_runner.KnowledgeRefreshResult(
-        key=key,
         indexed_count=7,
         index_published=False,
         availability=KnowledgeAvailability.REFRESH_FAILED,

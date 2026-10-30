@@ -75,7 +75,7 @@ def _reader(tmp_path: Path, embedder: _Embedder) -> PublishedIndexReader:
             published_revision=None,
         ),
     )
-    return PublishedIndexReader(str(tmp_path), embedder, settings)
+    return PublishedIndexReader(tmp_path, embedder, settings)
 
 
 @pytest.mark.asyncio

@@ -336,7 +336,6 @@ def _index_status_sync(
             base_id,
             config=config,
             runtime_paths=runtime_paths,
-            create=False,
             refreshing=refreshing,
         )
     except ValueError:
@@ -349,9 +348,8 @@ async def _index_status(
     base_id: str,
     runtime_paths: RuntimePaths,
     *,
-    request: Request,
+    refreshing: bool,
 ) -> KnowledgeIndexStatus:
-    refreshing = _is_refreshing(config, base_id, runtime_paths, request=request)
     return await asyncio.to_thread(partial(_index_status_sync, config, base_id, runtime_paths, refreshing=refreshing))
 
 
@@ -403,15 +401,13 @@ async def _git_status(
     base_id: str,
     runtime_paths: RuntimePaths,
     *,
-    request: Request,
-    index_status: KnowledgeIndexStatus | None = None,
+    index_status: KnowledgeIndexStatus,
+    refreshing: bool,
 ) -> dict[str, Any] | None:
     git_config = config.knowledge_bases[base_id].git
     if git_config is None:
         return None
     root = _knowledge_root(config, base_id, runtime_paths)
-    if index_status is None:
-        index_status = await _index_status(config, base_id, runtime_paths, request=request)
     repo_present = await asyncio.to_thread(
         git_checkout_present,
         root,
@@ -421,7 +417,7 @@ async def _git_status(
         "repo_url": redact_url_credentials(git_config.repo_url),
         "branch": git_config.branch,
         "lfs": git_config.lfs,
-        "syncing": _is_refreshing(config, base_id, runtime_paths, request=request),
+        "syncing": refreshing,
         "repo_present": repo_present,
         "initial_sync_complete": index_status.initial_sync_complete,
         "last_successful_sync_at": index_status.last_published_at,
@@ -627,15 +623,15 @@ async def list_knowledge_bases(request: Request) -> dict[str, Any]:
         base_config = config.knowledge_bases[base_id]
         root = _knowledge_root(config, base_id, runtime_paths)
         file_info = await _count_managed_files(config, base_id, root, runtime_paths)
-        index_status = await _index_status(config, base_id, runtime_paths, request=request)
+        refreshing = _is_refreshing(config, base_id, runtime_paths, request=request)
+        index_status = await _index_status(config, base_id, runtime_paths, refreshing=refreshing)
         git_status = await _git_status(
             config,
             base_id,
             runtime_paths,
-            request=request,
             index_status=index_status,
+            refreshing=refreshing,
         )
-        refreshing = _is_refreshing(config, base_id, runtime_paths, request=request)
 
         base_entry: dict[str, Any] = {
             "name": base_id,
@@ -820,16 +816,16 @@ async def knowledge_status(base_id: str, request: Request) -> dict[str, Any]:
     config, runtime_paths = config_lifecycle.read_committed_runtime_config(request)
     root = _knowledge_root(config, base_id, runtime_paths)
     base_config = config.knowledge_bases[base_id]
-    index_status = await _index_status(config, base_id, runtime_paths, request=request)
+    refreshing = _is_refreshing(config, base_id, runtime_paths, request=request)
+    index_status = await _index_status(config, base_id, runtime_paths, refreshing=refreshing)
     file_info = await _count_managed_files(config, base_id, root, runtime_paths)
     git_status = await _git_status(
         config,
         base_id,
         runtime_paths,
-        request=request,
         index_status=index_status,
+        refreshing=refreshing,
     )
-    refreshing = _is_refreshing(config, base_id, runtime_paths, request=request)
 
     payload: dict[str, Any] = {
         "base_id": base_id,

@@ -2,14 +2,15 @@
 
 Resolving an agent's knowledge for a query is a read, but a stale or failed index
 also has to get itself rescheduled. This module owns the decision half of that;
-``knowledge/utils.py`` owns the effect half, driving these functions in order:
+``knowledge/utils.py`` owns the effect half. It asks the scheduler first whether a
+refresh of the base is already running, which needs no policy, then drives these
+functions in order:
 
 1. ``refresh_trigger`` -- pure and cheap. Does this availability warrant a refresh
-   at all, and what should the turn report while one is in flight? Returns None
+   at all, and what should the turn report once one is queued? Returns None
    when nothing should happen, which is the common READY case.
-2. The caller probes the scheduler, reached only when a trigger exists.
-3. ``refresh_cooldown_key`` -- the one step that touches the filesystem. Deferred
-   to here so an already-in-flight refresh never pays for it. The scheduler then
+2. ``refresh_cooldown_key`` -- the one step that touches the filesystem. Deferred
+   to here so a read that warrants no refresh never pays for it. The scheduler then
    schedules the refresh unless the same key was scheduled within the cooldown.
 
 Splitting it this way keeps a single source of truth for "should this refresh":
@@ -48,10 +49,10 @@ _RefreshCooldownKey = tuple[KnowledgeRefreshTarget, KnowledgeAvailability, "Hash
 
 @dataclass(frozen=True)
 class _RefreshTrigger:
-    """A refresh this availability warrants, pending a scheduler probe and its cooldown.
+    """A refresh this availability warrants, pending its cooldown.
 
     ``availability_while_refreshing`` is what the turn should report once the
-    refresh is in flight or newly queued. It differs from the resolved
+    refresh is newly queued. It differs from the resolved
     availability only for READY, which is downgraded to STALE so the agent does
     not claim to have searched contents a pending refresh may replace.
     """
@@ -145,7 +146,7 @@ def refresh_trigger(
 
     Pure, and cheap enough to run on every knowledge read: a READY index that is
     not yet due for an on-access refresh returns None here, before the caller pays
-    for a scheduler probe.
+    for the cooldown key.
     """
     if availability is KnowledgeAvailability.READY:
         if not lookup.schedule_refresh_on_access or not _refresh_on_access_due(lookup, config, wall_now=wall_now):

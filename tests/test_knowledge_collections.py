@@ -261,7 +261,7 @@ def test_concurrent_cold_lookups_keep_returned_readers_queryable(
         second = pool.submit(lookup)
         readers = [first.result(timeout=10), second.result(timeout=10)]
     for reader in readers:
-        with read_collection(Path(reader.path), reader.settings) as selected:
+        with read_collection(reader.path, reader.settings) as selected:
             assert selected == "present"
 
 
