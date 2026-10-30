@@ -308,7 +308,6 @@ async def test_cross_sink_correlation_invariant_for_matrix_turn_processing_log(
         "reply_to_event_id": "$event:localhost",
         "requester_id": "@user:localhost",
         "correlation_id": "$event:localhost",
-        "model_params": {},
         "matrix_event_id": "$event:localhost",
         "matrix_seen_event_ids": ["$event:localhost"],
     }

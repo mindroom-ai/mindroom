@@ -86,6 +86,7 @@ entities_count  # unused variable (src/mindroom/api/homeassistant_integration.py
 has_custom_client_config  # unused variable (src/mindroom/api/oauth.py)
 stream_options  # unused variable (src/mindroom/api/openai_request_parsing.py)
 owned_by  # unused variable (src/mindroom/api/openai_compat.py)
+system_fingerprint  # OpenAI chat completion response field (src/mindroom/api/openai_compat.py, src/mindroom/api/openai_streaming_protocol.py)
 template_exists  # dashboard response field (src/mindroom/api/main.py)
 git_enabled  # unused variable (src/mindroom/config/main.py)
 git_repo_identity  # unused variable (src/mindroom/config/main.py)

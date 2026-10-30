@@ -30,7 +30,7 @@ def stamp_model(message: Message, identity: ModelIdentity) -> None:
     """Record on ``message`` which model answered it (``model_provenance``), keeping the rest of its provider data."""
     message.provider_data = {
         **(message.provider_data or {}),
-        **model_provenance(identity.id, identity.provider_name),
+        **model_provenance(identity.id, identity.provider),
     }
 
 
@@ -92,16 +92,16 @@ def finished_turn(
     if usage is not None:
         message.metrics = usage
     stamp_finished_turn(message, identity, timer)
-    return turn_end(message, stop_reason, usage_reported=usage is not None)
+    return turn_end(message, stop_reason)
 
 
-def turn_end(message: Message, stop_reason: StopReason | None, *, usage_reported: bool) -> list[StreamEvent]:
+def turn_end(message: Message, stop_reason: StopReason | None) -> list[StreamEvent]:
     """Return a finished turn's last events: its final usage report, when the provider reported usage, then completion.
 
     The final report carries the message's metrics, timings included.
     """
     completed = TurnCompleted(message=message, stop_reason=stop_reason)
-    return [UsageReported(message.metrics), completed] if usage_reported else [completed]
+    return [UsageReported(message.metrics), completed] if message.metrics.reported else [completed]
 
 
 @dataclass(slots=True)

@@ -830,7 +830,6 @@ def test_handled_attempt_preserves_seeded_turn_metadata() -> None:
         "reply_to_event_id": "$reply",
         "requester_id": "@user:hs",
         "correlation_id": "corr-1",
-        "model_params": {},
         "matrix_event_id": "$reply",
     }
 

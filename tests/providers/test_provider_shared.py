@@ -22,9 +22,17 @@ from mindroom.llm.errors import (
     RateLimited,
 )
 from mindroom.llm.messages import Message, model_provenance
-from mindroom.llm.provider import ModelIdentity, ReasoningDelta, StreamProgress, TextDelta, ToolCallReady, UsageReported
-from mindroom.llm.usage import MessageMetrics
-from mindroom.providers.assistant_turn import TurnTimer, stamp_finished_turn
+from mindroom.llm.provider import (
+    ModelIdentity,
+    ReasoningDelta,
+    StreamProgress,
+    TextDelta,
+    ToolCallReady,
+    TurnCompleted,
+    UsageReported,
+)
+from mindroom.llm.usage import MessageMetrics, TokenCounts
+from mindroom.providers.assistant_turn import TurnTimer, finished_turn, stamp_finished_turn
 from mindroom.providers.errors import classify_provider_error, provider_failure, retry_after_seconds
 from mindroom.providers.extra_kwargs import settings_from_extra_kwargs
 
@@ -478,9 +486,34 @@ def test_a_turn_is_timed_from_its_first_output(output: TextDelta | ReasoningDelt
     assert first_output_at is not None
     assert timer.output(TextDelta("more")) == TextDelta("more")
     message = Message(role="assistant", content="Hi")
-    stamp_finished_turn(message, ModelIdentity(id="m", provider="P", provider_name="P"), timer)
+    stamp_finished_turn(message, ModelIdentity(id="m", provider="P"), timer)
 
     assert timer.first_output_at == first_output_at
     assert message.metrics.time_to_first_token == first_output_at - timer.started
     assert 0 <= message.metrics.time_to_first_token <= message.metrics.duration <= time.monotonic() - timer.started
     assert message.provider_data == model_provenance("m", "P")
+
+
+@pytest.mark.parametrize(
+    ("usage", "reported"),
+    [(None, False), (MessageMetrics(), False), (MessageMetrics(tokens=TokenCounts(output_tokens=3)), True)],
+    ids=["no-usage", "zero-counters", "counters"],
+)
+def test_a_finished_turn_reports_usage_only_when_a_counter_is_not_zero(
+    usage: MessageMetrics | None,
+    reported: bool,
+) -> None:
+    """A usage report whose counters are all zero is one the provider did not make, so the turn ends without one."""
+    events = finished_turn(
+        ModelIdentity(id="m", provider="P"),
+        TurnTimer(),
+        content="Hi",
+        tool_calls=(),
+        usage=usage,
+        stop_reason="end",
+    )
+
+    completed = events[-1]
+    assert isinstance(completed, TurnCompleted)
+    assert completed.message.metrics.duration is not None
+    assert events[:-1] == ([UsageReported(completed.message.metrics)] if reported else [])

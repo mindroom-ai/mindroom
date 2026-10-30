@@ -54,7 +54,7 @@ REQUESTER_ID = "@user:example.org"
 _OWNERS: dict[ScenarioKind, str] = {"agent": "code", "team": "squad"}
 _MEMBERS = ("alpha", "beta")
 # The model every compaction summary reports, and the counters it returns.
-SUMMARY_MODEL = ModelIdentity(id="oracle-summary-model", provider="oracle", provider_name="oracle")
+SUMMARY_MODEL = ModelIdentity(id="oracle-summary-model", provider="oracle")
 SUMMARY_USAGE = MessageMetrics(tokens=TokenCounts(input_tokens=7, output_tokens=3, total_tokens=10))
 # The response turn id a run's live queued-message notice names.
 _NOTICE_TURN_KEY = "mindroom_queued_message_notice_response_turn_id"

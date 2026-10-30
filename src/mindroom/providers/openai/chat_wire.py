@@ -401,12 +401,8 @@ def _usage_metrics(usage: Mapping[str, Any]) -> MessageMetrics:
         audio_input_tokens=_detail(usage, "prompt_tokens_details", "audio_tokens"),
         audio_output_tokens=_detail(usage, "completion_tokens_details", "audio_tokens"),
     ).with_totals()
-    cost = usage.get("cost")
     # ``with_totals`` derives the audio total; the token total is the one the provider reports.
-    return MessageMetrics(
-        tokens=replace(counts, total_tokens=usage.get("total_tokens") or 0),
-        cost=cost if isinstance(cost, int | float) else None,
-    )
+    return MessageMetrics(tokens=replace(counts, total_tokens=usage.get("total_tokens") or 0))
 
 
 def _chunk_usage(chunk: ChatCompletionChunk, wire: ChatWire) -> Mapping[str, Any] | None:
@@ -440,12 +436,10 @@ def _completed_tool_calls(calls: list[dict[str, Any]]) -> list[dict[str, Any]]:
 
 
 def _reply_metadata(reply: ChatCompletionChunk) -> dict[str, Any]:
-    """Return the ``id``, ``system_fingerprint``, and unknown fields a chunk carried, for stored provider data."""
+    """Return the ``id`` and unknown fields a chunk carried, for stored provider data."""
     data: dict[str, Any] = {}
     if reply.id:
         data["id"] = reply.id
-    if reply.system_fingerprint:
-        data["system_fingerprint"] = reply.system_fingerprint
     if extra := _extra(reply):
         data["model_extra"] = extra
     return data

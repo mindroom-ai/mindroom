@@ -77,9 +77,8 @@
         "id": "chatcmpl-parity",
         "mindroom_model": {
           "id": "k3",
-          "provider": "Kimi Chat"
-        },
-        "system_fingerprint": "fp_parity"
+          "provider": "Kimi"
+        }
       },
       "reasoning_content": "Check the forecast first.",
       "role": "assistant",

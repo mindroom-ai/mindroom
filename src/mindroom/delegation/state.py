@@ -9,13 +9,14 @@ from mindroom.history.types import HistoryScope
 from mindroom.tool_system.worker_routing import parse_tool_execution_identity_payload
 
 if TYPE_CHECKING:
-    from collections.abc import Collection, Mapping
+    from collections.abc import Collection, Mapping, Sequence
 
     from mindroom.agent_modes import AgentMode
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
     from mindroom.knowledge.refresh_scheduler import KnowledgeRefreshScheduler
     from mindroom.llm.runs import RunRequirement
+    from mindroom.llm.usage import RunMetrics
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 
 DELEGATION_STATE_KEY = "mindroom_delegation"
@@ -294,6 +295,10 @@ class ChildResponseRunner(Protocol):
         config: Config,
         runtime_paths: RuntimePaths,
         refresh_scheduler: KnowledgeRefreshScheduler | None,
+        prior_usage: Sequence[RunMetrics] = (),
     ) -> str:
-        """Execute a child response in its retained scope, reporting exact run IDs."""
+        """Execute a child response in its retained scope, reporting exact run IDs.
+
+        ``prior_usage`` is the usage of the child's turn before this response, which its runs' records carry.
+        """
         ...

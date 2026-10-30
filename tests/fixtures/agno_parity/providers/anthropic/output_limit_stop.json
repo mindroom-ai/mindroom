@@ -36,21 +36,16 @@
           "id": "claude-sonnet-5-5",
           "provider": "Anthropic"
         },
-        "mindroom_native_compaction": null,
-        "stop_reason": "max_tokens"
+        "mindroom_native_compaction": null
       },
       "role": "assistant"
     },
     "metrics": {
+      "context": {
+        "input_tokens": 42
+      },
       "input_tokens": 42,
       "output_tokens": 8,
-      "provider_metrics": {
-        "context_usage": {
-          "cache_read_tokens": 0,
-          "cache_write_tokens": 0,
-          "input_tokens": 42
-        }
-      },
       "total_tokens": 50
     },
     "stop_reason": "output_limit"

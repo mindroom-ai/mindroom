@@ -71,8 +71,7 @@ if TYPE_CHECKING:
     from mindroom.constants import RuntimePaths
 
 GOLDEN = Path(__file__).parent / "fixtures" / "helper_usage_rows.json"
-# A run's ``model_provider`` and its requests' model provenance use different provider names, so the rows show each.
-_IDENTITY = ModelIdentity(id="scripted-model", provider="Scripted", provider_name="Scripted Chat")
+_IDENTITY = ModelIdentity(id="scripted-model", provider="Scripted")
 # Not a whole second, so a row shows whether its time was truncated to an integer.
 NOW = 1_790_000_000.5
 _UUID = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
@@ -127,7 +126,7 @@ def _system_config(paths: RuntimePaths) -> Config:
 
 
 def _scripted(monkeypatch: pytest.MonkeyPatch, text: str, *, sums_attempts: bool = False) -> None:
-    """Answer the default model's one request with ``text``, as a route whose two provider names differ."""
+    """Answer the default model's one request with ``text``."""
     turn = answer(text, usage(20, 2, cache_read_tokens=3))
     if sums_attempts:
         # The retrying stage marks a finished turn whose usage adds up failed attempts.

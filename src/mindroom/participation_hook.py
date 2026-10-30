@@ -107,7 +107,7 @@ async def _request_decision(model: ModelProvider, gate: ParticipationGate, state
         )
         assert state.record.metrics is not None
         identity = model.identity
-        state.record.metrics.add(turn.usage, model_id=identity.id, provider=identity.provider_name)
+        state.record.metrics.add(turn.usage, model_id=identity.id, provider=identity.provider)
         if turn.tool_calls or not isinstance(turn.message.content, str):
             return ParticipationDecision(action="error", reason="invalid_decision")
         return parse_decision(turn.message.content)

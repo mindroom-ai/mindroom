@@ -3664,7 +3664,7 @@ class TestTeamCompletion:
         """Team usage sums every run's prompt tokens, each normalized for its own provider's cache accounting."""
         member = ScriptedModel(
             [answer("Member view", usage(50, 10, cache_read_tokens=30))],
-            identity=ModelIdentity(id="gpt-6-astra", provider="OpenAI", provider_name="OpenAI"),
+            identity=ModelIdentity(id="gpt-6-astra", provider="OpenAI"),
         )
         team = _scripted_team(
             calls(
@@ -3673,7 +3673,7 @@ class TestTeamCompletion:
             ),
             answer("Team consensus result", usage(100, 20, cache_read_tokens=1000, cache_write_tokens=200)),
             members=[("general", "GeneralAgent", member)],
-            leader_identity=ModelIdentity(id="claude-sonnet-5-5", provider="Anthropic", provider_name="Anthropic"),
+            leader_identity=ModelIdentity(id="claude-sonnet-5-5", provider="Anthropic"),
         )
 
         with (
@@ -4423,7 +4423,7 @@ class TestTeamCompletion:
         persist_entity_accounts(team_config, runtime_paths)
         member = ScriptedModel(
             [answer("Done", usage(40, 4))],
-            identity=ModelIdentity(id="member-model", provider="Synthetic", provider_name="Synthetic"),
+            identity=ModelIdentity(id="member-model", provider="Synthetic"),
         )
         built = _scripted_team(
             calls(
@@ -4673,8 +4673,8 @@ class TestTeamCompletion:
 
         assert prepared.prompt_text == "Previous team reply\n\nAnalyze this."
         assert prepared.run_metadata is not None
-        assert "tools_schema" not in prepared.run_metadata
-        assert prepared.run_metadata["model_params"] == {"temperature": 0.7}
+        # The run records no route settings: nothing reads them, and the request log keeps them.
+        assert {"tools_schema", "model_params"}.isdisjoint(prepared.run_metadata)
         assert prepared.run_metadata[constants.AI_RUN_METADATA_KEY]["compaction"]["decision"] == "none"
         scope_context = load_bound_scope_session(
             member_names=["general"],

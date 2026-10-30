@@ -32,7 +32,7 @@ from mindroom.llm.provider import (
     TurnCompleted,
     UsageReported,
 )
-from mindroom.llm.usage import TokenCounts, add_usage
+from mindroom.llm.usage import add_usage
 from mindroom.tool_system.context_bound_streams import closing_async_stream
 
 if TYPE_CHECKING:
@@ -133,7 +133,7 @@ async def attempts(
                     yield _with_carried_usage(event, carried)
             if finished:
                 return
-            raise incomplete_stream_error(provider=inner.identity.provider_name)
+            raise incomplete_stream_error(provider=inner.identity.provider)
         except ProviderError as error:
             if committed or (reissue := retry(error)) is None:
                 raise
@@ -161,11 +161,11 @@ def _with_carried_usage(event: StreamEvent, carried: MessageMetrics | None) -> S
     """Add the failed attempts' usage to a reissued attempt's finished turn, marking its usage as summing attempts.
 
     The mark goes on the attempt's reports and its finished turn alike, once the failed attempts reported tokens.
-    Counters sum, and a value that does not, such as Claude's ``context_usage``, stays the answering attempt's.
+    Counters sum, and the reported ``context`` stays the answering attempt's.
     """
     if carried is None:
         return event
-    sums_attempts = carried.tokens != TokenCounts()
+    sums_attempts = carried.reported
     if isinstance(event, UsageReported):
         return replace(event, sums_attempts=True) if sums_attempts else event
     if not isinstance(event, TurnCompleted):

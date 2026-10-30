@@ -101,7 +101,7 @@ BOB = replace(ALICE, requester_id="@bob:example.test")
 
 
 _Call = tuple[str, dict[str, object]]
-_SCRIPTED = ModelIdentity(id="scripted", provider="test", provider_name="test")
+_SCRIPTED = ModelIdentity(id="scripted", provider="test")
 
 
 @dataclass

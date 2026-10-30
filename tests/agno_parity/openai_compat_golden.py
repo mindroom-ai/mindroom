@@ -134,7 +134,7 @@ def _post_all(tmp_path: Path) -> dict[str, Any]:
 
     def scripted_route(model_config: ModelConfig, *_args: object, **_kwargs: object) -> ScriptedModel:
         # Every route of one model id answers from the same script, as the capture's scripted models did.
-        identity = ModelIdentity(id=model_config.id, provider="Synthetic", provider_name="Synthetic")
+        identity = ModelIdentity(id=model_config.id, provider="Synthetic")
         return ScriptedModel(turns.setdefault(model_config.id, []), identity=identity)
 
     app = openai_compat_app(runtime_paths)

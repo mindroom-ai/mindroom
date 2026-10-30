@@ -32,15 +32,14 @@ type StructuredOutput = Literal["native", "json_schema", "forced_tool", "json_mo
 class ModelIdentity:
     """Who answers a request.
 
-    ``id`` is the effective model id, ``provider`` the stored ``model_provider`` string, and ``provider_name`` the
-    metrics provider string that usage rows and pricing key by.
+    ``id`` is the effective model id and ``provider`` the route's provider name: runs store it as ``model_provider``,
+    usage rows and prices key by it with ``id``, and errors name it.
     ``endpoint`` identifies the server requests reach, when the route has one: its base URL, plus the project and
     region on Vertex AI Claude; capabilities learned from provider errors and native-compaction routes are keyed by it.
     """
 
     id: str
     provider: str
-    provider_name: str
     endpoint: str | None = None
 
 
@@ -380,7 +379,7 @@ class ModelProvider(Protocol):
 
     @property
     def model_params(self) -> dict[str, Any]:
-        """The route's JSON-safe, non-secret settings, which run metadata and the request log record."""
+        """The route's JSON-safe, non-secret settings, which the request log records."""
         ...
 
     def stream(self, request: ModelRequest) -> AsyncIterator[StreamEvent]:
@@ -402,7 +401,7 @@ async def complete(provider: ModelProvider, request: ModelRequest) -> ModelTurn:
         if isinstance(event, TurnCompleted):
             completed = event
     if completed is None:
-        raise incomplete_stream_error(provider=provider.identity.provider_name)
+        raise incomplete_stream_error(provider=provider.identity.provider)
     return ModelTurn(message=completed.message, stop_reason=completed.stop_reason)
 
 

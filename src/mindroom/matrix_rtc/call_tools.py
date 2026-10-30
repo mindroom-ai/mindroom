@@ -46,6 +46,7 @@ from mindroom.llm.usage import HelperUsage, MessageMetrics, ModelMetrics, Reques
 from mindroom.logging_config import get_logger
 from mindroom.matrix_rtc.voice_agent import CallAgentResponse
 from mindroom.message_target import MessageTarget
+from mindroom.providers.names import ROUTE_PROVIDERS
 from mindroom.session_ids import create_session_id
 from mindroom.session_storage.agent_storage import create_session_storage
 from mindroom.session_storage.lanes import run_session_storage_operation
@@ -186,7 +187,7 @@ async def record_call_voice_usage(
         HelperUsage(
             run_id=usage.provider_session_id,
             model=usage.model,
-            provider="OpenAI",
+            provider=ROUTE_PROVIDERS["openai"],
             metrics=RunMetrics(),
             voice=VoiceDuration(seconds=usage.duration_seconds, finalized=usage.finalized),
             created_at=usage.created_at,
@@ -209,18 +210,18 @@ async def record_call_token_usage(
 
     The call's model has its entry under ``details`` even before any response, so stored usage names it from the start.
     """
-    metrics = RunMetrics(details={"model": [ModelMetrics(id=usage.model, provider="OpenAI")]})
-    model = ModelProvenance(model_id=usage.model, provider="OpenAI")
+    metrics = RunMetrics(details={"model": [ModelMetrics(id=usage.model, provider=ROUTE_PROVIDERS["openai"])]})
+    model = ModelProvenance(model_id=usage.model, provider=ROUTE_PROVIDERS["openai"])
     requests: list[RequestUsage] = []
     for response in usage.responses:
         response_metrics = MessageMetrics(tokens=response.tokens.with_totals())
-        metrics.add(response_metrics, model_id=usage.model, provider="OpenAI")
+        metrics.add(response_metrics, model_id=usage.model, provider=ROUTE_PROVIDERS["openai"])
         requests.append(RequestUsage(created_at=int(response.created_at), metrics=response_metrics, model=model))
     await _save_call_usage(
         HelperUsage(
             run_id=usage.usage_id,
             model=usage.model,
-            provider="OpenAI",
+            provider=ROUTE_PROVIDERS["openai"],
             metrics=metrics,
             requests=tuple(requests),
             created_at=int(usage.created_at),

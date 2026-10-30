@@ -1373,6 +1373,27 @@ async def test_claude_turn_without_messages_counts_toward_the_session_model(
 
 
 @pytest.mark.asyncio
+async def test_claude_turn_that_reported_no_usage_records_none(
+    tmp_path: Path,
+    fake_manager: claude_agent_module._ClaudeSessionManager,  # noqa: ARG001
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A turn whose result reports only zeroes and that sent no message records no usage."""
+    recorded: list[object] = []
+
+    async def record(*args: object, **_kwargs: object) -> None:
+        recorded.append(args)
+
+    monkeypatch.setattr(claude_agent_module, "record_helper_usage", record)
+    monkeypatch.setattr(claude_agent_module, "ClaudeSDKClient", _ScriptedClaudeSDKClient)
+    monkeypatch.setattr(_ScriptedClaudeSDKClient, "turns", [[_claude_result(0)]])
+
+    await _send_metered_turns(tmp_path, ["@user:localhost"], model="claude-sonnet-5-5")
+
+    assert recorded == []
+
+
+@pytest.mark.asyncio
 async def test_claude_turn_usage_counts_toward_api_requester(
     tmp_path: Path,
     fake_manager: claude_agent_module._ClaudeSessionManager,  # noqa: ARG001

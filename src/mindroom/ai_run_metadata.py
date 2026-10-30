@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 from mindroom.budgets.pricing import format_cost_usd, run_cost_usd
-from mindroom.constants import AI_RUN_METADATA_KEY
+from mindroom.constants import AI_RUN_METADATA_KEY, PRIOR_USAGE_RUN_METADATA_KEY
 from mindroom.llm.messages import is_own_model_message
 from mindroom.llm.usage import RunMetrics
 from mindroom.model_usage import ContextTokens, message_context_tokens, uncached_input_tokens_from_counts
@@ -46,9 +46,9 @@ class ReplyUsage:
     """
 
     tokens: TokenCounts
-    cost: float | None
     time_to_first_token: float | None
     duration: float | None
+    # None when the provider reported no usage, whose input then has no split to publish.
     uncached_input_tokens: int | None
 
     @classmethod
@@ -61,19 +61,22 @@ class ReplyUsage:
         model_id: str | None,
     ) -> ReplyUsage:
         """Return the usage a run's metrics publish, for the model that answered when ``metrics`` has no breakdown."""
-        uncached_input_tokens = _uncached_input_tokens(
-            metrics,
-            provider=provider,
-            configured_provider=configured_provider,
-            model_id=model_id,
+        uncached_input_tokens = (
+            _uncached_input_tokens(
+                metrics,
+                provider=provider,
+                configured_provider=configured_provider,
+                model_id=model_id,
+            )
+            if metrics.reported
+            else None
         )
-        return cls(metrics.tokens, metrics.cost, metrics.time_to_first_token, metrics.duration, uncached_input_tokens)
+        return cls(metrics.tokens, metrics.time_to_first_token, metrics.duration, uncached_input_tokens)
 
     def to_wire(self) -> dict[str, Any]:
-        """Return the published object, empty when nothing was reported; the uncached input is published as given."""
+        """Return the published object; the uncached input is published as given, zero included."""
         values = {
             **self.tokens.to_dict(first=_PUBLISHED_COUNTERS),
-            "cost": self.cost,
             "time_to_first_token": self.time_to_first_token,
             "duration": self.duration,
         }
@@ -82,7 +85,7 @@ class ReplyUsage:
             for key, value in values.items()
             if isinstance(value, (float, str)) or (isinstance(value, int) and value != 0)
         }
-        if wire and self.uncached_input_tokens is not None:
+        if self.uncached_input_tokens is not None:
             wire["uncached_input_tokens"] = self.uncached_input_tokens
         return wire
 
@@ -214,7 +217,7 @@ def turn_usage(prior_usage: Sequence[RunMetrics], metrics: RunMetrics | None) ->
     """Return the usage of a turn: its spent attempts' ``prior_usage``, then ``metrics``, the final attempt's.
 
     A reply and a delegated child's record both report their turn's usage so. A turn of one attempt reports that
-    attempt's usage as it is. Otherwise counters, costs, durations, and per-model details add up, and the turn's first
+    attempt's usage as it is. Otherwise counters, durations, and per-model details add up, and the turn's first
     token is its first attempt's that reported one, as a run's is its first request's.
     """
     if not prior_usage:
@@ -226,6 +229,32 @@ def turn_usage(prior_usage: Sequence[RunMetrics], metrics: RunMetrics | None) ->
         None,
     )
     return total
+
+
+def with_prior_usage(metadata: dict[str, Any] | None, prior_usage: Sequence[RunMetrics]) -> dict[str, Any] | None:
+    """Return the metadata a run's record stores: ``metadata``, with ``prior_usage``, what its turn spent before it.
+
+    The record keeps that usage summed (``turn_usage``), so whichever resume continues the run after a pause, even
+    after a restart, reports it with the run's own (``prior_usage_of``). A turn's first run keeps none. ``metadata``
+    is the turn's, which holds no other run's usage (``without_run_usage``).
+    """
+    usage = turn_usage(prior_usage, None)
+    return metadata if usage is None else {**(metadata or {}), PRIOR_USAGE_RUN_METADATA_KEY: usage.to_dict()}
+
+
+def prior_usage_of(record: AnyRunRecord) -> tuple[RunMetrics, ...]:
+    """Return the usage the turn of ``record``'s run spent on attempts before it, as ``with_prior_usage`` stored it."""
+    # LEGACY_COMPAT: a run stored without the usage its turn spent before it.
+    # Legacy format: a run record whose metadata has no ``mindroom_prior_usage`` key though its turn spent attempts
+    # before it, such as an empty answer the turn retried or a run a model switch continued; it matters for a run that
+    # is still paused.
+    # Last legacy release: v2026.10.733 stored every run without the key; the next release stores it on each run whose
+    # turn spent earlier attempts.
+    # Handling: such a run reads as its turn's first, so its resume reports the paused run and what follows, as those
+    # releases did; the usage ledger counts the earlier attempts either way.
+    # Coverage: tests/test_approval_turn_continuation.py::test_a_pause_stored_without_its_turn_s_earlier_usage_resumes_publishing_the_paused_run_s.
+    stored = (record.metadata or {}).get(PRIOR_USAGE_RUN_METADATA_KEY)
+    return (RunMetrics.from_dict(stored),) if isinstance(stored, dict) else ()
 
 
 def build_ai_run_metadata_content(

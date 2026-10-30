@@ -694,7 +694,7 @@ async def test_conversation_memory_extraction_records_its_token_usage(config: Co
     # Each extraction call is one request in usage reports.
     [request] = run.requests
     assert request.metrics.tokens.total_tokens == 150
-    assert request.model == ModelProvenance(model_id="gpt-6-luna", provider="OpenAI Chat")
+    assert request.model == ModelProvenance(model_id="gpt-6-luna", provider="OpenAI")
 
 
 @pytest.mark.asyncio

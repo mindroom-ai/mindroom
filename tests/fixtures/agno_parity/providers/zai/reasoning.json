@@ -30,8 +30,7 @@
         "mindroom_model": {
           "id": "glm-5.3",
           "provider": "ZAI"
-        },
-        "system_fingerprint": "fp_parity"
+        }
       },
       "reasoning_content": "Rain is likely, so pack for wet weather.",
       "role": "assistant"

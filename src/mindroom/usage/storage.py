@@ -98,7 +98,7 @@ def request_usage(message: Message) -> RequestUsage | None:
         message.role != "assistant"
         or message.from_history
         or usage_sums_attempts(provider_data)
-        or not project_token_counters(message.metrics.to_dict())
+        or not message.metrics.reported
     ):
         return None
     return RequestUsage(
@@ -176,10 +176,12 @@ def helper_usage_snapshot(
 
 
 def _project_request(request: RequestUsage) -> dict[str, object] | None:
-    metrics = project_token_counters(request.metrics.to_dict())
-    if not metrics:
+    if not request.metrics.reported:
         return None
-    projected: dict[str, object] = {"created_at": request.created_at, "metrics": metrics}
+    projected: dict[str, object] = {
+        "created_at": request.created_at,
+        "metrics": project_token_counters(request.metrics.to_dict()),
+    }
     if request.model is not None:
         projected["model"] = request.model.model_id
         projected["model_provider"] = request.model.provider

@@ -25,6 +25,7 @@ from claude_agent_sdk import (
 from mindroom.helper_usage import get_helper_usage_owner, record_helper_usage
 from mindroom.llm.usage import HelperUsage, MessageMetrics, RunMetrics, TokenCounts
 from mindroom.logging_config import get_logger
+from mindroom.providers.names import ROUTE_PROVIDERS
 from mindroom.tool_system.authoring import Toolkit, current_call
 from mindroom.tool_system.invocation import DETACHED_SESSION_ID
 from mindroom.tool_system.runtime_context import current_requester_id, get_tool_runtime_context
@@ -312,8 +313,8 @@ async def _record_turn_usage(turn: _ClaudeTurn, session_model: str | None) -> No
     )
     metrics = RunMetrics()
     for model, counts in models.items():
-        metrics.add(MessageMetrics(tokens=counts.with_totals()), model_id=model, provider="Anthropic")
-    if not (metrics.tokens.total_tokens or metrics.tokens.cache_read_tokens or metrics.tokens.cache_write_tokens):
+        metrics.add(MessageMetrics(tokens=counts.with_totals()), model_id=model, provider=ROUTE_PROVIDERS["anthropic"])
+    if not metrics.reported:
         return
     await record_helper_usage(
         HelperUsage(run_id=uuid4().hex, model=None, provider=None, metrics=metrics),
