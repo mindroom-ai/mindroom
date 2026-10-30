@@ -44,7 +44,6 @@ from mindroom.tool_system.catalog import (
     resolved_tool_metadata_for_runtime,
 )
 from mindroom.tool_system.runtime_context import (
-    build_execution_identity_from_runtime_context,
     get_tool_runtime_context,
 )
 from mindroom.yaml_io import safe_dump
@@ -396,7 +395,7 @@ def _build_oauth_onboarding_guidance(
             f"credentials for agent `{agent_name}`."
         )
 
-    caller_identity = build_execution_identity_from_runtime_context(runtime_context)
+    caller_identity = runtime_context.execution_identity
     target_identity = replace(
         caller_identity,
         agent_name=agent_name,

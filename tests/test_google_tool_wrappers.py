@@ -53,7 +53,8 @@ from mindroom.oauth.credential_store import _oauth_credential_database_path
 from mindroom.oauth.google_drive import GOOGLE_DRIVE_READ_OAUTH_SCOPES
 from mindroom.oauth.providers import OAuthConnectionRequired, OAuthProviderError, OAuthTokenResult
 from mindroom.tool_system.metadata import export_tools_metadata, get_tool_by_name
-from mindroom.tool_system.worker_routing import ToolExecutionIdentity, resolve_worker_target, tool_execution_identity
+from mindroom.tool_system.runtime_context import detached_tool_scope
+from mindroom.tool_system.worker_routing import ToolExecutionIdentity, resolve_worker_target
 from tests.oauth_test_utils import corrupt_oauth_credential_payload, publish_oauth_credentials
 
 if TYPE_CHECKING:
@@ -2086,7 +2087,7 @@ def test_google_wrapper_full_context_key_clears_persistent_worker_between_reques
     )
 
     def authenticate(identity: ToolExecutionIdentity, *, install_service: bool) -> tuple[str, bool]:
-        with tool_execution_identity(identity):
+        with detached_tool_scope(identity):
             assert tool._ensure_structured_auth() is None
             service_cleared = tool.service is None
             if install_service:

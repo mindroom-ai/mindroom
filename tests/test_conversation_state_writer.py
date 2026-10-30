@@ -29,11 +29,6 @@ from mindroom.message_target import MessageTarget
 from mindroom.session_storage.agent_storage import create_state_storage
 from mindroom.session_storage.lanes import run_session_storage_operation
 from mindroom.session_storage.types import ConversationSession
-from mindroom.tool_system.runtime_context import (
-    LiveToolDispatchContext,
-    ToolDispatchContext,
-    build_execution_identity_from_runtime_context,
-)
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 from tests.authorization_helpers import make_test_tool_runtime_context
 from tests.conftest import (
@@ -261,7 +256,7 @@ def _reply(
     )
     reply = ReplySession(
         scope=scope or HistoryScope(kind="agent", scope_id="test_agent"),
-        tool_dispatch=LiveToolDispatchContext.from_runtime_context(context),
+        tool_context=context,
     )
     return reply, create_state_storage(reply.scope.scope_id, tmp_path / "sessions", reply.scope)
 
@@ -315,7 +310,7 @@ async def test_session_started_fires_once_after_the_reply_whose_write_created_it
         "$thread",
     )
     assert (started.agent_name, started.correlation_id) == ("test_agent", "corr-1")
-    runtime_context = reply.tool_dispatch.runtime_context
+    runtime_context = reply.tool_context
     assert (started.config, started.runtime_paths) == (runtime_context.config, runtime_context.runtime_paths)
 
 
@@ -392,15 +387,11 @@ async def test_session_started_skips_a_reply_that_raises(tmp_path: Path) -> None
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("reply_kind", ["no hook", "detached", "none"])
-async def test_session_started_watches_nothing_without_a_hook_or_a_live_reply(tmp_path: Path, reply_kind: str) -> None:
-    """With no ``session:started`` hook, outside a live Matrix context, or without a session, nothing is watched."""
+@pytest.mark.parametrize("reply_kind", ["no hook", "none"])
+async def test_session_started_watches_nothing_without_a_hook_or_a_reply(tmp_path: Path, reply_kind: str) -> None:
+    """With no ``session:started`` hook, or without a reply, nothing is watched."""
     seen: list[SessionHookContext | str] = []
     reply, store = _reply(tmp_path, seen, hooks=reply_kind != "no hook")
-    if reply_kind == "detached":
-        assert isinstance(reply.tool_dispatch, LiveToolDispatchContext)
-        identity = build_execution_identity_from_runtime_context(reply.tool_dispatch.runtime_context)
-        reply = ReplySession(scope=reply.scope, tool_dispatch=ToolDispatchContext(execution_identity=identity))
     watched: ReplySession | None = None if reply_kind == "none" else reply
 
     with patch("mindroom.conversation_state_writer.watch_session_row", side_effect=AssertionError("watched")):

@@ -106,7 +106,10 @@ def resolve_exact_team_members(
             agent_name,
             config,
             runtime_paths,
-            execution_identity=execution_identity,
+            # The member's toolkits act for the member, still answering through the turn's account.
+            execution_identity=(
+                replace(execution_identity, agent_name=agent_name) if execution_identity is not None else None
+            ),
             model=model,
             knowledge=knowledge[agent_name],
             include_interactive_questions=False,
@@ -235,8 +238,7 @@ def _member_build(
     """
     model_name = members.model_names[agent_name]
     build = members.build(agent_name, model_name)
-    # The binding opens the policy a managed job runs again, so a member's call that becomes a job runs as the member.
-    as_member = replace(build, tool_policy=(_as_member(build.spec.id, model_name), *build.tool_policy))
+    as_member = _as_member(build.spec.id, model_name)
     turn = HookTurn(
         config=config,
         runtime_paths=runtime_paths,
@@ -247,7 +249,9 @@ def _member_build(
     )
 
     def new_hooks() -> LoopHooks:
-        return agent_loop_hooks(as_member, turn, queued_notices=False)
+        hooks = agent_loop_hooks(build, turn, queued_notices=False)
+        # Outermost, so job admission and the managed job a call becomes, which inherits its context, act as the member.
+        return replace(hooks, tool_middleware=(as_member, *hooks.tool_middleware))
 
     return MemberBuild(
         spec=replace(build.spec, system_messages=prompt_for_turn(build, system_enrichment)),
@@ -258,7 +262,7 @@ def _member_build(
 
 
 def _as_member(member_id: str, model_name: str) -> ToolMiddleware:
-    """Return the outermost step of a member's tool-call policy, which runs the rest under the member's own identity.
+    """Return the outermost step around a member's calls, which runs the rest under the member's own identity.
 
     The turn's tool runtime context names the configured team, or for an ad hoc team the agent whose account posts
     the reply. Tools that act for the running agent, such as ``todo``'s default assignee and workspace templates or

@@ -40,7 +40,8 @@ from mindroom.oauth.credential_store import _oauth_credential_database_path
 from mindroom.oauth.github import github_oauth_provider
 from mindroom.oauth.providers import OAuthProviderError, OAuthRefreshRejectedError
 from mindroom.tool_system.metadata import get_tool_by_name
-from mindroom.tool_system.worker_routing import ToolExecutionIdentity, resolve_worker_target, tool_execution_identity
+from mindroom.tool_system.runtime_context import detached_tool_scope
+from mindroom.tool_system.worker_routing import ToolExecutionIdentity, resolve_worker_target
 from tests.oauth_test_utils import corrupt_oauth_credential_payload, publish_oauth_credentials
 
 if TYPE_CHECKING:
@@ -702,7 +703,7 @@ def test_active_requester_overrides_tool_construction_identity(tmp_path: Path) -
     tool = _build_tool(runtime_paths, manager, alice_target)
     tool.g = _FakeGithub()
 
-    with tool_execution_identity(bob_target.execution_identity):
+    with detached_tool_scope(bob_target.execution_identity):
         result = json.loads(tool.list_repositories())
 
     assert result["oauth_connection_required"] is True

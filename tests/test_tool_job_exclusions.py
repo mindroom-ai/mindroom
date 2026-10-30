@@ -21,7 +21,6 @@ from mindroom.tool_jobs.runtime import ToolJobRuntime, register_background_runti
 from mindroom.tool_system.metadata import get_tool_by_name
 from mindroom.tool_system.plugins import isolated_plugin_runtime
 from mindroom.tool_system.runtime_context import (
-    build_execution_identity_from_runtime_context,
     get_tool_runtime_context,
     tool_runtime_context,
 )
@@ -60,7 +59,7 @@ async def shell_runtime(tmp_path: Path, request: pytest.FixtureRequest) -> Async
         agents={"leader": AgentConfig(display_name="Leader", tools=[authored_name])},
     )
     context = _delegate_runtime_context(config, paths)
-    owner = build_execution_identity_from_runtime_context(context)
+    owner = context.execution_identity
     runtime = await tool_job_runtime(tmp_path)
     pin_background_tool_jobs(context.config, paths)
     register_background_runtime(paths, runtime)
@@ -250,7 +249,7 @@ async def test_registered_plugin_exclusion_is_pinned_for_every_function(  # noqa
     )
     paths = test_runtime_paths(tmp_path)
     context = _delegate_runtime_context(config, paths)
-    owner = build_execution_identity_from_runtime_context(context)
+    owner = context.execution_identity
     runtime = await tool_job_runtime(tmp_path)
     instance = pin_background_tool_jobs(config, paths)
     register_background_runtime(paths, runtime)

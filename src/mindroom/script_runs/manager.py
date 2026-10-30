@@ -53,7 +53,6 @@ from mindroom.shell.supervisor import (
     parse_shell_supervisor_status,
     run_command_via_supervisor,
 )
-from mindroom.tool_system.runtime_context import build_execution_identity_from_runtime_context
 from mindroom.tool_system.sandbox_proxy import runner_config_snapshot, sandbox_proxy_config
 from mindroom.tool_system.worker_routing import (
     build_agent_toolkit_worker_target,
@@ -314,7 +313,7 @@ class ScriptRunManager:
         effective_limits = limits or ScriptRunLimits()
         source_bytes = await self._resolve_source(context, source=source, path=path)
         source_digest = hashlib.sha256(source_bytes).hexdigest()
-        execution_identity = build_execution_identity_from_runtime_context(context)
+        execution_identity = context.execution_identity
         worker_target = build_agent_toolkit_worker_target(
             "user_agent",
             context.agent_name,

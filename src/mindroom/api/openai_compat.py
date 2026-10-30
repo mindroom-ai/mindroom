@@ -90,12 +90,14 @@ from mindroom.teams.members import (
 from mindroom.teams.runtime import MemberEvent, team_usage_runs
 from mindroom.teams.spec import TeamMode
 from mindroom.tool_system.context_bound_streams import closing_async_stream, context_bound_async_stream
-from mindroom.tool_system.runtime_context import DetachedRequesterContext, detached_requester_context
+from mindroom.tool_system.runtime_context import (
+    DetachedRequesterContext,
+    detached_requester_context,
+    detached_tool_scope,
+)
 from mindroom.tool_system.worker_routing import (
     ToolExecutionIdentity,
     build_tool_execution_identity,
-    stream_with_tool_execution_identity,
-    tool_execution_identity,
 )
 from mindroom.turn_model import (
     ModelScope,
@@ -795,7 +797,7 @@ async def _chat_completions(  # noqa: C901, PLR0912
             if req.stream:
                 response = await _stream_completion(turn, config, runtime_paths)
             else:
-                with tool_execution_identity(execution_identity):
+                with detached_tool_scope(execution_identity):
                     response = await _non_stream_completion(turn, config, runtime_paths)
     except BaseException:
         _release_openai_completion_lock(completion_lock)
@@ -871,8 +873,8 @@ async def _stream_completion(
     agent_name, session_id = turn.entity_label, turn.session_id
     stream = cast(
         "AsyncGenerator[AIStreamChunk, None]",
-        stream_with_tool_execution_identity(
-            turn.execution_identity,
+        context_bound_async_stream(
+            context_factory=lambda: detached_tool_scope(turn.execution_identity),
             stream_factory=lambda: stream_agent_response(turn, runtime_paths, config),
         ),
     )
@@ -1048,7 +1050,7 @@ async def _prepare_team_turn(
     )
     unavailable_bases: dict[str, KnowledgeAvailabilityDetail] = {}
     try:
-        with tool_execution_identity(execution_identity):
+        with detached_tool_scope(execution_identity):
             built = await asyncio.to_thread(
                 _build_team,
                 team_name,
@@ -1114,8 +1116,8 @@ def _team_completion_events(
     )
     return cast(
         "AsyncGenerator[TeamRunEvent, None]",
-        stream_with_tool_execution_identity(
-            execution_identity,
+        context_bound_async_stream(
+            context_factory=lambda: detached_tool_scope(execution_identity),
             stream_factory=lambda: context_bound_async_stream(
                 context_factory=lambda: helper_usage_context(scope_context),
                 stream_factory=lambda: stream_with_llm_request_log_context(

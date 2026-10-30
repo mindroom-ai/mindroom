@@ -1151,8 +1151,6 @@ def _assemble_agent_toolkits(  # noqa: C901, PLR0915 - eager and deferred tools 
         background_tool_jobs_enabled(config, runtime_paths) and delegation_depth == 0 and not minimal_mode
     )
     persona_tools = persona.tools if persona is not None else None
-    # A team member is built under its team turn's identity; its job controls act as the member.
-    agent_identity = replace(execution_identity, agent_name=agent_name) if execution_identity is not None else None
     hook_middleware = _build_agent_tool_middleware(
         hook_registry=hook_registry,
         plugins=plugins,
@@ -1353,7 +1351,7 @@ def _assemble_agent_toolkits(  # noqa: C901, PLR0915 - eager and deferred tools 
     controls = JobTools.build(
         {function.name for entry in entries for function in entry.adapted.functions},
         runtime_paths,
-        agent_identity,
+        execution_identity,
         depth=delegation_depth,
         enabled=not disable_runtime_capabilities and background_tool_jobs_enabled(config, runtime_paths),
         output_file_policy=_agent_tool_output_file_policy(
@@ -1748,7 +1746,7 @@ def create_agent(
         config,
         runtime_paths,
         model_name,
-        replace(execution_identity, agent_name=agent_name) if execution_identity is not None else None,
+        execution_identity,
     )
     # An authored persona's prompt replaces the agent's identity; it gets only the caller skills and knowledge bases
     # its persona keeps.

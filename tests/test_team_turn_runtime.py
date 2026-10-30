@@ -75,9 +75,13 @@ from mindroom.tool_system.events import StructuredStreamChunk
 from mindroom.tool_system.invocation import ToolCallContext, run_tool_call
 from mindroom.tool_system.registration import register_tool_with_metadata
 from mindroom.tool_system.registry_state import capture_tool_registry_snapshot, restore_tool_registry_snapshot
-from mindroom.tool_system.runtime_context import get_tool_runtime_context
+from mindroom.tool_system.runtime_context import (
+    current_execution_identity,
+    detached_tool_scope,
+    get_tool_runtime_context,
+)
 from mindroom.tool_system.tool_function import ToolFunction
-from mindroom.tool_system.worker_routing import ResolvedWorkerTarget, get_tool_execution_identity
+from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 from tests.ai_user_id_helpers import _install_inert_post_response_effects
 from tests.approval_continuation_helpers import (
     carries_approval_receipt,
@@ -135,6 +139,7 @@ if TYPE_CHECKING:
     from mindroom.teams.envelope import TeamStreamChunk
     from mindroom.tool_system.events import ToolTraceEntry
     from mindroom.tool_system.runtime_context import ToolRuntimeContext
+    from mindroom.tool_system.worker_routing import ResolvedWorkerTarget
 
 HEADER = "🤝 **Team Response** (Writer, Checker):\n\n"
 
@@ -770,13 +775,12 @@ class _IdentityProbe(Toolkit):
 
     async def who(self) -> str:
         """Record whom the running call acts for."""
-        identity = get_tool_execution_identity()
+        identity = current_execution_identity()
         type(self).called_for.append((identity.agent_name, identity.recipient) if identity is not None else None)
         return "recorded"
 
 
 @pytest.mark.asyncio
-@pytest.mark.xfail(strict=True, reason="member toolkits are built under the team identity")
 async def test_a_member_s_tools_are_built_for_and_called_as_the_member(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -814,24 +818,31 @@ async def test_a_member_s_tools_are_built_for_and_called_as_the_member(
 
 
 @pytest.mark.asyncio
-async def test_the_member_step_runs_a_call_as_it_is_outside_a_matrix_turn() -> None:
-    """Without a tool runtime context, as in an OpenAI-compatible API turn, a member's call runs without one."""
-    seen: list[ToolRuntimeContext | None] = []
+async def test_the_member_step_runs_a_call_as_the_member_outside_a_matrix_turn() -> None:
+    """In an OpenAI-compatible API turn, which has no tool runtime context, a member's call acts as the member.
+
+    The member still answers through the team, as the identity the API turn bound for the team names it.
+    """
+    seen: list[tuple[ToolRuntimeContext | None, ToolExecutionIdentity | None]] = []
 
     async def probe() -> str:
-        seen.append(get_tool_runtime_context())
+        seen.append((get_tool_runtime_context(), current_execution_identity()))
         return "ran"
 
     function = ToolFunction(name="probe", description=None, parameters={"type": "object"}, entrypoint=probe)
+    team = ToolExecutionIdentity("openai_compat", "squad", REQUESTER_ID, None, None, None, SESSION_ID)
 
-    result = await run_tool_call(
-        function,
-        {},
-        ToolCallContext(run_id="run-1", session_id=SESSION_ID, user_id=None),
-        middleware=(_as_member("writer", "writer-model"),),
-    )
+    with detached_tool_scope(team):
+        result = await run_tool_call(
+            function,
+            {},
+            ToolCallContext(run_id="run-1", session_id=SESSION_ID, user_id=None),
+            middleware=(_as_member("writer", "writer-model"),),
+        )
+        assert current_execution_identity() == team
 
-    assert (result.value, seen) == ("ran", [None])
+    member = replace(team, agent_name="writer", transport_agent_name="squad")
+    assert (result.value, seen) == ("ran", [(None, member)])
 
 
 @pytest.mark.asyncio

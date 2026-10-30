@@ -35,7 +35,6 @@ from mindroom.session_storage.agent_storage import create_state_storage
 from mindroom.tool_system.agno_toolkits import adapt_toolkit
 from mindroom.tool_system.events import CollectedStreamPresentation, deserialize_tool_trace, serialize_tool_trace
 from mindroom.tool_system.output_files import ToolOutputFilePolicy
-from mindroom.tool_system.runtime_context import build_execution_identity_from_runtime_context
 from mindroom.tool_system.tool_access import ToolKey
 from tests.conftest import live_turn_tools_for_test
 from tests.fakes.scripted_model import ScriptedModel, answer, calls, tool_call
@@ -88,7 +87,7 @@ async def _run(tmp_path, result, *, policy=None):  # noqa: C901
 
     (tmp_path / "workspace").mkdir(exist_ok=True)
     owner = live_turn_tools_for_test(
-        CliTurnOwner(build_execution_identity_from_runtime_context(catalog.runtime_context), "turn", "run"),
+        CliTurnOwner(catalog.runtime_context.execution_identity, "turn", "run"),
         catalog=catalog,
         authorize=authorize,
         output_file_policy=policy or ToolOutputFilePolicy(tmp_path / "workspace"),
@@ -292,7 +291,7 @@ async def test_single_oversized_schema_is_retrievable_through_scoped_context(tmp
         pass
 
     owner = live_turn_tools_for_test(
-        CliTurnOwner(build_execution_identity_from_runtime_context(catalog.runtime_context), "turn", "run"),
+        CliTurnOwner(catalog.runtime_context.execution_identity, "turn", "run"),
         catalog=catalog,
         authorize=authorize,
         output_file_policy=ToolOutputFilePolicy(tmp_path / "workspace"),
@@ -359,7 +358,7 @@ async def test_admission_uses_current_window_context_after_rebuild(tmp_path) -> 
 
     catalog = await catalog_for_window()
     owner = live_turn_tools_for_test(
-        CliTurnOwner(build_execution_identity_from_runtime_context(catalog.runtime_context), "turn", "run"),
+        CliTurnOwner(catalog.runtime_context.execution_identity, "turn", "run"),
         catalog=catalog,
         authorize=authorize,
         output_file_policy=ToolOutputFilePolicy(tmp_path / "workspace"),

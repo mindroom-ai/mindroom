@@ -103,9 +103,6 @@ from mindroom.tool_system.output_files import (
 )
 from mindroom.tool_system.runtime_context import current_budget_monitor, get_tool_runtime_context, tool_runtime_context
 from mindroom.tool_system.tool_function import ToolOutcome
-from mindroom.tool_system.worker_routing import (
-    run_with_tool_execution_identity,
-)
 from mindroom.turn_continuation import continuation_decision_from_tools, stopped_calls
 from mindroom.turn_model import ModelScope, resolve_turn_model
 from mindroom.workspaces import resolve_agent_workspace_from_state_path
@@ -278,19 +275,16 @@ async def _run_child(
     await reserve_child_turn(child, owner=caller_identity, runtime_paths=runtime_paths)
     async with child_run_context(child, config=config, runtime_paths=runtime_paths) as observation:
         with approval_receipt_call_ids(partial(child_call_id, child.delegation_id)):
-            response = await run_with_tool_execution_identity(
-                child_execution_identity(child),
-                operation=lambda: _execute_child(
-                    child,
-                    run_child=run_child,
-                    config=config,
-                    runtime_paths=runtime_paths,
-                    refresh_scheduler=refresh_scheduler,
-                    decisions=decisions,
-                    denial_reasons=denial_reasons,
-                    approval_calls=approval_calls,
-                    fresh=fresh,
-                ),
+            response = await _execute_child(
+                child,
+                run_child=run_child,
+                config=config,
+                runtime_paths=runtime_paths,
+                refresh_scheduler=refresh_scheduler,
+                decisions=decisions,
+                denial_reasons=denial_reasons,
+                approval_calls=approval_calls,
+                fresh=fresh,
             )
         observation.keep_outcome(response.response)
         return response

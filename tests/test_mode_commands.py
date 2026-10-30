@@ -23,7 +23,6 @@ from mindroom.credentials.manager import get_runtime_credentials_manager, save_s
 from mindroom.message_target import MessageTarget
 from mindroom.runtime_resolution import resolve_agent_storage
 from mindroom.runtime_state import clear_api_server_address, set_api_server_address
-from mindroom.tool_system.runtime_context import build_execution_identity_from_runtime_context
 from mindroom.tool_system.sandbox_proxy import primary_owns_tool_settings
 from mindroom.tool_system.worker_routing import build_agent_toolkit_worker_target
 from tests.authorization_helpers import make_test_command_handler_context
@@ -96,7 +95,7 @@ async def test_mode_command_matches_response_runner_session(
     target = MessageTarget.resolve("!room:localhost", "$thread", "$next", room_mode=thread_mode == "room")
     request = _plain_request(target)
     runtime = await runner.prepare_response_runtime(request, show_tool_calls=True)
-    root = resolve_agent_storage("general", config, paths, runtime.tool_dispatch.execution_identity).state_root
+    root = resolve_agent_storage("general", config, paths, runtime.tool_context.execution_identity).state_root
     set_agent_mode(paths, root, "general", target.session_id, "minimal")
     result = mode_commands.handle_mode_command(
         f"general {action}",
@@ -133,7 +132,7 @@ async def test_private_agent_mode_is_isolated_per_requester(tmp_path: Path) -> N
     target = MessageTarget.resolve("!room:localhost", "$thread", "$next")
     request = _plain_request(target)
     runtime = await runner.prepare_response_runtime(request, show_tool_calls=True)
-    root = resolve_agent_storage("general", config, paths, runtime.tool_dispatch.execution_identity).state_root
+    root = resolve_agent_storage("general", config, paths, runtime.tool_context.execution_identity).state_root
     set_agent_mode(paths, root, "general", target.session_id, "minimal")
 
     def show(requester_id: str) -> str:
@@ -175,7 +174,7 @@ async def test_mode_handler_preserves_canonical_or_explicit_source_thread(tmp_pa
         "helper",
         runtime.config,
         runtime.runtime_paths,
-        build_execution_identity_from_runtime_context(runtime),
+        runtime.execution_identity,
     ).state_root
     set_agent_mode(runtime.runtime_paths, root, "helper", runtime.session_id, "minimal")
     room = nio.MatrixRoom(runtime.room_id, "@router:example.test")
@@ -262,7 +261,7 @@ def test_selection_refuses_unsafe_worker_shell_deployment_before_saving(
         "helper",
         context.config,
         paths,
-        build_execution_identity_from_runtime_context(context),
+        context.execution_identity,
     )
     set_agent_mode(paths, storage.state_root, "helper", context.session_id, "standard")
     saved = _mode_file(paths, storage.state_root).read_bytes()
@@ -298,7 +297,7 @@ def test_mode_command_refusal_and_recovery_controls(tmp_path: Path) -> None:
         "helper",
         context.config,
         context.runtime_paths,
-        build_execution_identity_from_runtime_context(context),
+        context.execution_identity,
     ).state_root
     set_agent_mode(context.runtime_paths, root, "helper", context.session_id, "minimal")
     assert "minimal" in mode_commands.handle_mode_command("helper show", **kwargs)
@@ -355,7 +354,7 @@ def test_selection_checks_effective_shell_permissions(
         context.runtime_paths,
         process_env=_CLI_DEPLOYMENT_ENV,
     )
-    identity = build_execution_identity_from_runtime_context(context)
+    identity = context.execution_identity
     storage = resolve_agent_storage("helper", context.config, paths, identity)
     target = build_agent_toolkit_worker_target(
         storage.execution.execution_scope,
@@ -431,7 +430,7 @@ def test_selection_preserves_choice_on_shell_preparation_failure(
         "helper",
         context.config,
         context.runtime_paths,
-        build_execution_identity_from_runtime_context(context),
+        context.execution_identity,
     )
     set_agent_mode(
         context.runtime_paths,
@@ -485,7 +484,7 @@ def test_selection_lists_every_missing_deployment_setting_at_once(tmp_path: Path
         "helper",
         context.config,
         paths,
-        build_execution_identity_from_runtime_context(context),
+        context.execution_identity,
     ).state_root
 
     result = mode_commands.handle_mode_command(
@@ -519,7 +518,7 @@ def test_local_shell_agent_selects_minimal_mode_without_setup(tmp_path: Path, ap
         "helper",
         context.config,
         context.runtime_paths,
-        build_execution_identity_from_runtime_context(context),
+        context.execution_identity,
     ).state_root
 
     result = mode_commands.handle_mode_command(
@@ -549,7 +548,7 @@ def test_a_shell_a_preset_brings_in_selects_minimal_mode(tmp_path: Path) -> None
         tools=["openclaw_compat"],
         memory_backend="file",
     )
-    identity = build_execution_identity_from_runtime_context(context)
+    identity = context.execution_identity
     root = resolve_agent_storage("helper", context.config, context.runtime_paths, identity).state_root
 
     result = mode_commands.handle_mode_command(

@@ -27,7 +27,7 @@ from mindroom.message_target import MessageTarget
 from mindroom.run_storage import RunStorage
 from mindroom.session_storage.types import ConversationSession
 from mindroom.tool_system.agent_tool_calls import execute_agent_tool_call
-from mindroom.tool_system.runtime_context import build_execution_identity_from_runtime_context, tool_runtime_context
+from mindroom.tool_system.runtime_context import tool_runtime_context
 from mindroom.tool_system.tool_access import ToolKey
 from mindroom.tool_system.toolkit_connections import run_connection, shielded_lifecycle
 from tests.authorization_helpers import make_test_tool_runtime_context
@@ -247,7 +247,7 @@ async def test_a_minimal_turn_s_catalog_connects_its_toolkits_until_it_closes(tm
             "helper",
             runtime.config,
             runtime.runtime_paths,
-            build_execution_identity_from_runtime_context(runtime),
+            runtime.execution_identity,
             agent_mode="minimal",
             knowledge=None,
             model=turn_model(runtime.config, runtime.runtime_paths, "helper"),

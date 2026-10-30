@@ -22,14 +22,10 @@ import secrets
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Protocol, cast
 
-from mindroom.tool_system.runtime_context import (
-    ToolRuntimeContext,
-    build_execution_identity_from_runtime_context,
-)
-
 if TYPE_CHECKING:
     from mindroom.agent_cli.protocol import AgentCliOperation
     from mindroom.response_turn import ResponseTurnContext
+    from mindroom.tool_system.runtime_context import ToolRuntimeContext
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 
 MAX_CLI_GRANT_LIFETIME_NS = 24 * 60 * 60 * 1_000_000_000
@@ -100,7 +96,7 @@ def cli_turn_owner(
             msg = f"CLI turn owner requires a non-empty {label} identity"
             raise ValueError(msg)
     return CliTurnOwner(
-        execution_identity=build_execution_identity_from_runtime_context(runtime_context),
+        execution_identity=runtime_context.execution_identity,
         turn_id=cast("str", runtime_context.membership_turn_id),
         generation=cast("str", turn_context.run_id),
     )

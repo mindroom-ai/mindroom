@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from dataclasses import replace
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, patch
 
@@ -29,12 +30,10 @@ from mindroom.redaction import redact_sensitive_text
 from mindroom.tool_system.agno_toolkits import adapt_function, adapt_toolkit
 from mindroom.tool_system.invocation import ToolCall, ToolCallContext, ToolNext, execute_tool_call, run_tool_call
 from mindroom.tool_system.progress import tool_progress_reporter
-from mindroom.tool_system.runtime_context import tool_runtime_context
+from mindroom.tool_system.runtime_context import current_execution_identity, tool_runtime_context
 from mindroom.tool_system.worker_routing import (
     ToolExecutionIdentity,
     agent_workspace_root_path,
-    get_tool_execution_identity,
-    tool_execution_identity,
 )
 from tests.access_schema_support import with_responder_access
 from tests.agent_loop.helpers import collect, toolkit
@@ -557,19 +556,24 @@ async def test_native_delegation_leaves_record_ownership_to_driver(tmp_path: Pat
 async def test_a_delegated_child_runs_its_tools_as_itself(tmp_path: Path) -> None:
     """Workflow participants run through this envelope too, so the child's identity, not its caller's, is current."""
     _toolkit, config, runtime_paths = _tools(tmp_path)
-    context = _delegate_runtime_context(config, runtime_paths, execution_identity=_identity())
+    # The caller's reply answers through its own account, as every bot-built context does.
+    identity = replace(_identity(), transport_agent_name="leader")
+    context = replace(
+        _delegate_runtime_context(config, runtime_paths, execution_identity=identity),
+        transport_agent_name="leader",
+    )
     seen: list[ToolExecutionIdentity | None] = []
 
     async def respond(*_args: object, **_kwargs: object) -> str:
-        seen.append(get_tool_execution_identity())
+        seen.append(current_execution_identity())
         return "child answer"
 
-    with tool_runtime_context(context), tool_execution_identity(_identity()), patch("mindroom.ai.ai_response", respond):
+    with tool_runtime_context(context), patch("mindroom.ai.ai_response", respond):
         child = prepare_child_turn(
             "leader",
             "child",
             "Do the work",
-            owner=_identity(),
+            owner=identity,
             config=config,
             runtime_paths=runtime_paths,
             depth=0,
@@ -587,6 +591,6 @@ async def test_a_delegated_child_runs_its_tools_as_itself(tmp_path: Path) -> Non
             refresh_scheduler=None,
             supports_native_tool_approval=True,
         )
-        assert get_tool_execution_identity() == _identity()
+        assert current_execution_identity() == identity
 
     assert seen == [child_execution_identity(child)]

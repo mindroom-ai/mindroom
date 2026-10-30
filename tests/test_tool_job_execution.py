@@ -64,7 +64,7 @@ from mindroom.tool_system.agno_toolkits import Toolkit
 from mindroom.tool_system.call_record import recording_tool_calls
 from mindroom.tool_system.invocation import ToolCallContext
 from mindroom.tool_system.metadata import get_tool_by_name
-from mindroom.tool_system.runtime_context import build_execution_identity_from_runtime_context, tool_runtime_context
+from mindroom.tool_system.runtime_context import tool_runtime_context
 from mindroom.tool_system.tool_function import ToolOutcome, ToolValue
 from mindroom.tool_system.tool_hooks import run_async_entrypoint_blocking_call
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity
@@ -140,7 +140,7 @@ async def _managed_context(tmp_path: Path, config: Config | None = None) -> tupl
 
 
 def _job_controls(context: ToolRuntimeContext) -> JobTools:
-    return JobTools(context.runtime_paths, build_execution_identity_from_runtime_context(context))
+    return JobTools(context.runtime_paths)
 
 
 @pytest.mark.asyncio
@@ -181,7 +181,7 @@ async def test_large_outcome_encoding_leaves_event_loop_free(
                 )
         assert len(encoding_threads) == 1
         assert encoding_threads[0] != loop_thread
-        owner = build_execution_identity_from_runtime_context(context)
+        owner = context.execution_identity
         listed = (await runtime.list_jobs(owner=owner, depth=0))[0]
         payload = await read_result_payload(runtime, await lookup(runtime, listed.job_id, owner=owner, depth=0))
         if kind == "stream":
@@ -238,7 +238,7 @@ async def test_cancellation_during_encoding_drains_resources_and_keeps_returned_
     """An operation that returned before cancellation still owns its completed encoded outcome."""
     started, release, closed = threading.Event(), threading.Event(), asyncio.Event()
     context, runtime = await _managed_context(tmp_path)
-    owner = build_execution_identity_from_runtime_context(context)
+    owner = context.execution_identity
 
     async def cleanup() -> None:
         closed.set()
@@ -303,7 +303,7 @@ async def test_registered_sync_tool_completes_through_the_loop(
         background_tool_jobs=BackgroundToolJobsConfig(enabled=managed),
     )
     context = _delegate_runtime_context(config, paths)
-    owner = build_execution_identity_from_runtime_context(context)
+    owner = context.execution_identity
     runtime = await tool_job_runtime(tmp_path)
     if managed:
         pin_background_tool_jobs(context.config, paths)
@@ -567,7 +567,7 @@ async def test_failed_shell_command_states_exit_code_inline_and_as_job(
         background_tool_jobs=BackgroundToolJobsConfig(enabled=managed),
     )
     context = _delegate_runtime_context(config, paths)
-    owner = build_execution_identity_from_runtime_context(context)
+    owner = context.execution_identity
     runtime = await tool_job_runtime(tmp_path)
     if managed:
         pin_background_tool_jobs(context.config, paths)
@@ -622,7 +622,7 @@ async def test_human_followup_releases_original_call_once(tmp_path: Path) -> Non
         return "actual result"
 
     context, runtime = await _managed_context(tmp_path)
-    owner = build_execution_identity_from_runtime_context(context)
+    owner = context.execution_identity
     signal = asyncio.Event()
     model = ScriptedModel([calls(tool_call("slow_tool", "exact-call")), answer("done")])
     actor = job_actor(job_tool(slow_tool))
@@ -667,7 +667,7 @@ async def test_streamed_result_saves_its_text_and_media_once(tmp_path: Path) -> 
         yield text[1500:]
 
     context, runtime = await _managed_context(tmp_path)
-    owner = build_execution_identity_from_runtime_context(context)
+    owner = context.execution_identity
     actor = job_actor(job_tool(streamed))
     try:
         async with execution_resources():
@@ -696,7 +696,7 @@ async def test_oversized_result_becomes_a_failed_job(tmp_path: Path, monkeypatch
         return "x" * 200
 
     context, runtime = await _managed_context(tmp_path)
-    owner = build_execution_identity_from_runtime_context(context)
+    owner = context.execution_identity
     actor = job_actor(job_tool(large))
     monkeypatch.setattr(results, "_MAX_ENCODED_RESULT_BYTES", 150)
     try:
@@ -735,7 +735,7 @@ async def test_a_call_a_plugin_hook_declines_fails_its_job_with_the_decline(tmp_
     policy = detached_policy(registry)
     context, runtime = await _managed_context(tmp_path)
     context = replace(context, hooks=HookBindings(registry=registry))
-    owner = build_execution_identity_from_runtime_context(context)
+    owner = context.execution_identity
     try:
         async with execution_resources():
             with tool_runtime_context(context):
@@ -790,7 +790,7 @@ async def test_run_connected_toolkit_call_stays_inline_through_human_followup(tm
             return "connected result"
 
     context, runtime = await _managed_context(tmp_path)
-    owner = build_execution_identity_from_runtime_context(context)
+    owner = context.execution_identity
     signal = asyncio.Event()
     model = ScriptedModel([calls(tool_call("read", "read-call")), answer("done")])
     actor = job_actor(*toolkit_job_tools(ConnectionTools(), authored_name="connection").values())
@@ -842,7 +842,7 @@ async def test_generator_result_finishes_inside_owned_operation(
             closed.set()
 
     context, runtime = await _managed_context(tmp_path)
-    owner = build_execution_identity_from_runtime_context(context)
+    owner = context.execution_identity
     signal = asyncio.Event()
     model = ScriptedModel([calls(tool_call("generated", "generator-call")), answer("done")])
     actor = job_actor(job_tool(generated))
@@ -951,7 +951,7 @@ async def test_fast_result_acknowledges_exact_saved_run(  # noqa: PLR0915 - Rece
     paths = _runtime_paths(tmp_path)
     config = Config(agents={"leader": AgentConfig(display_name="Leader")})
     context = replace(_delegate_runtime_context(config, paths), membership_turn_id="$original-request")
-    owner = build_execution_identity_from_runtime_context(context)
+    owner = context.execution_identity
     runtime = await tool_job_runtime(tmp_path)
     pin_background_tool_jobs(context.config, paths)
     register_background_runtime(paths, runtime)
@@ -1025,7 +1025,7 @@ async def test_cancel_returns_while_a_sync_job_waits_for_its_thread(tmp_path: Pa
         return "finished"
 
     context, runtime = await _managed_context(tmp_path)
-    owner = build_execution_identity_from_runtime_context(context)
+    owner = context.execution_identity
     signal = asyncio.Event()
     model = ScriptedModel([calls(tool_call("slow_tool", "sync-call")), answer("done")])
     actor = job_actor(job_tool(slow_tool, authored_name="slow"))
@@ -1104,7 +1104,7 @@ async def test_a_cancel_of_an_ended_job_does_not_replay_its_outcome(tmp_path: Pa
     """A cancel of an ended job neither replays its outcome's errors or state changes nor acknowledges it."""
     config = Config(agents={"leader": AgentConfig(display_name="Leader")})
     context, runtime = await _managed_context(tmp_path, config)
-    owner = build_execution_identity_from_runtime_context(context)
+    owner = context.execution_identity
     paths = context.runtime_paths
 
     async def original(run_context: RunContext) -> str:
@@ -1170,7 +1170,7 @@ async def test_saved_result_reread_preserves_later_session_state(
     """Old output is readable across turns and restart without repeating mutations or conflict warnings."""
     config = Config(agents={"leader": AgentConfig(display_name="Leader")})
     context, runtime = await _managed_context(tmp_path, config)
-    owner = build_execution_identity_from_runtime_context(context)
+    owner = context.execution_identity
     paths = context.runtime_paths
 
     def storage_factory() -> ConversationStore:
@@ -1224,7 +1224,7 @@ async def test_job_list_skips_a_call_that_returned_inline_earlier_in_the_same_tu
     """A call that returned its result inline is no job, even before the reply that got it is saved."""
     config = Config(agents={"leader": AgentConfig(display_name="Leader")})
     context, runtime = await _managed_context(tmp_path, config)
-    owner = build_execution_identity_from_runtime_context(context)
+    owner = context.execution_identity
 
     def storage_factory() -> ConversationStore:
         return create_session_storage("leader", config, context.runtime_paths, owner)
@@ -1311,7 +1311,7 @@ async def test_later_consumption_merges_only_changed_state_and_reports_conflicts
         return "result"
 
     context, runtime = await _managed_context(tmp_path)
-    owner = build_execution_identity_from_runtime_context(context)
+    owner = context.execution_identity
     signal = asyncio.Event()
     tool = job_tool(change_state)
     state: dict[str, object] = {"changed": 0, "conflict": "old", "unrelated": "old"}
@@ -1474,7 +1474,7 @@ async def test_reply_records_a_managed_call_before_its_job_starts(
     model = ScriptedModel([calls(tool_call("write_note", "note-call", **arguments)), answer("done")])
     actor = job_actor(job_tool(write_note))
     recorder = SpanRecorder(stopped=case == "stopped")
-    owner = build_execution_identity_from_runtime_context(context)
+    owner = context.execution_identity
     try:
         async with execution_resources():
             with tool_runtime_context(context), recording_tool_calls(recorder):
@@ -1680,7 +1680,7 @@ async def test_a_call_cancelled_while_its_reply_waits_tells_the_model_not_to_run
         return "finished"
 
     context, runtime = await _managed_context(tmp_path)
-    owner = build_execution_identity_from_runtime_context(context)
+    owner = context.execution_identity
     model = ScriptedModel([calls(tool_call("slow_tool", "call")), answer("done")])
 
     def storage_factory() -> ConversationStore:
@@ -1725,7 +1725,7 @@ async def test_a_finished_call_counts_as_read_when_its_reply_fails_on_the_next_s
         raise ProviderError(msg, provider="Synthetic")
 
     context, runtime = await _managed_context(tmp_path)
-    owner = build_execution_identity_from_runtime_context(context)
+    owner = context.execution_identity
     model = ScriptedModel([calls(tool_call("report", "call", topic="alpha")), [Await(overloaded)]])
 
     def storage_factory() -> ConversationStore:

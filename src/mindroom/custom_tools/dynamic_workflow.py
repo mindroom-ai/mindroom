@@ -63,7 +63,6 @@ from mindroom.tool_system.automation_approval import NEVER_PREAPPROVE_TOOLKITS, 
 from mindroom.tool_system.catalog import TOOL_METADATA, ensure_tool_registry_loaded
 from mindroom.tool_system.runtime_context import (
     ToolRuntimeContext,
-    build_execution_identity_from_runtime_context,
     get_tool_runtime_context,
 )
 from mindroom.tool_system.sandbox_proxy import tool_placement
@@ -510,7 +509,7 @@ def _build_room_agent_participant(
         agent_name,
         context.config,
         context.runtime_paths,
-        execution_identity=build_execution_identity_from_runtime_context(participant_context),
+        execution_identity=participant_context.execution_identity,
         hook_registry=context.hooks.registry,
         knowledge=None,
         model=model,
@@ -597,7 +596,7 @@ async def _execute_subagent_participant(
         allowed=allowed,
         reads_skills=bool(persona.skills),
     )
-    owner = build_execution_identity_from_runtime_context(context)
+    owner = context.execution_identity
     child = prepare_child_turn(
         context.agent_name,
         context.agent_name,
@@ -786,7 +785,7 @@ def _resolve_participant_toolkits(context: ToolRuntimeContext, tool_names: list[
     # Imported lazily to avoid the create_agent -> dynamic_workflow toolkit cycle.
     from mindroom.agents import build_agent_toolkit  # noqa: PLC0415
 
-    execution_identity = build_execution_identity_from_runtime_context(context)
+    execution_identity = context.execution_identity
     agent_tools = resolve_agent_tools(context.config, context.agent_name)
     placement = tool_placement(context.runtime_paths)
     authored_overrides = {entry.name: entry.tool_config_overrides for entry in agent_tools.candidates()}

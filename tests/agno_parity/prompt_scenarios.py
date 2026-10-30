@@ -69,7 +69,6 @@ from mindroom.teams.formation import select_ad_hoc_team_mode
 from mindroom.teams.spec import TeamMode
 from mindroom.thread_summary import _generate_summary, _resolve_thread_summary_model_name, _ThreadEnrichment
 from mindroom.tool_system.runtime_context import (
-    build_execution_identity_from_runtime_context,
     tool_runtime_context,
 )
 from mindroom.tool_system.skills import agent_workspace_skills_root
@@ -453,7 +452,7 @@ async def _agent_turn(
     )
     recorder = TurnRecorder(user_message=turn.prompt)
     with reply_runtime(turn) as runtime:
-        execution_identity = build_execution_identity_from_runtime_context(runtime)
+        execution_identity = runtime.execution_identity
         async for _chunk in ai.stream_agent_response(
             replace(
                 ctx,
@@ -690,7 +689,7 @@ async def _run_team(root: Path, mode: TeamMode) -> ScenarioOutput:
         prompt=prompt,
         current_timestamp_ms=_CURRENT_TIMESTAMP_MS,
         thread_history=_thread_history(),
-        execution_identity=build_execution_identity_from_runtime_context(runtime),
+        execution_identity=runtime.execution_identity,
     )
     spec = TeamTurnSpec(
         agent_names=["planner", "writer"],

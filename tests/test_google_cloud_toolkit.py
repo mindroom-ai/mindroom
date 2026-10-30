@@ -18,7 +18,8 @@ from mindroom.constants import resolve_runtime_paths
 from mindroom.credentials.manager import get_runtime_credentials_manager
 from mindroom.custom_tools.google_service import GoogleCloudToolkit
 from mindroom.oauth.google_cloud import google_cloud_oauth_provider
-from mindroom.tool_system.worker_routing import ToolExecutionIdentity, resolve_worker_target, tool_execution_identity
+from mindroom.tool_system.runtime_context import detached_tool_scope
+from mindroom.tool_system.worker_routing import ToolExecutionIdentity, resolve_worker_target
 from tests.oauth_test_utils import publish_oauth_credentials
 
 if TYPE_CHECKING:
@@ -148,7 +149,7 @@ def test_clients_are_built_per_requester_from_that_requesters_stored_credentials
     )
 
     def call_as(identity: ToolExecutionIdentity) -> dict[str, str]:
-        with tool_execution_identity(identity):
+        with detached_tool_scope(identity):
             return json.loads(tool.probe_cloud())
 
     # One worker thread serves both requesters, so only a requester-keyed cache keeps their clients apart.

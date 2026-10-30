@@ -20,9 +20,9 @@ from mindroom.hooks import (
 )
 from mindroom.tool_system.context_bound_streams import context_bound_async_stream
 from mindroom.tool_system.worker_routing import (
+    bind_detached_execution_identity,
     build_tool_execution_identity,
-    get_tool_execution_identity,
-    tool_execution_identity,
+    detached_execution_identity,
 )
 
 if TYPE_CHECKING:
@@ -276,7 +276,7 @@ class ToolRuntimeContext:
             self.agent_name,
             self.config,
             self.runtime_paths,
-            execution_identity=build_execution_identity_from_runtime_context(self),
+            execution_identity=self.execution_identity,
         ).worker_target
 
     def agent_workspace_root(self, *, create: bool = False) -> Path:
@@ -292,37 +292,9 @@ class ToolRuntimeContext:
             self.agent_name,
             self.config,
             self.runtime_paths,
-            execution_identity=build_execution_identity_from_runtime_context(self),
+            execution_identity=self.execution_identity,
             create=create,
         ).workspace.root
-
-
-@dataclass(frozen=True)
-class ToolDispatchContext:
-    """Detached execution identity for tool dispatch outside a live Matrix runtime."""
-
-    execution_identity: ToolExecutionIdentity
-
-
-@dataclass(frozen=True)
-class LiveToolDispatchContext(ToolDispatchContext):
-    """Execution identity paired with one matching live Matrix runtime context."""
-
-    runtime_context: ToolRuntimeContext
-
-    def __post_init__(self) -> None:
-        """Validate that the detached identity and live runtime represent the same dispatch."""
-        if not execution_identity_matches_tool_runtime_context(self.execution_identity, self.runtime_context):
-            msg = "Live tool dispatch execution_identity must match the provided tool runtime context"
-            raise ValueError(msg)
-
-    @classmethod
-    def from_runtime_context(cls, runtime_context: ToolRuntimeContext) -> LiveToolDispatchContext:
-        """Build the live dispatch contract represented by one tool runtime context."""
-        return cls(
-            execution_identity=build_execution_identity_from_runtime_context(runtime_context),
-            runtime_context=runtime_context,
-        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -398,7 +370,7 @@ class ToolRuntimeSupport:
             config_provider=lambda: self.runtime.config,
         )
 
-    def build_dispatch_context(
+    def build_turn_context(
         self,
         target: MessageTarget,
         *,
@@ -408,13 +380,8 @@ class ToolRuntimeSupport:
         attachment_ids: list[str] | tuple[str, ...] | None = None,
         correlation_id: str | None = None,
         source_envelope: MessageEnvelope | None = None,
-    ) -> ToolDispatchContext:
-        """Build the canonical detached or live dispatch contract for one tool call."""
-        execution_identity = self.build_execution_identity(
-            target=target,
-            user_id=user_id,
-            agent_name=agent_name,
-        )
+    ) -> ToolRuntimeContext:
+        """Build the tool context of a turn this bot runs now; a bot without a Matrix client is restarting."""
         context = self.build_context(
             target,
             user_id=user_id,
@@ -425,8 +392,9 @@ class ToolRuntimeSupport:
             source_envelope=source_envelope,
         )
         if context is None:
-            return ToolDispatchContext(execution_identity=execution_identity)
-        return LiveToolDispatchContext.from_runtime_context(context)
+            msg = f"Agent runtime '{self.agent_name}' is restarting."
+            raise RuntimeError(msg)
+        return context
 
     def build_execution_identity(
         self,
@@ -435,7 +403,7 @@ class ToolRuntimeSupport:
         user_id: str | None,
         agent_name: str | None = None,
     ) -> ToolExecutionIdentity:
-        """Build the serializable execution identity used for worker routing."""
+        """Build the identity a context this bot builds for ``target`` and ``user_id`` has, before or without one."""
         return _matrix_execution_identity(
             target,
             agent_name=agent_name or self.agent_name,
@@ -489,7 +457,7 @@ def current_execution_identity() -> ToolExecutionIdentity | None:
     the identity with ``detached_tool_scope``.
     """
     context = get_tool_runtime_context()
-    return context.execution_identity if context is not None else get_tool_execution_identity()
+    return context.execution_identity if context is not None else detached_execution_identity()
 
 
 def get_worker_progress_pump() -> WorkerProgressPump | None:
@@ -524,33 +492,6 @@ def scope_hook_context_kwargs(
     }
 
 
-def resolve_current_session_id(
-    *,
-    execution_identity: ToolExecutionIdentity | None = None,
-    runtime_context: ToolRuntimeContext | None = None,
-) -> str | None:
-    """Resolve the current session ID from explicit execution/runtime state."""
-    if execution_identity is not None and execution_identity.session_id is not None:
-        return execution_identity.session_id
-
-    resolved_runtime_context = runtime_context if runtime_context is not None else get_tool_runtime_context()
-    if resolved_runtime_context is not None:
-        return resolved_runtime_context.session_id
-
-    return None
-
-
-def build_execution_identity_from_runtime_context(context: ToolRuntimeContext) -> ToolExecutionIdentity:
-    """Build the canonical execution identity represented by one live runtime context."""
-    return _matrix_execution_identity(
-        context.target,
-        agent_name=context.agent_name,
-        transport_agent_name=context.transport_agent_name,
-        requester_id=context.requester_id,
-        runtime_paths=context.runtime_paths,
-    )
-
-
 def _matrix_execution_identity(
     target: MessageTarget,
     *,
@@ -571,34 +512,6 @@ def _matrix_execution_identity(
         resolved_thread_id=target.resolved_thread_id,
         session_id=target.session_id,
     )
-
-
-def execution_identity_matches_tool_runtime_context(
-    execution_identity: ToolExecutionIdentity,
-    context: ToolRuntimeContext,
-) -> bool:
-    """Return whether one execution identity represents the same live Matrix tool runtime."""
-    target = context.target
-    valid_thread_ids = {target.source_thread_id, target.resolved_thread_id}
-    return (
-        execution_identity.channel == "matrix"
-        and execution_identity.agent_name == context.agent_name
-        and execution_identity.requester_id == context.requester_id
-        and execution_identity.room_id == target.room_id
-        and execution_identity.thread_id in valid_thread_ids
-        and execution_identity.resolved_thread_id == target.resolved_thread_id
-        and execution_identity.session_id == target.session_id
-        and execution_identity.tenant_id == context.runtime_paths.env_value("CUSTOMER_ID")
-        and execution_identity.account_id == context.runtime_paths.env_value("ACCOUNT_ID")
-        and execution_identity.recipient == context.recipient
-    )
-
-
-def runtime_context_from_dispatch_context(dispatch_context: ToolDispatchContext) -> ToolRuntimeContext | None:
-    """Return the live runtime context when one dispatch contract is runtime-bound."""
-    if isinstance(dispatch_context, LiveToolDispatchContext):
-        return dispatch_context.runtime_context
-    return None
 
 
 def build_scheduling_runtime_from_tool_runtime_context(context: ToolRuntimeContext) -> SchedulingRuntime:
@@ -728,7 +641,7 @@ def tool_runtime_context(context: ToolRuntimeContext | None) -> Iterator[None]:
 @contextmanager
 def detached_tool_scope(identity: ToolExecutionIdentity | None) -> Iterator[None]:
     """Run as ``identity`` outside any Matrix conversation, clearing the context of one that encloses this scope."""
-    with tool_runtime_context(None), tool_execution_identity(identity):
+    with tool_runtime_context(None), bind_detached_execution_identity(identity):
         yield
 
 
@@ -751,11 +664,13 @@ def member_tool_scope(member: str, model_name: str) -> Iterator[None]:
         with tool_runtime_context(member_context):
             yield
         return
-    identity = get_tool_execution_identity()
+    identity = detached_execution_identity()
     if identity is None:
         yield
         return
-    with tool_execution_identity(replace(identity, agent_name=member, transport_agent_name=identity.recipient)):
+    with bind_detached_execution_identity(
+        replace(identity, agent_name=member, transport_agent_name=identity.recipient),
+    ):
         yield
 
 

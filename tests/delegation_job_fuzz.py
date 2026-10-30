@@ -360,7 +360,7 @@ class DelegationFuzzRunner:
     async def _cancel(self, step: Step) -> None:
         if (job_id := self._job(step.index)) is not None:
             self._cause(job_id, "cancel")
-            self._start_turn(f"cancel:{job_id}", JobTools(self.paths, self.identity).job("cancel", job_id))
+            self._start_turn(f"cancel:{job_id}", JobTools(self.paths).job("cancel", job_id))
 
     async def _client_cancel(self, step: Step) -> None:
         """Cancel from the jobs bar, which asks the job to stop without waiting for it."""

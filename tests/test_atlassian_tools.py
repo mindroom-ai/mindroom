@@ -20,7 +20,7 @@ from mindroom.oauth.credential_lifecycle import load_oauth_credentials_snapshot_
 from mindroom.tool_system.catalog import TOOL_METADATA
 from mindroom.tool_system.declarations import ToolFileAccess
 from mindroom.tool_system.metadata import get_tool_by_name
-from mindroom.tool_system.worker_routing import tool_execution_identity
+from mindroom.tool_system.runtime_context import detached_tool_scope
 from tests.atlassian_test_support import (
     ALICE,
     BOB,
@@ -305,7 +305,7 @@ async def test_calls_follow_the_active_requester_not_the_constructing_one(
     """A toolkit built for one requester never lends that requester's grant to another active requester."""
     tool, gateway = _connected(tmp_path, monkeypatch)
 
-    with tool_execution_identity(execution_identity(BOB)):
+    with detached_tool_scope(execution_identity(BOB)):
         result = json.loads(await tool.jira_get_issue(issue_key="PROJ-1"))
 
     assert result["oauth_connection_required"] is True

@@ -45,8 +45,7 @@ from mindroom.oauth.service import (
     oauth_connection_required,
 )
 from mindroom.tool_system.dependencies import ensure_tool_deps, optional_dependency_environment
-from mindroom.tool_system.runtime_context import get_tool_runtime_context
-from mindroom.tool_system.worker_routing import active_tool_execution_identity
+from mindroom.tool_system.runtime_context import current_execution_identity, get_tool_runtime_context
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterator, Mapping
@@ -78,7 +77,7 @@ def active_oauth_credential_context(
     config: Config | None,
 ) -> OAuthCredentialContext:
     """Resolve OAuth storage from the active tool call and its configured fallback."""
-    execution_identity = active_tool_execution_identity(None)
+    execution_identity = current_execution_identity()
     if execution_identity is None and worker_target is not None:
         execution_identity = worker_target.execution_identity
     runtime_context = get_tool_runtime_context()

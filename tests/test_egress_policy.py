@@ -264,14 +264,10 @@ def test_tool_and_worker_provisioning_resolve_the_same_policy(monkeypatch: pytes
         thread_id = "$thread"
         requester_id = "@user:server"
         config = real_config
+        execution_identity = identity
 
     monkeypatch.setattr(approved_egress_module, "_post_grant", post_grant)
     monkeypatch.setattr(approved_egress_module, "get_tool_runtime_context", lambda: Context())
-    monkeypatch.setattr(
-        approved_egress_module,
-        "build_execution_identity_from_runtime_context",
-        lambda _context: identity,
-    )
 
     result = asyncio.run(
         approved_egress_module.approved_egress_tools()().request_network_access(

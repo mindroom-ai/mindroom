@@ -114,11 +114,6 @@ from mindroom.streaming import PROGRESS_PLACEHOLDER
 from mindroom.teams.resume import continue_paused_team_run
 from mindroom.teams.spec import TeamMode
 from mindroom.tool_system.events import body_without_tool_markers
-from mindroom.tool_system.runtime_context import (
-    LiveToolDispatchContext,
-    ToolDispatchContext,
-    runtime_context_from_dispatch_context,
-)
 from mindroom.turn_model import ModelScope, resolve_turn_model
 
 if TYPE_CHECKING:
@@ -137,6 +132,7 @@ if TYPE_CHECKING:
     from mindroom.response_runner import PreparedResponseRuntime, ResponseRunnerDeps
     from mindroom.streaming import ProgressPublisher
     from mindroom.tool_system.events import ToolTraceEntry
+    from mindroom.tool_system.runtime_context import ToolRuntimeContext
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
     from mindroom.turn_origin import TurnOrigin
 
@@ -259,7 +255,7 @@ class _ResponseHost(Protocol):
     async def run_in_tool_context[T](
         self,
         *,
-        tool_dispatch: ToolDispatchContext,
+        tool_context: ToolRuntimeContext,
         operation: Callable[[], Awaitable[T]],
     ) -> T: ...
 
@@ -803,25 +799,16 @@ class ApprovalContinuationRunner:
         history_scope: HistoryScope,
     ) -> AsyncIterator[PreparedResponseRuntime]:
         """Attach approval publication to this response's real source and placeholder."""
-        context = runtime_context_from_dispatch_context(runtime.tool_dispatch)
-        if context is None:
-            yield runtime
-            return
         async with self._cli_approval_handler_scope(
             request=request,
             progress=progress,
             history_scope=history_scope,
             target=runtime.resolved_target,
-            execution_identity=runtime.tool_dispatch.execution_identity,
+            execution_identity=runtime.tool_context.execution_identity,
             show_tool_calls=runtime.show_tool_calls,
             settle_terminal=True,
         ) as handler:
-            yield replace(
-                runtime,
-                tool_dispatch=LiveToolDispatchContext.from_runtime_context(
-                    replace(context, cli_approval_handler=handler),
-                ),
-            )
+            yield replace(runtime, tool_context=replace(runtime.tool_context, cli_approval_handler=handler))
 
     def _cli_approval_handler_scope(
         self,
@@ -1253,7 +1240,7 @@ class ApprovalContinuationRunner:
         cli_approval_handler: Callable[[PausedAttempt], Awaitable[tuple[RunRequirement, ...]]] | None,
     ) -> CompletedApprovalRun | PausedAttempt:
         execution_identity = continuation.execution_identity
-        tool_dispatch = self.deps.tool_runtime.build_dispatch_context(
+        tool_context = self.deps.tool_runtime.build_turn_context(
             target,
             user_id=continuation.requester_id,
             agent_name=continuation.entity_name,
@@ -1262,17 +1249,11 @@ class ApprovalContinuationRunner:
             correlation_id=correlation_id_for_request(request),
             source_envelope=request.response_envelope,
         )
-        if tool_dispatch.execution_identity != execution_identity:
+        if tool_context.execution_identity != execution_identity:
             msg = "Approval continuation execution identity no longer matches its target"
             raise RuntimeError(msg)
         if cli_approval_handler is not None:
-            context = runtime_context_from_dispatch_context(tool_dispatch)
-            if context is None:
-                msg = "CLI approval recovery requires a live tool runtime"
-                raise RuntimeError(msg)
-            tool_dispatch = LiveToolDispatchContext.from_runtime_context(
-                replace(context, cli_approval_handler=cli_approval_handler),
-            )
+            tool_context = replace(tool_context, cli_approval_handler=cli_approval_handler)
         decisions = {call.tool_call_id: call.decision is ApprovalDecision.APPROVED for call in continuation.calls}
         denial_reasons = {call.tool_call_id: call.reason for call in continuation.calls}
         paused_answer = _paused_answer()
@@ -1320,14 +1301,14 @@ class ApprovalContinuationRunner:
                     response_run_id=continuation.run_id,
                 ):
                     response_text = await self.host.run_in_tool_context(
-                        tool_dispatch=tool_dispatch,
+                        tool_context=tool_context,
                         operation=continue_team,
                     )
             else:
                 response_text = await self._approval_execution.continue_run(
                     continuation,
                     paused_answer=paused_answer,
-                    tool_dispatch=tool_dispatch,
+                    tool_context=tool_context,
                     decisions=decisions,
                     denial_reasons=denial_reasons,
                     tool_trace_collector=tool_trace_collector,

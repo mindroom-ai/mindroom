@@ -45,7 +45,7 @@ from mindroom.session_storage.store import persist_to
 from mindroom.teams.envelope import TeamTurnSpec
 from mindroom.teams.resume import continue_paused_team_run
 from mindroom.teams.spec import TeamMode
-from mindroom.tool_system.runtime_context import LiveToolDispatchContext, tool_runtime_context
+from mindroom.tool_system.runtime_context import tool_runtime_context
 from tests.ai_user_id_helpers import team_orchestrator
 from tests.approval_continuation_helpers import approval_continuation
 from tests.authorization_helpers import make_test_tool_runtime_context
@@ -355,7 +355,7 @@ async def resume(
     return await execution.continue_run(
         continuation,
         paused_answer=PausedAnswer(text=paused.response_text, tool_trace=paused.tool_trace),
-        tool_dispatch=LiveToolDispatchContext(execution_identity=identity, runtime_context=runtime),
+        tool_context=runtime,
         decisions=dict(decisions),
         denial_reasons={call_id: (denial_reasons or {}).get(call_id) for call_id in decisions},
         tool_trace_collector=[],

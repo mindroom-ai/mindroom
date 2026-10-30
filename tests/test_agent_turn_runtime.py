@@ -76,7 +76,7 @@ from mindroom.session_storage.schema import quote_identifier
 from mindroom.session_storage.types import ConversationSession
 from mindroom.skill_learning.capture import SkillReviewCapture
 from mindroom.tool_system.call_record import recording_tool_calls
-from mindroom.tool_system.runtime_context import build_execution_identity_from_runtime_context, tool_runtime_context
+from mindroom.tool_system.runtime_context import tool_runtime_context
 from mindroom.usage.storage import COMPACTED_REQUESTS_METADATA_KEY
 from tests.access_schema_support import with_current_room_member_access
 from tests.approval_continuation_helpers import RECEIPT_CALLS, RECEIPT_TEXT
@@ -242,7 +242,7 @@ def _reply(
         # The turn's bot binds its plugins' hooks into the turn's context.
         hooks=HookBindings(registry=HookRegistry.from_plugins(plugins)),
     )
-    identity = build_execution_identity_from_runtime_context(runtime)
+    identity = runtime.execution_identity
     storage = create_session_storage("assistant", config, runtime_paths, execution_identity=identity)
     return _Reply(config, runtime_paths, model, TurnRecorder(user_message="Hello"), storage, identity, runtime)
 

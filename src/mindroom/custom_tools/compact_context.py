@@ -11,7 +11,7 @@ from mindroom.constants import RuntimePaths  # noqa: TC001
 from mindroom.history.manual import request_compaction_before_next_reply
 from mindroom.history.types import HistoryScope
 from mindroom.tool_system.invocation import current_tool_call
-from mindroom.tool_system.runtime_context import get_tool_runtime_context, resolve_current_session_id
+from mindroom.tool_system.runtime_context import current_execution_identity, get_tool_runtime_context
 
 if TYPE_CHECKING:
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
@@ -43,10 +43,8 @@ class CompactContextTools(Toolkit):
             if call is not None and call.context.history_scope is not None
             else HistoryScope(kind="agent", scope_id=self._agent_name)
         )
-        session_id = resolve_current_session_id(
-            execution_identity=self._execution_identity,
-            runtime_context=runtime_context,
-        )
+        identity = current_execution_identity()
+        session_id = identity.session_id if identity is not None else None
         if session_id is None:
             return "Error: No active session available. Cannot determine session."
 

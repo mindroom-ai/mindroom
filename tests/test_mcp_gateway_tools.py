@@ -39,10 +39,10 @@ from mindroom.tool_system.catalog import TOOL_METADATA, ConfigField, ensure_tool
 from mindroom.tool_system.invocation import DETACHED_SESSION_ID
 from mindroom.tool_system.registry_state import BUILTIN_TOOL_METADATA, BUILTIN_TOOL_REGISTRY, TOOL_REGISTRY
 from mindroom.tool_system.runtime_context import (
+    current_execution_identity,
     get_tool_runtime_context,
     tool_runtime_context,
 )
-from mindroom.tool_system.worker_routing import get_tool_execution_identity, tool_execution_identity
 from tests.oauth_test_utils import publish_oauth_credentials
 from tests.test_mcp_manager import _FakeClientSession, _patch_manager, _tool
 from tests.test_script_tool_broker import _routed_connection_calculator
@@ -731,7 +731,7 @@ async def test_gateway_call_context_covers_construction_body_and_cleanup(
 
     def check(phase: str) -> None:
         assert get_tool_runtime_context() is None
-        assert get_tool_execution_identity() == context.execution_identity
+        assert current_execution_identity() == context.execution_identity
         phases.append(phase)
 
     class ScopedToolkit(Toolkit):
@@ -756,11 +756,10 @@ async def test_gateway_call_context_covers_construction_body_and_cleanup(
 
     monkeypatch.setattr(agents, "build_agent_toolkit", build_toolkit)
     ambient = _tool_runtime_context(context.runtime_paths.storage_root, agent_name="other")
-    other_identity = replace(context.execution_identity, requester_id="@bob:example.org")
-    with tool_runtime_context(ambient), tool_execution_identity(other_identity):
+    with tool_runtime_context(ambient):
         result = await gateway.invoke_tool(context, toolkit="calculator", function="account", arguments={})
         assert get_tool_runtime_context() is ambient
-        assert get_tool_execution_identity() == other_identity
+        assert current_execution_identity() == ambient.execution_identity
     assert result == {"result": "account"}
     assert phases == ["build", "connect", "body", "close"]
     # Worker-routed calls take their config from the toolkit build, so the gateway's config reaches the worker.

@@ -31,7 +31,6 @@ from mindroom.oauth.google_drive import google_drive_oauth_provider
 from mindroom.oauth.providers import OAuthProviderError
 from mindroom.tool_system.runtime_context import (
     ToolRuntimeContext,
-    build_execution_identity_from_runtime_context,
     tool_runtime_context,
 )
 from mindroom.tool_system.worker_routing import build_agent_toolkit_worker_target
@@ -96,7 +95,7 @@ def _tool_and_context(
         config.resolve_agent("research").policy.effective_execution_scope,
         "research",
         is_private=False,
-        execution_identity=build_execution_identity_from_runtime_context(context),
+        execution_identity=context.execution_identity,
         runtime_paths=runtime_paths,
     )
     return OAuthConnectionTools(runtime_paths, worker_target=worker_target), context, worker_target

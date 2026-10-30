@@ -14,7 +14,7 @@ from mindroom.hooks import EVENT_SESSION_STARTED, SessionHookContext, emit
 from mindroom.runtime_protocols import SupportsConfig  # noqa: TC001
 from mindroom.session_storage.lanes import run_session_storage_operation
 from mindroom.session_storage.store import watch_session_row
-from mindroom.tool_system.runtime_context import runtime_context_from_dispatch_context, scope_hook_context_kwargs
+from mindroom.tool_system.runtime_context import scope_hook_context_kwargs
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Sequence
@@ -23,7 +23,7 @@ if TYPE_CHECKING:
 
     from mindroom.constants import RuntimePaths
     from mindroom.session_storage.store import ConversationStore
-    from mindroom.tool_system.runtime_context import ToolDispatchContext
+    from mindroom.tool_system.runtime_context import ToolRuntimeContext
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 
 
@@ -39,10 +39,10 @@ class ConversationStateWriterDeps:
 
 @dataclass(frozen=True)
 class ReplySession:
-    """The stored session one reply writes: its history scope, and the dispatch the reply's tools run under."""
+    """The stored session one reply writes: its history scope, and the context the reply's tools run in."""
 
     scope: HistoryScope
-    tool_dispatch: ToolDispatchContext
+    tool_context: ToolRuntimeContext
 
 
 @asynccontextmanager
@@ -55,13 +55,13 @@ async def session_started_on_creation(
 
     A write counts once it commits, in this block or in a task or thread the block starts, whichever writer made it:
     the run's save, an interrupted turn's record, a fold, or a helper's usage. The store is never read for this, and
-    nothing is watched outside a live Matrix context or while no ``session:started`` hook is registered. A block that
+    nothing is watched without a reply or while no ``session:started`` hook is registered. A block that
     raises emits nothing.
     """
-    context = runtime_context_from_dispatch_context(reply.tool_dispatch) if reply is not None else None
-    if reply is None or context is None or not context.hooks.registry.has_hooks(EVENT_SESSION_STARTED):
+    if reply is None or not reply.tool_context.hooks.registry.has_hooks(EVENT_SESSION_STARTED):
         yield
         return
+    context = reply.tool_context
     with watch_session_row(reply.scope, context.session_id) as watch:
         yield
     if not watch.created:

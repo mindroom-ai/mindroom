@@ -99,11 +99,11 @@ from mindroom.tool_system.worker_proxy_client import EXECUTE_KEEPALIVE_SECONDS
 from mindroom.tool_system.worker_routing import (
     ToolExecutionIdentity,
     WorkerScope,
+    bind_detached_execution_identity,
     build_worker_target_from_runtime_env,
     parse_tool_execution_identity_payload,
     resolved_worker_key_scope,
     serialize_tool_execution_identity,
-    tool_execution_identity,
     visible_workspace_roots,
 )
 from mindroom.worker_computer.runtime import WorkerComputerRuntime
@@ -1022,7 +1022,7 @@ async def _execute_prepared_request_inprocess(
         Path(prepared.tool_output_workspace_root) if prepared.tool_output_workspace_root is not None else None
     )
 
-    with tool_execution_identity(execution_identity):
+    with bind_detached_execution_identity(execution_identity):
         try:
             toolkit, entrypoint = _resolve_entrypoint(
                 runtime_paths=runtime_paths,
@@ -1678,7 +1678,7 @@ async def _execute_worker_browser(
     prepared_context = _prepare_execute_request(call)
     prepared = prepared_context.request
     browser_paths = replace(prepared_context.runtime_paths, storage_root=prepared_worker.paths.root)
-    with tool_execution_identity(route.identity):
+    with bind_detached_execution_identity(route.identity):
         toolkit, current_entrypoint = _resolve_entrypoint(
             runtime_paths=browser_paths,
             config=config,

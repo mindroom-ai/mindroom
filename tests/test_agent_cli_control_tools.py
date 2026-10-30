@@ -52,7 +52,7 @@ from mindroom.tool_system.agno_toolkits import adapt_function, adapt_toolkit
 from mindroom.tool_system.events import CollectedStreamPresentation
 from mindroom.tool_system.metadata import get_tool_by_name
 from mindroom.tool_system.output_files import ToolOutputFilePolicy
-from mindroom.tool_system.runtime_context import build_execution_identity_from_runtime_context, tool_runtime_context
+from mindroom.tool_system.runtime_context import tool_runtime_context
 from mindroom.tool_system.skills import Skill, SkillsToolkit
 from mindroom.tool_system.tool_access import ToolKey
 from mindroom.tool_system.tool_function import AdaptedToolkit
@@ -87,7 +87,7 @@ def _owner(catalog, **options) -> LiveTurnTools:
         return None
 
     return live_turn_tools_for_test(
-        CliTurnOwner(build_execution_identity_from_runtime_context(catalog.runtime_context), "turn", "run"),
+        CliTurnOwner(catalog.runtime_context.execution_identity, "turn", "run"),
         catalog=catalog,
         authorize=authorize,
         **({"output_file_policy": _output_policy(catalog)} | options),
@@ -125,7 +125,7 @@ async def _delegation_catalog(
         cli_approval_handler=approval_handler,
     )
     catalog.runtime_context = runtime
-    identity = build_execution_identity_from_runtime_context(runtime)
+    identity = runtime.execution_identity
     store = create_session_storage("helper", config, paths, identity)
     catalog.store = store
     seed_session_row(store, catalog.session)
@@ -722,7 +722,7 @@ async def test_hidden_memory_write_standard_read_and_live_compaction(tmp_path) -
     bind_runtime_paths(config, paths)
     memory = adapt_toolkit(MemoryTools("helper", paths.storage_root, config, paths))
     catalog = await _catalog(tmp_path, [memory])
-    identity = build_execution_identity_from_runtime_context(catalog.runtime_context)
+    identity = catalog.runtime_context.execution_identity
     await catalog.prepare(
         [adapt_toolkit(CompactContextTools("helper", config, paths, identity), key="compact_context")],
     )

@@ -9,7 +9,7 @@ import threading
 from dataclasses import replace
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
-from unittest.mock import AsyncMock, patch
+from unittest.mock import patch
 
 import pytest
 from structlog.testing import capture_logs
@@ -21,17 +21,12 @@ from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.constants import RuntimePaths, resolve_runtime_paths
 from mindroom.credentials.manager import get_runtime_credentials_manager
-from mindroom.message_target import MessageTarget
 from mindroom.skill_learning import library
 from mindroom.tool_system.agno_toolkits import adapt_function
 from mindroom.tool_system.output_files import ToolOutputFilePolicy
-from mindroom.tool_system.runtime_context import LiveToolDispatchContext
 from mindroom.tool_system.skills import RefusedWorkspaceSkill, Skill, SkillsToolkit, build_skills_toolkit
-from mindroom.tool_system.worker_routing import ToolExecutionIdentity, agent_workspace_root_path
-from tests.authorization_helpers import (
-    make_test_tool_runtime_context,
-)
-from tests.conftest import SETTLE_TIMEOUT_SECONDS, make_conversation_reader_mock, make_relation_lookup
+from mindroom.tool_system.worker_routing import agent_workspace_root_path
+from tests.conftest import SETTLE_TIMEOUT_SECONDS
 from tests.cpu_budget_helpers import cpu_budget
 
 if TYPE_CHECKING:
@@ -384,40 +379,6 @@ def test_skill_cache_refreshes_on_change(tmp_path: Path) -> None:
     )
     assert refreshed is not None
     assert _skill(refreshed, "alpha").description == "Alpha v2"
-
-
-def test_live_skill_dispatch_context_rejects_mismatched_execution_identity() -> None:
-    """Live dispatch contracts should reject identities that do not match the runtime context."""
-    config = _base_config(["dispatch"])
-    runtime_paths = resolve_runtime_paths()
-    runtime_context = make_test_tool_runtime_context(
-        agent_name="code",
-        target=MessageTarget.resolve(
-            room_id="!room:example.org",
-            thread_id="$thread",
-            reply_to_event_id=None,
-        ),
-        requester_id="@alice:example.org",
-        client=AsyncMock(),
-        config=config,
-        runtime_paths=runtime_paths,
-        relations=make_relation_lookup(),
-        conversation_reader=make_conversation_reader_mock(),
-    )
-
-    with pytest.raises(ValueError, match="must match the provided tool runtime context"):
-        LiveToolDispatchContext(
-            runtime_context=runtime_context,
-            execution_identity=ToolExecutionIdentity(
-                channel="matrix",
-                agent_name="other-agent",
-                requester_id="@bob:example.org",
-                room_id="!other:example.org",
-                thread_id="$other-thread",
-                resolved_thread_id="$other-thread",
-                session_id="!other:example.org:$other-thread",
-            ),
-        )
 
 
 def test_workspace_skills_dir_discovered(tmp_path: Path) -> None:

@@ -99,7 +99,7 @@ from mindroom.tool_system.metadata import get_tool_by_name
 from mindroom.tool_system.registration import register_tool_with_metadata
 from mindroom.tool_system.runtime_context import (
     ToolRuntimeContext,
-    build_execution_identity_from_runtime_context,
+    current_execution_identity,
     emit_custom_event,
     get_tool_runtime_context,
 )
@@ -186,11 +186,11 @@ __all__ = [
     "atlassian_connection_oauth_provider",
     "automation",
     "automation_threads",
-    "build_execution_identity_from_runtime_context",
     "build_model_provider",
     "build_oauth_connect_instruction",
     "complete_prompt",
     "current_call",
+    "current_execution_identity",
     "emit_custom_event",
     "get_logger",
     "get_tool_by_name",

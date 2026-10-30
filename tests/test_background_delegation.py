@@ -371,7 +371,7 @@ async def test_native_background_result_runs_child_once(  # noqa: C901, PLR0915
         if exclude_after_acceptance:
             config.background_tool_jobs.exclude_toolkits.append("delegate")
         if approval == "cancelled":
-            assert '"status": "cancel_requested"' in str(await JobTools(paths, identity).job("cancel", job_id))
+            assert '"status": "cancel_requested"' in str(await JobTools(paths).job("cancel", job_id))
             await wait_for_status(runtime, job_id, "cancelled")
             cancelled = await read_child_run(children[0], config, paths)
             assert cancelled is not None
@@ -432,7 +432,7 @@ async def test_native_background_result_runs_child_once(  # noqa: C901, PLR0915
                     assert not completed.is_set()
                     assert DelegationState.from_metadata(result.metadata).children == []
                     if human:
-                        listed = json.loads(await JobTools(paths, identity).job("list"))
+                        listed = json.loads(await JobTools(paths).job("list"))
                         assert [item["status"] for item in listed if item["job_id"] == child.delegation_id] == [
                             "running",
                         ]

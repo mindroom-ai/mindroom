@@ -32,7 +32,7 @@ from mindroom.config.plugin import PluginEntryConfig
 from mindroom.hooks import EVENT_TOOL_BEFORE_CALL, ToolBeforeCallContext, hook
 from mindroom.mcp_gateway import admission
 from mindroom.mcp_gateway import tools as gateway_tools
-from mindroom.tool_system.worker_routing import get_tool_execution_identity
+from mindroom.tool_system.runtime_context import current_execution_identity
 from tests.api.conftest import trusted_upstream_jwks, trusted_upstream_jwt, trusted_upstream_jwt_key
 
 if TYPE_CHECKING:
@@ -383,7 +383,7 @@ def _native_dispatch_builder(
     )
 
     def account() -> str:
-        identity = get_tool_execution_identity()
+        identity = current_execution_identity()
         assert identity is not None
         assert identity.requester_id == "@alice:example.org"
         assert identity.agent_name == agent

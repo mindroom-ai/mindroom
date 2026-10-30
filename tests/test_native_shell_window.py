@@ -16,7 +16,6 @@ from mindroom.agent_cli.session import CliTurnOwner, TurnToolRegistry
 from mindroom.agent_cli.shell_contract import AgentCliShellEnv, current_agent_cli_shell_env
 from mindroom.session_storage.agent_storage import create_agent_state_storage
 from mindroom.tool_system.output_files import ToolOutputFilePolicy
-from mindroom.tool_system.runtime_context import build_execution_identity_from_runtime_context
 from mindroom.tool_system.tool_function import AdaptedToolkit, ToolFunction
 from tests.conftest import SETTLE_TIMEOUT_SECONDS, live_turn_tools_for_test
 from tests.minimal_agent_fixtures import cli_window, settled_receipt
@@ -109,7 +108,7 @@ async def _windowed_shell(
     catalog = await _catalog(tmp_path, windowed)
     catalog.store = create_agent_state_storage("helper", tmp_path)
     owner = live_turn_tools_for_test(
-        CliTurnOwner(build_execution_identity_from_runtime_context(catalog.runtime_context), "turn", "run"),
+        CliTurnOwner(catalog.runtime_context.execution_identity, "turn", "run"),
         catalog=catalog,
         authorize=_allow,
         output_file_policy=ToolOutputFilePolicy(tmp_path / "workspace"),

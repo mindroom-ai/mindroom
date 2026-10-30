@@ -17,7 +17,7 @@ from mindroom.shell.execution import ShellRunResult
 from mindroom.tool_system import sandbox_proxy
 from mindroom.tool_system.invocation import ToolCallContext
 from mindroom.tool_system.metadata import get_tool_by_name
-from mindroom.tool_system.runtime_context import build_execution_identity_from_runtime_context, tool_runtime_context
+from mindroom.tool_system.runtime_context import tool_runtime_context
 from mindroom.tool_system.worker_routing import ResolvedWorkerTarget, ToolExecutionIdentity
 from mindroom.tools import shell as shell_module
 from mindroom.workers.backend import WorkerBackendError
@@ -401,7 +401,7 @@ async def test_room_context_tool_uses_primary_matrix_client(
         "routing",
         config,
         runtime_paths,
-        execution_identity=build_execution_identity_from_runtime_context(context),
+        execution_identity=context.execution_identity,
         include_interactive_questions=False,
         persist_runtime_state=False,
         supports_native_tool_approval=True,

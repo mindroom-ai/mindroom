@@ -503,11 +503,7 @@ async def build_call_tools(
             agent_name=agent_name,
         ),
     )
-    execution_identity = tool_support.build_execution_identity(
-        target=target,
-        user_id=requester_id,
-        agent_name=agent_name,
-    )
+    execution_identity = context.execution_identity
     if enable_responder:
         voice_enrichment_items: tuple[EnrichmentItem, ...] = ()
         if voice_instructions:

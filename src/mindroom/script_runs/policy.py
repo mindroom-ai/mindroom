@@ -8,7 +8,6 @@ from mindroom.script_runs.models import ScriptToolGrant
 from mindroom.tool_system.agent_tools import resolve_agent_tools
 from mindroom.tool_system.agno_toolkits import adapt_toolkit
 from mindroom.tool_system.catalog import TOOL_METADATA, ensure_tool_registry_loaded
-from mindroom.tool_system.runtime_context import build_execution_identity_from_runtime_context
 from mindroom.tool_system.sandbox_proxy import tool_placement
 
 if TYPE_CHECKING:
@@ -115,7 +114,7 @@ def _build_script_toolkits(
     agent_tools = resolve_agent_tools(config, context.agent_name)
     placement = tool_placement(context.runtime_paths)
     workspace_in_worker = agent_tools.workspace_in_worker([entry.name for entry in tool_entries], placement)
-    execution_identity = build_execution_identity_from_runtime_context(context)
+    execution_identity = context.execution_identity
     agent_runtime = resolve_agent_runtime(
         context.agent_name,
         config,

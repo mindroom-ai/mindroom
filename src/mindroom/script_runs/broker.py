@@ -45,7 +45,6 @@ from mindroom.tool_system.invocation import (
 )
 from mindroom.tool_system.runtime_context import (
     ToolRuntimeContext,
-    build_execution_identity_from_runtime_context,
     tool_runtime_context,
 )
 from mindroom.tool_system.tool_calls import sanitize_failure_text
@@ -61,7 +60,6 @@ from mindroom.tool_system.worker_routing import (
     ToolExecutionIdentity,
     build_agent_toolkit_worker_target,
     parse_tool_execution_identity_payload,
-    run_with_tool_execution_identity,
 )
 
 if TYPE_CHECKING:
@@ -647,10 +645,7 @@ class ScriptToolBroker:
                 return await run_tool_call(function, arguments, call_context, middleware=(policy,))
 
         try:
-            return await run_with_tool_execution_identity(
-                prepared.execution_identity,
-                operation=execute_function,
-            )
+            return await execute_function()
         except asyncio.CancelledError:
             cancelled = True
             raise
@@ -907,7 +902,7 @@ def _validate_resolved_authority(
         run.execution_identity,
         error_prefix="Background script execution_identity",
     )
-    live_identity = build_execution_identity_from_runtime_context(context)
+    live_identity = context.execution_identity
     live_config = context.current_config
     expected_process_worker_target = build_agent_toolkit_worker_target(
         "user_agent",

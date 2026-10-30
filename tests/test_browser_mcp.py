@@ -18,6 +18,7 @@ from mindroom.tool_system import media_transport
 from mindroom.tool_system.agno_toolkits import adapt_function
 from mindroom.tool_system.media_transport import decode_media_result, encode_media_result
 from mindroom.tool_system.output_files import ToolOutputFilePolicy, wrap_function_for_output_files
+from mindroom.tool_system.runtime_context import detached_tool_scope
 from mindroom.tool_system.tool_function import ToolValue
 from mindroom.worker_computer.mcp_catalog import browser_mcp_catalog, verify_browser_mcp_catalog
 from mindroom.worker_computer.mcp_provider import WorkerBrowserMCP
@@ -61,7 +62,6 @@ def test_primary_materialization_has_no_process_or_workspace_effects(
     from mindroom.tool_system.worker_routing import (  # noqa: PLC0415
         ToolExecutionIdentity,
         build_agent_toolkit_worker_target,
-        tool_execution_identity,
     )
 
     paths = resolve_primary_runtime_paths(
@@ -98,7 +98,7 @@ def test_primary_materialization_has_no_process_or_workspace_effects(
         execution_identity=identity,
         runtime_paths=paths,
     )
-    with tool_execution_identity(identity):
+    with detached_tool_scope(identity):
         toolkit = get_tool_by_name(
             "browser_mcp",
             paths,

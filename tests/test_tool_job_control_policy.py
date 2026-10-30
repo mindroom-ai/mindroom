@@ -17,7 +17,7 @@ from mindroom.hooks import EVENT_TOOL_AFTER_CALL, EVENT_TOOL_BEFORE_CALL, HookBi
 from mindroom.llm.runs import RunStatus
 from mindroom.tool_jobs.instances import pin_background_tool_jobs
 from mindroom.tool_jobs.runtime import register_background_runtime
-from mindroom.tool_system.runtime_context import build_execution_identity_from_runtime_context, tool_runtime_context
+from mindroom.tool_system.runtime_context import tool_runtime_context
 from tests.delegation_helpers import ScriptedAgents, _delegate_runtime_context, _runtime_paths
 from tests.fakes.scripted_model import ScriptedModel, answer, calls, tool_call
 from tests.identity_helpers import persist_entity_accounts
@@ -71,7 +71,7 @@ async def test_reserved_controls_run_without_approval_and_emit_plugin_hooks(
         ],
     )
     context = replace(_delegate_runtime_context(config, paths), hooks=HookBindings(registry=registry))
-    owner = build_execution_identity_from_runtime_context(context)
+    owner = context.execution_identity
     runtime = await tool_job_runtime(paths.storage_root)
     pin_background_tool_jobs(context.config, paths)
     register_background_runtime(paths, runtime)

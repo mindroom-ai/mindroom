@@ -24,7 +24,7 @@ from mindroom.script_runs.models import ScriptCallState
 from mindroom.tool_jobs.resources import execution_resources
 from mindroom.tool_system.agent_tool_calls import AgentToolCallStep
 from mindroom.tool_system.agno_toolkits import Function, Toolkit, adapt_function
-from mindroom.tool_system.runtime_context import build_execution_identity_from_runtime_context, tool_runtime_context
+from mindroom.tool_system.runtime_context import tool_runtime_context
 from mindroom.tool_system.tool_function import ToolOutcome
 from tests.agent_loop.helpers import context as run_context
 from tests.agent_tool_helpers import detached_policy
@@ -324,7 +324,7 @@ async def test_a_managed_job_completes_an_oauth_requirement_with_the_payloads_re
         _oauth_required()
 
     turn_context, runtime = await _managed_context(tmp_path)
-    owner = build_execution_identity_from_runtime_context(turn_context)
+    owner = turn_context.execution_identity
     try:
         async with execution_resources():
             with tool_runtime_context(turn_context):

@@ -3,11 +3,14 @@
 from __future__ import annotations
 
 import hashlib
+from typing import TYPE_CHECKING
 
 from mindroom.dynamic_workflows.store import DynamicWorkflowRun, DynamicWorkflowStore
 from mindroom.dynamic_workflows.validation import DynamicWorkflowError
 from mindroom.runtime_resolution import resolve_agent_execution
-from mindroom.tool_system.runtime_context import ToolRuntimeContext, build_execution_identity_from_runtime_context
+
+if TYPE_CHECKING:
+    from mindroom.tool_system.runtime_context import ToolRuntimeContext
 
 
 def dynamic_workflow_store(context: ToolRuntimeContext) -> DynamicWorkflowStore:
@@ -52,7 +55,7 @@ def authorize_dynamic_workflow_run(context: ToolRuntimeContext, run: DynamicWork
 
 
 def _agent_scope_owner_id(context: ToolRuntimeContext) -> str:
-    execution_identity = build_execution_identity_from_runtime_context(context)
+    execution_identity = context.execution_identity
     resolved_execution = resolve_agent_execution(
         context.agent_name,
         context.config,

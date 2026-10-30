@@ -49,7 +49,6 @@ from mindroom.tool_jobs.resources import execution_resources
 from mindroom.tool_system.agent_tool_calls import DeferredAgentToolkit
 from mindroom.tool_system.agno_toolkits import adapt_toolkit
 from mindroom.tool_system.output_files import ToolOutputFilePolicy
-from mindroom.tool_system.runtime_context import build_execution_identity_from_runtime_context
 from mindroom.tool_system.tool_access import ToolKey
 from mindroom.tool_system.tool_function import ToolValue
 from tests.agent_tool_helpers import detached_policy
@@ -134,7 +133,7 @@ async def test_outer_shell_cli_nested_shell_cli_mutation_and_late_rejection(
         return receipt
 
     owner = live_turn_tools_for_test(
-        CliTurnOwner(build_execution_identity_from_runtime_context(catalog.runtime_context), "turn", "run"),
+        CliTurnOwner(catalog.runtime_context.execution_identity, "turn", "run"),
         catalog=catalog,
         authorize=authorize,
         output_file_policy=ToolOutputFilePolicy(tmp_path / "workspace"),
@@ -177,7 +176,7 @@ async def test_native_shell_call_admits_cli_calls_only_while_it_runs(tmp_path: P
         return None
 
     owner = live_turn_tools_for_test(
-        CliTurnOwner(build_execution_identity_from_runtime_context(catalog.runtime_context), "turn", "run"),
+        CliTurnOwner(catalog.runtime_context.execution_identity, "turn", "run"),
         catalog=catalog,
         authorize=authorize,
         output_file_policy=ToolOutputFilePolicy(tmp_path / "workspace"),
@@ -226,7 +225,7 @@ async def test_native_shell_result_carries_media_from_its_cli_calls(tmp_path: Pa
         return None
 
     owner = live_turn_tools_for_test(
-        CliTurnOwner(build_execution_identity_from_runtime_context(catalog.runtime_context), "turn", "run"),
+        CliTurnOwner(catalog.runtime_context.execution_identity, "turn", "run"),
         catalog=catalog,
         authorize=authorize,
         output_file_policy=ToolOutputFilePolicy(tmp_path / "workspace"),
@@ -267,7 +266,7 @@ async def _native_owner(
     catalog.store = create_agent_state_storage("helper", tmp_path)
     (tmp_path / "workspace").mkdir(exist_ok=True)
     owner = live_turn_tools_for_test(
-        CliTurnOwner(build_execution_identity_from_runtime_context(catalog.runtime_context), "turn", "run"),
+        CliTurnOwner(catalog.runtime_context.execution_identity, "turn", "run"),
         catalog=catalog,
         authorize=authorize,
         output_file_policy=ToolOutputFilePolicy(tmp_path / "workspace"),
@@ -359,7 +358,7 @@ async def test_a_cli_call_approved_after_its_commands_timeout_still_runs(tmp_pat
 
     catalog.runtime_context = replace(catalog.runtime_context, cli_approval_handler=decide_later)
     owner = live_turn_tools_for_test(
-        CliTurnOwner(build_execution_identity_from_runtime_context(catalog.runtime_context), "turn", "run"),
+        CliTurnOwner(catalog.runtime_context.execution_identity, "turn", "run"),
         catalog=catalog,
         authorize=_allow,
         output_file_policy=ToolOutputFilePolicy(tmp_path / "workspace"),
@@ -412,7 +411,7 @@ async def test_a_cli_approval_pause_records_its_run_and_that_run_s_model(tmp_pat
         active_model_name="ambient-model",
     )
     owner = live_turn_tools_for_test(
-        CliTurnOwner(build_execution_identity_from_runtime_context(catalog.runtime_context), "turn", "run"),
+        CliTurnOwner(catalog.runtime_context.execution_identity, "turn", "run"),
         catalog=catalog,
         authorize=_allow,
         output_file_policy=ToolOutputFilePolicy(tmp_path / "workspace"),
@@ -643,7 +642,7 @@ async def test_nested_cli_shell_keeps_its_parent_window_while_a_newer_window_is_
     catalog = await _catalog(tmp_path, [_toolkit("shell", run_shell_command)])
     catalog.store = create_agent_state_storage("helper", tmp_path)
     owner = live_turn_tools_for_test(
-        CliTurnOwner(build_execution_identity_from_runtime_context(catalog.runtime_context), "turn", "run"),
+        CliTurnOwner(catalog.runtime_context.execution_identity, "turn", "run"),
         catalog=catalog,
         authorize=authorize,
         output_file_policy=ToolOutputFilePolicy(tmp_path / "workspace"),
@@ -1051,7 +1050,7 @@ async def test_write_failure_prevents_shell_and_inner_effects(
         effects.append("authorize")
 
     owner = live_turn_tools_for_test(
-        CliTurnOwner(build_execution_identity_from_runtime_context(catalog.runtime_context), "turn", "run"),
+        CliTurnOwner(catalog.runtime_context.execution_identity, "turn", "run"),
         catalog=catalog,
         authorize=authorize,
         output_file_policy=ToolOutputFilePolicy(tmp_path / "workspace"),
@@ -1102,7 +1101,7 @@ async def test_a_failed_shell_call_answers_its_bash_call_as_failed(
     catalog = await _catalog(tmp_path, [_toolkit("shell", run_shell_command)], max_tool_calls_per_turn=limit)
     catalog.store = create_agent_state_storage("helper", tmp_path)
     owner = live_turn_tools_for_test(
-        CliTurnOwner(build_execution_identity_from_runtime_context(catalog.runtime_context), "turn", "run"),
+        CliTurnOwner(catalog.runtime_context.execution_identity, "turn", "run"),
         catalog=catalog,
         authorize=_allow,
         output_file_policy=ToolOutputFilePolicy(tmp_path / "workspace"),
@@ -1193,7 +1192,7 @@ async def test_real_cli_call_wait_completes_inside_outer_bash(
         return None
 
     owner = live_turn_tools_for_test(
-        CliTurnOwner(build_execution_identity_from_runtime_context(catalog.runtime_context), "turn", "run"),
+        CliTurnOwner(catalog.runtime_context.execution_identity, "turn", "run"),
         catalog=catalog,
         authorize=authorize,
         output_file_policy=ToolOutputFilePolicy(tmp_path / "workspace"),
@@ -1272,7 +1271,7 @@ async def test_provider_batch_serializes_bash_but_independent_turns_progress(
         catalog = await _catalog(tmp_path / name, [_toolkit("shell", run_shell_command)])
         catalog.store = create_agent_state_storage("helper", tmp_path / name)
         owner = live_turn_tools_for_test(
-            CliTurnOwner(build_execution_identity_from_runtime_context(catalog.runtime_context), name, "run"),
+            CliTurnOwner(catalog.runtime_context.execution_identity, name, "run"),
             catalog=catalog,
             authorize=authorize,
             output_file_policy=ToolOutputFilePolicy(tmp_path / "workspace"),
@@ -1330,7 +1329,7 @@ async def test_catalog_rebind_retains_shell_env_and_rejects_between_attempt_call
 
     old = await _catalog(tmp_path, [])
     owner = live_turn_tools_for_test(
-        CliTurnOwner(build_execution_identity_from_runtime_context(old.runtime_context), "turn", "run"),
+        CliTurnOwner(old.runtime_context.execution_identity, "turn", "run"),
         catalog=old,
         authorize=authorize,
         output_file_policy=ToolOutputFilePolicy(tmp_path / "workspace"),
@@ -1396,7 +1395,7 @@ async def test_cancelling_outer_io_cancels_and_joins_admitted_work(
     )
     catalog.store = create_agent_state_storage("helper", tmp_path)
     owner = live_turn_tools_for_test(
-        CliTurnOwner(build_execution_identity_from_runtime_context(catalog.runtime_context), "turn", "run"),
+        CliTurnOwner(catalog.runtime_context.execution_identity, "turn", "run"),
         catalog=catalog,
         authorize=authorize,
         output_file_policy=ToolOutputFilePolicy(tmp_path / "workspace"),
@@ -1440,7 +1439,7 @@ async def test_admission_closes_at_quiescence_and_rejects_later_submission(
 
     catalog = await _catalog(tmp_path, [_toolkit("state", change)])
     owner = live_turn_tools_for_test(
-        CliTurnOwner(build_execution_identity_from_runtime_context(catalog.runtime_context), "turn", "run"),
+        CliTurnOwner(catalog.runtime_context.execution_identity, "turn", "run"),
         catalog=catalog,
         authorize=authorize,
         output_file_policy=ToolOutputFilePolicy(tmp_path / "workspace"),
@@ -1526,7 +1525,7 @@ async def test_cursor_discovery_and_deferred_describe_require_window(
 
         catalog.add_deferred(DeferredAgentToolkit(f"tool{index}", f"Metadata {index}", factory))
     owner = live_turn_tools_for_test(
-        CliTurnOwner(build_execution_identity_from_runtime_context(catalog.runtime_context), "turn", "run"),
+        CliTurnOwner(catalog.runtime_context.execution_identity, "turn", "run"),
         catalog=catalog,
         authorize=authorize,
         output_file_policy=ToolOutputFilePolicy(tmp_path / "workspace"),
@@ -1598,7 +1597,7 @@ async def test_refused_describe_is_a_caller_safe_rejection(tmp_path: Path) -> No
 
     catalog = await _catalog(tmp_path, [_toolkit("state", selected)])
     owner = live_turn_tools_for_test(
-        CliTurnOwner(build_execution_identity_from_runtime_context(catalog.runtime_context), "turn", "run"),
+        CliTurnOwner(catalog.runtime_context.execution_identity, "turn", "run"),
         catalog=catalog,
         authorize=authorize,
         output_file_policy=ToolOutputFilePolicy(tmp_path / "workspace"),
@@ -1629,7 +1628,7 @@ async def test_live_turn_bounds_receipts_and_concurrent_operations(
 
     catalog = await _catalog(tmp_path, [_toolkit("state", slow)])
     owner = live_turn_tools_for_test(
-        CliTurnOwner(build_execution_identity_from_runtime_context(catalog.runtime_context), "turn", "run"),
+        CliTurnOwner(catalog.runtime_context.execution_identity, "turn", "run"),
         catalog=catalog,
         authorize=authorize,
         output_file_policy=ToolOutputFilePolicy(tmp_path / "workspace"),
@@ -1666,7 +1665,7 @@ async def test_owner_rejects_catalog_bound_to_another_execution_identity(
         live_turn_tools_for_test(
             CliTurnOwner(
                 replace(
-                    build_execution_identity_from_runtime_context(catalog.runtime_context),
+                    catalog.runtime_context.execution_identity,
                     requester_id="@other:test",
                 ),
                 "turn",
@@ -1688,7 +1687,7 @@ async def test_context_page_caps_complete_unicode_envelope(tmp_path: Path) -> No
 
     context = "😀" * 20000
     owner = live_turn_tools_for_test(
-        CliTurnOwner(build_execution_identity_from_runtime_context(catalog.runtime_context), "turn", "run"),
+        CliTurnOwner(catalog.runtime_context.execution_identity, "turn", "run"),
         catalog=catalog,
         authorize=authorize,
         output_file_policy=ToolOutputFilePolicy(tmp_path / "workspace"),
@@ -1734,7 +1733,7 @@ async def test_live_call_retains_frozen_arguments_and_bounds_terminal_output(
     catalog = await _catalog(tmp_path, [_toolkit("state", change)])
     (tmp_path / "workspace").mkdir()
     owner = live_turn_tools_for_test(
-        CliTurnOwner(build_execution_identity_from_runtime_context(catalog.runtime_context), "turn", "run"),
+        CliTurnOwner(catalog.runtime_context.execution_identity, "turn", "run"),
         catalog=catalog,
         authorize=authorize,
         output_file_policy=ToolOutputFilePolicy(tmp_path / "workspace"),
@@ -1833,7 +1832,7 @@ async def test_nested_shell_submits_child_after_outer_shell_returns(
         return None
 
     owner = live_turn_tools_for_test(
-        CliTurnOwner(build_execution_identity_from_runtime_context(catalog.runtime_context), "turn", "run"),
+        CliTurnOwner(catalog.runtime_context.execution_identity, "turn", "run"),
         catalog=catalog,
         authorize=authorize,
         output_file_policy=ToolOutputFilePolicy(tmp_path / "workspace"),
@@ -1885,7 +1884,7 @@ async def test_admitted_describe_waiter_settles_when_its_task_is_cancelled(
         return None
 
     owner = live_turn_tools_for_test(
-        CliTurnOwner(build_execution_identity_from_runtime_context(catalog.runtime_context), "turn", "run"),
+        CliTurnOwner(catalog.runtime_context.execution_identity, "turn", "run"),
         catalog=catalog,
         authorize=authorize,
         output_file_policy=ToolOutputFilePolicy(tmp_path / "workspace"),
@@ -1977,7 +1976,7 @@ async def test_bash_waits_for_exact_native_approval_without_holding_catalog(tmp_
         pass
 
     owner = live_turn_tools_for_test(
-        CliTurnOwner(build_execution_identity_from_runtime_context(catalog.runtime_context), "turn", "run"),
+        CliTurnOwner(catalog.runtime_context.execution_identity, "turn", "run"),
         catalog=catalog,
         authorize=authorize,
         output_file_policy=ToolOutputFilePolicy(tmp_path / "workspace"),

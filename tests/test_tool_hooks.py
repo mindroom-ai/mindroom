@@ -61,7 +61,7 @@ from mindroom.tool_system.runtime_context import (
     tool_runtime_context,
 )
 from mindroom.tool_system.tool_function import ToolOutcome
-from mindroom.tool_system.worker_routing import ToolExecutionIdentity, tool_execution_identity
+from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 from tests.agent_tool_helpers import detached_policy, tool_policy
 from tests.authorization_helpers import (
     make_test_tool_runtime_context,
@@ -434,7 +434,6 @@ async def test_tool_hook_bridge_records_failures_without_registered_hooks(tmp_pa
 
     with (
         tool_runtime_context(runtime_context),
-        tool_execution_identity(_execution_identity()),
         pytest.raises(ValueError, match="boom") as exc_info,
     ):
         await bridge(
@@ -557,7 +556,6 @@ async def test_tool_hook_bridge_preserves_original_error_when_failure_recording_
         patch("mindroom.tool_system.tool_hooks.record_tool_failure", side_effect=RuntimeError("disk full")),
         patch("mindroom.tool_system.tool_hooks.logger.exception") as mock_logger_exception,
         tool_runtime_context(runtime_context),
-        tool_execution_identity(_execution_identity()),
         pytest.raises(ValueError, match="boom") as exc_info,
     ):
         await bridge("explode", explode, {"api_key": "secret"})
@@ -694,7 +692,6 @@ async def test_tool_hook_bridge_allows_call_and_populates_contexts(tmp_path: Pat
 
     with (
         tool_runtime_context(_tool_runtime_context(tmp_path, hook_registry=registry)),
-        tool_execution_identity(_execution_identity()),
     ):
         result = await bridge("read_file", next_func, {"path": "notes.txt"})
 
@@ -740,7 +737,6 @@ async def test_tool_after_call_hooks_cannot_mutate_returned_result(tmp_path: Pat
 
     with (
         tool_runtime_context(_tool_runtime_context(tmp_path, hook_registry=registry)),
-        tool_execution_identity(_execution_identity()),
     ):
         result = await bridge("read_file", next_func, {"path": "notes.txt"})
 
@@ -760,7 +756,7 @@ async def test_tool_hook_bridge_does_not_record_success_rows_by_default(tmp_path
     async def next_func(**kwargs: object) -> dict[str, object]:
         return {"echo": kwargs["path"]}
 
-    with tool_runtime_context(runtime_context), tool_execution_identity(_execution_identity()):
+    with tool_runtime_context(runtime_context):
         result = await bridge("read_file", next_func, {"path": "notes.txt"})
 
     assert result == {"echo": "notes.txt"}
@@ -783,7 +779,7 @@ async def test_tool_after_call_hook_error_does_not_lose_debug_success_row(tmp_pa
     async def next_func(**kwargs: object) -> dict[str, object]:
         return {"echo": kwargs["path"]}
 
-    with tool_runtime_context(runtime_context), tool_execution_identity(_execution_identity()):
+    with tool_runtime_context(runtime_context):
         result = await bridge("read_file", next_func, {"path": "notes.txt"})
 
     assert result == {"echo": "notes.txt"}
@@ -828,7 +824,7 @@ async def test_a_call_s_record_and_after_hooks_read_one_duration(
     async def next_func(**kwargs: object) -> str:
         return str(kwargs["path"])
 
-    with tool_runtime_context(runtime_context), tool_execution_identity(_execution_identity()):
+    with tool_runtime_context(runtime_context):
         assert await bridge("read_file", next_func, {"path": "notes.txt"}) == "notes.txt"
 
     log_path = runtime_context.runtime_paths.storage_root / "tracking" / "tool_calls.jsonl"
@@ -858,7 +854,6 @@ async def test_tool_success_logging_error_does_not_skip_after_hook(tmp_path: Pat
 
     with (
         tool_runtime_context(runtime_context),
-        tool_execution_identity(_execution_identity()),
         patch("mindroom.tool_system.tool_calls._append_tool_call_record", side_effect=RuntimeError("disk full")),
     ):
         result = await bridge("read_file", next_func, {"path": "notes.txt"})
@@ -905,7 +900,6 @@ async def test_a_tool_that_answers_with_a_failed_outcome_reaches_its_observers_a
 
     with (
         tool_runtime_context(runtime_context),
-        tool_execution_identity(_execution_identity()),
         recording_tool_calls(_Recorder()),
     ):
         result = await bridge("run_scheduled_call", next_func, {"task_id": "task-1"})
@@ -936,7 +930,7 @@ async def test_oauth_required_tool_result_is_recorded_when_debug_enabled(tmp_pat
             connect_url="https://example.test/connect",
         )
 
-    with tool_runtime_context(runtime_context), tool_execution_identity(_execution_identity()):
+    with tool_runtime_context(runtime_context):
         result = await bridge("gmail", next_func, {})
 
     assert isinstance(result, dict)
@@ -967,7 +961,6 @@ async def test_tool_after_call_hooks_cannot_mutate_non_deepcopyable_result(tmp_p
 
     with (
         tool_runtime_context(_tool_runtime_context(tmp_path, hook_registry=registry)),
-        tool_execution_identity(_execution_identity()),
     ):
         result = await bridge("read_file", next_func, {"path": "notes.txt"})
 
@@ -1023,7 +1016,6 @@ async def test_tool_hook_context_send_message_uses_bound_sender(tmp_path: Path) 
         tool_runtime_context(
             _tool_runtime_context(tmp_path, hook_message_sender=hook_message_sender, hook_registry=registry),
         ),
-        tool_execution_identity(_execution_identity()),
     ):
         result = await bridge("read_file", next_func, {"path": "notes.txt"})
 
@@ -1094,7 +1086,6 @@ async def test_tool_hook_context_send_message_advances_existing_message_received
                 hook_registry=registry,
             ),
         ),
-        tool_execution_identity(_execution_identity()),
     ):
         result = await bridge("read_file", next_func, {"path": "notes.txt"})
 
@@ -1148,10 +1139,6 @@ async def test_tool_hook_contexts_expose_router_backed_matrix_admin(tmp_path: Pa
 
     registry = HookRegistry.from_plugins([_plugin("tool-policy", [before, after])])
     target = MessageTarget.resolve("!room:localhost", "$thread", None)
-    execution_identity = bot._tool_runtime_support.build_execution_identity(
-        target=target,
-        user_id="@user:localhost",
-    )
     bridge = tool_policy(registry)
 
     async def next_func(**kwargs: object) -> dict[str, object]:
@@ -1161,7 +1148,7 @@ async def test_tool_hook_contexts_expose_router_backed_matrix_admin(tmp_path: Pa
     runtime_context = bot._tool_runtime_support.build_context(target, user_id="@user:localhost")
     assert runtime_context is not None
 
-    with tool_runtime_context(runtime_context), tool_execution_identity(execution_identity):
+    with tool_runtime_context(runtime_context):
         result = await bridge("read_file", next_func, {"path": "notes.txt"})
 
     assert result == {"echo": "notes.txt"}
@@ -1220,7 +1207,7 @@ async def test_tool_hook_context_room_state_helpers_use_runtime_client(tmp_path:
     runtime_context.client.room_get_state_event.return_value = SimpleNamespace(content={"name": "Lobby"})
     runtime_context.client.room_put_state.return_value = object()
 
-    with tool_runtime_context(runtime_context), tool_execution_identity(_execution_identity()):
+    with tool_runtime_context(runtime_context):
         result = await bridge("read_file", next_func, {"path": "notes.txt"})
 
     assert result == {"echo": "notes.txt"}
@@ -1278,10 +1265,6 @@ async def test_agent_bot_tool_runtime_context_room_state_helpers_fallback_to_rou
 
     registry = HookRegistry.from_plugins([_plugin("tool-policy", [before])])
     target = MessageTarget.resolve("!room:localhost", "$thread", None)
-    execution_identity = bot._tool_runtime_support.build_execution_identity(
-        target=target,
-        user_id="@user:localhost",
-    )
     bridge = tool_policy(registry)
 
     async def next_func(**kwargs: object) -> dict[str, object]:
@@ -1291,7 +1274,7 @@ async def test_agent_bot_tool_runtime_context_room_state_helpers_fallback_to_rou
     runtime_context = bot._tool_runtime_support.build_context(target, user_id="@user:localhost")
     assert runtime_context is not None
 
-    with tool_runtime_context(runtime_context), tool_execution_identity(execution_identity):
+    with tool_runtime_context(runtime_context):
         result = await bridge("read_file", next_func, {"path": "notes.txt"})
 
     assert result == {"echo": "notes.txt"}
@@ -1382,7 +1365,6 @@ async def test_a_sync_tool_call_keeps_its_hooks_on_the_loop_and_its_body_off_it(
             tool_runtime_context(
                 _tool_runtime_context(tmp_path, hook_message_sender=hook_message_sender, hook_registry=registry),
             ),
-            tool_execution_identity(_execution_identity()),
         ):
             outcome = await _run_echo_through_middleware(DemoToolkit(), registry)
     finally:
@@ -1444,7 +1426,6 @@ async def test_a_call_whose_grant_is_revoked_while_its_before_hook_runs_never_en
     try:
         with (
             tool_runtime_context(context),
-            tool_execution_identity(_execution_identity()),
             authorized_tool_call(_execution_identity(), call),
             pytest.raises(JobAccessError),
         ):
@@ -1479,7 +1460,6 @@ async def test_a_sync_tool_call_cancelled_during_its_before_hook_never_starts_it
 
     with (
         tool_runtime_context(_tool_runtime_context(tmp_path, hook_registry=registry)),
-        tool_execution_identity(_execution_identity()),
     ):
         execution = asyncio.create_task(_run_echo_through_middleware(DemoToolkit(), registry))
         await before_started.wait()
@@ -1609,7 +1589,6 @@ async def test_tool_hook_bridge_declines_and_skips_real_tool(tmp_path: Path) -> 
     next_func = AsyncMock(return_value="should not run")
     with (
         tool_runtime_context(_tool_runtime_context(tmp_path, hook_registry=registry)),
-        tool_execution_identity(_execution_identity()),
     ):
         result = await bridge("read_file", next_func, {"path": "secret.txt"})
 
@@ -1649,7 +1628,6 @@ async def test_a_denied_background_script_call_reaches_the_after_call_hooks_as_a
     next_func = AsyncMock(return_value="should not run")
     with (
         tool_runtime_context(_tool_runtime_context(tmp_path, hook_registry=registry)),
-        tool_execution_identity(_execution_identity()),
     ):
         result = await bridge("read_file", next_func, {"path": "notes.txt"})
 
@@ -1719,7 +1697,6 @@ async def test_tool_hook_bridge_reraises_tool_errors_after_after_call(tmp_path: 
 
     with (
         tool_runtime_context(_tool_runtime_context(tmp_path, hook_registry=registry)),
-        tool_execution_identity(_execution_identity()),
         pytest.raises(ValueError, match="boom"),
     ):
         await bridge("explode", explode, {})
@@ -1751,7 +1728,6 @@ async def test_tool_after_call_hooks_cannot_mutate_reraised_non_deepcopyable_err
 
     with (
         tool_runtime_context(_tool_runtime_context(tmp_path, hook_registry=registry)),
-        tool_execution_identity(_execution_identity()),
         pytest.raises(NonDeepcopyableToolError, match="original boom") as exc_info,
     ):
         await bridge("explode", explode, {})
@@ -1843,7 +1819,7 @@ async def test_agent_bot_tool_runtime_context_routes_custom_events_from_tool_hoo
         )
         echo = build.spec.functions["echo"]
 
-        with tool_runtime_context(tool_context), tool_execution_identity(execution_identity):
+        with tool_runtime_context(tool_context):
             result = await execute_tool_call(
                 echo,
                 {"text": "hi"},
@@ -2015,7 +1991,6 @@ async def test_tool_hook_bridge_fails_open_when_before_hook_raises(tmp_path: Pat
     next_func = AsyncMock(return_value="ok")
     with (
         tool_runtime_context(_tool_runtime_context(tmp_path, hook_registry=registry)),
-        tool_execution_identity(_execution_identity()),
     ):
         result = await bridge("read_file", next_func, {"path": "notes.txt"})
 

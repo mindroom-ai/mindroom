@@ -6,7 +6,6 @@ Each turn runs independently and returns its response as the tool result.
 
 from __future__ import annotations
 
-from dataclasses import replace
 from typing import TYPE_CHECKING
 
 from agno.tools import Toolkit
@@ -31,10 +30,7 @@ from mindroom.delegation.state import RUN_SUBAGENT
 from mindroom.tool_jobs.runtime import get_background_runtime
 from mindroom.tool_jobs.settings import background_tool_jobs_enabled, toolkit_is_background_excluded
 from mindroom.tool_system.invocation import current_tool_call
-from mindroom.tool_system.runtime_context import current_budget_monitor, get_tool_runtime_context
-from mindroom.tool_system.worker_routing import (
-    build_tool_execution_identity,
-)
+from mindroom.tool_system.runtime_context import current_budget_monitor, current_execution_identity
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -259,28 +255,12 @@ class DelegateTools(Toolkit):
         )
 
     def _caller_identity(self) -> ToolExecutionIdentity:
-        """Resolve one concrete caller identity for execution, ownership, and audit."""
-        context = get_tool_runtime_context()
-        if self._execution_identity is not None:
-            return replace(
-                self._execution_identity,
-                agent_name=self._agent_name,
-                session_id=context.session_id if context is not None else self._execution_identity.session_id,
-            )
-        if context is None:
+        """Return who delegates: the running call's identity, for execution, ownership, and audit."""
+        identity = current_execution_identity()
+        if identity is None:
             msg = "Delegation requires a caller execution identity"
             raise RuntimeError(msg)
-        return build_tool_execution_identity(
-            channel="matrix",
-            agent_name=self._agent_name,
-            transport_agent_name=context.transport_agent_name,
-            runtime_paths=self._runtime_paths,
-            requester_id=context.requester_id,
-            room_id=context.room_id,
-            thread_id=context.thread_id,
-            resolved_thread_id=context.resolved_thread_id,
-            session_id=context.session_id,
-        )
+        return identity
 
     async def continue_subagent(self, subagent_id: str, message: str) -> str:
         """Send a follow-up to an existing subagent and wait for its answer.
