@@ -190,7 +190,6 @@ def discover_self_usage_sources(
             scope=scope,
             agent_name=agent_name,
             config=config,
-            requester_isolated=resolved.execution.is_private,
             owner_id=execution_identity.requester_id if resolved.execution.is_private else None,
         ),
     )
@@ -258,7 +257,6 @@ def discover_admin_usage_sources(
                 scope="system",
                 agent_name=None,
                 config=config,
-                requester_isolated=False,
             ),
         )
     return tuple(sorted(sources, key=lambda item: item.path_label))
@@ -288,7 +286,6 @@ def _shared_agent_sources(
                 scope="shared_agent",
                 agent_name=agent_name,
                 config=config,
-                requester_isolated=False,
             ),
         )
     return sources
@@ -337,7 +334,6 @@ def _private_agent_sources(
                     scope="private_agent",
                     agent_name=agent_name,
                     config=config,
-                    requester_isolated=True,
                     owner_id=owner.requester_id if owner is not None else None,
                 ),
             )
@@ -370,7 +366,6 @@ def _team_sources(
                 scope="team",
                 agent_name=None,
                 config=config,
-                requester_isolated=False,
             ),
         )
     return sources
@@ -415,7 +410,6 @@ def _source(
     scope: _UsageStorageScope,
     agent_name: str | None,
     config: Config,
-    requester_isolated: bool,
     owner_id: str | None = None,
 ) -> UsageStorageSource:
     return UsageStorageSource(
@@ -424,7 +418,7 @@ def _source(
         scope=scope,
         source_agent_id=agent_name,
         allowed_agent_ids=frozenset(config.agents),
-        requester_isolated=requester_isolated,
+        requester_isolated=scope == "private_agent",
         owner_id=owner_id,
     )
 
