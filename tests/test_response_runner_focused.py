@@ -2078,21 +2078,6 @@ async def test_recovery_fails_an_approval_whose_resume_already_failed(tmp_path: 
     release_to_replay.assert_not_awaited()
 
 
-def _visible_event_response(*, sender: str, body: str) -> nio.RoomGetEventResponse:
-    """Return one complete visible Matrix event response."""
-    response = nio.RoomGetEventResponse.from_dict(
-        {
-            "event_id": "$waiting",
-            "sender": sender,
-            "origin_server_ts": 1_000,
-            "type": "m.room.message",
-            "content": {"msgtype": "m.text", "body": body},
-        },
-    )
-    assert isinstance(response, nio.RoomGetEventResponse)
-    return response
-
-
 def _encrypted_event(*, sender: str, event_id: str = "$edit") -> nio.MegolmEvent:
     """Return one encrypted Matrix event."""
     event = nio.MegolmEvent.from_dict(
@@ -2112,40 +2097,6 @@ def _encrypted_event(*, sender: str, event_id: str = "$edit") -> nio.MegolmEvent
     )
     assert isinstance(event, nio.MegolmEvent)
     return event
-
-
-def _decrypted_edit(*, sender: str, target_event_id: str = "$waiting") -> nio.RoomMessage:
-    """Return the visible edit corresponding to `_encrypted_event`."""
-    event = nio.Event.parse_event(
-        {
-            "event_id": "$edit",
-            "sender": sender,
-            "origin_server_ts": 2_000,
-            "type": "m.room.message",
-            "content": {
-                "msgtype": "m.text",
-                "body": "latest partial",
-                "m.new_content": {"msgtype": "m.text", "body": "latest partial"},
-                "m.relates_to": {"rel_type": "m.replace", "event_id": target_event_id},
-            },
-        },
-    )
-    assert isinstance(event, nio.RoomMessage)
-    return event
-
-
-def _sidecar_preview_content() -> dict[str, Any]:
-    """Return one unresolved v2 long-text preview."""
-    return {
-        "msgtype": "m.file",
-        "body": "Preview partial...",
-        "info": {"mimetype": "application/json"},
-        "io.mindroom.long_text": {
-            "version": 2,
-            "encoding": "matrix_event_content_json",
-        },
-        "url": "mxc://server/recovery-sidecar",
-    }
 
 
 @pytest.mark.asyncio
@@ -8182,8 +8133,7 @@ async def test_claimed_cli_recovery_owns_chained_approval_scope(tmp_path: Path, 
         decisions.append(decision)
 
     async def recover(_self, current, *, tool_context, **kwargs):  # noqa: ANN001, ANN003, ANN202, ARG001
-        context = tool_context
-        assert context.cli_approval_handler is not None
+        assert tool_context.cli_approval_handler is not None
         for index in range(2):
             tool = ToolExecution(
                 tool_call_id=f"next-{index}",
@@ -8205,11 +8155,11 @@ async def test_claimed_cli_recovery_owns_chained_approval_scope(tmp_path: Path, 
                 async with response_cli_lifetime() as lifetime:
                     lifetime.grant_expires_at_ns = 1
                     try:
-                        await context.cli_approval_handler(paused)
+                        await tool_context.cli_approval_handler(paused)
                     except ResponsePausedForApproval as error:
                         return error.paused
             else:
-                resolved = await context.cli_approval_handler(paused)
+                resolved = await tool_context.cli_approval_handler(paused)
                 assert resolved[0].confirmation is True
         return CompletedApprovalRun(response_text="finished both approvals", metadata_content={})
 

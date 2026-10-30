@@ -1776,9 +1776,6 @@ def test_revoked_github_token_requires_reconnect_when_upstream_logging_is_disabl
 
 
 def test_wrapper_preserves_all_registered_github_function_names(tmp_path: Path) -> None:
-    from mindroom import tools as _mindroom_tools  # noqa: F401, PLC0415
-    from mindroom.tool_system.registry import builtin_tool_registry  # noqa: PLC0415
-
     runtime_paths = _runtime_paths(tmp_path)
     manager = _save_client_config(runtime_paths)
     tool = _build_tool(

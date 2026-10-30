@@ -178,7 +178,7 @@ def test_check_plugin_accepts_skill_only_plugin_and_keeps_builtin_tools(tmp_path
     assert result.tool_names == ()
     assert result.hook_names == ()
     assert result.skill_directories == ("skills",)
-    assert builtin_tool_registry().factory("calculator") is not None
+    assert "calculator" in builtin_tool_registry()
 
 
 def _tool_plugin(root: Path, factory: str) -> Path:

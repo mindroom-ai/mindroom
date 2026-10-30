@@ -133,10 +133,6 @@ def _call(skills: SkillsToolkit, function_name: str, *arguments: str) -> dict[st
     return json.loads(skills.functions[function_name](*arguments))
 
 
-def _get_skill_script(skills: SkillsToolkit, skill_name: str, script_path: str) -> dict[str, object]:
-    return _call(skills, "get_skill_script", skill_name, script_path)
-
-
 def test_bundled_mindroom_docs_skill_is_discoverable(monkeypatch: pytest.MonkeyPatch) -> None:
     """Ensure the bundled mindroom-docs skill is discoverable."""
     bundled_root = skills_module._get_bundled_skills_dir()
@@ -521,7 +517,7 @@ def test_symlinked_workspace_skill_is_never_loaded(tmp_path: Path) -> None:
 
     assert _skill_names(skills) == ["own"]
     assert skills is not None
-    assert "error" in _get_skill_script(skills, "linked", "hello.sh")
+    assert "error" in _call(skills, "get_skill_script", "linked", "hello.sh")
 
 
 @pytest.mark.parametrize("layout", ["linked_skills_dir", "linked_skill_file", "fifo_skill_file", "huge_skill_file"])

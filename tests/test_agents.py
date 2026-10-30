@@ -102,7 +102,7 @@ from mindroom.tool_system.worker_routing import (
 )
 from mindroom.workspaces import _copy_workspace_template, validate_workspace_template_dir
 from tests.agent_tool_helpers import toolkit_offers
-from tests.conftest import publish_hook_plugin, register_test_tool
+from tests.conftest import publish_hook_plugin, register_test_tool, runtime_paths_for
 from tests.identity_helpers import persist_entity_accounts
 from tests.tool_approval_helpers import gated_functions
 from tests.turn_model_helpers import turn_model
@@ -199,8 +199,6 @@ def _toolkit_named(name: str, *_args: object, **_kwargs: object) -> Toolkit:
 
 def _create_agent_for_test(agent_name: str, config: Config, **kwargs: object) -> AgentBuild:
     """Create an agent with the test config's explicit runtime context."""
-    from tests.conftest import runtime_paths_for  # noqa: PLC0415
-
     runtime_paths = runtime_paths_for(config)
     execution_identity = cast("ToolExecutionIdentity | None", kwargs.pop("execution_identity", None))
     kwargs.setdefault("supports_native_tool_approval", True)
@@ -990,8 +988,6 @@ def test_create_agent_builds_every_toolkit_from_the_caller_s_plugin_view(
     mock_get_tool_by_name: MagicMock,
 ) -> None:
     """Agent construction builds each toolkit from the one plugin view its caller captured."""
-    from tests.conftest import runtime_paths_for  # noqa: PLC0415
-
     mock_get_tool_by_name.return_value = MagicMock()
     config = _test_config()
     config.agents["general"].tools = ["shell", "coding", "duckduckgo", "website"]
@@ -1196,8 +1192,6 @@ def test_create_agent_expands_openclaw_compat_for_worker_tool_overrides(
     mock_get_tool_by_name: MagicMock,
 ) -> None:
     """Worker override list should receive expanded tool names including openclaw_compat."""
-    from tests.conftest import runtime_paths_for  # noqa: PLC0415
-
     mock_get_tool_by_name.return_value = MagicMock()
     config = _test_config()
     config.agents["summary"].tools = ["openclaw_compat"]
@@ -2583,8 +2577,6 @@ def test_get_agent_summary() -> None:
 
 def test_get_agent_unknown() -> None:
     """Tests that an unknown agent raises a ValueError."""
-    from tests.conftest import runtime_paths_for  # noqa: PLC0415
-
     config = _test_config()
     # The turn model names an explicit model, so the build itself is what rejects the unknown agent.
     model = turn_model(config, runtime_paths_for(config), "unknown", "default")
@@ -5426,8 +5418,6 @@ def test_a_team_member_build_opens_no_conversation_database(tmp_path: Path) -> N
 
 def test_team_member_matches_solo_agent_construction() -> None:
     """A team-materialized member must equal the same agent built solo, modulo explicit deltas."""
-    from tests.conftest import runtime_paths_for  # noqa: PLC0415
-
     config = _test_config()
     runtime_paths = runtime_paths_for(config)
 

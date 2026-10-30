@@ -24,7 +24,7 @@ from mindroom.config.access import ResponderAccessConfig
 from mindroom.config.agent import AgentConfig, TeamConfig
 from mindroom.config.main import Config
 from mindroom.config.models import BackgroundToolJobsConfig
-from mindroom.delegation.background import delegation_child, start_delegation
+from mindroom.delegation.background import start_delegation
 from mindroom.delegation.execution import _drive_delegations
 from mindroom.delegation.state import DelegationChild
 from mindroom.event_journal import (
@@ -703,24 +703,6 @@ def team_coordinator(tmp_path: Path, config: Config) -> ToolJobRuntimeCoordinato
         agent_reply_memberships=AgentReplyMembershipIndex(),
         journal_provider=partial(tool_job_journal, paths.storage_root),
     )
-
-
-async def finish_delegation_job(coordinator: ToolJobRuntimeCoordinator) -> BackgroundJob:
-    """Run `completed_delegation_job` to a saved outcome whose claim is released."""
-    fixture = completed_delegation_job()
-
-    async def operation() -> BackgroundOutcome:
-        return BackgroundOutcome("completed", "Saved answer")
-
-    job = await start_delegation_job(
-        coordinator.runtime,
-        delegation_child(fixture),
-        owner=fixture.owner,
-        operation=operation,
-    )
-    result = await coordinator.runtime.wait(job.job_id, owner=job.owner, depth=0)
-    await coordinator.runtime.release_wait(job.job_id, result.claim)
-    return result.job
 
 
 async def awaiting_approval(runtime: ToolJobRuntime, job_id: str) -> BackgroundOutcome:

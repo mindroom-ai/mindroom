@@ -12,7 +12,7 @@ from contextlib import nullcontext
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from types import SimpleNamespace, TracebackType
+from types import SimpleNamespace
 from typing import Annotated, Any, NoReturn, cast
 from unittest.mock import AsyncMock, MagicMock, patch
 from urllib.parse import parse_qs, urlparse
@@ -154,16 +154,6 @@ def _authored_config_payload(agent_name: str) -> dict[str, Any]:
     }
 
 
-def _validated_authored_payload(
-    runtime_paths: constants.RuntimePaths,
-    agent_name: str,
-) -> dict[str, Any]:
-    return Config.validate_with_runtime(
-        _authored_config_payload(agent_name),
-        runtime_paths,
-    ).authored_model_dump()
-
-
 def _publish_committed_runtime_config(
     api_app: FastAPI,
     runtime_paths: constants.RuntimePaths,
@@ -243,26 +233,6 @@ def test_config_lifecycle_published_snapshot_owns_optional_runtime_fields(tmp_pa
     assert cleared.config_load_result is None
     assert cleared.source_fingerprint is None
     assert cleared.auth_state is None
-
-
-class _ContextSwapLock:
-    def __init__(self, on_enter: Callable[[], None] | None = None) -> None:
-        self.on_enter = on_enter
-
-    def __enter__(self) -> object:
-        if self.on_enter is not None:
-            on_enter = self.on_enter
-            self.on_enter = None
-            on_enter()
-        return self
-
-    def __exit__(
-        self,
-        exc_type: type[BaseException] | None,
-        exc: BaseException | None,
-        traceback: TracebackType | None,
-    ) -> bool | None:
-        return None
 
 
 def _supabase_settings(url: str | None, anon_key: str | None) -> auth._ApiAuthSettings:

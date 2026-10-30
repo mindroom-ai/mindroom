@@ -233,16 +233,6 @@ def completed_outcome(lifecycle: RecordingCompactionLifecycle) -> CompactionOutc
     return outcome
 
 
-@dataclass
-class FailingStartCompactionLifecycle(RecordingCompactionLifecycle):
-    """Lifecycle test double whose initial notice delivery fails."""
-
-    async def start(self, event: CompactionLifecycleStart) -> str | None:
-        self.events.append(event)
-        message = "matrix unavailable"
-        raise RuntimeError(message)
-
-
 def _runtime_paths(tmp_path: Path) -> RuntimePaths:
     return resolve_runtime_paths(
         config_path=tmp_path / "config.yaml",

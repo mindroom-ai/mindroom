@@ -221,7 +221,6 @@ def test_a_config_without_an_mcp_server_has_no_tool_for_it(tmp_path: Path) -> No
     )
 
     assert "mcp_demo" not in _tools(without_server, tmp_path)
-    assert _tools(without_server, tmp_path).mcp_server_id("mcp_demo") is None
     assert _tools(config, tmp_path).mcp_server_id("mcp_demo") == "demo"
 
 

@@ -85,7 +85,6 @@ if TYPE_CHECKING:
 _MessageHandler = Callable[[object], Awaitable[None]]
 ACCESS_0 = "access-refresh-0"
 ACCESS_1 = "access-refresh-1"
-ACCESS_2 = "access-refresh-2"
 CHAIN_0 = "refresh-0"
 CHAIN_1 = "refresh-1"
 CHAIN_2 = "refresh-2"
@@ -125,7 +124,6 @@ BOB_ACCESS_1 = "access-bob-refresh-1"
 BOB_CHAIN_0 = "bob-refresh-0"
 INVALID_GRANT = "invalid_grant"
 INVALID_ROTATION = "invalid_refresh_token"
-TEMPORARILY_UNAVAILABLE = "temporarily_unavailable"
 
 
 class _ConfigStub:

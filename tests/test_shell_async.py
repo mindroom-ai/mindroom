@@ -1,4 +1,4 @@
-"""Tests for async shell tool with timeout-to-handle support."""
+"""Tests for async shell execution and timeout termination."""
 
 from __future__ import annotations
 

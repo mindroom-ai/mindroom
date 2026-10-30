@@ -105,10 +105,8 @@ from mindroom.event_journal import (
     EventKind,
     FinalAnswerEnqueue,
     InboundEvent,
-    JournalEvent,
     MatrixDelivery,
     MatrixDeliveryView,
-    PendingTurnView,
     PermanentDeliveryFailure,
     PrincipalStore,
     ProjectedEvent,
@@ -2177,34 +2175,6 @@ async def ignore_delivered_projection(
 
 
 @dataclass
-class FakePendingTurnStore:
-    """A journal holding no unfinished work, for tests that are not about the replay guard.
-
-    The empty answer is the one that changes nothing: the degraded replay
-    guard acts only on positive proof, so a store with nothing pending never
-    suppresses a turn. Tests that are about the guard admit into a real journal
-    instead, because the filtering they exercise happens in SQL.
-    """
-
-    async def pending_thread_events_after(
-        self,
-        *,
-        room_id: str,  # noqa: ARG002 - part of the view's shape
-        thread_id: str,  # noqa: ARG002 - part of the view's shape
-        after_origin_server_ts: int,  # noqa: ARG002 - part of the view's shape
-        excluding_event_id: str,  # noqa: ARG002 - part of the view's shape
-        limit: int = 256,  # noqa: ARG002 - part of the view's shape
-    ) -> tuple[JournalEvent, ...]:
-        """Return no unsettled events in this thread."""
-        return ()
-
-
-def make_pending_turn_view() -> PendingTurnView:
-    """Return a journal view that reports no unfinished work in any conversation."""
-    return cast("PendingTurnView", FakePendingTurnStore())
-
-
-@dataclass
 class FakeRelationStore:
     """The journal's answer about which events it admitted, and their threads."""
 
@@ -2870,7 +2840,11 @@ def _restore_published_plugins() -> Iterator[None]:
     published = plugins_module._PUBLISHED
     module_cache = dict(plugin_imports._MODULE_IMPORT_CACHE)
     manifest_cache = dict(plugin_imports._PLUGIN_CACHE)
-    modules = {name: module for name, module in sys.modules.items() if name.startswith("mindroom_plugin_")}
+    modules = {
+        name: module
+        for name, module in sys.modules.items()
+        if name.startswith(tool_registry_module.PLUGIN_MODULE_PREFIX)
+    }
     yield
     plugins_module._PUBLISHED = published
     plugin_imports._MODULE_IMPORT_CACHE.clear()
@@ -2878,7 +2852,15 @@ def _restore_published_plugins() -> Iterator[None]:
     plugin_imports._PLUGIN_CACHE.clear()
     plugin_imports._PLUGIN_CACHE.update(manifest_cache)
     for name in [
-        name for name in sys.modules if name.startswith(("mindroom_plugin_", "mindroom_candidate_", _TEST_PROBE_PREFIX))
+        name
+        for name in sys.modules
+        if name.startswith(
+            (
+                tool_registry_module.PLUGIN_MODULE_PREFIX,
+                tool_registry_module.CANDIDATE_PLUGIN_MODULE_PREFIX,
+                _TEST_PROBE_PREFIX,
+            ),
+        )
     ]:
         if name not in modules:
             del sys.modules[name]

@@ -131,11 +131,6 @@ def _fake_local_worker_venv_create(venv_dir: Path) -> None:
 
 
 @pytest.fixture(autouse=True)
-def _load_tools() -> None:
-    builtin_tool_registry()
-
-
-@pytest.fixture(autouse=True)
 def _reset_worker_manager(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     monkeypatch.setattr(local_workers_module, "_local_worker_manager", None)
     monkeypatch.setattr(local_workers_module, "_local_worker_manager_config", None)
@@ -254,16 +249,6 @@ def _initialize_runner_app_from_startup_runtime() -> tuple[RuntimePaths, Config]
         runner_token=SANDBOX_TOKEN,
     )
     return runtime_paths, config
-
-
-def _initialize_runner_app_from_env() -> RuntimePaths:
-    runtime_paths = resolve_primary_runtime_paths(process_env=dict(os.environ))
-    sandbox_runner_module.initialize_sandbox_runner_app(
-        sandbox_runner_app,
-        runtime_paths,
-        config=sandbox_runner_module._runtime_config_or_empty(runtime_paths),
-    )
-    return runtime_paths
 
 
 def _lifespan_app_for_dedicated_worker(

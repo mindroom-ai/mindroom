@@ -20,7 +20,6 @@ from mindroom.tool_jobs.resources import execution_resources
 from mindroom.tool_jobs.runtime import ToolJobRuntime, register_background_runtime
 from mindroom.tool_system.agno_toolkits import toolkit_function_names
 from mindroom.tool_system.metadata import get_tool_by_name
-from mindroom.tool_system.plugins import config_plugins
 from mindroom.tool_system.registry import builtin_tool_registry
 from mindroom.tool_system.runtime_context import (
     get_tool_runtime_context,
@@ -257,7 +256,7 @@ async def test_registered_plugin_exclusion_is_pinned_for_every_function(  # noqa
     instance = pin_background_tool_jobs(config, paths)
     register_background_runtime(paths, runtime)
     excluded = excluded_name == "native_plugin"
-    publish_test_plugins(config, paths)
+    plugins = publish_test_plugins(config, paths)
     try:
         with tool_runtime_context(context):
             toolkit = get_tool_by_name(
@@ -265,7 +264,7 @@ async def test_registered_plugin_exclusion_is_pinned_for_every_function(  # noqa
                 paths,
                 runtime_config=config,
                 worker_target=None,
-                tools=config_plugins(config, paths).tools,
+                tools=plugins.tools,
             )
             actor = job_actor(*toolkit_job_tools(toolkit, authored_name="native_plugin").values())
             async with execution_resources():

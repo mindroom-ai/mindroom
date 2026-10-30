@@ -271,12 +271,12 @@ class DelegationFuzzRunner:
         await self._end_tasks()
         await self.runtime.close_journal()
         await self.approvals.journal.close()
-        restore_builtin_tools(self._registry)
+        restore_builtin_tools(self._builtin_tools)
 
     def _register_notes(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        """Register the child's ``notes`` toolkit for this example; ``close`` restores the registries."""
+        """Register the child's ``notes`` toolkit for this example; ``close`` restores the built-in tools."""
         monkeypatch.setattr(_NotesTools, "runner", self)
-        self._registry = snapshot_builtin_tools()
+        self._builtin_tools = snapshot_builtin_tools()
         register_tool_with_metadata(
             name="notes",
             file_access=ToolFileAccess.NONE,
