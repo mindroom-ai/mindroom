@@ -326,9 +326,7 @@ class HookContext:
         requester_id = _requester_id_for_hook_send(self, trigger_dispatch=trigger_dispatch)
         if requester_id:
             resolved_extra_content.setdefault(ORIGINAL_SENDER_KEY, requester_id)
-        message_received_depth = _message_received_depth_for_hook_send(self)
-        if message_received_depth > 0:
-            resolved_extra_content[HOOK_MESSAGE_RECEIVED_DEPTH_KEY] = message_received_depth
+        resolved_extra_content[HOOK_MESSAGE_RECEIVED_DEPTH_KEY] = _message_received_depth_for_hook_send(self)
         return await self.message_sender(
             room_id,
             text,
