@@ -526,16 +526,16 @@ def _run_extra_host(args: argparse.Namespace) -> int:
         results: list[ExtraHostResult] = []
         if args.workers > 1 and len(selected_tools) > 1:
             with ThreadPoolExecutor(max_workers=args.workers) as executor:
-                futures = {
+                futures = [
                     executor.submit(
                         _run_extra_host_for_tool,
                         tool_name=tool_name,
                         wheel_path=wheel_path,
                         python=args.python,
                         keep_env=args.keep_env,
-                    ): tool_name
+                    )
                     for tool_name in selected_tools
-                }
+                ]
                 for index, future in enumerate(as_completed(futures), start=1):
                     result = future.result()
                     results.append(result)

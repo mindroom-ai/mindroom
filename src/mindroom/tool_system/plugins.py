@@ -184,9 +184,6 @@ class ConfigPlugins:
     @cached_property
     def tools(self) -> ToolRegistry:
         """Return the built-ins, the tools of the configured plugins the generation loaded, and the MCP tools."""
-        # Deferred: the MCP registry imports this module through the tool runtime context its toolkit reads.
-        from mindroom.mcp.registry import mcp_tool_entries  # noqa: PLC0415
-
         plugin_tools: dict[str, ToolMetadata] = {}
         unavailable: dict[str, ToolMetadata] = {}
         unresolved: set[str] = set()
@@ -200,7 +197,7 @@ class ConfigPlugins:
                 unresolved.add(unresolved_source)
         registry = compose_tool_registry(
             plugin_tools,
-            mcp_tool_entries(self.mcp_servers),
+            _mcp_tool_entries(self.mcp_servers),
             unavailable=unavailable,
             unresolved_plugin_sources=frozenset(unresolved),
         )
@@ -338,6 +335,38 @@ def _modules_under(prefix: str) -> dict[str, ModuleType]:
     }
 
 
+def _install_canonical_modules(
+    modules: Mapping[str, ModuleType],
+    module_cache: Mapping[str, plugin_imports._ModuleCacheEntry],
+) -> None:
+    """Make ``modules`` the canonical plugin modules in sys.modules, and ``module_cache`` the module cache."""
+    for module_name in _canonical_plugin_modules():
+        sys.modules.pop(module_name, None)
+    sys.modules.update(modules)
+    plugin_imports._MODULE_IMPORT_CACHE.clear()
+    plugin_imports._MODULE_IMPORT_CACHE.update(module_cache)
+
+
+def _installed_generation(
+    plugins: Mapping[Path, _LoadedPlugin],
+    skipped: tuple[SkippedPlugin, ...] = (),
+) -> PluginGeneration:
+    """Return a generation of ``plugins`` holding the canonical plugin modules and module cache installed now."""
+    return PluginGeneration(
+        plugins=MappingProxyType(dict(plugins)),
+        skipped=skipped,
+        modules=MappingProxyType(_canonical_plugin_modules()),
+        module_cache=MappingProxyType(dict(plugin_imports._MODULE_IMPORT_CACHE)),
+    )
+
+
+def _mcp_tool_entries(mcp_servers: Mapping[str, MCPServerConfig]) -> dict[str, ToolMetadata]:
+    # Deferred: the MCP registry imports this module through the tool runtime context its toolkit reads.
+    from mindroom.mcp.registry import mcp_tool_entries  # noqa: PLC0415
+
+    return mcp_tool_entries(mcp_servers)
+
+
 def prepare_plugins(config: Config, runtime_paths: RuntimePaths) -> PluginGeneration:
     """Load ``config``'s plugins fresh into an unpublished generation, leaving the installed modules in place.
 
@@ -362,29 +391,18 @@ def staged_plugins(config: Config, runtime_paths: RuntimePaths) -> Iterator[Plug
         installed_cache = dict(plugin_imports._MODULE_IMPORT_CACHE)
         installed_manifests = dict(plugin_imports._PLUGIN_CACHE)
         try:
-            plugin_imports._MODULE_IMPORT_CACHE.clear()
+            _install_canonical_modules({}, {})
             plugin_imports._PLUGIN_CACHE.clear()
-            for module_name in installed_modules:
-                sys.modules.pop(module_name, None)
             try:
                 plugins, skipped = _load_plugins(config, runtime_paths, previous=None)
             except BaseException:
                 _cancel_module_tasks(_canonical_plugin_modules().values())
                 raise
-            generation = PluginGeneration(
-                plugins=MappingProxyType(plugins),
-                skipped=skipped,
-                modules=MappingProxyType(_canonical_plugin_modules()),
-                module_cache=MappingProxyType(dict(plugin_imports._MODULE_IMPORT_CACHE)),
-            )
+            generation = _installed_generation(plugins, skipped)
             _log_loaded_plugins(generation)
             yield generation
         finally:
-            for module_name in _canonical_plugin_modules():
-                sys.modules.pop(module_name, None)
-            sys.modules.update(installed_modules)
-            plugin_imports._MODULE_IMPORT_CACHE.clear()
-            plugin_imports._MODULE_IMPORT_CACHE.update(installed_cache)
+            _install_canonical_modules(installed_modules, installed_cache)
             plugin_imports._PLUGIN_CACHE.clear()
             plugin_imports._PLUGIN_CACHE.update(installed_manifests)
 
@@ -396,11 +414,7 @@ def publish_plugins(generation: PluginGeneration) -> PluginReloadResult:
         kept = {id(module) for module in generation.modules.values()}
         replaced = [*_canonical_plugin_modules().values(), *_PUBLISHED.modules.values()]
         cancelled_task_count = _cancel_module_tasks(module for module in replaced if id(module) not in kept)
-        for module_name in _canonical_plugin_modules():
-            sys.modules.pop(module_name, None)
-        sys.modules.update(generation.modules)
-        plugin_imports._MODULE_IMPORT_CACHE.clear()
-        plugin_imports._MODULE_IMPORT_CACHE.update(generation.module_cache)
+        _install_canonical_modules(generation.modules, generation.module_cache)
         _clear_configured_plugin_roots_cache()
         _PUBLISHED = generation
     return PluginReloadResult(
@@ -433,15 +447,11 @@ def refresh_plugins(config: Config, runtime_paths: RuntimePaths) -> ConfigPlugin
         failed_roots = {plugin.root for plugin in skipped} & set(published.plugins)
         changed = {root: plugin for root, plugin in plugins.items() if published.plugins.get(root) is not plugin}
         if changed or failed_roots:
-            generation = PluginGeneration(
-                plugins=MappingProxyType(
-                    {
-                        **{root: plugin for root, plugin in published.plugins.items() if root not in failed_roots},
-                        **plugins,
-                    },
-                ),
-                modules=MappingProxyType(_canonical_plugin_modules()),
-                module_cache=MappingProxyType(dict(plugin_imports._MODULE_IMPORT_CACHE)),
+            generation = _installed_generation(
+                {
+                    **{root: plugin for root, plugin in published.plugins.items() if root not in failed_roots},
+                    **plugins,
+                },
             )
             if changed:
                 _log_loaded_plugins(generation)
@@ -460,11 +470,7 @@ def candidate_tool_registry(
     """
     import mindroom.tools  # noqa: F401, PLC0415 - built-ins register before any plugin may collide with them.
 
-    # Deferred: the MCP registry imports this module through the tool runtime context its toolkit reads.
-    from mindroom.mcp.registry import mcp_tool_entries  # noqa: PLC0415
-
     plugin_bases, skipped = plugin_imports._collect_plugin_bases(config.plugins, runtime_paths)
-    plugin_imports._reject_duplicate_plugin_manifest_names(plugin_bases)
     published = _PUBLISHED
     unresolved = {plugin.path for plugin in skipped}
     plugin_tools: dict[str, tuple[str, ToolMetadata]] = {}
@@ -479,8 +485,7 @@ def candidate_tool_registry(
             try:
                 _execute_candidate_plugin(plugin_base, registrations, completed)
             except (Exception, SystemExit) as exc:
-                plugin_imports._log_skipped_plugin_entry(plugin_entry.path, plugin_base.root, exc)
-                skipped.append(SkippedPlugin(plugin_entry.path, _plugin_error(plugin_base, exc), plugin_base.root))
+                skipped.append(_skipped_plugin(plugin_entry, plugin_base, exc))
                 if plugin_base.tools_module_path is not None and "tools" not in completed:
                     unresolved.add(plugin_base.name)
                 unavailable.update(_declared_tools(plugin_base))
@@ -490,7 +495,7 @@ def candidate_tool_registry(
         _add_plugin_tools(plugin_tools, plugin_base.name, tools)
     registry = compose_tool_registry(
         {name: metadata for name, (_, metadata) in plugin_tools.items()},
-        mcp_tool_entries(config.mcp_servers),
+        _mcp_tool_entries(config.mcp_servers),
         unavailable=unavailable,
         unresolved_plugin_sources=frozenset(unresolved),
     )
@@ -554,11 +559,17 @@ def _module_within(module: ModuleType, root: Path) -> bool:
     return isinstance(module_file, str) and Path(module_file).resolve().is_relative_to(root)
 
 
-def _plugin_error(plugin: plugin_imports._PluginBase, exc: BaseException) -> Exception:
+def _skipped_plugin(
+    entry: PluginEntryConfig,
+    plugin: plugin_imports._PluginBase,
+    exc: BaseException,
+) -> SkippedPlugin:
+    """Log one plugin that failed to load and return the record of its skip."""
+    plugin_imports._log_skipped_plugin_entry(entry.path, plugin.root, exc)
     if isinstance(exc, Exception):
-        return exc
+        return SkippedPlugin(entry.path, exc, plugin.root)
     msg = f"Plugin materialization failed for {plugin.root}: {exc}"
-    return plugin_imports.PluginValidationError(msg)
+    return SkippedPlugin(entry.path, plugin_imports.PluginValidationError(msg), plugin.root)
 
 
 def _add_plugin_tools(
@@ -593,7 +604,6 @@ def _load_plugins(
 ) -> tuple[dict[Path, _LoadedPlugin], tuple[SkippedPlugin, ...]]:
     """Load ``config``'s enabled plugins through the canonical module cache, skipping each one that fails."""
     plugin_bases, skipped = plugin_imports._collect_plugin_bases(config.plugins, runtime_paths)
-    plugin_imports._reject_duplicate_plugin_manifest_names(plugin_bases)
     plugins: dict[Path, _LoadedPlugin] = {}
     for plugin_base, plugin_entry in plugin_bases:
         package_name = plugin_imports._plugin_package_name(plugin_base.name, plugin_base.root)
@@ -608,25 +618,19 @@ def _load_plugins(
                 plugin_base,
                 previous.plugins.get(plugin_base.root) if previous is not None else None,
             )
-        except (Exception, SystemExit) as exc:
+        except BaseException as exc:
             _dispose_failed_plugin(package_name, installed_modules, installed_cache)
-            plugin_imports._log_skipped_plugin_entry(plugin_entry.path, plugin_base.root, exc)
-            skipped.append(SkippedPlugin(plugin_entry.path, _plugin_error(plugin_base, exc), plugin_base.root))
+            _raise_if_host_control_exception(exc)
+            skipped.append(_skipped_plugin(plugin_entry, plugin_base, exc))
             continue
-        except BaseException:
-            _dispose_failed_plugin(package_name, installed_modules, installed_cache)
-            raise
         plugins[plugin_base.root] = plugin
     plugin_tools: dict[str, tuple[str, ToolMetadata]] = {}
     for plugin in plugins.values():
         _add_plugin_tools(plugin_tools, plugin.name, plugin.tools)
-    # Deferred: the MCP registry imports this module through the tool runtime context its toolkit reads.
-    from mindroom.mcp.registry import mcp_tool_entries  # noqa: PLC0415
-
     # The config's MCP servers name tools too, so a plugin tool taking one of those names fails the load as a whole.
     compose_tool_registry(
         {name: metadata for name, (_, metadata) in plugin_tools.items()},
-        mcp_tool_entries(config.mcp_servers),
+        _mcp_tool_entries(config.mcp_servers),
     )
     return plugins, tuple(skipped)
 
@@ -833,7 +837,7 @@ def _load_plugin_module(
         msg = f"Failed to load plugin {kind} module: {module_path}"
         logger.error("Failed to load plugin module", path=str(module_path), kind=kind)
         raise plugin_imports.PluginValidationError(msg)
-    module, _, previous_packages = prepared_module
+    module, previous_packages = prepared_module
 
     try:
         # A module may provide several capabilities; whatever it registers belongs to this module.

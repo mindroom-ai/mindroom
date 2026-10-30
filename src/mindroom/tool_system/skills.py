@@ -554,14 +554,14 @@ def agent_workspace_skills_root(workspace_root: Path) -> Path:
     return workspace_root / _WORKSPACE_SKILLS_DIRNAME
 
 
-def list_skill_listings(roots: Sequence[Path], *, plugin_skill_roots: Sequence[Path]) -> list[SkillListing]:
-    """Return the skill listings of ``roots`` with precedence rules applied; ``plugin_skill_roots`` are labeled plugin."""
+def list_skill_listings(plugin_skill_roots: Sequence[Path]) -> list[SkillListing]:
+    """Return the skill listings of the default skill roots with precedence rules applied, the plugins' labeled plugin."""
     bundled_root = _get_bundled_skills_dir().expanduser().resolve()
     user_root = get_user_skills_dir().expanduser().resolve()
     plugin_roots = {root.expanduser().resolve() for root in plugin_skill_roots}
 
     skills_by_name: dict[str, SkillListing] = {}
-    for root in _unique_paths(roots):
+    for root in default_skill_roots(plugin_skill_roots):
         origin = _root_origin(root, bundled_root, user_root, plugin_roots)
         for skill_dir in _iter_skill_dirs(root):
             identity = _listed_skill_identity(skill_dir)
@@ -572,17 +572,12 @@ def list_skill_listings(roots: Sequence[Path], *, plugin_skill_roots: Sequence[P
     return sorted(skills_by_name.values(), key=lambda item: item.name.lower())
 
 
-def resolve_skill_listing(
-    skill_name: str,
-    roots: Sequence[Path],
-    *,
-    plugin_skill_roots: Sequence[Path],
-) -> SkillListing | None:
+def resolve_skill_listing(skill_name: str, plugin_skill_roots: Sequence[Path]) -> SkillListing | None:
     """Resolve a skill listing by name, honoring precedence rules."""
     normalized = skill_name.strip().lower()
     if not normalized:
         return None
-    for listing in list_skill_listings(roots, plugin_skill_roots=plugin_skill_roots):
+    for listing in list_skill_listings(plugin_skill_roots):
         if listing.name.lower() == normalized:
             return listing
     return None

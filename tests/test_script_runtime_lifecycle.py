@@ -2811,7 +2811,7 @@ async def test_cancelled_late_backend_build_cannot_publish_after_final_shutdown(
     tmp_path: Path,
 ) -> None:
     """Final shutdown fences a provider thread even after its asyncio owner is cancelled."""
-    workers_runtime_module._reset_primary_worker_manager()
+    workers_runtime_module.reset_primary_worker_manager()
     runtime_paths = _runtime_paths(tmp_path)
     loop = asyncio.get_running_loop()
     build_started = asyncio.Event()
@@ -2895,7 +2895,7 @@ async def test_cancelled_late_backend_build_cannot_publish_after_final_shutdown(
             await asyncio.gather(pending_acquisition.task, return_exceptions=True)
         if build_started.is_set():
             await manager_shutdown.wait()
-        workers_runtime_module._reset_primary_worker_manager()
+        workers_runtime_module.reset_primary_worker_manager()
 
 
 @pytest.mark.asyncio
@@ -2904,7 +2904,7 @@ async def test_cancelled_published_worker_lease_handoff_releases_after_final_shu
     tmp_path: Path,
 ) -> None:
     """Cancellation after publication cannot strand the executor-owned lease delivery."""
-    workers_runtime_module._reset_primary_worker_manager()
+    workers_runtime_module.reset_primary_worker_manager()
     runtime_paths = _runtime_paths(tmp_path)
     loop = asyncio.get_running_loop()
     lease_published = asyncio.Event()
@@ -2998,7 +2998,7 @@ async def test_cancelled_published_worker_lease_handoff_releases_after_final_shu
             await asyncio.gather(pending_acquisition.task, return_exceptions=True)
         if lease_published.is_set():
             await manager_shutdown.wait()
-        workers_runtime_module._reset_primary_worker_manager()
+        workers_runtime_module.reset_primary_worker_manager()
 
 
 @pytest.mark.asyncio

@@ -32,7 +32,6 @@ from mindroom.tool_system.plugins import config_plugins
 from mindroom.tool_system.skills import (
     SKILL_FILENAME,
     build_skills_toolkit,
-    default_skill_roots,
     list_skill_listings,
     parse_skill_markdown,
 )
@@ -125,11 +124,7 @@ def load_skill_catalog(config: Config, runtime_paths: RuntimePaths, agent_name: 
         for skill in loaded
     }
     reserved = {name.lower() for name in entries} | {
-        listing.name.lower()
-        for listing in list_skill_listings(
-            default_skill_roots(plugin_skill_roots),
-            plugin_skill_roots=plugin_skill_roots,
-        )
+        listing.name.lower() for listing in list_skill_listings(plugin_skill_roots)
     }
     return SkillCatalog(skills, entries, frozenset(reserved))
 

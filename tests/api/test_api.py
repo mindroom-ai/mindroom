@@ -1729,7 +1729,6 @@ async def test_non_oauth_auth_provider_uses_required_credential_fields(tmp_path:
         credentials_manager=credentials_manager,
         worker_target=None,
         allowed_shared_services=None,
-        auth_provider_credential_services={},
         oauth_providers={},
         runtime_paths=runtime_paths,
         tools=builtin_tool_registry(),
@@ -1778,7 +1777,6 @@ def test_effective_allowed_shared_services_uses_credential_policy(
         credentials_manager=get_runtime_credentials_manager(_runtime_paths(tmp_path)),
         worker_target=None,
         allowed_shared_services=frozenset({"weather"}),
-        auth_provider_credential_services={},
         oauth_providers={},
         runtime_paths=_runtime_paths(tmp_path),
         tools=builtin_tool_registry(),
@@ -1794,7 +1792,7 @@ def test_get_tools_marks_shared_only_integrations_unsupported_for_isolating_work
     config = _config_with_worker_scope("user")
     runtime_paths = main._app_runtime_paths(main.app)
 
-    with patch("mindroom.api.tools._read_tools_runtime_config", return_value=(config, runtime_paths)):
+    with patch("mindroom.api.config_lifecycle.read_committed_runtime_config", return_value=(config, runtime_paths)):
         response = test_client.get("/api/tools/?agent_name=general")
 
     assert response.status_code == 200
@@ -1838,7 +1836,7 @@ def test_get_tools_execution_scope_override_marks_backend_tools_unsupported(
     ]
 
     with (
-        patch("mindroom.api.tools._read_tools_runtime_config", return_value=(config, runtime_paths)),
+        patch("mindroom.api.config_lifecycle.read_committed_runtime_config", return_value=(config, runtime_paths)),
         patch("mindroom.api.tools.export_tools_metadata", return_value=tools),
     ):
         response = test_client.get("/api/tools/?agent_name=general&execution_scope=user")
@@ -1880,7 +1878,7 @@ def test_get_tools_explicit_unscoped_override_does_not_fall_back_to_saved_scope(
     ]
 
     with (
-        patch("mindroom.api.tools._read_tools_runtime_config", return_value=(config, runtime_paths)),
+        patch("mindroom.api.config_lifecycle.read_committed_runtime_config", return_value=(config, runtime_paths)),
         patch("mindroom.api.tools.export_tools_metadata", return_value=tools),
     ):
         response = test_client.get("/api/tools/?agent_name=general&execution_scope=unscoped")
@@ -1898,7 +1896,7 @@ def test_get_tools_unknown_agent_previews_draft_scope(test_client: TestClient) -
     config = _config_with_worker_scope("shared")
     runtime_paths = main._app_runtime_paths(main.app)
 
-    with patch("mindroom.api.tools._read_tools_runtime_config", return_value=(config, runtime_paths)):
+    with patch("mindroom.api.config_lifecycle.read_committed_runtime_config", return_value=(config, runtime_paths)):
         response = test_client.get("/api/tools/?agent_name=draft_agent&execution_scope=user")
 
     assert response.status_code == 200
@@ -1936,7 +1934,7 @@ def test_get_tools_requires_agent_reply_permission_for_agent_scoped_status(test_
     )
 
     with (
-        patch("mindroom.api.tools._read_tools_runtime_config", return_value=(config, runtime_paths)),
+        patch("mindroom.api.config_lifecycle.read_committed_runtime_config", return_value=(config, runtime_paths)),
         patch("mindroom.api.tools.export_tools_metadata", return_value=tools),
         patch("mindroom.api.tools.load_scoped_credentials") as mock_load_scoped_credentials,
     ):
@@ -1970,7 +1968,7 @@ def test_get_tools_marks_allowlisted_shared_ui_scoped_tools_available(test_clien
     ]
 
     with (
-        patch("mindroom.api.tools._read_tools_runtime_config", return_value=(config, runtime_paths)),
+        patch("mindroom.api.config_lifecycle.read_committed_runtime_config", return_value=(config, runtime_paths)),
         patch("mindroom.api.tools.export_tools_metadata", return_value=tools),
     ):
         response = test_client.get("/api/tools/?agent_name=general&execution_scope=user")
@@ -2007,7 +2005,7 @@ def test_get_tools_hides_non_allowlisted_shared_scoped_credentials(test_client: 
     ]
 
     with (
-        patch("mindroom.api.tools._read_tools_runtime_config", return_value=(config, runtime_paths)),
+        patch("mindroom.api.config_lifecycle.read_committed_runtime_config", return_value=(config, runtime_paths)),
         patch("mindroom.api.tools.export_tools_metadata", return_value=tools),
     ):
         response = test_client.get("/api/tools/?agent_name=general&execution_scope=user")
@@ -2048,7 +2046,7 @@ def test_get_tools_shared_scope_homeassistant_ignores_worker_allowlist(test_clie
     ]
 
     with (
-        patch("mindroom.api.tools._read_tools_runtime_config", return_value=(config, runtime_paths)),
+        patch("mindroom.api.config_lifecycle.read_committed_runtime_config", return_value=(config, runtime_paths)),
         patch("mindroom.api.tools.export_tools_metadata", return_value=tools),
     ):
         response = test_client.get("/api/tools/?agent_name=general")
@@ -2116,7 +2114,7 @@ def test_get_tools_requires_oauth_token_for_generic_auth_provider(test_client: T
     ]
 
     with (
-        patch("mindroom.api.tools._read_tools_runtime_config", return_value=(config, runtime_paths)),
+        patch("mindroom.api.config_lifecycle.read_committed_runtime_config", return_value=(config, runtime_paths)),
         patch("mindroom.api.tools.export_tools_metadata", return_value=tools),
     ):
         response = test_client.get("/api/tools/?agent_name=general")
@@ -2155,7 +2153,7 @@ def test_get_tools_requires_oauth_token_for_generic_auth_provider(test_client: T
 
     asyncio.run(publish_oauth_credentials())
     with (
-        patch("mindroom.api.tools._read_tools_runtime_config", return_value=(config, runtime_paths)),
+        patch("mindroom.api.config_lifecycle.read_committed_runtime_config", return_value=(config, runtime_paths)),
         patch("mindroom.api.tools.export_tools_metadata", return_value=tools),
     ):
         connected_response = test_client.get("/api/tools/?agent_name=general")
@@ -2226,7 +2224,7 @@ def test_get_tools_non_requester_oauth_keeps_non_authoritative_shared_preview(
     )
 
     with (
-        patch("mindroom.api.tools._read_tools_runtime_config", return_value=(config, runtime_paths)),
+        patch("mindroom.api.config_lifecycle.read_committed_runtime_config", return_value=(config, runtime_paths)),
         patch("mindroom.api.tools.export_tools_metadata", return_value=tools),
     ):
         response = test_client.get("/api/tools/?agent_name=general", headers=headers)
@@ -2265,7 +2263,7 @@ def test_get_tools_marks_google_oauth_tool_available_with_service_account(
     ]
 
     with (
-        patch("mindroom.api.tools._read_tools_runtime_config", return_value=(config, runtime_paths)),
+        patch("mindroom.api.config_lifecycle.read_committed_runtime_config", return_value=(config, runtime_paths)),
         patch("mindroom.api.tools.export_tools_metadata", return_value=tools),
     ):
         response = test_client.get("/api/tools/?agent_name=general")
@@ -2300,7 +2298,7 @@ def test_get_tools_does_not_treat_scoped_credentials_as_dashboard_truth(
     ]
 
     with (
-        patch("mindroom.api.tools._read_tools_runtime_config", return_value=(config, runtime_paths)),
+        patch("mindroom.api.config_lifecycle.read_committed_runtime_config", return_value=(config, runtime_paths)),
         patch("mindroom.api.tools.export_tools_metadata", return_value=tools),
         patch("mindroom.api.tools.load_scoped_credentials") as mock_load_scoped_credentials,
     ):
@@ -2370,7 +2368,7 @@ def test_get_tools_reports_requester_scoped_github_manual_fallback(test_client: 
     )
 
     with (
-        patch("mindroom.api.tools._read_tools_runtime_config", return_value=(config, runtime_paths)),
+        patch("mindroom.api.config_lifecycle.read_committed_runtime_config", return_value=(config, runtime_paths)),
         patch("mindroom.api.tools.export_tools_metadata", side_effect=lambda *_: copy.deepcopy(tools)),
     ):
         alice_response = test_client.get("/api/tools/?agent_name=general", headers=alice_headers)
@@ -2441,7 +2439,7 @@ def test_get_tools_reports_requester_scoped_github_oauth_for_unscoped_agent(test
     ]
 
     with (
-        patch("mindroom.api.tools._read_tools_runtime_config", return_value=(config, runtime_paths)),
+        patch("mindroom.api.config_lifecycle.read_committed_runtime_config", return_value=(config, runtime_paths)),
         patch("mindroom.api.tools.export_tools_metadata", return_value=tools),
     ):
         response = test_client.get(
@@ -2474,7 +2472,7 @@ def test_get_tools_uses_one_runtime_snapshot(
     )
     captured_runtime_paths: list[constants.RuntimePaths] = []
 
-    def _read_tools_runtime_config(_request: object) -> tuple[Config, constants.RuntimePaths]:
+    def _read_committed_runtime_config(_request: object) -> tuple[Config, constants.RuntimePaths]:
         main.initialize_api_app(main.app, second_runtime)
         config_lifecycle.load_config_into_app(second_runtime, main.app)
         return _config_with_worker_scope("shared"), first_runtime
@@ -2497,14 +2495,16 @@ def test_get_tools_uses_one_runtime_snapshot(
             credentials_manager=MagicMock(),
             worker_target=None,
             allowed_shared_services=None,
-            auth_provider_credential_services={},
             oauth_providers={},
             runtime_paths=runtime_paths,
             tools=plugins.tools,
         )
 
     with (
-        patch("mindroom.api.tools._read_tools_runtime_config", side_effect=_read_tools_runtime_config),
+        patch(
+            "mindroom.api.config_lifecycle.read_committed_runtime_config",
+            side_effect=_read_committed_runtime_config,
+        ),
         patch(
             "mindroom.api.tools.config_plugins",
             side_effect=lambda config, runtime_paths: (

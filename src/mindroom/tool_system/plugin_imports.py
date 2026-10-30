@@ -28,7 +28,7 @@ logger = get_logger(__name__)
 _PLUGIN_MANIFEST = "mindroom.plugin.json"
 _REPO_ROOT = Path(__file__).resolve().parents[3]
 _WARNED_PLUGIN_MESSAGES: set[tuple[str, Path]] = set()
-_PreparedPluginModule = tuple[ModuleType, Any, dict[str, ModuleType | None]] | None
+_PreparedPluginModule = tuple[ModuleType, dict[str, ModuleType | None]] | None
 
 
 class PluginValidationError(ValueError):
@@ -102,7 +102,7 @@ def _collect_plugin_bases(
 ) -> tuple[list[tuple[_PluginBase, PluginEntryConfig]], list[SkippedPlugin]]:
     """Resolve the enabled plugin roots and manifests of one config, skipping and logging the entries that fail.
 
-    The skipped entries are the ones whose tool names cannot even be inspected.
+    The skipped entries are the ones whose tool names cannot even be inspected. Two manifests with one name raise.
     """
     plugin_bases: list[tuple[_PluginBase, PluginEntryConfig]] = []
     skipped: list[SkippedPlugin] = []
@@ -120,6 +120,7 @@ def _collect_plugin_bases(
             continue
 
         plugin_bases.append((plugin_base, plugin_entry))
+    _reject_duplicate_plugin_manifest_names(plugin_bases)
     return plugin_bases, skipped
 
 
@@ -438,7 +439,7 @@ def _prepare_module(name: str, root: Path, path: Path, module_name: str, prefix:
         return None
 
     module = sys.modules[module_name] = util.module_from_spec(spec)
-    return module, spec.loader, previous_packages
+    return module, previous_packages
 
 
 def declared_tool_metadata(module_path: Path) -> dict[str, ToolMetadata]:

@@ -137,13 +137,11 @@ def _get_skill_script(skills: SkillsToolkit, skill_name: str, script_path: str) 
     return _call(skills, "get_skill_script", skill_name, script_path)
 
 
-def test_bundled_mindroom_docs_skill_is_discoverable() -> None:
+def test_bundled_mindroom_docs_skill_is_discoverable(monkeypatch: pytest.MonkeyPatch) -> None:
     """Ensure the bundled mindroom-docs skill is discoverable."""
-    listing = skills_module.resolve_skill_listing(
-        "mindroom-docs",
-        [skills_module._get_bundled_skills_dir()],
-        plugin_skill_roots=(),
-    )
+    bundled_root = skills_module._get_bundled_skills_dir()
+    monkeypatch.setattr(skills_module, "default_skill_roots", lambda _plugin_skill_roots: [bundled_root])
+    listing = skills_module.resolve_skill_listing("mindroom-docs", ())
     assert listing is not None
     assert listing.origin == "bundled"
     assert (listing.path.parent / "references" / "reference-index.md").exists()
@@ -579,21 +577,28 @@ def test_workspace_skills_created_after_a_build_load_on_the_next_build(tmp_path:
     assert _skill_names(build()) == ["later"]
 
 
-def test_skill_listings_use_name_fallback_for_missing_description(tmp_path: Path) -> None:
+def test_skill_listings_use_name_fallback_for_missing_description(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """Skills missing description should still appear in listings."""
     skill_dir = tmp_path / "alpha"
     skill_dir.mkdir()
     (skill_dir / "SKILL.md").write_text("---\nname: alpha\n---\n\n# Body\n", encoding="utf-8")
+    monkeypatch.setattr(skills_module, "default_skill_roots", lambda _plugin_skill_roots: [tmp_path])
 
-    listings = skills_module.list_skill_listings([tmp_path], plugin_skill_roots=())
+    listings = skills_module.list_skill_listings(())
 
     assert [(listing.name, listing.description) for listing in listings] == [("alpha", "alpha")]
-    listing = skills_module.resolve_skill_listing("alpha", [tmp_path], plugin_skill_roots=())
+    listing = skills_module.resolve_skill_listing("alpha", ())
     assert listing is not None
     assert listing.description == "alpha"
 
 
-def test_operator_skill_listings_parse_yaml_aliases_like_agent_loading(tmp_path: Path) -> None:
+def test_operator_skill_listings_parse_yaml_aliases_like_agent_loading(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """Operator-root skills that agents load with aliased frontmatter stay listed, unlike workspace skills."""
     skill_dir = tmp_path / "aliased"
     skill_dir.mkdir()
@@ -601,15 +606,17 @@ def test_operator_skill_listings_parse_yaml_aliases_like_agent_loading(tmp_path:
         "---\nname: aliased\ndescription: Aliased skill\nmetadata:\n  defaults: &d {os: [linux]}\n  openclaw: *d\n---\n",
         encoding="utf-8",
     )
+    monkeypatch.setattr(skills_module, "default_skill_roots", lambda _plugin_skill_roots: [tmp_path])
 
-    assert [listing.name for listing in skills_module.list_skill_listings([tmp_path], plugin_skill_roots=())] == [
-        "aliased",
-    ]
-    assert skills_module.resolve_skill_listing("aliased", [tmp_path], plugin_skill_roots=()) is not None
+    assert [listing.name for listing in skills_module.list_skill_listings(())] == ["aliased"]
+    assert skills_module.resolve_skill_listing("aliased", ()) is not None
     assert [skill.name for skill in skills_module._load_root_skills(tmp_path)] == ["aliased"]
 
 
-def test_skill_with_no_frontmatter_uses_name_fallback_across_discovery_paths(tmp_path: Path) -> None:
+def test_skill_with_no_frontmatter_uses_name_fallback_across_discovery_paths(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """Skills without YAML frontmatter should still resolve consistently."""
     skill_dir = tmp_path / "mindroom-dev"
     skill_dir.mkdir()
@@ -626,7 +633,8 @@ def test_skill_with_no_frontmatter_uses_name_fallback_across_discovery_paths(tmp
     skill = _skill(skills, "mindroom-dev")
     assert skill.description == "mindroom-dev"
 
-    listing = skills_module.resolve_skill_listing("mindroom-dev", [tmp_path], plugin_skill_roots=())
+    monkeypatch.setattr(skills_module, "default_skill_roots", lambda _plugin_skill_roots: [tmp_path])
+    listing = skills_module.resolve_skill_listing("mindroom-dev", ())
     assert listing is not None
     assert listing.description == "mindroom-dev"
 

@@ -67,7 +67,6 @@ class _ResolvedToolAvailabilityContext:
     credentials_manager: CredentialsManager
     worker_target: ResolvedWorkerTarget | None
     allowed_shared_services: frozenset[str] | None
-    auth_provider_credential_services: dict[str, str]
     oauth_providers: Mapping[str, OAuthProvider]
     runtime_paths: RuntimePaths
     tools: ToolRegistry
@@ -286,26 +285,17 @@ def _resolve_tool_availability_context(
         and (scope_request.agent_name is not None or execution_scope is not None)
         else None
     )
-    oauth_providers = plugins.oauth_providers
     return _ResolvedToolAvailabilityContext(
         execution_scope=execution_scope,
         status_authoritative=status_authoritative,
         credentials_manager=get_runtime_credentials_manager(runtime_paths),
         worker_target=worker_target,
         allowed_shared_services=(config.get_worker_grantable_credentials() if execution_scope is not None else None),
-        auth_provider_credential_services={
-            provider_id: provider.credential_service for provider_id, provider in oauth_providers.items()
-        },
-        oauth_providers=oauth_providers,
+        oauth_providers=plugins.oauth_providers,
         runtime_paths=runtime_paths,
         tools=plugins.tools,
         oauth_config=config,
     )
-
-
-def _read_tools_runtime_config(request: Request) -> tuple[Config, RuntimePaths]:
-    """Read one coherent config/runtime snapshot for the tools dashboard route."""
-    return config_lifecycle.read_committed_runtime_config(request)
 
 
 async def _load_oauth_provider_credentials(
@@ -394,7 +384,7 @@ async def _update_tools_statuses(
                 tool["manual_auth_configured"] = manual_auth_configured
             environment_auth_configured = _check_environment_oauth_fallback_configured(tool, context.runtime_paths)
             tool["environment_auth_configured"] = environment_auth_configured
-            credential_service = context.auth_provider_credential_services.get(auth_provider, auth_provider)
+            credential_service = provider.credential_service if provider is not None else auth_provider
             provider_creds = (
                 await _load_oauth_provider_credentials(provider, context, oauth_credentials_cache)
                 if provider is not None and (context.status_authoritative or use_request_target)
@@ -438,7 +428,7 @@ async def get_registered_tools(
     This builds tool metadata from the in-memory registry and updates availability
     based on credentials (including plugin-provided tools).
     """
-    config, runtime_paths = _read_tools_runtime_config(request)
+    config, runtime_paths = config_lifecycle.read_committed_runtime_config(request)
     plugins = config_plugins(config, runtime_paths)
     tools = export_tools_metadata(with_catalog_function_names(plugins.tools.listable()))
     execution_scope_override_provided, execution_scope_override = resolve_dashboard_execution_scope_override(request)

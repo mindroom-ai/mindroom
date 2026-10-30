@@ -14,7 +14,6 @@ from mindroom.api import config_lifecycle
 from mindroom.constants import safe_replace
 from mindroom.tool_system.plugins import config_plugins
 from mindroom.tool_system.skills import (
-    default_skill_roots,
     get_user_skills_dir,
     list_skill_listings,
     resolve_skill_listing,
@@ -68,19 +67,13 @@ def _plugin_skill_roots(request: Request) -> tuple[Path, ...]:
 
 
 def _listing(skill_name: str, request: Request) -> SkillListing | None:
-    plugin_skill_roots = _plugin_skill_roots(request)
-    return resolve_skill_listing(
-        skill_name,
-        default_skill_roots(plugin_skill_roots),
-        plugin_skill_roots=plugin_skill_roots,
-    )
+    return resolve_skill_listing(skill_name, _plugin_skill_roots(request))
 
 
 @router.get("")
 async def list_skills(request: Request) -> list[SkillSummary]:
     """List installed skills."""
-    plugin_skill_roots = _plugin_skill_roots(request)
-    listings = list_skill_listings(default_skill_roots(plugin_skill_roots), plugin_skill_roots=plugin_skill_roots)
+    listings = list_skill_listings(_plugin_skill_roots(request))
     return [
         SkillSummary(
             name=listing.name,

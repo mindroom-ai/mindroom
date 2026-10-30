@@ -55,8 +55,6 @@ from mindroom.workers.runtime import bind_worker_launch_config_source, shutdown_
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
 
-    from playwright.async_api import Page
-
     from mindroom.workers.models import WorkerHandle
 
 ASSETS = Path(__file__).resolve().parents[1] / "tests/fixtures/worker_computer"
@@ -548,11 +546,6 @@ def fixture_tab_index(tabs: list[dict[str, Any]]) -> int:
     return next(tab["index"] for tab in tabs if tab["url"].split("?", 1)[0] == "http://127.0.0.1:8767/")
 
 
-async def connect(page: Page, session: dict[str, Any]) -> None:
-    """Wait for a real connected noVNC stream."""
-    await connect_viewer(page, session)
-
-
 async def exercise(fixture: Fixture) -> dict[str, Any]:  # noqa: PLR0915 - sequential acceptance scenario
     """Check gateway auth, shared browser/files, takeover, foreground and persistence."""
     result: dict[str, Any] = {"provider": fixture.args.provider}
@@ -689,7 +682,7 @@ with sync_playwright() as playwright:
                     ),
                 )
                 await page.goto(fixture.origin)
-                await connect(page, session)
+                await connect_viewer(page, session)
                 await page.wait_for_function(framebuffer)
                 await page.evaluate("window.rfb.sendKey(120,'KeyX')")
                 await asyncio.sleep(0.2)
@@ -794,7 +787,7 @@ with sync_playwright() as playwright:
                 (fixture.args.output / "agent-snapshot.json").write_text(json.dumps(snapshot, indent=2) + "\n")
                 result["agent_snapshot_sees_typed_text"] = True
                 result["takeover_and_release"] = True
-                await connect(page, session)
+                await connect_viewer(page, session)
                 await page.wait_for_function(framebuffer)
                 await page.screenshot(path=str(fixture.args.output / "typed-visible.png"))
 
@@ -819,14 +812,14 @@ with sync_playwright() as playwright:
                         targetUrl="http://127.0.0.1:8767/",
                     )
                     assert selected["targetId"] == opened["targetId"]
-                    await connect(page, session)
+                    await connect_viewer(page, session)
                     await page.wait_for_function(framebuffer)
                     await page.screenshot(path=str(fixture.args.output / (action + "-visible.png")))
                     result[action + "_visibly_selected"] = True
 
                 await page.evaluate("window.rfb.disconnect()")
                 await page.wait_for_function("window.probe.disconnected")
-                await connect(page, session)
+                await connect_viewer(page, session)
                 assert (await control("stop"))["state"] == "stopped"
                 await page.wait_for_function("window.probe.disconnected")
                 assert (await client.get(path, headers=headers)).status_code == 401

@@ -29,6 +29,13 @@ def _write_skill(root: Path, name: str = "test-skill", description: str = "Test 
     return skill_file
 
 
+def _use_skill_root(monkeypatch: pytest.MonkeyPatch, root: Path, *, user_dir: Path | None = None) -> None:
+    """Make ``root`` the only skill root, and ``user_dir`` (``root`` by default) the user's skills directory."""
+    user_skills_dir = root if user_dir is None else user_dir
+    monkeypatch.setattr(skills_module, "default_skill_roots", lambda _plugin_skill_roots: [root])
+    monkeypatch.setattr(skills_module, "get_user_skills_dir", lambda: user_skills_dir)
+
+
 def test_list_skills(
     test_client: TestClient,
     tmp_path: Path,
@@ -36,8 +43,7 @@ def test_list_skills(
 ) -> None:
     """List skills with metadata."""
     _write_skill(tmp_path)
-    monkeypatch.setattr("mindroom.api.skills.default_skill_roots", lambda _plugin_skill_roots: [tmp_path])
-    monkeypatch.setattr(skills_module, "get_user_skills_dir", lambda: tmp_path)
+    _use_skill_root(monkeypatch, tmp_path)
 
     response = test_client.get("/api/skills")
     assert response.status_code == 200
@@ -56,8 +62,7 @@ def test_get_skill(
 ) -> None:
     """Fetch skill content."""
     _write_skill(tmp_path)
-    monkeypatch.setattr("mindroom.api.skills.default_skill_roots", lambda _plugin_skill_roots: [tmp_path])
-    monkeypatch.setattr(skills_module, "get_user_skills_dir", lambda: tmp_path)
+    _use_skill_root(monkeypatch, tmp_path)
 
     response = test_client.get("/api/skills/test-skill")
     assert response.status_code == 200
@@ -73,8 +78,7 @@ def test_update_skill(
 ) -> None:
     """Update skill content when editable."""
     skill_file = _write_skill(tmp_path)
-    monkeypatch.setattr("mindroom.api.skills.default_skill_roots", lambda _plugin_skill_roots: [tmp_path])
-    monkeypatch.setattr(skills_module, "get_user_skills_dir", lambda: tmp_path)
+    _use_skill_root(monkeypatch, tmp_path)
 
     updated_content = "---\nname: test-skill\ndescription: Test skill\n---\n\n# Updated"
     response = test_client.put("/api/skills/test-skill", json={"content": updated_content})
@@ -90,8 +94,7 @@ def test_update_skill_forbidden(
 ) -> None:
     """Block updates for read-only skills."""
     _write_skill(tmp_path)
-    monkeypatch.setattr("mindroom.api.skills.default_skill_roots", lambda _plugin_skill_roots: [tmp_path])
-    monkeypatch.setattr(skills_module, "get_user_skills_dir", lambda: tmp_path / "other")
+    _use_skill_root(monkeypatch, tmp_path, user_dir=tmp_path / "other")
 
     response = test_client.put("/api/skills/test-skill", json={"content": "---"})
     assert response.status_code == 403
@@ -110,8 +113,7 @@ def test_create_skill(
 ) -> None:
     """Create a new skill via POST."""
     user_dir = tmp_path / "user-skills"
-    monkeypatch.setattr("mindroom.api.skills.default_skill_roots", lambda _plugin_skill_roots: [user_dir])
-    monkeypatch.setattr(skills_module, "get_user_skills_dir", lambda: user_dir)
+    _use_skill_root(monkeypatch, user_dir)
     monkeypatch.setattr(skills_api_module, "get_user_skills_dir", lambda: user_dir)
 
     response = test_client.post("/api/skills", json={"name": "my-skill", "description": "A test skill"})
@@ -136,8 +138,7 @@ def test_create_skill_conflict(
 ) -> None:
     """POST with an existing name returns 409."""
     _write_skill(tmp_path)
-    monkeypatch.setattr("mindroom.api.skills.default_skill_roots", lambda _plugin_skill_roots: [tmp_path])
-    monkeypatch.setattr(skills_module, "get_user_skills_dir", lambda: tmp_path)
+    _use_skill_root(monkeypatch, tmp_path)
 
     response = test_client.post("/api/skills", json={"name": "test-skill", "description": "Dup"})
     assert response.status_code == 409
@@ -149,8 +150,7 @@ def test_create_skill_invalid_name(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """POST with an invalid name returns 422."""
-    monkeypatch.setattr("mindroom.api.skills.default_skill_roots", lambda _plugin_skill_roots: [tmp_path])
-    monkeypatch.setattr(skills_module, "get_user_skills_dir", lambda: tmp_path)
+    _use_skill_root(monkeypatch, tmp_path)
 
     response = test_client.post("/api/skills", json={"name": "Bad Name!", "description": "Nope"})
     assert response.status_code == 422
@@ -163,8 +163,7 @@ def test_delete_skill(
 ) -> None:
     """DELETE removes a user skill."""
     _write_skill(tmp_path)
-    monkeypatch.setattr("mindroom.api.skills.default_skill_roots", lambda _plugin_skill_roots: [tmp_path])
-    monkeypatch.setattr(skills_module, "get_user_skills_dir", lambda: tmp_path)
+    _use_skill_root(monkeypatch, tmp_path)
     monkeypatch.setattr(skills_api_module, "get_user_skills_dir", lambda: tmp_path)
 
     response = test_client.delete("/api/skills/test-skill")
@@ -185,8 +184,7 @@ def test_delete_skill_root_level_blocked(
         "---\nname: root-skill\ndescription: Root skill\n---\n\n# root-skill",
         encoding="utf-8",
     )
-    monkeypatch.setattr("mindroom.api.skills.default_skill_roots", lambda _plugin_skill_roots: [tmp_path])
-    monkeypatch.setattr(skills_module, "get_user_skills_dir", lambda: tmp_path)
+    _use_skill_root(monkeypatch, tmp_path)
     monkeypatch.setattr(skills_api_module, "get_user_skills_dir", lambda: tmp_path)
 
     response = test_client.delete("/api/skills/root-skill")
@@ -203,8 +201,7 @@ def test_delete_skill_forbidden(
 ) -> None:
     """DELETE on a read-only skill returns 403."""
     _write_skill(tmp_path)
-    monkeypatch.setattr("mindroom.api.skills.default_skill_roots", lambda _plugin_skill_roots: [tmp_path])
-    monkeypatch.setattr(skills_module, "get_user_skills_dir", lambda: tmp_path / "other")
+    _use_skill_root(monkeypatch, tmp_path, user_dir=tmp_path / "other")
 
     response = test_client.delete("/api/skills/test-skill")
     assert response.status_code == 403

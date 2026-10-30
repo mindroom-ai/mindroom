@@ -169,11 +169,11 @@ def _offered_entrypoint(tool: AnyToolkit, name: str) -> Callable[..., Any]:
 @pytest.fixture(autouse=True)
 def _isolate_primary_worker_manager_runtime() -> Iterator[None]:
     """Reopen the process-global worker runtime around final-shutdown tests."""
-    workers_runtime_module._reset_primary_worker_manager()
+    workers_runtime_module.reset_primary_worker_manager()
     try:
         yield
     finally:
-        workers_runtime_module._reset_primary_worker_manager()
+        workers_runtime_module.reset_primary_worker_manager()
 
 
 @pytest.mark.asyncio
@@ -5167,7 +5167,7 @@ def test_docker_worker_manager_rebuilds_when_runtime_storage_path_changes(
     tmp_path: Path,
 ) -> None:
     """Changing the runtime storage path should rebuild the Docker worker manager with the new root."""
-    workers_runtime_module._reset_primary_worker_manager()
+    workers_runtime_module.reset_primary_worker_manager()
     monkeypatch.setenv("MINDROOM_WORKER_BACKEND", "docker")
     monkeypatch.setenv("MINDROOM_DOCKER_WORKER_IMAGE", "ghcr.io/mindroom-ai/mindroom:latest")
 
@@ -5240,12 +5240,12 @@ def test_docker_worker_manager_rebuilds_when_runtime_storage_path_changes(
         assert built_runtime_paths == [runtime_paths, runtime_paths]
         assert first_manager is not second_manager
     finally:
-        workers_runtime_module._reset_primary_worker_manager()
+        workers_runtime_module.reset_primary_worker_manager()
 
 
 def test_shutdown_primary_worker_manager_resets_cached_runtime_manager() -> None:
     """Shutting down the primary manager should tear down the cached manager."""
-    workers_runtime_module._reset_primary_worker_manager()
+    workers_runtime_module.reset_primary_worker_manager()
     shutdown_calls: list[str] = []
 
     class _FakeWorkerManager:
@@ -5272,7 +5272,7 @@ def test_explicit_primary_worker_reset_reopens_construction_after_shutdown(
     tmp_path: Path,
 ) -> None:
     """Final shutdown rejects new builds until an explicit process reset establishes a new epoch."""
-    workers_runtime_module._reset_primary_worker_manager()
+    workers_runtime_module.reset_primary_worker_manager()
 
     class _FakeWorkerManager:
         def shutdown(self) -> None:
@@ -5300,7 +5300,7 @@ def test_explicit_primary_worker_reset_reopens_construction_after_shutdown(
                 storage_root=tmp_path,
             )
 
-        workers_runtime_module._reset_primary_worker_manager()
+        workers_runtime_module.reset_primary_worker_manager()
         manager = _unleased_primary_worker_manager(
             runtime_paths,
             proxy_url=None,
@@ -5310,7 +5310,7 @@ def test_explicit_primary_worker_reset_reopens_construction_after_shutdown(
 
         assert isinstance(manager, _FakeWorkerManager)
     finally:
-        workers_runtime_module._reset_primary_worker_manager()
+        workers_runtime_module.reset_primary_worker_manager()
 
 
 def test_superseded_worker_manager_disposes_when_its_last_lease_releases(
@@ -5318,7 +5318,7 @@ def test_superseded_worker_manager_disposes_when_its_last_lease_releases(
     tmp_path: Path,
 ) -> None:
     """A superseded manager shuts down exactly once when its final borrower releases it."""
-    workers_runtime_module._reset_primary_worker_manager()
+    workers_runtime_module.reset_primary_worker_manager()
     monkeypatch.setenv("MINDROOM_WORKER_BACKEND", "docker")
     monkeypatch.setenv("MINDROOM_DOCKER_WORKER_IMAGE", "ghcr.io/mindroom-ai/mindroom:latest")
 
@@ -5395,7 +5395,7 @@ def test_superseded_worker_manager_disposes_when_its_last_lease_releases(
 
     assert first_manager.shutdown_calls == 1
     assert build_order == [str(first_storage_path), str(second_storage_path)]
-    workers_runtime_module._reset_primary_worker_manager()
+    workers_runtime_module.reset_primary_worker_manager()
     assert first_manager.shutdown_calls == 1
     assert second_manager.shutdown_calls == 1
 
@@ -5405,7 +5405,7 @@ def test_shutdown_primary_worker_manager_keeps_leased_retired_manager_tracked_un
     tmp_path: Path,
 ) -> None:
     """A timed-out shutdown should keep leased retired managers so lease release can drain them."""
-    workers_runtime_module._reset_primary_worker_manager()
+    workers_runtime_module.reset_primary_worker_manager()
     monkeypatch.setenv("MINDROOM_WORKER_BACKEND", "docker")
     monkeypatch.setenv("MINDROOM_DOCKER_WORKER_IMAGE", "ghcr.io/mindroom-ai/mindroom:latest")
 
@@ -5472,7 +5472,7 @@ def test_docker_worker_manager_preserves_cached_manager_when_new_build_fails(
     tmp_path: Path,
 ) -> None:
     """A failed build for a new signature should not evict the last known-good manager."""
-    workers_runtime_module._reset_primary_worker_manager()
+    workers_runtime_module.reset_primary_worker_manager()
     monkeypatch.setenv("MINDROOM_WORKER_BACKEND", "docker")
     monkeypatch.setenv("MINDROOM_DOCKER_WORKER_IMAGE", "ghcr.io/mindroom-ai/mindroom:latest")
 
@@ -5551,7 +5551,7 @@ def test_docker_worker_manager_preserves_cached_manager_when_new_build_fails(
     assert build_order == [str(first_storage_path), str(second_storage_path)]
     assert repeated_first_manager is first_manager
     assert first_manager.shutdown_calls == 0
-    workers_runtime_module._reset_primary_worker_manager()
+    workers_runtime_module.reset_primary_worker_manager()
     assert first_manager.shutdown_calls == 1
 
 
@@ -5560,7 +5560,7 @@ def test_docker_worker_manager_replacement_disposes_previous_once_despite_shutdo
     tmp_path: Path,
 ) -> None:
     """The final lease release disposes a superseded manager exactly once even on failure."""
-    workers_runtime_module._reset_primary_worker_manager()
+    workers_runtime_module.reset_primary_worker_manager()
     monkeypatch.setenv("MINDROOM_WORKER_BACKEND", "docker")
     monkeypatch.setenv("MINDROOM_DOCKER_WORKER_IMAGE", "ghcr.io/mindroom-ai/mindroom:latest")
 
@@ -5649,7 +5649,7 @@ def test_docker_worker_manager_replacement_disposes_previous_once_despite_shutdo
     )
 
     first_manager.raise_on_shutdown = False
-    workers_runtime_module._reset_primary_worker_manager()
+    workers_runtime_module.reset_primary_worker_manager()
     assert first_manager.shutdown_calls == 1
     assert second_manager.shutdown_calls == 1
 
@@ -5659,7 +5659,7 @@ def test_docker_worker_manager_build_does_not_hold_cache_lock(
     tmp_path: Path,
 ) -> None:
     """Slow manager construction must not block unrelated cache-lock reads."""
-    workers_runtime_module._reset_primary_worker_manager()
+    workers_runtime_module.reset_primary_worker_manager()
     monkeypatch.setenv("MINDROOM_WORKER_BACKEND", "docker")
     monkeypatch.setenv("MINDROOM_DOCKER_WORKER_IMAGE", "ghcr.io/mindroom-ai/mindroom:latest")
 
@@ -5728,7 +5728,7 @@ def test_docker_worker_manager_build_does_not_hold_cache_lock(
 
     assert thread_error == []
     assert not build_thread.is_alive()
-    workers_runtime_module._reset_primary_worker_manager()
+    workers_runtime_module.reset_primary_worker_manager()
 
 
 def test_docker_worker_manager_replacement_disposes_unleased_generation_before_return(
@@ -5736,7 +5736,7 @@ def test_docker_worker_manager_replacement_disposes_unleased_generation_before_r
     tmp_path: Path,
 ) -> None:
     """An unleased superseded manager is disposed before replacement acquisition returns."""
-    workers_runtime_module._reset_primary_worker_manager()
+    workers_runtime_module.reset_primary_worker_manager()
     monkeypatch.setenv("MINDROOM_WORKER_BACKEND", "docker")
     monkeypatch.setenv("MINDROOM_DOCKER_WORKER_IMAGE", "ghcr.io/mindroom-ai/mindroom:latest")
 
@@ -5824,7 +5824,7 @@ def test_docker_worker_manager_replacement_disposes_unleased_generation_before_r
     )
 
     assert thread_result["manager"] is second_manager
-    workers_runtime_module._reset_primary_worker_manager()
+    workers_runtime_module.reset_primary_worker_manager()
 
 
 def test_docker_worker_manager_rebuilds_when_runtime_shared_credentials_path_changes(
@@ -5832,7 +5832,7 @@ def test_docker_worker_manager_rebuilds_when_runtime_shared_credentials_path_cha
     tmp_path: Path,
 ) -> None:
     """Changing the runtime shared-credentials path should rebuild the Docker worker manager."""
-    workers_runtime_module._reset_primary_worker_manager()
+    workers_runtime_module.reset_primary_worker_manager()
     monkeypatch.setenv("MINDROOM_WORKER_BACKEND", "docker")
     monkeypatch.setenv("MINDROOM_DOCKER_WORKER_IMAGE", "ghcr.io/mindroom-ai/mindroom:latest")
 
@@ -5900,7 +5900,7 @@ def test_docker_worker_manager_rebuilds_when_runtime_shared_credentials_path_cha
         str((tmp_path / "shared-b").resolve()),
     ]
     assert first_manager is not second_manager
-    workers_runtime_module._reset_primary_worker_manager()
+    workers_runtime_module.reset_primary_worker_manager()
 
 
 def test_docker_worker_manager_rebuilds_when_committed_runtime_env_changes(
@@ -5908,7 +5908,7 @@ def test_docker_worker_manager_rebuilds_when_committed_runtime_env_changes(
     tmp_path: Path,
 ) -> None:
     """Changing committed worker runtime env should rebuild the Docker worker manager."""
-    workers_runtime_module._reset_primary_worker_manager()
+    workers_runtime_module.reset_primary_worker_manager()
     built_browser_paths: list[str | None] = []
 
     class _FakeDockerBackend:
@@ -5970,7 +5970,7 @@ def test_docker_worker_manager_rebuilds_when_committed_runtime_env_changes(
 
     assert built_browser_paths == ["/usr/bin/a", "/usr/bin/b"]
     assert first_manager is not second_manager
-    workers_runtime_module._reset_primary_worker_manager()
+    workers_runtime_module.reset_primary_worker_manager()
 
 
 def test_kubernetes_worker_manager_reuse_ignores_later_disk_drift(

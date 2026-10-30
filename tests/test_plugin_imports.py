@@ -272,14 +272,16 @@ def test_prepare_module_installs_package_chain(tmp_path: Path) -> None:
     ]
 
     try:
-        module, loader, _ = plugin_imports._prepare_module(
+        module, _ = plugin_imports._prepare_module(
             "demo",
             plugin_root,
             module_path,
             module_name,
             PLUGIN_MODULE_PREFIX,
         )
-        loader.exec_module(module)
+        assert module.__spec__ is not None
+        assert module.__spec__.loader is not None
+        module.__spec__.loader.exec_module(module)
 
         assert module.VALUE == 42
         assert sys.modules[module_name] is module

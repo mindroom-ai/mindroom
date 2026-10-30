@@ -207,9 +207,9 @@ def _turn_context(runtime_paths: RuntimePaths, config: Config) -> object:
 
 @pytest.fixture(autouse=True)
 def _fresh_worker_manager() -> Iterator[None]:
-    workers_runtime_module._reset_primary_worker_manager()
+    workers_runtime_module.reset_primary_worker_manager()
     yield
-    workers_runtime_module._reset_primary_worker_manager()
+    workers_runtime_module.reset_primary_worker_manager()
 
 
 class _AppliedConfig:

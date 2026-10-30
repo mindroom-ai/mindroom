@@ -7871,7 +7871,6 @@ expose = [
     "SkillMarkdownError",
     "SkillsToolkit",
     "agent_workspace_skills_root",
-    "build_agent_skills",
     "build_skills_toolkit",
     "clear_skill_cache",
     "default_skill_roots",
