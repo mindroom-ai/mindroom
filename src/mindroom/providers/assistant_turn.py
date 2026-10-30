@@ -30,7 +30,7 @@ def stamp_model(message: Message, identity: ModelIdentity) -> None:
     """Record on ``message`` which model answered it (``model_provenance``), keeping the rest of its provider data."""
     message.provider_data = {
         **(message.provider_data or {}),
-        **model_provenance(identity.id, identity.provider_name),
+        **model_provenance(identity.id, identity.provider),
     }
 
 

@@ -24,6 +24,7 @@ from mindroom.constants import AI_RUN_METADATA_KEY, SILENT_SCHEDULE_NO_REPLY_TOK
 from mindroom.llm.errors import ProviderError
 from mindroom.llm.messages import Message
 from mindroom.llm.runs import TeamRunRecord
+from mindroom.providers.identity import model_identity
 from mindroom.response_turn import CompletedApprovalRun, ResponsePausedForApproval
 from mindroom.timing import DispatchPipelineTiming
 from mindroom.turn_continuation import TURN_CONTINUATION_LIMIT
@@ -180,7 +181,9 @@ async def test_a_team_reply_publishes_the_usage_and_cost_of_every_attempt_its_tu
             ],
             general=[calls(switch, metrics=usage(30, 3))],
         )
-    # Every scripted model answers as one identity, which the leader's prices price.
+    # Every scripted model answers as the model its config names, one model for all, which the leader's prices price.
+    for name, model in team.models.items():
+        model.identity = model_identity(team.config.models[name])
     team.config.models["default"].pricing = ModelPricing(input=2, output=10)
     run_metadata: dict[str, Any] = {}
 

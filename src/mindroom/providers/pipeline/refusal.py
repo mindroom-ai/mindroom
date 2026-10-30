@@ -27,5 +27,5 @@ async def refusal_stream(inner: ModelProvider, request: ModelRequest) -> AsyncIt
     async with closing_async_stream(events):
         async for event in events:
             if isinstance(event, TurnCompleted) and event.stop_reason == "refusal":
-                raise ModelSafeguardRefusal(provider=inner.identity.provider_name, usage=event.message.metrics)
+                raise ModelSafeguardRefusal(provider=inner.identity.provider, usage=event.message.metrics)
             yield event

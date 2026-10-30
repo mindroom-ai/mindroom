@@ -1311,6 +1311,11 @@ visibility = [
 path = "mindroom.providers.names"
 depends_on = []
 
+# A configured model's identity, read from its config; every provider builder and pricing take it from here.
+[[modules]]
+path = "mindroom.providers.identity"
+depends_on = ["mindroom.llm", "mindroom.model_defaults", "mindroom.providers.names"]
+
 # The request that proves a provider key valid, for doctor and the dashboard's provider setup.
 [[modules]]
 path = "mindroom.providers.key_checks"
@@ -3057,6 +3062,7 @@ depends_on = [
     "mindroom.providers.errors",
     "mindroom.providers.extra_kwargs",
     "mindroom.providers.google_adc",
+    "mindroom.providers.identity",
     "mindroom.providers.model_http_client",
     "mindroom.providers.names",
     "mindroom.runtime_env_policy",
@@ -3974,7 +3980,7 @@ visibility = [
 
 [[modules]]
 path = "mindroom.memory._mem0_usage"
-depends_on = ["mindroom.llm"]
+depends_on = ["mindroom.llm", "mindroom.providers.names"]
 visibility = ["mindroom.memory._mem0_backend", "mindroom.memory.config"]
 
 [[modules]]
@@ -4938,6 +4944,7 @@ depends_on = [
     "mindroom.llm",
     "mindroom.logging_config",
     "mindroom.message_target",
+    "mindroom.providers.names",
     "mindroom.session_ids",
     "mindroom.approval.tool_approval",
     "mindroom.tool_system.agno_toolkits",
@@ -6558,6 +6565,7 @@ depends_on = [
     "mindroom.providers.credentials",
     "mindroom.providers.errors",
     "mindroom.providers.extra_kwargs",
+    "mindroom.providers.identity",
     "mindroom.providers.media_files",
     "mindroom.providers.model_http_client",
     "mindroom.providers.names",
@@ -8560,6 +8568,7 @@ depends_on = [
     "mindroom.providers.errors",
     "mindroom.providers.extra_kwargs",
     "mindroom.providers.google_adc",
+    "mindroom.providers.identity",
     "mindroom.providers.media_files",
     "mindroom.providers.tool_policy",
 ]
@@ -8575,6 +8584,7 @@ depends_on = [
     "mindroom.llm",
     "mindroom.providers.assistant_turn",
     "mindroom.providers.extra_kwargs",
+    "mindroom.providers.identity",
     "mindroom.providers.media_files",
     "mindroom.providers.ollama.errors",
     "mindroom.providers.ollama.settings",
@@ -8594,7 +8604,7 @@ depends_on = ["mindroom.providers.extra_kwargs"]
 
 [[modules]]
 path = "mindroom.providers.synthetic_adapter"
-depends_on = ["mindroom.llm", "mindroom.providers.assistant_turn", "mindroom.providers.extra_kwargs"]
+depends_on = ["mindroom.llm", "mindroom.providers.assistant_turn", "mindroom.providers.extra_kwargs", "mindroom.providers.identity"]
 
 [[modules]]
 path = "mindroom.config.cold_cache"
@@ -9634,7 +9644,7 @@ visibility = ["mindroom.session_storage.legacy_agno3_conversion", "mindroom.sess
 [[modules]]
 path = "mindroom.usage.legacy_usage_storage"
 depends_on = []
-visibility = ["mindroom.usage.stats"]
+visibility = ["mindroom.budgets.pricing", "mindroom.usage.stats", "mindroom.usage.stats_storage"]
 
 # Shared judgment leaves; no dependency on the response pipeline.
 [[modules]]

@@ -10,7 +10,7 @@ from typing import TYPE_CHECKING
 
 import pytest
 
-from mindroom.budgets.pricing import _price_table
+from mindroom.budgets.pricing import model_prices
 from mindroom.budgets.spend import _UnpricedModelUsage, collect_monthly_spend, month_bounds
 from mindroom.config.agent import AgentConfig, TeamConfig
 from mindroom.config.main import Config
@@ -19,11 +19,14 @@ from mindroom.constants import RuntimePaths, resolve_runtime_paths
 from mindroom.llm.messages import Message
 from mindroom.llm.runs import RunRecord, RunStatus
 from mindroom.llm.usage import MessageMetrics, ModelMetrics, RunMetrics, TokenCounts
+from mindroom.matrix_rtc.call_tools import record_call_token_usage
+from mindroom.matrix_rtc.voice_agent import RealtimeCallUsage, _RealtimeResponseUsage
 from mindroom.providers.registry import build_model_provider
 from mindroom.session_storage.agent_storage import create_agent_state_storage
 from mindroom.session_storage.types import ConversationSession
+from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 from mindroom.usage.stats_storage import UsageRunNode, UsageSessionRow, UsageStorageDiagnostic, UsageStorageSource
-from tests.conftest import persist_runs, persist_session
+from tests.conftest import persist_runs, persist_session, test_runtime_paths
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
@@ -77,7 +80,7 @@ def _source(scope: str = "shared_agent") -> UsageStorageSource:
 
 
 def _provider(config: Config, tmp_path: Path, model_name: str) -> str:
-    return build_model_provider(config, _paths(tmp_path), model_name).identity.provider_name
+    return build_model_provider(config, _paths(tmp_path), model_name).identity.provider
 
 
 def _run(
@@ -141,7 +144,7 @@ def _wire(
 
 def _spend(config: Config, tmp_path: Path) -> object:
     paths = _paths(tmp_path)
-    return collect_monthly_spend(config, paths, NOW, _price_table(config, paths).prices)
+    return collect_monthly_spend(config, paths, NOW, model_prices(config))
 
 
 def test_month_bounds_are_utc_calendar_months() -> None:
@@ -274,7 +277,7 @@ def test_spend_prices_usage_recorded_through_session_storage(tmp_path: Path) -> 
                 ModelMetrics(
                     tokens=TokenCounts(input_tokens=1_000_000, output_tokens=100_000, total_tokens=1_100_000),
                     id=model.id,
-                    provider=model.provider_name,
+                    provider=model.provider,
                 ),
             ],
         },
@@ -298,7 +301,7 @@ def test_spend_prices_usage_recorded_through_session_storage(tmp_path: Path) -> 
         ),
     )
 
-    snapshot = collect_monthly_spend(config, paths, NOW, _price_table(config, paths).prices)
+    snapshot = collect_monthly_spend(config, paths, NOW, model_prices(config))
 
     assert snapshot.spend_usd == {ALICE: pytest.approx(5.0 + 3.0)}
     assert snapshot.unpriced_models == ()
@@ -319,7 +322,7 @@ def test_spend_charges_a_resumed_run_for_its_requests_this_month(
         return Message(
             role="assistant",
             created_at=created_at,
-            provider_data={"mindroom_model": {"id": model.id, "provider": model.provider_name}},
+            provider_data={"mindroom_model": {"id": model.id, "provider": model.provider}},
             metrics=MessageMetrics(tokens=TokenCounts(input_tokens=1_000_000, total_tokens=1_000_000)),
         )
 
@@ -327,7 +330,7 @@ def test_spend_charges_a_resumed_run_for_its_requests_this_month(
         model_metrics = ModelMetrics(
             tokens=TokenCounts(input_tokens=tokens, total_tokens=tokens),
             id=model.id,
-            provider=model.provider_name,
+            provider=model.provider,
         )
         return RunMetrics(
             tokens=TokenCounts(input_tokens=tokens, total_tokens=tokens),
@@ -357,6 +360,39 @@ def test_spend_charges_a_resumed_run_for_its_requests_this_month(
         clock.setattr("mindroom.session_storage.store.time", lambda: resumed)
         persist_runs(storage, session, run)
 
-    snapshot = collect_monthly_spend(config, paths, NOW, _price_table(config, paths).prices)
+    snapshot = collect_monthly_spend(config, paths, NOW, model_prices(config))
 
     assert snapshot.spend_usd == {ALICE: pytest.approx(5.0)}
+
+
+@pytest.mark.asyncio
+async def test_realtime_call_tokens_are_charged_at_the_openai_entry_of_the_speech_model(tmp_path: Path) -> None:
+    """A realtime call records its speech model's tokens under the ``openai`` route's name, so that entry prices them."""
+    paths = test_runtime_paths(tmp_path)
+    config = Config(
+        agents={"code": AgentConfig(display_name="Code")},
+        models={
+            "realtime": ModelConfig(provider="openai", id="gpt-realtime-2.1", pricing=ModelPricing(input=4, output=16)),
+        },
+    )
+    caller = ToolExecutionIdentity(
+        channel="matrix",
+        agent_name="code",
+        requester_id=ALICE,
+        room_id="!room:example.test",
+        thread_id=None,
+        resolved_thread_id=None,
+        session_id="call",
+    )
+    started = int(NOW.timestamp())
+    response = _RealtimeResponseUsage(
+        created_at=started,
+        tokens=TokenCounts(input_tokens=1_000_000, output_tokens=100_000),
+    )
+    call = RealtimeCallUsage(usage_id="call-1", model="gpt-realtime-2.1", created_at=started, responses=(response,))
+    await record_call_token_usage(call, config=config, runtime_paths=paths, execution_identity=caller)
+
+    snapshot = collect_monthly_spend(config, paths, NOW, model_prices(config))
+
+    assert snapshot.spend_usd == {ALICE: pytest.approx(4.0 + 1.6)}
+    assert snapshot.unpriced_models == ()

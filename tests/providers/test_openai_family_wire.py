@@ -811,7 +811,7 @@ async def test_http_errors_map_to_typed_provider_errors(
         await _adapter_turn(built, ModelRequest(messages=[_user()]))
 
     assert type(info.value) is error_type
-    assert (info.value.status_code, info.value.retryable, info.value.provider) == (status, retryable, "OpenAI Chat")
+    assert (info.value.status_code, info.value.retryable, info.value.provider) == (status, retryable, "OpenAI")
     assert str(info.value) == body["error"]["message"]
     assert len(built.requests) == 1, "the SDK client never retries; the pipeline alone does"
 
@@ -1121,10 +1121,15 @@ async def test_a_starter_placeholder_key_is_a_missing_key(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ("model_config", "reply", "message"),
+    ("model_config", "reply", "message", "provider"),
     [
-        ({"provider": "openrouter", "id": "z-ai/glm-5.3"}, _chat_reply(), "OPENROUTER_API_KEY not set"),
-        ({"provider": "openai", "api": "responses", "id": "gpt-6-astra"}, _responses_reply(), "OPENAI_API_KEY not set"),
+        ({"provider": "openrouter", "id": "z-ai/glm-5.3"}, _chat_reply(), "OPENROUTER_API_KEY not set", "OpenRouter"),
+        (
+            {"provider": "openai", "api": "responses", "id": "gpt-6-astra"},
+            _responses_reply(),
+            "OPENAI_API_KEY not set",
+            "OpenAI",
+        ),
         (
             {
                 "provider": "azure",
@@ -1133,6 +1138,7 @@ async def test_a_starter_placeholder_key_is_a_missing_key(
             },
             _chat_reply(),
             "Please provide one of: AZURE_OPENAI_API_KEY environment variable, azure_ad_token, or",
+            "Azure",
         ),
     ],
     ids=["chat", "responses", "azure"],
@@ -1142,13 +1148,16 @@ async def test_missing_api_key_fails_at_the_first_request(
     model_config: dict[str, Any],
     reply: dict[str, Any],
     message: str,
+    provider: str,
 ) -> None:
+    """The error names the route's provider, as every other error of the route does."""
     built = _Built(tmp_path, model_config, reply)
 
     with pytest.raises(ProviderError, match=message) as info:
         await _turn(built, ModelRequest(messages=[_user()]))
 
     assert (info.value.status_code, info.value.code, built.requests) == (401, "missing_api_key", [])
+    assert info.value.provider == provider
 
 
 @pytest.mark.asyncio
@@ -1224,7 +1233,7 @@ async def test_responses_error_event_is_classified_by_its_code(tmp_path: Path) -
         await _adapter_turn(built, ModelRequest(messages=[_user()]))
 
     assert (info.value.status_code, info.value.provider_code, str(info.value)) == (None, "server_error", "boom")
-    assert info.value.provider == "OpenAI Responses"
+    assert info.value.provider == "OpenAI"
 
 
 @pytest.mark.asyncio
@@ -2111,23 +2120,21 @@ def _runtime(tmp_path: Path, **env: str) -> ProviderRuntime:
 
 
 @pytest.mark.parametrize(
-    ("config", "provider", "provider_name", "endpoint"),
+    ("config", "provider", "endpoint"),
     [
-        ({"provider": "openai", "id": "gpt-4.1"}, "OpenAI", "OpenAI Chat", "https://api.openai.com/v1"),
-        ({"provider": "openai", "id": "gpt-6-astra"}, "OpenAI", "OpenAI Responses", "https://api.openai.com/v1"),
+        ({"provider": "openai", "id": "gpt-4.1"}, "OpenAI", "https://api.openai.com/v1"),
+        ({"provider": "openai", "id": "gpt-6-astra"}, "OpenAI", "https://api.openai.com/v1"),
         (
             {"provider": "codex", "id": "gpt-6.1-sol"},
             "OpenAI Codex",
-            "OpenAI Codex Responses",
             "https://chatgpt.com/backend-api/codex",
         ),
         (
             {"provider": "openai-codex", "id": "gpt-6.1-sol"},
             "OpenAI Codex",
-            "OpenAI Codex Responses",
             "https://chatgpt.com/backend-api/codex",
         ),
-        ({"provider": "kimi_code", "id": "k3"}, "Kimi", "Kimi Chat", "https://api.kimi.com/coding/v1"),
+        ({"provider": "kimi_code", "id": "k3"}, "Kimi", "https://api.kimi.com/coding/v1"),
         (
             {
                 "provider": "azure",
@@ -2135,27 +2142,25 @@ def _runtime(tmp_path: Path, **env: str) -> ProviderRuntime:
                 "extra_kwargs": {"azure_endpoint": "https://r.openai.azure.com/"},
             },
             "Azure",
-            "Azure",
             "https://r.openai.azure.com",
         ),
-        ({"provider": "openrouter", "id": "z-ai/glm-5.3"}, "OpenRouter", "OpenRouter", "https://openrouter.ai/api/v1"),
-        ({"provider": "deepseek", "id": "deepseek-flash"}, "DeepSeek", "DeepSeek", "https://api.deepseek.com"),
-        ({"provider": "zai", "id": "glm-5.3"}, "ZAI", "ZAI", "https://api.z.ai/api/paas/v4"),
-        ({"provider": "llama_cpp", "id": "qwen"}, "LlamaCpp", "LlamaCpp", "http://127.0.0.1:8080/v1"),
-        ({"provider": "groq", "id": "openai/gpt-oss-120b"}, "Groq", "Groq", "https://api.groq.com/openai/v1"),
-        ({"provider": "Cerebras", "id": "gpt-oss-120b"}, "Cerebras", "Cerebras", "https://api.cerebras.ai/v1"),
+        ({"provider": "openrouter", "id": "z-ai/glm-5.3"}, "OpenRouter", "https://openrouter.ai/api/v1"),
+        ({"provider": "deepseek", "id": "deepseek-flash"}, "DeepSeek", "https://api.deepseek.com"),
+        ({"provider": "zai", "id": "glm-5.3"}, "ZAI", "https://api.z.ai/api/paas/v4"),
+        ({"provider": "llama_cpp", "id": "qwen"}, "LlamaCpp", "http://127.0.0.1:8080/v1"),
+        ({"provider": "groq", "id": "openai/gpt-oss-120b"}, "Groq", "https://api.groq.com/openai/v1"),
+        ({"provider": "Cerebras", "id": "gpt-oss-120b"}, "Cerebras", "https://api.cerebras.ai/v1"),
     ],
 )
 def test_identity_strings_match_the_stored_provider_names(
     tmp_path: Path,
     config: dict[str, Any],
     provider: str,
-    provider_name: str,
     endpoint: str,
 ) -> None:
     identity = build_provider(ModelConfig(**config), _runtime(tmp_path)).identity
 
-    assert (identity.provider, identity.provider_name, identity.endpoint) == (provider, provider_name, endpoint)
+    assert (identity.provider, identity.endpoint) == (provider, endpoint)
 
 
 def test_openai_routes_pick_responses_only_where_it_is_selected_or_searchable(tmp_path: Path) -> None:

@@ -149,5 +149,5 @@ def retrying_stream(
     if request.overrides.caller_retries:
         return inner.stream(request)
     reissue = partial(_reissue, request=request, budget=_RetryBudget(), model_id=inner.identity.id)
-    next_event = partial(_next_event, idle_timeout_seconds=idle_timeout_seconds, provider=inner.identity.provider_name)
+    next_event = partial(_next_event, idle_timeout_seconds=idle_timeout_seconds, provider=inner.identity.provider)
     return attempts(inner, request, reissue, next_event=next_event)

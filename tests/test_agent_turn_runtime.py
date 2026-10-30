@@ -54,7 +54,6 @@ from mindroom.llm.events import RunFinished
 from mindroom.llm.messages import Message, system_text
 from mindroom.llm.provider import (
     Capabilities,
-    ModelIdentity,
     NativeCompactionReplay,
     TextDelta,
     ToolCallReady,
@@ -67,6 +66,7 @@ from mindroom.matrix.users import AgentMatrixUser
 from mindroom.message_target import MessageTarget
 from mindroom.native_compaction import replay_basis
 from mindroom.participation import ParticipationGate
+from mindroom.providers.identity import model_identity
 from mindroom.reply_turn.request import ResponseRequest
 from mindroom.response_sources import ResponseSources
 from mindroom.response_turn import ResponsePausedForApproval, TurnSinks
@@ -1144,11 +1144,6 @@ async def test_a_reply_publishes_the_usage_and_cost_of_every_attempt_its_turn_ra
         tools=(PROBE_TOOL, "thread_model"),
     )
     with_current_room_member_access(reply.config)
-    large = ScriptedModel(
-        [final],
-        identity=ModelIdentity(id="large-model", provider="Synthetic", provider_name="Synthetic"),
-    )
-    install_model_providers(monkeypatch, {"large": large})
     reply.config.models["default"].pricing = ModelPricing(input=2, output=10)
     reply.config.models["default"].context_window = 1_000
     reply.config.models["large"] = ModelConfig(
@@ -1157,6 +1152,10 @@ async def test_a_reply_publishes_the_usage_and_cost_of_every_attempt_its_turn_ra
         context_window=2_000,
         pricing=ModelPricing(input=3, output=15),
     )
+    # Each scripted model answers as the model its config names, whose prices the reply's cost reads.
+    reply.model.identity = model_identity(reply.config.models["default"])
+    large = ScriptedModel([final], identity=model_identity(reply.config.models["large"]))
+    install_model_providers(monkeypatch, {"large": large})
     sinks = TurnSinks(turn_recorder=reply.recorder)
 
     with tool_runtime_context(reply.runtime):

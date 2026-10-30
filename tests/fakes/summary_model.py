@@ -76,7 +76,7 @@ def summary_model(
     """Return a summary model named ``model_id``; ``claude`` gives it Claude's conservative input sizing."""
     return ScriptedSummaryModel(
         turns=[_steps(reply) for reply in replies],
-        identity=ModelIdentity(id=model_id, provider=provider, provider_name=provider),
+        identity=ModelIdentity(id=model_id, provider=provider),
         capabilities=Capabilities(conservative_token_estimates=claude),
         default=summary_steps(default) if default is not None else None,
     )

@@ -635,7 +635,6 @@ class _TeamTurn:
         return partial(
             attempt.metadata_content,
             self.config,
-            runtime_paths=self.runtime_paths,
             session_id=self.session_id,
             status=status,
             prior_usage=prior_usage,

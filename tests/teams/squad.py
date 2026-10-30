@@ -72,7 +72,7 @@ def pre_resume_runs(dump: str) -> dict[str, dict[str, Any]]:
 
 def scripted(model_id: str, *turns: list[Any]) -> ScriptedModel:
     """Return a scripted model with the capture's provider identity."""
-    return ScriptedModel(list(turns), identity=ModelIdentity(id=model_id, provider=PROVIDER, provider_name=PROVIDER))
+    return ScriptedModel(list(turns), identity=ModelIdentity(id=model_id, provider=PROVIDER))
 
 
 def calculator(*, gate_multiply: bool) -> AdaptedToolkit:

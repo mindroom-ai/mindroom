@@ -419,8 +419,8 @@ async def test_mem0_extraction_calls_are_complete_request_rows(tmp_path: Path) -
     assert report.request_breakdown is not None
     assert [(row.kind, row.model_provider, row.model, row.totals.total_tokens) for row in report.request_breakdown] == [
         ("run", "test-provider", "reply-model", 10),
-        ("memory_extraction", "OpenAI Chat", "gpt-6-luna", 150),
-        ("memory_extraction", "OpenAI Chat", "gpt-6-luna", 150),
+        ("memory_extraction", "OpenAI", "gpt-6-luna", 150),
+        ("memory_extraction", "OpenAI", "gpt-6-luna", 150),
     ]
     assert report.request_coverage is not None
     assert report.request_coverage.unavailable_sources == 0

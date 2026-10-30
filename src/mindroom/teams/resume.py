@@ -454,7 +454,6 @@ async def continue_paused_team_run(
             response_text=response_text,
             metadata_content=attempt.metadata_content(
                 config,
-                runtime_paths=runtime_paths,
                 session_id=session_id,
                 status=continued.status,
                 # The usage of the turn's attempts before the paused run, which its record carries across the pause.

@@ -135,13 +135,13 @@ def save_compaction_usage(
     summary = HelperUsage(
         run_id=str(uuid4()),
         model=model.id,
-        provider=model.provider_name,
+        provider=model.provider,
         metrics=RunMetrics(tokens=usage.tokens),
         requests=(
             RequestUsage(
                 created_at=created_at,
                 metrics=usage,
-                model=ModelProvenance(model_id=model.id, provider=model.provider_name),
+                model=ModelProvenance(model_id=model.id, provider=model.provider),
             ),
         ),
         created_at=created_at,

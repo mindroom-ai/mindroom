@@ -1142,7 +1142,7 @@ async def test_cascaded_responder_records_effective_selected_model_metadata(
         model_id = config.models[model_name].id
         return ScriptedModel(
             [answer("It is sunny.")],
-            identity=ModelIdentity(id=model_id, provider="OpenAI", provider_name="OpenAI"),
+            identity=ModelIdentity(id=model_id, provider="OpenAI"),
         )
 
     create_agent_mock = MagicMock(side_effect=create_agent)

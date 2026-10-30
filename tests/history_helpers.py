@@ -626,7 +626,7 @@ BIG_TOOL = ToolSpec(
     parameters={},
     strict=None,
 )
-_TEST_MODEL = ModelIdentity(id="test-model", provider="test", provider_name="test")
+_TEST_MODEL = ModelIdentity(id="test-model", provider="test")
 
 
 @dataclass
