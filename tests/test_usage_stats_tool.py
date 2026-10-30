@@ -87,7 +87,7 @@ def _context(
 
 
 def _function_names(toolkit: UsageStatsTools) -> set[str]:
-    return set(toolkit.functions) | set(toolkit.functions)
+    return set(toolkit.functions)
 
 
 @pytest.mark.asyncio

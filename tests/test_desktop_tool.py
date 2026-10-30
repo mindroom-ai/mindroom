@@ -1170,7 +1170,6 @@ async def test_large_shell_output_uses_the_workspace_output_file_wrapper(
     )
     function = toolkit_offers(toolkit, "desktop")
     assert "mindroom_output_path" in function.parameters["properties"]
-    assert function.entrypoint is not None
 
     auto_saved = await function.entrypoint(action="run_shell", command="make logs")
     redirected = await function.entrypoint(

@@ -529,7 +529,6 @@ async def test_panel_rejects_unexpected_url_without_sending(tmp_path: Path, pane
     """Panel requests cannot smuggle navigation or endpoints through extra arguments."""
     context = _context(tmp_path)
     function = toolkit_offers(ChatUITools(), "open_panel")
-    assert function.entrypoint is not None
     with tool_runtime_context(context), pytest.raises((TypeError, ValidationError), match="url"):
         await function.entrypoint(panel=panel, url="https://example.org")
     context.client.room_send.assert_not_awaited()

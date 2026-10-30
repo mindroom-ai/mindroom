@@ -3115,8 +3115,6 @@ def test_get_tool_by_name_does_not_expose_runtime_env_to_file_backed_python_exec
     )
     save_entrypoint = blocking_entrypoint(tool, "save_to_file_and_run")
     run_file_entrypoint = blocking_entrypoint(tool, "run_python_file_return_variable")
-    assert save_entrypoint is not None
-    assert run_file_entrypoint is not None
 
     code = (
         "import os\n"
