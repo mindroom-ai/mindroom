@@ -193,7 +193,9 @@ class KnowledgeSourceWatcher:
             )
 
         for base_id in chroma_era_shared_base_ids(config, runtime_paths):
-            if not self._refresh_scheduler.is_refreshing(base_id, config=config, runtime_paths=runtime_paths):
+            target = resolve_refresh_target(base_id, config=config, runtime_paths=runtime_paths)
+            # A reload during a conversion must not queue the same conversion again.
+            if not self._refresh_scheduler.is_refreshing(target):
                 self._refresh_scheduler.schedule_refresh(base_id, config=config, runtime_paths=runtime_paths)
 
     async def stop(self) -> None:

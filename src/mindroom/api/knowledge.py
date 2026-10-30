@@ -8,6 +8,7 @@ import uuid
 from contextlib import suppress
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from functools import partial
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -24,16 +25,15 @@ from mindroom.knowledge.file_listing import list_git_tracked_knowledge_files as 
 from mindroom.knowledge.file_listing import list_knowledge_files as list_managed_knowledge_files
 from mindroom.knowledge.indexing_config import knowledge_git_dir
 from mindroom.knowledge.redaction import redact_credentials_in_text
-from mindroom.knowledge.refresh_locks import is_refresh_active_for_binding
 from mindroom.knowledge.refresh_runner import (
     knowledge_binding_mutation_lock,
     publish_file_mode_source_metadata_for_base,
-    refresh_knowledge_binding_in_subprocess,
 )
 from mindroom.knowledge.status import (
     KnowledgeCandidateStatus,
     KnowledgeIndexStatus,
     get_knowledge_index_status,
+    knowledge_base_refreshing,
     mark_knowledge_source_changed_async,
 )
 from mindroom.logging_config import get_logger
@@ -325,6 +325,8 @@ def _index_status_sync(
     config: Config,
     base_id: str,
     runtime_paths: RuntimePaths,
+    *,
+    refreshing: bool,
 ) -> KnowledgeIndexStatus:
     base_config = config.get_knowledge_base_config(base_id)
     if base_config.mode == "files" and base_config.git is None:
@@ -335,6 +337,7 @@ def _index_status_sync(
             config=config,
             runtime_paths=runtime_paths,
             create=False,
+            refreshing=refreshing,
         )
     except ValueError:
         logger.warning("Could not resolve published knowledge index state", base_id=base_id, exc_info=True)
@@ -345,8 +348,11 @@ async def _index_status(
     config: Config,
     base_id: str,
     runtime_paths: RuntimePaths,
+    *,
+    request: Request,
 ) -> KnowledgeIndexStatus:
-    return await asyncio.to_thread(_index_status_sync, config, base_id, runtime_paths)
+    refreshing = _is_refreshing(config, base_id, runtime_paths, request=request)
+    return await asyncio.to_thread(partial(_index_status_sync, config, base_id, runtime_paths, refreshing=refreshing))
 
 
 def _redacted_last_error(value: str | None) -> str | None:
@@ -384,14 +390,8 @@ def _is_refreshing(
     *,
     request: Request,
 ) -> bool:
-    refresh_scheduler = _request_refresh_scheduler(request)
-    if refresh_scheduler is not None:
-        return refresh_scheduler.is_refreshing(
-            base_id,
-            config=config,
-            runtime_paths=runtime_paths,
-        )
-    return is_refresh_active_for_binding(
+    return knowledge_base_refreshing(
+        _request_refresh_scheduler(request),
         base_id,
         config=config,
         runtime_paths=runtime_paths,
@@ -411,7 +411,7 @@ async def _git_status(
         return None
     root = _knowledge_root(config, base_id, runtime_paths)
     if index_status is None:
-        index_status = _index_status_sync(config, base_id, runtime_paths)
+        index_status = await _index_status(config, base_id, runtime_paths, request=request)
     repo_present = await asyncio.to_thread(
         git_checkout_present,
         root,
@@ -627,7 +627,7 @@ async def list_knowledge_bases(request: Request) -> dict[str, Any]:
         base_config = config.knowledge_bases[base_id]
         root = _knowledge_root(config, base_id, runtime_paths)
         file_info = await _count_managed_files(config, base_id, root, runtime_paths)
-        index_status = await _index_status(config, base_id, runtime_paths)
+        index_status = await _index_status(config, base_id, runtime_paths, request=request)
         git_status = await _git_status(
             config,
             base_id,
@@ -820,7 +820,7 @@ async def knowledge_status(base_id: str, request: Request) -> dict[str, Any]:
     config, runtime_paths = config_lifecycle.read_committed_runtime_config(request)
     root = _knowledge_root(config, base_id, runtime_paths)
     base_config = config.knowledge_bases[base_id]
-    index_status = await _index_status(config, base_id, runtime_paths)
+    index_status = await _index_status(config, base_id, runtime_paths, request=request)
     file_info = await _count_managed_files(config, base_id, root, runtime_paths)
     git_status = await _git_status(
         config,
@@ -859,29 +859,19 @@ async def reindex_knowledge(base_id: str, request: Request) -> dict[str, Any]:
     config, runtime_paths = config_lifecycle.read_committed_runtime_config(request)
     _ensure_base_exists(config, base_id)
 
+    refresh_scheduler = _request_refresh_scheduler(request)
+    if refresh_scheduler is None:
+        raise HTTPException(status_code=503, detail="Knowledge refresh is not running")
     try:
-        refresh_scheduler = _request_refresh_scheduler(request)
-        if refresh_scheduler is not None:
-            result = await refresh_scheduler.refresh_now(
-                base_id,
-                config=config,
-                runtime_paths=runtime_paths,
-                force_reindex=True,
-            )
-        else:
-            result = await refresh_knowledge_binding_in_subprocess(
-                base_id,
-                config=config,
-                runtime_paths=runtime_paths,
-                force_reindex=True,
-            )
-    except Exception as exc:
-        index_status = _index_status_sync(config, base_id, runtime_paths)
-        availability = (
-            index_status.availability
-            if index_status.persisted_index_status is not None
-            else KnowledgeAvailability.REFRESH_FAILED
+        result = await refresh_scheduler.refresh_now(
+            base_id,
+            config=config,
+            runtime_paths=runtime_paths,
+            force_reindex=True,
         )
+    except Exception as exc:
+        index_status = _index_status_sync(config, base_id, runtime_paths, refreshing=False)
+        availability = index_status.availability if index_status.published else KnowledgeAvailability.REFRESH_FAILED
         last_error = index_status.last_error if index_status.last_error is not None else str(exc)
         raise HTTPException(
             status_code=409,
@@ -893,7 +883,7 @@ async def reindex_knowledge(base_id: str, request: Request) -> dict[str, Any]:
                 "last_error": _redacted_last_error(last_error),
             },
         ) from exc
-    if not (result.index_published and result.availability is KnowledgeAvailability.READY):
+    if not result.index_published:
         raise HTTPException(
             status_code=409,
             detail={

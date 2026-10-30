@@ -1,6 +1,10 @@
-"""One knowledge collection stored as one SQLite file: chunk rows, their vectors, and a keyword index.
+"""One knowledge collection stored as one SQLite file: chunk rows, their vectors, a keyword index, and its own state.
 
-Publication only changes which file the base's metadata names, so readers never wait on a writer. A file is written
+The file also holds which source files its rows claim (``files``), which ones failed (``failures``), and its settings
+and lifecycle (``meta``), each changed in the same transaction as the rows it describes, so the claims are exact
+whenever the file is readable. A new file appears whole or not at all.
+
+Publication only changes which file the base's publication names, so readers never wait on a writer. A file is written
 again only once it is no longer published and its readers have drained: a refresh may take a retired collection over
 as its next candidate. Loaded vector matrices are therefore keyed by the file's write generation, not only its path.
 """
@@ -15,8 +19,9 @@ import threading
 from collections import OrderedDict
 from contextlib import closing, suppress
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Literal
 
 from mindroom.knowledge.read_protocol import (
     DISTANCE_KEY,
@@ -28,12 +33,15 @@ from mindroom.knowledge.read_protocol import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Iterator, Mapping, Sequence
+    from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 
     import numpy as np
 
-#: Bump together with ``indexing_config._VECTOR_STORE_FORMAT``, which makes every semantic index rebuild.
-_SCHEMA_VERSION = 1
+    from mindroom.knowledge.corpus_signature import FileSignature
+
+#: The file's table layout. A layout change migrates existing files in place (``legacy_index_state``); a change to what
+#: the vectors mean bumps ``indexing_config._VECTOR_STORE_FORMAT`` instead, which rebuilds every semantic index.
+SCHEMA_VERSION = 2
 _FILE_SUFFIX = ".sqlite3"
 #: The file Chroma kept in a base's storage directory before MindRoom owned this store; never a collection.
 _CHROMA_FILE = "chroma.sqlite3"
@@ -91,6 +99,16 @@ CREATE TRIGGER chunks_fts_delete AFTER DELETE ON chunks BEGIN
     UPDATE generation SET value = value + 1;
 END;
 """  # noqa: S608 - fixed DDL; the only substitution is the constant tokenizer
+#: The collection's own state; one statement each, so a caller's transaction holds them.
+_STATE_SCHEMA = (
+    # The file version each claimed source path's rows embed; an empty file is claimed with no rows.
+    "CREATE TABLE files (path TEXT PRIMARY KEY, stamp INTEGER NOT NULL, size INTEGER NOT NULL, digest TEXT NOT NULL)"
+    " WITHOUT ROWID",
+    "CREATE TABLE failures (path TEXT PRIMARY KEY) WITHOUT ROWID",
+    "CREATE TABLE meta (settings TEXT NOT NULL, stage TEXT NOT NULL, rebuild INTEGER NOT NULL, revision TEXT,"
+    " total_files INTEGER NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL)",
+)
+_META_COLUMNS = "settings, stage, rebuild, revision, total_files, created_at, updated_at"
 
 
 class _CollectionNotFoundError(LookupError):
@@ -110,6 +128,24 @@ class StoredRow:
     metadata: Mapping[str, Any]
     #: The vector, or its little-endian float32 bytes as stored.
     embedding: Sequence[float] | bytes
+
+
+@dataclass(frozen=True)
+class CollectionMeta:
+    """A collection's settings and lifecycle, stored beside its rows."""
+
+    #: The indexing settings its vectors were built under, as ``IndexingSettings.to_metadata()``.
+    settings: Mapping[str, str]
+    #: ``building`` until the publisher marks it ``complete`` just before publishing it.
+    stage: Literal["building", "complete"]
+    #: Fixed at creation: a forced rebuild, which neither reuses nor keeps the publication it replaces.
+    rebuild: bool
+    #: The Git revision its claims describe, when known.
+    revision: str | None
+    #: Source files in the corpus it last reconciled against.
+    total_files: int
+    created_at: str
+    updated_at: str
 
 
 @dataclass(frozen=True)
@@ -134,14 +170,47 @@ class KnowledgeCollection:
         """Return whether the collection's file exists."""
         return self.file.is_file()
 
-    def reset(self) -> None:
-        """Replace the collection with an empty one; the new file appears whole or not at all."""
+    def create(self, meta: CollectionMeta, *, pages: Iterable[Sequence[StoredRow]] = ()) -> None:
+        """Replace the collection with a new one holding ``pages``; the new file appears whole or not at all.
+
+        Rows copied from another store carry their file's signature in their metadata, which claims their path.
+        """
+
+        def fill(connection: sqlite3.Connection) -> None:
+            for page in pages:
+                _insert_rows(connection, page)
+            install_state_tables(connection, meta)
+
+        self._build(fill)
+
+    def create_copy(self, source: KnowledgeCollection, meta: CollectionMeta) -> None:
+        """Replace the collection with a compact copy of ``source`` and ``meta``; it appears whole or not at all."""
+
+        def fill(connection: sqlite3.Connection) -> None:
+            _write_meta(connection, meta)
+
+        with closing(source._connect(read_only=True)) as reader:
+            self._build(fill, vacuum_from=reader)
+
+    def _build(
+        self,
+        fill: Callable[[sqlite3.Connection], None],
+        *,
+        vacuum_from: sqlite3.Connection | None = None,
+    ) -> None:
         self.path.mkdir(parents=True, exist_ok=True)
         building = self.file.with_name(f"{self.file.name}.building")
         building.unlink(missing_ok=True)
+        if vacuum_from is not None:
+            vacuum_from.execute("VACUUM INTO ?", (str(building),))
         with closing(sqlite3.connect(building)) as connection:
-            connection.executescript(_SCHEMA)
-            connection.execute(f"PRAGMA user_version = {_SCHEMA_VERSION}")
+            if vacuum_from is None:
+                connection.executescript(_SCHEMA)
+            # No reader sees the file before the rename, so one transaction is only for speed.
+            connection.execute("BEGIN")
+            fill(connection)
+            connection.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
+            connection.commit()
         # The old file's journal must not outlive it, or SQLite would roll it back into the new file.
         self.file.with_name(f"{self.file.name}-journal").unlink(missing_ok=True)
         building.replace(self.file)
@@ -151,66 +220,29 @@ class KnowledgeCollection:
         self.file.with_name(f"{self.file.name}-journal").unlink(missing_ok=True)
         self.file.unlink(missing_ok=True)
 
-    def write_source_rows(self, relative_path: str, rows: Sequence[StoredRow]) -> None:
-        """Replace one source file's rows with ``rows`` in one transaction; vectors must match the collection's width."""
-        with closing(self._connect()) as connection, connection:
-            connection.execute("DELETE FROM chunks WHERE source_path = ?", (relative_path,))
-            _insert_rows(connection, rows)
-
-    def add_rows(self, rows: Sequence[StoredRow]) -> None:
-        """Add rows in one transaction, as copied from another store; vectors must match the collection's width."""
-        with closing(self._connect()) as connection, connection:
-            _insert_rows(connection, rows)
-
-    def copy_rows(
-        self,
-        source: KnowledgeCollection,
-        *,
-        select: Callable[[Mapping[str, Any]], bool],
-        page_rows: int = 500,
-    ) -> None:
-        """Copy the rows of ``source`` whose metadata ``select`` accepts, verbatim, in pages of ``page_rows``."""
-        with closing(source._connect(read_only=True)) as reader, closing(self._connect()) as writer:
-            last_rowid = 0
-            while page := reader.execute(
-                "SELECT rowid, id, source_path, document, metadata, embedding FROM chunks "
-                "WHERE rowid > ? ORDER BY rowid LIMIT ?",
-                (last_rowid, page_rows),
-            ).fetchall():
-                last_rowid = page[-1][0]
-                kept = [row[1:] for row in page if select(json.loads(row[4]))]
-                with writer:
-                    writer.executemany(
-                        "INSERT INTO chunks(id, source_path, document, metadata, embedding) VALUES (?, ?, ?, ?, ?)",
-                        kept,
-                    )
-
-    def delete_source_paths(self, relative_paths: Sequence[str]) -> None:
-        """Delete every row of the given source paths."""
-        with closing(self._connect()) as connection, connection:
-            for batch in _batches(relative_paths):
-                connection.execute(f"DELETE FROM chunks WHERE source_path IN ({_placeholders(batch)})", batch)  # noqa: S608
-
-    def paths_with_vectors(self, relative_paths: Sequence[str]) -> set[str]:
-        """Return which of the given source paths have at least one row."""
-        if not relative_paths:
-            return set()
-        found: set[str] = set()
+    def meta(self) -> CollectionMeta:
+        """Return the collection's settings and lifecycle."""
         with closing(self._connect()) as connection:
-            for batch in _batches(relative_paths):
-                found.update(
-                    row[0]
-                    for row in connection.execute(
-                        f"SELECT DISTINCT source_path FROM chunks WHERE source_path IN ({_placeholders(batch)})",  # noqa: S608
-                        batch,
-                    )
-                )
-        return found
+            return _read_meta(connection)
 
-    def row_count(self) -> int:
-        """Return how many rows the collection holds."""
+    def files(self) -> dict[str, FileSignature]:
+        """Return the file version each claimed source path's rows embed."""
         with closing(self._connect()) as connection:
-            return connection.execute("SELECT COUNT(*) FROM chunks").fetchone()[0]
+            return {
+                path: (stamp, size, digest) for path, stamp, size, digest in connection.execute("SELECT * FROM files")
+            }
+
+    def failed_paths(self) -> set[str]:
+        """Return the source paths whose last attempt failed."""
+        with closing(self._connect()) as connection:
+            return {path for (path,) in connection.execute("SELECT path FROM failures")}
+
+    def claim_counts(self) -> tuple[int, int]:
+        """Return how many source files the collection claims and how many failed."""
+        with closing(self._connect()) as connection:
+            claimed = connection.execute("SELECT COUNT(*) FROM files").fetchone()[0]
+            failed = connection.execute("SELECT COUNT(*) FROM failures").fetchone()[0]
+        return claimed, failed
 
     def free_fraction(self) -> float:
         """Return the share of the file's pages that deleted rows left free; SQLite reuses them but never shrinks."""
@@ -219,10 +251,62 @@ class KnowledgeCollection:
             free = connection.execute("PRAGMA freelist_count").fetchone()[0]
         return free / pages if pages else 0.0
 
-    def has_rows(self) -> bool:
-        """Return whether the collection holds any row."""
-        with closing(self._connect()) as connection:
-            return connection.execute("SELECT 1 FROM chunks LIMIT 1").fetchone() is not None
+    def write_file(self, relative_path: str, signature: FileSignature, rows: Sequence[StoredRow]) -> None:
+        """Replace one source file's rows with ``rows`` and claim it at ``signature``, in one transaction.
+
+        Vectors must match the collection's width.
+        """
+        with closing(self._connect()) as connection, connection:
+            connection.execute("DELETE FROM chunks WHERE source_path = ?", (relative_path,))
+            _insert_rows(connection, rows)
+            connection.execute("INSERT OR REPLACE INTO files VALUES (?, ?, ?, ?)", (relative_path, *signature))
+            connection.execute("DELETE FROM failures WHERE path = ?", (relative_path,))
+            _touch(connection)
+
+    def record_failure(self, relative_path: str) -> None:
+        """Record that one source file failed to index: it keeps no rows and no claim."""
+        with closing(self._connect()) as connection, connection:
+            connection.execute("DELETE FROM chunks WHERE source_path = ?", (relative_path,))
+            connection.execute("DELETE FROM files WHERE path = ?", (relative_path,))
+            connection.execute("INSERT OR IGNORE INTO failures VALUES (?)", (relative_path,))
+            _touch(connection)
+
+    def reconcile(
+        self,
+        *,
+        drop: Sequence[str],
+        restamp: Mapping[str, FileSignature],
+        revision: str | None,
+        total_files: int,
+        rebuild: bool,
+    ) -> None:
+        """Start or continue a build against one listing, in one transaction.
+
+        Drops the rows, claims and failures of ``drop``, adopts the new stamps of files whose content is unchanged,
+        and records the revision and corpus size the claims now describe; the collection is a ``building`` one, a
+        forced rebuild only when ``rebuild``, from here.
+        """
+        with closing(self._connect()) as connection, connection:
+            for batch in _batches(drop):
+                placeholders = _placeholders(batch)
+                connection.execute(f"DELETE FROM chunks WHERE source_path IN ({placeholders})", batch)  # noqa: S608
+                connection.execute(f"DELETE FROM files WHERE path IN ({placeholders})", batch)  # noqa: S608
+                connection.execute(f"DELETE FROM failures WHERE path IN ({placeholders})", batch)  # noqa: S608
+            connection.executemany(
+                "UPDATE files SET stamp = ? WHERE path = ?",
+                ((signature[0], path) for path, signature in restamp.items()),
+            )
+            connection.execute(
+                "UPDATE meta SET stage = 'building', rebuild = ?, revision = ?, total_files = ?",
+                (int(rebuild), revision, total_files),
+            )
+            _touch(connection)
+
+    def mark_complete(self) -> None:
+        """Mark the build complete, which the publisher does just before publishing it."""
+        with closing(self._connect()) as connection, connection:
+            connection.execute("UPDATE meta SET stage = 'complete'")
+            _touch(connection)
 
     def search(
         self,
@@ -294,9 +378,69 @@ class KnowledgeCollection:
 
 def _check_schema_version(connection: sqlite3.Connection, name: str) -> None:
     version = connection.execute("PRAGMA user_version").fetchone()[0]
-    if version != _SCHEMA_VERSION:
-        message = f"Knowledge collection {name!r} has schema version {version}, expected {_SCHEMA_VERSION}"
+    if version != SCHEMA_VERSION:
+        message = f"Knowledge collection {name!r} has schema version {version}, expected {SCHEMA_VERSION}"
         raise sqlite3.DatabaseError(message)
+
+
+def install_state_tables(connection: sqlite3.Connection, meta: CollectionMeta) -> None:
+    """Add the state tables to a collection's rows in the caller's transaction, claiming each path its rows carry.
+
+    Every path's rows were written in one transaction, so they carry one file version, which they claim. Rows without
+    a well-formed signature claim nothing and are dropped, so no row is ever unclaimed.
+    """
+    for statement in _STATE_SCHEMA:
+        connection.execute(statement)
+    stamp, size, digest = (f"$.{SOURCE_MTIME_NS_KEY}", f"$.{SOURCE_SIZE_KEY}", f"$.{SOURCE_DIGEST_KEY}")
+    connection.execute(
+        "INSERT INTO files SELECT source_path, json_extract(metadata, ?), json_extract(metadata, ?),"
+        " json_extract(metadata, ?) FROM chunks"
+        " WHERE json_type(metadata, ?) = 'integer' AND json_type(metadata, ?) = 'integer'"
+        " AND json_extract(metadata, ?) >= 0 AND json_type(metadata, ?) = 'text' AND json_extract(metadata, ?) != ''"
+        " GROUP BY source_path",
+        (stamp, size, digest, stamp, size, size, digest, digest),
+    )
+    connection.execute("DELETE FROM chunks WHERE source_path NOT IN (SELECT path FROM files)")
+    _write_meta(connection, meta)
+
+
+def _write_meta(connection: sqlite3.Connection, meta: CollectionMeta) -> None:
+    connection.execute("DELETE FROM meta")
+    connection.execute(
+        f"INSERT INTO meta ({_META_COLUMNS}) VALUES (?, ?, ?, ?, ?, ?, ?)",  # noqa: S608 - fixed column list
+        (
+            json.dumps(dict(meta.settings), sort_keys=True),
+            meta.stage,
+            int(meta.rebuild),
+            meta.revision,
+            meta.total_files,
+            meta.created_at,
+            meta.updated_at,
+        ),
+    )
+
+
+def _read_meta(connection: sqlite3.Connection) -> CollectionMeta:
+    settings, stage, rebuild, revision, total_files, created_at, updated_at = connection.execute(
+        f"SELECT {_META_COLUMNS} FROM meta",  # noqa: S608 - fixed column list
+    ).fetchone()
+    return CollectionMeta(
+        settings=json.loads(settings),
+        stage="complete" if stage == "complete" else "building",
+        rebuild=bool(rebuild),
+        revision=revision,
+        total_files=total_files,
+        created_at=created_at,
+        updated_at=updated_at,
+    )
+
+
+def _touch(connection: sqlite3.Connection) -> None:
+    connection.execute("UPDATE meta SET updated_at = ?", (_utc_now(),))
+
+
+def _utc_now() -> str:
+    return datetime.now(tz=UTC).isoformat()
 
 
 def list_collection_names(storage_path: Path) -> tuple[str, ...]:

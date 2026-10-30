@@ -35,6 +35,7 @@ from mindroom.credentials.manager import get_runtime_shared_credentials_manager
 from mindroom.knowledge.file_listing import knowledge_files_from_relative_paths
 from mindroom.knowledge.git_source import GitKnowledgeSource, GitSyncResult
 from mindroom.knowledge.github_app_auth import GitHubAppTokenProvider
+from mindroom.knowledge.index_metadata import publication_path
 from mindroom.knowledge.indexing_config import knowledge_git_dir
 from mindroom.knowledge.manager import KnowledgeManager
 from mindroom.knowledge.refresh_locks import refresh_source_root_lock
@@ -46,7 +47,6 @@ from mindroom.knowledge.refresh_runner import (
 )
 from mindroom.knowledge.registry import (
     get_published_index,
-    published_index_metadata_path,
     published_index_storage_path,
     resolve_published_index_key,
     source_root_for_published_index_key,
@@ -518,11 +518,11 @@ async def test_git_credentials_service_token_stays_out_of_git_config_and_metadat
 
     result = await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)
     key = resolve_published_index_key("docs", config=config, runtime_paths=runtime_paths)
-    metadata_text = published_index_metadata_path(key).read_text(encoding="utf-8")
+    metadata_text = publication_path(published_index_storage_path(key)).read_text(encoding="utf-8")
     git_config_text = (knowledge_git_dir(runtime_paths.storage_root, docs_path) / "config").read_text(encoding="utf-8")
     fetch_env = fetch_envs[0]
 
-    assert result.index_published is True
+    assert result.published is True
     assert fetch_env is not None
     assert fetch_env["GIT_CONFIG_KEY_0"] == f"http.{clean_url}.extraHeader"
     assert fetch_env["GIT_CONFIG_VALUE_0"].startswith("Authorization: Basic ")
@@ -744,7 +744,7 @@ async def test_git_embedded_userinfo_url_is_not_reused_in_git_auth_env(
     fetch_env = fetch_envs[0]
     git_dir = knowledge_git_dir(runtime_paths.storage_root, docs_path)
 
-    assert result.index_published is True
+    assert result.published is True
     assert fetch_env is not None
     assert fetch_env["GIT_CONFIG_KEY_0"] == f"http.{clean_url}.extraHeader"
     assert fetch_env["GIT_CONFIG_VALUE_0"].startswith("Authorization: Basic ")
@@ -782,10 +782,10 @@ async def test_git_unsupported_scheme_userinfo_is_not_copied_to_git_config_env(
 
     result = await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)
     key = resolve_published_index_key("docs", config=config, runtime_paths=runtime_paths)
-    metadata_text = published_index_metadata_path(key).read_text(encoding="utf-8")
+    metadata_text = publication_path(published_index_storage_path(key)).read_text(encoding="utf-8")
     git_config_text = (knowledge_git_dir(runtime_paths.storage_root, docs_path) / "config").read_text(encoding="utf-8")
 
-    assert result.index_published is True
+    assert result.published is True
     assert fetch_envs == [None]
     assert clean_url in git_config_text
     assert "secret-token" not in git_config_text
@@ -815,11 +815,11 @@ async def test_git_query_and_fragment_tokens_stay_out_of_persistent_remote_and_m
 
     result = await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)
     key = resolve_published_index_key("docs", config=config, runtime_paths=runtime_paths)
-    metadata_text = published_index_metadata_path(key).read_text(encoding="utf-8")
+    metadata_text = publication_path(published_index_storage_path(key)).read_text(encoding="utf-8")
     git_dir = knowledge_git_dir(runtime_paths.storage_root, docs_path)
     git_config_text = (git_dir / "config").read_text(encoding="utf-8")
 
-    assert result.index_published is True
+    assert result.published is True
     assert fetch_envs
     assert "query-secret" in str(fetch_envs[0])
     assert "frag-secret" in str(fetch_envs[0])
@@ -876,8 +876,8 @@ async def test_existing_single_branch_checkout_switches_to_new_remote_branch(tmp
     runtime_paths = runtime_paths_for(main_config)
     await refresh_knowledge_binding("docs", config=main_config, runtime_paths=runtime_paths)
     main_lookup = get_published_index("docs", config=main_config, runtime_paths=runtime_paths)
-    assert main_lookup.index is not None
-    assert [document.content for document in await main_lookup.index.reader.asearch("branch", limit=5)] == [
+    assert main_lookup.reader is not None
+    assert [document.content for document in await main_lookup.reader.asearch("branch", limit=5)] == [
         "main branch content",
     ]
 
@@ -895,9 +895,9 @@ async def test_existing_single_branch_checkout_switches_to_new_remote_branch(tmp
     )
     release_lookup = get_published_index("docs", config=release_config, runtime_paths=runtime_paths)
 
-    assert result.index_published is True
-    assert release_lookup.index is not None
-    assert [document.content for document in await release_lookup.index.reader.asearch("branch", limit=5)] == [
+    assert result.published is True
+    assert release_lookup.reader is not None
+    assert [document.content for document in await release_lookup.reader.asearch("branch", limit=5)] == [
         "release branch content",
     ]
 
@@ -953,9 +953,9 @@ async def test_refresh_recovers_orphaned_git_index_lock(tmp_path: Path) -> None:
     lookup = get_published_index("docs", config=config, runtime_paths=runtime_paths)
 
     assert lock_path.exists() is False
-    assert result.index_published is True
-    assert lookup.index is not None
-    assert [document.content for document in await lookup.index.reader.asearch("crash", limit=5)] == [
+    assert result.published is True
+    assert lookup.reader is not None
+    assert [document.content for document in await lookup.reader.asearch("crash", limit=5)] == [
         "after crash",
     ]
 
@@ -1241,7 +1241,7 @@ cat
     result = await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)
 
     assert index_lock_path.exists() is False
-    assert result.index_published is True
+    assert result.published is True
     assert (docs_path / "doc.md").read_text(encoding="utf-8") == "after timeout"
 
 
@@ -1426,8 +1426,8 @@ def _published_row_ids(config: Config, runtime_paths: RuntimePaths) -> dict[str,
 
 async def _search(config: Config, runtime_paths: RuntimePaths, query: str) -> list[str]:
     lookup = get_published_index("docs", config=config, runtime_paths=runtime_paths)
-    assert lookup.index is not None
-    return [document.content for document in await lookup.index.reader.asearch(query, limit=5)]
+    assert lookup.reader is not None
+    return [document.content for document in await lookup.reader.asearch(query, limit=5)]
 
 
 @pytest.mark.skipif(os.name == "nt", reason="POSIX shell hooks and filters are required")
@@ -1449,7 +1449,7 @@ async def test_git_metadata_planted_in_the_checkout_never_runs(tmp_path: Path) -
     result = await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)
     manager = KnowledgeManager("docs", config=config, runtime_paths=runtime_paths)
 
-    assert result.index_published is True
+    assert result.published is True
     assert not marker.exists()
     assert (docs_path / "doc.md").read_text(encoding="utf-8") == "after planting"
     assert await _search(config, runtime_paths, "planting") == ["after planting"]
@@ -1498,7 +1498,7 @@ async def test_legacy_in_tree_git_dir_is_renamed_not_refetched(
 
     result = await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)
 
-    assert result.index_published is True
+    assert result.published is True
     assert not (docs_path / ".git").exists()
     assert _object_files(git_dir) == object_files
     assert not any(args[0] in {"clone", "init"} for args in commands)
@@ -1632,7 +1632,7 @@ async def test_legacy_adoption_resumes_from_staging(
 
     result = await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)
 
-    assert result.index_published is True
+    assert result.published is True
     assert not staging.exists()
     assert _object_files(git_dir) == object_files
     assert not (docs_path / ".git" / "packed-refs").exists()
@@ -1718,7 +1718,7 @@ async def test_deleted_checkout_is_restored_from_the_owned_repository(
 
     result = await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)
 
-    assert result.index_published is True
+    assert result.published is True
     assert (docs_path / "doc.md").read_text(encoding="utf-8") == "restored content"
     assert _object_files(git_dir) == object_files
     assert not any(args[0] in {"clone", "init"} for args in commands)

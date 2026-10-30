@@ -605,7 +605,7 @@ def test_logged_tracebacks_omit_frame_locals(
 
 
 def test_knowledge_refresh_subprocess_failure_omits_frame_locals() -> None:
-    """The refresh child's failure traceback omits frame locals."""
+    """The refresh child's failure traceback omits frame locals, and the failure it reports carries none either."""
     request = {"base_id": "docs", "config_data": {"GIT_CONFIG_VALUE_0": _FRAME_LOCAL_CREDENTIAL}}
 
     completed = subprocess.run(
@@ -617,7 +617,8 @@ def test_knowledge_refresh_subprocess_failure_omits_frame_locals() -> None:
     )
 
     stderr = completed.stderr.decode()
-    assert completed.returncode == 1
+    assert completed.returncode == 0
+    assert json.loads(completed.stdout)["error"] == "Knowledge refresh subprocess request is missing config_path"
     assert "Knowledge refresh subprocess failed" in stderr
     assert _FRAME_LOCAL_CREDENTIAL not in stderr
     assert "Traceback (most recent call last):" in stderr
@@ -727,7 +728,7 @@ def test_knowledge_refresh_subprocess_logs_like_its_parent(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The refresh child entrypoint applies the parent's logging instead of printing plain text."""
+    """The refresh child entrypoint logs like its parent, keeping stdout for the result it reports."""
     monkeypatch.setenv("MINDROOM_LOG_FORMAT", "json")
     setup_logging(level="INFO", runtime_paths=_runtime_paths(tmp_path))
 
@@ -740,12 +741,13 @@ def test_knowledge_refresh_subprocess_logs_like_its_parent(
         timeout=60,
     )
 
-    assert completed.returncode == 1
-    assert completed.stdout == b""
-    [record] = _stderr_records(completed.stderr)
-    assert record["event"] == "Knowledge refresh subprocess failed"
-    assert record["level"] == "error"
-    assert "missing config_data" in str(record["exception"])
+    assert completed.returncode == 0
+    assert json.loads(completed.stdout)["error"] == "Knowledge refresh subprocess request is missing config_data"
+    failed, finished = _stderr_records(completed.stderr)
+    assert failed["event"] == "Knowledge refresh subprocess failed"
+    assert failed["level"] == "error"
+    assert "missing config_data" in str(failed["exception"])
+    assert (finished["event"], finished["level"]) == ("Knowledge refresh subprocess completed", "info")
 
 
 def test_subprocess_logging_appends_to_the_parent_log_file(

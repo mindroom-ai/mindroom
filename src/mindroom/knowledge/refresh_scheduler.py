@@ -1,21 +1,21 @@
-"""Best-effort background refresh scheduling for published knowledge indexes."""
+"""The runtime's one knowledge refresh scheduler: which bases are refreshing, and how many children run at once.
+
+Each process has one scheduler, shared by the bots, the API, and file memory, so its task map is the only answer to
+"is this base refreshing" and its limit bounds every refresh child the process starts.
+"""
 
 from __future__ import annotations
 
 import asyncio
+import time
 from contextlib import suppress
 from contextvars import Context
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING
 
 from mindroom.embeddings.embedder_health import (
     EmbedderHealthRecorder,
     capture_embedder_health_recorder,
-)
-from mindroom.knowledge.refresh_locks import (
-    claim_scheduled_refresh,
-    is_refresh_active,
-    mark_scheduled_refresh_inactive,
 )
 from mindroom.knowledge.registry import (
     KnowledgeRefreshTarget,
@@ -24,6 +24,8 @@ from mindroom.knowledge.registry import (
 from mindroom.logging_config import get_logger
 
 if TYPE_CHECKING:
+    from collections.abc import Hashable
+
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
     from mindroom.knowledge.refresh_runner import KnowledgeRefreshResult
@@ -33,7 +35,8 @@ if TYPE_CHECKING:
 logger = get_logger(__name__)
 _DEFAULT_MAX_CONCURRENT_REFRESHES = 1
 _MAX_CONCURRENT_REFRESHES_ENV = "MINDROOM_KNOWLEDGE_REFRESH_CONCURRENCY"
-_REFRESH_CLAIM_RETRY_SECONDS = 0.1
+#: On-access refreshes remembered for their cooldown; private knowledge has one target per requester.
+_MAX_SCHEDULED_COOLDOWNS = 512
 
 
 def _max_concurrent_refreshes(runtime_paths: RuntimePaths) -> int:
@@ -58,23 +61,29 @@ class _ScheduledRefresh:
     runtime_paths: RuntimePaths
     execution_identity: ToolExecutionIdentity | None
     health_recorder: EmbedderHealthRecorder
+    force_reindex: bool = False
+    #: Callers of ``refresh_now`` waiting for the refresh that serves this request.
+    waiters: tuple[asyncio.Future[KnowledgeRefreshResult], ...] = ()
+
+    def absorbing(self, earlier: _ScheduledRefresh) -> _ScheduledRefresh:
+        """Return this request, standing in for an earlier one still queued: a forced rebuild covers a plain refresh."""
+        return replace(
+            self,
+            force_reindex=self.force_reindex or earlier.force_reindex,
+            waiters=(*earlier.waiters, *self.waiters),
+        )
 
 
 @dataclass(slots=True)
 class KnowledgeRefreshScheduler:
-    """Deduplicate per-binding refreshes and limit global background refresh concurrency."""
+    """Run at most one refresh per base, queue one more behind it, and bound concurrent refresh children."""
 
     max_concurrent_refreshes: int = _DEFAULT_MAX_CONCURRENT_REFRESHES
     _tasks: dict[KnowledgeRefreshTarget, asyncio.Task[None]] = field(default_factory=dict, init=False)
     _pending: dict[KnowledgeRefreshTarget, _ScheduledRefresh] = field(default_factory=dict, init=False)
-    _claim_retry_handles: dict[KnowledgeRefreshTarget, asyncio.TimerHandle] = field(default_factory=dict, init=False)
+    _scheduled_at: dict[Hashable, float] = field(default_factory=dict, init=False)
     _shutting_down: bool = field(default=False, init=False)
     _refresh_slots: asyncio.Semaphore | None = field(default=None, init=False)
-
-    @classmethod
-    def from_runtime(cls, runtime_paths: RuntimePaths) -> KnowledgeRefreshScheduler:
-        """Build a scheduler limited by the runtime's ``MINDROOM_KNOWLEDGE_REFRESH_CONCURRENCY``; a bad value raises."""
-        return cls(max_concurrent_refreshes=_max_concurrent_refreshes(runtime_paths))
 
     def schedule_refresh(
         self,
@@ -85,33 +94,32 @@ class KnowledgeRefreshScheduler:
         execution_identity: ToolExecutionIdentity | None = None,
     ) -> None:
         """Schedule a background refresh for one resolved knowledge binding."""
-        self._schedule(
-            base_id,
-            config=config,
-            runtime_paths=runtime_paths,
-            execution_identity=execution_identity,
-        )
+        self._schedule(base_id, config=config, runtime_paths=runtime_paths, execution_identity=execution_identity)
 
-    def is_refreshing(
+    def schedule_refresh_after_cooldown(
         self,
         base_id: str,
         *,
         config: Config,
         runtime_paths: RuntimePaths,
-        execution_identity: ToolExecutionIdentity | None = None,
+        execution_identity: ToolExecutionIdentity | None,
+        cooldown_key: Hashable,
+        cooldown_seconds: float,
     ) -> bool:
-        """Return whether one resolved knowledge binding is refreshing."""
-        try:
-            key = resolve_refresh_target(
-                base_id,
-                config=config,
-                runtime_paths=runtime_paths,
-                execution_identity=execution_identity,
-                create=False,
-            )
-        except ValueError:
+        """Schedule a refresh unless one with ``cooldown_key`` was scheduled within ``cooldown_seconds``."""
+        now = time.monotonic()
+        last_scheduled_at = self._scheduled_at.get(cooldown_key)
+        if last_scheduled_at is not None and now - last_scheduled_at < cooldown_seconds:
             return False
-        return is_refresh_active(key)
+        self._scheduled_at[cooldown_key] = now
+        for stale in sorted(self._scheduled_at, key=self._scheduled_at.__getitem__)[:-_MAX_SCHEDULED_COOLDOWNS]:
+            del self._scheduled_at[stale]
+        self._schedule(base_id, config=config, runtime_paths=runtime_paths, execution_identity=execution_identity)
+        return True
+
+    def is_refreshing(self, target: KnowledgeRefreshTarget) -> bool:
+        """Return whether a refresh of ``target`` is running or waiting for a slot."""
+        return target in self._tasks
 
     async def refresh_now(
         self,
@@ -122,36 +130,35 @@ class KnowledgeRefreshScheduler:
         execution_identity: ToolExecutionIdentity | None = None,
         force_reindex: bool = False,
     ) -> KnowledgeRefreshResult:
-        """Run a refresh immediately and wait for it."""
-        from mindroom.knowledge.refresh_runner import refresh_knowledge_binding_in_subprocess  # noqa: PLC0415
+        """Schedule a refresh and wait for it, behind any refresh of the same base already running.
 
-        with suppress(ValueError):
-            key = resolve_refresh_target(
-                base_id,
-                config=config,
-                runtime_paths=runtime_paths,
-                execution_identity=execution_identity,
-                create=False,
-            )
-            self._pending.pop(key, None)
-        return await refresh_knowledge_binding_in_subprocess(
+        The refresh is shared with background requests for the base and keeps running if this caller stops waiting.
+        """
+        if self._shutting_down:
+            msg = "Knowledge refresh scheduler is shutting down"
+            raise RuntimeError(msg)
+        waiter: asyncio.Future[KnowledgeRefreshResult] = asyncio.get_running_loop().create_future()
+        self._schedule(
             base_id,
             config=config,
             runtime_paths=runtime_paths,
             execution_identity=execution_identity,
             force_reindex=force_reindex,
+            waiter=waiter,
         )
+        return await asyncio.shield(waiter)
 
     async def shutdown(self) -> None:
-        """Cancel in-flight background refresh tasks."""
+        """Cancel in-flight background refresh tasks and release this process's scheduler."""
+        global _runtime_scheduler
         self._shutting_down = True
+        if _runtime_scheduler is self:
+            _runtime_scheduler = None
         tasks = list(self._tasks.values())
         self._tasks.clear()
+        for request in self._pending.values():
+            _cancel_waiters(request)
         self._pending.clear()
-        retry_handles = list(self._claim_retry_handles.values())
-        self._claim_retry_handles.clear()
-        for handle in retry_handles:
-            handle.cancel()
         for task in tasks:
             task.cancel()
         for task in tasks:
@@ -165,20 +172,24 @@ class KnowledgeRefreshScheduler:
         config: Config,
         runtime_paths: RuntimePaths,
         execution_identity: ToolExecutionIdentity | None,
+        force_reindex: bool = False,
+        waiter: asyncio.Future[KnowledgeRefreshResult] | None = None,
     ) -> None:
         if self._shutting_down:
             logger.debug("Skipping knowledge refresh schedule after shutdown", base_id=base_id)
             return
         try:
-            key = resolve_refresh_target(
+            target = resolve_refresh_target(
                 base_id,
                 config=config,
                 runtime_paths=runtime_paths,
                 execution_identity=execution_identity,
                 create=False,
             )
-        except ValueError:
+        except ValueError as exc:
             logger.exception("Could not resolve knowledge binding for refresh", base_id=base_id)
+            if waiter is not None:
+                waiter.set_exception(exc)
             return
 
         request = _ScheduledRefresh(
@@ -189,98 +200,72 @@ class KnowledgeRefreshScheduler:
             runtime_paths=runtime_paths,
             execution_identity=execution_identity,
             health_recorder=capture_embedder_health_recorder(),
+            force_reindex=force_reindex,
+            waiters=() if waiter is None else (waiter,),
         )
-        if key in self._tasks:
-            self._pending[key] = request
+        if target in self._tasks:
+            earlier = self._pending.get(target)
+            self._pending[target] = request if earlier is None else request.absorbing(earlier)
             return
-        self._start_task(key, request)
+        self._start_task(target, request)
 
-    def _start_task(self, key: KnowledgeRefreshTarget, request: _ScheduledRefresh) -> None:
-        loop = _running_loop_for_schedule(key.base_id)
-        if loop is None:
+    def _start_task(self, target: KnowledgeRefreshTarget, request: _ScheduledRefresh) -> None:
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            logger.warning("Skipping knowledge refresh schedule without a running event loop", base_id=target.base_id)
+            _cancel_waiters(request)
             return
-        claim_result = claim_scheduled_refresh(key)
-        if claim_result == "scheduled_refresh_active":
-            logger.debug("Skipping duplicate knowledge refresh owned by another scheduler", base_id=key.base_id)
-            return
-        if claim_result == "direct_refresh_active":
-            logger.debug("Deferring knowledge refresh owned by a direct caller", base_id=key.base_id)
-            self._pending[key] = request
-            self._schedule_claim_retry(key, loop)
-            return
-        self._pending.pop(key, None)
-        retry_handle = self._claim_retry_handles.pop(key, None)
-        if retry_handle is not None:
-            retry_handle.cancel()
         # A tool call can schedule a refresh that outlives it, and a turn's contextvars hold its Agent and tools.
         context = Context()
         task = loop.create_task(
-            self._run_refresh(key, request),
-            name=f"knowledge_refresh:{key.base_id}",
+            self._run_refresh(request),
+            name=f"knowledge_refresh:{target.base_id}",
             context=context,
         )
-        self._tasks[key] = task
-
+        self._tasks[target] = task
         task.add_done_callback(
-            lambda completed, *, scheduled_key=key: self._handle_done(scheduled_key, completed),
+            lambda completed, *, scheduled_target=target: self._handle_done(scheduled_target, completed),
             context=context,
         )
 
-    def _schedule_claim_retry(
-        self,
-        key: KnowledgeRefreshTarget,
-        loop: asyncio.AbstractEventLoop,
-    ) -> None:
-        if key in self._claim_retry_handles:
+    def _handle_done(self, target: KnowledgeRefreshTarget, task: asyncio.Task[None]) -> None:
+        if self._tasks.get(target) is task:
+            self._tasks.pop(target, None)
+        if task.cancelled():
             return
-        # Each retry reschedules from the last one, so a copy of the scheduling turn's context would live on.
-        self._claim_retry_handles[key] = loop.call_later(
-            _REFRESH_CLAIM_RETRY_SECONDS,
-            self._retry_pending_claim,
-            key,
-            context=Context(),
-        )
+        if (error := task.exception()) is not None:
+            logger.error("Background knowledge refresh failed", base_id=target.base_id, exc_info=error)
+        pending_request = self._pending.pop(target, None)
+        if pending_request is not None and not self._shutting_down:
+            self._start_task(target, pending_request)
 
-    def _retry_pending_claim(self, key: KnowledgeRefreshTarget) -> None:
-        self._claim_retry_handles.pop(key, None)
-        if self._shutting_down:
-            self._pending.pop(key, None)
-            return
-        if key in self._tasks:
-            return
-        request = self._pending.pop(key, None)
-        if request is not None:
-            self._start_task(key, request)
-
-    def _handle_done(self, key: KnowledgeRefreshTarget, task: asyncio.Task[None]) -> None:
-        mark_scheduled_refresh_inactive(key)
-        if self._tasks.get(key) is task:
-            self._tasks.pop(key, None)
-        cancelled = False
-        try:
-            task.result()
-        except asyncio.CancelledError:
-            cancelled = True
-        except Exception:
-            logger.exception("Background knowledge refresh failed", base_id=key.base_id)
-        if cancelled or self._shutting_down:
-            self._pending.pop(key, None)
-            return
-        pending_request = self._pending.pop(key, None)
-        if pending_request is not None:
-            self._start_task(key, pending_request)
-
-    async def _run_refresh(self, key: KnowledgeRefreshTarget, request: _ScheduledRefresh) -> None:
+    async def _run_refresh(self, request: _ScheduledRefresh) -> None:
         from mindroom.knowledge.refresh_runner import refresh_knowledge_binding_in_subprocess  # noqa: PLC0415
 
-        async with self._refresh_semaphore():
-            await refresh_knowledge_binding_in_subprocess(
-                key.base_id,
-                config=request.config,
-                runtime_paths=request.runtime_paths,
-                execution_identity=request.execution_identity,
-                health_recorder=request.health_recorder,
-            )
+        try:
+            async with self._refresh_semaphore():
+                result = await refresh_knowledge_binding_in_subprocess(
+                    request.base_id,
+                    config=request.config,
+                    runtime_paths=request.runtime_paths,
+                    execution_identity=request.execution_identity,
+                    force_reindex=request.force_reindex,
+                    health_recorder=request.health_recorder,
+                )
+        except asyncio.CancelledError:
+            _cancel_waiters(request)
+            raise
+        except Exception as exc:
+            for waiter in request.waiters:
+                if not waiter.done():
+                    waiter.set_exception(exc)
+            if request.waiters:
+                return
+            raise
+        for waiter in request.waiters:
+            if not waiter.done():
+                waiter.set_result(result)
 
     def _refresh_semaphore(self) -> asyncio.Semaphore:
         if self._refresh_slots is None:
@@ -288,9 +273,22 @@ class KnowledgeRefreshScheduler:
         return self._refresh_slots
 
 
-def _running_loop_for_schedule(base_id: str) -> asyncio.AbstractEventLoop | None:
-    try:
-        return asyncio.get_running_loop()
-    except RuntimeError:
-        logger.warning("Skipping knowledge refresh schedule without a running event loop", base_id=base_id)
-        return None
+def _cancel_waiters(request: _ScheduledRefresh) -> None:
+    for waiter in request.waiters:
+        waiter.cancel()
+
+
+_runtime_scheduler: KnowledgeRefreshScheduler | None = None
+
+
+def runtime_refresh_scheduler(runtime_paths: RuntimePaths) -> KnowledgeRefreshScheduler:
+    """Return this process's one refresh scheduler, created with its runtime's refresh limit; a bad value raises.
+
+    The bots, the API, and file memory all schedule through it, so one limit bounds every refresh child.
+    """
+    global _runtime_scheduler
+    if _runtime_scheduler is None:
+        _runtime_scheduler = KnowledgeRefreshScheduler(
+            max_concurrent_refreshes=_max_concurrent_refreshes(runtime_paths),
+        )
+    return _runtime_scheduler

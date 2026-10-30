@@ -65,7 +65,8 @@ from mindroom.credentials.sync import sync_env_to_credentials
 from mindroom.delegation.legacy_snapshots import migrate_subagent_sessions
 from mindroom.embeddings.embedder_health import get_embedder_failure
 from mindroom.integrations import integration_routers
-from mindroom.knowledge.refresh_scheduler import KnowledgeRefreshScheduler
+from mindroom.knowledge.legacy_index_state import migrate_knowledge_index_state
+from mindroom.knowledge.refresh_scheduler import KnowledgeRefreshScheduler, runtime_refresh_scheduler
 from mindroom.knowledge.status import reconcile_knowledge_mode_transition_states
 from mindroom.knowledge.watch import KnowledgeSourceWatcher
 from mindroom.knowledge_graph.store import knowledge_graph_failure
@@ -514,6 +515,7 @@ async def _lifespan(_app: FastAPI) -> AsyncIterator[None]:
             await migrate_subagent_sessions(runtime_paths)
             await migrate_conversation_storage(runtime_paths)
             await migrate_tool_credential_defaults(runtime_paths)
+            await migrate_knowledge_index_state(runtime_paths)
             await asyncio.to_thread(
                 constants.ensure_writable_config_path,
                 create_minimal=True,
@@ -530,7 +532,7 @@ async def _lifespan(_app: FastAPI) -> AsyncIterator[None]:
             logger.info("Syncing API credentials from runtime env")
             await run_blocking_until_complete(sync_env_to_credentials, runtime_paths)
 
-            api_owned_knowledge_refresh_scheduler = KnowledgeRefreshScheduler.from_runtime(runtime_paths)
+            api_owned_knowledge_refresh_scheduler = runtime_refresh_scheduler(runtime_paths)
             knowledge_refresh_scheduler = api_owned_knowledge_refresh_scheduler
             standalone_knowledge_source_watcher = KnowledgeSourceWatcher(knowledge_refresh_scheduler, runtime_paths)
             app_state.knowledge_source_watcher = standalone_knowledge_source_watcher

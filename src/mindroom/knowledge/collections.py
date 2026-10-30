@@ -9,7 +9,6 @@ needs as arguments.
 
 from __future__ import annotations
 
-import asyncio
 import hashlib
 import json
 import uuid
@@ -32,23 +31,19 @@ if TYPE_CHECKING:
     from contextlib import AbstractContextManager
     from pathlib import Path
 
-    from mindroom.knowledge.candidate_checkpoint import FileSignature
+    from mindroom.knowledge.corpus_signature import FileSignature
 
 logger = get_logger(__name__)
 
 
 _COLLECTION_PREFIX = "mindroom_knowledge"
 
-#: Completed candidate entries whose vectors are confirmed per thread hop, so verifying a huge candidate still yields
-#: to the event loop and to cancellation.
-VECTOR_VERIFY_BATCH = 500
-
 
 @dataclass(frozen=True)
 class CollectionSpace:
     """One knowledge base's private storage directory and the names it owns.
 
-    ``default_collection`` is *derived*, never accepted. Cleanup treats it as
+    ``_default_collection`` is *derived*, never accepted. Cleanup treats it as
     proof of ownership -- a collection is deletable only if it matches that
     name or carries its candidate prefix -- so a space that could be handed the
     name would be able to authorize deleting a collection this base does not
@@ -61,7 +56,7 @@ class CollectionSpace:
     storage_path: Path
 
     @property
-    def default_collection(self) -> str:
+    def _default_collection(self) -> str:
         """Return the published collection name this base's identity owns."""
         return _collection_name_for_base(self.base_id, self.knowledge_path)
 
@@ -84,12 +79,22 @@ def _collection_name_for_base(base_id: str, knowledge_path: Path) -> str:
 
 def candidate_collection_name(space: CollectionSpace) -> str:
     """Return a fresh candidate name under the prefix this base provably owns."""
-    return f"{space.default_collection}_candidate_{uuid.uuid4().hex[:16]}"
+    return f"{space._default_collection}_candidate_{uuid.uuid4().hex[:16]}"
 
 
 def open_collection(space: CollectionSpace, collection_name: str) -> KnowledgeCollection:
     """Return a handle on one collection in this base's storage directory; nothing is opened yet."""
     return KnowledgeCollection(path=space.storage_path, name=collection_name)
+
+
+def owned_collection_names(space: CollectionSpace) -> list[str]:
+    """Return the collections this base provably owns: its default name and its candidate prefix."""
+    default_collection = space._default_collection
+    return [
+        name
+        for name in list_collection_names(space.storage_path)
+        if name == default_collection or name.startswith(f"{default_collection}_candidate_")
+    ]
 
 
 def readers_drained(space: CollectionSpace) -> AbstractContextManager[None]:
@@ -129,14 +134,13 @@ def _row_metadata(
     return metadata
 
 
-def write_source_rows(
+def write_file_rows(
     collection: KnowledgeCollection,
-    *,
     relative_path: str,
     signature: FileSignature,
     rows: Sequence[tuple[KnowledgeChunk, Sequence[float]]],
 ) -> None:
-    """Replace one source file's rows with its chunks, each paired with its vector.
+    """Replace one source file's rows with its chunks, each paired with its vector, and claim it at ``signature``.
 
     The caller embeds every chunk before it writes, so a failed embedding
     never empties a file. Row ids are fixed by the file version and the
@@ -150,8 +154,9 @@ def write_source_rows(
         SOURCE_DIGEST_KEY: digest,
     }
     content_hash = _source_content_hash(source_metadata)
-    collection.write_source_rows(
+    collection.write_file(
         relative_path,
+        signature,
         [
             StoredRow(
                 id=hashlib.md5(f"{content_hash}_{index}".encode()).hexdigest(),  # noqa: S324
@@ -162,27 +167,6 @@ def write_source_rows(
             for index, (chunk, vector) in enumerate(rows)
         ],
     )
-
-
-async def delete_collection(space: CollectionSpace, collection_name: str) -> bool:
-    """Delete one collection this base owns, reporting whether it is really gone."""
-    try:
-        await asyncio.to_thread(_delete_collection_sync, space, collection_name)
-    except Exception:
-        logger.warning(
-            "Failed to delete knowledge collection",
-            base_id=space.base_id,
-            collection=collection_name,
-            exc_info=True,
-        )
-        return False
-    return True
-
-
-def _delete_collection_sync(space: CollectionSpace, collection_name: str) -> None:
-    """Delete one collection, treating an already-absent one as deleted."""
-    with collection_lifetime_lock(space.storage_path, exclusive=True):
-        open_collection(space, collection_name).delete()
 
 
 def cleanup_superseded_collections(
@@ -199,7 +183,7 @@ def cleanup_superseded_collections(
     else in that directory is left alone and reported rather than deleted,
     because nothing here can prove who owns it.
     """
-    default_collection = space.default_collection
+    default_collection = space._default_collection
     candidate_prefix = f"{default_collection}_candidate_"
 
     try:

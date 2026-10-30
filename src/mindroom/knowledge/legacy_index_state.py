@@ -1,0 +1,288 @@
+"""Knowledge index state that earlier releases kept outside each collection, converted once at startup.
+
+Earlier releases kept one base's state in one file with two writers (``indexing_settings.json``), and which source
+files a collection held in a candidate checkpoint, its journal, and two seal files beside the collections, whose own
+files had no state tables. Each base directory is converted before any refresh or search reads it, so the current
+readers take only the current shape.
+"""
+
+from __future__ import annotations
+
+import json
+import sqlite3
+from contextlib import closing
+from typing import TYPE_CHECKING
+
+from mindroom.background_tasks import run_blocking_until_complete
+from mindroom.knowledge.index_metadata import (
+    Publication,
+    RefreshStatus,
+    publication_path,
+    save_publication,
+    update_refresh_status,
+    utc_now,
+    write_json_atomic,
+)
+from mindroom.knowledge.indexing_config import IndexingSettings
+from mindroom.knowledge.vector_store import (
+    SCHEMA_VERSION,
+    CollectionMeta,
+    KnowledgeCollection,
+    install_state_tables,
+    list_collection_names,
+)
+from mindroom.logging_config import get_logger
+
+if TYPE_CHECKING:
+    from pathlib import Path
+
+    from mindroom.constants import RuntimePaths
+
+logger = get_logger(__name__)
+
+_LEGACY_STATE_FILE = "indexing_settings.json"
+_LEGACY_CHECKPOINT_FILE = "candidate_index.json"
+_LEGACY_JOURNAL_FILE = "candidate_index.jsonl"
+_LEGACY_PUBLISHED_SEAL_FILE = "published_index_seal.json"
+_LEGACY_RETIRED_SEAL_FILE = "retired_index_seal.json"
+_LEGACY_SCHEMA_VERSION = 1
+
+
+# LEGACY_COMPAT: One knowledge index state file holding both the publication and the refresh job.
+# Legacy format: `knowledge_db/<key>/indexing_settings.json` (and under `knowledge_db/private/<ns>/knowledge_db/`) with
+# `settings`, `status` (`complete`, or `indexing`, `failed`, `resetting` before any publication), the publication's
+# `collection`, `indexed_count`, `source_signature`, `published_revision`, `last_published_at`, and the refresh job's
+# `refresh_job`, `reason`, `last_error`, `last_refresh_at`, `consecutive_refresh_failures`.
+# Last legacy release: v2026.10.696 wrote it; the next release writes `publication.json` and `refresh_status.json`.
+# Handling: At startup, a `complete` record that names its publication becomes `publication.json`, keeping the retired
+# seal's collection as the kept one; the refresh job's reason, error, failure streak, and time become
+# `refresh_status.json`, and a running or pending job is dropped, since no refresh survives a restart. A record that
+# does not parse is kept, wrapped so it stays unreadable, so the next refresh still deletes and resumes nothing until
+# a replacement publishes. The legacy file is deleted last, so an interrupted conversion reruns whole.
+# Coverage: tests/test_knowledge_legacy_index_state.py.
+def _legacy_publication(payload: dict[str, object], retired: str | None) -> Publication | None:
+    settings = _legacy_settings(payload.get("settings"))
+    collection = _optional_str(payload.get("collection"))
+    indexed_count = _legacy_count(payload.get("indexed_count"))
+    source_signature = _optional_str(payload.get("source_signature"))
+    if (
+        settings is None
+        or payload.get("status") != "complete"
+        or indexed_count is None
+        or source_signature is None
+        or (collection is None and settings.mode != "files")
+    ):
+        return None
+    return Publication(
+        settings=settings,
+        collection=collection,
+        indexed_count=indexed_count,
+        source_signature=source_signature,
+        published_revision=_optional_str(payload.get("published_revision")),
+        last_published_at=_optional_str(payload.get("last_published_at")) or utc_now(),
+        retired=retired if retired != collection else None,
+    )
+
+
+def _legacy_refresh_status(payload: dict[str, object]) -> RefreshStatus:
+    return RefreshStatus(
+        reason=_optional_str(payload.get("reason")),
+        last_error=_optional_str(payload.get("last_error")),
+        consecutive_refresh_failures=_legacy_count(payload.get("consecutive_refresh_failures")) or 0,
+        last_refresh_at=_optional_str(payload.get("last_refresh_at")),
+    )
+
+
+# LEGACY_COMPAT: Knowledge file claims kept outside the collection, in a candidate checkpoint and seals.
+# Legacy format: `candidate_index.json` (schema 2: `collection`, `settings`, `target_revision`, `total_files`,
+# `completed`, `failed`) with its `candidate_index.jsonl` journal, and `published_index_seal.json` and
+# `retired_index_seal.json` snapshots naming the published and the retired collection and their settings.
+# Last legacy release: v2026.10.696 wrote them (the checkpoint since v2026.7.266, the seals since v2026.10.558); the
+# next release keeps each collection's claims in its own `files` table.
+# Handling: They only name each collection and its settings for the schema upgrade below; claims come from the rows.
+# A checkpoint candidate with no claims in its snapshot and an empty journal but with rows is a bulk copy interrupted
+# before its claims were recorded, whose rows may cut a file short, so it is deleted, as the old code rebuilt it.
+# Then every checkpoint and seal file is deleted.
+# Coverage: tests/test_knowledge_legacy_index_state.py.
+def _legacy_snapshot(path: Path) -> tuple[str, IndexingSettings, dict[str, object]] | None:
+    payload = _load_object(path)
+    if payload is None:
+        return None
+    collection = _optional_str(payload.get("collection"))
+    settings = _legacy_settings(payload.get("settings"))
+    if collection is None or settings is None:
+        return None
+    return collection, settings, payload
+
+
+def _interrupted_copy(storage: Path, snapshot: dict[str, object]) -> bool:
+    try:
+        journal = (storage / _LEGACY_JOURNAL_FILE).read_text(encoding="utf-8")
+    except OSError:
+        journal = ""
+    return not snapshot.get("completed") and not journal.strip()
+
+
+# LEGACY_COMPAT: Knowledge collection files without their own state tables.
+# Legacy format: `<collection>.sqlite3` at `PRAGMA user_version = 1`, holding `chunks`, its keyword index, and
+# `generation`; each row's metadata carries its source file's signature.
+# Last legacy release: v2026.10.696 wrote them (since v2026.10.569); the next release writes schema 2.
+# Handling: A schema-1 collection whose settings the legacy state names is upgraded in place, in one transaction:
+# `files` claims each path at the signature its rows carry (every path's rows were written in one transaction),
+# `failures` starts empty, and `meta` records those settings, `complete` for the published and retired collections
+# and `building` for a candidate. No row and no vector is rewritten. A file a refresh restamped is read once more,
+# and empty files and failed files are simply indexed again. Other schema-1 collections stay as they are for the next
+# refresh, which deletes them as unusable unless the publication is unreadable.
+# Coverage: tests/test_knowledge_legacy_index_state.py.
+def _upgrade_collection(collection: KnowledgeCollection, meta: CollectionMeta) -> None:
+    with closing(sqlite3.connect(collection.file, timeout=30.0)) as connection:
+        if connection.execute("PRAGMA user_version").fetchone()[0] != _LEGACY_SCHEMA_VERSION:
+            return
+        connection.execute("BEGIN")
+        install_state_tables(connection, meta)
+        connection.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
+        connection.commit()
+
+
+async def migrate_knowledge_index_state(runtime_paths: RuntimePaths) -> None:
+    """Convert every knowledge base directory an earlier release left, before any refresh or search reads one."""
+    await run_blocking_until_complete(_migrate_knowledge_index_state, runtime_paths)
+
+
+def _migrate_knowledge_index_state(runtime_paths: RuntimePaths) -> None:
+    root = runtime_paths.storage_root / "knowledge_db"
+    states = [*root.glob(f"*/{_LEGACY_STATE_FILE}"), *root.glob(f"private/*/knowledge_db/*/{_LEGACY_STATE_FILE}")]
+    for state_file in sorted(states):
+        storage = state_file.parent
+        if storage.is_symlink() or state_file.is_symlink():
+            continue
+        try:
+            _migrate_base(storage)
+        except (OSError, sqlite3.Error, ValueError) as error:
+            # That base then fails where it is read, and its next refresh rebuilds it; the rest of startup goes on.
+            logger.warning("knowledge_index_state_conversion_failed", storage=str(storage), error=str(error))
+
+
+def _migrate_base(storage: Path) -> None:
+    state_file = storage / _LEGACY_STATE_FILE
+    payload = _load_object(state_file)
+    seals = {
+        name: snapshot
+        for name in (_LEGACY_PUBLISHED_SEAL_FILE, _LEGACY_RETIRED_SEAL_FILE)
+        if (snapshot := _legacy_snapshot(storage / name)) is not None
+    }
+    retired_seal = seals.get(_LEGACY_RETIRED_SEAL_FILE)
+    publication = (
+        None if payload is None else _legacy_publication(payload, None if retired_seal is None else retired_seal[0])
+    )
+    if payload is None:
+        write_json_atomic(
+            publication_path(storage),
+            {"unreadable_legacy_state": state_file.read_text(encoding="utf-8", errors="replace")},
+        )
+    else:
+        if publication is not None:
+            save_publication(storage, publication)
+        status = _legacy_refresh_status(payload)
+        if status != RefreshStatus():
+            update_refresh_status(storage, lambda _current: status)
+        _upgrade_named_collections(storage, payload, publication, seals)
+    for name in (_LEGACY_JOURNAL_FILE, _LEGACY_CHECKPOINT_FILE, _LEGACY_PUBLISHED_SEAL_FILE, _LEGACY_RETIRED_SEAL_FILE):
+        (storage / name).unlink(missing_ok=True)
+    state_file.unlink()
+
+
+def _upgrade_named_collections(
+    storage: Path,
+    payload: dict[str, object],
+    publication: Publication | None,
+    seals: dict[str, tuple[str, IndexingSettings, dict[str, object]]],
+) -> None:
+    """Upgrade each schema-1 collection the legacy state names, with the settings and stage it names it under."""
+    named: dict[str, tuple[IndexingSettings, str, str | None, int | None]] = {}
+    checkpoint = _legacy_snapshot(storage / _LEGACY_CHECKPOINT_FILE)
+    if checkpoint is not None:
+        collection, settings, snapshot = checkpoint
+        if _interrupted_copy(storage, snapshot) and collection != (publication and publication.collection):
+            KnowledgeCollection(path=storage, name=collection).delete()
+        else:
+            named[collection] = (
+                settings,
+                "building",
+                _optional_str(snapshot.get("target_revision")),
+                _legacy_count(snapshot.get("total_files")),
+            )
+    if publication is None:
+        settings = _legacy_settings(payload.get("settings"))
+        collection = _optional_str(payload.get("collection"))
+        if settings is not None and collection is not None:
+            named.setdefault(collection, (settings, "building", _optional_str(payload.get("published_revision")), None))
+    for collection, settings, snapshot in seals.values():
+        named[collection] = (
+            settings,
+            "complete",
+            _optional_str(snapshot.get("target_revision")),
+            _legacy_count(snapshot.get("total_files")),
+        )
+    if publication is not None and publication.collection is not None:
+        named[publication.collection] = (
+            publication.settings,
+            "complete",
+            publication.published_revision,
+            publication.indexed_count,
+        )
+    present = set(list_collection_names(storage))
+    now = utc_now()
+    for collection, (settings, stage, revision, total_files) in named.items():
+        if collection not in present:
+            continue
+        meta = CollectionMeta(
+            settings=settings.to_metadata(),
+            stage="complete" if stage == "complete" else "building",
+            rebuild=False,
+            revision=revision,
+            total_files=total_files or 0,
+            created_at=now,
+            updated_at=now,
+        )
+        _upgrade_collection(KnowledgeCollection(path=storage, name=collection), meta)
+
+
+def _load_object(path: Path) -> dict[str, object] | None:
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    return payload if isinstance(payload, dict) else None
+
+
+def _legacy_settings(raw_settings: object) -> IndexingSettings | None:
+    if not isinstance(raw_settings, dict):
+        return None
+    settings: dict[str, str] = {}
+    for key, value in raw_settings.items():
+        if not isinstance(key, str) or not isinstance(value, str):
+            return None
+        settings[key] = value
+    return IndexingSettings.from_metadata(settings)
+
+
+def _optional_str(value: object) -> str | None:
+    return value if isinstance(value, str) and value else None
+
+
+def _legacy_count(value: object) -> int | None:
+    """Return a stored count, which earlier releases also wrote as a whole float or a decimal string."""
+    match value:
+        case bool():
+            return None
+        case int() if value >= 0:
+            return value
+        case float() if value.is_integer() and value >= 0:
+            return int(value)
+        case str() if value.strip().isdecimal():
+            try:
+                return int(value.strip())
+            except ValueError:
+                return None
+    return None

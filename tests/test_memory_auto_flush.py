@@ -12,7 +12,6 @@ from unittest.mock import patch
 import pytest
 from structlog.testing import capture_logs
 
-import mindroom.memory._semantic_file_search as semantic_file_search
 from mindroom.config.agent import AgentConfig, AgentPrivateConfig
 from mindroom.config.main import Config
 from mindroom.constants import HOOK_SOURCE_RUN_METADATA_KEY, MATRIX_EVENT_ID_METADATA_KEY, resolve_runtime_paths
@@ -37,6 +36,7 @@ from mindroom.tool_system.worker_routing import (
     tool_execution_identity,
 )
 from tests.conftest import bind_runtime_paths, install_model_providers, runtime_paths_for, seed_session
+from tests.fakes.knowledge import install_recording_refresh_scheduler
 from tests.fakes.scripted_model import Await, ScriptedModel, answer
 
 if TYPE_CHECKING:
@@ -1003,22 +1003,16 @@ async def test_a_note_warms_the_semantic_index(
     """A written note schedules a background refresh of the agent's semantic file-memory index."""
     config = _config(tmp_path)
     config.memory.search.mode = "semantic"
-    scheduled: list[tuple[str, Config]] = []
-
-    class FakeScheduler:
-        def schedule_refresh(self, base_id: str, **kwargs: object) -> None:
-            scheduled.append((base_id, cast("Config", kwargs["config"])))
-
-    monkeypatch.setattr(semantic_file_search, "_memory_refresh_scheduler", FakeScheduler())
+    scheduler = install_recording_refresh_scheduler(monkeypatch)
     worker = await _started(config)
     session = _thread("t1")
     _seed(config, session, [_run("r1", session, T0 + 10)])
 
     await worker._run_cycle(config)
 
-    [(base_id, scheduled_config)] = scheduled
+    [scheduled] = scheduler.scheduled
     workspace = agent_workspace_root_path(tmp_path, "general")
-    assert scheduled_config.knowledge_bases[base_id].path == str(workspace.resolve())
+    assert scheduled.config.knowledge_bases[scheduled.base_id].path == str(workspace.resolve())
     assert extractor.calls
 
 

@@ -1,4 +1,8 @@
-"""Heavy knowledge refresh path run outside request handling."""
+"""One knowledge refresh, run in a child interpreter, and the runtime side that starts it and records its outcome.
+
+The child holds the base's source-root lock and alone writes the publication. It reports what it did; the runtime
+alone records that in the base's refresh status, so the two never write the same file.
+"""
 
 from __future__ import annotations
 
@@ -13,12 +17,13 @@ import tempfile
 from contextlib import asynccontextmanager, suppress
 from dataclasses import asdict, dataclass, field, replace
 from datetime import UTC, datetime
+from functools import partial
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, TypedDict, cast
 
 from pydantic import TypeAdapter
 
-from mindroom.background_tasks import create_background_task
+from mindroom.background_tasks import create_background_task, run_blocking_until_complete, run_coroutine_until_complete
 from mindroom.config.knowledge import KnowledgeBaseConfig
 from mindroom.config.main import Config
 from mindroom.constants import (
@@ -37,38 +42,34 @@ from mindroom.embeddings.embedder_health import (
     get_embedder_failure,
 )
 from mindroom.embeddings.errors import extract_classified_embedder_detail
-from mindroom.knowledge.availability import KnowledgeAvailability
 from mindroom.knowledge.github_app_auth import (
     GitHubAppTokenBinding,
     get_runtime_github_app_token_provider,
 )
-from mindroom.knowledge.index_metadata import state_for_publication
+from mindroom.knowledge.index_metadata import (
+    Publication,
+    load_publication,
+    load_refresh_status,
+    new_publication,
+    publication_path,
+    save_publication,
+    utc_now,
+)
 from mindroom.knowledge.manager import KnowledgeManager
 from mindroom.knowledge.redaction import redact_credentials_in_text
-from mindroom.knowledge.refresh_locks import (
-    mark_refresh_active,
-    mark_refresh_inactive,
-    refresh_source_root_lock,
-)
+from mindroom.knowledge.refresh_locks import refresh_source_root_lock
 from mindroom.knowledge.registry import (
     PublishedIndexKey,
-    PublishedIndexState,
-    load_published_index_state,
+    index_availability,
     mark_knowledge_source_changed_async,
-    mark_published_index_refresh_failed_preserving_last_good,
-    mark_published_index_refresh_running,
-    mark_published_index_refresh_succeeded,
     mark_published_index_stale,
-    prune_private_index_bookkeeping,
-    publish_knowledge_index_from_state,
-    published_index_availability_for_state,
-    published_index_collection_exists_for_state,
-    published_index_metadata_path,
-    published_index_settings_compatible,
-    refresh_target_for_published_index_key,
+    published_collection_exists,
+    published_index_storage_path,
+    record_refresh_failed,
+    record_refresh_succeeded,
+    refresh_reason_generation,
     resolve_published_index_key,
     resolve_refresh_target,
-    save_published_index_state,
     source_root_for_published_index_key,
     source_root_for_refresh_target,
 )
@@ -84,13 +85,15 @@ from mindroom.tool_system.worker_routing import (
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
 
+    from mindroom.knowledge.availability import KnowledgeAvailability
+
 
 logger = get_logger(__name__)
 
 
 @dataclass(frozen=True)
 class KnowledgeRefreshResult:
-    """Result of one explicit knowledge refresh."""
+    """Result of one explicit knowledge refresh, as recorded by the runtime."""
 
     key: PublishedIndexKey
     indexed_count: int
@@ -99,14 +102,33 @@ class KnowledgeRefreshResult:
     last_error: str | None = None
 
 
-class _SubprocessRefreshResult(TypedDict):
-    indexed_count: int
-    index_published: bool
-    availability: KnowledgeAvailability
-    last_error: str | None
+@dataclass(frozen=True)
+class _RefreshChildResult:
+    """What one refresh child did, reported to the runtime that started it."""
+
+    indexed_count: int = 0
+    published: bool = False
+    #: Why the refresh failed, credential-redacted, or None.
+    error: str | None = None
+    #: A content-gated base with no files yet, which publishes nothing.
+    deferred: bool = False
+    #: Why other bases over the same source must refresh too, when this refresh found the source changed.
+    source_changed: str | None = None
+    #: When the publication the child left was made, read under its lock, so the runtime can tell whether a later
+    #: publication, such as a dashboard upload's, superseded this result.
+    publication_made_at: str | None = None
 
 
-_subprocess_result_adapter = TypeAdapter(_SubprocessRefreshResult)
+_child_result_adapter = TypeAdapter(_RefreshChildResult)
+
+
+class _RefreshChildFailedError(RuntimeError):
+    """A refresh child that could not start or ended without reporting a result."""
+
+    def __init__(self, message: str, *, started: bool) -> None:
+        super().__init__(message)
+        #: Whether the child ran, so it may have published before it died.
+        self.started = started
 
 
 @dataclass(frozen=True)
@@ -156,13 +178,6 @@ _REFRESH_SUBPROCESS_THREAD_ENV = {
     "VECLIB_MAXIMUM_THREADS": "1",
     "TOKENIZERS_PARALLELISM": "false",
 }
-_REFRESH_SUBPROCESS_INTERMEDIATE_PENDING_REASONS = frozenset(
-    {
-        "git_source_updated",
-        "manual_reindex",
-        "source_changed",
-    },
-)
 
 
 async def _github_app_refresh_binding(
@@ -219,7 +234,7 @@ async def refresh_knowledge_binding_in_subprocess(
     force_reindex: bool = False,
     health_recorder: EmbedderHealthRecorder | None = None,
 ) -> KnowledgeRefreshResult:
-    """Run one knowledge refresh in a child interpreter.
+    """Run one knowledge refresh in a child interpreter and record its outcome in the base's refresh status.
 
     Manual and scheduled refreshes share this boundary. A subprocess keeps
     vector store, embedding, Git, and reader CPU/I/O away from the
@@ -234,19 +249,103 @@ async def refresh_knowledge_binding_in_subprocess(
         create=True,
     )
     recorder = health_recorder or capture_embedder_health_recorder()
+    storage = published_index_storage_path(key)
+    reason_generation = await asyncio.to_thread(refresh_reason_generation, key)
+    publication_before = await asyncio.to_thread(load_publication, storage)
     try:
-        result = await _refresh_index_in_subprocess(
+        result = await _run_refresh_child(
             key,
             config=config,
             runtime_paths=runtime_paths,
             execution_identity=execution_identity,
             force_reindex=force_reindex,
         )
-    except Exception:
-        _schedule_refresh_health_check(key, config, runtime_paths, recorder, refresh_raised=True)
+    except asyncio.CancelledError:
+        await run_blocking_until_complete(
+            _record_refresh_without_result,
+            key,
+            publication_before,
+            reason_generation,
+            None,
+        )
         raise
-    _schedule_refresh_health_check(key, config, runtime_paths, recorder, refresh_raised=False)
-    return result
+    except _RefreshChildFailedError as failure:
+        error = redact_credentials_in_text(str(failure))
+        if failure.started:
+            await run_blocking_until_complete(
+                _record_refresh_without_result,
+                key,
+                publication_before,
+                reason_generation,
+                error,
+            )
+        else:
+            await run_blocking_until_complete(_record_failure, key, error)
+        _schedule_refresh_health_check(key, config, runtime_paths, recorder, error=error)
+        raise
+    await run_blocking_until_complete(_record_child_result, key, result, reason_generation)
+    if result.source_changed is not None:
+        await mark_knowledge_source_changed_async(
+            base_id,
+            config=config,
+            runtime_paths=runtime_paths,
+            execution_identity=execution_identity,
+            reason=result.source_changed,
+            excluding=key,
+        )
+    _schedule_refresh_health_check(key, config, runtime_paths, recorder, error=result.error)
+    publication = await asyncio.to_thread(load_publication, storage)
+    return KnowledgeRefreshResult(
+        key=key,
+        indexed_count=result.indexed_count,
+        index_published=result.published,
+        availability=index_availability(
+            key,
+            publication,
+            await asyncio.to_thread(load_refresh_status, storage),
+            publication_unreadable=publication is None and publication_path(storage).exists(),
+            refreshing=False,
+        ),
+        last_error=result.error,
+    )
+
+
+def _record_child_result(key: PublishedIndexKey, result: _RefreshChildResult, reason_generation: int) -> None:
+    if result.published:
+        record_refresh_succeeded(key, reason_generation=reason_generation)
+    elif result.deferred:
+        mark_published_index_stale(key, reason="source_empty")
+    elif result.error is not None and result.publication_made_at in {None, _publication_made_at(key)}:
+        # A publication made after the child released its lock, such as a dashboard upload's, answers for the base;
+        # a child that failed before it could read the publication reports none and is recorded.
+        _record_failure(key, result.error)
+
+
+def _publication_made_at(key: PublishedIndexKey) -> str | None:
+    publication = load_publication(published_index_storage_path(key))
+    return None if publication is None else publication.last_published_at
+
+
+def _record_refresh_without_result(
+    key: PublishedIndexKey,
+    publication_before: Publication | None,
+    reason_generation: int,
+    error: str | None,
+) -> None:
+    """Record a child that ran but reported nothing: it published if the publication changed, else it failed.
+
+    Within one runtime no other refresh of this base runs meanwhile, so a changed publication is this child's. A
+    cancelled child that did not publish leaves the status as it was.
+    """
+    publication = load_publication(published_index_storage_path(key))
+    if publication is not None and publication != publication_before:
+        record_refresh_succeeded(key, reason_generation=reason_generation)
+    elif error is not None:
+        _record_failure(key, error)
+
+
+def _record_failure(key: PublishedIndexKey, error: str) -> None:
+    record_refresh_failed(key, error=error)
 
 
 def _schedule_refresh_health_check(
@@ -255,159 +354,107 @@ def _schedule_refresh_health_check(
     runtime_paths: RuntimePaths,
     health_recorder: EmbedderHealthRecorder,
     *,
-    refresh_raised: bool,
+    error: str | None,
 ) -> None:
-    """Restore parent provider health after either manual or scheduled child work."""
+    """Restore the runtime's provider health after a refresh child failed on, or worked with, the embedder."""
     if embedder_in_use(config):
         create_background_task(
-            _check_embedder_after_refresh(
-                key,
-                config,
-                runtime_paths,
-                health_recorder,
-                refresh_raised=refresh_raised,
-            ),
+            _check_embedder_after_refresh(config, runtime_paths, health_recorder, error=error),
             name=f"embedder_refresh_health_check:{key.base_id}",
         )
 
 
 async def _check_embedder_after_refresh(
-    key: PublishedIndexKey,
     config: Config,
     runtime_paths: RuntimePaths,
     health_recorder: EmbedderHealthRecorder,
     *,
-    refresh_raised: bool,
+    error: str | None,
 ) -> None:
     if not health_recorder.is_current():
         return
-    state = await asyncio.to_thread(load_published_index_state, published_index_metadata_path(key))
-    persisted_embedder_failure = state is not None and extract_classified_embedder_detail(state.last_error) is not None
-    if refresh_raised or persisted_embedder_failure:
-        if not persisted_embedder_failure:
-            return
+    if extract_classified_embedder_detail(error) is not None:
         reason = "knowledge_refresh_failed"
-    else:
-        if get_embedder_failure() is None:
-            return
+    elif error is None and get_embedder_failure() is not None:
         reason = "knowledge_refresh_recovery"
+    else:
+        return
     await check_embedder_health(config, runtime_paths, reason=reason, health_recorder=health_recorder)
 
 
-async def _refresh_index_in_subprocess(  # noqa: PLR0915 - Keep process and result-file ownership together.
+async def _run_refresh_child(
     key: PublishedIndexKey,
     *,
     config: Config,
     runtime_paths: RuntimePaths,
     execution_identity: ToolExecutionIdentity | None,
     force_reindex: bool,
-) -> KnowledgeRefreshResult:
+) -> _RefreshChildResult:
+    """Run the child and return what it reported; raise ``_RefreshChildFailedError`` when it reported nothing."""
     base_id = key.base_id
-    target = refresh_target_for_published_index_key(key)
-    mark_refresh_active(target)
-    try:
-        # A file avoids pipe backpressure or waiting for EOF from a Git helper
-        # before the existing process-group cleanup can terminate that helper.
-        with tempfile.TemporaryFile() as output:
-            initial_state = await asyncio.to_thread(load_published_index_state, published_index_metadata_path(key))
-            try:
-                github_app_token = await _resolve_subprocess_github_app_token(
-                    base_id,
-                    config=config,
-                    runtime_paths=runtime_paths,
-                )
-                request_payload = await asyncio.to_thread(
-                    _serialize_subprocess_refresh_request,
-                    base_id,
-                    config=config,
-                    runtime_paths=runtime_paths,
-                    execution_identity=execution_identity,
-                    github_app_token=github_app_token,
-                    force_reindex=force_reindex,
-                )
-                # Resolved before the spawn so a malformed window rejects the refresh
-                # instead of leaving a child nobody is waiting on.
-                timeout = _refresh_subprocess_timeout_seconds(runtime_paths)
-                env = dict(runtime_env_values(runtime_paths))
-                env.setdefault("PATH", os.environ.get("PATH") or os.defpath)
-                env.update(_REFRESH_SUBPROCESS_THREAD_ENV)
-                env.update(subprocess_logging_env())
-                env["MINDROOM_KNOWLEDGE_REFRESH_SUBPROCESS"] = "1"
-                # Parent and child derive the cross-process refresh lock from their temp
-                # root, so the child shares this one whatever the runtime env names.
-                env["TMPDIR"] = tempfile.gettempdir()
-                process = await asyncio.create_subprocess_exec(
-                    sys.executable,
-                    "-m",
-                    "mindroom.knowledge.refresh_entrypoint",
-                    stdin=asyncio.subprocess.PIPE,
-                    stdout=output,
-                    env=env,
-                    **_subprocess_session_kwargs(),
-                )
-            except Exception as exc:
-                await _reconcile_failed_refresh_subprocess(
-                    key,
-                    initial_state=initial_state,
-                    error=redact_credentials_in_text(str(exc)),
-                )
-                raise
-            try:
-                async with asyncio.timeout(timeout):
-                    with suppress(BrokenPipeError, ConnectionResetError):
-                        await _send_subprocess_refresh_request(process, request_payload)
-                    return_code = await process.wait()
-            except TimeoutError:
-                # A refresh child can wedge below Python: torch's Metal shader-library
-                # caches are unlocked, and a corrupted lookup spins forever. The child
-                # gets its own session, so nothing else would ever reap it.
-                msg = f"Knowledge refresh subprocess for {base_id!r} timed out after {timeout}s and was terminated"
-                logger.warning(msg, base_id=base_id)
-                cleanup_task = asyncio.create_task(
-                    _cleanup_timed_out_refresh_subprocess(
-                        process,
-                        key,
-                        initial_state=initial_state,
-                        error=msg,
-                    ),
-                )
-                cancellation = await _drain_owned_cleanup_task(cleanup_task)
-                cleanup_task.result()
-                if cancellation is not None:
-                    raise cancellation from None
-                raise RuntimeError(msg) from None
-            except asyncio.CancelledError:
-                cleanup_task = asyncio.create_task(
-                    _cleanup_cancelled_refresh_subprocess(
-                        process,
-                        key,
-                        initial_state=initial_state,
-                        config=config,
-                        runtime_paths=runtime_paths,
-                    ),
-                )
-                await _drain_owned_cleanup_task(cleanup_task)
-                with suppress(Exception):
-                    cleanup_task.result()
-                raise
-
-            cleanup_task = asyncio.create_task(_terminate_refresh_subprocess(process))
-            cancellation = await _drain_owned_cleanup_task(cleanup_task)
-            cleanup_task.result()
-            if cancellation is not None:
-                raise cancellation from None
-
-            if return_code != 0:
-                msg = f"Knowledge refresh subprocess failed for {base_id!r} with exit code {return_code}"
-                await _reconcile_failed_refresh_subprocess(key, initial_state=initial_state, error=msg)
-                raise RuntimeError(msg)
-
-            output.seek(0)
-            result = _subprocess_result_adapter.validate_json(output.read())
-            return KnowledgeRefreshResult(key=key, **result)
-    finally:
-        mark_refresh_inactive(target)
-        prune_private_index_bookkeeping()
+    # A file avoids pipe backpressure or waiting for EOF from a Git helper
+    # before the process-group cleanup can terminate that helper.
+    with tempfile.TemporaryFile() as output:
+        try:
+            github_app_token = await _resolve_subprocess_github_app_token(
+                base_id,
+                config=config,
+                runtime_paths=runtime_paths,
+            )
+            request_payload = await asyncio.to_thread(
+                _serialize_subprocess_refresh_request,
+                base_id,
+                config=config,
+                runtime_paths=runtime_paths,
+                execution_identity=execution_identity,
+                github_app_token=github_app_token,
+                force_reindex=force_reindex,
+            )
+            # Resolved before the spawn so a malformed window rejects the refresh
+            # instead of leaving a child nobody is waiting on.
+            timeout = _refresh_subprocess_timeout_seconds(runtime_paths)
+            env = dict(runtime_env_values(runtime_paths))
+            env.setdefault("PATH", os.environ.get("PATH") or os.defpath)
+            env.update(_REFRESH_SUBPROCESS_THREAD_ENV)
+            env.update(subprocess_logging_env())
+            env["MINDROOM_KNOWLEDGE_REFRESH_SUBPROCESS"] = "1"
+            # Parent and child derive the cross-process refresh lock from their temp
+            # root, so the child shares this one whatever the runtime env names.
+            env["TMPDIR"] = tempfile.gettempdir()
+            process = await asyncio.create_subprocess_exec(
+                sys.executable,
+                "-m",
+                "mindroom.knowledge.refresh_entrypoint",
+                stdin=asyncio.subprocess.PIPE,
+                stdout=output,
+                env=env,
+                **_subprocess_session_kwargs(),
+            )
+        except Exception as exc:
+            raise _RefreshChildFailedError(str(exc), started=False) from exc
+        try:
+            async with asyncio.timeout(timeout):
+                with suppress(BrokenPipeError, ConnectionResetError):
+                    await _send_subprocess_refresh_request(process, request_payload)
+                return_code = await process.wait()
+        except TimeoutError:
+            # A refresh child can wedge below Python: torch's Metal shader-library
+            # caches are unlocked, and a corrupted lookup spins forever. The child
+            # gets its own session, so nothing else would ever reap it.
+            msg = f"Knowledge refresh subprocess for {base_id!r} timed out after {timeout}s and was terminated"
+            logger.warning(msg, base_id=base_id)
+            await run_coroutine_until_complete(_terminate_refresh_subprocess(process))
+            raise _RefreshChildFailedError(msg, started=True) from None
+        except asyncio.CancelledError:
+            await run_coroutine_until_complete(_terminate_refresh_subprocess(process))
+            raise
+        await run_coroutine_until_complete(_terminate_refresh_subprocess(process))
+        output.seek(0)
+        reported = output.read()
+        if return_code != 0 or not reported:
+            msg = f"Knowledge refresh subprocess failed for {base_id!r} with exit code {return_code}"
+            raise _RefreshChildFailedError(msg, started=True)
+        return _child_result_adapter.validate_json(reported)
 
 
 def _serialize_subprocess_refresh_request(
@@ -516,69 +563,6 @@ async def _terminate_refresh_subprocess(process: asyncio.subprocess.Process) -> 
         await _wait_for_process_group_exit(process_group_id)
 
 
-async def _drain_owned_cleanup_task(cleanup_task: asyncio.Task[None]) -> asyncio.CancelledError | None:
-    """Wait through repeated caller cancellation until an owned cleanup task settles."""
-    cancellation: asyncio.CancelledError | None = None
-    while not cleanup_task.done():
-        try:
-            await asyncio.shield(cleanup_task)
-        except asyncio.CancelledError as exc:
-            if cancellation is None:
-                cancellation = exc
-    return cancellation
-
-
-async def _cleanup_cancelled_refresh_subprocess(
-    process: asyncio.subprocess.Process,
-    key: PublishedIndexKey,
-    *,
-    initial_state: PublishedIndexState | None,
-    config: Config,
-    runtime_paths: RuntimePaths,
-) -> None:
-    try:
-        await _terminate_refresh_subprocess(process)
-        source_root = source_root_for_published_index_key(key)
-        async with refresh_source_root_lock(source_root):
-            await _reconcile_cancelled_refresh(
-                key,
-                initial_state=initial_state,
-                config=config,
-                runtime_paths=runtime_paths,
-            )
-    except Exception:
-        logger.warning("Failed to reconcile cancelled knowledge refresh subprocess", base_id=key.base_id, exc_info=True)
-
-
-async def _cleanup_timed_out_refresh_subprocess(
-    process: asyncio.subprocess.Process,
-    key: PublishedIndexKey,
-    *,
-    initial_state: PublishedIndexState | None,
-    error: str,
-) -> None:
-    """Terminate one timed-out child and persist its failure before returning."""
-    await _terminate_refresh_subprocess(process)
-    await _reconcile_failed_refresh_subprocess(key, initial_state=initial_state, error=error)
-
-
-async def _reconcile_failed_refresh_subprocess(
-    key: PublishedIndexKey,
-    *,
-    initial_state: PublishedIndexState | None,
-    error: str,
-) -> None:
-    try:
-        source_root = source_root_for_published_index_key(key)
-        async with refresh_source_root_lock(source_root):
-            state = await asyncio.to_thread(load_published_index_state, published_index_metadata_path(key))
-            if not _failed_subprocess_state_can_be_reconciled(key, state, initial_state):
-                return
-            await asyncio.to_thread(mark_published_index_refresh_failed_preserving_last_good, key, error=error)
-    except Exception:
-        logger.warning("Failed to reconcile failed knowledge refresh subprocess", base_id=key.base_id, exc_info=True)
-
-
 @asynccontextmanager
 async def knowledge_binding_mutation_lock(
     base_id: str,
@@ -608,8 +592,8 @@ async def _refresh_knowledge_binding(
     runtime_paths: RuntimePaths,
     execution_identity: ToolExecutionIdentity | None = None,
     force_reindex: bool = False,
-) -> KnowledgeRefreshResult:
-    """Build and publish one resolved knowledge binding."""
+) -> _RefreshChildResult:
+    """Refresh one resolved knowledge binding under its source-root lock: the refresh child's whole job."""
     key = resolve_published_index_key(
         base_id,
         config=config,
@@ -617,222 +601,25 @@ async def _refresh_knowledge_binding(
         execution_identity=execution_identity,
         create=True,
     )
-    return await _refresh_resolved_knowledge_binding(
-        key,
-        config=config,
-        runtime_paths=runtime_paths,
-        execution_identity=execution_identity,
-        force_reindex=force_reindex,
-    )
+    async with refresh_source_root_lock(source_root_for_published_index_key(key)):
+        result = await _refresh_locked(
+            key,
+            config=config,
+            runtime_paths=runtime_paths,
+            execution_identity=execution_identity,
+            force_reindex=force_reindex,
+        )
+        return replace(result, publication_made_at=await asyncio.to_thread(_publication_made_at, key))
 
 
-async def _refresh_resolved_knowledge_binding(
+async def _refresh_locked(
     key: PublishedIndexKey,
     *,
     config: Config,
     runtime_paths: RuntimePaths,
     execution_identity: ToolExecutionIdentity | None,
     force_reindex: bool,
-) -> KnowledgeRefreshResult:
-    refresh_target = refresh_target_for_published_index_key(key)
-    source_root = source_root_for_published_index_key(key)
-    mark_refresh_active(refresh_target)
-    try:
-        async with refresh_source_root_lock(source_root):
-            initial_state = await asyncio.to_thread(
-                load_published_index_state,
-                published_index_metadata_path(key),
-            )
-            try:
-                await _save_refreshing_state(key)
-                return await _refresh_knowledge_binding_locked(
-                    key,
-                    config=config,
-                    runtime_paths=runtime_paths,
-                    execution_identity=execution_identity,
-                    force_reindex=force_reindex,
-                )
-            except asyncio.CancelledError:
-                await _reconcile_cancelled_refresh(
-                    key,
-                    initial_state=initial_state,
-                    config=config,
-                    runtime_paths=runtime_paths,
-                )
-                raise
-    finally:
-        mark_refresh_inactive(refresh_target)
-        prune_private_index_bookkeeping()
-
-
-async def _save_refreshing_state(key: PublishedIndexKey) -> None:
-    write_task = asyncio.create_task(asyncio.to_thread(mark_published_index_refresh_running, key))
-    try:
-        await asyncio.shield(write_task)
-    except asyncio.CancelledError:
-        write_completed = False
-        with suppress(Exception):
-            await write_task
-            write_completed = True
-        if write_completed:
-            with suppress(Exception):
-                await asyncio.to_thread(mark_published_index_stale, key, reason="refresh_cancelled", refresh_job="idle")
-        raise
-
-
-async def _refresh_knowledge_binding_locked(
-    key: PublishedIndexKey,
-    *,
-    config: Config,
-    runtime_paths: RuntimePaths,
-    execution_identity: ToolExecutionIdentity | None = None,
-    force_reindex: bool = False,
-) -> KnowledgeRefreshResult:
-    base_id = key.base_id
-    try:
-        if config.get_knowledge_base_config(base_id).mode == "files":
-            return await _refresh_file_mode_binding_locked(
-                key,
-                config=config,
-                runtime_paths=runtime_paths,
-                execution_identity=execution_identity,
-            )
-
-        binding = resolve_knowledge_binding(
-            base_id,
-            config,
-            runtime_paths,
-            execution_identity=execution_identity,
-            start_watchers=False,
-            create=True,
-        )
-        manager = KnowledgeManager(
-            base_id=base_id,
-            config=config,
-            runtime_paths=runtime_paths,
-            storage_path=binding.storage_root,
-            knowledge_path=binding.knowledge_path,
-        )
-        if await _should_defer_cold_empty_publication(manager, key):
-            await asyncio.to_thread(
-                mark_published_index_stale,
-                key,
-                reason="source_empty",
-                refresh_job="idle",
-            )
-            return KnowledgeRefreshResult(
-                key=key,
-                indexed_count=0,
-                index_published=False,
-                availability=KnowledgeAvailability.INITIALIZING,
-                last_error=None,
-            )
-        unchanged_result = await _maybe_publish_unchanged_index(
-            manager,
-            key,
-            execution_identity=execution_identity,
-            force_reindex=force_reindex,
-        )
-        if unchanged_result is not None:
-            return unchanged_result
-        outcome = await manager.reindex_all(force_reindex=force_reindex)
-        if outcome.error is not None:
-            await asyncio.to_thread(
-                mark_published_index_refresh_failed_preserving_last_good,
-                key,
-                error=outcome.error,
-            )
-            return KnowledgeRefreshResult(
-                key=key,
-                indexed_count=outcome.indexed_count,
-                index_published=False,
-                availability=KnowledgeAvailability.REFRESH_FAILED,
-                last_error=outcome.error,
-            )
-    except Exception as exc:
-        error = redact_credentials_in_text(str(exc))
-        await asyncio.to_thread(mark_published_index_refresh_failed_preserving_last_good, key, error=error)
-        raise
-    return await _refresh_result_from_persisted_state(
-        key,
-        indexed_count=outcome.indexed_count,
-        config=config,
-        runtime_paths=runtime_paths,
-    )
-
-
-async def _should_defer_cold_empty_publication(
-    manager: KnowledgeManager,
-    key: PublishedIndexKey,
-) -> bool:
-    """Return whether a content-gated cold index has no corpus to publish yet."""
-    if not manager.config.get_knowledge_base_config(manager.base_id).require_content_before_publish:
-        return False
-    files = await asyncio.to_thread(manager.list_files)
-    if files:
-        return False
-    state = await asyncio.to_thread(load_published_index_state, published_index_metadata_path(key))
-    return state is None or state.status != "complete" or not state.indexed_count
-
-
-async def _publish_file_mode_source_metadata(
-    key: PublishedIndexKey,
-    manager: KnowledgeManager,
-    *,
-    published_revision: str | None = None,
-) -> KnowledgeRefreshResult:
-    """Publish current source metadata for a file-only base without building vectors."""
-    source_signature = await manager.source_signature()
-    await asyncio.to_thread(
-        save_published_index_state,
-        published_index_metadata_path(key),
-        state_for_publication(
-            settings=key.indexing_settings,
-            collection=None,
-            indexed_count=0,
-            source_signature=source_signature,
-            published_revision=published_revision,
-        ),
-    )
-    return KnowledgeRefreshResult(
-        key=key,
-        indexed_count=0,
-        index_published=True,
-        availability=KnowledgeAvailability.READY,
-        last_error=None,
-    )
-
-
-async def publish_file_mode_source_metadata_for_base(
-    base_id: str,
-    *,
-    config: Config,
-    runtime_paths: RuntimePaths,
-    execution_identity: ToolExecutionIdentity | None = None,
-) -> KnowledgeRefreshResult:
-    """Resolve and publish current source metadata for a file-only base."""
-    key = resolve_published_index_key(
-        base_id,
-        config=config,
-        runtime_paths=runtime_paths,
-        execution_identity=execution_identity,
-        create=True,
-    )
-    return await _publish_file_mode_source_metadata_for_resolved(
-        key,
-        config=config,
-        runtime_paths=runtime_paths,
-        execution_identity=execution_identity,
-    )
-
-
-async def _publish_file_mode_source_metadata_for_resolved(
-    key: PublishedIndexKey,
-    *,
-    config: Config,
-    runtime_paths: RuntimePaths,
-    execution_identity: ToolExecutionIdentity | None,
-) -> KnowledgeRefreshResult:
+) -> _RefreshChildResult:
     base_id = key.base_id
     binding = resolve_knowledge_binding(
         base_id,
@@ -849,19 +636,128 @@ async def _publish_file_mode_source_metadata_for_resolved(
         storage_path=binding.storage_root,
         knowledge_path=binding.knowledge_path,
     )
-    return await _publish_file_mode_source_metadata(key, manager)
+    if config.get_knowledge_base_config(base_id).mode == "files":
+        return await _refresh_files_mode(manager, key)
+    if await _should_defer_cold_empty_publication(manager, key):
+        return _RefreshChildResult(deferred=True)
+    source_changed: str | None = None
+    git_head: str | None = None
+    if manager.git_source.is_configured():
+        git_sync_result = await manager.git_source.sync()
+        if git_sync_result.updated:
+            source_changed = "git_source_updated"
+        else:
+            git_head = git_sync_result.head
+    if not force_reindex and source_changed is None:
+        unchanged = await _publish_unchanged(manager, key, git_head=git_head)
+        if unchanged:
+            publication = await asyncio.to_thread(load_publication, published_index_storage_path(key))
+            return _RefreshChildResult(
+                indexed_count=0 if publication is None else publication.indexed_count,
+                published=True,
+            )
+        if unchanged is False and not manager.git_source.is_configured():
+            source_changed = "source_changed"
+    outcome = await manager.reindex_all(force_reindex=force_reindex)
+    return _RefreshChildResult(
+        indexed_count=outcome.indexed_count,
+        published=outcome.published,
+        error=outcome.error,
+        source_changed=source_changed,
+    )
 
 
-async def _refresh_file_mode_binding_locked(
+async def _should_defer_cold_empty_publication(manager: KnowledgeManager, key: PublishedIndexKey) -> bool:
+    """Return whether a content-gated cold index has no corpus to publish yet."""
+    if not manager.config.get_knowledge_base_config(manager.base_id).require_content_before_publish:
+        return False
+    if await asyncio.to_thread(manager.list_files):
+        return False
+    publication = await asyncio.to_thread(load_publication, published_index_storage_path(key))
+    return publication is None or not publication.indexed_count
+
+
+async def _publish_unchanged(manager: KnowledgeManager, key: PublishedIndexKey, *, git_head: str | None) -> bool | None:
+    """Republish an index whose source has not changed, without opening a candidate or building an embedder.
+
+    Returns True when it did, False when the corpus changed, and None when the publication cannot be republished as
+    it is, such as after a settings change or an interrupted forced rebuild.
+
+    A Git base whose revision did not move is unchanged by construction: MindRoom owns the checkout and realigns it
+    with ``git reset --hard``, and every corpus filter lives in the settings compared here. Any other base hashes its
+    corpus, reading only the files whose stamp or size no longer match the published collection's claims.
+    """
+    storage = published_index_storage_path(key)
+    publication = await asyncio.to_thread(load_publication, storage)
+    if (
+        publication is None
+        or publication.settings != key.indexing_settings
+        or not await asyncio.to_thread(published_collection_exists, key, publication)
+        or await manager.has_unfinished_rebuild(publication)
+    ):
+        return None
+    if git_head is None or publication.published_revision != git_head:
+        known = await manager.published_file_signatures(publication)
+        if await manager.source_signature(known) != publication.source_signature:
+            return False
+    if git_head is not None:
+        # The dashboard reports this as the last successful sync.
+        await run_blocking_until_complete(
+            save_publication,
+            storage,
+            replace(publication, published_revision=git_head, last_published_at=utc_now()),
+        )
+    return True
+
+
+async def _refresh_files_mode(manager: KnowledgeManager, key: PublishedIndexKey) -> _RefreshChildResult:
+    """Publish current source metadata for a file-only base, syncing its Git checkout first when it has one."""
+    published_revision: str | None = None
+    source_changed: str | None = None
+    if manager.git_source.is_configured():
+        git_sync_result = await manager.git_source.sync()
+        published_revision = git_sync_result.head
+        source_changed = "git_source_updated" if git_sync_result.updated else None
+    await _publish_file_mode_source_metadata(manager, key, published_revision=published_revision)
+    return _RefreshChildResult(published=True, source_changed=source_changed)
+
+
+async def _publish_file_mode_source_metadata(
+    manager: KnowledgeManager,
     key: PublishedIndexKey,
+    *,
+    published_revision: str | None = None,
+) -> None:
+    publication = new_publication(
+        settings=key.indexing_settings,
+        collection=None,
+        indexed_count=0,
+        source_signature=await manager.source_signature(),
+        published_revision=published_revision,
+    )
+    await run_blocking_until_complete(save_publication, published_index_storage_path(key), publication)
+
+
+async def publish_file_mode_source_metadata_for_base(
+    base_id: str,
     *,
     config: Config,
     runtime_paths: RuntimePaths,
-    execution_identity: ToolExecutionIdentity | None,
-) -> KnowledgeRefreshResult:
-    """Refresh source metadata for a file-only base without building vectors."""
+    execution_identity: ToolExecutionIdentity | None = None,
+) -> None:
+    """Publish a local file-only base's current source listing; the caller holds its source-root lock.
+
+    This runs in the runtime, after a dashboard upload or delete, so it records its success itself.
+    """
+    key = resolve_published_index_key(
+        base_id,
+        config=config,
+        runtime_paths=runtime_paths,
+        execution_identity=execution_identity,
+        create=True,
+    )
     binding = resolve_knowledge_binding(
-        key.base_id,
+        base_id,
         config,
         runtime_paths,
         execution_identity=execution_identity,
@@ -869,361 +765,15 @@ async def _refresh_file_mode_binding_locked(
         create=True,
     )
     manager = KnowledgeManager(
-        base_id=key.base_id,
+        base_id=base_id,
         config=config,
         runtime_paths=runtime_paths,
         storage_path=binding.storage_root,
         knowledge_path=binding.knowledge_path,
     )
-    published_revision: str | None = None
-    if manager.git_source.is_configured():
-        git_sync_result = await manager.git_source.sync()
-        published_revision = git_sync_result.head
-        if git_sync_result.updated:
-            await mark_knowledge_source_changed_async(
-                key.base_id,
-                config=manager.config,
-                runtime_paths=manager.runtime_paths,
-                execution_identity=execution_identity,
-                reason="git_source_updated",
-            )
-
-    return await _publish_file_mode_source_metadata(key, manager, published_revision=published_revision)
-
-
-async def _maybe_publish_unchanged_index(
-    manager: KnowledgeManager,
-    key: PublishedIndexKey,
-    *,
-    execution_identity: ToolExecutionIdentity | None,
-    force_reindex: bool,
-) -> KnowledgeRefreshResult | None:
-    force_reindex = force_reindex or manager.needs_full_reindex_on_create()
-    if manager.git_source.is_configured():
-        git_sync_result = await manager.git_source.sync()
-        if force_reindex or git_sync_result.updated:
-            if git_sync_result.updated:
-                await mark_knowledge_source_changed_async(
-                    key.base_id,
-                    config=manager.config,
-                    runtime_paths=manager.runtime_paths,
-                    execution_identity=execution_identity,
-                    reason="git_source_updated",
-                )
-            return None
-        return await _publish_unchanged_index(
-            manager,
-            key,
-            published_revision=git_sync_result.head,
-        )
-    if force_reindex:
-        await mark_knowledge_source_changed_async(
-            key.base_id,
-            config=manager.config,
-            runtime_paths=manager.runtime_paths,
-            execution_identity=execution_identity,
-            reason="manual_reindex",
-        )
-        return None
-    return await _publish_unchanged_index(
-        manager,
-        key,
-        mark_stale_on_source_change=True,
-        execution_identity=execution_identity,
-    )
-
-
-async def _refresh_result_from_persisted_state(
-    key: PublishedIndexKey,
-    *,
-    indexed_count: int,
-    config: Config,
-    runtime_paths: RuntimePaths,
-) -> KnowledgeRefreshResult:
-    state = await asyncio.to_thread(load_published_index_state, published_index_metadata_path(key))
-    if state is None:
-        error = "Published index metadata was missing after refresh"
-        await asyncio.to_thread(mark_published_index_refresh_failed_preserving_last_good, key, error=error)
-        return KnowledgeRefreshResult(
-            key=key,
-            indexed_count=indexed_count,
-            index_published=False,
-            availability=KnowledgeAvailability.REFRESH_FAILED,
-            last_error=error,
-        )
-    if state.status != "complete":
-        error = "Published index metadata was incomplete after refresh"
-        await asyncio.to_thread(mark_published_index_refresh_failed_preserving_last_good, key, error=error)
-        return KnowledgeRefreshResult(
-            key=key,
-            indexed_count=indexed_count,
-            index_published=False,
-            availability=KnowledgeAvailability.REFRESH_FAILED,
-            last_error=error,
-        )
-
-    availability = published_index_availability_for_state(key=key, state=state)
-    if not published_index_settings_compatible(state.settings, key.indexing_settings):
-        await asyncio.to_thread(
-            mark_published_index_stale,
-            key,
-            reason="published_index_config_mismatch",
-        )
-        return KnowledgeRefreshResult(
-            key=key,
-            indexed_count=indexed_count,
-            index_published=False,
-            availability=availability,
-            last_error=None,
-        )
-    index = await asyncio.to_thread(
-        publish_knowledge_index_from_state,
-        key,
-        state=state,
-        config=config,
-        runtime_paths=runtime_paths,
-        metadata_path=published_index_metadata_path(key),
-    )
-    if index is None:
-        error = "Published index collection was missing after refresh"
-        await asyncio.to_thread(mark_published_index_refresh_failed_preserving_last_good, key, error=error)
-        return KnowledgeRefreshResult(
-            key=key,
-            indexed_count=indexed_count,
-            index_published=False,
-            availability=KnowledgeAvailability.REFRESH_FAILED,
-            last_error=error,
-        )
-    await asyncio.to_thread(mark_published_index_refresh_succeeded, key)
-    return KnowledgeRefreshResult(
-        key=key,
-        indexed_count=indexed_count,
-        index_published=True,
-        availability=KnowledgeAvailability.READY,
-        last_error=None,
-    )
-
-
-def _revision_proves_source_unchanged(state: PublishedIndexState, published_revision: str | None) -> bool:
-    """Return whether a matching Git revision already proves the indexed corpus is unchanged.
-
-    MindRoom owns the checkout and realigns it with ``git reset --hard``, so a tracked
-    file's content is fully determined by HEAD. Every corpus filter (branch, LFS, hidden
-    paths, include/exclude patterns and extensions) lives in ``IndexingSettings``, which
-    the caller has already compared. An unmoved revision therefore means byte-identical
-    indexed content, and hashing the corpus to learn the same thing costs a full read of
-    every file — the dominant cost on a large or network-mounted source.
-    """
-    return published_revision is not None and state.published_revision == published_revision
-
-
-async def _publish_unchanged_index(
-    manager: KnowledgeManager,
-    key: PublishedIndexKey,
-    *,
-    published_revision: str | None = None,
-    mark_stale_on_source_change: bool = False,
-    execution_identity: ToolExecutionIdentity | None = None,
-) -> KnowledgeRefreshResult | None:
-    state = await asyncio.to_thread(load_published_index_state, published_index_metadata_path(key))
-    if (
-        state is None
-        or state.status != "complete"
-        or state.source_signature is None
-        or state.settings != key.indexing_settings
-        or not await asyncio.to_thread(published_index_collection_exists_for_state, key, state)
-    ):
-        return None
-
-    if _revision_proves_source_unchanged(state, published_revision):
-        current_source_signature = state.source_signature
-    else:
-        current_source_signature = await manager.source_signature(await manager.published_file_signatures(state))
-    if current_source_signature != state.source_signature:
-        if mark_stale_on_source_change:
-            await mark_knowledge_source_changed_async(
-                key.base_id,
-                config=manager.config,
-                runtime_paths=manager.runtime_paths,
-                execution_identity=execution_identity,
-                reason="source_changed",
-            )
-        return None
-
-    # Settings already matched at the top of this function, so only the revision
-    # and publish stamp can still move.
-    updated_state = state
-    if published_revision is not None:
-        updated_state = replace(
-            updated_state,
-            last_published_at=datetime.now(tz=UTC).isoformat(),
-            published_revision=published_revision,
-        )
-    if updated_state != state:
-        await asyncio.to_thread(save_published_index_state, published_index_metadata_path(key), updated_state)
-    index = await asyncio.to_thread(
-        publish_knowledge_index_from_state,
-        key,
-        state=updated_state,
-        config=manager.config,
-        runtime_paths=manager.runtime_paths,
-        metadata_path=published_index_metadata_path(key),
-    )
-    if index is None:
-        error = "Published index collection was missing during unchanged refresh"
-        await asyncio.to_thread(mark_published_index_refresh_failed_preserving_last_good, key, error=error)
-        return KnowledgeRefreshResult(
-            key=key,
-            indexed_count=updated_state.indexed_count or 0,
-            index_published=False,
-            availability=KnowledgeAvailability.REFRESH_FAILED,
-            last_error=error,
-        )
-    await asyncio.to_thread(mark_published_index_refresh_succeeded, key)
-    # This path returns before any candidate is opened, so it is the only place
-    # that can retire candidate state left by an interrupted forced rebuild.
-    try:
-        await manager.discard_superseded_candidate(published_collection=updated_state.collection)
-    except Exception:
-        logger.warning(
-            "Failed to retire candidate after unchanged knowledge index publish",
-            base_id=manager.base_id,
-            collection=updated_state.collection,
-            exc_info=True,
-        )
-    return KnowledgeRefreshResult(
-        key=key,
-        indexed_count=updated_state.indexed_count or 0,
-        index_published=True,
-        availability=KnowledgeAvailability.READY,
-        last_error=None,
-    )
-
-
-def _published_state_fingerprint(state: PublishedIndexState | None) -> tuple[object, ...] | None:
-    if state is None:
-        return None
-    return (
-        state.settings,
-        state.status,
-        state.collection,
-        state.last_published_at,
-        state.published_revision,
-        state.indexed_count,
-        state.source_signature,
-        state.refresh_job,
-        state.reason,
-        state.last_error,
-        state.consecutive_refresh_failures,
-    )
-
-
-def _refresh_running_fingerprint(
-    key: PublishedIndexKey,
-    state: PublishedIndexState | None,
-) -> tuple[object, ...] | None:
-    if state is None:
-        return _published_state_fingerprint(
-            PublishedIndexState(
-                settings=key.indexing_settings,
-                status="indexing",
-                refresh_job="running",
-                reason="refreshing",
-            ),
-        )
-    return _published_state_fingerprint(
-        replace(
-            state,
-            refresh_job="running",
-            reason="refreshing",
-            last_error=None,
-        ),
-    )
-
-
-def _published_state_publication_fingerprint(state: PublishedIndexState) -> tuple[object, ...]:
-    return (
-        state.settings,
-        state.status,
-        state.collection,
-        state.last_published_at,
-        state.published_revision,
-        state.indexed_count,
-        state.source_signature,
-    )
-
-
-def _refresh_start_publication_fingerprint(
-    key: PublishedIndexKey,
-    initial_state: PublishedIndexState | None,
-) -> tuple[object, ...]:
-    if initial_state is not None:
-        return _published_state_publication_fingerprint(initial_state)
-    return _published_state_publication_fingerprint(
-        PublishedIndexState(
-            settings=key.indexing_settings,
-            status="indexing",
-        ),
-    )
-
-
-def _failed_subprocess_state_can_be_reconciled(
-    key: PublishedIndexKey,
-    state: PublishedIndexState | None,
-    initial_state: PublishedIndexState | None,
-) -> bool:
-    if _published_state_fingerprint(state) in {
-        _published_state_fingerprint(initial_state),
-        _refresh_running_fingerprint(key, initial_state),
-    }:
-        return True
-    if state is None:
-        return False
-    if state.refresh_job == "running" and state.reason == "refreshing":
-        return True
-    return (
-        state.refresh_job == "pending"
-        and state.reason in _REFRESH_SUBPROCESS_INTERMEDIATE_PENDING_REASONS
-        and _published_state_publication_fingerprint(state)
-        == _refresh_start_publication_fingerprint(key, initial_state)
-    )
-
-
-async def _reconcile_cancelled_refresh(
-    key: PublishedIndexKey,
-    *,
-    initial_state: PublishedIndexState | None,
-    config: Config,
-    runtime_paths: RuntimePaths,
-) -> None:
-    state = await asyncio.to_thread(load_published_index_state, published_index_metadata_path(key))
-    state_advanced = _published_state_fingerprint(state) != _published_state_fingerprint(initial_state)
-    if not state_advanced:
-        return
-    if (
-        state is not None
-        and state.status == "complete"
-        and published_index_settings_compatible(state.settings, key.indexing_settings)
-        and published_index_availability_for_state(key=key, state=state) is KnowledgeAvailability.READY
-    ):
-        if state.settings.mode == "files":
-            await asyncio.to_thread(mark_published_index_refresh_succeeded, key)
-            return
-        if not await asyncio.to_thread(published_index_collection_exists_for_state, key, state):
-            await asyncio.to_thread(mark_published_index_stale, key, reason="refresh_cancelled", refresh_job="idle")
-            return
-        index = await asyncio.to_thread(
-            publish_knowledge_index_from_state,
-            key,
-            state=state,
-            config=config,
-            runtime_paths=runtime_paths,
-            metadata_path=published_index_metadata_path(key),
-        )
-        if index is not None:
-            await asyncio.to_thread(mark_published_index_refresh_succeeded, key)
-            return
-    await asyncio.to_thread(mark_published_index_stale, key, reason="refresh_cancelled", refresh_job="idle")
+    reason_generation = await asyncio.to_thread(refresh_reason_generation, key)
+    await _publish_file_mode_source_metadata(manager, key)
+    await run_blocking_until_complete(partial(record_refresh_succeeded, key, reason_generation=reason_generation))
 
 
 def _load_subprocess_github_app_binding(raw_binding_payload: object) -> GitHubAppTokenBinding:
@@ -1356,7 +906,7 @@ async def _prime_subprocess_github_app_token(
     )
 
 
-async def _run_subprocess_refresh_request(payload: bytes) -> KnowledgeRefreshResult:
+async def _run_subprocess_refresh_request(payload: bytes) -> _RefreshChildResult:
     request = _load_subprocess_refresh_request(payload)
     runtime_paths = resolve_runtime_paths(
         config_path=Path(request.config_path),
@@ -1394,6 +944,11 @@ def _parse_refresh_runner_args(argv: list[str] | None = None) -> argparse.Namesp
     return parser.parse_args(argv)
 
 
+def _failed_child_result(error: Exception) -> _RefreshChildResult:
+    """Return what a refresh child reports for an error it did not handle, credential-redacted."""
+    return _RefreshChildResult(error=redact_credentials_in_text(str(error)) or type(error).__name__)
+
+
 def main(argv: list[str] | None = None) -> int:
     """Internal CLI used by scheduled knowledge refresh subprocesses."""
     _parse_refresh_runner_args(argv)
@@ -1404,27 +959,16 @@ def main(argv: list[str] | None = None) -> int:
         os.dup2(sys.stderr.fileno(), sys.stdout.fileno())
         try:
             result = asyncio.run(_run_subprocess_refresh_request(payload))
-        except Exception:
+        except Exception as exc:
             logger.exception("Knowledge refresh subprocess failed")
-            return 1
+            result = _failed_child_result(exc)
         logger.info(
             "Knowledge refresh subprocess completed",
-            base_id=result.key.base_id,
             indexed_count=result.indexed_count,
-            index_published=result.index_published,
-            availability=result.availability.value,
+            published=result.published,
+            error=result.error is not None,
         )
-        output.write(
-            _subprocess_result_adapter.dump_json(
-                {
-                    "indexed_count": result.indexed_count,
-                    "index_published": result.index_published,
-                    "availability": result.availability,
-                    "last_error": result.last_error,
-                },
-            ),
-        )
-
+        output.write(_child_result_adapter.dump_json(result))
     return 0
 
 

@@ -26,23 +26,13 @@ _search_threads = ThreadPoolExecutor(4, thread_name_prefix="knowledge-search")
 
 @dataclass
 class PublishedIndexReader:
-    """A scoped read handle; each read selects and holds the current compatible publication."""
+    """A scoped read handle; each read selects and holds the current publication compatible with ``settings``."""
 
-    collection_name: str
     path: str
     embedder: Embedder
-    published_settings: IndexingSettings | None = None
+    settings: IndexingSettings
     #: The most bytes of vectors a search may load, or None for no limit.
     max_matrix_bytes: int | None = None
-
-    def _published_metadata(self) -> dict[str, str] | None:
-        """Return the settings that select this handle's compatible publication, or None to read its collection."""
-        return self.published_settings.to_metadata() if self.published_settings is not None else None
-
-    def exists(self) -> bool:
-        """Probe the same compatible publication that a subsequent search resolves."""
-        with read_collection(self.path, self.collection_name, self._published_metadata()) as collection_name:
-            return KnowledgeCollection(path=Path(self.path), name=collection_name).exists()
 
     async def asearch(self, query: str, *, limit: int) -> list[SearchHit]:
         """Embed under the caller's credentials, then run the hybrid search on a search thread, all within a deadline."""
@@ -57,7 +47,7 @@ class PublishedIndexReader:
             )
 
     def _search(self, query: str, embedding: Sequence[float], limit: int) -> list[SearchHit]:
-        with read_collection(self.path, self.collection_name, self._published_metadata()) as collection_name:
+        with read_collection(Path(self.path), self.settings) as collection_name:
             return KnowledgeCollection(path=Path(self.path), name=collection_name).search(
                 embedding,
                 limit=limit,

@@ -9,14 +9,12 @@ from typing import TYPE_CHECKING, Any
 
 import pytest
 
-import mindroom.knowledge.refresh_locks as knowledge_refresh_locks
 import mindroom.knowledge.registry as knowledge_registry
-import mindroom.knowledge.utils as knowledge_utils
 from mindroom.config.agent import AgentConfig
 from mindroom.config.knowledge import KnowledgeBaseConfig
 from mindroom.config.main import Config
 from mindroom.knowledge.read_protocol import SOURCE_PATH_KEY
-from mindroom.knowledge.vector_store import StoredRow
+from mindroom.knowledge.vector_store import CollectionMeta, StoredRow
 from tests.conftest import bind_runtime_paths, test_runtime_paths
 
 if TYPE_CHECKING:
@@ -38,9 +36,32 @@ def stored_rows(collection: KnowledgeCollection) -> list[dict[str, Any]]:
         ]
 
 
-def seed_collection(collection: KnowledgeCollection, rows: Sequence[Mapping[str, Any]]) -> None:
-    """Replace a collection with ``rows`` (``content``, ``metadata`` and optional ``id``), each with a one-dimension vector."""
-    collection.reset()
+def collection_meta(settings: Mapping[str, str] | None = None, **changes: Any) -> CollectionMeta:  # noqa: ANN401
+    """Return the state a test collection starts with: building, under ``settings``."""
+    fields: dict[str, Any] = {
+        "settings": dict(settings or {}),
+        "stage": "building",
+        "rebuild": False,
+        "revision": None,
+        "total_files": 0,
+        "created_at": "2026-01-01T00:00:00+00:00",
+        "updated_at": "2026-01-01T00:00:00+00:00",
+    }
+    fields.update(changes)
+    return CollectionMeta(**fields)
+
+
+def seed_collection(
+    collection: KnowledgeCollection,
+    rows: Sequence[Mapping[str, Any]],
+    *,
+    settings: Mapping[str, str] | None = None,
+) -> None:
+    """Replace a collection with ``rows`` (``content``, ``metadata`` and optional ``id``), each with a one-dimension vector.
+
+    Each source path is claimed at the signature its first row's metadata names, or ``(0, 0, "seeded")``.
+    """
+    collection.create(collection_meta(settings))
     by_path: dict[str, list[StoredRow]] = {}
     for index, row in enumerate(rows):
         metadata = dict(row.get("metadata") or {})
@@ -54,7 +75,13 @@ def seed_collection(collection: KnowledgeCollection, rows: Sequence[Mapping[str,
             ),
         )
     for relative_path, path_rows in by_path.items():
-        collection.write_source_rows(relative_path, path_rows)
+        metadata = path_rows[0].metadata
+        signature = (
+            int(metadata.get("source_mtime_ns", 0)),
+            int(metadata.get("source_size", 0)),
+            str(metadata.get("source_digest", "seeded")),
+        )
+        collection.write_file(relative_path, signature, path_rows)
 
 
 class _FakeEmbedder:
@@ -82,14 +109,8 @@ def patch_vector_store(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
         lambda *_args, **_kwargs: _FakeEmbedder(),
     )
     knowledge_registry._published_indexes.clear()
-    knowledge_utils._refresh_scheduled_at.clear()
-    knowledge_refresh_locks._refresh_locks.clear()
-    knowledge_refresh_locks._active_refresh_counts.clear()
     yield
     knowledge_registry._published_indexes.clear()
-    knowledge_utils._refresh_scheduled_at.clear()
-    knowledge_refresh_locks._refresh_locks.clear()
-    knowledge_refresh_locks._active_refresh_counts.clear()
 
 
 def _config(

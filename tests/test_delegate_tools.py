@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from types import SimpleNamespace
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -19,8 +18,6 @@ from mindroom.constants import resolve_runtime_paths
 from mindroom.custom_tools.delegate import DelegateTools
 from mindroom.delegation.lifecycle import MAX_DELEGATION_DEPTH
 from mindroom.delegation.state import DELEGATION_FUNCTIONS
-from mindroom.knowledge.availability import KnowledgeAvailability
-from mindroom.knowledge.indexing_config import IndexingSettings
 from mindroom.knowledge.utils import _KnowledgeResolution
 from mindroom.matrix.state import MatrixState
 from mindroom.message_target import MessageTarget
@@ -40,12 +37,14 @@ from tests.conftest import (
     runtime_paths_for,
 )
 from tests.delegation_helpers import _delegate_runtime_context, _runtime_paths
+from tests.fakes.knowledge import RecordingRefreshScheduler, published_index_lookup
 from tests.turn_model_helpers import turn_model
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
     from pathlib import Path
 
+    from mindroom.knowledge.registry import PublishedIndexResolution
     from mindroom.response_turn import ResponseTurnContext
 
 
@@ -59,31 +58,6 @@ def _make_config(agents: dict[str, AgentConfig]) -> Config:
 
 def _bind_runtime_paths(config: Config, storage_path: Path) -> Config:
     return bind_runtime_paths(config, _runtime_paths(storage_path))
-
-
-def _fake_indexing_settings(base_id: str) -> IndexingSettings:
-    return IndexingSettings(
-        base_id=base_id,
-        storage_root="storage",
-        knowledge_path=f"knowledge/{base_id}",
-        mode="semantic",
-        embedder_provider="openai",
-        embedder_model="text-embedding-3-small",
-        embedder_host="",
-        embedder_dimensions="",
-        chunk_size="5000",
-        chunk_overlap="0",
-        repo_identity="",
-        git_branch="",
-        git_lfs="",
-        git_skip_hidden="",
-        git_include_patterns="",
-        git_exclude_patterns="",
-        include_patterns="",
-        exclude_patterns="",
-        include_extensions="",
-        exclude_extensions="()",
-    )
 
 
 def _assert_direct_result_with_receipt(result: str, expected_content: str) -> None:
@@ -545,34 +519,14 @@ class TestDelegateKnowledge:
     @pytest.mark.asyncio
     async def test_delegation_schedules_initial_load_for_unready_shared_base(self, tmp_path: Path) -> None:
         """Delegation should trigger the shared-base initial load when the published index is still initializing."""
-        scheduled_base_ids: list[str] = []
+        refresh_scheduler = RecordingRefreshScheduler()
 
-        class _FakeRefreshScheduler:
-            def schedule_refresh(self, base_id: str, **_kwargs: object) -> None:
-                scheduled_base_ids.append(base_id)
-
-            def is_refreshing(self, base_id: str, **_kwargs: object) -> bool:
-                _ = base_id
-                return False
-
-        def fake_lookup_knowledge_for_base(
-            base_id: str,
-            *,
-            on_availability: object | None = None,
-            **_kwargs: object,
-        ) -> SimpleNamespace:
-            if on_availability is not None:
-                on_availability(KnowledgeAvailability.INITIALIZING)
-            return SimpleNamespace(
-                key=SimpleNamespace(
-                    base_id=base_id,
-                    storage_root=str(tmp_path),
-                    knowledge_path=str(tmp_path / base_id),
-                    indexing_settings=_fake_indexing_settings(base_id),
-                ),
-                index=None,
-                availability=KnowledgeAvailability.INITIALIZING,
-                state=None,
+        def fake_lookup_knowledge_for_base(base_id: str, **_kwargs: object) -> PublishedIndexResolution:
+            return published_index_lookup(
+                base_id,
+                None,
+                storage_root=str(tmp_path),
+                knowledge_path=str(tmp_path / base_id),
             )
 
         config = Config(
@@ -598,7 +552,7 @@ class TestDelegateKnowledge:
             runtime_paths=runtime_paths_for(config),
             execution_identity=None,
             include_interactive_questions=False,
-            refresh_scheduler=_FakeRefreshScheduler(),
+            refresh_scheduler=refresh_scheduler,
             knowledge=None,
             model=turn_model(config, runtime_paths_for(config), "leader"),
         )
@@ -622,7 +576,7 @@ class TestDelegateKnowledge:
             result = await run_subagent.entrypoint(agent_name="researcher", task="Find info about X")
 
         _assert_direct_result_with_receipt(result, "Found relevant docs")
-        assert scheduled_base_ids == ["docs"]
+        assert refresh_scheduler.scheduled_base_ids == ["docs"]
 
     @pytest.mark.asyncio
     async def test_delegation_without_knowledge_passes_none(self, tmp_path: Path) -> None:

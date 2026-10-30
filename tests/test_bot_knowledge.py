@@ -2,22 +2,18 @@
 
 from __future__ import annotations
 
-import hashlib
-from types import SimpleNamespace
 from typing import TYPE_CHECKING
 from unittest.mock import patch
 
 import pytest
 
 from mindroom.config.knowledge import KnowledgeBaseConfig
-from mindroom.knowledge.availability import KnowledgeAvailability
 from mindroom.knowledge.read_protocol import SearchHit
 from mindroom.knowledge.search import AgentKnowledge, KnowledgeSource, KnowledgeSourceDescription
 from mindroom.knowledge.utils import knowledge_runtime_identity
 from tests.bot_helpers import (
     AgentBotTestBase,
     _FailingStubIndex,
-    _fake_indexing_settings,
     _StubIndex,
     make_mock_agent_user,
     make_test_agent_bot,
@@ -25,10 +21,12 @@ from tests.bot_helpers import (
 from tests.conftest import (
     runtime_paths_for,
 )
+from tests.fakes.knowledge import published_index_lookup
 
 if TYPE_CHECKING:
     from pathlib import Path
 
+    from mindroom.knowledge.registry import PublishedIndexResolution
     from mindroom.matrix.users import AgentMatrixUser
 
 
@@ -90,22 +88,11 @@ class TestAgentBot(AgentBotTestBase):
         )
         bot = make_test_agent_bot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
         expected_reader = _StubIndex(hits=[])
-        lookup = SimpleNamespace(
-            key=SimpleNamespace(
-                base_id="research",
-                storage_root=str(tmp_path),
-                knowledge_path=str(tmp_path / "kb"),
-                indexing_settings=_fake_indexing_settings("research"),
-            ),
-            index=SimpleNamespace(
-                reader=expected_reader,
-                state=SimpleNamespace(
-                    source_signature=hashlib.sha256().hexdigest(),
-                    last_published_at="2999-01-01T00:00:00+00:00",
-                ),
-            ),
-            availability=KnowledgeAvailability.READY,
-            state=None,
+        lookup = published_index_lookup(
+            "research",
+            expected_reader,
+            storage_root=str(tmp_path),
+            knowledge_path=str(tmp_path / "kb"),
         )
 
         with patch("mindroom.knowledge.utils.get_published_index", return_value=lookup):
@@ -138,23 +125,12 @@ class TestAgentBot(AgentBotTestBase):
             "legal": _StubIndex(hits=_hits("legal content 1", "legal content 2", "legal content 3")),
         }
 
-        def _lookup(base_id: str, **_kwargs: object) -> SimpleNamespace:
-            return SimpleNamespace(
-                key=SimpleNamespace(
-                    base_id=base_id,
-                    storage_root=str(tmp_path),
-                    knowledge_path=str(tmp_path / f"kb_{base_id}"),
-                    indexing_settings=_fake_indexing_settings(base_id),
-                ),
-                index=SimpleNamespace(
-                    reader=readers[base_id],
-                    state=SimpleNamespace(
-                        source_signature=hashlib.sha256().hexdigest(),
-                        last_published_at="2999-01-01T00:00:00+00:00",
-                    ),
-                ),
-                availability=KnowledgeAvailability.READY,
-                state=None,
+        def _lookup(base_id: str, **_kwargs: object) -> PublishedIndexResolution:
+            return published_index_lookup(
+                base_id,
+                readers[base_id],
+                storage_root=str(tmp_path),
+                knowledge_path=str(tmp_path / f"kb_{base_id}"),
             )
 
         with patch("mindroom.knowledge.utils.get_published_index", side_effect=_lookup):

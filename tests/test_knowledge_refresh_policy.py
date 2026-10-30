@@ -1,4 +1,4 @@
-"""Knowledge refresh-policy decisions, taken with no scheduler and no globals.
+"""Knowledge refresh-policy decisions, and the scheduler's cooldown that throttles them.
 
 Both clocks are injected, so the Git poll-interval boundary and the cooldown
 window are pinned to exact instants rather than approximated against wall time.
@@ -6,26 +6,31 @@ window are pinned to exact instants rather than approximated against wall time.
 
 from __future__ import annotations
 
+import asyncio
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
+from types import SimpleNamespace
 from typing import TYPE_CHECKING, cast
 
 import pytest
 
+import mindroom.knowledge.refresh_runner as refresh_runner_module
+import mindroom.knowledge.refresh_scheduler as refresh_scheduler_module
 from mindroom.config.knowledge import KnowledgeBaseConfig, KnowledgeGitConfig
 from mindroom.config.main import AgentConfig, Config
-from mindroom.knowledge import registry as knowledge_registry
+from mindroom.knowledge import utils as knowledge_utils
 from mindroom.knowledge.availability import KnowledgeAvailability
+from mindroom.knowledge.index_metadata import Publication, RefreshStatus
 from mindroom.knowledge.refresh_policy import (
-    RefreshCooldownKey,
-    cooldown_elapsed,
     ready_index_effective_availability,
     refresh_cooldown_key,
     refresh_trigger,
 )
+from mindroom.knowledge.refresh_scheduler import KnowledgeRefreshScheduler
 from mindroom.knowledge.registry import (
     PublishedIndexResolution,
-    PublishedIndexState,
-    published_index_metadata_path,
+    index_availability,
+    refresh_target_for_published_index_key,
     resolve_published_index_key,
 )
 from tests.conftest import bind_runtime_paths, test_runtime_paths
@@ -35,8 +40,11 @@ if TYPE_CHECKING:
 
     from mindroom.constants import RuntimePaths
     from mindroom.knowledge.index_reader import PublishedIndexReader
+    from mindroom.knowledge.refresh_runner import KnowledgeRefreshResult
 
 _WALL_NOW = datetime(2026, 7, 1, 12, 0, 0, tzinfo=UTC)
+#: How long ago a test publication was published, unless a test says otherwise: long enough for any poll to be due.
+_PUBLISHED_AGE = timedelta(days=365)
 
 
 def _config(
@@ -65,27 +73,65 @@ def _resolution(
     availability: KnowledgeAvailability,
     schedule_refresh_on_access: bool = False,
     last_refresh_age: timedelta | None = None,
+    published_age: timedelta = _PUBLISHED_AGE,
+    last_error: str | None = None,
 ) -> PublishedIndexResolution:
     key = resolve_published_index_key("docs", config=config, runtime_paths=runtime_paths)
-    last_refresh_at = None if last_refresh_age is None else (_WALL_NOW - last_refresh_age).isoformat()
-    state = PublishedIndexState(
+    publication = Publication(
         settings=key.indexing_settings,
-        status="complete",
         collection="docs_collection",
-        last_refresh_at=last_refresh_at,
+        indexed_count=1,
+        source_signature="docs-signature",
+        published_revision=None,
+        last_published_at=(_WALL_NOW - published_age).isoformat(),
     )
-    index = knowledge_registry._PublishedIndexHandle(
-        key=key,
-        reader=cast("PublishedIndexReader", object()),
-        state=state,
-        metadata_path=published_index_metadata_path(key),
+    status = RefreshStatus(
+        last_error=last_error,
+        last_refresh_at=None if last_refresh_age is None else (_WALL_NOW - last_refresh_age).isoformat(),
     )
     return PublishedIndexResolution(
         key=key,
-        index=index,
-        state=state,
+        reader=cast("PublishedIndexReader", object()),
+        publication=publication,
+        status=status,
         availability=availability,
         schedule_refresh_on_access=schedule_refresh_on_access,
+    )
+
+
+@pytest.fixture
+def scheduler_clock(monkeypatch: pytest.MonkeyPatch) -> list[float]:
+    """Drive the scheduler's cooldown clock by hand; only the scheduler module sees it, never the event loop."""
+    clock = [0.0]
+    monkeypatch.setattr(refresh_scheduler_module, "time", SimpleNamespace(monotonic=lambda: clock[0]))
+    return clock
+
+
+@pytest.fixture
+def idle_refreshes(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Replace every refresh child with one that runs until the scheduler shuts down."""
+
+    async def _refresh(_base_id: str, **_kwargs: object) -> KnowledgeRefreshResult:
+        await asyncio.Event().wait()
+        raise AssertionError
+
+    monkeypatch.setattr(refresh_runner_module, "refresh_knowledge_binding_in_subprocess", _refresh)
+
+
+def _schedule_after_cooldown(
+    scheduler: KnowledgeRefreshScheduler,
+    lookup: PublishedIndexResolution,
+    config: Config,
+    runtime_paths: RuntimePaths,
+) -> bool:
+    """Schedule the lookup's refresh as a turn does, under the default 300-second cooldown."""
+    return scheduler.schedule_refresh_after_cooldown(
+        "docs",
+        config=config,
+        runtime_paths=runtime_paths,
+        execution_identity=None,
+        cooldown_key=refresh_cooldown_key(lookup, config, runtime_paths, lookup.availability),
+        cooldown_seconds=300.0,
     )
 
 
@@ -199,6 +245,26 @@ def test_local_poll_interval_boundary_is_exact(tmp_path: Path, age_seconds: int,
     assert (effective is KnowledgeAvailability.STALE) is expected_due
 
 
+@pytest.mark.parametrize(
+    ("age_seconds", "expected_due"),
+    [(59, False), (60, True)],
+)
+def test_poll_age_falls_back_to_the_publication_time(tmp_path: Path, age_seconds: int, expected_due: bool) -> None:
+    """A base no refresh has finished for since it published ages from its publication instead."""
+    config = _config(tmp_path, poll_interval_seconds=60)
+    runtime_paths = test_runtime_paths(tmp_path)
+    lookup = _resolution(
+        config,
+        runtime_paths,
+        availability=KnowledgeAvailability.READY,
+        schedule_refresh_on_access=True,
+        published_age=timedelta(seconds=age_seconds),
+    )
+
+    effective = ready_index_effective_availability(lookup, config, wall_now=_WALL_NOW)
+    assert (effective is KnowledgeAvailability.STALE) is expected_due
+
+
 def test_local_base_without_poll_interval_stays_ready(tmp_path: Path) -> None:
     """A local base that sets no poll interval never turns STALE from age alone."""
     config = _config(tmp_path)
@@ -236,46 +302,115 @@ def test_git_poll_interval_replaces_the_default_cooldown(tmp_path: Path) -> None
     assert trigger.cooldown_seconds == 60.0
 
 
-def test_cooldown_window_boundary_is_exact(tmp_path: Path) -> None:
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("idle_refreshes")
+async def test_cooldown_window_boundary_is_exact(tmp_path: Path, scheduler_clock: list[float]) -> None:
     """A cooldown suppresses rescheduling right up to its boundary, then allows it."""
     config = _config(tmp_path)
     runtime_paths = test_runtime_paths(tmp_path)
     lookup = _resolution(config, runtime_paths, availability=KnowledgeAvailability.STALE)
-    key = refresh_cooldown_key(lookup, config, runtime_paths, KnowledgeAvailability.STALE)
-    scheduled_at: dict[RefreshCooldownKey, float] = {key: 1_000.0}
+    scheduler = KnowledgeRefreshScheduler()
+    try:
+        scheduler_clock[0] = 1_000.0
+        assert _schedule_after_cooldown(scheduler, lookup, config, runtime_paths)
+        assert scheduler.is_refreshing(refresh_target_for_published_index_key(lookup.key))
 
-    assert not cooldown_elapsed(scheduled_at, key, monotonic_now=1_299.0, cooldown_seconds=300.0)
-    assert cooldown_elapsed(scheduled_at, key, monotonic_now=1_300.0, cooldown_seconds=300.0)
-    assert cooldown_elapsed({}, key, monotonic_now=0.0, cooldown_seconds=300.0)
+        scheduler_clock[0] = 1_299.0
+        assert not _schedule_after_cooldown(scheduler, lookup, config, runtime_paths)
+        scheduler_clock[0] = 1_300.0
+        assert _schedule_after_cooldown(scheduler, lookup, config, runtime_paths)
+    finally:
+        await scheduler.shutdown()
 
 
-def test_changed_git_credentials_retry_a_failed_refresh_before_the_cooldown(tmp_path: Path) -> None:
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("idle_refreshes")
+async def test_changed_git_credentials_retry_a_failed_refresh_before_the_cooldown(
+    tmp_path: Path,
+    scheduler_clock: list[float],
+) -> None:
     """Rotating the credential that broke a refresh must not wait out the retry cooldown."""
     git = KnowledgeGitConfig(repo_url="https://user:old-secret@example.com/x.git")
     config = _config(tmp_path, git=git)
     runtime_paths = test_runtime_paths(tmp_path)
     lookup = _resolution(config, runtime_paths, availability=KnowledgeAvailability.REFRESH_FAILED)
-    failed_key = refresh_cooldown_key(lookup, config, runtime_paths, KnowledgeAvailability.REFRESH_FAILED)
-    scheduled_at: dict[RefreshCooldownKey, float] = {failed_key: 1_000.0}
+    scheduler = KnowledgeRefreshScheduler()
+    try:
+        scheduler_clock[0] = 1_000.0
+        assert _schedule_after_cooldown(scheduler, lookup, config, runtime_paths)
+        scheduler_clock[0] = 1_100.0
+        assert not _schedule_after_cooldown(scheduler, lookup, config, runtime_paths)
 
-    assert not cooldown_elapsed(scheduled_at, failed_key, monotonic_now=1_100.0, cooldown_seconds=300.0)
+        rotated_config = _config(
+            tmp_path,
+            git=git.model_copy(update={"repo_url": "https://user:new-secret@example.com/x.git"}),
+        )
+        rotated_lookup = _resolution(rotated_config, runtime_paths, availability=KnowledgeAvailability.REFRESH_FAILED)
+        failed_key = refresh_cooldown_key(lookup, config, runtime_paths, KnowledgeAvailability.REFRESH_FAILED)
+        rotated_key = refresh_cooldown_key(
+            rotated_lookup,
+            rotated_config,
+            runtime_paths,
+            KnowledgeAvailability.REFRESH_FAILED,
+        )
 
-    rotated_config = _config(
-        tmp_path,
-        git=git.model_copy(update={"repo_url": "https://user:new-secret@example.com/x.git"}),
-    )
-    rotated_lookup = _resolution(rotated_config, runtime_paths, availability=KnowledgeAvailability.REFRESH_FAILED)
-    rotated_key = refresh_cooldown_key(
-        rotated_lookup,
-        rotated_config,
-        runtime_paths,
-        KnowledgeAvailability.REFRESH_FAILED,
-    )
+        assert rotated_key != failed_key
+        assert _schedule_after_cooldown(scheduler, rotated_lookup, rotated_config, runtime_paths)
+        assert "new-secret" not in repr(rotated_key)
+        assert "old-secret" not in repr(rotated_key)
+    finally:
+        await scheduler.shutdown()
 
-    assert rotated_key != failed_key
-    assert cooldown_elapsed(scheduled_at, rotated_key, monotonic_now=1_100.0, cooldown_seconds=300.0)
-    assert "new-secret" not in repr(rotated_key)
-    assert "old-secret" not in repr(rotated_key)
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("idle_refreshes")
+@pytest.mark.parametrize("published", [True, False])
+async def test_a_refresh_in_flight_supersedes_the_failure_it_retries(tmp_path: Path, published: bool) -> None:
+    """While the scheduler refreshes a failed base, a turn sees it STALE, or INITIALIZING with no publication, and no error."""
+    config = _config(tmp_path)
+    runtime_paths = test_runtime_paths(tmp_path)
+    failed = _resolution(config, runtime_paths, availability=KnowledgeAvailability.REFRESH_FAILED, last_error="boom")
+    if not published:
+        failed = replace(
+            failed,
+            reader=None,
+            publication=None,
+            availability=index_availability(
+                failed.key,
+                None,
+                failed.status,
+                publication_unreadable=False,
+                refreshing=False,
+            ),
+        )
+    assert failed.availability is KnowledgeAvailability.REFRESH_FAILED
+    scheduler = KnowledgeRefreshScheduler()
+    try:
+        scheduler.schedule_refresh("docs", config=config, runtime_paths=runtime_paths)
+        assert scheduler.is_refreshing(refresh_target_for_published_index_key(failed.key))
+        source, availability, last_error = knowledge_utils._finish_base_knowledge_resolution(
+            "docs",
+            lookup=failed,
+            config=config,
+            runtime_paths=runtime_paths,
+            refresh_scheduler=scheduler,
+            execution_identity=None,
+        )
+        idle = knowledge_utils._finish_base_knowledge_resolution(
+            "docs",
+            lookup=failed,
+            config=config,
+            runtime_paths=runtime_paths,
+            refresh_scheduler=None,
+            execution_identity=None,
+        )
+    finally:
+        await scheduler.shutdown()
+
+    assert availability is (KnowledgeAvailability.STALE if published else KnowledgeAvailability.INITIALIZING)
+    assert last_error is None
+    assert (source is not None) is published
+    assert idle[1:] == (KnowledgeAvailability.REFRESH_FAILED, "boom")
 
 
 @pytest.mark.parametrize(

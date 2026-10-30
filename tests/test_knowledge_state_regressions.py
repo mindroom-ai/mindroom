@@ -7,18 +7,21 @@ local embedder to test that a file exists.
 from __future__ import annotations
 
 import asyncio
+from dataclasses import replace
 from typing import TYPE_CHECKING
 
 import pytest
 
 import mindroom.knowledge.index_metadata as knowledge_index_metadata
 import mindroom.knowledge.manager as knowledge_manager_module
+import mindroom.knowledge.refresh_runner as knowledge_refresh_runner
 import mindroom.knowledge.registry as knowledge_registry
 from mindroom.config.agent import AgentConfig
 from mindroom.config.knowledge import KnowledgeBaseConfig
 from mindroom.config.main import Config
 from mindroom.config.memory import MemorySearchConfig
-from mindroom.knowledge.manager import KnowledgeManager, _PreparedFile
+from mindroom.knowledge.file_indexer import FileIndexer, _PreparedFile
+from mindroom.knowledge.index_metadata import load_publication, load_refresh_status, save_publication
 from mindroom.knowledge.refresh_runner import _refresh_knowledge_binding as refresh_knowledge_binding
 from mindroom.knowledge.registry import (
     get_published_index,
@@ -75,7 +78,6 @@ def _config(tmp_path: Path, bases: Sequence[str] = ("docs",)) -> Config:
     )
 
 
-@pytest.mark.xfail(strict=True, reason="the watcher's stale mark rewrites the publication it read before")
 @pytest.mark.asyncio
 async def test_a_source_change_marked_during_a_publication_never_reverts_it(
     tmp_path: Path,
@@ -93,20 +95,20 @@ async def test_a_source_change_marked_during_a_publication_never_reverts_it(
     docs = tmp_path / "docs"
     (docs / "a.md").write_text("alpha one", encoding="utf-8")
     (docs / "b.md").write_text("bravo one", encoding="utf-8")
-    original_index = KnowledgeManager._index_file_locked
+    original_index = FileIndexer._index_file
 
-    async def _fail_b(self: KnowledgeManager, prepared: _PreparedFile, **kwargs: object) -> bool:
+    async def _fail_b(self: FileIndexer, prepared: _PreparedFile, **kwargs: object) -> object:
         if prepared.path.name == "b.md":
-            return False
+            return None
         return await original_index(self, prepared, **kwargs)
 
-    monkeypatch.setattr(KnowledgeManager, "_index_file_locked", _fail_b)
+    monkeypatch.setattr(FileIndexer, "_index_file", _fail_b)
     await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)
-    monkeypatch.setattr(KnowledgeManager, "_index_file_locked", original_index)
+    monkeypatch.setattr(FileIndexer, "_index_file", original_index)
     await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)
     first = get_published_index("docs", config=config, runtime_paths=runtime_paths)
-    assert first.state is not None
-    first_collection = first.state.collection
+    assert first.publication is not None
+    first_collection = first.publication.collection
 
     (docs / "a.md").write_text("alpha two", encoding="utf-8")
     loop = asyncio.get_running_loop()
@@ -128,18 +130,18 @@ async def test_a_source_change_marked_during_a_publication_never_reverts_it(
 
     assert published_meanwhile
     resolution = get_published_index("docs", config=config, runtime_paths=runtime_paths)
-    assert resolution.state is not None
-    assert resolution.state.collection != first_collection
-    assert resolution.index is not None
+    assert resolution.publication is not None
+    assert resolution.publication.collection is not None
+    assert resolution.publication.collection != first_collection
+    assert resolution.reader is not None
     storage = published_index_storage_path(
         resolve_published_index_key("docs", config=config, runtime_paths=runtime_paths),
     )
-    assert KnowledgeCollection(path=storage, name=resolution.state.collection).exists()
-    hits = await resolution.index.reader.asearch("alpha", limit=5)
+    assert KnowledgeCollection(path=storage, name=resolution.publication.collection).exists()
+    hits = await resolution.reader.asearch("alpha", limit=5)
     assert [hit.content for hit in hits if "alpha" in hit.content] == ["alpha two"]
 
 
-@pytest.mark.xfail(strict=True, reason="each scheduler applies the limit alone and refresh_now bypasses it")
 @pytest.mark.asyncio
 async def test_one_refresh_child_runs_at_a_time_across_the_runtime_api_and_file_memory(
     tmp_path: Path,
@@ -193,7 +195,6 @@ async def test_one_refresh_child_runs_at_a_time_across_the_runtime_api_and_file_
         await scheduler.shutdown()
 
 
-@pytest.mark.xfail(strict=True, reason="the unchanged refresh builds a reader, and with it the embedder")
 @pytest.mark.asyncio
 async def test_an_unchanged_refresh_builds_no_embedder(tmp_path: Path, embedder_builds: list[str]) -> None:
     """A refresh that finds the corpus unchanged republishes without constructing the embedder."""
@@ -205,5 +206,83 @@ async def test_an_unchanged_refresh_builds_no_embedder(tmp_path: Path, embedder_
 
     result = await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)
 
-    assert result.index_published
+    assert result.published
     assert embedder_builds == []
+
+
+@pytest.mark.asyncio
+async def test_a_child_failure_superseded_by_a_later_publication_is_not_recorded(
+    tmp_path: Path,
+    embedder_builds: list[str],
+) -> None:
+    """A failure the runtime records after a dashboard publication replaced what the child saw would be stale."""
+    del embedder_builds
+    config = _config(tmp_path)
+    runtime_paths = runtime_paths_for(config)
+    (tmp_path / "docs" / "a.md").write_text("alpha one", encoding="utf-8")
+    first = await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)
+    key = resolve_published_index_key("docs", config=config, runtime_paths=runtime_paths)
+    storage = published_index_storage_path(key)
+    failure = replace(first, published=False, error="refresh failed")
+
+    knowledge_refresh_runner._record_child_result(key, failure, 0)
+    assert load_refresh_status(storage).last_error == "refresh failed"
+
+    knowledge_registry.record_refresh_succeeded(key, reason_generation=0)
+    publication = load_publication(storage)
+    assert publication is not None
+    save_publication(storage, replace(publication, last_published_at="2099-01-01T00:00:00+00:00"))
+    knowledge_refresh_runner._record_child_result(key, failure, 0)
+
+    assert load_refresh_status(storage).last_error is None
+
+
+def test_a_config_change_replaces_the_bindings_cached_read_handle(tmp_path: Path, embedder_builds: list[str]) -> None:
+    """Each settings change gives a binding a new key, so only the newest key keeps a cached handle."""
+    del embedder_builds
+    (tmp_path / "docs").mkdir()
+    for chunk_size in (500, 600, 700):
+        config = bind_runtime_paths(
+            Config(
+                agents={"helper": AgentConfig(display_name="Helper", knowledge_bases=["docs"])},
+                knowledge_bases={"docs": KnowledgeBaseConfig(path=str(tmp_path / "docs"), chunk_size=chunk_size)},
+            ),
+            test_runtime_paths(tmp_path),
+        )
+        key = resolve_published_index_key("docs", config=config, runtime_paths=runtime_paths_for(config))
+        knowledge_registry._cached_reader(key, config=config, runtime_paths=runtime_paths_for(config))
+
+    assert list(knowledge_registry._published_indexes) == [key]
+
+
+@pytest.mark.asyncio
+async def test_a_retired_forced_rebuild_is_taken_over_as_an_ordinary_build(
+    tmp_path: Path,
+    embedder_builds: list[str],
+) -> None:
+    """Once a forced rebuild has published and been retired, taking it over is no rebuild and keeps its successor."""
+    del embedder_builds
+    config = _config(tmp_path)
+    runtime_paths = runtime_paths_for(config)
+    docs = tmp_path / "docs"
+    (docs / "a.md").write_text("alpha one", encoding="utf-8")
+    await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths, force_reindex=True)
+    storage = published_index_storage_path(
+        resolve_published_index_key("docs", config=config, runtime_paths=runtime_paths),
+    )
+    rebuilt = load_publication(storage)
+    assert rebuilt is not None
+    (docs / "a.md").write_text("alpha two", encoding="utf-8")
+    await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)
+    successor = load_publication(storage)
+    assert successor is not None
+    assert successor.retired == rebuilt.collection
+
+    (docs / "a.md").write_text("alpha three", encoding="utf-8")
+    await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)
+
+    latest = load_publication(storage)
+    assert latest is not None
+    assert (latest.collection, latest.retired) == (rebuilt.collection, successor.collection)
+    assert latest.collection is not None
+    assert not KnowledgeCollection(path=storage, name=latest.collection).meta().rebuild

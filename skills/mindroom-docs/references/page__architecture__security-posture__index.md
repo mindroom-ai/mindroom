@@ -38,7 +38,7 @@ The one-time conversions of a database from an earlier release read its rows as 
 The thread exporter writes into a private instance only for the requester that the primary's owner record names, so an owner record planted in `private_instances` gets no export.
 Automations likewise run for a private instance only as the requester that record names, and post only in that requester's personal room, so their replies quoting private files never reach another room.
 The knowledge graph database lives in the primary-only `knowledge_graph/` storage directory, and its embedded server opens no TCP port and listens on a Unix socket in a private temporary directory of the primary, so no worker can reach it.
-Knowledge indexes, including private agents' indexes, their metadata, and candidate checkpoints, live in the primary-only `knowledge_db/` storage directory, like knowledge Git directories, so no worker can write the index files the primary opens.
+Knowledge indexes, including private agents' indexes and their publication and refresh-status files, live in the primary-only `knowledge_db/` storage directory, like knowledge Git directories, so no worker can write the index files the primary opens.
 
 The Slack app's credentials (`slack_app`: bot token, signing secret, and app-level token) and each person's Slack user token (`slack_oauth`) stay in the primary runtime: `slack` always runs there, and `slack_app` can never be granted to a worker through `worker_grantable_credentials`.
 

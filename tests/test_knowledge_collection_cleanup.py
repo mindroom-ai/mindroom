@@ -12,13 +12,12 @@ from mindroom.knowledge.availability import KnowledgeAvailability
 from mindroom.knowledge.collections import (
     CollectionSpace,
     cleanup_superseded_collections,
-    delete_collection,
     open_collection,
 )
-from mindroom.knowledge.index_metadata import save_published_index_state, state_for_publication
+from mindroom.knowledge.index_metadata import load_publication, new_publication, save_publication
 from mindroom.knowledge.manager import KnowledgeManager
 from mindroom.knowledge.registry import get_published_index
-from mindroom.knowledge.vector_store import list_collection_names
+from mindroom.knowledge.vector_store import KnowledgeCollection, list_collection_names
 from tests.conftest import runtime_paths_for
 from tests.knowledge_test_support import (  # noqa: F401
     _config,
@@ -33,6 +32,13 @@ if TYPE_CHECKING:
     from pathlib import Path
 
 
+def _published_collection(manager: KnowledgeManager) -> KnowledgeCollection:
+    publication = load_publication(manager._base_storage_path)
+    assert publication is not None
+    assert publication.collection is not None
+    return open_collection(manager._collections, publication.collection)
+
+
 @pytest.mark.asyncio
 async def test_cleanup_removes_legacy_chroma_storage_and_leaves_other_files(tmp_path: Path) -> None:
     """Cleanup reclaims superseded collections, and after a publication old Chroma files, preserving everything else."""
@@ -42,11 +48,11 @@ async def test_cleanup_removes_legacy_chroma_storage_and_leaves_other_files(tmp_
         knowledge_path=tmp_path / "docs",
         storage_path=storage_path,
     )
-    live = open_collection(space, space.default_collection)
+    live = open_collection(space, space._default_collection)
     seed_collection(live, [{"content": "live"}])
-    deleted = open_collection(space, f"{space.default_collection}_candidate_deleted")
+    deleted = open_collection(space, f"{space._default_collection}_candidate_deleted")
     seed_collection(deleted, [{"content": "deleted"}])
-    stale = open_collection(space, f"{space.default_collection}_candidate_stale")
+    stale = open_collection(space, f"{space._default_collection}_candidate_stale")
     seed_collection(stale, [{"content": "stale"}])
 
     legacy_files = [storage_path / name for name in ("chroma.sqlite3", "chroma.sqlite3-wal", "chroma.sqlite3-shm")]
@@ -61,28 +67,24 @@ async def test_cleanup_removes_legacy_chroma_storage_and_leaves_other_files(tmp_
     uuid_named_file.write_bytes(b"not a segment")
     unrelated_file = storage_path / "notes.txt"
     unrelated_file.write_bytes(b"kept")
-    interrupted_reset = storage_path / f"{space.default_collection}_candidate_crashed.sqlite3.building"
+    interrupted_reset = storage_path / f"{space._default_collection}_candidate_crashed.sqlite3.building"
     interrupted_reset.write_bytes(b"half built")
-
-    assert await delete_collection(space, deleted.name)
-    assert not deleted.exists()
-    assert await delete_collection(space, deleted.name)
 
     cleanup_superseded_collections(
         space,
-        preserved=frozenset({space.default_collection}),
+        preserved=frozenset({space._default_collection}),
         candidates_only=True,
     )
 
-    assert list_collection_names(storage_path) == (space.default_collection,)
+    assert list_collection_names(storage_path) == (space._default_collection,)
     assert not interrupted_reset.exists()
     # Until a publication, the Chroma files stay: they are what a downgrade would read.
     assert all(legacy_file.exists() for legacy_file in legacy_files)
     assert legacy_segment.is_dir()
 
-    cleanup_superseded_collections(space, preserved=frozenset({space.default_collection}))
+    cleanup_superseded_collections(space, preserved=frozenset({space._default_collection}))
 
-    assert list_collection_names(storage_path) == (space.default_collection,)
+    assert list_collection_names(storage_path) == (space._default_collection,)
     assert [row["content"] for row in stored_rows(live)] == ["live"]
     assert not any(legacy_file.exists() for legacy_file in legacy_files)
     assert not legacy_segment.exists()
@@ -102,11 +104,11 @@ async def test_a_chroma_era_index_rebuilds_and_its_files_go_only_after_publicati
     runtime_paths = runtime_paths_for(config)
     manager = KnowledgeManager("docs", config=config, runtime_paths=runtime_paths)
     storage = manager._base_storage_path
-    save_published_index_state(
-        manager._indexing_settings_path,
-        state_for_publication(
+    save_publication(
+        storage,
+        new_publication(
             settings=replace(manager._indexing_settings, vector_store=""),
-            collection=manager._collections.default_collection,
+            collection=manager._collections._default_collection,
             indexed_count=1,
             source_signature="chroma-era",
             published_revision=None,
@@ -120,7 +122,6 @@ async def test_a_chroma_era_index_rebuilds_and_its_files_go_only_after_publicati
         KnowledgeAvailability.CONFIG_MISMATCH
     )
     upgraded = KnowledgeManager("docs", config=config, runtime_paths=runtime_paths)
-    assert upgraded.needs_full_reindex_on_create()
 
     outcome = await upgraded.reindex_all()
 
@@ -128,6 +129,9 @@ async def test_a_chroma_era_index_rebuilds_and_its_files_go_only_after_publicati
     assert get_published_index("docs", config=config, runtime_paths=runtime_paths).availability is (
         KnowledgeAvailability.READY
     )
+    assert [row["content"] for row in stored_rows(_published_collection(upgraded))] == [
+        "Travel policy and hotel limits.",
+    ]
     assert not (storage / "chroma.sqlite3").exists()
     assert not segment.exists()
 
@@ -148,11 +152,10 @@ async def test_a_chroma_era_index_is_copied_without_embedding_again(
     runtime_paths = runtime_paths_for(config)
     first = KnowledgeManager("docs", config=config, runtime_paths=runtime_paths)
     assert (await first.reindex_all()).published
-    assert first._published_collection is not None
-    rows = stored_rows(first._published_collection)
+    rows = stored_rows(_published_collection(first))
     storage = first._base_storage_path
     client = chromadb.PersistentClient(path=str(storage), settings=chromadb.Settings(anonymized_telemetry=False))
-    chroma = client.create_collection(first._collections.default_collection, metadata={"hnsw:space": "cosine"})
+    chroma = client.create_collection(first._collections._default_collection, metadata={"hnsw:space": "cosine"})
     chroma.add(
         ids=[row["id"] for row in rows],
         embeddings=[[1.0] for _row in rows],
@@ -162,11 +165,11 @@ async def test_a_chroma_era_index_is_copied_without_embedding_again(
     client.close()
     for name in list_collection_names(storage):
         open_collection(first._collections, name).delete()
-    save_published_index_state(
-        first._indexing_settings_path,
-        state_for_publication(
+    save_publication(
+        storage,
+        new_publication(
             settings=replace(first._indexing_settings, vector_store=""),
-            collection=first._collections.default_collection,
+            collection=first._collections._default_collection,
             indexed_count=2,
             source_signature=await first.source_signature(),
             published_revision=None,
@@ -186,11 +189,12 @@ async def test_a_chroma_era_index_is_copied_without_embedding_again(
     assert (await upgraded.reindex_all()).published
 
     assert embedded == ["Expense reports are due weekly."]
-    assert upgraded._published_collection is not None
-    assert sorted(row["content"] for row in stored_rows(upgraded._published_collection)) == [
+    published = _published_collection(upgraded)
+    assert sorted(row["content"] for row in stored_rows(published)) == [
         "Expense reports are due weekly.",
         "Travel policy and hotel limits.",
     ]
-    hits = upgraded._published_collection.search([1.0], limit=1, query="hotel limits")
+    assert set(published.files()) == {"guide.md", "notes.md"}
+    hits = published.search([1.0], limit=1, query="hotel limits")
     assert [hit.content for hit in hits] == ["Travel policy and hotel limits."]
     assert not (storage / "chroma.sqlite3").exists()

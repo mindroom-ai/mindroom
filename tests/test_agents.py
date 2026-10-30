@@ -52,7 +52,6 @@ from mindroom.delegation.state import SubagentPersona
 from mindroom.entity_resolution import current_entity_id, managed_entity_power_user_ids_for_room
 from mindroom.entity_rooms import get_rooms_for_entity
 from mindroom.hooks import EVENT_TOOL_BEFORE_CALL, HookRegistry, ToolBeforeCallContext, hook
-from mindroom.knowledge.availability import KnowledgeAvailability
 from mindroom.knowledge.search import AgentKnowledge, KnowledgeSource, KnowledgeSourceDescription
 from mindroom.knowledge.utils import resolve_agent_knowledge_access
 from mindroom.llm.messages import system_text
@@ -99,6 +98,7 @@ from mindroom.tool_system.worker_routing import (
     worker_root_path,
 )
 from mindroom.workspaces import _copy_workspace_template, validate_workspace_template_dir
+from tests.fakes.knowledge import published_index_lookup
 from tests.identity_helpers import persist_entity_accounts
 from tests.tool_approval_helpers import gated_functions
 from tests.turn_model_helpers import turn_model
@@ -106,6 +106,7 @@ from tests.turn_model_helpers import turn_model
 if TYPE_CHECKING:
     from collections.abc import Callable
 
+    from mindroom.knowledge.registry import PublishedIndexResolution
     from mindroom.tool_system.tool_function import ToolFunction
     from mindroom.tool_system.worker_routing import WorkerScope
 
@@ -252,9 +253,6 @@ def test_get_rooms_for_entity_uses_authored_entity_rooms_only(tmp_path: Path) ->
 
 
 class _EmptyIndex:
-    def exists(self) -> bool:
-        return True
-
     async def asearch(self, query: str, *, limit: int) -> list[object]:
         _ = (query, limit)
         return []
@@ -277,16 +275,8 @@ def _patch_published_knowledge(
     monkeypatch: pytest.MonkeyPatch,
     knowledge_by_base: dict[str, _EmptyIndex],
 ) -> None:
-    def _get_published_index(base_id: str, **_kwargs: object) -> object:
-        return SimpleNamespace(
-            key=SimpleNamespace(base_id=base_id),
-            index=SimpleNamespace(
-                reader=knowledge_by_base[base_id],
-                state=SimpleNamespace(last_refresh_at=None, last_published_at=None),
-            ),
-            availability=KnowledgeAvailability.READY,
-            state=None,
-        )
+    def _get_published_index(base_id: str, **_kwargs: object) -> PublishedIndexResolution:
+        return published_index_lookup(base_id, knowledge_by_base[base_id])
 
     monkeypatch.setattr("mindroom.knowledge.utils.get_published_index", _get_published_index)
 
@@ -4732,21 +4722,13 @@ def test_memory_only_agent_gets_semantic_knowledge_search_description(
     config.memory.search.mode = "semantic"
     seen_base_ids: list[str] = []
 
-    def _get_published_index(base_id: str, **kwargs: object) -> object:
+    def _get_published_index(base_id: str, **kwargs: object) -> PublishedIndexResolution:
         effective_config = kwargs["config"]
         assert isinstance(effective_config, Config)
         base_config = effective_config.knowledge_bases[base_id]
         assert base_config.path == str(agent_workspace_root_path(runtime_paths.storage_root, "general").resolve())
         seen_base_ids.append(base_id)
-        return SimpleNamespace(
-            key=SimpleNamespace(base_id=base_id),
-            index=SimpleNamespace(
-                reader=_queryable_knowledge_handle(),
-                state=SimpleNamespace(last_refresh_at=None, last_published_at=None),
-            ),
-            availability=KnowledgeAvailability.READY,
-            state=None,
-        )
+        return published_index_lookup(base_id, _queryable_knowledge_handle())
 
     monkeypatch.setattr("mindroom.knowledge.utils.get_published_index", _get_published_index)
 
