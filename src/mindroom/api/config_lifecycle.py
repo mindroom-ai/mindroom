@@ -197,7 +197,7 @@ def _registered_api_states() -> list[ApiState]:
     return states
 
 
-def request_snapshot(request: Request) -> ApiSnapshot | None:
+def _request_snapshot(request: Request) -> ApiSnapshot | None:
     """Return the request-bound API snapshot, if one was pinned earlier."""
     snapshot = request.scope.get(_REQUEST_SNAPSHOT_SCOPE_KEY)
     return snapshot if isinstance(snapshot, ApiSnapshot) else None
@@ -211,7 +211,7 @@ def _store_request_snapshot(request: Request, snapshot: ApiSnapshot) -> ApiSnaps
 
 def bind_current_request_snapshot(request: Request) -> ApiSnapshot:
     """Pin the app's current published snapshot to the current request."""
-    existing = request_snapshot(request)
+    existing = _request_snapshot(request)
     if existing is not None:
         return existing
     state = require_api_state(request.app)
@@ -227,7 +227,7 @@ def rebind_current_request_snapshot(request: Request) -> ApiSnapshot:
     state = require_api_state(request.app)
     with state.config_lock:
         current = state.snapshot
-    pinned = request_snapshot(request)
+    pinned = _request_snapshot(request)
     if pinned is not None and pinned.runtime_paths != current.runtime_paths:
         raise _stale_snapshot_error()
     return _store_request_snapshot(request, current)
@@ -235,7 +235,7 @@ def rebind_current_request_snapshot(request: Request) -> ApiSnapshot:
 
 def _request_or_current_snapshot(request: Request) -> ApiSnapshot:
     """Return the request-bound snapshot when present, else the current app snapshot."""
-    bound_snapshot = request_snapshot(request)
+    bound_snapshot = _request_snapshot(request)
     if bound_snapshot is not None:
         return bound_snapshot
     return require_api_state(request.app).snapshot

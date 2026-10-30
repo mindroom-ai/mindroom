@@ -87,7 +87,6 @@ async def _dashboard_allowed(
     openid_token: MatrixOpenIDToken,
     matrix_user_id: str,
     snapshot: config_lifecycle.ApiSnapshot,
-    paths: RuntimePaths,
 ) -> bool:
     """Return whether this sign-in may open the dashboard: an administrator whose token is bound to this deployment.
 
@@ -97,10 +96,10 @@ async def _dashboard_allowed(
     """
     if not is_administrator(matrix_user_id, snapshot):
         return False
-    if not await homeserver_binds_openid_audience(paths):
+    if not await homeserver_binds_openid_audience(snapshot.runtime_paths):
         return False
     try:
-        return await verify_matrix_openid(openid_token, paths) == matrix_user_id
+        return await verify_matrix_openid(openid_token, snapshot.runtime_paths) == matrix_user_id
     except MatrixOpenIDError as error:
         logger.warning("Dashboard access check failed after the binding probe", detail=error.detail)
         return False
@@ -136,7 +135,7 @@ async def sign_in(body: _SignIn, request: Request, response: Response, paths: _P
     token = issue_connections_session(
         matrix_user_id,
         now=time.time(),
-        dashboard=await _dashboard_allowed(body.openid_token, matrix_user_id, snapshot, paths),
+        dashboard=await _dashboard_allowed(body.openid_token, matrix_user_id, snapshot),
     )
     response.headers.update(CONNECTIONS_HEADERS)
     cookie = connections_session_cookie(origin)

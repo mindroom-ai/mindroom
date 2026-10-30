@@ -110,15 +110,6 @@ class _SupabaseClientProtocol(Protocol):
 
 
 @dataclass(frozen=True)
-class _TrustedUpstreamJwtIdentity:
-    """Identity claims verified from the upstream JWT."""
-
-    email: str
-    user_id: str | None = None
-    matrix_user_id: str | None = None
-
-
-@dataclass(frozen=True)
 class _TrustedUpstreamAuthSettings:
     """Settings for the signed assertion in which a deployment-owned gateway names the browser user."""
 
@@ -242,7 +233,7 @@ def _build_trusted_upstream_jwt_client(settings: _TrustedUpstreamAuthSettings) -
 
 
 def _app_auth_state(api_app: FastAPI, runtime_paths: RuntimePaths) -> ApiAuthState:
-    """Return the app's auth state for `runtime_paths`, built once per runtime the app serves."""
+    """Return the app's auth state for `runtime_paths`, rebuilt when the app last built it for another runtime."""
     app_state = config_lifecycle.app_state(api_app)
     with _auth_state_build_lock:
         state = app_state.api_auth_state
@@ -370,12 +361,14 @@ async def _verified_trusted_upstream_jwt_claims(
     return claims
 
 
-async def _verified_trusted_upstream_jwt_identity(
+async def _trusted_upstream_auth_user(
     request: Request,
     settings: _TrustedUpstreamAuthSettings,
     jwt_client: PyJWKClient | None,
-) -> _TrustedUpstreamJwtIdentity:
-    """Return the identity claims the gateway signed for this request."""
+) -> AuthUser | None:
+    """Return the browser user the gateway's signed assertion names, when trusted upstream auth is on."""
+    if not settings.enabled:
+        return None
     header = _trusted_upstream_required_jwt_setting(settings.jwt_header, "MINDROOM_TRUSTED_UPSTREAM_JWT_HEADER")
     audience = _trusted_upstream_required_jwt_setting(settings.audience, "MINDROOM_TRUSTED_UPSTREAM_JWT_AUDIENCE")
     issuer = _trusted_upstream_required_jwt_setting(settings.issuer, "MINDROOM_TRUSTED_UPSTREAM_JWT_ISSUER")
@@ -407,12 +400,20 @@ async def _verified_trusted_upstream_jwt_identity(
         if settings.user_id_claim is not None
         else None
     )
-    matrix_user_id = (
+    matrix_user_id_claim = (
         _trusted_upstream_jwt_string_claim(claims, settings.matrix_user_id_claim)
         if settings.matrix_user_id_claim is not None
         else None
     )
-    return _TrustedUpstreamJwtIdentity(email=email, user_id=user_id, matrix_user_id=matrix_user_id)
+    matrix_user_id = _trusted_upstream_matrix_user_id(settings, email, matrix_user_id_claim)
+    if matrix_user_id is None:
+        return AuthUser(user_id=user_id or email, email=email, source=AuthSource.TRUSTED_UPSTREAM)
+    return SignedMatrixUser(
+        user_id=user_id or email,
+        email=email,
+        source=AuthSource.TRUSTED_UPSTREAM,
+        matrix_user_id=matrix_user_id,
+    )
 
 
 def _trusted_upstream_jwt_string_claim(claims: dict[str, Any], claim_name: str) -> str:
@@ -424,11 +425,12 @@ def _trusted_upstream_jwt_string_claim(claims: dict[str, Any], claim_name: str) 
 
 def _trusted_upstream_matrix_user_id(
     settings: _TrustedUpstreamAuthSettings,
-    identity: _TrustedUpstreamJwtIdentity,
+    email: str,
+    matrix_user_id_claim: str | None,
 ) -> str | None:
     """Return the signed Matrix claim, else the Matrix user the email template names, else None."""
     if settings.matrix_user_id_claim is not None:
-        matrix_user_id = try_parse_historical_matrix_user_id(identity.matrix_user_id)
+        matrix_user_id = try_parse_historical_matrix_user_id(matrix_user_id_claim)
         if matrix_user_id is None:
             raise HTTPException(status_code=401, detail="Invalid trusted upstream Matrix user id")
         return matrix_user_id
@@ -436,30 +438,9 @@ def _trusted_upstream_matrix_user_id(
     if template is None:
         return None
     try:
-        return matrix_user_id_from_email(identity.email, template, settings.email_domain)
+        return matrix_user_id_from_email(email, template, settings.email_domain)
     except ValueError as exc:
         raise HTTPException(status_code=401, detail="Invalid trusted upstream email identity") from exc
-
-
-async def _trusted_upstream_auth_user(
-    request: Request,
-    settings: _TrustedUpstreamAuthSettings,
-    jwt_client: PyJWKClient | None,
-) -> AuthUser | None:
-    """Return the browser user the gateway's signed assertion names, when trusted upstream auth is on."""
-    if not settings.enabled:
-        return None
-    identity = await _verified_trusted_upstream_jwt_identity(request, settings, jwt_client)
-    user_id = identity.user_id or identity.email
-    matrix_user_id = _trusted_upstream_matrix_user_id(settings, identity)
-    if matrix_user_id is None:
-        return AuthUser(user_id=user_id, email=identity.email, source=AuthSource.TRUSTED_UPSTREAM)
-    return SignedMatrixUser(
-        user_id=user_id,
-        email=identity.email,
-        source=AuthSource.TRUSTED_UPSTREAM,
-        matrix_user_id=matrix_user_id,
-    )
 
 
 def _supabase_auth_error_class() -> type[Exception]:
@@ -560,12 +541,11 @@ def _consume_platform_sso_ticket(ticket_id: object, expires_at: int) -> None:
 
 async def request_has_frontend_access(request: Request) -> bool:
     """Return whether the current request may load the dashboard UI."""
-    authorization = request.headers.get("authorization")
     if _is_connections_path(request.scope["path"]):
         # The portal page is a static shell that signs itself in; its APIs authenticate every request.
         return True
     try:
-        auth_user = await authenticate_user(request, authorization)
+        auth_user = await authenticate_user(request, request.headers.get("authorization"))
     except HTTPException as exc:
         # Only a missing or invalid credential falls through to the login page.
         if exc.status_code not in {401, 403}:
@@ -896,8 +876,7 @@ async def require_connections_user(request: Request) -> SignedMatrixUser:
     if auth_user is not None:
         bind_request_auth_user(request, auth_user)
     else:
-        settings = _request_auth_state(request).settings.trusted_upstream
-        if not settings.enabled:
+        if not _request_auth_state(request).settings.trusted_upstream.enabled:
             # Without a signed upstream identity, only a portal session can authenticate, so ask the page to sign in.
             raise HTTPException(status_code=401, detail="Connections sign-in required")
         auth_user = await _require_signed_matrix_user(request, label="Connections")
@@ -1074,7 +1053,6 @@ async def authenticate_user(request: Request, authorization: str | None = Header
         _require_browser_mutation_origin(request, auth_state.settings)
         return bind_request_auth_user(request, session_user)
 
-    mindroom_api_key = auth_state.settings.mindroom_api_key
     trusted_auth_user = await _trusted_upstream_auth_user(
         request,
         auth_state.settings.trusted_upstream,
@@ -1085,6 +1063,7 @@ async def authenticate_user(request: Request, authorization: str | None = Header
         return bind_request_auth_user(request, trusted_auth_user)
 
     if auth_state.supabase_auth is None:
+        mindroom_api_key = auth_state.settings.mindroom_api_key
         if mindroom_api_key:
             token = _extract_bearer_token(authorization) or request.cookies.get(_STANDALONE_AUTH_COOKIE_NAME) or None
             if token is None:
@@ -1193,11 +1172,12 @@ async def complete_platform_sso(request: Request, ticket: str, next: str = "/") 
 @router.get("/login", include_in_schema=False)
 async def standalone_login(request: Request, next: str = "/") -> Response:  # noqa: A002
     """Render the standalone dashboard login form when API-key auth is enabled."""
-    if not _request_auth_state(request).settings.mindroom_api_key:
+    auth_state = _request_auth_state(request)
+    if not auth_state.settings.mindroom_api_key:
         raise HTTPException(status_code=404, detail="Not found")
 
     next_path = sanitize_next_path(next)
     if await request_has_frontend_access(request):
         return RedirectResponse(next_path)
 
-    return HTMLResponse(_render_standalone_login_page(next_path, config_lifecycle.api_runtime_paths(request)))
+    return HTMLResponse(_render_standalone_login_page(next_path, auth_state.runtime_paths))

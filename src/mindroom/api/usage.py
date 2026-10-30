@@ -57,9 +57,6 @@ def _get_organization_usage(
     """Start or poll one application-scoped organization usage report."""
     headers = {"Cache-Control": "no-store"}
     unavailable = Response(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, headers=headers)
-    snapshot = config_lifecycle.request_snapshot(request)
-    if snapshot is None:
-        return unavailable
     try:
         config, runtime_paths = config_lifecycle.read_committed_runtime_config(request)
     except HTTPException:
@@ -67,7 +64,7 @@ def _get_organization_usage(
     api_app = request.app
     context = UsageExportContext(
         runtime_paths=runtime_paths,
-        generation=snapshot.generation,
+        generation=config_lifecycle.committed_generation(request),
         include_daily=include_daily,
         include_requests=include_requests,
     )
