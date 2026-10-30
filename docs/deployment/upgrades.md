@@ -18,7 +18,7 @@ A member's Mem0 store holding a link or special file, or one Chroma cannot read,
 Only Mem0 team memories of the configured embedder merge; those an earlier embedder wrote, which the runtime no longer read, stay with a `Left` warning, as does a memory whose embedding size the configured embedder never gives.
 A storage error while writing team memory stops startup before any member's Mem0 copy is removed, and the next start merges the rest.
 The first start installs Chroma for this when any agent the config lists has a Mem0 store; with `MINDROOM_NO_AUTO_INSTALL_TOOLS=1` and no `chromadb` extra, the Mem0 copies stay until the first start with Chroma.
-With any embedder other than OpenAI's own API, such as a local or Ollama embedder or an OpenAI-compatible server at another host, the first start asks the embedder once for the size of its embeddings, and the Mem0 copies wait for a start whose embedder answers; after fixing the embedder, restart MindRoom to merge them.
+With any embedder other than OpenAI's own API, such as a local or Ollama embedder or an OpenAI-compatible server set as `host` or through `OPENAI_BASE_URL`, the first start asks the embedder once for the size of its embeddings, and the Mem0 copies wait for a start whose embedder answers; after fixing the embedder, restart MindRoom to merge them.
 An older release does not read `team_memory/`; after going back and upgrading again, delete `tracking/team_memory_merged.json` before the start so the copies that release wrote merge too.
 That start also checks again every copy a `Left` warning named, so first remove any of them whose memories you do not want back.
 

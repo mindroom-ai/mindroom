@@ -451,33 +451,42 @@ async def test_a_storage_root_without_mem0_copies_never_asks_the_embedder(tmp_pa
 
 
 @pytest.mark.parametrize(
-    ("provider", "settings", "size"),
+    ("provider", "settings", "process_env", "size"),
     [
-        ("openai", {"model": "text-embedding-3-small", "dimensions": 256}, 256),
-        ("openai", {"model": "text-embedding-3-large"}, 3072),
-        ("openai", {"model": "text-embedding-3-small", "host": "http://embedder.test/v1"}, None),
-        ("openai", {"model": "text-embedding-3-small", "host": "http://embedder.test/v1", "dimensions": 256}, None),
-        ("sentence_transformers", {"model": "sentence-transformers/all-MiniLM-L6-v2"}, None),
-        ("huggingface", {"model": "sentence-transformers/all-MiniLM-L6-v2", "dimensions": 256}, None),
+        ("openai", {"model": "text-embedding-3-small", "dimensions": 256}, {}, 256),
+        ("openai", {"model": "text-embedding-3-large"}, {}, 3072),
+        ("openai", {"model": "text-embedding-3-small", "host": "http://embedder.test/v1"}, {}, None),
+        ("openai", {"model": "text-embedding-3-small"}, {"OPENAI_BASE_URL": "http://embedder.test/v1"}, None),
+        ("openai", {"model": "text-embedding-3-small", "host": "http://embedder.test/v1", "dimensions": 256}, {}, None),
+        ("sentence_transformers", {"model": "sentence-transformers/all-MiniLM-L6-v2"}, {}, None),
+        ("huggingface", {"model": "sentence-transformers/all-MiniLM-L6-v2", "dimensions": 256}, {}, None),
     ],
     ids=[
         "configured dimensions",
         "known OpenAI model",
         "other OpenAI-compatible host",
+        "other host the OpenAI SDK reads from its environment",
         "dimensions another host may ignore",
         "local model",
         "dimensions no Mem0-only embedder receives",
     ],
 )
 def test_only_settings_that_fix_the_embedding_size_spare_the_embedder_call(
+    tmp_path: Path,
     provider: str,
     settings: dict[str, object],
+    process_env: dict[str, str],
     size: int | None,
 ) -> None:
     """Only OpenAI's own API is sure to apply `dimensions` and to serve an OpenAI model's size; any other embedder is asked."""
     memory = MemoryConfig(embedder=_MemoryEmbedderConfig(provider=provider, config=EmbedderConfig(**settings)))
+    runtime_paths = resolve_runtime_paths(
+        config_path=tmp_path / "config.yaml",
+        storage_path=tmp_path,
+        process_env=process_env,
+    )
     with patch.object(legacy_team_memory, "OPENAI_EMBEDDING_DIMENSIONS", OPENAI_EMBEDDING_DIMENSIONS):
-        assert legacy_team_memory._configured_embedding_size(Config(memory=memory)) == size
+        assert legacy_team_memory._configured_embedding_size(Config(memory=memory), runtime_paths) == size
 
 
 @pytest.mark.asyncio

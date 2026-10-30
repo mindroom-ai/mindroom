@@ -283,7 +283,7 @@ async def _trusted_embedding_size(runtime_paths: RuntimePaths, config: Config) -
     team_root = team_memory_root(runtime_paths)
     if (held := await asyncio.to_thread(_held_embedding_size, team_root, mem0_collection_name(config))) is not None:
         return held
-    if (configured := _configured_embedding_size(config)) is not None:
+    if (configured := _configured_embedding_size(config, runtime_paths)) is not None:
         return configured
     try:
         memory = await create_memory_instance(team_root, config, runtime_paths)
@@ -298,12 +298,13 @@ async def _trusted_embedding_size(runtime_paths: RuntimePaths, config: Config) -
     return len(embedding)
 
 
-def _configured_embedding_size(config: Config) -> int | None:
+def _configured_embedding_size(config: Config, runtime_paths: RuntimePaths) -> int | None:
     """Return the size OpenAI's own API gives the configured embeddings: their `dimensions`, or the model's own size."""
     embedder = config.memory.embedder
     # Only OpenAI's own API applies `dimensions` for certain: other providers never receive it, and an OpenAI-compatible
-    # server at another host may ignore it or serve another model under the same name.
-    if embedder.provider != "openai" or embedder.config.host is not None:
+    # server, set as `host` or through the `OPENAI_BASE_URL` the OpenAI SDK reads without one, may ignore it or serve
+    # another model under the same name.
+    if embedder.provider != "openai" or embedder.config.host is not None or runtime_paths.env_value("OPENAI_BASE_URL"):
         return None
     if embedder.config.dimensions is not None:
         return embedder.config.dimensions
