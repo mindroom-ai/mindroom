@@ -52,12 +52,12 @@ BACKUP_SUFFIX = ".pre-storage-v4"
 # `owner_kind` and `owner_id` columns; its session rows name their owner instead.
 # Last legacy release: v2026.10.676; replacement: the next release, layout version 4, whose meta row records the
 # agent, team scope, or system usage ledger that owns the database.
-# Handling: Every store open and the startup sweep, which know the owner, convert such a database once in one write
-# transaction, after its backup to `<name>.db.pre-storage-v4`: at version 2 an agent's rows first take its name, then
-# the sessions table converts (`convert_session_columns`), the meta row records the owner, and the later layout steps
-# follow. The sweep takes a team database's owner from the team its rows name whose database has this one's name
-# (`team_owner`), and leaves one no row names to its scope's next store open. Two openers converting at once are
-# serialized by the write lock, and the second finds the database converted.
+# Handling: A process's first store open of each database file and the startup sweep, which know the owner, convert
+# such a database once in one write transaction, after its backup to `<name>.db.pre-storage-v4`: at version 2 an
+# agent's rows first take its name, then the sessions table converts (`convert_session_columns`), the meta row records
+# the owner, and the later layout steps follow. The sweep takes a team database's owner from the team its rows name
+# whose database has this one's name (`team_owner`), and leaves one no row names to its scope's next store open. Two
+# openers converting at once are serialized by the write lock, and the second finds the database converted.
 # Coverage: tests/session_storage/test_legacy_session_columns.py.
 def upgrade_layout(
     connection: sqlite3.Connection,
